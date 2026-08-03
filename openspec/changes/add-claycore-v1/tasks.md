@@ -1,0 +1,117 @@
+# Tasks: add-claycore-v1
+
+Groups 1–10 are Phase 1 (the ClaySpace app's dependency set). Groups 11–14 map to Phases 2–4 (see design.md §Phasing).
+
+## 1. Repository scaffolding & build
+
+- [ ] 1.1 Create repo layout (`include/clay/{kernel,math,scene,eval,brick,voxel,mesh,pick,io}`, `src/`, `backends/`, `bindings/`, `tests/`, `tools/`) with CMake presets `cpu-only`/`+metal`/`+cuda`/`+opencl`, warnings-as-errors
+- [ ] 1.2 Vendor/fetch permissive deps (ufbx, meshoptimizer, xsimd, doctest/Catch2, benchmark) and add the CI license-manifest gate
+- [ ] 1.3 CI matrix: macOS/Linux/Windows `cpu-only` build + test; ASan/UBSan jobs; module-layering include check; `openspec validate --all --strict` job
+- [ ] 1.4 Kernel-dialect enforcement check (compile kernel headers against the most restrictive target profile)
+
+## 2. Kernel headers (sdf-kernels)
+
+- [ ] 2.1 `shim.h`: fixed-size types (`cfloat3`, `cfloat4x4`, …) and qualifier macros for CPU/Metal/CUDA/OpenCL
+- [ ] 2.2 `prim3d.h`: all exact 3D primitives + bound primitives with flags; unit tests vs docs/01 reference values
+- [ ] 2.3 `prim2d.h`: 2D profiles incl. exact polygon and quadratic Bézier; cubic-by-subdivision
+- [ ] 2.4 `ops.h`: hard booleans; quadratic/cubic/circular smins + chamfer with material-mix `h`; blend-rigidity property tests
+- [ ] 2.5 `xform.h` + `repeat.h`: transforms, uniform/non-uniform scale, elongate, mirror + Mirror Blend, round/onion; infinite/finite/radial repetition with clamped-cell tests
+- [ ] 2.6 `lift.h` + `ease.h`: extrude/revolve (exact), extrude-to/loft (bound); easing-curve library (≥30 curves)
+- [ ] 2.7 `deform.h`: twist/bend/taper/displace, bend_linear/radial, wrap_around, transitions — Lipschitz factors + easing params
+- [ ] 2.8 Exactness/Lipschitz propagation through the tree + safe-step-scale API; property tests (bounds hold on random compositions)
+- [ ] 2.9 Stroke item (capsule/round-cone chain, per-point radius/color) + stamp placement + mirror application
+- [ ] 2.10 `field.h`: tetrahedron normals, sphere tracing (over-relaxation, pixel-proportional eps), AO, Aaltonen soft shadow, raycast refinement
+
+## 3. Host math & scene model (scene-model)
+
+- [ ] 3.1 `math/`: AABB, transforms, quaternions, ray, frustum (host-side)
+- [ ] 3.2 Document model: layers (voxel|sdf), ordered edit lists, groups (≥4 deep, group ops incl. None), instancing, visibility/selection state
+- [ ] 3.3 Influence bounds per item/group (AABB ⊕ blend ⊕ rounding) + conservativeness property test
+- [ ] 3.4 Tape compiler: edit list → flat postfix tape (pre-inverted transforms, param blocks); tape-vs-tree equivalence tests
+- [ ] 3.5 Per-brick tape culling + culled-vs-full bit-identity test
+- [ ] 3.6 Undo command vocabulary (serializable, invertible, stroke-coalescing) + inverse round-trip tests
+
+## 4. Evaluation backends — CPU & Metal (evaluation-backends)
+
+- [ ] 4.1 `clay::eval::Backend` interface (eval_points/eval_bricks/raycast/mesh/capabilities) + runtime registry
+- [ ] 4.2 CPU scalar reference interpreter (always compiled in)
+- [ ] 4.3 CPU SIMD batch path (Apple simd / xsimd) + thread-pool dispatch; SIMD-vs-scalar parity (1e-6)
+- [ ] 4.4 Parity suite harness: per-kernel + composed-scene comparison vs CPU scalar with per-kernel tolerances, CI-gated
+- [ ] 4.5 Metal backend host (metal-cpp), MSL compilation of kernel headers, argument-buffer tapes; eval_points/eval_bricks/raycast
+- [ ] 4.6 Metal parity pass on macOS CI (and device smoke test via the app repo)
+
+## 5. Brick cache (brick-cache)
+
+- [ ] 5.1 Sparse brick storage (8³/16³, fp16 ±3-voxel band, implicit inside/outside)
+- [ ] 5.2 Dirty tracking from influence bounds; incremental re-eval; generation counters for stale-result rejection
+- [ ] 5.3 Locality regression test: distant edit ⇒ bit-identical untouched bricks
+- [ ] 5.4 LOD mip bricks + consistency test
+- [ ] 5.5 Memory budget enforcement (query, budget-exceeded results) + mobile-ceiling tests
+
+## 6. Voxel engine (voxel-engine)
+
+- [ ] 6.1 Palette-indexed chunked storage to 256³+ with palette+RLE serialization
+- [ ] 6.2 Edit ops: set/erase/paint (single + N³ footprint), box/line fills, mirror application, build-plane queries, flood select
+- [ ] 6.3 Greedy meshing with per-face color + losslessness test
+- [ ] 6.4 Voxel↔SDF bridges (step-function field; SDF rasterization to voxels)
+
+## 7. Meshing (meshing)
+
+- [ ] 7.1 CPU marching cubes with asymptotic decider over surface-crossing bricks; watertight/manifold validation suite
+- [ ] 7.2 Vertex attributes: colors from color field (blend-faithful), gradient/face normals, box-projection UV utility
+- [ ] 7.3 Decimation via meshoptimizer (ratio/error targets, color-aware) 
+- [ ] 7.4 Mesh validation module (watertight, manifold, degenerates, sampled self-intersection) — the CI export gate
+- [ ] 7.5 Golden-scene meshing gates across the op × blend matrix
+- [ ] 7.6 GPU meshing on Metal with topology-invariant parity vs CPU MC
+
+## 8. Picking (picking)
+
+- [ ] 8.1 Ray ↔ scene raycast (tape + brick paths) with layer/item attribution
+- [ ] 8.2 Surface snapping (closest-point gradient descent; position and position+normal modes)
+- [ ] 8.3 Voxel face/cell picking + build-plane resolution
+- [ ] 8.4 Bounds/frustum utilities (selection bounds, zoom-to-selection)
+
+## 9. File I/O (file-io)
+
+- [ ] 9.1 `.clayspace` chunked container: writer/reader, versioning (backward-open, forward-refuse), round-trip bit-identity tests
+- [ ] 9.2 OBJ + MTL reader/writer (dependency-free) with vertex-color extension
+- [ ] 9.3 FBX import via ufbx; minimal binary FBX writer; CI round-trip via assimp + Blender headless (units/axes)
+- [ ] 9.4 PLY reader/writer with vertex colors
+- [ ] 9.5 Import guardrails: triangle budgets, fuzz corpus, allocation-bomb tests
+- [ ] 9.6 Platform-consumable mesh buffer API (for app-side USDZ via Model I/O)
+
+## 10. C ABI, SwiftPM, CLI (c-abi, build-packaging)
+
+- [ ] 10.1 `clay.h`: opaque handles, error codes, size-query buffer pattern, `clay_version()`; C11 consumer smoke test
+- [ ] 10.2 Error/memory discipline plumbing (`std::expected`-style internals, thread-local detail messages, `clay_free_*`)
+- [ ] 10.3 SwiftPM wrapper target (xcframework build script) + iOS device/simulator build verification with ClaySpace
+- [ ] 10.4 FFI hygiene check (rust-bindgen or equivalent in CI)
+- [ ] 10.5 `clay-cli`: mesh/validate/eval/convert subcommands over public APIs
+- [ ] 10.6 Performance benchmarks (points/sec, bricks/sec, mesh time) with CI regression gates
+
+## 11. Phase 2 — Python, extended vocabulary, meshers, glTF
+
+- [ ] 11.1 `pyclay` nanobind module: document/layer/edit API, numpy-native eval/gradients (GIL released), meshing, save/load/export
+- [ ] 11.2 Backend selection + enumeration from Python with clear unavailable-backend errors
+- [ ] 11.3 Wheels via scikit-build-core + cibuildwheel (macOS arm64/x86-64, manylinux, Windows); pip-install quickstart test
+- [ ] 11.4 Port golden-scene corpus authoring + property suites to Python; wire into CI
+- [ ] 11.5 Extended blend vocabulary (groove, tongue/pipe, emboss/deboss, push, avoid, inset, shell, stain/paint, replace) with rigidity tests
+- [ ] 11.6 Surface nets mesher (preview path) + benchmark
+- [ ] 11.7 Dual contouring (QEF/Hermite, manifold variant) behind flag + sharp-edge golden tests
+- [ ] 11.8 glTF/GLB writer + glTF-validator CI gate
+
+## 12. Phase 3 — CUDA
+
+- [ ] 12.1 CUDA backend host (NVRTC/nvcc) compiling the same kernel headers; eval_points/eval_bricks/raycast
+- [ ] 12.2 CUDA parity suite on a CUDA CI runner; pyclay `backend="cuda"` batch-eval test
+- [ ] 12.3 Ship CUDA-enabled wheels/binaries where toolchain permits
+
+## 13. Phase 4 — OpenCL
+
+- [ ] 13.1 Constrain kernel shim to the OpenCL C-compatible subset; OpenCL 3.0 host with eval_points/eval_bricks
+- [ ] 13.2 OpenCL parity pass; document tier-3/best-effort support status
+
+## 14. Release
+
+- [ ] 14.1 SemVer release checklist automation (ABI check, wheel build, parity gate) and v1.0 tag
+- [ ] 14.2 Update repo docs (README, docs/) to match shipped behavior; archive this change
