@@ -1,0 +1,66 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CLAY_WERROR": "ON",
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "cpu-only",
+      "displayName": "CPU only (any platform)",
+      "inherits": "base"
+    },
+    {
+      "name": "metal",
+      "displayName": "CPU + Metal (Apple platforms)",
+      "inherits": "base",
+      "cacheVariables": { "CLAY_BACKEND_METAL": "ON" },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Darwin" }
+    },
+    {
+      "name": "cuda",
+      "displayName": "CPU + CUDA",
+      "inherits": "base",
+      "cacheVariables": { "CLAY_BACKEND_CUDA": "ON" }
+    },
+    {
+      "name": "opencl",
+      "displayName": "CPU + OpenCL",
+      "inherits": "base",
+      "cacheVariables": { "CLAY_BACKEND_OPENCL": "ON" }
+    },
+    {
+      "name": "asan-ubsan",
+      "displayName": "CPU only, Address+UB sanitizers (Clang/GCC)",
+      "inherits": "cpu-only",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CLAY_SANITIZE": "address,undefined"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "cpu-only", "configurePreset": "cpu-only", "configuration": "Release" },
+    { "name": "metal", "configurePreset": "metal", "configuration": "Release" },
+    { "name": "asan-ubsan", "configurePreset": "asan-ubsan" }
+  ],
+  "testPresets": [
+    {
+      "name": "cpu-only",
+      "configurePreset": "cpu-only",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "asan-ubsan",
+      "configurePreset": "asan-ubsan",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

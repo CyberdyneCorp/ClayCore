@@ -1,0 +1,22 @@
+# Warning and sanitizer configuration shared by all claycore targets.
+
+function(clay_apply_warnings target)
+  if(MSVC)
+    target_compile_options(${target} PRIVATE /W4 /permissive-)
+    if(CLAY_WERROR)
+      target_compile_options(${target} PRIVATE /WX)
+    endif()
+  else()
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wshadow)
+    if(CLAY_WERROR)
+      target_compile_options(${target} PRIVATE -Werror)
+    endif()
+  endif()
+endfunction()
+
+function(clay_apply_sanitizers target)
+  if(CLAY_SANITIZE AND NOT MSVC)
+    target_compile_options(${target} PRIVATE -fsanitize=${CLAY_SANITIZE} -fno-omit-frame-pointer -g)
+    target_link_options(${target} PRIVATE -fsanitize=${CLAY_SANITIZE})
+  endif()
+endfunction()

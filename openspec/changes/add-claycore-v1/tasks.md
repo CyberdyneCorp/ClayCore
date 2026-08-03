@@ -4,10 +4,10 @@ Groups 1–10 are Phase 1 (the ClaySpace app's dependency set). Groups 11–14 m
 
 ## 1. Repository scaffolding & build
 
-- [ ] 1.1 Create repo layout (`include/clay/{kernel,math,scene,eval,brick,voxel,mesh,pick,io}`, `src/`, `backends/`, `bindings/`, `tests/`, `tools/`) with CMake presets `cpu-only`/`+metal`/`+cuda`/`+opencl`, warnings-as-errors
-- [ ] 1.2 Vendor/fetch permissive deps (ufbx, meshoptimizer, xsimd, doctest/Catch2, benchmark) and add the CI license-manifest gate
-- [ ] 1.3 CI matrix: macOS/Linux/Windows `cpu-only` build + test; ASan/UBSan jobs; module-layering include check; `openspec validate --all --strict` job
-- [ ] 1.4 Kernel-dialect enforcement check (compile kernel headers against the most restrictive target profile)
+- [x] 1.1 Create repo layout (`include/clay/{kernel,math,scene,eval,brick,voxel,mesh,pick,io}`, `src/`, `backends/`, `bindings/`, `tests/`, `tools/`) with CMake presets `cpu-only`/`+metal`/`+cuda`/`+opencl`, warnings-as-errors
+- [x] 1.2 Vendor/fetch permissive deps (ufbx, meshoptimizer, xsimd, doctest/Catch2, benchmark) and add the CI license-manifest gate
+- [x] 1.3 CI matrix: macOS/Linux/Windows `cpu-only` build + test; ASan/UBSan jobs; module-layering include check; `openspec validate --all --strict` job
+- [x] 1.4 Kernel-dialect enforcement check (compile kernel headers against the most restrictive target profile)
 
 ## 2. Kernel headers (sdf-kernels)
 

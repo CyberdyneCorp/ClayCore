@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    name: build+test (${{ matrix.os }}, cpu-only)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset cpu-only
+      - name: Build
+        run: cmake --build --preset cpu-only
+      - name: Test
+        run: ctest --preset cpu-only
+
+  sanitizers:
+    name: ASan + UBSan (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset asan-ubsan
+      - name: Build
+        run: cmake --build --preset asan-ubsan
+      - name: Test
+        run: ctest --preset asan-ubsan
+
+  checks:
+    name: layering, kernel dialect, licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Module layering
+        run: python3 tools/check_layering.py
+      - name: Kernel dialect
+        run: python3 tools/check_kernel_dialect.py --compiler g++
+      - name: License manifest
+        run: python3 tools/check_licenses.py
+
+  deps-pins:
+    name: dependency pins resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure with all dependencies
+        run: cmake --preset cpu-only -DCLAY_FETCH_ALL_DEPS=ON
+
+  openspec:
+    name: openspec validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install -g @fission-ai/openspec@latest
+      - run: openspec validate --all --strict
