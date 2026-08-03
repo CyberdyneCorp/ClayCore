@@ -43,13 +43,6 @@ struct cfloat3 {
 struct cfloat4 {
     float x, y, z, w;
 };
-// Column-major, like MSL/GLSL.
-struct cfloat3x3 {
-    cfloat3 c0, c1, c2;
-};
-struct cfloat4x4 {
-    cfloat4 c0, c1, c2, c3;
-};
 
 CLAY_FN cfloat2 cf2(float x, float y) { return cfloat2{x, y}; }
 CLAY_FN cfloat3 cf3(float x, float y, float z) { return cfloat3{x, y, z}; }
@@ -100,7 +93,63 @@ CLAY_FN float cexp2(float v) { return ::exp2f(v); }
 CLAY_FN float cfmod(float a, float b) { return ::fmodf(a, b); }
 CLAY_FN float cmix(float a, float b, float t) { return a + (b - a) * t; }
 
-// -- vector math -------------------------------------------------------------
+CLAY_NS_END
+
+#elif defined(CLAY_KERNEL_METAL)
+
+#include <metal_stdlib>
+
+#define CLAY_FN inline
+#define CLAY_THREAD thread
+#define CLAY_DEVICE device
+// `kernel` is a reserved word in MSL, so the namespace is `clay::kernels`
+// on this backend (only .metal sources ever see it).
+#define CLAY_NS_BEGIN \
+    namespace clay {  \
+    namespace kernels {
+#define CLAY_NS_END \
+    }               \
+    }
+
+CLAY_NS_BEGIN
+
+using cfloat2 = ::float2;
+using cfloat3 = ::float3;
+using cfloat4 = ::float4;
+
+CLAY_FN cfloat2 cf2(float x, float y) { return cfloat2(x, y); }
+CLAY_FN cfloat3 cf3(float x, float y, float z) { return cfloat3(x, y, z); }
+CLAY_FN cfloat4 cf4(float x, float y, float z, float w) { return cfloat4(x, y, z, w); }
+
+CLAY_FN float cmin(float a, float b) { return metal::fmin(a, b); }
+CLAY_FN float cmax(float a, float b) { return metal::fmax(a, b); }
+CLAY_FN float cclamp(float v, float lo, float hi) { return metal::clamp(v, lo, hi); }
+CLAY_FN float cabs(float v) { return metal::fabs(v); }
+CLAY_FN float csign(float v) { return metal::sign(v); }
+CLAY_FN float cfloor(float v) { return metal::floor(v); }
+CLAY_FN float cround(float v) { return metal::round(v); }
+CLAY_FN float csqrt(float v) { return metal::sqrt(v); }
+CLAY_FN float csin(float v) { return metal::sin(v); }
+CLAY_FN float ccos(float v) { return metal::cos(v); }
+CLAY_FN float ctan(float v) { return metal::tan(v); }
+CLAY_FN float cacos(float v) { return metal::acos(v); }
+CLAY_FN float catan2(float y, float x) { return metal::atan2(y, x); }
+CLAY_FN float cpow(float b, float e) { return metal::pow(b, e); }
+CLAY_FN float cexp2(float v) { return metal::exp2(v); }
+CLAY_FN float cfmod(float a, float b) { return metal::fmod(a, b); }
+CLAY_FN float cmix(float a, float b, float t) { return a + (b - a) * t; }
+
+CLAY_NS_END
+
+#else
+// The CUDA/OpenCL type mappings land with their backend hosts
+// (tasks 12.1, 13.1); until then compiling with those macros is an error.
+#error "claycore kernel shim: this backend mapping is not implemented yet"
+#endif
+
+// -- shared vector/matrix layer (built on the per-backend types above) -------
+
+CLAY_NS_BEGIN
 
 CLAY_FN float cdot(cfloat2 a, cfloat2 b) { return a.x * b.x + a.y * b.y; }
 CLAY_FN float cdot(cfloat3 a, cfloat3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
@@ -135,7 +184,13 @@ CLAY_FN cfloat3 cround(cfloat3 v) { return cf3(cround(v.x), cround(v.y), cround(
 CLAY_FN cfloat2 cmix(cfloat2 a, cfloat2 b, float t) { return a + (b - a) * t; }
 CLAY_FN cfloat3 cmix(cfloat3 a, cfloat3 b, float t) { return a + (b - a) * t; }
 
-// -- matrices ----------------------------------------------------------------
+// Column-major, like MSL/GLSL.
+struct cfloat3x3 {
+    cfloat3 c0, c1, c2;
+};
+struct cfloat4x4 {
+    cfloat4 c0, c1, c2, c3;
+};
 
 CLAY_FN cfloat3 cmul(cfloat3x3 m, cfloat3 v) { return m.c0 * v.x + m.c1 * v.y + m.c2 * v.z; }
 
@@ -152,9 +207,3 @@ CLAY_FN cfloat3 cmul_dir(cfloat4x4 m, cfloat3 d) {
 }
 
 CLAY_NS_END
-
-#else
-// The Metal/CUDA/OpenCL type mappings land with their backend hosts
-// (tasks 4.5, 12.1, 13.1); until then compiling with those macros is an error.
-#error "claycore kernel shim: this backend mapping is not implemented yet"
-#endif

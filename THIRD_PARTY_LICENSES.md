@@ -12,8 +12,9 @@ row here; `tools/check_licenses.py` enforces both directions in CI.
 | xsimd | 14.3.0 | BSD-3-Clause | https://github.com/xtensor-stack/xsimd |
 | benchmark | v1.9.5 | Apache-2.0 | https://github.com/google/benchmark |
 | ufbx | v0.23.0 | MIT | https://github.com/ufbx/ufbx |
+| metalcpp | macOS15.2_iOS18.2 | Apache-2.0 | https://developer.apple.com/metal/cpp/ |
 
 Planned (added when their consuming module lands, per the same policy):
-metal-cpp (Apache-2.0, Metal backend), nanobind (BSD-3-Clause, pyclay),
-cgltf or tinyply (MIT, glTF/PLY). assimp is used in CI only as an
-independent export validator and is never linked into the shipping library.
+nanobind (BSD-3-Clause, pyclay), cgltf or tinyply (MIT, glTF/PLY). assimp
+is used in CI only as an independent export validator and is never linked
+into the shipping library.

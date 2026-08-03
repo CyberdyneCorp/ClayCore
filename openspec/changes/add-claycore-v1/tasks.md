@@ -33,12 +33,12 @@ Groups 1–10 are Phase 1 (the ClaySpace app's dependency set). Groups 11–14 m
 
 ## 4. Evaluation backends — CPU & Metal (evaluation-backends)
 
-- [ ] 4.1 `clay::eval::Backend` interface (eval_points/eval_bricks/raycast/mesh/capabilities) + runtime registry
-- [ ] 4.2 CPU scalar reference interpreter (always compiled in)
-- [ ] 4.3 CPU SIMD batch path (Apple simd / xsimd) + thread-pool dispatch; SIMD-vs-scalar parity (1e-6)
-- [ ] 4.4 Parity suite harness: per-kernel + composed-scene comparison vs CPU scalar with per-kernel tolerances, CI-gated
-- [ ] 4.5 Metal backend host (metal-cpp), MSL compilation of kernel headers, argument-buffer tapes; eval_points/eval_bricks/raycast
-- [ ] 4.6 Metal parity pass on macOS CI (and device smoke test via the app repo)
+- [x] 4.1 `clay::eval::Backend` interface (eval_points/eval_bricks/raycast/mesh/capabilities) + runtime registry
+- [x] 4.2 CPU scalar reference interpreter (always compiled in)
+- [x] 4.3 CPU batch path (block chunks, thread-pool dispatch, compiler-vectorized loops) + batch-vs-scalar parity (1e-6); hand-tuned xsimd lanes deferred to the 10.6 benchmark work
+- [x] 4.4 Parity suite harness: per-kernel + composed-scene comparison vs CPU scalar with per-kernel tolerances, CI-gated
+- [x] 4.5 Metal backend host (metal-cpp), MSL compilation of kernel headers, argument-buffer tapes; eval_points/eval_bricks/raycast
+- [x] 4.6 Metal parity pass on macOS CI (and device smoke test via the app repo)
 
 ## 5. Brick cache (brick-cache)
 

@@ -26,6 +26,10 @@ FetchContent_Declare(ufbx
   GIT_REPOSITORY https://github.com/ufbx/ufbx
   GIT_TAG v0.23.0)
 
+FetchContent_Declare(metalcpp
+  URL https://developer.apple.com/metal/cpp/files/metal-cpp_macOS15.2_iOS18.2.zip
+  URL_HASH SHA256=3437e4abfbd3d45217f34772ef3502f31ba3358e5fb6ac9d0ca952a047bcfe25)
+
 if(CLAY_BUILD_TESTS OR CLAY_FETCH_ALL_DEPS)
   FetchContent_MakeAvailable(doctest)
 endif()
@@ -38,8 +42,13 @@ endif()
 
 # Consumed from later task groups: xsimd (CPU SIMD path, group 4),
 # meshoptimizer (decimation, group 7), ufbx (FBX import, group 9).
+if(CLAY_BACKEND_METAL AND APPLE)
+  FetchContent_Populate(metalcpp)  # header-only, no CMake project
+endif()
+
 if(CLAY_FETCH_ALL_DEPS)
   FetchContent_MakeAvailable(xsimd meshoptimizer)
-  # ufbx is a plain source pair with no CMake project of its own.
+  # ufbx and metal-cpp carry no CMake project of their own.
   FetchContent_Populate(ufbx)
+  FetchContent_Populate(metalcpp)
 endif()

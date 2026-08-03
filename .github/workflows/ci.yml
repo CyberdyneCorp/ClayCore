@@ -22,6 +22,18 @@ jobs:
       - name: Test
         run: ctest --preset cpu-only
 
+  metal:
+    name: build+test (macos, +metal, parity)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset metal
+      - name: Build
+        run: cmake --build --preset metal
+      - name: Test (Metal parity runs when the runner exposes a Metal device)
+        run: ctest --test-dir build/metal --output-on-failure -C Release
+
   sanitizers:
     name: ASan + UBSan (ubuntu)
     runs-on: ubuntu-latest

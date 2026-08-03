@@ -43,10 +43,13 @@ def lexical_check(path: Path) -> list[str]:
     for kw in BANNED_KEYWORDS:
         if re.search(rf"\b{kw}\b", code):
             errors.append(f"{rel}: banned construct '{kw}'")
-    for inc in re.findall(r"#\s*include\s*<([^>]+)>", code):
-        name = inc.split("/")[0]
-        if name not in ALLOWED_STD_HEADERS and not inc.startswith("clay/"):
-            errors.append(f"{rel}: system include <{inc}> not in kernel allowlist {sorted(ALLOWED_STD_HEADERS)}")
+    # shim.h is the ONE header allowed backend includes (<metal_stdlib>, ...)
+    if path.name != "shim.h":
+        for inc in re.findall(r"#\s*include\s*<([^>]+)>", code):
+            name = inc.split("/")[0]
+            if name not in ALLOWED_STD_HEADERS and not inc.startswith("clay/"):
+                errors.append(
+                    f"{rel}: system include <{inc}> not in kernel allowlist {sorted(ALLOWED_STD_HEADERS)}")
     return errors
 
 

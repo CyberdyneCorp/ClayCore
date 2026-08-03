@@ -26,7 +26,11 @@ add_library(claycore
   src/version.cpp
   src/scene/bounds.cpp
   src/scene/commands.cpp
-  src/scene/tape_build.cpp)
+  src/scene/tape_build.cpp
+  backends/cpu/cpu_backend.cpp)
+
+find_package(Threads REQUIRED)
+target_link_libraries(claycore PRIVATE Threads::Threads)
 add_library(clay::core ALIAS claycore)
 
 target_include_directories(claycore PUBLIC
@@ -48,9 +52,43 @@ if(NOT MSVC)
   target_compile_options(claycore PRIVATE -fno-exceptions -fno-rtti)
 endif()
 
-# Backend hosts land in later task groups (4, 12, 13); the presets and
-# options exist now so consumers/CI configure against a stable interface.
-foreach(_backend METAL CUDA OPENCL)
+# -- Metal backend (Apple platforms) -----------------------------------------
+if(CLAY_BACKEND_METAL AND APPLE)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  find_program(XCRUN xcrun REQUIRED)
+  file(GLOB CLAY_KERNEL_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/include/clay/kernel/*.h)
+  set(CLAY_METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/clay_kernels.air)
+  set(CLAY_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/clay_kernels.metallib)
+  set(CLAY_METALLIB_C ${CMAKE_CURRENT_BINARY_DIR}/clay_metallib_embedded.cpp)
+  add_custom_command(OUTPUT ${CLAY_METAL_AIR}
+    COMMAND ${XCRUN} -sdk macosx metal -c
+            ${CMAKE_CURRENT_SOURCE_DIR}/backends/metal/clay_kernels.metal
+            -I ${CMAKE_CURRENT_SOURCE_DIR}/include
+            -I ${CMAKE_CURRENT_SOURCE_DIR}/backends/metal
+            -fno-fast-math -o ${CLAY_METAL_AIR}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/backends/metal/clay_kernels.metal
+            ${CMAKE_CURRENT_SOURCE_DIR}/backends/metal/metal_shared.h
+            ${CLAY_KERNEL_HEADERS}
+    COMMENT "Compiling claycore kernels to MSL (single-source)")
+  add_custom_command(OUTPUT ${CLAY_METALLIB}
+    COMMAND ${XCRUN} -sdk macosx metallib ${CLAY_METAL_AIR} -o ${CLAY_METALLIB}
+    DEPENDS ${CLAY_METAL_AIR})
+  add_custom_command(OUTPUT ${CLAY_METALLIB_C}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_binary.py
+            ${CLAY_METALLIB} ${CLAY_METALLIB_C} clay_metallib
+    DEPENDS ${CLAY_METALLIB} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_binary.py)
+
+  set_source_files_properties(${CLAY_METALLIB_C} PROPERTIES COMPILE_OPTIONS "-w")
+  target_sources(claycore PRIVATE backends/metal/metal_backend.cpp ${CLAY_METALLIB_C})
+  target_compile_definitions(claycore PRIVATE CLAY_HAS_METAL=1)
+  target_include_directories(claycore SYSTEM PRIVATE ${metalcpp_SOURCE_DIR})
+  target_include_directories(claycore PRIVATE backends/metal)
+  find_library(METAL_FRAMEWORK Metal REQUIRED)
+  find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+  target_link_libraries(claycore PRIVATE ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK})
+endif()
+
+foreach(_backend CUDA OPENCL)
   if(CLAY_BACKEND_${_backend})
     message(STATUS "claycore: ${_backend} backend requested — host not implemented yet (see openspec add-claycore-v1 tasks)")
   endif()
