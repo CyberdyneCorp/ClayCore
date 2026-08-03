@@ -43,6 +43,14 @@ IoStatus load_fbx(const std::uint8_t* data, std::size_t size, mesh::Mesh* out,
 IoStatus save_fbx_file(const mesh::Mesh& m, const std::string& path);
 IoStatus load_fbx_file(const std::string& path, mesh::Mesh* out, const ImportBudget& budget = {});
 
+// -- glTF / GLB ---------------------------------------------------------------
+// Dependency-free glTF 2.0 binary (GLB) writer: POSITION plus optional
+// NORMAL / COLOR_0 (vec3 float) / TEXCOORD_0, uint32 indices, one
+// scene/node/mesh primitive. Full glTF-validator conformance runs in CI at
+// integration time.
+std::vector<std::uint8_t> save_glb(const mesh::Mesh& m);
+IoStatus save_glb_file(const mesh::Mesh& m, const std::string& path);
+
 // -- platform buffer view (file-io spec: USDZ exclusion) ---------------------
 // Contiguous typed arrays, zero conversion — what Model I/O and engine
 // importers consume directly.
