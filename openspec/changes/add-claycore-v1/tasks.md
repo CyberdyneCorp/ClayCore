@@ -11,16 +11,16 @@ Groups 1–10 are Phase 1 (the ClaySpace app's dependency set). Groups 11–14 m
 
 ## 2. Kernel headers (sdf-kernels)
 
-- [ ] 2.1 `shim.h`: fixed-size types (`cfloat3`, `cfloat4x4`, …) and qualifier macros for CPU/Metal/CUDA/OpenCL
-- [ ] 2.2 `prim3d.h`: all exact 3D primitives + bound primitives with flags; unit tests vs docs/01 reference values
-- [ ] 2.3 `prim2d.h`: 2D profiles incl. exact polygon and quadratic Bézier; cubic-by-subdivision
-- [ ] 2.4 `ops.h`: hard booleans; quadratic/cubic/circular smins + chamfer with material-mix `h`; blend-rigidity property tests
-- [ ] 2.5 `xform.h` + `repeat.h`: transforms, uniform/non-uniform scale, elongate, mirror + Mirror Blend, round/onion; infinite/finite/radial repetition with clamped-cell tests
-- [ ] 2.6 `lift.h` + `ease.h`: extrude/revolve (exact), extrude-to/loft (bound); easing-curve library (≥30 curves)
-- [ ] 2.7 `deform.h`: twist/bend/taper/displace, bend_linear/radial, wrap_around, transitions — Lipschitz factors + easing params
-- [ ] 2.8 Exactness/Lipschitz propagation through the tree + safe-step-scale API; property tests (bounds hold on random compositions)
-- [ ] 2.9 Stroke item (capsule/round-cone chain, per-point radius/color) + stamp placement + mirror application
-- [ ] 2.10 `field.h`: tetrahedron normals, sphere tracing (over-relaxation, pixel-proportional eps), AO, Aaltonen soft shadow, raycast refinement
+- [x] 2.1 `shim.h`: fixed-size types (`cfloat3`, `cfloat4x4`, …) and qualifier macros for CPU/Metal/CUDA/OpenCL
+- [x] 2.2 `prim3d.h`: all exact 3D primitives + bound primitives with flags; unit tests vs docs/01 reference values
+- [x] 2.3 `prim2d.h`: 2D profiles incl. exact polygon and quadratic Bézier; cubic-by-subdivision
+- [x] 2.4 `ops.h`: hard booleans; quadratic/cubic/circular smins + chamfer with material-mix `h`; blend-rigidity property tests
+- [x] 2.5 `xform.h` + `repeat.h`: transforms, uniform/non-uniform scale, elongate, mirror + Mirror Blend, round/onion; infinite/finite/radial repetition with clamped-cell tests
+- [x] 2.6 `lift.h` + `ease.h`: extrude/revolve (exact), extrude-to/loft (bound); easing-curve library (≥30 curves)
+- [x] 2.7 `deform.h`: twist/bend/taper/displace, bend_linear/radial, wrap_around, transitions — Lipschitz factors + easing params
+- [x] 2.8 Exactness/Lipschitz propagation through the tree + safe-step-scale API; property tests (bounds hold on random compositions)
+- [x] 2.9 Stroke item (capsule/round-cone chain, per-point radius/color) + stamp placement + mirror application
+- [x] 2.10 `field.h`: tetrahedron normals, sphere tracing (over-relaxation, pixel-proportional eps), AO, Aaltonen soft shadow, raycast refinement
 
 ## 3. Host math & scene model (scene-model)
 
