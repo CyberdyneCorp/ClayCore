@@ -21,6 +21,13 @@ jobs:
         run: cmake --build --preset cpu-only
       - name: Test
         run: ctest --preset cpu-only
+      - name: Validate FBX export with assimp (independent implementation)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q assimp-utils
+          assimp info build/cpu-only/tests/io_sample.fbx
+          assimp info build/cpu-only/tests/io_sample.obj
+          assimp info build/cpu-only/tests/io_sample.ply
 
   metal:
     name: build+test (macos, +metal, parity)

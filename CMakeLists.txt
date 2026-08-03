@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.24)
 project(claycore
   VERSION 0.1.0
   DESCRIPTION "Portable C++20 SDF + voxel engine library"
-  LANGUAGES CXX)
+  LANGUAGES C CXX)  # C: ufbx
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -32,7 +32,16 @@ add_library(claycore
   src/mesh/marching.cpp
   src/mesh/validate.cpp
   src/mesh/decimate.cpp
+  src/pick/pick.cpp
+  src/io/clayspace.cpp
+  src/io/obj.cpp
+  src/io/ply.cpp
+  src/io/fbx.cpp
+  ${ufbx_SOURCE_DIR}/ufbx.c
   backends/cpu/cpu_backend.cpp)
+
+set_source_files_properties(${ufbx_SOURCE_DIR}/ufbx.c PROPERTIES COMPILE_OPTIONS "-w")
+target_include_directories(claycore SYSTEM PRIVATE ${ufbx_SOURCE_DIR})
 
 find_package(Threads REQUIRED)
 target_link_libraries(claycore PRIVATE Threads::Threads meshoptimizer)

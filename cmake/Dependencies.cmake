@@ -34,8 +34,10 @@ if(CLAY_BUILD_TESTS OR CLAY_FETCH_ALL_DEPS)
   FetchContent_MakeAvailable(doctest)
 endif()
 
-# decimation (mesh module) links meshoptimizer unconditionally
+# decimation (mesh module) links meshoptimizer unconditionally; FBX import
+# (io module) compiles ufbx directly (plain C source pair, no CMake project)
 FetchContent_MakeAvailable(meshoptimizer)
+FetchContent_Populate(ufbx)
 
 if(CLAY_BUILD_BENCHMARKS OR CLAY_FETCH_ALL_DEPS)
   set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
@@ -51,7 +53,5 @@ endif()
 
 if(CLAY_FETCH_ALL_DEPS)
   FetchContent_MakeAvailable(xsimd)
-  # ufbx and metal-cpp carry no CMake project of their own.
-  FetchContent_Populate(ufbx)
-  FetchContent_Populate(metalcpp)
+  FetchContent_Populate(metalcpp)  # header-only, no CMake project
 endif()

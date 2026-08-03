@@ -548,6 +548,19 @@ std::vector<std::uint8_t> serialize_document(const Document& doc) {
     return std::move(w.out);
 }
 
+std::optional<Document> deserialize_document(const std::uint8_t* data, std::size_t size) {
+    Reader r{data, size};
+    std::uint32_t count = r.u32();
+    if (!r.ok || count > 100000) return std::nullopt;
+    Document doc;
+    for (std::uint32_t i = 0; i < count && r.ok; ++i) {
+        Layer l = read_layer(r);
+        if (r.ok) doc.insert_layer(std::move(l), -1);
+    }
+    if (!r.ok) return std::nullopt;
+    return doc;
+}
+
 // ---------------------------------------------------------------------------
 // undo stack
 // ---------------------------------------------------------------------------

@@ -96,6 +96,7 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size);
 // Whole-document snapshot (used by tests for bit-identity checks and by the
 // io module as the scene chunk payload).
 std::vector<std::uint8_t> serialize_document(const Document& doc);
+std::optional<Document> deserialize_document(const std::uint8_t* data, std::size_t size);
 
 // Undo stack over the command vocabulary. perform() applies and records;
 // consecutive AppendStrokeCmds on the same node coalesce into one step, and

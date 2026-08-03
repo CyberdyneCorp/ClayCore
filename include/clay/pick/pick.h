@@ -1,0 +1,98 @@
+#pragma once
+
+// Picking & interaction math (picking spec): CPU-side, called every Pencil
+// event. Ray <-> scene raycast with layer/item attribution (analytic tape or
+// brick cache, whichever the caller says is fresher), surface snapping by
+// gradient descent, voxel cell/face picking, and selection-bounds utilities.
+
+#include <optional>
+#include <vector>
+
+#include "clay/brick/cache.h"
+#include "clay/scene/document.h"
+#include "clay/scene/tape.h"
+#include "clay/voxel/grid.h"
+
+namespace clay {
+namespace pick {
+
+struct RaycastOptions {
+    float tmin = 0.0f;
+    float tmax = 1e6f;
+    float eps = 1e-4f;
+    int max_steps = 256;
+};
+
+struct SceneHit {
+    bool hit = false;
+    float t = 0.0f;
+    kernel::cfloat3 position = kernel::cf3(0, 0, 0);
+    kernel::cfloat3 normal = kernel::cf3(0, 1, 0);
+    scene::LayerId layer = 0;   // attribution (0 = none)
+    scene::NodeId item = scene::kNoNode;
+};
+
+// Analytic raycast against the document's compiled tape, with hit
+// attribution to the closest layer and edit item (by field proximity at the
+// hit point; subtract items attribute their carved surfaces).
+SceneHit raycast_scene(const scene::Document& doc, const math::Ray& ray,
+                       const RaycastOptions& options = {});
+
+// Raycast against a filled brick cache (trilinear narrow-band samples, brick
+// DDA across non-surface bricks). Position/normal only — pass the document
+// to attribute() for ids.
+SceneHit raycast_bricks(const brick::BrickCache& cache, const math::Ray& ray,
+                        const RaycastOptions& options = {});
+
+// Attribute a world position to the nearest (layer, item) of the document.
+void attribute(const scene::Document& doc, kernel::cfloat3 position, scene::LayerId* layer,
+               scene::NodeId* item);
+
+// -- surface snapping --------------------------------------------------------
+
+struct SnapResult {
+    bool ok = false;
+    kernel::cfloat3 position = kernel::cf3(0, 0, 0);
+    kernel::cfloat3 normal = kernel::cf3(0, 1, 0);  // outward
+};
+
+// Gradient-descent closest-point-on-surface; converges for points within a
+// few band-widths of the surface. Position and position+normal modes share
+// this call — the normal is always filled.
+SnapResult snap_to_surface(const scene::Tape& tape, kernel::cfloat3 p, int max_iters = 12,
+                           float tolerance = 1e-4f);
+
+// -- voxel picking -----------------------------------------------------------
+
+// Entry-face ids: 0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z (the face the ray
+// entered the cell through — its neighbor is where a new voxel goes).
+struct VoxelHit {
+    bool hit = false;
+    voxel::VoxelCoord cell;
+    int face = 0;
+    float t = 0.0f;
+};
+
+VoxelHit raycast_voxels(const voxel::VoxelGrid& grid, const math::Ray& ray, float tmax = 1e6f);
+
+// The neighbor cell across the entry face (placement target).
+voxel::VoxelCoord adjacent_cell(const VoxelHit& hit);
+
+// Build-plane resolution (delegates to the grid; here so all interaction
+// queries live in one module).
+std::optional<voxel::VoxelCoord> pick_build_plane(const voxel::VoxelGrid& grid,
+                                                  const math::Ray& ray,
+                                                  std::int32_t plane_cell);
+
+// -- bounds utilities --------------------------------------------------------
+
+// World-space shape bounds (no blend/rounding dilation — the tight box for
+// zoom-to-selection) of a set of nodes in a layer.
+math::Aabb selection_bounds(const scene::Document& doc, scene::LayerId layer,
+                            const std::vector<scene::NodeId>& nodes);
+
+// Whole-layer shape bounds.
+math::Aabb layer_bounds(const scene::Layer& layer);
+
+}  // namespace pick
+}  // namespace clay

@@ -1,0 +1,227 @@
+#include <doctest/doctest.h>
+
+#include "clay/io/clayspace.h"
+#include "clay/io/mesh_io.h"
+#include "clay/mesh/marching.h"
+#include "clay/mesh/validate.h"
+#include "kernel_utils.h"
+#include "scene_utils.h"
+
+using namespace clay;
+using namespace clay::kernel;
+using clay_test::gnarly_document;
+using clay_test::item;
+
+namespace {
+
+mesh::Mesh sample_mesh() {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node a = item(scene::Prim::sphere(0.6f), cf3(-0.3f, 0, 0));
+    a.color = cf3(0.9f, 0.2f, 0.1f);
+    l.sdf->insert(a);
+    scene::Node b = item(scene::Prim::box(cf3(0.4f, 0.4f, 0.4f)), cf3(0.4f, 0.1f, 0),
+                         scene::Op::Add, scene::Blend{scene::BlendProfile::Quadratic, 0.1f});
+    b.color = cf3(0.1f, 0.3f, 0.9f);
+    l.sdf->insert(b);
+    scene::Tape tape = scene::compile_document(doc);
+    return mesh::mesh_tape(tape, math::Aabb{cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)},
+                           0.08f);
+}
+
+io::ClaySpaceDoc sample_clayspace() {
+    io::ClaySpaceDoc cs;
+    cs.document = gnarly_document();
+    scene::Layer& vl = cs.document.add_sdf_layer("blocks");
+    vl.kind = scene::LayerKind::Voxel;
+    vl.sdf.reset();
+    voxel::VoxelGrid grid(0.1f);
+    grid.fill_box({0, 0, 0}, {5, 3, 2}, grid.palette_add(cf3(1, 0.5f, 0)));
+    cs.voxel_layers.emplace(vl.id, std::move(grid));
+    cs.thumbnail_png = {0x89, 'P', 'N', 'G', 1, 2, 3};
+    return cs;
+}
+
+}  // namespace
+
+TEST_CASE("clayspace: bit-identical round trip with voxel layers and extras") {
+    io::ClaySpaceDoc cs = sample_clayspace();
+    std::vector<std::uint8_t> bytes = io::save_clayspace(cs);
+    io::ClaySpaceDoc back;
+    io::IoStatus s = io::load_clayspace(bytes.data(), bytes.size(), &back);
+    REQUIRE(s.ok());
+    CHECK(io::save_clayspace(back) == bytes);  // canonical bit-identity
+    CHECK(back.voxel_layers.size() == 1);
+    CHECK(back.thumbnail_png == cs.thumbnail_png);
+    // the reloaded document evaluates identically
+    scene::Tape a = scene::compile_document(cs.document);
+    scene::Tape b = scene::compile_document(back.document);
+    clay_test::Lcg rng(901);
+    for (int i = 0; i < 200; ++i) {
+        cfloat3 p = rng.vec3(-3, 3);
+        CHECK(a.eval(p).d == b.eval(p).d);  // exact
+    }
+}
+
+TEST_CASE("clayspace: forward-refuse, truncation, unknown chunks") {
+    std::vector<std::uint8_t> bytes = io::save_clayspace(sample_clayspace());
+    io::ClaySpaceDoc out;
+
+    // newer major version refused with no partial document
+    std::vector<std::uint8_t> newer = bytes;
+    newer[4] = 99;
+    io::IoStatus s = io::load_clayspace(newer.data(), newer.size(), &out);
+    CHECK(s.error == io::IoError::ForwardVersion);
+
+    // truncation at every prefix fails cleanly (never crashes)
+    for (std::size_t cut = 0; cut < bytes.size(); cut += 97)
+        CHECK_FALSE(io::load_clayspace(bytes.data(), cut, &out).ok());
+
+    // unknown chunk appended -> still loads (backward-open)
+    std::vector<std::uint8_t> extended = bytes;
+    const char cc[4] = {'F', 'U', 'T', 'R'};
+    extended.insert(extended.end(), cc, cc + 4);
+    for (int i = 0; i < 8; ++i) extended.push_back(i == 0 ? 4 : 0);  // u64 size = 4
+    for (int i = 0; i < 4; ++i) extended.push_back(0xAB);
+    CHECK(io::load_clayspace(extended.data(), extended.size(), &out).ok());
+}
+
+TEST_CASE("OBJ: vertex-color round trip") {
+    mesh::Mesh m = sample_mesh();
+    std::string text = io::save_obj(m, "clay", "clay.mtl");
+    CHECK(text.find("mtllib clay.mtl") != std::string::npos);
+    mesh::Mesh back;
+    REQUIRE(io::load_obj(text, &back).ok());
+    REQUIRE(back.positions.size() == m.positions.size());
+    REQUIRE(back.indices == m.indices);
+    REQUIRE(back.colors.size() == m.colors.size());
+    for (std::size_t i = 0; i < m.positions.size(); i += 13) {
+        CHECK(clength(back.positions[i] - m.positions[i]) < 1e-5f);
+        CHECK(clength(back.colors[i] - m.colors[i]) < 1e-5f);
+    }
+    CHECK(io::save_mtl().find("newmtl") == 0);
+}
+
+TEST_CASE("PLY: binary and ascii round trips with colors") {
+    mesh::Mesh m = sample_mesh();
+    for (bool binary : {true, false}) {
+        CAPTURE(binary);
+        std::vector<std::uint8_t> bytes = io::save_ply(m, binary);
+        mesh::Mesh back;
+        REQUIRE(io::load_ply(bytes.data(), bytes.size(), &back).ok());
+        REQUIRE(back.positions.size() == m.positions.size());
+        REQUIRE(back.indices == m.indices);
+        for (std::size_t i = 0; i < m.positions.size(); i += 13) {
+            CHECK(clength(back.positions[i] - m.positions[i]) < (binary ? 1e-7f : 1e-5f));
+            // colors quantized to 8 bits: sqrt(3) * half-step L2 bound
+            CHECK(clength(back.colors[i] - m.colors[i]) < 1.7320508f * 0.5f / 255.0f + 1e-4f);
+        }
+    }
+}
+
+TEST_CASE("FBX: writer output round-trips through ufbx with geometry intact") {
+    mesh::Mesh m = sample_mesh();
+    std::vector<std::uint8_t> bytes = io::save_fbx(m, "clay_export");
+    REQUIRE(bytes.size() > 200);
+    mesh::Mesh back;
+    io::IoStatus s = io::load_fbx(bytes.data(), bytes.size(), &back);
+    REQUIRE(s.ok());
+    CHECK(back.triangle_count() == m.triangle_count());
+    // geometry preserved: volume and area agree (import splits vertices per
+    // corner, so counts differ but the surface must not)
+    CHECK(mesh::signed_volume(back) == doctest::Approx(mesh::signed_volume(m)).epsilon(1e-4));
+    CHECK(mesh::surface_area(back) == doctest::Approx(mesh::surface_area(m)).epsilon(1e-4));
+    // colors survived
+    REQUIRE(back.colors.size() == back.positions.size());
+    bool found_red = false, found_blue = false;
+    for (const cfloat3& c : back.colors) {
+        if (c.x > 0.7f && c.z < 0.3f) found_red = true;
+        if (c.z > 0.7f && c.x < 0.3f) found_blue = true;
+    }
+    CHECK(found_red);
+    CHECK(found_blue);
+}
+
+TEST_CASE("import guardrails: budgets") {
+    mesh::Mesh m = sample_mesh();
+    io::ImportBudget tiny;
+    tiny.max_vertices = 10;
+    mesh::Mesh out;
+    CHECK(io::load_obj(io::save_obj(m), &out, tiny).error == io::IoError::BudgetExceeded);
+    std::vector<std::uint8_t> ply = io::save_ply(m);
+    CHECK(io::load_ply(ply.data(), ply.size(), &out, tiny).error ==
+          io::IoError::BudgetExceeded);
+    std::vector<std::uint8_t> fbx = io::save_fbx(m);
+    CHECK(io::load_fbx(fbx.data(), fbx.size(), &out, tiny).error ==
+          io::IoError::BudgetExceeded);
+}
+
+TEST_CASE("import guardrails: PLY allocation bomb rejected before allocating") {
+    // header declares 100M vertices with a 10-byte payload
+    std::string bomb =
+        "ply\nformat binary_little_endian 1.0\nelement vertex 100000000\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "element face 0\nproperty list uchar int vertex_indices\nend_header\n"
+        "0123456789";
+    mesh::Mesh out;
+    io::IoStatus s = io::load_ply(reinterpret_cast<const std::uint8_t*>(bomb.data()),
+                                  bomb.size(), &out, io::ImportBudget{});
+    CHECK_FALSE(s.ok());
+    CHECK(out.positions.capacity() < 1000000);  // no giant reservation happened
+}
+
+TEST_CASE("import fuzz: mutated files never crash the loaders") {
+    mesh::Mesh m = sample_mesh();
+    std::string obj = io::save_obj(m);
+    std::vector<std::uint8_t> ply = io::save_ply(m);
+    std::vector<std::uint8_t> fbx = io::save_fbx(m);
+    clay_test::Lcg rng(902);
+    mesh::Mesh out;
+    for (int i = 0; i < 60; ++i) {
+        auto mutate = [&](std::vector<std::uint8_t> data) {
+            for (int k = 0; k < 8; ++k)
+                data[static_cast<std::size_t>(rng.range(0.0f, 0.999f) *
+                                              static_cast<float>(data.size()))] =
+                    static_cast<std::uint8_t>(rng.range(0, 255.99f));
+            if (i % 3 == 0) data.resize(data.size() / 2 + 1);
+            return data;
+        };
+        std::vector<std::uint8_t> pm = mutate(ply);
+        (void)io::load_ply(pm.data(), pm.size(), &out, io::ImportBudget{});
+        std::vector<std::uint8_t> fm = mutate(fbx);
+        (void)io::load_fbx(fm.data(), fm.size(), &out, io::ImportBudget{});
+        std::vector<std::uint8_t> om = mutate({obj.begin(), obj.end()});
+        (void)io::load_obj(std::string(om.begin(), om.end()), &out, io::ImportBudget{});
+    }
+    CHECK(true);  // surviving without a crash IS the assertion (ASan job hardens it)
+}
+
+TEST_CASE("platform buffer view exposes contiguous typed arrays") {
+    mesh::Mesh m = sample_mesh();
+    io::MeshBufferView v = io::buffer_view(m);
+    REQUIRE(v.vertex_count == m.positions.size());
+    REQUIRE(v.index_count == m.indices.size());
+    CHECK(v.positions == &m.positions[0].x);
+    CHECK(v.positions[4] == m.positions[1].y);  // stride-3 packing
+    CHECK(v.colors != nullptr);
+    CHECK(v.normals != nullptr);
+    CHECK(v.indices == m.indices.data());
+}
+
+TEST_CASE("io: file round trips through disk") {
+    mesh::Mesh m = sample_mesh();
+    std::string base = "io_sample";
+    REQUIRE(io::save_obj_file(m, base + ".obj").ok());
+    REQUIRE(io::save_ply_file(m, base + ".ply").ok());
+    REQUIRE(io::save_fbx_file(m, base + ".fbx").ok());
+    io::ClaySpaceDoc cs = sample_clayspace();
+    REQUIRE(io::save_clayspace_file(cs, base + ".clayspace").ok());
+
+    mesh::Mesh back;
+    CHECK(io::load_obj_file(base + ".obj", &back).ok());
+    CHECK(io::load_ply_file(base + ".ply", &back).ok());
+    CHECK(io::load_fbx_file(base + ".fbx", &back).ok());
+    io::ClaySpaceDoc cs_back;
+    CHECK(io::load_clayspace_file(base + ".clayspace", &cs_back).ok());
+    CHECK_FALSE(io::load_obj_file("does_not_exist.obj", &back).ok());
+}
