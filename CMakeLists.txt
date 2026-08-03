@@ -29,10 +29,13 @@ add_library(claycore
   src/scene/tape_build.cpp
   src/brick/cache.cpp
   src/voxel/grid.cpp
+  src/mesh/marching.cpp
+  src/mesh/validate.cpp
+  src/mesh/decimate.cpp
   backends/cpu/cpu_backend.cpp)
 
 find_package(Threads REQUIRED)
-target_link_libraries(claycore PRIVATE Threads::Threads)
+target_link_libraries(claycore PRIVATE Threads::Threads meshoptimizer)
 add_library(clay::core ALIAS claycore)
 
 target_include_directories(claycore PUBLIC

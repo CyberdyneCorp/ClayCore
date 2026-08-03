@@ -8,6 +8,8 @@
 #include "clay/eval/backend.h"
 #include "clay/kernel/field.h"
 #include "clay/math/geom.h"
+
+#include "../common/grid_mesh.h"
 #include "thread_pool.h"
 
 namespace clay {
@@ -89,6 +91,11 @@ class CpuBackend final : public Backend {
                 }
             });
         return Status::Ok;
+    }
+
+    Status mesh(const scene::Tape& tape, const GridQuery& q, std::vector<float>* out_verts,
+                std::vector<std::uint32_t>* out_indices) override {
+        return grid_mesh(*this, tape, q, out_verts, out_indices);
     }
 
     Status raycast(const scene::Tape& tape, const RayQuery& q, RayHit* hits) override {

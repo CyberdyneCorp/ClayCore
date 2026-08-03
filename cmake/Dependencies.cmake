@@ -34,6 +34,9 @@ if(CLAY_BUILD_TESTS OR CLAY_FETCH_ALL_DEPS)
   FetchContent_MakeAvailable(doctest)
 endif()
 
+# decimation (mesh module) links meshoptimizer unconditionally
+FetchContent_MakeAvailable(meshoptimizer)
+
 if(CLAY_BUILD_BENCHMARKS OR CLAY_FETCH_ALL_DEPS)
   set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
   set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "" FORCE)
@@ -47,7 +50,7 @@ if(CLAY_BACKEND_METAL AND APPLE)
 endif()
 
 if(CLAY_FETCH_ALL_DEPS)
-  FetchContent_MakeAvailable(xsimd meshoptimizer)
+  FetchContent_MakeAvailable(xsimd)
   # ufbx and metal-cpp carry no CMake project of their own.
   FetchContent_Populate(ufbx)
   FetchContent_Populate(metalcpp)

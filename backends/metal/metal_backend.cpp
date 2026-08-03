@@ -14,6 +14,8 @@
 #include "clay/eval/backend.h"
 #include "metal_shared.h"
 
+#include "../common/grid_mesh.h"
+
 extern "C" {
 extern const unsigned char clay_metallib[];
 extern const unsigned int clay_metallib_size;
@@ -101,6 +103,12 @@ class MetalBackend final : public Backend {
         }
         release_all({tb.instrs, tb.params, tb.strokes, dist, cols});
         return ok ? Status::Ok : Status::DeviceError;
+    }
+
+    Status mesh(const scene::Tape& tape, const GridQuery& q, std::vector<float>* out_verts,
+                std::vector<std::uint32_t>* out_indices) override {
+        // hybrid: field values on the device, triangulation on the host
+        return grid_mesh(*this, tape, q, out_verts, out_indices);
     }
 
     Status raycast(const scene::Tape& tape, const RayQuery& q, RayHit* hits) override {

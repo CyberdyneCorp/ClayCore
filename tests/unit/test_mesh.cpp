@@ -1,0 +1,268 @@
+#include <doctest/doctest.h>
+
+#include <string>
+
+#include "clay/brick/cache.h"
+#include "clay/scene/bounds.h"
+#include "clay/mesh/decimate.h"
+#include "clay/mesh/marching.h"
+#include "clay/mesh/validate.h"
+#include "kernel_utils.h"
+#include "scene_utils.h"
+
+using namespace clay;
+using namespace clay::kernel;
+using clay_test::gnarly_document;
+using clay_test::item;
+using mesh::Mesh;
+using mesh::ValidationReport;
+
+namespace {
+
+scene::Tape sphere_tape(float r) {
+    static scene::Document doc;
+    doc = scene::Document{};
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node n = item(scene::Prim::sphere(r), cf3(0, 0, 0));
+    n.color = cf3(0.8f, 0.2f, 0.1f);
+    l.sdf->insert(n);
+    return scene::compile_document(doc);
+}
+
+}  // namespace
+
+TEST_CASE("sphere mesh: watertight, manifold, outward, right volume/area/euler") {
+    scene::Tape tape = sphere_tape(1.0f);
+    Mesh m = mesh::mesh_tape(tape, math::Aabb{cf3(-1.3f, -1.3f, -1.3f), cf3(1.3f, 1.3f, 1.3f)},
+                             0.05f);
+    REQUIRE(!m.empty());
+    ValidationReport r = mesh::validate(m, 20000);
+    CHECK(r.watertight);
+    CHECK(r.manifold);
+    CHECK(r.oriented);
+    CHECK(r.degenerate_triangles == 0);
+    CHECK(r.intersecting_pairs == 0);
+    CHECK(r.euler_characteristic == 2);  // sphere topology
+    CHECK(mesh::signed_volume(m) == doctest::Approx(4.18879).epsilon(0.02));   // outward normals
+    CHECK(mesh::surface_area(m) == doctest::Approx(12.56637).epsilon(0.02));
+}
+
+TEST_CASE("torus mesh: euler characteristic 0 (genus 1)") {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    l.sdf->insert(item(scene::Prim::torus(1.0f, 0.3f), cf3(0, 0, 0)));
+    scene::Tape tape = scene::compile_document(doc);
+    Mesh m = mesh::mesh_tape(tape, math::Aabb{cf3(-1.5f, -0.5f, -1.5f), cf3(1.5f, 0.5f, 1.5f)},
+                             0.04f);
+    ValidationReport r = mesh::validate(m);
+    CHECK(r.watertight);
+    CHECK(r.manifold);
+    CHECK(r.euler_characteristic == 0);
+}
+
+TEST_CASE("golden gates: op x blend matrix meshes are clean") {
+    using scene::Blend;
+    using scene::BlendProfile;
+    using scene::Op;
+    const Op ops[] = {Op::Add, Op::Subtract, Op::Intersect};
+    const BlendProfile profiles[] = {BlendProfile::Hard, BlendProfile::Quadratic,
+                                     BlendProfile::Cubic, BlendProfile::Circular,
+                                     BlendProfile::Chamfer};
+    for (Op op : ops) {
+        for (BlendProfile profile : profiles) {
+            CAPTURE(static_cast<int>(op));
+            CAPTURE(static_cast<int>(profile));
+            scene::Document doc;
+            scene::Layer& l = doc.add_sdf_layer("l");
+            l.sdf->insert(item(scene::Prim::sphere(0.7f), cf3(-0.25f, 0, 0)));
+            l.sdf->insert(item(scene::Prim::box(cf3(0.5f, 0.45f, 0.55f)), cf3(0.35f, 0.15f, 0),
+                               op, Blend{profile, profile == BlendProfile::Hard ? 0.0f : 0.12f}));
+            scene::Tape tape = scene::compile_document(doc);
+            Mesh m = mesh::mesh_tape(
+                tape, math::Aabb{cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)}, 0.06f);
+            REQUIRE(!m.empty());
+            ValidationReport r = mesh::validate(m, 5000);
+            CHECK(r.watertight);
+            CHECK(r.manifold);
+            CHECK(r.oriented);
+            CHECK(r.degenerate_triangles == 0);
+            CHECK(r.intersecting_pairs == 0);
+        }
+    }
+}
+
+TEST_CASE("golden gate: the gnarly composed scene meshes clean") {
+    scene::Document doc = gnarly_document();
+    scene::Tape tape = scene::compile_document(doc);
+    Mesh m = mesh::mesh_tape(tape, math::Aabb{cf3(-2.5f, -2.5f, -2.5f), cf3(4.2f, 2.5f, 2.5f)},
+                             0.08f);
+    REQUIRE(!m.empty());
+    ValidationReport r = mesh::validate(m);
+    CHECK(r.watertight);
+    CHECK(r.manifold);
+    CHECK(r.oriented);
+    CHECK(r.degenerate_triangles == 0);
+}
+
+TEST_CASE("brick-cache meshing is watertight across brick seams") {
+    scene::Document doc = gnarly_document();
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    brick::BrickCache cache(brick::BrickConfig{8, 0.08f, 3, 0});
+    cache.mark_dirty(scene::layer_influence_bound(doc.layers[0]));
+    scene::Tape full = scene::compile_document(doc);
+    for (const brick::BrickRequest& req : cache.take_dirty()) {
+        scene::CullRegion cull{cache.cull_region(req.key)};
+        scene::Tape tape = scene::compile_document(doc, &cull);
+        std::vector<float> values(static_cast<std::size_t>(req.grid.nx) * req.grid.ny *
+                                  req.grid.nz);
+        REQUIRE(cpu->eval_grid(tape, req.grid, values.data()) == eval::Status::Ok);
+        cache.submit(req, values.data());
+    }
+    Mesh m = mesh::mesh_bricks(cache, &full);
+    REQUIRE(!m.empty());
+    ValidationReport r = mesh::validate(m);
+    CHECK(r.watertight);  // no holes at brick boundaries
+    CHECK(r.manifold);
+    CHECK(r.oriented);
+}
+
+TEST_CASE("vertex attributes: blend-faithful colors and gradient normals") {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node a = item(scene::Prim::sphere(0.6f), cf3(-0.45f, 0, 0));
+    a.color = cf3(1, 0, 0);
+    l.sdf->insert(a);
+    scene::Node b = item(scene::Prim::sphere(0.6f), cf3(0.45f, 0, 0), scene::Op::Add,
+                         scene::Blend{scene::BlendProfile::Quadratic, 0.25f});
+    b.color = cf3(0, 0, 1);
+    l.sdf->insert(b);
+    scene::Tape tape = scene::compile_document(doc);
+    Mesh m = mesh::mesh_tape(tape, math::Aabb{cf3(-1.3f, -1.0f, -1.0f), cf3(1.3f, 1.0f, 1.0f)},
+                             0.05f);
+    REQUIRE(m.colors.size() == m.positions.size());
+    REQUIRE(m.normals.size() == m.positions.size());
+
+    bool found_left = false, found_right = false, found_mid = false;
+    for (std::size_t i = 0; i < m.positions.size(); ++i) {
+        cfloat3 p = m.positions[i];
+        cfloat3 c = m.colors[i];
+        if (p.x < -0.7f && c.x > 0.9f && c.z < 0.1f) found_left = true;
+        if (p.x > 0.7f && c.z > 0.9f && c.x < 0.1f) found_right = true;
+        // near the joint: an actual gradient, neither pure red nor pure blue
+        if (cabs(p.x) < 0.05f && c.x > 0.2f && c.x < 0.8f && c.z > 0.2f && c.z < 0.8f)
+            found_mid = true;
+        CHECK(clength(m.normals[i]) == doctest::Approx(1.0f).epsilon(1e-3));
+    }
+    CHECK(found_left);
+    CHECK(found_right);
+    CHECK(found_mid);
+
+    // face normals + box UVs also work
+    mesh::compute_face_normals(m);
+    mesh::uv_box_project(m, 1.0f);
+    CHECK(m.uvs.size() == m.positions.size());
+}
+
+TEST_CASE("gradient normals agree with geometry on a sphere") {
+    scene::Tape tape = sphere_tape(1.0f);
+    Mesh m = mesh::mesh_tape(tape, math::Aabb{cf3(-1.3f, -1.3f, -1.3f), cf3(1.3f, 1.3f, 1.3f)},
+                             0.08f);
+    for (std::size_t i = 0; i < m.positions.size(); i += 7) {
+        cfloat3 radial = cnormalize(m.positions[i]);
+        CHECK(cdot(m.normals[i], radial) > 0.999f);
+    }
+}
+
+TEST_CASE("decimation: ratio target, watertightness, color boundaries") {
+    scene::Tape tape = sphere_tape(1.0f);
+    Mesh m = mesh::mesh_tape(tape, math::Aabb{cf3(-1.3f, -1.3f, -1.3f), cf3(1.3f, 1.3f, 1.3f)},
+                             0.05f);
+    std::size_t before = m.triangle_count();
+
+    mesh::DecimateOptions opts;
+    opts.target_ratio = 0.25f;
+    opts.target_error = 0.05f;
+    Mesh d = mesh::decimate(m, opts);
+    CHECK(d.triangle_count() < before / 2);       // meaningful reduction
+    CHECK(d.colors.size() == d.positions.size()); // attributes survive
+    ValidationReport r = mesh::validate(d);
+    CHECK(r.watertight);
+    CHECK(r.manifold);
+    CHECK(mesh::signed_volume(d) == doctest::Approx(4.18879).epsilon(0.1));
+}
+
+TEST_CASE("backend mesh(): CPU produces valid geometry; GPU matches topology") {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    l.sdf->insert(item(scene::Prim::sphere(0.8f), cf3(0, 0, 0)));
+    l.sdf->insert(item(scene::Prim::box(cf3(0.4f, 0.4f, 0.4f)), cf3(0.7f, 0, 0), scene::Op::Add,
+                       scene::Blend{scene::BlendProfile::Quadratic, 0.1f}));
+    scene::Tape tape = scene::compile_document(doc);
+
+    eval::GridQuery grid;
+    grid.origin = cf3(-1.4f, -1.4f, -1.4f);
+    grid.spacing = 0.07f;
+    grid.nx = grid.ny = grid.nz = 42;
+
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    REQUIRE(cpu);
+    std::vector<float> cpu_verts;
+    std::vector<std::uint32_t> cpu_idx;
+    REQUIRE(cpu->mesh(tape, grid, &cpu_verts, &cpu_idx) == eval::Status::Ok);
+    Mesh cm;
+    for (std::size_t i = 0; i < cpu_verts.size(); i += 3)
+        cm.positions.push_back(cf3(cpu_verts[i], cpu_verts[i + 1], cpu_verts[i + 2]));
+    cm.indices = cpu_idx;
+    ValidationReport cr = mesh::validate(cm);
+    CHECK(cr.watertight);
+    CHECK(cr.manifold);
+    CHECK(cr.oriented);
+
+    for (eval::Backend* backend : eval::Registry::instance().all()) {
+        if (backend == cpu) continue;
+        CAPTURE(backend->name());
+        std::vector<float> verts;
+        std::vector<std::uint32_t> idx;
+        eval::Status s = backend->mesh(tape, grid, &verts, &idx);
+        if (s == eval::Status::Unsupported) continue;
+        REQUIRE(s == eval::Status::Ok);
+        Mesh gm;
+        for (std::size_t i = 0; i < verts.size(); i += 3)
+            gm.positions.push_back(cf3(verts[i], verts[i + 1], verts[i + 2]));
+        gm.indices = idx;
+        ValidationReport gr = mesh::validate(gm);
+        // topology-invariant parity (meshing spec): watertight/manifold and
+        // identical Euler characteristic, not bit-identical vertices
+        CHECK(gr.watertight);
+        CHECK(gr.manifold);
+        CHECK(gr.euler_characteristic == cr.euler_characteristic);
+    }
+}
+
+TEST_CASE("validator catches a hole and non-manifold fins") {
+    scene::Tape tape = sphere_tape(0.8f);
+    Mesh m = mesh::mesh_tape(tape, math::Aabb{cf3(-1.1f, -1.1f, -1.1f), cf3(1.1f, 1.1f, 1.1f)},
+                             0.1f);
+    REQUIRE(mesh::validate(m).watertight);
+
+    // delete one triangle -> boundary edges appear
+    Mesh holed = m;
+    holed.indices.resize(holed.indices.size() - 3);
+    ValidationReport r = mesh::validate(holed);
+    CHECK_FALSE(r.watertight);
+    CHECK(r.boundary_edges == 3);
+
+    // duplicate a triangle -> non-manifold edges
+    Mesh fin = m;
+    fin.indices.push_back(fin.indices[0]);
+    fin.indices.push_back(fin.indices[1]);
+    fin.indices.push_back(fin.indices[2]);
+    CHECK_FALSE(mesh::validate(fin).manifold);
+
+    // degenerate triangle detected
+    Mesh degen = m;
+    degen.indices.push_back(0);
+    degen.indices.push_back(0);
+    degen.indices.push_back(1);
+    CHECK(mesh::validate(degen).degenerate_triangles == 1);
+}

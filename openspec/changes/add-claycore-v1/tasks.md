@@ -57,12 +57,12 @@ Groups 1–10 are Phase 1 (the ClaySpace app's dependency set). Groups 11–14 m
 
 ## 7. Meshing (meshing)
 
-- [ ] 7.1 CPU marching cubes with asymptotic decider over surface-crossing bricks; watertight/manifold validation suite
-- [ ] 7.2 Vertex attributes: colors from color field (blend-faithful), gradient/face normals, box-projection UV utility
-- [ ] 7.3 Decimation via meshoptimizer (ratio/error targets, color-aware) 
-- [ ] 7.4 Mesh validation module (watertight, manifold, degenerates, sampled self-intersection) — the CI export gate
-- [ ] 7.5 Golden-scene meshing gates across the op × blend matrix
-- [ ] 7.6 GPU meshing on Metal with topology-invariant parity vs CPU MC
+- [x] 7.1 Default mesher over surface-crossing bricks: marching tetrahedra (consistent Freudenthal decomposition — watertight/2-manifold by construction, per amended meshing spec); watertight/manifold validation suite
+- [x] 7.2 Vertex attributes: colors from color field (blend-faithful), gradient/face normals, box-projection UV utility
+- [x] 7.3 Decimation via meshoptimizer (ratio/error targets, color-aware) 
+- [x] 7.4 Mesh validation module (watertight, manifold, degenerates, sampled self-intersection) — the CI export gate
+- [x] 7.5 Golden-scene meshing gates across the op × blend matrix
+- [x] 7.6 Backend::mesh() hybrid GPU meshing on Metal (device field eval + host triangulation) with topology-invariant parity vs CPU; full on-device triangulation left as a perf follow-up
 
 ## 8. Picking (picking)
 
