@@ -11,6 +11,7 @@
 #include "clay/brick/cache.h"
 #include "clay/eval/backend.h"
 #include "clay/mesh/marching.h"
+#include "clay/mesh/surface_nets.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/tape.h"
 
@@ -113,6 +114,18 @@ void BM_MeshTape(benchmark::State& state) {
     }
 }
 BENCHMARK(BM_MeshTape)->Unit(benchmark::kMillisecond);
+
+// same scene/resolution as BM_MeshTape: the meshing spec's "preview is
+// cheaper than marching" claim is gated on this pair by check_bench.py
+void BM_SurfaceNets(benchmark::State& state) {
+    scene::Document doc = bench_document();
+    scene::Tape tape = scene::compile_document(doc);
+    for (auto _ : state) {
+        mesh::Mesh m = mesh::mesh_tape_nets(tape, tape.bounds, 0.02f);
+        benchmark::DoNotOptimize(m.triangle_count());
+    }
+}
+BENCHMARK(BM_SurfaceNets)->Unit(benchmark::kMillisecond);
 
 }  // namespace
 

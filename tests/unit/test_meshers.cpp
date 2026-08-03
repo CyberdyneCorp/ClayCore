@@ -1,0 +1,168 @@
+#include <doctest/doctest.h>
+
+#include "clay/mesh/dual_contouring.h"
+#include "clay/mesh/marching.h"
+#include "clay/mesh/surface_nets.h"
+#include "clay/mesh/validate.h"
+#include "scene_utils.h"
+
+using namespace clay;
+using namespace clay::kernel;
+using clay_test::item;
+using mesh::Mesh;
+using mesh::ValidationReport;
+
+namespace {
+
+scene::Tape sphere_tape(float r) {
+    static scene::Document doc;
+    doc = scene::Document{};
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node n = item(scene::Prim::sphere(r), cf3(0, 0, 0));
+    n.color = cf3(0.8f, 0.2f, 0.1f);
+    l.sdf->insert(n);
+    return scene::compile_document(doc);
+}
+
+// two hard-unioned boxes forming a plus sign: sharp 90-degree edges. Rotated
+// off the lattice axes — an axis-aligned box is degenerate for this test
+// (marching's lerp crossings on axis lattice edges are exact there).
+const math::Quat kCrossRot = math::Quat::from_axis_angle(cf3(1, 0, 0), 0.35f);
+
+scene::Tape cross_tape() {
+    static scene::Document doc;
+    doc = scene::Document{};
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node a = item(scene::Prim::box(cf3(0.6f, 0.3f, 0.3f)), cf3(0, 0, 0));
+    scene::Node b = item(scene::Prim::box(cf3(0.3f, 0.6f, 0.3f)), cf3(0, 0, 0));
+    a.xform.rotation = kCrossRot;
+    b.xform.rotation = kCrossRot;
+    l.sdf->insert(a);
+    l.sdf->insert(b);
+    return scene::compile_document(doc);
+}
+
+}  // namespace
+
+TEST_CASE("surface nets: sphere preview is lighter than marching, outward-oriented") {
+    scene::Tape tape = sphere_tape(1.0f);
+    math::Aabb region{cf3(-1.3f, -1.3f, -1.3f), cf3(1.3f, 1.3f, 1.3f)};
+    Mesh nets = mesh::mesh_tape_nets(tape, region, 0.05f);
+    Mesh mt = mesh::mesh_tape(tape, region, 0.05f);
+    REQUIRE(!nets.empty());
+    REQUIRE(!mt.empty());
+
+    // preview economy: one vertex per cell beats one per crossing edge, and
+    // one quad per crossing edge beats the tetrahedra fan
+    CHECK(nets.positions.size() < mt.positions.size());
+    CHECK(nets.triangle_count() < mt.triangle_count());
+
+    // NOT asserted: watertight/manifold — the meshing spec does not promise
+    // them for surface nets. Where the sphere IS manifold, orientation must
+    // be consistent and outward (positive signed volume near 4/3*pi).
+    ValidationReport r = mesh::validate(nets);
+    CHECK(r.oriented);
+    CHECK(r.degenerate_triangles == 0);
+    CHECK(mesh::signed_volume(nets) == doctest::Approx(4.18879).epsilon(0.05));
+
+    // attribute pass shared with mesh_tape
+    CHECK(nets.colors.size() == nets.positions.size());
+    CHECK(nets.normals.size() == nets.positions.size());
+    for (std::size_t i = 0; i < nets.positions.size(); i += 11) {
+        cfloat3 radial = cnormalize(nets.positions[i]);
+        CHECK(cdot(nets.normals[i], radial) > 0.99f);
+    }
+}
+
+TEST_CASE("surface nets: region-crossing sphere stays closed (ring)") {
+    scene::Tape tape = sphere_tape(1.0f);
+    Mesh m = mesh::mesh_tape_nets(
+        tape, math::Aabb{cf3(-0.7f, -0.7f, -0.7f), cf3(0.7f, 0.7f, 0.7f)}, 0.05f);
+    REQUIRE(!m.empty());
+    ValidationReport r = mesh::validate(m);
+    CHECK(r.boundary_edges == 0);  // clipped, but capped by the closure ring
+    CHECK(mesh::signed_volume(m) > 0.0);
+}
+
+TEST_CASE("surface nets: lattice API leaves range-boundary surfaces open") {
+    // sphere poking through the +x face of the cell range: no ring, so the
+    // hole is expected — closure is the tape wrapper's job
+    auto sample = [](int i, int j, int k) {
+        cfloat3 p = cf3(-0.6f + 0.05f * (float)i, -0.6f + 0.05f * (float)j,
+                        -0.6f + 0.05f * (float)k);
+        return clength(p) - 0.5f;
+    };
+    int cmin[3] = {0, 0, 0};
+    int cmax[3] = {12, 24, 24};  // cut at x = 0
+    Mesh m = mesh::mesh_lattice_nets(sample, cmin, cmax, cf3(-0.6f, -0.6f, -0.6f), 0.05f);
+    REQUIRE(!m.empty());
+    CHECK(mesh::validate(m).boundary_edges > 0);
+}
+
+TEST_CASE("dual contouring: experimental flag off yields an empty mesh") {
+    scene::Tape tape = cross_tape();
+    math::Aabb region{cf3(-0.85f, -0.85f, -0.85f), cf3(0.85f, 0.85f, 0.85f)};
+    Mesh m = mesh::mesh_tape_dc(tape, region, 0.05f);  // default options: flag off
+    CHECK(m.empty());
+}
+
+TEST_CASE("dual contouring golden: hard-union box keeps sharp edges") {
+    const float voxel = 0.05f;
+    scene::Tape tape = cross_tape();
+    math::Aabb region{cf3(-0.85f, -0.85f, -0.85f), cf3(0.85f, 0.85f, 0.85f)};
+    mesh::DualContouringOptions opts;
+    opts.enable_experimental = true;
+    Mesh dc = mesh::mesh_tape_dc(tape, region, voxel, opts);
+    Mesh mt = mesh::mesh_tape(tape, region, voxel);
+    REQUIRE(!dc.empty());
+    REQUIRE(!mt.empty());
+    CHECK(mesh::validate(dc).boundary_edges == 0);  // scene inside region: closed
+    CHECK(mesh::signed_volume(dc) > 0.0);           // outward winding
+
+    // true box edge of the (0.6, 0.3, 0.3) box: local line (y, z) = (0.3, 0.3)
+    // sampled over x in [0.35, 0.55] — safely outside the second box
+    auto edge_dist = [](cfloat3 p) {
+        cfloat3 lp = kCrossRot.conjugate().rotate(p);
+        return csqrt((lp.y - 0.3f) * (lp.y - 0.3f) + (lp.z - 0.3f) * (lp.z - 0.3f));
+    };
+    auto near_edge = [&](cfloat3 p) {
+        cfloat3 lp = kCrossRot.conjugate().rotate(p);
+        return lp.x > 0.35f && lp.x < 0.55f && edge_dist(p) < 1.5f * voxel;
+    };
+
+    // QEF vertices land on the edge line: several within 15% of a voxel
+    // (marching/nets round the edge by roughly half a voxel instead)
+    int on_edge = 0;
+    for (const cfloat3& p : dc.positions)
+        if (near_edge(p) && edge_dist(p) < 0.15f * voxel) ++on_edge;
+    CHECK(on_edge >= 2);
+
+    // near the edge, DC vertices sit closer to the true surface than
+    // marching's (|SDF| at a vertex = distance to the exact hard-union box)
+    auto max_field_error = [&](const Mesh& m) {
+        float worst = 0.0f;
+        for (const cfloat3& p : m.positions)
+            if (near_edge(p)) worst = cmax(worst, cabs(tape.eval(p).d));
+        return worst;
+    };
+    float dc_err = max_field_error(dc);
+    float mt_err = max_field_error(mt);
+    CHECK(dc_err < mt_err);
+    CHECK(dc_err < 0.15f * voxel);
+}
+
+TEST_CASE("dual contouring: lattice API with central-difference normals") {
+    auto sample = [](int i, int j, int k) {
+        cfloat3 p = cf3(-0.6f + 0.05f * (float)i, -0.6f + 0.05f * (float)j,
+                        -0.6f + 0.05f * (float)k);
+        return clength(p) - 0.5f;
+    };
+    int cmin[3] = {0, 0, 0};
+    int cmax[3] = {24, 24, 24};
+    Mesh m = mesh::mesh_lattice_dc(sample, cmin, cmax, cf3(-0.6f, -0.6f, -0.6f), 0.05f);
+    REQUIRE(!m.empty());
+    ValidationReport r = mesh::validate(m);
+    CHECK(r.oriented);
+    CHECK(r.degenerate_triangles == 0);
+    CHECK(mesh::signed_volume(m) == doctest::Approx(0.5236).epsilon(0.05));  // 4/3*pi*0.5^3
+}
