@@ -180,14 +180,40 @@ struct Reader {
     std::uint32_t u32() { return pod<std::uint32_t>(); }
 };
 
+// Prim and Blend contain padding (uint8 + float) — serialize field-wise so
+// indeterminate padding bytes never reach the stream.
+void write_prim(Writer& w, const Prim& p) {
+    w.pod(p.type);
+    for (float f : p.params) w.pod(f);
+}
+
+Prim read_prim(Reader& r) {
+    Prim p;
+    p.type = r.pod<PrimType>();
+    for (float& f : p.params) f = r.pod<float>();
+    return p;
+}
+
+void write_blend(Writer& w, const Blend& b) {
+    w.pod(b.profile);
+    w.pod(b.k);
+}
+
+Blend read_blend(Reader& r) {
+    Blend b;
+    b.profile = r.pod<BlendProfile>();
+    b.k = r.pod<float>();
+    return b;
+}
+
 // Node has std::vectors — serialize field-wise.
 void write_node(Writer& w, const Node& n) {
     w.pod(n.id);
     w.pod(n.is_group);
     w.pod(n.visible);
     w.pod(n.op);
-    w.pod(n.blend);
-    w.pod(n.prim);
+    write_blend(w, n.blend);
+    write_prim(w, n.prim);
     w.pod(n.xform);
     w.pod(n.rounding);
     w.pod(n.color);
@@ -205,8 +231,8 @@ Node read_node(Reader& r) {
     n.is_group = r.pod<bool>();
     n.visible = r.pod<bool>();
     n.op = r.pod<Op>();
-    n.blend = r.pod<Blend>();
-    n.prim = r.pod<Prim>();
+    n.blend = read_blend(r);
+    n.prim = read_prim(r);
     n.xform = r.pod<math::Transform>();
     n.rounding = r.pod<float>();
     n.color = r.pod<kernel::cfloat3>();
@@ -346,7 +372,7 @@ struct SerializeVisitor {
         w.pod(Tag::SetPrim);
         w.pod(c.layer);
         w.pod(c.node);
-        w.pod(c.prim);
+        write_prim(w, c.prim);
     }
     void operator()(const SetColorCmd& c) {
         w.pod(Tag::SetColor);
@@ -359,7 +385,7 @@ struct SerializeVisitor {
         w.pod(c.layer);
         w.pod(c.node);
         w.pod(c.op);
-        w.pod(c.blend);
+        write_blend(w, c.blend);
         w.pod(c.rounding);
     }
     void operator()(const AppendStrokeCmd& c) {
@@ -443,7 +469,7 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
             SetPrimCmd c;
             c.layer = r.pod<LayerId>();
             c.node = r.pod<NodeId>();
-            c.prim = r.pod<Prim>();
+            c.prim = read_prim(r);
             cmd = c;
             break;
         }
@@ -460,7 +486,7 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
             c.layer = r.pod<LayerId>();
             c.node = r.pod<NodeId>();
             c.op = r.pod<Op>();
-            c.blend = r.pod<Blend>();
+            c.blend = read_blend(r);
             c.rounding = r.pod<float>();
             cmd = c;
             break;
