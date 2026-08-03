@@ -1,0 +1,58 @@
+# pyclay wheel packaging (python-bindings spec): scikit-build-core drives the
+# CMake build with the pyclay module ON and the C++ test suite OFF; wheels
+# are produced by cibuildwheel in CI for the platforms configured below.
+
+[build-system]
+requires = ["scikit-build-core>=0.10"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "pyclay"
+version = "0.1.0"
+description = "Python bindings for claycore, the portable C++20 SDF + voxel engine library"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = ["numpy>=1.22"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.scikit-build]
+minimum-version = "0.10"
+cmake.version = ">=3.24"
+# abi3 wheels from CPython 3.12 up (nanobind STABLE_ABI); older interpreters
+# build a version-specific module instead.
+wheel.py-api = "cp312"
+# vendored dependencies (meshoptimizer) add install rules of their own; only
+# the extension module belongs in the wheel
+wheel.exclude = ["include/**", "lib/**", "share/**"]
+
+[tool.scikit-build.cmake.define]
+CLAY_BUILD_PYTHON = "ON"
+CLAY_BUILD_TESTS = "OFF"
+
+# nanobind links with Apple response-file flags (-Wl,@...sym) that only the
+# Apple clang driver expands; a Homebrew LLVM earlier in PATH would break the
+# module link, so macOS wheel builds pin the system compiler shims. The
+# override table replaces the base cmake.define block, so the CLAY_* defines
+# are repeated here.
+[[tool.scikit-build.overrides]]
+if.platform-system = "darwin"
+cmake.define.CLAY_BUILD_PYTHON = "ON"
+cmake.define.CLAY_BUILD_TESTS = "OFF"
+cmake.define.CMAKE_C_COMPILER = "/usr/bin/cc"
+cmake.define.CMAKE_CXX_COMPILER = "/usr/bin/c++"
+
+[tool.cibuildwheel]
+build = ["cp312-*"]
+test-requires = "pytest"
+test-command = "pytest {project}/bindings/python/tests -q"
+
+[tool.cibuildwheel.macos]
+archs = ["arm64", "x86_64"]
+
+[tool.cibuildwheel.linux]
+archs = ["x86_64", "aarch64"]
+
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]

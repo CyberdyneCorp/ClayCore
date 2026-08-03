@@ -30,6 +30,10 @@ FetchContent_Declare(metalcpp
   URL https://developer.apple.com/metal/cpp/files/metal-cpp_macOS15.2_iOS18.2.zip
   URL_HASH SHA256=3437e4abfbd3d45217f34772ef3502f31ba3358e5fb6ac9d0ca952a047bcfe25)
 
+FetchContent_Declare(nanobind
+  GIT_REPOSITORY https://github.com/wjakob/nanobind
+  GIT_TAG v2.13.0)
+
 if(CLAY_BUILD_TESTS OR CLAY_FETCH_ALL_DEPS)
   FetchContent_MakeAvailable(doctest)
 endif()
@@ -54,4 +58,7 @@ endif()
 if(CLAY_FETCH_ALL_DEPS)
   FetchContent_MakeAvailable(xsimd)
   FetchContent_Populate(metalcpp)  # header-only, no CMake project
+  if(NOT CLAY_BUILD_PYTHON)  # pin validation only; bindings/python consumes it
+    FetchContent_Populate(nanobind)
+  endif()
 endif()

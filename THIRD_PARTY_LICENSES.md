@@ -13,8 +13,8 @@ row here; `tools/check_licenses.py` enforces both directions in CI.
 | benchmark | v1.9.5 | Apache-2.0 | https://github.com/google/benchmark |
 | ufbx | v0.23.0 | MIT | https://github.com/ufbx/ufbx |
 | metalcpp | macOS15.2_iOS18.2 | Apache-2.0 | https://developer.apple.com/metal/cpp/ |
+| nanobind | v2.13.0 | BSD-3-Clause | https://github.com/wjakob/nanobind |
 
 Planned (added when their consuming module lands, per the same policy):
-nanobind (BSD-3-Clause, pyclay), cgltf or tinyply (MIT, glTF/PLY). assimp
-is used in CI only as an independent export validator and is never linked
-into the shipping library.
+cgltf or tinyply (MIT, glTF/PLY). assimp is used in CI only as an
+independent export validator and is never linked into the shipping library.
