@@ -31,6 +31,11 @@ jobs:
       - name: C ABI FFI check (hygiene + ctypes)
         if: matrix.os == 'ubuntu-latest'
         run: python3 tools/check_c_abi.py build/cpu-only/libclay_shared.so
+      - name: Validate GLB with the official Khronos glTF validator
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          npm install --silent gltf-validator
+          node tools/validate_gltf.js build/cpu-only/clay_selftest.glb
 
   metal:
     name: build+test (macos, +metal, parity)
@@ -75,6 +80,38 @@ jobs:
       - uses: actions/checkout@v4
       - name: Configure with all dependencies
         run: cmake --preset cpu-only -DCLAY_FETCH_ALL_DEPS=ON
+
+  python:
+    name: pyclay (build, pytest, wheel install)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test tooling
+        run: python -m pip install --upgrade pip pytest numpy
+      - name: Configure + build with pyclay
+        run: |
+          cmake --preset cpu-only -DCLAY_BUILD_PYTHON=ON
+          cmake --build --preset cpu-only
+      - name: Test (unit + C ABI + CLI + pytest)
+        run: ctest --preset cpu-only
+      - name: Wheel install smoke (scikit-build-core)
+        run: |
+          python -m pip install .
+          python -c "
+          import numpy as np, pyclay as clay
+          doc = clay.Document()
+          body = doc.add_sdf_layer('body')
+          body.add(clay.Sphere(r=1.0), color='#38a6cf')
+          body.add(clay.Box(size=(0.8, 0.8, 0.8), position=(0.9, 0, 0)), blend=clay.Smooth(0.2))
+          d = doc.eval(np.array([[0, 0, 0], [3, 0, 0]], dtype=np.float32))
+          assert d[0] < 0 and d[1] > 0, d
+          m = doc.mesh(resolution=64)
+          assert m.is_watertight()
+          print('wheel smoke OK:', clay.backends(), len(m.positions), 'verts')
+          "
 
   benchmarks:
     name: benchmarks + regression gate

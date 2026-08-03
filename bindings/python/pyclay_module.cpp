@@ -164,8 +164,9 @@ void save_mesh_any(const mesh::Mesh& m, const std::string& path) {
     if (ext == "obj") return check_io(io::save_obj_file(m, path));
     if (ext == "ply") return check_io(io::save_ply_file(m, path));
     if (ext == "fbx") return check_io(io::save_fbx_file(m, path));
+    if (ext == "glb") return check_io(io::save_glb_file(m, path));
     throw std::invalid_argument("unsupported mesh extension '." + ext +
-                                "' (supported: .obj, .ply, .fbx)");
+                                "' (supported: .obj, .ply, .fbx, .glb)");
 }
 
 // -- document / layer wrappers ------------------------------------------------
@@ -446,7 +447,7 @@ NB_MODULE(pyclay, m) {
              "True when no edge has more than two incident triangles")
         .def("save",
              [](const PyMesh& pm, const std::string& path) { save_mesh_any(pm.m, path); },
-             "path"_a, "Save by extension: .obj, .ply or .fbx");
+             "path"_a, "Save by extension: .obj, .ply, .fbx or .glb");
 
     // -- layer -----------------------------------------------------------------------
     nb::class_<PyLayer>(m, "Layer", "SDF layer: an ordered edit list inside a Document")

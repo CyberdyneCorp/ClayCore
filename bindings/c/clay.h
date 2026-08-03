@@ -158,7 +158,7 @@ const uint32_t* clay_mesh_indices(const clay_mesh* mesh);
 clay_result clay_mesh_validate(const clay_mesh* mesh, int32_t* out_watertight,
                                int32_t* out_manifold);
 
-/* Save by extension: .obj, .ply, .fbx */
+/* Save by extension: .obj, .ply, .fbx, .glb */
 clay_result clay_mesh_save(const clay_mesh* mesh, const char* path);
 
 #ifdef __cplusplus

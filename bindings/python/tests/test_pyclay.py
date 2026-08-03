@@ -117,7 +117,7 @@ def test_clayspace_round_trip(tmp_path):
 def test_mesh_export(tmp_path):
     doc, _ = build_body()
     mesh = doc.mesh(resolution=64)
-    for ext in ("obj", "ply", "fbx"):
+    for ext in ("obj", "ply", "fbx", "glb"):
         out = tmp_path / f"body.{ext}"
         mesh.save(str(out))
         assert out.is_file() and out.stat().st_size > 0

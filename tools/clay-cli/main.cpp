@@ -23,11 +23,11 @@ int usage() {
                  "clay-cli — claycore command line\n"
                  "  clay sample <out.clayspace>                     write a demo document\n"
                  "  clay mesh <in.clayspace> [--res N] [--voxel S]\n"
-                 "            [--decimate R] -o <out.{obj,ply,fbx}> mesh a document\n"
+                 "            [--decimate R] -o <out.{obj,ply,fbx,glb}>  mesh a document\n"
                  "  clay validate <mesh.{obj,ply,fbx}>              watertight/manifold gate\n"
                  "  clay eval <in.clayspace> --points <pts.npy>\n"
                  "            -o <dists.npy>                        batch field evaluation\n"
-                 "  clay convert <in.{obj,ply,fbx}> -o <out.{obj,ply,fbx}>\n"
+                 "  clay convert <in.{obj,ply,fbx}> -o <out.{obj,ply,fbx,glb}>\n"
                  "  clay selftest                                   end-to-end pipeline check\n");
     return 2;
 }
@@ -42,6 +42,7 @@ io::IoStatus save_mesh_any(const mesh::Mesh& m, const std::string& path) {
     if (ext == "obj") return io::save_obj_file(m, path);
     if (ext == "ply") return io::save_ply_file(m, path);
     if (ext == "fbx") return io::save_fbx_file(m, path);
+    if (ext == "glb") return io::save_glb_file(m, path);
     return io::IoStatus::fail(io::IoError::Unsupported, "unknown output extension: " + ext);
 }
 
@@ -239,6 +240,7 @@ int cmd_selftest() {
     if (!(dists[0] < 0 && dists[1] > 0)) return 1;
     if (cmd_convert("clay_selftest.obj", "clay_selftest.ply") != 0) return 1;
     if (cmd_convert("clay_selftest.ply", "clay_selftest.fbx") != 0) return 1;
+    if (cmd_convert("clay_selftest.obj", "clay_selftest.glb") != 0) return 1;
     std::printf("selftest: OK\n");
     return 0;
 }

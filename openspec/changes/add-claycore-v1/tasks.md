@@ -91,14 +91,14 @@ Groups 1–10 are Phase 1 (the ClaySpace app's dependency set). Groups 11–14 m
 
 ## 11. Phase 2 — Python, extended vocabulary, meshers, glTF
 
-- [ ] 11.1 `pyclay` nanobind module: document/layer/edit API, numpy-native eval/gradients (GIL released), meshing, save/load/export
-- [ ] 11.2 Backend selection + enumeration from Python with clear unavailable-backend errors
-- [ ] 11.3 Wheels via scikit-build-core + cibuildwheel (macOS arm64/x86-64, manylinux, Windows); pip-install quickstart test
-- [ ] 11.4 Port golden-scene corpus authoring + property suites to Python; wire into CI
-- [ ] 11.5 Extended blend vocabulary (groove, tongue/pipe, emboss/deboss, push, avoid, inset, shell, stain/paint, replace) with rigidity tests
-- [ ] 11.6 Surface nets mesher (preview path) + benchmark
-- [ ] 11.7 Dual contouring (QEF/Hermite, manifold variant) behind flag + sharp-edge golden tests
-- [ ] 11.8 glTF/GLB writer + glTF-validator CI gate
+- [x] 11.1 `pyclay` nanobind module: document/layer/edit API, numpy-native eval/gradients (GIL released), meshing, save/load/export
+- [x] 11.2 Backend selection + enumeration from Python with clear unavailable-backend errors
+- [x] 11.3 Wheels via scikit-build-core + cibuildwheel (macOS arm64/x86-64, manylinux, Windows); pip-install quickstart test
+- [x] 11.4 Port golden-scene corpus authoring + property suites to Python; wire into CI
+- [x] 11.5 Extended blend vocabulary (groove, tongue/pipe, emboss/deboss, push, avoid, inset, shell, stain/paint, replace) with rigidity tests
+- [x] 11.6 Surface nets mesher (preview path) + benchmark (BM_SurfaceNets, CI-gated as strictly faster than the marching mesher: 221 ms vs 331 ms locally)
+- [x] 11.7 Dual contouring (QEF/Hermite, regularized normal equations — no SVD dependency) behind an explicit experimental flag + sharp-edge golden test on an off-axis rotated union; the manifold-DC variant remains roadmap-hardening per spec
+- [x] 11.8 glTF/GLB writer + glTF-validator CI gate
 
 ## 12. Phase 3 — CUDA
 

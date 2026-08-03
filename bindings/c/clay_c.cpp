@@ -264,6 +264,7 @@ clay_result clay_mesh_save(const clay_mesh* mesh, const char* path) {
     if (ext == "obj") return from_io(io::save_obj_file(mesh->data, p));
     if (ext == "ply") return from_io(io::save_ply_file(mesh->data, p));
     if (ext == "fbx") return from_io(io::save_fbx_file(mesh->data, p));
+    if (ext == "glb") return from_io(io::save_glb_file(mesh->data, p));
     return fail(CLAY_ERROR_UNSUPPORTED, "unknown extension: " + ext);
 }
 
