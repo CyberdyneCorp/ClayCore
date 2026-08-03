@@ -3,7 +3,9 @@
 function(clay_apply_warnings target)
   if(MSVC)
     # C4723 fires on guarded divisions (slab tests); the guards are real.
+    # _CRT_SECURE_NO_WARNINGS: standard fopen/sscanf are used portably.
     target_compile_options(${target} PRIVATE /W4 /permissive- /wd4723)
+    target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
     if(CLAY_WERROR)
       target_compile_options(${target} PRIVATE /WX)
     endif()
