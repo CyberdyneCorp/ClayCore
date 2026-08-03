@@ -10,3 +10,4 @@ io_sample.*
 dist/
 clay_selftest.*
 c_api_smoke.*
+.claude/worktrees/
