@@ -1,0 +1,191 @@
+#include "clay/scene/bounds.h"
+#include "clay/scene/tape.h"
+
+namespace clay {
+namespace scene {
+
+using kernel::cfloat4x4;
+using kernel::CTapeInstr;
+
+namespace {
+
+struct Compiler {
+    Tape tape;
+    const CullRegion* cull;
+
+    bool culled(const math::Aabb& bound) const {
+        if (!cull) return false;
+        if (bound.is_infinite()) return false;
+        return !bound.intersects(cull->region);
+    }
+
+    // -- emission ------------------------------------------------------------
+
+    void emit_prim(unsigned int op, const cfloat4x4& inv, float scale, float round,
+                   kernel::cfloat3 color, const float* prim_params, int prim_param_count) {
+        CTapeInstr instr;
+        instr.op = op;
+        instr.param_offset = static_cast<unsigned int>(tape.params.size());
+        tape.instrs.push_back(instr);
+        const float xf[12] = {inv.c0.x, inv.c0.y, inv.c0.z, inv.c1.x, inv.c1.y, inv.c1.z,
+                              inv.c2.x, inv.c2.y, inv.c2.z, inv.c3.x, inv.c3.y, inv.c3.z};
+        tape.params.insert(tape.params.end(), xf, xf + 12);
+        tape.params.push_back(scale);
+        tape.params.push_back(round);
+        tape.params.push_back(color.x);
+        tape.params.push_back(color.y);
+        tape.params.push_back(color.z);
+        tape.params.insert(tape.params.end(), prim_params, prim_params + prim_param_count);
+    }
+
+    void emit_combine(Op op, Blend blend) {
+        CTapeInstr instr;
+        instr.op = kernel::ctape_combine;
+        instr.param_offset = static_cast<unsigned int>(tape.params.size());
+        tape.instrs.push_back(instr);
+        tape.params.push_back(static_cast<float>(static_cast<int>(op)));
+        tape.params.push_back(static_cast<float>(static_cast<int>(blend.profile)));
+        tape.params.push_back(blend.k);
+    }
+
+    // -- field-info bookkeeping ----------------------------------------------
+
+    void fold_info(const Node& item, bool smooth) {
+        kernel::CFieldInfo prim_info =
+            (item.prim.type == PrimType::Ellipsoid) ? kernel::cfi_bound() : kernel::cfi_exact();
+        tape.info = smooth ? kernel::cfi_smooth_blend(tape.info, prim_info)
+                           : kernel::cfi_boolean(tape.info, prim_info);
+    }
+
+    // -- items ---------------------------------------------------------------
+
+    // One primitive instance evaluated through the given world matrix.
+    void emit_item_instance(const Node& item, const math::cfloat4x4& inv_world, float scale) {
+        float round_world = item.rounding * scale;
+        if (item.prim.type == PrimType::Stroke) {
+            float prim_params[3];
+            prim_params[0] = item.stroke_blend_k;
+            prim_params[1] = static_cast<float>(tape.strokes.size());
+            prim_params[2] = static_cast<float>(item.stroke.size());
+            for (const StrokePoint& sp : item.stroke) {
+                tape.strokes.push_back(sp.pos.x);
+                tape.strokes.push_back(sp.pos.y);
+                tape.strokes.push_back(sp.pos.z);
+                tape.strokes.push_back(sp.radius);
+            }
+            emit_prim(kernel::ctape_stroke, inv_world, scale, round_world, item.color,
+                      prim_params, 3);
+        } else {
+            emit_prim(static_cast<unsigned int>(item.prim.type), inv_world, scale, round_world,
+                      item.color, item.prim.params, kMaxPrimParams);
+        }
+    }
+
+    // Item plus its mirror copies, pre-combined with the layer's Mirror
+    // Blend, left on the stack as one value.
+    void emit_item(const Node& item, const Layer& layer) {
+        math::Transform world = layer.xform * item.xform;
+        emit_item_instance(item, world.inverse_matrix(), world.scale);
+        if (item.mirror && layer.mirror_axes != 0) {
+            Blend mirror_blend{layer.mirror_k > 0.0f ? BlendProfile::Quadratic
+                                                     : BlendProfile::Hard,
+                               layer.mirror_k};
+            for (int axis = 0; axis < 3; ++axis) {
+                if (!(layer.mirror_axes & (1u << axis))) continue;
+                // inv of (layer * R * item) = item^-1 * R * layer^-1
+                cfloat4x4 inv = math::mul(
+                    item.xform.inverse_matrix(),
+                    math::mul(math::reflection_matrix(axis), layer.xform.inverse_matrix()));
+                emit_item_instance(item, inv, world.scale);
+                emit_combine(Op::Add, mirror_blend);
+            }
+            if (layer.mirror_k > 0.0f)
+                tape.info = kernel::cfi_smooth_blend(tape.info, kernel::cfi_exact());
+        }
+    }
+
+    // -- chains --------------------------------------------------------------
+
+    // Compile an ordered node list. have_acc says whether a running value is
+    // already on the stack below; returns whether one is there afterwards.
+    bool compile_list(const std::vector<NodeId>& ids, const SdfContent& content,
+                      const Layer& layer, bool have_acc) {
+        for (NodeId id : ids) {
+            const Node* n = content.find(id);
+            if (!n || !n->visible) continue;
+            if (n->is_group) {
+                have_acc = compile_group(*n, content, layer, have_acc);
+            } else {
+                // carving/painting with nothing beneath produces nothing
+                if (!have_acc && n->op != Op::Add) continue;
+                math::Aabb bound = item_influence_bound(*n, layer);
+                if (culled(bound)) continue;
+                tape.bounds.expand(bound);
+                emit_item(*n, layer);
+                bool smooth = n->blend.profile != BlendProfile::Hard && n->blend.k > 0.0f;
+                if (have_acc) emit_combine(n->op, n->blend);
+                fold_info(*n, smooth && have_acc);
+                have_acc = true;
+            }
+        }
+        return have_acc;
+    }
+
+    bool compile_group(const Node& group, const SdfContent& content, const Layer& layer,
+                       bool have_acc) {
+        if (culled(node_influence_bound(content, group.id, layer))) return have_acc;
+        if (group.op == Op::None) {
+            // inline: children continue the outer chain
+            return compile_list(group.children, content, layer, have_acc);
+        }
+        // a carving/painting group with nothing beneath produces nothing
+        if (!have_acc && group.op != Op::Add) return have_acc;
+        std::size_t saved_instrs = tape.instrs.size();
+        std::size_t saved_params = tape.params.size();
+        std::size_t saved_strokes = tape.strokes.size();
+        bool sub = compile_list(group.children, content, layer, false);
+        if (!sub) {  // empty subtree: roll back any partial emission
+            tape.instrs.resize(saved_instrs);
+            tape.params.resize(saved_params);
+            tape.strokes.resize(saved_strokes);
+            return have_acc;
+        }
+        if (have_acc) {
+            emit_combine(group.op, group.blend);
+            bool smooth = group.blend.profile != BlendProfile::Hard && group.blend.k > 0.0f;
+            if (smooth) tape.info = kernel::cfi_smooth_blend(tape.info, tape.info);
+        }
+        return true;
+    }
+
+    void run(const Document& doc, const CullRegion* cull_region) {
+        cull = cull_region;
+        bool have_acc = false;
+        for (const Layer& layer : doc.layers) {
+            if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
+            bool layer_val = compile_list(layer.sdf->roots, *layer.sdf, layer, false);
+            if (!layer_val) continue;
+            if (have_acc) emit_combine(Op::Add, Blend{});  // layers union hard
+            have_acc = true;
+        }
+    }
+};
+
+}  // namespace
+
+Tape compile_document(const Document& doc, const CullRegion* cull) {
+    Compiler c;
+    c.run(doc, cull);
+    return std::move(c.tape);
+}
+
+Tape compile_layer(const Layer& layer, const CullRegion* cull) {
+    Compiler c;
+    c.cull = cull;
+    if (layer.visible && layer.kind == LayerKind::Sdf && layer.sdf)
+        c.compile_list(layer.sdf->roots, *layer.sdf, layer, false);
+    return std::move(c.tape);
+}
+
+}  // namespace scene
+}  // namespace clay

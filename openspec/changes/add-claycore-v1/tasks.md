@@ -24,12 +24,12 @@ Groups 1–10 are Phase 1 (the ClaySpace app's dependency set). Groups 11–14 m
 
 ## 3. Host math & scene model (scene-model)
 
-- [ ] 3.1 `math/`: AABB, transforms, quaternions, ray, frustum (host-side)
-- [ ] 3.2 Document model: layers (voxel|sdf), ordered edit lists, groups (≥4 deep, group ops incl. None), instancing, visibility/selection state
-- [ ] 3.3 Influence bounds per item/group (AABB ⊕ blend ⊕ rounding) + conservativeness property test
-- [ ] 3.4 Tape compiler: edit list → flat postfix tape (pre-inverted transforms, param blocks); tape-vs-tree equivalence tests
-- [ ] 3.5 Per-brick tape culling + culled-vs-full bit-identity test
-- [ ] 3.6 Undo command vocabulary (serializable, invertible, stroke-coalescing) + inverse round-trip tests
+- [x] 3.1 `math/`: AABB, transforms, quaternions, ray, frustum (host-side)
+- [x] 3.2 Document model: layers (voxel|sdf), ordered edit lists, groups (≥4 deep, group ops incl. None), instancing, visibility/selection state
+- [x] 3.3 Influence bounds per item/group (AABB ⊕ blend ⊕ rounding) + conservativeness property test
+- [x] 3.4 Tape compiler: edit list → flat postfix tape (pre-inverted transforms, param blocks); tape-vs-tree equivalence tests
+- [x] 3.5 Per-brick tape culling + culled-vs-full bit-identity test
+- [x] 3.6 Undo command vocabulary (serializable, invertible, stroke-coalescing) + inverse round-trip tests
 
 ## 4. Evaluation backends — CPU & Metal (evaluation-backends)
 

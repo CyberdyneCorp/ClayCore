@@ -23,7 +23,10 @@ include(ClayWarnings)
 include(Dependencies)
 
 add_library(claycore
-  src/version.cpp)
+  src/version.cpp
+  src/scene/bounds.cpp
+  src/scene/commands.cpp
+  src/scene/tape_build.cpp)
 add_library(clay::core ALIAS claycore)
 
 target_include_directories(claycore PUBLIC

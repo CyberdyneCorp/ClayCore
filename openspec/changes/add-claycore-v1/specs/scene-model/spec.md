@@ -16,11 +16,11 @@ Delta for `add-claycore-v1`. This is the library-side owner of the scene semanti
 - **THEN** both instances evaluate with the new item without duplicating stored content
 
 ### Requirement: Influence bounds
-Every edit item and group SHALL expose a conservative influence bound: its shape AABB dilated by blend radius and rounding. The bound SHALL be conservative — the item SHALL NOT change field values outside it.
+Every edit item and group SHALL expose a conservative influence bound: its shape AABB dilated by blend radius and rounding. The bound SHALL be conservative in the narrow-band sense that all evaluated storage relies on: outside the bound (dilated by the band width), band-clamped field values are unaffected by the item. (Raw far-field values may legitimately shift when a smooth-blend operand changes — smin deviates wherever |a−b| is inside the support width — which is why the guarantee, like brick storage, is stated band-clamped.)
 
 #### Scenario: Bound is conservative
-- **WHEN** a property test samples the field with and without an item at points outside the item's influence bound
-- **THEN** the two fields are bit-identical at every sampled point
+- **WHEN** a property test samples the field with and without an item at points outside the item's influence bound dilated by a band width β, clamping values to ±β
+- **THEN** the two clamped fields are bit-identical at every sampled point
 
 ### Requirement: Blend locality guarantee
 Because all blends are rigid, an edit whose influence bound does not intersect a region SHALL leave evaluated data (bricks, samples) for that region bit-identical. This SHALL be regression-tested at the brick level.
