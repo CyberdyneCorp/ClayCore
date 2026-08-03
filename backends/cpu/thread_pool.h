@@ -2,11 +2,13 @@
 
 // Minimal persistent thread pool for batch dispatch. One global pool sized
 // to hardware concurrency; parallel_for splits [0, n) into contiguous
-// chunks. No per-item allocation.
+// chunks. Job state lives in a shared_ptr so a late-waking worker can never
+// touch a completed call's stack (it just finds no chunks left).
 
 #include <atomic>
 #include <condition_variable>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -33,32 +35,50 @@ class ThreadPool {
             fn(0, n);
             return;
         }
-        std::atomic<std::size_t> next{0};
-        std::atomic<std::size_t> done{0};
+
+        auto job = std::make_shared<Job>();
+        job->fn = fn;
+        job->n = n;
+        job->chunk = chunk;
+        job->num_tasks = num_tasks;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            job_ = [&, chunk, n, num_tasks]() {
-                for (;;) {
-                    std::size_t idx = next.fetch_add(1);
-                    if (idx >= num_tasks) break;
-                    std::size_t b = idx * chunk;
-                    std::size_t e = b + chunk < n ? b + chunk : n;
-                    fn(b, e);
-                    done.fetch_add(1);
-                }
-            };
+            current_ = job;
             ++generation_;
         }
         cv_.notify_all();
-        job_();  // calling thread participates
-        while (done.load() < num_tasks) std::this_thread::yield();
+        run(*job);  // calling thread participates
+        // all chunks are claimed before done reaches num_tasks, so once done
+        // equals num_tasks no worker can be inside fn
+        while (job->done.load(std::memory_order_acquire) < num_tasks)
+            std::this_thread::yield();
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            job_ = nullptr;
+            current_.reset();
         }
     }
 
   private:
+    struct Job {
+        std::function<void(std::size_t, std::size_t)> fn;
+        std::size_t n = 0;
+        std::size_t chunk = 0;
+        std::size_t num_tasks = 0;
+        std::atomic<std::size_t> next{0};
+        std::atomic<std::size_t> done{0};
+    };
+
+    static void run(Job& job) {
+        for (;;) {
+            std::size_t idx = job.next.fetch_add(1, std::memory_order_relaxed);
+            if (idx >= job.num_tasks) break;
+            std::size_t b = idx * job.chunk;
+            std::size_t e = b + job.chunk < job.n ? b + job.chunk : job.n;
+            job.fn(b, e);
+            job.done.fetch_add(1, std::memory_order_release);
+        }
+    }
+
     ThreadPool() {
         unsigned hc = std::thread::hardware_concurrency();
         unsigned count = hc > 1 ? hc - 1 : 0;
@@ -77,22 +97,22 @@ class ThreadPool {
     void worker() {
         std::uint64_t seen = 0;
         for (;;) {
-            std::function<void()> job;
+            std::shared_ptr<Job> job;
             {
                 std::unique_lock<std::mutex> lock(mutex_);
-                cv_.wait(lock, [&] { return stop_ || (job_ && generation_ != seen); });
+                cv_.wait(lock, [&] { return stop_ || (current_ && generation_ != seen); });
                 if (stop_) return;
                 seen = generation_;
-                job = job_;
+                job = current_;  // shared ownership: safe past completion
             }
-            if (job) job();
+            if (job) run(*job);
         }
     }
 
     std::vector<std::thread> threads_;
     std::mutex mutex_;
     std::condition_variable cv_;
-    std::function<void()> job_;
+    std::shared_ptr<Job> current_;
     std::uint64_t generation_ = 0;
     bool stop_ = false;
 };

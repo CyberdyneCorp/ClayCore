@@ -42,11 +42,11 @@ Groups 1–10 are Phase 1 (the ClaySpace app's dependency set). Groups 11–14 m
 
 ## 5. Brick cache (brick-cache)
 
-- [ ] 5.1 Sparse brick storage (8³/16³, fp16 ±3-voxel band, implicit inside/outside)
-- [ ] 5.2 Dirty tracking from influence bounds; incremental re-eval; generation counters for stale-result rejection
-- [ ] 5.3 Locality regression test: distant edit ⇒ bit-identical untouched bricks
-- [ ] 5.4 LOD mip bricks + consistency test
-- [ ] 5.5 Memory budget enforcement (query, budget-exceeded results) + mobile-ceiling tests
+- [x] 5.1 Sparse brick storage (8³/16³, fp16 ±3-voxel band, implicit inside/outside)
+- [x] 5.2 Dirty tracking from influence bounds; incremental re-eval; generation counters for stale-result rejection
+- [x] 5.3 Locality regression test: distant edit ⇒ bit-identical untouched bricks
+- [x] 5.4 LOD mip bricks + consistency test
+- [x] 5.5 Memory budget enforcement (query, budget-exceeded results) + mobile-ceiling tests
 
 ## 6. Voxel engine (voxel-engine)
 

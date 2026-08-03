@@ -27,6 +27,7 @@ add_library(claycore
   src/scene/bounds.cpp
   src/scene/commands.cpp
   src/scene/tape_build.cpp
+  src/brick/cache.cpp
   backends/cpu/cpu_backend.cpp)
 
 find_package(Threads REQUIRED)
