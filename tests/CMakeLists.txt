@@ -16,6 +16,7 @@ add_executable(clay_unit_tests
   unit/test_brick.cpp
   unit/test_voxel.cpp
   unit/test_mesh.cpp
+  unit/test_meshers.cpp
   unit/test_pick.cpp
   unit/test_io.cpp)
 

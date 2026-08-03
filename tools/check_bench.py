@@ -15,7 +15,12 @@ FLOORS = {
     "BM_EvalPoints": {"min_items_per_second": 500_000},
     "BM_BrickFill": {"min_items_per_second": 100},
     "BM_MeshTape": {"max_ms": 20_000},
+    "BM_SurfaceNets": {"max_ms": 20_000},
 }
+
+# relative gates: (bench, must_be_faster_than) — meshing spec requires the
+# surface-nets preview to beat the marching mesher at equal resolution
+FASTER_THAN = [("BM_SurfaceNets", "BM_MeshTape")]
 
 
 def main() -> int:
@@ -26,11 +31,13 @@ def main() -> int:
         data = json.load(f)
     failures = []
     seen = set()
+    times = {}
     for bench in data.get("benchmarks", []):
         name = bench["name"].split("/")[0]
         if name not in FLOORS:
             continue
         seen.add(name)
+        times[name] = bench.get("real_time", 0)
         rule = FLOORS[name]
         if "min_items_per_second" in rule:
             ips = bench.get("items_per_second", 0)
@@ -45,6 +52,11 @@ def main() -> int:
     for name in FLOORS:
         if name not in seen:
             failures.append(f"{name}: benchmark missing from results")
+    for fast, slow in FASTER_THAN:
+        if fast in times and slow in times:
+            print(f"bench-gate: {fast}: {times[fast]:,.1f} ms vs {slow}: {times[slow]:,.1f} ms")
+            if times[fast] >= times[slow]:
+                failures.append(f"{fast}: {times[fast]:,.1f} ms not faster than {slow}")
     for f_ in failures:
         print(f"bench-gate: FAIL {f_}", file=sys.stderr)
     if not failures:
