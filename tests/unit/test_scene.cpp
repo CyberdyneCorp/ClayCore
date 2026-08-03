@@ -106,8 +106,8 @@ TEST_CASE("influence bounds are conservative (band-clamped bit-identity outside)
         if (!n || n->is_group) continue;
         math::Aabb bound = item_influence_bound(*n, layer).dilated(band);
         Node saved = *n;
-        NodeId parent;
-        int index;
+        NodeId parent = kNoNode;
+        int index = -1;
         layer.sdf->locate(id, &parent, &index);
         layer.sdf->remove(id);
         Tape without = compile_document(doc);

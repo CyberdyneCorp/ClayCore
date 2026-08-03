@@ -26,8 +26,8 @@ std::optional<Command> apply_one(Document& doc, const AddNodeCmd& c) {
 std::optional<Command> apply_one(Document& doc, const RemoveNodeCmd& c) {
     SdfContent* content = content_of(doc, c.layer);
     if (!content) return std::nullopt;
-    NodeId parent;
-    int index;
+    NodeId parent = kNoNode;
+    int index = -1;
     if (!content->locate(c.node, &parent, &index)) return std::nullopt;
     std::vector<Node> subtree = content->remove(c.node);
     if (subtree.empty()) return std::nullopt;
@@ -37,8 +37,8 @@ std::optional<Command> apply_one(Document& doc, const RemoveNodeCmd& c) {
 std::optional<Command> apply_one(Document& doc, const MoveNodeCmd& c) {
     SdfContent* content = content_of(doc, c.layer);
     if (!content) return std::nullopt;
-    NodeId parent;
-    int index;
+    NodeId parent = kNoNode;
+    int index = -1;
     if (!content->locate(c.node, &parent, &index)) return std::nullopt;
     if (!content->move(c.node, c.new_parent, c.new_index)) return std::nullopt;
     return Command{MoveNodeCmd{c.layer, c.node, parent, index}};

@@ -104,8 +104,8 @@ class SdfContent {
     }
 
     bool move(NodeId id, NodeId new_parent, int new_index) {
-        NodeId parent;
-        int index;
+        NodeId parent = kNoNode;
+        int index = -1;
         if (!locate(id, &parent, &index)) return false;
         // detach without destroying
         std::vector<NodeId>* siblings = parent == kNoNode ? &roots : &find_mut(parent)->children;

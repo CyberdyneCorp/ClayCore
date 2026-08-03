@@ -2,7 +2,8 @@
 
 function(clay_apply_warnings target)
   if(MSVC)
-    target_compile_options(${target} PRIVATE /W4 /permissive-)
+    # C4723 fires on guarded divisions (slab tests); the guards are real.
+    target_compile_options(${target} PRIVATE /W4 /permissive- /wd4723)
     if(CLAY_WERROR)
       target_compile_options(${target} PRIVATE /WX)
     endif()
