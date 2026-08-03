@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Benchmark regression gate (build-packaging spec).
+
+Reads google-benchmark JSON and enforces generous floor thresholds —
+deliberately loose so shared CI runners don't flake, tight enough to catch
+order-of-magnitude regressions (an accidental O(n^2), a dropped thread pool,
+a debug-mode kernel). Report includes baseline and measured values.
+"""
+
+import json
+import sys
+
+# floors: items/sec minimums, time maximums (ms)
+FLOORS = {
+    "BM_EvalPoints": {"min_items_per_second": 500_000},
+    "BM_BrickFill": {"min_items_per_second": 100},
+    "BM_MeshTape": {"max_ms": 20_000},
+}
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        print("usage: check_bench.py <benchmark.json>", file=sys.stderr)
+        return 2
+    with open(sys.argv[1]) as f:
+        data = json.load(f)
+    failures = []
+    seen = set()
+    for bench in data.get("benchmarks", []):
+        name = bench["name"].split("/")[0]
+        if name not in FLOORS:
+            continue
+        seen.add(name)
+        rule = FLOORS[name]
+        if "min_items_per_second" in rule:
+            ips = bench.get("items_per_second", 0)
+            print(f"bench-gate: {name}: {ips:,.0f} items/s (floor {rule['min_items_per_second']:,})")
+            if ips < rule["min_items_per_second"]:
+                failures.append(f"{name}: {ips:,.0f} items/s below floor")
+        if "max_ms" in rule:
+            ms = bench.get("real_time", 0)
+            print(f"bench-gate: {name}: {ms:,.1f} ms (ceiling {rule['max_ms']:,} ms)")
+            if ms > rule["max_ms"]:
+                failures.append(f"{name}: {ms:,.1f} ms above ceiling")
+    for name in FLOORS:
+        if name not in seen:
+            failures.append(f"{name}: benchmark missing from results")
+    for f_ in failures:
+        print(f"bench-gate: FAIL {f_}", file=sys.stderr)
+    if not failures:
+        print("bench-gate: OK")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -7,3 +7,6 @@ compile_commands.json
 .vscode/
 .idea/
 io_sample.*
+dist/
+clay_selftest.*
+c_api_smoke.*

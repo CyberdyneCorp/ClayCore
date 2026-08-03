@@ -38,7 +38,8 @@ add_library(claycore
   src/io/ply.cpp
   src/io/fbx.cpp
   ${ufbx_SOURCE_DIR}/ufbx.c
-  backends/cpu/cpu_backend.cpp)
+  backends/cpu/cpu_backend.cpp
+  bindings/c/clay_c.cpp)
 
 set_source_files_properties(${ufbx_SOURCE_DIR}/ufbx.c PROPERTIES COMPILE_OPTIONS "-w")
 target_include_directories(claycore SYSTEM PRIVATE ${ufbx_SOURCE_DIR})
@@ -108,7 +109,37 @@ foreach(_backend CUDA OPENCL)
   endif()
 endforeach()
 
+# -- clay-cli ----------------------------------------------------------------
+add_executable(clay_cli tools/clay-cli/main.cpp)
+set_target_properties(clay_cli PROPERTIES OUTPUT_NAME clay)
+target_link_libraries(clay_cli PRIVATE claycore)
+clay_apply_warnings(clay_cli)
+clay_apply_sanitizers(clay_cli)
+
 if(CLAY_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+
+  # C11 consumer smoke test (c-abi spec)
+  add_executable(clay_c_smoke tests/c_api/smoke.c)
+  target_include_directories(clay_c_smoke PRIVATE bindings/c)
+  set_target_properties(clay_c_smoke PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON)
+  target_link_libraries(clay_c_smoke PRIVATE claycore)
+  add_test(NAME clay_c_smoke COMMAND clay_c_smoke)
+
+  add_test(NAME clay_cli_selftest COMMAND clay_cli selftest)
+
+  # shared library for the cross-language FFI check (ctypes)
+  add_library(clay_shared SHARED bindings/c/clay_c.cpp)
+  target_link_libraries(clay_shared PRIVATE claycore Threads::Threads meshoptimizer)
+  set_target_properties(clay_shared PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+  if(CLAY_BACKEND_METAL AND APPLE)
+    target_link_libraries(clay_shared PRIVATE ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK})
+  endif()
+endif()
+
+if(CLAY_BUILD_BENCHMARKS)
+  add_executable(clay_bench benchmarks/bench_main.cpp)
+  target_link_libraries(clay_bench PRIVATE claycore benchmark::benchmark)
+  clay_apply_warnings(clay_bench)
 endif()

@@ -82,12 +82,12 @@ Groups 1–10 are Phase 1 (the ClaySpace app's dependency set). Groups 11–14 m
 
 ## 10. C ABI, SwiftPM, CLI (c-abi, build-packaging)
 
-- [ ] 10.1 `clay.h`: opaque handles, error codes, size-query buffer pattern, `clay_version()`; C11 consumer smoke test
-- [ ] 10.2 Error/memory discipline plumbing (`std::expected`-style internals, thread-local detail messages, `clay_free_*`)
-- [ ] 10.3 SwiftPM wrapper target (xcframework build script) + iOS device/simulator build verification with ClaySpace
-- [ ] 10.4 FFI hygiene check (rust-bindgen or equivalent in CI)
-- [ ] 10.5 `clay-cli`: mesh/validate/eval/convert subcommands over public APIs
-- [ ] 10.6 Performance benchmarks (points/sec, bricks/sec, mesh time) with CI regression gates
+- [x] 10.1 `clay.h`: opaque handles, error codes, size-query buffer pattern, `clay_version()`; C11 consumer smoke test
+- [x] 10.2 Error/memory discipline plumbing (`std::expected`-style internals, thread-local detail messages, `clay_free_*`)
+- [x] 10.3 SwiftPM wrapper (Package.swift binaryTarget) + xcframework build script; verified macOS/iOS-device/iOS-simulator slices build and Swift consumes the module; in-app verification pending the ClaySpace Xcode project (repo has no app target yet); Metal wired per-app at integration
+- [x] 10.4 FFI hygiene check: header lint (no variadics/bitfields/non-fixed-width ints) + Python ctypes cross-language exercise of the shared library, in CI
+- [x] 10.5 `clay-cli`: mesh/validate/eval/convert subcommands over public APIs
+- [x] 10.6 Performance benchmarks (points/sec, bricks/sec, mesh time) with CI floor-threshold gates (generous floors catch order-of-magnitude regressions without shared-runner flake; tight deltas need dedicated hardware)
 
 ## 11. Phase 2 — Python, extended vocabulary, meshers, glTF
 
