@@ -8,6 +8,8 @@ project(claycore
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# static claycore objects also link into libclay_shared (ctypes FFI check)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(CLAY_WERROR          "Treat warnings as errors"                    ON)
 option(CLAY_BUILD_TESTS     "Build unit tests"                            ON)
