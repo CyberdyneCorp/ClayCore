@@ -16,7 +16,9 @@
 // matrix already contains 1/s; the interpreter multiplies the local distance
 // back by s and subtracts the rounding.
 //
-// Combine param block: [mode] [profile] [k].
+// Combine param block: [mode] [profile] [k] [r2]. r2 is the second radius
+// of the two-parameter extended modes (groove/tongue half-width rb, mapped
+// from the item's rounding in world units by the compiler); 0 elsewhere.
 
 #include "clay/kernel/ops.h"
 #include "clay/kernel/prim3d.h"
@@ -42,14 +44,34 @@ enum CTapeOp {
     ctape_stroke,            // blend_k, point_offset, point_count
     ctape_prim_count,
 
+    // Pushes the far field ("empty space"): standard primitive param block,
+    // no prim-specific params. The compiler emits it to seed material-
+    // creating combines (shell, replace) whose accumulator is absent.
+    ctape_empty = 32,
+
     ctape_combine = 64,
 };
 
+// Extended modes (ops.h math; a = accumulated field, b = item field).
+// Parameter mapping: k is the mode's radius/depth (pipe radius, engrave/
+// emboss depth, groove/tongue depth ra, inset depth, shell half-thickness);
+// r2 is the groove/tongue half-width rb (compiled from the item's rounding
+// in world units). Color semantics: carving modes (groove, engrave, inset)
+// keep a's color; adding modes (tongue, pipe, emboss, shell) take b's color
+// where the added field wins; replace takes b's color inside b.
 enum CCombineMode {
     ccombine_add = 0,
     ccombine_subtract = 1,
     ccombine_intersect = 2,
-    ccombine_paint = 3,  // color-only
+    ccombine_paint = 3,  // color-only (stain)
+    ccombine_groove = 4,
+    ccombine_tongue = 5,
+    ccombine_pipe = 6,
+    ccombine_engrave = 7,  // deboss
+    ccombine_emboss = 8,
+    ccombine_inset = 9,
+    ccombine_shell = 10,
+    ccombine_replace = 11,
 };
 
 enum CBlendProfile {
@@ -82,6 +104,20 @@ CLAY_FN float ctape_blend_support(int profile, float k) {
     if (profile == cblend_circular) return csmin_circular_support(k);
     if (profile == cblend_chamfer) return cchamfer_support(k);
     return 0.0f;
+}
+
+// Support width of an extended combine mode: the band-clamped result can
+// differ from `a` only where the item field b < support + band, so influence
+// bounds dilate the item bound by this width. Groove/tongue deviate within
+// the channel half-width r2 of b's surface; pipe within its radius k of the
+// intersection curve; engrave/emboss within the V depth k; shell within the
+// wall half-thickness k. Inset and replace are decided by b's own sign
+// outside its bound (support 0). The blend profile is ignored by these
+// modes.
+CLAY_FN float ccombine_extended_support(int mode, float k, float r2) {
+    if (mode == ccombine_groove || mode == ccombine_tongue) return cmax(r2, 0.0f);
+    if (mode == ccombine_inset || mode == ccombine_replace) return 0.0f;
+    return cmax(k, 0.0f);
 }
 
 CLAY_FN cfloat2 ctape_smin_m(int profile, float a, float b, float k) {
@@ -151,8 +187,11 @@ CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
     return CLAY_TAPE_FAR;
 }
 
-CLAY_FN CTapeValue ctape_combine_values(CTapeValue a, CTapeValue b, int mode, int profile, float k) {
+CLAY_FN CTapeValue ctape_combine_values(CTapeValue a, CTapeValue b, int mode, int profile,
+                                        float k, float r2) {
     CTapeValue r;
+    r.d = a.d;
+    r.color = a.color;
     if (mode == ccombine_add) {
         cfloat2 dm = ctape_smin_m(profile, a.d, b.d, k);
         r.d = dm.x;
@@ -160,16 +199,36 @@ CLAY_FN CTapeValue ctape_combine_values(CTapeValue a, CTapeValue b, int mode, in
     } else if (mode == ccombine_subtract) {
         // b carves out of a: -smin(-a, b)
         r.d = -ctape_smin(profile, -a.d, b.d, k);
-        r.color = a.color;
     } else if (mode == ccombine_intersect) {
         r.d = -ctape_smin(profile, -a.d, -b.d, k);
-        r.color = a.color;
-    } else {  // paint: color-only, field untouched
+    } else if (mode == ccombine_paint) {
+        // color-only, field untouched
         float support = cmax(ctape_blend_support(profile, k), k);
         float w = 1.0f - cclamp(b.d / cmax(support, 1e-6f), 0.0f, 1.0f);
-        r.d = a.d;
         r.color = cmix(a.color, b.color, w);
+    } else if (mode == ccombine_groove) {
+        r.d = op_groove(a.d, b.d, k, r2);
+    } else if (mode == ccombine_tongue) {
+        r.d = op_tongue(a.d, b.d, k, r2);
+        if (r.d < a.d) r.color = b.color;
+    } else if (mode == ccombine_pipe) {
+        r.d = op_pipe(a.d, b.d, k);
+        if (r.d < a.d) r.color = b.color;
+    } else if (mode == ccombine_engrave) {
+        r.d = op_engrave(a.d, b.d, k);
+    } else if (mode == ccombine_emboss) {
+        r.d = op_emboss(a.d, b.d, k);
+        if (r.d < a.d) r.color = b.color;
+    } else if (mode == ccombine_inset) {
+        r.d = op_inset(a.d, b.d, k);
+    } else if (mode == ccombine_shell) {
+        r.d = op_shell_union(a.d, b.d, k);
+        if (r.d < a.d) r.color = b.color;
+    } else if (mode == ccombine_replace) {
+        r.d = op_replace(a.d, b.d);
+        if (b.d < 0.0f) r.color = b.color;
     }
+    // unknown modes fall through as identity (forward compatibility)
     return r;
 }
 
@@ -184,11 +243,19 @@ CLAY_FN CTapeValue ctape_eval(CLAY_DEVICE const CTapeInstr* instrs, int instr_co
         unsigned int op = instrs[i].op;
         CLAY_DEVICE const float* pr = params + instrs[i].param_offset;
         if (op == ctape_combine) {
-            if (top < 2) continue;
+            if (top < 1) continue;
             CTapeValue b = stack[top - 1];
-            CTapeValue a = stack[top - 2];
-            stack[top - 2] = ctape_combine_values(a, b, (int)pr[0], (int)pr[1], pr[2]);
-            --top;
+            CTapeValue a;
+            // A combine with an empty accumulator applies against empty
+            // space: this is how material-creating modes (shell, replace)
+            // seed a chain whose earlier items were culled or absent.
+            a.d = CLAY_TAPE_FAR;
+            a.color = b.color;
+            if (top >= 2) {
+                a = stack[top - 2];
+                --top;
+            }
+            stack[top - 1] = ctape_combine_values(a, b, (int)pr[0], (int)pr[1], pr[2], pr[3]);
         } else {
             if (top >= CLAY_TAPE_MAX_STACK) continue;
             cfloat4x4 inv;
