@@ -18,6 +18,19 @@ using namespace clay;
 using kernel::cfloat3;
 using kernel::CTapeValue;
 
+// Mirrors the compiler's empty-accumulator seeding: material-creating modes
+// (shell, replace) combine against the far field (ctape_empty, carrying the
+// node's color) instead of being skipped.
+inline CTapeValue ref_combine(const CTapeValue* acc, kernel::cfloat3 seed_color, CTapeValue item,
+                              scene::Op op, scene::Blend blend, float rb) {
+    CTapeValue a;
+    a.d = CLAY_TAPE_FAR;
+    a.color = seed_color;
+    if (acc) a = *acc;
+    return kernel::ctape_combine_values(a, item, static_cast<int>(op),
+                                        static_cast<int>(blend.profile), blend.k, rb);
+}
+
 inline CTapeValue ref_eval_item(const scene::Node& item, const scene::Layer& layer, cfloat3 p) {
     using namespace kernel;
     math::Transform world = layer.xform * item.xform;
@@ -69,13 +82,16 @@ inline bool ref_eval_group(const scene::Node& g, const scene::SdfContent& conten
     using namespace kernel;
     if (g.op == scene::Op::None)
         return ref_eval_list(g.children, content, layer, p, acc, have_acc);
-    if (!have_acc && g.op != scene::Op::Add) return have_acc;
+    if (!have_acc && g.op != scene::Op::Add && !scene::op_creates_material(g.op))
+        return have_acc;
     CTapeValue sub;
     bool has_sub = ref_eval_list(g.children, content, layer, p, sub, false);
     if (!has_sub) return have_acc;
+    float rb = g.rounding * layer.xform.scale;
     if (have_acc)
-        acc = ctape_combine_values(acc, sub, static_cast<int>(g.op), static_cast<int>(g.blend.profile),
-                            g.blend.k);
+        acc = ref_combine(&acc, g.color, sub, g.op, g.blend, rb);
+    else if (g.op != scene::Op::Add)
+        acc = ref_combine(nullptr, g.color, sub, g.op, g.blend, rb);
     else
         acc = sub;
     return true;
@@ -92,11 +108,14 @@ inline bool ref_eval_list(const std::vector<scene::NodeId>& ids,
             have_acc = ref_eval_group(*n, content, layer, p, acc, have_acc);
             continue;
         }
-        if (!have_acc && n->op != scene::Op::Add) continue;
+        if (!have_acc && n->op != scene::Op::Add && !scene::op_creates_material(n->op))
+            continue;
         CTapeValue item = ref_eval_item(*n, layer, p);
+        float rb = n->rounding * layer.xform.scale * n->xform.scale;
         if (have_acc)
-            acc = ctape_combine_values(acc, item, static_cast<int>(n->op),
-                                static_cast<int>(n->blend.profile), n->blend.k);
+            acc = ref_combine(&acc, n->color, item, n->op, n->blend, rb);
+        else if (n->op != scene::Op::Add)
+            acc = ref_combine(nullptr, n->color, item, n->op, n->blend, rb);
         else
             acc = item;
         have_acc = true;
@@ -113,7 +132,7 @@ inline CTapeValue ref_eval_document(const scene::Document& doc, cfloat3 p) {
         CTapeValue lv;
         if (!ref_eval_list(layer.sdf->roots, *layer.sdf, layer, p, lv, false)) continue;
         if (have_acc)
-            acc = ctape_combine_values(acc, lv, ccombine_add, cblend_hard, 0.0f);
+            acc = ctape_combine_values(acc, lv, ccombine_add, cblend_hard, 0.0f, 0.0f);
         else
             acc = lv;
         have_acc = true;

@@ -37,6 +37,16 @@ CLAY_FN CFieldInfo cfi_smooth_blend(CFieldInfo a, CFieldInfo b) {
     return CFieldInfo{false, cmax(a.lipschitz, b.lipschitz)};
 }
 
+// Extended blends (ops.h). Modes built from min/max/abs of the operands
+// (groove, tongue, inset, shell, replace) preserve the Lipschitz bound.
+// The diagonal 45-degree constructions — pipe, engrave, emboss — mix both
+// gradients: |grad| can reach (La + Lb) / sqrt(2), so pass diagonal = true.
+CLAY_FN CFieldInfo cfi_extended_blend(CFieldInfo a, CFieldInfo b, bool diagonal) {
+    float l = cmax(a.lipschitz, b.lipschitz);
+    if (diagonal) l = cmax(l, (a.lipschitz + b.lipschitz) * 0.70710678f);
+    return CFieldInfo{false, l};
+}
+
 // Rigid transform, uniform scale, round/onion, elongate, extrude, revolve,
 // repetition with adequate padding: exactness and Lipschitz preserved.
 CLAY_FN CFieldInfo cfi_isometric(CFieldInfo a) { return a; }

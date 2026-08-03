@@ -44,7 +44,36 @@ enum class Op : std::uint8_t {
     Subtract = kernel::ccombine_subtract,
     Intersect = kernel::ccombine_intersect,
     Paint = kernel::ccombine_paint,
+    // Extended vocabulary (kernel/tape.h math + color semantics). blend.k is
+    // the mode's radius/depth; the blend profile is ignored. Groove/Tongue
+    // additionally consume the node's rounding (world units) as the channel
+    // half-width rb — the item field itself still gets rounded, so the
+    // channel is centered on the rounded surface.
+    Groove = kernel::ccombine_groove,
+    Tongue = kernel::ccombine_tongue,
+    Pipe = kernel::ccombine_pipe,
+    Engrave = kernel::ccombine_engrave,
+    Emboss = kernel::ccombine_emboss,
+    Inset = kernel::ccombine_inset,
+    Shell = kernel::ccombine_shell,
+    Replace = kernel::ccombine_replace,
 };
+
+inline bool op_is_extended(Op op) {
+    return static_cast<int>(op) >= kernel::ccombine_groove &&
+           static_cast<int>(op) <= kernel::ccombine_replace;
+}
+
+// Diagonal modes mix both gradients (Lipschitz up to sqrt(2); exactness.h).
+inline bool op_is_diagonal(Op op) {
+    return op == Op::Pipe || op == Op::Engrave || op == Op::Emboss;
+}
+
+// Modes that create material independent of the accumulated field. They are
+// not skipped on an empty accumulator: the compiler emits their combine
+// anyway and the interpreter seeds it with the far field, so per-brick
+// culling of everything beneath them stays band-clamp identical.
+inline bool op_creates_material(Op op) { return op == Op::Shell || op == Op::Replace; }
 
 enum class BlendProfile : std::uint8_t {
     Hard = kernel::cblend_hard,

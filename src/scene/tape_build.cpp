@@ -38,7 +38,23 @@ struct Compiler {
         tape.params.insert(tape.params.end(), prim_params, prim_params + prim_param_count);
     }
 
-    void emit_combine(Op op, Blend blend) {
+    // Far-field accumulator seed for material-creating combines whose chain
+    // is empty (kernel/tape.h ctape_empty). Emitted explicitly because the
+    // postfix stack may hold outer-chain values, so interpreter underflow
+    // seeding cannot be relied on inside group subtrees.
+    void emit_empty(kernel::cfloat3 color) {
+        kernel::cfloat4x4 ident;
+        ident.c0 = kernel::cf4(1, 0, 0, 0);
+        ident.c1 = kernel::cf4(0, 1, 0, 0);
+        ident.c2 = kernel::cf4(0, 0, 1, 0);
+        ident.c3 = kernel::cf4(0, 0, 0, 1);
+        float none = 0.0f;
+        emit_prim(kernel::ctape_empty, ident, 1.0f, 0.0f, color, &none, 0);
+    }
+
+    // rb: second radius of the two-parameter extended modes (groove/tongue
+    // half-width), already in world units; 0 for everything else.
+    void emit_combine(Op op, Blend blend, float rb) {
         CTapeInstr instr;
         instr.op = kernel::ctape_combine;
         instr.param_offset = static_cast<unsigned int>(tape.params.size());
@@ -46,15 +62,19 @@ struct Compiler {
         tape.params.push_back(static_cast<float>(static_cast<int>(op)));
         tape.params.push_back(static_cast<float>(static_cast<int>(blend.profile)));
         tape.params.push_back(blend.k);
+        tape.params.push_back(rb);
     }
 
     // -- field-info bookkeeping ----------------------------------------------
 
-    void fold_info(const Node& item, bool smooth) {
+    void fold_info(const Node& item, Op op, bool smooth) {
         kernel::CFieldInfo prim_info =
             (item.prim.type == PrimType::Ellipsoid) ? kernel::cfi_bound() : kernel::cfi_exact();
-        tape.info = smooth ? kernel::cfi_smooth_blend(tape.info, prim_info)
-                           : kernel::cfi_boolean(tape.info, prim_info);
+        if (op_is_extended(op))
+            tape.info = kernel::cfi_extended_blend(tape.info, prim_info, op_is_diagonal(op));
+        else
+            tape.info = smooth ? kernel::cfi_smooth_blend(tape.info, prim_info)
+                               : kernel::cfi_boolean(tape.info, prim_info);
     }
 
     // -- items ---------------------------------------------------------------
@@ -97,7 +117,7 @@ struct Compiler {
                     item.xform.inverse_matrix(),
                     math::mul(math::reflection_matrix(axis), layer.xform.inverse_matrix()));
                 emit_item_instance(item, inv, world.scale);
-                emit_combine(Op::Add, mirror_blend);
+                emit_combine(Op::Add, mirror_blend, 0.0f);
             }
             if (layer.mirror_k > 0.0f)
                 tape.info = kernel::cfi_smooth_blend(tape.info, kernel::cfi_exact());
@@ -116,15 +136,20 @@ struct Compiler {
             if (n->is_group) {
                 have_acc = compile_group(*n, content, layer, have_acc);
             } else {
-                // carving/painting with nothing beneath produces nothing
-                if (!have_acc && n->op != Op::Add) continue;
+                // carving/painting with nothing beneath produces nothing;
+                // material-creating modes seed the chain against empty space
+                if (!have_acc && n->op != Op::Add && !op_creates_material(n->op)) continue;
                 math::Aabb bound = item_influence_bound(*n, layer);
                 if (culled(bound)) continue;
                 tape.bounds.expand(bound);
+                bool seeded = !have_acc && n->op != Op::Add;
+                if (seeded) emit_empty(n->color);
                 emit_item(*n, layer);
                 bool smooth = n->blend.profile != BlendProfile::Hard && n->blend.k > 0.0f;
-                if (have_acc) emit_combine(n->op, n->blend);
-                fold_info(*n, smooth && have_acc);
+                if (have_acc || seeded)
+                    emit_combine(n->op, n->blend,
+                                 n->rounding * layer.xform.scale * n->xform.scale);
+                fold_info(*n, (have_acc || seeded) ? n->op : Op::Add, smooth && have_acc);
                 have_acc = true;
             }
         }
@@ -138,11 +163,14 @@ struct Compiler {
             // inline: children continue the outer chain
             return compile_list(group.children, content, layer, have_acc);
         }
-        // a carving/painting group with nothing beneath produces nothing
-        if (!have_acc && group.op != Op::Add) return have_acc;
+        // a carving/painting group with nothing beneath produces nothing;
+        // material-creating groups seed the chain against empty space
+        if (!have_acc && group.op != Op::Add && !op_creates_material(group.op)) return have_acc;
         std::size_t saved_instrs = tape.instrs.size();
         std::size_t saved_params = tape.params.size();
         std::size_t saved_strokes = tape.strokes.size();
+        bool seeded = !have_acc && group.op != Op::Add;
+        if (seeded) emit_empty(group.color);
         bool sub = compile_list(group.children, content, layer, false);
         if (!sub) {  // empty subtree: roll back any partial emission
             tape.instrs.resize(saved_instrs);
@@ -150,10 +178,14 @@ struct Compiler {
             tape.strokes.resize(saved_strokes);
             return have_acc;
         }
-        if (have_acc) {
-            emit_combine(group.op, group.blend);
+        if (have_acc || seeded) {
+            emit_combine(group.op, group.blend, group.rounding * layer.xform.scale);
             bool smooth = group.blend.profile != BlendProfile::Hard && group.blend.k > 0.0f;
-            if (smooth) tape.info = kernel::cfi_smooth_blend(tape.info, tape.info);
+            if (op_is_extended(group.op))
+                tape.info = kernel::cfi_extended_blend(tape.info, tape.info,
+                                                       op_is_diagonal(group.op));
+            else if (smooth)
+                tape.info = kernel::cfi_smooth_blend(tape.info, tape.info);
         }
         return true;
     }
@@ -165,7 +197,7 @@ struct Compiler {
             if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
             bool layer_val = compile_list(layer.sdf->roots, *layer.sdf, layer, false);
             if (!layer_val) continue;
-            if (have_acc) emit_combine(Op::Add, Blend{});  // layers union hard
+            if (have_acc) emit_combine(Op::Add, Blend{}, 0.0f);  // layers union hard
             have_acc = true;
         }
     }

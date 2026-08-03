@@ -77,10 +77,16 @@ Aabb item_influence_bound(const Node& item, const Layer& layer) {
     }
     // Rounding is authored in item-local units (tape emits round*scale);
     // erosion (negative rounding) shrinks the surface, never the bound.
-    // Paint fades over max(profile support, k).
-    float dilation = kernel::cmax(item.rounding * world.scale, 0.0f) +
-                     kernel::cmax(item.blend.support(), item.blend.k);
-    return bound.dilated(dilation);
+    // Paint fades over max(profile support, k). Extended modes deviate
+    // within their documented support of the item surface (kernel/tape.h) —
+    // for groove/tongue that is the rounding again (rb), on top of the
+    // rounding dilation the item field already carries.
+    float round_world = item.rounding * world.scale;
+    float combine = op_is_extended(item.op)
+                        ? kernel::ccombine_extended_support(static_cast<int>(item.op),
+                                                            item.blend.k, round_world)
+                        : kernel::cmax(item.blend.support(), item.blend.k);
+    return bound.dilated(kernel::cmax(round_world, 0.0f) + combine);
 }
 
 Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& layer) {
@@ -94,7 +100,14 @@ Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& lay
         if (cb.is_infinite()) return Aabb::infinite();
         b.expand(cb);
     }
-    return b.empty() ? b : b.dilated(n->blend.support());
+    // Extended-op groups: the subtree field is not rounded, so rb comes
+    // straight from the group's rounding scaled into world units.
+    float support = op_is_extended(n->op)
+                        ? kernel::ccombine_extended_support(
+                              static_cast<int>(n->op), n->blend.k,
+                              n->rounding * layer.xform.scale)
+                        : n->blend.support();
+    return b.empty() ? b : b.dilated(support);
 }
 
 Aabb layer_influence_bound(const Layer& layer) {
