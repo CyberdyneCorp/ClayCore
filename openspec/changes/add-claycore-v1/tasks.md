@@ -50,10 +50,10 @@ Groups 1–10 are Phase 1 (the ClaySpace app's dependency set). Groups 11–14 m
 
 ## 6. Voxel engine (voxel-engine)
 
-- [ ] 6.1 Palette-indexed chunked storage to 256³+ with palette+RLE serialization
-- [ ] 6.2 Edit ops: set/erase/paint (single + N³ footprint), box/line fills, mirror application, build-plane queries, flood select
-- [ ] 6.3 Greedy meshing with per-face color + losslessness test
-- [ ] 6.4 Voxel↔SDF bridges (step-function field; SDF rasterization to voxels)
+- [x] 6.1 Palette-indexed chunked storage to 256³+ with palette+RLE serialization
+- [x] 6.2 Edit ops: set/erase/paint (single + N³ footprint), box/line fills, mirror application, build-plane queries, flood select
+- [x] 6.3 Greedy meshing with per-face color + losslessness test
+- [x] 6.4 Voxel↔SDF bridges (step-function field; SDF rasterization to voxels)
 
 ## 7. Meshing (meshing)
 
