@@ -21,8 +21,13 @@ forward-refuse).
    layering, kernel dialect (CPU + CUDA profiles), the license manifest, C
    ABI hygiene + ctypes FFI, `openspec validate --all --strict`, benchmark
    floors, and a real `pip install .` quickstart in a throwaway venv.
-3. On a minor/patch release, confirm no symbol or struct-layout break in
-   `clay.h` (the ABI gate checks hygiene, not history — read the diff).
+3. On a minor/patch release, read the `clay.h` diff for symbol and
+   struct-layout breaks (the ABI gate checks hygiene, not history). Below 1.0
+   a break is allowed on a minor bump under SemVer's 0.x rule, but it is never
+   silent: say so in the release notes, and make the library reject the older
+   layout instead of misreading it. **0.2.0 is such a release** — the leading
+   `struct_size` shifted every field of `clay_item_desc` and
+   `clay_mesh_params`, so ABI 0.1.0 binaries must recompile.
 
 ## Tagging
 

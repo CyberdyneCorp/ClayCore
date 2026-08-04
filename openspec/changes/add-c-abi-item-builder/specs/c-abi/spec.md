@@ -5,7 +5,7 @@ Delta for `add-c-abi-item-builder`.
 ## MODIFIED Requirements
 
 ### Requirement: Flat versioned C API
-`bindings/c/clay.h` SHALL expose documents, layers, edit commands, evaluation, brick access, meshing, picking, and file I/O through a flat C API: opaque handles, integer error codes, caller-owned buffers, no C++ types and no exceptions crossing the boundary. The header SHALL carry an ABI version triple queryable at runtime (`clay_version()`), and the ABI SHALL follow SemVer (breaking changes only on major).
+`bindings/c/clay.h` SHALL expose documents, layers, edit commands, evaluation, brick access, meshing, picking, and file I/O through a flat C API: opaque handles, integer error codes, caller-owned buffers, no C++ types and no exceptions crossing the boundary. The header SHALL carry an ABI version triple queryable at runtime (`clay_version()`), and the ABI SHALL follow SemVer: from 1.0 breaking changes only on major, and below 1.0 under SemVer's 0.x rule a minor bump MAY break the ABI. A break below 1.0 SHALL be stated in the header, the proposal and the release notes, and SHALL be detectable rather than silent: a call made in the older layout SHALL be rejected with an error code, never read as if it were the newer one.
 
 The C API SHALL reach every authoring and query capability the Python bindings reach, so a Swift consumer is not restricted to a subset of what `pyclay` can drive. Where a Python construct has no direct C equivalent — chained modifiers, variable-length payloads — the C API SHALL provide an equivalent builder rather than omitting the capability.
 
@@ -14,7 +14,7 @@ The C API SHALL reach every authoring and query capability the Python bindings r
 - **THEN** it can create a document, add a sphere edit, evaluate points, mesh, and export OBJ — with every failure path returning an error code
 
 #### Scenario: Version check
-- **WHEN** a consumer compiled against header version X.Y links a library reporting major ≠ X
+- **WHEN** a consumer compiled against header version X.Y links a library reporting major ≠ X, or reporting major 0 with a different minor
 - **THEN** the documented init-time version check fails explicitly instead of undefined behavior
 
 ## ADDED Requirements
@@ -37,15 +37,19 @@ The existing flat `clay_item_desc` entry point SHALL keep working, defined as su
 - **THEN** the payload is carried by the builder without any fixed-size struct limit
 
 #### Scenario: Existing flat path still works
-- **WHEN** a consumer compiled against the previous header calls `clay_add_item` with a `clay_item_desc`
-- **THEN** it behaves exactly as before
+- **WHEN** source written against the previous header is recompiled and calls `clay_add_item` with a `clay_item_desc` declaring its `struct_size`
+- **THEN** every field means what it meant before and the edit lands on the same node
+
+#### Scenario: A binary from the previous ABI is rejected, not misread
+- **WHEN** a binary compiled against ABI 0.1.0 — whose `clay_item_desc` and `clay_mesh_params` predate the `struct_size` prefix — calls `clay_add_item` or `clay_document_mesh`
+- **THEN** the call returns `CLAY_ERROR_INVALID_ARGUMENT`, the document is unchanged, and the library reads nothing beyond the shorter object it was handed
 
 ### Requirement: Versioned descriptor structs
-Every descriptor struct crossing the ABI SHALL carry a leading `uint32_t struct_size` set by the caller. The library SHALL read only the prefix the caller declares, so fields may be appended without a major version bump. The ABI hygiene gate SHALL fail if a public descriptor struct lacks the field.
+Every descriptor struct crossing the ABI SHALL carry a leading `uint32_t struct_size` set by the caller. The library SHALL read only the prefix the caller declares, so fields may be appended without a major version bump. Setting it SHALL be mandatory: a declared size below the struct's original layout — zero included — SHALL be rejected with `CLAY_ERROR_INVALID_ARGUMENT`, and so SHALL a value too large to be any descriptor, because both are what a caller that predates the convention leaves in that word. A declared size larger than the library knows SHALL be clamped, so an unknown tail is ignored rather than misread, and the library SHALL never copy more than the caller declared. The ABI hygiene gate SHALL fail if a public descriptor struct lacks the field.
 
 #### Scenario: Older caller against newer library
 - **WHEN** a caller sets `struct_size` to the size it was compiled against and the library has since appended fields
-- **THEN** the call succeeds and the appended fields take documented defaults
+- **THEN** the call succeeds, only the declared prefix is read, and the appended fields take their documented defaults
 
 #### Scenario: Gate rejects an unversioned struct
 - **WHEN** a public descriptor struct is added without `struct_size`
@@ -58,6 +62,8 @@ Every descriptor struct crossing the ABI SHALL carry a leading `uint32_t struct_
 - **WHEN** a primitive, op or blend is added to the scene model without a matching C enumerator
 - **THEN** a compile-time assertion fails rather than the C API silently lagging
 
+Where an engine primitive constructor conditions its arguments, the C entry points SHALL condition them identically, so the same authored intent gives the same field through either binding: a plane's normal SHALL be normalized (a zero-length one rejected), and the sine/cosine pair the angle primitives take SHALL be rejected when it is not a unit pair.
+
 #### Scenario: Every primitive is reachable
 - **WHEN** a C consumer adds one edit of every `clay_prim` value to a document
-- **THEN** each evaluates and the document meshes
+- **THEN** each evaluates to the same field as the same primitive authored on the scene model, and a document of the bounded ones meshes

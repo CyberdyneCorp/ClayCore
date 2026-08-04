@@ -23,9 +23,12 @@ add_executable(clay_unit_tests
   unit/test_deformers.cpp
   unit/test_lifts.cpp
   unit/test_repetition.cpp
-  unit/test_primitives_backfill.cpp)
+  unit/test_primitives_backfill.cpp
+  unit/test_c_item_builder.cpp)
 
 target_link_libraries(clay_unit_tests PRIVATE clay::core doctest::doctest)
+# the C ABI item builder test consumes the public header as a C consumer would
+target_include_directories(clay_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../bindings/c)
 clay_apply_warnings(clay_unit_tests)
 clay_apply_sanitizers(clay_unit_tests)
 

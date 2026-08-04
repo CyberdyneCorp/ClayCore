@@ -283,6 +283,8 @@ Use cases the bindings are designed for: authoring the spec's golden-scene test 
 
 Flat, stable, versioned C API over documents, evaluation, meshing, and I/O — the boundary the Swift app links against (alongside or instead of direct Swift-C++ interop), and the FFI story for C#/Rust/anything. Opaque handles, error codes, caller-owned buffers; no C++ types cross it.
 
+Authoring reaches what `pyclay` reaches: an opaque **item builder** (`clay_item_create` → setters → `clay_layer_add_item`) carries the chained modifiers and variable-length payloads no fixed struct can express, and the flat `clay_item_desc` path is sugar over it. Every descriptor struct starts with a `uint32_t struct_size` the caller sets and the library reads only up to, so fields are appended without a major bump; setting it is mandatory, and a value that is not a declared layout is rejected rather than misread.
+
 ## 12. Dependencies (all permissive, all C/C++)
 
 | Dep | Role | License |
@@ -307,7 +309,7 @@ assimp is kept out of the shipping library (heavy, licensing surface) but used *
 
 ## 14. Versioning & compatibility
 
-SemVer on the C ABI and Python API; kernel headers may evolve freely inside a major. Document format version is independent and governed by the `project-documents` spec (backward-open, forward-refuse). GPU backend availability never changes results — only speed — enforced by the parity suite.
+SemVer on the C ABI and Python API; kernel headers may evolve freely inside a major. Below 1.0 the 0.x rule applies — the ABI may break on a minor bump, and **0.2.0 did**: `clay_item_desc` and `clay_mesh_params` grew the leading `struct_size`, which shifts every other field, so a 0.1.0 binary is rejected with `CLAY_ERROR_INVALID_ARGUMENT` (never silently misread) and consumers recompile. Consumers therefore compare majors at init, and the minor too while the major is 0. Document format version is independent and governed by the `project-documents` spec (backward-open, forward-refuse). GPU backend availability never changes results — only speed — enforced by the parity suite.
 
 ## 15. Phasing (maps to OpenSpec changes)
 

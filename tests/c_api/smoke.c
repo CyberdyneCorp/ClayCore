@@ -1,9 +1,13 @@
 /* C11 consumer smoke test (c-abi spec scenario "Pure C consumer"):
  * create a document, add a sphere edit, evaluate points, mesh, export OBJ,
- * save/load the document — every failure path returns an error code. */
+ * save/load the document — every failure path returns an error code. The
+ * sections below it cover the item builder: a composed edit, the modifier
+ * chain, payloads of any length, every clay_prim value, the versioned
+ * descriptor structs, and the error paths of all of them. */
 
 #include <clay.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,12 +21,528 @@
         }                                                                    \
     } while (0)
 
-int main(void) {
-    int32_t major = -1, minor = -1, patch = -1;
-    clay_version(&major, &minor, &patch);
-    REQUIRE(major == CLAY_ABI_MAJOR && minor >= 0 && patch >= 0);
+/* Same, plus a printf-style line saying what diverged. */
+#define REQUIREF(cond, ...)                                                  \
+    do {                                                                     \
+        if (!(cond)) {                                                       \
+            fprintf(stderr, "FAILED %s:%d: %s (last error: %s)\n  ",         \
+                    __FILE__, __LINE__, #cond, clay_last_error());           \
+            fprintf(stderr, __VA_ARGS__);                                    \
+            fprintf(stderr, "\n");                                           \
+            return 1;                                                        \
+        }                                                                    \
+    } while (0)
 
-    /* backend enumeration: size query first, then fill */
+/* -- item builder ---------------------------------------------------------- */
+
+/* A composed edit: a primitive, a chain of warps, an array — added to a
+ * layer and evaluated. */
+static int check_item_builder(void) {
+    clay_document* composed = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(composed, "composed", &layer) == CLAY_OK);
+
+    float box_params[3] = {0.4f, 0.9f, 0.4f};
+    float place[3] = {0.0f, 0.0f, 0.0f};
+    float axis[3] = {0.0f, 1.0f, 0.0f};
+    float rgb[3] = {0.3f, 0.6f, 0.2f};
+    float twist[1] = {0.8f};
+    float bend[1] = {0.35f};
+    float taper[4] = {-1.0f, 1.0f, 1.0f, 0.4f};
+    clay_item* item = clay_item_create(CLAY_PRIM_BOX, box_params, 3);
+    REQUIRE(item != NULL);
+    REQUIRE(clay_item_set_position(item, place) == CLAY_OK);
+    REQUIRE(clay_item_set_rotation(item, axis, 0.3f) == CLAY_OK);
+    REQUIRE(clay_item_set_scale(item, 1.1f) == CLAY_OK);
+    REQUIRE(clay_item_set_color(item, rgb) == CLAY_OK);
+    REQUIRE(clay_item_set_rounding(item, 0.02f) == CLAY_OK);
+    REQUIRE(clay_item_set_mirror(item, 0) == CLAY_OK);
+    REQUIRE(clay_item_add_deformer(item, CLAY_DEFORM_TWIST, twist, 1, CLAY_EASE_LINEAR) == CLAY_OK);
+    REQUIRE(clay_item_add_deformer(item, CLAY_DEFORM_BEND, bend, 1, CLAY_EASE_LINEAR) == CLAY_OK);
+    REQUIRE(clay_item_add_deformer(item, CLAY_DEFORM_TAPER, taper, 4, CLAY_EASE_LINEAR) == CLAY_OK);
+    REQUIRE(clay_item_set_repeat_radial(item, 5, 1.4f) == CLAY_OK);
+    clay_node_id composed_node = 0;
+    REQUIRE(clay_layer_add_item(composed, layer, item, &composed_node) == CLAY_OK);
+    REQUIRE(composed_node != 0);
+    clay_item_destroy(item);
+
+    float pts[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 4.0f};
+    float d[2] = {99.0f, 99.0f};
+    float rgb_out[6] = {0.0f};
+    REQUIRE(clay_eval_points(composed, NULL, pts, 2, d, rgb_out) == CLAY_OK);
+    REQUIREF(d[0] < 0.0f, "the composed edit is empty at the origin: d = %g", (double)d[0]);
+    REQUIREF(d[1] > 0.0f, "the composed edit fills (0, 0, 4): d = %g", (double)d[1]);
+    REQUIREF(rgb_out[0] > 0.29f && rgb_out[0] < 0.31f,
+             "the item's colour did not reach the field: red = %g", (double)rgb_out[0]);
+    clay_document_destroy(composed);
+    return 0;
+}
+
+/* Every way of getting one wrong: parameter counts, unknown enumerators,
+ * out-of-range values, payloads on the wrong primitive. */
+static int check_builder_rejections(void) {
+    float box_params[3] = {0.4f, 0.9f, 0.4f};
+    float twist[1] = {0.8f};
+    float taper[4] = {-1.0f, 1.0f, 1.0f, 0.4f};
+    clay_item* item = clay_item_create(CLAY_PRIM_BOX, box_params, 3);
+    REQUIRE(item != NULL);
+    REQUIRE(clay_item_create(CLAY_PRIM_BOX, box_params, 2) == NULL);
+    REQUIRE(strlen(clay_last_error()) > 0);
+    REQUIRE(clay_item_create(999, box_params, 3) == NULL);
+    REQUIRE(clay_item_create(CLAY_PRIM_BOX, NULL, 3) == NULL);
+    float flat_taper[4] = {1.0f, 1.0f, 1.0f, 1.0f}; /* y1 == y0 */
+    REQUIRE(clay_item_add_deformer(item, CLAY_DEFORM_TAPER, taper, 3, 0) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_add_deformer(item, CLAY_DEFORM_TAPER, flat_taper, 4, 0) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_add_deformer(item, CLAY_DEFORM_TWIST, twist, 1, CLAY_EASE_COUNT) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_add_deformer(item, 99, twist, 1, 0) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_scale(item, 0.0f) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_blend(item, CLAY_BLEND_QUADRATIC, -1.0f) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_blend(item, 99, 0.1f) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_rounding(item, -0.1f) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_op(item, 250) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_repeat_radial(item, 1, 0.0f) == CLAY_ERROR_INVALID_ARGUMENT);
+    float wide[3] = {1.0f, 2.0f, 3.0f};
+    float counts[3] = {1.0f, 1.0f, 1.0f};
+    REQUIRE(clay_item_set_repeat_grid(item, wide, counts) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_repeat_grid(item, wide, NULL) == CLAY_OK); /* infinite grids may differ */
+    REQUIRE(clay_item_set_repeat_radial(item, 5, 1.4f) == CLAY_OK); /* one repeat: last call wins */
+    /* payload setters check the primitive they belong to */
+    REQUIRE(clay_item_set_stroke_points(item, NULL, 0) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_profile(item, CLAY_PROFILE_CIRCLE, twist, 1) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    clay_item_destroy(item);
+    return 0;
+}
+
+/* A transition op needs its parameters, of its own kind, and no other op
+ * accepts them. */
+static int check_transition_pairing(void) {
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "morph", &layer) == CLAY_OK);
+    float r[1] = {0.6f};
+    float from[3] = {0.0f, -1.0f, 0.0f};
+    float to[3] = {0.0f, 1.0f, 0.0f};
+    clay_item* item = clay_item_create(CLAY_PRIM_SPHERE, r, 1);
+    REQUIRE(item != NULL);
+    REQUIRE(clay_item_set_op(item, CLAY_OP_TRANSITION_LINEAR) == CLAY_OK);
+    REQUIRE(clay_layer_add_item(doc, layer, item, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_transition_linear(item, from, from, 0) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_transition_radial(item, 1.0f, 1.0f, 0) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_transition_linear(item, from, to, CLAY_EASE_COUNT) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_transition_linear(item, from, to, CLAY_EASE_LINEAR) == CLAY_OK);
+    REQUIRE(clay_layer_add_item(doc, layer, item, NULL) == CLAY_OK);
+    REQUIRE(clay_item_set_transition_radial(item, 0.2f, 1.5f, CLAY_EASE_LINEAR) == CLAY_OK);
+    REQUIRE(clay_layer_add_item(doc, layer, item, NULL) ==
+            CLAY_ERROR_INVALID_ARGUMENT); /* radial parameters, linear op */
+    REQUIRE(clay_item_set_op(item, CLAY_OP_TRANSITION_RADIAL) == CLAY_OK);
+    REQUIRE(clay_layer_add_item(doc, layer, item, NULL) == CLAY_OK);
+    REQUIRE(clay_item_set_op(item, CLAY_OP_ADD) == CLAY_OK);
+    REQUIRE(clay_layer_add_item(doc, layer, item, NULL) ==
+            CLAY_ERROR_INVALID_ARGUMENT); /* parameters without a morph op */
+    clay_item_destroy(item);
+    clay_document_destroy(doc);
+    return 0;
+}
+
+/* Variable-length payloads: the caller's arrays need not outlive the call. */
+static int check_builder_payloads(void) {
+    clay_document* composed = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(composed, "payloads", &layer) == CLAY_OK);
+
+    float chain[12] = {-0.6f, 0.0f, 0.0f, 0.20f, 0.0f, 0.3f, 0.0f, 0.15f,
+                       0.6f,  0.0f, 0.0f, 0.10f};
+    float tip[3] = {0.9f, 0.2f, 0.0f};
+    clay_item* stroke = clay_item_create(CLAY_PRIM_STROKE, NULL, 0);
+    REQUIRE(stroke != NULL);
+    REQUIRE(clay_item_set_stroke_points(stroke, chain, 3) == CLAY_OK);
+    REQUIRE(clay_item_add_stroke_point(stroke, tip, 0.1f) == CLAY_OK);
+    REQUIRE(clay_item_add_stroke_point(stroke, tip, -1.0f) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_stroke_blend_k(stroke, 0.04f) == CLAY_OK);
+    REQUIRE(clay_item_set_stroke_blend_k(stroke, -0.1f) == CLAY_ERROR_INVALID_ARGUMENT);
+    memset(chain, 0, sizeof chain);
+    REQUIRE(clay_layer_add_item(composed, layer, stroke, NULL) == CLAY_OK);
+    clay_item_destroy(stroke);
+
+    float half_depth[1] = {0.25f};
+    float bad_depth[1] = {0.0f};
+    float outline[8] = {-0.4f, -0.4f, 0.4f, -0.4f, 0.4f, 0.4f, -0.4f, 0.4f};
+    REQUIRE(clay_item_create(CLAY_PRIM_EXTRUDE, bad_depth, 1) == NULL);
+    clay_item* lift = clay_item_create(CLAY_PRIM_EXTRUDE, half_depth, 1);
+    REQUIRE(lift != NULL);
+    REQUIRE(clay_item_set_profile_polygon(lift, outline, 2) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_profile(lift, CLAY_PROFILE_POLYGON, outline, 1) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_profile(lift, 99, outline, 1) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_profile_polygon(lift, outline, 4) == CLAY_OK);
+    memset(outline, 0, sizeof outline);
+    REQUIRE(clay_layer_add_item(composed, layer, lift, NULL) == CLAY_OK);
+    clay_item_destroy(lift);
+
+    float pts[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.3f, 0.0f};
+    float d[2] = {99.0f, 99.0f};
+    REQUIRE(clay_eval_points(composed, NULL, pts, 2, d, NULL) == CLAY_OK);
+    REQUIREF(d[0] < 0.0f, "the stroke and the lift are empty at the origin: d = %g",
+             (double)d[0]);
+    REQUIREF(d[1] < 0.0f, "the stroke is empty at its own vertex (0, 0.3, 0): d = %g",
+             (double)d[1]);
+    clay_document_destroy(composed);
+    return 0;
+}
+
+/* Payload length is a caller's choice: a long stroke and a many-sided
+ * polygon go through the same setters as a short one. */
+static int check_large_payloads(void) {
+    enum { kPoints = 300, kVertices = 128 };
+    float* chain = (float*)malloc((size_t)kPoints * 4 * sizeof(float));
+    float* outline = (float*)malloc((size_t)kVertices * 2 * sizeof(float));
+    REQUIRE(chain != NULL && outline != NULL);
+    for (int i = 0; i < kPoints; ++i) { /* a straight rod of radius 0.1 */
+        float t = (float)i / (float)(kPoints - 1);
+        chain[i * 4] = -1.0f + 2.0f * t;
+        chain[i * 4 + 1] = 0.0f;
+        chain[i * 4 + 2] = 0.0f;
+        chain[i * 4 + 3] = 0.1f;
+    }
+    for (int i = 0; i < kVertices; ++i) { /* a 128-gon of radius 0.5 */
+        float a = 6.2831853f * (float)i / (float)kVertices;
+        outline[i * 2] = 0.5f * cosf(a);
+        outline[i * 2 + 1] = 0.5f * sinf(a);
+    }
+
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "payloads", &layer) == CLAY_OK);
+
+    clay_item* stroke = clay_item_create(CLAY_PRIM_STROKE, NULL, 0);
+    REQUIRE(stroke != NULL);
+    REQUIRE(clay_item_set_stroke_points(stroke, chain, kPoints) == CLAY_OK);
+    REQUIRE(clay_layer_add_item(doc, layer, stroke, NULL) == CLAY_OK);
+    clay_item_destroy(stroke);
+
+    float depth[1] = {0.2f};
+    float where[3] = {3.0f, 0.0f, 0.0f};
+    clay_item* lift = clay_item_create(CLAY_PRIM_EXTRUDE, depth, 1);
+    REQUIRE(lift != NULL);
+    REQUIRE(clay_item_set_profile_polygon(lift, outline, kVertices) == CLAY_OK);
+    REQUIRE(clay_item_set_position(lift, where) == CLAY_OK);
+    REQUIRE(clay_layer_add_item(doc, layer, lift, NULL) == CLAY_OK);
+    clay_item_destroy(lift);
+
+    free(chain); /* the builder copied both payloads in */
+    free(outline);
+
+    float pts[12] = {0.0f, 0.0f, 0.0f,  0.0f, 0.5f, 0.0f,
+                     3.0f, 0.0f, 0.0f,  3.9f, 0.0f, 0.0f};
+    float d[4];
+    REQUIRE(clay_eval_points(doc, NULL, pts, 4, d, NULL) == CLAY_OK);
+    REQUIREF(fabsf(d[0] + 0.1f) < 1e-3f, "%d-point rod: d at its axis is %g, expected -0.1",
+             kPoints, (double)d[0]);
+    REQUIREF(fabsf(d[1] - 0.4f) < 1e-3f, "%d-point rod: d at 0.5 above it is %g, expected 0.4",
+             kPoints, (double)d[1]);
+    REQUIREF(fabsf(d[2] + 0.2f) < 1e-3f, "%d-gon: d at its centre is %g, expected -0.2 (half depth)",
+             kVertices, (double)d[2]);
+    REQUIREF(d[3] > 0.3f, "%d-gon: d 0.9 from its centre is %g, expected the outside",
+             kVertices, (double)d[3]);
+    clay_document_destroy(doc);
+    return 0;
+}
+
+/* -- every primitive ------------------------------------------------------- */
+
+/* One edit of every clay_prim value. The table is indexed by the enum: entry
+ * i is primitive i, and the sweep below fails if the library accepts a value
+ * this table does not cover — which is what happens when a primitive is added
+ * to the engine. */
+static const struct {
+    int32_t prim;
+    size_t count;
+    float params[7];
+} kZoo[] = {{CLAY_PRIM_SPHERE, 1, {0.5f}},
+            {CLAY_PRIM_BOX, 3, {0.4f, 0.4f, 0.4f}},
+            {CLAY_PRIM_ROUND_BOX, 4, {0.4f, 0.3f, 0.3f, 0.05f}},
+            {CLAY_PRIM_BOX_FRAME, 4, {0.4f, 0.4f, 0.4f, 0.05f}},
+            {CLAY_PRIM_TORUS, 2, {0.5f, 0.15f}},
+            {CLAY_PRIM_CAPSULE, 7, {-0.3f, 0.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.2f}},
+            {CLAY_PRIM_CAPPED_CYLINDER, 2, {0.3f, 0.4f}},
+            {CLAY_PRIM_ROUNDED_CYLINDER, 3, {0.3f, 0.05f, 0.4f}},
+            {CLAY_PRIM_CAPPED_CONE, 3, {0.4f, 0.3f, 0.1f}},
+            {CLAY_PRIM_ROUND_CONE, 3, {0.3f, 0.1f, 0.5f}},
+            {CLAY_PRIM_ELLIPSOID, 3, {0.4f, 0.3f, 0.2f}},
+            {CLAY_PRIM_OCTAHEDRON, 1, {0.5f}},
+            {CLAY_PRIM_HEX_PRISM, 2, {0.3f, 0.2f}},
+            {CLAY_PRIM_PYRAMID, 1, {0.6f}},
+            {CLAY_PRIM_STROKE, 0, {0.0f}},
+            {CLAY_PRIM_EXTRUDE, 1, {0.2f}},
+            {CLAY_PRIM_REVOLVE, 1, {0.6f}},
+            {CLAY_PRIM_CAPPED_TORUS, 4, {0.8415f, 0.5403f, 0.5f, 0.15f}},
+            {CLAY_PRIM_LINK, 3, {0.3f, 0.4f, 0.15f}},
+            {CLAY_PRIM_CYLINDER_INFINITE, 3, {0.0f, 0.0f, 0.3f}},
+            {CLAY_PRIM_CONE, 3, {0.5f, 0.866f, 0.5f}},
+            {CLAY_PRIM_PLANE, 4, {0.0f, 1.0f, 0.0f, 2.0f}},
+            {CLAY_PRIM_CUT_SPHERE, 2, {0.5f, 0.1f}},
+            {CLAY_PRIM_CUT_HOLLOW_SPHERE, 3, {0.5f, 0.1f, 0.05f}},
+            {CLAY_PRIM_SOLID_ANGLE, 3, {0.5f, 0.866f, 0.5f}},
+            {CLAY_PRIM_TETRAHEDRON, 1, {0.4f}},
+            {CLAY_PRIM_DODECAHEDRON, 1, {0.4f}},
+            {CLAY_PRIM_ICOSAHEDRON, 1, {0.4f}},
+            {CLAY_PRIM_TRI_PRISM, 2, {0.3f, 0.2f}},
+            {CLAY_PRIM_OCTAHEDRON_CHEAP, 1, {0.4f}},
+            {CLAY_PRIM_LNORM_SPHERE, 2, {0.4f, 4.0f}}};
+
+#define ZOO_COUNT (sizeof kZoo / sizeof kZoo[0])
+
+/* The item for one table entry, with the payload its primitive needs. */
+static clay_item* zoo_item(size_t i) {
+    static const float chain[8] = {-0.4f, 0.0f, 0.0f, 0.15f, 0.4f, 0.0f, 0.0f, 0.15f};
+    static const float profile[1] = {0.3f};
+    clay_item* one = clay_item_create(kZoo[i].prim, kZoo[i].params, kZoo[i].count);
+    if (!one) return NULL;
+    clay_result r = CLAY_OK;
+    if (kZoo[i].prim == CLAY_PRIM_STROKE)
+        r = clay_item_set_stroke_points(one, chain, 2);
+    if (kZoo[i].prim == CLAY_PRIM_EXTRUDE || kZoo[i].prim == CLAY_PRIM_REVOLVE)
+        r = clay_item_set_profile(one, CLAY_PROFILE_HEXAGON, profile, 1);
+    if (r != CLAY_OK) {
+        clay_item_destroy(one);
+        return NULL;
+    }
+    return one;
+}
+
+/* 27 sample points spread over the unit cube. */
+static size_t zoo_grid(float* out) {
+    size_t n = 0;
+    for (int ix = -1; ix <= 1; ++ix)
+        for (int iy = -1; iy <= 1; ++iy)
+            for (int iz = -1; iz <= 1; ++iz) {
+                out[n * 3] = 0.7f * (float)ix;
+                out[n * 3 + 1] = 0.7f * (float)iy;
+                out[n * 3 + 2] = 0.7f * (float)iz;
+                ++n;
+            }
+    return n;
+}
+
+/* One primitive alone in a document: it evaluates, in range, and its field
+ * varies — a primitive that contributed nothing would read the same
+ * everywhere. */
+static int check_one_primitive(size_t i) {
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "one", &layer) == CLAY_OK);
+    clay_item* one = zoo_item(i);
+    REQUIREF(one != NULL, "clay_prim %d: the table entry does not build", (int)kZoo[i].prim);
+    REQUIREF(clay_layer_add_item(doc, layer, one, NULL) == CLAY_OK, "clay_prim %d does not add",
+             (int)kZoo[i].prim);
+    clay_item_destroy(one);
+
+    float pts[27 * 3];
+    float d[27];
+    size_t n = zoo_grid(pts);
+    REQUIREF(clay_eval_points(doc, NULL, pts, n, d, NULL) == CLAY_OK,
+             "clay_prim %d does not evaluate", (int)kZoo[i].prim);
+    float lo = d[0], hi = d[0];
+    for (size_t k = 1; k < n; ++k) {
+        if (d[k] < lo) lo = d[k];
+        if (d[k] > hi) hi = d[k];
+    }
+    REQUIREF(lo > -1e6f && hi < 1e6f, "clay_prim %d evaluates out of range: [%g, %g]",
+             (int)kZoo[i].prim, (double)lo, (double)hi);
+    REQUIREF(hi - lo > 1e-4f, "clay_prim %d reads %g everywhere: it contributes no field",
+             (int)kZoo[i].prim, (double)lo);
+    clay_document_destroy(doc);
+    return 0;
+}
+
+/* All of them in one document: it evaluates, and the bounded subset meshes. */
+static int check_primitive_zoo_document(void) {
+    clay_document* all = clay_document_create();
+    clay_document* bounded = clay_document_create();
+    clay_layer_id all_layer = 0, bounded_layer = 0;
+    REQUIRE(clay_add_sdf_layer(all, "zoo", &all_layer) == CLAY_OK);
+    REQUIRE(clay_add_sdf_layer(bounded, "zoo", &bounded_layer) == CLAY_OK);
+    for (size_t i = 0; i < ZOO_COUNT; ++i) {
+        clay_item* one = zoo_item(i);
+        REQUIREF(one != NULL, "clay_prim %d: the table entry does not build", (int)kZoo[i].prim);
+        REQUIRE(clay_layer_add_item(all, all_layer, one, NULL) == CLAY_OK);
+        /* the two unbounded primitives make a scene that cannot be meshed */
+        if (kZoo[i].prim != CLAY_PRIM_PLANE && kZoo[i].prim != CLAY_PRIM_CYLINDER_INFINITE)
+            REQUIRE(clay_layer_add_item(bounded, bounded_layer, one, NULL) == CLAY_OK);
+        clay_item_destroy(one);
+    }
+    float pts[6] = {0.0f, 0.0f, 0.0f, 0.7f, 0.2f, 0.1f};
+    float d[2] = {0.0f, 0.0f};
+    REQUIRE(clay_eval_points(all, NULL, pts, 2, d, NULL) == CLAY_OK);
+    REQUIREF(d[0] > -1e6f && d[0] < 1e6f, "the zoo evaluates to %g at the origin", (double)d[0]);
+    REQUIREF(d[1] > -1e6f && d[1] < 1e6f, "the zoo evaluates to %g off centre", (double)d[1]);
+
+    clay_mesh_params mp;
+    memset(&mp, 0, sizeof mp);
+    mp.struct_size = (uint32_t)sizeof mp;
+    mp.resolution = 32;
+    clay_mesh* mesh = NULL;
+    REQUIRE(clay_document_mesh(bounded, &mp, &mesh) == CLAY_OK);
+    REQUIRE(clay_mesh_vertex_count(mesh) > 0);
+    REQUIRE(clay_mesh_index_count(mesh) % 3 == 0);
+    clay_mesh_destroy(mesh);
+    mesh = NULL;
+    /* the unbounded ones are why that subset exists */
+    REQUIRE(clay_document_mesh(all, &mp, &mesh) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(mesh == NULL);
+    clay_document_destroy(all);
+    clay_document_destroy(bounded);
+    return 0;
+}
+
+static int check_every_primitive(void) {
+    for (size_t i = 0; i < ZOO_COUNT; ++i)
+        REQUIREF(kZoo[i].prim == (int32_t)i, "table slot %d holds clay_prim %d: the table is "
+                 "indexed by the enum", (int)i, (int)kZoo[i].prim);
+
+    /* driven from the library, not from the table: every primitive value it
+     * accepts must be covered above, so a new one is caught here. The first
+     * two probe values are a unit sine and cosine, which is what the angle
+     * primitives take. */
+    float probe[7] = {0.6f, 0.8f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f};
+    int highest = -1;
+    for (int32_t p = 0; p < 64; ++p) {
+        for (size_t n = 0; n <= 7; ++n) {
+            clay_item* one = clay_item_create(p, probe, n);
+            if (!one) continue;
+            clay_item_destroy(one);
+            highest = (int)p;
+            break;
+        }
+    }
+    REQUIREF(highest + 1 == (int)ZOO_COUNT,
+             "the library accepts clay_prim values up to %d, the table covers %d: give the new "
+             "primitive an entry", highest, (int)ZOO_COUNT);
+
+    for (size_t i = 0; i < ZOO_COUNT; ++i)
+        if (check_one_primitive(i) != 0) return 1;
+    return check_primitive_zoo_document();
+}
+
+/* -- versioned descriptor structs ------------------------------------------ */
+
+/* struct_size is the caller's declared layout, and setting it is mandatory: a
+ * longer one means fields this build does not know, and anything shorter than
+ * the original layout — zero included, which is what a descriptor from ABI
+ * 0.1.0 leaves there — is rejected. Unset fields take their documented
+ * defaults. */
+static int check_struct_versioning(void) {
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "versioned", &layer) == CLAY_OK);
+
+    clay_item_desc desc;
+    memset(&desc, 0, sizeof desc);
+    desc.prim = CLAY_PRIM_SPHERE;
+    desc.params[0] = 1.0f;
+    desc.rotation[3] = 1.0f;
+    desc.scale = 1.0f;
+    /* a descriptor that never declares its layout is not read */
+    REQUIRE(clay_add_item(doc, layer, &desc, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    desc.struct_size = (uint32_t)sizeof desc;
+    REQUIRE(clay_add_item(doc, layer, &desc, NULL) == CLAY_OK);
+    desc.struct_size = 4; /* shorter than any layout that ever shipped */
+    REQUIRE(clay_add_item(doc, layer, &desc, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    desc.struct_size = 0x3d23d70a; /* the bits of 0.04f: not a struct size */
+    REQUIRE(clay_add_item(doc, layer, &desc, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    desc.struct_size = (uint32_t)sizeof desc;
+
+    /* a caller from the future: the tail this build cannot name is ignored */
+    struct {
+        clay_item_desc desc;
+        float tail[4];
+    } future;
+    memset(&future, 0, sizeof future);
+    future.desc = desc;
+    future.desc.struct_size = (uint32_t)sizeof future;
+    for (int i = 0; i < 4; ++i) future.tail[i] = 1234.5f;
+    REQUIRE(clay_add_item(doc, layer, &future.desc, NULL) == CLAY_OK);
+
+    /* the same rule on the meshing descriptor, and the defaults it documents:
+     * declaring the layout and nothing else meshes exactly as an explicit
+     * resolution 128 does */
+    clay_mesh_params zeroed, spelled_out;
+    memset(&zeroed, 0, sizeof zeroed);
+    memset(&spelled_out, 0, sizeof spelled_out);
+    spelled_out.struct_size = (uint32_t)sizeof spelled_out;
+    spelled_out.resolution = 128;
+    clay_mesh* from_defaults = NULL;
+    clay_mesh* from_fields = NULL;
+    REQUIRE(clay_document_mesh(doc, &zeroed, &from_defaults) == CLAY_ERROR_INVALID_ARGUMENT);
+    zeroed.struct_size = (uint32_t)sizeof zeroed;
+    REQUIRE(clay_document_mesh(doc, &zeroed, &from_defaults) == CLAY_OK);
+    REQUIRE(clay_document_mesh(doc, &spelled_out, &from_fields) == CLAY_OK);
+    REQUIREF(clay_mesh_vertex_count(from_defaults) == clay_mesh_vertex_count(from_fields),
+             "a zeroed clay_mesh_params gave %zu vertices, an explicit resolution 128 gave %zu",
+             clay_mesh_vertex_count(from_defaults), clay_mesh_vertex_count(from_fields));
+    REQUIRE(clay_mesh_vertex_count(from_defaults) > 0);
+    clay_mesh_destroy(from_defaults);
+    clay_mesh_destroy(from_fields);
+
+    clay_mesh_params truncated = spelled_out;
+    truncated.struct_size = 4;
+    clay_mesh* rejected = NULL;
+    REQUIRE(clay_document_mesh(doc, &truncated, &rejected) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(rejected == NULL);
+    clay_document_destroy(doc);
+    return 0;
+}
+
+/* -- error paths ----------------------------------------------------------- */
+
+/* Null handles are arguments, not crashes, and a released handle is released
+ * once: a C caller clears the pointer, so the second destroy is a null no-op.
+ * (Destroying the same non-null handle twice is a double free, as it is in
+ * any C API, and is not something the library can detect.) */
+static int check_error_paths(void) {
+    float three[3] = {1.0f, 1.0f, 1.0f};
+    REQUIRE(clay_add_item(NULL, 0, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_position(NULL, three) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_scale(NULL, 1.0f) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_add_deformer(NULL, CLAY_DEFORM_TWIST, three, 1, 0) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_repeat_grid(NULL, three, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_transition_radial(NULL, 0.0f, 1.0f, 0) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_layer_add_item(NULL, 0, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_document_mesh(NULL, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_mesh_validate(NULL, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_mesh_save(NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_document_save(NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(strlen(clay_last_error()) > 0);
+    /* the accessors answer for a null mesh instead of dereferencing it */
+    REQUIRE(clay_mesh_vertex_count(NULL) == 0);
+    REQUIRE(clay_mesh_index_count(NULL) == 0);
+    REQUIRE(clay_mesh_positions(NULL) == NULL);
+    REQUIRE(clay_mesh_indices(NULL) == NULL);
+
+    float r[1] = {0.5f};
+    clay_item* item = clay_item_create(CLAY_PRIM_SPHERE, r, 1);
+    REQUIRE(item != NULL);
+    clay_item_destroy(item);
+    item = NULL;
+    clay_item_destroy(item);
+    clay_document* doc = clay_document_create();
+    clay_document_destroy(doc);
+    doc = NULL;
+    clay_document_destroy(doc);
+    clay_mesh_destroy(NULL);
+    return 0;
+}
+
+/* -- the flat descriptor path ---------------------------------------------- */
+
+/* backend enumeration: size query first, then fill */
+static int check_backends(void) {
     size_t size = 0;
     REQUIRE(clay_list_backends(NULL, &size) == CLAY_OK && size >= 4);
     char small[2];
@@ -33,15 +553,15 @@ int main(void) {
     REQUIRE(clay_list_backends(names, &size) == CLAY_OK);
     REQUIRE(strstr(names, "cpu") != NULL);
     free(names);
+    return 0;
+}
 
-    /* build a small document */
-    clay_document* doc = clay_document_create();
-    REQUIRE(doc != NULL);
-    clay_layer_id layer = 0;
-    REQUIRE(clay_add_sdf_layer(doc, "body", &layer) == CLAY_OK);
-
+/* The edits the rest of the file evaluates, meshes and saves, added through
+ * clay_item_desc exactly as a 0.1.0 consumer added them. */
+static int check_flat_path(clay_document* doc, clay_layer_id layer) {
     clay_item_desc sphere;
     memset(&sphere, 0, sizeof sphere);
+    sphere.struct_size = (uint32_t)sizeof sphere;
     sphere.prim = CLAY_PRIM_SPHERE;
     sphere.params[0] = 1.0f;
     sphere.rotation[3] = 1.0f;
@@ -61,6 +581,18 @@ int main(void) {
     box.blend_k = 0.1f;
     REQUIRE(clay_add_item(doc, layer, &box, NULL) == CLAY_OK);
 
+    /* the backfilled primitives are reachable from the flat path too */
+    clay_document* scratch = clay_document_create();
+    clay_layer_id scratch_layer = 0;
+    REQUIRE(clay_add_sdf_layer(scratch, "scratch", &scratch_layer) == CLAY_OK);
+    clay_item_desc link = sphere;
+    link.prim = CLAY_PRIM_LINK;
+    link.params[0] = 0.3f; /* le r1 r2 */
+    link.params[1] = 0.4f;
+    link.params[2] = 0.15f;
+    REQUIRE(clay_add_item(scratch, scratch_layer, &link, NULL) == CLAY_OK);
+    clay_document_destroy(scratch);
+
     /* error paths */
     REQUIRE(clay_add_item(doc, 9999, &sphere, NULL) == CLAY_ERROR_NOT_FOUND);
     REQUIRE(strlen(clay_last_error()) > 0);
@@ -68,15 +600,33 @@ int main(void) {
     clay_item_desc bad = sphere;
     bad.prim = 999;
     REQUIRE(clay_add_item(doc, layer, &bad, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    /* out-of-line payloads and transition parameters do not fit the descriptor */
+    bad = sphere;
+    bad.prim = CLAY_PRIM_STROKE;
+    REQUIRE(clay_add_item(doc, layer, &bad, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    bad = sphere;
+    bad.prim = CLAY_PRIM_EXTRUDE;
+    REQUIRE(clay_add_item(doc, layer, &bad, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    bad = sphere;
+    bad.op = CLAY_OP_TRANSITION_RADIAL;
+    REQUIRE(clay_add_item(doc, layer, &bad, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    bad = sphere;
+    bad.blend = 99;
+    REQUIRE(clay_add_item(doc, layer, &bad, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    return 0;
+}
 
-    /* evaluate points */
+/* -- evaluation, meshing, file I/O ----------------------------------------- */
+
+static int check_evaluation(clay_document* doc) {
     float pts[9] = {0, 0, 0, 3, 0, 0, 0.9f, 0, 0};
     float dist[3] = {99, 99, 99};
     float colors[9];
     REQUIRE(clay_eval_points(doc, NULL, pts, 3, dist, colors) == CLAY_OK);
-    REQUIRE(dist[0] < -0.9f && dist[0] > -1.1f); /* center of the sphere */
-    REQUIRE(dist[1] > 1.0f);                     /* outside everything */
-    REQUIRE(dist[2] < 0.0f);                     /* inside the blend region */
+    REQUIREF(dist[0] < -0.9f && dist[0] > -1.1f, "at the sphere's centre d = %g, expected -1",
+             (double)dist[0]);
+    REQUIREF(dist[1] > 1.0f, "outside everything d = %g, expected > 1", (double)dist[1]);
+    REQUIREF(dist[2] < 0.0f, "inside the blend region d = %g, expected < 0", (double)dist[2]);
     REQUIRE(clay_eval_points(doc, "no_such_backend", pts, 3, dist, NULL) ==
             CLAY_ERROR_NOT_FOUND);
 
@@ -86,12 +636,15 @@ int main(void) {
     float t = 0, pos[3], normal[3];
     REQUIRE(clay_raycast(doc, origin, direction, &hit, &t, pos, normal) == CLAY_OK);
     REQUIRE(hit == 1);
-    REQUIRE(t > 3.9f && t < 4.1f);
+    REQUIREF(t > 3.9f && t < 4.1f, "the ray hit at t = %g, expected 4", (double)t);
     REQUIRE(normal[2] < -0.9f);
+    return 0;
+}
 
-    /* mesh + validate + export */
+static int check_meshing(clay_document* doc) {
     clay_mesh_params mp;
     memset(&mp, 0, sizeof mp);
+    mp.struct_size = (uint32_t)sizeof mp;
     mp.resolution = 48;
     clay_mesh* mesh = NULL;
     REQUIRE(clay_document_mesh(doc, &mp, &mesh) == CLAY_OK);
@@ -106,17 +659,53 @@ int main(void) {
     REQUIRE(clay_mesh_save(mesh, "c_api_smoke.obj") == CLAY_OK);
     REQUIRE(clay_mesh_save(mesh, "c_api_smoke.xyz") == CLAY_ERROR_UNSUPPORTED);
     clay_mesh_destroy(mesh);
+    return 0;
+}
 
-    /* save/load round trip */
+static int check_round_trip(clay_document* doc) {
+    float pts[9] = {0, 0, 0, 3, 0, 0, 0.9f, 0, 0};
+    float before[3], after[3];
+    REQUIRE(clay_eval_points(doc, NULL, pts, 3, before, NULL) == CLAY_OK);
     REQUIRE(clay_document_save(doc, "c_api_smoke.clayspace") == CLAY_OK);
     clay_document* loaded = NULL;
     REQUIRE(clay_document_load("c_api_smoke.clayspace", &loaded) == CLAY_OK);
-    float dist2[3];
-    REQUIRE(clay_eval_points(loaded, NULL, pts, 3, dist2, NULL) == CLAY_OK);
-    REQUIRE(dist2[0] == dist[0]); /* identical evaluation after reload */
+    REQUIRE(clay_eval_points(loaded, NULL, pts, 3, after, NULL) == CLAY_OK);
+    for (int i = 0; i < 3; ++i) /* identical evaluation after reload */
+        REQUIREF(after[i] == before[i], "sample %d reads %g after reload, %g before", i,
+                 (double)after[i], (double)before[i]);
     clay_document_destroy(loaded);
     REQUIRE(clay_document_load("missing_file.clayspace", &loaded) == CLAY_ERROR_NOT_FOUND);
     REQUIRE(loaded == NULL);
+    return 0;
+}
+
+int main(void) {
+    int32_t major = -1, minor = -1, patch = -1;
+    clay_version(&major, &minor, &patch);
+    /* the init-time check the header documents: majors must agree, and while
+     * the major is 0 so must the minors, because the ABI may still break on a
+     * minor bump (0.2.0 did, on the two descriptor structs) */
+    REQUIRE(major == CLAY_ABI_MAJOR && patch >= 0);
+    REQUIRE(major != 0 || minor == CLAY_ABI_MINOR);
+    if (check_backends() != 0) return 1;
+
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != NULL);
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "body", &layer) == CLAY_OK);
+
+    if (check_flat_path(doc, layer) != 0) return 1;
+    if (check_item_builder() != 0) return 1;
+    if (check_builder_rejections() != 0) return 1;
+    if (check_transition_pairing() != 0) return 1;
+    if (check_builder_payloads() != 0) return 1;
+    if (check_large_payloads() != 0) return 1;
+    if (check_every_primitive() != 0) return 1;
+    if (check_struct_versioning() != 0) return 1;
+    if (check_error_paths() != 0) return 1;
+    if (check_evaluation(doc) != 0) return 1;
+    if (check_meshing(doc) != 0) return 1;
+    if (check_round_trip(doc) != 0) return 1;
 
     clay_document_destroy(doc);
     printf("c-api smoke: OK\n");
