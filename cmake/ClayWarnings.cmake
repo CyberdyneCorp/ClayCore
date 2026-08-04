@@ -10,16 +10,21 @@ function(clay_apply_warnings target)
       target_compile_options(${target} PRIVATE /WX)
     endif()
   else()
-    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wshadow)
+    # CXX-only: nvcc rejects host warning flags on .cu sources (it parses
+    # -Werror as its own option). CUDA device code is gated by the CUDA CI
+    # job and the kernel-dialect check's CUDA profile instead.
+    target_compile_options(${target} PRIVATE
+      $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Wshadow>)
     if(CLAY_WERROR)
-      target_compile_options(${target} PRIVATE -Werror)
+      target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Werror>)
     endif()
   endif()
 endfunction()
 
 function(clay_apply_sanitizers target)
   if(CLAY_SANITIZE AND NOT MSVC)
-    target_compile_options(${target} PRIVATE -fsanitize=${CLAY_SANITIZE} -fno-omit-frame-pointer -g)
+    target_compile_options(${target} PRIVATE
+      $<$<COMPILE_LANGUAGE:CXX>:-fsanitize=${CLAY_SANITIZE} -fno-omit-frame-pointer -g>)
     target_link_options(${target} PRIVATE -fsanitize=${CLAY_SANITIZE})
   endif()
 endfunction()

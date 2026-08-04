@@ -70,7 +70,9 @@ clay_apply_sanitizers(claycore)
 # building without exceptions/RTTI on GCC/Clang enforces that at compile time.
 # MSVC keeps its defaults for now (the STL fights /EHs-c-).
 if(NOT MSVC)
-  target_compile_options(claycore PRIVATE -fno-exceptions -fno-rtti)
+  # CXX only: CUDA device code needs nvcc's own defaults
+  target_compile_options(claycore PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions -fno-rtti>)
 endif()
 
 # -- Metal backend (Apple platforms) -----------------------------------------
