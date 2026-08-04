@@ -17,6 +17,12 @@ namespace scene {
 // Local-space AABB of a primitive (before transform, rounding, blend).
 math::Aabb prim_local_bounds(const Node& item);
 
+// Local-space AABB of an item's SHAPE: the primitive bound after its deformer
+// chain and repetition, still before transform, rounding and blend. Callers
+// that want the shape's extent (picking, zoom-to-selection) need this rather
+// than prim_local_bounds, which describes one undeformed, unrepeated copy.
+math::Aabb item_local_bounds(const Node& item);
+
 // Lipschitz factor of an item's deformer chain (1 when undeformed). A warped
 // field UNDERESTIMATES distance by at most this factor, so the item's
 // influence reaches L times further than its blend support alone suggests —

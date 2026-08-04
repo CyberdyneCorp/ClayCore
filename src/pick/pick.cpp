@@ -319,7 +319,7 @@ math::Aabb node_shape_bounds(const scene::SdfContent& content, const scene::Node
         }
         return b;
     }
-    math::Aabb local = scene::prim_local_bounds(n);
+    math::Aabb local = scene::item_local_bounds(n);
     if (local.empty()) return local;
     math::Transform world = layer.xform * n.xform;
     math::Aabb bound = local.transformed(world.matrix());

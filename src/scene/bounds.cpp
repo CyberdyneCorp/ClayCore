@@ -222,10 +222,15 @@ Aabb repeated_local_bounds(const Aabb& local, const Repeat& r) {
     return local;  // infinite grid: handled by the caller
 }
 
-Aabb item_geometry_bound(const Node& item, const Layer& layer) {
+Aabb item_local_bounds(const Node& item) {
     Aabb local = prim_local_bounds(item);
     if (!item.deformers.empty()) local = deformed_local_bounds(local, item.deformers);
     if (item.repeat.active()) local = repeated_local_bounds(local, item.repeat);
+    return local;
+}
+
+Aabb item_geometry_bound(const Node& item, const Layer& layer) {
+    Aabb local = item_local_bounds(item);
     if (local.empty()) return local;
 
     math::Transform world = layer.xform * item.xform;

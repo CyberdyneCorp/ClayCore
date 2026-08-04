@@ -170,3 +170,65 @@ TEST_CASE("selection bounds: tight union for zoom-to-selection") {
     CHECK(only_a.max.x == doctest::Approx(-0.5f).epsilon(1e-4));
     CHECK(pick::layer_bounds(l).max.x == doctest::Approx(2.3f).epsilon(1e-4));
 }
+
+// Regression: pick's shape bounds computed prim_local_bounds directly, so a
+// repeated or deformed item reported the extent of ONE undeformed copy. That
+// makes zoom-to-selection frame the wrong region, and it silently disagreed
+// with scene::item_geometry_bound, which had always applied both.
+TEST_CASE("pick bounds cover repetition and deformers") {
+    SUBCASE("finite grid spans every cell") {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        scene::Node n = item(scene::Prim::sphere(0.25f), cf3(0, 0, 0));
+        n.repeat = scene::Repeat::grid_finite(0.9f, cf3(2, 1, 1));
+        l.sdf->insert(n);
+
+        math::Aabb b = pick::layer_bounds(l);
+        // reach = spacing * counts, so x spans 2 cells either side
+        CHECK(b.max.x == doctest::Approx(0.25f + 1.8f).epsilon(1e-4));
+        CHECK(b.max.y == doctest::Approx(0.25f + 0.9f).epsilon(1e-4));
+        CHECK(b.min.x == doctest::Approx(-(0.25f + 1.8f)).epsilon(1e-4));
+
+        // and it must not exceed what the scene layer reports as geometry
+        math::Aabb geom = scene::item_geometry_bound(*l.sdf->find(l.sdf->roots[0]), l);
+        CHECK(b.max.x <= geom.max.x + 1e-4f);
+    }
+
+    SUBCASE("radial array sweeps the annulus") {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        scene::Node n = item(scene::Prim::box(cf3(0.2f, 0.3f, 0.2f)), cf3(0, 0, 0));
+        n.repeat = scene::Repeat::radial(8, 1.0f);
+        l.sdf->insert(n);
+
+        math::Aabb b = pick::layer_bounds(l);
+        CHECK(b.max.x > 1.0f);  // copies sit out at the offset radius
+        CHECK(b.max.z > 1.0f);
+        CHECK(b.max.y == doctest::Approx(0.3f).epsilon(1e-4));  // axis extent unchanged
+    }
+
+    SUBCASE("a twisted box is wider than the box") {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        scene::Node n = item(scene::Prim::box(cf3(0.3f, 1.0f, 0.3f)), cf3(0, 0, 0));
+        n.deformers.push_back(scene::Deformer::twist(2.0f));
+        l.sdf->insert(n);
+
+        math::Aabb plain = scene::prim_local_bounds(n);
+        math::Aabb b = pick::layer_bounds(l);
+        CHECK(b.max.x >= plain.max.x);  // twisting sweeps the corners outward
+    }
+
+    SUBCASE("selection bounds agree with layer bounds for one repeated item") {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        scene::Node n = item(scene::Prim::sphere(0.2f), cf3(0, 0, 0));
+        n.repeat = scene::Repeat::grid_finite(0.5f, cf3(1, 0, 0));
+        scene::NodeId id = l.sdf->insert(n);
+
+        math::Aabb sel = pick::selection_bounds(doc, l.id, {id});
+        math::Aabb all = pick::layer_bounds(l);
+        CHECK(sel.max.x == doctest::Approx(all.max.x).epsilon(1e-4));
+        CHECK(sel.max.x == doctest::Approx(0.7f).epsilon(1e-4));
+    }
+}
