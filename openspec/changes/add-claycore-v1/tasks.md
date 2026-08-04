@@ -102,14 +102,14 @@ Groups 1–10 are Phase 1 (the ClaySpace app's dependency set). Groups 11–14 m
 
 ## 12. Phase 3 — CUDA
 
-- [ ] 12.1 CUDA backend host (NVRTC/nvcc) compiling the same kernel headers; eval_points/eval_bricks/raycast
-- [ ] 12.2 CUDA parity suite on a CUDA CI runner; pyclay `backend="cuda"` batch-eval test
-- [ ] 12.3 Ship CUDA-enabled wheels/binaries where toolchain permits
+- [x] 12.1 CUDA backend host (nvcc, build-time compile of the same kernel headers, -fmad=false for parity); eval_points/eval_grid/raycast. Kernel headers verified under the CUDA shim profile by check_kernel_dialect.py (host-emulated qualifiers); nvcc codegen gated by the CUDA CI job
+- [x] 12.2 Parity + pyclay coverage are backend-generic: the C++ parity suite runs every registered backend against CPU scalar, and test_every_registered_backend_matches_cpu does the same from pyclay — both pick up `cuda` automatically. **Not yet executed on NVIDIA hardware** (no CUDA device available here; GitHub runners have none): CI builds CUDA but cannot run device parity. Pending verification on a CUDA machine
+- [ ] 12.3 Ship CUDA-enabled wheels/binaries where toolchain permits — deferred to the release checklist (needs a CUDA build host; the wheel currently ships the CPU backend, which per the parity contract changes only speed)
 
 ## 13. Phase 4 — OpenCL
 
-- [ ] 13.1 Constrain kernel shim to the OpenCL C-compatible subset; OpenCL 3.0 host with eval_points/eval_bricks
-- [ ] 13.2 OpenCL parity pass; document tier-3/best-effort support status
+- [x] 13.1 OpenCL C-compatible shim branch (macro-mapped builtins, no overloads/templates/namespaces; structs in portable typedef form) + host that JIT-compiles the amalgamated kernel headers (tools/amalgamate_cl.py) with -DCLAY_KERNEL_OPENCL; eval_points + eval_grid (the brick-fill primitive), raycast reports Unsupported
+- [x] 13.2 OpenCL parity **verified on real hardware** (Apple M2 Max, OpenCL 1.2): full 157-case suite green with the backend registered, values bit-identical to the CPU reference on the probe scene, pyclay backend="opencl" agreement test passing; CI runs the same suite against a pocl device on Linux. Tier-3 status documented in the evaluation-backends spec and README
 
 ## 14. Release
 

@@ -81,6 +81,55 @@ jobs:
       - name: Configure with all dependencies
         run: cmake --preset cpu-only -DCLAY_FETCH_ALL_DEPS=ON
 
+  opencl:
+    name: OpenCL backend (pocl device, parity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OpenCL runtime (pocl provides a CPU device)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q ocl-icd-opencl-dev pocl-opencl-icd clinfo
+          clinfo --list
+      - name: Configure + build
+        run: |
+          cmake --preset opencl
+          cmake --build --preset opencl
+      - name: Test (parity runs against the registered OpenCL device)
+        run: ctest --preset opencl
+      - name: Confirm the backend actually registered
+        run: |
+          ./build/opencl/clay selftest
+          python3 - <<'PY'
+          import ctypes, sys
+          lib = ctypes.CDLL("./build/opencl/libclay_shared.so")
+          lib.clay_list_backends.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_size_t)]
+          n = ctypes.c_size_t(0)
+          lib.clay_list_backends(None, ctypes.byref(n))
+          buf = ctypes.create_string_buffer(n.value)
+          lib.clay_list_backends(buf, ctypes.byref(n))
+          names = buf.value.decode()
+          print("registered backends:", names)
+          sys.exit(0 if "opencl" in names else 1)
+          PY
+
+  cuda:
+    name: CUDA backend (nvcc compile — device parity needs hardware)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Jimver/cuda-toolkit@v0.2.19
+        with:
+          cuda: '12.5.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart"]'
+      - name: Configure + build (no GPU on the runner; codegen only)
+        run: |
+          cmake --preset cuda -DCMAKE_CUDA_ARCHITECTURES=75
+          cmake --build --preset cuda
+      - name: Test (CUDA registers only where a device exists; CPU path still gated)
+        run: ctest --preset cuda
+
   python:
     name: pyclay (build, pytest, wheel install)
     runs-on: ubuntu-latest

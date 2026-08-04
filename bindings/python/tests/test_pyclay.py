@@ -141,6 +141,23 @@ def test_backend_listing_and_unknown_backend():
         doc.mesh(backend="nope")
 
 
+def test_every_registered_backend_matches_cpu():
+    """Backend availability changes speed, never results (evaluation-backends
+    spec). Runs against whatever is registered in this build: cuda on an
+    NVIDIA machine, opencl where a device exists, metal on Apple."""
+    doc, _ = build_body()
+    rng = np.random.default_rng(20260803)
+    pts = rng.uniform(-2.5, 2.5, size=(4096, 3)).astype(np.float32)
+    reference = doc.eval(pts, backend="cpu")
+    for name in clay.backends():
+        if name == "cpu":
+            continue
+        got = doc.eval(pts, backend=name)
+        scale = np.maximum(np.maximum(np.abs(reference), np.abs(got)), 1.0)
+        worst = float(np.max(np.abs(reference - got) / scale))
+        assert worst <= 1e-4, f"{name} deviates from the cpu reference by {worst}"
+
+
 def test_conservative_steps_property():
     # Sphere tracing safety: stepping by distance * safe_step_scale from an
     # outside point can never cross the surface (vectorized numpy sampling).

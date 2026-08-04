@@ -55,8 +55,12 @@ The CUDA backend SHALL compile the same kernel headers as device code via NVRTC 
 - **THEN** results match `backend="cpu"` within parity tolerance
 
 ### Requirement: OpenCL backend (tier 3, best-effort)
-The OpenCL backend SHALL target OpenCL 3.0 with kernel headers constrained (via shim macros) to the C-compatible subset, implement at minimum `eval_points` and `eval_bricks`, and pass the parity suite where registered. Its absence on any platform SHALL NOT block any other capability. The backend interface SHALL NOT assume OpenCL specifics, so a future Vulkan-compute backend can slot into the same interface.
+The OpenCL backend SHALL run on OpenCL 3.0 runtimes, built against the CL1.2 common subset the kernels actually use so that 1.2-only implementations also work, with kernel headers constrained (via shim macros) to the C-compatible subset. It SHALL implement at minimum `eval_points` and the grid evaluation that fills bricks, and pass the parity suite where registered. Capabilities it does not provide (raycast, whose sphere-tracing utilities are templated C++ that OpenCL C cannot compile; device meshing) SHALL report `Unsupported` so callers fall back to another backend. Its absence on any platform SHALL NOT block any other capability. The backend interface SHALL NOT assume OpenCL specifics, so a future Vulkan-compute backend can slot into the same interface.
 
 #### Scenario: OpenCL optional
 - **WHEN** claycore is configured without the `+opencl` preset
 - **THEN** the build, tests, and all other backends are unaffected
+
+#### Scenario: Unsupported capability falls back
+- **WHEN** a caller requests `raycast` from the OpenCL backend
+- **THEN** it returns `Unsupported` without evaluating, and the caller can obtain identical results from the CPU backend

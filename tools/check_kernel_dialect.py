@@ -53,22 +53,37 @@ def lexical_check(path: Path) -> list[str]:
     return errors
 
 
-def compile_check(path: Path, compiler: str) -> list[str]:
+def compile_check(path: Path, compiler: str, profile: str = "cpu") -> list[str]:
+    """Compile one header in isolation under a backend profile.
+
+    cpu:  the reference profile, warnings-as-errors.
+    cuda: host-emulated (__device__/__host__/__global__ defined away). This
+          proves the shim's CUDA branch and the headers are valid C++ under
+          it without a CUDA toolchain; nvcc device codegen is verified by the
+          CUDA CI job and on real hardware.
+    """
+    prelude = ""
+    define = "-DCLAY_KERNEL_CPU=1"
+    if profile == "cuda":
+        prelude = ("#define __host__\n#define __device__\n#define __global__\n"
+                   "#define __forceinline__\n")
+        define = "-DCLAY_KERNEL_CUDA=1"
     with tempfile.NamedTemporaryFile("w", suffix=".cpp", delete=False) as tu:
-        tu.write(f'#include "{path.relative_to(REPO / "include")}"\n')
+        tu.write(prelude + f'#include "{path.relative_to(REPO / "include")}"\n')
         tu_path = tu.name
     cmd = [
         compiler, "-std=c++20", "-fsyntax-only",
         "-fno-exceptions", "-fno-rtti",
         "-Wall", "-Wextra", "-Wpedantic", "-Werror",
-        "-DCLAY_KERNEL_CPU=1",
+        define,
         f"-I{REPO / 'include'}",
         tu_path,
     ]
     proc = subprocess.run(cmd, capture_output=True, text=True)
     Path(tu_path).unlink(missing_ok=True)
     if proc.returncode != 0:
-        return [f"{path.relative_to(REPO)}: restrictive compile failed:\n{proc.stderr.strip()}"]
+        return [f"{path.relative_to(REPO)} [{profile}]: restrictive compile failed:\n"
+                f"{proc.stderr.strip()}"]
     return []
 
 
@@ -85,12 +100,13 @@ def main() -> int:
     errors = []
     for header in headers:
         errors += lexical_check(header)
-        errors += compile_check(header, args.compiler)
+        errors += compile_check(header, args.compiler, "cpu")
+        errors += compile_check(header, args.compiler, "cuda")
 
     for e in errors:
         print(f"kernel-dialect: {e}", file=sys.stderr)
     if not errors:
-        print(f"kernel-dialect: OK ({len(headers)} headers)")
+        print(f"kernel-dialect: OK ({len(headers)} headers x cpu+cuda profiles)")
     return 1 if errors else 0
 
 

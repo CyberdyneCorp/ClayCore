@@ -1,0 +1,56 @@
+// OpenCL kernel entry points (evaluation-backends spec, tier 3). The tape
+// interpreter itself is the amalgamated kernel-header text prepended to this
+// file at build time — single source with every other backend.
+//
+// Scope is eval_points + eval_grid (the brick-cache fill primitive); raycast
+// stays CPU/Metal/CUDA because its sphere-tracing utilities are templated
+// C++ (field.h), which OpenCL C cannot compile.
+
+__kernel void clay_eval_points(__global const CTapeInstr* instrs,
+                               __global const float* params,
+                               __global const float* strokes,
+                               __global const float* pts,
+                               __global float* out_d,
+                               __global float* out_col,
+                               const unsigned int instr_count,
+                               const unsigned int point_count,
+                               const unsigned int has_colors) {
+    unsigned int gid = (unsigned int)get_global_id(0);
+    if (gid >= point_count) return;
+    float3 p = cf3(pts[gid * 3 + 0], pts[gid * 3 + 1], pts[gid * 3 + 2]);
+    CTapeValue v = ctape_eval(instrs, (int)instr_count, params, strokes, p);
+    out_d[gid] = v.d;
+    if (has_colors) {
+        out_col[gid * 3 + 0] = v.color.x;
+        out_col[gid * 3 + 1] = v.color.y;
+        out_col[gid * 3 + 2] = v.color.z;
+    }
+}
+
+__kernel void clay_eval_grid(__global const CTapeInstr* instrs,
+                             __global const float* params,
+                             __global const float* strokes,
+                             __global float* out_d,
+                             __global float* out_col,
+                             const float ox, const float oy, const float oz,
+                             const float spacing,
+                             const unsigned int instr_count,
+                             const unsigned int nx,
+                             const unsigned int ny,
+                             const unsigned int nz,
+                             const unsigned int has_colors) {
+    unsigned int gid = (unsigned int)get_global_id(0);
+    unsigned int total = nx * ny * nz;
+    if (gid >= total) return;
+    unsigned int x = gid % nx;
+    unsigned int y = (gid / nx) % ny;
+    unsigned int z = gid / (nx * ny);
+    float3 p = cf3(ox, oy, oz) + cf3((float)x, (float)y, (float)z) * spacing;
+    CTapeValue v = ctape_eval(instrs, (int)instr_count, params, strokes, p);
+    out_d[gid] = v.d;
+    if (has_colors) {
+        out_col[gid * 3 + 0] = v.color.x;
+        out_col[gid * 3 + 1] = v.color.y;
+        out_col[gid * 3 + 2] = v.color.z;
+    }
+}

@@ -82,15 +82,17 @@ enum CBlendProfile {
     cblend_chamfer = 4,
 };
 
-struct CTapeInstr {
+// typedef form: the OpenCL backend compiles these headers as C99, where a
+// bare struct tag is not a type name.
+typedef struct CTapeInstrT {
     unsigned int op;
     unsigned int param_offset;
-};
+} CTapeInstr;
 
-struct CTapeValue {
+typedef struct CTapeValueT {
     float d;
     cfloat3 color;
-};
+} CTapeValue;
 
 #define CLAY_TAPE_MAX_STACK 16
 #define CLAY_TAPE_FAR 3.4e37f

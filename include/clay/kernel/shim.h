@@ -17,12 +17,19 @@
 #define CLAY_KERNEL_CPU 1
 #endif
 
-#if defined(CLAY_KERNEL_CPU)
+// CPU and CUDA share one implementation: plain structs plus C++ operators,
+// with libm/CUDA-device math behind the same c* names. Identical arithmetic
+// on both sides is exactly what keeps CUDA close to the scalar reference.
+#if defined(CLAY_KERNEL_CPU) || defined(CLAY_KERNEL_CUDA)
 
 #include <cmath>
 #include <cstdint>
 
+#if defined(CLAY_KERNEL_CUDA)
+#define CLAY_FN __host__ __device__ inline
+#else
 #define CLAY_FN inline
+#endif
 #define CLAY_THREAD  // address-space qualifier for out-params (MSL: thread)
 #define CLAY_DEVICE  // address-space qualifier for buffers (MSL: device)
 #define CLAY_NS_BEGIN \
@@ -141,13 +148,61 @@ CLAY_FN float cmix(float a, float b, float t) { return a + (b - a) * t; }
 
 CLAY_NS_END
 
+#elif defined(CLAY_KERNEL_OPENCL)
+
+// OpenCL C is C99: no namespaces, no user overloading, no references. The
+// language's own vector types carry arithmetic operators and its builtins
+// are generically overloaded by the compiler, so the whole c* surface maps
+// to macros here and the shared C++ overload layer below is skipped.
+// Constraint for kernel headers: anything the OpenCL backend compiles must
+// avoid templates and function overloading (field.h is therefore CPU/Metal/
+// CUDA only — the OpenCL backend implements eval_points/eval_grid, per the
+// tier-3 scope in the evaluation-backends spec).
+
+#define CLAY_FN static inline
+#define CLAY_THREAD          // private is the default address space
+#define CLAY_DEVICE __global
+#define CLAY_NS_BEGIN
+#define CLAY_NS_END
+
+typedef float2 cfloat2;
+typedef float3 cfloat3;
+typedef float4 cfloat4;
+
+#define cf2(x, y) ((float2)((float)(x), (float)(y)))
+#define cf3(x, y, z) ((float3)((float)(x), (float)(y), (float)(z)))
+#define cf4(x, y, z, w) ((float4)((float)(x), (float)(y), (float)(z), (float)(w)))
+
+#define cmin(a, b) min(a, b)
+#define cmax(a, b) max(a, b)
+#define cclamp(v, lo, hi) clamp(v, lo, hi)
+#define cabs(v) fabs(v)
+#define csign(v) sign(v)
+#define cfloor(v) floor(v)
+#define cround(v) round(v)
+#define csqrt(v) sqrt(v)
+#define csin(v) sin(v)
+#define ccos(v) cos(v)
+#define ctan(v) tan(v)
+#define cacos(v) acos(v)
+#define catan2(y, x) atan2(y, x)
+#define cpow(b, e) pow(b, e)
+#define cexp2(v) exp2(v)
+#define cfmod(a, b) fmod(a, b)
+#define cmix(a, b, t) mix(a, b, (float)(t))
+#define cdot(a, b) dot(a, b)
+#define cdot2(v) dot(v, v)
+#define clength(v) length(v)
+#define cnormalize(v) normalize(v)
+#define ccross(a, b) cross(a, b)
+
 #else
-// The CUDA/OpenCL type mappings land with their backend hosts
-// (tasks 12.1, 13.1); until then compiling with those macros is an error.
 #error "claycore kernel shim: this backend mapping is not implemented yet"
 #endif
 
 // -- shared vector/matrix layer (built on the per-backend types above) -------
+
+#if !defined(CLAY_KERNEL_OPENCL)  // OpenCL gets these from its builtins
 
 CLAY_NS_BEGIN
 
@@ -184,13 +239,21 @@ CLAY_FN cfloat3 cround(cfloat3 v) { return cf3(cround(v.x), cround(v.y), cround(
 CLAY_FN cfloat2 cmix(cfloat2 a, cfloat2 b, float t) { return a + (b - a) * t; }
 CLAY_FN cfloat3 cmix(cfloat3 a, cfloat3 b, float t) { return a + (b - a) * t; }
 
-// Column-major, like MSL/GLSL.
-struct cfloat3x3 {
+CLAY_NS_END
+
+#endif  // !CLAY_KERNEL_OPENCL
+
+// -- matrices: no overloads, so every backend shares these ------------------
+
+CLAY_NS_BEGIN
+
+// Column-major, like MSL/GLSL. typedef form for C99 (OpenCL) compatibility.
+typedef struct cfloat3x3T {
     cfloat3 c0, c1, c2;
-};
-struct cfloat4x4 {
+} cfloat3x3;
+typedef struct cfloat4x4T {
     cfloat4 c0, c1, c2, c3;
-};
+} cfloat4x4;
 
 CLAY_FN cfloat3 cmul(cfloat3x3 m, cfloat3 v) { return m.c0 * v.x + m.c1 * v.y + m.c2 * v.z; }
 

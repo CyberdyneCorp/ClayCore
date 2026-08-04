@@ -109,11 +109,46 @@ if(CLAY_BACKEND_METAL AND APPLE)
   target_link_libraries(claycore PRIVATE ${METAL_FRAMEWORK} ${FOUNDATION_FRAMEWORK})
 endif()
 
-foreach(_backend CUDA OPENCL)
-  if(CLAY_BACKEND_${_backend})
-    message(STATUS "claycore: ${_backend} backend requested — host not implemented yet (see openspec add-claycore-v1 tasks)")
+# -- CUDA backend (tier 2) ---------------------------------------------------
+if(CLAY_BACKEND_CUDA)
+  enable_language(CUDA)
+  set(CMAKE_CUDA_STANDARD 20)
+  set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+    set(CMAKE_CUDA_ARCHITECTURES native)
   endif()
-endforeach()
+  target_sources(claycore PRIVATE backends/cuda/clay_kernels.cu backends/cuda/cuda_backend.cpp)
+  target_compile_definitions(claycore PRIVATE CLAY_HAS_CUDA=1)
+  target_include_directories(claycore PRIVATE backends/cuda)
+  # parity requires IEEE arithmetic: no fast-math, no FMA contraction
+  set_source_files_properties(backends/cuda/clay_kernels.cu PROPERTIES
+    COMPILE_OPTIONS "-fmad=false")
+  set_target_properties(claycore PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+endif()
+
+# -- OpenCL backend (tier 3, best-effort) ------------------------------------
+if(CLAY_BACKEND_OPENCL)
+  find_package(OpenCL REQUIRED)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  file(GLOB CLAY_KERNEL_HEADERS_CL ${CMAKE_CURRENT_SOURCE_DIR}/include/clay/kernel/*.h)
+  set(CLAY_CL_EMBED ${CMAKE_CURRENT_BINARY_DIR}/clay_cl_source_embedded.cpp)
+  add_custom_command(OUTPUT ${CLAY_CL_EMBED}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate_cl.py
+            clay/kernel/tape.h ${CLAY_CL_EMBED} clay_cl_source
+            ${CMAKE_CURRENT_SOURCE_DIR}/backends/opencl/clay_kernels.cl.in
+    DEPENDS ${CLAY_KERNEL_HEADERS_CL}
+            ${CMAKE_CURRENT_SOURCE_DIR}/backends/opencl/clay_kernels.cl.in
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate_cl.py
+    COMMENT "Amalgamating claycore kernels for OpenCL (single-source)")
+  set_source_files_properties(${CLAY_CL_EMBED} PROPERTIES COMPILE_OPTIONS "-w")
+  target_sources(claycore PRIVATE backends/opencl/opencl_backend.cpp ${CLAY_CL_EMBED})
+  target_compile_definitions(claycore PRIVATE CLAY_HAS_OPENCL=1)
+  target_link_libraries(claycore PRIVATE OpenCL::OpenCL)
+  if(APPLE)  # Apple's OpenCL 1.2 headers are deprecated but functional
+    set_source_files_properties(backends/opencl/opencl_backend.cpp PROPERTIES
+      COMPILE_OPTIONS "-Wno-deprecated-declarations")
+  endif()
+endif()
 
 # -- clay-cli ----------------------------------------------------------------
 add_executable(clay_cli tools/clay-cli/main.cpp)

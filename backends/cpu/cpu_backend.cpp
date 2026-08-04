@@ -147,11 +147,23 @@ class CpuBackend final : public Backend {
 #if defined(CLAY_HAS_METAL)
 std::unique_ptr<Backend> create_metal_backend();  // backends/metal
 #endif
+#if defined(CLAY_HAS_CUDA)
+std::unique_ptr<Backend> create_cuda_backend();  // backends/cuda
+#endif
+#if defined(CLAY_HAS_OPENCL)
+std::unique_ptr<Backend> create_opencl_backend();  // backends/opencl
+#endif
 
 Registry::Registry() {
     backends_.push_back(std::make_unique<CpuBackend>());
 #if defined(CLAY_HAS_METAL)
     if (auto metal = create_metal_backend()) backends_.push_back(std::move(metal));
+#endif
+#if defined(CLAY_HAS_CUDA)
+    if (auto cuda = create_cuda_backend()) backends_.push_back(std::move(cuda));
+#endif
+#if defined(CLAY_HAS_OPENCL)
+    if (auto opencl = create_opencl_backend()) backends_.push_back(std::move(opencl));
 #endif
 }
 

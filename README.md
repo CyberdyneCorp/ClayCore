@@ -24,6 +24,19 @@ cmake --build --preset cpu-only
 ctest --preset cpu-only
 ```
 
+## Backends
+
+| Backend | Preset | Status | Capabilities |
+|---|---|---|---|
+| CPU | `cpu-only` | reference — always compiled in | everything; defines correctness |
+| Metal | `metal` | tier 1 (the iPad app) | eval points/grid, raycast, hybrid meshing |
+| CUDA | `cuda` | tier 2 | eval points/grid, raycast |
+| OpenCL | `opencl` | tier 3, best-effort | eval points/grid; raycast and device meshing report `Unsupported` and fall back |
+
+Backend availability changes speed, never results: every registered backend
+is checked against the CPU scalar reference by the parity suite (1e-4
+relative on distances, 1e-6 for the CPU batch path).
+
 ## Repository checks
 
 ```sh
