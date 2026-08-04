@@ -176,9 +176,34 @@ float deformer_lipschitz(const Node& item) {
     return kernel::cmax(info.lipschitz, 1.0f);
 }
 
+// Local bound of a repeated item: the finite grid sweeps the item across its
+// occupied cells, a radial array sweeps it into an annulus. An infinite grid
+// has no finite bound — the caller turns that into infinite influence.
+Aabb repeated_local_bounds(const Aabb& local, const Repeat& r) {
+    if (!r.active() || local.empty()) return local;
+    if (r.type == kernel::crepeat_grid_finite) {
+        kernel::cfloat3 reach = kernel::cf3(r.spacing.x * r.counts.x, r.spacing.y * r.counts.y,
+                                            r.spacing.z * r.counts.z);
+        return Aabb{local.min - reach, local.max + reach};
+    }
+    if (r.type == kernel::crepeat_radial) {
+        // copies sit at radius |offset| +/- the item's own reach, all around Y
+        float reach = 0.0f;
+        for (int i = 0; i < 4; ++i) {
+            float x = (i & 1) ? local.max.x : local.min.x;
+            float z = (i & 2) ? local.max.z : local.min.z;
+            reach = kernel::cmax(reach, kernel::clength(kernel::cf2(x, z)));
+        }
+        float radius = kernel::cabs(r.spacing.y) + reach;
+        return Aabb{cf3(-radius, local.min.y, -radius), cf3(radius, local.max.y, radius)};
+    }
+    return local;  // infinite grid: handled by the caller
+}
+
 Aabb item_geometry_bound(const Node& item, const Layer& layer) {
     Aabb local = prim_local_bounds(item);
     if (!item.deformers.empty()) local = deformed_local_bounds(local, item.deformers);
+    if (item.repeat.active()) local = repeated_local_bounds(local, item.repeat);
     if (local.empty()) return local;
 
     math::Transform world = layer.xform * item.xform;
@@ -212,6 +237,8 @@ Aabb item_influence_bound(const Node& item, const Layer& layer) {
     // arbitrarily far from the item: claiming a finite bound would let
     // per-brick culling drop them and silently corrupt the result.
     if (!op_is_local(item.op)) return Aabb::infinite();
+    // an infinite grid produces copies arbitrarily far away
+    if (item.repeat.is_infinite_grid()) return Aabb::infinite();
     return item_geometry_bound(item, layer);
 }
 

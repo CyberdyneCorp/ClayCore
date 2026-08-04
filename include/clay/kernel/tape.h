@@ -14,7 +14,8 @@
 //
 // Primitive param block: [inv affine 12 floats (columns c0..c3, xyz each)]
 // [uniform scale s] [rounding r] [color rgb] [prim params, always
-// CLAY_TAPE_PRIM_PARAMS wide] [deformer count] [deformer records...]. The
+// CLAY_TAPE_PRIM_PARAMS wide] [repeat record] [deformer count]
+// [deformer records...]. The
 // inverse matrix already contains 1/s; the interpreter multiplies the local
 // distance back by s and subtracts the rounding. Prim params are fixed-width
 // so the deformer block sits at a known offset.
@@ -33,6 +34,7 @@
 #include "clay/kernel/ops.h"
 #include "clay/kernel/lift.h"
 #include "clay/kernel/prim2d.h"
+#include "clay/kernel/repeat.h"
 #include "clay/kernel/prim3d.h"
 #include "clay/kernel/shim.h"
 
@@ -119,6 +121,39 @@ typedef struct CTapeValueT {
 #define CLAY_TAPE_PRIM_PARAMS 7
 #define CLAY_TAPE_DEFORM_FLOATS 6
 #define CLAY_TAPE_PRIM_HEADER 17
+
+// Repetition an item can carry (repeat.h). Applied to the local point
+// BEFORE the deformer chain, so an array of twisted copies twists each copy.
+// Record: [type] [sx] [sy] [sz] [cx] [cy] [cz] — for radial, sx = count and
+// sy = axis offset.
+#define CLAY_TAPE_REPEAT_FLOATS 7
+
+enum CRepeatType {
+    crepeat_none = 0,
+    crepeat_grid_infinite = 1,  // spacing per axis
+    crepeat_grid_finite = 2,    // spacing + max cell index per axis
+    crepeat_radial = 3,         // count about Y, profile offset from the axis
+};
+
+// Map the local point into its repetition cell. Radial arrays need the O(2)
+// neighbour evaluation, so the caller evaluates twice: pass sector = 0 and
+// then sector = crep_radial_neighbor(...).
+CLAY_FN cfloat3 ctape_repeat_point(CLAY_DEVICE const float* rec, cfloat3 p, int sector) {
+    int type = (int)rec[0];
+    if (type == crepeat_grid_infinite) return crep_inf_point(p, cf3(rec[1], rec[2], rec[3]));
+    if (type == crepeat_grid_finite)
+        return crep_lim_point(p, rec[1], cf3(rec[4], rec[5], rec[6]));
+    if (type == crepeat_radial) return crep_radial_point(p, (int)rec[1], sector);
+    return p;
+}
+
+CLAY_FN bool ctape_repeat_is_radial(CLAY_DEVICE const float* rec) {
+    return (int)rec[0] == crepeat_radial;
+}
+
+CLAY_FN bool ctape_repeat_active(CLAY_DEVICE const float* rec) {
+    return (int)rec[0] != crepeat_none;
+}
 
 // Domain warps an item can carry (deform.h). Values are serialization-stable.
 enum CDeformType {
@@ -351,6 +386,24 @@ CLAY_FN CTapeValue ctape_combine_values(CTapeValue a, CTapeValue b, int mode, in
     return r;
 }
 
+// One primitive evaluation at a local point: the deformer chain, then the
+// primitive's distance function. Repetition calls this once per cell it
+// needs (twice for radial arrays).
+CLAY_FN float ctape_prim_local(unsigned int op, CLAY_DEVICE const float* pr,
+                               CLAY_DEVICE const float* blob, cfloat3 lp) {
+    CLAY_DEVICE const float* deform =
+        pr + CLAY_TAPE_PRIM_HEADER + CLAY_TAPE_PRIM_PARAMS + CLAY_TAPE_REPEAT_FLOATS;
+    int deform_count = (int)deform[0];
+    float offset = 0.0f;
+    cfloat3 wp = lp;
+    for (int di = 0; di < deform_count; ++di) {
+        CLAY_DEVICE const float* rec = deform + 1 + di * CLAY_TAPE_DEFORM_FLOATS;
+        offset += ctape_deform_offset(rec, wp);
+        wp = ctape_deform_point(rec, wp);
+    }
+    return ctape_prim_dist(op, pr + CLAY_TAPE_PRIM_HEADER, blob, wp) + offset;
+}
+
 // The fixed interpreter every backend ships. Postfix stack machine; empty
 // tapes evaluate to "far outside".
 CLAY_FN CTapeValue ctape_eval(CLAY_DEVICE const CTapeInstr* instrs, int instr_count,
@@ -398,19 +451,23 @@ CLAY_FN CTapeValue ctape_eval(CLAY_DEVICE const CTapeInstr* instrs, int instr_co
             CTapeValue v;
             v.color = cf3(pr[14], pr[15], pr[16]);
             cfloat3 lp = cmul_point(inv, p);
-            // deformer chain: warp the local point in authoring order, then
-            // add each deformer's distance contribution (deform.h semantics)
-            CLAY_DEVICE const float* deform = pr + CLAY_TAPE_PRIM_HEADER + CLAY_TAPE_PRIM_PARAMS;
-            int deform_count = (int)deform[0];
-            float offset = 0.0f;
-            cfloat3 wp = lp;
-            for (int di = 0; di < deform_count; ++di) {
-                CLAY_DEVICE const float* rec = deform + 1 + di * CLAY_TAPE_DEFORM_FLOATS;
-                offset += ctape_deform_offset(rec, wp);
-                wp = ctape_deform_point(rec, wp);
+            CLAY_DEVICE const float* repeat = pr + CLAY_TAPE_PRIM_HEADER + CLAY_TAPE_PRIM_PARAMS;
+            float prim_value;  // NB: not `local` — reserved in OpenCL C
+            if (!ctape_repeat_active(repeat)) {
+                prim_value = ctape_prim_local(op, pr, blob, lp);
+            } else if (ctape_repeat_is_radial(repeat)) {
+                // O(2): the nearest angular sector and its neighbour, per
+                // docs/01 2.4 — one evaluation would seam at sector borders
+                float d0 = ctape_prim_local(op, pr, blob, ctape_repeat_point(repeat, lp, 0));
+                int neighbour = crep_radial_neighbor(lp, (int)repeat[1]);
+                float d1 = ctape_prim_local(op, pr, blob,
+                                            ctape_repeat_point(repeat, lp, neighbour));
+                prim_value = cmin(d0, d1);
+            } else {
+                prim_value =
+                    ctape_prim_local(op, pr, blob, ctape_repeat_point(repeat, lp, 0));
             }
-            v.d = (ctape_prim_dist(op, pr + CLAY_TAPE_PRIM_HEADER, blob, wp) + offset) *
-                      scale - round;
+            v.d = prim_value * scale - round;
             stack[top] = v;
             ++top;
         }

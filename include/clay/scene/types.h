@@ -159,6 +159,28 @@ struct Prim {
     static Prim revolve(float offset) { return {PrimType::Revolve, {offset}}; }
 };
 
+// Repetition an item carries (kernel/tape.h CRepeatType). Applied to the
+// local point before any deformer, so an array repeats the deformed shape.
+struct Repeat {
+    std::uint8_t type = kernel::crepeat_none;
+    kernel::cfloat3 spacing = kernel::cf3(1, 1, 1);  // radial: x = count, y = offset
+    kernel::cfloat3 counts = kernel::cf3(0, 0, 0);   // finite grid: max cell index per axis
+
+    static Repeat grid_infinite(kernel::cfloat3 spacing) {
+        return {kernel::crepeat_grid_infinite, spacing, kernel::cf3(0, 0, 0)};
+    }
+    static Repeat grid_finite(float spacing, kernel::cfloat3 counts) {
+        return {kernel::crepeat_grid_finite, kernel::cf3(spacing, spacing, spacing), counts};
+    }
+    static Repeat radial(int count, float offset) {
+        return {kernel::crepeat_radial,
+                kernel::cf3(static_cast<float>(count), offset, 0.0f), kernel::cf3(0, 0, 0)};
+    }
+
+    bool active() const { return type != kernel::crepeat_none; }
+    bool is_infinite_grid() const { return type == kernel::crepeat_grid_infinite; }
+};
+
 // A closed 2D profile for the lift primitives (kernel/tape.h CProfileType).
 // Polygon vertices live on the Node (out-of-line, like stroke points).
 struct Profile {
@@ -243,6 +265,7 @@ struct Node {
     float stroke_blend_k = 0.0f;      // within-stroke segment smoothing
     std::vector<Deformer> deformers;  // applied to the local point, in order
     Transition transition;            // TransitionLinear/Radial ops only
+    Repeat repeat;                    // grid / radial array of this item
     Profile profile;                  // Extrude/Revolve prims only
     std::vector<kernel::cfloat2> profile_points;  // polygon profile vertices
 

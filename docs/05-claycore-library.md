@@ -212,6 +212,17 @@ lo, hi = body.selection_bounds([node_id])  # tight bounds for zoom-to-selection
 ```
 
 ```python
+# arrays — grid and radial repetition, chainable like deformers
+body.add(clay.Sphere(r=0.2).repeat_grid(spacing=1.0, counts=(2, 0, 0)))  # finite
+body.add(clay.Box(size=(0.3, 0.8, 0.3)).twist(0.9).repeat_radial(count=5, offset=1.2))
+body.add(clay.Sphere(r=0.3).repeat_grid(spacing=2.0))    # infinite: never culled
+```
+
+Repetition preserves exactness only while the item plus its rounding and
+blend influence fits inside its half-cell (docs/01 2.4); the compiler checks
+that and downgrades the tracked field to a bound when it does not.
+
+```python
 # profile-driven modelling: extrude and revolve exact 2D profiles
 outline = np.array([[-1, -1], [1, -1], [1, 0], [0, 0], [0, 1], [-1, 1]], np.float32)
 body.add(clay.Extrude(clay.Profile.polygon(outline), half_depth=0.3))

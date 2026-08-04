@@ -719,3 +719,61 @@ def test_lifts_round_trip_and_compose(tmp_path):
     path = tmp_path / "lathe.clayspace"
     doc.save(str(path))
     assert np.array_equal(before, clay.load(str(path)).eval(pts))
+
+
+# --- repetition (add-repetition) --------------------------------------------
+
+
+def test_finite_grid_array():
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Sphere(r=0.2).repeat_grid(spacing=1.0, counts=(2, 0, 0)))
+    # copies at x = -2, -1, 0, 1, 2 and nothing at x = 3
+    inside = np.array([[-2, 0, 0], [0, 0, 0], [2, 0, 0]], dtype=np.float32)
+    assert np.all(doc.eval(inside) < 0)
+    assert doc.eval(np.array([[3.0, 0, 0]], dtype=np.float32))[0] > 0
+
+
+def test_infinite_grid_is_periodic():
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Sphere(r=0.3).repeat_grid(spacing=2.0))
+    rng = np.random.default_rng(41)
+    pts = rng.uniform(-3, 3, size=(128, 3)).astype(np.float32)
+    shifted = pts + np.array([2.0, 0.0, -4.0], dtype=np.float32)
+    assert np.allclose(doc.eval(pts), doc.eval(shifted), atol=1e-4)
+
+
+def test_radial_array_periodicity():
+    count = 6
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Sphere(r=0.25).repeat_radial(count=count, offset=1.0))
+    rng = np.random.default_rng(43)
+    pts = rng.uniform(-2, 2, size=(128, 3)).astype(np.float32)
+    angle = 2 * np.pi / count
+    c, s = np.cos(angle), np.sin(angle)
+    rotated = np.stack([c * pts[:, 0] - s * pts[:, 2], pts[:, 1],
+                        s * pts[:, 0] + c * pts[:, 2]], axis=1).astype(np.float32)
+    assert np.allclose(doc.eval(pts), doc.eval(rotated), atol=2e-4)
+
+
+def test_repeat_inspection_and_validation():
+    prim = clay.Sphere(r=0.2).repeat_grid(spacing=1.5, counts=(1, 1, 0))
+    assert prim.repeat["type"] == "grid_finite"
+    assert clay.Sphere(r=0.2).repeat_grid(spacing=2.0).repeat["type"] == "grid_infinite"
+    assert clay.Sphere(r=0.2).repeat is None
+
+    with pytest.raises(ValueError, match="spacing"):
+        clay.Sphere(r=0.2).repeat_grid(spacing=0.0)
+    with pytest.raises(ValueError, match="count"):
+        clay.Sphere(r=0.2).repeat_radial(count=1)
+
+
+def test_repetition_round_trip_and_composition(tmp_path):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Box(size=(0.3, 0.8, 0.3)).twist(0.9).repeat_radial(count=5, offset=1.2))
+    rng = np.random.default_rng(45)
+    pts = rng.uniform(-2.5, 2.5, size=(256, 3)).astype(np.float32)
+    before = doc.eval(pts)
+    path = tmp_path / "array.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(pts))

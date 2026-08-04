@@ -223,6 +223,9 @@ void write_node(Writer& w, const Node& n) {
     for (const StrokePoint& sp : n.stroke) w.pod(sp);
     // Deformer carries uint8 + floats: field-wise, so padding never reaches
     // the stream (the portability trap struct-wise writes hit on GCC).
+    w.pod(n.repeat.type);
+    w.pod(n.repeat.spacing);
+    w.pod(n.repeat.counts);
     w.pod(n.profile.type);
     for (float f : n.profile.params) w.pod(f);
     w.u32(static_cast<std::uint32_t>(n.profile_points.size()));
@@ -265,6 +268,9 @@ Node read_node(Reader& r) {
     }
     n.stroke.reserve(sc);
     for (std::uint32_t i = 0; i < sc && r.ok; ++i) n.stroke.push_back(r.pod<StrokePoint>());
+    n.repeat.type = r.pod<std::uint8_t>();
+    n.repeat.spacing = r.pod<kernel::cfloat3>();
+    n.repeat.counts = r.pod<kernel::cfloat3>();
     n.profile.type = r.pod<std::uint8_t>();
     for (float& f : n.profile.params) f = r.pod<float>();
     std::uint32_t pc = r.u32();

@@ -79,9 +79,24 @@ inline CTapeValue ref_eval_item(const scene::Node& item, const scene::Layer& lay
         return (d + offset) * world.scale - item.rounding * world.scale;
     };
 
+    // repetition maps the local point before any deformer; radial arrays
+    // need the nearest sector and its neighbour
+    auto eval_repeated = [&](cfloat3 lp) {
+        const scene::Repeat& r = item.repeat;
+        if (!r.active()) return eval_at(lp);
+        float rec[7] = {static_cast<float>(r.type), r.spacing.x, r.spacing.y, r.spacing.z,
+                        r.counts.x, r.counts.y, r.counts.z};
+        if (r.type == kernel::crepeat_radial) {
+            float d0 = eval_at(ctape_repeat_point(rec, lp, 0));
+            int neighbour = crep_radial_neighbor(lp, static_cast<int>(r.spacing.x));
+            return cmin(d0, eval_at(ctape_repeat_point(rec, lp, neighbour)));
+        }
+        return eval_at(ctape_repeat_point(rec, lp, 0));
+    };
+
     CTapeValue v;
     v.color = item.color;
-    v.d = eval_at(world.apply_inverse(p));
+    v.d = eval_repeated(world.apply_inverse(p));
     if (item.mirror && layer.mirror_axes != 0) {
         for (int axis = 0; axis < 3; ++axis) {
             if (!(layer.mirror_axes & (1u << axis))) continue;
@@ -89,7 +104,7 @@ inline CTapeValue ref_eval_item(const scene::Node& item, const scene::Layer& lay
             if (axis == 0) lq.x = -lq.x;
             if (axis == 1) lq.y = -lq.y;
             if (axis == 2) lq.z = -lq.z;
-            float dm = eval_at(item.xform.apply_inverse(lq));
+            float dm = eval_repeated(item.xform.apply_inverse(lq));
             v.d = layer.mirror_k > 0.0f ? csmin_quadratic(v.d, dm, layer.mirror_k)
                                         : cmin(v.d, dm);
         }

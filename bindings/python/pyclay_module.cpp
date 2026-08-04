@@ -129,6 +129,7 @@ struct PyPrim {
     std::vector<scene::Deformer> deformers;
     scene::Profile profile;
     std::vector<kernel::cfloat2> profile_points;
+    scene::Repeat repeat;
 };
 
 void place(PyPrim& p, nb::handle position, nb::handle rotation_axis_angle, float scale) {
@@ -555,6 +556,55 @@ NB_MODULE(pyclay, m) {
                      "document cannot carry it; use twist/bend/taper/displace");
              },
              "x0"_a, "y0"_a, "Not available: no tape opcode (see the error message)")
+        .def("repeat_grid",
+             [](nb::object self, nb::handle spacing, nb::handle counts) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 kernel::cfloat3 s3;
+                 if (nb::isinstance<nb::float_>(spacing) || nb::isinstance<nb::int_>(spacing)) {
+                     float v = nb::cast<float>(spacing);
+                     s3 = kernel::cf3(v, v, v);
+                 } else {
+                     s3 = to_f3(spacing, "spacing");
+                 }
+                 if (s3.x <= 0 || s3.y <= 0 || s3.z <= 0)
+                     throw std::invalid_argument("spacing must be > 0 on every axis");
+                 if (counts.is_none()) {
+                     p.repeat = scene::Repeat::grid_infinite(s3);
+                 } else {
+                     kernel::cfloat3 c = to_f3(counts, "counts");
+                     if (c.x < 0 || c.y < 0 || c.z < 0)
+                         throw std::invalid_argument("counts must be >= 0 (max cell index)");
+                     if (s3.x != s3.y || s3.y != s3.z)
+                         throw std::invalid_argument(
+                             "finite grids use one spacing for all axes");
+                     p.repeat = scene::Repeat::grid_finite(s3.x, c);
+                 }
+                 return self;
+             },
+             "spacing"_a, "counts"_a = nb::none(),
+             "Repeat on a grid: infinite without counts, otherwise the max cell "
+             "index per axis. An infinite grid is never culled (unbounded influence).")
+        .def("repeat_radial",
+             [](nb::object self, int count, float offset) {
+                 if (count < 2) throw std::invalid_argument("radial count must be >= 2");
+                 nb::cast<PyPrim&>(self).repeat = scene::Repeat::radial(count, offset);
+                 return self;
+             },
+             "count"_a, "offset"_a = 0.0f,
+             "Circular array of `count` copies about Y at the given radius")
+        .def_prop_ro("repeat",
+                     [](const PyPrim& p) -> nb::object {
+                         if (!p.repeat.active()) return nb::none();
+                         nb::dict d;
+                         const char* names[] = {"none", "grid_infinite", "grid_finite", "radial"};
+                         d["type"] = p.repeat.type < 4 ? names[p.repeat.type] : "unknown";
+                         d["spacing"] = nb::make_tuple(p.repeat.spacing.x, p.repeat.spacing.y,
+                                                       p.repeat.spacing.z);
+                         d["counts"] = nb::make_tuple(p.repeat.counts.x, p.repeat.counts.y,
+                                                      p.repeat.counts.z);
+                         return d;
+                     },
+                     "The repetition applied to this primitive, or None")
         .def_prop_ro("deformers",
                      [](const PyPrim& p) {
                          nb::list out;
@@ -971,6 +1021,7 @@ NB_MODULE(pyclay, m) {
                  n.deformers = prim.deformers;
                  n.profile = prim.profile;
                  n.profile_points = prim.profile_points;
+                 n.repeat = prim.repeat;
                  n.op = op;
                  if (!blend.is_none()) {
                      try {

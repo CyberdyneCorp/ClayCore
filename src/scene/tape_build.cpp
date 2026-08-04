@@ -23,7 +23,7 @@ struct Compiler {
 
     void emit_prim(unsigned int op, const cfloat4x4& inv, float scale, float round,
                    kernel::cfloat3 color, const float* prim_params, int prim_param_count,
-                   const std::vector<Deformer>& deformers) {
+                   const std::vector<Deformer>& deformers, const Repeat& repeat = Repeat{}) {
         CTapeInstr instr;
         instr.op = op;
         instr.param_offset = static_cast<unsigned int>(tape.params.size());
@@ -40,6 +40,14 @@ struct Compiler {
         // known offset for the interpreter
         tape.params.insert(tape.params.end(), prim_params, prim_params + prim_param_count);
         for (int i = prim_param_count; i < CLAY_TAPE_PRIM_PARAMS; ++i) tape.params.push_back(0.0f);
+        // repeat record, then the deformer block
+        tape.params.push_back(static_cast<float>(repeat.type));
+        tape.params.push_back(repeat.spacing.x);
+        tape.params.push_back(repeat.spacing.y);
+        tape.params.push_back(repeat.spacing.z);
+        tape.params.push_back(repeat.counts.x);
+        tape.params.push_back(repeat.counts.y);
+        tape.params.push_back(repeat.counts.z);
         tape.params.push_back(static_cast<float>(deformers.size()));
         for (const Deformer& d : deformers) {
             tape.params.push_back(static_cast<float>(d.type));
@@ -112,6 +120,41 @@ struct Compiler {
     void fold_info(const Node& item, Op op, bool smooth) {
         kernel::CFieldInfo prim_info =
             (item.prim.type == PrimType::Ellipsoid) ? kernel::cfi_bound() : kernel::cfi_exact();
+        // Repetition preserves exactness only when the item plus its rounding
+        // and blend influence fits inside its half-cell (docs/01 2.4). Check
+        // it rather than assume it: an overflowing array is a bound field.
+        if (item.repeat.active()) {
+            math::Aabb local = prim_local_bounds(item);
+            float influence = kernel::cmax(item.rounding, 0.0f) +
+                              kernel::cmax(item.blend.support(), item.blend.k);
+            bool fits = true;
+            if (item.repeat.type == kernel::crepeat_radial) {
+                int count = static_cast<int>(item.repeat.spacing.x);
+                float ring = kernel::cabs(item.repeat.spacing.y);
+                float reach = 0.0f;
+                if (!local.empty()) {
+                    for (int i = 0; i < 4; ++i) {
+                        float x = (i & 1) ? local.max.x : local.min.x;
+                        float z = (i & 2) ? local.max.z : local.min.z;
+                        reach = kernel::cmax(reach, kernel::clength(kernel::cf2(x, z)));
+                    }
+                }
+                // the copy must fit inside its angular sector at its radius
+                float sector_reach = ring * kernel::csin(3.14159265f /
+                                                         kernel::cmax((float)count, 2.0f));
+                fits = count >= 2 && (reach + influence) <= sector_reach;
+            } else if (!local.empty()) {
+                const float sx = item.repeat.spacing.x, sy = item.repeat.spacing.y,
+                            sz = item.repeat.spacing.z;
+                float hx = kernel::cmax(kernel::cabs(local.min.x), kernel::cabs(local.max.x));
+                float hy = kernel::cmax(kernel::cabs(local.min.y), kernel::cabs(local.max.y));
+                float hz = kernel::cmax(kernel::cabs(local.min.z), kernel::cabs(local.max.z));
+                fits = (hx + influence) <= sx * 0.5f && (hy + influence) <= sy * 0.5f &&
+                       (hz + influence) <= sz * 0.5f;
+            }
+            if (!fits) prim_info = kernel::cfi_bound();
+        }
+
         // domain warps break the metric: fold the chain's Lipschitz factor
         // (shared with the influence bound) so the safe step scale drops
         float deform_l = deformer_lipschitz(item);
@@ -157,7 +200,7 @@ struct Compiler {
                 tape.blob.push_back(sp.radius);
             }
             emit_prim(kernel::ctape_stroke, inv_world, scale, round_world, item.color,
-                      prim_params, 3, item.deformers);
+                      prim_params, 3, item.deformers, item.repeat);
         } else if (prim_is_lift(item.prim.type)) {
             // [profile type][p0..p3][lift param]; polygon vertices go to the
             // out-of-line pool as consecutive (x, y) pairs
@@ -174,10 +217,12 @@ struct Compiler {
             }
             prim_params[CLAY_TAPE_PROFILE_FLOATS] = item.prim.params[0];
             emit_prim(static_cast<unsigned int>(item.prim.type), inv_world, scale, round_world,
-                      item.color, prim_params, CLAY_TAPE_PROFILE_FLOATS + 1, item.deformers);
+                      item.color, prim_params, CLAY_TAPE_PROFILE_FLOATS + 1, item.deformers,
+                      item.repeat);
         } else {
             emit_prim(static_cast<unsigned int>(item.prim.type), inv_world, scale, round_world,
-                      item.color, item.prim.params, kMaxPrimParams, item.deformers);
+                      item.color, item.prim.params, kMaxPrimParams, item.deformers,
+                      item.repeat);
         }
     }
 
