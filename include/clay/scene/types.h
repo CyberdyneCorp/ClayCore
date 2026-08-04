@@ -57,6 +57,28 @@ enum class Op : std::uint8_t {
     Inset = kernel::ccombine_inset,
     Shell = kernel::ccombine_shell,
     Replace = kernel::ccombine_replace,
+    // Spatial morphs (Node::transition carries their parameters). NON-LOCAL:
+    // the weight reaches arbitrarily far, so these report infinite influence
+    // and are never culled — see op_is_local below.
+    TransitionLinear = kernel::ccombine_transition_linear,
+    TransitionRadial = kernel::ccombine_transition_radial,
+};
+
+inline bool op_is_transition(Op op) {
+    return op == Op::TransitionLinear || op == Op::TransitionRadial;
+}
+
+// Ops whose influence is bounded by the item's geometry. Intersect and the
+// transitions are not: they change the field arbitrarily far away.
+inline bool op_is_local(Op op) { return op != Op::Intersect && !op_is_transition(op); }
+
+// Parameters of a spatial morph (kernel/deform.h weights).
+struct Transition {
+    kernel::cfloat3 a = kernel::cf3(0, -1, 0);  // linear: segment start
+    kernel::cfloat3 b = kernel::cf3(0, 1, 0);   // linear: segment end
+    float r0 = 0.0f;                            // radial: inner radius
+    float r1 = 1.0f;                            // radial: outer radius
+    std::uint8_t ease = 0;
 };
 
 inline bool op_is_extended(Op op) {
@@ -190,6 +212,7 @@ struct Node {
     std::vector<StrokePoint> stroke;  // PrimType::Stroke only
     float stroke_blend_k = 0.0f;      // within-stroke segment smoothing
     std::vector<Deformer> deformers;  // applied to the local point, in order
+    Transition transition;            // TransitionLinear/Radial ops only
 
     // group fields
     std::vector<NodeId> children;

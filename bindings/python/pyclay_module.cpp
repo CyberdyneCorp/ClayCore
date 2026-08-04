@@ -89,6 +89,12 @@ void check_io(const io::IoStatus& s) {
 
 // -- scene wrappers -----------------------------------------------------------
 
+struct PyTransition {
+    scene::Transition t;
+};
+struct PyTransitionLinear : PyTransition {};
+struct PyTransitionRadial : PyTransition {};
+
 struct PyBlend {
     scene::Blend b;
     explicit PyBlend(scene::BlendProfile profile, float k) : b{profile, k} {
@@ -421,9 +427,42 @@ NB_MODULE(pyclay, m) {
         .value("EMBOSS", scene::Op::Emboss)
         .value("INSET", scene::Op::Inset)
         .value("SHELL", scene::Op::Shell)
-        .value("REPLACE", scene::Op::Replace);
+        .value("REPLACE", scene::Op::Replace)
+        // spatial morphs: need a transition= argument, and are NON-LOCAL
+        // (never culled) because their weight reaches arbitrarily far
+        .value("TRANSITION_LINEAR", scene::Op::TransitionLinear)
+        .value("TRANSITION_RADIAL", scene::Op::TransitionRadial);
 
     // -- blends ----------------------------------------------------------------
+    nb::class_<PyTransition>(m, "Transition",
+                             "Base class of TransitionLinear / TransitionRadial");
+    nb::class_<PyTransitionLinear, PyTransition>(
+        m, "TransitionLinear",
+        "Morph weight from the eased projection onto the segment a -> b")
+        .def("__init__",
+             [](PyTransitionLinear* self, nb::handle a, nb::handle b, int ease) {
+                 new (self) PyTransitionLinear();
+                 self->t.a = to_f3(a, "a");
+                 self->t.b = to_f3(b, "b");
+                 if (ease < 0 || ease >= kernel::ease_count)
+                     throw std::invalid_argument("ease must be a valid easing curve index");
+                 self->t.ease = static_cast<std::uint8_t>(ease);
+             },
+             "a"_a, "b"_a, "ease"_a = 0);
+    nb::class_<PyTransitionRadial, PyTransition>(
+        m, "TransitionRadial", "Morph weight from the eased XZ radius between r0 and r1")
+        .def("__init__",
+             [](PyTransitionRadial* self, float r0, float r1, int ease) {
+                 new (self) PyTransitionRadial();
+                 if (r0 == r1) throw std::invalid_argument("transition needs r0 != r1");
+                 self->t.r0 = r0;
+                 self->t.r1 = r1;
+                 if (ease < 0 || ease >= kernel::ease_count)
+                     throw std::invalid_argument("ease must be a valid easing curve index");
+                 self->t.ease = static_cast<std::uint8_t>(ease);
+             },
+             "r0"_a, "r1"_a, "ease"_a = 0);
+
     nb::class_<PyBlend>(m, "Blend", "Base class of Smooth/Cubic/Circular/Chamfer blend kinds")
         .def_prop_ro("k", [](const PyBlend& b) { return b.b.k; });
     nb::class_<PySmooth, PyBlend>(m, "Smooth", "Quadratic smooth-min blend of radius k")
@@ -820,7 +859,7 @@ NB_MODULE(pyclay, m) {
         .def_prop_ro("resolution", [](const PyLayer& l) { return l.layer().resolution; })
         .def("add",
              [](PyLayer& l, const PyPrim& prim, scene::Op op, nb::handle blend, nb::handle color,
-                float rounding, bool mirror) {
+                float rounding, bool mirror, nb::handle transition) {
                  if (op == scene::Op::None)
                      throw std::invalid_argument(
                          "op must be a combine operator, not Op.NONE");
@@ -843,10 +882,26 @@ NB_MODULE(pyclay, m) {
                  if (rounding < 0.0f) throw std::invalid_argument("rounding must be >= 0");
                  n.rounding = rounding;
                  n.mirror = mirror;
+                 if (scene::op_is_transition(op)) {
+                     if (transition.is_none())
+                         throw std::invalid_argument(
+                             "transition ops need transition=clay.TransitionLinear(a, b) or "
+                             "clay.TransitionRadial(r0, r1)");
+                     const PyTransition& pt = nb::cast<const PyTransition&>(transition);
+                     bool linear_params = op == scene::Op::TransitionLinear;
+                     bool linear_object = nb::isinstance<PyTransitionLinear>(transition);
+                     if (linear_params != linear_object)
+                         throw std::invalid_argument(
+                             "TRANSITION_LINEAR needs TransitionLinear parameters and "
+                             "TRANSITION_RADIAL needs TransitionRadial parameters");
+                     n.transition = pt.t;
+                 } else if (!transition.is_none()) {
+                     throw std::invalid_argument("transition= only applies to transition ops");
+                 }
                  return l.layer().sdf->insert(n);
              },
              "prim"_a, "op"_a = scene::Op::Add, "blend"_a = nb::none(), "color"_a = nb::none(),
-             "rounding"_a = 0.0f, "mirror"_a = false,
+             "rounding"_a = 0.0f, "mirror"_a = false, "transition"_a = nb::none(),
              "Append an edit to the layer; returns the node id")
         .def("mirror",
              [](PyLayer& l, const std::string& axis, float blend) {

@@ -218,9 +218,19 @@ body.add(clay.Cylinder(r=0.6, h=1.0).taper(-1.0, 1.0, 1.0, 0.35))
 body.add(clay.Sphere(r=1.0).displace(amplitude=0.08, frequency=6.0))
 ```
 
-`wrap_around` and the two-subtree `transition_*` morphs remain header-only:
-they have no tape opcode, and the Python call raises rather than silently
-doing nothing.
+```python
+# spatial morphs — combine modes, not point warps: they blend TWO fields
+body.add(clay.Box(size=(1.2, 1.2, 1.2)), op=clay.Op.TRANSITION_LINEAR,
+         transition=clay.TransitionLinear(a=(0, -2, 0), b=(0, 2, 0), ease=1))
+body.add(clay.Torus(R=1.0, r=0.3), op=clay.Op.TRANSITION_RADIAL,
+         transition=clay.TransitionRadial(r0=0.5, r1=2.0))
+```
+
+Transitions are deliberately NON-LOCAL: their weight reaches arbitrarily far
+from both operands, so such items report infinite influence and are never
+culled. Only `wrap_around` remains header-only (its inverse-mapping
+semantics need their own design pass); the Python call raises rather than
+silently doing nothing.
 
 Use cases the bindings are designed for: authoring the spec's golden-scene test corpus, procedural/batch asset generation, ML dataset generation (SDF samples, mesh/CSG pairs — the PrimFusion-style direction), Blender/Houdini scripting, and quick math experiments against the same kernels the app ships.
 

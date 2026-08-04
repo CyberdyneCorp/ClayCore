@@ -67,7 +67,7 @@ struct Compiler {
 
     // rb: second radius of the two-parameter extended modes (groove/tongue
     // half-width), already in world units; 0 for everything else.
-    void emit_combine(Op op, Blend blend, float rb) {
+    void emit_combine(Op op, Blend blend, float rb, const Transition* transition = nullptr) {
         CTapeInstr instr;
         instr.op = kernel::ctape_combine;
         instr.param_offset = static_cast<unsigned int>(tape.params.size());
@@ -76,9 +76,38 @@ struct Compiler {
         tape.params.push_back(static_cast<float>(static_cast<int>(blend.profile)));
         tape.params.push_back(blend.k);
         tape.params.push_back(rb);
+        // transition modes append their own parameters after the shared four
+        if (op == Op::TransitionLinear) {
+            const Transition& t = transition ? *transition : default_transition_;
+            for (float v : {t.a.x, t.a.y, t.a.z, t.b.x, t.b.y, t.b.z}) tape.params.push_back(v);
+            tape.params.push_back(static_cast<float>(t.ease));
+        } else if (op == Op::TransitionRadial) {
+            const Transition& t = transition ? *transition : default_transition_;
+            tape.params.push_back(t.r0);
+            tape.params.push_back(t.r1);
+            tape.params.push_back(static_cast<float>(t.ease));
+        }
     }
 
+    Transition default_transition_{};
+
     // -- field-info bookkeeping ----------------------------------------------
+
+    // Steepest slope of an easing curve, measured by dense sampling — the
+    // curves are arbitrary (back and elastic overshoot), so a constant would
+    // not be a safe bound for the transition weight's Lipschitz factor.
+    static float ease_max_slope(std::uint8_t ease) {
+        const int kSamples = 512;
+        float worst = 1.0f;
+        float prev = kernel::cease(ease, 0.0f);
+        for (int i = 1; i <= kSamples; ++i) {
+            float t = static_cast<float>(i) / static_cast<float>(kSamples);
+            float v = kernel::cease(ease, t);
+            worst = kernel::cmax(worst, kernel::cabs(v - prev) * static_cast<float>(kSamples));
+            prev = v;
+        }
+        return worst * 1.25f;  // sampling headroom
+    }
 
     void fold_info(const Node& item, Op op, bool smooth) {
         kernel::CFieldInfo prim_info =
@@ -87,7 +116,24 @@ struct Compiler {
         // (shared with the influence bound) so the safe step scale drops
         float deform_l = deformer_lipschitz(item);
         if (deform_l > 1.0f) prim_info = kernel::CFieldInfo{false, prim_info.lipschitz * deform_l};
-        if (op_is_extended(op))
+        if (op_is_transition(op)) {
+            // A lerp of two fields is not a distance. |d1 - d2| is bounded by
+            // how far apart the two surfaces can be, and both live inside the
+            // union of their influence bounds, so its diagonal is a safe
+            // bound. The weight's slope is the easing curve's steepest
+            // measured rise over the transition's span.
+            const math::Aabb& region = tape.bounds;  // already includes this item
+            float diff_bound = region.empty() || region.is_infinite()
+                                   ? 1e3f
+                                   : kernel::clength(region.extent());
+            float span = item.op == Op::TransitionLinear
+                             ? kernel::cmax(kernel::clength(item.transition.b - item.transition.a),
+                                            1e-6f)
+                             : kernel::cmax(kernel::cabs(item.transition.r1 - item.transition.r0),
+                                            1e-6f);
+            span /= kernel::cmax(ease_max_slope(item.transition.ease), 1e-6f);
+            tape.info = kernel::cfi_transition(tape.info, prim_info, diff_bound, span);
+        } else if (op_is_extended(op))
             tape.info = kernel::cfi_extended_blend(tape.info, prim_info, op_is_diagonal(op));
         else
             tape.info = smooth ? kernel::cfi_smooth_blend(tape.info, prim_info)
@@ -156,16 +202,18 @@ struct Compiler {
                 // carving/painting with nothing beneath produces nothing;
                 // material-creating modes seed the chain against empty space
                 if (!have_acc && n->op != Op::Add && !op_creates_material(n->op)) continue;
-                math::Aabb bound = item_influence_bound(*n, layer);
-                if (culled(bound)) continue;
-                tape.bounds.expand(bound);
+                if (culled(item_influence_bound(*n, layer))) continue;
+                // tape.bounds is the geometric extent meshing and raycast
+                // clipping use — never infinite, even for non-local ops
+                tape.bounds.expand(item_geometry_bound(*n, layer));
                 bool seeded = !have_acc && n->op != Op::Add;
                 if (seeded) emit_empty(n->color);
                 emit_item(*n, layer);
                 bool smooth = n->blend.profile != BlendProfile::Hard && n->blend.k > 0.0f;
                 if (have_acc || seeded)
                     emit_combine(n->op, n->blend,
-                                 n->rounding * layer.xform.scale * n->xform.scale);
+                                 n->rounding * layer.xform.scale * n->xform.scale,
+                                 &n->transition);
                 fold_info(*n, (have_acc || seeded) ? n->op : Op::Add, smooth && have_acc);
                 have_acc = true;
             }

@@ -140,8 +140,7 @@ float deformer_lipschitz(const Node& item) {
     return kernel::cmax(info.lipschitz, 1.0f);
 }
 
-Aabb item_influence_bound(const Node& item, const Layer& layer) {
-    if (item.op == Op::Intersect) return Aabb::infinite();
+Aabb item_geometry_bound(const Node& item, const Layer& layer) {
     Aabb local = prim_local_bounds(item);
     if (!item.deformers.empty()) local = deformed_local_bounds(local, item.deformers);
     if (local.empty()) return local;
@@ -172,11 +171,19 @@ Aabb item_influence_bound(const Node& item, const Layer& layer) {
     return bound.dilated(kernel::cmax(round_world, 0.0f) + combine);
 }
 
+Aabb item_influence_bound(const Node& item, const Layer& layer) {
+    // Non-local ops (intersect, the spatial morphs) change the field
+    // arbitrarily far from the item: claiming a finite bound would let
+    // per-brick culling drop them and silently corrupt the result.
+    if (!op_is_local(item.op)) return Aabb::infinite();
+    return item_geometry_bound(item, layer);
+}
+
 Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& layer) {
     const Node* n = content.find(id);
     if (!n || !n->visible) return Aabb{};
     if (!n->is_group) return item_influence_bound(*n, layer);
-    if (n->op == Op::Intersect) return Aabb::infinite();
+    if (!op_is_local(n->op)) return Aabb::infinite();
     Aabb b;
     for (NodeId c : n->children) {
         Aabb cb = node_influence_bound(content, c, layer);

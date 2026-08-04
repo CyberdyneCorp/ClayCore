@@ -254,3 +254,171 @@ TEST_CASE("undo restores a deformer chain") {
     REQUIRE(undo.undo(doc));
     CHECK(scene::serialize_document(doc) == before);  // deformers came back
 }
+
+
+// --- transition morphs (add-transition-morphs) ------------------------------
+
+namespace {
+
+// sphere at the origin, then a box morphed in by a transition
+scene::Document morph_doc(scene::Op op, const scene::Transition& t) {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node base = item(scene::Prim::sphere(0.8f), cf3(0, 0, 0));
+    base.color = cf3(1, 0, 0);
+    l.sdf->insert(base);
+    scene::Node morph = item(scene::Prim::box(cf3(0.6f, 0.6f, 0.6f)), cf3(0, 0, 0), op);
+    morph.color = cf3(0, 0, 1);
+    morph.transition = t;
+    l.sdf->insert(morph);
+    return doc;
+}
+
+}  // namespace
+
+TEST_CASE("transition weight endpoints select each operand") {
+    scene::Transition t;
+    t.a = cf3(0, -2, 0);
+    t.b = cf3(0, 2, 0);
+    scene::Document doc = morph_doc(scene::Op::TransitionLinear, t);
+    scene::Tape tape = scene::compile_document(doc);
+
+    // at the segment start the accumulated (sphere) field wins outright,
+    // at the end the item (box) field does
+    for (float radius : {0.3f, 1.5f, 3.0f}) {
+        cfloat3 at_start = cf3(radius, -2, 0);
+        cfloat3 at_end = cf3(radius, 2, 0);
+        CHECK(tape.eval(at_start).d ==
+              doctest::Approx(sd_sphere(at_start, 0.8f)).epsilon(1e-5));
+        CHECK(tape.eval(at_end).d ==
+              doctest::Approx(sd_box(at_end, cf3(0.6f, 0.6f, 0.6f))).epsilon(1e-5));
+    }
+    // and the colors follow the same weight
+    CHECK(tape.eval(cf3(0.2f, -2, 0)).color.x > 0.99f);
+    CHECK(tape.eval(cf3(0.2f, 2, 0)).color.z > 0.99f);
+}
+
+TEST_CASE("transitions match the kernel weight (linear and radial)") {
+    scene::Transition lin;
+    lin.a = cf3(-1.5f, 0, 0);
+    lin.b = cf3(1.5f, 0, 0);
+    lin.ease = kernel::ease_smoothstep;
+    scene::Tape linear = scene::compile_document(morph_doc(scene::Op::TransitionLinear, lin));
+
+    scene::Transition rad;
+    rad.r0 = 0.5f;
+    rad.r1 = 2.0f;
+    rad.ease = kernel::ease_in_out_cubic;
+    scene::Tape radial = scene::compile_document(morph_doc(scene::Op::TransitionRadial, rad));
+
+    clay_test::Lcg rng(1201);
+    for (int i = 0; i < 800; ++i) {
+        cfloat3 p = rng.vec3(-3, 3);
+        float a = sd_sphere(p, 0.8f);
+        float b = sd_box(p, cf3(0.6f, 0.6f, 0.6f));
+
+        float wl = ctransition_linear_weight(p, lin.a, lin.b, lin.ease);
+        CHECK(linear.eval(p).d == doctest::Approx(cmix(a, b, wl)).epsilon(1e-5));
+
+        float wr = ctransition_radial_weight(p, rad.r0, rad.r1, rad.ease);
+        CHECK(radial.eval(p).d == doctest::Approx(cmix(a, b, wr)).epsilon(1e-5));
+    }
+}
+
+TEST_CASE("transitions are non-exact and step conservatively") {
+    scene::Transition t;
+    t.a = cf3(0, -1.5f, 0);
+    t.b = cf3(0, 1.5f, 0);
+    scene::Tape tape = scene::compile_document(morph_doc(scene::Op::TransitionLinear, t));
+    CHECK_FALSE(tape.info.is_exact);
+    CHECK(tape.safe_step_scale() < 1.0f);
+    clay_test::check_conservative_steps([&](cfloat3 p) { return tape.eval(p).d; },
+                                        tape.safe_step_scale(), 3.0f, 500, 1202);
+}
+
+TEST_CASE("transition items report infinite influence and are never culled") {
+    scene::Transition t;
+    t.a = cf3(0, -1.5f, 0);
+    t.b = cf3(0, 1.5f, 0);
+    scene::Document doc = morph_doc(scene::Op::TransitionLinear, t);
+    scene::Layer& l = doc.layers[0];
+    const scene::Node* morph = l.sdf->find(l.sdf->roots[1]);
+    REQUIRE(morph != nullptr);
+    CHECK(scene::item_influence_bound(*morph, l).is_infinite());
+    // the geometric bound stays finite so meshing and raycast clipping work
+    CHECK_FALSE(scene::item_geometry_bound(*morph, l).is_infinite());
+
+    scene::Tape full = scene::compile_document(doc);
+    CHECK_FALSE(full.bounds.is_infinite());
+
+    // even a brick far from both operands keeps the morph
+    const float band = 0.1f;
+    clay_test::Lcg rng(1203);
+    for (int b = 0; b < 20; ++b) {
+        cfloat3 corner = rng.vec3(-6, 6);
+        math::Aabb brick{corner, corner + cf3(0.3f, 0.3f, 0.3f)};
+        scene::CullRegion cull{brick.dilated(band)};
+        scene::Tape culled = scene::compile_document(doc, &cull);
+        for (int i = 0; i < 60; ++i) {
+            cfloat3 p = cf3(rng.range(brick.min.x, brick.max.x),
+                            rng.range(brick.min.y, brick.max.y),
+                            rng.range(brick.min.z, brick.max.z));
+            CHECK(cclamp(full.eval(p).d, -band, band) ==
+                  cclamp(culled.eval(p).d, -band, band));
+        }
+    }
+}
+
+TEST_CASE("rigid blends are still culled alongside a transition") {
+    scene::Transition t;
+    t.a = cf3(0, -1.5f, 0);
+    t.b = cf3(0, 1.5f, 0);
+    scene::Document doc = morph_doc(scene::Op::TransitionLinear, t);
+    // a local item far away must still be dropped for a distant brick
+    doc.layers[0].sdf->insert(item(scene::Prim::sphere(0.2f), cf3(9, 9, 9), scene::Op::Add,
+                                   scene::Blend{scene::BlendProfile::Quadratic, 0.05f}));
+    scene::Tape full = scene::compile_document(doc);
+    scene::CullRegion cull{math::Aabb{cf3(-0.2f, -0.2f, -0.2f), cf3(0.2f, 0.2f, 0.2f)}};
+    scene::Tape culled = scene::compile_document(doc, &cull);
+    CHECK(culled.instrs.size() < full.instrs.size());  // the distant sphere went
+}
+
+TEST_CASE("transition parameters round-trip through serialization") {
+    scene::Transition t;
+    t.a = cf3(0.5f, -1.0f, 0.25f);
+    t.b = cf3(-0.5f, 2.0f, 0.75f);
+    t.r0 = 0.3f;
+    t.r1 = 1.7f;
+    t.ease = kernel::ease_out_back;
+    scene::Document doc = morph_doc(scene::Op::TransitionRadial, t);
+
+    std::vector<std::uint8_t> bytes = scene::serialize_document(doc);
+    auto back = scene::deserialize_document(bytes.data(), bytes.size());
+    REQUIRE(back.has_value());
+    CHECK(scene::serialize_document(*back) == bytes);
+
+    scene::Tape a = scene::compile_document(doc);
+    scene::Tape b = scene::compile_document(*back);
+    clay_test::Lcg rng(1204);
+    for (int i = 0; i < 300; ++i) {
+        cfloat3 p = rng.vec3(-3, 3);
+        CHECK(a.eval(p).d == b.eval(p).d);
+    }
+}
+
+TEST_CASE("tape transition matches the reference tree evaluator") {
+    scene::Transition t;
+    t.a = cf3(-1, -1, 0);
+    t.b = cf3(1, 2, 0.5f);
+    t.ease = kernel::ease_in_out_quad;
+    scene::Document doc = morph_doc(scene::Op::TransitionLinear, t);
+    scene::Tape tape = scene::compile_document(doc);
+    clay_test::Lcg rng(1205);
+    for (int i = 0; i < 500; ++i) {
+        cfloat3 p = rng.vec3(-3, 3);
+        CTapeValue tv = tape.eval(p);
+        CTapeValue rv = clay_test::ref_eval_document(doc, p);
+        CHECK(tv.d == doctest::Approx(rv.d).epsilon(1e-5));
+        CHECK(clength(tv.color - rv.color) < 1e-4f);
+    }
+}

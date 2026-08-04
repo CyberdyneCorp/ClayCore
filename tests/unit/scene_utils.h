@@ -85,6 +85,19 @@ inline bool ref_eval_list(const std::vector<scene::NodeId>& ids,
                           const scene::SdfContent& content, const scene::Layer& layer, cfloat3 p,
                           CTapeValue& acc, bool have_acc);
 
+// Mirror of the tape's transition combine (a lerp of both operands).
+inline CTapeValue ref_transition(CTapeValue a, CTapeValue b, const scene::Node& n, cfloat3 p) {
+    float w = n.op == scene::Op::TransitionLinear
+                  ? kernel::ctransition_linear_weight(p, n.transition.a, n.transition.b,
+                                                      n.transition.ease)
+                  : kernel::ctransition_radial_weight(p, n.transition.r0, n.transition.r1,
+                                                      n.transition.ease);
+    CTapeValue r;
+    r.d = kernel::cmix(a.d, b.d, w);
+    r.color = kernel::cmix(a.color, b.color, w);
+    return r;
+}
+
 inline bool ref_eval_group(const scene::Node& g, const scene::SdfContent& content,
                            const scene::Layer& layer, cfloat3 p, CTapeValue& acc,
                            bool have_acc) {
@@ -121,7 +134,9 @@ inline bool ref_eval_list(const std::vector<scene::NodeId>& ids,
             continue;
         CTapeValue item = ref_eval_item(*n, layer, p);
         float rb = n->rounding * layer.xform.scale * n->xform.scale;
-        if (have_acc)
+        if (have_acc && scene::op_is_transition(n->op))
+            acc = ref_transition(acc, item, *n, p);
+        else if (have_acc)
             acc = ref_combine(&acc, n->color, item, n->op, n->blend, rb);
         else if (n->op != scene::Op::Add)
             acc = ref_combine(nullptr, n->color, item, n->op, n->blend, rb);

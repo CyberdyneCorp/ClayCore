@@ -578,3 +578,67 @@ def test_deformers_survive_clayspace_round_trip(tmp_path):
 def test_unsupported_deformer_reports_clearly():
     with pytest.raises(ValueError, match="no tape opcode"):
         clay.Sphere(r=1.0).wrap_around(-1.0, 1.0)
+
+
+# --- transition morphs (add-transition-morphs) ------------------------------
+
+
+def test_transition_linear_morphs_between_shapes():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.8), color="#ff0000")
+    layer.add(clay.Box(size=(1.2, 1.2, 1.2)), op=clay.Op.TRANSITION_LINEAR,
+              transition=clay.TransitionLinear(a=(0, -2, 0), b=(0, 2, 0)), color="#0000ff")
+
+    # at the segment start the sphere wins outright, at the end the box does
+    start = np.array([[0.3, -2.0, 0.0]], dtype=np.float32)
+    end = np.array([[0.3, 2.0, 0.0]], dtype=np.float32)
+    sphere_only = clay.Document()
+    sphere_only.add_sdf_layer("s").add(clay.Sphere(r=0.8))
+    box_only = clay.Document()
+    box_only.add_sdf_layer("b").add(clay.Box(size=(1.2, 1.2, 1.2)))
+
+    assert doc.eval(start)[0] == pytest.approx(sphere_only.eval(start)[0], abs=1e-5)
+    assert doc.eval(end)[0] == pytest.approx(box_only.eval(end)[0], abs=1e-5)
+    # colors follow the same weight
+    assert doc.colors(start)[0][0] > 0.99
+    assert doc.colors(end)[0][2] > 0.99
+
+
+def test_transition_radial_and_easing():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.7))
+    layer.add(clay.Box(size=(1.4, 1.4, 1.4)), op=clay.Op.TRANSITION_RADIAL,
+              transition=clay.TransitionRadial(r0=0.5, r1=2.0, ease=1))
+    pts = np.array([[0.0, 0.0, 0.0], [3.0, 0.0, 0.0]], dtype=np.float32)
+    assert np.all(np.isfinite(doc.eval(pts)))
+    assert doc.safe_step_scale() < 1.0  # a lerp of fields is not a distance
+
+
+def test_transition_requires_its_parameters():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=1.0))
+    with pytest.raises(ValueError, match="transition"):
+        layer.add(clay.Box(size=(1, 1, 1)), op=clay.Op.TRANSITION_LINEAR)
+    with pytest.raises(ValueError, match="TransitionLinear parameters"):
+        layer.add(clay.Box(size=(1, 1, 1)), op=clay.Op.TRANSITION_LINEAR,
+                  transition=clay.TransitionRadial(r0=0.0, r1=1.0))
+    with pytest.raises(ValueError, match="only applies to transition ops"):
+        layer.add(clay.Box(size=(1, 1, 1)), transition=clay.TransitionRadial(r0=0.0, r1=1.0))
+
+
+def test_transition_round_trip(tmp_path):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.9))
+    layer.add(clay.Torus(R=1.0, r=0.25), op=clay.Op.TRANSITION_LINEAR,
+              transition=clay.TransitionLinear(a=(-1, 0, 0), b=(1.5, 0.5, 0), ease=2))
+    rng = np.random.default_rng(21)
+    pts = rng.uniform(-2, 2, size=(256, 3)).astype(np.float32)
+    before = doc.eval(pts)
+
+    path = tmp_path / "morph.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(pts))

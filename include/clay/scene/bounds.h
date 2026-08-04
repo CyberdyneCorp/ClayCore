@@ -23,8 +23,14 @@ math::Aabb prim_local_bounds(const Node& item);
 // both the influence bound and the tape's tracked field info use this.
 float deformer_lipschitz(const Node& item);
 
-// World-space influence bound of one item within a layer (includes mirror
-// copies, rounding, and the item's blend support).
+// World-space GEOMETRY bound of one item: shape AABB (deformed, mirrored,
+// transformed) dilated by rounding and blend support. Always finite — this
+// is what meshing and raycast clipping want.
+math::Aabb item_geometry_bound(const Node& item, const Layer& layer);
+
+// World-space INFLUENCE bound: the geometry bound for local ops, infinite
+// for ops that change the field arbitrarily far away (intersect, the spatial
+// morphs). This is what per-brick culling must consult.
 math::Aabb item_influence_bound(const Node& item, const Layer& layer);
 
 // Influence bound of any node (recursive union for groups, dilated by the

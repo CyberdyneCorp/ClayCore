@@ -22,7 +22,9 @@
 // [ease]. Deformers warp the LOCAL point in authoring order before the
 // primitive's distance function; each may also correct the distance after.
 //
-// Combine param block: [mode] [profile] [k] [r2]. r2 is the second radius
+// Combine param block: [mode] [profile] [k] [r2], followed for transition
+// modes by their own parameters — linear: [ax ay az bx by bz ease],
+// radial: [r0 r1 ease]. Every other mode reads only the first four. r2 is the second radius
 // of the two-parameter extended modes (groove/tongue half-width rb, mapped
 // from the item's rounding in world units by the compiler); 0 elsewhere.
 
@@ -79,6 +81,12 @@ enum CCombineMode {
     ccombine_inset = 9,
     ccombine_shell = 10,
     ccombine_replace = 11,
+    // Spatial morphs between the accumulated field and the item
+    // (deform.h). NON-LOCAL: the weight is non-zero arbitrarily far from
+    // both operands, so the scene marks these items infinite-influence and
+    // never culls them. Extra params follow the shared four (see below).
+    ccombine_transition_linear = 12,
+    ccombine_transition_radial = 13,
 };
 
 enum CBlendProfile {
@@ -235,6 +243,19 @@ CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
     return CLAY_TAPE_FAR;
 }
 
+// Transition weight for the morph modes (0 -> accumulated, 1 -> item).
+CLAY_FN float ctape_transition_weight(int mode, CLAY_DEVICE const float* extra, cfloat3 p) {
+    if (mode == ccombine_transition_linear) {
+        return ctransition_linear_weight(p, cf3(extra[0], extra[1], extra[2]),
+                                         cf3(extra[3], extra[4], extra[5]), (int)extra[6]);
+    }
+    return ctransition_radial_weight(p, extra[0], extra[1], (int)extra[2]);
+}
+
+CLAY_FN bool ctape_mode_is_transition(int mode) {
+    return mode == ccombine_transition_linear || mode == ccombine_transition_radial;
+}
+
 CLAY_FN CTapeValue ctape_combine_values(CTapeValue a, CTapeValue b, int mode, int profile,
                                         float k, float r2) {
     CTapeValue r;
@@ -303,7 +324,18 @@ CLAY_FN CTapeValue ctape_eval(CLAY_DEVICE const CTapeInstr* instrs, int instr_co
                 a = stack[top - 2];
                 --top;
             }
-            stack[top - 1] = ctape_combine_values(a, b, (int)pr[0], (int)pr[1], pr[2], pr[3]);
+            int mode = (int)pr[0];
+            if (ctape_mode_is_transition(mode)) {
+                // spatial morph: lerp BOTH operands by the weight at p. Not a
+                // distance — the tape's tracked field info records that.
+                float w = ctape_transition_weight(mode, pr + 4, p);
+                CTapeValue r;
+                r.d = cmix(a.d, b.d, w);
+                r.color = cmix(a.color, b.color, w);
+                stack[top - 1] = r;
+            } else {
+                stack[top - 1] = ctape_combine_values(a, b, mode, (int)pr[1], pr[2], pr[3]);
+            }
         } else {
             if (top >= CLAY_TAPE_MAX_STACK) continue;
             cfloat4x4 inv;
