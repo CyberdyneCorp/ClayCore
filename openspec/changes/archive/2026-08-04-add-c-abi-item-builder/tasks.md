@@ -15,4 +15,4 @@
 ## 3. Close-out
 - [x] 3.1 Docs: `docs/05`, README, `docs/RELEASE.md` — incl. the 0.2.0 binary
       break in `clay_item_desc` / `clay_mesh_params` and the 0.x SemVer rule
-- [ ] 3.2 Full verification: all presets, gates, release checklist, CI
+- [x] 3.2 Full verification: all presets, gates, release checklist, CI
