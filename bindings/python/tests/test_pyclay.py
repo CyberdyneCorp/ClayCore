@@ -215,3 +215,294 @@ def test_all_primitives_mesh():
         assert doc.eval(np.array([[4, 4, 4]], np.float32))[0] > 0
         mesh = doc.mesh(resolution=48)
         assert mesh.is_watertight() and mesh.is_manifold(), type(prim).__name__
+
+
+# --- widened surface: strokes, extended ops, voxels, meshers, picking --------
+
+
+def test_stroke_is_one_item_and_matches_field():
+    doc = clay.Document()
+    body = doc.add_sdf_layer("body")
+    stroke = clay.Stroke(points=[(-1.0, 0.0, 0.0, 0.30),
+                                 (0.0, 0.5, 0.0, 0.22),
+                                 (1.0, 0.0, 0.0, 0.30)], blend_k=0.05)
+    node = body.add(stroke)
+    assert isinstance(node, int)
+    assert stroke.point_count == 3
+    assert stroke.points.shape == (3, 4)
+
+    # inside the chain near its middle point, outside far away
+    pts = np.array([[0.0, 0.5, 0.0], [0.0, 3.0, 0.0]], dtype=np.float32)
+    d = doc.eval(pts)
+    assert d[0] < 0 < d[1]
+
+    # incremental authoring appends to the same item
+    tail = clay.Stroke().add_point((2.0, 0.0, 0.0), 0.25).add_point((3.0, 0.0, 0.0), 0.2)
+    assert tail.point_count == 2
+    body.add(tail)
+    assert doc.eval(np.array([[2.5, 0.0, 0.0]], dtype=np.float32))[0] < 0
+
+
+def test_stroke_numpy_batch_form():
+    pts = np.array([[0, 0, 0, 0.3], [1, 0, 0, 0.3]], dtype=np.float32)
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Stroke(points=pts))
+    assert doc.eval(np.array([[0.5, 0, 0]], dtype=np.float32))[0] < 0
+    with pytest.raises(ValueError, match=r"\(N, 4\)"):
+        clay.Stroke(points=np.zeros((2, 3), np.float32))
+
+
+@pytest.mark.parametrize("op", ["GROOVE", "TONGUE", "PIPE", "ENGRAVE",
+                                "EMBOSS", "INSET", "SHELL", "REPLACE"])
+def test_extended_ops_evaluate_and_round_trip(op, tmp_path):
+    doc = clay.Document()
+    body = doc.add_sdf_layer("body")
+    body.add(clay.Sphere(r=1.0))
+    body.add(clay.Box(size=(0.6, 0.6, 3.0), position=(0.7, 0, 0)),
+             op=getattr(clay.Op, op), blend=clay.Smooth(0.12), rounding=0.05)
+
+    pts = np.array([[0, 0, 0], [0.7, 0, 0], [4, 0, 0]], dtype=np.float32)
+    before = doc.eval(pts)
+    assert np.all(np.isfinite(before))
+    assert before[2] > 0  # far outside stays outside for every mode
+
+    path = tmp_path / f"{op.lower()}.clayspace"
+    doc.save(str(path))
+    after = clay.load(str(path)).eval(pts)
+    assert np.array_equal(before, after)  # op survives the document round trip
+
+
+def test_extended_ops_differ_from_each_other():
+    # These modes deviate only where the second operand's SURFACE crosses the
+    # accumulated one, so compare over a cloud around that crossing curve
+    # rather than at hand-picked points.
+    rng = np.random.default_rng(11)
+    cloud = rng.uniform(-1.4, 1.4, size=(4096, 3)).astype(np.float32)
+
+    def field(op):
+        doc = clay.Document()
+        layer = doc.add_sdf_layer("l")
+        layer.add(clay.Sphere(r=1.0))
+        layer.add(clay.Box(size=(0.5, 0.5, 3.0), position=(0.9, 0, 0)),
+                  op=op, blend=clay.Smooth(0.15), rounding=0.08)
+        return doc.eval(cloud)
+
+    # baseline is the ACCUMULATED field (the sphere alone): engrave/emboss
+    # deviate from that, not from a plain union with the second operand
+    base_doc = clay.Document()
+    base_doc.add_sdf_layer("l").add(clay.Sphere(r=1.0))
+    base = base_doc.eval(cloud)
+
+    engrave = field(clay.Op.ENGRAVE)
+    emboss = field(clay.Op.EMBOSS)
+    groove = field(clay.Op.GROOVE)
+
+    assert not np.allclose(groove, base)
+    assert not np.allclose(engrave, emboss)
+    # engrave only carves (field rises), emboss only adds (field falls)
+    assert np.all(engrave >= base - 1e-5)
+    assert np.all(emboss <= base + 1e-5)
+
+
+def test_voxel_grid_edits_and_queries():
+    g = clay.VoxelGrid(voxel_size=0.5)
+    red = g.palette_add("#ff0000")
+    blue = g.palette_add((0.0, 0.0, 1.0))
+    assert red != blue and g.palette_size >= 3
+
+    g.set((0, 0, 0), red)
+    assert g.get((0, 0, 0)) == red
+    assert g.occupied_count == 1
+
+    g.set_brush((5, 5, 5), 3, blue)
+    assert g.occupied_count == 1 + 27
+
+    g.fill_box((10, 0, 0), (12, 1, 0), red)
+    assert g.get((11, 1, 0)) == red
+    g.fill_line((20, 0, 0), (25, 0, 0), red)
+    assert g.get((23, 0, 0)) == red
+
+    g.erase((0, 0, 0))
+    assert g.get((0, 0, 0)) == 0
+
+    # paint only affects occupied cells; palette recolor leaves data alone
+    g.paint((99, 99, 99), blue)
+    assert g.get((99, 99, 99)) == 0
+    g.palette_set(red, "#00ff00")
+    assert g.palette_color(red)[1] > 0.9
+    assert g.get((23, 0, 0)) == red
+
+    lo, hi = g.bounds()
+    assert lo[0] <= 4 and hi[0] >= 25
+
+
+def test_voxel_batch_coordinate_form():
+    g = clay.VoxelGrid(0.25)
+    idx = g.palette_add("#123456")
+    cells = np.array([[0, 0, 0], [1, 0, 0], [2, 0, 0], [-3, 4, -5]], dtype=np.int32)
+    g.set_many(cells, idx)
+    assert g.occupied_count == 4
+    assert g.get((-3, 4, -5)) == idx
+    g.erase_many(cells[:2])
+    assert g.occupied_count == 2
+
+
+def test_voxel_mirror_and_flood_select():
+    g = clay.VoxelGrid(0.5)
+    idx = g.palette_add("#ffffff")
+    g.set_mirrored((3, 2, 1), idx, axes="xz")
+    assert g.occupied_count == 4
+    assert g.get((-4, 2, -2)) == idx
+
+    g2 = clay.VoxelGrid(0.5)
+    a = g2.palette_add("#ff0000")
+    b = g2.palette_add("#0000ff")
+    g2.fill_box((0, 0, 0), (3, 0, 0), a)
+    g2.set((4, 0, 0), b)
+    g2.fill_box((5, 0, 0), (8, 0, 0), a)
+    assert g2.flood_select((0, 0, 0), same_color=True).shape[0] == 4
+    assert g2.flood_select((0, 0, 0), same_color=False).shape[0] == 9
+
+
+def test_voxel_greedy_mesh_and_step_field():
+    g = clay.VoxelGrid(1.0)
+    idx = g.palette_add("#3355ff")
+    g.fill_box((0, 0, 0), (3, 3, 3), idx)
+    m = g.mesh()
+    assert m.triangle_count > 0
+    # a solid 4^3 block exposes 6*16 unit faces; greedy merging beats that
+    assert m.triangle_count < 6 * 16 * 2
+    assert m.colors.shape == m.positions.shape
+
+    inside = g.sample_step_field(np.array([[0.5, 0.5, 0.5]], dtype=np.float32))
+    outside = g.sample_step_field(np.array([[-5.0, 0.5, 0.5]], dtype=np.float32))
+    assert inside[0] < 0 < outside[0]
+
+
+def test_voxel_layer_in_document_round_trip(tmp_path):
+    doc = clay.Document()
+    grid = doc.add_voxel_layer("blocks", voxel_size=0.2)
+    idx = grid.palette_add("#ff8800")
+    grid.fill_box((0, 0, 0), (4, 2, 1), idx)
+    assert grid.occupied_count == 5 * 3 * 2
+
+    path = tmp_path / "voxels.clayspace"
+    doc.save(str(path))
+    loaded = clay.load(str(path))
+    back = loaded.voxel_layer("blocks")
+    assert back is not None
+    assert back.occupied_count == grid.occupied_count
+    assert back.get((2, 1, 0)) == idx
+    assert back.palette_color(idx)[0] > 0.9
+
+
+def test_sdf_rasterized_into_voxels():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.5), color="#ff0000")
+    g = clay.VoxelGrid(0.1)
+    g.rasterize(doc)
+    assert g.occupied_count > 0
+    volume = g.occupied_count * 0.1 ** 3
+    assert volume == pytest.approx(4.0 / 3.0 * np.pi * 0.5 ** 3, rel=0.2)
+
+
+def test_mesher_selection():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=1.0))
+    layer.add(clay.Box(size=(1.0, 1.0, 1.0), position=(0.8, 0, 0)), blend=clay.Smooth(0.15))
+
+    marching = doc.mesh(resolution=48)
+    nets = doc.mesh(resolution=48, mesher="nets")
+    assert marching.triangle_count > 0 and nets.triangle_count > 0
+    assert nets.triangle_count < marching.triangle_count  # the preview claim
+
+    with pytest.raises(ValueError, match="experimental"):
+        doc.mesh(resolution=32, mesher="dual_contouring")
+    dc = doc.mesh(resolution=32, mesher="dual_contouring", experimental=True)
+    assert dc.triangle_count > 0
+
+    with pytest.raises(ValueError, match="mesher"):
+        doc.mesh(resolution=32, mesher="nope")
+
+
+def test_scene_picking_attributes_hits():
+    doc = clay.Document()
+    body = doc.add_sdf_layer("body")
+    sphere = body.add(clay.Sphere(r=1.0))
+    other = doc.add_sdf_layer("other")
+    box = other.add(clay.Box(size=(0.8, 0.8, 0.8), position=(4, 0, 0)))
+
+    hit = doc.raycast((0, 0, -5), (0, 0, 1))
+    assert hit is not None
+    assert hit["t"] == pytest.approx(4.0, abs=1e-2)
+    assert hit["item"] == sphere
+    assert hit["position"][2] == pytest.approx(-1.0, abs=1e-2)
+    assert hit["normal"][2] < -0.9
+
+    far = doc.raycast((4, 0, -5), (0, 0, 1))
+    assert far is not None and far["item"] == box and far["layer"] != hit["layer"]
+    assert doc.raycast((0, 9, -5), (0, 0, 1)) is None
+
+
+def test_batch_raycast_matches_scalar():
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Sphere(r=1.0))
+    rays = np.array([[0, 0, -5, 0, 0, 1],
+                     [0, 0, 5, 0, 0, -1],
+                     [0, 9, -5, 0, 0, 1]], dtype=np.float32)
+    out = doc.raycast_many(rays)
+    assert out["hit"].tolist() == [True, True, False]
+    assert out["t"][0] == pytest.approx(4.0, abs=1e-2)
+    assert out["position"].shape == (3, 3) and out["normal"].shape == (3, 3)
+    scalar = doc.raycast((0, 0, -5), (0, 0, 1))
+    assert out["t"][0] == pytest.approx(scalar["t"], abs=1e-4)
+
+
+def test_snap_to_surface_batch():
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Sphere(r=1.0))
+    rng = np.random.default_rng(7)
+    dirs = rng.normal(size=(64, 3))
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    starts = (dirs * rng.uniform(0.85, 1.15, size=(64, 1))).astype(np.float32)
+
+    snapped = doc.snap_to_surface(starts)
+    on_surface = np.abs(doc.eval(snapped["position"]))
+    assert np.all(on_surface < 1e-3)
+    # outward normals point along the radius for a sphere
+    assert np.all(np.sum(snapped["normal"] * dirs, axis=1) > 0.99)
+
+
+def test_voxel_picking_cell_and_face():
+    g = clay.VoxelGrid(0.5)
+    idx = g.palette_add("#ffffff")
+    g.fill_box((0, 0, 0), (2, 2, 2), idx)
+
+    hit = g.raycast((5, 0.75, 0.75), (-1, 0, 0))
+    assert hit is not None
+    assert hit["cell"] == (2, 1, 1)
+    assert hit["adjacent"] == (3, 1, 1)
+    assert g.get(hit["adjacent"]) == 0  # placement target is empty
+
+    assert g.raycast((5, 5, 5), (1, 0, 0)) is None
+    assert g.build_plane_pick((0.6, 4, 0.6), (0, -1, 0), 0) == (1, 0, 1)
+
+
+def test_selection_and_layer_bounds():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    a = layer.add(clay.Sphere(r=0.5, position=(-1, 0, 0)))
+    b = layer.add(clay.Box(size=(0.6, 0.6, 0.6), position=(2, 0, 0)),
+                  blend=clay.Smooth(0.4))
+
+    sel = layer.selection_bounds([a])
+    assert sel[0][0] == pytest.approx(-1.5) and sel[1][0] == pytest.approx(-0.5)
+
+    both = layer.selection_bounds([a, b])
+    assert both[1][0] == pytest.approx(2.3)
+    # tight bounds: no blend-support dilation
+    assert both[1][0] < 2.3 + 1e-3
+    assert layer.bounds()[1][0] == pytest.approx(both[1][0])

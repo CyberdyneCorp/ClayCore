@@ -180,6 +180,40 @@ mesh.save("body.fbx"); mesh.save("body.obj")
 doc.save("body.clayspace")               # opens in the iPad app
 ```
 
+### Widened surface (implemented)
+
+Beyond the sample above, `pyclay` reaches the rest of the C++ vocabulary:
+
+```python
+# sculpt strokes — one edit item, not one per segment
+body.add(clay.Stroke(points=[(-1, 0, 0, 0.3), (0, 0.5, 0, 0.22), (1, 0, 0, 0.3)],
+                     blend_k=0.05))
+
+# extended combine modes
+body.add(clay.Box(size=(0.6, 0.6, 3.0), position=(0.7, 0, 0)),
+         op=clay.Op.GROOVE, blend=clay.Smooth(0.12), rounding=0.05)
+
+# voxels: standalone grids or document layers
+blocks = doc.add_voxel_layer("blocks", voxel_size=0.1)
+blocks.set_many(np.array([[0, 0, 0], [1, 0, 0]], np.int32), blocks.palette_add("#ff8800"))
+blocks.rasterize(doc)                      # SDF -> voxels
+vox_mesh = blocks.mesh()                   # greedy meshing
+
+# mesher selection (dual contouring is experimental, per the meshing spec)
+preview = doc.mesh(resolution=128, mesher="nets")
+sharp = doc.mesh(resolution=128, mesher="dual_contouring", experimental=True)
+
+# picking, scalar and batch
+hit = doc.raycast((0, 0, -5), (0, 0, 1))   # position, normal, layer, item
+hits = doc.raycast_many(rays)              # (N,6) float32 -> arrays
+snapped = doc.snap_to_surface(points)      # (N,3) -> positions + normals
+cell = blocks.raycast((5, 0.75, 0.75), (-1, 0, 0))   # cell, face, adjacent
+lo, hi = body.selection_bounds([node_id])  # tight bounds for zoom-to-selection
+```
+
+Deformers remain the one gap: the tape has no deformer opcodes yet, so
+`.twist()`-style calls in the sample above are not bound.
+
 Use cases the bindings are designed for: authoring the spec's golden-scene test corpus, procedural/batch asset generation, ML dataset generation (SDF samples, mesh/CSG pairs — the PrimFusion-style direction), Blender/Houdini scripting, and quick math experiments against the same kernels the app ships.
 
 ## 11. C ABI (`bindings/c/clay.h`)
