@@ -131,10 +131,11 @@ paint, then greedy meshing and picking.
 ![flood select](output/07_voxel_flood.png)
 ![carving](output/07_voxel_carve.png)
 
-Brushes come in two footprints, cube and sphere, selected with `shape=`. The
-sphere is the ball inscribed in the cube of the same size, so it is always a
-subset. Both use radius `(size-1)/2`, which is why an even size behaves as
-`size-1` — `set_brush(c, 4, i)` covers the same cells as `set_brush(c, 3, i)`.
+Brushes come in two footprints, cube and sphere, selected with `shape=`. A
+brush of size N covers exactly N cells per axis for every N: the footprint runs
+`-((N-1)/2) ..= N/2`, symmetric for odd N and biased half a cell toward the
+positive axes for even N. The sphere is the ball of diameter N, so it is always
+a subset of the cube and its occupancy ratio approaches π/6.
 
 ![cube and sphere brushes](output/07_brush_shapes.png)
 

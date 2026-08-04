@@ -90,16 +90,20 @@ def voxel_sculpt():
             grid.set_mirrored((6, y, z), plate, axes="x")
             grid.set_mirrored((7, y, z), plate, axes="x")
 
-    # Head, sunk slightly into the collar.
-    grid.fill_box((-4, 4, -3), (4, 9, 3), shell)
-    grid.fill_box((-4, 9, -3), (4, 9, 3), trim)      # cap
+    # Head: a sphere brush gives it a domed skull the cube brush cannot.
+    grid.set_brush((0, 7, 0), 9, shell, shape="sphere")
+    grid.fill_box((-4, 4, -3), (4, 6, 3), shell)     # square off the jaw
+
+    # Shoulder pads, sphere-brushed so they read as rounded.
+    for sx in (6, -6):
+        grid.set_brush((sx, 2, 0), 5, trim, shape="sphere")
 
     # Eyes on the front face, mirrored so they stay aligned.
-    for y in (6, 7):
-        grid.set_mirrored((2, y, -4), eye, axes="x")
+    for y in (7, 8):
+        grid.set_mirrored((2, y, -5), eye, axes="x")
 
-    # Hollow the back of the head — erase_brush is the sculpting eraser.
-    grid.erase_brush((0, 7, 4), 3)
+    # Scoop the back of the head with a sphere eraser.
+    grid.erase_brush((0, 8, 6), 5, shape="sphere")
 
     return grid
 

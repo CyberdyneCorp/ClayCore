@@ -871,19 +871,22 @@ def _brush(size, shape, index=None):
 
 
 def test_sphere_brush_is_a_subset_of_the_cube():
-    for size in (3, 5, 7, 9):
+    for size in (3, 4, 5, 7, 9):
         cube = _brush(size, "cube")
         sphere = _brush(size, "sphere")
-        assert 0 < sphere.occupied_count < cube.occupied_count
+        assert 0 < sphere.occupied_count <= cube.occupied_count
 
-        r = (size - 1) // 2
-        for z in range(-r, r + 1):
-            for y in range(-r, r + 1):
-                for x in range(-r, r + 1):
+        lo, hi = -((size - 1) // 2), size // 2
+        mid = lo + hi
+        for z in range(lo, hi + 1):
+            for y in range(lo, hi + 1):
+                for x in range(lo, hi + 1):
                     if sphere.get((x, y, z)) != 0:
                         assert cube.get((x, y, z)) != 0
-                        assert x * x + y * y + z * z <= r * r
-        assert sphere.get((r, r, r)) == 0  # the cube corner is outside the ball
+                        dx, dy, dz = 2 * x - mid, 2 * y - mid, 2 * z - mid
+                        assert dx * dx + dy * dy + dz * dz <= size * size
+        if size >= 3:
+            assert sphere.get((hi, hi, hi)) == 0  # cube corner outside the ball
 
 
 def test_brush_shape_defaults_to_cube_and_rejects_unknown():
@@ -896,10 +899,21 @@ def test_brush_shape_defaults_to_cube_and_rejects_unknown():
         g.set_brush((0, 0, 0), 3, i, shape="blob")
 
 
-def test_even_brush_sizes_round_down():
+def test_brush_size_n_covers_n_cells_per_axis():
+    # Regression: even sizes used to collapse onto the odd size below, because
+    # the footprint was radius (n-1)/2 over -r..r.
+    for size in range(1, 9):
+        assert _brush(size, "cube").occupied_count == size ** 3
+
     for shape in ("cube", "sphere"):
-        assert _brush(4, shape).occupied_count == _brush(3, shape).occupied_count
-        assert _brush(2, shape).occupied_count == _brush(1, shape).occupied_count
+        counts = [_brush(size, shape).occupied_count for size in range(1, 9)]
+        assert counts == sorted(counts)
+        assert all(b > a for a, b in zip(counts, counts[1:])), counts
+
+
+def test_sphere_brush_is_non_degenerate_at_size_two():
+    # radius n/2 = 1 covers every cell centre of the 2x2x2 footprint
+    assert _brush(2, "sphere").occupied_count == 8
 
 
 def test_erase_brush_honours_shape():

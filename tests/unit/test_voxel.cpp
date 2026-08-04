@@ -286,34 +286,78 @@ TEST_CASE("SDF rasterization: inside centers set with field colors") {
     CHECK(clength(g.palette_color(g.get({0, 0, 0})) - cf3(0.9f, 0.1f, 0.2f)) < 0.05f);
 }
 
-TEST_CASE("brush shapes: sphere is the inscribed subset of the cube") {
+TEST_CASE("brush size N covers N cells per axis") {
+    // Regression: the footprint used radius (n-1)/2 over -r..r, which spans
+    // n cells for odd n but n-1 for even n — every even size silently
+    // behaved as the odd size below it.
+    SUBCASE("cube is exactly N^3 for every size") {
+        for (int n = 1; n <= 8; ++n) {
+            VoxelGrid g(0.1f);
+            std::uint8_t c = g.palette_add(cf3(1, 1, 1));
+            g.set_brush({0, 0, 0}, n, c);
+            CAPTURE(n);
+            CHECK(g.occupied_count() == static_cast<std::size_t>(n) * n * n);
+        }
+    }
+
+    SUBCASE("consecutive sizes are distinct") {
+        for (int n = 1; n < 8; ++n) {
+            VoxelGrid small(0.1f), large(0.1f);
+            std::uint8_t c = small.palette_add(cf3(1, 1, 1));
+            large.palette_add(cf3(1, 1, 1));
+            small.set_brush({0, 0, 0}, n, c);
+            large.set_brush({0, 0, 0}, n + 1, c);
+            CAPTURE(n);
+            CHECK(large.occupied_count() > small.occupied_count());
+        }
+    }
+}
+
+TEST_CASE("brush shapes: sphere is the ball of the same diameter") {
     std::uint8_t c = 1;
 
-    SUBCASE("sphere cells are a strict subset of cube cells") {
-        for (int n : {3, 5, 7, 9}) {
+    SUBCASE("sphere cells are a subset of cube cells, within radius n/2") {
+        for (int n : {3, 4, 5, 7, 9}) {
             VoxelGrid cube(0.1f), sphere(0.1f);
             c = cube.palette_add(cf3(1, 1, 1));
             sphere.palette_add(cf3(1, 1, 1));
             cube.set_brush({0, 0, 0}, n, c);
             sphere.set_brush({0, 0, 0}, n, c, voxel::BrushShape::Sphere);
 
-            CHECK(sphere.occupied_count() < cube.occupied_count());
+            CAPTURE(n);
+            CHECK(sphere.occupied_count() <= cube.occupied_count());
             CHECK(sphere.occupied_count() > 0);
 
-            // every sphere cell is also a cube cell, and lies within radius
-            int r = (n - 1) / 2;
-            for (int z = -r; z <= r; ++z)
-                for (int y = -r; y <= r; ++y)
-                    for (int x = -r; x <= r; ++x) {
-                        bool in_sphere = sphere.get({x, y, z}) != 0;
-                        if (in_sphere) {
+            int lo = -((n - 1) / 2), hi = n / 2, mid = lo + hi;
+            for (int z = lo; z <= hi; ++z)
+                for (int y = lo; y <= hi; ++y)
+                    for (int x = lo; x <= hi; ++x)
+                        if (sphere.get({x, y, z}) != 0) {
                             CHECK(cube.get({x, y, z}) != 0);
-                            CHECK(x * x + y * y + z * z <= r * r);
+                            int dx = 2 * x - mid, dy = 2 * y - mid, dz = 2 * z - mid;
+                            CHECK(dx * dx + dy * dy + dz * dz <= n * n);
                         }
-                    }
-            // the cube's corner is outside the sphere
-            CHECK(sphere.get({r, r, r}) == 0);
         }
+    }
+
+    SUBCASE("the cube's corner is outside the sphere once it can be") {
+        // n=2 is fully covered (every cell centre is within radius 1), so the
+        // corner test only bites from n=3 up.
+        for (int n : {3, 5, 7}) {
+            VoxelGrid sphere(0.1f);
+            c = sphere.palette_add(cf3(1, 1, 1));
+            sphere.set_brush({0, 0, 0}, n, c, voxel::BrushShape::Sphere);
+            int hi = n / 2;
+            CAPTURE(n);
+            CHECK(sphere.get({hi, hi, hi}) == 0);
+        }
+    }
+
+    SUBCASE("sphere is non-degenerate at small even sizes") {
+        VoxelGrid g(0.1f);
+        c = g.palette_add(cf3(1, 1, 1));
+        g.set_brush({0, 0, 0}, 2, c, voxel::BrushShape::Sphere);
+        CHECK(g.occupied_count() == 8);  // every centre is within radius 1
     }
 
     SUBCASE("cube remains the default") {
@@ -323,25 +367,17 @@ TEST_CASE("brush shapes: sphere is the inscribed subset of the cube") {
         CHECK(g.occupied_count() == 125);
     }
 
-    SUBCASE("even sizes round down for both shapes") {
-        for (voxel::BrushShape shape : {voxel::BrushShape::Cube, voxel::BrushShape::Sphere}) {
-            VoxelGrid even(0.1f), odd(0.1f);
-            c = even.palette_add(cf3(1, 1, 1));
-            odd.palette_add(cf3(1, 1, 1));
-            even.set_brush({0, 0, 0}, 4, c, shape);
-            odd.set_brush({0, 0, 0}, 3, c, shape);
-            CHECK(even.occupied_count() == odd.occupied_count());
-        }
-    }
-
     SUBCASE("erase_brush honours the shape") {
-        VoxelGrid g(0.1f);
+        VoxelGrid g(0.1f), ball(0.1f);
         c = g.palette_add(cf3(1, 1, 1));
+        ball.palette_add(cf3(1, 1, 1));
+        ball.set_brush({0, 0, 0}, 5, c, voxel::BrushShape::Sphere);
+
         g.set_brush({0, 0, 0}, 5, c);                            // solid cube
-        g.erase_brush({0, 0, 0}, 5, voxel::BrushShape::Sphere);         // scoop a ball
+        g.erase_brush({0, 0, 0}, 5, voxel::BrushShape::Sphere);  // scoop a ball
         CHECK(g.get({0, 0, 0}) == 0);                            // centre gone
         CHECK(g.get({2, 2, 2}) == c);                            // corner kept
-        CHECK(g.occupied_count() == 125 - 33);
+        CHECK(g.occupied_count() == 125 - ball.occupied_count());
     }
 }
 

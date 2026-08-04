@@ -80,30 +80,41 @@ void VoxelGrid::paint(VoxelCoord c, std::uint8_t index) {
 
 namespace {
 
-// Whether offset (x, y, z) lies inside a brush of radius r. The sphere test
-// is on cell centres, so it is exactly the sphere inscribed in the cube and
-// therefore always a subset of it.
-inline bool in_brush(int x, int y, int z, int r, BrushShape shape) {
+// Footprint of a size-n brush along one axis: n cells for every n, symmetric
+// for odd n and biased half a cell toward + for even n.
+struct BrushExtent {
+    int lo, hi;
+};
+inline BrushExtent brush_extent(int n) { return {-((n - 1) / 2), n / 2}; }
+
+// Whether cell offset (x, y, z) lies inside the brush. The sphere admits
+// cells whose centre is within radius n/2 of the footprint centre. The
+// centre is half-integer for even n, so the test works in half-units
+// (doubling everything) and stays exact integer arithmetic:
+//     (2x - (lo+hi))^2 + ... <= n^2
+inline bool in_brush(int x, int y, int z, int n, BrushExtent e, BrushShape shape) {
     if (shape == BrushShape::Cube) return true;
-    return x * x + y * y + z * z <= r * r;
+    int mid = e.lo + e.hi;  // == 2 * centre
+    int dx = 2 * x - mid, dy = 2 * y - mid, dz = 2 * z - mid;
+    return dx * dx + dy * dy + dz * dz <= n * n;
 }
 
 }  // namespace
 
 void VoxelGrid::set_brush(VoxelCoord c, int n, std::uint8_t index, BrushShape shape) {
-    int r = (n - 1) / 2;
-    for (int z = -r; z <= r; ++z)
-        for (int y = -r; y <= r; ++y)
-            for (int x = -r; x <= r; ++x)
-                if (in_brush(x, y, z, r, shape)) set({c.x + x, c.y + y, c.z + z}, index);
+    BrushExtent e = brush_extent(n);
+    for (int z = e.lo; z <= e.hi; ++z)
+        for (int y = e.lo; y <= e.hi; ++y)
+            for (int x = e.lo; x <= e.hi; ++x)
+                if (in_brush(x, y, z, n, e, shape)) set({c.x + x, c.y + y, c.z + z}, index);
 }
 
 void VoxelGrid::paint_brush(VoxelCoord c, int n, std::uint8_t index, BrushShape shape) {
-    int r = (n - 1) / 2;
-    for (int z = -r; z <= r; ++z)
-        for (int y = -r; y <= r; ++y)
-            for (int x = -r; x <= r; ++x)
-                if (in_brush(x, y, z, r, shape)) paint({c.x + x, c.y + y, c.z + z}, index);
+    BrushExtent e = brush_extent(n);
+    for (int z = e.lo; z <= e.hi; ++z)
+        for (int y = e.lo; y <= e.hi; ++y)
+            for (int x = e.lo; x <= e.hi; ++x)
+                if (in_brush(x, y, z, n, e, shape)) paint({c.x + x, c.y + y, c.z + z}, index);
 }
 
 void VoxelGrid::fill_box(VoxelCoord a, VoxelCoord b, std::uint8_t index) {
