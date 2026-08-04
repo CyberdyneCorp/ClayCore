@@ -13,27 +13,22 @@
 
 #include "cuda_shared.h"
 
-// Defined in clay_kernels.cu.
-extern "C" __global__ void clay_eval_points_kernel(const clay::kernel::CTapeInstr*, const float*,
-                                                   const float*, const float*, float*, float*,
-                                                   ClayCudaEvalUniforms);
-extern "C" __global__ void clay_eval_grid_kernel(const clay::kernel::CTapeInstr*, const float*,
-                                                 const float*, float*, float*,
-                                                 ClayCudaGridUniforms);
-extern "C" __global__ void clay_raycast_kernel(const clay::kernel::CTapeInstr*, const float*,
-                                               const float*, const float*, ClayCudaRayHit*,
-                                               ClayCudaRayUniforms);
+// Launch wrappers defined in clay_kernels.cu: the <<<>>> syntax only exists
+// in nvcc's translation unit, so this host file calls plain functions.
+extern "C" int clay_cuda_launch_eval_points(const void* instrs, const float* params,
+                                            const float* strokes, const float* pts, float* out_d,
+                                            float* out_col, ClayCudaEvalUniforms u);
+extern "C" int clay_cuda_launch_eval_grid(const void* instrs, const float* params,
+                                          const float* strokes, float* out_d, float* out_col,
+                                          ClayCudaGridUniforms u);
+extern "C" int clay_cuda_launch_raycast(const void* instrs, const float* params,
+                                        const float* strokes, const float* rays, void* hits,
+                                        ClayCudaRayUniforms u);
 
 namespace clay {
 namespace eval {
 
 namespace {
-
-constexpr int kBlock = 128;
-
-int grid_blocks(std::size_t items) {
-    return static_cast<int>((items + kBlock - 1) / kBlock);
-}
 
 // RAII device buffer — no allocation survives a failed call.
 class DeviceBuffer {
@@ -108,11 +103,10 @@ class CudaBackend final : public Backend {
         u.point_count = static_cast<unsigned int>(q.count);
         u.has_colors = out.colors_rgb ? 1u : 0u;
 
-        clay_eval_points_kernel<<<grid_blocks(q.count), kBlock>>>(
-            tb.instrs.as<const kernel::CTapeInstr>(), tb.params.as<const float>(),
-            tb.strokes.as<const float>(), pts.as<const float>(), dist.as<float>(),
-            cols.as<float>(), u);
-        if (cudaDeviceSynchronize() != cudaSuccess) return Status::DeviceError;
+        if (clay_cuda_launch_eval_points(tb.instrs.as<const void>(), tb.params.as<const float>(),
+                                         tb.strokes.as<const float>(), pts.as<const float>(),
+                                         dist.as<float>(), cols.as<float>(), u) != 0)
+            return Status::DeviceError;
 
         if (!dist.download(out.distances, q.count * sizeof(float))) return Status::DeviceError;
         if (out.colors_rgb && !cols.download(out.colors_rgb, q.count * 3 * sizeof(float)))
@@ -149,10 +143,10 @@ class CudaBackend final : public Backend {
         u.nz = static_cast<unsigned int>(q.nz);
         u.has_colors = out_colors_rgb ? 1u : 0u;
 
-        clay_eval_grid_kernel<<<grid_blocks(total), kBlock>>>(
-            tb.instrs.as<const kernel::CTapeInstr>(), tb.params.as<const float>(),
-            tb.strokes.as<const float>(), dist.as<float>(), cols.as<float>(), u);
-        if (cudaDeviceSynchronize() != cudaSuccess) return Status::DeviceError;
+        if (clay_cuda_launch_eval_grid(tb.instrs.as<const void>(), tb.params.as<const float>(),
+                                       tb.strokes.as<const float>(), dist.as<float>(),
+                                       cols.as<float>(), u) != 0)
+            return Status::DeviceError;
 
         if (!dist.download(out_values, total * sizeof(float))) return Status::DeviceError;
         if (out_colors_rgb && !cols.download(out_colors_rgb, total * 3 * sizeof(float)))
@@ -190,10 +184,10 @@ class CudaBackend final : public Backend {
             u.bounds_max[2] = b.max.z;
         }
 
-        clay_raycast_kernel<<<grid_blocks(q.count), kBlock>>>(
-            tb.instrs.as<const kernel::CTapeInstr>(), tb.params.as<const float>(),
-            tb.strokes.as<const float>(), rays.as<const float>(), out.as<ClayCudaRayHit>(), u);
-        if (cudaDeviceSynchronize() != cudaSuccess) return Status::DeviceError;
+        if (clay_cuda_launch_raycast(tb.instrs.as<const void>(), tb.params.as<const float>(),
+                                     tb.strokes.as<const float>(), rays.as<const float>(),
+                                     out.as<void>(), u) != 0)
+            return Status::DeviceError;
         return out.download(hits, q.count * sizeof(ClayCudaRayHit)) ? Status::Ok
                                                                     : Status::DeviceError;
     }

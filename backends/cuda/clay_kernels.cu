@@ -26,7 +26,7 @@ struct TapeField {
 
 }  // namespace
 
-extern "C" __global__ void clay_eval_points_kernel(const CTapeInstr* instrs,
+static __global__ void clay_eval_points_kernel(const CTapeInstr* instrs,
                                                    const float* params, const float* strokes,
                                                    const float* pts, float* out_d,
                                                    float* out_col, ClayCudaEvalUniforms u) {
@@ -42,7 +42,7 @@ extern "C" __global__ void clay_eval_points_kernel(const CTapeInstr* instrs,
     }
 }
 
-extern "C" __global__ void clay_eval_grid_kernel(const CTapeInstr* instrs, const float* params,
+static __global__ void clay_eval_grid_kernel(const CTapeInstr* instrs, const float* params,
                                                  const float* strokes, float* out_d,
                                                  float* out_col, ClayCudaGridUniforms u) {
     unsigned int gid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -62,7 +62,7 @@ extern "C" __global__ void clay_eval_grid_kernel(const CTapeInstr* instrs, const
     }
 }
 
-extern "C" __global__ void clay_raycast_kernel(const CTapeInstr* instrs, const float* params,
+static __global__ void clay_raycast_kernel(const CTapeInstr* instrs, const float* params,
                                                const float* strokes, const float* rays,
                                                ClayCudaRayHit* hits, ClayCudaRayUniforms u) {
     unsigned int gid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -123,4 +123,40 @@ extern "C" __global__ void clay_raycast_kernel(const CTapeInstr* instrs, const f
         hit.normal[2] = n.z;
     }
     hits[gid] = hit;
+}
+
+// -- launchers ---------------------------------------------------------------
+// Kernel launch syntax only exists inside nvcc's translation unit, so the
+// host backend calls these plain wrappers instead. Each synchronizes and
+// returns a cudaError_t as int.
+
+namespace {
+constexpr int kBlock = 128;
+int blocks(unsigned int items) { return (int)((items + kBlock - 1) / kBlock); }
+}  // namespace
+
+extern "C" int clay_cuda_launch_eval_points(const void* instrs, const float* params,
+                                            const float* strokes, const float* pts, float* out_d,
+                                            float* out_col, ClayCudaEvalUniforms u) {
+    clay_eval_points_kernel<<<blocks(u.point_count), kBlock>>>(
+        (const CTapeInstr*)instrs, params, strokes, pts, out_d, out_col, u);
+    return (int)cudaDeviceSynchronize();
+}
+
+extern "C" int clay_cuda_launch_eval_grid(const void* instrs, const float* params,
+                                          const float* strokes, float* out_d, float* out_col,
+                                          ClayCudaGridUniforms u) {
+    unsigned int total = u.nx * u.ny * u.nz;
+    clay_eval_grid_kernel<<<blocks(total), kBlock>>>((const CTapeInstr*)instrs, params, strokes,
+                                                     out_d, out_col, u);
+    return (int)cudaDeviceSynchronize();
+}
+
+extern "C" int clay_cuda_launch_raycast(const void* instrs, const float* params,
+                                        const float* strokes, const float* rays, void* hits,
+                                        ClayCudaRayUniforms u) {
+    clay_raycast_kernel<<<blocks(u.ray_count), kBlock>>>((const CTapeInstr*)instrs, params,
+                                                         strokes, rays,
+                                                         (ClayCudaRayHit*)hits, u);
+    return (int)cudaDeviceSynchronize();
 }
