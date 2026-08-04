@@ -45,3 +45,10 @@ The C ABI and Python API SHALL follow SemVer; kernel headers may evolve freely w
 - **WHEN** a release tag is cut
 - **THEN** CI verifies ABI version bump correctness (no symbol/layout break on minor), wheel builds, and parity-suite pass on all registered backends
 
+### Requirement: Examples CI job
+CI SHALL build the Python module and run every script under `examples/`, failing the build on a non-zero exit from any of them.
+
+#### Scenario: Examples job runs the gallery
+- **WHEN** the examples job runs on a pull request
+- **THEN** every example executes against the freshly built wheel and the job fails if any script raises
+
