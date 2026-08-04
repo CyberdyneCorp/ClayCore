@@ -5,7 +5,10 @@
    the patterns that break Swift/C#/Rust bindings generators — and a leading
    uint32_t struct_size on every public descriptor struct, so fields can be
    appended without a major bump.
-2. A real cross-language FFI exercise: load the shared library with Python
+2. Every function clay.h declares resolves in the shared library: a
+   declaration without a definition is a link error for every generated
+   binding, and nothing else in the repository compares the two.
+3. A real cross-language FFI exercise: load the shared library with Python
    ctypes (a bindings generator equivalent) and drive the core flow,
    including the struct_size prefix rule and the item builder.
 """
@@ -126,12 +129,32 @@ def struct_size_exercise(lib, doc, layer: int) -> list[str]:
     return errors
 
 
-def declared_prims() -> list[int]:
-    """clay_prim as a bindings generator parses it out of the header."""
+def declared_functions() -> list[str]:
+    """Every clay_* function clay.h declares, as a bindings generator reads it."""
     text = (REPO / "bindings" / "c" / "clay.h").read_text()
-    body = re.search(r"typedef enum clay_prim\s*{(.*?)}\s*clay_prim;", text, re.S).group(1)
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return sorted(set(re.findall(r"\b(clay_\w+)\s*\(", text)))
+
+
+def exports_exercise(lib) -> list[str]:
+    """The header's declarations are claims about the binary, so check them.
+
+    The parity gate reads clay.h alone, so a prototype with no definition
+    satisfies it — and a rename that touches only one of the two files ships a
+    header every bindings generator turns into an unresolved-symbol link
+    error, with CI green. Resolving each name is what makes the header's
+    claim an ABI-level one.
+    """
+    return [f"clay.h declares {name}, the library does not export it"
+            for name in declared_functions() if not hasattr(lib, name)]
+
+
+def declared_enum(name: str) -> list[int]:
+    """An enumeration as a bindings generator parses it out of the header."""
+    text = (REPO / "bindings" / "c" / "clay.h").read_text()
+    body = re.search(r"typedef enum %s\s*{(.*?)}\s*%s;" % (name, name), text, re.S).group(1)
     body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
-    return [int(value) for _, value in re.findall(r"(CLAY_PRIM_\w+)\s*=\s*(\d+)", body)]
+    return [int(value) for _, value in re.findall(r"(CLAY_\w+)\s*=\s*(\d+)", body)]
 
 
 def prim_sweep(lib) -> list[str]:
@@ -148,7 +171,7 @@ def prim_sweep(lib) -> list[str]:
                 lib.clay_item_destroy(handle)
                 accepted.add(prim)
                 break
-    declared = set(declared_prims())
+    declared = set(declared_enum("clay_prim"))
     if accepted == declared:
         return []
     return [f"clay_prim disagrees with the library: declared but rejected "
@@ -202,9 +225,212 @@ def builder_exercise(lib, doc, layer: int) -> list[str]:
     return errors
 
 
+class BrushParams(ctypes.Structure):
+    """clay_brush_params as a bindings generator would emit it."""
+
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("size", ctypes.c_int32),
+        ("shape", ctypes.c_int32),
+        ("falloff", ctypes.c_int32),
+        ("strength", ctypes.c_float),
+        ("seed", ctypes.c_uint32),
+    ]
+
+
+class FutureBrushParams(ctypes.Structure):
+    """clay_brush_params as a caller compiled against a later header sees it."""
+
+    _fields_ = BrushParams._fields_ + [("appended", ctypes.c_float * 2)]
+
+
+def cells(*values: int):
+    return (ctypes.c_int32 * len(values))(*values)
+
+
+def brush(size: int, shape: int = 0, falloff: int = 0, strength: float = 1.0,
+          seed: int = 0) -> BrushParams:
+    p = BrushParams()
+    p.struct_size = ctypes.sizeof(BrushParams)
+    p.size, p.shape, p.falloff, p.strength, p.seed = size, shape, falloff, strength, seed
+    return p
+
+
+def brush_struct_size_exercise(lib, grid) -> list[str]:
+    """The versioned-descriptor contract on the descriptor voxels added."""
+    errors = []
+    at = cells(0, 0, 0)
+    p = brush(3)
+    p.struct_size = 0  # setting it is mandatory, exactly as for clay_item_desc
+    if lib.clay_voxel_set_brush(grid, at, ctypes.byref(p), 1) != 1:
+        errors.append("clay_voxel_set_brush accepted a brush that declares no struct_size")
+    p.struct_size = ctypes.sizeof(BrushParams)
+    if lib.clay_voxel_set_brush(grid, at, ctypes.byref(p), 1) != 0:
+        errors.append("clay_voxel_set_brush rejected an explicit struct_size")
+    p.struct_size = 4  # shorter than the layout clay_brush_params shipped with
+    if lib.clay_voxel_set_brush(grid, at, ctypes.byref(p), 1) != 1:
+        errors.append("clay_voxel_set_brush accepted a struct_size below the original layout")
+    p.struct_size = 0x3D23D70A  # the bits of 0.04f: not a struct size
+    if lib.clay_voxel_set_brush(grid, at, ctypes.byref(p), 1) != 1:
+        errors.append("clay_voxel_set_brush accepted a struct_size no descriptor could have")
+
+    future = FutureBrushParams()
+    ctypes.memmove(ctypes.byref(future), ctypes.byref(brush(3)), ctypes.sizeof(BrushParams))
+    future.struct_size = ctypes.sizeof(FutureBrushParams)
+    future.appended[0], future.appended[1] = 1234.5, -7.0
+    as_known = ctypes.cast(ctypes.byref(future), ctypes.POINTER(BrushParams))
+    if lib.clay_voxel_set_brush(grid, at, as_known, 1) != 0:
+        errors.append("clay_voxel_set_brush rejected a struct_size from a later header")
+    return errors
+
+
+def brush_sweep(lib, grid) -> list[str]:
+    """Every brush shape and falloff the header declares is one the library
+    stamps, and no other value is."""
+    errors = []
+    at = cells(8, 8, 8)
+    for enum, field in (("clay_brush_shape", "shape"), ("clay_brush_falloff", "falloff")):
+        accepted = set()
+        for value in range(-1, 8):
+            p = brush(3)
+            setattr(p, field, value)
+            if lib.clay_voxel_set_brush(grid, at, ctypes.byref(p), 1) == 0:
+                accepted.add(value)
+        declared = set(declared_enum(enum))
+        if accepted != declared:
+            errors.append(f"{enum} disagrees with the library: declared but rejected "
+                          f"{sorted(declared - accepted)}, accepted but undeclared "
+                          f"{sorted(accepted - declared)}")
+    return errors
+
+
+def flood_select_exercise(lib, grid, occupied: int) -> list[str]:
+    """The size-query pattern on a selection only the library can measure."""
+    errors = []
+    seed = cells(0, 0, 0)
+    count = ctypes.c_size_t(0)
+    if lib.clay_voxel_flood_select(grid, seed, 1, None, ctypes.byref(count)) != 0:
+        return ["clay_voxel_flood_select size query failed"]
+    if count.value != occupied:
+        errors.append(f"the flood select reports {count.value} cells, the grid holds "
+                      f"{occupied}")
+    needed = count.value
+    short = ctypes.c_size_t(needed - 1)
+    buf = (ctypes.c_int32 * (needed * 3))()
+    if lib.clay_voxel_flood_select(grid, seed, 1, buf, ctypes.byref(short)) != 3:
+        errors.append("clay_voxel_flood_select accepted a buffer one cell too small")
+    elif short.value != needed:
+        errors.append(f"a short flood select reports {short.value} needed, not {needed}")
+    filled = ctypes.c_size_t(needed)
+    if lib.clay_voxel_flood_select(grid, seed, 1, buf, ctypes.byref(filled)) != 0:
+        errors.append("clay_voxel_flood_select rejected an adequate buffer")
+    elif filled.value != needed:
+        errors.append(f"the filling call wrote {filled.value} cells, not {needed}")
+    elif tuple(buf[0:3]) != (0, 0, 0):
+        errors.append(f"the flood select starts at {tuple(buf[0:3])}, not the seed")
+    index = ctypes.c_int32(0)
+    for i in range(needed):
+        cell = (ctypes.c_int32 * 3)(*buf[i * 3:i * 3 + 3])
+        if lib.clay_voxel_get(grid, cell, ctypes.byref(index)) != 0 or index.value == 0:
+            errors.append(f"the flood select returned empty cell {tuple(cell)}")
+            break
+    return errors
+
+
+def stamp_exercise(lib, grid, sphere) -> tuple[list[str], int]:
+    """A palette entry and a sphere stamp: what everything below works on."""
+    errors = []
+    index = ctypes.c_int32(0)
+    rgb = (ctypes.c_float * 3)(0.9, 0.3, 0.2)
+    if lib.clay_voxel_palette_add(grid, rgb, ctypes.byref(index)) != 0 or index.value != 1:
+        errors.append(f"clay_voxel_palette_add returned index {index.value}, not 1")
+    if lib.clay_voxel_set_brush(grid, cells(0, 0, 0), ctypes.byref(sphere), index) != 0:
+        errors.append("clay_voxel_set_brush rejected a sphere stamp")
+    occupied = ctypes.c_size_t(0)
+    lib.clay_voxel_occupied_count(grid, ctypes.byref(occupied))
+    if occupied.value == 0:
+        errors.append("a sphere stamp left the grid empty")
+    return errors, occupied.value
+
+
+def sculpt_exercise(lib, grid, sphere, occupied: int) -> list[str]:
+    """The bounds of the stamp, a sculpting verb over it, and its greedy mesh."""
+    errors = []
+    lo, hi, has = (ctypes.c_int32 * 3)(), (ctypes.c_int32 * 3)(), ctypes.c_int32(0)
+    if lib.clay_voxel_bounds(grid, lo, hi, ctypes.byref(has)) != 0 or has.value != 1:
+        errors.append("clay_voxel_bounds reported no bounds for a stamped grid")
+    elif tuple(lo) != (-2, -2, -2) or tuple(hi) != (2, 2, 2):
+        errors.append(f"a size-5 stamp at the origin spans {tuple(lo)}..{tuple(hi)}, "
+                      f"not (-2,-2,-2)..(2,2,2)")
+
+    after = ctypes.c_size_t(0)
+    if lib.clay_voxel_sculpt_smooth(grid, cells(0, 0, 0), ctypes.byref(sphere)) != 0:
+        errors.append("clay_voxel_sculpt_smooth rejected a valid brush")
+    lib.clay_voxel_occupied_count(grid, ctypes.byref(after))
+    if after.value == occupied:
+        errors.append(f"smoothing a size-5 ball changed nothing (still {occupied} cells)")
+
+    mesh = ctypes.c_void_p(0)
+    if lib.clay_voxel_mesh(grid, ctypes.byref(mesh)) != 0 or not mesh.value:
+        errors.append("clay_voxel_mesh failed on a stamped grid")
+    elif lib.clay_mesh_vertex_count(mesh) == 0:
+        errors.append("the greedy mesh of a stamped grid has no vertices")
+    lib.clay_mesh_destroy(mesh)
+    return errors
+
+
+def voxel_exercise(lib) -> list[str]:
+    """A standalone grid: palette, a brush stamp, a sculpt verb, the size-query
+    selection and a greedy mesh, driven the way a generated binding would."""
+    grid = lib.clay_voxel_grid_create(0.1)
+    if not grid:
+        return ["clay_voxel_grid_create rejected a valid voxel size"]
+    errors = []
+    if lib.clay_voxel_grid_create(0.0):
+        errors.append("clay_voxel_grid_create accepted a voxel size of 0")
+
+    sphere = brush(5, shape=1)  # CLAY_BRUSH_SHAPE_SPHERE
+    stamped, occupied = stamp_exercise(lib, grid, sphere)
+    errors += stamped
+    if occupied:
+        errors += flood_select_exercise(lib, grid, occupied)
+        errors += sculpt_exercise(lib, grid, sphere, occupied)
+    errors += brush_struct_size_exercise(lib, grid)
+    errors += brush_sweep(lib, grid)
+    if lib.clay_voxel_grid_destroy(grid) != 0:
+        errors.append("clay_voxel_grid_destroy refused a grid the caller owns")
+    if lib.clay_voxel_grid_destroy(None) != 1:
+        errors.append("clay_voxel_grid_destroy accepted a null handle")
+    return errors
+
+
+def voxel_ownership_exercise(lib, doc) -> list[str]:
+    """A grid borrowed from a document layer is the document's: destroying it
+    is refused, and the document keeps working afterwards."""
+    errors = []
+    layer, grid = ctypes.c_uint32(0), ctypes.c_void_p(0)
+    if lib.clay_document_add_voxel_layer(doc, b"clay", 0.1, ctypes.byref(layer),
+                                         ctypes.byref(grid)) != 0 or not grid.value:
+        return ["clay_document_add_voxel_layer failed"]
+    if lib.clay_voxel_set(grid, cells(1, 2, 3), 1) != 0:
+        errors.append("clay_voxel_set failed on a borrowed grid")
+    if lib.clay_voxel_grid_destroy(grid) != 1:
+        errors.append("clay_voxel_grid_destroy obeyed a borrowed handle instead of refusing it")
+
+    again = ctypes.c_void_p(0)
+    if lib.clay_document_voxel_layer(doc, b"clay", None, ctypes.byref(again)) != 0:
+        errors.append("the voxel layer is gone after a refused destroy")
+    elif again.value != grid.value:
+        errors.append("looking the same voxel layer up twice returned two handles")
+    index = ctypes.c_int32(0)
+    if lib.clay_voxel_get(grid, cells(1, 2, 3), ctypes.byref(index)) != 0 or index.value != 1:
+        errors.append("the refused destroy lost the edit that was already made")
+    return errors
+
+
 def ffi_exercise(lib_path: str) -> list[str]:
     lib = ctypes.CDLL(lib_path)
-    errors = []
+    errors = exports_exercise(lib)
 
     lib.clay_version.argtypes = [ctypes.POINTER(ctypes.c_int32)] * 3
     lib.clay_last_error.restype = ctypes.c_char_p
@@ -232,6 +458,34 @@ def ffi_exercise(lib_path: str) -> list[str]:
                                      ctypes.POINTER(ctypes.c_float),
                                      ctypes.POINTER(ctypes.c_float)]
 
+    cell_p = ctypes.POINTER(ctypes.c_int32)
+    brush_p = ctypes.POINTER(BrushParams)
+    lib.clay_voxel_grid_create.argtypes = [ctypes.c_float]
+    lib.clay_voxel_grid_create.restype = ctypes.c_void_p
+    lib.clay_voxel_grid_destroy.argtypes = [ctypes.c_void_p]
+    lib.clay_document_add_voxel_layer.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                                  ctypes.c_float,
+                                                  ctypes.POINTER(ctypes.c_uint32),
+                                                  ctypes.POINTER(ctypes.c_void_p)]
+    lib.clay_document_voxel_layer.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                              ctypes.POINTER(ctypes.c_uint32),
+                                              ctypes.POINTER(ctypes.c_void_p)]
+    lib.clay_voxel_palette_add.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_float),
+                                           ctypes.POINTER(ctypes.c_int32)]
+    lib.clay_voxel_get.argtypes = [ctypes.c_void_p, cell_p, ctypes.POINTER(ctypes.c_int32)]
+    lib.clay_voxel_set.argtypes = [ctypes.c_void_p, cell_p, ctypes.c_int32]
+    lib.clay_voxel_set_brush.argtypes = [ctypes.c_void_p, cell_p, brush_p, ctypes.c_int32]
+    lib.clay_voxel_sculpt_smooth.argtypes = [ctypes.c_void_p, cell_p, brush_p]
+    lib.clay_voxel_occupied_count.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t)]
+    lib.clay_voxel_bounds.argtypes = [ctypes.c_void_p, cell_p, cell_p,
+                                      ctypes.POINTER(ctypes.c_int32)]
+    lib.clay_voxel_flood_select.argtypes = [ctypes.c_void_p, cell_p, ctypes.c_int32, cell_p,
+                                            ctypes.POINTER(ctypes.c_size_t)]
+    lib.clay_voxel_mesh.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    lib.clay_mesh_vertex_count.argtypes = [ctypes.c_void_p]
+    lib.clay_mesh_vertex_count.restype = ctypes.c_size_t
+    lib.clay_mesh_destroy.argtypes = [ctypes.c_void_p]
+
     major, minor, patch = ctypes.c_int32(-1), ctypes.c_int32(-1), ctypes.c_int32(-1)
     lib.clay_version(ctypes.byref(major), ctypes.byref(minor), ctypes.byref(patch))
     if major.value < 0 or minor.value < 0:
@@ -255,6 +509,8 @@ def ffi_exercise(lib_path: str) -> list[str]:
             errors += struct_size_exercise(lib, doc, layer.value)
             errors += builder_exercise(lib, doc, layer.value)
             errors += prim_sweep(lib)
+            errors += voxel_exercise(lib)
+            errors += voxel_ownership_exercise(lib, doc)
         lib.clay_document_destroy(doc)
         lib.clay_document_destroy(None)  # releasing a null handle is a no-op
     return errors

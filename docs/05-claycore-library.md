@@ -187,6 +187,12 @@ every CI run — and rendered — see `examples/`, which covers the primitive se
 every blend and combine mode, deformers, repetition, lifts, transitions, voxel
 sculpting, meshing and I/O.
 
+The C ABI mirrors this surface: an item builder composes the same edits, and
+voxel grids, brushes, sculpting verbs, picking and evaluation are all reachable
+from C and therefore from Swift. `tools/check_binding_parity.py` fails CI when a
+`pyclay` capability has no C counterpart and no recorded exemption, so the two
+cannot drift apart again.
+
 ### Widened surface (implemented)
 
 Beyond the sample above, `pyclay` reaches the rest of the C++ vocabulary:

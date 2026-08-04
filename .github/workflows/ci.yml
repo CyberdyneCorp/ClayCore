@@ -62,7 +62,7 @@ jobs:
         run: ctest --preset asan-ubsan
 
   checks:
-    name: layering, kernel dialect, licenses
+    name: layering, kernel dialect, licenses, binding parity
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,6 +72,11 @@ jobs:
         run: python3 tools/check_kernel_dialect.py --compiler g++
       - name: License manifest
         run: python3 tools/check_licenses.py
+      # no build here, so the gate reads pyclay's surface out of its nanobind
+      # registrations; the pytest suite runs the same gate against the built
+      # module, and the two readings must agree
+      - name: Binding parity (C ABI vs pyclay)
+        run: python3 tools/check_binding_parity.py
 
   deps-pins:
     name: dependency pins resolve

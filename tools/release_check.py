@@ -109,9 +109,11 @@ def main() -> int:
     cases = re.search(r"test cases:\s+(\d+)\s+\|\s+(\d+) passed", out_parity)
     cl.add("parity", ok_parity, cases.group(0) if cases else out_parity[-200:])
 
+    # "bindings" rather than "parity", which already names the backend row
     for name, script in (("layering", "check_layering.py"),
                          ("dialect", "check_kernel_dialect.py"),
-                         ("licenses", "check_licenses.py")):
+                         ("licenses", "check_licenses.py"),
+                         ("bindings", "check_binding_parity.py")):
         ok, out = run([sys.executable, str(REPO / "tools" / script)])
         cl.add(name, ok, out.splitlines()[-1] if out else "")
 

@@ -24,8 +24,18 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 2
+#define CLAY_ABI_MINOR 3
 #define CLAY_ABI_PATCH 0
+
+/* Upper bound on the element count of any batch call: points, rays, cells,
+ * selected node ids, stroke points, polygon vertices. A count above it is
+ * rejected with CLAY_ERROR_INVALID_ARGUMENT rather than used to size a
+ * buffer. A count is the one argument this ABI cannot check against the
+ * caller's memory, and several calls allocate from one, so a byte length
+ * passed where an element count belongs — or a negative signed value widened
+ * to size_t, the usual Swift Int mistake — would otherwise allocate until the
+ * process dies. Split larger work into batches. */
+#define CLAY_MAX_BATCH 16777216 /* 1 << 24 */
 
 typedef enum clay_result {
     CLAY_OK = 0,
@@ -41,7 +51,8 @@ typedef enum clay_result {
 
 /* Library/ABI version (see c-abi spec). Compare majors at init — and while
  * the major is 0, the minor too: under SemVer's 0.x rule the ABI may still
- * break on a minor bump, and 0.2.0 did break (see below). */
+ * break on a minor bump, 0.2.0 did break (see below), and every minor below
+ * 1.0 adds entry points a host cannot dlopen its way out of missing. */
 void clay_version(int32_t* major, int32_t* minor, int32_t* patch);
 
 /* Thread-local detail message for the last failing call on this thread. */
@@ -168,6 +179,10 @@ typedef enum clay_profile {
  * CLAY_ERROR_INVALID_ARGUMENT. A value larger than this header knows about is
  * clamped, so a newer caller's unknown tail is ignored rather than misread,
  * and a value too large to be any descriptor is rejected outright.
+ *
+ * clay_mesh_params is the first struct to have used this: mesher and
+ * experimental were appended to it in 0.3.0, and a caller compiled against
+ * the 0.2.0 layout still meshes, with both fields taking their zero default.
  *
  * ABI 0.2.0 BREAKS BINARY COMPATIBILITY WITH 0.1.0 for the two descriptors
  * that predate the convention, clay_item_desc and clay_mesh_params: the new
@@ -311,14 +326,95 @@ clay_result clay_eval_points(const clay_document* doc, const char* backend,
                              const float* points_xyz, size_t count, float* out_distances,
                              float* out_colors_rgb);
 
+/* Normalized field gradients (the tetrahedron trick, so they are unit-length
+ * surface normals rather than raw differences) at the same points
+ * clay_eval_points takes; out_gradients_xyz is count*3 floats. A call of its
+ * own because a parameter cannot be appended to one that already shipped. */
+clay_result clay_eval_gradients(const clay_document* doc, const char* backend,
+                                const float* points_xyz, size_t count,
+                                float* out_gradients_xyz);
+
+/* The same two queries against one layer's own field: only that layer is
+ * compiled, so an edit in a layer above cannot change the answer and a layer
+ * can be probed while the stack around it is being authored. A layer that
+ * shows nothing — hidden, or a voxel layer, which carries no SDF content —
+ * evaluates as empty space rather than failing. */
+clay_result clay_layer_eval_points(const clay_document* doc, clay_layer_id layer,
+                                   const char* backend, const float* points_xyz, size_t count,
+                                   float* out_distances, float* out_colors_rgb);
+clay_result clay_layer_eval_gradients(const clay_document* doc, clay_layer_id layer,
+                                      const char* backend, const float* points_xyz, size_t count,
+                                      float* out_gradients_xyz);
+
+/* Multiply a field distance by this before stepping along a ray: the tape's
+ * Lipschitz safety factor, which a scaled or displaced edit lowers. */
+clay_result clay_safe_step_scale(const clay_document* doc, float* out_scale);
+clay_result clay_layer_safe_step_scale(const clay_document* doc, clay_layer_id layer,
+                                       float* out_scale);
+
 /* Single raycast (origin + normalized direction). *out_hit is 0/1. */
 clay_result clay_raycast(const clay_document* doc, const float origin[3], const float dir[3],
                          int32_t* out_hit, float* out_t, float out_position[3],
                          float out_normal[3]);
 
+/* Batch raycast. rays_origin_dir is count*6 floats, an origin xyz then a
+ * direction xyz per ray; unlike clay_raycast the directions are normalized
+ * here, so a zero-length one is rejected rather than traced. Each out buffer
+ * may be NULL and holds count values, or count*3 for position and normal. */
+clay_result clay_raycast_many(const clay_document* doc, const float* rays_origin_dir,
+                              size_t count, int32_t* out_hits, float* out_t,
+                              float* out_positions_xyz, float* out_normals_xyz);
+
+/* -- picking --------------------------------------------------------------- */
+
+/* Raycast that also reports WHAT was hit: the layer and the item whose field
+ * is closest at the hit point, so a subtract item is attributed the surface it
+ * carved. *out_layer and *out_node are 0 when nothing attributes, and 0 is
+ * never a valid layer or node id. The direction is normalized here.
+ *
+ * This is not the cheap path — it compiles the document, then one tape per
+ * layer and one per candidate item. Use clay_raycast when only the position
+ * and normal are wanted. */
+clay_result clay_raycast_attributed(const clay_document* doc, const float origin[3],
+                                    const float dir[3], int32_t* out_hit, float* out_t,
+                                    float out_position[3], float out_normal[3],
+                                    clay_layer_id* out_layer, clay_node_id* out_node);
+
+/* Snap count points onto the nearest surface by gradient descent.
+ * out_positions_xyz and out_normals_xyz are count*3 floats, out_ok is count
+ * flags, and each may be NULL. A point that did not converge still reports the
+ * best position and outward normal found, with its flag 0. */
+clay_result clay_snap_to_surface(const clay_document* doc, const float* points_xyz,
+                                 size_t count, float* out_positions_xyz,
+                                 float* out_normals_xyz, int32_t* out_ok);
+
+/* Tight world-space bounds of a layer's shapes, with no blend or rounding
+ * dilation — the box to frame a camera on. *out_has_bounds is 0 when the layer
+ * shows nothing, and out_min/out_max are then left alone. */
+clay_result clay_layer_bounds(const clay_document* doc, clay_layer_id layer, float out_min[3],
+                              float out_max[3], int32_t* out_has_bounds);
+/* The same box for a subset of the layer's nodes — zoom to selection. nodes is
+ * count node ids; an id the layer does not hold contributes nothing, so a
+ * selection of only such ids reports no bounds rather than an error. */
+clay_result clay_layer_selection_bounds(const clay_document* doc, clay_layer_id layer,
+                                        const clay_node_id* nodes, size_t count,
+                                        float out_min[3], float out_max[3],
+                                        int32_t* out_has_bounds);
+
 /* -- meshing (owner-handle pattern) ---------------------------------------- */
 
 typedef struct clay_mesh clay_mesh; /* opaque */
+
+/* Which mesher runs. No engine enumeration stands behind these — the meshers
+ * are three separate entry points — so the value is checked against this list
+ * and an unknown one is rejected rather than mapped onto the default. Marching
+ * is 0 because that is what a caller whose struct_size predates the field
+ * gets, and it is what every caller got before the field existed. */
+typedef enum clay_mesher {
+    CLAY_MESHER_MARCHING = 0,       /* watertight and 2-manifold by construction */
+    CLAY_MESHER_NETS = 1,           /* surface nets: preview speed, NOT manifold */
+    CLAY_MESHER_DUAL_CONTOURING = 2 /* sharp features; experimental, see below */
+} clay_mesher;
 
 typedef struct clay_mesh_params {
     uint32_t struct_size;   /* = sizeof(clay_mesh_params); required, see above */
@@ -326,8 +422,16 @@ typedef struct clay_mesh_params {
     int32_t resolution;     /* used when voxel_size <= 0: cells across the largest extent */
     int32_t decimate;       /* 0/1 */
     float decimate_ratio;   /* target triangle ratio when decimate != 0 */
+    /* appended in ABI 0.3.0, after the original layout; both default to 0 */
+    int32_t mesher;         /* clay_mesher */
+    int32_t experimental;   /* 0/1: the opt-in CLAY_MESHER_DUAL_CONTOURING needs */
 } clay_mesh_params;
 
+/* Meshes the document's SDF content. CLAY_MESHER_DUAL_CONTOURING is not
+ * hardened — plain dual contouring is not guaranteed manifold — so it is
+ * reachable only with experimental set; without it the call returns
+ * CLAY_ERROR_INVALID_ARGUMENT rather than meshing, which is the refusal the
+ * Python bindings make in the same place. */
 clay_result clay_document_mesh(const clay_document* doc, const clay_mesh_params* params,
                                clay_mesh** out_mesh);
 void clay_mesh_destroy(clay_mesh* mesh);
@@ -347,6 +451,253 @@ clay_result clay_mesh_validate(const clay_mesh* mesh, int32_t* out_watertight,
 
 /* Save by extension: .obj, .ply, .fbx, .glb */
 clay_result clay_mesh_save(const clay_mesh* mesh, const char* path);
+
+/* -- voxel grids ----------------------------------------------------------- */
+
+/* Palette-indexed colored voxels on an integer lattice: cell (x, y, z) covers
+ * world space [x, x+1) * voxel_size per axis, and palette index 0 means empty
+ * everywhere — setting it erases, painting skips it, meshing emits no face,
+ * and it is never returned by clay_voxel_palette_add. Cells cross this ABI as
+ * int32_t[3] and batches as a packed int32_t array of count*3, so a caller's
+ * (N, 3) int32 buffer needs no repacking.
+ *
+ * Two lifetimes, and the handle records which one it is:
+ *  - clay_voxel_grid_create returns a grid the CALLER owns and destroys.
+ *  - clay_document_add_voxel_layer and clay_document_voxel_layer return a
+ *    grid BORROWED from a document layer: the document owns both the grid and
+ *    the handle, edits through it are what clay_document_save writes, and
+ *    clay_voxel_grid_destroy on it is rejected rather than obeyed.
+ * A borrowed handle names its layer rather than pointing at the grid, and
+ * looks it up again on every call, so it never caches a pointer that a later
+ * edit to the document could move. Nothing in this ABI removes a layer today,
+ * so that lookup does not fail; if a removal call is ever added, calls through
+ * a handle to the removed layer become CLAY_ERROR_NOT_FOUND rather than a use
+ * after free. Destroying the document does invalidate the handle and nothing
+ * can detect that, so a borrowed handle must not outlive its document. */
+
+typedef struct clay_voxel_grid clay_voxel_grid; /* opaque */
+
+/* Mirror axes of a mirrored edit, OR'd together; 0 is the plain edit. The
+ * mirror plane passes through lattice coordinate 0, so cell x reflects to
+ * -1-x, and the cell given is always written alongside its reflections. */
+typedef enum clay_mirror {
+    CLAY_MIRROR_X = 1,
+    CLAY_MIRROR_Y = 2,
+    CLAY_MIRROR_Z = 4
+} clay_mirror;
+
+/* Brush footprint. A sphere is the ball of the same diameter, so it is always
+ * a subset of the cube of the same size. */
+typedef enum clay_brush_shape {
+    CLAY_BRUSH_SHAPE_CUBE = 0,
+    CLAY_BRUSH_SHAPE_SPHERE = 1
+} clay_brush_shape;
+
+/* Falloff curve over the normalized distance from the footprint centre.
+ * Occupancy is binary, so a weight between 0 and 1 cannot be stored in a
+ * cell: it is resolved by dithering against a hash of the cell coordinate and
+ * the seed, which makes a soft stamp reproducible — same stamp, same seed,
+ * same cells, on every platform and through every binding. */
+typedef enum clay_brush_falloff {
+    CLAY_BRUSH_FALLOFF_CONSTANT = 0, /* hard-edged, the usual brush */
+    CLAY_BRUSH_FALLOFF_LINEAR = 1,
+    CLAY_BRUSH_FALLOFF_SMOOTH = 2, /* smoothstep */
+    CLAY_BRUSH_FALLOFF_GAUSSIAN = 3
+} clay_brush_falloff;
+
+/* One brush stamp. Every field belongs to the original layout, so none of
+ * them can be left out by a shorter struct_size, and none of them has a
+ * default: a struct_size shorter than this is rejected outright. Keep it that
+ * way — a field appended later takes the zero value when a caller does not
+ * declare it, so only fields whose default is zero may be appended.
+ *
+ * strength reaches the engine untouched, so a stamp lands on exactly the
+ * cells the same stamp lands on through the Python bindings. It must be > 0:
+ * a strength that is not covers no cell at all, which is a zero-initialized
+ * descriptor rather than a request, and unlike the Python bindings this
+ * boundary rejects it instead of stamping nothing. A strength at or above 1
+ * is the full footprint. */
+typedef struct clay_brush_params {
+    uint32_t struct_size; /* = sizeof(clay_brush_params); required, see above */
+    int32_t size;         /* cells the footprint spans per axis; must be > 0 */
+    int32_t shape;        /* clay_brush_shape */
+    int32_t falloff;      /* clay_brush_falloff */
+    float strength;       /* coverage multiplier; must be > 0, >= 1 is full */
+    uint32_t seed;        /* dither seed */
+} clay_brush_params;
+
+/* A standalone grid, owned by the caller. voxel_size is world units per cell
+ * and must be > 0. Returns NULL on invalid input, with the detail in
+ * clay_last_error(). Free with clay_voxel_grid_destroy. */
+clay_voxel_grid* clay_voxel_grid_create(float voxel_size);
+/* Frees a grid created by clay_voxel_grid_create. A handle borrowed from a
+ * document layer is owned by that document: this returns
+ * CLAY_ERROR_INVALID_ARGUMENT and leaves the document untouched. */
+clay_result clay_voxel_grid_destroy(clay_voxel_grid* grid);
+
+/* Adds a voxel layer and borrows its grid. A voxel layer carries no SDF
+ * content, so clay_add_item and clay_layer_add_item do not apply to it. */
+clay_result clay_document_add_voxel_layer(clay_document* doc, const char* name,
+                                          float voxel_size, clay_layer_id* out_layer,
+                                          clay_voxel_grid** out_grid);
+/* Borrows the grid of an existing voxel layer by name; CLAY_ERROR_NOT_FOUND
+ * when the document has no such layer. */
+clay_result clay_document_voxel_layer(clay_document* doc, const char* name,
+                                      clay_layer_id* out_layer, clay_voxel_grid** out_grid);
+
+clay_result clay_voxel_size(const clay_voxel_grid* grid, float* out_voxel_size);
+
+/* -- palette --------------------------------------------------------------- */
+
+/* Palette indices are [0, 255] and anything else is rejected. Index 0 is the
+ * empty slot: it is never added, never matched, and cannot be recolored.
+ * The palette saturates at 256 entries, returning 255 rather than growing. */
+clay_result clay_voxel_palette_add(clay_voxel_grid* grid, const float rgb[3],
+                                   int32_t* out_index);
+clay_result clay_voxel_palette_color(const clay_voxel_grid* grid, int32_t index,
+                                     float out_rgb[3]);
+/* Recolors an entry; every voxel referencing it follows, with no voxel data
+ * touched. A no-op for index 0 and for an index the palette does not hold. */
+clay_result clay_voxel_palette_set(clay_voxel_grid* grid, int32_t index, const float rgb[3]);
+/* Counts the unused index-0 slot, so a fresh grid reports 1. */
+clay_result clay_voxel_palette_size(const clay_voxel_grid* grid, size_t* out_size);
+
+/* -- edits ----------------------------------------------------------------- */
+
+clay_result clay_voxel_get(const clay_voxel_grid* grid, const int32_t cell[3],
+                           int32_t* out_index);
+clay_result clay_voxel_set(clay_voxel_grid* grid, const int32_t cell[3], int32_t index);
+clay_result clay_voxel_erase(clay_voxel_grid* grid, const int32_t cell[3]);
+/* Recolors an occupied cell; empty cells and index 0 are no-ops. */
+clay_result clay_voxel_paint(clay_voxel_grid* grid, const int32_t cell[3], int32_t index);
+
+/* Batch forms: cells_xyz is count*3 int32 values. */
+clay_result clay_voxel_set_many(clay_voxel_grid* grid, const int32_t* cells_xyz, size_t count,
+                                int32_t index);
+clay_result clay_voxel_erase_many(clay_voxel_grid* grid, const int32_t* cells_xyz, size_t count);
+
+clay_result clay_voxel_fill_box(clay_voxel_grid* grid, const int32_t a[3], const int32_t b[3],
+                                int32_t index); /* inclusive corners */
+clay_result clay_voxel_fill_line(clay_voxel_grid* grid, const int32_t a[3], const int32_t b[3],
+                                 int32_t index); /* 3D DDA */
+
+/* The edit and every mirror combination of `axes` (clay_mirror bits) in one
+ * call; axes == 0 is the plain edit. Bits outside the three axes are
+ * rejected. */
+clay_result clay_voxel_set_mirrored(clay_voxel_grid* grid, const int32_t cell[3], int32_t index,
+                                    int32_t axes);
+clay_result clay_voxel_paint_mirrored(clay_voxel_grid* grid, const int32_t cell[3],
+                                      int32_t index, int32_t axes);
+
+/* -- brushes --------------------------------------------------------------- */
+
+/* Stamp the footprint centered on a cell. Size n spans exactly n cells per
+ * axis for every n: the footprint runs -((n-1)/2) ..= n/2, symmetric for odd
+ * n and biased half a cell toward +XYZ for even n. */
+clay_result clay_voxel_set_brush(clay_voxel_grid* grid, const int32_t cell[3],
+                                 const clay_brush_params* brush, int32_t index);
+clay_result clay_voxel_erase_brush(clay_voxel_grid* grid, const int32_t cell[3],
+                                   const clay_brush_params* brush);
+clay_result clay_voxel_paint_brush(clay_voxel_grid* grid, const int32_t cell[3],
+                                   const clay_brush_params* brush, int32_t index);
+
+/* -- sculpting verbs ------------------------------------------------------- */
+
+/* These reshape existing material instead of stamping a footprint. Each reads
+ * a snapshot of the region first, so a cell's outcome never depends on a
+ * neighbour the same call already changed. */
+
+/* Majority filter over the 26-neighbourhood: spurs dissolve, notches fill. */
+clay_result clay_voxel_sculpt_smooth(clay_voxel_grid* grid, const int32_t cell[3],
+                                     const clay_brush_params* brush);
+/* amount > 0 dilates, < 0 erodes, |amount| one-cell passes; 0 is a no-op. */
+clay_result clay_voxel_sculpt_inflate(clay_voxel_grid* grid, const int32_t cell[3],
+                                      const clay_brush_params* brush, int32_t amount);
+/* Pull the surface onto the plane through the brush centre: material on the
+ * +normal side goes, hollows on the other side that touch material are
+ * filled. offset_cells slides the plane along +normal, in CELLS. Unlike the
+ * Python bindings, a zero-length normal is rejected rather than evaluated. */
+clay_result clay_voxel_sculpt_flatten(clay_voxel_grid* grid, const int32_t cell[3],
+                                      const clay_brush_params* brush, const float normal[3],
+                                      float offset_cells);
+/* Move surface cells one step toward the brush centre. */
+clay_result clay_voxel_sculpt_pinch(clay_voxel_grid* grid, const int32_t cell[3],
+                                    const clay_brush_params* brush);
+
+/* -- queries --------------------------------------------------------------- */
+
+clay_result clay_voxel_occupied_count(const clay_voxel_grid* grid, size_t* out_count);
+/* Inclusive cell bounds of the occupied voxels. *out_has_bounds is 0 for an
+ * empty grid, and out_min/out_max are then left alone. */
+clay_result clay_voxel_bounds(const clay_voxel_grid* grid, int32_t out_min[3],
+                              int32_t out_max[3], int32_t* out_has_bounds);
+
+/* 6-connected flood select from a seed cell, over the seed's palette index
+ * when same_color is non-zero or over any occupied cell otherwise, via the
+ * size-query pattern: call with out_cells == NULL to receive the cell count
+ * in *count, then again with a buffer of count*3 int32 values. *count is the
+ * capacity in CELLS going in and the count written coming out; a buffer that
+ * is too small gets CLAY_ERROR_BUFFER_TOO_SMALL with the needed count in
+ * *count. An empty seed cell selects nothing, which is not an error. The
+ * traversal order is deterministic, so both calls agree, and the selection is
+ * capped at 1048576 cells. */
+clay_result clay_voxel_flood_select(const clay_voxel_grid* grid, const int32_t seed[3],
+                                    int32_t same_color, int32_t* out_cells, size_t* count);
+
+/* The grid as a step field for SDF compositing: -voxel_size/2 inside an
+ * occupied cell and +voxel_size/2 elsewhere (a bound, not a distance —
+ * classify accordingly). points_xyz is count*3 floats, out_values count. */
+clay_result clay_voxel_sample_step_field(const clay_voxel_grid* grid, const float* points_xyz,
+                                         size_t count, float* out_values);
+
+/* -- meshing and rasterization --------------------------------------------- */
+
+/* Greedy mesh (merged quads per axis slice, palette color per face) behind
+ * the same owner handle as clay_document_mesh, freed with clay_mesh_destroy.
+ * An empty grid yields an empty mesh rather than an error. */
+clay_result clay_voxel_mesh(const clay_voxel_grid* grid, clay_mesh** out_mesh);
+
+/* Rasterize a document's SDF content into the grid: cells whose centre lands
+ * inside are set, colored from the field through the nearest palette entry
+ * (added as needed). region_min/region_max bound the work in world space and
+ * are both NULL to use the document's own bounds; passing one without the
+ * other is rejected, as is a region that is empty, unbounded, or carries any
+ * non-finite bound — an infinity or a NaN, which is what a region derived
+ * from a camera frustum or a degenerate selection box arrives as. A rejected
+ * call leaves the grid exactly as it was. */
+clay_result clay_voxel_rasterize(clay_voxel_grid* grid, const clay_document* doc,
+                                 const float region_min[3], const float region_max[3]);
+
+/* -- voxel picking --------------------------------------------------------- */
+
+/* The cube face a picking ray entered a cell through. The neighbour across it
+ * is where a voxel placed by that click goes, which is what
+ * clay_voxel_raycast's out_adjacent already holds. */
+typedef enum clay_voxel_face {
+    CLAY_VOXEL_FACE_POS_X = 0,
+    CLAY_VOXEL_FACE_NEG_X = 1,
+    CLAY_VOXEL_FACE_POS_Y = 2,
+    CLAY_VOXEL_FACE_NEG_Y = 3,
+    CLAY_VOXEL_FACE_POS_Z = 4,
+    CLAY_VOXEL_FACE_NEG_Z = 5
+} clay_voxel_face;
+
+/* Cell picking by ray (origin plus a direction normalized here). *out_hit is
+ * 0/1 and the rest is written only on a hit: out_cell is the first occupied
+ * cell along the ray, *out_face the clay_voxel_face it was entered through,
+ * out_adjacent the neighbour across that face, and *out_t the world distance
+ * to the entry point. Every out pointer but out_hit may be NULL. */
+clay_result clay_voxel_raycast(const clay_voxel_grid* grid, const float origin[3],
+                               const float dir[3], int32_t* out_hit, int32_t out_cell[3],
+                               int32_t* out_face, int32_t out_adjacent[3], float* out_t);
+
+/* The cell under the ray on the build plane y = plane_cell — where a voxel
+ * goes when the ray hits none. Build planes are Y-normal, so the returned
+ * cell's y is always plane_cell. *out_hit is 0 when the ray runs parallel to
+ * the plane or the plane lies behind its origin, which is not an error. */
+clay_result clay_voxel_build_plane_pick(const clay_voxel_grid* grid, const float origin[3],
+                                        const float dir[3], int32_t plane_cell,
+                                        int32_t* out_hit, int32_t out_cell[3]);
 
 #ifdef __cplusplus
 } /* extern "C" */

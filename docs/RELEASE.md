@@ -19,10 +19,12 @@ forward-refuse).
    It gates: version agreement, configure/build, the whole ctest suite,
    backend parity for every backend registered in that build, module
    layering, kernel dialect (CPU + CUDA profiles), the license manifest, C
-   ABI hygiene + ctypes FFI, `openspec validate --all --strict`, benchmark
-   floors, and a real `pip install .` quickstart in a throwaway venv.
+   ABI hygiene + declared-symbol resolution + ctypes FFI, `openspec validate
+   --all --strict`, benchmark floors, and a real `pip install .` quickstart in
+   a throwaway venv.
 3. On a minor/patch release, read the `clay.h` diff for symbol and
-   struct-layout breaks (the ABI gate checks hygiene, not history). Below 1.0
+   struct-layout breaks (the ABI gate checks that every declared symbol
+   resolves and that the header is bindgen-clean, not history). Below 1.0
    a break is allowed on a minor bump under SemVer's 0.x rule, but it is never
    silent: say so in the release notes, and make the library reject the older
    layout instead of misreading it. **0.2.0 is such a release** — the leading
@@ -57,5 +59,9 @@ Tracked honestly rather than assumed done:
   Shipping CUDA wheels needs a CUDA build host in the wheel matrix.
 - **Blender-headless FBX validation** runs only as a release-time manual
   check; per-push CI validates exports with assimp instead (task 9.3).
-- **In-app SwiftPM verification** awaits the ClaySpace Xcode project; the
-  xcframework slices build and a Swift smoke consumes the module (task 10.3).
+- **In-app SwiftPM verification** awaits the ClaySpace Xcode project. The
+  xcframework slices build and `tools/check_swift_smoke.sh` compiles and runs a
+  Swift program against the macOS slice — a composed SDF edit, voxel sculpting
+  through a borrowed layer handle, and meshing — so the header is proven
+  consumable from Swift. What remains is opening it inside the real app
+  (task 10.3).

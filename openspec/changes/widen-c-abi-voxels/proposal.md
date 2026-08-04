@@ -31,7 +31,14 @@ already and will do so again without one.
 - **Meshing**: mesher selection (marching, nets, dual contouring behind its
   experimental flag) through a versioned params struct.
 - **A parity gate** that enumerates the capability surface `pyclay` exposes and
-  fails when a C entry point is missing without a recorded exemption.
+  fails when a C entry point is missing without a recorded exemption, plus an
+  ABI-level check that every function `clay.h` declares the library exports.
+- **ABI 0.3.0**: 44 entry points, three enumerations and two appended
+  `clay_mesh_params` fields are a surface a host has to be able to tell apart
+  from 0.2.0's, and below 1.0 consumers compare the minor.
+- **A documented batch ceiling** (`CLAY_MAX_BATCH`) on every count crossing the
+  boundary: the library builds without exceptions, so an allocation sized from
+  a wrong count would terminate the host process rather than return an error.
 
 ## Capabilities
 

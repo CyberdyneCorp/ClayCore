@@ -7,6 +7,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -16,10 +18,14 @@
 #include "clay/io/clayspace.h"
 #include "clay/io/mesh_io.h"
 #include "clay/mesh/decimate.h"
+#include "clay/mesh/dual_contouring.h"
 #include "clay/mesh/marching.h"
+#include "clay/mesh/surface_nets.h"
 #include "clay/mesh/validate.h"
+#include "clay/pick/pick.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/tape.h"
+#include "clay/voxel/grid.h"
 
 using namespace clay;
 
@@ -102,6 +108,32 @@ static_assert(CLAY_PROFILE_POLYGON == static_cast<int>(kernel::cprofile_polygon)
 
 static_assert(CLAY_EASE_LINEAR == kernel::ease_linear);
 static_assert(CLAY_EASE_COUNT == kernel::ease_count);
+
+static_assert(CLAY_MIRROR_X == voxel::kVoxMirrorX);
+static_assert(CLAY_MIRROR_Y == voxel::kVoxMirrorY);
+static_assert(CLAY_MIRROR_Z == voxel::kVoxMirrorZ);
+
+static_assert(CLAY_BRUSH_SHAPE_CUBE == static_cast<int>(voxel::BrushShape::Cube));
+static_assert(CLAY_BRUSH_SHAPE_SPHERE == static_cast<int>(voxel::BrushShape::Sphere));
+
+static_assert(CLAY_BRUSH_FALLOFF_CONSTANT == static_cast<int>(voxel::BrushFalloff::Constant));
+static_assert(CLAY_BRUSH_FALLOFF_LINEAR == static_cast<int>(voxel::BrushFalloff::Linear));
+static_assert(CLAY_BRUSH_FALLOFF_SMOOTH == static_cast<int>(voxel::BrushFalloff::Smooth));
+static_assert(CLAY_BRUSH_FALLOFF_GAUSSIAN == static_cast<int>(voxel::BrushFalloff::Gaussian));
+
+// A voxel coordinate is three int32 values in x, y, z order and nothing else,
+// which is what lets a flood selection reach the caller's buffer as one copy
+// instead of a loop that could disagree with the engine's field order.
+static_assert(sizeof(voxel::VoxelCoord) == 3 * sizeof(std::int32_t));
+static_assert(alignof(voxel::VoxelCoord) == alignof(std::int32_t));
+static_assert(offsetof(voxel::VoxelCoord, x) == 0);
+static_assert(offsetof(voxel::VoxelCoord, y) == sizeof(std::int32_t));
+static_assert(offsetof(voxel::VoxelCoord, z) == 2 * sizeof(std::int32_t));
+
+// clay_voxel_face has no engine enumeration behind it either: the face ids are
+// a documented convention of pick::VoxelHit, so nothing here can assert them.
+// What pins them is the smoke test, which shoots a ray down each axis and
+// requires the face and the adjacent cell clay.h names.
 
 namespace {
 
@@ -189,6 +221,40 @@ bool blend_is_known(std::int32_t v) {
     return false;
 }
 
+bool brush_shape_is_known(std::int32_t v) {
+    if (v < 0 || v > 0xff) return false;
+    switch (static_cast<voxel::BrushShape>(v)) {
+        case voxel::BrushShape::Cube:
+        case voxel::BrushShape::Sphere: return true;
+    }
+    return false;
+}
+
+bool brush_falloff_is_known(std::int32_t v) {
+    if (v < 0 || v > 0xff) return false;
+    switch (static_cast<voxel::BrushFalloff>(v)) {
+        case voxel::BrushFalloff::Constant:
+        case voxel::BrushFalloff::Linear:
+        case voxel::BrushFalloff::Smooth:
+        case voxel::BrushFalloff::Gaussian: return true;
+    }
+    return false;
+}
+
+// The one enumeration with nothing behind it to pin: the meshers are three
+// separate entry points, not an engine enum, so this list IS the definition.
+// The switch still has no default, which keeps adding a clay_mesher value
+// without teaching mesh_with about it a -Werror compile error.
+bool mesher_is_known(std::int32_t v) {
+    if (v < 0 || v > 0xff) return false;
+    switch (static_cast<clay_mesher>(v)) {
+        case CLAY_MESHER_MARCHING:
+        case CLAY_MESHER_NETS:
+        case CLAY_MESHER_DUAL_CONTOURING: return true;
+    }
+    return false;
+}
+
 // Versioned descriptor structs (c-abi spec): the prefix rule lives in
 // desc_version.h; this maps its verdict onto the boundary's error code and
 // detail message. struct_size is required — there is no "0 means the original
@@ -216,6 +282,8 @@ clay_result read_desc(const Desc* src, std::size_t original, Desc* out) {
 constexpr std::size_t kItemDescOriginal = offsetof(clay_item_desc, mirror) + sizeof(std::int32_t);
 constexpr std::size_t kMeshParamsOriginal =
     offsetof(clay_mesh_params, decimate_ratio) + sizeof(float);
+constexpr std::size_t kBrushParamsOriginal =
+    offsetof(clay_brush_params, seed) + sizeof(std::uint32_t);
 
 // Parameters each primitive takes, indexed by clay_prim (= the tape opcode).
 // This is what the clay_prim comments document and what clay_item_create
@@ -246,13 +314,76 @@ clay_result check_ease(std::int32_t ease) {
     return CLAY_OK;
 }
 
-// Out-of-line payloads: counts cross the ABI as size_t but serialize as u32.
+// The one argument this boundary cannot check against the caller's memory is
+// a count, and several entry points size a working buffer from one. A count
+// that is not a count — a byte length where an element count belongs, a
+// negative Swift Int widened to size_t — would allocate until the allocator
+// gives up, and the throw could not be caught here: the core builds
+// -fno-exceptions, so std::bad_alloc would reach std::terminate and take the
+// host process down instead of returning an error. CLAY_MAX_BATCH is the
+// documented ceiling; every count crossing the ABI passes through here.
+static_assert(CLAY_MAX_BATCH <= 0xffffffffu);  // out-of-line counts serialize as u32
+
+clay_result check_batch(const char* what, std::size_t count) {
+    if (count > CLAY_MAX_BATCH)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    std::string("too many ") + what + ": " + std::to_string(count) +
+                        " is above the batch limit of " + std::to_string(CLAY_MAX_BATCH));
+    return CLAY_OK;
+}
+
+// Out-of-line payloads: the same ceiling, plus the pointer the count implies.
 clay_result check_payload(const char* what, const float* data, std::size_t count) {
     if (count > 0 && !data) return fail(CLAY_ERROR_INVALID_ARGUMENT, std::string("null ") + what);
-    if constexpr (sizeof(std::size_t) > sizeof(std::uint32_t)) {
-        if (count > 0xffffffffu)
-            return fail(CLAY_ERROR_INVALID_ARGUMENT, std::string("too many ") + what);
-    }
+    return check_batch(what, count);
+}
+
+// -- voxel argument checks ---------------------------------------------------
+
+// The engine stores a palette index in a byte, so the boundary widens it to
+// int32_t and rejects what does not fit rather than truncating it silently.
+clay_result check_palette_index(std::int32_t index, std::uint8_t* out) {
+    if (index < 0 || index > 255)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "palette index must be in [0, 255], got " + std::to_string(index));
+    *out = static_cast<std::uint8_t>(index);
+    return CLAY_OK;
+}
+
+clay_result check_mirror_axes(std::int32_t axes, std::uint8_t* out) {
+    constexpr std::int32_t kAll = CLAY_MIRROR_X | CLAY_MIRROR_Y | CLAY_MIRROR_Z;
+    if (axes < 0 || (axes & ~kAll) != 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "mirror axes outside CLAY_MIRROR_X|Y|Z: " + std::to_string(axes));
+    *out = static_cast<std::uint8_t>(axes);
+    return CLAY_OK;
+}
+
+// The brush descriptor, checked in the order the Python bindings check it —
+// size, then shape, then falloff — so the same mistake reports the same way
+// through both bindings. strength comes last because they do not check it at
+// all: it is passed through untouched, so a stamp lands on exactly the cells
+// pyclay's does, and the one thing this boundary adds is refusing a strength
+// that is not > 0. That value covers nothing, which no caller means to ask
+// for and which is what a zero-initialized descriptor would otherwise say.
+clay_result read_brush(const clay_brush_params* src, voxel::BrushParams* out) {
+    clay_brush_params b;
+    clay_result r = read_desc(src, kBrushParamsOriginal, &b);
+    if (r != CLAY_OK) return r;
+    if (b.size <= 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "brush size must be > 0");
+    if (!brush_shape_is_known(b.shape))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "unknown brush shape: " + std::to_string(b.shape));
+    if (!brush_falloff_is_known(b.falloff))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "unknown brush falloff: " + std::to_string(b.falloff));
+    if (!(b.strength > 0.0f))  // also rejects NaN
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "brush strength must be > 0");
+    out->size = b.size;
+    out->shape = static_cast<voxel::BrushShape>(b.shape);
+    out->falloff = static_cast<voxel::BrushFalloff>(b.falloff);
+    out->strength = b.strength;
+    out->seed = b.seed;
     return CLAY_OK;
 }
 
@@ -325,8 +456,26 @@ clay_result from_io(const io::IoStatus& s) {
 
 }  // namespace
 
+struct clay_document;
+
+// A voxel grid handle is one of two things and says which: the owner of a
+// standalone grid, or a borrow of the grid a document keeps for one layer.
+// A borrow names the layer rather than pointing at it, so nothing caches a
+// pointer into the document's layer map: the lookup is redone on every call.
+// No entry point removes a layer today, so the miss below cannot be reached
+// through this ABI; it is what keeps that true if one is ever added.
+struct clay_voxel_grid {
+    voxel::VoxelGrid* owned = nullptr;  // non-null: the caller destroys it
+    clay_document* doc = nullptr;       // non-null: borrowed from a layer
+    clay_layer_id layer = 0;
+};
+
 struct clay_document {
     io::ClaySpaceDoc doc;
+    // Borrowed handles are the document's, one per layer, handed back by
+    // address: repeated lookups return the same handle, nothing leaks, and
+    // std::map keeps the addresses stable as more layers arrive.
+    std::map<clay_layer_id, clay_voxel_grid> voxel_handles;
 };
 
 struct clay_mesh {
@@ -370,6 +519,215 @@ clay_result validate_item(const clay_item& item) {
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "the linear op needs linear parameters and the radial op radial ones");
     return CLAY_OK;
+}
+
+// -- voxel handle resolution, below the handles it touches -------------------
+
+voxel::VoxelCoord to_coord(const std::int32_t c[3]) { return {c[0], c[1], c[2]}; }
+
+clay_result resolve(const clay_voxel_grid* grid, voxel::VoxelGrid** out) {
+    if (!grid) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null voxel grid");
+    if (grid->owned) {
+        *out = grid->owned;
+        return CLAY_OK;
+    }
+    auto it = grid->doc->doc.voxel_layers.find(grid->layer);
+    if (it == grid->doc->doc.voxel_layers.end())  // no removal call exists yet
+        return fail(CLAY_ERROR_NOT_FOUND, "voxel layer is no longer in its document");
+    *out = &it->second;
+    return CLAY_OK;
+}
+
+// The shapes of argument list the voxel entry points start with, checked once
+// here so each entry point below is its own engine call and nothing else.
+clay_result resolve_at(const clay_voxel_grid* grid, const std::int32_t cell[3],
+                       voxel::VoxelGrid** out) {
+    clay_result r = resolve(grid, out);
+    if (r != CLAY_OK) return r;
+    if (!cell) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cell");
+    return CLAY_OK;
+}
+
+clay_result resolve_batch(const clay_voxel_grid* grid, const std::int32_t* cells_xyz,
+                          std::size_t count, voxel::VoxelGrid** out) {
+    clay_result r = resolve(grid, out);
+    if (r != CLAY_OK) return r;
+    if (count > 0 && !cells_xyz) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cells");
+    return check_batch("cells", count);
+}
+
+clay_result resolve_at_index(const clay_voxel_grid* grid, const std::int32_t cell[3],
+                             std::int32_t index, voxel::VoxelGrid** out_grid,
+                             std::uint8_t* out_index) {
+    clay_result r = resolve_at(grid, cell, out_grid);
+    if (r != CLAY_OK) return r;
+    return check_palette_index(index, out_index);
+}
+
+clay_result resolve_brush(const clay_voxel_grid* grid, const std::int32_t cell[3],
+                          const clay_brush_params* brush, voxel::VoxelGrid** out_grid,
+                          voxel::BrushParams* out_brush) {
+    clay_result r = resolve_at(grid, cell, out_grid);
+    if (r != CLAY_OK) return r;
+    if (!brush) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brush parameters");
+    return read_brush(brush, out_brush);
+}
+
+// -- evaluation, picking and meshing helpers ---------------------------------
+
+void write_f3(float* out, kernel::cfloat3 v) {
+    out[0] = v.x;
+    out[1] = v.y;
+    out[2] = v.z;
+}
+
+// Origin and direction as the engine's ray. The direction is normalized here
+// rather than required to be: the tracer walks along the vector it is given,
+// so an unnormalized one silently rescales t, and the Python bindings
+// normalize for the same reason. A zero-length one has no direction at all and
+// is rejected, which is the one place this boundary is stricter than they are.
+clay_result make_ray(const float origin[3], const float dir[3], math::Ray* out) {
+    if (!origin || !dir) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null origin or direction");
+    kernel::cfloat3 d = kernel::cf3(dir[0], dir[1], dir[2]);
+    if (!(kernel::clength(d) >= 1e-12f))  // also rejects NaN
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "ray direction must be non-zero");
+    out->origin = kernel::cf3(origin[0], origin[1], origin[2]);
+    out->dir = kernel::cnormalize(d);
+    return CLAY_OK;
+}
+
+// The same, for a batch: the rays are copied so the caller's buffer is never
+// written, and one bad direction rejects the call rather than the ray.
+clay_result normalize_rays(const float* src, std::size_t count, std::vector<float>* out) {
+    clay_result r = check_batch("rays", count);
+    if (r != CLAY_OK) return r;
+    if (count > 0) out->assign(src, src + count * 6);
+    for (std::size_t i = 0; i < count; ++i) {
+        float* d = out->data() + i * 6 + 3;
+        kernel::cfloat3 v = kernel::cf3(d[0], d[1], d[2]);
+        if (!(kernel::clength(v) >= 1e-12f))
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "ray direction must be non-zero");
+        write_f3(d, kernel::cnormalize(v));
+    }
+    return CLAY_OK;
+}
+
+// Each of a batch raycast's four results is a buffer the caller may not have
+// asked for, so the scatter is its own pass rather than four tests inside the
+// query.
+void write_ray_hits(const std::vector<eval::RayHit>& hits, std::size_t count,
+                    std::int32_t* out_hits, float* out_t, float* out_positions_xyz,
+                    float* out_normals_xyz) {
+    for (std::size_t i = 0; i < count; ++i) {
+        if (out_hits) out_hits[i] = hits[i].hit;
+        if (out_t) out_t[i] = hits[i].t;
+        if (out_positions_xyz)
+            std::memcpy(out_positions_xyz + i * 3, hits[i].pos, sizeof hits[i].pos);
+        if (out_normals_xyz)
+            std::memcpy(out_normals_xyz + i * 3, hits[i].normal, sizeof hits[i].normal);
+    }
+}
+
+// Neither of the box predicates catches a box a caller derived from a camera
+// frustum or a degenerate selection: empty() and is_infinite() are both
+// comparisons and every comparison against NaN is false, and is_infinite()
+// tests for +/-FLT_MAX, which an actual infinity is not. Both then reach the
+// engine's float-to-int cell conversion — undefined for a NaN, and an
+// unbounded loop for an infinity. Finiteness is therefore checked first, on
+// the same footing as clay_voxel_grid_create's `!(voxel_size > 0.0f)`.
+bool box_is_finite(const math::Aabb& box) {
+    return std::isfinite(box.min.x) && std::isfinite(box.min.y) && std::isfinite(box.min.z) &&
+           std::isfinite(box.max.x) && std::isfinite(box.max.y) && std::isfinite(box.max.z);
+}
+
+// A box reaches the caller as two triples plus a flag, because "no bounds" is
+// a real answer — an empty layer, a selection of ids the layer does not hold —
+// and not a failure; the Python bindings answer it with None.
+clay_result write_bounds(const math::Aabb& box, float out_min[3], float out_max[3],
+                         std::int32_t* out_has_bounds) {
+    bool has = !box.empty();
+    if (out_has_bounds) *out_has_bounds = has ? 1 : 0;
+    if (!has) return CLAY_OK;
+    if (out_min) write_f3(out_min, box.min);
+    if (out_max) write_f3(out_max, box.max);
+    return CLAY_OK;
+}
+
+// A cell reaches the caller as three int32 values, which is exactly the
+// engine's layout (asserted at the top of this file).
+void write_cell(std::int32_t out[3], voxel::VoxelCoord c) {
+    std::memcpy(out, &c, sizeof c);
+}
+
+// Distances, colors and gradients come off one backend call and differ only in
+// which buffer they fill, so the backend lookup lives here once. The tape is
+// the caller's: a document compiles the whole stack, a layer only itself.
+clay_result eval_into(const scene::Tape& tape, const char* backend, const float* points_xyz,
+                      std::size_t count, const eval::PointResults& out) {
+    clay_result r = check_batch("points", count);
+    if (r != CLAY_OK) return r;
+    const char* name = backend ? backend : "cpu";
+    eval::Backend* b = eval::Registry::instance().find(name);
+    if (!b)
+        return fail(CLAY_ERROR_NOT_FOUND, std::string("backend not registered: ") + name);
+    eval::PointQuery q{points_xyz, count, 1e-4f};
+    if (b->eval_points(tape, q, out) != eval::Status::Ok)
+        return fail(CLAY_ERROR_BACKEND, "eval_points failed");
+    return CLAY_OK;
+}
+
+// The backends fill distances alongside whatever else was asked for, so the
+// ones a gradients-only caller does not want still need somewhere to land.
+clay_result gradients_into(const scene::Tape& tape, const char* backend,
+                           const float* points_xyz, std::size_t count, float* out_gradients_xyz) {
+    clay_result r = check_batch("points", count);  // before the scratch buffer, not after
+    if (r != CLAY_OK) return r;
+    std::vector<float> distances(count ? count : 1);
+    return eval_into(tape, backend, points_xyz, count,
+                     eval::PointResults{distances.data(), out_gradients_xyz, nullptr});
+}
+
+// One layer's own field, which is what the Python bindings' Layer.eval answers:
+// an edit in a layer above cannot change it, so a layer can be probed while the
+// stack it sits in is being authored.
+clay_result compile_one_layer(const clay_document* doc, clay_layer_id layer_id,
+                              scene::Tape* out) {
+    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    *out = scene::compile_layer(*layer);
+    return CLAY_OK;
+}
+
+// Mesher dispatch and the one gate the meshing spec puts on it: plain dual
+// contouring is not guaranteed manifold, so it is reachable only when the
+// caller opts in. The refusal happens here rather than in the engine, which
+// answers an unflagged call with an empty mesh — indistinguishable, one line
+// later, from a document that meshed to nothing.
+clay_result mesh_with(std::int32_t mesher, bool experimental, const scene::Tape& tape,
+                      const math::Aabb& region, float voxel, mesh::Mesh* out) {
+    if (!mesher_is_known(mesher))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown mesher: " + std::to_string(mesher));
+    if (mesher == CLAY_MESHER_DUAL_CONTOURING && !experimental)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the dual_contouring mesher is experimental: set "
+                    "clay_mesh_params.experimental to opt in");
+    if (mesher == CLAY_MESHER_NETS) {
+        *out = mesh::mesh_tape_nets(tape, region, voxel);
+    } else if (mesher == CLAY_MESHER_DUAL_CONTOURING) {
+        mesh::DualContouringOptions dc;
+        dc.enable_experimental = true;
+        *out = mesh::mesh_tape_dc(tape, region, voxel, dc);
+    } else {
+        *out = mesh::mesh_tape(tape, region, voxel);
+    }
+    return CLAY_OK;
+}
+
+clay_voxel_grid* borrow_layer(clay_document* doc, clay_layer_id layer) {
+    clay_voxel_grid& handle = doc->voxel_handles[layer];
+    handle.doc = doc;
+    handle.layer = layer;
+    return &handle;
 }
 
 // The flat descriptor as a builder: same fields, same insertion path. The
@@ -729,14 +1087,57 @@ clay_result clay_eval_points(const clay_document* doc, const char* backend,
                              float* out_colors_rgb) {
     if (!doc || !points_xyz || !out_distances)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null buffer");
-    eval::Backend* b = eval::Registry::instance().find(backend ? backend : "cpu");
-    if (!b) return fail(CLAY_ERROR_NOT_FOUND, std::string("backend not registered: ") +
-                                                  (backend ? backend : "cpu"));
-    scene::Tape tape = scene::compile_document(doc->doc.document);
-    eval::PointQuery q{points_xyz, count, 1e-4f};
-    eval::PointResults out{out_distances, nullptr, out_colors_rgb};
-    eval::Status s = b->eval_points(tape, q, out);
-    if (s != eval::Status::Ok) return fail(CLAY_ERROR_BACKEND, "eval_points failed");
+    return eval_into(scene::compile_document(doc->doc.document), backend, points_xyz, count,
+                     eval::PointResults{out_distances, nullptr, out_colors_rgb});
+}
+
+clay_result clay_eval_gradients(const clay_document* doc, const char* backend,
+                                const float* points_xyz, size_t count,
+                                float* out_gradients_xyz) {
+    if (!doc || !points_xyz || !out_gradients_xyz)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null buffer");
+    return gradients_into(scene::compile_document(doc->doc.document), backend, points_xyz,
+                          count, out_gradients_xyz);
+}
+
+clay_result clay_layer_eval_points(const clay_document* doc, clay_layer_id layer,
+                                   const char* backend, const float* points_xyz, size_t count,
+                                   float* out_distances, float* out_colors_rgb) {
+    if (!doc || !points_xyz || !out_distances)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null buffer");
+    scene::Tape tape;
+    clay_result r = compile_one_layer(doc, layer, &tape);
+    if (r != CLAY_OK) return r;
+    return eval_into(tape, backend, points_xyz, count,
+                     eval::PointResults{out_distances, nullptr, out_colors_rgb});
+}
+
+clay_result clay_layer_eval_gradients(const clay_document* doc, clay_layer_id layer,
+                                      const char* backend, const float* points_xyz, size_t count,
+                                      float* out_gradients_xyz) {
+    if (!doc || !points_xyz || !out_gradients_xyz)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null buffer");
+    scene::Tape tape;
+    clay_result r = compile_one_layer(doc, layer, &tape);
+    if (r != CLAY_OK) return r;
+    return gradients_into(tape, backend, points_xyz, count, out_gradients_xyz);
+}
+
+clay_result clay_safe_step_scale(const clay_document* doc, float* out_scale) {
+    if (!doc || !out_scale)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out pointer");
+    *out_scale = scene::compile_document(doc->doc.document).safe_step_scale();
+    return CLAY_OK;
+}
+
+clay_result clay_layer_safe_step_scale(const clay_document* doc, clay_layer_id layer,
+                                       float* out_scale) {
+    if (!doc || !out_scale)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out pointer");
+    scene::Tape tape;
+    clay_result r = compile_one_layer(doc, layer, &tape);
+    if (r != CLAY_OK) return r;
+    *out_scale = tape.safe_step_scale();
     return CLAY_OK;
 }
 
@@ -759,6 +1160,88 @@ clay_result clay_raycast(const clay_document* doc, const float origin[3], const 
     return CLAY_OK;
 }
 
+clay_result clay_raycast_many(const clay_document* doc, const float* rays_origin_dir,
+                              size_t count, int32_t* out_hits, float* out_t,
+                              float* out_positions_xyz, float* out_normals_xyz) {
+    if (!doc || (count > 0 && !rays_origin_dir))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or rays");
+    if (count == 0) return CLAY_OK;  // no rays is no work, not a rejected query
+    std::vector<float> rays;
+    clay_result r = normalize_rays(rays_origin_dir, count, &rays);
+    if (r != CLAY_OK) return r;
+    eval::Backend* b = eval::Registry::instance().find("cpu");
+    scene::Tape tape = scene::compile_document(doc->doc.document);
+    std::vector<eval::RayHit> hits(count ? count : 1);
+    eval::RayQuery q{rays.data(), count, 0.0f, 1e6f, 1e-4f, 256};
+    if (b->raycast(tape, q, hits.data()) != eval::Status::Ok)
+        return fail(CLAY_ERROR_BACKEND, "raycast failed");
+    write_ray_hits(hits, count, out_hits, out_t, out_positions_xyz, out_normals_xyz);
+    return CLAY_OK;
+}
+
+// -- picking (picking spec, through the C boundary) --------------------------
+
+clay_result clay_raycast_attributed(const clay_document* doc, const float origin[3],
+                                    const float dir[3], int32_t* out_hit, float* out_t,
+                                    float out_position[3], float out_normal[3],
+                                    clay_layer_id* out_layer, clay_node_id* out_node) {
+    if (!doc || !out_hit) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out_hit");
+    math::Ray ray;
+    clay_result r = make_ray(origin, dir, &ray);
+    if (r != CLAY_OK) return r;
+    pick::SceneHit hit = pick::raycast_scene(doc->doc.document, ray);
+    *out_hit = hit.hit ? 1 : 0;
+    if (out_t) *out_t = hit.t;
+    if (out_position) write_f3(out_position, hit.position);
+    if (out_normal) write_f3(out_normal, hit.normal);
+    if (out_layer) *out_layer = hit.layer;
+    if (out_node) *out_node = hit.item;
+    return CLAY_OK;
+}
+
+clay_result clay_snap_to_surface(const clay_document* doc, const float* points_xyz, size_t count,
+                                 float* out_positions_xyz, float* out_normals_xyz,
+                                 int32_t* out_ok) {
+    if (!doc || (count > 0 && !points_xyz))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or points");
+    clay_result r = check_batch("points", count);
+    if (r != CLAY_OK) return r;
+    scene::Tape tape = scene::compile_document(doc->doc.document);
+    for (size_t i = 0; i < count; ++i) {
+        kernel::cfloat3 p =
+            kernel::cf3(points_xyz[i * 3], points_xyz[i * 3 + 1], points_xyz[i * 3 + 2]);
+        pick::SnapResult s = pick::snap_to_surface(tape, p);
+        if (out_positions_xyz) write_f3(out_positions_xyz + i * 3, s.position);
+        if (out_normals_xyz) write_f3(out_normals_xyz + i * 3, s.normal);
+        if (out_ok) out_ok[i] = s.ok ? 1 : 0;
+    }
+    return CLAY_OK;
+}
+
+clay_result clay_layer_bounds(const clay_document* doc, clay_layer_id layer_id, float out_min[3],
+                              float out_max[3], int32_t* out_has_bounds) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    return write_bounds(pick::layer_bounds(*layer), out_min, out_max, out_has_bounds);
+}
+
+clay_result clay_layer_selection_bounds(const clay_document* doc, clay_layer_id layer_id,
+                                        const clay_node_id* nodes, size_t count,
+                                        float out_min[3], float out_max[3],
+                                        int32_t* out_has_bounds) {
+    if (!doc || (count > 0 && !nodes))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or nodes");
+    clay_result r = check_batch("selected nodes", count);
+    if (r != CLAY_OK) return r;
+    if (!doc->doc.document.find_layer(layer_id))
+        return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    std::vector<scene::NodeId> ids;
+    if (count > 0) ids.assign(nodes, nodes + count);
+    return write_bounds(pick::selection_bounds(doc->doc.document, layer_id, ids), out_min,
+                        out_max, out_has_bounds);
+}
+
 clay_result clay_document_mesh(const clay_document* doc, const clay_mesh_params* params,
                                clay_mesh** out_mesh) {
     if (!doc || !params || !out_mesh)
@@ -777,7 +1260,9 @@ clay_result clay_document_mesh(const clay_document* doc, const clay_mesh_params*
         kernel::cfloat3 ext = region.extent();
         voxel = kernel::cmax(ext.x, kernel::cmax(ext.y, ext.z)) / static_cast<float>(res);
     }
-    mesh::Mesh m = mesh::mesh_tape(tape, region, voxel);
+    mesh::Mesh m;
+    r = mesh_with(p.mesher, p.experimental != 0, tape, region, voxel, &m);
+    if (r != CLAY_OK) return r;
     if (m.empty()) return fail(CLAY_ERROR_BACKEND, "meshing produced no triangles");
     if (p.decimate) {
         mesh::DecimateOptions opts;
@@ -801,13 +1286,19 @@ size_t clay_mesh_index_count(const clay_mesh* mesh) {
 const float* clay_mesh_positions(const clay_mesh* mesh) {
     return mesh && !mesh->data.positions.empty() ? &mesh->data.positions[0].x : nullptr;
 }
+// !empty() before the size comparison, not instead of it: clay_voxel_mesh is
+// the one call that hands back a mesh with nothing in it, and indexing an
+// empty vector to take the address of its first field is undefined even when
+// the result is never dereferenced.
 const float* clay_mesh_normals(const clay_mesh* mesh) {
-    return mesh && mesh->data.normals.size() == mesh->data.positions.size()
+    return mesh && !mesh->data.normals.empty() &&
+                   mesh->data.normals.size() == mesh->data.positions.size()
                ? &mesh->data.normals[0].x
                : nullptr;
 }
 const float* clay_mesh_colors(const clay_mesh* mesh) {
-    return mesh && mesh->data.colors.size() == mesh->data.positions.size()
+    return mesh && !mesh->data.colors.empty() &&
+                   mesh->data.colors.size() == mesh->data.positions.size()
                ? &mesh->data.colors[0].x
                : nullptr;
 }
@@ -834,6 +1325,422 @@ clay_result clay_mesh_save(const clay_mesh* mesh, const char* path) {
     if (ext == "fbx") return from_io(io::save_fbx_file(mesh->data, p));
     if (ext == "glb") return from_io(io::save_glb_file(mesh->data, p));
     return fail(CLAY_ERROR_UNSUPPORTED, "unknown extension: " + ext);
+}
+
+// -- voxel grids (c-abi spec: voxel grids across the ABI) --------------------
+
+clay_voxel_grid* clay_voxel_grid_create(float voxel_size) {
+    if (!(voxel_size > 0.0f)) {  // also rejects NaN
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "voxel_size must be > 0");
+        return nullptr;
+    }
+    auto* handle = new clay_voxel_grid();
+    handle->owned = new voxel::VoxelGrid(voxel_size);
+    return handle;
+}
+
+clay_result clay_voxel_grid_destroy(clay_voxel_grid* grid) {
+    if (!grid) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null voxel grid");
+    if (!grid->owned)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this grid is a document layer: the document owns it");
+    delete grid->owned;
+    delete grid;
+    return CLAY_OK;
+}
+
+clay_result clay_document_add_voxel_layer(clay_document* doc, const char* name, float voxel_size,
+                                          clay_layer_id* out_layer, clay_voxel_grid** out_grid) {
+    if (!doc || !name) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or name");
+    if (!(voxel_size > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "voxel_size must be > 0");
+    scene::Layer& layer = doc->doc.document.add_sdf_layer(name);
+    layer.kind = scene::LayerKind::Voxel;
+    layer.sdf.reset();  // a voxel layer carries no SDF content
+    doc->doc.voxel_layers.emplace(layer.id, voxel::VoxelGrid(voxel_size));
+    if (out_layer) *out_layer = layer.id;
+    if (out_grid) *out_grid = borrow_layer(doc, layer.id);
+    return CLAY_OK;
+}
+
+clay_result clay_document_voxel_layer(clay_document* doc, const char* name,
+                                      clay_layer_id* out_layer, clay_voxel_grid** out_grid) {
+    if (!doc || !name) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or name");
+    for (const scene::Layer& layer : doc->doc.document.layers) {
+        if (layer.name != name || layer.kind != scene::LayerKind::Voxel) continue;
+        if (!doc->doc.voxel_layers.count(layer.id)) continue;
+        if (out_layer) *out_layer = layer.id;
+        if (out_grid) *out_grid = borrow_layer(doc, layer.id);
+        return CLAY_OK;
+    }
+    return fail(CLAY_ERROR_NOT_FOUND, std::string("no voxel layer named ") + name);
+}
+
+clay_result clay_voxel_size(const clay_voxel_grid* grid, float* out_voxel_size) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (out_voxel_size) *out_voxel_size = g->voxel_size();
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_palette_add(clay_voxel_grid* grid, const float rgb[3],
+                                   int32_t* out_index) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (!rgb) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null color");
+    std::uint8_t index = g->palette_add(kernel::cf3(rgb[0], rgb[1], rgb[2]));
+    if (out_index) *out_index = index;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_palette_color(const clay_voxel_grid* grid, int32_t index,
+                                     float out_rgb[3]) {
+    voxel::VoxelGrid* g = nullptr;
+    std::uint8_t slot = 0;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    r = check_palette_index(index, &slot);
+    if (r != CLAY_OK) return r;
+    kernel::cfloat3 c = g->palette_color(slot);
+    if (!out_rgb) return CLAY_OK;
+    out_rgb[0] = c.x;
+    out_rgb[1] = c.y;
+    out_rgb[2] = c.z;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_palette_set(clay_voxel_grid* grid, int32_t index, const float rgb[3]) {
+    voxel::VoxelGrid* g = nullptr;
+    std::uint8_t slot = 0;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    r = check_palette_index(index, &slot);
+    if (r != CLAY_OK) return r;
+    if (!rgb) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null color");
+    g->palette_set(slot, kernel::cf3(rgb[0], rgb[1], rgb[2]));
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_palette_size(const clay_voxel_grid* grid, size_t* out_size) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (out_size) *out_size = g->palette_size();
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_get(const clay_voxel_grid* grid, const int32_t cell[3],
+                           int32_t* out_index) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve_at(grid, cell, &g);
+    if (r != CLAY_OK) return r;
+    if (out_index) *out_index = g->get(to_coord(cell));
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_set(clay_voxel_grid* grid, const int32_t cell[3], int32_t index) {
+    voxel::VoxelGrid* g = nullptr;
+    std::uint8_t slot = 0;
+    clay_result r = resolve_at_index(grid, cell, index, &g, &slot);
+    if (r != CLAY_OK) return r;
+    g->set(to_coord(cell), slot);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_erase(clay_voxel_grid* grid, const int32_t cell[3]) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve_at(grid, cell, &g);
+    if (r != CLAY_OK) return r;
+    g->erase(to_coord(cell));
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_paint(clay_voxel_grid* grid, const int32_t cell[3], int32_t index) {
+    voxel::VoxelGrid* g = nullptr;
+    std::uint8_t slot = 0;
+    clay_result r = resolve_at_index(grid, cell, index, &g, &slot);
+    if (r != CLAY_OK) return r;
+    g->paint(to_coord(cell), slot);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_set_many(clay_voxel_grid* grid, const int32_t* cells_xyz, size_t count,
+                                int32_t index) {
+    voxel::VoxelGrid* g = nullptr;
+    std::uint8_t slot = 0;
+    clay_result r = resolve_batch(grid, cells_xyz, count, &g);
+    if (r != CLAY_OK) return r;
+    r = check_palette_index(index, &slot);
+    if (r != CLAY_OK) return r;
+    for (size_t i = 0; i < count; ++i) g->set(to_coord(cells_xyz + i * 3), slot);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_erase_many(clay_voxel_grid* grid, const int32_t* cells_xyz, size_t count) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve_batch(grid, cells_xyz, count, &g);
+    if (r != CLAY_OK) return r;
+    for (size_t i = 0; i < count; ++i) g->erase(to_coord(cells_xyz + i * 3));
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_fill_box(clay_voxel_grid* grid, const int32_t a[3], const int32_t b[3],
+                                int32_t index) {
+    voxel::VoxelGrid* g = nullptr;
+    std::uint8_t slot = 0;
+    clay_result r = resolve_at_index(grid, a, index, &g, &slot);
+    if (r != CLAY_OK) return r;
+    if (!b) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cell");
+    g->fill_box(to_coord(a), to_coord(b), slot);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_fill_line(clay_voxel_grid* grid, const int32_t a[3], const int32_t b[3],
+                                 int32_t index) {
+    voxel::VoxelGrid* g = nullptr;
+    std::uint8_t slot = 0;
+    clay_result r = resolve_at_index(grid, a, index, &g, &slot);
+    if (r != CLAY_OK) return r;
+    if (!b) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cell");
+    g->fill_line(to_coord(a), to_coord(b), slot);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_set_mirrored(clay_voxel_grid* grid, const int32_t cell[3], int32_t index,
+                                    int32_t axes) {
+    voxel::VoxelGrid* g = nullptr;
+    std::uint8_t slot = 0;
+    std::uint8_t mask = 0;
+    clay_result r = resolve_at_index(grid, cell, index, &g, &slot);
+    if (r != CLAY_OK) return r;
+    r = check_mirror_axes(axes, &mask);
+    if (r != CLAY_OK) return r;
+    g->set_mirrored(to_coord(cell), slot, mask);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_paint_mirrored(clay_voxel_grid* grid, const int32_t cell[3], int32_t index,
+                                      int32_t axes) {
+    voxel::VoxelGrid* g = nullptr;
+    std::uint8_t slot = 0;
+    std::uint8_t mask = 0;
+    clay_result r = resolve_at_index(grid, cell, index, &g, &slot);
+    if (r != CLAY_OK) return r;
+    r = check_mirror_axes(axes, &mask);
+    if (r != CLAY_OK) return r;
+    g->paint_mirrored(to_coord(cell), slot, mask);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_set_brush(clay_voxel_grid* grid, const int32_t cell[3],
+                                 const clay_brush_params* brush, int32_t index) {
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    std::uint8_t slot = 0;
+    clay_result r = resolve_brush(grid, cell, brush, &g, &p);
+    if (r != CLAY_OK) return r;
+    r = check_palette_index(index, &slot);
+    if (r != CLAY_OK) return r;
+    g->set_brush(to_coord(cell), p, slot);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_erase_brush(clay_voxel_grid* grid, const int32_t cell[3],
+                                   const clay_brush_params* brush) {
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    clay_result r = resolve_brush(grid, cell, brush, &g, &p);
+    if (r != CLAY_OK) return r;
+    g->erase_brush(to_coord(cell), p);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_paint_brush(clay_voxel_grid* grid, const int32_t cell[3],
+                                   const clay_brush_params* brush, int32_t index) {
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    std::uint8_t slot = 0;
+    clay_result r = resolve_brush(grid, cell, brush, &g, &p);
+    if (r != CLAY_OK) return r;
+    r = check_palette_index(index, &slot);
+    if (r != CLAY_OK) return r;
+    g->paint_brush(to_coord(cell), p, slot);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_smooth(clay_voxel_grid* grid, const int32_t cell[3],
+                                     const clay_brush_params* brush) {
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    clay_result r = resolve_brush(grid, cell, brush, &g, &p);
+    if (r != CLAY_OK) return r;
+    g->sculpt_smooth(to_coord(cell), p);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_inflate(clay_voxel_grid* grid, const int32_t cell[3],
+                                      const clay_brush_params* brush, int32_t amount) {
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    clay_result r = resolve_brush(grid, cell, brush, &g, &p);
+    if (r != CLAY_OK) return r;
+    g->sculpt_inflate(to_coord(cell), p, amount);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_flatten(clay_voxel_grid* grid, const int32_t cell[3],
+                                      const clay_brush_params* brush, const float normal[3],
+                                      float offset_cells) {
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    clay_result r = resolve_brush(grid, cell, brush, &g, &p);
+    if (r != CLAY_OK) return r;
+    if (!normal) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null normal");
+    kernel::cfloat3 n = kernel::cf3(normal[0], normal[1], normal[2]);
+    // The engine normalizes without checking, as the Python bindings do; a
+    // zero-length normal would flatten every cell against a NaN plane, so it
+    // is rejected here the way a plane primitive's is.
+    if (kernel::cdot2(n) <= 0.0f)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "flatten needs a non-zero normal");
+    g->sculpt_flatten(to_coord(cell), p, n, offset_cells);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_pinch(clay_voxel_grid* grid, const int32_t cell[3],
+                                    const clay_brush_params* brush) {
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    clay_result r = resolve_brush(grid, cell, brush, &g, &p);
+    if (r != CLAY_OK) return r;
+    g->sculpt_pinch(to_coord(cell), p);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_occupied_count(const clay_voxel_grid* grid, size_t* out_count) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (out_count) *out_count = g->occupied_count();
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_bounds(const clay_voxel_grid* grid, int32_t out_min[3],
+                              int32_t out_max[3], int32_t* out_has_bounds) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    std::optional<voxel::VoxelCoord> lo = g->bounds_min();
+    std::optional<voxel::VoxelCoord> hi = g->bounds_max();
+    if (out_has_bounds) *out_has_bounds = lo && hi ? 1 : 0;
+    if (!lo || !hi) return CLAY_OK;
+    if (out_min) std::memcpy(out_min, &*lo, sizeof(voxel::VoxelCoord));
+    if (out_max) std::memcpy(out_max, &*hi, sizeof(voxel::VoxelCoord));
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_flood_select(const clay_voxel_grid* grid, const int32_t seed[3],
+                                    int32_t same_color, int32_t* out_cells, size_t* count) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve_at(grid, seed, &g);
+    if (r != CLAY_OK) return r;
+    if (!count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null count");
+    std::vector<voxel::VoxelCoord> sel = g->flood_select(to_coord(seed), same_color != 0);
+    std::size_t found = sel.size();
+    if (out_cells && *count < found) {
+        *count = found;
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "the selection needs " + std::to_string(found) + " cells");
+    }
+    if (out_cells && found > 0)
+        std::memcpy(out_cells, sel.data(), found * sizeof(voxel::VoxelCoord));
+    *count = found;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sample_step_field(const clay_voxel_grid* grid, const float* points_xyz,
+                                         size_t count, float* out_values) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (count > 0 && (!points_xyz || !out_values))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null buffer");
+    r = check_batch("points", count);
+    if (r != CLAY_OK) return r;
+    for (size_t i = 0; i < count; ++i)
+        out_values[i] = g->sample_step_field(
+            kernel::cf3(points_xyz[i * 3], points_xyz[i * 3 + 1], points_xyz[i * 3 + 2]));
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_mesh(const clay_voxel_grid* grid, clay_mesh** out_mesh) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (!out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out pointer");
+    auto* handle = new clay_mesh();
+    handle->data = g->mesh_greedy();
+    *out_mesh = handle;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_rasterize(clay_voxel_grid* grid, const clay_document* doc,
+                                 const float region_min[3], const float region_max[3]) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if ((region_min == nullptr) != (region_max == nullptr))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a region needs both a min and a max");
+    scene::Tape tape = scene::compile_document(doc->doc.document);
+    math::Aabb box = tape.bounds;
+    if (region_min)
+        box = math::Aabb{kernel::cf3(region_min[0], region_min[1], region_min[2]),
+                         kernel::cf3(region_max[0], region_max[1], region_max[2])};
+    // Checked before the grid is touched, so a rejected call leaves it as it
+    // was rather than half-rasterized.
+    if (!box_is_finite(box) || box.empty() || box.is_infinite())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    region_min ? "the region must be finite, non-empty and bounded"
+                               : "document has no bounded content to rasterize");
+    g->rasterize_tape(tape, box);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_raycast(const clay_voxel_grid* grid, const float origin[3],
+                               const float dir[3], int32_t* out_hit, int32_t out_cell[3],
+                               int32_t* out_face, int32_t out_adjacent[3], float* out_t) {
+    voxel::VoxelGrid* g = nullptr;
+    math::Ray ray;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    r = make_ray(origin, dir, &ray);
+    if (r != CLAY_OK) return r;
+    if (!out_hit) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_hit");
+    pick::VoxelHit hit = pick::raycast_voxels(*g, ray);
+    *out_hit = hit.hit ? 1 : 0;
+    if (!hit.hit) return CLAY_OK;  // nothing else means anything on a miss
+    if (out_cell) write_cell(out_cell, hit.cell);
+    if (out_face) *out_face = hit.face;
+    if (out_adjacent) write_cell(out_adjacent, pick::adjacent_cell(hit));
+    if (out_t) *out_t = hit.t;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_build_plane_pick(const clay_voxel_grid* grid, const float origin[3],
+                                        const float dir[3], int32_t plane_cell,
+                                        int32_t* out_hit, int32_t out_cell[3]) {
+    voxel::VoxelGrid* g = nullptr;
+    math::Ray ray;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    r = make_ray(origin, dir, &ray);
+    if (r != CLAY_OK) return r;
+    if (!out_hit) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_hit");
+    std::optional<voxel::VoxelCoord> cell = pick::pick_build_plane(*g, ray, plane_cell);
+    *out_hit = cell ? 1 : 0;
+    if (cell && out_cell) write_cell(out_cell, *cell);
+    return CLAY_OK;
 }
 
 }  // extern "C"

@@ -3,10 +3,10 @@
  *
  * Internal to the bindings, not installed: it lives beside clay_c.cpp only so
  * the rule can be exercised with a descriptor whose original layout is
- * genuinely shorter than its current one. No shipped descriptor is yet, so
- * driving it through clay_add_item alone would leave the prefix path — the
- * whole point of the convention — untested until the first field is appended,
- * which is exactly when it must already work.
+ * genuinely shorter than its current one. clay_mesh_params is now the first
+ * shipped descriptor to have grown — the mesher fields were appended to it in
+ * ABI 0.3.0 — and the synthetic pair here stays because the rule has to keep
+ * working for the descriptors that have not.
  */
 
 #ifndef CLAY_DESC_VERSION_H

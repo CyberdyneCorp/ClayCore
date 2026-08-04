@@ -514,6 +514,26 @@ static int check_error_paths(void) {
     REQUIRE(clay_item_set_repeat_grid(NULL, three, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_item_set_transition_radial(NULL, 0.0f, 1.0f, 0) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_layer_add_item(NULL, 0, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_eval_gradients(NULL, NULL, three, 1, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_layer_eval_points(NULL, 0, NULL, three, 1, NULL, NULL) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_layer_eval_gradients(NULL, 0, NULL, three, 1, NULL) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_safe_step_scale(NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_layer_safe_step_scale(NULL, 0, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_raycast_many(NULL, NULL, 1, NULL, NULL, NULL, NULL) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_raycast_attributed(NULL, three, three, NULL, NULL, NULL, NULL, NULL, NULL) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_snap_to_surface(NULL, three, 1, NULL, NULL, NULL) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_layer_bounds(NULL, 0, NULL, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_layer_selection_bounds(NULL, 0, NULL, 0, NULL, NULL, NULL) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_raycast(NULL, three, three, NULL, NULL, NULL, NULL, NULL) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_build_plane_pick(NULL, three, three, 0, NULL, NULL) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_document_mesh(NULL, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_mesh_validate(NULL, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_mesh_save(NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
@@ -616,6 +636,387 @@ static int check_flat_path(clay_document* doc, clay_layer_id layer) {
     return 0;
 }
 
+/* -- voxel grids ----------------------------------------------------------- */
+
+/* A brush declaring the layout it was compiled against, hard-edged. */
+static clay_brush_params cube_brush(int32_t size) {
+    clay_brush_params b;
+    memset(&b, 0, sizeof b);
+    b.struct_size = (uint32_t)sizeof b;
+    b.size = size;
+    b.shape = CLAY_BRUSH_SHAPE_CUBE;
+    b.falloff = CLAY_BRUSH_FALLOFF_CONSTANT;
+    b.strength = 1.0f; /* no field of this descriptor has a default */
+    return b;
+}
+
+/* Palette, single and batch edits, fills, mirror and the queries over a
+ * caller-owned grid. */
+static int check_voxel_edits(void) {
+    const int32_t origin[3] = {0, 0, 0};
+    const int32_t away[3] = {5, 0, 0};
+    const int32_t batch[6] = {10, 0, 0, 11, 0, 0};
+    const int32_t box_a[3] = {-2, -2, -2}, box_b[3] = {-1, -1, -1};
+    float red[3] = {1.0f, 0.0f, 0.0f}, blue[3] = {0.0f, 0.0f, 1.0f};
+    float back[3] = {0.0f, 0.0f, 0.0f};
+    int32_t red_index = -1, blue_index = -1, read = -1, has_bounds = -1;
+    int32_t lo[3], hi[3];
+    size_t palette = 0, occupied = 0;
+    float voxel_size = 0.0f;
+
+    clay_voxel_grid* grid = clay_voxel_grid_create(0.25f);
+    REQUIRE(grid != NULL);
+    REQUIRE(clay_voxel_grid_create(0.0f) == NULL);
+    REQUIRE(clay_voxel_size(grid, &voxel_size) == CLAY_OK);
+    REQUIRE(voxel_size == 0.25f);
+
+    /* index 0 is the empty slot: never added, never recolored */
+    REQUIRE(clay_voxel_palette_size(grid, &palette) == CLAY_OK);
+    REQUIRE(palette == 1);
+    REQUIRE(clay_voxel_palette_add(grid, red, &red_index) == CLAY_OK);
+    REQUIRE(clay_voxel_palette_add(grid, blue, &blue_index) == CLAY_OK);
+    REQUIRE(red_index == 1 && blue_index == 2);
+    REQUIRE(clay_voxel_palette_color(grid, red_index, back) == CLAY_OK);
+    REQUIRE(back[0] == 1.0f && back[2] == 0.0f);
+    /* a recolor is read back off the entry it recolored, and only that one */
+    REQUIRE(clay_voxel_palette_color(grid, blue_index, back) == CLAY_OK);
+    REQUIRE(back[0] == 0.0f && back[2] == 1.0f);
+    REQUIRE(clay_voxel_palette_set(grid, blue_index, red) == CLAY_OK);
+    REQUIRE(clay_voxel_palette_color(grid, blue_index, back) == CLAY_OK);
+    REQUIREF(back[0] == 1.0f && back[2] == 0.0f, "the recolored entry reads %g %g %g",
+             (double)back[0], (double)back[1], (double)back[2]);
+    /* index 0 is the empty slot: recoloring it is a no-op, not an error */
+    REQUIRE(clay_voxel_palette_set(grid, 0, red) == CLAY_OK);
+    REQUIRE(clay_voxel_palette_color(grid, 0, back) == CLAY_OK);
+    REQUIRE(back[0] == 0.0f);
+    REQUIRE(clay_voxel_palette_set(grid, 300, red) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    /* set, get, paint (occupied cells only), erase */
+    REQUIRE(clay_voxel_set(grid, origin, red_index) == CLAY_OK);
+    REQUIRE(clay_voxel_get(grid, origin, &read) == CLAY_OK);
+    REQUIRE(read == red_index);
+    REQUIRE(clay_voxel_paint(grid, origin, blue_index) == CLAY_OK);
+    REQUIRE(clay_voxel_get(grid, origin, &read) == CLAY_OK && read == blue_index);
+    REQUIRE(clay_voxel_paint(grid, away, blue_index) == CLAY_OK);
+    REQUIRE(clay_voxel_get(grid, away, &read) == CLAY_OK && read == 0);
+    REQUIRE(clay_voxel_erase(grid, origin) == CLAY_OK);
+    REQUIRE(clay_voxel_get(grid, origin, &read) == CLAY_OK && read == 0);
+
+    REQUIRE(clay_voxel_set_many(grid, batch, 2, red_index) == CLAY_OK);
+    REQUIRE(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK);
+    REQUIRE(occupied == 2);
+    REQUIRE(clay_voxel_erase_many(grid, batch, 2) == CLAY_OK);
+    REQUIRE(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK && occupied == 0);
+
+    /* an empty grid has no bounds, and says so instead of inventing some */
+    REQUIRE(clay_voxel_bounds(grid, lo, hi, &has_bounds) == CLAY_OK);
+    REQUIRE(has_bounds == 0);
+
+    REQUIRE(clay_voxel_fill_box(grid, box_a, box_b, red_index) == CLAY_OK);
+    REQUIRE(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK && occupied == 8);
+    REQUIRE(clay_voxel_bounds(grid, lo, hi, &has_bounds) == CLAY_OK);
+    REQUIRE(has_bounds == 1);
+    REQUIREF(lo[0] == -2 && hi[0] == -1, "box fill bounds x are %d..%d, expected -2..-1", lo[0],
+             hi[0]);
+
+    REQUIRE(clay_voxel_fill_line(grid, batch, batch + 3, red_index) == CLAY_OK);
+    REQUIRE(clay_voxel_get(grid, batch, &read) == CLAY_OK && read == red_index);
+
+    /* mirrored: the cell given plus its reflection about lattice 0 */
+    const int32_t right[3] = {3, 1, 1};
+    const int32_t left[3] = {-4, 1, 1};
+    REQUIRE(clay_voxel_set_mirrored(grid, right, red_index, CLAY_MIRROR_X) == CLAY_OK);
+    REQUIRE(clay_voxel_get(grid, left, &read) == CLAY_OK && read == red_index);
+    REQUIRE(clay_voxel_paint_mirrored(grid, right, blue_index, CLAY_MIRROR_X) == CLAY_OK);
+    REQUIRE(clay_voxel_get(grid, left, &read) == CLAY_OK && read == blue_index);
+    REQUIRE(clay_voxel_set_mirrored(grid, right, red_index, 8) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    REQUIRE(clay_voxel_grid_destroy(grid) == CLAY_OK);
+    return 0;
+}
+
+/* Brushes, the sculpting verbs, flood select's size-query, the step field and
+ * greedy meshing. */
+static int check_voxel_sculpting(void) {
+    const int32_t centre[3] = {0, 0, 0};
+    const int32_t outside[3] = {40, 40, 40};
+    float white[3] = {1.0f, 1.0f, 1.0f};
+    int32_t index = -1;
+    size_t occupied = 0, selected = 0, capacity = 0;
+    clay_brush_params cube5 = cube_brush(5);
+    clay_brush_params sphere5 = cube_brush(5);
+    sphere5.shape = CLAY_BRUSH_SHAPE_SPHERE;
+
+    clay_voxel_grid* grid = clay_voxel_grid_create(0.1f);
+    REQUIRE(grid != NULL);
+    REQUIRE(clay_voxel_palette_add(grid, white, &index) == CLAY_OK);
+
+    REQUIRE(clay_voxel_set_brush(grid, centre, &cube5, index) == CLAY_OK);
+    REQUIRE(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK);
+    REQUIREF(occupied == 125, "a size-5 cube brush filled %zu cells, expected 125", occupied);
+
+    /* a sphere of the same size is a subset of the cube */
+    REQUIRE(clay_voxel_erase_brush(grid, centre, &cube5) == CLAY_OK);
+    REQUIRE(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK && occupied == 0);
+    REQUIRE(clay_voxel_set_brush(grid, centre, &sphere5, index) == CLAY_OK);
+    REQUIRE(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK);
+    REQUIREF(occupied > 0 && occupied < 125, "a size-5 sphere brush filled %zu cells", occupied);
+
+    /* Painting recolors what the footprint covers and leaves everything else,
+     * so it is checked with an index the stamp above did not use: painting
+     * with the same one is unobservable by construction. */
+    const int32_t under_brush[3] = {1, 0, 0};
+    int32_t recolored = -1, painted = -1, untouched = -1;
+    float grey[3] = {0.5f, 0.5f, 0.5f};
+    REQUIRE(clay_voxel_set(grid, outside, index) == CLAY_OK);
+    REQUIRE(clay_voxel_palette_add(grid, grey, &recolored) == CLAY_OK && recolored != index);
+    REQUIRE(clay_voxel_paint_brush(grid, centre, &sphere5, recolored) == CLAY_OK);
+    REQUIRE(clay_voxel_get(grid, under_brush, &painted) == CLAY_OK);
+    REQUIREF(painted == recolored, "a cell inside the painted footprint reads %d, expected %d",
+             painted, recolored);
+    REQUIRE(clay_voxel_get(grid, outside, &untouched) == CLAY_OK);
+    REQUIREF(untouched == index, "paint_brush reached a cell outside its footprint (%d)",
+             untouched);
+    REQUIRE(clay_voxel_erase(grid, outside) == CLAY_OK);
+    REQUIRE(clay_voxel_paint_brush(grid, centre, &sphere5, index) == CLAY_OK);
+
+    /* a soft brush touches fewer cells than the hard one it softens */
+    clay_voxel_grid* soft = clay_voxel_grid_create(0.1f);
+    REQUIRE(soft != NULL);
+    clay_brush_params faded = sphere5;
+    faded.falloff = CLAY_BRUSH_FALLOFF_LINEAR;
+    faded.seed = 7;
+    size_t soft_count = 0;
+    REQUIRE(clay_voxel_set_brush(soft, centre, &faded, 1) == CLAY_OK);
+    REQUIRE(clay_voxel_occupied_count(soft, &soft_count) == CLAY_OK);
+    REQUIREF(soft_count > 0 && soft_count < occupied,
+             "a linear falloff filled %zu cells, the hard brush %zu", soft_count, occupied);
+    REQUIRE(clay_voxel_grid_destroy(soft) == CLAY_OK);
+
+    /* the four verbs run over the same footprint */
+    float normal[3] = {0.0f, 1.0f, 0.0f};
+    float zero[3] = {0.0f, 0.0f, 0.0f};
+    REQUIRE(clay_voxel_sculpt_smooth(grid, centre, &sphere5) == CLAY_OK);
+    REQUIRE(clay_voxel_sculpt_inflate(grid, centre, &sphere5, 1) == CLAY_OK);
+    REQUIRE(clay_voxel_sculpt_inflate(grid, centre, &sphere5, -1) == CLAY_OK);
+    REQUIRE(clay_voxel_sculpt_flatten(grid, centre, &sphere5, normal, 0.0f) == CLAY_OK);
+    REQUIRE(clay_voxel_sculpt_flatten(grid, centre, &sphere5, zero, 0.0f) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_sculpt_pinch(grid, centre, &sphere5) == CLAY_OK);
+    REQUIRE(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK && occupied > 0);
+
+    /* flood select through the size-query pattern */
+    REQUIRE(clay_voxel_flood_select(grid, centre, 1, NULL, &selected) == CLAY_OK);
+    REQUIREF(selected == occupied, "flood select reports %zu cells of %zu occupied", selected,
+             occupied);
+    capacity = selected - 1;
+    int32_t* cells = (int32_t*)malloc(selected * 3 * sizeof(int32_t));
+    REQUIRE(cells != NULL);
+    REQUIRE(clay_voxel_flood_select(grid, centre, 1, cells, &capacity) ==
+            CLAY_ERROR_BUFFER_TOO_SMALL);
+    REQUIRE(capacity == selected); /* the short call reports what it needs */
+    REQUIRE(clay_voxel_flood_select(grid, centre, 1, cells, &capacity) == CLAY_OK);
+    REQUIRE(capacity == selected);
+    int32_t seeded = -1;
+    REQUIRE(clay_voxel_get(grid, cells, &seeded) == CLAY_OK && seeded != 0);
+    free(cells);
+    /* an empty seed selects nothing, which is not an error */
+    REQUIRE(clay_voxel_flood_select(grid, outside, 1, NULL, &selected) == CLAY_OK);
+    REQUIRE(selected == 0);
+
+    /* the step field is a bound: negative inside, positive outside */
+    float points[6] = {0.0f, 0.0f, 0.0f, 100.0f, 100.0f, 100.0f};
+    float field[2] = {0.0f, 0.0f};
+    REQUIRE(clay_voxel_sample_step_field(grid, points, 2, field) == CLAY_OK);
+    REQUIRE(field[0] < 0.0f && field[1] > 0.0f);
+
+    clay_mesh* mesh = NULL;
+    REQUIRE(clay_voxel_mesh(grid, &mesh) == CLAY_OK);
+    REQUIRE(clay_mesh_vertex_count(mesh) > 0);
+    REQUIRE(clay_mesh_index_count(mesh) % 3 == 0);
+    REQUIRE(clay_mesh_colors(mesh) != NULL);
+    clay_mesh_destroy(mesh);
+
+    /* an empty grid meshes to nothing rather than failing */
+    clay_voxel_grid* bare = clay_voxel_grid_create(0.1f);
+    clay_mesh* empty = NULL;
+    REQUIRE(bare != NULL);
+    REQUIRE(clay_voxel_mesh(bare, &empty) == CLAY_OK);
+    REQUIRE(clay_mesh_vertex_count(empty) == 0);
+    clay_mesh_destroy(empty);
+    REQUIRE(clay_voxel_grid_destroy(bare) == CLAY_OK);
+
+    REQUIRE(clay_voxel_grid_destroy(grid) == CLAY_OK);
+    return 0;
+}
+
+/* The ownership rule: a document layer's grid is borrowed, survives a save and
+ * load, and refuses to be destroyed by the caller. */
+static int check_voxel_ownership(void) {
+    const int32_t cell[3] = {1, 2, 3};
+    float green[3] = {0.0f, 1.0f, 0.0f};
+    int32_t index = -1, read = -1;
+    clay_layer_id layer = 0, found_layer = 0;
+    clay_voxel_grid* grid = NULL;
+    clay_voxel_grid* again = NULL;
+
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != NULL);
+    REQUIRE(clay_document_add_voxel_layer(doc, "voxels", 0.0f, &layer, &grid) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_document_add_voxel_layer(doc, "voxels", 0.2f, &layer, &grid) == CLAY_OK);
+    REQUIRE(grid != NULL);
+
+    /* the borrowed handle is the document's: destroying it is refused, and the
+     * document keeps working afterwards */
+    REQUIRE(clay_voxel_grid_destroy(grid) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_palette_add(grid, green, &index) == CLAY_OK);
+    REQUIRE(clay_voxel_set(grid, cell, index) == CLAY_OK);
+
+    /* looking the layer up again borrows the same grid */
+    REQUIRE(clay_document_voxel_layer(doc, "voxels", &found_layer, &again) == CLAY_OK);
+    REQUIRE(found_layer == layer && again == grid);
+    REQUIRE(clay_document_voxel_layer(doc, "nothing", NULL, &again) == CLAY_ERROR_NOT_FOUND);
+
+    /* an SDF layer is not a voxel layer, and vice versa */
+    clay_layer_id sdf = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "body", &sdf) == CLAY_OK);
+    REQUIRE(clay_document_voxel_layer(doc, "body", NULL, &again) == CLAY_ERROR_NOT_FOUND);
+
+    /* edits through the borrow are what the document saves */
+    REQUIRE(clay_document_save(doc, "c_api_smoke_voxels.clayspace") == CLAY_OK);
+    clay_document* loaded = NULL;
+    REQUIRE(clay_document_load("c_api_smoke_voxels.clayspace", &loaded) == CLAY_OK);
+    REQUIRE(clay_document_voxel_layer(loaded, "voxels", NULL, &again) == CLAY_OK);
+    REQUIRE(clay_voxel_get(again, cell, &read) == CLAY_OK);
+    REQUIREF(read == index, "the reloaded layer reads %d at the edited cell, wrote %d", read,
+             index);
+
+    clay_document_destroy(loaded);
+    clay_document_destroy(doc);
+    return 0;
+}
+
+/* Everything the voxel surface rejects, including the versioned brush. */
+static int check_voxel_rejections(void) {
+    const int32_t cell[3] = {0, 0, 0};
+    float rgb[3] = {1.0f, 1.0f, 1.0f};
+    clay_brush_params brush = cube_brush(3);
+    clay_voxel_grid* grid = clay_voxel_grid_create(0.1f);
+    REQUIRE(grid != NULL);
+
+    /* null handles are arguments, not crashes */
+    REQUIRE(clay_voxel_grid_destroy(NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_size(NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_set(NULL, cell, 1) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_set(grid, NULL, 1) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_set_brush(grid, cell, NULL, 1) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_flood_select(grid, cell, 1, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_palette_add(grid, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_rasterize(grid, NULL, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_document_add_voxel_layer(NULL, NULL, 0.1f, NULL, NULL) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_document_voxel_layer(NULL, NULL, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    /* out-of-range palette indices are rejected, not truncated to a byte */
+    REQUIRE(clay_voxel_set(grid, cell, 256) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_set(grid, cell, -1) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_palette_color(grid, 256, rgb) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    /* the brush descriptor obeys the prefix rule, and its own fields */
+    clay_brush_params unsized = brush;
+    unsized.struct_size = 0;
+    REQUIRE(clay_voxel_set_brush(grid, cell, &unsized, 1) == CLAY_ERROR_INVALID_ARGUMENT);
+    unsized.struct_size = 4; /* shorter than any layout that ever shipped */
+    REQUIRE(clay_voxel_set_brush(grid, cell, &unsized, 1) == CLAY_ERROR_INVALID_ARGUMENT);
+    unsized.struct_size = 0x3D23D70A; /* the bits of 0.04f: not a struct size */
+    REQUIRE(clay_voxel_set_brush(grid, cell, &unsized, 1) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    clay_brush_params bad = brush;
+    bad.size = 0;
+    REQUIRE(clay_voxel_set_brush(grid, cell, &bad, 1) == CLAY_ERROR_INVALID_ARGUMENT);
+    bad = brush;
+    bad.shape = 99;
+    REQUIRE(clay_voxel_set_brush(grid, cell, &bad, 1) == CLAY_ERROR_INVALID_ARGUMENT);
+    bad = brush;
+    bad.falloff = 99;
+    REQUIRE(clay_voxel_erase_brush(grid, cell, &bad) == CLAY_ERROR_INVALID_ARGUMENT);
+    /* a bad size is reported before a bad shape, as it is in the Python
+     * bindings, so the same mistake reads the same way through both */
+    bad = brush;
+    bad.size = -1;
+    bad.shape = 99;
+    REQUIRE(clay_voxel_set_brush(grid, cell, &bad, 1) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(strstr(clay_last_error(), "size") != NULL);
+
+    /* a caller from the future: the tail this build cannot name is ignored */
+    struct {
+        clay_brush_params brush;
+        float tail[3];
+    } future;
+    memset(&future, 0, sizeof future);
+    future.brush = brush;
+    future.brush.struct_size = (uint32_t)sizeof future;
+    REQUIRE(clay_voxel_set_brush(grid, cell, &future.brush, 1) == CLAY_OK);
+
+    /* No field of this descriptor has a default, so a zeroed-but-sized brush
+     * is rejected on the first field whose value means nothing — strength —
+     * rather than silently stamping everything or silently stamping nothing.
+     * A destructive verb makes the difference matter: at full coverage the
+     * erase below would take the whole footprint away. */
+    clay_brush_params zeroed;
+    memset(&zeroed, 0, sizeof zeroed);
+    zeroed.struct_size = (uint32_t)sizeof zeroed;
+    zeroed.size = 3;
+    size_t stamped = 0, left = 0;
+    clay_voxel_grid* a = clay_voxel_grid_create(0.1f);
+    REQUIRE(a != NULL);
+    REQUIRE(clay_voxel_set_brush(a, cell, &zeroed, 1) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(strstr(clay_last_error(), "strength") != NULL);
+    REQUIRE(clay_voxel_occupied_count(a, &stamped) == CLAY_OK && stamped == 0);
+    zeroed.strength = -1.0f;
+    REQUIRE(clay_voxel_set_brush(a, cell, &zeroed, 1) == CLAY_ERROR_INVALID_ARGUMENT);
+    zeroed.strength = 1.0f;
+    REQUIRE(clay_voxel_set_brush(a, cell, &zeroed, 1) == CLAY_OK);
+    REQUIRE(clay_voxel_occupied_count(a, &stamped) == CLAY_OK);
+    REQUIREF(stamped == 27, "a size-3 cube brush filled %zu cells, expected 27", stamped);
+    zeroed.strength = 0.0f;
+    REQUIRE(clay_voxel_erase_brush(a, cell, &zeroed) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_occupied_count(a, &left) == CLAY_OK);
+    REQUIREF(left == stamped, "a rejected erase took %zu of %zu cells", stamped - left, stamped);
+    REQUIRE(clay_voxel_grid_destroy(a) == CLAY_OK);
+
+    REQUIRE(clay_voxel_grid_destroy(grid) == CLAY_OK);
+    return 0;
+}
+
+/* Rasterizing an SDF document into a voxel layer of the same document. */
+static int check_voxel_rasterize(clay_document* doc) {
+    float small[3] = {-0.5f, -0.5f, -0.5f}, big[3] = {0.5f, 0.5f, 0.5f};
+    clay_voxel_grid* grid = NULL;
+    size_t occupied = 0;
+
+    clay_document* empty = clay_document_create();
+    clay_voxel_grid* bare = clay_voxel_grid_create(0.1f);
+    REQUIRE(empty != NULL && bare != NULL);
+    REQUIRE(clay_voxel_rasterize(bare, empty, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    /* half a region is not a region */
+    REQUIRE(clay_voxel_rasterize(bare, empty, small, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_occupied_count(bare, &occupied) == CLAY_OK && occupied == 0);
+    REQUIRE(clay_voxel_grid_destroy(bare) == CLAY_OK);
+    clay_document_destroy(empty);
+
+    REQUIRE(clay_document_add_voxel_layer(doc, "rasterized", 0.05f, NULL, &grid) == CLAY_OK);
+    REQUIRE(clay_voxel_rasterize(grid, doc, small, big) == CLAY_OK);
+    REQUIRE(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK);
+    REQUIREF(occupied > 0, "rasterizing the smoke document filled %zu cells", occupied);
+    /* the field's colors arrive as palette entries */
+    size_t palette = 0;
+    REQUIRE(clay_voxel_palette_size(grid, &palette) == CLAY_OK);
+    REQUIRE(palette > 1);
+    return 0;
+}
+
 /* -- evaluation, meshing, file I/O ----------------------------------------- */
 
 static int check_evaluation(clay_document* doc) {
@@ -638,6 +1039,325 @@ static int check_evaluation(clay_document* doc) {
     REQUIRE(hit == 1);
     REQUIREF(t > 3.9f && t < 4.1f, "the ray hit at t = %g, expected 4", (double)t);
     REQUIRE(normal[2] < -0.9f);
+    return 0;
+}
+
+/* gradients, the batch raycast and the step scale: the entry points a viewer
+ * calls per frame rather than per edit */
+static int check_batch_evaluation(clay_document* doc) {
+    /* off the sphere's centre on purpose: the gradient at the exact centre of
+     * a ball is not a direction, and normalizing it gives NaN */
+    float pts[9] = {0.5f, 0, 0, 3, 0, 0, 0.4f, 0.3f, 0.2f};
+    float gradients[9];
+    memset(gradients, 0, sizeof gradients);
+    REQUIRE(clay_eval_gradients(doc, NULL, pts, 3, gradients) == CLAY_OK);
+    for (int i = 0; i < 3; ++i) { /* a gradient is a direction: unit length */
+        float g[3] = {gradients[i * 3], gradients[i * 3 + 1], gradients[i * 3 + 2]};
+        float len = sqrtf(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
+        REQUIREF(len > 0.99f && len < 1.01f, "gradient %d has length %g, expected 1", i,
+                 (double)len);
+    }
+    REQUIRE(clay_eval_gradients(doc, "no_such_backend", pts, 3, gradients) ==
+            CLAY_ERROR_NOT_FOUND);
+
+    float scale = 0.0f;
+    REQUIRE(clay_safe_step_scale(doc, &scale) == CLAY_OK);
+    REQUIREF(scale > 0.0f && scale <= 1.0f, "the safe step scale is %g, expected (0, 1]",
+             (double)scale);
+
+    /* two rays: one down +Z at the sphere, one that leaves the scene. The
+     * second direction is not unit length on purpose — the batch form
+     * normalizes, so t stays a world distance. */
+    float rays[12] = {0, 0, -5, 0, 0, 1, 0, 40, -5, 0, 0, 3};
+    int32_t hits[2] = {0, 0};
+    float t[2] = {0, 0};
+    float positions[6], normals[6];
+    REQUIRE(clay_raycast_many(doc, rays, 2, hits, t, positions, normals) == CLAY_OK);
+    REQUIRE(hits[0] == 1 && hits[1] == 0);
+    REQUIREF(t[0] > 3.9f && t[0] < 4.1f, "the batch ray hit at t = %g, expected 4",
+             (double)t[0]);
+    REQUIRE(normals[2] < -0.9f);
+    /* every out buffer is optional */
+    REQUIRE(clay_raycast_many(doc, rays, 2, hits, NULL, NULL, NULL) == CLAY_OK);
+    /* a ray with no direction has nowhere to go */
+    float degenerate[6] = {0, 0, -5, 0, 0, 0};
+    REQUIRE(clay_raycast_many(doc, degenerate, 1, hits, NULL, NULL, NULL) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    return 0;
+}
+
+/* One layer's own field, which is not the document's: what the layer beside it
+ * holds cannot change what this one reads. */
+static int check_layer_evaluation(void) {
+    clay_document* doc = clay_document_create();
+    clay_layer_id body = 0, beside = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "body", &body) == CLAY_OK);
+    REQUIRE(clay_add_sdf_layer(doc, "beside", &beside) == CLAY_OK);
+
+    clay_item_desc sphere;
+    memset(&sphere, 0, sizeof sphere);
+    sphere.struct_size = (uint32_t)sizeof sphere;
+    sphere.prim = CLAY_PRIM_SPHERE;
+    sphere.params[0] = 1.0f;
+    sphere.rotation[3] = 1.0f;
+    sphere.scale = 1.0f;
+    sphere.color[0] = 0.8f;
+    REQUIRE(clay_add_item(doc, body, &sphere, NULL) == CLAY_OK);
+    clay_item_desc other = sphere;
+    other.params[0] = 0.5f;
+    other.position[0] = 2.0f;
+    REQUIRE(clay_add_item(doc, beside, &other, NULL) == CLAY_OK);
+
+    /* a point inside the second layer's sphere: material to the document,
+     * empty space to the first layer on its own */
+    float at[3] = {2.0f, 0, 0};
+    float whole = 0.0f, one_layer = 0.0f, colors[3];
+    REQUIRE(clay_eval_points(doc, NULL, at, 1, &whole, NULL) == CLAY_OK);
+    REQUIRE(clay_layer_eval_points(doc, body, NULL, at, 1, &one_layer, colors) == CLAY_OK);
+    REQUIREF(whole < 0.0f, "the whole document reads %g at (2, 0, 0), expected inside",
+             (double)whole);
+    REQUIREF(one_layer > 0.0f, "the body layer reads %g at (2, 0, 0), expected empty space",
+             (double)one_layer);
+
+    float gradient[3] = {0, 0, 0};
+    REQUIRE(clay_layer_eval_gradients(doc, body, NULL, at, 1, gradient) == CLAY_OK);
+    REQUIREF(gradient[0] > 0.9f, "the layer gradient at (2, 0, 0) points (%g, %g, %g), "
+             "expected +x", (double)gradient[0], (double)gradient[1], (double)gradient[2]);
+
+    float scale = 0.0f;
+    REQUIRE(clay_layer_safe_step_scale(doc, body, &scale) == CLAY_OK);
+    REQUIREF(scale > 0.0f && scale <= 1.0f, "the layer step scale is %g, expected (0, 1]",
+             (double)scale);
+
+    /* a layer that is not there is an error, not an empty field */
+    REQUIRE(clay_layer_eval_points(doc, 99999, NULL, at, 1, &one_layer, NULL) ==
+            CLAY_ERROR_NOT_FOUND);
+    REQUIRE(clay_layer_safe_step_scale(doc, 99999, &scale) == CLAY_ERROR_NOT_FOUND);
+    clay_document_destroy(doc);
+    return 0;
+}
+
+/* -- picking --------------------------------------------------------------- */
+
+/* Attribution, snapping and the two bounds queries, over a document whose two
+ * layers are far enough apart to attribute unambiguously. */
+static int check_picking(void) {
+    clay_document* doc = clay_document_create();
+    clay_layer_id ball = 0, slab = 0;
+    clay_node_id ball_node = 0, slab_node = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "ball", &ball) == CLAY_OK);
+    REQUIRE(clay_add_sdf_layer(doc, "slab", &slab) == CLAY_OK);
+
+    clay_item_desc sphere;
+    memset(&sphere, 0, sizeof sphere);
+    sphere.struct_size = (uint32_t)sizeof sphere;
+    sphere.prim = CLAY_PRIM_SPHERE;
+    sphere.params[0] = 1.0f;
+    sphere.rotation[3] = 1.0f;
+    sphere.scale = 1.0f;
+    REQUIRE(clay_add_item(doc, ball, &sphere, &ball_node) == CLAY_OK);
+    clay_item_desc box = sphere;
+    box.prim = CLAY_PRIM_BOX;
+    box.params[0] = box.params[1] = box.params[2] = 0.5f;
+    box.position[0] = 3.0f;
+    REQUIRE(clay_add_item(doc, slab, &box, &slab_node) == CLAY_OK);
+
+    /* a ray down each shape attributes to its own layer and item */
+    float dir[3] = {0, 0, 1};
+    float at_ball[3] = {0, 0, -5}, at_slab[3] = {3, 0, -5};
+    int32_t hit = 0;
+    float t = 0, position[3], normal[3];
+    clay_layer_id layer = 424242;
+    clay_node_id node = 424242;
+    REQUIRE(clay_raycast_attributed(doc, at_ball, dir, &hit, &t, position, normal, &layer,
+                                    &node) == CLAY_OK);
+    REQUIRE(hit == 1);
+    REQUIREF(layer == ball && node == ball_node,
+             "the sphere attributed to layer %u node %u, expected layer %u node %u", layer,
+             node, ball, ball_node);
+    REQUIRE(clay_raycast_attributed(doc, at_slab, dir, &hit, &t, position, normal, &layer,
+                                    &node) == CLAY_OK);
+    REQUIRE(hit == 1);
+    REQUIREF(layer == slab && node == slab_node,
+             "the box attributed to layer %u node %u, expected layer %u node %u", layer, node,
+             slab, slab_node);
+
+    /* a miss attributes nothing, and 0 is never a layer or a node id */
+    float away[3] = {0, 40, -5};
+    REQUIRE(clay_raycast_attributed(doc, away, dir, &hit, NULL, NULL, NULL, &layer, &node) ==
+            CLAY_OK);
+    REQUIRE(hit == 0 && layer == 0 && node == 0);
+    float no_direction[3] = {0, 0, 0};
+    REQUIRE(clay_raycast_attributed(doc, away, no_direction, &hit, NULL, NULL, NULL, NULL,
+                                    NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    /* snapping: a point off the sphere lands on it, normal pointing outward */
+    float points[6] = {0, 2.0f, 0, 0, -2.0f, 0};
+    float snapped[6], snapped_normals[6];
+    int32_t ok[2] = {-1, -1};
+    REQUIRE(clay_snap_to_surface(doc, points, 2, snapped, snapped_normals, ok) == CLAY_OK);
+    REQUIRE(ok[0] == 1 && ok[1] == 1);
+    REQUIREF(snapped[1] > 0.99f && snapped[1] < 1.01f,
+             "the point above the sphere snapped to y = %g, expected 1", (double)snapped[1]);
+    REQUIRE(snapped_normals[1] > 0.9f);
+    REQUIREF(snapped[4] < -0.99f && snapped[4] > -1.01f,
+             "the point below the sphere snapped to y = %g, expected -1", (double)snapped[4]);
+    REQUIRE(snapped_normals[4] < -0.9f);
+    REQUIRE(clay_snap_to_surface(doc, points, 2, snapped, NULL, NULL) == CLAY_OK);
+
+    /* bounds: the box layer's box, then the same for that one node */
+    float lo[3], hi[3];
+    int32_t has_bounds = 0;
+    REQUIRE(clay_layer_bounds(doc, slab, lo, hi, &has_bounds) == CLAY_OK);
+    REQUIRE(has_bounds == 1);
+    REQUIREF(lo[0] > 2.4f && lo[0] < 2.6f && hi[0] > 3.4f && hi[0] < 3.6f,
+             "the box layer spans x [%g, %g], expected [2.5, 3.5]", (double)lo[0],
+             (double)hi[0]);
+    float sel_lo[3], sel_hi[3];
+    REQUIRE(clay_layer_selection_bounds(doc, slab, &slab_node, 1, sel_lo, sel_hi,
+                                        &has_bounds) == CLAY_OK);
+    REQUIRE(has_bounds == 1);
+    for (int i = 0; i < 3; ++i) {
+        REQUIRE(sel_lo[i] == lo[i]);
+        REQUIRE(sel_hi[i] == hi[i]);
+    }
+    /* an empty selection is an answer, a missing layer is not found */
+    has_bounds = 1;
+    REQUIRE(clay_layer_selection_bounds(doc, slab, NULL, 0, sel_lo, sel_hi, &has_bounds) ==
+            CLAY_OK);
+    REQUIRE(has_bounds == 0);
+    REQUIRE(clay_layer_bounds(doc, 99999, lo, hi, &has_bounds) == CLAY_ERROR_NOT_FOUND);
+    REQUIRE(clay_layer_selection_bounds(doc, 99999, &slab_node, 1, lo, hi, &has_bounds) ==
+            CLAY_ERROR_NOT_FOUND);
+    clay_document_destroy(doc);
+    return 0;
+}
+
+/* Cell picking, the six entry faces clay_voxel_face names, and the build
+ * plane a click resolves against when the ray hits nothing. */
+static int check_voxel_picking(void) {
+    struct shot {
+        float origin[3];
+        float dir[3];
+        int32_t face;
+        int32_t cell[3];
+        int32_t adjacent[3];
+    };
+    static const struct shot shots[6] = {
+        {{2.0f, 0.15f, 0.15f}, {-1, 0, 0}, CLAY_VOXEL_FACE_POS_X, {3, 1, 1}, {4, 1, 1}},
+        {{-2.0f, 0.15f, 0.15f}, {1, 0, 0}, CLAY_VOXEL_FACE_NEG_X, {0, 1, 1}, {-1, 1, 1}},
+        {{0.15f, 2.0f, 0.15f}, {0, -1, 0}, CLAY_VOXEL_FACE_POS_Y, {1, 3, 1}, {1, 4, 1}},
+        {{0.15f, -2.0f, 0.15f}, {0, 1, 0}, CLAY_VOXEL_FACE_NEG_Y, {1, 0, 1}, {1, -1, 1}},
+        {{0.15f, 0.15f, 2.0f}, {0, 0, -1}, CLAY_VOXEL_FACE_POS_Z, {1, 1, 3}, {1, 1, 4}},
+        {{0.15f, 0.15f, -2.0f}, {0, 0, 1}, CLAY_VOXEL_FACE_NEG_Z, {1, 1, 0}, {1, 1, -1}}};
+    clay_voxel_grid* grid = clay_voxel_grid_create(0.1f);
+    REQUIRE(grid != NULL);
+    int32_t index = 0;
+    float rgb[3] = {0.5f, 0.5f, 0.5f};
+    int32_t lo[3] = {0, 0, 0}, hi[3] = {3, 3, 3};
+    REQUIRE(clay_voxel_palette_add(grid, rgb, &index) == CLAY_OK);
+    REQUIRE(clay_voxel_fill_box(grid, lo, hi, index) == CLAY_OK);
+
+    for (size_t i = 0; i < 6; ++i) {
+        int32_t hit = 0, face = -1, cell[3] = {0, 0, 0}, adjacent[3] = {0, 0, 0};
+        float t = 0;
+        REQUIRE(clay_voxel_raycast(grid, shots[i].origin, shots[i].dir, &hit, cell, &face,
+                                   adjacent, &t) == CLAY_OK);
+        REQUIRE(hit == 1);
+        REQUIREF(face == shots[i].face, "shot %zu entered through face %d, expected %d", i,
+                 face, shots[i].face);
+        for (int c = 0; c < 3; ++c) {
+            REQUIREF(cell[c] == shots[i].cell[c],
+                     "shot %zu hit cell (%d, %d, %d), expected (%d, %d, %d)", i, cell[0],
+                     cell[1], cell[2], shots[i].cell[0], shots[i].cell[1], shots[i].cell[2]);
+            REQUIREF(adjacent[c] == shots[i].adjacent[c],
+                     "shot %zu places at (%d, %d, %d), expected (%d, %d, %d)", i, adjacent[0],
+                     adjacent[1], adjacent[2], shots[i].adjacent[0], shots[i].adjacent[1],
+                     shots[i].adjacent[2]);
+        }
+        REQUIRE(t > 0.0f);
+    }
+
+    /* a ray that leaves the block reports a miss, not an error */
+    float away[3] = {5, 5, 5}, outward[3] = {1, 1, 1};
+    int32_t hit = 1;
+    REQUIRE(clay_voxel_raycast(grid, away, outward, &hit, NULL, NULL, NULL, NULL) == CLAY_OK);
+    REQUIRE(hit == 0);
+
+    /* the build plane: y is always the plane's own cell index */
+    float origin[3] = {0.55f, 2.0f, 0.35f}, down[3] = {0, -1, 0};
+    int32_t cell[3] = {0, 0, 0};
+    REQUIRE(clay_voxel_build_plane_pick(grid, origin, down, 0, &hit, cell) == CLAY_OK);
+    REQUIRE(hit == 1);
+    REQUIREF(cell[0] == 5 && cell[1] == 0 && cell[2] == 3,
+             "the build plane resolved to (%d, %d, %d), expected (5, 0, 3)", cell[0], cell[1],
+             cell[2]);
+    REQUIRE(clay_voxel_build_plane_pick(grid, origin, down, 2, &hit, cell) == CLAY_OK);
+    REQUIRE(hit == 1 && cell[1] == 2);
+    /* parallel to the plane, and with the plane behind: both are misses */
+    float sideways[3] = {1, 0, 0}, up[3] = {0, 1, 0};
+    hit = 1;
+    REQUIRE(clay_voxel_build_plane_pick(grid, origin, sideways, 0, &hit, cell) == CLAY_OK);
+    REQUIRE(hit == 0);
+    hit = 1;
+    REQUIRE(clay_voxel_build_plane_pick(grid, origin, up, 0, &hit, cell) == CLAY_OK);
+    REQUIRE(hit == 0);
+
+    /* rejections */
+    float no_direction[3] = {0, 0, 0};
+    REQUIRE(clay_voxel_raycast(grid, origin, no_direction, &hit, NULL, NULL, NULL, NULL) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_raycast(grid, NULL, down, &hit, NULL, NULL, NULL, NULL) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_raycast(grid, origin, down, NULL, NULL, NULL, NULL, NULL) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_build_plane_pick(NULL, origin, down, 0, &hit, cell) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_voxel_grid_destroy(grid) == CLAY_OK);
+    return 0;
+}
+
+/* Mesher selection, and the gate the experimental one sits behind. */
+static int check_meshers(clay_document* doc) {
+    clay_mesh_params mp;
+    memset(&mp, 0, sizeof mp);
+    mp.struct_size = (uint32_t)sizeof mp;
+    mp.resolution = 32;
+
+    mp.mesher = CLAY_MESHER_MARCHING;
+    clay_mesh* marching = NULL;
+    REQUIRE(clay_document_mesh(doc, &mp, &marching) == CLAY_OK);
+    REQUIRE(clay_mesh_vertex_count(marching) > 0);
+
+    mp.mesher = CLAY_MESHER_NETS;
+    clay_mesh* nets = NULL;
+    REQUIRE(clay_document_mesh(doc, &mp, &nets) == CLAY_OK);
+    REQUIRE(clay_mesh_vertex_count(nets) > 0);
+    /* surface nets is the preview path: one vertex per crossing cell, so it
+     * is always the smaller mesh at the same voxel size */
+    REQUIREF(clay_mesh_vertex_count(nets) < clay_mesh_vertex_count(marching),
+             "surface nets gave %zu vertices, marching %zu", clay_mesh_vertex_count(nets),
+             clay_mesh_vertex_count(marching));
+
+    /* dual contouring is refused without the opt-in and reachable with it */
+    mp.mesher = CLAY_MESHER_DUAL_CONTOURING;
+    clay_mesh* dc = NULL;
+    REQUIRE(clay_document_mesh(doc, &mp, &dc) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(dc == NULL);
+    REQUIRE(strstr(clay_last_error(), "experimental") != NULL);
+    mp.experimental = 1;
+    REQUIRE(clay_document_mesh(doc, &mp, &dc) == CLAY_OK);
+    REQUIRE(clay_mesh_vertex_count(dc) > 0);
+
+    /* an unknown mesher is rejected rather than meshed with the default */
+    mp.mesher = 99;
+    clay_mesh* rejected = NULL;
+    REQUIRE(clay_document_mesh(doc, &mp, &rejected) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(rejected == NULL);
+
+    clay_mesh_destroy(marching);
+    clay_mesh_destroy(nets);
+    clay_mesh_destroy(dc);
     return 0;
 }
 
@@ -703,9 +1423,19 @@ int main(void) {
     if (check_every_primitive() != 0) return 1;
     if (check_struct_versioning() != 0) return 1;
     if (check_error_paths() != 0) return 1;
+    if (check_voxel_edits() != 0) return 1;
+    if (check_voxel_sculpting() != 0) return 1;
+    if (check_voxel_ownership() != 0) return 1;
+    if (check_voxel_rejections() != 0) return 1;
+    if (check_voxel_picking() != 0) return 1;
     if (check_evaluation(doc) != 0) return 1;
+    if (check_batch_evaluation(doc) != 0) return 1;
+    if (check_layer_evaluation() != 0) return 1;
+    if (check_picking() != 0) return 1;
+    if (check_meshers(doc) != 0) return 1;
     if (check_meshing(doc) != 0) return 1;
     if (check_round_trip(doc) != 0) return 1;
+    if (check_voxel_rasterize(doc) != 0) return 1;
 
     clay_document_destroy(doc);
     printf("c-api smoke: OK\n");

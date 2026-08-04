@@ -50,7 +50,7 @@ write PNGs with the standard library.
 | Meshing | Marching tetrahedra (watertight + 2-manifold by construction), surface nets preview, flagged dual contouring, meshoptimizer decimation, validation, vertex colors/normals/UVs |
 | Picking | Scene and brick raycast with layer/item attribution, surface snapping, voxel cell/face picking, selection bounds |
 | I/O | `.clayspace` documents, OBJ+MTL, PLY, FBX (ufbx import + binary writer), glTF 2.0 GLB |
-| Bindings | Stable C ABI (`clay.h`: item builder for composed edits, complete primitive/op/blend enumerations, versioned descriptor structs), SwiftPM xcframework, `pyclay` (nanobind, numpy-native: authoring incl. strokes and extended ops, voxels, evaluation, all three meshers, picking, I/O), `clay` CLI |
+| Bindings | Stable C ABI (`clay.h`: item builder for composed edits, complete primitive/op/blend enumerations, versioned descriptor structs, the whole voxel engine incl. brushes and sculpting verbs, picking and evaluation — parity with `pyclay` is gated in CI), SwiftPM xcframework, `pyclay` (nanobind, numpy-native: authoring incl. strokes and extended ops, voxels, evaluation, all three meshers, picking, I/O), `clay` CLI |
 
 ## Build
 
@@ -82,6 +82,8 @@ python3 tools/check_layering.py        # module dependency rule
 python3 tools/check_kernel_dialect.py  # kernel headers stay backend-portable
 python3 tools/check_licenses.py        # permissive-license manifest gate
 python3 examples/run_all.py            # every example runs (needs pyclay built)
+python3 tools/check_binding_parity.py  # the C ABI reaches what pyclay reaches
+./tools/check_swift_smoke.sh           # clay.h is usable from Swift (Apple only)
 ```
 
 ## License
