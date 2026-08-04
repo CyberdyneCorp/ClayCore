@@ -45,6 +45,29 @@ inline constexpr std::uint8_t kVoxMirrorZ = 4;
 // of Cube for a given size, and its occupancy ratio approaches pi/6.
 enum class BrushShape : std::uint8_t { Cube = 0, Sphere = 1 };
 
+// Falloff curve over the normalized distance from the footprint centre.
+// Constant is the hard-edged brush and stays the default.
+enum class BrushFalloff : std::uint8_t {
+    Constant = 0,
+    Linear = 1,
+    Smooth = 2,  // smoothstep
+    Gaussian = 3,
+};
+
+// One brush stamp. Occupancy is binary, so a weight strictly between 0 and 1
+// cannot be stored in a cell; it is resolved by dithering against a hash of
+// the cell coordinate and `seed`. Weight 1 always applies and weight 0 never
+// does, so the falloff shows up as fractional coverage across the footprint
+// rather than as partial density in any one cell. The hash makes that
+// reproducible: same stamp, same seed, same cells, on every platform.
+struct BrushParams {
+    int size = 3;
+    BrushShape shape = BrushShape::Cube;
+    BrushFalloff falloff = BrushFalloff::Constant;
+    float strength = 1.0f;
+    std::uint32_t seed = 0;
+};
+
 class VoxelGrid {
   public:
     explicit VoxelGrid(float voxel_size = 0.1f) : voxel_size_(voxel_size) {
@@ -81,6 +104,28 @@ class VoxelGrid {
                      BrushShape shape = BrushShape::Cube);
     void fill_box(VoxelCoord a, VoxelCoord b, std::uint8_t index);  // inclusive corners
     void fill_line(VoxelCoord a, VoxelCoord b, std::uint8_t index); // 3D DDA
+
+    // Falloff-weighted forms of the same three brushes.
+    void set_brush(VoxelCoord c, const BrushParams& p, std::uint8_t index);
+    void erase_brush(VoxelCoord c, const BrushParams& p) { set_brush(c, p, 0); }
+    void paint_brush(VoxelCoord c, const BrushParams& p, std::uint8_t index);
+
+    // -- sculpting verbs -----------------------------------------------------
+    // These reshape existing material instead of stamping a footprint. Each
+    // reads a snapshot of the region first, so a cell's outcome never depends
+    // on a neighbour the same call already changed.
+
+    // Majority filter over the 26-neighbourhood: spurs dissolve, notches fill.
+    void sculpt_smooth(VoxelCoord c, const BrushParams& p);
+    // amount > 0 dilates, < 0 erodes, |amount| times.
+    void sculpt_inflate(VoxelCoord c, const BrushParams& p, int amount = 1);
+    // Pull the surface onto the plane through the brush centre (offset in
+    // cells along `normal`): material on the + side goes, hollows on the -
+    // side that touch material are filled.
+    void sculpt_flatten(VoxelCoord c, const BrushParams& p, kernel::cfloat3 normal,
+                        float offset_cells = 0.0f);
+    // Move surface cells one step toward the brush centre.
+    void sculpt_pinch(VoxelCoord c, const BrushParams& p);
 
     // -- mirror --------------------------------------------------------------
     // Mirror plane passes through lattice coordinate 0 on each active axis:

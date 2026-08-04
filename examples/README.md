@@ -151,6 +151,30 @@ layer.
 ![scene](output/08_scene.png)
 ![rasterized SDF](output/08_rasterized.png)
 
+### 09 — falloff brushes and sculpting verbs
+
+Occupancy is binary, so a soft brush cannot make a cell half-solid. What it
+can do is cover a *fraction* of its footprint, thinning toward the rim. That
+is a falloff curve resolved by dithering against a hash of the cell
+coordinate — a hash rather than a random number, so the same stroke always
+produces the same cells and these renders regenerate identically.
+
+![falloff curves](output/09_falloff_curves.png)
+
+Strength scales the same curve down.
+
+![falloff strength](output/09_falloff_strength.png)
+
+The four verbs reshape material rather than stamping a footprint. Every tile
+starts from the same bumpy slab, so the only difference is which verb ran.
+
+![sculpting verbs](output/09_sculpt_verbs.png)
+
+Each verb reads a snapshot of the region before writing, so no cell's outcome
+depends on a neighbour the same call already changed. Note that inflate
+followed by erode is not an identity — that is a morphological closing, which
+fills small hollows on the way through.
+
 ## Notes
 
 - **Committed models are budgeted.** `_render.save_model` fails above 400 KiB

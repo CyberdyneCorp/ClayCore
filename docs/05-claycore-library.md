@@ -211,6 +211,13 @@ blocks = doc.add_voxel_layer("blocks", voxel_size=0.1)
 blocks.set_many(np.array([[0, 0, 0], [1, 0, 0]], np.int32), blocks.palette_add("#ff8800"))
 blocks.set_brush((0, 0, 0), 5, blocks.palette_add("#4488ff"), shape="sphere")
 blocks.paint_brush((0, 0, 0), 7, blocks.palette_add("#ff4444"))  # occupied only
+# soft brushes: falloff dithers coverage across the footprint, deterministically
+blocks.set_brush((0, 0, 0), 15, 1, shape="sphere", falloff="smooth", strength=0.6)
+# sculpting verbs reshape what is already there
+blocks.sculpt_smooth((0, 0, 0), 9)
+blocks.sculpt_inflate((0, 0, 0), 9, amount=-1)          # negative = erode
+blocks.sculpt_flatten((0, 0, 0), 9, normal=(0, 1, 0))
+blocks.sculpt_pinch((0, 0, 0), 9)
 blocks.rasterize(doc)                      # SDF -> voxels
 vox_mesh = blocks.mesh()                   # greedy meshing
 

@@ -32,6 +32,7 @@ add_library(claycore
   src/scene/tape_build.cpp
   src/brick/cache.cpp
   src/voxel/grid.cpp
+  src/voxel/sculpt.cpp
   src/mesh/marching.cpp
   src/mesh/surface_nets.cpp
   src/mesh/dual_contouring.cpp

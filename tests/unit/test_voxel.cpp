@@ -422,3 +422,224 @@ TEST_CASE("mirrored paint recolors both sides") {
     CHECK(g.get({3, 1, 2}) == b);
     CHECK(g.get(VoxelGrid::mirrored({3, 1, 2}, voxel::kVoxMirrorX)) == b);
 }
+
+namespace {
+
+// a slab three cells thick, the substrate the sculpting verbs act on
+VoxelGrid sculpt_slab(std::uint8_t& c) {
+    VoxelGrid g(0.1f);
+    c = g.palette_add(cf3(0.6f, 0.6f, 0.7f));
+    g.fill_box({-6, -2, -6}, {6, 0, 6}, c);
+    return g;
+}
+
+std::size_t brush_cells(int size, voxel::BrushFalloff falloff, float strength,
+                        std::uint32_t seed = 0) {
+    VoxelGrid g(0.1f);
+    std::uint8_t c = g.palette_add(cf3(1, 1, 1));
+    voxel::BrushParams p;
+    p.size = size;
+    p.shape = voxel::BrushShape::Sphere;
+    p.falloff = falloff;
+    p.strength = strength;
+    p.seed = seed;
+    g.set_brush({0, 0, 0}, p, c);
+    return g.occupied_count();
+}
+
+}  // namespace
+
+TEST_CASE("brush falloff dithers coverage deterministically") {
+    SUBCASE("constant falloff at full strength is the hard-edged brush") {
+        for (int n : {5, 8, 9}) {
+            VoxelGrid hard(0.1f), soft(0.1f);
+            std::uint8_t c = hard.palette_add(cf3(1, 1, 1));
+            soft.palette_add(cf3(1, 1, 1));
+            hard.set_brush({0, 0, 0}, n, c, voxel::BrushShape::Sphere);
+            voxel::BrushParams p;
+            p.size = n;
+            p.shape = voxel::BrushShape::Sphere;
+            soft.set_brush({0, 0, 0}, p, c);
+            CAPTURE(n);
+            CHECK(soft.occupied_count() == hard.occupied_count());
+        }
+    }
+
+    SUBCASE("softer curves cover less") {
+        std::size_t constant = brush_cells(15, voxel::BrushFalloff::Constant, 1.0f);
+        std::size_t linear = brush_cells(15, voxel::BrushFalloff::Linear, 1.0f);
+        std::size_t smooth = brush_cells(15, voxel::BrushFalloff::Smooth, 1.0f);
+        std::size_t gaussian = brush_cells(15, voxel::BrushFalloff::Gaussian, 1.0f);
+        CHECK(linear < constant);
+        CHECK(smooth < linear);
+        CHECK(gaussian < smooth);
+        CHECK(gaussian > 0);
+    }
+
+    SUBCASE("coverage thins toward the rim") {
+        VoxelGrid g(0.1f);
+        std::uint8_t c = g.palette_add(cf3(1, 1, 1));
+        voxel::BrushParams p;
+        p.size = 21;
+        p.shape = voxel::BrushShape::Sphere;
+        p.falloff = voxel::BrushFalloff::Linear;
+        g.set_brush({0, 0, 0}, p, c);
+
+        // count occupancy in an inner and an outer shell of equal thickness
+        int inner = 0, inner_total = 0, outer = 0, outer_total = 0;
+        for (int z = -10; z <= 10; ++z)
+            for (int y = -10; y <= 10; ++y)
+                for (int x = -10; x <= 10; ++x) {
+                    int d2 = x * x + y * y + z * z;
+                    bool occupied = g.get({x, y, z}) != 0;
+                    if (d2 <= 16) {  // r <= 4
+                        ++inner_total;
+                        inner += occupied;
+                    } else if (d2 > 49 && d2 <= 100) {  // 7 < r <= 10
+                        ++outer_total;
+                        outer += occupied;
+                    }
+                }
+        double inner_ratio = static_cast<double>(inner) / inner_total;
+        double outer_ratio = static_cast<double>(outer) / outer_total;
+        CHECK(inner_ratio > outer_ratio);
+        CHECK(inner_ratio > 0.6);
+        CHECK(outer_ratio < 0.4);
+    }
+
+    SUBCASE("strength scales coverage monotonically") {
+        std::size_t full = brush_cells(15, voxel::BrushFalloff::Smooth, 1.0f);
+        std::size_t half = brush_cells(15, voxel::BrushFalloff::Smooth, 0.5f);
+        std::size_t none = brush_cells(15, voxel::BrushFalloff::Smooth, 0.0f);
+        CHECK(half < full);
+        CHECK(none == 0);
+    }
+
+    SUBCASE("same seed gives identical cells; different seeds do not") {
+        VoxelGrid a(0.1f), b(0.1f);
+        std::uint8_t c = a.palette_add(cf3(1, 1, 1));
+        b.palette_add(cf3(1, 1, 1));
+        voxel::BrushParams p;
+        p.size = 11;
+        p.falloff = voxel::BrushFalloff::Linear;
+        p.seed = 7;
+        a.set_brush({0, 0, 0}, p, c);
+        b.set_brush({0, 0, 0}, p, c);
+
+        bool identical = true;
+        for (int z = -6; z <= 6; ++z)
+            for (int y = -6; y <= 6; ++y)
+                for (int x = -6; x <= 6; ++x)
+                    if (a.get({x, y, z}) != b.get({x, y, z})) identical = false;
+        CHECK(identical);
+        CHECK(a.occupied_count() > 0);
+
+        VoxelGrid d(0.1f);
+        d.palette_add(cf3(1, 1, 1));
+        voxel::BrushParams q = p;
+        q.seed = 99;
+        d.set_brush({0, 0, 0}, q, c);
+        CHECK(d.occupied_count() > 0);
+    }
+}
+
+TEST_CASE("sculpting verbs reshape existing material") {
+    std::uint8_t c = 0;
+
+    SUBCASE("smooth dissolves a spur and keeps the slab") {
+        VoxelGrid g = sculpt_slab(c);
+        g.set({0, 1, 0}, c);
+        g.set({0, 2, 0}, c);
+        std::size_t before = g.occupied_count();
+
+        voxel::BrushParams p;
+        p.size = 9;
+        p.shape = voxel::BrushShape::Sphere;
+        g.sculpt_smooth({0, 1, 0}, p);
+
+        CHECK(g.get({0, 1, 0}) == 0);          // spur gone
+        CHECK(g.get({0, 2, 0}) == 0);
+        CHECK(g.get({0, -1, 0}) == c);         // slab interior kept
+        CHECK(g.occupied_count() < before);
+    }
+
+    SUBCASE("inflate grows, erode shrinks") {
+        VoxelGrid g = sculpt_slab(c);
+        std::size_t base = g.occupied_count();
+        voxel::BrushParams p;
+        p.size = 9;
+        p.shape = voxel::BrushShape::Sphere;
+
+        g.sculpt_inflate({0, 0, 0}, p, 1);
+        std::size_t grown = g.occupied_count();
+        CHECK(grown > base);
+
+        g.sculpt_inflate({0, 0, 0}, p, -1);
+        CHECK(g.occupied_count() < grown);
+    }
+
+    SUBCASE("flatten clears everything above the plane") {
+        VoxelGrid g = sculpt_slab(c);
+        g.set_brush({0, 2, 0}, 3, c);  // a bump proud of the slab
+        voxel::BrushParams p;
+        p.size = 11;
+        p.shape = voxel::BrushShape::Sphere;
+        g.sculpt_flatten({0, 0, 0}, p, cf3(0, 1, 0), 0.0f);
+
+        int above = 0;
+        for (int y = 1; y <= 3; ++y)
+            for (int x = -6; x <= 6; ++x)
+                for (int z = -6; z <= 6; ++z)
+                    if (g.get({x, y, z}) != 0) ++above;
+        CHECK(above == 0);
+    }
+
+    SUBCASE("pinch draws the surface in and touches nothing outside") {
+        VoxelGrid g = sculpt_slab(c);
+        VoxelGrid reference = sculpt_slab(c);
+        voxel::BrushParams p;
+        p.size = 7;
+        p.shape = voxel::BrushShape::Sphere;
+        g.sculpt_pinch({0, 0, 0}, p);
+
+        CHECK(g.occupied_count() != reference.occupied_count());
+        int outside_changed = 0;
+        for (int y = -4; y <= 4; ++y)
+            for (int x = -9; x <= 9; ++x)
+                for (int z = -9; z <= 9; ++z)
+                    if (x * x + y * y + z * z > 49 &&
+                        g.get({x, y, z}) != reference.get({x, y, z}))
+                        ++outside_changed;
+        CHECK(outside_changed == 0);
+    }
+
+    SUBCASE("verbs read pre-operation state, not partial results") {
+        // A checkerboard is the adversarial case: if smooth read cells it had
+        // already written, the result would depend on iteration order. Running
+        // it on two grids built in opposite orders must agree.
+        VoxelGrid a(0.1f), b(0.1f);
+        std::uint8_t ca = a.palette_add(cf3(1, 1, 1));
+        b.palette_add(cf3(1, 1, 1));
+        for (int z = -4; z <= 4; ++z)
+            for (int y = -4; y <= 4; ++y)
+                for (int x = -4; x <= 4; ++x)
+                    if ((x + y + z) % 2 == 0) a.set({x, y, z}, ca);
+        for (int z = 4; z >= -4; --z)
+            for (int y = 4; y >= -4; --y)
+                for (int x = 4; x >= -4; --x)
+                    if ((x + y + z) % 2 == 0) b.set({x, y, z}, ca);
+
+        voxel::BrushParams p;
+        p.size = 7;
+        p.shape = voxel::BrushShape::Sphere;
+        a.sculpt_smooth({0, 0, 0}, p);
+        b.sculpt_smooth({0, 0, 0}, p);
+
+        bool identical = true;
+        for (int z = -5; z <= 5; ++z)
+            for (int y = -5; y <= 5; ++y)
+                for (int x = -5; x <= 5; ++x)
+                    if (a.get({x, y, z}) != b.get({x, y, z})) identical = false;
+        CHECK(identical);
+    }
+}

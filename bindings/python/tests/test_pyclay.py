@@ -963,3 +963,108 @@ def test_paint_mirrored_recolors_both_sides():
     assert g.occupied_count == 2
     assert g.get((3, 1, 2)) == b
     assert g.get((-4, 1, 2)) == b     # mirror of x=3 is -1-3
+
+
+# --- falloff brushes and sculpting verbs (add-sculpt-brushes) ---------------
+
+
+def _soft(size, falloff, strength=1.0, seed=0, shape="sphere"):
+    g = clay.VoxelGrid(voxel_size=0.1)
+    i = g.palette_add("#ffffff")
+    g.set_brush((0, 0, 0), size, i, shape=shape, falloff=falloff,
+                strength=strength, seed=seed)
+    return g
+
+
+def _slab():
+    g = clay.VoxelGrid(voxel_size=0.1)
+    c = g.palette_add("#8899aa")
+    g.fill_box((-6, -2, -6), (6, 0, 6), c)
+    return g, c
+
+
+def test_constant_falloff_matches_the_hard_brush():
+    for size in (5, 8, 9):
+        hard = clay.VoxelGrid(voxel_size=0.1)
+        i = hard.palette_add("#ffffff")
+        hard.set_brush((0, 0, 0), size, i, shape="sphere")
+        assert _soft(size, "constant").occupied_count == hard.occupied_count
+
+
+def test_softer_falloff_covers_less():
+    counts = [_soft(15, f).occupied_count
+              for f in ("constant", "linear", "smooth", "gaussian")]
+    assert counts == sorted(counts, reverse=True), counts
+    assert counts[-1] > 0
+
+
+def test_strength_scales_coverage():
+    full = _soft(15, "smooth", strength=1.0).occupied_count
+    half = _soft(15, "smooth", strength=0.5).occupied_count
+    assert 0 < half < full
+    assert _soft(15, "smooth", strength=0.0).occupied_count == 0
+
+
+def test_falloff_dither_is_deterministic():
+    a = _soft(11, "linear", seed=7)
+    b = _soft(11, "linear", seed=7)
+    assert a.occupied_count == b.occupied_count
+    for z in range(-6, 7):
+        for y in range(-6, 7):
+            for x in range(-6, 7):
+                assert a.get((x, y, z)) == b.get((x, y, z))
+
+
+def test_unknown_falloff_is_rejected():
+    g = clay.VoxelGrid(voxel_size=0.1)
+    i = g.palette_add("#ffffff")
+    with pytest.raises(ValueError, match="constant.*linear.*smooth.*gaussian"):
+        g.set_brush((0, 0, 0), 5, i, falloff="wobble")
+
+
+def test_sculpt_smooth_dissolves_a_spur():
+    g, c = _slab()
+    g.set((0, 1, 0), c)
+    g.set((0, 2, 0), c)
+    before = g.occupied_count
+    g.sculpt_smooth((0, 1, 0), 9)
+    assert g.get((0, 1, 0)) == 0
+    assert g.get((0, 2, 0)) == 0
+    assert g.get((0, -1, 0)) == c        # slab interior survives
+    assert g.occupied_count < before
+
+
+def test_sculpt_inflate_grows_and_erodes():
+    g, _ = _slab()
+    base = g.occupied_count
+    g.sculpt_inflate((0, 0, 0), 9, amount=1)
+    grown = g.occupied_count
+    assert grown > base
+    g.sculpt_inflate((0, 0, 0), 9, amount=-1)
+    assert g.occupied_count < grown
+
+
+def test_sculpt_flatten_clears_above_the_plane():
+    g, c = _slab()
+    g.set_brush((0, 2, 0), 3, c)          # a bump proud of the slab
+    g.sculpt_flatten((0, 0, 0), 11, normal=(0, 1, 0))
+    above = sum(
+        1
+        for y in range(1, 4)
+        for x in range(-6, 7)
+        for z in range(-6, 7)
+        if g.get((x, y, z)) != 0
+    )
+    assert above == 0
+
+
+def test_sculpt_pinch_leaves_the_outside_alone():
+    g, _ = _slab()
+    reference, _ = _slab()
+    g.sculpt_pinch((0, 0, 0), 7)
+    assert g.occupied_count != reference.occupied_count
+    for y in range(-4, 5):
+        for x in range(-9, 10):
+            for z in range(-9, 10):
+                if x * x + y * y + z * z > 49:
+                    assert g.get((x, y, z)) == reference.get((x, y, z))

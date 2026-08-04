@@ -77,6 +77,27 @@ voxel::BrushShape parse_brush_shape(const std::string& shape) {
     throw std::invalid_argument("shape must be 'cube' or 'sphere', got '" + shape + "'");
 }
 
+voxel::BrushFalloff parse_falloff(const std::string& falloff) {
+    if (falloff == "constant") return voxel::BrushFalloff::Constant;
+    if (falloff == "linear") return voxel::BrushFalloff::Linear;
+    if (falloff == "smooth") return voxel::BrushFalloff::Smooth;
+    if (falloff == "gaussian") return voxel::BrushFalloff::Gaussian;
+    throw std::invalid_argument(
+        "falloff must be 'constant', 'linear', 'smooth' or 'gaussian', got '" + falloff + "'");
+}
+
+voxel::BrushParams make_brush(int size, const std::string& shape, const std::string& falloff,
+                              float strength, std::uint32_t seed) {
+    if (size <= 0) throw std::invalid_argument("brush size must be > 0");
+    voxel::BrushParams p;
+    p.size = size;
+    p.shape = parse_brush_shape(shape);
+    p.falloff = parse_falloff(falloff);
+    p.strength = strength;
+    p.seed = seed;
+    return p;
+}
+
 eval::Backend* find_backend(const std::string& name) {
     eval::Registry& reg = eval::Registry::instance();
     if (eval::Backend* b = reg.find(name)) return b;
@@ -1509,28 +1530,73 @@ NB_MODULE(pyclay, m) {
              "cell"_a, "index"_a, "Recolor an occupied cell (no-op on empty cells)")
         .def("set_brush",
              [](PyVoxelGrid& g, nb::handle cell, int n, std::uint8_t index,
-                const std::string& shape) {
-                 if (n <= 0) throw std::invalid_argument("brush size must be > 0");
-                 g.grid().set_brush(to_coord(cell), n, index, parse_brush_shape(shape));
+                const std::string& shape, const std::string& falloff, float strength,
+                std::uint32_t seed) {
+                 g.grid().set_brush(to_coord(cell),
+                                    make_brush(n, shape, falloff, strength, seed), index);
              },
-             "cell"_a, "size"_a, "index"_a, "shape"_a = "cube",
-             "Brush footprint centered on the cell: 'cube' (n^3) or 'sphere' "
-             "(inscribed in that cube). Radius is (size-1)/2, so an even size "
-             "behaves as size-1.")
+             "cell"_a, "size"_a, "index"_a, "shape"_a = "cube", "falloff"_a = "constant",
+             "strength"_a = 1.0f, "seed"_a = 0u,
+             "Brush footprint centered on the cell: 'cube' or 'sphere', size n "
+             "covering n cells per axis. falloff ('constant', 'linear', 'smooth', "
+             "'gaussian') and strength soften the edge by dithering coverage "
+             "deterministically against seed.")
         .def("erase_brush",
-             [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape) {
-                 if (n <= 0) throw std::invalid_argument("brush size must be > 0");
-                 g.grid().erase_brush(to_coord(cell), n, parse_brush_shape(shape));
+             [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
+                const std::string& falloff, float strength, std::uint32_t seed) {
+                 g.grid().erase_brush(to_coord(cell),
+                                      make_brush(n, shape, falloff, strength, seed));
              },
-             "cell"_a, "size"_a, "shape"_a = "cube")
+             "cell"_a, "size"_a, "shape"_a = "cube", "falloff"_a = "constant",
+             "strength"_a = 1.0f, "seed"_a = 0u)
         .def("paint_brush",
              [](PyVoxelGrid& g, nb::handle cell, int n, std::uint8_t index,
-                const std::string& shape) {
-                 if (n <= 0) throw std::invalid_argument("brush size must be > 0");
-                 g.grid().paint_brush(to_coord(cell), n, index, parse_brush_shape(shape));
+                const std::string& shape, const std::string& falloff, float strength,
+                std::uint32_t seed) {
+                 g.grid().paint_brush(to_coord(cell),
+                                      make_brush(n, shape, falloff, strength, seed), index);
              },
-             "cell"_a, "size"_a, "index"_a, "shape"_a = "cube",
+             "cell"_a, "size"_a, "index"_a, "shape"_a = "cube", "falloff"_a = "constant",
+             "strength"_a = 1.0f, "seed"_a = 0u,
              "Recolor occupied cells in the footprint; empty cells are untouched")
+        .def("sculpt_smooth",
+             [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
+                const std::string& falloff, float strength, std::uint32_t seed) {
+                 g.grid().sculpt_smooth(to_coord(cell),
+                                        make_brush(n, shape, falloff, strength, seed));
+             },
+             "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant",
+             "strength"_a = 1.0f, "seed"_a = 0u,
+             "Majority filter over the 26-neighbourhood: spurs dissolve, notches fill")
+        .def("sculpt_inflate",
+             [](PyVoxelGrid& g, nb::handle cell, int n, int amount, const std::string& shape,
+                const std::string& falloff, float strength, std::uint32_t seed) {
+                 g.grid().sculpt_inflate(to_coord(cell),
+                                         make_brush(n, shape, falloff, strength, seed), amount);
+             },
+             "cell"_a, "size"_a, "amount"_a = 1, "shape"_a = "sphere",
+             "falloff"_a = "constant", "strength"_a = 1.0f, "seed"_a = 0u,
+             "Dilate for a positive amount, erode for a negative one")
+        .def("sculpt_flatten",
+             [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle normal, float offset,
+                const std::string& shape, const std::string& falloff, float strength,
+                std::uint32_t seed) {
+                 g.grid().sculpt_flatten(to_coord(cell),
+                                         make_brush(n, shape, falloff, strength, seed),
+                                         to_f3(normal, "normal"), offset);
+             },
+             "cell"_a, "size"_a, "normal"_a, "offset"_a = 0.0f, "shape"_a = "sphere",
+             "falloff"_a = "constant", "strength"_a = 1.0f, "seed"_a = 0u,
+             "Pull the surface onto the plane through the brush centre")
+        .def("sculpt_pinch",
+             [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
+                const std::string& falloff, float strength, std::uint32_t seed) {
+                 g.grid().sculpt_pinch(to_coord(cell),
+                                       make_brush(n, shape, falloff, strength, seed));
+             },
+             "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant",
+             "strength"_a = 1.0f, "seed"_a = 0u,
+             "Move surface cells one step toward the brush centre")
         .def("fill_box",
              [](PyVoxelGrid& g, nb::handle a, nb::handle b, std::uint8_t index) {
                  g.grid().fill_box(to_coord(a), to_coord(b), index);
