@@ -114,6 +114,9 @@ endif()
 # -- CUDA backend (tier 2) ---------------------------------------------------
 if(CLAY_BACKEND_CUDA)
   enable_language(CUDA)
+  # the host .cpp is compiled by the C++ compiler and needs cuda_runtime.h
+  # plus the runtime library; CUDA::cudart carries both
+  find_package(CUDAToolkit REQUIRED)
   set(CMAKE_CUDA_STANDARD 20)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
   if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
@@ -126,6 +129,7 @@ if(CLAY_BACKEND_CUDA)
   set_source_files_properties(backends/cuda/clay_kernels.cu PROPERTIES
     COMPILE_OPTIONS "-fmad=false")
   set_target_properties(claycore PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+  target_link_libraries(claycore PRIVATE CUDA::cudart)
 endif()
 
 # -- OpenCL backend (tier 3, best-effort) ------------------------------------
