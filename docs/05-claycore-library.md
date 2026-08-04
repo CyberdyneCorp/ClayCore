@@ -211,8 +211,16 @@ cell = blocks.raycast((5, 0.75, 0.75), (-1, 0, 0))   # cell, face, adjacent
 lo, hi = body.selection_bounds([node_id])  # tight bounds for zoom-to-selection
 ```
 
-Deformers remain the one gap: the tape has no deformer opcodes yet, so
-`.twist()`-style calls in the sample above are not bound.
+```python
+# deformers — chainable, applied in call order
+body.add(clay.Box(size=(0.4, 0.4, 0.4)).twist(1.2), op=clay.Op.SUBTRACT)
+body.add(clay.Cylinder(r=0.6, h=1.0).taper(-1.0, 1.0, 1.0, 0.35))
+body.add(clay.Sphere(r=1.0).displace(amplitude=0.08, frequency=6.0))
+```
+
+`wrap_around` and the two-subtree `transition_*` morphs remain header-only:
+they have no tape opcode, and the Python call raises rather than silently
+doing nothing.
 
 Use cases the bindings are designed for: authoring the spec's golden-scene test corpus, procedural/batch asset generation, ML dataset generation (SDF samples, mesh/CSG pairs — the PrimFusion-style direction), Blender/Houdini scripting, and quick math experiments against the same kernels the app ships.
 

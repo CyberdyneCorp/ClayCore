@@ -115,6 +115,7 @@ struct PyPrim {
     math::Transform xform;
     std::vector<scene::StrokePoint> stroke;
     float stroke_blend_k = 0.0f;
+    std::vector<scene::Deformer> deformers;
 };
 
 void place(PyPrim& p, nb::handle position, nb::handle rotation_axis_angle, float scale) {
@@ -442,7 +443,66 @@ NB_MODULE(pyclay, m) {
                  nb::cast<PyPrim&>(self).xform.position = to_f3(position, "position");
                  return self;
              },
-             "position"_a, "Set the primitive position; returns self for chaining");
+             "position"_a, "Set the primitive position; returns self for chaining")
+        // -- deformer modifiers (add-tape-deformers). Chainable and ordered:
+        // the point is warped by the first-called deformer first.
+        .def("twist",
+             [](nb::object self, float k) {
+                 nb::cast<PyPrim&>(self).deformers.push_back(scene::Deformer::twist(k));
+                 return self;
+             },
+             "k"_a, "Twist about Y at k radians per unit of height")
+        .def("bend",
+             [](nb::object self, float k) {
+                 nb::cast<PyPrim&>(self).deformers.push_back(scene::Deformer::bend(k));
+                 return self;
+             },
+             "k"_a, "Bend along X at k radians per unit")
+        .def("taper",
+             [](nb::object self, float y0, float y1, float s0, float s1, int ease) {
+                 if (y1 == y0) throw std::invalid_argument("taper needs y1 != y0");
+                 if (s0 <= 0.0f || s1 <= 0.0f)
+                     throw std::invalid_argument("taper scales must be > 0");
+                 if (ease < 0 || ease >= kernel::ease_count)
+                     throw std::invalid_argument("ease must be a valid easing curve index");
+                 nb::cast<PyPrim&>(self).deformers.push_back(scene::Deformer::taper(
+                     y0, y1, s0, s1, static_cast<std::uint8_t>(ease)));
+                 return self;
+             },
+             "y0"_a, "y1"_a, "s0"_a, "s1"_a, "ease"_a = 0,
+             "Scale the cross-section from s0 at y0 to s1 at y1 along an easing curve")
+        .def("displace",
+             [](nb::object self, float amplitude, float frequency) {
+                 nb::cast<PyPrim&>(self).deformers.push_back(
+                     scene::Deformer::displace(amplitude, frequency));
+                 return self;
+             },
+             "amplitude"_a, "frequency"_a,
+             "Procedural sine displacement of the field (amplitude in world units)")
+        .def("wrap_around",
+             [](nb::object, float, float) {
+                 throw std::invalid_argument(
+                     "wrap_around is implemented in deform.h but has no tape opcode yet, so a "
+                     "document cannot carry it; use twist/bend/taper/displace");
+             },
+             "x0"_a, "y0"_a, "Not available: no tape opcode (see the error message)")
+        .def_prop_ro("deformers",
+                     [](const PyPrim& p) {
+                         nb::list out;
+                         for (const scene::Deformer& d : p.deformers) {
+                             nb::dict e;
+                             const char* names[] = {"twist", "bend", "taper", "displace"};
+                             e["type"] = d.type < 4 ? names[d.type] : "unknown";
+                             e["k"] = d.k;
+                             e["a"] = d.a;
+                             e["b"] = d.b;
+                             e["c"] = d.c;
+                             e["ease"] = d.ease;
+                             out.append(e);
+                         }
+                         return out;
+                     },
+                     "The deformer chain, in application order");
 
     // Every primitive constructor accepts position=(x, y, z),
     // rotation_axis_angle=((x, y, z), radians) and scale=<uniform factor>.
@@ -769,6 +829,7 @@ NB_MODULE(pyclay, m) {
                  n.xform = prim.xform;
                  n.stroke = prim.stroke;
                  n.stroke_blend_k = prim.stroke_blend_k;
+                 n.deformers = prim.deformers;
                  n.op = op;
                  if (!blend.is_none()) {
                      try {

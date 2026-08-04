@@ -127,6 +127,47 @@ struct Prim {
     static Prim stroke() { return {PrimType::Stroke, {}}; }
 };
 
+// One domain warp on an item (kernel/tape.h CDeformType). Ordered chains
+// apply in authoring order: the point is warped by deformers[0] first.
+struct Deformer {
+    std::uint8_t type = kernel::cdeform_twist;
+    float k = 0.0f;      // twist/bend: radians per unit; taper: y0; displace: amplitude
+    float a = 0.0f;      // taper: y1; displace: frequency
+    float b = 1.0f;      // taper: s0
+    float c = 1.0f;      // taper: s1
+    std::uint8_t ease = 0;
+
+    static Deformer twist(float radians_per_unit) {
+        Deformer d;
+        d.type = kernel::cdeform_twist;
+        d.k = radians_per_unit;
+        return d;
+    }
+    static Deformer bend(float radians_per_unit) {
+        Deformer d;
+        d.type = kernel::cdeform_bend;
+        d.k = radians_per_unit;
+        return d;
+    }
+    static Deformer taper(float y0, float y1, float s0, float s1, std::uint8_t ease = 0) {
+        Deformer d;
+        d.type = kernel::cdeform_taper;
+        d.k = y0;
+        d.a = y1;
+        d.b = s0;
+        d.c = s1;
+        d.ease = ease;
+        return d;
+    }
+    static Deformer displace(float amplitude, float frequency) {
+        Deformer d;
+        d.type = kernel::cdeform_displace;
+        d.k = amplitude;
+        d.a = frequency;
+        return d;
+    }
+};
+
 struct StrokePoint {
     kernel::cfloat3 pos;
     float radius;
@@ -148,6 +189,7 @@ struct Node {
     bool mirror = false;  // apply through the layer's active mirror
     std::vector<StrokePoint> stroke;  // PrimType::Stroke only
     float stroke_blend_k = 0.0f;      // within-stroke segment smoothing
+    std::vector<Deformer> deformers;  // applied to the local point, in order
 
     // group fields
     std::vector<NodeId> children;

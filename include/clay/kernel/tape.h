@@ -12,14 +12,21 @@
 //   strokes: float[] — stroke point data, 4 floats per point (x, y, z, r)
 //
 // Primitive param block: [inv affine 12 floats (columns c0..c3, xyz each)]
-// [uniform scale s] [rounding r] [color rgb] [prim-specific...]. The inverse
-// matrix already contains 1/s; the interpreter multiplies the local distance
-// back by s and subtracts the rounding.
+// [uniform scale s] [rounding r] [color rgb] [prim params, always
+// CLAY_TAPE_PRIM_PARAMS wide] [deformer count] [deformer records...]. The
+// inverse matrix already contains 1/s; the interpreter multiplies the local
+// distance back by s and subtracts the rounding. Prim params are fixed-width
+// so the deformer block sits at a known offset.
+//
+// Deformer record (CLAY_TAPE_DEFORM_FLOATS wide): [type] [k] [a] [b] [c]
+// [ease]. Deformers warp the LOCAL point in authoring order before the
+// primitive's distance function; each may also correct the distance after.
 //
 // Combine param block: [mode] [profile] [k] [r2]. r2 is the second radius
 // of the two-parameter extended modes (groove/tongue half-width rb, mapped
 // from the item's rounding in world units by the compiler); 0 elsewhere.
 
+#include "clay/kernel/deform.h"
 #include "clay/kernel/ops.h"
 #include "clay/kernel/prim3d.h"
 #include "clay/kernel/shim.h"
@@ -96,6 +103,45 @@ typedef struct CTapeValueT {
 
 #define CLAY_TAPE_MAX_STACK 16
 #define CLAY_TAPE_FAR 3.4e37f
+#define CLAY_TAPE_PRIM_PARAMS 7
+#define CLAY_TAPE_DEFORM_FLOATS 6
+#define CLAY_TAPE_PRIM_HEADER 17
+
+// Domain warps an item can carry (deform.h). Values are serialization-stable.
+enum CDeformType {
+    cdeform_twist = 0,     // k = radians per unit about Y
+    cdeform_bend = 1,      // k = radians per unit along X
+    cdeform_taper = 2,     // k = y0, a = y1, b = s0, c = s1, ease
+    cdeform_displace = 3,  // k = amplitude, a = frequency
+};
+
+// Apply one deformer record to the local point. No deformer corrects the
+// distance: safety is carried by the tape's tracked Lipschitz factor, which
+// also keeps influence bounds tight (see the taper note below).
+CLAY_FN cfloat3 ctape_deform_point(CLAY_DEVICE const float* rec, cfloat3 p) {
+    int type = (int)rec[0];
+    if (type == cdeform_twist) return ctwist_point(p, rec[1]);
+    if (type == cdeform_bend) return cbend_point(p, rec[1]);
+    if (type == cdeform_taper) {
+        // NOTE: deliberately no ctaper_dist here. Multiplying the distance by
+        // min(s,1) would keep the field conservative on its own, but it also
+        // shrinks the field everywhere, which makes the item's influence
+        // reach 1/s further than its geometry — and influence bounds are what
+        // brick culling trusts. Instead the taper behaves like twist and bend:
+        // the raw warped field, with safety carried by the tape's tracked
+        // Lipschitz factor (cfi_taper includes the 1/s_min stretch).
+        return ctaper_point(p, rec[1], rec[2], rec[3], rec[4], (int)rec[5]);
+    }
+    return p;  // displace acts on the distance, not the point
+}
+
+// Post-primitive distance contribution of one deformer (0 for point warps).
+CLAY_FN float ctape_deform_offset(CLAY_DEVICE const float* rec, cfloat3 p) {
+    if ((int)rec[0] != cdeform_displace) return 0.0f;
+    float amp = rec[1];
+    float freq = rec[2];
+    return amp * csin(freq * p.x) * csin(freq * p.y) * csin(freq * p.z);
+}
 
 // Blend support width in world units — deviation from the hard op is zero
 // beyond this |a-b| difference. The scene compiler uses the same function
@@ -270,7 +316,19 @@ CLAY_FN CTapeValue ctape_eval(CLAY_DEVICE const CTapeInstr* instrs, int instr_co
             CTapeValue v;
             v.color = cf3(pr[14], pr[15], pr[16]);
             cfloat3 lp = cmul_point(inv, p);
-            v.d = ctape_prim_dist(op, pr + 17, strokes, lp) * scale - round;
+            // deformer chain: warp the local point in authoring order, then
+            // add each deformer's distance contribution (deform.h semantics)
+            CLAY_DEVICE const float* deform = pr + CLAY_TAPE_PRIM_HEADER + CLAY_TAPE_PRIM_PARAMS;
+            int deform_count = (int)deform[0];
+            float offset = 0.0f;
+            cfloat3 wp = lp;
+            for (int di = 0; di < deform_count; ++di) {
+                CLAY_DEVICE const float* rec = deform + 1 + di * CLAY_TAPE_DEFORM_FLOATS;
+                offset += ctape_deform_offset(rec, wp);
+                wp = ctape_deform_point(rec, wp);
+            }
+            v.d = (ctape_prim_dist(op, pr + CLAY_TAPE_PRIM_HEADER, strokes, wp) + offset) *
+                      scale - round;
             stack[top] = v;
             ++top;
         }

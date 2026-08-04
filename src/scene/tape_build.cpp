@@ -22,7 +22,8 @@ struct Compiler {
     // -- emission ------------------------------------------------------------
 
     void emit_prim(unsigned int op, const cfloat4x4& inv, float scale, float round,
-                   kernel::cfloat3 color, const float* prim_params, int prim_param_count) {
+                   kernel::cfloat3 color, const float* prim_params, int prim_param_count,
+                   const std::vector<Deformer>& deformers) {
         CTapeInstr instr;
         instr.op = op;
         instr.param_offset = static_cast<unsigned int>(tape.params.size());
@@ -35,7 +36,19 @@ struct Compiler {
         tape.params.push_back(color.x);
         tape.params.push_back(color.y);
         tape.params.push_back(color.z);
+        // prim params are fixed-width so the deformer block lands at a
+        // known offset for the interpreter
         tape.params.insert(tape.params.end(), prim_params, prim_params + prim_param_count);
+        for (int i = prim_param_count; i < CLAY_TAPE_PRIM_PARAMS; ++i) tape.params.push_back(0.0f);
+        tape.params.push_back(static_cast<float>(deformers.size()));
+        for (const Deformer& d : deformers) {
+            tape.params.push_back(static_cast<float>(d.type));
+            tape.params.push_back(d.k);
+            tape.params.push_back(d.a);
+            tape.params.push_back(d.b);
+            tape.params.push_back(d.c);
+            tape.params.push_back(static_cast<float>(d.ease));
+        }
     }
 
     // Far-field accumulator seed for material-creating combines whose chain
@@ -49,7 +62,7 @@ struct Compiler {
         ident.c2 = kernel::cf4(0, 0, 1, 0);
         ident.c3 = kernel::cf4(0, 0, 0, 1);
         float none = 0.0f;
-        emit_prim(kernel::ctape_empty, ident, 1.0f, 0.0f, color, &none, 0);
+        emit_prim(kernel::ctape_empty, ident, 1.0f, 0.0f, color, &none, 0, {});
     }
 
     // rb: second radius of the two-parameter extended modes (groove/tongue
@@ -70,6 +83,10 @@ struct Compiler {
     void fold_info(const Node& item, Op op, bool smooth) {
         kernel::CFieldInfo prim_info =
             (item.prim.type == PrimType::Ellipsoid) ? kernel::cfi_bound() : kernel::cfi_exact();
+        // domain warps break the metric: fold the chain's Lipschitz factor
+        // (shared with the influence bound) so the safe step scale drops
+        float deform_l = deformer_lipschitz(item);
+        if (deform_l > 1.0f) prim_info = kernel::CFieldInfo{false, prim_info.lipschitz * deform_l};
         if (op_is_extended(op))
             tape.info = kernel::cfi_extended_blend(tape.info, prim_info, op_is_diagonal(op));
         else
@@ -94,10 +111,10 @@ struct Compiler {
                 tape.strokes.push_back(sp.radius);
             }
             emit_prim(kernel::ctape_stroke, inv_world, scale, round_world, item.color,
-                      prim_params, 3);
+                      prim_params, 3, item.deformers);
         } else {
             emit_prim(static_cast<unsigned int>(item.prim.type), inv_world, scale, round_world,
-                      item.color, item.prim.params, kMaxPrimParams);
+                      item.color, item.prim.params, kMaxPrimParams, item.deformers);
         }
     }
 

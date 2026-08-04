@@ -506,3 +506,75 @@ def test_selection_and_layer_bounds():
     # tight bounds: no blend-support dilation
     assert both[1][0] < 2.3 + 1e-3
     assert layer.bounds()[1][0] == pytest.approx(both[1][0])
+
+
+# --- deformers (add-tape-deformers) -----------------------------------------
+
+
+def test_docs_sample_twist_line_works():
+    # the exact construct from docs/05 section 10 that had no tape opcode
+    doc = clay.Document()
+    body = doc.add_sdf_layer("body")
+    body.add(clay.Sphere(r=1.0), color="#38a6cf")
+    body.add(clay.Box(size=(0.4, 0.4, 0.4)).twist(1.2), op=clay.Op.SUBTRACT)
+
+    pts = np.array([[0, 0, 0], [3, 0, 0]], dtype=np.float32)
+    d = doc.eval(pts)
+    assert d[1] > 0
+    mesh = doc.mesh(resolution=48)
+    assert mesh.is_watertight()
+
+
+def test_deformer_chain_inspection_and_order():
+    prim = clay.Box(size=(0.8, 2.0, 0.8)).twist(1.2).bend(0.7)
+    chain = prim.deformers
+    assert [d["type"] for d in chain] == ["twist", "bend"]
+    assert chain[0]["k"] == pytest.approx(1.2)
+
+    def field(p):
+        doc = clay.Document()
+        doc.add_sdf_layer("l").add(p)
+        rng = np.random.default_rng(3)
+        pts = rng.uniform(-1.5, 1.5, size=(512, 3)).astype(np.float32)
+        return doc.eval(pts)
+
+    forward = field(clay.Box(size=(0.8, 2.0, 0.8)).twist(1.2).bend(0.7))
+    reverse = field(clay.Box(size=(0.8, 2.0, 0.8)).bend(0.7).twist(1.2))
+    assert not np.allclose(forward, reverse)  # twist and bend do not commute
+
+
+def test_taper_and_displace_from_python():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Cylinder(r=0.6, h=1.0).taper(-1.0, 1.0, 1.0, 0.35))
+    # the tapered top is narrower than the base
+    wide_bottom = doc.eval(np.array([[0.5, -0.9, 0.0]], dtype=np.float32))[0]
+    same_at_top = doc.eval(np.array([[0.5, 0.9, 0.0]], dtype=np.float32))[0]
+    assert wide_bottom < 0 < same_at_top
+
+    bumpy = clay.Document()
+    bumpy.add_sdf_layer("l").add(clay.Sphere(r=1.0).displace(0.08, 6.0))
+    assert bumpy.safe_step_scale() < 1.0  # tracked Lipschitz drops
+
+    with pytest.raises(ValueError, match="taper scales"):
+        clay.Sphere(r=1.0).taper(-1.0, 1.0, 0.0, 1.0)
+
+
+def test_deformers_survive_clayspace_round_trip(tmp_path):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Box(size=(0.8, 2.0, 0.8)).twist(0.9).taper(-1.0, 1.0, 1.0, 0.5))
+
+    rng = np.random.default_rng(5)
+    pts = rng.uniform(-2, 2, size=(256, 3)).astype(np.float32)
+    before = doc.eval(pts)
+
+    path = tmp_path / "deformed.clayspace"
+    doc.save(str(path))
+    after = clay.load(str(path)).eval(pts)
+    assert np.array_equal(before, after)
+
+
+def test_unsupported_deformer_reports_clearly():
+    with pytest.raises(ValueError, match="no tape opcode"):
+        clay.Sphere(r=1.0).wrap_around(-1.0, 1.0)

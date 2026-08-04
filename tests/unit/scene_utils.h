@@ -36,6 +36,15 @@ inline CTapeValue ref_eval_item(const scene::Node& item, const scene::Layer& lay
     math::Transform world = layer.xform * item.xform;
 
     auto eval_at = [&](cfloat3 lp) {
+        // mirror the tape's deformer chain: warp in authoring order, then add
+        // each deformer's distance contribution
+        float offset = 0.0f;
+        for (const scene::Deformer& def : item.deformers) {
+            float rec[6] = {static_cast<float>(def.type), def.k, def.a,
+                            def.b, def.c, static_cast<float>(def.ease)};
+            offset += ctape_deform_offset(rec, lp);
+            lp = ctape_deform_point(rec, lp);
+        }
         float d;
         if (item.prim.type == scene::PrimType::Stroke) {
             std::vector<float> pts;
@@ -51,7 +60,7 @@ inline CTapeValue ref_eval_item(const scene::Node& item, const scene::Layer& lay
             d = ctape_prim_dist(static_cast<unsigned int>(item.prim.type), item.prim.params,
                                 nullptr, lp);
         }
-        return d * world.scale - item.rounding * world.scale;
+        return (d + offset) * world.scale - item.rounding * world.scale;
     };
 
     CTapeValue v;

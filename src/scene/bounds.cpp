@@ -1,5 +1,7 @@
 #include "clay/scene/bounds.h"
 
+#include "clay/kernel/exactness.h"
+
 namespace clay {
 namespace scene {
 
@@ -58,9 +60,90 @@ Aabb prim_local_bounds(const Node& item) {
     return b;
 }
 
+// Conservative widening of a local bound under one domain warp. Twist and
+// bend are rotations, so the warped shape stays inside the axis-aligned hull
+// of the original's rotational sweep about the relevant axis; taper scales
+// the cross-section; displacement moves the surface by at most its amplitude.
+Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& deformers) {
+    Aabb b = local;
+    for (const Deformer& d : deformers) {
+        if (b.empty()) break;
+        switch (d.type) {
+            case kernel::cdeform_twist: {
+                // rotation about Y: |(x,z)| preserved -> hull is the cylinder
+                float r = 0.0f;
+                for (int i = 0; i < 4; ++i) {
+                    float x = (i & 1) ? b.max.x : b.min.x;
+                    float z = (i & 2) ? b.max.z : b.min.z;
+                    r = kernel::cmax(r, kernel::clength(kernel::cf2(x, z)));
+                }
+                b = Aabb{cf3(-r, b.min.y, -r), cf3(r, b.max.y, r)};
+                break;
+            }
+            case kernel::cdeform_bend: {
+                // rotation of (x,y) about the origin: |(x,y)| preserved
+                float r = 0.0f;
+                for (int i = 0; i < 4; ++i) {
+                    float x = (i & 1) ? b.max.x : b.min.x;
+                    float y = (i & 2) ? b.max.y : b.min.y;
+                    r = kernel::cmax(r, kernel::clength(kernel::cf2(x, y)));
+                }
+                b = Aabb{cf3(-r, -r, b.min.z), cf3(r, r, b.max.z)};
+                break;
+            }
+            case kernel::cdeform_taper: {
+                // evaluating at p/s scales the shape by s; take the largest
+                float s = kernel::cmax(kernel::cmax(d.b, d.c), 1.0f);
+                b = Aabb{cf3(b.min.x * s, b.min.y, b.min.z * s),
+                         cf3(b.max.x * s, b.max.y, b.max.z * s)};
+                break;
+            }
+            case kernel::cdeform_displace:
+                b = b.dilated(kernel::cabs(d.k));
+                break;
+            default:
+                break;
+        }
+    }
+    return b;
+}
+
+float deformer_lipschitz(const Node& item) {
+    if (item.deformers.empty()) return 1.0f;
+    Aabb local = prim_local_bounds(item);
+    kernel::CFieldInfo info = kernel::cfi_exact();
+    for (const Deformer& d : item.deformers) {
+        float radius = 0.0f;
+        if (!local.empty()) {
+            for (int i = 0; i < 8; ++i) {
+                float x = (i & 1) ? local.max.x : local.min.x;
+                float y = (i & 2) ? local.max.y : local.min.y;
+                float z = (i & 4) ? local.max.z : local.min.z;
+                radius = kernel::cmax(radius, d.type == kernel::cdeform_twist
+                                                  ? kernel::clength(kernel::cf2(x, z))
+                                                  : kernel::clength(kernel::cf2(x, y)));
+            }
+        }
+        if (d.type == kernel::cdeform_twist) {
+            info = kernel::cfi_twist(info, d.k, radius);
+        } else if (d.type == kernel::cdeform_bend) {
+            info = kernel::cfi_bend(info, d.k, radius);
+        } else if (d.type == kernel::cdeform_taper) {
+            float s_min = kernel::cmin(d.b, d.c);
+            float s_max = kernel::cmax(d.b, d.c);
+            float height = kernel::cmax(kernel::cabs(d.a - d.k), 1e-6f);
+            info = kernel::cfi_taper(info, s_min, s_max, height, radius);
+        } else if (d.type == kernel::cdeform_displace) {
+            info = kernel::cfi_displace(info, kernel::cabs(d.k) * kernel::cabs(d.a) * 1.7320508f);
+        }
+    }
+    return kernel::cmax(info.lipschitz, 1.0f);
+}
+
 Aabb item_influence_bound(const Node& item, const Layer& layer) {
     if (item.op == Op::Intersect) return Aabb::infinite();
     Aabb local = prim_local_bounds(item);
+    if (!item.deformers.empty()) local = deformed_local_bounds(local, item.deformers);
     if (local.empty()) return local;
 
     math::Transform world = layer.xform * item.xform;

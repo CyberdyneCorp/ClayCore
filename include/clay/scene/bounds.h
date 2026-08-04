@@ -17,6 +17,12 @@ namespace scene {
 // Local-space AABB of a primitive (before transform, rounding, blend).
 math::Aabb prim_local_bounds(const Node& item);
 
+// Lipschitz factor of an item's deformer chain (1 when undeformed). A warped
+// field UNDERESTIMATES distance by at most this factor, so the item's
+// influence reaches L times further than its blend support alone suggests —
+// both the influence bound and the tape's tracked field info use this.
+float deformer_lipschitz(const Node& item);
+
 // World-space influence bound of one item within a layer (includes mirror
 // copies, rounding, and the item's blend support).
 math::Aabb item_influence_bound(const Node& item, const Layer& layer);

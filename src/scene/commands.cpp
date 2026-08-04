@@ -221,6 +221,17 @@ void write_node(Writer& w, const Node& n) {
     w.pod(n.stroke_blend_k);
     w.u32(static_cast<std::uint32_t>(n.stroke.size()));
     for (const StrokePoint& sp : n.stroke) w.pod(sp);
+    // Deformer carries uint8 + floats: field-wise, so padding never reaches
+    // the stream (the portability trap struct-wise writes hit on GCC).
+    w.u32(static_cast<std::uint32_t>(n.deformers.size()));
+    for (const Deformer& d : n.deformers) {
+        w.pod(d.type);
+        w.pod(d.k);
+        w.pod(d.a);
+        w.pod(d.b);
+        w.pod(d.c);
+        w.pod(d.ease);
+    }
     w.u32(static_cast<std::uint32_t>(n.children.size()));
     for (NodeId c : n.children) w.pod(c);
 }
@@ -245,6 +256,21 @@ Node read_node(Reader& r) {
     }
     n.stroke.reserve(sc);
     for (std::uint32_t i = 0; i < sc && r.ok; ++i) n.stroke.push_back(r.pod<StrokePoint>());
+    std::uint32_t dc = r.u32();
+    if (dc > r.remaining / 6) {  // smallest possible encoded deformer
+        r.ok = false;
+        return n;
+    }
+    for (std::uint32_t i = 0; i < dc && r.ok; ++i) {
+        Deformer d;
+        d.type = r.pod<std::uint8_t>();
+        d.k = r.pod<float>();
+        d.a = r.pod<float>();
+        d.b = r.pod<float>();
+        d.c = r.pod<float>();
+        d.ease = r.pod<std::uint8_t>();
+        n.deformers.push_back(d);
+    }
     std::uint32_t cc = r.u32();
     if (cc > r.remaining / sizeof(NodeId)) {
         r.ok = false;
