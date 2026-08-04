@@ -178,14 +178,12 @@ def shade(hit, normal, position, view_dir, colors=None):
     return np.clip(lit, 0.0, 1.0)
 
 
-def render(doc, name, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
-           fov_degrees=35.0, colors_from_field=False, caption=None):
-    """Raycast `doc`, shade it, downsample, and write examples/output/<name>.
-
-    Returns the written path. `colors_from_field=True` shades with the
-    document's own per-point colors instead of a neutral grey.
-    """
-    rays, (h, w) = camera_rays(eye, target, fov_degrees=fov_degrees)
+def render_array(doc, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
+                 fov_degrees=35.0, colors_from_field=False,
+                 width=WIDTH, height=HEIGHT, supersample=SUPERSAMPLE):
+    """Raycast and shade `doc`, returning the (H, W, 3) image array."""
+    rays, (h, w) = camera_rays(eye, target, fov_degrees=fov_degrees,
+                               width=width, height=height, supersample=supersample)
     result = doc.raycast_many(rays)
 
     hit = result["hit"]
@@ -207,13 +205,23 @@ def render(doc, name, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
     image = flat.reshape(h, w, 3)
 
     # Box-filter the supersampled buffer down to the committed resolution.
-    if SUPERSAMPLE > 1:
-        s = SUPERSAMPLE
+    if supersample > 1:
+        s = supersample
         image = image.reshape(h // s, s, w // s, s, 3).mean(axis=(1, 3))
 
     # Gamma for display.
-    image = np.power(np.clip(image, 0.0, 1.0), 1.0 / 2.2)
+    return np.power(np.clip(image, 0.0, 1.0), 1.0 / 2.2)
 
+
+def render(doc, name, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
+           fov_degrees=35.0, colors_from_field=False, caption=None):
+    """Raycast `doc`, shade it, downsample, and write examples/output/<name>.
+
+    Returns the written path. `colors_from_field=True` shades with the
+    document's own per-point colors instead of a neutral grey.
+    """
+    image = render_array(doc, eye=eye, target=target, fov_degrees=fov_degrees,
+                         colors_from_field=colors_from_field)
     path = output_path(name)
     write_png(path, image)
     print(f"  wrote {os.path.relpath(path, os.path.dirname(OUTPUT_DIR))}"
@@ -228,9 +236,9 @@ _FACE_NORMALS = np.array(
 )
 
 
-def render_voxels(grid, name, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
-                  fov_degrees=35.0, caption=None, width=240, height=180):
-    """Render a VoxelGrid via its own DDA raycast, shaded by palette color.
+def render_voxels_array(grid, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
+                        fov_degrees=35.0, width=240, height=180):
+    """Render a VoxelGrid via its own DDA raycast; returns the image array.
 
     `VoxelGrid.raycast` is one ray at a time, so this loops in Python and
     therefore renders at a lower resolution than the SDF path. The hit dict
@@ -257,10 +265,35 @@ def render_voxels(grid, name, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
         lambert = float(np.clip(normal @ key, 0.0, 1.0))
         image[i] = np.clip(color * (0.25 + 0.8 * lambert), 0.0, 1.0)
 
-    image = np.power(np.clip(image.reshape(h, w, 3), 0.0, 1.0), 1.0 / 2.2)
+    return np.power(np.clip(image.reshape(h, w, 3), 0.0, 1.0), 1.0 / 2.2)
 
+
+def render_voxels(grid, name, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
+                  fov_degrees=35.0, caption=None, width=240, height=180):
+    """Render a VoxelGrid and write examples/output/<name>."""
+    image = render_voxels_array(grid, eye=eye, target=target,
+                                fov_degrees=fov_degrees, width=width, height=height)
     path = output_path(name)
     write_png(path, image)
+    print(f"  wrote {os.path.relpath(path, os.path.dirname(OUTPUT_DIR))}"
+          + (f"  ({caption})" if caption else ""))
+    return path
+
+
+def side_by_side(left, right, name, gap=12, caption=None):
+    """Join two equal-height images with a thin divider between them."""
+    if left.shape[0] != right.shape[0]:
+        raise ValueError(
+            f"side_by_side needs equal heights, got {left.shape[0]} and {right.shape[0]}"
+        )
+    h = left.shape[0]
+    divider = np.tile(
+        np.power(BACKGROUND_BOTTOM, 1.0 / 2.2)[None, None, :], (h, gap, 1)
+    ).astype(np.float32)
+    joined = np.concatenate([left, divider, right], axis=1)
+
+    path = output_path(name)
+    write_png(path, joined)
     print(f"  wrote {os.path.relpath(path, os.path.dirname(OUTPUT_DIR))}"
           + (f"  ({caption})" if caption else ""))
     return path

@@ -15,6 +15,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 EXAMPLES = [
+    "00_hero",
     "01_primitives",
     "02_blends",
     "03_deformers",

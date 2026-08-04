@@ -31,6 +31,20 @@ the build rather than silently rotting the gallery.
 
 ## The gallery
 
+### 00 — the hero image
+
+The README's banner: an SDF sculpt and a voxel sculpt side by side, rendered
+at matching size and joined with a divider. Deliberately the same kind of
+subject on both sides — one form in the round — so the contrast is the
+representation, not the subject.
+
+![SDF and voxels side by side](output/00_hero.png)
+
+The SDF half is a lesson in blend radii: every feature has to sit *outside*
+the body it blends onto, or smooth-min swallows it and the result is a plain
+egg. The voxel half is a character rather than a landscape, because at this
+size a landscape's voxels would each be a handful of pixels.
+
 ### 01 — primitives
 
 Every primitive class the module exposes, enumerated from the module itself:
