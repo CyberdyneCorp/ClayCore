@@ -46,6 +46,42 @@ Aabb prim_local_bounds(const Node& item) {
             b.expand(cf3(0.5f, q[0], 0.5f));
             break;
         }
+        case PrimType::Extrude:
+        case PrimType::Revolve: {
+            // 2D extent of the profile, then lifted: a slab for extrusion,
+            // a full circular sweep for revolution
+            float ex = 0.0f, ey = 0.0f;
+            const float* pp = item.profile.params;
+            switch (item.profile.type) {
+                case kernel::cprofile_circle: ex = ey = pp[0]; break;
+                case kernel::cprofile_box: ex = pp[0]; ey = pp[1]; break;
+                // face radius -> vertex radius
+                case kernel::cprofile_hexagon: ex = ey = pp[0] * 1.1547006f; break;
+                case kernel::cprofile_triangle: ex = ey = pp[0] * 2.0f; break;
+                case kernel::cprofile_trapezoid:
+                    ex = kernel::cmax(pp[0], pp[1]);
+                    ey = pp[2];
+                    break;
+                case kernel::cprofile_vesica: ex = ey = pp[0]; break;
+                case kernel::cprofile_polygon:
+                    for (const kernel::cfloat2& v : item.profile_points) {
+                        ex = kernel::cmax(ex, kernel::cabs(v.x));
+                        ey = kernel::cmax(ey, kernel::cabs(v.y));
+                    }
+                    break;
+                default: break;
+            }
+            if (item.prim.type == PrimType::Extrude) {
+                float h = q[0];
+                b.expand(cf3(-ex, -ey, -h));
+                b.expand(cf3(ex, ey, h));
+            } else {
+                float radius = kernel::cabs(q[0]) + ex;  // offset plus profile reach
+                b.expand(cf3(-radius, -ey, -radius));
+                b.expand(cf3(radius, ey, radius));
+            }
+            break;
+        }
         case PrimType::Stroke: {
             for (const StrokePoint& p : item.stroke) {
                 b.expand(p.pos - cf3(p.radius, p.radius, p.radius));

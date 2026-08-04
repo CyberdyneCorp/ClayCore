@@ -17,15 +17,15 @@ struct TapeField {
     device const CTapeInstr* instrs;
     int count;
     device const float* params;
-    device const float* strokes;
-    float operator()(cfloat3 p) const { return ctape_eval(instrs, count, params, strokes, p).d; }
+    device const float* blob;
+    float operator()(cfloat3 p) const { return ctape_eval(instrs, count, params, blob, p).d; }
 };
 
 }  // namespace
 
 kernel void clay_eval_points(device const CTapeInstr* instrs [[buffer(0)]],
                              device const float* params [[buffer(1)]],
-                             device const float* strokes [[buffer(2)]],
+                             device const float* blob [[buffer(2)]],
                              device const float* pts [[buffer(3)]],
                              device float* out_d [[buffer(4)]],
                              device float* out_col [[buffer(5)]],
@@ -33,7 +33,7 @@ kernel void clay_eval_points(device const CTapeInstr* instrs [[buffer(0)]],
                              uint gid [[thread_position_in_grid]]) {
     if (gid >= u.point_count) return;
     cfloat3 p = cf3(pts[gid * 3 + 0], pts[gid * 3 + 1], pts[gid * 3 + 2]);
-    CTapeValue v = ctape_eval(instrs, (int)u.instr_count, params, strokes, p);
+    CTapeValue v = ctape_eval(instrs, (int)u.instr_count, params, blob, p);
     out_d[gid] = v.d;
     if (u.has_colors) {
         out_col[gid * 3 + 0] = v.color.x;
@@ -44,7 +44,7 @@ kernel void clay_eval_points(device const CTapeInstr* instrs [[buffer(0)]],
 
 kernel void clay_eval_grid(device const CTapeInstr* instrs [[buffer(0)]],
                            device const float* params [[buffer(1)]],
-                           device const float* strokes [[buffer(2)]],
+                           device const float* blob [[buffer(2)]],
                            device float* out_d [[buffer(3)]],
                            device float* out_col [[buffer(4)]],
                            constant ClayGridUniforms& u [[buffer(5)]],
@@ -56,7 +56,7 @@ kernel void clay_eval_grid(device const CTapeInstr* instrs [[buffer(0)]],
     uint z = gid / (u.nx * u.ny);
     cfloat3 p = cf3(u.origin[0], u.origin[1], u.origin[2]) +
                 cf3((float)x, (float)y, (float)z) * u.spacing;
-    CTapeValue v = ctape_eval(instrs, (int)u.instr_count, params, strokes, p);
+    CTapeValue v = ctape_eval(instrs, (int)u.instr_count, params, blob, p);
     out_d[gid] = v.d;
     if (u.has_colors) {
         out_col[gid * 3 + 0] = v.color.x;
@@ -67,7 +67,7 @@ kernel void clay_eval_grid(device const CTapeInstr* instrs [[buffer(0)]],
 
 kernel void clay_raycast(device const CTapeInstr* instrs [[buffer(0)]],
                          device const float* params [[buffer(1)]],
-                         device const float* strokes [[buffer(2)]],
+                         device const float* blob [[buffer(2)]],
                          device const float* rays [[buffer(3)]],
                          device ClayRayHitGpu* hits [[buffer(4)]],
                          constant ClayRayUniforms& u [[buffer(5)]],
@@ -117,7 +117,7 @@ kernel void clay_raycast(device const CTapeInstr* instrs [[buffer(0)]],
         tmax = hi;
     }
 
-    TapeField field{instrs, (int)u.instr_count, params, strokes};
+    TapeField field{instrs, (int)u.instr_count, params, blob};
     CRayHit r = craycast(field, ro, rd, tmin, tmax, u.eps, u.step_scale, 1.4f,
                          (int)u.max_steps);
     if (r.hit) {

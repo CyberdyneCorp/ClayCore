@@ -20,7 +20,8 @@ add_executable(clay_unit_tests
   unit/test_pick.cpp
   unit/test_io.cpp
   unit/test_gltf.cpp
-  unit/test_deformers.cpp)
+  unit/test_deformers.cpp
+  unit/test_lifts.cpp)
 
 target_link_libraries(clay_unit_tests PRIVATE clay::core doctest::doctest)
 clay_apply_warnings(clay_unit_tests)

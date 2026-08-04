@@ -9,7 +9,8 @@
 // Layout
 //   instrs:  CTapeInstr[] — {op, param_offset into params[]}
 //   params:  float[] — per-instruction parameter blocks
-//   strokes: float[] — stroke point data, 4 floats per point (x, y, z, r)
+//   blob:    float[] — out-of-line payload pool: stroke points (4 floats
+//            each: x, y, z, radius) and polygon profile vertices (2 each)
 //
 // Primitive param block: [inv affine 12 floats (columns c0..c3, xyz each)]
 // [uniform scale s] [rounding r] [color rgb] [prim params, always
@@ -30,6 +31,8 @@
 
 #include "clay/kernel/deform.h"
 #include "clay/kernel/ops.h"
+#include "clay/kernel/lift.h"
+#include "clay/kernel/prim2d.h"
 #include "clay/kernel/prim3d.h"
 #include "clay/kernel/shim.h"
 
@@ -51,6 +54,8 @@ enum CTapeOp {
     ctape_hex_prism,         // hx, hy
     ctape_pyramid,           // h
     ctape_stroke,            // blend_k, point_offset, point_count
+    ctape_extrude,           // profile block + half-depth (along Z)
+    ctape_revolve,           // profile block + axis offset (about Y)
     ctape_prim_count,
 
     // Pushes the far field ("empty space"): standard primitive param block,
@@ -217,8 +222,44 @@ CLAY_FN float ctape_stroke_dist(CLAY_DEVICE const float* pts, int count, cfloat3
     return d;
 }
 
+// Closed 2D profiles a lift can carry (prim2d.h). Open curves (segment,
+// Bezier) are unsigned distances rather than regions, so they are not
+// profiles: documents reach curved outlines by flattening to a polygon.
+enum CProfileType {
+    cprofile_circle = 0,    // p0 = radius
+    cprofile_box = 1,       // p0, p1 = half extents
+    cprofile_hexagon = 2,   // p0 = face radius
+    cprofile_triangle = 3,  // p0 = radius
+    cprofile_trapezoid = 4, // p0 = bottom half-width, p1 = top half-width, p2 = half height
+    cprofile_vesica = 5,    // p0 = radius, p1 = center separation
+    cprofile_polygon = 6,   // p0 = blob offset, p1 = vertex count (2 floats each)
+};
+
+// Profile block layout inside a lift's prim params: [type] [p0..p3].
+#define CLAY_TAPE_PROFILE_FLOATS 5
+
+CLAY_FN float ctape_profile_dist(CLAY_DEVICE const float* prof, CLAY_DEVICE const float* blob,
+                                 cfloat2 p) {
+    int type = (int)prof[0];
+    if (type == cprofile_circle) return sd_circle2(p, prof[1]);
+    if (type == cprofile_box) return sd_box2(p, cf2(prof[1], prof[2]));
+    if (type == cprofile_hexagon) return sd_hexagon2(p, prof[1]);
+    if (type == cprofile_triangle) return sd_equilateral_triangle2(p, prof[1]);
+    if (type == cprofile_trapezoid) return sd_trapezoid2(p, prof[1], prof[2], prof[3]);
+    if (type == cprofile_vesica) return sd_vesica2(p, prof[1], prof[2]);
+    if (type == cprofile_polygon) {
+        int off = (int)prof[1];
+        int count = (int)prof[2];
+        if (count < 3) return CLAY_TAPE_FAR;
+        // vertices live in the out-of-line pool as consecutive (x, y) pairs;
+        // sd_polygon2 walks them without materializing an array
+        return sd_polygon2_raw(blob + off, count, p);
+    }
+    return CLAY_TAPE_FAR;
+}
+
 CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
-                              CLAY_DEVICE const float* strokes, cfloat3 lp) {
+                              CLAY_DEVICE const float* blob, cfloat3 lp) {
     // q points at the prim-specific params (after xform/scale/round/color).
     if (op == ctape_sphere) return sd_sphere(lp, q[0]);
     if (op == ctape_box) return sd_box(lp, cf3(q[0], q[1], q[2]));
@@ -235,10 +276,19 @@ CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
     if (op == ctape_octahedron) return sd_octahedron(lp, q[0]);
     if (op == ctape_hex_prism) return sd_hex_prism(lp, cf2(q[0], q[1]));
     if (op == ctape_pyramid) return sd_pyramid(lp, q[0]);
+    if (op == ctape_extrude) {
+        // exact lift: profile distance merged with the axial slab
+        return cop_extrude(ctape_profile_dist(q, blob, cf2(lp.x, lp.y)), lp.z,
+                           q[CLAY_TAPE_PROFILE_FLOATS]);
+    }
+    if (op == ctape_revolve) {
+        // exact lift: evaluate the profile in the (radius - offset, y) plane
+        return ctape_profile_dist(q, blob, crevolve_point(lp, q[CLAY_TAPE_PROFILE_FLOATS]));
+    }
     if (op == ctape_stroke) {
         int off = (int)q[1];
         int cnt = (int)q[2];
-        return ctape_stroke_dist(strokes + off, cnt, lp, q[0]);
+        return ctape_stroke_dist(blob + off, cnt, lp, q[0]);
     }
     return CLAY_TAPE_FAR;
 }
@@ -304,7 +354,7 @@ CLAY_FN CTapeValue ctape_combine_values(CTapeValue a, CTapeValue b, int mode, in
 // The fixed interpreter every backend ships. Postfix stack machine; empty
 // tapes evaluate to "far outside".
 CLAY_FN CTapeValue ctape_eval(CLAY_DEVICE const CTapeInstr* instrs, int instr_count,
-                              CLAY_DEVICE const float* params, CLAY_DEVICE const float* strokes,
+                              CLAY_DEVICE const float* params, CLAY_DEVICE const float* blob,
                               cfloat3 p) {
     CTapeValue stack[CLAY_TAPE_MAX_STACK];
     int top = 0;
@@ -359,7 +409,7 @@ CLAY_FN CTapeValue ctape_eval(CLAY_DEVICE const CTapeInstr* instrs, int instr_co
                 offset += ctape_deform_offset(rec, wp);
                 wp = ctape_deform_point(rec, wp);
             }
-            v.d = (ctape_prim_dist(op, pr + CLAY_TAPE_PRIM_HEADER, strokes, wp) + offset) *
+            v.d = (ctape_prim_dist(op, pr + CLAY_TAPE_PRIM_HEADER, blob, wp) + offset) *
                       scale - round;
             stack[top] = v;
             ++top;

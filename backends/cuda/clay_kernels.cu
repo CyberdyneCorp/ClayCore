@@ -18,22 +18,22 @@ struct TapeField {
     const CTapeInstr* instrs;
     int count;
     const float* params;
-    const float* strokes;
+    const float* blob;
     __device__ float operator()(cfloat3 p) const {
-        return ctape_eval(instrs, count, params, strokes, p).d;
+        return ctape_eval(instrs, count, params, blob, p).d;
     }
 };
 
 }  // namespace
 
 static __global__ void clay_eval_points_kernel(const CTapeInstr* instrs,
-                                                   const float* params, const float* strokes,
+                                                   const float* params, const float* blob,
                                                    const float* pts, float* out_d,
                                                    float* out_col, ClayCudaEvalUniforms u) {
     unsigned int gid = blockIdx.x * blockDim.x + threadIdx.x;
     if (gid >= u.point_count) return;
     cfloat3 p = cf3(pts[gid * 3 + 0], pts[gid * 3 + 1], pts[gid * 3 + 2]);
-    CTapeValue v = ctape_eval(instrs, (int)u.instr_count, params, strokes, p);
+    CTapeValue v = ctape_eval(instrs, (int)u.instr_count, params, blob, p);
     out_d[gid] = v.d;
     if (u.has_colors) {
         out_col[gid * 3 + 0] = v.color.x;
@@ -43,7 +43,7 @@ static __global__ void clay_eval_points_kernel(const CTapeInstr* instrs,
 }
 
 static __global__ void clay_eval_grid_kernel(const CTapeInstr* instrs, const float* params,
-                                                 const float* strokes, float* out_d,
+                                                 const float* blob, float* out_d,
                                                  float* out_col, ClayCudaGridUniforms u) {
     unsigned int gid = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned int total = u.nx * u.ny * u.nz;
@@ -53,7 +53,7 @@ static __global__ void clay_eval_grid_kernel(const CTapeInstr* instrs, const flo
     unsigned int z = gid / (u.nx * u.ny);
     cfloat3 p = cf3(u.origin[0], u.origin[1], u.origin[2]) +
                 cf3((float)x, (float)y, (float)z) * u.spacing;
-    CTapeValue v = ctape_eval(instrs, (int)u.instr_count, params, strokes, p);
+    CTapeValue v = ctape_eval(instrs, (int)u.instr_count, params, blob, p);
     out_d[gid] = v.d;
     if (u.has_colors) {
         out_col[gid * 3 + 0] = v.color.x;
@@ -63,7 +63,7 @@ static __global__ void clay_eval_grid_kernel(const CTapeInstr* instrs, const flo
 }
 
 static __global__ void clay_raycast_kernel(const CTapeInstr* instrs, const float* params,
-                                               const float* strokes, const float* rays,
+                                               const float* blob, const float* rays,
                                                ClayCudaRayHit* hits, ClayCudaRayUniforms u) {
     unsigned int gid = blockIdx.x * blockDim.x + threadIdx.x;
     if (gid >= u.ray_count) return;
@@ -108,7 +108,7 @@ static __global__ void clay_raycast_kernel(const CTapeInstr* instrs, const float
         tmax = hi;
     }
 
-    TapeField field{instrs, (int)u.instr_count, params, strokes};
+    TapeField field{instrs, (int)u.instr_count, params, blob};
     CRayHit r = craycast(field, ro, rd, tmin, tmax, u.eps, u.step_scale, 1.4f, (int)u.max_steps);
     if (r.hit) {
         hit.hit = 1;
@@ -136,27 +136,27 @@ int blocks(unsigned int items) { return (int)((items + kBlock - 1) / kBlock); }
 }  // namespace
 
 extern "C" int clay_cuda_launch_eval_points(const void* instrs, const float* params,
-                                            const float* strokes, const float* pts, float* out_d,
+                                            const float* blob, const float* pts, float* out_d,
                                             float* out_col, ClayCudaEvalUniforms u) {
     clay_eval_points_kernel<<<blocks(u.point_count), kBlock>>>(
-        (const CTapeInstr*)instrs, params, strokes, pts, out_d, out_col, u);
+        (const CTapeInstr*)instrs, params, blob, pts, out_d, out_col, u);
     return (int)cudaDeviceSynchronize();
 }
 
 extern "C" int clay_cuda_launch_eval_grid(const void* instrs, const float* params,
-                                          const float* strokes, float* out_d, float* out_col,
+                                          const float* blob, float* out_d, float* out_col,
                                           ClayCudaGridUniforms u) {
     unsigned int total = u.nx * u.ny * u.nz;
-    clay_eval_grid_kernel<<<blocks(total), kBlock>>>((const CTapeInstr*)instrs, params, strokes,
+    clay_eval_grid_kernel<<<blocks(total), kBlock>>>((const CTapeInstr*)instrs, params, blob,
                                                      out_d, out_col, u);
     return (int)cudaDeviceSynchronize();
 }
 
 extern "C" int clay_cuda_launch_raycast(const void* instrs, const float* params,
-                                        const float* strokes, const float* rays, void* hits,
+                                        const float* blob, const float* rays, void* hits,
                                         ClayCudaRayUniforms u) {
     clay_raycast_kernel<<<blocks(u.ray_count), kBlock>>>((const CTapeInstr*)instrs, params,
-                                                         strokes, rays,
+                                                         blob, rays,
                                                          (ClayCudaRayHit*)hits, u);
     return (int)cudaDeviceSynchronize();
 }

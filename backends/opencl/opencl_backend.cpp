@@ -63,7 +63,7 @@ class OpenClBackend final : public Backend {
         cl_mem dist = buffer_out(q.count * sizeof(float), &err);
         cl_mem cols = buffer_out((out.colors_rgb ? q.count * 3 : 1) * sizeof(float), &err);
         if (err != CL_SUCCESS) {
-            release({tb.instrs, tb.params, tb.strokes, pts, dist, cols});
+            release({tb.instrs, tb.params, tb.blob, pts, dist, cols});
             return Status::DeviceError;
         }
 
@@ -73,7 +73,7 @@ class OpenClBackend final : public Backend {
         int a = 0;
         err |= clSetKernelArg(kernel_points_, a++, sizeof(cl_mem), &tb.instrs);
         err |= clSetKernelArg(kernel_points_, a++, sizeof(cl_mem), &tb.params);
-        err |= clSetKernelArg(kernel_points_, a++, sizeof(cl_mem), &tb.strokes);
+        err |= clSetKernelArg(kernel_points_, a++, sizeof(cl_mem), &tb.blob);
         err |= clSetKernelArg(kernel_points_, a++, sizeof(cl_mem), &pts);
         err |= clSetKernelArg(kernel_points_, a++, sizeof(cl_mem), &dist);
         err |= clSetKernelArg(kernel_points_, a++, sizeof(cl_mem), &cols);
@@ -88,7 +88,7 @@ class OpenClBackend final : public Backend {
         if (err == CL_SUCCESS && out.colors_rgb)
             err = clEnqueueReadBuffer(queue_, cols, CL_TRUE, 0, q.count * 3 * sizeof(float),
                                       out.colors_rgb, 0, nullptr, nullptr);
-        release({tb.instrs, tb.params, tb.strokes, pts, dist, cols});
+        release({tb.instrs, tb.params, tb.blob, pts, dist, cols});
         if (err != CL_SUCCESS) return Status::DeviceError;
 
         // gradients are a host-side tetrahedron tap on the same tape
@@ -113,7 +113,7 @@ class OpenClBackend final : public Backend {
         cl_mem dist = buffer_out(total * sizeof(float), &err);
         cl_mem cols = buffer_out((out_colors_rgb ? total * 3 : 1) * sizeof(float), &err);
         if (err != CL_SUCCESS) {
-            release({tb.instrs, tb.params, tb.strokes, dist, cols});
+            release({tb.instrs, tb.params, tb.blob, dist, cols});
             return Status::DeviceError;
         }
 
@@ -125,7 +125,7 @@ class OpenClBackend final : public Backend {
         int a = 0;
         err |= clSetKernelArg(kernel_grid_, a++, sizeof(cl_mem), &tb.instrs);
         err |= clSetKernelArg(kernel_grid_, a++, sizeof(cl_mem), &tb.params);
-        err |= clSetKernelArg(kernel_grid_, a++, sizeof(cl_mem), &tb.strokes);
+        err |= clSetKernelArg(kernel_grid_, a++, sizeof(cl_mem), &tb.blob);
         err |= clSetKernelArg(kernel_grid_, a++, sizeof(cl_mem), &dist);
         err |= clSetKernelArg(kernel_grid_, a++, sizeof(cl_mem), &cols);
         err |= clSetKernelArg(kernel_grid_, a++, sizeof(float), &q.origin.x);
@@ -145,7 +145,7 @@ class OpenClBackend final : public Backend {
         if (err == CL_SUCCESS && out_colors_rgb)
             err = clEnqueueReadBuffer(queue_, cols, CL_TRUE, 0, total * 3 * sizeof(float),
                                       out_colors_rgb, 0, nullptr, nullptr);
-        release({tb.instrs, tb.params, tb.strokes, dist, cols});
+        release({tb.instrs, tb.params, tb.blob, dist, cols});
         return err == CL_SUCCESS ? Status::Ok : Status::DeviceError;
     }
 
@@ -161,7 +161,7 @@ class OpenClBackend final : public Backend {
     struct TapeBuffers {
         cl_mem instrs = nullptr;
         cl_mem params = nullptr;
-        cl_mem strokes = nullptr;
+        cl_mem blob = nullptr;
     };
 
     bool init() {
@@ -256,7 +256,7 @@ class OpenClBackend final : public Backend {
         out->instrs = buffer_in(tape.instrs.data(),
                                 tape.instrs.size() * sizeof(kernel::CTapeInstr), &err);
         out->params = buffer_in(tape.params.data(), tape.params.size() * sizeof(float), &err);
-        out->strokes = buffer_in(tape.strokes.data(), tape.strokes.size() * sizeof(float), &err);
+        out->blob = buffer_in(tape.blob.data(), tape.blob.size() * sizeof(float), &err);
         return err == CL_SUCCESS;
     }
 

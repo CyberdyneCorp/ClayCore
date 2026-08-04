@@ -89,6 +89,11 @@ void check_io(const io::IoStatus& s) {
 
 // -- scene wrappers -----------------------------------------------------------
 
+struct PyProfile {
+    scene::Profile profile;
+    std::vector<kernel::cfloat2> points;  // polygon only
+};
+
 struct PyTransition {
     scene::Transition t;
 };
@@ -122,6 +127,8 @@ struct PyPrim {
     std::vector<scene::StrokePoint> stroke;
     float stroke_blend_k = 0.0f;
     std::vector<scene::Deformer> deformers;
+    scene::Profile profile;
+    std::vector<kernel::cfloat2> profile_points;
 };
 
 void place(PyPrim& p, nb::handle position, nb::handle rotation_axis_angle, float scale) {
@@ -157,6 +164,8 @@ struct PyOctahedron : PyPrim {};
 struct PyHexPrism : PyPrim {};
 struct PyPyramid : PyPrim {};
 struct PyStroke : PyPrim {};
+struct PyExtrude : PyPrim {};
+struct PyRevolve : PyPrim {};
 
 // -- mesh wrapper ---------------------------------------------------------------
 
@@ -241,6 +250,27 @@ PointsView to_points(nb::handle obj) {
     }
     if (view.shape(1) != 3) throw std::invalid_argument("points must be an (N, 3) array");
     return PointsView{arr, view.data(), view.shape(0)};
+}
+
+// (N,2) float32 polygon vertices. Sequences of pairs also work.
+std::vector<kernel::cfloat2> to_polygon(nb::handle obj) {
+    nb::module_ np = nb::module_::import_("numpy");
+    nb::object arr = np.attr("ascontiguousarray")(obj, "dtype"_a = "float32");
+    nb::ndarray<const float, nb::ndim<2>, nb::c_contig, nb::device::cpu> view;
+    try {
+        view = nb::cast<decltype(view)>(arr);
+    } catch (const std::exception&) {
+        throw std::invalid_argument("polygon points must be an (N, 2) array");
+    }
+    if (view.shape(1) != 2)
+        throw std::invalid_argument("polygon points must be an (N, 2) array");
+    if (view.shape(0) < 3)
+        throw std::invalid_argument("a polygon needs at least 3 vertices");
+    std::vector<kernel::cfloat2> out;
+    out.reserve(view.shape(0));
+    for (std::size_t i = 0; i < view.shape(0); ++i)
+        out.push_back(kernel::cf2(view.data()[i * 2], view.data()[i * 2 + 1]));
+    return out;
 }
 
 // (N,4) float32 stroke points: xyz + radius. Sequences of 4-tuples also work.
@@ -659,9 +689,79 @@ NB_MODULE(pyclay, m) {
                  place(*self, pos, rot, scale);
              },
              "h"_a, CLAY_PLACE_ARGS);
-#undef CLAY_PLACE_ARGS
 
     // -- mesh ---------------------------------------------------------------------
+    nb::class_<PyProfile>(m, "Profile", "A closed 2D profile for Extrude / Revolve")
+        .def_static("circle", [](float r) {
+            PyProfile p;
+            p.profile = scene::Profile::circle(r);
+            return p;
+        }, "r"_a)
+        .def_static("box", [](float half_x, float half_y) {
+            PyProfile p;
+            p.profile = scene::Profile::box(half_x, half_y);
+            return p;
+        }, "half_x"_a, "half_y"_a)
+        .def_static("hexagon", [](float r) {
+            PyProfile p;
+            p.profile = scene::Profile::hexagon(r);
+            return p;
+        }, "r"_a)
+        .def_static("triangle", [](float r) {
+            PyProfile p;
+            p.profile = scene::Profile::triangle(r);
+            return p;
+        }, "r"_a)
+        .def_static("trapezoid", [](float bottom, float top, float half_height) {
+            PyProfile p;
+            p.profile = scene::Profile::trapezoid(bottom, top, half_height);
+            return p;
+        }, "bottom"_a, "top"_a, "half_height"_a)
+        .def_static("vesica", [](float r, float d) {
+            PyProfile p;
+            p.profile = scene::Profile::vesica(r, d);
+            return p;
+        }, "r"_a, "d"_a)
+        .def_static("polygon", [](nb::handle points) {
+            PyProfile p;
+            p.profile = scene::Profile::polygon();
+            p.points = to_polygon(points);
+            return p;
+        }, "points"_a,
+           "Arbitrary closed polygon from an (N, 2) array; concave and "
+           "self-intersecting outlines follow the even-odd rule. Flatten curves "
+           "host-side (open curves are unsigned distances, not regions).")
+        .def_prop_ro("point_count", [](const PyProfile& p) { return p.points.size(); });
+
+    nb::class_<PyExtrude, PyPrim>(m, "Extrude",
+                                  "Exact extrusion of a profile along Z (half_depth)")
+        .def("__init__",
+             [](PyExtrude* self, const PyProfile& profile, float half_depth,
+                nb::handle position, nb::handle rotation_axis_angle, float scale) {
+                 new (self) PyExtrude();
+                 if (half_depth <= 0.0f)
+                     throw std::invalid_argument("half_depth must be > 0");
+                 self->prim = scene::Prim::extrude(half_depth);
+                 self->profile = profile.profile;
+                 self->profile_points = profile.points;
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "profile"_a, "half_depth"_a, CLAY_PLACE_ARGS);
+
+    nb::class_<PyRevolve, PyPrim>(m, "Revolve",
+                                  "Exact revolution of a profile about Y at a given offset")
+        .def("__init__",
+             [](PyRevolve* self, const PyProfile& profile, float offset, nb::handle position,
+                nb::handle rotation_axis_angle, float scale) {
+                 new (self) PyRevolve();
+                 self->prim = scene::Prim::revolve(offset);
+                 self->profile = profile.profile;
+                 self->profile_points = profile.points;
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "profile"_a, "offset"_a = 0.0f, CLAY_PLACE_ARGS);
+#undef CLAY_PLACE_ARGS
+
     nb::class_<PyStroke, PyPrim>(
         m, "Stroke",
         "Sculpt stroke: a polyline chain of sphere-swept cones with per-point "
@@ -869,6 +969,8 @@ NB_MODULE(pyclay, m) {
                  n.stroke = prim.stroke;
                  n.stroke_blend_k = prim.stroke_blend_k;
                  n.deformers = prim.deformers;
+                 n.profile = prim.profile;
+                 n.profile_points = prim.profile_points;
                  n.op = op;
                  if (!blend.is_none()) {
                      try {

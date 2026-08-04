@@ -61,7 +61,7 @@ class MetalBackend final : public Backend {
             (out.colors_rgb ? q.count * 3 : 1) * sizeof(float), MTL::ResourceStorageModeShared);
 
         TapeBuffers tb = upload_tape(tape);
-        bool ok = dispatch(pso_points_, {tb.instrs, tb.params, tb.strokes, pts, dist, cols},
+        bool ok = dispatch(pso_points_, {tb.instrs, tb.params, tb.blob, pts, dist, cols},
                            &u, sizeof(u), 6, q.count);
         if (ok) {
             std::memcpy(out.distances, dist->contents(), q.count * sizeof(float));
@@ -69,7 +69,7 @@ class MetalBackend final : public Backend {
                 std::memcpy(out.colors_rgb, cols->contents(), q.count * 3 * sizeof(float));
             if (out.gradients_xyz) gradients_from_taps(tape, q, out);
         }
-        release_all({tb.instrs, tb.params, tb.strokes, pts, dist, cols});
+        release_all({tb.instrs, tb.params, tb.blob, pts, dist, cols});
         return ok ? Status::Ok : Status::DeviceError;
     }
 
@@ -94,14 +94,14 @@ class MetalBackend final : public Backend {
         MTL::Buffer* cols = device_->newBuffer(
             (out_colors_rgb ? total * 3 : 1) * sizeof(float), MTL::ResourceStorageModeShared);
         TapeBuffers tb = upload_tape(tape);
-        bool ok = dispatch(pso_grid_, {tb.instrs, tb.params, tb.strokes, dist, cols}, &u,
+        bool ok = dispatch(pso_grid_, {tb.instrs, tb.params, tb.blob, dist, cols}, &u,
                            sizeof(u), 5, total);
         if (ok) {
             std::memcpy(out_values, dist->contents(), total * sizeof(float));
             if (out_colors_rgb)
                 std::memcpy(out_colors_rgb, cols->contents(), total * 3 * sizeof(float));
         }
-        release_all({tb.instrs, tb.params, tb.strokes, dist, cols});
+        release_all({tb.instrs, tb.params, tb.blob, dist, cols});
         return ok ? Status::Ok : Status::DeviceError;
     }
 
@@ -139,10 +139,10 @@ class MetalBackend final : public Backend {
         MTL::Buffer* out = device_->newBuffer(q.count * sizeof(ClayRayHitGpu),
                                               MTL::ResourceStorageModeShared);
         TapeBuffers tb = upload_tape(tape);
-        bool ok = dispatch(pso_rays_, {tb.instrs, tb.params, tb.strokes, rays, out}, &u,
+        bool ok = dispatch(pso_rays_, {tb.instrs, tb.params, tb.blob, rays, out}, &u,
                            sizeof(u), 5, q.count);
         if (ok) std::memcpy(hits, out->contents(), q.count * sizeof(ClayRayHitGpu));
-        release_all({tb.instrs, tb.params, tb.strokes, rays, out});
+        release_all({tb.instrs, tb.params, tb.blob, rays, out});
         return ok ? Status::Ok : Status::DeviceError;
     }
 
@@ -152,7 +152,7 @@ class MetalBackend final : public Backend {
     struct TapeBuffers {
         MTL::Buffer* instrs;
         MTL::Buffer* params;
-        MTL::Buffer* strokes;
+        MTL::Buffer* blob;
     };
 
     bool init() {
@@ -191,7 +191,7 @@ class MetalBackend final : public Backend {
         return TapeBuffers{
             copy_in(tape.instrs.data(), tape.instrs.size() * sizeof(kernel::CTapeInstr)),
             copy_in(tape.params.data(), tape.params.size() * sizeof(float)),
-            copy_in(tape.strokes.data(), tape.strokes.size() * sizeof(float)),
+            copy_in(tape.blob.data(), tape.blob.size() * sizeof(float)),
         };
     }
 

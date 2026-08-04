@@ -18,7 +18,7 @@ namespace scene {
 struct Tape {
     std::vector<kernel::CTapeInstr> instrs;
     std::vector<float> params;
-    std::vector<float> strokes;
+    std::vector<float> blob;  // out-of-line payload: stroke points, polygon verts
     kernel::CFieldInfo info{true, 1.0f};
     math::Aabb bounds;  // union of item influence bounds (raycast clipping)
 
@@ -27,7 +27,7 @@ struct Tape {
 
     kernel::CTapeValue eval(kernel::cfloat3 p) const {
         return kernel::ctape_eval(instrs.data(), static_cast<int>(instrs.size()), params.data(),
-                                  strokes.data(), p);
+                                  blob.data(), p);
     }
 };
 

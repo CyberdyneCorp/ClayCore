@@ -77,6 +77,28 @@ CLAY_FN float sd_polygon2(CLAY_DEVICE const cfloat2* v, int n, cfloat2 p) {
     return s * csqrt(d);
 }
 
+// Same even-odd polygon, over a raw (x, y) float pool — the form the tape
+// uses, since its out-of-line payload is a flat float array.
+CLAY_FN float sd_polygon2_raw(CLAY_DEVICE const float* v, int n, cfloat2 p) {
+    cfloat2 v0 = cf2(v[0], v[1]);
+    float d = cdot2(p - v0);
+    float s = 1.0f;
+    int j = n - 1;
+    for (int i = 0; i < n; j = i, i++) {
+        cfloat2 vi = cf2(v[i * 2], v[i * 2 + 1]);
+        cfloat2 vj = cf2(v[j * 2], v[j * 2 + 1]);
+        cfloat2 e = vj - vi;
+        cfloat2 w = p - vi;
+        cfloat2 b = w - e * cclamp(cdot(w, e) / cdot(e, e), 0.0f, 1.0f);
+        d = cmin(d, cdot2(b));
+        bool c0 = p.y >= vi.y;
+        bool c1 = p.y < vj.y;
+        bool c2 = e.x * w.y > e.y * w.x;
+        if ((c0 && c1 && c2) || (!c0 && !c1 && !c2)) s = -s;
+    }
+    return s * csqrt(d);
+}
+
 // Unsigned distance to a quadratic Bézier A-B-C (closed-form cubic solve).
 // Degenerate (collinear) control points fall back to the segment distance.
 CLAY_FN float sd_bezier2(cfloat2 pos, cfloat2 A, cfloat2 B, cfloat2 C) {

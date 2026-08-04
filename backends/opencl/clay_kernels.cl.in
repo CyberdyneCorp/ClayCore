@@ -8,7 +8,7 @@
 
 __kernel void clay_eval_points(__global const CTapeInstr* instrs,
                                __global const float* params,
-                               __global const float* strokes,
+                               __global const float* blob,
                                __global const float* pts,
                                __global float* out_d,
                                __global float* out_col,
@@ -18,7 +18,7 @@ __kernel void clay_eval_points(__global const CTapeInstr* instrs,
     unsigned int gid = (unsigned int)get_global_id(0);
     if (gid >= point_count) return;
     float3 p = cf3(pts[gid * 3 + 0], pts[gid * 3 + 1], pts[gid * 3 + 2]);
-    CTapeValue v = ctape_eval(instrs, (int)instr_count, params, strokes, p);
+    CTapeValue v = ctape_eval(instrs, (int)instr_count, params, blob, p);
     out_d[gid] = v.d;
     if (has_colors) {
         out_col[gid * 3 + 0] = v.color.x;
@@ -29,7 +29,7 @@ __kernel void clay_eval_points(__global const CTapeInstr* instrs,
 
 __kernel void clay_eval_grid(__global const CTapeInstr* instrs,
                              __global const float* params,
-                             __global const float* strokes,
+                             __global const float* blob,
                              __global float* out_d,
                              __global float* out_col,
                              const float ox, const float oy, const float oz,
@@ -46,7 +46,7 @@ __kernel void clay_eval_grid(__global const CTapeInstr* instrs,
     unsigned int y = (gid / nx) % ny;
     unsigned int z = gid / (nx * ny);
     float3 p = cf3(ox, oy, oz) + cf3((float)x, (float)y, (float)z) * spacing;
-    CTapeValue v = ctape_eval(instrs, (int)instr_count, params, strokes, p);
+    CTapeValue v = ctape_eval(instrs, (int)instr_count, params, blob, p);
     out_d[gid] = v.d;
     if (has_colors) {
         out_col[gid * 3 + 0] = v.color.x;

@@ -642,3 +642,80 @@ def test_transition_round_trip(tmp_path):
     path = tmp_path / "morph.clayspace"
     doc.save(str(path))
     assert np.array_equal(before, clay.load(str(path)).eval(pts))
+
+
+# --- profiles and lifts (add-profile-lifts) ---------------------------------
+
+
+def test_extruded_polygon_from_numpy(tmp_path):
+    # an L-shaped outline: the kind of thing text and SVG produce
+    outline = np.array([[-1, -1], [1, -1], [1, 0], [0, 0], [0, 1], [-1, 1]], dtype=np.float32)
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Extrude(clay.Profile.polygon(outline), half_depth=0.3), color="#c0d020")
+
+    pts = np.array([[-0.5, -0.5, 0.0],   # solid arm
+                    [0.5, 0.5, 0.0],     # the notch -> outside
+                    [0.0, 0.0, 2.0]],    # past the depth
+                   dtype=np.float32)
+    d = doc.eval(pts)
+    assert d[0] < 0 < d[1] and d[2] > 0
+
+    mesh = doc.mesh(resolution=64)
+    assert mesh.is_watertight() and mesh.is_manifold()
+    mesh.save(str(tmp_path / "extruded.obj"))
+
+
+def test_revolved_circle_matches_torus():
+    revolved = clay.Document()
+    revolved.add_sdf_layer("l").add(clay.Revolve(clay.Profile.circle(0.3), offset=1.1))
+    torus = clay.Document()
+    torus.add_sdf_layer("l").add(clay.Torus(R=1.1, r=0.3))
+
+    rng = np.random.default_rng(31)
+    pts = rng.uniform(-2.5, 2.5, size=(512, 3)).astype(np.float32)
+    assert np.allclose(revolved.eval(pts), torus.eval(pts), atol=1e-5)
+
+
+def test_all_profile_kinds_lift():
+    profiles = [
+        clay.Profile.circle(0.5),
+        clay.Profile.box(0.4, 0.3),
+        clay.Profile.hexagon(0.45),
+        clay.Profile.triangle(0.5),
+        clay.Profile.trapezoid(0.5, 0.25, 0.35),
+        clay.Profile.vesica(0.6, 0.25),
+        clay.Profile.polygon([(-0.4, -0.4), (0.4, -0.4), (0.0, 0.5)]),
+    ]
+    for profile in profiles:
+        doc = clay.Document()
+        doc.add_sdf_layer("l").add(clay.Extrude(profile, half_depth=0.25))
+        assert doc.eval(np.array([[0.0, 0.0, 0.0]], dtype=np.float32))[0] < 0
+        assert doc.eval(np.array([[5.0, 0.0, 0.0]], dtype=np.float32))[0] > 0
+        assert doc.mesh(resolution=40).is_watertight()
+
+
+def test_polygon_input_validation():
+    with pytest.raises(ValueError, match=r"\(N, 2\)"):
+        clay.Profile.polygon(np.zeros((4, 3), np.float32))
+    with pytest.raises(ValueError, match="at least 3"):
+        clay.Profile.polygon([(0, 0), (1, 1)])
+    assert clay.Profile.polygon([(0, 0), (1, 0), (0, 1)]).point_count == 3
+
+
+def test_lifts_round_trip_and_compose(tmp_path):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Revolve(clay.Profile.polygon([(-0.2, -0.3), (0.2, -0.3), (0.25, 0.3),
+                                                 (-0.25, 0.3)]), offset=0.9))
+    # lifts compose with everything else: blends, ops, deformers
+    layer.add(clay.Extrude(clay.Profile.hexagon(0.35), half_depth=0.6).twist(0.8),
+              op=clay.Op.SUBTRACT, blend=clay.Smooth(0.05))
+
+    rng = np.random.default_rng(33)
+    pts = rng.uniform(-2, 2, size=(256, 3)).astype(np.float32)
+    before = doc.eval(pts)
+
+    path = tmp_path / "lathe.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(pts))

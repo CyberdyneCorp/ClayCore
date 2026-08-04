@@ -95,6 +95,14 @@
       }
     },
     {
+      "name": "metal",
+      "configurePreset": "metal",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
       "name": "asan-ubsan",
       "configurePreset": "asan-ubsan",
       "output": {

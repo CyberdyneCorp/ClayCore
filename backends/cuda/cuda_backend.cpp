@@ -16,13 +16,13 @@
 // Launch wrappers defined in clay_kernels.cu: the <<<>>> syntax only exists
 // in nvcc's translation unit, so this host file calls plain functions.
 extern "C" int clay_cuda_launch_eval_points(const void* instrs, const float* params,
-                                            const float* strokes, const float* pts, float* out_d,
+                                            const float* blob, const float* pts, float* out_d,
                                             float* out_col, ClayCudaEvalUniforms u);
 extern "C" int clay_cuda_launch_eval_grid(const void* instrs, const float* params,
-                                          const float* strokes, float* out_d, float* out_col,
+                                          const float* blob, float* out_d, float* out_col,
                                           ClayCudaGridUniforms u);
 extern "C" int clay_cuda_launch_raycast(const void* instrs, const float* params,
-                                        const float* strokes, const float* rays, void* hits,
+                                        const float* blob, const float* rays, void* hits,
                                         ClayCudaRayUniforms u);
 
 namespace clay {
@@ -64,13 +64,13 @@ class DeviceBuffer {
 };
 
 struct TapeBuffers {
-    DeviceBuffer instrs, params, strokes;
+    DeviceBuffer instrs, params, blob;
 
     bool upload(const scene::Tape& tape) {
         return instrs.upload(tape.instrs.data(),
                              tape.instrs.size() * sizeof(kernel::CTapeInstr)) &&
                params.upload(tape.params.data(), tape.params.size() * sizeof(float)) &&
-               strokes.upload(tape.strokes.data(), tape.strokes.size() * sizeof(float));
+               blob.upload(tape.blob.data(), tape.blob.size() * sizeof(float));
     }
 };
 
@@ -104,7 +104,7 @@ class CudaBackend final : public Backend {
         u.has_colors = out.colors_rgb ? 1u : 0u;
 
         if (clay_cuda_launch_eval_points(tb.instrs.as<const void>(), tb.params.as<const float>(),
-                                         tb.strokes.as<const float>(), pts.as<const float>(),
+                                         tb.blob.as<const float>(), pts.as<const float>(),
                                          dist.as<float>(), cols.as<float>(), u) != 0)
             return Status::DeviceError;
 
@@ -144,7 +144,7 @@ class CudaBackend final : public Backend {
         u.has_colors = out_colors_rgb ? 1u : 0u;
 
         if (clay_cuda_launch_eval_grid(tb.instrs.as<const void>(), tb.params.as<const float>(),
-                                       tb.strokes.as<const float>(), dist.as<float>(),
+                                       tb.blob.as<const float>(), dist.as<float>(),
                                        cols.as<float>(), u) != 0)
             return Status::DeviceError;
 
@@ -185,7 +185,7 @@ class CudaBackend final : public Backend {
         }
 
         if (clay_cuda_launch_raycast(tb.instrs.as<const void>(), tb.params.as<const float>(),
-                                     tb.strokes.as<const float>(), rays.as<const float>(),
+                                     tb.blob.as<const float>(), rays.as<const float>(),
                                      out.as<void>(), u) != 0)
             return Status::DeviceError;
         return out.download(hits, q.count * sizeof(ClayCudaRayHit)) ? Status::Ok

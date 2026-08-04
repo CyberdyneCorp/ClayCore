@@ -212,6 +212,18 @@ lo, hi = body.selection_bounds([node_id])  # tight bounds for zoom-to-selection
 ```
 
 ```python
+# profile-driven modelling: extrude and revolve exact 2D profiles
+outline = np.array([[-1, -1], [1, -1], [1, 0], [0, 0], [0, 1], [-1, 1]], np.float32)
+body.add(clay.Extrude(clay.Profile.polygon(outline), half_depth=0.3))
+body.add(clay.Revolve(clay.Profile.circle(0.3), offset=1.1))   # == a torus
+# built-in profiles: circle, box, hexagon, triangle, trapezoid, vesica, polygon
+```
+
+Curved outlines reach documents by flattening to a polygon host-side
+(`math/bezier.h` converts cubics to quadratic chains); open curves are
+unsigned distances rather than regions, so they are not profiles.
+
+```python
 # deformers — chainable, applied in call order
 body.add(clay.Box(size=(0.4, 0.4, 0.4)).twist(1.2), op=clay.Op.SUBTRACT)
 body.add(clay.Cylinder(r=0.6, h=1.0).taper(-1.0, 1.0, 1.0, 0.35))

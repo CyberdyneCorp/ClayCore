@@ -148,16 +148,33 @@ struct Compiler {
         if (item.prim.type == PrimType::Stroke) {
             float prim_params[3];
             prim_params[0] = item.stroke_blend_k;
-            prim_params[1] = static_cast<float>(tape.strokes.size());
+            prim_params[1] = static_cast<float>(tape.blob.size());
             prim_params[2] = static_cast<float>(item.stroke.size());
             for (const StrokePoint& sp : item.stroke) {
-                tape.strokes.push_back(sp.pos.x);
-                tape.strokes.push_back(sp.pos.y);
-                tape.strokes.push_back(sp.pos.z);
-                tape.strokes.push_back(sp.radius);
+                tape.blob.push_back(sp.pos.x);
+                tape.blob.push_back(sp.pos.y);
+                tape.blob.push_back(sp.pos.z);
+                tape.blob.push_back(sp.radius);
             }
             emit_prim(kernel::ctape_stroke, inv_world, scale, round_world, item.color,
                       prim_params, 3, item.deformers);
+        } else if (prim_is_lift(item.prim.type)) {
+            // [profile type][p0..p3][lift param]; polygon vertices go to the
+            // out-of-line pool as consecutive (x, y) pairs
+            float prim_params[CLAY_TAPE_PROFILE_FLOATS + 1];
+            prim_params[0] = static_cast<float>(item.profile.type);
+            for (int i = 0; i < 4; ++i) prim_params[i + 1] = item.profile.params[i];
+            if (item.profile.is_polygon()) {
+                prim_params[1] = static_cast<float>(tape.blob.size());
+                prim_params[2] = static_cast<float>(item.profile_points.size());
+                for (const kernel::cfloat2& v : item.profile_points) {
+                    tape.blob.push_back(v.x);
+                    tape.blob.push_back(v.y);
+                }
+            }
+            prim_params[CLAY_TAPE_PROFILE_FLOATS] = item.prim.params[0];
+            emit_prim(static_cast<unsigned int>(item.prim.type), inv_world, scale, round_world,
+                      item.color, prim_params, CLAY_TAPE_PROFILE_FLOATS + 1, item.deformers);
         } else {
             emit_prim(static_cast<unsigned int>(item.prim.type), inv_world, scale, round_world,
                       item.color, item.prim.params, kMaxPrimParams, item.deformers);
@@ -233,14 +250,14 @@ struct Compiler {
         if (!have_acc && group.op != Op::Add && !op_creates_material(group.op)) return have_acc;
         std::size_t saved_instrs = tape.instrs.size();
         std::size_t saved_params = tape.params.size();
-        std::size_t saved_strokes = tape.strokes.size();
+        std::size_t saved_strokes = tape.blob.size();
         bool seeded = !have_acc && group.op != Op::Add;
         if (seeded) emit_empty(group.color);
         bool sub = compile_list(group.children, content, layer, false);
         if (!sub) {  // empty subtree: roll back any partial emission
             tape.instrs.resize(saved_instrs);
             tape.params.resize(saved_params);
-            tape.strokes.resize(saved_strokes);
+            tape.blob.resize(saved_strokes);
             return have_acc;
         }
         if (have_acc || seeded) {

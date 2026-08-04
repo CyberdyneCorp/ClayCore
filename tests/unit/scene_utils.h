@@ -56,6 +56,22 @@ inline CTapeValue ref_eval_item(const scene::Node& item, const scene::Layer& lay
             }
             d = ctape_stroke_dist(pts.data(), static_cast<int>(item.stroke.size()), lp,
                                   item.stroke_blend_k);
+        } else if (scene::prim_is_lift(item.prim.type)) {
+            std::vector<float> prof(CLAY_TAPE_PROFILE_FLOATS + 1, 0.0f);
+            std::vector<float> verts;
+            prof[0] = static_cast<float>(item.profile.type);
+            for (int i = 0; i < 4; ++i) prof[i + 1] = item.profile.params[i];
+            if (item.profile.is_polygon()) {
+                prof[1] = 0.0f;
+                prof[2] = static_cast<float>(item.profile_points.size());
+                for (const cfloat2& v : item.profile_points) {
+                    verts.push_back(v.x);
+                    verts.push_back(v.y);
+                }
+            }
+            prof[CLAY_TAPE_PROFILE_FLOATS] = item.prim.params[0];
+            d = ctape_prim_dist(static_cast<unsigned int>(item.prim.type), prof.data(),
+                                verts.data(), lp);
         } else {
             d = ctape_prim_dist(static_cast<unsigned int>(item.prim.type), item.prim.params,
                                 nullptr, lp);
@@ -193,7 +209,7 @@ inline Node item(Prim prim, cfloat3 pos, Op op = Op::Add, Blend blend = {}) {
 }
 
 // A document exercising the whole vocabulary: nested groups (4 deep),
-// mirror, strokes, every blend profile, all ops, layer + item transforms,
+// mirror, blob, every blend profile, all ops, layer + item transforms,
 // and an instanced layer.
 inline Document gnarly_document() {
     Document doc;

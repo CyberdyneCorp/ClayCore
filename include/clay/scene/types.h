@@ -36,7 +36,13 @@ enum class PrimType : std::uint8_t {
     HexPrism = kernel::ctape_hex_prism,
     Pyramid = kernel::ctape_pyramid,
     Stroke = kernel::ctape_stroke,
+    Extrude = kernel::ctape_extrude,
+    Revolve = kernel::ctape_revolve,
 };
+
+inline bool prim_is_lift(PrimType t) {
+    return t == PrimType::Extrude || t == PrimType::Revolve;
+}
 
 enum class Op : std::uint8_t {
     None = 255,  // groups only: children apply inline to the outer chain
@@ -147,6 +153,30 @@ struct Prim {
     static Prim hex_prism(float hx, float hy) { return {PrimType::HexPrism, {hx, hy}}; }
     static Prim pyramid(float h) { return {PrimType::Pyramid, {h}}; }
     static Prim stroke() { return {PrimType::Stroke, {}}; }
+    // Lifts carry their profile in Node::profile / Node::profile_points; the
+    // single prim param is the lift's own (half-depth or axis offset).
+    static Prim extrude(float half_depth) { return {PrimType::Extrude, {half_depth}}; }
+    static Prim revolve(float offset) { return {PrimType::Revolve, {offset}}; }
+};
+
+// A closed 2D profile for the lift primitives (kernel/tape.h CProfileType).
+// Polygon vertices live on the Node (out-of-line, like stroke points).
+struct Profile {
+    std::uint8_t type = kernel::cprofile_circle;
+    float params[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+
+    static Profile circle(float r) { return {kernel::cprofile_circle, {r}}; }
+    static Profile box(float hx, float hy) { return {kernel::cprofile_box, {hx, hy}}; }
+    static Profile hexagon(float r) { return {kernel::cprofile_hexagon, {r}}; }
+    static Profile triangle(float r) { return {kernel::cprofile_triangle, {r}}; }
+    static Profile trapezoid(float bottom, float top, float half_height) {
+        return {kernel::cprofile_trapezoid, {bottom, top, half_height}};
+    }
+    static Profile vesica(float r, float d) { return {kernel::cprofile_vesica, {r, d}}; }
+    // vertices are carried by Node::profile_points
+    static Profile polygon() { return {kernel::cprofile_polygon, {}}; }
+
+    bool is_polygon() const { return type == kernel::cprofile_polygon; }
 };
 
 // One domain warp on an item (kernel/tape.h CDeformType). Ordered chains
@@ -213,6 +243,8 @@ struct Node {
     float stroke_blend_k = 0.0f;      // within-stroke segment smoothing
     std::vector<Deformer> deformers;  // applied to the local point, in order
     Transition transition;            // TransitionLinear/Radial ops only
+    Profile profile;                  // Extrude/Revolve prims only
+    std::vector<kernel::cfloat2> profile_points;  // polygon profile vertices
 
     // group fields
     std::vector<NodeId> children;
