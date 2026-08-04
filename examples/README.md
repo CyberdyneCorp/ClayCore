@@ -131,6 +131,13 @@ paint, then greedy meshing and picking.
 ![flood select](output/07_voxel_flood.png)
 ![carving](output/07_voxel_carve.png)
 
+Brushes come in two footprints, cube and sphere, selected with `shape=`. The
+sphere is the ball inscribed in the cube of the same size, so it is always a
+subset. Both use radius `(size-1)/2`, which is why an even size behaves as
+`size-1` — `set_brush(c, 4, i)` covers the same cells as `set_brush(c, 3, i)`.
+
+![cube and sphere brushes](output/07_brush_shapes.png)
+
 Voxel renders go through `VoxelGrid.raycast`, which handles one ray at a
 time, so they run at lower resolution than the SDF examples.
 

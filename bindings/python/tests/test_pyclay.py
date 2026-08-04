@@ -858,3 +858,94 @@ def test_bound_primitives_lower_the_step_scale():
     exact = clay.Document()
     exact.add_sdf_layer("l").add(clay.Tetrahedron(r=0.7))
     assert exact.safe_step_scale() == pytest.approx(1.0)
+
+
+# --- brush shapes and the paint brush (add-brush-shapes) --------------------
+
+
+def _brush(size, shape, index=None):
+    g = clay.VoxelGrid(voxel_size=0.1)
+    i = index if index is not None else g.palette_add("#ffffff")
+    g.set_brush((0, 0, 0), size, i, shape=shape)
+    return g
+
+
+def test_sphere_brush_is_a_subset_of_the_cube():
+    for size in (3, 5, 7, 9):
+        cube = _brush(size, "cube")
+        sphere = _brush(size, "sphere")
+        assert 0 < sphere.occupied_count < cube.occupied_count
+
+        r = (size - 1) // 2
+        for z in range(-r, r + 1):
+            for y in range(-r, r + 1):
+                for x in range(-r, r + 1):
+                    if sphere.get((x, y, z)) != 0:
+                        assert cube.get((x, y, z)) != 0
+                        assert x * x + y * y + z * z <= r * r
+        assert sphere.get((r, r, r)) == 0  # the cube corner is outside the ball
+
+
+def test_brush_shape_defaults_to_cube_and_rejects_unknown():
+    g = clay.VoxelGrid(voxel_size=0.1)
+    i = g.palette_add("#ffffff")
+    g.set_brush((0, 0, 0), 5, i)
+    assert g.occupied_count == 125
+
+    with pytest.raises(ValueError, match="cube.*sphere"):
+        g.set_brush((0, 0, 0), 3, i, shape="blob")
+
+
+def test_even_brush_sizes_round_down():
+    for shape in ("cube", "sphere"):
+        assert _brush(4, shape).occupied_count == _brush(3, shape).occupied_count
+        assert _brush(2, shape).occupied_count == _brush(1, shape).occupied_count
+
+
+def test_erase_brush_honours_shape():
+    g = clay.VoxelGrid(voxel_size=0.1)
+    i = g.palette_add("#ffffff")
+    g.set_brush((0, 0, 0), 5, i)
+    g.erase_brush((0, 0, 0), 5, shape="sphere")
+    assert g.get((0, 0, 0)) == 0     # scooped
+    assert g.get((2, 2, 2)) == i     # corner survives
+    assert g.occupied_count == 125 - _brush(5, "sphere").occupied_count
+
+
+def test_paint_brush_recolors_without_creating_voxels():
+    g = clay.VoxelGrid(voxel_size=0.1)
+    a = g.palette_add("#ff0000")
+    b = g.palette_add("#00ff00")
+    g.set((0, 0, 0), a)
+    g.set((1, 0, 0), a)
+    before = g.occupied_count
+
+    g.paint_brush((0, 0, 0), 5, b)
+    assert g.occupied_count == before          # no new cells
+    assert g.get((0, 0, 0)) == b
+    assert g.get((1, 0, 0)) == b
+    assert g.get((2, 0, 0)) == 0               # still empty
+
+
+def test_paint_brush_sphere_leaves_cube_corners():
+    g = clay.VoxelGrid(voxel_size=0.1)
+    a = g.palette_add("#ff0000")
+    b = g.palette_add("#00ff00")
+    g.set_brush((0, 0, 0), 5, a)
+    g.paint_brush((0, 0, 0), 5, b, shape="sphere")
+    assert g.get((0, 0, 0)) == b
+    assert g.get((2, 2, 2)) == a
+    assert g.occupied_count == 125
+
+
+def test_paint_mirrored_recolors_both_sides():
+    g = clay.VoxelGrid(voxel_size=0.1)
+    a = g.palette_add("#ff0000")
+    b = g.palette_add("#00ff00")
+    g.set_mirrored((3, 1, 2), a, axes="x")
+    assert g.occupied_count == 2
+
+    g.paint_mirrored((3, 1, 2), b, axes="x")
+    assert g.occupied_count == 2
+    assert g.get((3, 1, 2)) == b
+    assert g.get((-4, 1, 2)) == b     # mirror of x=3 is -1-3

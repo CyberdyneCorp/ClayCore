@@ -41,6 +41,10 @@ inline constexpr std::uint8_t kVoxMirrorX = 1;
 inline constexpr std::uint8_t kVoxMirrorY = 2;
 inline constexpr std::uint8_t kVoxMirrorZ = 4;
 
+// Brush footprint. Sphere is the sphere inscribed in the cube of the same
+// size, so it is always a subset of Cube for a given size.
+enum class BrushShape : std::uint8_t { Cube = 0, Sphere = 1 };
+
 class VoxelGrid {
   public:
     explicit VoxelGrid(float voxel_size = 0.1f) : voxel_size_(voxel_size) {
@@ -63,10 +67,16 @@ class VoxelGrid {
     void paint(VoxelCoord c, std::uint8_t index);          // occupied cells only
 
     // -- brushes and fills ---------------------------------------------------
-    // n x n x n footprint centered on c (n odd recommended; even rounds down).
-    void set_brush(VoxelCoord c, int n, std::uint8_t index);
-    void erase_brush(VoxelCoord c, int n) { set_brush(c, n, 0); }
-    void paint_brush(VoxelCoord c, int n, std::uint8_t index);
+    // Footprint of size n centered on c, as a solid cube or as the sphere
+    // inscribed in that cube. Both use radius (n - 1) / 2, so an even n
+    // behaves as n - 1 (size 4 covers the same cells as size 3).
+    void set_brush(VoxelCoord c, int n, std::uint8_t index,
+                   BrushShape shape = BrushShape::Cube);
+    void erase_brush(VoxelCoord c, int n, BrushShape shape = BrushShape::Cube) {
+        set_brush(c, n, 0, shape);
+    }
+    void paint_brush(VoxelCoord c, int n, std::uint8_t index,
+                     BrushShape shape = BrushShape::Cube);
     void fill_box(VoxelCoord a, VoxelCoord b, std::uint8_t index);  // inclusive corners
     void fill_line(VoxelCoord a, VoxelCoord b, std::uint8_t index); // 3D DDA
 

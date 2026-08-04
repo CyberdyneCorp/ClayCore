@@ -78,18 +78,32 @@ void VoxelGrid::paint(VoxelCoord c, std::uint8_t index) {
 
 // -- brushes and fills -------------------------------------------------------
 
-void VoxelGrid::set_brush(VoxelCoord c, int n, std::uint8_t index) {
-    int r = (n - 1) / 2;
-    for (int z = -r; z <= r; ++z)
-        for (int y = -r; y <= r; ++y)
-            for (int x = -r; x <= r; ++x) set({c.x + x, c.y + y, c.z + z}, index);
+namespace {
+
+// Whether offset (x, y, z) lies inside a brush of radius r. The sphere test
+// is on cell centres, so it is exactly the sphere inscribed in the cube and
+// therefore always a subset of it.
+inline bool in_brush(int x, int y, int z, int r, BrushShape shape) {
+    if (shape == BrushShape::Cube) return true;
+    return x * x + y * y + z * z <= r * r;
 }
 
-void VoxelGrid::paint_brush(VoxelCoord c, int n, std::uint8_t index) {
+}  // namespace
+
+void VoxelGrid::set_brush(VoxelCoord c, int n, std::uint8_t index, BrushShape shape) {
     int r = (n - 1) / 2;
     for (int z = -r; z <= r; ++z)
         for (int y = -r; y <= r; ++y)
-            for (int x = -r; x <= r; ++x) paint({c.x + x, c.y + y, c.z + z}, index);
+            for (int x = -r; x <= r; ++x)
+                if (in_brush(x, y, z, r, shape)) set({c.x + x, c.y + y, c.z + z}, index);
+}
+
+void VoxelGrid::paint_brush(VoxelCoord c, int n, std::uint8_t index, BrushShape shape) {
+    int r = (n - 1) / 2;
+    for (int z = -r; z <= r; ++z)
+        for (int y = -r; y <= r; ++y)
+            for (int x = -r; x <= r; ++x)
+                if (in_brush(x, y, z, r, shape)) paint({c.x + x, c.y + y, c.z + z}, index);
 }
 
 void VoxelGrid::fill_box(VoxelCoord a, VoxelCoord b, std::uint8_t index) {

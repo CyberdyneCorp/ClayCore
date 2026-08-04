@@ -285,3 +285,104 @@ TEST_CASE("SDF rasterization: inside centers set with field colors") {
     // color came from the field
     CHECK(clength(g.palette_color(g.get({0, 0, 0})) - cf3(0.9f, 0.1f, 0.2f)) < 0.05f);
 }
+
+TEST_CASE("brush shapes: sphere is the inscribed subset of the cube") {
+    std::uint8_t c = 1;
+
+    SUBCASE("sphere cells are a strict subset of cube cells") {
+        for (int n : {3, 5, 7, 9}) {
+            VoxelGrid cube(0.1f), sphere(0.1f);
+            c = cube.palette_add(cf3(1, 1, 1));
+            sphere.palette_add(cf3(1, 1, 1));
+            cube.set_brush({0, 0, 0}, n, c);
+            sphere.set_brush({0, 0, 0}, n, c, voxel::BrushShape::Sphere);
+
+            CHECK(sphere.occupied_count() < cube.occupied_count());
+            CHECK(sphere.occupied_count() > 0);
+
+            // every sphere cell is also a cube cell, and lies within radius
+            int r = (n - 1) / 2;
+            for (int z = -r; z <= r; ++z)
+                for (int y = -r; y <= r; ++y)
+                    for (int x = -r; x <= r; ++x) {
+                        bool in_sphere = sphere.get({x, y, z}) != 0;
+                        if (in_sphere) {
+                            CHECK(cube.get({x, y, z}) != 0);
+                            CHECK(x * x + y * y + z * z <= r * r);
+                        }
+                    }
+            // the cube's corner is outside the sphere
+            CHECK(sphere.get({r, r, r}) == 0);
+        }
+    }
+
+    SUBCASE("cube remains the default") {
+        VoxelGrid g(0.1f);
+        c = g.palette_add(cf3(1, 1, 1));
+        g.set_brush({0, 0, 0}, 5, c);
+        CHECK(g.occupied_count() == 125);
+    }
+
+    SUBCASE("even sizes round down for both shapes") {
+        for (voxel::BrushShape shape : {voxel::BrushShape::Cube, voxel::BrushShape::Sphere}) {
+            VoxelGrid even(0.1f), odd(0.1f);
+            c = even.palette_add(cf3(1, 1, 1));
+            odd.palette_add(cf3(1, 1, 1));
+            even.set_brush({0, 0, 0}, 4, c, shape);
+            odd.set_brush({0, 0, 0}, 3, c, shape);
+            CHECK(even.occupied_count() == odd.occupied_count());
+        }
+    }
+
+    SUBCASE("erase_brush honours the shape") {
+        VoxelGrid g(0.1f);
+        c = g.palette_add(cf3(1, 1, 1));
+        g.set_brush({0, 0, 0}, 5, c);                            // solid cube
+        g.erase_brush({0, 0, 0}, 5, voxel::BrushShape::Sphere);         // scoop a ball
+        CHECK(g.get({0, 0, 0}) == 0);                            // centre gone
+        CHECK(g.get({2, 2, 2}) == c);                            // corner kept
+        CHECK(g.occupied_count() == 125 - 33);
+    }
+}
+
+TEST_CASE("paint brush recolors without creating voxels") {
+    VoxelGrid g(0.1f);
+    std::uint8_t a = g.palette_add(cf3(1, 0, 0));
+    std::uint8_t b = g.palette_add(cf3(0, 1, 0));
+
+    // a sparse pattern: only some cells inside the footprint are occupied
+    g.set({0, 0, 0}, a);
+    g.set({1, 0, 0}, a);
+    std::size_t before = g.occupied_count();
+
+    g.paint_brush({0, 0, 0}, 5, b);
+    CHECK(g.occupied_count() == before);  // no new cells
+    CHECK(g.get({0, 0, 0}) == b);
+    CHECK(g.get({1, 0, 0}) == b);
+    CHECK(g.get({2, 0, 0}) == 0);         // still empty
+
+    SUBCASE("sphere-shaped paint leaves cube corners alone") {
+        VoxelGrid h(0.1f);
+        std::uint8_t x = h.palette_add(cf3(1, 0, 0));
+        std::uint8_t y = h.palette_add(cf3(0, 1, 0));
+        h.set_brush({0, 0, 0}, 5, x);
+        h.paint_brush({0, 0, 0}, 5, y, voxel::BrushShape::Sphere);
+        CHECK(h.get({0, 0, 0}) == y);   // inside the ball: recoloured
+        CHECK(h.get({2, 2, 2}) == x);   // cube corner: untouched
+        CHECK(h.occupied_count() == 125);
+    }
+}
+
+TEST_CASE("mirrored paint recolors both sides") {
+    VoxelGrid g(0.1f);
+    std::uint8_t a = g.palette_add(cf3(1, 0, 0));
+    std::uint8_t b = g.palette_add(cf3(0, 1, 0));
+
+    g.set_mirrored({3, 1, 2}, a, voxel::kVoxMirrorX);
+    CHECK(g.occupied_count() == 2);
+
+    g.paint_mirrored({3, 1, 2}, b, voxel::kVoxMirrorX);
+    CHECK(g.occupied_count() == 2);                       // no new cells
+    CHECK(g.get({3, 1, 2}) == b);
+    CHECK(g.get(VoxelGrid::mirrored({3, 1, 2}, voxel::kVoxMirrorX)) == b);
+}

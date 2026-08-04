@@ -71,6 +71,12 @@ int parse_axis(const std::string& axis) {
     throw std::invalid_argument("axis must be 'x', 'y' or 'z'");
 }
 
+voxel::BrushShape parse_brush_shape(const std::string& shape) {
+    if (shape == "cube") return voxel::BrushShape::Cube;
+    if (shape == "sphere") return voxel::BrushShape::Sphere;
+    throw std::invalid_argument("shape must be 'cube' or 'sphere', got '" + shape + "'");
+}
+
 eval::Backend* find_backend(const std::string& name) {
     eval::Registry& reg = eval::Registry::instance();
     if (eval::Backend* b = reg.find(name)) return b;
@@ -1502,17 +1508,29 @@ NB_MODULE(pyclay, m) {
              },
              "cell"_a, "index"_a, "Recolor an occupied cell (no-op on empty cells)")
         .def("set_brush",
-             [](PyVoxelGrid& g, nb::handle cell, int n, std::uint8_t index) {
+             [](PyVoxelGrid& g, nb::handle cell, int n, std::uint8_t index,
+                const std::string& shape) {
                  if (n <= 0) throw std::invalid_argument("brush size must be > 0");
-                 g.grid().set_brush(to_coord(cell), n, index);
+                 g.grid().set_brush(to_coord(cell), n, index, parse_brush_shape(shape));
              },
-             "cell"_a, "size"_a, "index"_a, "N^3 brush footprint centered on the cell")
+             "cell"_a, "size"_a, "index"_a, "shape"_a = "cube",
+             "Brush footprint centered on the cell: 'cube' (n^3) or 'sphere' "
+             "(inscribed in that cube). Radius is (size-1)/2, so an even size "
+             "behaves as size-1.")
         .def("erase_brush",
-             [](PyVoxelGrid& g, nb::handle cell, int n) {
+             [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape) {
                  if (n <= 0) throw std::invalid_argument("brush size must be > 0");
-                 g.grid().erase_brush(to_coord(cell), n);
+                 g.grid().erase_brush(to_coord(cell), n, parse_brush_shape(shape));
              },
-             "cell"_a, "size"_a)
+             "cell"_a, "size"_a, "shape"_a = "cube")
+        .def("paint_brush",
+             [](PyVoxelGrid& g, nb::handle cell, int n, std::uint8_t index,
+                const std::string& shape) {
+                 if (n <= 0) throw std::invalid_argument("brush size must be > 0");
+                 g.grid().paint_brush(to_coord(cell), n, index, parse_brush_shape(shape));
+             },
+             "cell"_a, "size"_a, "index"_a, "shape"_a = "cube",
+             "Recolor occupied cells in the footprint; empty cells are untouched")
         .def("fill_box",
              [](PyVoxelGrid& g, nb::handle a, nb::handle b, std::uint8_t index) {
                  g.grid().fill_box(to_coord(a), to_coord(b), index);
@@ -1531,6 +1549,14 @@ NB_MODULE(pyclay, m) {
              },
              "cell"_a, "index"_a, "axes"_a = "x",
              "Set the cell and every mirror combination of the given axes ('x', 'xz', ...)")
+        .def("paint_mirrored",
+             [](PyVoxelGrid& g, nb::handle cell, std::uint8_t index, const std::string& axes) {
+                 std::uint8_t mask = 0;
+                 for (char c : axes) mask |= static_cast<std::uint8_t>(1u << parse_axis({c}));
+                 g.grid().paint_mirrored(to_coord(cell), index, mask);
+             },
+             "cell"_a, "index"_a, "axes"_a = "x",
+             "Recolor the cell and every mirror combination (occupied cells only)")
         .def("flood_select",
              [](const PyVoxelGrid& g, nb::handle seed, bool same_color) {
                  std::vector<voxel::VoxelCoord> sel =

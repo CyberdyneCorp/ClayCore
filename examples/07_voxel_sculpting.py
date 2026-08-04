@@ -75,14 +75,35 @@ def main():
     shell = grid.palette_add("#9aa8b5")
     inner = grid.palette_add("#d95f5f")
     grid.fill_box((-5, -5, -5), (5, 5, 5), shell)
-    grid.erase_brush((0, 5, 0), 5)              # scoop a hollow from the top
-    for cell in ((0, 0, 0), (1, 0, 0), (-1, 0, 0)):
-        grid.paint(cell, inner)                 # recolour occupied cells only
+    grid.erase_brush((0, 5, 0), 5, shape="sphere")   # scoop a rounded hollow
+    grid.paint_brush((0, 0, 0), 7, inner, shape="sphere")  # recolour a ball
     grid.erase((5, 5, 5))
 
     eye, target = R.voxel_camera(grid, VOXEL_SIZE, elevation=30.0)
     R.render_voxels(grid, "07_voxel_carve.png", eye=eye, target=target,
-                    caption="erase_brush hollows, paint recolours in place")
+                    caption="sphere erase_brush hollows, sphere paint_brush recolours")
+
+    # --- brush shapes -----------------------------------------------------
+    # The same size in both shapes: the sphere is the ball inscribed in the
+    # cube, so it is always a subset. Radius is (size-1)/2, which is why an
+    # even size behaves as size-1.
+    for size in (5, 9):
+        cube = clay.VoxelGrid(voxel_size=VOXEL_SIZE)
+        sphere = clay.VoxelGrid(voxel_size=VOXEL_SIZE)
+        ci, si = cube.palette_add("#9aa8b5"), sphere.palette_add("#c96f6f")
+        cube.set_brush((0, 0, 0), size, ci)
+        sphere.set_brush((0, 0, 0), size, si, shape="sphere")
+        print(f"  size {size}: cube {cube.occupied_count:4d} cells, "
+              f"sphere {sphere.occupied_count:4d} cells")
+
+    shapes = clay.VoxelGrid(voxel_size=VOXEL_SIZE)
+    cube_i = shapes.palette_add("#9aa8b5")
+    ball_i = shapes.palette_add("#c96f6f")
+    shapes.set_brush((-6, 0, 0), 9, cube_i)
+    shapes.set_brush((6, 0, 0), 9, ball_i, shape="sphere")
+    eye, target = R.voxel_camera(shapes, VOXEL_SIZE, elevation=24.0)
+    R.render_voxels(shapes, "07_brush_shapes.png", eye=eye, target=target,
+                    caption="cube brush and sphere brush, same size")
 
     # --- greedy meshing ---------------------------------------------------
     mesh = grid.mesh()
