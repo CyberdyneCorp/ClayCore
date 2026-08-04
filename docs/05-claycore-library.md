@@ -182,6 +182,11 @@ mesh.save("body.fbx"); mesh.save("body.obj")
 doc.save("body.clayspace")               # opens in the iPad app
 ```
 
+The snippets in this section are illustrative. For code that is executed on
+every CI run — and rendered — see `examples/`, which covers the primitive set,
+every blend and combine mode, deformers, repetition, lifts, transitions, voxel
+sculpting, meshing and I/O.
+
 ### Widened surface (implemented)
 
 Beyond the sample above, `pyclay` reaches the rest of the C++ vocabulary:

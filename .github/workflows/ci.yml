@@ -162,6 +162,30 @@ jobs:
           print('wheel smoke OK:', clay.backends(), len(m.positions), 'verts')
           "
 
+  examples:
+    name: examples (gallery runs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install numpy only
+        # Examples must run against a bare wheel: pyclay + numpy + stdlib.
+        # Installing nothing else is what enforces the no-dependency rule.
+        run: python -m pip install --upgrade pip numpy
+      - name: Build pyclay
+        run: |
+          cmake --preset cpu-only -DCLAY_BUILD_PYTHON=ON
+          cmake --build --preset cpu-only
+      - name: Run every example
+        run: PYTHONPATH=build/cpu-only/bindings/python python examples/run_all.py
+      - name: Committed gallery is up to date with the code
+        # Renders are float output, so bytes can differ across platforms. The
+        # gate is that everything runs and produces files, not pixel equality;
+        # regenerated outputs are discarded here.
+        run: git checkout -- examples/output || true
+
   benchmarks:
     name: benchmarks + regression gate
     runs-on: ubuntu-latest
