@@ -74,7 +74,9 @@ Dependency rule: `kernel` depends on nothing; `scene`/`brick`/`mesh` depend on `
 
 Everything below ships in `clay::kernel` with CPU reference + per-backend parity tests. Items marked *(bound)* propagate non-exactness through the tree per principle 3.
 
-**3D primitives (exact):** sphere, box, rounded box, box frame, torus, capped torus, link, capsule, infinite & capped & rounded cylinder (incl. arbitrary axis), cone (exact) & capped & round cone, plane, hex prism, octahedron, pyramid, cut sphere / cut hollow sphere, solid angle, tetrahedron, platonic solids via plane folds. **(bound):** ellipsoid, tri-prism, cheap octahedron, superellipsoid / L-norm sphere.
+**3D primitives (exact):** sphere, box, rounded box, box frame, torus, capped torus, link, capsule, infinite & capped & rounded cylinder (incl. arbitrary axis), cone (exact) & capped & round cone, plane, hex prism, octahedron, pyramid, cut sphere / cut hollow sphere, solid angle, tetrahedron, platonic solids via plane folds. **(bound):** ellipsoid, tri-prism, cheap octahedron, superellipsoid / L-norm sphere — these downgrade the node's tracked field info, which lowers the safe sphere-tracing step scale.
+
+Plane and infinite cylinder have no finite geometry bound: they report an infinite influence bound, so per-brick culling never drops them and `Document.bounds()` stays finite by falling back to the finite part of the scene.
 
 **2D profiles (for extrude/revolve):** circle, box, segment, hexagon, equilateral triangle, trapezoid, vesica, arbitrary polygon (exact, even-odd sign), quadratic Bézier. Cubic Bézier by adaptive quadratic subdivision (quintic roots ruled out, 01 §1.3).
 
@@ -188,6 +190,12 @@ Beyond the sample above, `pyclay` reaches the rest of the C++ vocabulary:
 # sculpt strokes — one edit item, not one per segment
 body.add(clay.Stroke(points=[(-1, 0, 0, 0.3), (0, 0.5, 0, 0.22), (1, 0, 0, 0.3)],
                      blend_k=0.05))
+
+# every primitive is a class; the unbounded ones work like the rest
+body.add(clay.Link(length=0.3, r1=0.5, r2=0.15))
+body.add(clay.SolidAngle(angle=0.7, ra=0.8), op=clay.Op.SUBTRACT)
+body.add(clay.Plane(normal=(0, 1, 0), offset=-0.5), op=clay.Op.SUBTRACT)  # flat cut
+body.add(clay.Icosahedron(r=0.4), blend=clay.Smooth(0.1))
 
 # extended combine modes
 body.add(clay.Box(size=(0.6, 0.6, 3.0), position=(0.7, 0, 0)),

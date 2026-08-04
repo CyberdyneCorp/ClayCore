@@ -58,6 +58,25 @@ enum CTapeOp {
     ctape_stroke,            // blend_k, point_offset, point_count
     ctape_extrude,           // profile block + half-depth (along Z)
     ctape_revolve,           // profile block + axis offset (about Y)
+    // backfill: the rest of prim3d.h (add-primitive-backfill). The _ab
+    // endpoint variants are deliberately absent: they need 8 parameters, and
+    // an oriented cylinder or round cone is already expressible as the
+    // axis-aligned form plus the item's transform — no capability lost, and
+    // the prim block (and therefore the document format) stays put.
+    ctape_capped_torus,      // sin, cos of the aperture, ra, rb
+    ctape_link,              // le, r1, r2
+    ctape_cylinder_inf,      // cx, cz, r  (unbounded)
+    ctape_cone,              // sin, cos of the half-angle, h
+    ctape_plane,             // nx ny nz h  (unbounded)
+    ctape_cut_sphere,        // r, h
+    ctape_cut_hollow_sphere, // r, h, t
+    ctape_solid_angle,       // sin, cos of the angle, ra
+    ctape_tetrahedron,       // r
+    ctape_dodecahedron,      // r
+    ctape_icosahedron,       // r
+    ctape_tri_prism,         // hx, hy      (bound)
+    ctape_octahedron_cheap,  // s           (bound)
+    ctape_lnorm_sphere,      // r, n        (bound)
     ctape_prim_count,
 
     // Pushes the far field ("empty space"): standard primitive param block,
@@ -311,6 +330,20 @@ CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
     if (op == ctape_octahedron) return sd_octahedron(lp, q[0]);
     if (op == ctape_hex_prism) return sd_hex_prism(lp, cf2(q[0], q[1]));
     if (op == ctape_pyramid) return sd_pyramid(lp, q[0]);
+    if (op == ctape_capped_torus) return sd_capped_torus(lp, cf2(q[0], q[1]), q[2], q[3]);
+    if (op == ctape_link) return sd_link(lp, q[0], q[1], q[2]);
+    if (op == ctape_cylinder_inf) return sd_cylinder_inf(lp, cf2(q[0], q[1]), q[2]);
+    if (op == ctape_cone) return sd_cone(lp, cf2(q[0], q[1]), q[2]);
+    if (op == ctape_plane) return sd_plane(lp, cf3(q[0], q[1], q[2]), q[3]);
+    if (op == ctape_cut_sphere) return sd_cut_sphere(lp, q[0], q[1]);
+    if (op == ctape_cut_hollow_sphere) return sd_cut_hollow_sphere(lp, q[0], q[1], q[2]);
+    if (op == ctape_solid_angle) return sd_solid_angle(lp, cf2(q[0], q[1]), q[2]);
+    if (op == ctape_tetrahedron) return sd_tetrahedron(lp, q[0]);
+    if (op == ctape_dodecahedron) return sd_dodecahedron(lp, q[0]);
+    if (op == ctape_icosahedron) return sd_icosahedron(lp, q[0]);
+    if (op == ctape_tri_prism) return sd_tri_prism_bound(lp, cf2(q[0], q[1]));
+    if (op == ctape_octahedron_cheap) return sd_octahedron_bound(lp, q[0]);
+    if (op == ctape_lnorm_sphere) return sd_lnorm_sphere_bound(lp, q[0], q[1]);
     if (op == ctape_extrude) {
         // exact lift: profile distance merged with the axial slab
         return cop_extrude(ctape_profile_dist(q, blob, cf2(lp.x, lp.y)), lp.z,

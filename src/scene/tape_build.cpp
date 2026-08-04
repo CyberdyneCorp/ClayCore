@@ -119,7 +119,7 @@ struct Compiler {
 
     void fold_info(const Node& item, Op op, bool smooth) {
         kernel::CFieldInfo prim_info =
-            (item.prim.type == PrimType::Ellipsoid) ? kernel::cfi_bound() : kernel::cfi_exact();
+            prim_is_bound_field(item.prim.type) ? kernel::cfi_bound() : kernel::cfi_exact();
         // Repetition preserves exactness only when the item plus its rounding
         // and blend influence fits inside its half-cell (docs/01 2.4). Check
         // it rather than assume it: an overflowing array is a bound field.

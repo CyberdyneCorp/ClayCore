@@ -46,6 +46,28 @@ Aabb prim_local_bounds(const Node& item) {
             b.expand(cf3(0.5f, q[0], 0.5f));
             break;
         }
+        // -- backfill ------------------------------------------------------
+        case PrimType::CappedTorus: sym(q[2] + q[3], q[2] + q[3], q[3]); break;
+        case PrimType::Link: sym(q[1] + q[2], q[0] + q[1] + q[2], q[2]); break;
+        case PrimType::Cone: {
+            // apex at the origin, opening downward to height h
+            float radius = q[2] * q[0] / kernel::cmax(q[1], 1e-6f);
+            b.expand(cf3(-radius, -q[2], -radius));
+            b.expand(cf3(radius, 0.0f, radius));
+            break;
+        }
+        case PrimType::CutSphere: sym(q[0], q[0], q[0]); break;
+        case PrimType::CutHollowSphere: sym(q[0] + q[2], q[0] + q[2], q[0] + q[2]); break;
+        case PrimType::SolidAngle: sym(q[2], q[2], q[2]); break;
+        case PrimType::Tetrahedron: sym(q[0], q[0], q[0]); break;
+        case PrimType::Dodecahedron:
+        case PrimType::Icosahedron: sym(q[0] * 1.9f, q[0] * 1.9f, q[0] * 1.9f); break;
+        case PrimType::TriPrism: sym(q[0], q[0], q[1]); break;
+        case PrimType::OctahedronCheap: sym(q[0], q[0], q[0]); break;
+        case PrimType::LNormSphere: sym(q[0], q[0], q[0]); break;
+        // no finite extent — item_influence_bound reports infinite instead
+        case PrimType::Plane:
+        case PrimType::CylinderInfinite: return Aabb::infinite();
         case PrimType::Extrude:
         case PrimType::Revolve: {
             // 2D extent of the profile, then lifted: a slab for extrusion,
@@ -239,6 +261,8 @@ Aabb item_influence_bound(const Node& item, const Layer& layer) {
     if (!op_is_local(item.op)) return Aabb::infinite();
     // an infinite grid produces copies arbitrarily far away
     if (item.repeat.is_infinite_grid()) return Aabb::infinite();
+    // so do primitives with no finite extent (plane, infinite cylinder)
+    if (prim_is_unbounded(item.prim.type)) return Aabb::infinite();
     return item_geometry_bound(item, layer);
 }
 

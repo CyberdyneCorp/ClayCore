@@ -166,6 +166,20 @@ struct PyHexPrism : PyPrim {};
 struct PyPyramid : PyPrim {};
 struct PyStroke : PyPrim {};
 struct PyExtrude : PyPrim {};
+struct PyCappedTorus : PyPrim {};
+struct PyLink : PyPrim {};
+struct PyCylinderInfinite : PyPrim {};
+struct PyExactCone : PyPrim {};
+struct PyPlane : PyPrim {};
+struct PyCutSphere : PyPrim {};
+struct PyCutHollowSphere : PyPrim {};
+struct PySolidAngle : PyPrim {};
+struct PyTetrahedron : PyPrim {};
+struct PyDodecahedron : PyPrim {};
+struct PyIcosahedron : PyPrim {};
+struct PyTriPrism : PyPrim {};
+struct PyOctahedronCheap : PyPrim {};
+struct PyLNormSphere : PyPrim {};
 struct PyRevolve : PyPrim {};
 
 // -- mesh wrapper ---------------------------------------------------------------
@@ -741,6 +755,160 @@ NB_MODULE(pyclay, m) {
              "h"_a, CLAY_PLACE_ARGS);
 
     // -- mesh ---------------------------------------------------------------------
+    nb::class_<PyCappedTorus, PyPrim>(m, "CappedTorus",
+                           "Torus arc: aperture half-angle, ring radius ra, tube radius rb")
+        .def("__init__",
+             [](PyCappedTorus* self, float aperture, float ra, float rb, nb::handle position,
+                nb::handle rotation_axis_angle, float scale) {
+                 new (self) PyCappedTorus();
+                 self->prim = scene::Prim::capped_torus(aperture, ra, rb);
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "aperture"_a, "ra"_a, "rb"_a, CLAY_PLACE_ARGS);
+
+    nb::class_<PyLink, PyPrim>(m, "Link",
+                           "Chain link: straight length, ring radius r1, tube radius r2")
+        .def("__init__",
+             [](PyLink* self, float length, float r1, float r2, nb::handle position,
+                nb::handle rotation_axis_angle, float scale) {
+                 new (self) PyLink();
+                 self->prim = scene::Prim::link(length, r1, r2);
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "length"_a, "r1"_a, "r2"_a, CLAY_PLACE_ARGS);
+
+    nb::class_<PyCylinderInfinite, PyPrim>(m, "CylinderInfinite",
+                           "Infinite cylinder along Y (UNBOUNDED: never culled)")
+        .def("__init__",
+             [](PyCylinderInfinite* self, float cx, float cz, float r, nb::handle position,
+                nb::handle rotation_axis_angle, float scale) {
+                 new (self) PyCylinderInfinite();
+                 self->prim = scene::Prim::cylinder_infinite(cx, cz, r);
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "cx"_a = 0.0f, "cz"_a = 0.0f, "r"_a = 1.0f, CLAY_PLACE_ARGS);
+
+    nb::class_<PyExactCone, PyPrim>(m, "ExactCone",
+                           "Exact cone: half-angle at the apex, height h")
+        .def("__init__",
+             [](PyExactCone* self, float half_angle, float h, nb::handle position,
+                nb::handle rotation_axis_angle, float scale) {
+                 new (self) PyExactCone();
+                 self->prim = scene::Prim::cone(half_angle, h);
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "half_angle"_a, "h"_a, CLAY_PLACE_ARGS);
+
+    nb::class_<PyPlane, PyPrim>(m, "Plane",
+                           "Half-space with the given normal and offset (UNBOUNDED: never culled)")
+        .def("__init__",
+             [](PyPlane* self, nb::handle normal, float offset, nb::handle position,
+                nb::handle rotation_axis_angle, float scale) {
+                 new (self) PyPlane();
+                 self->prim = scene::Prim::plane(to_f3(normal, "normal"), offset);
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "normal"_a, "offset"_a = 0.0f, CLAY_PLACE_ARGS);
+
+    nb::class_<PyCutSphere, PyPrim>(m, "CutSphere",
+                           "Sphere of radius r cut by the plane y = h")
+        .def("__init__",
+             [](PyCutSphere* self, float r, float h, nb::handle position,
+                nb::handle rotation_axis_angle, float scale) {
+                 new (self) PyCutSphere();
+                 self->prim = scene::Prim::cut_sphere(r, h);
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "r"_a, "h"_a, CLAY_PLACE_ARGS);
+
+    nb::class_<PyCutHollowSphere, PyPrim>(m, "CutHollowSphere",
+                           "Hollow cut sphere of wall thickness t")
+        .def("__init__",
+             [](PyCutHollowSphere* self, float r, float h, float t, nb::handle position,
+                nb::handle rotation_axis_angle, float scale) {
+                 new (self) PyCutHollowSphere();
+                 self->prim = scene::Prim::cut_hollow_sphere(r, h, t);
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "r"_a, "h"_a, "t"_a, CLAY_PLACE_ARGS);
+
+    nb::class_<PySolidAngle, PyPrim>(m, "SolidAngle",
+                           "Spherical wedge: cone half-angle and radius")
+        .def("__init__",
+             [](PySolidAngle* self, float angle, float ra, nb::handle position,
+                nb::handle rotation_axis_angle, float scale) {
+                 new (self) PySolidAngle();
+                 self->prim = scene::Prim::solid_angle(angle, ra);
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "angle"_a, "ra"_a, CLAY_PLACE_ARGS);
+
+    nb::class_<PyTetrahedron, PyPrim>(m, "Tetrahedron",
+                           "Regular tetrahedron of size r")
+        .def("__init__",
+             [](PyTetrahedron* self, float r, nb::handle position,
+                nb::handle rotation_axis_angle, float scale) {
+                 new (self) PyTetrahedron();
+                 self->prim = scene::Prim::tetrahedron(r);
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "r"_a, CLAY_PLACE_ARGS);
+
+    nb::class_<PyDodecahedron, PyPrim>(m, "Dodecahedron",
+                           "Regular dodecahedron (plane folds)")
+        .def("__init__",
+             [](PyDodecahedron* self, float r, nb::handle position,
+                nb::handle rotation_axis_angle, float scale) {
+                 new (self) PyDodecahedron();
+                 self->prim = scene::Prim::dodecahedron(r);
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "r"_a, CLAY_PLACE_ARGS);
+
+    nb::class_<PyIcosahedron, PyPrim>(m, "Icosahedron",
+                           "Regular icosahedron (plane folds)")
+        .def("__init__",
+             [](PyIcosahedron* self, float r, nb::handle position,
+                nb::handle rotation_axis_angle, float scale) {
+                 new (self) PyIcosahedron();
+                 self->prim = scene::Prim::icosahedron(r);
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "r"_a, CLAY_PLACE_ARGS);
+
+    nb::class_<PyTriPrism, PyPrim>(m, "TriPrism",
+                           "Triangular prism (BOUND field, not exact)")
+        .def("__init__",
+             [](PyTriPrism* self, float hx, float hy, nb::handle position,
+                nb::handle rotation_axis_angle, float scale) {
+                 new (self) PyTriPrism();
+                 self->prim = scene::Prim::tri_prism(hx, hy);
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "hx"_a, "hy"_a, CLAY_PLACE_ARGS);
+
+    nb::class_<PyOctahedronCheap, PyPrim>(m, "OctahedronCheap",
+                           "Cheap octahedron (BOUND field, not exact)")
+        .def("__init__",
+             [](PyOctahedronCheap* self, float s, nb::handle position,
+                nb::handle rotation_axis_angle, float scale) {
+                 new (self) PyOctahedronCheap();
+                 self->prim = scene::Prim::octahedron_cheap(s);
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "s"_a, CLAY_PLACE_ARGS);
+
+    nb::class_<PyLNormSphere, PyPrim>(m, "LNormSphere",
+                           "Superellipsoid / L-norm sphere, n >= 2 (BOUND field)")
+        .def("__init__",
+             [](PyLNormSphere* self, float r, float n, nb::handle position,
+                nb::handle rotation_axis_angle, float scale) {
+                 new (self) PyLNormSphere();
+                 self->prim = scene::Prim::lnorm_sphere(r, n);
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "r"_a, "n"_a = 4.0f, CLAY_PLACE_ARGS);
+
     nb::class_<PyProfile>(m, "Profile", "A closed 2D profile for Extrude / Revolve")
         .def_static("circle", [](float r) {
             PyProfile p;

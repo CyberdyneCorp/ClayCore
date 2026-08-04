@@ -38,7 +38,35 @@ enum class PrimType : std::uint8_t {
     Stroke = kernel::ctape_stroke,
     Extrude = kernel::ctape_extrude,
     Revolve = kernel::ctape_revolve,
+    CappedTorus = kernel::ctape_capped_torus,
+    Link = kernel::ctape_link,
+    CylinderInfinite = kernel::ctape_cylinder_inf,
+    Cone = kernel::ctape_cone,
+    Plane = kernel::ctape_plane,
+    CutSphere = kernel::ctape_cut_sphere,
+    CutHollowSphere = kernel::ctape_cut_hollow_sphere,
+    SolidAngle = kernel::ctape_solid_angle,
+    Tetrahedron = kernel::ctape_tetrahedron,
+    Dodecahedron = kernel::ctape_dodecahedron,
+    Icosahedron = kernel::ctape_icosahedron,
+    TriPrism = kernel::ctape_tri_prism,
+    OctahedronCheap = kernel::ctape_octahedron_cheap,
+    LNormSphere = kernel::ctape_lnorm_sphere,
 };
+
+// Primitives with no finite extent: an item using one influences the field
+// arbitrarily far away, so (like intersect, the morphs and infinite grids)
+// it must never be culled.
+inline bool prim_is_unbounded(PrimType t) {
+    return t == PrimType::Plane || t == PrimType::CylinderInfinite;
+}
+
+// Primitives whose field is a bound rather than a true distance; the tape's
+// tracked exactness downgrades for them.
+inline bool prim_is_bound_field(PrimType t) {
+    return t == PrimType::Ellipsoid || t == PrimType::TriPrism ||
+           t == PrimType::OctahedronCheap || t == PrimType::LNormSphere;
+}
 
 inline bool prim_is_lift(PrimType t) {
     return t == PrimType::Extrude || t == PrimType::Revolve;
@@ -157,6 +185,39 @@ struct Prim {
     // single prim param is the lift's own (half-depth or axis offset).
     static Prim extrude(float half_depth) { return {PrimType::Extrude, {half_depth}}; }
     static Prim revolve(float offset) { return {PrimType::Revolve, {offset}}; }
+
+    // -- backfill (add-primitive-backfill) ------------------------------------
+    // aperture given as the half-angle in radians, stored as (sin, cos)
+    static Prim capped_torus(float aperture, float ra, float rb) {
+        return {PrimType::CappedTorus,
+                {kernel::csin(aperture), kernel::ccos(aperture), ra, rb}};
+    }
+    static Prim link(float length, float r1, float r2) {
+        return {PrimType::Link, {length, r1, r2}};
+    }
+    static Prim cylinder_infinite(float cx, float cz, float r) {
+        return {PrimType::CylinderInfinite, {cx, cz, r}};
+    }
+    static Prim cone(float half_angle, float h) {
+        return {PrimType::Cone, {kernel::csin(half_angle), kernel::ccos(half_angle), h}};
+    }
+    static Prim plane(kernel::cfloat3 normal, float offset) {
+        kernel::cfloat3 n = kernel::cnormalize(normal);
+        return {PrimType::Plane, {n.x, n.y, n.z, offset}};
+    }
+    static Prim cut_sphere(float r, float h) { return {PrimType::CutSphere, {r, h}}; }
+    static Prim cut_hollow_sphere(float r, float h, float t) {
+        return {PrimType::CutHollowSphere, {r, h, t}};
+    }
+    static Prim solid_angle(float angle, float ra) {
+        return {PrimType::SolidAngle, {kernel::csin(angle), kernel::ccos(angle), ra}};
+    }
+    static Prim tetrahedron(float r) { return {PrimType::Tetrahedron, {r}}; }
+    static Prim dodecahedron(float r) { return {PrimType::Dodecahedron, {r}}; }
+    static Prim icosahedron(float r) { return {PrimType::Icosahedron, {r}}; }
+    static Prim tri_prism(float hx, float hy) { return {PrimType::TriPrism, {hx, hy}}; }
+    static Prim octahedron_cheap(float s) { return {PrimType::OctahedronCheap, {s}}; }
+    static Prim lnorm_sphere(float r, float n) { return {PrimType::LNormSphere, {r, n}}; }
 };
 
 // Repetition an item carries (kernel/tape.h CRepeatType). Applied to the

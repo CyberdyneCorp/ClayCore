@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <set>
 #include <string>
 #include <vector>
 
@@ -48,6 +49,35 @@ std::vector<ParityScene> parity_scenes() {
     single("octahedron", Prim::octahedron(0.9f));
     single("hex_prism", Prim::hex_prism(0.7f, 0.4f));
     single("pyramid", Prim::pyramid(0.9f));
+    single("capped_torus", Prim::capped_torus(1.0f, 0.9f, 0.25f));
+    single("link", Prim::link(0.4f, 0.7f, 0.25f));
+    single("cylinder_infinite", Prim::cylinder_infinite(0.1f, -0.2f, 0.6f));
+    single("cone_exact", Prim::cone(0.5f, 1.1f));
+    single("plane", Prim::plane(cf3(0.3f, 1.0f, -0.2f), 0.2f));
+    single("cut_sphere", Prim::cut_sphere(1.0f, 0.3f));
+    single("cut_hollow_sphere", Prim::cut_hollow_sphere(1.0f, 0.3f, 0.08f));
+    single("solid_angle", Prim::solid_angle(0.8f, 1.0f));
+    single("tetrahedron", Prim::tetrahedron(0.9f));
+    single("dodecahedron", Prim::dodecahedron(0.8f));
+    single("icosahedron", Prim::icosahedron(0.8f));
+    single("tri_prism", Prim::tri_prism(0.8f, 0.5f));
+    single("octahedron_cheap", Prim::octahedron_cheap(0.9f));
+    single("lnorm_sphere", Prim::lnorm_sphere(0.9f, 4.0f));
+
+    // lifts carry a Profile on the node, so they need the long form
+    auto lift = [&](const char* name, Prim prim, Profile profile,
+                    std::vector<cfloat2> points = {}) {
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node n = item(prim, cf3(0.1f, -0.05f, 0.2f));
+        n.profile = profile;
+        n.profile_points = std::move(points);
+        l.sdf->insert(n);
+        scenes.push_back({name, std::move(doc), 3.0f});
+    };
+    lift("extrude_hexagon", Prim::extrude(0.5f), Profile::hexagon(0.8f));
+    lift("revolve_polygon", Prim::revolve(1.2f), Profile::polygon(),
+         {cf2(-0.3f, -0.3f), cf2(0.3f, -0.3f), cf2(0.3f, 0.3f), cf2(-0.3f, 0.3f)});
     {
         scene::Document doc;
         scene::Layer& l = doc.add_sdf_layer("l");
@@ -94,6 +124,22 @@ TEST_CASE("registry: CPU backend always present") {
     eval::Backend* cpu = eval::Registry::instance().find("cpu");
     REQUIRE(cpu != nullptr);
     CHECK(std::string(cpu->name()) == "cpu");
+}
+
+// Guard: a primitive that never reaches the parity corpus is never evaluated
+// on Metal/CUDA/OpenCL, so single-source agreement would be unverified for it.
+TEST_CASE("parity: the corpus exercises every primitive type") {
+    std::set<int> covered;
+    for (ParityScene& ps : parity_scenes())
+        for (scene::Layer& l : ps.doc.layers)
+            if (l.sdf)
+                for (const auto& kv : l.sdf->nodes())
+                    if (!kv.second.is_group) covered.insert(static_cast<int>(kv.second.prim.type));
+
+    for (int op = 0; op < kernel::ctape_prim_count; ++op) {
+        CAPTURE(op);
+        CHECK(covered.count(op) == 1);
+    }
 }
 
 TEST_CASE("parity: every registered backend matches the scalar reference") {

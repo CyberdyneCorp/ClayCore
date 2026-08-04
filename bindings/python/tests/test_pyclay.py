@@ -777,3 +777,84 @@ def test_repetition_round_trip_and_composition(tmp_path):
     path = tmp_path / "array.clayspace"
     doc.save(str(path))
     assert np.array_equal(before, clay.load(str(path)).eval(pts))
+
+
+# --- primitive backfill (add-primitive-backfill) ----------------------------
+
+
+def _all_primitive_instances():
+    """One instance of every primitive class the module exposes."""
+    return {
+        "Sphere": clay.Sphere(r=0.6),
+        "Box": clay.Box(size=(0.8, 0.8, 0.8)),
+        "RoundBox": clay.RoundBox(size=(0.8, 0.8, 0.8), r=0.1),
+        "Torus": clay.Torus(R=0.7, r=0.2),
+        "Capsule": clay.Capsule(a=(-0.3, 0, 0), b=(0.3, 0, 0), r=0.25),
+        "Cylinder": clay.Cylinder(r=0.5, h=0.6),
+        "Cone": clay.Cone(h=0.6, r1=0.5, r2=0.1),
+        "RoundCone": clay.RoundCone(r1=0.4, r2=0.15, h=0.7),
+        "Ellipsoid": clay.Ellipsoid(r=(0.7, 0.4, 0.5)),
+        "Octahedron": clay.Octahedron(s=0.7),
+        "HexPrism": clay.HexPrism(hx=0.5, hy=0.4),
+        "Pyramid": clay.Pyramid(h=0.9),
+        "CappedTorus": clay.CappedTorus(aperture=1.0, ra=0.7, rb=0.2),
+        "Link": clay.Link(length=0.3, r1=0.5, r2=0.15),
+        "ExactCone": clay.ExactCone(half_angle=0.5, h=0.9),
+        "CutSphere": clay.CutSphere(r=0.8, h=0.2),
+        "CutHollowSphere": clay.CutHollowSphere(r=0.8, h=0.2, t=0.07),
+        "SolidAngle": clay.SolidAngle(angle=0.7, ra=0.8),
+        "Tetrahedron": clay.Tetrahedron(r=0.7),
+        "Dodecahedron": clay.Dodecahedron(r=0.6),
+        "Icosahedron": clay.Icosahedron(r=0.6),
+        "TriPrism": clay.TriPrism(hx=0.6, hy=0.4),
+        "OctahedronCheap": clay.OctahedronCheap(s=0.7),
+        "LNormSphere": clay.LNormSphere(r=0.7, n=4.0),
+    }
+
+
+@pytest.mark.parametrize("name", sorted(_all_primitive_instances()))
+def test_every_primitive_evaluates_meshes_and_round_trips(name, tmp_path):
+    prim = _all_primitive_instances()[name]
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(prim)
+
+    pts = np.array([[0.0, 0.0, 0.0], [9.0, 9.0, 9.0]], dtype=np.float32)
+    d = doc.eval(pts)
+    assert np.all(np.isfinite(d))
+    assert d[1] > 0  # far outside every bounded shape
+
+    mesh = doc.mesh(resolution=40)
+    assert mesh.triangle_count > 0
+
+    path = tmp_path / f"{name}.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(d, clay.load(str(path)).eval(pts))
+
+
+def test_unbounded_primitives_are_usable_and_marked():
+    # a plane carves a half-space out of a sphere
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=1.0))
+    layer.add(clay.Plane(normal=(0, 1, 0), offset=0.0), op=clay.Op.SUBTRACT)
+    # subtracting a half-space removes the side where the plane field is
+    # negative (y < 0 here), leaving the upper half of the sphere
+    below = doc.eval(np.array([[0.0, -0.5, 0.0]], dtype=np.float32))[0]
+    above = doc.eval(np.array([[0.0, 0.5, 0.0]], dtype=np.float32))[0]
+    assert above < 0 < below
+
+    infinite = clay.Document()
+    infinite.add_sdf_layer("l").add(clay.CylinderInfinite(r=0.5))
+    far = infinite.eval(np.array([[0.0, 50.0, 0.0]], dtype=np.float32))[0]
+    assert far < 0  # still solid far along the axis
+
+
+def test_bound_primitives_lower_the_step_scale():
+    for prim in (clay.TriPrism(hx=0.6, hy=0.4), clay.OctahedronCheap(s=0.7),
+                 clay.LNormSphere(r=0.7, n=4.0), clay.Ellipsoid(r=(0.8, 0.4, 0.6))):
+        doc = clay.Document()
+        doc.add_sdf_layer("l").add(prim)
+        assert doc.safe_step_scale() <= 1.0
+    exact = clay.Document()
+    exact.add_sdf_layer("l").add(clay.Tetrahedron(r=0.7))
+    assert exact.safe_step_scale() == pytest.approx(1.0)
