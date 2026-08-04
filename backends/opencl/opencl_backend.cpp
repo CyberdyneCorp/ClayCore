@@ -16,6 +16,7 @@
 #include <CL/cl.h>
 #endif
 
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -217,8 +218,17 @@ class OpenClBackend final : public Backend {
         // CL1.2 is the subset the kernels use; -cl-fp32-correctly-rounded is
         // deliberately NOT requested (parity tolerance covers fp differences)
         const char* options = "-cl-std=CL1.2 -DCLAY_KERNEL_OPENCL=1";
-        if (clBuildProgram(program_, 1, &device_, options, nullptr, nullptr) != CL_SUCCESS)
+        if (clBuildProgram(program_, 1, &device_, options, nullptr, nullptr) != CL_SUCCESS) {
+            // Registration failing silently once cost real debugging time:
+            // surface the device compiler's log so the cause is visible.
+            std::size_t log_size = 0;
+            clGetProgramBuildInfo(program_, device_, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_size);
+            std::vector<char> log(log_size + 1, '\0');
+            clGetProgramBuildInfo(program_, device_, CL_PROGRAM_BUILD_LOG, log_size, log.data(),
+                                  nullptr);
+            std::fprintf(stderr, "claycore: OpenCL kernel build failed:\n%s\n", log.data());
             return false;
+        }
         kernel_points_ = clCreateKernel(program_, "clay_eval_points", &err);
         if (err != CL_SUCCESS) return false;
         kernel_grid_ = clCreateKernel(program_, "clay_eval_grid", &err);

@@ -33,8 +33,11 @@ def inline(path: Path, seen: set[str], out: list[str]) -> None:
 
 
 def main() -> int:
+    raw = "--raw" in sys.argv
+    if raw:
+        sys.argv.remove("--raw")
     if len(sys.argv) not in (4, 5):
-        print("usage: amalgamate_cl.py <entry-header> <output.cpp> <symbol> [kernels.cl]",
+        print("usage: amalgamate_cl.py [--raw] <entry-header> <output> <symbol> [kernels.cl]",
               file=sys.stderr)
         return 2
     entry = REPO / "include" / sys.argv[1]
@@ -49,6 +52,10 @@ def main() -> int:
     # byte length, not character count: the headers carry UTF-8 in comments
     # and the C array is bytes (a char-count here truncates the program)
     source_bytes = len(source.encode("utf-8"))
+    if raw:  # plain .cl text, for the dialect gate and for debugging
+        Path(sys.argv[2]).write_text(source)
+        print(f"amalgamate_cl: {source_bytes} bytes (raw) from {len(lines)} lines")
+        return 0
     escaped = source.replace("\\", "\\\\").replace('"', '\\"')
     body = "\n".join(f'    "{ln}\\n"' for ln in escaped.splitlines())
     symbol = sys.argv[3]

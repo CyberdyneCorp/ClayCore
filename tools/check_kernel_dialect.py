@@ -16,6 +16,7 @@ per-backend compiles (which reject it outright on Metal/OpenCL) cover it.
 
 import argparse
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -87,6 +88,36 @@ def compile_check(path: Path, compiler: str, profile: str = "cpu") -> list[str]:
     return []
 
 
+def opencl_check() -> list[str]:
+    """Compile the amalgamated kernel text as OpenCL C.
+
+    OpenCL C is C99: no namespaces, no overloading, no templates. clang's
+    OpenCL frontend is what pocl (and most ICDs) use, so this catches
+    C++-isms before they reach a device — the gap that let a namespaced
+    helper into ease.h and broke the OpenCL backend on Linux while Apple's
+    compiler accepted it.
+    """
+    if not shutil.which("clang"):
+        print("kernel-dialect: clang not found, skipping the OpenCL profile")
+        return []
+    with tempfile.TemporaryDirectory() as tmp:
+        cl_path = Path(tmp) / "kernels.cl"
+        gen = subprocess.run(
+            [sys.executable, str(REPO / "tools" / "amalgamate_cl.py"), "--raw",
+             "clay/kernel/tape.h", str(cl_path), "clay_cl_source",
+             str(REPO / "backends" / "opencl" / "clay_kernels.cl.in")],
+            capture_output=True, text=True)
+        if gen.returncode != 0:
+            return [f"OpenCL amalgamation failed:\n{gen.stderr.strip()}"]
+        proc = subprocess.run(
+            ["clang", "-x", "cl", "-cl-std=CL1.2", "-Xclang", "-finclude-default-header",
+             "-DCLAY_KERNEL_OPENCL=1", "-fsyntax-only", str(cl_path)],
+            capture_output=True, text=True)
+        if proc.returncode != 0:
+            return [f"OpenCL profile compile failed:\n{proc.stderr.strip()[:2000]}"]
+    return []
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--compiler", default="c++", help="host C++ compiler for the restrictive compile")
@@ -102,11 +133,12 @@ def main() -> int:
         errors += lexical_check(header)
         errors += compile_check(header, args.compiler, "cpu")
         errors += compile_check(header, args.compiler, "cuda")
+    errors += opencl_check()
 
     for e in errors:
         print(f"kernel-dialect: {e}", file=sys.stderr)
     if not errors:
-        print(f"kernel-dialect: OK ({len(headers)} headers x cpu+cuda profiles)")
+        print(f"kernel-dialect: OK ({len(headers)} headers x cpu+cuda profiles, plus the OpenCL amalgamation)")
     return 1 if errors else 0
 
 
