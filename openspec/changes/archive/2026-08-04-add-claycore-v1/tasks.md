@@ -113,5 +113,5 @@ Groups 1–10 are Phase 1 (the ClaySpace app's dependency set). Groups 11–14 m
 
 ## 14. Release
 
-- [ ] 14.1 SemVer release checklist automation (ABI check, wheel build, parity gate) and v1.0 tag
-- [ ] 14.2 Update repo docs (README, docs/) to match shipped behavior; archive this change
+- [x] 14.1 SemVer release checklist automation: tools/release_check.py gates version agreement across CMake/C ABI/wheel, build+tests, backend parity, layering/dialect/licenses, C ABI FFI, openspec validate, benchmark floors, and a real pip-install quickstart; .github/workflows/release.yml runs it on a tag then builds wheels + xcframework and drafts the release. **The v1.0 tag itself is deliberately not cut** — docs/RELEASE.md lists what must be verified first (CUDA device parity above all)
+- [x] 14.2 README refreshed to shipped behavior (capability table, backend tiers, spec pointers) + docs/RELEASE.md; change archived into openspec/specs/

@@ -8,11 +8,24 @@ I/O; Python (`pyclay`) and C-ABI/Swift bindings.
 claycore is the engine core of **ClaySpace** (iPad sculpting app) and stands
 alone for tools, pipelines, CI, and research.
 
-- Spec: `openspec/` (active change: `add-claycore-v1`) — the source of truth
-  for requirements and the implementation roadmap (`tasks.md`).
+- Spec: `openspec/specs/` — the living requirements (eleven capabilities,
+  from `sdf-kernels` to `build-packaging`).
 - Math reference: `docs/01-sdf-math-foundations.md`.
-- Architecture: `docs/05-claycore-library.md` and
-  `openspec/changes/add-claycore-v1/design.md`.
+- Architecture: `docs/05-claycore-library.md`.
+- Releasing: `docs/RELEASE.md`.
+
+## What ships today
+
+| Area | Capability |
+|---|---|
+| Kernels | 25 exact + 4 bound 3D primitives, 9 exact 2D profiles, hard/quadratic/cubic/circular/chamfer blends plus 8 extended modes (groove, tongue, pipe, engrave, emboss, inset, shell, replace), transforms, mirrors, repetition, deformers, lifts, 33 easing curves, stroke chains, per-node exactness/Lipschitz tracking |
+| Scene | Layers, ordered edit lists, nested groups, shared-content instancing, influence bounds, flat postfix tape with per-brick culling, invertible+serializable undo commands |
+| Evaluation | CPU (reference + threaded batch), Metal, CUDA, OpenCL — one interface, runtime registry, tolerance-gated parity |
+| Storage | Sparse fp16 narrow-band brick cache with dirty tracking, LOD mips, memory budget; palette-indexed colored voxel grids |
+| Meshing | Marching tetrahedra (watertight + 2-manifold by construction), surface nets preview, flagged dual contouring, meshoptimizer decimation, validation, vertex colors/normals/UVs |
+| Picking | Scene and brick raycast with layer/item attribution, surface snapping, voxel cell/face picking, selection bounds |
+| I/O | `.clayspace` documents, OBJ+MTL, PLY, FBX (ufbx import + binary writer), glTF 2.0 GLB |
+| Bindings | Stable C ABI (`clay.h`), SwiftPM xcframework, `pyclay` (nanobind, numpy-native), `clay` CLI |
 
 ## Build
 
