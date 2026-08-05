@@ -14,13 +14,13 @@ Last reconciled against `3dcoat_study/MISSING_FEATURES.md` and
 caught five items this file had dropped. Every ClayCore-owned row in their
 catalogue is now represented here or in the deferred list below.
 
-## Where the engine is (2026-08-05, v0.14.0)
+## Where the engine is (2026-08-06, v0.15.0)
 
-13 capabilities, 24 archived changes. Complete enough that the gaps below are
+13 capabilities, 25 archived changes. Complete enough that the gaps below are
 about *sculpting affordances*, not about the field engine:
 
-- 28 primitives + stroke, 14 combine ops, 5 blend profiles, grid/radial
-  repetition, mirror with blended seam
+- 28 primitives + stroke/curve chains, 14 combine ops, 5 blend profiles,
+  grid/radial repetition, mirror with blended seam
 - **9 deformers** — twist, bend, taper, displace, wrap_around, elongate,
   elongate_axis, bend_linear, bend_radial. Every point-warp implemented in the
   kernel headers is reachable from a document; there is nothing left stranded.

@@ -255,3 +255,10 @@ The C API SHALL expose reading and setting a layer's ghost and lock flags, and S
 - **WHEN** a C consumer adds an item to a ghosted layer
 - **THEN** the call returns an error naming the protection and the document is unchanged
 
+### Requirement: Curves across the ABI
+The C API SHALL accept control points with per-point radius, type and handles, a closed flag and a tolerance, and SHALL expose replacing a placed item's points.
+
+#### Scenario: A curve means the same through both bindings
+- **WHEN** a C consumer builds a curve with given control points, types and tolerance
+- **THEN** the field matches what `pyclay` produces for the same curve
+
