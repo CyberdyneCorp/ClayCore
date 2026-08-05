@@ -237,3 +237,25 @@ The module SHALL expose an opt-in undo stack per document: enabling it, `undo`, 
 - **WHEN** any component of `h` is negative
 - **THEN** the call raises, since a half-extent has no meaning below zero
 
+### Requirement: bend_linear and bend_radial as chainable modifiers
+`Prim.bend_linear(a, b, v, ease=0)` and `Prim.bend_radial(r0, r1, dz, ease=0)` SHALL append the corresponding deformer, compose in call order, and survive a `.clayspace` round trip.
+
+#### Scenario: Ramping from Python
+- **WHEN** a script adds a primitive with `.bend_linear(...)` or `.bend_radial(...)`
+- **THEN** the document evaluates a displaced field and no exception is raised
+
+#### Scenario: A degenerate span is refused
+- **WHEN** the two ramp endpoints coincide, or `r0` equals `r1`
+- **THEN** the call raises, since the ramp would divide by zero
+
+### Requirement: elongate_axis as a chainable modifier
+`Prim.elongate_axis(h)` SHALL append a per-axis elongation, taking the half-extents. It SHALL compose in call order and survive a `.clayspace` round trip.
+
+#### Scenario: Stretching an asymmetric primitive from Python
+- **WHEN** a script elongates a cone per axis
+- **THEN** the document evaluates a stretched field and no exception is raised
+
+#### Scenario: Negative extents are refused
+- **WHEN** any component of `h` is negative
+- **THEN** the call raises
+
