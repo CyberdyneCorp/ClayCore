@@ -339,6 +339,13 @@ body.add(clay.Sphere(r=1.0).grab(center=(1, 0, 0), radius=0.8,
 body.add(clay.Cylinder(r=0.3, h=1.0).pose(center=(0, 0.8, 0), radius=1.0,
                                           axis=(0, 0, 1), angle=0.7))
 
+# pose_line ramps the rotation ALONG a segment instead of radially, which is how
+# a limb tapers: the anchor stays put and the rotation grows toward the tip. It
+# is a bend rather than a rigid swing, and unlike grab it has no finite support
+# — everything past b turns with the tip.
+body.add(clay.Capsule(a=(0, -1, 0), b=(0, 1, 0), r=0.25).pose_line(
+    a=(0, -1, 0), b=(0, 1, 0), axis=(0, 0, 1), angle=0.8))
+
 # the voxel side moves occupancy through the same map
 blocks.sculpt_grab((0, 0, 0), 15, displacement=(0.3, 0.0, 0.0), shape="sphere")
 ```

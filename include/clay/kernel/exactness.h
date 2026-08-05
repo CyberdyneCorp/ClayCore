@@ -116,6 +116,15 @@ CLAY_FN CFieldInfo cfi_pose(CFieldInfo a, float angle, float ease_slope) {
     return CFieldInfo{false, a.lipschitz * (1.0f + cabs(angle) * ease_slope)};
 }
 
+// pose along a line: the angle ramps over the segment, so a point at distance
+// `extent` from the axis is dragged tangentially by extent * dtheta/ds. The
+// ramp runs over the segment length, hence the division by it.
+CLAY_FN CFieldInfo cfi_pose_line(CFieldInfo a, float angle, float extent, float segment_len,
+                                 float ease_slope) {
+    return CFieldInfo{false, a.lipschitz * (1.0f + cabs(angle) * extent * ease_slope /
+                                                       cmax(segment_len, 1e-6f))};
+}
+
 // transition (spatial morph of two subtrees): lerped fields are not
 // distances; the mix adds |d1 - d2| · Lipschitz(w). The compiler passes a
 // bound on the field difference over the influence region.

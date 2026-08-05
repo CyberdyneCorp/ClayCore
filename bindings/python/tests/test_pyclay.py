@@ -1598,3 +1598,57 @@ def test_region_deformers_round_trip(tmp_path):
     path = tmp_path / "region.clayspace"
     doc.save(str(path))
     assert np.array_equal(before, clay.load(str(path)).eval(probes))
+
+
+def test_pose_line_bends_along_its_segment():
+    import math
+
+    def build(angle):
+        d = clay.Document()
+        d.add_sdf_layer("l").add(
+            clay.Capsule(a=(0, -1, 0), b=(0, 1, 0), r=0.25)
+            .pose_line(a=(0, -1, 0), b=(0, 1, 0), axis=(0, 0, 1), angle=angle))
+        return d
+
+    straight, bent = build(0.0), build(1.0)
+    # sample a slab and compare where the material sits
+    xs = np.linspace(-3, 2, 60)
+    ys = np.linspace(-2, 2, 60)
+    pts = np.array([[x, y, 0.0] for y in ys for x in xs], dtype=np.float32)
+
+    def mean_solid_x(doc):
+        d = doc.eval(pts)
+        solid = pts[d < 0]
+        return float(solid[:, 0].mean())
+
+    assert mean_solid_x(straight) == pytest.approx(0.0, abs=0.05)
+    assert mean_solid_x(bent) < -0.05          # swung with the rotation
+    assert bent.safe_step_scale() < 1.0
+
+
+def test_pose_line_anchor_is_fixed():
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(
+        clay.Capsule(a=(0, -1, 0), b=(0, 1, 0), r=0.25)
+        .pose_line(a=(0, -1, 0), b=(0, 1, 0), axis=(0, 0, 1), angle=0.8))
+    plain = clay.Document()
+    plain.add_sdf_layer("l").add(clay.Capsule(a=(0, -1, 0), b=(0, 1, 0), r=0.25))
+    anchor = np.array([[0.0, -1.0, 0.0]], np.float32)
+    assert float(doc.eval(anchor)[0]) == pytest.approx(float(plain.eval(anchor)[0]), abs=1e-4)
+
+
+def test_pose_line_refuses_a_degenerate_segment():
+    with pytest.raises(ValueError, match="!="):
+        clay.Sphere(r=1.0).pose_line(a=(0, 0, 0), b=(0, 0, 0), axis=(0, 1, 0), angle=1.0)
+
+
+def test_pose_line_round_trips(tmp_path):
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(
+        clay.Capsule(a=(0, -1, 0), b=(0, 1, 0), r=0.3)
+        .pose_line(a=(0, -0.8, 0), b=(0, 0.9, 0), axis=(0.2, 0, 1), angle=0.6, ease=3))
+    probes = np.random.default_rng(23).uniform(-3, 3, size=(1024, 3)).astype(np.float32)
+    before = doc.eval(probes)
+    path = tmp_path / "poseline.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(probes))

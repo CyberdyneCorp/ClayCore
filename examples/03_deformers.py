@@ -44,6 +44,9 @@ CASES = [
     # sculpting brush rather than a whole-item modifier.
     ("grab", lambda: clay.Sphere(r=0.8).grab(
         center=(0.8, 0, 0), radius=0.7, displacement=(0.5, 0.25, 0), ease=3)),
+    # pose_line ramps the rotation along a segment, which is how a limb tapers
+    ("pose_line", lambda: clay.Capsule(a=(0, -0.9, 0), b=(0, 0.9, 0), r=0.22).pose_line(
+        a=(0, -0.9, 0), b=(0, 0.9, 0), axis=(0, 0, 1), angle=1.1, ease=3)),
     ("pose", lambda: clay.Cylinder(r=0.25, h=0.9).pose(
         center=(0, 0.7, 0), radius=0.9, axis=(0, 0, 1), angle=1.0, ease=2)),
     # Chains apply in authoring order — twist then bend is not bend then twist.

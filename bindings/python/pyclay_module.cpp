@@ -637,6 +637,23 @@ NB_MODULE(pyclay, m) {
              "center"_a, "radius"_a, "axis"_a, "angle"_a, "ease"_a = 0,
              nb::rv_policy::reference_internal,
              "Rotate a region about the centre, weighted the same way as grab")
+        .def("pose_line",
+             [](nb::object self, nb::handle a, nb::handle b, nb::handle axis, float angle,
+                int ease) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 kernel::cfloat3 pa = to_f3(a, "a"), pb = to_f3(b, "b");
+                 if (kernel::cdot2(pb - pa) <= 0.0f)
+                     throw std::invalid_argument(
+                         "pose_line needs a != b: the segment is the ramp");
+                 p.deformers.push_back(scene::Deformer::pose_line(
+                     pa, pb, to_f3(axis, "axis"), angle, static_cast<std::uint8_t>(ease)));
+                 return self;
+             },
+             "a"_a, "b"_a, "axis"_a, "angle"_a, "ease"_a = 0,
+             nb::rv_policy::reference_internal,
+             "Rotate about the axis through a, ramping from nothing at a to the full "
+             "angle at b and beyond. Unlike pose() this does not stop at a radius: "
+             "everything past b turns with the tip.")
         .def("bend_linear",
              [](nb::object self, nb::handle a, nb::handle b, nb::handle v, int ease) {
                  PyPrim& p = nb::cast<PyPrim&>(self);

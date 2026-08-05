@@ -85,6 +85,16 @@ std::vector<ParityScene> parity_scenes() {
         scenes.push_back({"grab", std::move(doc), 3.0f});
     }
 
+    {   // pose_line: a rotation ramped along a segment
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node n = item(Prim::capsule(cf3(0, -1, 0), cf3(0, 1, 0), 0.25f), cf3(0, 0, 0));
+        n.deformers.push_back(scene::Deformer::pose_line(
+            cf3(0, -1, 0), cf3(0, 1, 0), cf3(0, 0, 1), 0.8f, 3));
+        l.sdf->insert(n);
+        scenes.push_back({"pose_line", std::move(doc), 3.0f});
+    }
+
     {   // pose: a region rotated about its centre
         Document doc;
         Layer& l = doc.add_sdf_layer("l");

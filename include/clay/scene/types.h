@@ -288,12 +288,13 @@ struct Deformer {
     // Extension slots for the wide deformers: bend_linear needs nine floats
     // and k/a/b/c hold four. Written only for the types that use them, so the
     // document format needs no version bump.
-    float ext[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float ext[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
     // How many extension floats this type carries; the serializer and the
     // reader both take their count from here, dispatching on the type.
     static int ext_count(std::uint8_t type) {
         if (type == kernel::cdeform_bend_linear) return 5;
+        if (type == kernel::cdeform_pose_line) return 6;
         if (type == kernel::cdeform_grab || type == kernel::cdeform_pose) return 4;
         return 0;
     }
@@ -408,6 +409,26 @@ struct Deformer {
         d.ext[1] = axis.y;
         d.ext[2] = axis.z;
         d.ext[3] = angle;
+        d.ease = ease;
+        return d;
+    }
+    // Rotate about the axis through `a`, ramping from nothing at `a` to the
+    // full angle at `b` and beyond. The anchor is a fixed point; unlike the
+    // radial pose this does not stop at a radius.
+    static Deformer pose_line(kernel::cfloat3 a, kernel::cfloat3 b, kernel::cfloat3 axis,
+                              float angle, std::uint8_t ease = 0) {
+        Deformer d;
+        d.type = kernel::cdeform_pose_line;
+        d.k = a.x;
+        d.a = a.y;
+        d.b = a.z;
+        d.c = b.x;
+        d.ext[0] = b.y;
+        d.ext[1] = b.z;
+        d.ext[2] = axis.x;
+        d.ext[3] = axis.y;
+        d.ext[4] = axis.z;
+        d.ext[5] = angle;
         d.ease = ease;
         return d;
     }

@@ -176,6 +176,39 @@ Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& defor
                 b = Aabb{b.min - disp, b.max + disp};
                 break;
             }
+            case kernel::cdeform_pose_line: {
+                // The weight clamps, so material past the end is fully rotated:
+                // the bound is the hull of the original corners and their
+                // rotated images, dilated by the arc's sagitta so a large angle
+                // cannot bulge outside the chord between them.
+                kernel::cfloat3 anchor = cf3(d.k, d.a, d.b);
+                kernel::cfloat3 axis = cf3(d.ext[2], d.ext[3], d.ext[4]);
+                float axis_len = kernel::clength(axis);
+                if (axis_len < 1e-9f) break;
+                kernel::cfloat3 unit = axis * (1.0f / axis_len);
+                float angle = d.ext[5];
+
+                Aabb swept = b;
+                float extent = 0.0f;
+                for (int i = 0; i < 8; ++i) {
+                    kernel::cfloat3 corner = cf3((i & 1) ? b.max.x : b.min.x,
+                                                 (i & 2) ? b.max.y : b.min.y,
+                                                 (i & 4) ? b.max.z : b.min.z);
+                    kernel::cfloat3 v = corner - anchor;
+                    // distance from the rotation axis, which is what sweeps
+                    kernel::cfloat3 along = unit * kernel::cdot(unit, v);
+                    extent = kernel::cmax(extent, kernel::clength(v - along));
+                    float s = kernel::csin(angle), c = kernel::ccos(angle);
+                    kernel::cfloat3 rotated =
+                        v * c + kernel::ccross(unit, v) * s + unit * (kernel::cdot(unit, v) * (1.0f - c));
+                    swept.expand(anchor + rotated);
+                }
+                // sagitta of the chord across the whole swept angle
+                float half = kernel::cmin(kernel::cabs(angle), 3.14159265f) * 0.5f;
+                swept = swept.dilated(extent * (1.0f - kernel::ccos(half)));
+                b = swept;
+                break;
+            }
             case kernel::cdeform_pose: {
                 // Rotation about the centre keeps a point's distance from it,
                 // so the chord 2r|sin(theta/2)| bounds how far anything moves.
@@ -271,6 +304,25 @@ float deformer_lipschitz(const Node& item) {
         } else if (d.type == kernel::cdeform_grab) {
             float len = kernel::clength(kernel::cf3(d.ext[0], d.ext[1], d.ext[2]));
             info = kernel::cfi_grab(info, len, d.c, ease_max_slope(d.ease), d.ext[3] != 0.0f);
+        } else if (d.type == kernel::cdeform_pose_line) {
+            kernel::cfloat3 anchor = cf3(d.k, d.a, d.b);
+            kernel::cfloat3 end = cf3(d.c, d.ext[0], d.ext[1]);
+            kernel::cfloat3 axis = cf3(d.ext[2], d.ext[3], d.ext[4]);
+            float axis_len = kernel::cmax(kernel::clength(axis), 1e-9f);
+            kernel::cfloat3 unit = axis * (1.0f / axis_len);
+            float extent = 0.0f;
+            if (!local.empty()) {
+                for (int i = 0; i < 8; ++i) {
+                    kernel::cfloat3 corner = cf3((i & 1) ? local.max.x : local.min.x,
+                                                 (i & 2) ? local.max.y : local.min.y,
+                                                 (i & 4) ? local.max.z : local.min.z);
+                    kernel::cfloat3 v = corner - anchor;
+                    kernel::cfloat3 along = unit * kernel::cdot(unit, v);
+                    extent = kernel::cmax(extent, kernel::clength(v - along));
+                }
+            }
+            info = kernel::cfi_pose_line(info, d.ext[5], extent,
+                                         kernel::clength(end - anchor), ease_max_slope(d.ease));
         } else if (d.type == kernel::cdeform_pose) {
             info = kernel::cfi_pose(info, d.ext[3], ease_max_slope(d.ease));
         } else if (d.type == kernel::cdeform_bend_linear) {

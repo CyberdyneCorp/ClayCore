@@ -97,6 +97,37 @@ CLAY_FN cfloat3 cgrab_point(cfloat3 p, cfloat3 centre, float radius, cfloat3 dis
     return p - displacement * w;   // inverse map: sample where the material came from
 }
 
+// pose along a line: the weight ramps from the anchor to the end along the
+// projection onto the segment, and the rotation is about the axis THROUGH the
+// anchor, so the anchor is a fixed point.
+//
+// Unlike grab and radial pose this has NO finite support: the weight clamps, so
+// material past the end is fully rotated rather than untouched. That is the
+// tool — the whole limb tip moves — but it means the bound has to cover a swept
+// arc rather than a dilation.
+//
+// As with grab, the weight is taken at the SAMPLE point rather than at its
+// preimage, so the projection is measured in deformed space. The result is a
+// bend rather than a rigid swing: the form curves away from the anchor and the
+// achieved rotation falls short of the nominal angle as it grows — at a quarter
+// turn a straight capsule reads as a hockey stick, not an L. That is the
+// behaviour a tapered pose brush wants, and recovering the exact swing would
+// cost an iteration per sample.
+CLAY_FN cfloat3 cpose_line_point(cfloat3 p, cfloat3 a, cfloat3 b, cfloat3 axis, float angle,
+                                 int ease_type) {
+    cfloat3 ab = b - a;
+    float len2 = cdot(ab, ab);
+    float axis_len = clength(axis);
+    if (len2 < 1e-12f || axis_len < 1e-9f) return p;
+    cfloat3 unit = axis * (1.0f / axis_len);
+    float w = cease(ease_type, cclamp(cdot(p - a, ab) / len2, 0.0f, 1.0f));
+    float theta = -angle * w;  // inverse map
+    cfloat3 v = p - a;
+    float s = csin(theta), c = ccos(theta);
+    cfloat3 rotated = v * c + ccross(unit, v) * s + unit * (cdot(unit, v) * (1.0f - c));
+    return a + rotated;
+}
+
 // pose: rotate a region about `centre`, weighted the same way — the taper and
 // repose motion, where a limb turns about a joint and the influence tapers off.
 CLAY_FN cfloat3 cpose_point(cfloat3 p, cfloat3 centre, float radius, cfloat3 axis, float angle,

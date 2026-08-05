@@ -899,3 +899,143 @@ TEST_CASE("pose rotates a region about its centre") {
         CHECK(tape.safe_step_scale() < 1.0f);
     }
 }
+
+// --- pose along a line (add-pose-line-regions) -------------------------------
+
+namespace {
+
+scene::Tape line_posed(float angle, std::uint8_t ease, scene::Document& keep,
+                       scene::NodeId* out_id = nullptr) {
+    scene::Layer& l = keep.add_sdf_layer("l");
+    scene::Node n = clay_test::item(
+        scene::Prim::capsule(cf3(0, -1, 0), cf3(0, 1, 0), 0.25f), cf3(0, 0, 0));
+    n.deformers.push_back(
+        scene::Deformer::pose_line(cf3(0, -1, 0), cf3(0, 1, 0), cf3(0, 0, 1), angle, ease));
+    scene::NodeId id = l.sdf->insert(n);
+    if (out_id) *out_id = id;
+    return scene::compile_document(keep);
+}
+
+// Mean x of the solid samples — how far the form has swung.
+float mean_solid_x(const scene::Tape& tape) {
+    double sum = 0.0;
+    int n = 0;
+    for (int i = 0; i < 60; ++i)
+        for (int j = 0; j < 60; ++j)
+            for (int k = 0; k < 20; ++k) {
+                cfloat3 p = cf3(-3.0f + 6.0f * i / 59.0f, -2.0f + 4.0f * j / 59.0f,
+                                -0.5f + 1.0f * k / 19.0f);
+                if (tape.eval(p).d < 0.0f) {
+                    sum += p.x;
+                    ++n;
+                }
+            }
+    return n ? static_cast<float>(sum / n) : 0.0f;
+}
+
+}  // namespace
+
+TEST_CASE("pose_line ramps a rotation along its segment") {
+    scene::Document doc;
+    scene::Tape tape = line_posed(0.8f, 0, doc);
+
+    SUBCASE("the tape agrees with the kernel applied by hand") {
+        clay_test::Lcg rng(606);
+        for (int i = 0; i < 4096; ++i) {
+            cfloat3 p = cf3(rng.range(-3, 3), rng.range(-3, 3), rng.range(-2, 2));
+            cfloat3 q = cpose_line_point(p, cf3(0, -1, 0), cf3(0, 1, 0), cf3(0, 0, 1), 0.8f, 0);
+            float want = sd_capsule(q, cf3(0, -1, 0), cf3(0, 1, 0), 0.25f);
+            CHECK(tape.eval(p).d == doctest::Approx(want).epsilon(1e-4));
+        }
+    }
+
+    SUBCASE("the anchor is a fixed point") {
+        scene::Document plain;
+        scene::Layer& pl = plain.add_sdf_layer("l");
+        pl.sdf->insert(clay_test::item(
+            scene::Prim::capsule(cf3(0, -1, 0), cf3(0, 1, 0), 0.25f), cf3(0, 0, 0)));
+        scene::Tape base = scene::compile_document(plain);
+        CHECK(tape.eval(cf3(0, -1, 0)).d == doctest::Approx(base.eval(cf3(0, -1, 0)).d)
+                                                .epsilon(1e-4));
+    }
+
+    SUBCASE("the form bends further as the angle grows") {
+        scene::Document small_doc, large_doc;
+        float none = mean_solid_x(line_posed(0.0f, 0, small_doc));
+        float bent = mean_solid_x(line_posed(1.0f, 0, large_doc));
+        CHECK(none == doctest::Approx(0.0f).epsilon(0.05));  // straight to begin with
+        CHECK(bent < -0.05f);  // swung in the direction of rotation
+    }
+
+    SUBCASE("the weight follows the projection, not the distance") {
+        // Two points equidistant from the anchor but at different projections
+        // onto the segment must receive different weights. A radial region
+        // could not tell them apart, which is the whole reason for this mode.
+        const cfloat3 a = cf3(0, -1, 0), b = cf3(0, 1, 0);
+        cfloat3 along = cf3(0, 0, 0);            // projects half way up
+        cfloat3 sideways = cf3(1, -1, 0);        // same distance, projects at 0
+        CHECK(kernel::clength(along - a) == doctest::Approx(kernel::clength(sideways - a))
+                                                .epsilon(1e-4));
+        cfloat3 qa = cpose_line_point(along, a, b, cf3(0, 0, 1), 0.8f, 0);
+        cfloat3 qs = cpose_line_point(sideways, a, b, cf3(0, 0, 1), 0.8f, 0);
+        CHECK(kernel::clength(qa - along) > 1e-3f);   // moved
+        CHECK(kernel::clength(qs - sideways) < 1e-5f);  // did not
+    }
+
+    SUBCASE("the easing curve shapes the taper") {
+        scene::Document eased;
+        scene::Tape other = line_posed(0.8f, 5, eased);
+        clay_test::Lcg rng(11);
+        int differing = 0;
+        for (int i = 0; i < 4096; ++i) {
+            cfloat3 p = cf3(rng.range(-2, 2), rng.range(-2, 2), rng.range(-1, 1));
+            if (kernel::cabs(tape.eval(p).d - other.eval(p).d) > 1e-3f) ++differing;
+        }
+        CHECK(differing > 0);
+    }
+
+    SUBCASE("it is a bound and tracing slows") {
+        CHECK(tape.info.is_exact == false);
+        CHECK(tape.safe_step_scale() < 1.0f);
+    }
+}
+
+TEST_CASE("pose_line's bound contains the swept geometry, including a large angle") {
+    for (float angle : {0.5f, 1.5f, 3.0f}) {
+        scene::Document doc;
+        scene::NodeId id = 0;
+        scene::Tape tape = line_posed(angle, 0, doc, &id);
+        const scene::Layer& l = doc.layers.front();
+        const scene::Node* node = l.sdf->find(id);
+        REQUIRE(node != nullptr);
+        math::Aabb bound = scene::item_geometry_bound(*node, l);
+
+        clay_test::Lcg rng(77);
+        int outside = 0;
+        for (int i = 0; i < 20000; ++i) {
+            cfloat3 p = cf3(rng.range(-4, 4), rng.range(-4, 4), rng.range(-2, 2));
+            if (tape.eval(p).d > 0.0f) continue;
+            if (p.x < bound.min.x || p.x > bound.max.x || p.y < bound.min.y ||
+                p.y > bound.max.y || p.z < bound.min.z || p.z > bound.max.z)
+                ++outside;
+        }
+        CAPTURE(angle);
+        CHECK(outside == 0);
+    }
+}
+
+TEST_CASE("widening the deformer record left old documents readable") {
+    // ext_count dispatches on the deformer type, so a document using only the
+    // narrow deformers must still round-trip to identical bytes.
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::box(cf3(0.4f, 0.9f, 0.4f)), cf3(0, 0, 0));
+    n.deformers.push_back(scene::Deformer::twist(1.1f));
+    n.deformers.push_back(scene::Deformer::bend_radial(0.2f, 0.9f, 0.3f, 4));
+    l.sdf->insert(n);
+
+    std::vector<std::uint8_t> bytes = scene::serialize_document(doc);
+    std::optional<scene::Document> back = scene::deserialize_document(bytes.data(), bytes.size());
+    REQUIRE(back.has_value());
+    CHECK(scene::serialize_document(*back) == bytes);
+}

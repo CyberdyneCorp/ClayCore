@@ -21,8 +21,8 @@
 // so the deformer block sits at a known offset.
 //
 // Deformer record (CLAY_TAPE_DEFORM_FLOATS wide): [type] [k] [a] [b] [c]
-// [ease] then five extension slots, used only by the wide types (bend_linear
-// needs nine parameters). The tape is rebuilt from the document on every
+// [ease] then six extension slots, used only by the wide types (a line-gradient
+// pose needs ten parameters). The tape is rebuilt from the document on every
 // compile, so its width costs nothing but transient memory.
 // [ease]. Deformers warp the LOCAL point in authoring order before the
 // primitive's distance function; each may also correct the distance after.
@@ -142,7 +142,7 @@ typedef struct CTapeValueT {
 #define CLAY_TAPE_MAX_STACK 16
 #define CLAY_TAPE_FAR 3.4e37f
 #define CLAY_TAPE_PRIM_PARAMS 7
-#define CLAY_TAPE_DEFORM_FLOATS 11
+#define CLAY_TAPE_DEFORM_FLOATS 12
 #define CLAY_TAPE_PRIM_HEADER 17
 
 // Repetition an item can carry (repeat.h). Applied to the local point
@@ -191,6 +191,7 @@ enum CDeformType {
     cdeform_elongate_axis = 8,  // k, a, b = half-extents; no correction
     cdeform_grab = 9,      // centre(k,a,b) radius(c) disp(e0,e1,e2) front(e3)
     cdeform_pose = 10,     // centre(k,a,b) radius(c) axis(e0,e1,e2) angle(e3)
+    cdeform_pose_line = 11,  // a(k,a,b) b(c,e0,e1) axis(e2,e3,e4) angle(e5)
 };
 
 // Apply one deformer record to the local point. No deformer corrects the
@@ -222,6 +223,10 @@ CLAY_FN cfloat3 ctape_deform_point(CLAY_DEVICE const float* rec, cfloat3 p) {
     if (type == cdeform_grab) {
         return cgrab_point(p, cf3(rec[1], rec[2], rec[3]), rec[4],
                            cf3(rec[6], rec[7], rec[8]), rec[9], (int)rec[5]);
+    }
+    if (type == cdeform_pose_line) {
+        return cpose_line_point(p, cf3(rec[1], rec[2], rec[3]), cf3(rec[4], rec[6], rec[7]),
+                                cf3(rec[8], rec[9], rec[10]), rec[11], (int)rec[5]);
     }
     if (type == cdeform_pose) {
         return cpose_point(p, cf3(rec[1], rec[2], rec[3]), rec[4],
