@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 6
+#define CLAY_ABI_MINOR 9
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -140,13 +140,21 @@ typedef enum clay_blend {
  *   BEND      k             radians per unit along X
  *   TAPER     y0 y1 s0 s1   cross-section scale s0 at y0 to s1 at y1
  *   DISPLACE  amplitude frequency   sine displacement of the field
- *   WRAP      x0 x1         bend the X interval around a cylinder about Z */
+ *   WRAP      x0 x1         bend the X interval around a cylinder about Z
+ *   ELONGATE  hx hy hz      insert flat sections of half-extent h per axis
+ *   BEND_LINEAR ax ay az bx by bz vx vy vz   displace by v, eased along a->b
+ *   BEND_RADIAL r0 r1 dz  displace along Y by dz, eased across r0->r1
+ *   ELONGATE_AXIS hx hy hz  per-axis stretch; a bound for any primitive */
 typedef enum clay_deform {
     CLAY_DEFORM_TWIST = 0,
     CLAY_DEFORM_BEND = 1,
     CLAY_DEFORM_TAPER = 2,
     CLAY_DEFORM_DISPLACE = 3,
-    CLAY_DEFORM_WRAP_AROUND = 4
+    CLAY_DEFORM_WRAP_AROUND = 4,
+    CLAY_DEFORM_ELONGATE = 5,
+    CLAY_DEFORM_BEND_LINEAR = 6,
+    CLAY_DEFORM_BEND_RADIAL = 7,
+    CLAY_DEFORM_ELONGATE_AXIS = 8
 } clay_deform;
 
 /* Easing curves are given by index; 0 is linear. Only the taper deformer and

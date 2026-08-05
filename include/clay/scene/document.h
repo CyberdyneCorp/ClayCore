@@ -50,6 +50,11 @@ class SdfContent {
         return id;
     }
 
+    // Reserve a fresh id without inserting, so a brand-new insertion can be
+    // expressed as an AddNodeCmd (whose replay preserves ids) and thereby be
+    // recorded by an enabled undo stack like every other edit.
+    NodeId reserve_id() { return next_id_++; }
+
     // Remove a node and its subtree; returns the flattened subtree
     // (preorder, ids preserved) so a command inverse can reinsert it.
     std::vector<Node> remove(NodeId id) {
@@ -172,6 +177,11 @@ class Document {
         layers.push_back(std::move(l));
         return layers.back();
     }
+
+    // Reserve a fresh layer id without inserting — the AddLayerCmd analogue
+    // of SdfContent::reserve_id, for bindings that add layers through the
+    // command vocabulary so the add is undoable.
+    LayerId reserve_layer_id() { return next_layer_id_++; }
 
     // Instance: shares the source's content by reference.
     Layer* instance_layer(LayerId src_id, std::string name) {

@@ -21,6 +21,9 @@
 // so the deformer block sits at a known offset.
 //
 // Deformer record (CLAY_TAPE_DEFORM_FLOATS wide): [type] [k] [a] [b] [c]
+// [ease] then five extension slots, used only by the wide types (bend_linear
+// needs nine parameters). The tape is rebuilt from the document on every
+// compile, so its width costs nothing but transient memory.
 // [ease]. Deformers warp the LOCAL point in authoring order before the
 // primitive's distance function; each may also correct the distance after.
 //
@@ -31,6 +34,7 @@
 // from the item's rounding in world units by the compiler); 0 elsewhere.
 
 #include "clay/kernel/deform.h"
+#include "clay/kernel/xform.h"
 #include "clay/kernel/ops.h"
 #include "clay/kernel/lift.h"
 #include "clay/kernel/prim2d.h"
@@ -138,7 +142,7 @@ typedef struct CTapeValueT {
 #define CLAY_TAPE_MAX_STACK 16
 #define CLAY_TAPE_FAR 3.4e37f
 #define CLAY_TAPE_PRIM_PARAMS 7
-#define CLAY_TAPE_DEFORM_FLOATS 6
+#define CLAY_TAPE_DEFORM_FLOATS 11
 #define CLAY_TAPE_PRIM_HEADER 17
 
 // Repetition an item can carry (repeat.h). Applied to the local point
@@ -181,6 +185,10 @@ enum CDeformType {
     cdeform_taper = 2,     // k = y0, a = y1, b = s0, c = s1, ease
     cdeform_displace = 3,  // k = amplitude, a = frequency
     cdeform_wrap = 4,      // k = x0, a = x1: bend [x0,x1] about the Z axis
+    cdeform_elongate = 5,  // k, a, b = per-axis half-extents to insert
+    cdeform_bend_linear = 6,  // a(k,a,b) b(c,e0,e1) v(e2,e3,e4), eased
+    cdeform_bend_radial = 7,  // k = r0, a = r1, b = dz, eased
+    cdeform_elongate_axis = 8,  // k, a, b = half-extents; no correction
 };
 
 // Apply one deformer record to the local point. No deformer corrects the
@@ -201,12 +209,34 @@ CLAY_FN cfloat3 ctape_deform_point(CLAY_DEVICE const float* rec, cfloat3 p) {
         return ctaper_point(p, rec[1], rec[2], rec[3], rec[4], (int)rec[5]);
     }
     if (type == cdeform_wrap) return cwrap_around_point(p, rec[1], rec[2]);
+    if (type == cdeform_bend_linear) {
+        return cbend_linear_point(p, cf3(rec[1], rec[2], rec[3]),
+                                  cf3(rec[4], rec[6], rec[7]),
+                                  cf3(rec[8], rec[9], rec[10]), (int)rec[5]);
+    }
+    if (type == cdeform_bend_radial) {
+        return cbend_radial_point(p, rec[1], rec[2], rec[3], (int)rec[5]);
+    }
+    if (type == cdeform_elongate_axis)
+        return celongate_axis_point(p, cf3(rec[1], rec[2], rec[3]));
+    if (type == cdeform_elongate) {
+        // The correction rides ctape_deform_offset, which the chain evaluates
+        // at this same pre-warp point — exactly what elongation needs.
+        float unused = 0.0f;
+        return celongate_point(p, cf3(rec[1], rec[2], rec[3]), &unused);
+    }
     return p;  // displace acts on the distance, not the point
 }
 
 // Post-primitive distance contribution of one deformer (0 for point warps).
 CLAY_FN float ctape_deform_offset(CLAY_DEVICE const float* rec, cfloat3 p) {
-    if ((int)rec[0] != cdeform_displace) return 0.0f;
+    int type = (int)rec[0];
+    if (type == cdeform_elongate) {
+        float correction = 0.0f;
+        celongate_point(p, cf3(rec[1], rec[2], rec[3]), &correction);
+        return correction;
+    }
+    if (type != cdeform_displace) return 0.0f;
     float amp = rec[1];
     float freq = rec[2];
     return amp * csin(freq * p.x) * csin(freq * p.y) * csin(freq * p.z);

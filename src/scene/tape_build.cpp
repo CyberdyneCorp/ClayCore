@@ -56,6 +56,9 @@ struct Compiler {
             tape.params.push_back(d.b);
             tape.params.push_back(d.c);
             tape.params.push_back(static_cast<float>(d.ease));
+            // The record is fixed width, so always emit the extension slots;
+            // the types that do not use them read zeros.
+            for (int i = 0; i < 5; ++i) tape.params.push_back(d.ext[i]);
         }
     }
 
@@ -159,6 +162,7 @@ struct Compiler {
         // (shared with the influence bound) so the safe step scale drops
         float deform_l = deformer_lipschitz(item);
         if (deform_l > 1.0f) prim_info = kernel::CFieldInfo{false, prim_info.lipschitz * deform_l};
+        if (deformers_break_exactness(item)) prim_info.is_exact = false;
         if (op_is_transition(op)) {
             // A lerp of two fields is not a distance. |d1 - d2| is bounded by
             // how far apart the two surfaces can be, and both live inside the

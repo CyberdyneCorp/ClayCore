@@ -607,6 +607,56 @@ NB_MODULE(pyclay, m) {
              },
              "y0"_a, "y1"_a, "s0"_a, "s1"_a, "ease"_a = 0,
              "Scale the cross-section from s0 at y0 to s1 at y1 along an easing curve")
+        .def("bend_linear",
+             [](nb::object self, nb::handle a, nb::handle b, nb::handle v, int ease) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 kernel::cfloat3 pa = to_f3(a, "a"), pb = to_f3(b, "b");
+                 if (kernel::cdot2(pb - pa) <= 0.0f)
+                     throw std::invalid_argument(
+                         "bend_linear needs a != b: the segment is the ramp span");
+                 p.deformers.push_back(scene::Deformer::bend_linear(
+                     pa, pb, to_f3(v, "v"), static_cast<std::uint8_t>(ease)));
+                 return self;
+             },
+             "a"_a, "b"_a, "v"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
+             "Displace by v, eased along the segment a -> b")
+        .def("bend_radial",
+             [](nb::object self, float r0, float r1, float dz, int ease) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 if (r0 == r1)
+                     throw std::invalid_argument(
+                         "bend_radial needs r0 != r1: the band is the ramp span");
+                 p.deformers.push_back(
+                     scene::Deformer::bend_radial(r0, r1, dz, static_cast<std::uint8_t>(ease)));
+                 return self;
+             },
+             "r0"_a, "r1"_a, "dz"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
+             "Displace along Y by dz, eased across the radial band r0 -> r1")
+        .def("elongate_axis",
+             [](nb::object self, nb::handle h) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 kernel::cfloat3 e = to_f3(h, "elongate_axis half-extents");
+                 if (e.x < 0.0f || e.y < 0.0f || e.z < 0.0f)
+                     throw std::invalid_argument("elongate_axis half-extents must be >= 0");
+                 p.deformers.push_back(scene::Deformer::elongate_axis(e));
+                 return self;
+             },
+             "h"_a, nb::rv_policy::reference_internal,
+             "Per-axis elongation: works on any primitive, symmetric or not, but "
+             "the flat interior plateau makes the field a bound rather than exact.")
+        .def("elongate",
+             [](nb::object self, nb::handle h) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 kernel::cfloat3 e = to_f3(h, "elongate half-extents");
+                 if (e.x < 0.0f || e.y < 0.0f || e.z < 0.0f)
+                     throw std::invalid_argument("elongate half-extents must be >= 0");
+                 p.deformers.push_back(scene::Deformer::elongate(e));
+                 return self;
+             },
+             "h"_a, nb::rv_policy::reference_internal,
+             "Insert flat sections of half-extent h along each axis: the shape "
+             "stretches without its ends distorting. Exact on an origin-symmetric "
+             "primitive, a bound otherwise.")
         .def("displace",
              [](nb::object self, float amplitude, float frequency) {
                  nb::cast<PyPrim&>(self).deformers.push_back(
@@ -1157,7 +1207,19 @@ NB_MODULE(pyclay, m) {
                  } else if (!transition.is_none()) {
                      throw std::invalid_argument("transition= only applies to transition ops");
                  }
-                 return l.layer().sdf->insert(n);
+                 // Through the command vocabulary (AddNodeCmd with a reserved
+                 // id, since replay preserves ids) so an enabled undo stack
+                 // records the add like every other edit. Regression: a
+                 // direct insert let adds escape undo.
+                 n.id = l.layer().sdf->reserve_id();
+                 scene::NodeId id = n.id;
+                 std::vector<scene::Node> subtree;
+                 subtree.push_back(std::move(n));
+                 apply_or_throw(l.doc->document,
+                                scene::Command{scene::AddNodeCmd{l.id, scene::kNoNode, -1,
+                                                                 std::move(subtree)}},
+                                "add", l.undo.get());
+                 return id;
              },
              "prim"_a, "op"_a = scene::Op::Add, "blend"_a = nb::none(), "color"_a = nb::none(),
              "rounding"_a = 0.0f, "mirror"_a = false, "transition"_a = nb::none(),
@@ -1307,9 +1369,17 @@ NB_MODULE(pyclay, m) {
         .def("add_sdf_layer",
              [](PyDocument& d, const std::string& name, int resolution) {
                  if (resolution <= 0) throw std::invalid_argument("resolution must be > 0");
-                 scene::Layer& l = d.doc->document.add_sdf_layer(name);
+                 // Through AddLayerCmd so the add is undoable; see Layer.add.
+                 scene::Layer l;
+                 l.id = d.doc->document.reserve_layer_id();
+                 l.name = name;
+                 l.sdf = std::make_shared<scene::SdfContent>();
                  l.resolution = resolution;
-                 return PyLayer{d.doc, d.undo, l.id};
+                 scene::LayerId id = l.id;
+                 apply_or_throw(d.doc->document,
+                                scene::Command{scene::AddLayerCmd{std::move(l), -1}},
+                                "add_sdf_layer", d.undo.get());
+                 return PyLayer{d.doc, d.undo, id};
              },
              "name"_a, "resolution"_a = 256)
         .def("eval",

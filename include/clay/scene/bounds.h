@@ -29,6 +29,10 @@ math::Aabb item_local_bounds(const Node& item);
 // both the influence bound and the tape's tracked field info use this.
 float deformer_lipschitz(const Node& item);
 
+// Whether the item's deformer chain costs exactness for a reason the Lipschitz
+// factor does not capture (elongation on an asymmetric primitive).
+bool deformers_break_exactness(const Node& item);
+
 // World-space GEOMETRY bound of one item: shape AABB (deformed, mirrored,
 // transformed) dilated by rounding and blend support. Always finite — this
 // is what meshing and raycast clipping want.

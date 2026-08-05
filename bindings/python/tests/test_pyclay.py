@@ -1346,6 +1346,9 @@ def test_every_edit_kind_is_undoable(tmp_path):
         lambda: doc.set_layer_visible(other.id, False),
         lambda: doc.set_layer_transform(other.id, position=(0, 3, 0)),
         lambda: doc.remove_layer(other.id),
+        # regression (fix/adds-escape-undo): adds bypassed the undo stack
+        lambda: layer.add(clay.Sphere(r=0.2)),
+        lambda: doc.add_sdf_layer("added"),
     ]
     for i, edit in enumerate(edits):
         before = _snapshot(doc, tmp_path, f"before_{i}.clayspace")
@@ -1355,6 +1358,27 @@ def test_every_edit_kind_is_undoable(tmp_path):
         assert doc.undo() is True
         assert _snapshot(doc, tmp_path, f"after_{i}.clayspace") == before, f"edit {i}"
         doc.redo()
+
+
+def test_adding_records_undo_and_redo_preserves_ids(tmp_path):
+    # Regression (fix/adds-escape-undo): layer and node adds inserted
+    # directly instead of routing through the command vocabulary, so they
+    # escaped an enabled undo stack.
+    doc = clay.Document()
+    doc.enable_undo()
+    empty = _snapshot(doc, tmp_path, "empty.clayspace")
+
+    layer = doc.add_sdf_layer("l")
+    node = layer.add(clay.Sphere(r=0.5))
+    assert doc.undo_depth == 2
+
+    assert doc.undo() is True
+    assert doc.undo() is True
+    assert _snapshot(doc, tmp_path, "unwound.clayspace") == empty
+
+    assert doc.redo() is True
+    assert doc.redo() is True
+    layer.set_color(node, "#ff0000")  # the id survived the redo
 
 
 def test_wrap_around_bends_the_interval_around_the_axis():
@@ -1381,5 +1405,113 @@ def test_wrap_around_round_trips(tmp_path):
     before = doc.eval(probes)
 
     path = tmp_path / "wrapped.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(probes))
+
+
+def test_elongate_stretches_a_sphere_into_a_capsule():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.5).elongate((1.0, 0.0, 0.0)))
+
+    at = lambda p: float(doc.eval(np.array([p], dtype=np.float32))[0])
+    assert at((0, 0, 0)) == pytest.approx(-0.5, abs=1e-4)      # flat section
+    assert at((0.9, 0, 0)) == pytest.approx(-0.5, abs=1e-4)    # still flat
+    assert at((1.5, 0, 0)) == pytest.approx(0.0, abs=1e-3)     # undistorted cap
+    assert at((0, 0.5, 0)) == pytest.approx(0.0, abs=1e-3)
+
+    lo, hi = layer.bounds()
+    assert hi[0] == pytest.approx(1.5, abs=1e-3)
+    assert hi[1] == pytest.approx(0.5, abs=1e-3)
+    # non-expansive, so tracing is not slowed
+    assert doc.safe_step_scale() == pytest.approx(1.0)
+
+
+def test_elongate_refuses_negative_extents():
+    with pytest.raises(ValueError, match=">= 0"):
+        clay.Sphere(r=1.0).elongate((-1.0, 0.0, 0.0))
+
+
+def test_elongate_round_trips(tmp_path):
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Box(size=(0.6, 0.6, 0.6)).elongate((0.7, 0.2, 0.0)))
+    probes = np.random.default_rng(33).uniform(-3, 3, size=(1024, 3)).astype(np.float32)
+    before = doc.eval(probes)
+    path = tmp_path / "elongated.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(probes))
+
+
+def test_bend_linear_ramps_across_its_span():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Box(size=(0.6, 2.0, 0.6)).bend_linear(a=(0, -1, 0), b=(0, 1, 0),
+                                                         v=(1.0, 0, 0)))
+    at = lambda p: float(doc.eval(np.array([p], dtype=np.float32))[0])
+    # bottom of the ramp: undisplaced, so the face is at x = 0.3
+    assert at((0.3, -1, 0)) == pytest.approx(0.0, abs=1e-3)
+    # top: displaced by the whole vector
+    assert at((1.3, 1, 0)) == pytest.approx(0.0, abs=1e-3)
+    # slope = |v| / span
+    assert doc.safe_step_scale() == pytest.approx(1 / 1.5, abs=1e-3)
+
+
+def test_bend_radial_lifts_the_rim():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Cylinder(r=1.2, h=0.15).bend_radial(r0=0.2, r1=1.2, dz=0.6))
+    at = lambda p: float(doc.eval(np.array([p], dtype=np.float32))[0])
+    assert at((0, 0, 0)) < 0          # centre unmoved
+    assert at((1.1, 0.6, 0)) < 0      # rim lifted by dz
+
+
+@pytest.mark.parametrize("call", [
+    lambda: clay.Sphere(r=1.0).bend_linear((0, 0, 0), (0, 0, 0), (1, 0, 0)),
+    lambda: clay.Sphere(r=1.0).bend_radial(1.0, 1.0, 0.5),
+])
+def test_degenerate_ramp_span_is_refused(call):
+    with pytest.raises(ValueError, match="!="):
+        call()
+
+
+def test_bend_deformers_round_trip(tmp_path):
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(
+        clay.Box(size=(0.5, 1.5, 0.5))
+        .bend_linear(a=(0, -0.7, 0), b=(0, 0.7, 0), v=(0.4, 0.0, 0.2), ease=4)
+        .bend_radial(r0=0.1, r1=0.9, dz=0.3, ease=2))
+    probes = np.random.default_rng(77).uniform(-2, 2, size=(1024, 3)).astype(np.float32)
+    before = doc.eval(probes)
+    path = tmp_path / "bends.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(probes))
+
+
+def test_elongate_axis_stretches_an_asymmetric_primitive():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Cone(h=0.6, r1=0.5, r2=0.1).elongate_axis((0.8, 0.0, 0.0)))
+
+    at = lambda p: float(doc.eval(np.array([p], dtype=np.float32))[0])
+    centre = at((0, 0, 0))
+    assert centre < 0
+    assert at((0.8, 0, 0)) == pytest.approx(centre, abs=1e-4)   # flat plateau
+    assert doc.safe_step_scale() == pytest.approx(1.0)          # non-expansive
+
+    lo, hi = layer.bounds()
+    assert hi[0] == pytest.approx(1.3, abs=1e-3)                # 0.5 + 0.8
+
+
+def test_elongate_axis_refuses_negative_extents():
+    with pytest.raises(ValueError, match=">= 0"):
+        clay.Sphere(r=1.0).elongate_axis((0.0, -1.0, 0.0))
+
+
+def test_elongate_axis_round_trips(tmp_path):
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Pyramid(h=0.9).elongate_axis((0.4, 0.0, 0.6)))
+    probes = np.random.default_rng(88).uniform(-3, 3, size=(1024, 3)).astype(np.float32)
+    before = doc.eval(probes)
+    path = tmp_path / "ea.clayspace"
     doc.save(str(path))
     assert np.array_equal(before, clay.load(str(path)).eval(probes))

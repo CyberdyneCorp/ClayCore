@@ -1420,3 +1420,167 @@ TEST_CASE("wrap_around reaches the C ABI") {
     }
     clay_document_destroy(doc);
 }
+
+// Regression (fix/adds-escape-undo): adds and removes bypassed the undo
+// stack — insert_node, clay_remove_node and clay_add_sdf_layer touched the
+// document directly instead of routing through the command vocabulary, so
+// "no reachable edit escapes undo" did not hold for exactly the edits a
+// sculpting UI makes most.
+TEST_CASE("adds and removes record undo like every other edit") {
+    clay_document* doc = clay_document_create();
+    REQUIRE(clay_document_enable_undo(doc) == CLAY_OK);
+    std::vector<std::uint8_t> empty = doc_bytes(doc);
+
+    // layer add
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "clay", &layer) == CLAY_OK);
+    std::size_t depth = 0;
+    REQUIRE(clay_document_undo_state(doc, nullptr, &depth, nullptr) == CLAY_OK);
+    CHECK(depth == 1);
+
+    // flat-descriptor add
+    clay_item_desc d;
+    std::memset(&d, 0, sizeof d);
+    d.struct_size = sizeof d;
+    d.prim = CLAY_PRIM_SPHERE;
+    d.params[0] = 0.5f;
+    d.rotation[3] = 1.0f;
+    d.scale = 1.0f;
+    clay_node_id node = 0;
+    REQUIRE(clay_add_item(doc, layer, &d, &node) == CLAY_OK);
+    REQUIRE(clay_document_undo_state(doc, nullptr, &depth, nullptr) == CLAY_OK);
+    CHECK(depth == 2);
+
+    // builder add
+    float r[1] = {0.25f};
+    clay_item* item = clay_item_create(CLAY_PRIM_SPHERE, r, 1);
+    REQUIRE(item != nullptr);
+    clay_node_id node2 = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, item, &node2) == CLAY_OK);
+    clay_item_destroy(item);
+    CHECK(node2 != node);
+    REQUIRE(clay_document_undo_state(doc, nullptr, &depth, nullptr) == CLAY_OK);
+    CHECK(depth == 3);
+
+    // remove
+    REQUIRE(clay_remove_node(doc, layer, node2) == CLAY_OK);
+    REQUIRE(clay_document_undo_state(doc, nullptr, &depth, nullptr) == CLAY_OK);
+    CHECK(depth == 4);
+
+    std::vector<std::uint8_t> built = doc_bytes(doc);
+
+    // Unwind all four edits: back to the empty document, byte for byte.
+    for (int i = 0; i < 4; ++i) {
+        std::int32_t undone = 0;
+        REQUIRE(clay_document_undo(doc, &undone) == CLAY_OK);
+        CHECK(undone == 1);
+    }
+    CHECK(doc_bytes(doc) == empty);
+
+    // Replay all four: identical to the built state, ids preserved —
+    // the surviving node still answers to its id.
+    for (int i = 0; i < 4; ++i) {
+        std::int32_t redone = 0;
+        REQUIRE(clay_document_redo(doc, &redone) == CLAY_OK);
+        CHECK(redone == 1);
+    }
+    CHECK(doc_bytes(doc) == built);
+    const float red[3] = {1, 0, 0};
+    CHECK(clay_layer_set_color(doc, layer, node, red) == CLAY_OK);
+
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("elongate reaches the C ABI") {
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "l", &layer) == CLAY_OK);
+
+    float r[1] = {0.5f};
+    clay_item* item = clay_item_create(CLAY_PRIM_SPHERE, r, 1);
+    REQUIRE(item != nullptr);
+    const float h[3] = {1.0f, 0.0f, 0.3f};
+    REQUIRE(clay_item_add_deformer(item, CLAY_DEFORM_ELONGATE, h, 3, 0) == CLAY_OK);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, item, &node) == CLAY_OK);
+    clay_item_destroy(item);
+
+    scene::Document twin;
+    scene::Layer& tl = twin.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::sphere(0.5f), cf3(0, 0, 0));
+    n.deformers.push_back(scene::Deformer::elongate(cf3(1.0f, 0.0f, 0.3f)));
+    tl.sdf->insert(n);
+    check_same_field(doc, twin);
+
+    SUBCASE("negative half-extents are refused") {
+        clay_item* bad = clay_item_create(CLAY_PRIM_SPHERE, r, 1);
+        REQUIRE(bad != nullptr);
+        const float negative[3] = {-1.0f, 0.0f, 0.0f};
+        CHECK(clay_item_add_deformer(bad, CLAY_DEFORM_ELONGATE, negative, 3, 0) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+        clay_item_destroy(bad);
+    }
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("the ramped bends reach the C ABI") {
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "l", &layer) == CLAY_OK);
+
+    float box[3] = {0.3f, 1.0f, 0.3f};
+    clay_item* item = clay_item_create(CLAY_PRIM_BOX, box, 3);
+    REQUIRE(item != nullptr);
+    const float lin[9] = {0, -1, 0, 0, 1, 0, 0.8f, 0.0f, 0.2f};
+    REQUIRE(clay_item_add_deformer(item, CLAY_DEFORM_BEND_LINEAR, lin, 9, 0) == CLAY_OK);
+    const float rad[3] = {0.2f, 1.0f, 0.3f};
+    REQUIRE(clay_item_add_deformer(item, CLAY_DEFORM_BEND_RADIAL, rad, 3, 0) == CLAY_OK);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, item, &node) == CLAY_OK);
+    clay_item_destroy(item);
+
+    scene::Document twin;
+    scene::Layer& tl = twin.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::box(cf3(0.3f, 1.0f, 0.3f)), cf3(0, 0, 0));
+    n.deformers.push_back(
+        scene::Deformer::bend_linear(cf3(0, -1, 0), cf3(0, 1, 0), cf3(0.8f, 0.0f, 0.2f)));
+    n.deformers.push_back(scene::Deformer::bend_radial(0.2f, 1.0f, 0.3f));
+    tl.sdf->insert(n);
+    check_same_field(doc, twin);
+
+    SUBCASE("degenerate spans are refused") {
+        clay_item* bad = clay_item_create(CLAY_PRIM_BOX, box, 3);
+        REQUIRE(bad != nullptr);
+        const float same[9] = {0, 0, 0, 0, 0, 0, 1, 0, 0};
+        CHECK(clay_item_add_deformer(bad, CLAY_DEFORM_BEND_LINEAR, same, 9, 0) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+        const float flat[3] = {1.0f, 1.0f, 0.5f};
+        CHECK(clay_item_add_deformer(bad, CLAY_DEFORM_BEND_RADIAL, flat, 3, 0) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+        clay_item_destroy(bad);
+    }
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("elongate_axis reaches the C ABI") {
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "l", &layer) == CLAY_OK);
+
+    float cone[3] = {0.6f, 0.5f, 0.1f};
+    clay_item* item = clay_item_create(CLAY_PRIM_CAPPED_CONE, cone, 3);
+    REQUIRE(item != nullptr);
+    const float h[3] = {0.7f, 0.0f, 0.3f};
+    REQUIRE(clay_item_add_deformer(item, CLAY_DEFORM_ELONGATE_AXIS, h, 3, 0) == CLAY_OK);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, item, &node) == CLAY_OK);
+    clay_item_destroy(item);
+
+    scene::Document twin;
+    scene::Layer& tl = twin.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::capped_cone(0.6f, 0.5f, 0.1f), cf3(0, 0, 0));
+    n.deformers.push_back(scene::Deformer::elongate_axis(cf3(0.7f, 0.0f, 0.3f)));
+    tl.sdf->insert(n);
+    check_same_field(doc, twin);
+    clay_document_destroy(doc);
+}

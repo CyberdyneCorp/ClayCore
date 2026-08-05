@@ -187,3 +187,28 @@ The C API SHALL expose the same opt-in undo stack as the Python bindings: enable
 - **WHEN** a C consumer appends a wrap deformer to an item builder
 - **THEN** the document evaluates identically to the same item authored through the scene API
 
+### Requirement: elongate across the ABI
+`clay_deform` SHALL include an elongate enumerator taking the three half-extents, so a C consumer composes the same stretched item the Python bindings do.
+
+#### Scenario: Stretching from C
+- **WHEN** a C consumer appends an elongate deformer to an item builder
+- **THEN** the document evaluates identically to the same item authored through the scene API
+
+### Requirement: bend_linear and bend_radial across the ABI
+`clay_deform` SHALL include enumerators for both ramped bends, taking nine and three parameters respectively, so a C consumer composes the same item the Python bindings do.
+
+#### Scenario: Ramping from C
+- **WHEN** a C consumer appends either bend to an item builder
+- **THEN** the document evaluates identically to the same item authored through the scene API
+
+#### Scenario: A degenerate span is refused
+- **WHEN** either bend is given a zero-length span
+- **THEN** the call returns `CLAY_ERROR_INVALID_ARGUMENT`
+
+### Requirement: elongate_axis across the ABI
+`clay_deform` SHALL include a per-axis elongate enumerator taking the three half-extents.
+
+#### Scenario: Stretching from C
+- **WHEN** a C consumer appends a per-axis elongate to an item builder
+- **THEN** the document evaluates identically to the same item authored through the scene API
+

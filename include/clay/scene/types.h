@@ -63,6 +63,20 @@ inline bool prim_is_unbounded(PrimType t) {
 
 // Primitives whose field is a bound rather than a true distance; the tape's
 // tracked exactness downgrades for them.
+// Elongation's distance correction is derived about the origin, so it is only
+// exact for a primitive invariant under p -> -p. The list is deliberately
+// conservative: anything not obviously centrally symmetric is treated as
+// asymmetric, which costs a step-scale downgrade rather than correctness.
+inline bool prim_is_origin_symmetric(PrimType t) {
+    return t == PrimType::Sphere || t == PrimType::Box || t == PrimType::RoundBox ||
+           t == PrimType::BoxFrame || t == PrimType::Torus ||
+           t == PrimType::CappedCylinder || t == PrimType::RoundedCylinder ||
+           t == PrimType::Ellipsoid || t == PrimType::Octahedron ||
+           t == PrimType::OctahedronCheap || t == PrimType::HexPrism ||
+           t == PrimType::Dodecahedron || t == PrimType::Icosahedron ||
+           t == PrimType::LNormSphere;
+}
+
 inline bool prim_is_bound_field(PrimType t) {
     return t == PrimType::Ellipsoid || t == PrimType::TriPrism ||
            t == PrimType::OctahedronCheap || t == PrimType::LNormSphere;
@@ -271,6 +285,17 @@ struct Deformer {
     float b = 1.0f;      // taper: s0
     float c = 1.0f;      // taper: s1
     std::uint8_t ease = 0;
+    // Extension slots for the wide deformers: bend_linear needs nine floats
+    // and k/a/b/c hold four. Written only for the types that use them, so the
+    // document format needs no version bump.
+    float ext[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+    // How many extension floats this type carries; the serializer and the
+    // reader both take their count from here, dispatching on the type.
+    static int ext_count(std::uint8_t type) {
+        return type == kernel::cdeform_bend_linear ? 5 : 0;
+    }
+
 
     static Deformer twist(float radians_per_unit) {
         Deformer d;
@@ -301,6 +326,53 @@ struct Deformer {
         d.type = kernel::cdeform_wrap;
         d.k = x0;
         d.a = x1;
+        return d;
+    }
+    // Insert flat sections of half-extent h along each axis: the shape
+    // stretches without its ends distorting.
+    static Deformer elongate(kernel::cfloat3 h) {
+        Deformer d;
+        d.type = kernel::cdeform_elongate;
+        d.k = h.x;
+        d.a = h.y;
+        d.b = h.z;
+        return d;
+    }
+    // Displace by v, eased along the segment a -> b.
+    static Deformer bend_linear(kernel::cfloat3 a, kernel::cfloat3 b, kernel::cfloat3 v,
+                                std::uint8_t ease = 0) {
+        Deformer d;
+        d.type = kernel::cdeform_bend_linear;
+        d.k = a.x;
+        d.a = a.y;
+        d.b = a.z;
+        d.c = b.x;
+        d.ext[0] = b.y;
+        d.ext[1] = b.z;
+        d.ext[2] = v.x;
+        d.ext[3] = v.y;
+        d.ext[4] = v.z;
+        d.ease = ease;
+        return d;
+    }
+    // Displace along Y by dz, eased across the radial band r0 -> r1.
+    static Deformer bend_radial(float r0, float r1, float dz, std::uint8_t ease = 0) {
+        Deformer d;
+        d.type = kernel::cdeform_bend_radial;
+        d.k = r0;
+        d.a = r1;
+        d.b = dz;
+        d.ease = ease;
+        return d;
+    }
+    // Per-axis elongation: works on any primitive, but the flat interior
+    // plateau makes it a bound rather than a distance.
+    static Deformer elongate_axis(kernel::cfloat3 h) {
+        Deformer d;
+        d.type = kernel::cdeform_elongate_axis;
+        d.k = h.x;
+        d.a = h.y;
+        d.b = h.z;
         return d;
     }
     static Deformer displace(float amplitude, float frequency) {
