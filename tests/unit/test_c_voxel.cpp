@@ -1,5 +1,7 @@
 #include <doctest/doctest.h>
 
+#include <cstdio>
+
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -370,6 +372,7 @@ TEST_CASE("a document without the layer reports not-found, and borrows do not cr
     CHECK(clay_document_voxel_layer(reloaded, "sculpt", nullptr, &missing) ==
           CLAY_ERROR_NOT_FOUND);
     CHECK(missing == grid);  // a failed lookup writes nothing
+    std::remove("c_voxel_stale.clayspace");  // tests leave no artifacts behind
 
     // The first document is untouched by any of that: its handle still
     // resolves to its own layer, with the edit that was made through it.
