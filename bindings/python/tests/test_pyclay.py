@@ -1346,6 +1346,9 @@ def test_every_edit_kind_is_undoable(tmp_path):
         lambda: doc.set_layer_visible(other.id, False),
         lambda: doc.set_layer_transform(other.id, position=(0, 3, 0)),
         lambda: doc.remove_layer(other.id),
+        # regression (fix/adds-escape-undo): adds bypassed the undo stack
+        lambda: layer.add(clay.Sphere(r=0.2)),
+        lambda: doc.add_sdf_layer("added"),
     ]
     for i, edit in enumerate(edits):
         before = _snapshot(doc, tmp_path, f"before_{i}.clayspace")
@@ -1355,6 +1358,27 @@ def test_every_edit_kind_is_undoable(tmp_path):
         assert doc.undo() is True
         assert _snapshot(doc, tmp_path, f"after_{i}.clayspace") == before, f"edit {i}"
         doc.redo()
+
+
+def test_adding_records_undo_and_redo_preserves_ids(tmp_path):
+    # Regression (fix/adds-escape-undo): layer and node adds inserted
+    # directly instead of routing through the command vocabulary, so they
+    # escaped an enabled undo stack.
+    doc = clay.Document()
+    doc.enable_undo()
+    empty = _snapshot(doc, tmp_path, "empty.clayspace")
+
+    layer = doc.add_sdf_layer("l")
+    node = layer.add(clay.Sphere(r=0.5))
+    assert doc.undo_depth == 2
+
+    assert doc.undo() is True
+    assert doc.undo() is True
+    assert _snapshot(doc, tmp_path, "unwound.clayspace") == empty
+
+    assert doc.redo() is True
+    assert doc.redo() is True
+    layer.set_color(node, "#ff0000")  # the id survived the redo
 
 
 def test_wrap_around_bends_the_interval_around_the_axis():

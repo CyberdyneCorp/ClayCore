@@ -1157,7 +1157,19 @@ NB_MODULE(pyclay, m) {
                  } else if (!transition.is_none()) {
                      throw std::invalid_argument("transition= only applies to transition ops");
                  }
-                 return l.layer().sdf->insert(n);
+                 // Through the command vocabulary (AddNodeCmd with a reserved
+                 // id, since replay preserves ids) so an enabled undo stack
+                 // records the add like every other edit. Regression: a
+                 // direct insert let adds escape undo.
+                 n.id = l.layer().sdf->reserve_id();
+                 scene::NodeId id = n.id;
+                 std::vector<scene::Node> subtree;
+                 subtree.push_back(std::move(n));
+                 apply_or_throw(l.doc->document,
+                                scene::Command{scene::AddNodeCmd{l.id, scene::kNoNode, -1,
+                                                                 std::move(subtree)}},
+                                "add", l.undo.get());
+                 return id;
              },
              "prim"_a, "op"_a = scene::Op::Add, "blend"_a = nb::none(), "color"_a = nb::none(),
              "rounding"_a = 0.0f, "mirror"_a = false, "transition"_a = nb::none(),
@@ -1307,9 +1319,17 @@ NB_MODULE(pyclay, m) {
         .def("add_sdf_layer",
              [](PyDocument& d, const std::string& name, int resolution) {
                  if (resolution <= 0) throw std::invalid_argument("resolution must be > 0");
-                 scene::Layer& l = d.doc->document.add_sdf_layer(name);
+                 // Through AddLayerCmd so the add is undoable; see Layer.add.
+                 scene::Layer l;
+                 l.id = d.doc->document.reserve_layer_id();
+                 l.name = name;
+                 l.sdf = std::make_shared<scene::SdfContent>();
                  l.resolution = resolution;
-                 return PyLayer{d.doc, d.undo, l.id};
+                 scene::LayerId id = l.id;
+                 apply_or_throw(d.doc->document,
+                                scene::Command{scene::AddLayerCmd{std::move(l), -1}},
+                                "add_sdf_layer", d.undo.get());
+                 return PyLayer{d.doc, d.undo, id};
              },
              "name"_a, "resolution"_a = 256)
         .def("eval",

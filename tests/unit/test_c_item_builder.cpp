@@ -1420,3 +1420,73 @@ TEST_CASE("wrap_around reaches the C ABI") {
     }
     clay_document_destroy(doc);
 }
+
+// Regression (fix/adds-escape-undo): adds and removes bypassed the undo
+// stack — insert_node, clay_remove_node and clay_add_sdf_layer touched the
+// document directly instead of routing through the command vocabulary, so
+// "no reachable edit escapes undo" did not hold for exactly the edits a
+// sculpting UI makes most.
+TEST_CASE("adds and removes record undo like every other edit") {
+    clay_document* doc = clay_document_create();
+    REQUIRE(clay_document_enable_undo(doc) == CLAY_OK);
+    std::vector<std::uint8_t> empty = doc_bytes(doc);
+
+    // layer add
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "clay", &layer) == CLAY_OK);
+    std::size_t depth = 0;
+    REQUIRE(clay_document_undo_state(doc, nullptr, &depth, nullptr) == CLAY_OK);
+    CHECK(depth == 1);
+
+    // flat-descriptor add
+    clay_item_desc d;
+    std::memset(&d, 0, sizeof d);
+    d.struct_size = sizeof d;
+    d.prim = CLAY_PRIM_SPHERE;
+    d.params[0] = 0.5f;
+    d.rotation[3] = 1.0f;
+    d.scale = 1.0f;
+    clay_node_id node = 0;
+    REQUIRE(clay_add_item(doc, layer, &d, &node) == CLAY_OK);
+    REQUIRE(clay_document_undo_state(doc, nullptr, &depth, nullptr) == CLAY_OK);
+    CHECK(depth == 2);
+
+    // builder add
+    float r[1] = {0.25f};
+    clay_item* item = clay_item_create(CLAY_PRIM_SPHERE, r, 1);
+    REQUIRE(item != nullptr);
+    clay_node_id node2 = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, item, &node2) == CLAY_OK);
+    clay_item_destroy(item);
+    CHECK(node2 != node);
+    REQUIRE(clay_document_undo_state(doc, nullptr, &depth, nullptr) == CLAY_OK);
+    CHECK(depth == 3);
+
+    // remove
+    REQUIRE(clay_remove_node(doc, layer, node2) == CLAY_OK);
+    REQUIRE(clay_document_undo_state(doc, nullptr, &depth, nullptr) == CLAY_OK);
+    CHECK(depth == 4);
+
+    std::vector<std::uint8_t> built = doc_bytes(doc);
+
+    // Unwind all four edits: back to the empty document, byte for byte.
+    for (int i = 0; i < 4; ++i) {
+        std::int32_t undone = 0;
+        REQUIRE(clay_document_undo(doc, &undone) == CLAY_OK);
+        CHECK(undone == 1);
+    }
+    CHECK(doc_bytes(doc) == empty);
+
+    // Replay all four: identical to the built state, ids preserved —
+    // the surviving node still answers to its id.
+    for (int i = 0; i < 4; ++i) {
+        std::int32_t redone = 0;
+        REQUIRE(clay_document_redo(doc, &redone) == CLAY_OK);
+        CHECK(redone == 1);
+    }
+    CHECK(doc_bytes(doc) == built);
+    const float red[3] = {1, 0, 0};
+    CHECK(clay_layer_set_color(doc, layer, node, red) == CLAY_OK);
+
+    clay_document_destroy(doc);
+}

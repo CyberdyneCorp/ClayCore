@@ -506,13 +506,28 @@ namespace {
 
 // -- builder helpers, below the handles they touch ---------------------------
 
+// Defined with the other edit plumbing below; declared here because the
+// insertion path routes through it too.
+clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what);
+
 // The one insertion path: everything authored through this ABI, flat
-// descriptor included, ends here.
+// descriptor included, ends here. It routes through the command vocabulary —
+// an AddNodeCmd with a reserved id, since command replay preserves ids — so
+// an enabled undo stack records the add like every other edit. (Regression:
+// inserting directly into the layer let adds escape undo.)
 clay_result insert_node(clay_document* doc, clay_layer_id layer_id, scene::Node node,
                         clay_node_id* out_node) {
     scene::Layer* layer = doc->doc.document.find_layer(layer_id);
     if (!layer || !layer->sdf) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
-    scene::NodeId id = layer->sdf->insert(std::move(node));
+    node.id = layer->sdf->reserve_id();
+    scene::NodeId id = node.id;
+    std::vector<scene::Node> subtree;
+    subtree.push_back(std::move(node));
+    clay_result r = apply_edit(
+        doc,
+        scene::Command{scene::AddNodeCmd{layer_id, scene::kNoNode, -1, std::move(subtree)}},
+        "layer not found");
+    if (r != CLAY_OK) return r;
     if (out_node) *out_node = id;
     return CLAY_OK;
 }
@@ -802,8 +817,17 @@ clay_result clay_document_load(const char* path, clay_document** out_doc) {
 clay_result clay_add_sdf_layer(clay_document* doc, const char* name,
                                clay_layer_id* out_layer) {
     if (!doc || !name) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or name");
-    scene::Layer& layer = doc->doc.document.add_sdf_layer(name);
-    if (out_layer) *out_layer = layer.id;
+    // Through the command vocabulary (AddLayerCmd with a reserved id) so an
+    // enabled undo stack records the add; see insert_node.
+    scene::Layer layer;
+    layer.id = doc->doc.document.reserve_layer_id();
+    layer.name = name;
+    layer.sdf = std::make_shared<scene::SdfContent>();
+    clay_layer_id id = layer.id;
+    clay_result r = apply_edit(doc, scene::Command{scene::AddLayerCmd{std::move(layer), -1}},
+                               "layer could not be added");
+    if (r != CLAY_OK) return r;
+    if (out_layer) *out_layer = id;
     return CLAY_OK;
 }
 
@@ -822,11 +846,10 @@ clay_result clay_add_item(clay_document* doc, clay_layer_id layer_id,
 
 clay_result clay_remove_node(clay_document* doc, clay_layer_id layer_id, clay_node_id node) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
-    scene::Layer* layer = doc->doc.document.find_layer(layer_id);
-    if (!layer || !layer->sdf) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
-    if (layer->sdf->remove(node).empty())
-        return fail(CLAY_ERROR_NOT_FOUND, "node not found");
-    return CLAY_OK;
+    // Through the command vocabulary so the removal is undoable; the inverse
+    // AddNodeCmd carries the removed subtree, ids preserved.
+    return apply_edit(doc, scene::Command{scene::RemoveNodeCmd{layer_id, node}},
+                      "node not found");
 }
 
 namespace {
