@@ -68,13 +68,13 @@ sculpt with.
 **Gate:** an artist can block out a form, grab it into shape, freeze a region
 and detail around it, without leaving the engine's vocabulary. **Met
 2026-08-05** — every row above has landed. Phase 2 is next, and the largest
-structural gap in it is `add-curve-objects`.
+structural gap in it was `add-curve-objects`, which landed 2026-08-06.
 
 ## Phase 2 — depth and breadth
 
 | Change | Notes |
 |---|---|
-| `add-curve-objects` | The largest *structural* gap: control-point curves with per-point radius and type, lowering to the existing exact primitives. Blocks tubes, spline arrays, lofts, and curve-driven parametric modelling. |
+| ~~`add-curve-objects`~~ **landed 2026-08-06** | Control-point curves: per-point type (hard / Catmull-Rom / B-spline / Bezier with local-space handles), closed curves, and adaptive tessellation to a document-level tolerance. **A curve is not a new primitive** — the stroke opcode already sweeps a sphere along a segment chain exactly and with finite support, so typed points lower into it at compile time. That bought four backends, culling, exactness, picking, undo, masks and the file format for nothing, and an all-hard chain compiles to a bit-identical tape. Also added the versioned scene chunk, so the next field a node gains needs no packing trick. Cross-section sweeps (`add-loft-opcode`, `add-swept-n`) and radius profiles are unblocked but deliberately not included. |
 | `add-loft-opcode` | Loft is header-only and flagged in the specs as not tape-expressible; it is 3DCoat's base-mesh generator and the core of their 2026 parametric direction. Needs an item to carry two profiles. |
 | `add-swept-n` | Generalizes loft from two profiles to N across a guide, once two-profile loft is proven. Minor and arguably implied by the row above, but named so it is not assumed done when loft lands. |
 | `add-voxel-verbs` | fill-cavities, scrape (flatten+smooth), smudge, carve-with-alpha — the verbs our four are missing against their voxel set. |

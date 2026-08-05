@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(claycore
-  VERSION 0.14.0
+  VERSION 0.15.0
   DESCRIPTION "Portable C++20 SDF + voxel engine library"
   LANGUAGES C CXX)  # C: ufbx
 
@@ -28,6 +28,7 @@ include(Dependencies)
 add_library(claycore
   src/version.cpp
   src/scene/bounds.cpp
+  src/scene/curve.cpp
   src/scene/commands.cpp
   src/scene/tape_build.cpp
   src/brick/cache.cpp

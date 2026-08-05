@@ -74,6 +74,13 @@ ALIASES = {
     "Document.gradients": "clay_eval_gradients",
     "Document.raycast": "clay_raycast_attributed",  # pyclay's reports layer+item too
     "Layer.add": "clay_layer_add_item",
+    "Layer.set_points": "clay_layer_set_stroke_points",
+    # closed and the tolerance are one call in C: they only mean anything
+    # together, and a UI that exposes one exposes the other
+    "Stroke.closed": "clay_item_set_curve",
+    "Stroke.tolerance": "clay_item_set_curve",
+    # per-point types ride the point arrays rather than being set separately
+    "Stroke.types": "clay_item_set_curve_points",
     # the preset is an argument in C, not the receiver, so the name has no
     # _preset_ in it
     "StrokePreset.resolve": "clay_stroke_resolve",

@@ -162,6 +162,8 @@ struct PyPrim {
     math::Transform xform;
     std::vector<scene::StrokePoint> stroke;
     float stroke_blend_k = 0.0f;
+    bool stroke_closed = false;
+    float curve_tolerance = 0.01f;
     std::vector<scene::Deformer> deformers;
     scene::Profile profile;
     std::vector<kernel::cfloat2> profile_points;
@@ -410,6 +412,61 @@ std::vector<kernel::cfloat2> to_polygon(nb::handle obj) {
 }
 
 // (N,4) float32 stroke points: xyz + radius. Sequences of 4-tuples also work.
+scene::StrokePointType parse_point_type(const std::string& t) {
+    if (t == "hard") return scene::StrokePointType::Hard;
+    if (t == "spline") return scene::StrokePointType::Spline;
+    if (t == "bspline") return scene::StrokePointType::BSpline;
+    if (t == "bezier") return scene::StrokePointType::Bezier;
+    throw std::invalid_argument(
+        "point type must be 'hard', 'spline', 'bspline' or 'bezier', got '" + t + "'");
+}
+
+// One name for every point, or one per point. A single string is the common
+// case — a whole curve is usually smooth — and a list is what a per-point
+// editor produces.
+void apply_point_types(std::vector<scene::StrokePoint>& points, nb::handle types) {
+    if (types.is_none()) return;
+    if (nb::isinstance<nb::str>(types)) {
+        scene::StrokePointType t = parse_point_type(nb::cast<std::string>(types));
+        for (scene::StrokePoint& p : points) p.type = t;
+        return;
+    }
+    nb::sequence seq;
+    try {
+        seq = nb::cast<nb::sequence>(types);
+    } catch (const std::exception&) {
+        throw std::invalid_argument("types must be a string or a sequence of strings");
+    }
+    if (nb::len(seq) != points.size())
+        throw std::invalid_argument("types must have one entry per point (" +
+                                    std::to_string(points.size()) + ")");
+    for (std::size_t i = 0; i < points.size(); ++i)
+        points[i].type = parse_point_type(nb::cast<std::string>(seq[i]));
+}
+
+// (N, 3) handles, or None. Only Bezier points read them, but accepting them
+// for every point keeps the arrays parallel to the point list.
+void apply_handles(std::vector<scene::StrokePoint>& points, nb::handle in_handles,
+                   nb::handle out_handles) {
+    auto load = [&](nb::handle h, bool incoming) {
+        if (h.is_none()) return;
+        PointsView v = to_points(h);
+        if (v.count != points.size())
+            throw std::invalid_argument("handles must have one entry per point (" +
+                                        std::to_string(points.size()) + ")");
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            kernel::cfloat3 value =
+                kernel::cf3(v.data[i * 3 + 0], v.data[i * 3 + 1], v.data[i * 3 + 2]);
+            if (incoming)
+                points[i].in_handle = value;
+            else
+                points[i].out_handle = value;
+        }
+    };
+    load(in_handles, true);
+    load(out_handles, false);
+}
+
 std::vector<scene::StrokePoint> to_stroke_points(nb::handle obj) {
     nb::module_ np = nb::module_::import_("numpy");
     nb::object arr = np.attr("ascontiguousarray")(obj, "dtype"_a = "float32");
@@ -1205,29 +1262,71 @@ NB_MODULE(pyclay, m) {
 
     nb::class_<PyStroke, PyPrim>(
         m, "Stroke",
-        "Sculpt stroke: a polyline chain of sphere-swept cones with per-point "
-        "radius. One stroke is ONE edit item, not one per segment.")
+        "A chain of sphere-swept cones with per-point radius — ONE edit item,\n"
+        "not one per segment.\n\n"
+        "This is also the curve object. Each point carries a type saying how it\n"
+        "joins the next: 'hard' (a straight segment, the default and what a\n"
+        "finger drag produces), 'spline' (Catmull-Rom, through the points),\n"
+        "'bspline' (approximating, so it rounds corners off) or 'bezier'\n"
+        "(shaped by in_handles/out_handles). A stroke is a curve whose points\n"
+        "are all hard corners, so an all-hard chain means exactly what it\n"
+        "always did.\n\n"
+        "Typed points are tessellated into the same segment chain at compile\n"
+        "time, to `tolerance` — the largest distance a span's midpoint may sit\n"
+        "from its chord. Tolerance is a property of the document, not of the\n"
+        "viewer: two builds have to agree on what a document means.\n\n"
+        "Handles are in the item's LOCAL space, relative to their point.")
         .def("__init__",
-             [](PyStroke* self, nb::handle points, float blend_k, nb::handle position,
-                nb::handle rotation_axis_angle, float scale) {
+             [](PyStroke* self, nb::handle points, float blend_k, nb::handle types,
+                bool closed, float tolerance, nb::handle in_handles, nb::handle out_handles,
+                nb::handle position, nb::handle rotation_axis_angle, float scale) {
                  new (self) PyStroke();
                  self->prim = scene::Prim::stroke();
                  if (!points.is_none()) self->stroke = to_stroke_points(points);
+                 apply_point_types(self->stroke, types);
+                 apply_handles(self->stroke, in_handles, out_handles);
                  if (blend_k < 0.0f) throw std::invalid_argument("blend_k must be >= 0");
+                 if (!(tolerance > 0.0f)) throw std::invalid_argument("tolerance must be > 0");
                  self->stroke_blend_k = blend_k;
+                 self->stroke_closed = closed;
+                 self->curve_tolerance = tolerance;
                  place(*self, position, rotation_axis_angle, scale);
              },
-             "points"_a = nb::none(), "blend_k"_a = 0.0f, "position"_a = nb::none(),
+             "points"_a = nb::none(), "blend_k"_a = 0.0f, "types"_a = nb::none(),
+             "closed"_a = false, "tolerance"_a = 0.01f, "in_handles"_a = nb::none(),
+             "out_handles"_a = nb::none(), "position"_a = nb::none(),
              "rotation_axis_angle"_a = nb::none(), "scale"_a = 1.0f)
         .def("add_point",
-             [](PyStroke& self, nb::handle position, float radius) {
+             [](PyStroke& self, nb::handle position, float radius, const std::string& type,
+                nb::handle in_handle, nb::handle out_handle) {
                  if (radius < 0.0f) throw std::invalid_argument("radius must be >= 0");
-                 self.stroke.push_back(
-                     scene::StrokePoint{to_f3(position, "stroke point"), radius});
+                 scene::StrokePoint p;
+                 p.pos = to_f3(position, "stroke point");
+                 p.radius = radius;
+                 p.type = parse_point_type(type);
+                 if (!in_handle.is_none()) p.in_handle = to_f3(in_handle, "in_handle");
+                 if (!out_handle.is_none()) p.out_handle = to_f3(out_handle, "out_handle");
+                 self.stroke.push_back(p);
                  return &self;
              },
-             "position"_a, "radius"_a, nb::rv_policy::reference_internal,
+             "position"_a, "radius"_a, "type"_a = "hard", "in_handle"_a = nb::none(),
+             "out_handle"_a = nb::none(), nb::rv_policy::reference_internal,
              "Append one point (chainable) — the incremental authoring path")
+        .def_prop_ro("closed", [](const PyStroke& self) { return self.stroke_closed; })
+        .def_prop_ro("tolerance", [](const PyStroke& self) { return self.curve_tolerance; })
+        .def_prop_ro("types",
+                     [](const PyStroke& self) {
+                         nb::list out;
+                         for (const scene::StrokePoint& p : self.stroke) {
+                             switch (p.type) {
+                                 case scene::StrokePointType::Spline: out.append("spline"); break;
+                                 case scene::StrokePointType::BSpline: out.append("bspline"); break;
+                                 case scene::StrokePointType::Bezier: out.append("bezier"); break;
+                                 default: out.append("hard"); break;
+                             }
+                         }
+                         return out;
+                     })
         .def_prop_ro("point_count",
                      [](const PyStroke& self) { return self.stroke.size(); })
         .def_prop_ro("points", [](const PyStroke& self) {
@@ -1290,6 +1389,8 @@ NB_MODULE(pyclay, m) {
                  n.xform = prim.xform;
                  n.stroke = prim.stroke;
                  n.stroke_blend_k = prim.stroke_blend_k;
+                 n.stroke_closed = prim.stroke_closed;
+                 n.curve_tolerance = prim.curve_tolerance;
                  n.deformers = prim.deformers;
                  n.profile = prim.profile;
                  n.profile_points = prim.profile_points;
@@ -1340,6 +1441,25 @@ NB_MODULE(pyclay, m) {
              "prim"_a, "op"_a = scene::Op::Add, "blend"_a = nb::none(), "color"_a = nb::none(),
              "rounding"_a = 0.0f, "mirror"_a = false, "transition"_a = nb::none(),
              "Append an edit to the layer; returns the node id")
+        .def("set_points",
+             [](PyLayer& l, scene::NodeId node, nb::handle points, nb::handle types, bool closed,
+                float tolerance, nb::handle in_handles, nb::handle out_handles) {
+                 const scene::Node* n = l.layer().sdf->find(node);
+                 if (!n) throw std::invalid_argument("no node with that id in this layer");
+                 if (!(tolerance > 0.0f)) throw std::invalid_argument("tolerance must be > 0");
+                 std::vector<scene::StrokePoint> pts = to_stroke_points(points);
+                 apply_point_types(pts, types);
+                 apply_handles(pts, in_handles, out_handles);
+                 apply_or_throw(l.doc->document,
+                                scene::Command{scene::SetStrokePointsCmd{
+                                    l.id, node, std::move(pts), closed, tolerance}},
+                                "set_points", l.undo.get());
+             },
+             "node"_a, "points"_a, "types"_a = nb::none(), "closed"_a = false,
+             "tolerance"_a = 0.01f, "in_handles"_a = nb::none(), "out_handles"_a = nb::none(),
+             "Replace a placed stroke or curve's whole point list. A curve is "
+             "tens of points, so a whole-list replace costs less than granular "
+             "commands would and its undo is exact by construction.")
         .def("apply_stroke",
              [](PyLayer& l, nb::handle samples, const brush::StrokePreset& preset,
                 const PyPrim& prim, scene::Op op, nb::handle blend, nb::handle color,
@@ -1348,6 +1468,8 @@ NB_MODULE(pyclay, m) {
                  templ.prim = prim.prim;
                  templ.stroke = prim.stroke;
                  templ.stroke_blend_k = prim.stroke_blend_k;
+                 templ.stroke_closed = prim.stroke_closed;
+                 templ.curve_tolerance = prim.curve_tolerance;
                  templ.deformers = prim.deformers;
                  templ.repeat = prim.repeat;
                  templ.profile = prim.profile;

@@ -918,6 +918,42 @@ clay_voxel_grid* borrow_layer(clay_document* doc, clay_layer_id layer) {
     return &handle;
 }
 
+bool point_type_is_known(std::int32_t t) {
+    return t >= 0 && t <= static_cast<std::int32_t>(scene::StrokePointType::Bezier);
+}
+
+// The one place a caller's point arrays become StrokePoints, so the plain and
+// the typed setters cannot drift apart in what they accept.
+clay_result read_curve_points(const float* xyzr, std::size_t count, const std::int32_t* types,
+                              const float* in_handles_xyz, const float* out_handles_xyz,
+                              std::vector<scene::StrokePoint>* out) {
+    clay_result r = check_payload("stroke points", xyzr, count);
+    if (r != CLAY_OK) return r;
+    out->clear();
+    out->reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const float* p = xyzr + i * 4;
+        if (p[3] < 0.0f) return fail(CLAY_ERROR_INVALID_ARGUMENT, "stroke radius must be >= 0");
+        scene::StrokePoint sp;
+        sp.pos = kernel::cf3(p[0], p[1], p[2]);
+        sp.radius = p[3];
+        if (types) {
+            if (!point_type_is_known(types[i]))
+                return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                            "unknown point type: " + std::to_string(types[i]));
+            sp.type = static_cast<scene::StrokePointType>(types[i]);
+        }
+        if (in_handles_xyz)
+            sp.in_handle = kernel::cf3(in_handles_xyz[i * 3 + 0], in_handles_xyz[i * 3 + 1],
+                                       in_handles_xyz[i * 3 + 2]);
+        if (out_handles_xyz)
+            sp.out_handle = kernel::cf3(out_handles_xyz[i * 3 + 0], out_handles_xyz[i * 3 + 1],
+                                        out_handles_xyz[i * 3 + 2]);
+        out->push_back(sp);
+    }
+    return CLAY_OK;
+}
+
 clay_mask* borrow_mask_handle(clay_document* doc, clay_layer_id layer) {
     clay_mask& handle = doc->mask_handles[layer];
     handle.doc = doc;
@@ -1408,20 +1444,50 @@ clay_result clay_item_set_profile_polygon(clay_item* item, const float* xy, size
 }
 
 clay_result clay_item_set_stroke_points(clay_item* item, const float* xyzr, size_t count) {
+    return clay_item_set_curve_points(item, xyzr, count, nullptr, nullptr, nullptr);
+}
+
+clay_result clay_item_set_curve_points(clay_item* item, const float* xyzr, size_t count,
+                                       const int32_t* types, const float* in_handles_xyz,
+                                       const float* out_handles_xyz) {
     if (!item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item");
     if (item->node.prim.type != scene::PrimType::Stroke)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "stroke points need CLAY_PRIM_STROKE");
-    clay_result r = check_payload("stroke points", xyzr, count);
-    if (r != CLAY_OK) return r;
     std::vector<scene::StrokePoint> points;
-    points.reserve(count);
-    for (size_t i = 0; i < count; ++i) {
-        const float* p = xyzr + i * 4;
-        if (p[3] < 0.0f) return fail(CLAY_ERROR_INVALID_ARGUMENT, "stroke radius must be >= 0");
-        points.push_back(scene::StrokePoint{kernel::cf3(p[0], p[1], p[2]), p[3]});
-    }
+    clay_result r = read_curve_points(xyzr, count, types, in_handles_xyz, out_handles_xyz,
+                                      &points);
+    if (r != CLAY_OK) return r;
     item->node.stroke = std::move(points);
     return CLAY_OK;
+}
+
+clay_result clay_item_set_curve(clay_item* item, int32_t closed, float tolerance) {
+    if (!item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item");
+    if (item->node.prim.type != scene::PrimType::Stroke)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "curve settings need CLAY_PRIM_STROKE");
+    if (!(tolerance > 0.0f))  // also rejects NaN
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "curve tolerance must be > 0");
+    item->node.stroke_closed = closed != 0;
+    item->node.curve_tolerance = tolerance;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_set_stroke_points(clay_document* doc, clay_layer_id layer,
+                                         clay_node_id node, const float* xyzr, size_t count,
+                                         const int32_t* types, const float* in_handles_xyz,
+                                         const float* out_handles_xyz, int32_t closed,
+                                         float tolerance) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (!(tolerance > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "curve tolerance must be > 0");
+    std::vector<scene::StrokePoint> points;
+    clay_result r = read_curve_points(xyzr, count, types, in_handles_xyz, out_handles_xyz,
+                                      &points);
+    if (r != CLAY_OK) return r;
+    return apply_edit(doc,
+                      scene::Command{scene::SetStrokePointsCmd{layer, node, std::move(points),
+                                                               closed != 0, tolerance}},
+                      "no stroke or curve with that id in that layer");
 }
 
 clay_result clay_item_add_stroke_point(clay_item* item, const float position[3], float radius) {

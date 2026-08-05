@@ -285,6 +285,18 @@ blocks.apply_stroke(samples, brush, blocks.palette_add("#cc7744"))
 body.apply_stroke(samples, brush, clay.Sphere(r=1.0), mask=freeze)  # one undo step
 clay.StrokePreset.deserialize(brush.serialize())   # versioned: newer is refused
 
+# curves: a stroke point carries a type saying how it joins the next, so a
+# stroke is a curve whose points are all hard corners. Typed points tessellate
+# into the same segment chain at compile time, so a curve costs nothing to
+# evaluate and no backend knows it exists. Handles are LOCAL space.
+body.add(clay.Stroke(points=pts,                       # (N,4) x,y,z,radius
+                     types="spline",                   # or one per point
+                     closed=True, tolerance=0.005))    # tolerance is a
+                                                       # document property
+body.add(clay.Stroke(points=pts, types="bezier",
+                     in_handles=handles, out_handles=handles))
+body.set_points(node_id, pts, types="hard")            # undoable whole-list edit
+
 # protection: ghost is "show me this but stay out of my way" (still evaluated,
 # never picked, never edited); lock is "this is finished" (still picked).
 # Neither changes what the document evaluates to, and an edit to a protected

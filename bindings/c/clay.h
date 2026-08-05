@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 14
+#define CLAY_ABI_MINOR 15
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -401,6 +401,49 @@ clay_result clay_item_set_profile_polygon(clay_item* item, const float* xy, size
 clay_result clay_item_set_stroke_points(clay_item* item, const float* xyzr, size_t count);
 clay_result clay_item_add_stroke_point(clay_item* item, const float position[3], float radius);
 clay_result clay_item_set_stroke_blend_k(clay_item* item, float k);
+
+/* How a point joins the one after it. A stroke is a curve whose points are all
+ * hard corners, so CLAY_POINT_HARD is both the default and exactly what a
+ * chain authored before types existed means. */
+typedef enum clay_point_type {
+    CLAY_POINT_HARD = 0,   /* straight segment to the next point */
+    CLAY_POINT_SPLINE = 1, /* Catmull-Rom, passing through the points */
+    CLAY_POINT_BSPLINE = 2,/* uniform cubic B-spline; approximating, so it rounds corners */
+    CLAY_POINT_BEZIER = 3  /* cubic shaped by the handles below */
+} clay_point_type;
+
+/* The typed form of the call above: `count` points of x, y, z, radius, plus
+ * optional parallel arrays of count clay_point_type values and of count*3
+ * floats for the incoming and outgoing Bezier handles. Passing NULL for an
+ * optional array leaves that field at its default, so
+ * clay_item_set_curve_points(item, xyzr, count, NULL, NULL, NULL) is exactly
+ * clay_item_set_stroke_points.
+ *
+ * Handles are in the item's LOCAL space, relative to their point. 3DCoat keeps
+ * its handles in screen space and its own users call that a wart: the curve
+ * then means something different depending on where the camera was.
+ *
+ * Typed points are tessellated into the same segment chain at compile time, so
+ * a curve costs nothing at evaluation time and no backend knows it exists. */
+clay_result clay_item_set_curve_points(clay_item* item, const float* xyzr, size_t count,
+                                       const int32_t* types, const float* in_handles_xyz,
+                                       const float* out_handles_xyz);
+
+/* Close the chain, and set the tessellation tolerance: the largest distance a
+ * span's midpoint may sit from its chord, which must be > 0. Tolerance is a
+ * property of the DOCUMENT, not of the viewer — two builds have to agree on
+ * what a document means, so it is not a rendering setting. */
+clay_result clay_item_set_curve(clay_item* item, int32_t closed, float tolerance);
+
+/* Replace a placed stroke or curve's whole point list, through the command
+ * vocabulary, so the edit is undoable and refused on a protected layer. A
+ * curve is tens of points: a whole-list replace costs less than the
+ * bookkeeping granular commands would need, and its inverse is exact. */
+clay_result clay_layer_set_stroke_points(clay_document* doc, clay_layer_id layer,
+                                         clay_node_id node, const float* xyzr, size_t count,
+                                         const int32_t* types, const float* in_handles_xyz,
+                                         const float* out_handles_xyz, int32_t closed,
+                                         float tolerance);
 
 /* Parameters of a spatial morph, in world space. Required by the matching
  * transition op and rejected with any other op: linear morphs along the

@@ -1,6 +1,8 @@
 #include "clay/kernel/ease.h"
 #include "clay/scene/bounds.h"
 
+#include "clay/scene/curve.h"
+
 #include "clay/kernel/exactness.h"
 
 namespace clay {
@@ -106,7 +108,17 @@ Aabb prim_local_bounds(const Node& item) {
             break;
         }
         case PrimType::Stroke: {
-            for (const StrokePoint& p : item.stroke) {
+            // Tessellated, not the control points: a spline can pass outside
+            // the polygon its control points form, and bounds that missed
+            // that would make per-brick culling drop the bulge and picking
+            // miss it.
+            std::vector<StrokePoint> tess;
+            const std::vector<StrokePoint>& pts =
+                curve_is_polyline(item.stroke, item.stroke_closed)
+                    ? item.stroke
+                    : (tess = tessellate_curve(item.stroke, item.stroke_closed,
+                                               item.curve_tolerance));
+            for (const StrokePoint& p : pts) {
                 b.expand(p.pos - cf3(p.radius, p.radius, p.radius));
                 b.expand(p.pos + cf3(p.radius, p.radius, p.radius));
             }

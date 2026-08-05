@@ -18,6 +18,12 @@
 // the flags loses them, and a layer that is both hidden and ghosted reads as
 // visible there. That is the whole extent of the incompatibility, and it is
 // why the minor moved.
+//
+// Minor 2 adds a type and two Bezier handles to each stroke point, plus a
+// closed flag and a tolerance per item. From here the scene payload is decoded
+// AGAINST the minor rather than assuming the current layout, so the next field
+// a node gains needs no packing trick: minor 0 and 1 documents read their
+// points as hard corners, which is what they already meant.
 
 #include <map>
 #include <optional>
@@ -33,7 +39,7 @@ namespace clay {
 namespace io {
 
 inline constexpr std::uint16_t kClaySpaceMajor = 1;
-inline constexpr std::uint16_t kClaySpaceMinor = 1;
+inline constexpr std::uint16_t kClaySpaceMinor = 2;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).
@@ -56,7 +62,8 @@ IoStatus load_clayspace_file(const std::string& path, ClaySpaceDoc* out);
 
 // Scene payload codec shared with the command vocabulary (scene chunk =
 // serialize_document; exposed for tests and the C ABI).
-IoStatus decode_document(const std::uint8_t* data, std::size_t size, scene::Document* out);
+IoStatus decode_document(const std::uint8_t* data, std::size_t size, scene::Document* out,
+                         std::uint16_t minor = kClaySpaceMinor);
 
 }  // namespace io
 }  // namespace clay

@@ -1962,3 +1962,120 @@ def test_protection_is_undoable():
     assert doc.layer_protection(front.id) == (True, False)
     doc.undo()
     assert doc.layer_protection(front.id) == (False, False)
+
+
+# -- control-point curves (add-curve-objects) --------------------------------
+
+
+_SQUARE = np.array([[-1, 0, 0, 0.05], [0, 1, 0, 0.05], [1, 0, 0, 0.05], [0, -1, 0, 0.05]],
+                   np.float32)
+# The Catmull-Rom midpoint of the first span, against a chord midpoint of
+# (-0.5, 0.5): a bulge of ~0.088, well outside a tube of radius 0.05.
+_BULGE = np.array([[-0.5625, 0.5625, 0.0]], np.float32)
+
+
+def _curve_doc(**kwargs):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    node = layer.add(clay.Stroke(points=_SQUARE, **kwargs))
+    return doc, layer, node
+
+
+def test_a_hard_chain_is_the_stroke_it_always_was():
+    plain, _, _ = _curve_doc()
+    typed, _, _ = _curve_doc(types="hard")
+    probes = np.random.default_rng(11).uniform(-2, 2, size=(512, 3)).astype(np.float32)
+    assert np.array_equal(plain.eval(probes), typed.eval(probes))
+
+
+def test_smooth_points_bulge_outside_the_chain():
+    hard, _, _ = _curve_doc()
+    smooth, _, _ = _curve_doc(types="spline")
+    assert hard.eval(_BULGE)[0] > 0
+    assert smooth.eval(_BULGE)[0] < 0
+    # Catmull-Rom interpolates, so it still passes through every control point.
+    assert all(smooth.eval(_SQUARE[i:i + 1, :3])[0] < 0 for i in range(4))
+
+
+def test_bezier_handles_are_local_space():
+    pts = np.array([[-1, 0, 0, 0.1], [1, 0, 0, 0.1]], np.float32)
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Stroke(
+        points=pts, types="bezier",
+        out_handles=np.array([[0, 2, 0], [0, 0, 0]], np.float32),
+        in_handles=np.array([[0, 0, 0], [0, 2, 0]], np.float32)))
+    # Both handles at +2y put the cubic's peak at y = 1.5.
+    assert doc.eval(np.array([[0, 1.5, 0]], np.float32))[0] < 0
+    assert doc.eval(np.array([[0, 0, 0]], np.float32))[0] > 0
+
+
+def test_a_closed_curve_joins_its_ends():
+    open_doc, _, _ = _curve_doc(types="spline")
+    closed_doc, _, _ = _curve_doc(types="spline", closed=True)
+    # The closing span's Catmull-Rom midpoint. It is not the mirror of the
+    # open curve's: closing changes every span's neighbours, so the whole
+    # curve differs, not only the span that was added.
+    closing = np.array([[-0.625, -0.625, 0.0]], np.float32)
+    assert open_doc.eval(closing)[0] > 0
+    assert closed_doc.eval(closing)[0] < 0
+
+
+def test_tolerance_is_a_document_property_and_deterministic():
+    coarse, _, _ = _curve_doc(types="spline", tolerance=0.2)
+    fine, _, _ = _curve_doc(types="spline", tolerance=0.002)
+    probes = np.random.default_rng(5).uniform(-2, 2, size=(256, 3)).astype(np.float32)
+    assert not np.array_equal(coarse.eval(probes), fine.eval(probes))
+
+    again, _, _ = _curve_doc(types="spline", tolerance=0.002)
+    assert np.array_equal(fine.eval(probes), again.eval(probes))
+
+    with pytest.raises(ValueError):
+        clay.Stroke(points=_SQUARE, tolerance=0.0)
+
+
+def test_per_point_types_and_readback():
+    s = clay.Stroke(points=_SQUARE, types=["hard", "spline", "bezier", "bspline"],
+                    closed=True, tolerance=0.005)
+    assert s.types == ["hard", "spline", "bezier", "bspline"]
+    assert s.closed is True
+    assert s.tolerance == pytest.approx(0.005)
+
+    with pytest.raises(ValueError, match="hard"):
+        clay.Stroke(points=_SQUARE, types="wobble")
+    with pytest.raises(ValueError, match="one entry per point"):
+        clay.Stroke(points=_SQUARE, types=["hard", "spline"])
+
+
+def test_add_point_takes_a_type():
+    s = clay.Stroke().add_point((0, 0, 0), 0.1, type="spline") \
+                     .add_point((1, 0, 0), 0.1, type="bezier", out_handle=(0, 1, 0))
+    assert s.types == ["spline", "bezier"]
+    assert s.point_count == 2
+
+
+def test_editing_a_curve_is_an_ordinary_edit():
+    doc, layer, node = _curve_doc(types="spline")
+    doc.enable_undo()
+    assert doc.eval(_BULGE)[0] < 0
+
+    layer.set_points(node, _SQUARE, types="hard")
+    assert doc.eval(_BULGE)[0] > 0
+    doc.undo()
+    assert doc.eval(_BULGE)[0] < 0
+
+    doc.set_layer_protection(layer.id, locked=True)
+    with pytest.raises(ValueError, match="locked"):
+        layer.set_points(node, _SQUARE, types="hard")
+
+
+def test_curves_round_trip(tmp_path):
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Stroke(
+        points=_SQUARE, types=["bezier", "spline", "bspline", "hard"], closed=True,
+        tolerance=0.004, out_handles=np.array([[0.3, 0.7, -0.2], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
+                                              np.float32)))
+    probes = np.random.default_rng(19).uniform(-2, 2, size=(512, 3)).astype(np.float32)
+    before = doc.eval(probes)
+    path = tmp_path / "curve.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(probes))

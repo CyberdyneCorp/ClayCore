@@ -242,6 +242,35 @@ exactly, and a preset from a newer schema version is refused rather than
 reinterpreted. It also shows what freeze means for a declarative edit — a stamp
 in a masked region produces no item at all.
 
+### 13 — curves
+
+A stroke point carries a type saying how it joins the next: a hard corner, a
+Catmull-Rom spline through the points, an approximating B-spline that rounds
+corners off, or a Bezier shaped by two local-space handles. All four tiles
+below are the *same six control points*.
+
+![point types](output/13_point_types.png)
+
+Typed points are tessellated into the segment chain the engine already
+evaluates, at compile time, so a curve costs nothing at evaluation time and no
+backend knows it exists. The tolerance is the largest distance a span's
+midpoint may sit from its chord, and it is a property of the **document**, not
+of the viewer — two builds have to agree on what a document means.
+
+![tolerance](output/13_tolerance.png)
+
+Bounds come from the tessellated curve rather than the control points. Both
+control points of this arc sit at y = 0; the handles carry the span to y = 1.5,
+and a bound taken from the control points would have culling drop the arc and
+picking miss it.
+
+![bezier arc](output/13_bezier_arc.png)
+
+The example asserts three things rather than showing them: an all-hard chain
+evaluates bit-identically to what it did before types existed, a ray really
+finds the arc outside the control hull, and editing a placed curve undoes
+exactly.
+
 ## Notes
 
 - **Committed models are budgeted.** `_render.save_model` fails above 400 KiB

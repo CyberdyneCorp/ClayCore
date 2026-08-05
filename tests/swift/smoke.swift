@@ -160,6 +160,48 @@ var enabled: Int32 = 0, undoDepth = 0, redoDepth = 0
 check(clay_document_undo_state(doc, &enabled, &undoDepth, &redoDepth) == CLAY_OK
         && enabled == 1 && redoDepth == 1, "undo state reports enabled with a redo available")
 
+// -- curves ------------------------------------------------------------------
+
+var curveLayer: clay_layer_id = 0
+check(clay_add_sdf_layer(doc, "curve", &curveLayer) == CLAY_OK, "added a curve layer")
+
+// Placed well clear of the model the rest of this file builds: the document's
+// field is every layer combined, so a probe near the origin would be answering
+// a question about the body, not about the curve.
+let curveX: Float = 10.0
+var curvePoints: [Float] = [curveX - 1, 0, 0, 0.05,
+                            curveX + 0, 1, 0, 0.05,
+                            curveX + 1, 0, 0, 0.05,
+                            curveX + 0, -1, 0, 0.05]
+var pointTypes: [Int32] = Array(repeating: Int32(CLAY_POINT_SPLINE.rawValue), count: 4)
+
+guard let curveItem = clay_item_create(Int32(CLAY_PRIM_STROKE.rawValue), nil, 0) else {
+    check(false, "created a curve item")
+    exit(1)
+}
+check(clay_item_set_curve_points(curveItem, &curvePoints, 4, &pointTypes, nil, nil) == CLAY_OK,
+      "typed control points")
+check(clay_item_set_curve(curveItem, 0, 0.01) == CLAY_OK, "curve tolerance")
+check(clay_item_set_curve(curveItem, 0, 0) != CLAY_OK, "a tolerance of 0 is refused")
+var curveNode: clay_node_id = 0
+check(clay_layer_add_item(doc, curveLayer, curveItem, &curveNode) == CLAY_OK && curveNode != 0,
+      "placed the curve")
+clay_item_destroy(curveItem)
+
+// The Catmull-Rom midpoint of the first span, ~0.088 outside the chord a hard
+// chain would draw, so this only reads as inside if the curve really curved.
+let bulgeAt: [Float] = [curveX - 0.5625, 0.5625, 0.0]
+let bulge = evaluate(doc, bulgeAt)
+check(bulge[0] < 0, "the curve bulges outside its control polygon")
+
+// Editing it is an ordinary edit, so it undoes as one.
+var hardTypes: [Int32] = Array(repeating: Int32(CLAY_POINT_HARD.rawValue), count: 4)
+check(clay_layer_set_stroke_points(doc, curveLayer, curveNode, &curvePoints, 4, &hardTypes,
+                                   nil, nil, 0, 0.01) == CLAY_OK, "replaced the points")
+check(evaluate(doc, bulgeAt)[0] > 0, "the hard chain no longer reaches the bulge")
+check(clay_document_undo(doc, &undone) == CLAY_OK && undone == 1, "undid the curve edit")
+check(evaluate(doc, bulgeAt)[0] == bulge[0], "undo restored the curve exactly")
+
 // -- layer protection --------------------------------------------------------
 
 var isGhost: Int32 = 1

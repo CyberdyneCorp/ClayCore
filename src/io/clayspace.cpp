@@ -10,6 +10,12 @@ namespace io {
 
 namespace {
 
+// The scene module writes its payload at its own layout version; a reader is
+// told the container's. They have to be the same number or a document would be
+// decoded against the wrong layout.
+static_assert(kClaySpaceMinor == scene::kSceneMinor,
+              "the container minor and the scene payload layout version must move together");
+
 constexpr std::uint32_t kMagic = 0x59414C43u;  // "CLAY" little-endian
 constexpr std::uint32_t fourcc(const char (&s)[5]) {
     return static_cast<std::uint32_t>(s[0]) | (static_cast<std::uint32_t>(s[1]) << 8) |
@@ -105,8 +111,9 @@ std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc) {
     return out;
 }
 
-IoStatus decode_document(const std::uint8_t* data, std::size_t size, scene::Document* out) {
-    std::optional<scene::Document> doc = scene::deserialize_document(data, size);
+IoStatus decode_document(const std::uint8_t* data, std::size_t size, scene::Document* out,
+                         std::uint16_t minor) {
+    std::optional<scene::Document> doc = scene::deserialize_document(data, size, minor);
     if (!doc) return IoStatus::fail(IoError::Malformed, "scene chunk parse failed");
     *out = std::move(*doc);
     return IoStatus::success();
@@ -117,7 +124,6 @@ IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc
     if (c.u32() != kMagic) return IoStatus::fail(IoError::Malformed, "bad magic");
     std::uint16_t major = c.u16();
     std::uint16_t minor = c.u16();
-    (void)minor;
     if (!c.ok) return IoStatus::fail(IoError::Malformed, "truncated header");
     if (major > kClaySpaceMajor)
         return IoStatus::fail(IoError::ForwardVersion,
@@ -137,7 +143,7 @@ IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc
 
         if (cc == kScene) {
             IoStatus s = decode_document(payload, static_cast<std::size_t>(len),
-                                         &result.document);
+                                         &result.document, minor);
             if (!s.ok()) return s;
             have_scene = true;
         } else if (cc == kVoxel) {

@@ -28,6 +28,7 @@ EXAMPLES = [
     "10_editing",
     "11_masks",
     "12_strokes",
+    "13_curves",
 ]
 
 
