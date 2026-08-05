@@ -44,6 +44,28 @@ jobs:
           name: wheels-${{ matrix.os }}
           path: wheelhouse/*.whl
 
+  kernels:
+    name: kernels artifact (host GPU previews)
+    needs: checklist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # the fixture's reference values come from the CPU scalar path, so the
+      # artifact needs a built clay-cli — see docs/06-host-gpu-previews.md
+      - name: Build clay-cli
+        run: |
+          cmake --preset cpu-only -DCLAY_BUILD_TESTS=OFF
+          cmake --build --preset cpu-only --target clay_cli
+      - name: Package + verify
+        run: |
+          python3 tools/package_kernels.py --clay build/cpu-only/clay
+          python3 tools/package_kernels.py --verify
+          cd dist && zip -qry claycore-kernels.zip claycore-kernels
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernels
+          path: dist/claycore-kernels.zip
+
   xcframework:
     name: xcframework (SwiftPM binary target)
     needs: checklist
@@ -69,7 +91,7 @@ jobs:
 
   draft-release:
     name: draft GitHub release
-    needs: [wheels, xcframework]
+    needs: [wheels, xcframework, kernels]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

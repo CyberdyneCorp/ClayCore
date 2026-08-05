@@ -11,10 +11,23 @@
 //   CLAY_KERNEL_METAL   compiled as MSL
 //   CLAY_KERNEL_CUDA    compiled as CUDA device code
 //   CLAY_KERNEL_OPENCL  compiled as OpenCL C-compatible subset
+//
+// An explicit definition always wins. Absent one, the compiler's own identity
+// picks the branch, so a host that drops these headers into a .metal file and
+// includes them gets MSL with no build settings at all — which is the whole
+// point of publishing them (see docs/06-host-gpu-previews.md).
 
 #if !defined(CLAY_KERNEL_CPU) && !defined(CLAY_KERNEL_METAL) && \
     !defined(CLAY_KERNEL_CUDA) && !defined(CLAY_KERNEL_OPENCL)
+#if defined(__METAL_VERSION__)
+#define CLAY_KERNEL_METAL 1
+#elif defined(__OPENCL_VERSION__) || defined(__OPENCL_C_VERSION__)
+#define CLAY_KERNEL_OPENCL 1
+#elif defined(__CUDACC__)
+#define CLAY_KERNEL_CUDA 1
+#else
 #define CLAY_KERNEL_CPU 1
+#endif
 #endif
 
 // CPU and CUDA share one implementation: plain structs plus C++ operators,

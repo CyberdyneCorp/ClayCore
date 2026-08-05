@@ -20,6 +20,9 @@ alone for tools, pipelines, CI, and research.
   from `sdf-kernels` to `build-packaging`).
 - Math reference: `docs/01-sdf-math-foundations.md`.
 - Architecture: `docs/05-claycore-library.md`.
+- Host GPU previews: `docs/06-host-gpu-previews.md` — compile claycore's
+  kernels into your own shaders instead of copying them, and gate the result
+  with the parity fixture.
 - Releasing: `docs/RELEASE.md`.
 - Examples: `examples/` — runnable scripts with committed renders.
 - Roadmap: `openspec/ROADMAP.md` — what is missing and in what order.
@@ -52,6 +55,7 @@ write PNGs with the standard library.
 | Meshing | Marching tetrahedra (watertight + 2-manifold by construction), surface nets preview, flagged dual contouring, meshoptimizer decimation, validation, vertex colors/normals/UVs |
 | Picking | Scene and brick raycast with layer/item attribution, surface snapping, voxel cell/face picking, selection bounds |
 | I/O | `.clayspace` documents, OBJ+MTL, PLY, FBX (ufbx import + binary writer), glTF 2.0 GLB |
+| Kernels for hosts | The dialect ships as an artifact (`dist/claycore-kernels/`, and in the xcframework's `Headers/clay/kernel/`) so a host GPU preview compiles claycore's distance functions instead of copying them — the headers pick their backend from the compiler, so a `.metal` file needs one include and no build flags. `clay parity-fixture` exports tapes, probe points and reference values for the host to assert against in its own CI |
 | Bindings | Stable C ABI (`clay.h`: item builder for composed edits, complete primitive/op/blend enumerations, versioned descriptor structs, the whole voxel engine incl. brushes, sculpting verbs, mask fields and the stroke engine, picking and evaluation — parity with `pyclay` is gated in CI), SwiftPM xcframework, `pyclay` (nanobind, numpy-native: authoring incl. strokes and extended ops, voxels, evaluation, all three meshers, picking, I/O), `clay` CLI |
 
 ## Build
@@ -88,6 +92,8 @@ does know, as PTX only, and the driver JITs it at load. Pass
 ```sh
 python3 tools/check_layering.py        # module dependency rule
 python3 tools/check_kernel_dialect.py  # kernel headers stay backend-portable
+python3 tools/package_kernels.py       # publish dist/claycore-kernels/
+python3 tools/package_kernels.py --verify   # ...and it still matches the repo
 python3 tools/check_licenses.py        # permissive-license manifest gate
 python3 examples/run_all.py            # every example runs (needs pyclay built)
 python3 tools/check_binding_parity.py  # the C ABI reaches what pyclay reaches

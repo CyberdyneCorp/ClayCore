@@ -117,6 +117,14 @@ def main() -> int:
         ok, out = run([sys.executable, str(REPO / "tools" / script)])
         cl.add(name, ok, out.splitlines()[-1] if out else "")
 
+    # the kernels artifact hosts build their GPU previews from: it must still
+    # be a byte-identical copy that compiles on its own (docs/06)
+    pkg = [sys.executable, str(REPO / "tools" / "package_kernels.py")]
+    ok, out = run(pkg + ["--clay", str(build_dir / "clay")])
+    if ok:
+        ok, out = run(pkg + ["--verify"])
+    cl.add("kernels", ok, out.splitlines()[-1] if out else "")
+
     shared = next((p for p in (build_dir / "libclay_shared.so",
                                build_dir / "libclay_shared.dylib") if p.exists()), None)
     cmd = [sys.executable, str(REPO / "tools" / "check_c_abi.py")]

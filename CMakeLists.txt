@@ -42,6 +42,7 @@ add_library(claycore
   src/mesh/decimate.cpp
   src/pick/pick.cpp
   src/io/clayspace.cpp
+  src/io/parity_fixture.cpp
   src/io/obj.cpp
   src/io/ply.cpp
   src/io/fbx.cpp

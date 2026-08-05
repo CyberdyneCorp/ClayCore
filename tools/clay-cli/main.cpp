@@ -1,6 +1,6 @@
 // clay-cli — CI's workhorse and a user-facing converter (build-packaging
-// spec): mesh / validate / eval / convert / sample / selftest, all through
-// public library APIs only.
+// spec): mesh / validate / eval / convert / sample / parity-fixture /
+// selftest, all through public library APIs only.
 
 #include <cstdio>
 #include <cstring>
@@ -9,6 +9,7 @@
 
 #include "clay/io/clayspace.h"
 #include "clay/io/mesh_io.h"
+#include "clay/io/parity_fixture.h"
 #include "clay/mesh/decimate.h"
 #include "clay/mesh/marching.h"
 #include "clay/mesh/validate.h"
@@ -28,6 +29,8 @@ int usage() {
                  "  clay eval <in.clayspace> --points <pts.npy>\n"
                  "            -o <dists.npy>                        batch field evaluation\n"
                  "  clay convert <in.{obj,ply,fbx}> -o <out.{obj,ply,fbx,glb}>\n"
+                 "  clay parity-fixture -o <fixture.json>           tapes + probes + reference\n"
+                 "                                                  values for a host GPU preview\n"
                  "  clay selftest                                   end-to-end pipeline check\n");
     return 2;
 }
@@ -223,6 +226,18 @@ int cmd_convert(const std::string& in, const std::string& out) {
     return 0;
 }
 
+// Export the host parity fixture (build-packaging spec). A host GPU preview
+// evaluates these tapes with kernels compiled from clay/kernel/*.h and asserts
+// agreement in its own CI — the gate that would have caught the 4k-support
+// blend drift before it reached a bake.
+int cmd_parity_fixture(const std::string& out) {
+    io::IoStatus s = io::save_kernel_parity_fixture(out);
+    if (!s.ok()) return fail(s);
+    std::printf("wrote %s (%zu cases x %zu probe points)\n", out.c_str(),
+                io::kernel_parity_cases().size(), io::kernel_parity_probe_points().size());
+    return 0;
+}
+
 int cmd_selftest() {
     // end-to-end: sample -> save -> mesh -> validate -> eval -> convert
     io::ClaySpaceDoc cs = make_sample();
@@ -241,6 +256,7 @@ int cmd_selftest() {
     if (cmd_convert("clay_selftest.obj", "clay_selftest.ply") != 0) return 1;
     if (cmd_convert("clay_selftest.ply", "clay_selftest.fbx") != 0) return 1;
     if (cmd_convert("clay_selftest.obj", "clay_selftest.glb") != 0) return 1;
+    if (cmd_parity_fixture("clay_selftest_fixture.json") != 0) return 1;
     std::printf("selftest: OK\n");
     return 0;
 }
@@ -278,6 +294,11 @@ int main(int argc, char** argv) {
         std::string out = flag("-o", "");
         if (out.empty()) return usage();
         return cmd_convert(args[1], out);
+    }
+    if (cmd == "parity-fixture") {
+        std::string out = flag("-o", "");
+        if (out.empty()) return usage();
+        return cmd_parity_fixture(out);
     }
     if (cmd == "selftest") return cmd_selftest();
     return usage();

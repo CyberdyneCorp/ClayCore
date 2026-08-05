@@ -12,6 +12,21 @@ standard headers beyond a small allowlist. Two enforcement layers:
 
 Recursion is not statically checked here; the parity/property suites and
 per-backend compiles (which reject it outright on Metal/OpenCL) cover it.
+
+Profiles, in the order they run:
+
+  cpu    the reference profile.
+  cuda   host-emulated (__device__/__host__ defined away).
+  metal  host-emulated against tools/metal_stub/metal_stdlib. The headers are
+         now published for host shaders to include (build-packaging: kernels
+         artifact), so a break in the Metal branch of shim.h must fail on any
+         runner rather than waiting for an Apple one.
+  metal-native  the real thing, `xcrun metal`, where an Apple toolchain exists.
+  opencl the amalgamated kernel text through clang's OpenCL frontend.
+
+The two Metal profiles compile WITHOUT defining CLAY_KERNEL_METAL: shim.h is
+expected to select the branch from the compiler's own identity, which is what
+lets a host include the headers from a .metal file with no build settings.
 """
 
 import argparse
@@ -24,6 +39,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 KERNEL_DIR = REPO / "include" / "clay" / "kernel"
+METAL_STUB_DIR = REPO / "tools" / "metal_stub"
 
 ALLOWED_STD_HEADERS = {"cstdint", "cstddef", "cfloat", "cmath", "limits", "type_traits"}
 BANNED_KEYWORDS = ["virtual", "throw", "try", "catch", "new", "delete", "goto", "thread_local", "malloc", "free"]
@@ -54,29 +70,48 @@ def lexical_check(path: Path) -> list[str]:
     return errors
 
 
-def compile_check(path: Path, compiler: str, profile: str = "cpu") -> list[str]:
-    """Compile one header in isolation under a backend profile.
+# Host-emulated backend profiles: what to prepend to the one-line translation
+# unit, and what extra flags it needs. `defines` is empty for metal on purpose
+# — the point is that shim.h picks the branch from __METAL_VERSION__ alone.
+COMPILE_PROFILES = {
+    "cpu": {
+        "prelude": "",
+        "defines": ["-DCLAY_KERNEL_CPU=1"],
+        "flags": [],
+    },
+    "cuda": {
+        "prelude": ("#define __host__\n#define __device__\n#define __global__\n"
+                    "#define __forceinline__\n"),
+        "defines": ["-DCLAY_KERNEL_CUDA=1"],
+        "flags": [],
+    },
+    "metal": {
+        # __METAL_VERSION__ stands in for the Metal compiler's identity; the
+        # stub <metal_stdlib> stands in for its standard library.
+        "prelude": "#define __METAL_VERSION__ 310\n",
+        "defines": [],
+        "flags": [f"-isystem{METAL_STUB_DIR}"],
+    },
+}
 
-    cpu:  the reference profile, warnings-as-errors.
-    cuda: host-emulated (__device__/__host__/__global__ defined away). This
-          proves the shim's CUDA branch and the headers are valid C++ under
-          it without a CUDA toolchain; nvcc device codegen is verified by the
-          CUDA CI job and on real hardware.
+
+def compile_check(path: Path, compiler: str, profile: str = "cpu") -> list[str]:
+    """Compile one header in isolation under a host-emulated backend profile.
+
+    Emulation is what makes these checks runnable on any machine: nvcc device
+    codegen is verified by the CUDA CI job and on real hardware, and real MSL
+    by metal_native_check below, but a header that stops being valid C++ under
+    a backend's shim branch is caught here, on every runner.
     """
-    prelude = ""
-    define = "-DCLAY_KERNEL_CPU=1"
-    if profile == "cuda":
-        prelude = ("#define __host__\n#define __device__\n#define __global__\n"
-                   "#define __forceinline__\n")
-        define = "-DCLAY_KERNEL_CUDA=1"
+    spec = COMPILE_PROFILES[profile]
     with tempfile.NamedTemporaryFile("w", suffix=".cpp", delete=False) as tu:
-        tu.write(prelude + f'#include "{path.relative_to(REPO / "include")}"\n')
+        tu.write(spec["prelude"] + f'#include "{path.relative_to(REPO / "include")}"\n')
         tu_path = tu.name
     cmd = [
         compiler, "-std=c++20", "-fsyntax-only",
         "-fno-exceptions", "-fno-rtti",
         "-Wall", "-Wextra", "-Wpedantic", "-Werror",
-        define,
+        *spec["defines"], *spec["flags"],
         f"-I{REPO / 'include'}",
         tu_path,
     ]
@@ -86,6 +121,41 @@ def compile_check(path: Path, compiler: str, profile: str = "cpu") -> list[str]:
         return [f"{path.relative_to(REPO)} [{profile}]: restrictive compile failed:\n"
                 f"{proc.stderr.strip()}"]
     return []
+
+
+def metal_native_check(headers: list[Path]) -> list[str]:
+    """Compile every kernel header as real MSL with `xcrun metal`.
+
+    This is the profile that speaks for the published artifact: a host adds
+    the headers to its Metal header search path and includes them, with no
+    CLAY_KERNEL_* define anywhere, exactly as done here. Address-space
+    qualifiers, MSL's reserved words and its actual standard library are only
+    checked here — the emulated profile above erases them.
+    """
+    if sys.platform != "darwin" or not shutil.which("xcrun"):
+        print("kernel-dialect: no Apple toolchain, skipping the native Metal profile")
+        return []
+
+    def compile_msl(path: Path, label: str) -> list[str]:
+        proc = subprocess.run(
+            ["xcrun", "-sdk", "macosx", "metal", "-std=metal3.0", "-fsyntax-only",
+             "-Wall", "-Werror", f"-I{REPO / 'include'}", str(path)],
+            capture_output=True, text=True)
+        if proc.returncode != 0:
+            return [f"{label} [metal-native]: MSL compile failed:\n{proc.stderr.strip()}"]
+        return []
+
+    errors = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for header in headers:
+            src = Path(tmp) / "tu.metal"
+            src.write_text(f'#include "{header.relative_to(REPO / "include")}"\n')
+            errors += compile_msl(src, str(header.relative_to(REPO)))
+    # the worked example the kernels artifact ships: if a host cannot compile
+    # this, the artifact is not usable no matter what the headers do alone
+    example = REPO / "tools" / "kernel_package" / "host_preview.metal"
+    errors += compile_msl(example, str(example.relative_to(REPO)))
+    return errors
 
 
 def opencl_check() -> list[str]:
@@ -128,17 +198,20 @@ def main() -> int:
         print("kernel-dialect: no kernel headers found", file=sys.stderr)
         return 1
 
+    profiles = list(COMPILE_PROFILES)
     errors = []
     for header in headers:
         errors += lexical_check(header)
-        errors += compile_check(header, args.compiler, "cpu")
-        errors += compile_check(header, args.compiler, "cuda")
+        for profile in profiles:
+            errors += compile_check(header, args.compiler, profile)
+    errors += metal_native_check(headers)
     errors += opencl_check()
 
     for e in errors:
         print(f"kernel-dialect: {e}", file=sys.stderr)
     if not errors:
-        print(f"kernel-dialect: OK ({len(headers)} headers x cpu+cuda profiles, plus the OpenCL amalgamation)")
+        print(f"kernel-dialect: OK ({len(headers)} headers x {'+'.join(profiles)} profiles, "
+              f"plus the OpenCL amalgamation)")
     return 1 if errors else 0
 
 
