@@ -1,7 +1,13 @@
 # pyclay — nanobind extension module (python-bindings spec). Built only when
 # CLAY_BUILD_PYTHON=ON (scikit-build-core turns it on for wheels).
 
-find_package(Python 3.9 REQUIRED COMPONENTS Interpreter Development.Module)
+# Development.SABIModule is what makes CMake define Python_SOSABI. Without it
+# nanobind's STABLE_ABI silently degrades to a version-locked build: the wheel
+# is still tagged abi3, but the module lands as pyclay.cpython-3XX-<plat>.so,
+# which no other interpreter will import. Optional so a Python without the
+# limited API (PyPy, some distro builds) still configures.
+find_package(Python 3.9 REQUIRED COMPONENTS Interpreter Development.Module
+             OPTIONAL_COMPONENTS Development.SABIModule)
 
 FetchContent_MakeAvailable(nanobind)  # declared in cmake/Dependencies.cmake
 
@@ -14,11 +20,17 @@ clay_apply_warnings(pyclay)
 # nanobind's own headers trip -Wshadow on GCC (clang is quiet). Mark them
 # SYSTEM and, since the interface include still reaches the command line as
 # -I on some generators, silence shadow for this one thin binding TU.
-get_target_property(_nanobind_includes nanobind-static INTERFACE_INCLUDE_DIRECTORIES)
-if(_nanobind_includes)
-  set_target_properties(nanobind-static PROPERTIES
-    INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_nanobind_includes}")
-endif()
+# The runtime target's name depends on the build: a stable-ABI module links
+# nanobind-static-abi3, a version-locked one links nanobind-static.
+foreach(_nb_target nanobind-static-abi3 nanobind-static)
+  if(TARGET ${_nb_target})
+    get_target_property(_nanobind_includes ${_nb_target} INTERFACE_INCLUDE_DIRECTORIES)
+    if(_nanobind_includes)
+      set_target_properties(${_nb_target} PROPERTIES
+        INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_nanobind_includes}")
+    endif()
+  endif()
+endforeach()
 if(NOT MSVC)
   target_compile_options(pyclay PRIVATE -Wno-shadow)
 endif()

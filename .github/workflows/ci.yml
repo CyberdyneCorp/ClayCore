@@ -166,6 +166,28 @@ jobs:
           assert m.is_watertight()
           print('wheel smoke OK:', clay.backends(), len(m.positions), 'verts')
           "
+      # The wheel is tagged abi3, so it must import on an interpreter other
+      # than the one that built it. Building and testing on 3.12 alone cannot
+      # see a module that landed as pyclay.cpython-312-<plat>.so instead of
+      # pyclay.abi3.so — which is exactly how a version-locked build shipped
+      # under an abi3 tag once already.
+      - name: Set up a second interpreter
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: abi3 wheel imports on a different interpreter
+        run: |
+          python3.12 -m pip wheel . -w dist --no-deps
+          ls dist/*.whl
+          python3.13 -m venv /tmp/abi3check
+          /tmp/abi3check/bin/pip install numpy dist/*.whl
+          /tmp/abi3check/bin/python -c "
+          import sys, numpy as np, pyclay as clay
+          doc = clay.Document()
+          doc.add_sdf_layer('b').add(clay.Sphere(r=1.0))
+          assert doc.eval(np.zeros((1, 3), dtype=np.float32))[0] < 0
+          print('abi3 wheel imports on', sys.version.split()[0])
+          "
 
   examples:
     name: examples (gallery runs)
