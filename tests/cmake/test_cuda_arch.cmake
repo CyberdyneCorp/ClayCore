@@ -42,8 +42,31 @@ expect_arch("GPU supported by toolkit" "89-real"
   NATIVE "89-real"
   SUPPORTED 50-real 70-real 80-real 86-real 89-real 90)
 
-# No GPU present (CMake leaves NATIVE empty) — still must produce a buildable
-# arch rather than an empty list.
+# No GPU present — still must produce a buildable arch rather than an empty
+# list. CMake fills NATIVE with prose in this case, not an architecture, so the
+# non-numeric form has to be handled as well as the empty one.
 expect_arch("no GPU detected" "90-virtual"
   NATIVE ""
   SUPPORTED 50-real 80-real 90)
+
+expect_arch("NATIVE holds CMake's no-device message" "90-virtual"
+  NATIVE "No CUDA devices found.-real"
+  SUPPORTED 50-real 80-real 90)
+
+foreach(native "120-real" "89" "89-virtual")
+  clay_cuda_arch_is_detected(detected "${native}")
+  if(detected)
+    message(STATUS "ok   — '${native}' reads as a detected arch")
+  else()
+    message(SEND_ERROR "FAIL — '${native}' should read as a detected arch")
+  endif()
+endforeach()
+
+foreach(native "" "No CUDA devices found." "No CUDA devices found.-real")
+  clay_cuda_arch_is_detected(detected "${native}")
+  if(detected)
+    message(SEND_ERROR "FAIL — '${native}' should not read as a detected arch")
+  else()
+    message(STATUS "ok   — '${native}' reads as no GPU")
+  endif()
+endforeach()

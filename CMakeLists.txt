@@ -128,7 +128,11 @@ if(CLAY_BACKEND_CUDA)
     clay_select_cuda_arch(_clay_cuda_arch
       NATIVE "${CMAKE_CUDA_ARCHITECTURES_NATIVE}"
       SUPPORTED ${CMAKE_CUDA_ARCHITECTURES_ALL})
-    if(NOT _clay_cuda_arch STREQUAL CMAKE_CUDA_ARCHITECTURES_NATIVE)
+    clay_cuda_arch_is_detected(_clay_gpu_detected "${CMAKE_CUDA_ARCHITECTURES_NATIVE}")
+    if(NOT _clay_gpu_detected)
+      message(STATUS "CUDA: no GPU detected; building ${_clay_cuda_arch} PTX "
+                     "for the driver to JIT")
+    elseif(NOT _clay_cuda_arch STREQUAL CMAKE_CUDA_ARCHITECTURES_NATIVE)
       message(STATUS "CUDA: GPU arch ${CMAKE_CUDA_ARCHITECTURES_NATIVE} is newer than this "
                      "toolkit; building ${_clay_cuda_arch} PTX for the driver to JIT")
     endif()

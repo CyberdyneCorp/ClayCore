@@ -44,6 +44,16 @@ it targets.
   (native arch, supported list), so it can be tested without a CUDA toolkit or
   a GPU. `tests/cmake/test_cuda_arch.cmake` is the regression test and runs as
   the `clay_cuda_arch_selection` CTest case on every preset.
+- **"No GPU" is distinguished from "GPU too new".** On a machine without a
+  device CMake fills `CMAKE_CUDA_ARCHITECTURES_NATIVE` with prose ("No CUDA
+  devices found.") rather than an architecture, so anything non-numeric is
+  treated as absent and reported as such instead of being spliced into a
+  message claiming the GPU is newer than the toolkit.
+- **CI configures the CUDA job once without a pinned architecture.** The job
+  passed `-DCMAKE_CUDA_ARCHITECTURES=75`, which is why this survived: an
+  explicit cache value is set before `claycore` is created, so it reached the
+  target and the auto-detection path was never exercised. The unpinned
+  configure covers the wiring against a real toolkit, as the unit test cannot.
 
 ## Capabilities
 
@@ -55,7 +65,8 @@ it targets.
 ## Impact
 
 - `CMakeLists.txt`, new `cmake/ClayCudaArch.cmake`, new
-  `tests/cmake/test_cuda_arch.cmake`, `tests/CMakeLists.txt`, `README.md`.
+  `tests/cmake/test_cuda_arch.cmake`, `tests/CMakeLists.txt`,
+  `.github/workflows/ci.yml`, `README.md`.
 - No runtime or API impact: this is a build-configuration fix. Parity results
   are unchanged — a PTX-JIT build of the CUDA backend passes the same suite as
   a cubin build.

@@ -11,6 +11,21 @@
 # exercise it without a CUDA toolkit or a GPU.
 #
 #   clay_select_cuda_arch(<out_var> NATIVE <arch> SUPPORTED <arch>...)
+#
+# NATIVE is CMAKE_CUDA_ARCHITECTURES_NATIVE, which on a machine without a GPU
+# holds a human-readable excuse ("No CUDA devices found.") rather than an
+# architecture — anything that is not a number is treated as "no GPU".
+#
+# clay_cuda_arch_is_detected(<out_var> <native>) reports whether NATIVE names a
+# real architecture, so callers can word the fallback message correctly.
+
+function(clay_cuda_arch_is_detected out_var native)
+  if(native MATCHES "^[0-9]+(-real|-virtual)?$")
+    set(${out_var} TRUE PARENT_SCOPE)
+  else()
+    set(${out_var} FALSE PARENT_SCOPE)
+  endif()
+endfunction()
 
 function(clay_select_cuda_arch out_var)
   cmake_parse_arguments(PARSE_ARGV 1 arg "" "NATIVE" "SUPPORTED")
@@ -19,8 +34,9 @@ function(clay_select_cuda_arch out_var)
     message(FATAL_ERROR "clay_select_cuda_arch: SUPPORTED architecture list is empty")
   endif()
 
+  clay_cuda_arch_is_detected(detected "${arg_NATIVE}")
   list(FIND arg_SUPPORTED "${arg_NATIVE}" native_idx)
-  if(arg_NATIVE AND native_idx GREATER_EQUAL 0)
+  if(detected AND native_idx GREATER_EQUAL 0)
     set(${out_var} "${arg_NATIVE}" PARENT_SCOPE)
     return()
   endif()

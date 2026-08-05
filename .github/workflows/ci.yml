@@ -128,6 +128,11 @@ jobs:
           cuda: '12.5.0'
           method: 'network'
           sub-packages: '["nvcc", "cudart"]'
+      # pinning the arch above hides the auto-detection path, which is where
+      # "CUDA_ARCHITECTURES is empty for target claycore" came from; configure
+      # once without a pin so the fallback is exercised against a real toolkit
+      - name: Configure with auto-detected architecture
+        run: cmake -S . -B build/cuda-autoarch -DCLAY_BACKEND_CUDA=ON -DCMAKE_BUILD_TYPE=Release
       - name: Configure + build (no GPU on the runner; codegen only)
         run: |
           cmake --preset cuda -DCMAKE_CUDA_ARCHITECTURES=75
