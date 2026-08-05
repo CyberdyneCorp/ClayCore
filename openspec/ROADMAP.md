@@ -9,6 +9,11 @@ named here only where ClayCore has to provide something for them.
 Living requirements are in `openspec/specs/`; this file is the plan, not the
 contract. A row becomes real when it becomes a change in `openspec/changes/`.
 
+Last reconciled against `3dcoat_study/MISSING_FEATURES.md` and
+`3DCOAT_FEATURE_STUDY.md` on 2026-08-05, after a review from the study's authors
+caught five items this file had dropped. Every ClayCore-owned row in their
+catalogue is now represented here or in the deferred list below.
+
 ## Where the engine is (2026-08-05, v0.9.0)
 
 12 capabilities, 20 archived changes. Complete enough that the gaps below are
@@ -51,9 +56,10 @@ sculpt with.
 
 | Change | Why it is first |
 |---|---|
-| **`add-region-deformers`** *(scoped, ready)* | Grab and pose: displacement weighted across a region, with finite support so culling holds. The #1 and #4 practitioner tools have no analog today. Covers SDF and voxels together, since ClaySpace sculpts in both. |
+| ~~`add-region-deformers`~~ **landed 2026-08-05** | Grab and pose with finite support, on SDF and voxels. Shipped with **sphere (radial) region weights only**. |
+| `add-pose-line-regions` | The follow-up that shipping sphere-only left open. 3DCoat's Pose *defaults* to a line gradient with 15°-snapped angle — the taper workflow the hard-surface videos lean on — and the study's own draft requirement names it alongside sphere and mask. It needs anchor + end + axis + angle = 10 parameters against the deformer record's 9 slots, so it widens the extension array; contained, but a real change rather than an add. |
 | `add-mask-field` | Paintable per-layer scalar gating edit strength. Unlocks freeze, masked shell, pose-by-selection. Specify representation-independence as an invariant with a regression test: masks silently dying on voxelization is 3DCoat's worst-rated bug and is a free win to avoid. |
-| `add-brush-stroke-engine` | Stroke → spaced, alpha-modulated stamps: spacing, pressure curves, jitter, rotate-along-stroke, taper, buildup vs clamped. One engine so every app tool shares brush feel rather than each synthesizing its own. Version the preset schema from day one — their engine rewrite destroyed user preset libraries. |
+| `add-brush-stroke-engine` | Stroke → spaced, alpha-modulated stamps: spacing, pressure curves, jitter, rotate-along-stroke, taper, buildup vs clamped. One engine so every app tool shares brush feel rather than each synthesizing its own. Version the preset schema from day one — their engine rewrite destroyed user preset libraries. **Fix the interface as "stroke samples in, edit items out" when this is scoped**: that boundary is what would let brushes be scripted later without redesigning the engine, and it costs nothing to honour now. |
 | `add-layer-ghost-lock` | Per-layer ghost (visible, unpickable, edit-excluded) and lock. Small, and it properly fixes the "brushes touch everything" complaint that ghosting only works around. |
 
 **Gate:** an artist can block out a form, grab it into shape, freeze a region
@@ -65,7 +71,9 @@ and detail around it, without leaving the engine's vocabulary.
 |---|---|
 | `add-curve-objects` | The largest *structural* gap: control-point curves with per-point radius and type, lowering to the existing exact primitives. Blocks tubes, spline arrays, lofts, and curve-driven parametric modelling. |
 | `add-loft-opcode` | Loft is header-only and flagged in the specs as not tape-expressible; it is 3DCoat's base-mesh generator and the core of their 2026 parametric direction. Needs an item to carry two profiles. |
+| `add-swept-n` | Generalizes loft from two profiles to N across a guide, once two-profile loft is proven. Minor and arguably implied by the row above, but named so it is not assumed done when loft lands. |
 | `add-voxel-verbs` | fill-cavities, scrape (flatten+smooth), smudge, carve-with-alpha — the verbs our four are missing against their voxel set. |
+| `add-voxel-repair` | Close holes and fill interior voids, so a voxel layer can be made airtight before meshing. Lower priority than it sounds: SDF layers are watertight by construction, and the mesh importer's winding-number sign tolerates small holes — this is only for voxel layers that were sculpted into a non-manifold state. Their "Close Invisible Holes + Fill Voids" is the standard pre-bake step. |
 | `add-mesh-to-field-import` | Triangle mesh → field, via BVH distance and generalized winding number for sign. Unlocks scan cleanup, kitbashing, booleans on imported meshes. Density must be specified in voxels-per-unit, decoupled from object scale — their scale↔resolution entanglement is a documented pain. |
 
 ## Phase 3 — the pipeline
@@ -82,6 +90,24 @@ against their 2026 custom profiles) · `add-convenience-transforms`
 (snap-to-ground, centre-mass, zero-to-origin as single ABI calls) ·
 `add-field-stamps` (capture a region's field as a reusable brush — the VDM
 analog, and a differentiator rather than a parity item).
+
+## Deferred, but recorded
+
+Not scheduled, and not rejected either — small enough to slot in when something
+needs them, and listed so they are not mistaken for oversights:
+
+- **Procedural noise as a tape opcode.** `displace` is by-callable today, which
+  is not portable across backends. A tape-expressible 3D noise field is the
+  answer if node-style procedural detail ever becomes a goal.
+- **Voxel layers beyond 256³.** The spec guarantees ≥256³ per layer, with a
+  memory budget and typed errors past it. There is no streaming story for
+  scenes larger than that; per-layer grids have been sufficient so far.
+- **Scripted brushes.** A decision rather than a task: whether brushes should be
+  authorable in an embedded scripting language is not something this repository
+  can settle on its own, and no change is proposed here. The one thing that
+  matters now is keeping `add-brush-stroke-engine`'s interface at "stroke
+  samples in, edit items out", which the row above records — that keeps the
+  option open at no cost.
 
 ## Deliberately not doing
 
