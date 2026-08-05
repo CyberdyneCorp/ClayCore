@@ -188,3 +188,30 @@ The module SHALL expose editing of an existing document, not only construction: 
 - **WHEN** any editing entry point is called
 - **THEN** it applies commands from `scene::Command` rather than mutating the document directly, so its semantics match what the document format records. Layer reorder SHALL be documented as the remove-then-add pair the vocabulary expresses it with; every other edit is a single command.
 
+### Requirement: Undo from Python
+The module SHALL expose an opt-in undo stack per document: enabling it, `undo`, `redo`, the undo and redo depths, and grouping so a burst of edits undoes as one step. With no stack attached a document SHALL behave exactly as it does without this feature. Once attached, every editing entry point SHALL record its own inverse, so no reachable edit escapes undo.
+
+#### Scenario: Undo restores the previous state exactly
+- **WHEN** an edit is performed on a document with undo enabled and then undone
+- **THEN** the document serializes bit-identically to its state before the edit
+
+#### Scenario: Redo reapplies
+- **WHEN** an edit is undone and then redone
+- **THEN** the document matches the state after the original edit, and the redo depth returns to zero
+
+#### Scenario: A stroke undoes as one step
+- **WHEN** N point-append edits are made to one stroke and undo is called once
+- **THEN** all N points are gone and the undo depth drops by one
+
+#### Scenario: Grouped edits undo together
+- **WHEN** several edits are bracketed by begin/end group and undo is called once
+- **THEN** every edit in the group is reversed
+
+#### Scenario: A new edit clears the redo stack
+- **WHEN** an edit is undone and a different edit is then performed
+- **THEN** the redo depth is zero
+
+#### Scenario: Undo costs nothing when unused
+- **WHEN** a document is edited without undo enabled
+- **THEN** no inverse is recorded and the undo depth entry point reports the feature is off
+

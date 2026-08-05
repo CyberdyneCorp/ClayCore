@@ -55,6 +55,8 @@ For brick evaluation the compiler SHALL emit per-brick tapes containing only the
 ### Requirement: Undo command vocabulary
 Every document mutation SHALL be expressed as a serializable command with a computable inverse: add/remove/reorder item, set parameter, voxel-span edit, layer add/remove/reorder/retransform, group/ungroup. The in-memory undo stack and the document file format SHALL share this single command vocabulary. Consecutive commands from one stroke SHALL be coalescable into a single undo step. Item state carried by commands SHALL include any deformer chain, so deformed documents round-trip.
 
+The undo stack SHALL be reachable from the bindings, so a host application uses the engine's undo rather than reimplementing one over a second vocabulary that could disagree with what a saved document records.
+
 #### Scenario: Command inverse restores state
 - **WHEN** any command from the vocabulary is applied to a document and then its inverse is applied
 - **THEN** the document state is bit-identical to the original (verified by serialization comparison)
@@ -66,6 +68,10 @@ Every document mutation SHALL be expressed as a serializable command with a comp
 #### Scenario: Deformed item round trip
 - **WHEN** a document containing an item with a deformer chain is serialized and reloaded
 - **THEN** the reloaded document evaluates bit-identically and re-serializes to identical bytes
+
+#### Scenario: A host application undoes through the engine
+- **WHEN** a binding performs an edit on a document with undo enabled and then undoes it
+- **THEN** the document serializes bit-identically to its state before the edit
 
 ### Requirement: Non-local combine modes report infinite influence
 A combine mode whose weight is non-zero arbitrarily far from both operands SHALL report an infinite influence bound, so per-brick culling never drops it. Transition morphs are such modes: the linear weight is non-zero over a half-space and the radial weight past a radius. This preserves the blend-locality guarantee by refusing to claim locality that does not exist, rather than by silently corrupting culled bricks.
