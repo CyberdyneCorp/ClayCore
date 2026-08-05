@@ -575,9 +575,10 @@ def test_deformers_survive_clayspace_round_trip(tmp_path):
     assert np.array_equal(before, after)
 
 
-def test_unsupported_deformer_reports_clearly():
-    with pytest.raises(ValueError, match="no tape opcode"):
-        clay.Sphere(r=1.0).wrap_around(-1.0, 1.0)
+def test_wrap_around_needs_a_non_degenerate_interval():
+    # The interval fixes the cylinder radius, so x0 == x1 has no meaning.
+    with pytest.raises(ValueError, match="x0 != x1"):
+        clay.Sphere(r=1.0).wrap_around(1.0, 1.0)
 
 
 # --- transition morphs (add-transition-morphs) ------------------------------
@@ -1354,3 +1355,31 @@ def test_every_edit_kind_is_undoable(tmp_path):
         assert doc.undo() is True
         assert _snapshot(doc, tmp_path, f"after_{i}.clayspace") == before, f"edit {i}"
         doc.redo()
+
+
+def test_wrap_around_bends_the_interval_around_the_axis():
+    import math
+    x0, x1 = -math.pi, math.pi          # per = 2pi -> radius 1
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Box(size=(2 * math.pi, 0.4, 1.0)).wrap_around(x0, x1))
+
+    at = lambda p: float(doc.eval(np.array([p], dtype=np.float32))[0])
+    assert at((1, 0, 0)) < 0          # on the cylinder, inside the slab
+    assert at((0, 1, 0)) < 0
+    assert at((0, 0, 0)) == pytest.approx(0.8, abs=1e-3)   # axis to inner face
+    assert doc.safe_step_scale() == pytest.approx(1 / 1.2, abs=1e-3)
+
+    lo, hi = layer.bounds()
+    assert hi[0] == pytest.approx(1.2, abs=1e-3)           # r + half thickness
+
+
+def test_wrap_around_round_trips(tmp_path):
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Box(size=(6.0, 0.4, 1.0)).wrap_around(-3.0, 3.0))
+    probes = np.random.default_rng(21).uniform(-3, 3, size=(1024, 3)).astype(np.float32)
+    before = doc.eval(probes)
+
+    path = tmp_path / "wrapped.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(probes))

@@ -136,8 +136,6 @@ CLASS_CTOR = {
 # instead of disappearing, and it fails when one becomes reachable in C or
 # vanishes from pyclay.
 EXEMPT = {
-    "Prim.wrap_around": "raises in pyclay too: deform.h implements it but there is no "
-                        "tape opcode, so no document can carry it",
     "Prim.repeat": "reads a builder's own state back; clay_item is write-only by "
                    "design, the caller keeps what it set",
     "Prim.deformers": "reads a builder's own state back, as above",

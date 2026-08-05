@@ -616,12 +616,17 @@ NB_MODULE(pyclay, m) {
              "amplitude"_a, "frequency"_a,
              "Procedural sine displacement of the field (amplitude in world units)")
         .def("wrap_around",
-             [](nb::object, float, float) {
-                 throw std::invalid_argument(
-                     "wrap_around is implemented in deform.h but has no tape opcode yet, so a "
-                     "document cannot carry it; use twist/bend/taper/displace");
+             [](nb::object self, float x0, float x1) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 if (x0 == x1)
+                     throw std::invalid_argument(
+                         "wrap_around needs x0 != x1: the interval fixes the cylinder radius");
+                 p.deformers.push_back(scene::Deformer::wrap_around(x0, x1));
+                 return self;
              },
-             "x0"_a, "y0"_a, "Not available: no tape opcode (see the error message)")
+             "x0"_a, "x1"_a, nb::rv_policy::reference_internal,
+             "Bend the local X interval [x0, x1] around a cylinder about Z, so a "
+             "flat relief wraps around a column. Radius is (x1 - x0) / 2pi.")
         .def("repeat_grid",
              [](nb::object self, nb::handle spacing, nb::handle counts) {
                  PyPrim& p = nb::cast<PyPrim&>(self);

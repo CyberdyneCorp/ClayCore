@@ -422,3 +422,85 @@ TEST_CASE("tape transition matches the reference tree evaluator") {
         CHECK(clength(tv.color - rv.color) < 1e-4f);
     }
 }
+
+// --- wrap_around (add-wrap-around-opcode) ------------------------------------
+
+TEST_CASE("wrap_around bends the interval around the Z axis") {
+    const float x0 = -3.14159265f, x1 = 3.14159265f;   // per = 2pi -> r = 1
+    const float r = (x1 - x0) * 0.15915494f;
+
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::box(cf3(3.14f, 0.2f, 0.5f)), cf3(0, 0, 0));
+    n.deformers.push_back(scene::Deformer::wrap_around(x0, x1));
+    scene::NodeId id = l.sdf->insert(n);
+    scene::Tape tape = scene::compile_document(doc);
+
+    SUBCASE("the tape agrees with the kernel applied by hand") {
+        clay_test::Lcg rng(4242);
+        for (int i = 0; i < 4096; ++i) {
+            cfloat3 p = cf3(rng.range(-3, 3), rng.range(-3, 3), rng.range(-1, 1));
+            cfloat3 flat = cwrap_around_point(p, x0, x1);
+            float want = sd_box(flat, cf3(3.14f, 0.2f, 0.5f));
+            CHECK(tape.eval(p).d == doctest::Approx(want).epsilon(1e-4));
+        }
+    }
+
+    SUBCASE("the surface sits on the cylinder of radius r") {
+        // a point on the cylinder is inside the slab's half-thickness
+        CHECK(tape.eval(cf3(r, 0, 0)).d < 0.0f);
+        CHECK(tape.eval(cf3(0, r, 0)).d < 0.0f);
+        // the axis is about r - halfthickness away from the inner surface
+        CHECK(tape.eval(cf3(0, 0, 0)).d == doctest::Approx(r - 0.2f).epsilon(1e-3));
+    }
+
+    SUBCASE("the bound contains the wrapped geometry") {
+        const scene::Node* node = l.sdf->find(id);
+        REQUIRE(node != nullptr);
+        math::Aabb bound = scene::item_geometry_bound(*node, l);
+
+        clay_test::Lcg rng(99);
+        int outside = 0;
+        for (int i = 0; i < 20000; ++i) {
+            cfloat3 p = cf3(rng.range(-4, 4), rng.range(-4, 4), rng.range(-2, 2));
+            if (tape.eval(p).d > 0.0f) continue;          // only surface/interior
+            if (p.x < bound.min.x || p.x > bound.max.x || p.y < bound.min.y ||
+                p.y > bound.max.y || p.z < bound.min.z || p.z > bound.max.z)
+                ++outside;
+        }
+        CHECK(outside == 0);
+    }
+
+    SUBCASE("wrapping downgrades exactness and the step scale") {
+        CHECK(tape.info.is_exact == false);
+        CHECK(tape.safe_step_scale() < 1.0f);
+        // cfi_wrap_around: L = 1 + thickness / r, thickness = 0.2, r = 1
+        CHECK(tape.safe_step_scale() == doctest::Approx(1.0f / 1.2f).epsilon(1e-3));
+    }
+}
+
+TEST_CASE("wrap_around composes in a deformer chain, in order") {
+    auto build = [](bool wrap_first) {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        scene::Node n = clay_test::item(scene::Prim::box(cf3(3.0f, 0.2f, 0.4f)), cf3(0, 0, 0));
+        if (wrap_first) {
+            n.deformers.push_back(scene::Deformer::wrap_around(-3.0f, 3.0f));
+            n.deformers.push_back(scene::Deformer::twist(0.8f));
+        } else {
+            n.deformers.push_back(scene::Deformer::twist(0.8f));
+            n.deformers.push_back(scene::Deformer::wrap_around(-3.0f, 3.0f));
+        }
+        l.sdf->insert(n);
+        return scene::compile_document(doc);
+    };
+    scene::Tape a = build(true), b = build(false);
+
+    clay_test::Lcg rng(7);
+    int differing = 0;
+    for (int i = 0; i < 2048; ++i) {
+        cfloat3 p = cf3(rng.range(-2, 2), rng.range(-2, 2), rng.range(-1, 1));
+        if (kernel::cabs(a.eval(p).d - b.eval(p).d) > 1e-3f) ++differing;
+    }
+    CHECK(differing > 0);  // the chain does not commute
+}

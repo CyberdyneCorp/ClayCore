@@ -26,6 +26,9 @@ CASES = [
     ("taper", lambda: clay.Box(size=(0.9, 1.8, 0.9)).taper(
         y0=-0.9, y1=0.9, s0=1.0, s1=0.25)),
     ("displace", lambda: clay.Sphere(r=0.9).displace(amplitude=0.08, frequency=7.0)),
+    # wrap_around bends a flat slab around a cylinder — the deformer that
+    # cannot be faked with the others. The interval fixes the radius.
+    ("wrap_around", lambda: clay.Box(size=(6.283, 0.35, 1.2)).wrap_around(-3.1416, 3.1416)),
     # Chains apply in authoring order — twist then bend is not bend then twist.
     ("twist then bend", lambda: clay.Box(size=(0.7, 1.8, 0.7)).twist(2.0).bend(0.6)),
     ("bend then twist", lambda: clay.Box(size=(0.7, 1.8, 0.7)).bend(0.6).twist(2.0)),

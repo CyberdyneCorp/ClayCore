@@ -309,6 +309,10 @@ unsigned distances rather than regions, so they are not profiles.
 body.add(clay.Box(size=(0.4, 0.4, 0.4)).twist(1.2), op=clay.Op.SUBTRACT)
 body.add(clay.Cylinder(r=0.6, h=1.0).taper(-1.0, 1.0, 1.0, 0.35))
 body.add(clay.Sphere(r=1.0).displace(amplitude=0.08, frequency=6.0))
+
+# wrap_around bends a flat interval around a cylinder about Z — a relief or a
+# line of text around a column. The interval fixes the radius: r = (x1-x0)/2pi.
+body.add(clay.Box(size=(6.283, 0.3, 1.0)).wrap_around(-3.1416, 3.1416))
 ```
 
 ```python

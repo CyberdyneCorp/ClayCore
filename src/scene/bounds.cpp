@@ -156,6 +156,17 @@ Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& defor
                          cf3(b.max.x * s, b.max.y, b.max.z * s)};
                 break;
             }
+            case kernel::cdeform_wrap: {
+                // The interval becomes a full turn about Z, so the content's
+                // radial band [r+ymin, r+ymax] sweeps a disc. Conservative for
+                // an item covering only part of the interval, which is the
+                // safe direction.
+                float r = kernel::cabs(d.a - d.k) * 0.15915494f;  // per / 2pi
+                float outer = kernel::cmax(kernel::cabs(r + b.min.y),
+                                           kernel::cabs(r + b.max.y));
+                b = Aabb{cf3(-outer, -outer, b.min.z), cf3(outer, outer, b.max.z)};
+                break;
+            }
             case kernel::cdeform_displace:
                 b = b.dilated(kernel::cabs(d.k));
                 break;
@@ -191,6 +202,15 @@ float deformer_lipschitz(const Node& item) {
             float s_max = kernel::cmax(d.b, d.c);
             float height = kernel::cmax(kernel::cabs(d.a - d.k), 1e-6f);
             info = kernel::cfi_taper(info, s_min, s_max, height, radius);
+        } else if (d.type == kernel::cdeform_wrap) {
+            // Stretch grows as the content sits further from the wrap radius,
+            // so the content's own radial extent bounds it — the same
+            // convention twist and bend use.
+            float thickness = local.empty()
+                                  ? 0.0f
+                                  : kernel::cmax(kernel::cabs(local.min.y),
+                                                 kernel::cabs(local.max.y));
+            info = kernel::cfi_wrap_around(info, d.k, d.a, thickness);
         } else if (d.type == kernel::cdeform_displace) {
             info = kernel::cfi_displace(info, kernel::cabs(d.k) * kernel::cabs(d.a) * 1.7320508f);
         }

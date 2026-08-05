@@ -294,6 +294,15 @@ struct Deformer {
         d.ease = ease;
         return d;
     }
+    // Bend the local X interval [x0, x1] around a cylinder about Z. The
+    // radius is fixed by the interval: r = (x1 - x0) / 2pi.
+    static Deformer wrap_around(float x0, float x1) {
+        Deformer d;
+        d.type = kernel::cdeform_wrap;
+        d.k = x0;
+        d.a = x1;
+        return d;
+    }
     static Deformer displace(float amplitude, float frequency) {
         Deformer d;
         d.type = kernel::cdeform_displace;

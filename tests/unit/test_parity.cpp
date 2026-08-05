@@ -75,6 +75,15 @@ std::vector<ParityScene> parity_scenes() {
         l.sdf->insert(n);
         scenes.push_back({name, std::move(doc), 3.0f});
     };
+    {   // wrap_around: a flat slab bent around the Z axis
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node n = item(Prim::box(cf3(3.14f, 0.2f, 0.5f)), cf3(0, 0, 0));
+        n.deformers.push_back(scene::Deformer::wrap_around(-3.14159f, 3.14159f));
+        l.sdf->insert(n);
+        scenes.push_back({"wrap_around", std::move(doc), 3.0f});
+    }
+
     lift("extrude_hexagon", Prim::extrude(0.5f), Profile::hexagon(0.8f));
     lift("revolve_polygon", Prim::revolve(1.2f), Profile::polygon(),
          {cf2(-0.3f, -0.3f), cf2(0.3f, -0.3f), cf2(0.3f, 0.3f), cf2(-0.3f, 0.3f)});

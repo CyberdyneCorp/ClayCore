@@ -180,6 +180,7 @@ enum CDeformType {
     cdeform_bend = 1,      // k = radians per unit along X
     cdeform_taper = 2,     // k = y0, a = y1, b = s0, c = s1, ease
     cdeform_displace = 3,  // k = amplitude, a = frequency
+    cdeform_wrap = 4,      // k = x0, a = x1: bend [x0,x1] about the Z axis
 };
 
 // Apply one deformer record to the local point. No deformer corrects the
@@ -199,6 +200,7 @@ CLAY_FN cfloat3 ctape_deform_point(CLAY_DEVICE const float* rec, cfloat3 p) {
         // Lipschitz factor (cfi_taper includes the 1/s_min stretch).
         return ctaper_point(p, rec[1], rec[2], rec[3], rec[4], (int)rec[5]);
     }
+    if (type == cdeform_wrap) return cwrap_around_point(p, rec[1], rec[2]);
     return p;  // displace acts on the distance, not the point
 }
 

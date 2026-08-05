@@ -1386,3 +1386,37 @@ TEST_CASE("C undo matches the same sequence through the scene API") {
 
     check_same_field(f.doc, twin);
 }
+
+TEST_CASE("wrap_around reaches the C ABI") {
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "l", &layer) == CLAY_OK);
+
+    float box[3] = {3.14f, 0.2f, 0.5f};
+    clay_item* item = clay_item_create(CLAY_PRIM_BOX, box, 3);
+    REQUIRE(item != nullptr);
+    const float interval[2] = {-3.14159265f, 3.14159265f};
+    REQUIRE(clay_item_add_deformer(item, CLAY_DEFORM_WRAP_AROUND, interval, 2, 0) == CLAY_OK);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, item, &node) == CLAY_OK);
+    clay_item_destroy(item);
+
+    // the twin, through the engine's own types
+    scene::Document twin;
+    scene::Layer& tl = twin.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::box(cf3(3.14f, 0.2f, 0.5f)), cf3(0, 0, 0));
+    n.deformers.push_back(scene::Deformer::wrap_around(-3.14159265f, 3.14159265f));
+    tl.sdf->insert(n);
+
+    check_same_field(doc, twin);
+
+    SUBCASE("a degenerate interval is refused") {
+        clay_item* bad = clay_item_create(CLAY_PRIM_BOX, box, 3);
+        REQUIRE(bad != nullptr);
+        const float degenerate[2] = {1.0f, 1.0f};
+        CHECK(clay_item_add_deformer(bad, CLAY_DEFORM_WRAP_AROUND, degenerate, 2, 0) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+        clay_item_destroy(bad);
+    }
+    clay_document_destroy(doc);
+}
