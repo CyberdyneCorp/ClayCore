@@ -75,6 +75,15 @@ std::vector<ParityScene> parity_scenes() {
         l.sdf->insert(n);
         scenes.push_back({name, std::move(doc), 3.0f});
     };
+    {   // elongate: a sphere stretched into a capsule
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node n = item(Prim::sphere(0.5f), cf3(0, 0, 0));
+        n.deformers.push_back(scene::Deformer::elongate(cf3(0.8f, 0.0f, 0.3f)));
+        l.sdf->insert(n);
+        scenes.push_back({"elongate", std::move(doc), 3.0f});
+    }
+
     {   // wrap_around: a flat slab bent around the Z axis
         Document doc;
         Layer& l = doc.add_sdf_layer("l");

@@ -313,6 +313,11 @@ body.add(clay.Sphere(r=1.0).displace(amplitude=0.08, frequency=6.0))
 # wrap_around bends a flat interval around a cylinder about Z — a relief or a
 # line of text around a column. The interval fixes the radius: r = (x1-x0)/2pi.
 body.add(clay.Box(size=(6.283, 0.3, 1.0)).wrap_around(-3.1416, 3.1416))
+
+# elongate inserts flat sections without distorting the ends — a sphere becomes
+# a capsule. Alone among the deformers it is exact (on an origin-symmetric
+# primitive), so it costs nothing in step scale.
+body.add(clay.Sphere(r=0.5).elongate((1.0, 0.0, 0.0)))
 ```
 
 ```python

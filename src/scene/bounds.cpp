@@ -167,6 +167,14 @@ Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& defor
                 b = Aabb{cf3(-outer, -outer, b.min.z), cf3(outer, outer, b.max.z)};
                 break;
             }
+            case kernel::cdeform_elongate: {
+                // The flat sections are inserted symmetrically, so the shape
+                // grows by h on each side of every axis.
+                kernel::cfloat3 h = cf3(kernel::cabs(d.k), kernel::cabs(d.a),
+                                        kernel::cabs(d.b));
+                b = Aabb{b.min - h, b.max + h};
+                break;
+            }
             case kernel::cdeform_displace:
                 b = b.dilated(kernel::cabs(d.k));
                 break;
@@ -175,6 +183,17 @@ Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& defor
         }
     }
     return b;
+}
+
+bool deformers_break_exactness(const Node& item) {
+    // Elongation is non-expansive, so it never shows up in the Lipschitz
+    // factor — but its correction is only valid about the origin, so on an
+    // asymmetric primitive the field is a bound at Lipschitz 1. That is a
+    // reason to drop exactness that the Lipschitz check cannot see.
+    for (const Deformer& d : item.deformers)
+        if (d.type == kernel::cdeform_elongate && !prim_is_origin_symmetric(item.prim.type))
+            return true;
+    return false;
 }
 
 float deformer_lipschitz(const Node& item) {

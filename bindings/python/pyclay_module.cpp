@@ -607,6 +607,19 @@ NB_MODULE(pyclay, m) {
              },
              "y0"_a, "y1"_a, "s0"_a, "s1"_a, "ease"_a = 0,
              "Scale the cross-section from s0 at y0 to s1 at y1 along an easing curve")
+        .def("elongate",
+             [](nb::object self, nb::handle h) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 kernel::cfloat3 e = to_f3(h, "elongate half-extents");
+                 if (e.x < 0.0f || e.y < 0.0f || e.z < 0.0f)
+                     throw std::invalid_argument("elongate half-extents must be >= 0");
+                 p.deformers.push_back(scene::Deformer::elongate(e));
+                 return self;
+             },
+             "h"_a, nb::rv_policy::reference_internal,
+             "Insert flat sections of half-extent h along each axis: the shape "
+             "stretches without its ends distorting. Exact on an origin-symmetric "
+             "primitive, a bound otherwise.")
         .def("displace",
              [](nb::object self, float amplitude, float frequency) {
                  nb::cast<PyPrim&>(self).deformers.push_back(

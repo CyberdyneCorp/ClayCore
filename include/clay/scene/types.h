@@ -63,6 +63,20 @@ inline bool prim_is_unbounded(PrimType t) {
 
 // Primitives whose field is a bound rather than a true distance; the tape's
 // tracked exactness downgrades for them.
+// Elongation's distance correction is derived about the origin, so it is only
+// exact for a primitive invariant under p -> -p. The list is deliberately
+// conservative: anything not obviously centrally symmetric is treated as
+// asymmetric, which costs a step-scale downgrade rather than correctness.
+inline bool prim_is_origin_symmetric(PrimType t) {
+    return t == PrimType::Sphere || t == PrimType::Box || t == PrimType::RoundBox ||
+           t == PrimType::BoxFrame || t == PrimType::Torus ||
+           t == PrimType::CappedCylinder || t == PrimType::RoundedCylinder ||
+           t == PrimType::Ellipsoid || t == PrimType::Octahedron ||
+           t == PrimType::OctahedronCheap || t == PrimType::HexPrism ||
+           t == PrimType::Dodecahedron || t == PrimType::Icosahedron ||
+           t == PrimType::LNormSphere;
+}
+
 inline bool prim_is_bound_field(PrimType t) {
     return t == PrimType::Ellipsoid || t == PrimType::TriPrism ||
            t == PrimType::OctahedronCheap || t == PrimType::LNormSphere;
@@ -301,6 +315,16 @@ struct Deformer {
         d.type = kernel::cdeform_wrap;
         d.k = x0;
         d.a = x1;
+        return d;
+    }
+    // Insert flat sections of half-extent h along each axis: the shape
+    // stretches without its ends distorting.
+    static Deformer elongate(kernel::cfloat3 h) {
+        Deformer d;
+        d.type = kernel::cdeform_elongate;
+        d.k = h.x;
+        d.a = h.y;
+        d.b = h.z;
         return d;
     }
     static Deformer displace(float amplitude, float frequency) {

@@ -1407,3 +1407,36 @@ def test_wrap_around_round_trips(tmp_path):
     path = tmp_path / "wrapped.clayspace"
     doc.save(str(path))
     assert np.array_equal(before, clay.load(str(path)).eval(probes))
+
+
+def test_elongate_stretches_a_sphere_into_a_capsule():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.5).elongate((1.0, 0.0, 0.0)))
+
+    at = lambda p: float(doc.eval(np.array([p], dtype=np.float32))[0])
+    assert at((0, 0, 0)) == pytest.approx(-0.5, abs=1e-4)      # flat section
+    assert at((0.9, 0, 0)) == pytest.approx(-0.5, abs=1e-4)    # still flat
+    assert at((1.5, 0, 0)) == pytest.approx(0.0, abs=1e-3)     # undistorted cap
+    assert at((0, 0.5, 0)) == pytest.approx(0.0, abs=1e-3)
+
+    lo, hi = layer.bounds()
+    assert hi[0] == pytest.approx(1.5, abs=1e-3)
+    assert hi[1] == pytest.approx(0.5, abs=1e-3)
+    # non-expansive, so tracing is not slowed
+    assert doc.safe_step_scale() == pytest.approx(1.0)
+
+
+def test_elongate_refuses_negative_extents():
+    with pytest.raises(ValueError, match=">= 0"):
+        clay.Sphere(r=1.0).elongate((-1.0, 0.0, 0.0))
+
+
+def test_elongate_round_trips(tmp_path):
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Box(size=(0.6, 0.6, 0.6)).elongate((0.7, 0.2, 0.0)))
+    probes = np.random.default_rng(33).uniform(-3, 3, size=(1024, 3)).astype(np.float32)
+    before = doc.eval(probes)
+    path = tmp_path / "elongated.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(probes))

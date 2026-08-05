@@ -29,6 +29,9 @@ CASES = [
     # wrap_around bends a flat slab around a cylinder — the deformer that
     # cannot be faked with the others. The interval fixes the radius.
     ("wrap_around", lambda: clay.Box(size=(6.283, 0.35, 1.2)).wrap_around(-3.1416, 3.1416)),
+    # elongate inserts flat sections: a sphere becomes a capsule, and unlike
+    # every other deformer it is exact, so it costs nothing in step scale.
+    ("elongate", lambda: clay.Sphere(r=0.45).elongate((0.8, 0.0, 0.0))),
     # Chains apply in authoring order — twist then bend is not bend then twist.
     ("twist then bend", lambda: clay.Box(size=(0.7, 1.8, 0.7)).twist(2.0).bend(0.6)),
     ("bend then twist", lambda: clay.Box(size=(0.7, 1.8, 0.7)).bend(0.6).twist(2.0)),

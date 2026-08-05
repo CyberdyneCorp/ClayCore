@@ -504,3 +504,73 @@ TEST_CASE("wrap_around composes in a deformer chain, in order") {
     }
     CHECK(differing > 0);  // the chain does not commute
 }
+
+// --- elongate (add-elongate-opcode) ------------------------------------------
+
+TEST_CASE("elongate inserts flat sections without distorting the ends") {
+    const cfloat3 h = cf3(1.0f, 0.0f, 0.0f);
+
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::sphere(0.5f), cf3(0, 0, 0));
+    n.deformers.push_back(scene::Deformer::elongate(h));
+    scene::NodeId id = l.sdf->insert(n);
+    scene::Tape tape = scene::compile_document(doc);
+
+    SUBCASE("the tape agrees with the kernel applied by hand") {
+        clay_test::Lcg rng(31337);
+        for (int i = 0; i < 4096; ++i) {
+            cfloat3 p = cf3(rng.range(-3, 3), rng.range(-2, 2), rng.range(-2, 2));
+            float correction = 0.0f;
+            cfloat3 q = celongate_point(p, h, &correction);
+            float want = sd_sphere(q, 0.5f) + correction;
+            CHECK(tape.eval(p).d == doctest::Approx(want).epsilon(1e-4));
+        }
+    }
+
+    SUBCASE("a stretched sphere is a capsule") {
+        // flat along the inserted section, and the cap is undistorted
+        CHECK(tape.eval(cf3(0, 0, 0)).d == doctest::Approx(-0.5f).epsilon(1e-4));
+        CHECK(tape.eval(cf3(0.9f, 0, 0)).d == doctest::Approx(-0.5f).epsilon(1e-4));
+        CHECK(tape.eval(cf3(1.5f, 0, 0)).d == doctest::Approx(0.0f).epsilon(1e-3));
+        CHECK(tape.eval(cf3(0, 0.5f, 0)).d == doctest::Approx(0.0f).epsilon(1e-3));
+        // it really is a capsule: the cap centre is at x = h
+        CHECK(tape.eval(cf3(2.0f, 0, 0)).d == doctest::Approx(0.5f).epsilon(1e-3));
+    }
+
+    SUBCASE("an origin-symmetric primitive stays exact") {
+        CHECK(tape.info.is_exact);
+        CHECK(tape.safe_step_scale() == doctest::Approx(1.0f));
+    }
+
+    SUBCASE("the bound contains the stretched geometry") {
+        const scene::Node* node = l.sdf->find(id);
+        REQUIRE(node != nullptr);
+        math::Aabb bound = scene::item_geometry_bound(*node, l);
+
+        clay_test::Lcg rng(555);
+        int outside = 0;
+        for (int i = 0; i < 20000; ++i) {
+            cfloat3 p = cf3(rng.range(-3, 3), rng.range(-2, 2), rng.range(-2, 2));
+            if (tape.eval(p).d > 0.0f) continue;
+            if (p.x < bound.min.x || p.x > bound.max.x || p.y < bound.min.y ||
+                p.y > bound.max.y || p.z < bound.min.z || p.z > bound.max.z)
+                ++outside;
+        }
+        CHECK(outside == 0);
+    }
+}
+
+TEST_CASE("elongating an asymmetric primitive drops exactness but not the step scale") {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::capped_cone(0.8f, 0.6f, 0.1f), cf3(0, 0, 0));
+    n.deformers.push_back(scene::Deformer::elongate(cf3(0.5f, 0, 0)));
+    l.sdf->insert(n);
+    scene::Tape tape = scene::compile_document(doc);
+
+    // The correction is derived about the origin, so it is only a bound here.
+    CHECK(tape.info.is_exact == false);
+    // But the map is non-expansive, so tracing is not slowed.
+    CHECK(tape.safe_step_scale() == doctest::Approx(1.0f));
+}

@@ -1490,3 +1490,35 @@ TEST_CASE("adds and removes record undo like every other edit") {
 
     clay_document_destroy(doc);
 }
+
+TEST_CASE("elongate reaches the C ABI") {
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "l", &layer) == CLAY_OK);
+
+    float r[1] = {0.5f};
+    clay_item* item = clay_item_create(CLAY_PRIM_SPHERE, r, 1);
+    REQUIRE(item != nullptr);
+    const float h[3] = {1.0f, 0.0f, 0.3f};
+    REQUIRE(clay_item_add_deformer(item, CLAY_DEFORM_ELONGATE, h, 3, 0) == CLAY_OK);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, item, &node) == CLAY_OK);
+    clay_item_destroy(item);
+
+    scene::Document twin;
+    scene::Layer& tl = twin.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::sphere(0.5f), cf3(0, 0, 0));
+    n.deformers.push_back(scene::Deformer::elongate(cf3(1.0f, 0.0f, 0.3f)));
+    tl.sdf->insert(n);
+    check_same_field(doc, twin);
+
+    SUBCASE("negative half-extents are refused") {
+        clay_item* bad = clay_item_create(CLAY_PRIM_SPHERE, r, 1);
+        REQUIRE(bad != nullptr);
+        const float negative[3] = {-1.0f, 0.0f, 0.0f};
+        CHECK(clay_item_add_deformer(bad, CLAY_DEFORM_ELONGATE, negative, 3, 0) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+        clay_item_destroy(bad);
+    }
+    clay_document_destroy(doc);
+}
