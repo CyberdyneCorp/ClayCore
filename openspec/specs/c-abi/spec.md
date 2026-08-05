@@ -180,3 +180,10 @@ The C API SHALL expose the same opt-in undo stack as the Python bindings: enable
 - **WHEN** undo is called on a document with nothing to undo
 - **THEN** the call reports that nothing was undone without returning a failure code
 
+### Requirement: wrap_around across the ABI
+`clay_deform` SHALL include a wrap enumerator taking `x0` and `x1`, so a C consumer composes the same wrapped item the Python bindings do.
+
+#### Scenario: Wrapping from C
+- **WHEN** a C consumer appends a wrap deformer to an item builder
+- **THEN** the document evaluates identically to the same item authored through the scene API
+
