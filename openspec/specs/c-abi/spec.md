@@ -241,3 +241,17 @@ The C API SHALL expose mask creation on a layer, painting, the region operations
 - **WHEN** a C consumer masks a region and stamps a brush across it
 - **THEN** the masked cells are unchanged, matching what `pyclay` produces for the same sequence
 
+### Requirement: Strokes across the ABI
+The C API SHALL expose a versioned preset descriptor, stroke resolution through the size-query pattern, and stroke application to a voxel grid or an SDF layer with an optional mask.
+
+#### Scenario: A stroke resolves identically through both bindings
+- **WHEN** a C consumer resolves a stroke with a given preset and seed
+- **THEN** the stamps match what `pyclay` produces for the same input
+
+### Requirement: The flags across the ABI
+The C API SHALL expose reading and setting a layer's ghost and lock flags, and SHALL return a typed error for an edit naming a protected layer.
+
+#### Scenario: Editing a protected layer is a typed error
+- **WHEN** a C consumer adds an item to a ghosted layer
+- **THEN** the call returns an error naming the protection and the document is unchanged
+

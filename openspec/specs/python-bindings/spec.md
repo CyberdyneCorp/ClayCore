@@ -292,3 +292,21 @@ The module SHALL expose a mask on a layer: enabling it, painting with the brush 
 - **WHEN** a script samples the mask at an (N, 3) array of positions
 - **THEN** it receives an (N,) array of values in [0, 1]
 
+### Requirement: Strokes from Python
+The module SHALL expose a preset, resolution of an (N, samples) array of stroke samples into stamps, and application of a stroke to a voxel grid or an SDF layer with an optional mask.
+
+#### Scenario: Resolving a stroke returns stamps
+- **WHEN** a script resolves a stroke from an array of samples
+- **THEN** it receives one entry per stamp, with position, radius and strength
+
+#### Scenario: A stroke applied to a layer is undoable
+- **WHEN** a script applies a stroke to an SDF layer with undo enabled and undoes it
+- **THEN** the document is restored exactly
+
+### Requirement: The flags from Python
+The module SHALL expose reading and setting a layer's ghost and lock flags, and SHALL raise on an edit to a protected layer rather than silently dropping it.
+
+#### Scenario: Editing a locked layer raises
+- **WHEN** a script adds an item to a locked layer
+- **THEN** an error is raised and the layer is unchanged
+

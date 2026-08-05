@@ -14,9 +14,9 @@ Last reconciled against `3dcoat_study/MISSING_FEATURES.md` and
 caught five items this file had dropped. Every ClayCore-owned row in their
 catalogue is now represented here or in the deferred list below.
 
-## Where the engine is (2026-08-05, v0.9.0)
+## Where the engine is (2026-08-05, v0.14.0)
 
-12 capabilities, 20 archived changes. Complete enough that the gaps below are
+13 capabilities, 24 archived changes. Complete enough that the gaps below are
 about *sculpting affordances*, not about the field engine:
 
 - 28 primitives + stroke, 14 combine ops, 5 blend profiles, grid/radial
@@ -28,8 +28,10 @@ about *sculpting affordances*, not about the field engine:
   strength, sculpt verbs smooth / inflate / flatten / pinch, fills, mirrored
   edits, flood select, greedy meshing, SDF↔voxel bridges, paintable mask
   fields gating every verb
+- Brush stroke engine: samples in, edit items out, with versioned presets;
+  paintable per-layer mask fields; ghosted and locked layers
 - Editing and opt-in undo over one command vocabulary shared with the file
-  format; 167 capabilities gated for binding parity; four backends verified on
+  format; 217 capabilities gated for binding parity; four backends verified on
   device; the Swift package verified in the iOS Simulator
 
 ### Corrections to the study's baseline
