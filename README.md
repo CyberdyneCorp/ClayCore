@@ -22,6 +22,7 @@ alone for tools, pipelines, CI, and research.
 - Architecture: `docs/05-claycore-library.md`.
 - Releasing: `docs/RELEASE.md`.
 - Examples: `examples/` — runnable scripts with committed renders.
+- Roadmap: `openspec/ROADMAP.md` — what is missing and in what order.
 
 ## Gallery
 
