@@ -11,6 +11,13 @@
 // passthrough), 'CAMB' camera bookmarks (passthrough). Unknown chunks are
 // skipped (backward-open); a higher major version refuses to load
 // (forward-refuse) with no partial document.
+//
+// Minor 1 packs a layer's ghost and lock flags into the byte its visibility
+// flag already occupied. A minor-0 document therefore loads with both off,
+// with no version handling; a minor-1 document read by a build that predates
+// the flags loses them, and a layer that is both hidden and ghosted reads as
+// visible there. That is the whole extent of the incompatibility, and it is
+// why the minor moved.
 
 #include <map>
 #include <optional>
@@ -26,7 +33,7 @@ namespace clay {
 namespace io {
 
 inline constexpr std::uint16_t kClaySpaceMajor = 1;
-inline constexpr std::uint16_t kClaySpaceMinor = 0;
+inline constexpr std::uint16_t kClaySpaceMinor = 1;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).

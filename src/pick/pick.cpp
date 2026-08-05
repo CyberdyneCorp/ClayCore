@@ -15,10 +15,22 @@ using kernel::cfloat3;
 // scene raycast + attribution
 // ---------------------------------------------------------------------------
 
+scene::Tape pickable_tape(const scene::Document& doc, const scene::CullRegion* cull) {
+    bool any_ghost = false;
+    for (const scene::Layer& l : doc.layers) any_ghost = any_ghost || l.ghost;
+    if (!any_ghost) return scene::compile_document(doc, cull);
+    // A shallow copy: Layer holds its content by shared_ptr, so this shares
+    // the edit lists and only the flags differ. Cheap next to compiling.
+    scene::Document without_ghosts = doc;
+    for (scene::Layer& l : without_ghosts.layers)
+        if (l.ghost) l.visible = false;
+    return scene::compile_document(without_ghosts, cull);
+}
+
 SceneHit raycast_scene(const scene::Document& doc, const math::Ray& ray,
                        const RaycastOptions& options) {
     SceneHit hit;
-    scene::Tape tape = scene::compile_document(doc);
+    scene::Tape tape = pickable_tape(doc);
     if (tape.empty()) return hit;
 
     float tmin = options.tmin, tmax = options.tmax;
@@ -86,7 +98,7 @@ void attribute(const scene::Document& doc, cfloat3 position, scene::LayerId* lay
     *item = scene::kNoNode;
     float best_layer_d = 3.4e38f;
     for (const scene::Layer& l : doc.layers) {
-        if (!l.visible || l.kind != scene::LayerKind::Sdf || !l.sdf) continue;
+        if (!l.visible || l.ghost || l.kind != scene::LayerKind::Sdf || !l.sdf) continue;
         scene::Tape t = scene::compile_layer(l);
         if (t.empty()) continue;
         float d = kernel::cabs(t.eval(position).d);

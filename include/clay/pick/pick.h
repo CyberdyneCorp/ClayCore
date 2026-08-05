@@ -35,6 +35,17 @@ struct SceneHit {
 // Analytic raycast against the document's compiled tape, with hit
 // attribution to the closest layer and edit item (by field proximity at the
 // hit point; subtract items attribute their carved surfaces).
+// The tape every picking path should evaluate: the document, with ghosted
+// layers taken out. Ghost means "show me this but stay out of my way", so a
+// ghosted layer is still evaluated and still drawn — it is only unpickable and
+// unedited. Locked layers stay in: locking protects against edits, not
+// against selection.
+//
+// Exposed rather than kept private because a host doing its own ray marching
+// or snapping needs the same tape, and picking that disagreed with itself
+// depending on which entry point ran would be worse than no ghosting at all.
+scene::Tape pickable_tape(const scene::Document& doc, const scene::CullRegion* cull = nullptr);
+
 SceneHit raycast_scene(const scene::Document& doc, const math::Ray& ray,
                        const RaycastOptions& options = {});
 

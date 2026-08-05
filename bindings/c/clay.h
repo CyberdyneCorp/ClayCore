@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 13
+#define CLAY_ABI_MINOR 14
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -314,6 +314,21 @@ clay_result clay_document_move_layer(clay_document* doc, clay_layer_id layer, in
  * the original field exactly. */
 clay_result clay_document_set_layer_visible(clay_document* doc, clay_layer_id layer,
                                             int32_t visible);
+/* Protection, both off by default. A GHOSTED layer is still evaluated but is
+ * never picked and never edited: "show me this for reference, but stay out of
+ * my way". A LOCKED layer is still picked but never edited: "this is
+ * finished". Neither changes what the document evaluates to — how a host
+ * DRAWS a ghost is its own business.
+ *
+ * Every edit naming a protected layer returns CLAY_ERROR_INVALID_ARGUMENT and
+ * leaves the document unchanged. It is refused rather than silently dropped: a
+ * host that greys the layer out wants to know, and one that does not must not
+ * quietly discard the artist's work. This call itself is always allowed —
+ * locking would otherwise be irreversible. */
+clay_result clay_document_set_layer_protection(clay_document* doc, clay_layer_id layer,
+                                               int32_t ghost, int32_t locked);
+clay_result clay_document_layer_protection(const clay_document* doc, clay_layer_id layer,
+                                           int32_t* out_ghost, int32_t* out_locked);
 clay_result clay_document_set_layer_transform(clay_document* doc, clay_layer_id layer,
                                               const float position[3],
                                               const float rotation_axis[3],

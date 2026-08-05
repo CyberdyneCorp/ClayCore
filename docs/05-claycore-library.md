@@ -285,6 +285,14 @@ blocks.apply_stroke(samples, brush, blocks.palette_add("#cc7744"))
 body.apply_stroke(samples, brush, clay.Sphere(r=1.0), mask=freeze)  # one undo step
 clay.StrokePreset.deserialize(brush.serialize())   # versioned: newer is refused
 
+# protection: ghost is "show me this but stay out of my way" (still evaluated,
+# never picked, never edited); lock is "this is finished" (still picked).
+# Neither changes what the document evaluates to, and an edit to a protected
+# layer raises rather than being silently dropped.
+doc.set_layer_protection(reference.id, ghost=True)
+doc.set_layer_protection(body.id, locked=True)
+doc.layer_protection(body.id)              # -> (ghost, locked)
+
 blocks.rasterize(doc)                      # SDF -> voxels
 vox_mesh = blocks.mesh()                   # greedy meshing
 

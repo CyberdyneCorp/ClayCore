@@ -957,6 +957,17 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     // With a stack attached the edit is applied AND its inverse recorded, so
     // no reachable edit can escape undo.
+    // apply() says no for two different reasons, and a caller needs to tell
+    // them apart: a missing layer is a bug in the caller's bookkeeping, while
+    // a protected one is a state the artist chose and a UI can explain.
+    scene::LayerId target = scene::edited_layer(cmd);
+    if (target != 0) {
+        const scene::Layer* l = doc->doc.document.find_layer(target);
+        if (l && l->protected_from_edits())
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        std::string("layer ") + std::to_string(target) + " is " +
+                            (l->ghost ? "ghosted" : "locked") + " and takes no edits");
+    }
     bool ok = doc->undo ? doc->undo->perform(doc->doc.document, cmd)
                         : static_cast<bool>(scene::apply(doc->doc.document, cmd));
     if (!ok) return fail(CLAY_ERROR_NOT_FOUND, what);
@@ -1198,6 +1209,23 @@ clay_result clay_document_set_layer_visible(clay_document* doc, clay_layer_id la
                                             int32_t visible) {
     return apply_edit(doc, scene::Command{scene::SetLayerVisibleCmd{layer, visible != 0}},
                       "layer not found");
+}
+
+clay_result clay_document_set_layer_protection(clay_document* doc, clay_layer_id layer,
+                                               int32_t ghost, int32_t locked) {
+    return apply_edit(
+        doc, scene::Command{scene::SetLayerProtectionCmd{layer, ghost != 0, locked != 0}},
+        "layer not found");
+}
+
+clay_result clay_document_layer_protection(const clay_document* doc, clay_layer_id layer,
+                                           int32_t* out_ghost, int32_t* out_locked) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    if (out_ghost) *out_ghost = l->ghost ? 1 : 0;
+    if (out_locked) *out_locked = l->locked ? 1 : 0;
+    return CLAY_OK;
 }
 
 clay_result clay_document_set_layer_transform(clay_document* doc, clay_layer_id layer,
@@ -1588,7 +1616,7 @@ clay_result clay_raycast(const clay_document* doc, const float origin[3], const 
     if (!doc || !origin || !dir || !out_hit)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
     eval::Backend* b = eval::Registry::instance().find("cpu");
-    scene::Tape tape = scene::compile_document(doc->doc.document);
+    scene::Tape tape = pick::pickable_tape(doc->doc.document);
     float ray[6] = {origin[0], origin[1], origin[2], dir[0], dir[1], dir[2]};
     eval::RayQuery q{ray, 1, 0.0f, 1e6f, 1e-4f, 256};
     eval::RayHit hit;
@@ -1611,7 +1639,7 @@ clay_result clay_raycast_many(const clay_document* doc, const float* rays_origin
     clay_result r = normalize_rays(rays_origin_dir, count, &rays);
     if (r != CLAY_OK) return r;
     eval::Backend* b = eval::Registry::instance().find("cpu");
-    scene::Tape tape = scene::compile_document(doc->doc.document);
+    scene::Tape tape = pick::pickable_tape(doc->doc.document);
     std::vector<eval::RayHit> hits(count ? count : 1);
     eval::RayQuery q{rays.data(), count, 0.0f, 1e6f, 1e-4f, 256};
     if (b->raycast(tape, q, hits.data()) != eval::Status::Ok)
@@ -1647,7 +1675,7 @@ clay_result clay_snap_to_surface(const clay_document* doc, const float* points_x
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or points");
     clay_result r = check_batch("points", count);
     if (r != CLAY_OK) return r;
-    scene::Tape tape = scene::compile_document(doc->doc.document);
+    scene::Tape tape = pick::pickable_tape(doc->doc.document);
     for (size_t i = 0; i < count; ++i) {
         kernel::cfloat3 p =
             kernel::cf3(points_xyz[i * 3], points_xyz[i * 3 + 1], points_xyz[i * 3 + 2]);

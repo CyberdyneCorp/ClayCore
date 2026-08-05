@@ -3,6 +3,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cmath>
 
 #include "clay/brush/stroke.h"
@@ -121,15 +122,17 @@ TEST_CASE("stroke: jitter is reproducible and seed-dependent") {
         CHECK(a[i].radius == doctest::Approx(b[i].radius));
     }
     // It really is jittering: a straight run along +x leaves the axis.
-    CHECK(std::any_of(a.begin(), a.end(), [](const Stamp& s) { return std::abs(s.position.y) > 0; }));
+    bool moved_off_axis = false;
+    for (const Stamp& s : a) moved_off_axis = moved_off_axis || std::abs(s.position.y) > 0.0f;
+    CHECK(moved_off_axis);
 
     p.seed = 12;
     std::vector<Stamp> c = resolve_stroke(path, p);
     REQUIRE(c.size() == a.size());
-    CHECK(std::any_of(c.begin(), c.end(), [&](const Stamp& s) {
-        std::size_t i = static_cast<std::size_t>(&s - &c[0]);
-        return s.position.y != a[i].position.y;
-    }));
+    bool differs = false;
+    for (std::size_t i = 0; i < c.size(); ++i)
+        differs = differs || c[i].position.y != a[i].position.y;
+    CHECK(differs);
 }
 
 TEST_CASE("stroke: steady stroke smooths a shaky path") {

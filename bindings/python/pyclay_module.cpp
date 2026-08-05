@@ -329,6 +329,17 @@ using UndoRef = std::shared_ptr<scene::UndoStack>;
 // the document untouched.
 void apply_or_throw(scene::Document& doc, const scene::Command& cmd, const char* what,
                    const UndoRef* undo = nullptr) {
+    // apply() says no for two different reasons. A protected layer is a state
+    // the artist chose and deserves its own message; a missing id is a bug.
+    scene::LayerId target = scene::edited_layer(cmd);
+    if (target != 0) {
+        const scene::Layer* l = doc.find_layer(target);
+        if (l && l->protected_from_edits())
+            throw std::invalid_argument(std::string(what) + ": layer " +
+                                        std::to_string(target) + " is " +
+                                        (l->ghost ? "ghosted" : "locked") +
+                                        " and takes no edits");
+    }
     // With a stack attached the edit is applied AND its inverse recorded, so
     // no reachable edit can escape undo. Without one it is a plain apply.
     bool ok = (undo && *undo) ? (*undo)->perform(doc, cmd) : static_cast<bool>(scene::apply(doc, cmd));
@@ -1647,7 +1658,7 @@ NB_MODULE(pyclay, m) {
         .def("raycast_many",
              [](const PyDocument& d, nb::handle rays_in) {
                  RaysView rays = to_rays(rays_in);
-                 scene::Tape tape = scene::compile_document(d.doc->document);
+                 scene::Tape tape = pick::pickable_tape(d.doc->document);
                  eval::Backend* cpu = find_backend("cpu");
                  std::vector<eval::RayHit> hits(rays.count ? rays.count : 1);
                  eval::RayQuery q{rays.data.data(), rays.count, 0.0f, 1e6f, 1e-4f, 256};
@@ -1687,7 +1698,7 @@ NB_MODULE(pyclay, m) {
         .def("snap_to_surface",
              [](const PyDocument& d, nb::handle points) {
                  PointsView pts = to_points(points);
-                 scene::Tape tape = scene::compile_document(d.doc->document);
+                 scene::Tape tape = pick::pickable_tape(d.doc->document);
                  const std::size_t n = pts.count;
                  nb::module_ np = nb::module_::import_("numpy");
                  nb::object pos_arr =
@@ -1751,6 +1762,25 @@ NB_MODULE(pyclay, m) {
              },
              "layer"_a, "visible"_a,
              "Show or hide a layer; a hidden layer contributes nothing to the field")
+        .def("set_layer_protection",
+             [](PyDocument& d, scene::LayerId layer, bool ghost, bool locked) {
+                 apply_or_throw(
+                     d.doc->document,
+                     scene::Command{scene::SetLayerProtectionCmd{layer, ghost, locked}},
+                     "set_layer_protection", d.undo.get());
+             },
+             "layer"_a, "ghost"_a = false, "locked"_a = false,
+             "Protect a layer. A ghosted layer is still evaluated but is never "
+             "picked and never edited; a locked one is still picked but never "
+             "edited. Neither changes what the document evaluates to, and an "
+             "edit to a protected layer raises rather than being dropped.")
+        .def("layer_protection",
+             [](const PyDocument& d, scene::LayerId layer) {
+                 const scene::Layer* l = d.doc->document.find_layer(layer);
+                 if (!l) throw std::invalid_argument("no layer with that id in this document");
+                 return nb::make_tuple(l->ghost, l->locked);
+             },
+             "layer"_a, "A layer's (ghost, locked) flags")
         .def("set_layer_transform",
              [](PyDocument& d, scene::LayerId layer, nb::handle position,
                 nb::handle rotation_axis_angle, nb::handle scale) {

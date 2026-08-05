@@ -160,6 +160,19 @@ var enabled: Int32 = 0, undoDepth = 0, redoDepth = 0
 check(clay_document_undo_state(doc, &enabled, &undoDepth, &redoDepth) == CLAY_OK
         && enabled == 1 && redoDepth == 1, "undo state reports enabled with a redo available")
 
+// -- layer protection --------------------------------------------------------
+
+var isGhost: Int32 = 1
+var isLocked: Int32 = 1
+check(clay_document_layer_protection(doc, layer, &isGhost, &isLocked) == CLAY_OK
+      && isGhost == 0 && isLocked == 0, "layers start unprotected")
+
+check(clay_document_set_layer_protection(doc, layer, 0, 1) == CLAY_OK, "locked the layer")
+check(clay_layer_add_item(doc, layer, deformed, nil) == CLAY_ERROR_INVALID_ARGUMENT,
+      "a locked layer refuses an edit rather than dropping it")
+check(clay_document_set_layer_protection(doc, layer, 0, 0) == CLAY_OK,
+      "unlocking works, so locking is not permanent")
+
 // -- voxel sculpting ---------------------------------------------------------
 
 var voxelLayer: clay_layer_id = 0

@@ -1891,3 +1891,74 @@ def test_stroke_preset_rejects_a_bad_radius():
         clay.StrokePreset(radius=0.0)
     with pytest.raises(ValueError):
         clay.StrokePreset(spacing=0.0)
+
+
+# -- ghosted and locked layers (add-layer-ghost-lock) ------------------------
+
+
+def _two_layers():
+    doc = clay.Document()
+    front = doc.add_sdf_layer("front")
+    front.add(clay.Sphere(r=0.5, position=(0, 0, -2)))
+    back = doc.add_sdf_layer("back")
+    back.add(clay.Sphere(r=0.5, position=(0, 0, 2)))
+    return doc, front, back
+
+
+def test_protection_defaults_to_off_and_round_trips(tmp_path):
+    doc, front, back = _two_layers()
+    assert doc.layer_protection(front.id) == (False, False)
+
+    doc.set_layer_protection(front.id, ghost=True)
+    doc.set_layer_protection(back.id, locked=True)
+    assert doc.layer_protection(front.id) == (True, False)
+    assert doc.layer_protection(back.id) == (False, True)
+
+    path = tmp_path / "protected.clayspace"
+    doc.save(str(path))
+    reloaded = clay.load(str(path))
+    assert reloaded.layer_protection(front.id) == (True, False)
+    assert reloaded.layer_protection(back.id) == (False, True)
+
+
+def test_protection_does_not_change_the_field():
+    doc, front, _back = _two_layers()
+    probes = np.random.default_rng(3).uniform(-3, 3, size=(512, 3)).astype(np.float32)
+    before = doc.eval(probes)
+    doc.set_layer_protection(front.id, ghost=True, locked=True)
+    assert np.array_equal(doc.eval(probes), before)
+
+
+def test_a_ghost_does_not_steal_the_pick():
+    doc, front, back = _two_layers()
+    hit = doc.raycast((0, 0, -6), (0, 0, 1))
+    assert hit["layer"] == front.id
+
+    doc.set_layer_protection(front.id, ghost=True)
+    assert doc.raycast((0, 0, -6), (0, 0, 1))["layer"] == back.id
+
+    # Locking protects against edits, not against selection.
+    doc.set_layer_protection(front.id, ghost=False, locked=True)
+    assert doc.raycast((0, 0, -6), (0, 0, 1))["layer"] == front.id
+
+
+def test_editing_a_protected_layer_raises():
+    doc, front, _back = _two_layers()
+    doc.set_layer_protection(front.id, locked=True)
+    with pytest.raises(ValueError, match="locked"):
+        front.add(clay.Sphere(r=0.2))
+    with pytest.raises(ValueError, match="locked"):
+        doc.set_layer_visible(front.id, False)
+
+    # ...and it is reversible, or locking would be permanent.
+    doc.set_layer_protection(front.id, locked=False)
+    front.add(clay.Sphere(r=0.2))
+
+
+def test_protection_is_undoable():
+    doc, front, _back = _two_layers()
+    doc.enable_undo()
+    doc.set_layer_protection(front.id, ghost=True)
+    assert doc.layer_protection(front.id) == (True, False)
+    doc.undo()
+    assert doc.layer_protection(front.id) == (False, False)

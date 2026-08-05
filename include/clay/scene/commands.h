@@ -74,6 +74,13 @@ struct SetLayerVisibleCmd {
     LayerId id = 0;
     bool visible = true;
 };
+// Both flags in one command: they are the same concept at two strengths, and
+// a UI toggling one usually shows the other beside it.
+struct SetLayerProtectionCmd {
+    LayerId id = 0;
+    bool ghost = false;
+    bool locked = false;
+};
 struct SetLayerTransformCmd {
     LayerId id = 0;
     math::Transform xform;
@@ -82,10 +89,19 @@ struct SetLayerTransformCmd {
 using Command =
     std::variant<AddNodeCmd, RemoveNodeCmd, MoveNodeCmd, SetTransformCmd, SetPrimCmd,
                  SetColorCmd, SetOpBlendCmd, AppendStrokeCmd, TrimStrokeCmd, AddLayerCmd,
-                 RemoveLayerCmd, SetLayerVisibleCmd, SetLayerTransformCmd>;
+                 RemoveLayerCmd, SetLayerVisibleCmd, SetLayerTransformCmd,
+                 SetLayerProtectionCmd>;
+
+// The layer a command would edit, or 0 for one that edits no existing layer
+// (adding a layer creates its target; changing protection is how a protected
+// layer is released). Exposed because apply() returns nullopt for both "no
+// such layer" and "that layer is protected", and a binding has to tell a
+// caller which of the two it hit.
+LayerId edited_layer(const Command& cmd);
 
 // Apply a command; returns its inverse, or nullopt if the target does not
-// exist (document unchanged in that case).
+// exist or is protected (ghosted or locked). The document is unchanged in
+// either case.
 std::optional<Command> apply(Document& doc, const Command& cmd);
 
 // Binary serialization (the same encoding the document format's command

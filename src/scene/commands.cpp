@@ -126,6 +126,15 @@ std::optional<Command> apply_one(Document& doc, const SetLayerVisibleCmd& c) {
     return Command{inverse};
 }
 
+std::optional<Command> apply_one(Document& doc, const SetLayerProtectionCmd& c) {
+    Layer* l = doc.find_layer(c.id);
+    if (!l) return std::nullopt;
+    SetLayerProtectionCmd inverse{c.id, l->ghost, l->locked};
+    l->ghost = c.ghost;
+    l->locked = c.locked;
+    return Command{inverse};
+}
+
 std::optional<Command> apply_one(Document& doc, const SetLayerTransformCmd& c) {
     Layer* l = doc.find_layer(c.id);
     if (!l) return std::nullopt;
@@ -136,7 +145,39 @@ std::optional<Command> apply_one(Document& doc, const SetLayerTransformCmd& c) {
 
 }  // namespace
 
+namespace {
+// Adding a layer creates its target, and changing protection is how a
+// protected layer is released — locking would otherwise be irreversible.
+constexpr LayerId kNoLayer = 0;
+}  // namespace
+
+LayerId edited_layer(const Command& cmd) {
+    return std::visit(
+        [](const auto& c) -> LayerId {
+            using C = std::decay_t<decltype(c)>;
+            if constexpr (std::is_same_v<C, AddLayerCmd> ||
+                          std::is_same_v<C, SetLayerProtectionCmd>)
+                return kNoLayer;
+            else if constexpr (std::is_same_v<C, RemoveLayerCmd> ||
+                               std::is_same_v<C, SetLayerVisibleCmd> ||
+                               std::is_same_v<C, SetLayerTransformCmd>)
+                return c.id;
+            else
+                return c.layer;
+        },
+        cmd);
+}
+
 std::optional<Command> apply(Document& doc, const Command& cmd) {
+    // Refused, not silently dropped and not silently applied: a host that
+    // greys a protected layer out wants to know its edit was rejected, and one
+    // that does not must not quietly discard the artist's work. nullopt is
+    // this vocabulary's "no", and it already means the document is unchanged.
+    LayerId target = edited_layer(cmd);
+    if (target != kNoLayer) {
+        const Layer* l = doc.find_layer(target);
+        if (l && l->protected_from_edits()) return std::nullopt;
+    }
     return std::visit([&](const auto& c) { return apply_one(doc, c); }, cmd);
 }
 
@@ -355,7 +396,14 @@ void write_layer(Writer& w, const Layer& l) {
     w.bytes(l.name.data(), l.name.size());
     w.pod(l.kind);
     w.pod(l.xform);
-    w.pod(l.visible);
+    // Packed into the byte the visibility flag already occupied, rather than
+    // appended: an older document has 0 or 1 there, so it loads with both
+    // protection flags off with no version handling at all. The cost is the
+    // other direction — a pre-0.14 build reading a new file sees no
+    // protection, and a layer that is both hidden AND ghosted reads as
+    // visible there. That is why kClaySpaceMinor moves with this.
+    w.pod(static_cast<std::uint8_t>((l.visible ? 1u : 0u) | (l.ghost ? 2u : 0u) |
+                                    (l.locked ? 4u : 0u)));
     w.pod(l.resolution);
     w.pod(l.mirror_axes);
     w.pod(l.mirror_k);
@@ -376,7 +424,10 @@ Layer read_layer(Reader& r) {
     r.bytes(l.name.data(), ns);
     l.kind = r.pod<LayerKind>();
     l.xform = r.pod<math::Transform>();
-    l.visible = r.pod<bool>();
+    std::uint8_t flags = r.pod<std::uint8_t>();
+    l.visible = (flags & 1u) != 0;
+    l.ghost = (flags & 2u) != 0;
+    l.locked = (flags & 4u) != 0;
     l.resolution = r.pod<int>();
     l.mirror_axes = r.pod<std::uint8_t>();
     l.mirror_k = r.pod<float>();
@@ -398,6 +449,7 @@ enum class Tag : std::uint8_t {
     RemoveLayer,
     SetLayerVisible,
     SetLayerTransform,
+    SetLayerProtection,
 };
 
 struct SerializeVisitor {
@@ -474,6 +526,12 @@ struct SerializeVisitor {
         w.pod(Tag::SetLayerVisible);
         w.pod(c.id);
         w.pod(c.visible);
+    }
+    void operator()(const SetLayerProtectionCmd& c) {
+        w.pod(Tag::SetLayerProtection);
+        w.pod(c.id);
+        w.pod(c.ghost);
+        w.pod(c.locked);
     }
     void operator()(const SetLayerTransformCmd& c) {
         w.pod(Tag::SetLayerTransform);
@@ -584,6 +642,14 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
             SetLayerVisibleCmd c;
             c.id = r.pod<LayerId>();
             c.visible = r.pod<bool>();
+            cmd = c;
+            break;
+        }
+        case Tag::SetLayerProtection: {
+            SetLayerProtectionCmd c;
+            c.id = r.pod<LayerId>();
+            c.ghost = r.pod<bool>();
+            c.locked = r.pod<bool>();
             cmd = c;
             break;
         }

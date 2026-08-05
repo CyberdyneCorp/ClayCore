@@ -157,6 +157,15 @@ struct Layer {
     LayerKind kind = LayerKind::Sdf;
     math::Transform xform;
     bool visible = true;
+    // Protection, both off by default so a document that never sets them
+    // behaves exactly as it did before they existed. Ghost is "show me this
+    // but stay out of my way": still evaluated, never picked, never edited.
+    // Locked is "this is finished": still picked, never edited. Neither
+    // changes what the layer evaluates to — how a host DRAWS a ghost is its
+    // own business, and this engine is headless.
+    bool ghost = false;
+    bool locked = false;
+    bool protected_from_edits() const { return ghost || locked; }
     int resolution = 256;
     std::uint8_t mirror_axes = 0;  // kMirrorX|Y|Z — item-level mirror flag folds here
     float mirror_k = 0.0f;         // Mirror Blend seam smoothing

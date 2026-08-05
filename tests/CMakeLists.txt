@@ -30,6 +30,7 @@ add_executable(clay_unit_tests
   unit/test_c_voxel.cpp
   unit/test_c_mask.cpp
   unit/test_c_stroke.cpp
+  unit/test_layer_protection.cpp
   unit/test_c_pick_eval.cpp)
 
 target_link_libraries(clay_unit_tests PRIVATE clay::core doctest::doctest)
