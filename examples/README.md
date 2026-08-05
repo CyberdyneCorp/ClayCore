@@ -217,6 +217,31 @@ Masking gates edits where they are *authored*. Voxel edits consume it per cell
 at edit time; it does not retroactively protect a region from SDF items already
 in the edit list.
 
+### 12 — strokes
+
+A drag becomes stamps, and a stamp becomes an ordinary edit. Resolving is pure —
+samples and a preset in, stamps out, no document touched — and applying produces
+voxel brush stamps or nodes in a layer's edit list. Because a stroked edit is an
+*ordinary* edit, undo, coalescing, `.clayspace` serialization and picking apply
+to it without knowing this engine exists.
+
+![stroke presets](output/12_stroke_presets.png)
+
+Steady stroke ("lazy mouse") lets the emission point trail the cursor. Seen from
+above, the wobble drops from 0.050 to 0.011 across these three.
+
+![steady stroke](output/12_stroke_steady.png)
+
+One stroke on an SDF layer: 67 nodes, and exactly one undo step.
+
+![stroked sdf](output/12_stroke_sdf.png)
+
+The example asserts three things rather than showing them: spacing follows the
+path and not the sample rate, jitter is a hash so a preset reproduces its stroke
+exactly, and a preset from a newer schema version is refused rather than
+reinterpreted. It also shows what freeze means for a declarative edit — a stamp
+in a masked region produces no item at all.
+
 ## Notes
 
 - **Committed models are budgeted.** `_render.save_model` fails above 400 KiB

@@ -240,6 +240,96 @@ check(clay_mask_destroy(mask) != CLAY_OK, "destroying a borrowed mask handle is 
 // below compares against whatever it looks like at save time.
 check(clay_mask_painted_count(mask, &painted) == CLAY_OK, "read the mask back")
 
+// -- brush strokes -----------------------------------------------------------
+
+var preset = clay_stroke_preset()
+check(clay_stroke_preset_defaults(&preset) == CLAY_OK, "preset defaults")
+preset.radius = 0.15
+preset.spacing = 0.5
+
+// (N, 5) packed: position, pressure, tilt.
+var strokeSamples: [Float] = []
+for i in 0...30 {
+    strokeSamples += [-0.75 + Float(i) * 0.05, 0.6, 0, 1, 0]
+}
+let strokeCount = strokeSamples.count / 5
+
+var stampCount = 0
+check(clay_stroke_resolve(&strokeSamples, strokeCount, &preset, nil, &stampCount) == CLAY_OK
+      && stampCount > 3, "resolved \(stampCount) stamps")
+var stamps = [clay_stamp](repeating: clay_stamp(), count: stampCount)
+var stampCapacity = stampCount
+check(clay_stroke_resolve(&strokeSamples, strokeCount, &preset, &stamps, &stampCapacity) == CLAY_OK,
+      "read the stamps back")
+check(stamps[0].radius > 0 && stamps[stampCount - 1].along > 0.9, "stamps carry radius and along")
+
+var presetBytes = 0
+check(clay_stroke_preset_serialize(&preset, nil, &presetBytes) == CLAY_OK && presetBytes > 0,
+      "preset serializes to \(presetBytes) bytes")
+var presetBuffer = [UInt8](repeating: 0, count: presetBytes)
+var presetCapacity = presetBytes
+check(clay_stroke_preset_serialize(&preset, &presetBuffer, &presetCapacity) == CLAY_OK,
+      "wrote the preset")
+var presetBack = clay_stroke_preset()
+check(clay_stroke_preset_deserialize(&presetBuffer, presetBytes, &presetBack) == CLAY_OK
+      && presetBack.radius == preset.radius, "preset round trip")
+presetBuffer[0] = UInt8(clay_stroke_preset_version() + 1)
+check(clay_stroke_preset_deserialize(&presetBuffer, presetBytes, &presetBack) != CLAY_OK,
+      "a newer preset schema is refused rather than guessed at")
+
+// A fresh template: the builder used earlier was destroyed once its edit was
+// added, and a destroyed handle is not a stamp template.
+var stampParams: [Float] = [1.0]
+guard let stampItem = clay_item_create(Int32(CLAY_PRIM_SPHERE.rawValue), &stampParams, 1) else {
+    check(false, "created a stamp template")
+    exit(1)
+}
+check(clay_item_set_blend(stampItem, Int32(CLAY_BLEND_QUADRATIC.rawValue), 0.1) == CLAY_OK,
+      "stamp template blends")
+
+var strokeNodeCount = 0
+let strokeResult = clay_layer_apply_stroke(doc, layer, &strokeSamples, strokeCount, &preset,
+                                           stampItem, nil, nil, &strokeNodeCount)
+check(strokeResult == CLAY_OK && strokeNodeCount == stampCount,
+      "stroked \(strokeNodeCount) of \(stampCount) stamps onto the layer as edits")
+clay_item_destroy(stampItem)  // the nodes hold copies, not the builder
+var afterStroke: Int32 = 0
+var strokeUndo = 0
+var strokeRedo = 0
+check(clay_document_undo_state(doc, &afterStroke, &strokeUndo, &strokeRedo) == CLAY_OK,
+      "read undo state")
+check(clay_document_undo(doc, &undone) == CLAY_OK && undone == 1,
+      "the whole stroke undid as one step")
+
+var strokeApplied = 0
+check(clay_voxel_apply_stroke(grid, &strokeSamples, strokeCount, &preset, index,
+                              Int32(CLAY_BRUSH_SHAPE_SPHERE.rawValue),
+                              Int32(CLAY_BRUSH_FALLOFF_SMOOTH.rawValue), nil,
+                              &strokeApplied) == CLAY_OK && strokeApplied == stampCount,
+      "stroked \(strokeApplied) stamps into the voxel layer")
+// A caller-owned mask painted over the stroke's own path, so the freeze is
+// something this check can actually assert rather than hope for.
+let freeze = clay_mask_create(0.05)
+check(freeze != nil, "created a mask")
+for i in 0...30 {
+    var point: [Float] = [-0.75 + Float(i) * 0.05, 0.6, 0]
+    var stamped: Float = 0
+    _ = clay_mask_sample(freeze, &point, &stamped)
+    var frozenBrush = clay_brush_params()
+    frozenBrush.struct_size = UInt32(MemoryLayout<clay_brush_params>.size)
+    frozenBrush.size = 13
+    frozenBrush.shape = Int32(CLAY_BRUSH_SHAPE_SPHERE.rawValue)
+    frozenBrush.falloff = Int32(CLAY_BRUSH_FALLOFF_CONSTANT.rawValue)
+    frozenBrush.strength = 1.0
+    _ = clay_mask_paint(freeze, &point, &frozenBrush, 1.0)
+}
+check(clay_voxel_apply_stroke(grid, &strokeSamples, strokeCount, &preset, index,
+                              Int32(CLAY_BRUSH_SHAPE_SPHERE.rawValue),
+                              Int32(CLAY_BRUSH_FALLOFF_SMOOTH.rawValue), freeze,
+                              &strokeApplied) == CLAY_OK && strokeApplied == 0,
+      "a mask over the path froze the whole stroke (\(stampCount) stamps dropped)")
+check(clay_mask_destroy(freeze) == CLAY_OK, "destroyed the caller-owned mask")
+
 // -- meshing -----------------------------------------------------------------
 
 var meshParams = clay_mesh_params()

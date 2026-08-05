@@ -275,6 +275,16 @@ freeze.paint((0.5, 0, 0), size=9, falloff="smooth")     # target=1 masks, 0 eras
 freeze.expand(1); freeze.smooth(1); freeze.invert()     # region operations
 blocks.erase_brush((0, 0, 0), 15, mask=freeze)          # masked cells untouched
 freeze.sample_many(points)                              # (N,3) -> (N,) in [0,1]
+# strokes: a drag becomes stamps, and a stamp becomes an ordinary edit —
+# which is what gives a brush undo, coalescing and serialization for free
+brush = clay.StrokePreset(radius=0.15, spacing=0.25, pressure_size=1.0,
+                          taper_start=0.1, taper_end=0.1, steady=0.4, seed=7)
+samples = np.array([[x, y, z, pressure] for ...], np.float32)   # (N,3/4/5)
+brush.resolve(samples)                     # pure: positions/radii/strengths
+blocks.apply_stroke(samples, brush, blocks.palette_add("#cc7744"))
+body.apply_stroke(samples, brush, clay.Sphere(r=1.0), mask=freeze)  # one undo step
+clay.StrokePreset.deserialize(brush.serialize())   # versioned: newer is refused
+
 blocks.rasterize(doc)                      # SDF -> voxels
 vox_mesh = blocks.mesh()                   # greedy meshing
 

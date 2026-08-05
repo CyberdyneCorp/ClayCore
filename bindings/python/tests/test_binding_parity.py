@@ -21,8 +21,8 @@ parity = pytest.importorskip("check_binding_parity")
 
 @pytest.fixture(scope="module")
 def declared():
-    functions, enumerators = parity.c_surface()
-    return functions | enumerators
+    functions, enumerators, struct_fields = parity.c_surface()
+    return functions | enumerators | struct_fields
 
 
 def test_the_gate_passes_on_the_module_under_test(capsys):

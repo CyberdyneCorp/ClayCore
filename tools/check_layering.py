@@ -24,6 +24,7 @@ ALLOWED = {
     "brick": {"kernel", "math", "scene", "eval"},
     "voxel": {"kernel", "math", "scene", "mesh"},  # mesh_data.h is a leaf data type
     "mesh": {"kernel", "math", "scene", "eval", "brick"},
+    "brush": {"kernel", "math", "scene", "voxel"},
     "pick": {"kernel", "math", "scene", "eval", "brick", "voxel"},
     "io": {"kernel", "math", "scene", "eval", "brick", "voxel", "mesh"},
 }

@@ -26,6 +26,7 @@
 #include "clay/scene/commands.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
+#include "clay/brush/stroke.h"
 #include "clay/voxel/mask.h"
 #include "clay/version.h"
 
@@ -243,6 +244,33 @@ void save_mesh_any(const mesh::Mesh& m, const std::string& path) {
     if (ext == "glb") return check_io(io::save_glb_file(m, path));
     throw std::invalid_argument("unsupported mesh extension '." + ext +
                                 "' (supported: .obj, .ply, .fbx, .glb)");
+}
+
+// -- stroke engine helpers -----------------------------------------------------
+
+// (N, 3) positions, or (N, 4) with pressure, or (N, 5) with pressure and
+// tilt. Anything a stylus reports, without three separate array arguments.
+std::vector<brush::StrokeSample> to_stroke_samples(nb::handle obj) {
+    nb::module_ np = nb::module_::import_("numpy");
+    nb::object arr = np.attr("ascontiguousarray")(obj, "dtype"_a = "float32");
+    nb::ndarray<const float, nb::ndim<2>, nb::c_contig, nb::device::cpu> view;
+    try {
+        view = nb::cast<decltype(view)>(arr);
+    } catch (const std::exception&) {
+        throw std::invalid_argument("samples must be an (N, 3), (N, 4) or (N, 5) array");
+    }
+    std::size_t width = view.shape(1);
+    if (width < 3 || width > 5)
+        throw std::invalid_argument("samples must be an (N, 3), (N, 4) or (N, 5) array "
+                                    "(position, optional pressure, optional tilt)");
+    std::vector<brush::StrokeSample> out(view.shape(0));
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        const float* row = view.data() + i * width;
+        out[i].position = kernel::cf3(row[0], row[1], row[2]);
+        if (width > 3) out[i].pressure = row[3];
+        if (width > 4) out[i].tilt = row[4];
+    }
+    return out;
 }
 
 // -- voxel wrapper -------------------------------------------------------------
@@ -1301,6 +1329,52 @@ NB_MODULE(pyclay, m) {
              "prim"_a, "op"_a = scene::Op::Add, "blend"_a = nb::none(), "color"_a = nb::none(),
              "rounding"_a = 0.0f, "mirror"_a = false, "transition"_a = nb::none(),
              "Append an edit to the layer; returns the node id")
+        .def("apply_stroke",
+             [](PyLayer& l, nb::handle samples, const brush::StrokePreset& preset,
+                const PyPrim& prim, scene::Op op, nb::handle blend, nb::handle color,
+                nb::handle mask) {
+                 scene::Node templ;
+                 templ.prim = prim.prim;
+                 templ.stroke = prim.stroke;
+                 templ.stroke_blend_k = prim.stroke_blend_k;
+                 templ.deformers = prim.deformers;
+                 templ.repeat = prim.repeat;
+                 templ.profile = prim.profile;
+                 templ.profile_points = prim.profile_points;
+                 templ.op = op;
+                 if (!blend.is_none()) templ.blend = nb::cast<PyBlend&>(blend).b;
+                 if (!color.is_none()) templ.color = parse_color(color);
+
+                 std::vector<brush::Stamp> stamps =
+                     brush::resolve_stroke(to_stroke_samples(samples), preset);
+                 std::vector<scene::Node> nodes = brush::stamps_to_nodes(
+                     *l.layer().sdf, stamps, templ, borrow_mask(mask));
+
+                 // One AddNodeCmd per stamp, bundled into a single undo group:
+                 // a stroke is one step to undo, and every node in it is an
+                 // ordinary edit that serialization and picking already know.
+                 UndoRef undo = l.undo ? *l.undo : UndoRef();
+                 if (undo) undo->begin_group();
+                 std::vector<scene::NodeId> ids;
+                 ids.reserve(nodes.size());
+                 for (scene::Node& n : nodes) {
+                     scene::NodeId id = n.id;
+                     std::vector<scene::Node> subtree;
+                     subtree.push_back(std::move(n));
+                     apply_or_throw(l.doc->document,
+                                    scene::Command{scene::AddNodeCmd{l.id, scene::kNoNode, -1,
+                                                                     std::move(subtree)}},
+                                    "apply_stroke", l.undo.get());
+                     ids.push_back(id);
+                 }
+                 if (undo) undo->end_group();
+                 return ids;
+             },
+             "samples"_a, "preset"_a, "prim"_a, "op"_a = scene::Op::Add, "blend"_a = nb::none(),
+             "color"_a = nb::none(), "mask"_a = nb::none(),
+             "Resolve a stroke and append one edit per stamp; returns their node "
+             "ids. The prim is the stamp template, scaled to each stamp's radius. "
+             "The whole stroke is one undo step, and a masked stamp emits nothing.")
         .def("set_transform",
              [](PyLayer& l, scene::NodeId node, nb::handle position,
                 nb::handle rotation_axis_angle, nb::handle scale) {
@@ -1733,6 +1807,137 @@ NB_MODULE(pyclay, m) {
              });
 
     // -- module functions -----------------------------------------------------------
+    nb::enum_<brush::Accumulation>(m, "Accumulation",
+                                   "How overlapping stamps in one stroke combine")
+        .value("BUILDUP", brush::Accumulation::Buildup,
+               "each stamp applies at its own strength; passing twice acts twice")
+        .value("CLAMPED", brush::Accumulation::Clamped,
+               "the stroke reaches its strength once, however many stamps overlap");
+
+    nb::class_<brush::StrokePreset>(
+        m, "StrokePreset",
+        "How a drag becomes stamps: spacing, pressure response, jitter, taper,\n"
+        "steady-stroke smoothing and accumulation.\n\n"
+        "Presets carry a schema version and serialize with it. An older preset\n"
+        "loads with defaults for whatever it did not carry; a newer one is\n"
+        "refused rather than read as a prefix. Preset libraries outlive engine\n"
+        "versions, and that is the whole reason the version is there from the\n"
+        "first release rather than added later.")
+        .def("__init__",
+             [](brush::StrokePreset* self, float radius, float spacing, float strength,
+                float pressure_size, float pressure_strength, float pressure_curve,
+                float jitter_position, float jitter_size, float jitter_rotation,
+                std::uint32_t seed, bool rotate_along_stroke, float taper_start, float taper_end,
+                float steady, brush::Accumulation accumulation) {
+                 if (!(radius > 0.0f)) throw std::invalid_argument("radius must be > 0");
+                 if (!(spacing > 0.0f)) throw std::invalid_argument("spacing must be > 0");
+                 new (self) brush::StrokePreset();
+                 self->radius = radius;
+                 self->spacing = spacing;
+                 self->strength = strength;
+                 self->pressure.size = pressure_size;
+                 self->pressure.strength = pressure_strength;
+                 self->pressure.curve = pressure_curve;
+                 self->jitter_position = jitter_position;
+                 self->jitter_size = jitter_size;
+                 self->jitter_rotation = jitter_rotation;
+                 self->seed = seed;
+                 self->rotate_along_stroke = rotate_along_stroke;
+                 self->taper_start = taper_start;
+                 self->taper_end = taper_end;
+                 self->steady = steady;
+                 self->accumulation = accumulation;
+             },
+             "radius"_a = 0.25f, "spacing"_a = 0.25f, "strength"_a = 1.0f,
+             "pressure_size"_a = 0.0f, "pressure_strength"_a = 1.0f, "pressure_curve"_a = 1.0f,
+             "jitter_position"_a = 0.0f, "jitter_size"_a = 0.0f, "jitter_rotation"_a = 0.0f,
+             "seed"_a = 0u, "rotate_along_stroke"_a = false, "taper_start"_a = 0.0f,
+             "taper_end"_a = 0.0f, "steady"_a = 0.0f,
+             "accumulation"_a = brush::Accumulation::Buildup)
+        .def_rw("radius", &brush::StrokePreset::radius)
+        .def_rw("spacing", &brush::StrokePreset::spacing,
+                "distance between stamps as a fraction of the brush diameter")
+        .def_rw("strength", &brush::StrokePreset::strength)
+        .def_prop_rw("pressure_size",
+                     [](const brush::StrokePreset& p) { return p.pressure.size; },
+                     [](brush::StrokePreset& p, float v) { p.pressure.size = v; },
+                     "how much pressure drives the radius; 0 disables the channel")
+        .def_prop_rw("pressure_strength",
+                     [](const brush::StrokePreset& p) { return p.pressure.strength; },
+                     [](brush::StrokePreset& p, float v) { p.pressure.strength = v; })
+        .def_prop_rw("pressure_curve",
+                     [](const brush::StrokePreset& p) { return p.pressure.curve; },
+                     [](brush::StrokePreset& p, float v) { p.pressure.curve = v; },
+                     "exponent applied to pressure before either channel")
+        .def_rw("jitter_position", &brush::StrokePreset::jitter_position)
+        .def_rw("jitter_size", &brush::StrokePreset::jitter_size)
+        .def_rw("jitter_rotation", &brush::StrokePreset::jitter_rotation)
+        .def_rw("seed", &brush::StrokePreset::seed,
+                "jitter is a hash of the stamp index and this, never a random source")
+        .def_rw("rotate_along_stroke", &brush::StrokePreset::rotate_along_stroke)
+        .def_rw("taper_start", &brush::StrokePreset::taper_start)
+        .def_rw("taper_end", &brush::StrokePreset::taper_end)
+        .def_rw("steady", &brush::StrokePreset::steady,
+                "lazy-mouse lag: 0 follows exactly, approaching 1 lags more")
+        .def_rw("accumulation", &brush::StrokePreset::accumulation)
+        .def_prop_ro_static("version", [](nb::handle) { return brush::kPresetVersion; },
+                            "the schema version serialize() writes")
+        .def("serialize",
+             [](const brush::StrokePreset& p) {
+                 std::vector<std::uint8_t> bytes = p.serialize();
+                 return nb::bytes(bytes.data(), bytes.size());
+             },
+             "Preset as bytes, tagged with its schema version")
+        .def_static("deserialize",
+                    [](nb::bytes data) {
+                        auto p = brush::StrokePreset::deserialize(
+                            reinterpret_cast<const std::uint8_t*>(data.c_str()), data.size());
+                        if (!p)
+                            throw std::invalid_argument(
+                                "not a preset this build can read: either malformed, or written "
+                                "by a newer schema version than " +
+                                std::to_string(brush::kPresetVersion));
+                        return *p;
+                    },
+                    "data"_a,
+                    "Load a preset. An older schema loads with defaults for what it "
+                    "lacked; a newer one raises rather than being read as a prefix.")
+        .def("resolve",
+             [](const brush::StrokePreset& p, nb::handle samples) {
+                 std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
+                 std::vector<brush::Stamp> stamps;
+                 {
+                     nb::gil_scoped_release release;
+                     stamps = brush::resolve_stroke(in, p);
+                 }
+                 const std::size_t n = stamps.size();
+                 float* pos = new float[n ? n * 3 : 1];
+                 float* radius = new float[n ? n : 1];
+                 float* strength = new float[n ? n : 1];
+                 float* along = new float[n ? n : 1];
+                 auto own = [](void* q) noexcept { delete[] static_cast<float*>(q); };
+                 nb::capsule pos_owner(pos, own), radius_owner(radius, own);
+                 nb::capsule strength_owner(strength, own), along_owner(along, own);
+                 for (std::size_t i = 0; i < n; ++i) {
+                     pos[i * 3 + 0] = stamps[i].position.x;
+                     pos[i * 3 + 1] = stamps[i].position.y;
+                     pos[i * 3 + 2] = stamps[i].position.z;
+                     radius[i] = stamps[i].radius;
+                     strength[i] = stamps[i].strength;
+                     along[i] = stamps[i].along;
+                 }
+                 nb::dict out;
+                 out["positions"] = nb::ndarray<nb::numpy, float>(pos, {n, 3}, pos_owner);
+                 out["radii"] = nb::ndarray<nb::numpy, float>(radius, {n}, radius_owner);
+                 out["strengths"] = nb::ndarray<nb::numpy, float>(strength, {n}, strength_owner);
+                 out["along"] = nb::ndarray<nb::numpy, float>(along, {n}, along_owner);
+                 return out;
+             },
+             "samples"_a,
+             "Resolve stroke samples into stamps. Pure: no document is read or "
+             "touched. samples is (N, 3), (N, 4) with pressure, or (N, 5) with "
+             "pressure and tilt. Returns positions/radii/strengths/along arrays.");
+
     nb::class_<PyMaskField>(
         m, "MaskField",
         "Paintable scalar mask in [0, 1] gating how strongly an edit may act.\n\n"
@@ -1963,6 +2168,23 @@ NB_MODULE(pyclay, m) {
              "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant",
              "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
              "Move surface cells one step toward the brush centre")
+        .def("apply_stroke",
+             [](PyVoxelGrid& g, nb::handle samples, const brush::StrokePreset& preset,
+                std::uint8_t index, const std::string& shape, const std::string& falloff,
+                nb::handle mask) {
+                 std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
+                 voxel::BrushShape s = parse_brush_shape(shape);
+                 voxel::BrushFalloff f = parse_falloff(falloff);
+                 const voxel::MaskField* m = borrow_mask(mask);
+                 voxel::VoxelGrid& grid = g.grid();
+                 nb::gil_scoped_release release;
+                 return brush::apply_to_grid(grid, brush::resolve_stroke(in, preset), index, s, f,
+                                             m);
+             },
+             "samples"_a, "preset"_a, "index"_a, "shape"_a = "sphere", "falloff"_a = "smooth",
+             "mask"_a = nb::none(),
+             "Resolve a stroke and stamp it into the grid; returns how many stamps "
+             "ran. Masked stamps are dropped, so a frozen region receives nothing.")
         .def("fill_box",
              [](PyVoxelGrid& g, nb::handle a, nb::handle b, std::uint8_t index) {
                  g.grid().fill_box(to_coord(a), to_coord(b), index);

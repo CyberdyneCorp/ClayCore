@@ -1,0 +1,349 @@
+// Brush stroke engine (brush-engine spec). See include/clay/brush/stroke.h for
+// why resolution is pure and why stamps become ordinary edits.
+
+#include "clay/brush/stroke.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
+
+namespace clay {
+namespace brush {
+
+using kernel::cfloat3;
+
+namespace {
+
+// Same hash the voxel brush dither uses: integer mixing only, no floating
+// point until the end, so a stroke jitters identically on every platform.
+float stamp_noise(std::uint32_t index, std::uint32_t seed, std::uint32_t channel) {
+    std::uint32_t h = seed * 0x9E3779B9u;
+    h ^= index * 0x85EBCA6Bu;
+    h = (h ^ (h >> 13)) * 0xC2B2AE35u;
+    h ^= channel * 0x27D4EB2Fu;
+    h = (h ^ (h >> 15)) * 0x165667B1u;
+    h ^= h >> 16;
+    return static_cast<float>(h >> 8) / static_cast<float>(1u << 24);
+}
+
+// [-1, 1)
+float stamp_signed_noise(std::uint32_t index, std::uint32_t seed, std::uint32_t channel) {
+    return stamp_noise(index, seed, channel) * 2.0f - 1.0f;
+}
+
+// Steady stroke: the emission point trails the samples by a first-order lag.
+// Applied to the path before arc-length walking, so it smooths the geometry
+// rather than the timing.
+std::vector<StrokeSample> steady_path(const std::vector<StrokeSample>& samples, float steady) {
+    if (steady <= 0.0f || samples.size() < 2) return samples;
+    float lag = std::clamp(steady, 0.0f, 0.95f);
+    std::vector<StrokeSample> out = samples;
+    cfloat3 follower = samples[0].position;
+    for (std::size_t i = 1; i < out.size(); ++i) {
+        follower = follower * lag + samples[i].position * (1.0f - lag);
+        out[i].position = follower;
+    }
+    return out;
+}
+
+// Radius before jitter: base, scaled by pressure and by the end tapers.
+float stamp_radius(const StrokePreset& p, float pressure, float along) {
+    float r = p.radius;
+    if (p.pressure.size > 0.0f) {
+        float shaped = std::pow(std::clamp(pressure, 0.0f, 1.0f), std::max(p.pressure.curve, 1e-3f));
+        r *= 1.0f - p.pressure.size + p.pressure.size * shaped;
+    }
+    float start = std::clamp(p.taper_start, 0.0f, 1.0f);
+    float end = std::clamp(p.taper_end, 0.0f, 1.0f);
+    if (start + end > 1.0f) {  // overlapping tapers: split the stroke between them
+        float total = start + end;
+        start /= total;
+        end /= total;
+    }
+    if (start > 0.0f && along < start) r *= along / start;
+    if (end > 0.0f && along > 1.0f - end) r *= (1.0f - along) / end;
+    return std::max(r, 0.0f);
+}
+
+float stamp_strength(const StrokePreset& p, float pressure) {
+    float s = p.strength;
+    if (p.pressure.strength > 0.0f) {
+        float shaped = std::pow(std::clamp(pressure, 0.0f, 1.0f), std::max(p.pressure.curve, 1e-3f));
+        s *= 1.0f - p.pressure.strength + p.pressure.strength * shaped;
+    }
+    if (p.accumulation == Accumulation::Clamped) {
+        // A clamped stroke reaches its strength once however many stamps
+        // overlap, so divide by how many cover a point: one diameter of
+        // travel fits 1/spacing of them.
+        float overlap = std::max(1.0f / std::max(p.spacing, 1e-3f), 1.0f);
+        s /= overlap;
+    }
+    return std::clamp(s, 0.0f, 1.0f);
+}
+
+// The stamp at arc-length distance `d`, interpolating the path.
+struct PathPoint {
+    cfloat3 position;
+    cfloat3 direction;
+    float pressure;
+};
+
+PathPoint sample_path(const std::vector<StrokeSample>& path, const std::vector<float>& cumulative,
+                      float d) {
+    if (path.size() == 1) return {path[0].position, kernel::cf3(1, 0, 0), path[0].pressure};
+    std::size_t i = 1;
+    while (i + 1 < path.size() && cumulative[i] < d) ++i;
+    float span = cumulative[i] - cumulative[i - 1];
+    float t = span > 1e-9f ? std::clamp((d - cumulative[i - 1]) / span, 0.0f, 1.0f) : 0.0f;
+    cfloat3 a = path[i - 1].position, b = path[i].position;
+    cfloat3 dir = b - a;
+    float len = kernel::clength(dir);
+    return {a + (b - a) * t, len > 1e-9f ? dir * (1.0f / len) : kernel::cf3(1, 0, 0),
+            path[i - 1].pressure + (path[i].pressure - path[i - 1].pressure) * t};
+}
+
+// Rotation taking +X onto `dir`, so a stamp can follow the path.
+math::Quat align_x_to(cfloat3 dir) {
+    cfloat3 x = kernel::cf3(1, 0, 0);
+    float d = kernel::cdot(x, dir);
+    if (d > 0.999999f) return math::Quat::identity();
+    if (d < -0.999999f) return math::Quat{0.0f, 0.0f, 1.0f, 0.0f};  // 180 deg about Z
+    cfloat3 axis = kernel::ccross(x, dir);
+    float s = std::sqrt((1.0f + d) * 2.0f);
+    math::Quat q{axis.x / s, axis.y / s, axis.z / s, s * 0.5f};
+    return q.normalized();
+}
+
+// Gate a stamp on a mask, exactly as the voxel brushes do. Returns false when
+// the stamp is fully masked and should not be emitted at all.
+bool gate(const voxel::MaskField* mask, Stamp& s) {
+    if (!mask) return true;
+    float m = mask->sample(s.position);
+    if (m >= 1.0f) return false;
+    s.strength *= 1.0f - m;
+    return s.strength > 0.0f;
+}
+
+void put_u16(std::vector<std::uint8_t>& out, std::uint16_t v) {
+    out.push_back(static_cast<std::uint8_t>(v));
+    out.push_back(static_cast<std::uint8_t>(v >> 8));
+}
+void put_u32(std::vector<std::uint8_t>& out, std::uint32_t v) {
+    for (int i = 0; i < 4; ++i) out.push_back(static_cast<std::uint8_t>(v >> (i * 8)));
+}
+void put_f32(std::vector<std::uint8_t>& out, float f) {
+    std::uint32_t bits;
+    std::memcpy(&bits, &f, 4);
+    put_u32(out, bits);
+}
+
+struct Reader {
+    const std::uint8_t* p;
+    std::size_t remaining;
+    bool ok = true;
+    std::uint16_t u16() {
+        if (remaining < 2) return (ok = false), 0;
+        std::uint16_t v = static_cast<std::uint16_t>(p[0] | (p[1] << 8));
+        p += 2;
+        remaining -= 2;
+        return v;
+    }
+    std::uint32_t u32() {
+        if (remaining < 4) return (ok = false), 0;
+        std::uint32_t v = 0;
+        for (int i = 0; i < 4; ++i) v |= static_cast<std::uint32_t>(p[i]) << (i * 8);
+        p += 4;
+        remaining -= 4;
+        return v;
+    }
+    float f32() {
+        std::uint32_t bits = u32();
+        float f;
+        std::memcpy(&f, &bits, 4);
+        return f;
+    }
+};
+
+}  // namespace
+
+// -- presets -----------------------------------------------------------------
+
+std::vector<std::uint8_t> StrokePreset::serialize() const {
+    std::vector<std::uint8_t> out;
+    put_u16(out, kPresetVersion);
+    put_f32(out, spacing);
+    put_f32(out, pressure.size);
+    put_f32(out, pressure.strength);
+    put_f32(out, pressure.curve);
+    put_f32(out, jitter_position);
+    put_f32(out, jitter_size);
+    put_f32(out, jitter_rotation);
+    put_u32(out, seed);
+    out.push_back(rotate_along_stroke ? 1 : 0);
+    put_f32(out, taper_start);
+    put_f32(out, taper_end);
+    put_f32(out, steady);
+    out.push_back(static_cast<std::uint8_t>(accumulation));
+    put_f32(out, radius);
+    put_f32(out, strength);
+    return out;
+}
+
+std::optional<StrokePreset> StrokePreset::deserialize(const std::uint8_t* data, std::size_t size) {
+    Reader r{data, size};
+    std::uint16_t version = r.u16();
+    if (!r.ok) return std::nullopt;
+    // A newer schema is refused rather than read as a prefix: the fields we
+    // would skip could change what the ones we read mean, and a preset that
+    // silently means something else is exactly the failure the version is
+    // here to prevent.
+    if (version > kPresetVersion) return std::nullopt;
+
+    // Version 1 is the original layout. A later version reads its own extra
+    // fields here, after this block, leaving anything absent at its default.
+    StrokePreset p;
+    p.spacing = r.f32();
+    p.pressure.size = r.f32();
+    p.pressure.strength = r.f32();
+    p.pressure.curve = r.f32();
+    p.jitter_position = r.f32();
+    p.jitter_size = r.f32();
+    p.jitter_rotation = r.f32();
+    p.seed = r.u32();
+    if (r.remaining < 1) return std::nullopt;
+    p.rotate_along_stroke = *r.p++ != 0;
+    --r.remaining;
+    p.taper_start = r.f32();
+    p.taper_end = r.f32();
+    p.steady = r.f32();
+    if (r.remaining < 1) return std::nullopt;
+    std::uint8_t accumulation = *r.p++;
+    --r.remaining;
+    if (accumulation > static_cast<std::uint8_t>(Accumulation::Clamped)) return std::nullopt;
+    p.accumulation = static_cast<Accumulation>(accumulation);
+    p.radius = r.f32();
+    p.strength = r.f32();
+    if (!r.ok) return std::nullopt;
+    if (!(p.spacing > 0.0f) || !(p.radius > 0.0f)) return std::nullopt;
+    return p;
+}
+
+// -- resolution --------------------------------------------------------------
+
+std::vector<Stamp> resolve_stroke(const std::vector<StrokeSample>& samples,
+                                  const StrokePreset& preset) {
+    std::vector<Stamp> stamps;
+    if (samples.empty() || !(preset.radius > 0.0f)) return stamps;
+
+    std::vector<StrokeSample> path = steady_path(samples, preset.steady);
+
+    // Arc length, so spacing depends on the path rather than on how fast the
+    // finger moved across it.
+    std::vector<float> cumulative(path.size(), 0.0f);
+    for (std::size_t i = 1; i < path.size(); ++i)
+        cumulative[i] = cumulative[i - 1] + kernel::clength(path[i].position - path[i - 1].position);
+    const float length = cumulative.back();
+
+    const float step = std::max(preset.spacing, 1e-3f) * preset.radius * 2.0f;
+    // A tap, or a drag shorter than one spacing, still has to leave a mark.
+    //
+    // The epsilon is not cosmetic: `length` is a float sum over however many
+    // samples arrived, so the same path sampled sparsely and densely lands a
+    // few ulps apart. Without it the stamp count flips whenever length/step
+    // is near an integer, and the same gesture would stamp differently
+    // depending on the input rate — the one thing arc-length spacing exists
+    // to prevent.
+    const int count =
+        length < step ? 1 : static_cast<int>(std::floor(length / step + 1e-3f)) + 1;
+
+    stamps.reserve(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        float d = static_cast<float>(i) * step;
+        PathPoint at = sample_path(path, cumulative, d);
+        float along = length > 1e-9f ? std::clamp(d / length, 0.0f, 1.0f) : 0.0f;
+
+        Stamp s;
+        s.along = along;
+        s.position = at.position;
+        s.radius = stamp_radius(preset, at.pressure, along);
+        s.strength = stamp_strength(preset, at.pressure);
+        if (preset.rotate_along_stroke) s.rotation = align_x_to(at.direction);
+
+        auto index = static_cast<std::uint32_t>(i);
+        if (preset.jitter_position > 0.0f) {
+            float amp = preset.jitter_position * preset.radius;
+            s.position = s.position + kernel::cf3(stamp_signed_noise(index, preset.seed, 0) * amp,
+                                                  stamp_signed_noise(index, preset.seed, 1) * amp,
+                                                  stamp_signed_noise(index, preset.seed, 2) * amp);
+        }
+        if (preset.jitter_size > 0.0f)
+            s.radius = std::max(
+                s.radius * (1.0f + stamp_signed_noise(index, preset.seed, 3) * preset.jitter_size),
+                0.0f);
+        if (preset.jitter_rotation > 0.0f) {
+            float angle = stamp_signed_noise(index, preset.seed, 4) * preset.jitter_rotation;
+            math::Quat spin = math::Quat::from_axis_angle(at.direction, angle);
+            s.rotation = spin * s.rotation;
+        }
+        if (s.radius > 0.0f) stamps.push_back(s);
+    }
+    return stamps;
+}
+
+// -- consumers ---------------------------------------------------------------
+
+std::size_t apply_to_grid(voxel::VoxelGrid& grid, const std::vector<Stamp>& stamps,
+                          std::uint8_t index, voxel::BrushShape shape,
+                          voxel::BrushFalloff falloff, const voxel::MaskField* mask) {
+    const float cell = grid.voxel_size();
+    std::size_t applied = 0;
+    for (std::size_t i = 0; i < stamps.size(); ++i) {
+        Stamp s = stamps[i];
+        // Gating happens here rather than inside BrushParams so a fully masked
+        // stamp costs nothing at all, and so both consumers agree on what a
+        // dropped stamp means.
+        if (!gate(mask, s)) continue;
+        int size = std::max(static_cast<int>(std::lround(s.radius * 2.0f / cell)), 1);
+        voxel::BrushParams p;
+        p.size = size;
+        p.shape = shape;
+        p.falloff = falloff;
+        p.strength = s.strength;
+        p.seed = static_cast<std::uint32_t>(i);  // per-stamp, so a stroke is not banded
+        voxel::VoxelCoord at{static_cast<std::int32_t>(std::floor(s.position.x / cell)),
+                             static_cast<std::int32_t>(std::floor(s.position.y / cell)),
+                             static_cast<std::int32_t>(std::floor(s.position.z / cell))};
+        grid.set_brush(at, p, index);
+        ++applied;
+    }
+    return applied;
+}
+
+std::vector<scene::Node> stamps_to_nodes(scene::SdfContent& content,
+                                         const std::vector<Stamp>& stamps,
+                                         const scene::Node& templ,
+                                         const voxel::MaskField* mask) {
+    std::vector<scene::Node> nodes;
+    nodes.reserve(stamps.size());
+    for (const Stamp& raw : stamps) {
+        Stamp s = raw;
+        // This is the whole of "freeze" for a declarative edit: a stamp in a
+        // frozen region produces no item, so the region receives nothing new.
+        if (!gate(mask, s)) continue;
+        scene::Node node = templ;
+        // The command vocabulary preserves ids rather than assigning them, so
+        // reserve one here. Leaving it at kNoNode would have every node in the
+        // stroke share id 0 and collapse into one.
+        node.id = content.reserve_id();
+        node.xform.position = s.position;
+        node.xform.rotation = s.rotation;
+        // The template's own scale is the unit the radius is expressed in, so
+        // a template authored at radius 1 scales straight to the stamp's.
+        node.xform.scale = s.radius;
+        nodes.push_back(std::move(node));
+    }
+    return nodes;
+}
+
+}  // namespace brush
+}  // namespace clay

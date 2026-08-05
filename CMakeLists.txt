@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(claycore
-  VERSION 0.12.0
+  VERSION 0.13.0
   DESCRIPTION "Portable C++20 SDF + voxel engine library"
   LANGUAGES C CXX)  # C: ufbx
 
@@ -34,6 +34,7 @@ add_library(claycore
   src/voxel/grid.cpp
   src/voxel/sculpt.cpp
   src/voxel/mask.cpp
+  src/brush/stroke.cpp
   src/mesh/marching.cpp
   src/mesh/surface_nets.cpp
   src/mesh/dual_contouring.cpp

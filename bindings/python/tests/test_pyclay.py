@@ -1765,3 +1765,129 @@ def test_mask_lookup_and_removal():
 def test_mask_rejects_a_bad_cell_size():
     with pytest.raises(ValueError):
         clay.MaskField(0.0)
+
+
+# -- brush stroke engine (add-brush-stroke-engine) ---------------------------
+
+
+def _line(length=2.0, step=0.1, pressure=1.0):
+    n = int(length / step) + 1
+    return np.array([[i * step, 0.0, 0.0, pressure] for i in range(n)], np.float32)
+
+
+def test_stroke_spacing_follows_the_path_not_the_samples():
+    preset = clay.StrokePreset(radius=0.25, spacing=0.5)
+    sparse = preset.resolve(_line(step=0.5))
+    dense = preset.resolve(_line(step=0.05))
+    assert sparse["positions"].shape == dense["positions"].shape
+    assert np.allclose(sparse["positions"], dense["positions"], atol=1e-5)
+
+
+def test_stroke_accepts_three_four_or_five_columns():
+    preset = clay.StrokePreset(radius=0.25, spacing=0.5)
+    xyz = np.array([[0, 0, 0], [1, 0, 0]], np.float32)
+    assert preset.resolve(xyz)["positions"].shape[0] > 1
+    with pytest.raises(ValueError, match=r"\(N, 3\)"):
+        preset.resolve(np.zeros((2, 6), np.float32))
+
+
+def test_stroke_pressure_drives_size():
+    preset = clay.StrokePreset(radius=0.25, spacing=0.5, pressure_size=1.0)
+    ramp = np.array([[i * 0.1, 0, 0, i / 20.0] for i in range(21)], np.float32)
+    radii = preset.resolve(ramp)["radii"]
+    assert np.all(np.diff(radii) >= -1e-6)
+    assert radii[0] < radii[-1]
+
+
+def test_stroke_jitter_is_reproducible():
+    a = clay.StrokePreset(radius=0.2, spacing=0.5, jitter_position=0.5, seed=7)
+    b = clay.StrokePreset(radius=0.2, spacing=0.5, jitter_position=0.5, seed=7)
+    c = clay.StrokePreset(radius=0.2, spacing=0.5, jitter_position=0.5, seed=8)
+    path = _line()
+    assert np.array_equal(a.resolve(path)["positions"], b.resolve(path)["positions"])
+    assert not np.array_equal(a.resolve(path)["positions"], c.resolve(path)["positions"])
+
+
+# A preset library outlives the engine version that wrote it, which is the
+# whole reason the schema version is there from the first release.
+def test_stroke_preset_round_trips_and_refuses_a_newer_schema():
+    preset = clay.StrokePreset(radius=0.4, spacing=0.3, taper_start=0.2,
+                               accumulation=clay.Accumulation.CLAMPED, seed=99)
+    data = preset.serialize()
+    back = clay.StrokePreset.deserialize(data)
+    assert back.radius == pytest.approx(preset.radius)
+    assert back.spacing == pytest.approx(preset.spacing)
+    assert back.taper_start == pytest.approx(preset.taper_start)
+    assert back.accumulation == clay.Accumulation.CLAMPED
+    assert back.seed == 99
+    assert back.serialize() == data
+
+    newer = bytes([clay.StrokePreset.version + 1]) + data[1:]
+    with pytest.raises(ValueError, match="newer"):
+        clay.StrokePreset.deserialize(newer)
+
+
+def test_stroke_applied_to_a_voxel_grid():
+    grid = clay.VoxelGrid(0.05)
+    preset = clay.StrokePreset(radius=0.15, spacing=0.5)
+    stamps = grid.apply_stroke(_line(length=1.5), preset, grid.palette_add("#ffffff"))
+    assert stamps > 3
+    assert grid.occupied_count > 0
+    (lo, hi) = grid.bounds()
+    assert hi[0] - lo[0] > 25
+
+
+# The interface promise: a stroked edit is an ordinary edit, so undo applies
+# to it without knowing the stroke engine exists.
+def test_stroke_applied_to_a_layer_is_one_undo_step():
+    doc = clay.Document()
+    doc.enable_undo()
+    layer = doc.add_sdf_layer("body")
+    before = doc.undo_depth
+
+    preset = clay.StrokePreset(radius=0.2, spacing=0.5)
+    ids = layer.apply_stroke(_line(), preset, clay.Sphere(r=1.0))
+    assert len(ids) > 3
+    assert len(set(ids)) == len(ids)          # every stamp is its own node
+    assert doc.undo_depth == before + 1       # ...and the stroke is one step
+
+    probe = np.array([[1.0, 0.0, 0.0]], np.float32)
+    assert doc.eval(probe)[0] < 0
+    doc.undo()
+    assert doc.eval(probe)[0] > 0
+    doc.redo()
+    assert doc.eval(probe)[0] < 0
+
+
+def test_stroke_is_gated_by_a_mask():
+    mask = clay.MaskField(0.05)
+    for x in range(0, 60):
+        for y in range(-15, 16):
+            for z in range(-15, 16):
+                mask.set((x, y, z), 1.0)
+
+    preset = clay.StrokePreset(radius=0.15, spacing=0.5)
+    path = np.array([[-1.5 + i * 0.05, 0, 0, 1.0] for i in range(61)], np.float32)
+    total = len(preset.resolve(path)["radii"])
+
+    grid = clay.VoxelGrid(0.05)
+    gated = grid.apply_stroke(path, preset, grid.palette_add("#ffffff"), mask=mask)
+    assert 0 < gated < total
+
+    # The same freeze for a declarative SDF edit: the frozen half gets no items.
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("body")
+    doc_mask = doc.add_mask("body", cell_size=0.05)
+    for x in range(0, 60):
+        for y in range(-15, 16):
+            for z in range(-15, 16):
+                doc_mask.set((x, y, z), 1.0)
+    ids = layer.apply_stroke(path, preset, clay.Sphere(r=1.0), mask=doc_mask)
+    assert 0 < len(ids) < total
+
+
+def test_stroke_preset_rejects_a_bad_radius():
+    with pytest.raises(ValueError):
+        clay.StrokePreset(radius=0.0)
+    with pytest.raises(ValueError):
+        clay.StrokePreset(spacing=0.0)

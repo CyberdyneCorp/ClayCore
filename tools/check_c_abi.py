@@ -21,6 +21,19 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 
+# Structs that are array ELEMENTS rather than versioned descriptors. A
+# descriptor is an input a caller fills in and may have compiled against an
+# older layout, which is what struct_size negotiates. An element type is a
+# fixed binary layout that a caller passes thousands of, exactly like the
+# int32_t[3] a cell crosses as: a struct_size per element would be absurd, and
+# changing the layout is a break rather than something to negotiate. Naming
+# them here keeps that a decision rather than an oversight.
+ARRAY_ELEMENT_STRUCTS = {
+    "clay_stroke_sample",  # packed float[5] per sample, passed as a bare float*
+    "clay_stamp",          # packed float[10] per stamp, an output buffer
+}
+
+
 def hygiene() -> list[str]:
     text = (REPO / "bindings" / "c" / "clay.h").read_text()
     # strip comments
@@ -33,6 +46,11 @@ def hygiene() -> list[str]:
     for name, body in re.findall(r"typedef struct (\w*)\s*{([^}]*)}", text):
         if re.search(r"\w+\s*:\s*\d+\s*;", body):
             errors.append(f"bitfield in public struct {name}")
+        if name in ARRAY_ELEMENT_STRUCTS:
+            if re.search(r"\bstruct_size\b", body):
+                errors.append(f"{name} is listed as an array element type but has a "
+                              f"struct_size; it is a descriptor, so drop the exemption")
+            continue
         if not re.match(r"\s*uint32_t\s+struct_size\s*;", body):
             errors.append(f"public struct {name} lacks a leading uint32_t struct_size")
     if re.search(r"\b(?<!u)long\b", text):

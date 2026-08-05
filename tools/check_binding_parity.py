@@ -40,6 +40,7 @@ CLASS_PREFIX = {
     "Mesh": ("clay_mesh_",),
     "VoxelGrid": ("clay_voxel_", "clay_voxel_grid_"),
     "MaskField": ("clay_mask_",),
+    "StrokePreset": ("clay_stroke_preset_",),
     "Prim": ("clay_item_", "clay_item_set_", "clay_item_add_"),
     "Stroke": ("clay_item_", "clay_item_set_", "clay_item_add_"),
     "Blend": ("clay_item_set_",),
@@ -48,9 +49,19 @@ CLASS_PREFIX = {
     "module": (),
 }
 
+# Classes that are a versioned DESCRIPTOR in C rather than a handle with
+# entry points. Their members are satisfied by a field of the named struct: a
+# C caller sets preset.spacing directly, so demanding a clay_*_spacing getter
+# would be inventing surface that neither binding wants. A field still has to
+# exist, which is what the gate is for.
+CLASS_STRUCT = {
+    "StrokePreset": "clay_stroke_preset",
+}
+
 # Classes whose members name an enumerator rather than an entry point: a new
 # combine op or profile shape in pyclay needs one in clay.h.
 CLASS_ENUM_PREFIX = {
+    "Accumulation": "CLAY_ACCUMULATION_",
     "Op": "CLAY_OP_",
     "Profile": "CLAY_PROFILE_",
     "Prim": "CLAY_DEFORM_",  # the deformer chain; the rest falls to the prefixes
@@ -63,6 +74,9 @@ ALIASES = {
     "Document.gradients": "clay_eval_gradients",
     "Document.raycast": "clay_raycast_attributed",  # pyclay's reports layer+item too
     "Layer.add": "clay_layer_add_item",
+    # the preset is an argument in C, not the receiver, so the name has no
+    # _preset_ in it
+    "StrokePreset.resolve": "clay_stroke_resolve",
     "Layer.eval": "clay_layer_eval_points",
     "Layer.colors": "clay_layer_eval_points",
     "Layer.gradients": "clay_layer_eval_gradients",
@@ -95,6 +109,8 @@ CLASS_CTOR = {
     "Mesh": "clay_document_mesh",
     "VoxelGrid": "clay_voxel_grid_create",
     "MaskField": "clay_mask_create",
+    "Accumulation": None,
+    "StrokePreset": "clay_stroke_preset_defaults",
     "Smooth": "CLAY_BLEND_QUADRATIC",
     "Cubic": "CLAY_BLEND_CUBIC",
     "Circular": "CLAY_BLEND_CIRCULAR",
@@ -166,14 +182,22 @@ STRING_CHOICES = (
 # -- the C side ----------------------------------------------------------------
 
 
-def c_surface() -> tuple[set[str], set[str]]:
-    """Declared functions and enumerators, as a bindings generator reads them."""
+def c_surface() -> tuple[set[str], set[str], set[str]]:
+    """Declared functions, enumerators and struct fields, as a bindings
+    generator reads them. Struct fields arrive as "struct.field" so a
+    descriptor-backed class can resolve onto them."""
     text = HEADER.read_text()
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
     text = re.sub(r"//[^\n]*", "", text)
     functions = set(re.findall(r"\b(clay_\w+)\s*\(", text))
     enumerators = set(re.findall(r"\b(CLAY_[A-Z0-9_]+)\s*=", text))
-    return functions, enumerators
+    fields = set()
+    # The typedef's trailing name is the one a caller uses; the tag may be
+    # empty, so key off the typedef name rather than the struct tag.
+    for body, name in re.findall(r"typedef struct \w*\s*{([^}]*)}\s*(\w+)\s*;", text):
+        for field in re.findall(r"\b(\w+)\s*(?:\[\s*\d+\s*\])?\s*;", body):
+            fields.add(f"{name}.{field}")
+    return functions, enumerators, fields
 
 
 # -- the pyclay side -----------------------------------------------------------
@@ -203,7 +227,7 @@ def parsed_surface() -> dict[str, list[str]]:
     text = MODULE_SOURCE.read_text()
     declare = re.compile(r'nb::(?:class_|enum_)<[^>]*>\(\s*\n?\s*m,\s*"(\w+)"')
     # (?<!m) so a module-level m.def is not read as a member of the class above
-    member = re.compile(r'(?<!m)\.(?:def|def_prop_ro|def_prop_rw|def_static|def_ro|def_rw|value)'
+    member = re.compile(r'(?<!m)\.(?:def|def_prop_ro_static|def_prop_ro|def_prop_rw|def_static|def_ro|def_rw|value)'
                         r'\(\s*\n?\s*"(\w+)"')
     module_fn = re.compile(r'^\s*m\.def\(\s*\n?\s*"(\w+)"', re.M)
     surface: dict[str, list[str]] = {"module": sorted(module_fn.findall(text))}
@@ -258,6 +282,8 @@ def candidates(cls: str, member: str) -> list[str]:
     out = []
     if cls in CLASS_ENUM_PREFIX:
         out.append(CLASS_ENUM_PREFIX[cls] + member.upper())
+    if cls in CLASS_STRUCT:
+        out.append(f"{CLASS_STRUCT[cls]}.{member}")
     out += [prefix + member for prefix in CLASS_PREFIX.get(cls, ())]
     return out
 
@@ -363,8 +389,8 @@ def main() -> int:
                         help="list C entry points no pyclay capability maps onto")
     args = parser.parse_args()
 
-    functions, enumerators = c_surface()
-    declared = functions | enumerators
+    functions, enumerators, struct_fields = c_surface()
+    declared = functions | enumerators | struct_fields
     parsed = parsed_surface()
     module = load_module(args.pyclay)
     errors = []

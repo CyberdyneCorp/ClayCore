@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 12
+#define CLAY_ABI_MINOR 13
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -803,6 +803,124 @@ clay_result clay_mask_smooth(clay_mask* mask, int32_t iterations);
  * empty mask, and out_min/out_max are then left alone. */
 clay_result clay_mask_bounds(const clay_mask* mask, int32_t out_min[3], int32_t out_max[3],
                              int32_t* out_has_bounds);
+
+/* -- brush strokes --------------------------------------------------------- */
+
+/* A drag becomes stamps, and a stamp becomes an ordinary edit.
+ *
+ * Resolution is pure: samples and a preset go in, stamps come out, and no
+ * document is read or touched. Application turns those stamps into ordinary
+ * voxel brush stamps or ordinary edit-list nodes, so undo, stroke coalescing,
+ * `.clayspace` serialization and picking apply to a stroked edit without any
+ * of them knowing this exists.
+ *
+ * It is also where a mask reaches SDF edits. An SDF item is declarative and
+ * has no per-point strength, so gating it at evaluation time would cost the
+ * rigidity and finite support per-brick culling depends on. It is gated here
+ * instead, where the item is authored: a stamp in a frozen region emits
+ * nothing at all. */
+
+/* One moment of a drag: position, pressure in [0,1], tilt in radians. Samples
+ * cross this ABI as a packed float array of count*5, in this order, so a
+ * caller's (N, 5) buffer needs no repacking. */
+typedef struct clay_stroke_sample {
+    float position[3];
+    float pressure;
+    float tilt;
+} clay_stroke_sample;
+
+/* One resolved stamp: where an edit goes and how strong it is. */
+typedef struct clay_stamp {
+    float position[3];
+    float radius;
+    float strength;
+    float rotation[4]; /* xyzw quaternion */
+    float along;       /* [0,1] along the stroke */
+} clay_stamp;
+
+/* How overlapping stamps in one stroke combine. */
+typedef enum clay_accumulation {
+    CLAY_ACCUMULATION_BUILDUP = 0, /* passing twice acts twice */
+    CLAY_ACCUMULATION_CLAMPED = 1  /* the stroke reaches its strength once */
+} clay_accumulation;
+
+/* How a drag becomes stamps. A versioned descriptor like the others, and
+ * additionally a thing a user SAVES: a preset library outlives the engine
+ * version that wrote it, which is why clay_stroke_preset_serialize tags its
+ * output with a schema version from the first release rather than gaining one
+ * later. struct_size is the in-memory contract; the schema version is the
+ * on-disk one, and they move independently. */
+typedef struct clay_stroke_preset {
+    uint32_t struct_size; /* = sizeof(clay_stroke_preset); required */
+    float radius;         /* world units; must be > 0 */
+    float spacing;        /* stamp spacing as a fraction of the DIAMETER; > 0 */
+    float strength;
+    float pressure_size;     /* 0 = pressure does not drive the radius */
+    float pressure_strength; /* 0 = pressure does not drive the strength */
+    float pressure_curve;    /* exponent applied to pressure before either */
+    float jitter_position;   /* fraction of the radius */
+    float jitter_size;       /* fraction of the radius */
+    float jitter_rotation;   /* radians */
+    uint32_t seed;           /* jitter is a hash of the stamp index and this */
+    int32_t rotate_along_stroke;
+    float taper_start; /* fraction of the stroke the radius ramps in over */
+    float taper_end;
+    float steady;        /* lazy-mouse lag; 0 follows exactly, ->1 lags more */
+    int32_t accumulation; /* clay_accumulation */
+} clay_stroke_preset;
+
+/* Fill a descriptor with the engine's defaults, struct_size included. The one
+ * way to get a valid preset without knowing every field, and what a caller
+ * should start from before overriding what it cares about. */
+clay_result clay_stroke_preset_defaults(clay_stroke_preset* out_preset);
+
+/* Preset <-> bytes, tagged with the schema version. Serialization uses the
+ * size-query pattern: call with out_data == NULL for the size. Loading a
+ * preset from an OLDER schema succeeds, taking defaults for what it did not
+ * carry; one from a NEWER schema is refused with CLAY_ERROR_INVALID_ARGUMENT
+ * rather than read as a prefix, because the fields that would be skipped can
+ * change what the ones read mean. */
+clay_result clay_stroke_preset_serialize(const clay_stroke_preset* preset, uint8_t* out_data,
+                                         size_t* count);
+clay_result clay_stroke_preset_deserialize(const uint8_t* data, size_t size,
+                                           clay_stroke_preset* out_preset);
+/* The schema version this build writes. */
+uint32_t clay_stroke_preset_version(void);
+
+/* Resolve samples into stamps, via the size-query pattern: call with
+ * out_stamps == NULL to receive the count, then again with a buffer of that
+ * many. *count is the capacity going in and the count written coming out. */
+clay_result clay_stroke_resolve(const float* samples_xyzpt, size_t sample_count,
+                                const clay_stroke_preset* preset, clay_stamp* out_stamps,
+                                size_t* count);
+
+/* Resolve a stroke and stamp it into a grid. `index` is the palette entry to
+ * set, or 0 to erase; `mask` may be NULL. *out_applied receives how many
+ * stamps actually ran — a stamp in a frozen region is dropped, not weakened
+ * to nothing. */
+clay_result clay_voxel_apply_stroke(clay_voxel_grid* grid, const float* samples_xyzpt,
+                                    size_t sample_count, const clay_stroke_preset* preset,
+                                    int32_t index, int32_t shape, int32_t falloff,
+                                    const clay_mask* mask, size_t* out_applied);
+
+/* Resolve a stroke and append one edit per stamp to a layer, using `item` as
+ * the stamp template scaled to each stamp's radius. The builder is left
+ * untouched. With undo enabled the whole stroke is ONE step.
+ *
+ * This is NOT a size-query call: it applies the stroke exactly once, however
+ * it is called. `count` is the capacity of out_nodes going in and the number
+ * of nodes created coming out; if the buffer was too small the first capacity
+ * ids are written and *count still reports the true total. out_nodes may be
+ * NULL when the ids are not wanted.
+ *
+ * A caller that wants every id can size the buffer first with
+ * clay_stroke_resolve, which is pure and gives the same stamp count for the
+ * same input — an upper bound, since a masked stamp emits no node. */
+clay_result clay_layer_apply_stroke(clay_document* doc, clay_layer_id layer,
+                                    const float* samples_xyzpt, size_t sample_count,
+                                    const clay_stroke_preset* preset, const clay_item* item,
+                                    const clay_mask* mask, clay_node_id* out_nodes,
+                                    size_t* count);
 
 /* -- queries --------------------------------------------------------------- */
 

@@ -27,6 +27,7 @@
 #include "clay/scene/bounds.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
+#include "clay/brush/stroke.h"
 #include "clay/voxel/mask.h"
 
 using namespace clay;
@@ -379,6 +380,93 @@ clay_result check_mirror_axes(std::int32_t axes, std::uint8_t* out) {
 // Defined with the mask entry points below; a brush descriptor may name a
 // mask, so the two resolve together.
 clay_result resolve_mask(const clay_mask* mask, voxel::MaskField** out);
+
+constexpr std::size_t kStrokePresetOriginal =
+    offsetof(clay_stroke_preset, accumulation) + sizeof(std::int32_t);
+
+// A preset descriptor as the engine's type. The two values the engine cannot
+// make sense of — a radius or spacing that is not > 0 — are refused here
+// rather than clamped, on the same footing as a brush strength that is not
+// > 0: they describe no stroke, and a zero-initialized descriptor is what
+// they usually mean.
+clay_result read_preset(const clay_stroke_preset* src, brush::StrokePreset* out) {
+    if (!src) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null stroke preset");
+    clay_stroke_preset d;
+    clay_result r = read_desc(src, kStrokePresetOriginal, &d);
+    if (r != CLAY_OK) return r;
+    if (!(d.radius > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "preset radius must be > 0");
+    if (!(d.spacing > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "preset spacing must be > 0");
+    if (d.accumulation < 0 ||
+        d.accumulation > static_cast<std::int32_t>(brush::Accumulation::Clamped))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "unknown accumulation: " + std::to_string(d.accumulation));
+    out->radius = d.radius;
+    out->spacing = d.spacing;
+    out->strength = d.strength;
+    out->pressure.size = d.pressure_size;
+    out->pressure.strength = d.pressure_strength;
+    out->pressure.curve = d.pressure_curve;
+    out->jitter_position = d.jitter_position;
+    out->jitter_size = d.jitter_size;
+    out->jitter_rotation = d.jitter_rotation;
+    out->seed = d.seed;
+    out->rotate_along_stroke = d.rotate_along_stroke != 0;
+    out->taper_start = d.taper_start;
+    out->taper_end = d.taper_end;
+    out->steady = d.steady;
+    out->accumulation = static_cast<brush::Accumulation>(d.accumulation);
+    return CLAY_OK;
+}
+
+// Samples arrive packed as count*5 floats, matching clay_stroke_sample.
+clay_result read_stroke(const float* samples_xyzpt, std::size_t sample_count,
+                        const clay_stroke_preset* preset,
+                        std::vector<brush::StrokeSample>* out_samples,
+                        brush::StrokePreset* out_preset) {
+    if (sample_count > 0 && !samples_xyzpt)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null stroke samples");
+    clay_result r = check_batch("stroke samples", sample_count);
+    if (r != CLAY_OK) return r;
+    r = read_preset(preset, out_preset);
+    if (r != CLAY_OK) return r;
+    out_samples->resize(sample_count);
+    for (std::size_t i = 0; i < sample_count; ++i) {
+        const float* row = samples_xyzpt + i * 5;
+        (*out_samples)[i].position = kernel::cf3(row[0], row[1], row[2]);
+        (*out_samples)[i].pressure = row[3];
+        (*out_samples)[i].tilt = row[4];
+    }
+    return CLAY_OK;
+}
+
+clay_stamp to_c_stamp(const brush::Stamp& s) {
+    clay_stamp out{};
+    out.position[0] = s.position.x;
+    out.position[1] = s.position.y;
+    out.position[2] = s.position.z;
+    out.radius = s.radius;
+    out.strength = s.strength;
+    out.rotation[0] = s.rotation.x;
+    out.rotation[1] = s.rotation.y;
+    out.rotation[2] = s.rotation.z;
+    out.rotation[3] = s.rotation.w;
+    out.along = s.along;
+    return out;
+}
+
+// The size-query pattern for a byte payload.
+clay_result write_sized(const std::uint8_t* data, std::size_t size, std::uint8_t* out_data,
+                        std::size_t* count, const char* what) {
+    if (!count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null count");
+    if (out_data && *count < size) {
+        *count = size;
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    std::string("the ") + what + " needs " + std::to_string(size) + " bytes");
+    }
+    if (out_data && size > 0) std::memcpy(out_data, data, size);
+    *count = size;
+    return CLAY_OK;
+}
 
 clay_result read_brush(const clay_brush_params* src, voxel::BrushParams* out) {
     clay_brush_params b;
@@ -1366,6 +1454,54 @@ clay_result clay_layer_add_item(clay_document* doc, clay_layer_id layer_id, cons
     return insert_node(doc, layer_id, item->node, out_node);
 }
 
+clay_result clay_layer_apply_stroke(clay_document* doc, clay_layer_id layer_id,
+                                    const float* samples_xyzpt, size_t sample_count,
+                                    const clay_stroke_preset* preset, const clay_item* item,
+                                    const clay_mask* mask, clay_node_id* out_nodes,
+                                    size_t* count) {
+    if (!doc || !item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or item");
+    clay_result r = validate_item(*item);
+    if (r != CLAY_OK) return r;
+
+    std::vector<brush::StrokeSample> samples;
+    brush::StrokePreset p;
+    r = read_stroke(samples_xyzpt, sample_count, preset, &samples, &p);
+    if (r != CLAY_OK) return r;
+
+    scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    if (!layer || !layer->sdf) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+
+    voxel::MaskField* m = nullptr;
+    if (mask) {
+        r = resolve_mask(mask, &m);
+        if (r != CLAY_OK) return r;
+    }
+
+    std::vector<scene::Node> nodes = brush::stamps_to_nodes(
+        *layer->sdf, brush::resolve_stroke(samples, p), item->node, m);
+
+    // One AddNodeCmd per stamp inside a single undo group, so a whole stroke
+    // is one step to undo. Grouping is the stack's, not this module's.
+    if (doc->undo) doc->undo->begin_group();
+    std::size_t capacity = count ? *count : 0;
+    std::size_t written = 0;
+    for (scene::Node& node : nodes) {
+        clay_node_id id = node.id;
+        std::vector<scene::Node> subtree;
+        subtree.push_back(std::move(node));
+        r = apply_edit(
+            doc,
+            scene::Command{scene::AddNodeCmd{layer_id, scene::kNoNode, -1, std::move(subtree)}},
+            "layer not found");
+        if (r != CLAY_OK) break;
+        if (out_nodes && written < capacity) out_nodes[written] = id;
+        ++written;
+    }
+    if (doc->undo) doc->undo->end_group();
+    if (count) *count = written;
+    return r;
+}
+
 clay_result clay_list_backends(char* buffer, size_t* size) {
     if (!size) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null size");
     std::string names;
@@ -1678,6 +1814,129 @@ clay_result clay_document_voxel_layer(clay_document* doc, const char* name,
         return CLAY_OK;
     }
     return fail(CLAY_ERROR_NOT_FOUND, std::string("no voxel layer named ") + name);
+}
+
+// -- brush strokes (c-abi spec: the stroke engine) ---------------------------
+
+clay_result clay_stroke_preset_defaults(clay_stroke_preset* out_preset) {
+    if (!out_preset) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null preset");
+    brush::StrokePreset d;
+    *out_preset = clay_stroke_preset{};
+    out_preset->struct_size = static_cast<std::uint32_t>(sizeof(clay_stroke_preset));
+    out_preset->radius = d.radius;
+    out_preset->spacing = d.spacing;
+    out_preset->strength = d.strength;
+    out_preset->pressure_size = d.pressure.size;
+    out_preset->pressure_strength = d.pressure.strength;
+    out_preset->pressure_curve = d.pressure.curve;
+    out_preset->jitter_position = d.jitter_position;
+    out_preset->jitter_size = d.jitter_size;
+    out_preset->jitter_rotation = d.jitter_rotation;
+    out_preset->seed = d.seed;
+    out_preset->rotate_along_stroke = d.rotate_along_stroke ? 1 : 0;
+    out_preset->taper_start = d.taper_start;
+    out_preset->taper_end = d.taper_end;
+    out_preset->steady = d.steady;
+    out_preset->accumulation = static_cast<std::int32_t>(d.accumulation);
+    return CLAY_OK;
+}
+
+uint32_t clay_stroke_preset_version(void) { return brush::kPresetVersion; }
+
+clay_result clay_stroke_preset_serialize(const clay_stroke_preset* preset, uint8_t* out_data,
+                                         size_t* count) {
+    brush::StrokePreset p;
+    clay_result r = read_preset(preset, &p);
+    if (r != CLAY_OK) return r;
+    std::vector<std::uint8_t> bytes = p.serialize();
+    return write_sized(bytes.data(), bytes.size(), out_data, count, "preset");
+}
+
+clay_result clay_stroke_preset_deserialize(const uint8_t* data, size_t size,
+                                           clay_stroke_preset* out_preset) {
+    if (!data || size == 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null or empty preset data");
+    auto p = brush::StrokePreset::deserialize(data, size);
+    if (!p)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "not a preset this build can read: malformed, or written by a schema "
+                    "version newer than " +
+                        std::to_string(brush::kPresetVersion));
+    clay_result r = clay_stroke_preset_defaults(out_preset);
+    if (r != CLAY_OK) return r;
+    out_preset->radius = p->radius;
+    out_preset->spacing = p->spacing;
+    out_preset->strength = p->strength;
+    out_preset->pressure_size = p->pressure.size;
+    out_preset->pressure_strength = p->pressure.strength;
+    out_preset->pressure_curve = p->pressure.curve;
+    out_preset->jitter_position = p->jitter_position;
+    out_preset->jitter_size = p->jitter_size;
+    out_preset->jitter_rotation = p->jitter_rotation;
+    out_preset->seed = p->seed;
+    out_preset->rotate_along_stroke = p->rotate_along_stroke ? 1 : 0;
+    out_preset->taper_start = p->taper_start;
+    out_preset->taper_end = p->taper_end;
+    out_preset->steady = p->steady;
+    out_preset->accumulation = static_cast<std::int32_t>(p->accumulation);
+    return CLAY_OK;
+}
+
+clay_result clay_stroke_resolve(const float* samples_xyzpt, size_t sample_count,
+                                const clay_stroke_preset* preset, clay_stamp* out_stamps,
+                                size_t* count) {
+    std::vector<brush::StrokeSample> samples;
+    brush::StrokePreset p;
+    clay_result r = read_stroke(samples_xyzpt, sample_count, preset, &samples, &p);
+    if (r != CLAY_OK) return r;
+    std::vector<brush::Stamp> stamps = brush::resolve_stroke(samples, p);
+
+    if (!count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null count");
+    if (!out_stamps) {
+        *count = stamps.size();
+        return CLAY_OK;
+    }
+    if (*count < stamps.size()) {
+        *count = stamps.size();
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "the stroke needs " + std::to_string(stamps.size()) + " stamps");
+    }
+    for (std::size_t i = 0; i < stamps.size(); ++i) out_stamps[i] = to_c_stamp(stamps[i]);
+    *count = stamps.size();
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_apply_stroke(clay_voxel_grid* grid, const float* samples_xyzpt,
+                                    size_t sample_count, const clay_stroke_preset* preset,
+                                    int32_t index, int32_t shape, int32_t falloff,
+                                    const clay_mask* mask, size_t* out_applied) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    std::uint8_t slot = 0;
+    r = check_palette_index(index, &slot);
+    if (r != CLAY_OK) return r;
+    if (!brush_shape_is_known(shape))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown brush shape: " + std::to_string(shape));
+    if (!brush_falloff_is_known(falloff))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "unknown brush falloff: " + std::to_string(falloff));
+
+    std::vector<brush::StrokeSample> samples;
+    brush::StrokePreset p;
+    r = read_stroke(samples_xyzpt, sample_count, preset, &samples, &p);
+    if (r != CLAY_OK) return r;
+
+    voxel::MaskField* m = nullptr;
+    if (mask) {
+        r = resolve_mask(mask, &m);
+        if (r != CLAY_OK) return r;
+    }
+    std::size_t applied =
+        brush::apply_to_grid(*g, brush::resolve_stroke(samples, p), slot,
+                             static_cast<voxel::BrushShape>(shape),
+                             static_cast<voxel::BrushFalloff>(falloff), m);
+    if (out_applied) *out_applied = applied;
+    return CLAY_OK;
 }
 
 // -- masks (c-abi spec: the mask field) --------------------------------------

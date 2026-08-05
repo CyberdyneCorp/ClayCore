@@ -1,0 +1,156 @@
+#pragma once
+
+// Brush stroke engine (brush-engine spec): a finger drag becomes a list of
+// stamps, and a stamp becomes an ordinary edit.
+//
+// The interface is deliberately "stroke samples in, edit items out". Resolving
+// a stroke is PURE — samples and a preset go in, stamps come out, no document
+// is read or touched — and applying the result appends ordinary nodes to a
+// layer's edit list, or ordinary brush applications to a voxel grid. Nothing
+// here evaluates a stroke through a private path.
+//
+// That is what makes undo, stroke coalescing, `.clayspace` serialization and
+// picking work on stroked edits without any of them knowing this module
+// exists: they already work on edits. A brush with its own evaluation path
+// would need every one of them reimplemented, and would give the engine a
+// second meaning for "an edit" to keep consistent with the first.
+//
+// It is also where a mask reaches SDF edits. An SDF item is declarative and
+// has no per-point strength, so it cannot be gated where it is evaluated
+// without destroying the rigidity and finite support that per-brick culling
+// depends on. It is gated here instead, where the item is authored: a stamp
+// landing in a frozen region is simply not emitted.
+
+#include <cstdint>
+#include <optional>
+#include <vector>
+
+#include "clay/math/transform.h"
+#include "clay/scene/document.h"
+#include "clay/voxel/grid.h"
+#include "clay/voxel/mask.h"
+
+namespace clay {
+namespace brush {
+
+// What a stylus reports at one moment of a drag.
+struct StrokeSample {
+    kernel::cfloat3 position = kernel::cf3(0, 0, 0);
+    float pressure = 1.0f;  // [0,1]
+    float tilt = 0.0f;      // radians from the surface normal; 0 is upright
+};
+
+// How pressure drives a stamp. Each is an exponent on the normalized
+// pressure: 1 is linear, >1 favours light touches, <1 favours firm ones.
+// Zero disables the channel, which is what "size only" and "flow only"
+// brushes are.
+struct PressureResponse {
+    float size = 0.0f;      // 0 = pressure does not change the radius
+    float strength = 1.0f;  // 0 = pressure does not change the strength
+    float curve = 1.0f;     // exponent applied to pressure before either
+};
+
+// How overlapping stamps combine.
+enum class Accumulation : std::uint8_t {
+    // Each stamp applies at its own strength; passing over a spot twice acts
+    // twice. The usual sculpting behaviour.
+    Buildup = 0,
+    // A stroke reaches its strength once and no further, however many stamps
+    // overlap: the per-stamp strength is divided by the expected overlap.
+    Clamped = 1,
+};
+
+// The schema version a preset serializes with. It exists from the first
+// release rather than being retrofitted: presets outlive engine versions, and
+// a library of them silently reinterpreted by a later build is the failure
+// this number is here to prevent.
+inline constexpr std::uint16_t kPresetVersion = 1;
+
+struct StrokePreset {
+    // Distance between stamps as a fraction of the brush DIAMETER. 0.25 is a
+    // dense stroke; 1.0 places stamps just touching. Must be > 0.
+    float spacing = 0.25f;
+
+    PressureResponse pressure;
+
+    // Jitter, all as a fraction of the brush radius except rotation, which is
+    // in radians. Derived from the stamp index and `seed`, never from a random
+    // source, so a stroke resolves identically everywhere.
+    float jitter_position = 0.0f;
+    float jitter_size = 0.0f;
+    float jitter_rotation = 0.0f;
+    std::uint32_t seed = 0;
+
+    // Turn each stamp to follow the path. Off by default: it only matters for
+    // stamps that are not rotationally symmetric.
+    bool rotate_along_stroke = false;
+
+    // Fraction of the stroke's length over which the radius ramps in at the
+    // start and out at the end. 0 disables. Their sum is clamped to 1.
+    float taper_start = 0.0f;
+    float taper_end = 0.0f;
+
+    // Steady stroke ("lazy mouse"): the emission point trails the cursor,
+    // smoothing a shaky path. 0 follows exactly, approaching 1 lags more.
+    float steady = 0.0f;
+
+    Accumulation accumulation = Accumulation::Buildup;
+
+    // Base radius in world units, and base strength. Pressure, taper and
+    // jitter modulate these.
+    float radius = 0.25f;
+    float strength = 1.0f;
+
+    // Round trip. serialize() writes kPresetVersion; deserialize() accepts
+    // that version and any earlier one, taking defaults for whatever the
+    // older schema did not carry, and REFUSES a newer one rather than reading
+    // a prefix of it and pretending.
+    std::vector<std::uint8_t> serialize() const;
+    static std::optional<StrokePreset> deserialize(const std::uint8_t* data, std::size_t size);
+};
+
+// One resolved stamp: where an edit goes and how strong it is. Everything a
+// consumer needs, and nothing about what kind of edit it becomes.
+struct Stamp {
+    kernel::cfloat3 position = kernel::cf3(0, 0, 0);
+    float radius = 0.0f;
+    float strength = 1.0f;
+    math::Quat rotation = math::Quat::identity();
+    float along = 0.0f;  // [0,1] position along the stroke, for a caller's use
+};
+
+// The pure core. An empty sample list yields no stamps; a single sample, or a
+// path shorter than one spacing, yields exactly one stamp at the start —
+// a tap has to leave a mark.
+std::vector<Stamp> resolve_stroke(const std::vector<StrokeSample>& samples,
+                                  const StrokePreset& preset);
+
+// -- consumers ----------------------------------------------------------------
+// Both take the mask the same way the voxel brushes do: a stamp centred in a
+// fully masked region is dropped, and a partially masked one has its strength
+// scaled by (1 - mask).
+
+// Apply stamps to a voxel grid as ordinary brush stamps. `shape` and `falloff`
+// are the footprint; `index` is the palette entry to set, or 0 to erase.
+// Returns the number of stamps that actually ran (masked ones do not).
+std::size_t apply_to_grid(voxel::VoxelGrid& grid, const std::vector<Stamp>& stamps,
+                          std::uint8_t index, voxel::BrushShape shape = voxel::BrushShape::Sphere,
+                          voxel::BrushFalloff falloff = voxel::BrushFalloff::Smooth,
+                          const voxel::MaskField* mask = nullptr);
+
+// Turn stamps into edit-list nodes: one node per stamp, `templ` copied and
+// re-placed at the stamp's transform, with its radius scaled.
+//
+// The nodes are returned rather than inserted, so the caller decides which
+// commands carry them — one AddNodeCmd per node inside an undo group is what
+// makes a whole stroke one undo step, using the stack's existing grouping.
+// `content` is the layer's content, used only to reserve node ids: the
+// command vocabulary preserves the ids it is given (that is what makes replay
+// and undo exact), so a node handed to it must already have one.
+std::vector<scene::Node> stamps_to_nodes(scene::SdfContent& content,
+                                         const std::vector<Stamp>& stamps,
+                                         const scene::Node& templ,
+                                         const voxel::MaskField* mask = nullptr);
+
+}  // namespace brush
+}  // namespace clay
