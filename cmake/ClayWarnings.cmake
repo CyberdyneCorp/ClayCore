@@ -15,6 +15,16 @@ function(clay_apply_warnings target)
     # job and the kernel-dialect check's CUDA profile instead.
     target_compile_options(${target} PRIVATE
       $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Wshadow>)
+    # GCC 12 and 13 report -Wstringop-overflow and -Warray-bounds from inside
+    # libstdc++'s stl_algobase.h when std::vector operations are inlined at
+    # -O3. They are long-standing false positives in the header, not in our
+    # code, and they only appear on the manylinux_2_28 toolchain the release
+    # wheels use. Demote them rather than silence them, so the diagnostic
+    # stays visible if it ever points somewhere real.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12)
+      target_compile_options(${target} PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-Wno-error=stringop-overflow -Wno-error=array-bounds>)
+    endif()
     if(CLAY_WERROR)
       target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Werror>)
     endif()
