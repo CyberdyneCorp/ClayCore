@@ -27,6 +27,7 @@
 #include "clay/scene/bounds.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
+#include "clay/voxel/mask.h"
 
 using namespace clay;
 
@@ -375,6 +376,10 @@ clay_result check_mirror_axes(std::int32_t axes, std::uint8_t* out) {
 // pyclay's does, and the one thing this boundary adds is refusing a strength
 // that is not > 0. That value covers nothing, which no caller means to ask
 // for and which is what a zero-initialized descriptor would otherwise say.
+// Defined with the mask entry points below; a brush descriptor may name a
+// mask, so the two resolve together.
+clay_result resolve_mask(const clay_mask* mask, voxel::MaskField** out);
+
 clay_result read_brush(const clay_brush_params* src, voxel::BrushParams* out) {
     clay_brush_params b;
     clay_result r = read_desc(src, kBrushParamsOriginal, &b);
@@ -393,6 +398,13 @@ clay_result read_brush(const clay_brush_params* src, voxel::BrushParams* out) {
     out->falloff = static_cast<voxel::BrushFalloff>(b.falloff);
     out->strength = b.strength;
     out->seed = b.seed;
+    out->mask = nullptr;
+    if (b.mask) {
+        voxel::MaskField* m = nullptr;
+        clay_result mr = resolve_mask(b.mask, &m);
+        if (mr != CLAY_OK) return mr;
+        out->mask = m;
+    }
     return CLAY_OK;
 }
 
@@ -517,6 +529,12 @@ struct clay_voxel_grid {
     clay_layer_id layer = 0;
 };
 
+struct clay_mask {
+    voxel::MaskField* owned = nullptr;  // non-null: the caller destroys it
+    clay_document* doc = nullptr;       // non-null: borrowed from a layer
+    clay_layer_id layer = 0;
+};
+
 struct clay_document {
     io::ClaySpaceDoc doc;
     // Opt-in undo. Null means off, and a document that never enables it
@@ -526,6 +544,7 @@ struct clay_document {
     // address: repeated lookups return the same handle, nothing leaks, and
     // std::map keeps the addresses stable as more layers arrive.
     std::map<clay_layer_id, clay_voxel_grid> voxel_handles;
+    std::map<clay_layer_id, clay_mask> mask_handles;
 };
 
 struct clay_mesh {
@@ -602,6 +621,19 @@ clay_result resolve(const clay_voxel_grid* grid, voxel::VoxelGrid** out) {
     auto it = grid->doc->doc.voxel_layers.find(grid->layer);
     if (it == grid->doc->doc.voxel_layers.end())  // no removal call exists yet
         return fail(CLAY_ERROR_NOT_FOUND, "voxel layer is no longer in its document");
+    *out = &it->second;
+    return CLAY_OK;
+}
+
+clay_result resolve_mask(const clay_mask* mask, voxel::MaskField** out) {
+    if (!mask) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mask");
+    if (mask->owned) {
+        *out = mask->owned;
+        return CLAY_OK;
+    }
+    auto it = mask->doc->doc.masks.find(mask->layer);
+    if (it == mask->doc->doc.masks.end())
+        return fail(CLAY_ERROR_NOT_FOUND, "mask is no longer in its document");
     *out = &it->second;
     return CLAY_OK;
 }
@@ -793,6 +825,13 @@ clay_result mesh_with(std::int32_t mesher, bool experimental, const scene::Tape&
 
 clay_voxel_grid* borrow_layer(clay_document* doc, clay_layer_id layer) {
     clay_voxel_grid& handle = doc->voxel_handles[layer];
+    handle.doc = doc;
+    handle.layer = layer;
+    return &handle;
+}
+
+clay_mask* borrow_mask_handle(clay_document* doc, clay_layer_id layer) {
+    clay_mask& handle = doc->mask_handles[layer];
     handle.doc = doc;
     handle.layer = layer;
     return &handle;
@@ -1639,6 +1678,218 @@ clay_result clay_document_voxel_layer(clay_document* doc, const char* name,
         return CLAY_OK;
     }
     return fail(CLAY_ERROR_NOT_FOUND, std::string("no voxel layer named ") + name);
+}
+
+// -- masks (c-abi spec: the mask field) --------------------------------------
+
+clay_mask* clay_mask_create(float cell_size) {
+    if (!(cell_size > 0.0f)) {  // also rejects NaN
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "cell_size must be > 0");
+        return nullptr;
+    }
+    auto* handle = new clay_mask();
+    handle->owned = new voxel::MaskField(cell_size);
+    return handle;
+}
+
+clay_result clay_mask_destroy(clay_mask* mask) {
+    if (!mask) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mask");
+    if (!mask->owned)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this mask belongs to a document layer: the document owns it");
+    delete mask->owned;
+    delete mask;
+    return CLAY_OK;
+}
+
+clay_result clay_document_add_mask(clay_document* doc, clay_layer_id layer, float cell_size,
+                                   clay_mask** out_mask) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (!(cell_size > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "cell_size must be > 0");
+    if (!doc->doc.document.find_layer(layer))
+        return fail(CLAY_ERROR_NOT_FOUND, "no layer with id " + std::to_string(layer));
+    doc->doc.masks.insert_or_assign(layer, voxel::MaskField(cell_size));
+    if (out_mask) *out_mask = borrow_mask_handle(doc, layer);
+    return CLAY_OK;
+}
+
+clay_result clay_document_mask(clay_document* doc, clay_layer_id layer, clay_mask** out_mask) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (!doc->doc.masks.count(layer))
+        return fail(CLAY_ERROR_NOT_FOUND, "layer " + std::to_string(layer) + " has no mask");
+    if (out_mask) *out_mask = borrow_mask_handle(doc, layer);
+    return CLAY_OK;
+}
+
+clay_result clay_document_remove_mask(clay_document* doc, clay_layer_id layer) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (doc->doc.masks.erase(layer) == 0)
+        return fail(CLAY_ERROR_NOT_FOUND, "layer " + std::to_string(layer) + " has no mask");
+    return CLAY_OK;
+}
+
+clay_result clay_mask_cell_size(const clay_mask* mask, float* out_cell_size) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    if (out_cell_size) *out_cell_size = m->cell_size();
+    return CLAY_OK;
+}
+
+clay_result clay_mask_painted_count(const clay_mask* mask, size_t* out_count) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    if (out_count) *out_count = m->painted_count();
+    return CLAY_OK;
+}
+
+clay_result clay_mask_empty(const clay_mask* mask, int32_t* out_empty) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    if (out_empty) *out_empty = m->empty() ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_mask_get(const clay_mask* mask, const int32_t cell[3], float* out_value) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    if (!cell) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cell");
+    if (out_value) *out_value = m->get({cell[0], cell[1], cell[2]});
+    return CLAY_OK;
+}
+
+clay_result clay_mask_set(clay_mask* mask, const int32_t cell[3], float value) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    if (!cell) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cell");
+    m->set({cell[0], cell[1], cell[2]}, value);
+    return CLAY_OK;
+}
+
+clay_result clay_mask_sample(const clay_mask* mask, const float point[3], float* out_value) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    if (!point) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null point");
+    if (out_value) *out_value = m->sample(kernel::cf3(point[0], point[1], point[2]));
+    return CLAY_OK;
+}
+
+clay_result clay_mask_sample_many(const clay_mask* mask, const float* points_xyz, size_t count,
+                                  float* out_values) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    if (count > 0 && (!points_xyz || !out_values))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null points or output");
+    clay_result batch = check_batch("points", count);
+    if (batch != CLAY_OK) return batch;
+    for (std::size_t i = 0; i < count; ++i)
+        out_values[i] = m->sample(
+            kernel::cf3(points_xyz[i * 3 + 0], points_xyz[i * 3 + 1], points_xyz[i * 3 + 2]));
+    return CLAY_OK;
+}
+
+clay_result clay_mask_paint(clay_mask* mask, const float point[3],
+                            const clay_brush_params* brush, float target) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    if (!point) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null point");
+    if (!brush) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brush parameters");
+    voxel::BrushParams p;
+    r = read_brush(brush, &p);
+    if (r != CLAY_OK) return r;
+    p.mask = nullptr;  // a mask does not gate itself
+    m->paint(kernel::cf3(point[0], point[1], point[2]), p, target);
+    return CLAY_OK;
+}
+
+clay_result clay_mask_paint_cell(clay_mask* mask, const int32_t cell[3],
+                                 const clay_brush_params* brush, float target) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    if (!cell) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cell");
+    if (!brush) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brush parameters");
+    voxel::BrushParams p;
+    r = read_brush(brush, &p);
+    if (r != CLAY_OK) return r;
+    p.mask = nullptr;
+    m->paint(voxel::VoxelCoord{cell[0], cell[1], cell[2]}, p, target);
+    return CLAY_OK;
+}
+
+clay_result clay_mask_invert(clay_mask* mask) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    m->invert();
+    return CLAY_OK;
+}
+
+clay_result clay_mask_clear(clay_mask* mask) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    m->clear();
+    return CLAY_OK;
+}
+
+// steps and iterations must be > 0: a zero or negative count is a
+// zero-initialized argument rather than a request, on the same footing as a
+// brush strength that is not > 0.
+clay_result clay_mask_expand(clay_mask* mask, int32_t steps) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    if (steps <= 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "steps must be > 0");
+    m->expand(steps);
+    return CLAY_OK;
+}
+
+clay_result clay_mask_contract(clay_mask* mask, int32_t steps) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    if (steps <= 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "steps must be > 0");
+    m->contract(steps);
+    return CLAY_OK;
+}
+
+clay_result clay_mask_smooth(clay_mask* mask, int32_t iterations) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    if (iterations <= 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "iterations must be > 0");
+    m->smooth(iterations);
+    return CLAY_OK;
+}
+
+clay_result clay_mask_bounds(const clay_mask* mask, int32_t out_min[3], int32_t out_max[3],
+                             int32_t* out_has_bounds) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    std::optional<voxel::VoxelCoord> lo = m->bounds_min();
+    std::optional<voxel::VoxelCoord> hi = m->bounds_max();
+    if (out_has_bounds) *out_has_bounds = (lo && hi) ? 1 : 0;
+    if (!lo || !hi) return CLAY_OK;
+    if (out_min) {
+        out_min[0] = lo->x;
+        out_min[1] = lo->y;
+        out_min[2] = lo->z;
+    }
+    if (out_max) {
+        out_max[0] = hi->x;
+        out_max[1] = hi->y;
+        out_max[2] = hi->z;
+    }
+    return CLAY_OK;
 }
 
 clay_result clay_voxel_size(const clay_voxel_grid* grid, float* out_voxel_size) {

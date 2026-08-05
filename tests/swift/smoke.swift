@@ -197,6 +197,49 @@ check(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK && occupied != stamp
 
 check(clay_voxel_grid_destroy(grid) != CLAY_OK, "destroying a borrowed layer handle is refused")
 
+// -- masks -------------------------------------------------------------------
+
+var mask: OpaquePointer? = nil
+check(clay_document_add_mask(doc, voxelLayer, 0.1, &mask) == CLAY_OK, "attached a mask")
+
+var maskBrush = brush
+maskBrush.mask = nil  // a mask does not gate itself
+var maskCentre: [Int32] = [0, 0, 0]
+maskBrush.strength = 1.0
+maskBrush.falloff = Int32(CLAY_BRUSH_FALLOFF_CONSTANT.rawValue)
+maskBrush.size = 21
+check(clay_mask_paint_cell(mask, &maskCentre, &maskBrush, 1.0) == CLAY_OK, "painted the mask")
+
+var painted = 0
+check(clay_mask_painted_count(mask, &painted) == CLAY_OK && painted > 0,
+      "the mask covers \(painted) cells")
+var maskValue: Float = -1
+var maskPoint: [Float] = [0.05, 0.05, 0.05]
+check(clay_mask_sample(mask, &maskPoint, &maskValue) == CLAY_OK && maskValue == 1.0,
+      "sampled the mask in world space")
+
+// A fully masked region is frozen: the same brush that changed the grid above
+// now leaves it exactly as it is.
+let beforeMasked = occupied
+var maskedBrush = brush
+maskedBrush.mask = mask
+check(clay_voxel_erase_brush(grid, &cell, &maskedBrush) == CLAY_OK, "masked erase ran")
+check(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK && occupied == beforeMasked,
+      "the mask froze the region (\(beforeMasked) cells untouched)")
+check(clay_voxel_erase_brush(grid, &cell, &brush) == CLAY_OK, "unmasked erase ran")
+check(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK && occupied < beforeMasked,
+      "without the mask the same brush cuts (\(beforeMasked) -> \(occupied))")
+
+check(clay_mask_expand(mask, 1) == CLAY_OK, "mask expand")
+check(clay_mask_contract(mask, 1) == CLAY_OK, "mask contract")
+check(clay_mask_smooth(mask, 1) == CLAY_OK, "mask smooth")
+check(clay_mask_invert(mask) == CLAY_OK, "mask invert")
+check(clay_mask_destroy(mask) != CLAY_OK, "destroying a borrowed mask handle is refused")
+
+// Re-read after the region ops: they change the mask, and the round-trip check
+// below compares against whatever it looks like at save time.
+check(clay_mask_painted_count(mask, &painted) == CLAY_OK, "read the mask back")
+
 // -- meshing -----------------------------------------------------------------
 
 var meshParams = clay_mesh_params()
@@ -234,6 +277,15 @@ check(clay_document_load(outPath, &reloaded) == CLAY_OK, "loaded it back")
 if let reloaded = reloaded {
     let after = evaluate(reloaded, [0, 0, 0])
     check(after[0] == evaluate(doc, [0, 0, 0])[0], "the round trip preserved the field")
+
+    var reloadedMask: OpaquePointer? = nil
+    check(clay_document_mask(reloaded, voxelLayer, &reloadedMask) == CLAY_OK,
+          "the mask came back with the document")
+    var reloadedPainted = 0
+    check(clay_mask_painted_count(reloadedMask, &reloadedPainted) == CLAY_OK
+          && reloadedPainted == painted,
+          "the round trip preserved the mask (\(reloadedPainted) cells)")
+
     clay_document_destroy(reloaded)
 }
 try? FileManager.default.removeItem(atPath: outPath)

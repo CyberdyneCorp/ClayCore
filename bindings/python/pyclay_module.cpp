@@ -26,6 +26,7 @@
 #include "clay/scene/commands.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
+#include "clay/voxel/mask.h"
 #include "clay/version.h"
 
 namespace nb = nanobind;
@@ -87,8 +88,13 @@ voxel::BrushFalloff parse_falloff(const std::string& falloff) {
         "falloff must be 'constant', 'linear', 'smooth' or 'gaussian', got '" + falloff + "'");
 }
 
+// Forward declaration: the mask wrapper is defined below with the other
+// voxel types, but every brush entry point resolves a mask through here.
+struct PyMaskField;
+const voxel::MaskField* borrow_mask(nb::handle mask);
+
 voxel::BrushParams make_brush(int size, const std::string& shape, const std::string& falloff,
-                              float strength, std::uint32_t seed) {
+                              float strength, std::uint32_t seed, nb::handle mask = nb::handle()) {
     if (size <= 0) throw std::invalid_argument("brush size must be > 0");
     voxel::BrushParams p;
     p.size = size;
@@ -96,6 +102,7 @@ voxel::BrushParams make_brush(int size, const std::string& shape, const std::str
     p.falloff = parse_falloff(falloff);
     p.strength = strength;
     p.seed = seed;
+    p.mask = borrow_mask(mask);
     return p;
 }
 
@@ -255,6 +262,29 @@ struct PyVoxelGrid {
         return it->second;
     }
 };
+
+// Owns a mask, or borrows the one a document holds for a layer, mirroring
+// PyVoxelGrid so a mask edited through a document is the one that gets saved.
+struct PyMaskField {
+    std::shared_ptr<io::ClaySpaceDoc> doc;  // null for standalone masks
+    scene::LayerId layer = 0;
+    std::shared_ptr<voxel::MaskField> owned;
+
+    voxel::MaskField& field() const {
+        if (owned) return *owned;
+        auto it = doc->masks.find(layer);
+        if (it == doc->masks.end())
+            throw std::runtime_error("mask was removed from its document");
+        return it->second;
+    }
+};
+
+const voxel::MaskField* borrow_mask(nb::handle mask) {
+    if (!mask.is_valid() || mask.is_none()) return nullptr;
+    // Borrowed for the duration of the call only, which is all a BrushParams
+    // built at the call site needs.
+    return &nb::cast<PyMaskField&>(mask).field();
+}
 
 // -- document / layer wrappers ------------------------------------------------
 
@@ -1472,6 +1502,40 @@ NB_MODULE(pyclay, m) {
              },
              "name"_a, "voxel_size"_a = 0.1f,
              "Add a voxel layer and return its grid (edits are stored in the document)")
+        .def("add_mask",
+             [](PyDocument& d, const std::string& name, float cell_size) {
+                 if (cell_size <= 0.0f) throw std::invalid_argument("cell_size must be > 0");
+                 const scene::Layer* target = nullptr;
+                 for (const scene::Layer& l : d.doc->document.layers)
+                     if (l.name == name) target = &l;
+                 if (!target) throw std::invalid_argument("no layer named '" + name + "'");
+                 d.doc->masks.insert_or_assign(target->id, voxel::MaskField(cell_size));
+                 PyMaskField m;
+                 m.doc = d.doc;
+                 m.layer = target->id;
+                 return m;
+             },
+             "name"_a, "cell_size"_a = 0.1f,
+             "Attach a mask to a layer and return it (edits are stored in the document)")
+        .def("mask",
+             [](const PyDocument& d, const std::string& name) -> nb::object {
+                 for (const scene::Layer& l : d.doc->document.layers) {
+                     if (l.name != name || !d.doc->masks.count(l.id)) continue;
+                     PyMaskField m;
+                     m.doc = d.doc;
+                     m.layer = l.id;
+                     return nb::cast(m);
+                 }
+                 return nb::none();
+             },
+             "name"_a, "Look up a layer's mask by name, or None")
+        .def("remove_mask",
+             [](PyDocument& d, const std::string& name) {
+                 for (const scene::Layer& l : d.doc->document.layers)
+                     if (l.name == name) return d.doc->masks.erase(l.id) > 0;
+                 return false;
+             },
+             "name"_a, "Drop a layer's mask; returns whether there was one")
         .def("voxel_layer",
              [](const PyDocument& d, const std::string& name) -> nb::object {
                  for (const scene::Layer& l : d.doc->document.layers) {
@@ -1669,6 +1733,92 @@ NB_MODULE(pyclay, m) {
              });
 
     // -- module functions -----------------------------------------------------------
+    nb::class_<PyMaskField>(
+        m, "MaskField",
+        "Paintable scalar mask in [0, 1] gating how strongly an edit may act.\n\n"
+        "Addressed in world units on its own lattice, not in a layer's voxel\n"
+        "cells, so a mask survives a resolution change and a move between the\n"
+        "SDF and voxel representations. Pass one as the `mask` argument of any\n"
+        "VoxelGrid brush: the effective strength at a cell becomes\n"
+        "strength * (1 - mask), so a fully masked cell is frozen.\n\n"
+        "Masking gates edits where they are authored. A mask painted now does\n"
+        "not retroactively protect a region from SDF items already placed.")
+        .def("__init__",
+             [](PyMaskField* self, float cell_size) {
+                 if (cell_size <= 0.0f) throw std::invalid_argument("cell_size must be > 0");
+                 new (self) PyMaskField();
+                 self->owned = std::make_shared<voxel::MaskField>(cell_size);
+             },
+             "cell_size"_a = 0.1f)
+        .def_prop_ro("cell_size", [](const PyMaskField& m) { return m.field().cell_size(); })
+        .def_prop_ro("painted_count", [](const PyMaskField& m) { return m.field().painted_count(); })
+        .def_prop_ro("empty", [](const PyMaskField& m) { return m.field().empty(); })
+        .def("get", [](const PyMaskField& m,
+                       nb::handle cell) { return m.field().get(to_coord(cell)); }, "cell"_a)
+        .def("set",
+             [](PyMaskField& m, nb::handle cell, float value) {
+                 m.field().set(to_coord(cell), value);
+             },
+             "cell"_a, "value"_a)
+        .def("sample",
+             [](const PyMaskField& m, nb::handle p) {
+                 return m.field().sample(to_f3(p, "point"));
+             },
+             "point"_a, "Mask value at a world position")
+        .def("sample_many",
+             [](const PyMaskField& m, nb::handle points) {
+                 PointsView pts = to_points(points);
+                 const voxel::MaskField& f = m.field();
+                 const std::size_t n = pts.count;
+                 float* out = new float[n ? n : 1];
+                 nb::capsule owner(out, [](void* q) noexcept { delete[] static_cast<float*>(q); });
+                 {
+                     nb::gil_scoped_release release;
+                     for (std::size_t i = 0; i < n; ++i)
+                         out[i] = f.sample(kernel::cf3(pts.data[i * 3 + 0], pts.data[i * 3 + 1],
+                                                       pts.data[i * 3 + 2]));
+                 }
+                 return nb::cast(nb::ndarray<nb::numpy, float>(out, {n}, owner));
+             },
+             "points"_a, "Sample an (N, 3) array of world positions -> (N,) float32")
+        .def("paint",
+             [](PyMaskField& m, nb::handle point, int n, float target, const std::string& shape,
+                const std::string& falloff, float strength) {
+                 m.field().paint(to_f3(point, "point"),
+                                 make_brush(n, shape, falloff, strength, 0u), target);
+             },
+             "point"_a, "size"_a, "target"_a = 1.0f, "shape"_a = "sphere",
+             "falloff"_a = "smooth", "strength"_a = 1.0f,
+             "Brush the mask toward `target` at a world position. target=1 masks, "
+             "target=0 erases. Size is in mask cells.")
+        .def("paint_cell",
+             [](PyMaskField& m, nb::handle cell, int n, float target, const std::string& shape,
+                const std::string& falloff, float strength) {
+                 m.field().paint(to_coord(cell), make_brush(n, shape, falloff, strength, 0u),
+                                 target);
+             },
+             "cell"_a, "size"_a, "target"_a = 1.0f, "shape"_a = "sphere",
+             "falloff"_a = "smooth", "strength"_a = 1.0f,
+             "As paint(), centred on a mask cell rather than a world position")
+        .def("invert", [](PyMaskField& m) { m.field().invert(); },
+             "Flip the painted region (a sparse field has no finite complement)")
+        .def("clear", [](PyMaskField& m) { m.field().clear(); })
+        .def("expand", [](PyMaskField& m, int steps) { m.field().expand(steps); }, "steps"_a = 1,
+             "Grow the mask by grey dilation")
+        .def("contract", [](PyMaskField& m, int steps) { m.field().contract(steps); },
+             "steps"_a = 1, "Shrink the mask by grey erosion")
+        .def("smooth", [](PyMaskField& m, int iterations) { m.field().smooth(iterations); },
+             "iterations"_a = 1, "Blur the mask, softening its boundary")
+        .def("bounds",
+             [](const PyMaskField& m) -> nb::object {
+                 auto lo = m.field().bounds_min();
+                 auto hi = m.field().bounds_max();
+                 if (!lo || !hi) return nb::none();
+                 return nb::make_tuple(nb::make_tuple(lo->x, lo->y, lo->z),
+                                       nb::make_tuple(hi->x, hi->y, hi->z));
+             },
+             "Inclusive cell bounds of the painted region, or None");
+
     nb::class_<PyVoxelGrid>(m, "VoxelGrid",
                             "Palette-indexed colored voxel grid (chunked, sparse)")
         .def("__init__",
@@ -1732,85 +1882,86 @@ NB_MODULE(pyclay, m) {
         .def("set_brush",
              [](PyVoxelGrid& g, nb::handle cell, int n, std::uint8_t index,
                 const std::string& shape, const std::string& falloff, float strength,
-                std::uint32_t seed) {
+                std::uint32_t seed, nb::handle mask) {
                  g.grid().set_brush(to_coord(cell),
-                                    make_brush(n, shape, falloff, strength, seed), index);
+                                    make_brush(n, shape, falloff, strength, seed, mask), index);
              },
              "cell"_a, "size"_a, "index"_a, "shape"_a = "cube", "falloff"_a = "constant",
-             "strength"_a = 1.0f, "seed"_a = 0u,
+             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
              "Brush footprint centered on the cell: 'cube' or 'sphere', size n "
              "covering n cells per axis. falloff ('constant', 'linear', 'smooth', "
              "'gaussian') and strength soften the edge by dithering coverage "
              "deterministically against seed.")
         .def("erase_brush",
              [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
-                const std::string& falloff, float strength, std::uint32_t seed) {
+                const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
                  g.grid().erase_brush(to_coord(cell),
-                                      make_brush(n, shape, falloff, strength, seed));
+                                      make_brush(n, shape, falloff, strength, seed, mask));
              },
              "cell"_a, "size"_a, "shape"_a = "cube", "falloff"_a = "constant",
-             "strength"_a = 1.0f, "seed"_a = 0u)
+             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none())
         .def("paint_brush",
              [](PyVoxelGrid& g, nb::handle cell, int n, std::uint8_t index,
                 const std::string& shape, const std::string& falloff, float strength,
-                std::uint32_t seed) {
+                std::uint32_t seed, nb::handle mask) {
                  g.grid().paint_brush(to_coord(cell),
-                                      make_brush(n, shape, falloff, strength, seed), index);
+                                      make_brush(n, shape, falloff, strength, seed, mask), index);
              },
              "cell"_a, "size"_a, "index"_a, "shape"_a = "cube", "falloff"_a = "constant",
-             "strength"_a = 1.0f, "seed"_a = 0u,
+             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
              "Recolor occupied cells in the footprint; empty cells are untouched")
         .def("sculpt_smooth",
              [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
-                const std::string& falloff, float strength, std::uint32_t seed) {
+                const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
                  g.grid().sculpt_smooth(to_coord(cell),
-                                        make_brush(n, shape, falloff, strength, seed));
+                                        make_brush(n, shape, falloff, strength, seed, mask));
              },
              "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant",
-             "strength"_a = 1.0f, "seed"_a = 0u,
+             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
              "Majority filter over the 26-neighbourhood: spurs dissolve, notches fill")
         .def("sculpt_inflate",
              [](PyVoxelGrid& g, nb::handle cell, int n, int amount, const std::string& shape,
-                const std::string& falloff, float strength, std::uint32_t seed) {
+                const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
                  g.grid().sculpt_inflate(to_coord(cell),
-                                         make_brush(n, shape, falloff, strength, seed), amount);
+                                         make_brush(n, shape, falloff, strength, seed, mask), amount);
              },
              "cell"_a, "size"_a, "amount"_a = 1, "shape"_a = "sphere",
-             "falloff"_a = "constant", "strength"_a = 1.0f, "seed"_a = 0u,
+             "falloff"_a = "constant", "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
              "Dilate for a positive amount, erode for a negative one")
         .def("sculpt_flatten",
              [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle normal, float offset,
                 const std::string& shape, const std::string& falloff, float strength,
-                std::uint32_t seed) {
+                std::uint32_t seed, nb::handle mask) {
                  g.grid().sculpt_flatten(to_coord(cell),
-                                         make_brush(n, shape, falloff, strength, seed),
+                                         make_brush(n, shape, falloff, strength, seed, mask),
                                          to_f3(normal, "normal"), offset);
              },
              "cell"_a, "size"_a, "normal"_a, "offset"_a = 0.0f, "shape"_a = "sphere",
-             "falloff"_a = "constant", "strength"_a = 1.0f, "seed"_a = 0u,
+             "falloff"_a = "constant", "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
              "Pull the surface onto the plane through the brush centre")
         .def("sculpt_grab",
              [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle displacement,
                 const std::string& shape, const std::string& falloff, float strength,
-                std::uint32_t seed, bool front_only) {
+                std::uint32_t seed, bool front_only,
+                nb::handle mask) {
                  g.grid().sculpt_grab(to_coord(cell),
-                                      make_brush(n, shape, falloff, strength, seed),
+                                      make_brush(n, shape, falloff, strength, seed, mask),
                                       to_f3(displacement, "displacement"), front_only);
              },
              "cell"_a, "size"_a, "displacement"_a, "shape"_a = "sphere",
              "falloff"_a = "smooth", "strength"_a = 1.0f, "seed"_a = 0u,
-             "front_only"_a = false,
+             "front_only"_a = false, "mask"_a = nb::none(),
              "Translate occupancy through the same map the SDF grab uses. Binary "
              "occupancy means this resamples nearest-cell, so material moves in "
              "whole cells rather than flowing.")
         .def("sculpt_pinch",
              [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
-                const std::string& falloff, float strength, std::uint32_t seed) {
+                const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
                  g.grid().sculpt_pinch(to_coord(cell),
-                                       make_brush(n, shape, falloff, strength, seed));
+                                       make_brush(n, shape, falloff, strength, seed, mask));
              },
              "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant",
-             "strength"_a = 1.0f, "seed"_a = 0u,
+             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
              "Move surface cells one step toward the brush centre")
         .def("fill_box",
              [](PyVoxelGrid& g, nb::handle a, nb::handle b, std::uint8_t index) {

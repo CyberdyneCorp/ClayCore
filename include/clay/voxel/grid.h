@@ -45,6 +45,8 @@ inline constexpr std::uint8_t kVoxMirrorZ = 4;
 // of Cube for a given size, and its occupancy ratio approaches pi/6.
 enum class BrushShape : std::uint8_t { Cube = 0, Sphere = 1 };
 
+class MaskField;  // clay/voxel/mask.h
+
 // Falloff curve over the normalized distance from the footprint centre.
 // Constant is the hard-edged brush and stays the default.
 enum class BrushFalloff : std::uint8_t {
@@ -66,6 +68,11 @@ struct BrushParams {
     BrushFalloff falloff = BrushFalloff::Constant;
     float strength = 1.0f;
     std::uint32_t seed = 0;
+    // Optional gate. Where a mask is given, the effective weight at a cell is
+    // scaled by (1 - mask), so a fully masked cell is untouched by every verb
+    // below rather than by a hand-picked few. Borrowed, not owned: BrushParams
+    // is a transient call-site struct.
+    const MaskField* mask = nullptr;
 };
 
 class VoxelGrid {

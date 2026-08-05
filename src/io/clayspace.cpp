@@ -17,6 +17,7 @@ constexpr std::uint32_t fourcc(const char (&s)[5]) {
 }
 constexpr std::uint32_t kScene = fourcc("SCNE");
 constexpr std::uint32_t kVoxel = fourcc("VOXL");
+constexpr std::uint32_t kMask = fourcc("MASK");
 constexpr std::uint32_t kThumb = fourcc("THMB");
 constexpr std::uint32_t kCamera = fourcc("CAMB");
 
@@ -91,6 +92,14 @@ std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc) {
         payload.insert(payload.end(), grid_bytes.begin(), grid_bytes.end());
         put_chunk(out, kVoxel, payload);
     }
+    for (const auto& [layer_id, mask] : doc.masks) {
+        if (mask.empty()) continue;
+        std::vector<std::uint8_t> payload;
+        put_u32(payload, layer_id);
+        std::vector<std::uint8_t> mask_bytes = mask.serialize();
+        payload.insert(payload.end(), mask_bytes.begin(), mask_bytes.end());
+        put_chunk(out, kMask, payload);
+    }
     if (!doc.thumbnail_png.empty()) put_chunk(out, kThumb, doc.thumbnail_png);
     if (!doc.camera_bookmarks.empty()) put_chunk(out, kCamera, doc.camera_bookmarks);
     return out;
@@ -139,6 +148,14 @@ IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc
                                                       static_cast<std::size_t>(len) - 4);
             if (!grid) return IoStatus::fail(IoError::Malformed, "voxel chunk parse failed");
             result.voxel_layers.emplace(layer_id, std::move(*grid));
+        } else if (cc == kMask) {
+            if (len < 4) return IoStatus::fail(IoError::Malformed, "mask chunk too small");
+            std::uint32_t layer_id = 0;
+            std::memcpy(&layer_id, payload, 4);
+            auto mask = voxel::MaskField::deserialize(payload + 4,
+                                                      static_cast<std::size_t>(len) - 4);
+            if (!mask) return IoStatus::fail(IoError::Malformed, "mask chunk parse failed");
+            result.masks.emplace(layer_id, std::move(*mask));
         } else if (cc == kThumb) {
             result.thumbnail_png.assign(payload, payload + len);
         } else if (cc == kCamera) {

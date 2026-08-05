@@ -26,6 +26,7 @@ EXAMPLES = [
     "08_meshing_and_io",
     "09_sculpt_brushes",
     "10_editing",
+    "11_masks",
 ]
 
 

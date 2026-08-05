@@ -225,8 +225,13 @@ def builder_exercise(lib, doc, layer: int) -> list[str]:
     return errors
 
 
-class BrushParams(ctypes.Structure):
-    """clay_brush_params as a bindings generator would emit it."""
+class BrushParamsV0_11_0(ctypes.Structure):
+    """clay_brush_params as it shipped before the mask field was appended.
+
+    Kept as its own type rather than as a shorter struct_size on the current
+    one: this is what a caller built against 0.11.0 actually passes, and the
+    prefix rule has to zero-fill the mask for it rather than read past its end.
+    """
 
     _fields_ = [
         ("struct_size", ctypes.c_uint32),
@@ -238,8 +243,20 @@ class BrushParams(ctypes.Structure):
     ]
 
 
+class BrushParams(ctypes.Structure):
+    """clay_brush_params as a bindings generator would emit it."""
+
+    _fields_ = BrushParamsV0_11_0._fields_ + [("mask", ctypes.c_void_p)]
+
+
 class FutureBrushParams(ctypes.Structure):
-    """clay_brush_params as a caller compiled against a later header sees it."""
+    """clay_brush_params as a caller compiled against a later header sees it.
+
+    Appended AFTER the current layout, which is the only thing a later header
+    can do. Modelling it any other way would have the boundary read a field
+    the caller never wrote — and since `mask` is a pointer, that is a wild
+    dereference rather than a wrong number.
+    """
 
     _fields_ = BrushParams._fields_ + [("appended", ctypes.c_float * 2)]
 
@@ -281,6 +298,16 @@ def brush_struct_size_exercise(lib, grid) -> list[str]:
     as_known = ctypes.cast(ctypes.byref(future), ctypes.POINTER(BrushParams))
     if lib.clay_voxel_set_brush(grid, at, as_known, 1) != 0:
         errors.append("clay_voxel_set_brush rejected a struct_size from a later header")
+
+    # ...and the other direction: a caller built against 0.11.0, before the
+    # mask field existed. The prefix rule zero-fills it, so the stamp means
+    # exactly what it always meant.
+    old = BrushParamsV0_11_0()
+    old.struct_size = ctypes.sizeof(BrushParamsV0_11_0)
+    old.size, old.strength = 3, 1.0
+    as_current = ctypes.cast(ctypes.byref(old), ctypes.POINTER(BrushParams))
+    if lib.clay_voxel_set_brush(grid, at, as_current, 1) != 0:
+        errors.append("clay_voxel_set_brush rejected a pre-0.12.0 brush descriptor")
     return errors
 
 

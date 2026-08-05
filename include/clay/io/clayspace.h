@@ -6,7 +6,8 @@
 //   chunk: fourcc u32 | u64 payload size | payload
 //
 // Chunks: 'SCNE' scene command/document payload, 'VOXL' one voxel layer
-// (u32 layer id + VoxelGrid stream), 'THMB' thumbnail bytes (PNG,
+// (u32 layer id + VoxelGrid stream), 'MASK' one layer's mask field (u32 layer
+// id + MaskField stream), 'THMB' thumbnail bytes (PNG,
 // passthrough), 'CAMB' camera bookmarks (passthrough). Unknown chunks are
 // skipped (backward-open); a higher major version refuses to load
 // (forward-refuse) with no partial document.
@@ -19,6 +20,7 @@
 #include "clay/io/result.h"
 #include "clay/scene/document.h"
 #include "clay/voxel/grid.h"
+#include "clay/voxel/mask.h"
 
 namespace clay {
 namespace io {
@@ -31,6 +33,10 @@ inline constexpr std::uint16_t kClaySpaceMinor = 0;
 struct ClaySpaceDoc {
     scene::Document document;
     std::map<scene::LayerId, voxel::VoxelGrid> voxel_layers;
+    // Masks sit beside voxel content rather than inside scene::Document, so a
+    // mask's presence cannot change what the document evaluates to — the
+    // structural version of "masking gates authoring, not evaluation".
+    std::map<scene::LayerId, voxel::MaskField> masks;
     std::vector<std::uint8_t> thumbnail_png;      // optional passthrough
     std::vector<std::uint8_t> camera_bookmarks;   // optional passthrough
 };

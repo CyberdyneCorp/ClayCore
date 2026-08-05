@@ -15,6 +15,7 @@ add_executable(clay_unit_tests
   unit/test_parity.cpp
   unit/test_brick.cpp
   unit/test_voxel.cpp
+  unit/test_mask.cpp
   unit/test_mesh.cpp
   unit/test_meshers.cpp
   unit/test_pick.cpp
@@ -26,6 +27,7 @@ add_executable(clay_unit_tests
   unit/test_primitives_backfill.cpp
   unit/test_c_item_builder.cpp
   unit/test_c_voxel.cpp
+  unit/test_c_mask.cpp
   unit/test_c_pick_eval.cpp)
 
 target_link_libraries(clay_unit_tests PRIVATE clay::core doctest::doctest)

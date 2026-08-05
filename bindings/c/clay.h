@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 11
+#define CLAY_ABI_MINOR 12
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -596,12 +596,20 @@ typedef enum clay_brush_falloff {
  * way — a field appended later takes the zero value when a caller does not
  * declare it, so only fields whose default is zero may be appended.
  *
+ * One field is a pointer, which sharpens the struct_size contract: a caller
+ * that declares a struct_size LARGER than the layout it actually compiled
+ * against has the boundary read a mask handle out of bytes it never wrote,
+ * and a handle cannot be validated the way a number can be range-checked.
+ * Declaring sizeof of the struct you compiled against is not a formality.
+ *
  * strength reaches the engine untouched, so a stamp lands on exactly the
  * cells the same stamp lands on through the Python bindings. It must be > 0:
  * a strength that is not covers no cell at all, which is a zero-initialized
  * descriptor rather than a request, and unlike the Python bindings this
  * boundary rejects it instead of stamping nothing. A strength at or above 1
  * is the full footprint. */
+typedef struct clay_mask clay_mask; /* opaque; see -- masks -- below */
+
 typedef struct clay_brush_params {
     uint32_t struct_size; /* = sizeof(clay_brush_params); required, see above */
     int32_t size;         /* cells the footprint spans per axis; must be > 0 */
@@ -609,6 +617,11 @@ typedef struct clay_brush_params {
     int32_t falloff;      /* clay_brush_falloff */
     float strength;       /* coverage multiplier; must be > 0, >= 1 is full */
     uint32_t seed;        /* dither seed */
+    /* Appended at ABI 0.12.0. NULL — the zero value, and what a caller
+     * compiled against 0.11.0 effectively declares — means no gating, so an
+     * older caller's stamp lands exactly where it always did. The mask is
+     * borrowed for the duration of the call and must outlive it. */
+    const clay_mask* mask;
 } clay_brush_params;
 
 /* A standalone grid, owned by the caller. voxel_size is world units per cell
@@ -714,6 +727,82 @@ clay_result clay_voxel_sculpt_pinch(clay_voxel_grid* grid, const int32_t cell[3]
 clay_result clay_voxel_sculpt_grab(clay_voxel_grid* grid, const int32_t cell[3],
                                    const clay_brush_params* brush, const float displacement[3],
                                    int32_t front_only);
+
+/* -- masks ----------------------------------------------------------------- */
+
+/* A paintable scalar mask in [0, 1] gating how strongly an edit may act: the
+ * effective brush weight at a cell becomes strength * (1 - mask), so a fully
+ * masked cell is frozen and an unmasked one is untouched by the feature.
+ *
+ * The mask is addressed in WORLD units on its own lattice, deliberately not
+ * in a layer's voxel cells, so changing a layer's resolution or moving
+ * content between the SDF and voxel representations cannot silently drop or
+ * misalign it. Its cell size is independent of any grid's.
+ *
+ * Masking gates edits where they are AUTHORED. Voxel edits consume a mask at
+ * apply time, per cell. SDF edits are declarative items with no per-point
+ * strength, so they consume it when a stroke becomes items — a mask painted
+ * now does not retroactively gate items already in the edit list.
+ *
+ * Lifetime mirrors clay_voxel_grid exactly: clay_mask_create returns a mask
+ * the CALLER destroys, while clay_document_add_mask and clay_document_mask
+ * return one BORROWED from a document layer, which clay_mask_destroy rejects
+ * and which must not outlive its document. */
+
+/* A standalone mask, owned by the caller. cell_size is world units per mask
+ * cell and must be > 0. NULL on invalid input, detail in clay_last_error. */
+clay_mask* clay_mask_create(float cell_size);
+/* Frees a mask from clay_mask_create; rejects a borrowed handle. */
+clay_result clay_mask_destroy(clay_mask* mask);
+
+/* Attach a mask to a layer and hand back a borrowed handle. Replaces any mask
+ * the layer already had. */
+clay_result clay_document_add_mask(clay_document* doc, clay_layer_id layer, float cell_size,
+                                   clay_mask** out_mask);
+/* The layer's mask, or CLAY_ERROR_NOT_FOUND when it has none. */
+clay_result clay_document_mask(clay_document* doc, clay_layer_id layer, clay_mask** out_mask);
+/* Drop a layer's mask. CLAY_ERROR_NOT_FOUND when there was none. Borrowed
+ * handles onto it then fail with CLAY_ERROR_NOT_FOUND rather than dangling. */
+clay_result clay_document_remove_mask(clay_document* doc, clay_layer_id layer);
+
+clay_result clay_mask_cell_size(const clay_mask* mask, float* out_cell_size);
+clay_result clay_mask_painted_count(const clay_mask* mask, size_t* out_count);
+/* Non-zero when nothing has been painted. Equivalent to a zero painted count,
+ * and the cheap way to ask. */
+clay_result clay_mask_empty(const clay_mask* mask, int32_t* out_empty);
+
+/* Single-cell access, on the MASK's lattice. Values are clamped to [0, 1]. */
+clay_result clay_mask_get(const clay_mask* mask, const int32_t cell[3], float* out_value);
+clay_result clay_mask_set(clay_mask* mask, const int32_t cell[3], float value);
+
+/* Mask at a world position, 0 where nothing has been painted. */
+clay_result clay_mask_sample(const clay_mask* mask, const float point[3], float* out_value);
+/* Batch form: points is a packed float array of count*3, out_values receives
+ * count floats. Neither is a size query — the caller knows the count. */
+clay_result clay_mask_sample_many(const clay_mask* mask, const float* points_xyz, size_t count,
+                                  float* out_values);
+
+/* Brush the mask toward `target` (clamped to [0, 1]): 1 masks, 0 erases. The
+ * footprint is the ordinary brush vocabulary, sized in MASK cells; the seed
+ * is unused, because a mask stores a fractional weight directly rather than
+ * dithering it. brush->mask is ignored here — a mask does not gate itself. */
+clay_result clay_mask_paint(clay_mask* mask, const float point[3],
+                            const clay_brush_params* brush, float target);
+clay_result clay_mask_paint_cell(clay_mask* mask, const int32_t cell[3],
+                                 const clay_brush_params* brush, float target);
+
+/* Region operations over the painted region. invert flips what has been
+ * painted: a sparse field has no finite complement to invert into. */
+clay_result clay_mask_invert(clay_mask* mask);
+clay_result clay_mask_clear(clay_mask* mask);
+clay_result clay_mask_expand(clay_mask* mask, int32_t steps);   /* grey dilation */
+clay_result clay_mask_contract(clay_mask* mask, int32_t steps); /* grey erosion */
+clay_result clay_mask_smooth(clay_mask* mask, int32_t iterations);
+
+/* Inclusive cell bounds of the painted region. *out_has_bounds is 0 for an
+ * empty mask, and out_min/out_max are then left alone. */
+clay_result clay_mask_bounds(const clay_mask* mask, int32_t out_min[3], int32_t out_max[3],
+                             int32_t* out_has_bounds);
 
 /* -- queries --------------------------------------------------------------- */
 

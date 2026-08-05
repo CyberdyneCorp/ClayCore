@@ -266,6 +266,15 @@ blocks.sculpt_smooth((0, 0, 0), 9)
 blocks.sculpt_inflate((0, 0, 0), 9, amount=-1)          # negative = erode
 blocks.sculpt_flatten((0, 0, 0), 9, normal=(0, 1, 0))
 blocks.sculpt_pinch((0, 0, 0), 9)
+# masks freeze a region against any edit: effective strength is
+# strength * (1 - mask). Addressed in WORLD units on their own lattice, so a
+# mask survives a resolution change or a move between representations — the
+# failure mode 3DCoat is best known for.
+freeze = doc.add_mask("blocks", cell_size=0.1)
+freeze.paint((0.5, 0, 0), size=9, falloff="smooth")     # target=1 masks, 0 erases
+freeze.expand(1); freeze.smooth(1); freeze.invert()     # region operations
+blocks.erase_brush((0, 0, 0), 15, mask=freeze)          # masked cells untouched
+freeze.sample_many(points)                              # (N,3) -> (N,) in [0,1]
 blocks.rasterize(doc)                      # SDF -> voxels
 vox_mesh = blocks.mesh()                   # greedy meshing
 

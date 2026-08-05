@@ -193,6 +193,30 @@ Node ids come back from `Layer.add` and survive every edit, which is what lets
 a UI hold a selection. Each entry point applies one command from the engine's
 vocabulary — the same one `.clayspace` records.
 
+### 11 — masks
+
+A mask is a scalar field in [0, 1] scaling how strongly a brush may act: the
+effective strength at a cell is `strength * (1 - mask)`. All three tiles below
+run the same erase, with the same dither seed; the third has the left half
+masked, and nothing there moves.
+
+![mask freeze](output/11_mask_freeze.png)
+
+Painting the mask with a falloff gives a graded gate, so the cut fades out
+across the boundary instead of stopping at a wall.
+
+![mask falloff](output/11_mask_falloff.png)
+
+A mask is addressed in **world units on its own lattice**, not in a layer's
+voxel cells, so it survives a resolution change and a `.clayspace` round trip —
+the example asserts both. That is deliberate: masks silently dying on
+voxelization is the most complained-about defect in the tool this engine is
+measured against.
+
+Masking gates edits where they are *authored*. Voxel edits consume it per cell
+at edit time; it does not retroactively protect a region from SDF items already
+in the edit list.
+
 ## Notes
 
 - **Committed models are budgeted.** `_render.save_model` fails above 400 KiB

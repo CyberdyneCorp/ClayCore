@@ -1652,3 +1652,116 @@ def test_pose_line_round_trips(tmp_path):
     path = tmp_path / "poseline.clayspace"
     doc.save(str(path))
     assert np.array_equal(before, clay.load(str(path)).eval(probes))
+
+
+# -- mask field (add-mask-field) ---------------------------------------------
+
+
+def test_mask_paints_and_samples():
+    m = clay.MaskField(cell_size=0.1)
+    assert m.empty
+    m.paint((0.05, 0.05, 0.05), size=9, falloff="smooth")
+    assert not m.empty
+    assert m.sample((0.05, 0.05, 0.05)) == pytest.approx(1.0)
+    assert m.sample((5.0, 5.0, 5.0)) == pytest.approx(0.0)
+
+    pts = np.array([[0.05, 0.05, 0.05], [5.0, 5.0, 5.0]], dtype=np.float32)
+    values = m.sample_many(pts)
+    assert values.shape == (2,)
+    assert values[0] == pytest.approx(1.0) and values[1] == pytest.approx(0.0)
+
+
+def test_mask_falloff_is_graded():
+    m = clay.MaskField(0.1)
+    m.paint_cell((0, 0, 0), size=9, falloff="smooth")
+    mid = m.get((3, 0, 0))
+    assert 0.0 < mid < 1.0
+
+
+def test_mask_freezes_a_region():
+    grid = clay.VoxelGrid(0.1)
+    idx = grid.palette_add("#ffffff")
+    grid.fill_box((-8, -1, -1), (8, 1, 1), idx)
+    before = grid.occupied_count
+
+    m = clay.MaskField(0.1)
+    for x in range(-8, 0):
+        for y in (-1, 0, 1):
+            for z in (-1, 0, 1):
+                m.set((x, y, z), 1.0)
+
+    grid.erase_brush((0, 0, 0), size=20, mask=m)
+    assert grid.occupied_count < before
+    assert all(grid.get((x, 0, 0)) != 0 for x in range(-8, 0))   # frozen
+    assert all(grid.get((x, 0, 0)) == 0 for x in range(0, 9))    # erased
+
+
+def test_mask_none_is_the_unmasked_brush():
+    a, b = clay.VoxelGrid(0.1), clay.VoxelGrid(0.1)
+    for g in (a, b):
+        g.fill_box((-4, -4, -4), (4, 4, 4), g.palette_add("#ffffff"))
+    a.erase_brush((0, 0, 0), size=5, falloff="smooth", seed=3)
+    b.erase_brush((0, 0, 0), size=5, falloff="smooth", seed=3, mask=clay.MaskField(0.1))
+    assert a.occupied_count == b.occupied_count
+
+
+def test_mask_region_operations():
+    m = clay.MaskField(0.1)
+    m.paint_cell((0, 0, 0), size=5, falloff="linear")
+    before = m.get((1, 0, 0))
+    m.invert()
+    assert m.get((1, 0, 0)) == pytest.approx(1.0 - before, abs=0.01)
+    m.invert()
+    assert m.get((1, 0, 0)) == pytest.approx(before, abs=0.01)
+
+    (_lo, hi) = m.bounds()
+    m.expand(1)
+    assert m.bounds()[1][0] == hi[0] + 1
+    m.contract(1)
+    assert m.bounds()[1][0] == hi[0]
+
+    m.clear()
+    assert m.empty and m.bounds() is None
+
+
+# The invariant this feature exists for: 3DCoat's masks die on voxelization,
+# ours are addressed in world units so they cannot.
+def test_mask_survives_a_resolution_change(tmp_path):
+    doc = clay.Document()
+    doc.add_voxel_layer("clay", voxel_size=0.1)
+    m = doc.add_mask("clay", cell_size=0.1)
+    m.paint((0.35, 0.35, 0.35), size=7, falloff="smooth")
+
+    probes = np.array([[0.35, 0.35, 0.35], [0.15, 0.35, 0.35], [2.0, 2.0, 2.0]], np.float32)
+    before = m.sample_many(probes)
+    assert before[0] == pytest.approx(1.0)
+
+    # Grids at three resolutions all consult the same mask through world space,
+    # and none of them perturbs it.
+    for voxel_size in (0.05, 0.1, 0.4):
+        g = clay.VoxelGrid(voxel_size)
+        g.fill_box((0, 0, 0), (20, 20, 20), g.palette_add("#ffffff"))
+        g.erase_brush((3, 3, 3), size=9, mask=m)
+        assert np.allclose(m.sample_many(probes), before)
+
+    path = tmp_path / "masked.clayspace"
+    doc.save(str(path))
+    reloaded = clay.load(str(path))
+    assert np.allclose(reloaded.mask("clay").sample_many(probes), before)
+
+
+def test_mask_lookup_and_removal():
+    doc = clay.Document()
+    doc.add_sdf_layer("body")
+    assert doc.mask("body") is None
+    m = doc.add_mask("body")
+    m.paint_cell((0, 0, 0), size=3)
+    assert doc.mask("body").painted_count == m.painted_count
+    assert doc.remove_mask("body") is True
+    assert doc.mask("body") is None
+    assert doc.remove_mask("body") is False
+
+
+def test_mask_rejects_a_bad_cell_size():
+    with pytest.raises(ValueError):
+        clay.MaskField(0.0)

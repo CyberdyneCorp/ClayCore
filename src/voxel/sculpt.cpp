@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "clay/voxel/grid.h"
+#include "clay/voxel/mask.h"
 
 namespace clay {
 namespace voxel {
@@ -161,10 +162,18 @@ bool has_occupied_face_neighbour(const Region& r, int x, int y, int z) {
            r.at(x, y - 1, z) != 0 || r.at(x, y, z + 1) != 0 || r.at(x, y, z - 1) != 0;
 }
 
+// Mask value at a voxel cell, sampled through world space so the mask's
+// lattice and the grid's are free to differ — which is exactly what lets a
+// mask outlive a resolution change.
+inline float mask_at(const MaskField& mask, VoxelCoord c, float voxel_size) {
+    return mask.sample(kernel::cf3((c.x + 0.5f) * voxel_size, (c.y + 0.5f) * voxel_size,
+                                   (c.z + 0.5f) * voxel_size));
+}
+
 // Iterate the footprint, handing the callback each in-shape cell together
 // with its world coordinate and dithered pass/fail. Keeps the verbs flat.
 template <typename Fn>
-void for_each_brush_cell(VoxelCoord c, const BrushParams& p, Fn&& fn) {
+void for_each_brush_cell(VoxelCoord c, const BrushParams& p, float voxel_size, Fn&& fn) {
     BrushExtent e = brush_extent(p.size);
     for (int z = e.lo; z <= e.hi; ++z)
         for (int y = e.lo; y <= e.hi; ++y)
@@ -173,6 +182,7 @@ void for_each_brush_cell(VoxelCoord c, const BrushParams& p, Fn&& fn) {
                 VoxelCoord w{c.x + x, c.y + y, c.z + z};
                 float weight = falloff_weight(p.falloff, normalized_distance(x, y, z, p.size, e)) *
                                p.strength;
+                if (p.mask) weight *= 1.0f - mask_at(*p.mask, w, voxel_size);
                 if (passes(w, weight, p.seed)) fn(w);
             }
 }
@@ -180,16 +190,16 @@ void for_each_brush_cell(VoxelCoord c, const BrushParams& p, Fn&& fn) {
 }  // namespace
 
 void VoxelGrid::set_brush(VoxelCoord c, const BrushParams& p, std::uint8_t index) {
-    for_each_brush_cell(c, p, [&](VoxelCoord w) { set(w, index); });
+    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) { set(w, index); });
 }
 
 void VoxelGrid::paint_brush(VoxelCoord c, const BrushParams& p, std::uint8_t index) {
-    for_each_brush_cell(c, p, [&](VoxelCoord w) { paint(w, index); });
+    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) { paint(w, index); });
 }
 
 void VoxelGrid::sculpt_smooth(VoxelCoord c, const BrushParams& p) {
     Region before = snapshot(*this, c, p.size, 1);
-    for_each_brush_cell(c, p, [&](VoxelCoord w) {
+    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) {
         int n = occupied_neighbours_26(before, w.x, w.y, w.z);
         bool occupied = before.at(w.x, w.y, w.z) != 0;
         // Majority of the 26 neighbours decides: under-supported material
@@ -207,7 +217,7 @@ void VoxelGrid::sculpt_inflate(VoxelCoord c, const BrushParams& p, int amount) {
     bool grow = amount > 0;
     for (int step = 0; step < steps; ++step) {
         Region before = snapshot(*this, c, p.size, 1);
-        for_each_brush_cell(c, p, [&](VoxelCoord w) {
+        for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) {
             bool occupied = before.at(w.x, w.y, w.z) != 0;
             if (grow && !occupied && has_occupied_face_neighbour(before, w.x, w.y, w.z)) {
                 set(w, majority_colour(before, w.x, w.y, w.z));
@@ -222,7 +232,7 @@ void VoxelGrid::sculpt_flatten(VoxelCoord c, const BrushParams& p, kernel::cfloa
                                float offset_cells) {
     kernel::cfloat3 n = kernel::cnormalize(normal);
     Region before = snapshot(*this, c, p.size, 1);
-    for_each_brush_cell(c, p, [&](VoxelCoord w) {
+    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) {
         // Signed distance from the plane through the brush centre, in cells.
         float side = (static_cast<float>(w.x - c.x)) * n.x + (static_cast<float>(w.y - c.y)) * n.y +
                      (static_cast<float>(w.z - c.z)) * n.z - offset_cells;
@@ -248,7 +258,7 @@ void VoxelGrid::sculpt_grab(VoxelCoord c, const BrushParams& p, kernel::cfloat3 
     float radius = static_cast<float>(p.size) * 0.5f;
     kernel::cfloat3 centre = kernel::cf3(0, 0, 0);  // offsets are relative to c
 
-    for_each_brush_cell(c, p, [&](VoxelCoord w) {
+    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) {
         // Where this cell's material came from, in cell units, through the same
         // map cgrab_point applies to a point.
         kernel::cfloat3 local = kernel::cf3(static_cast<float>(w.x - c.x),
@@ -268,7 +278,7 @@ void VoxelGrid::sculpt_grab(VoxelCoord c, const BrushParams& p, kernel::cfloat3 
 
 void VoxelGrid::sculpt_pinch(VoxelCoord c, const BrushParams& p) {
     Region before = snapshot(*this, c, p.size, 1);
-    for_each_brush_cell(c, p, [&](VoxelCoord w) {
+    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) {
         if (before.at(w.x, w.y, w.z) == 0) return;
         if (!has_empty_face_neighbour(before, w.x, w.y, w.z)) return;  // interior
 
