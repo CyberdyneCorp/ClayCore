@@ -632,6 +632,18 @@ NB_MODULE(pyclay, m) {
              },
              "r0"_a, "r1"_a, "dz"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
              "Displace along Y by dz, eased across the radial band r0 -> r1")
+        .def("elongate_axis",
+             [](nb::object self, nb::handle h) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 kernel::cfloat3 e = to_f3(h, "elongate_axis half-extents");
+                 if (e.x < 0.0f || e.y < 0.0f || e.z < 0.0f)
+                     throw std::invalid_argument("elongate_axis half-extents must be >= 0");
+                 p.deformers.push_back(scene::Deformer::elongate_axis(e));
+                 return self;
+             },
+             "h"_a, nb::rv_policy::reference_internal,
+             "Per-axis elongation: works on any primitive, symmetric or not, but "
+             "the flat interior plateau makes the field a bound rather than exact.")
         .def("elongate",
              [](nb::object self, nb::handle h) {
                  PyPrim& p = nb::cast<PyPrim&>(self);

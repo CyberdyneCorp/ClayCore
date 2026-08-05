@@ -37,6 +37,8 @@ CASES = [
         a=(0, -0.9, 0), b=(0, 0.9, 0), v=(0.9, 0, 0), ease=3)),
     ("bend_radial", lambda: clay.Cylinder(r=1.0, h=0.12).bend_radial(
         r0=0.1, r1=1.0, dz=0.7, ease=5)),
+    # elongate_axis stretches an asymmetric primitive, which elongate cannot
+    ("elongate_axis", lambda: clay.Cone(h=0.6, r1=0.5, r2=0.1).elongate_axis((0.7, 0, 0))),
     # Chains apply in authoring order — twist then bend is not bend then twist.
     ("twist then bend", lambda: clay.Box(size=(0.7, 1.8, 0.7)).twist(2.0).bend(0.6)),
     ("bend then twist", lambda: clay.Box(size=(0.7, 1.8, 0.7)).bend(0.6).twist(2.0)),

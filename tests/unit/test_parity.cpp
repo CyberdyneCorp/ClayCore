@@ -75,6 +75,15 @@ std::vector<ParityScene> parity_scenes() {
         l.sdf->insert(n);
         scenes.push_back({name, std::move(doc), 3.0f});
     };
+    {   // elongate_axis: an asymmetric primitive stretched per axis
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node n = item(Prim::capped_cone(0.6f, 0.5f, 0.1f), cf3(0, 0, 0));
+        n.deformers.push_back(scene::Deformer::elongate_axis(cf3(0.7f, 0.0f, 0.3f)));
+        l.sdf->insert(n);
+        scenes.push_back({"elongate_axis", std::move(doc), 3.0f});
+    }
+
     {   // bend_linear: a slab tilted by a ramped displacement
         Document doc;
         Layer& l = doc.add_sdf_layer("l");

@@ -1485,3 +1485,33 @@ def test_bend_deformers_round_trip(tmp_path):
     path = tmp_path / "bends.clayspace"
     doc.save(str(path))
     assert np.array_equal(before, clay.load(str(path)).eval(probes))
+
+
+def test_elongate_axis_stretches_an_asymmetric_primitive():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Cone(h=0.6, r1=0.5, r2=0.1).elongate_axis((0.8, 0.0, 0.0)))
+
+    at = lambda p: float(doc.eval(np.array([p], dtype=np.float32))[0])
+    centre = at((0, 0, 0))
+    assert centre < 0
+    assert at((0.8, 0, 0)) == pytest.approx(centre, abs=1e-4)   # flat plateau
+    assert doc.safe_step_scale() == pytest.approx(1.0)          # non-expansive
+
+    lo, hi = layer.bounds()
+    assert hi[0] == pytest.approx(1.3, abs=1e-3)                # 0.5 + 0.8
+
+
+def test_elongate_axis_refuses_negative_extents():
+    with pytest.raises(ValueError, match=">= 0"):
+        clay.Sphere(r=1.0).elongate_axis((0.0, -1.0, 0.0))
+
+
+def test_elongate_axis_round_trips(tmp_path):
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Pyramid(h=0.9).elongate_axis((0.4, 0.0, 0.6)))
+    probes = np.random.default_rng(88).uniform(-3, 3, size=(1024, 3)).astype(np.float32)
+    before = doc.eval(probes)
+    path = tmp_path / "ea.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(probes))

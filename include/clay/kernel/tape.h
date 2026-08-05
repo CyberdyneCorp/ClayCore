@@ -188,6 +188,7 @@ enum CDeformType {
     cdeform_elongate = 5,  // k, a, b = per-axis half-extents to insert
     cdeform_bend_linear = 6,  // a(k,a,b) b(c,e0,e1) v(e2,e3,e4), eased
     cdeform_bend_radial = 7,  // k = r0, a = r1, b = dz, eased
+    cdeform_elongate_axis = 8,  // k, a, b = half-extents; no correction
 };
 
 // Apply one deformer record to the local point. No deformer corrects the
@@ -216,6 +217,8 @@ CLAY_FN cfloat3 ctape_deform_point(CLAY_DEVICE const float* rec, cfloat3 p) {
     if (type == cdeform_bend_radial) {
         return cbend_radial_point(p, rec[1], rec[2], rec[3], (int)rec[5]);
     }
+    if (type == cdeform_elongate_axis)
+        return celongate_axis_point(p, cf3(rec[1], rec[2], rec[3]));
     if (type == cdeform_elongate) {
         // The correction rides ctape_deform_offset, which the chain evaluates
         // at this same pre-warp point — exactly what elongation needs.

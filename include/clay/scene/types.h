@@ -365,6 +365,16 @@ struct Deformer {
         d.ease = ease;
         return d;
     }
+    // Per-axis elongation: works on any primitive, but the flat interior
+    // plateau makes it a bound rather than a distance.
+    static Deformer elongate_axis(kernel::cfloat3 h) {
+        Deformer d;
+        d.type = kernel::cdeform_elongate_axis;
+        d.k = h.x;
+        d.a = h.y;
+        d.b = h.z;
+        return d;
+    }
     static Deformer displace(float amplitude, float frequency) {
         Deformer d;
         d.type = kernel::cdeform_displace;

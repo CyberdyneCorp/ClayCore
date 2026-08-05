@@ -1561,3 +1561,26 @@ TEST_CASE("the ramped bends reach the C ABI") {
     }
     clay_document_destroy(doc);
 }
+
+TEST_CASE("elongate_axis reaches the C ABI") {
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "l", &layer) == CLAY_OK);
+
+    float cone[3] = {0.6f, 0.5f, 0.1f};
+    clay_item* item = clay_item_create(CLAY_PRIM_CAPPED_CONE, cone, 3);
+    REQUIRE(item != nullptr);
+    const float h[3] = {0.7f, 0.0f, 0.3f};
+    REQUIRE(clay_item_add_deformer(item, CLAY_DEFORM_ELONGATE_AXIS, h, 3, 0) == CLAY_OK);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, item, &node) == CLAY_OK);
+    clay_item_destroy(item);
+
+    scene::Document twin;
+    scene::Layer& tl = twin.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::capped_cone(0.6f, 0.5f, 0.1f), cf3(0, 0, 0));
+    n.deformers.push_back(scene::Deformer::elongate_axis(cf3(0.7f, 0.0f, 0.3f)));
+    tl.sdf->insert(n);
+    check_same_field(doc, twin);
+    clay_document_destroy(doc);
+}

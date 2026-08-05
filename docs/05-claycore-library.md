@@ -324,6 +324,11 @@ body.add(clay.Sphere(r=0.5).elongate((1.0, 0.0, 0.0)))
 body.add(clay.Box(size=(0.6, 2.0, 0.6))
          .bend_linear(a=(0, -1, 0), b=(0, 1, 0), v=(1.0, 0, 0), ease=3))
 body.add(clay.Cylinder(r=1.2, h=0.15).bend_radial(r0=0.2, r1=1.2, dz=0.6))
+
+# elongate_axis is the companion to elongate: it stretches any primitive,
+# symmetric or not, at the cost of a flat interior plateau — so it is a bound
+# where elongate would be exact.
+body.add(clay.Cone(h=0.6, r1=0.5, r2=0.1).elongate_axis((0.8, 0.0, 0.0)))
 ```
 
 ```python

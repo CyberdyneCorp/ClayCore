@@ -683,3 +683,63 @@ TEST_CASE("a document saved before the wide deformers still loads") {
     REQUIRE(back.has_value());
     CHECK(scene::serialize_document(*back) == bytes);
 }
+
+// --- elongate_axis (add-elongate-axis-opcode) --------------------------------
+
+TEST_CASE("elongate_axis stretches any primitive, as a bound") {
+    const cfloat3 h = cf3(0.7f, 0.0f, 0.3f);
+
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::capped_cone(0.6f, 0.5f, 0.1f), cf3(0, 0, 0));
+    n.deformers.push_back(scene::Deformer::elongate_axis(h));
+    scene::NodeId id = l.sdf->insert(n);
+    scene::Tape tape = scene::compile_document(doc);
+
+    SUBCASE("the tape agrees with the kernel applied by hand") {
+        clay_test::Lcg rng(9090);
+        for (int i = 0; i < 4096; ++i) {
+            cfloat3 p = cf3(rng.range(-3, 3), rng.range(-2, 2), rng.range(-2, 2));
+            float want = sd_capped_cone(celongate_axis_point(p, h), 0.6f, 0.5f, 0.1f);
+            CHECK(tape.eval(p).d == doctest::Approx(want).epsilon(1e-4));
+        }
+    }
+
+    SUBCASE("the interior plateau is flat across the stretch") {
+        float centre = tape.eval(cf3(0, 0, 0)).d;
+        CHECK(tape.eval(cf3(0.7f, 0, 0)).d == doctest::Approx(centre).epsilon(1e-4));
+        CHECK(tape.eval(cf3(-0.7f, 0, 0)).d == doctest::Approx(centre).epsilon(1e-4));
+    }
+
+    SUBCASE("always a bound, but never slower") {
+        CHECK(tape.info.is_exact == false);
+        CHECK(tape.safe_step_scale() == doctest::Approx(1.0f));
+    }
+
+    SUBCASE("even an origin-symmetric primitive is a bound") {
+        scene::Document sym;
+        scene::Layer& sl = sym.add_sdf_layer("l");
+        scene::Node m = clay_test::item(scene::Prim::sphere(0.5f), cf3(0, 0, 0));
+        m.deformers.push_back(scene::Deformer::elongate_axis(cf3(0.5f, 0, 0)));
+        sl.sdf->insert(m);
+        // elongate would stay exact here; elongate_axis cannot, because the
+        // plateau is not a distance.
+        CHECK(scene::compile_document(sym).info.is_exact == false);
+    }
+
+    SUBCASE("the bound contains the stretched geometry") {
+        const scene::Node* node = l.sdf->find(id);
+        REQUIRE(node != nullptr);
+        math::Aabb bound = scene::item_geometry_bound(*node, l);
+        clay_test::Lcg rng(4321);
+        int outside = 0;
+        for (int i = 0; i < 20000; ++i) {
+            cfloat3 p = cf3(rng.range(-3, 3), rng.range(-2, 2), rng.range(-2, 2));
+            if (tape.eval(p).d > 0.0f) continue;
+            if (p.x < bound.min.x || p.x > bound.max.x || p.y < bound.min.y ||
+                p.y > bound.max.y || p.z < bound.min.z || p.z > bound.max.z)
+                ++outside;
+        }
+        CHECK(outside == 0);
+    }
+}
