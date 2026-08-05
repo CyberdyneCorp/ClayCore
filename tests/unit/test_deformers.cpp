@@ -743,3 +743,159 @@ TEST_CASE("elongate_axis stretches any primitive, as a bound") {
         CHECK(outside == 0);
     }
 }
+
+// --- region deformers: grab and pose (add-region-deformers) ------------------
+
+namespace {
+
+scene::Tape grabbed(cfloat3 centre, float radius, cfloat3 disp, std::uint8_t ease,
+                    bool front_only, scene::Document& keep) {
+    scene::Layer& l = keep.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::sphere(1.0f), cf3(0, 0, 0));
+    n.deformers.push_back(scene::Deformer::grab(centre, radius, disp, ease, front_only));
+    l.sdf->insert(n);
+    return scene::compile_document(keep);
+}
+
+scene::Tape plain_sphere(scene::Document& keep) {
+    scene::Layer& l = keep.add_sdf_layer("l");
+    l.sdf->insert(clay_test::item(scene::Prim::sphere(1.0f), cf3(0, 0, 0)));
+    return scene::compile_document(keep);
+}
+
+}  // namespace
+
+TEST_CASE("grab moves a region and leaves the rest exactly alone") {
+    const cfloat3 centre = cf3(1.0f, 0, 0), disp = cf3(0.5f, 0, 0);
+    const float radius = 0.8f;
+    scene::Document doc, plain;
+    scene::Tape tape = grabbed(centre, radius, disp, 0, false, doc);
+    scene::Tape base = plain_sphere(plain);
+
+    SUBCASE("the tape agrees with the kernel applied by hand") {
+        clay_test::Lcg rng(1234);
+        for (int i = 0; i < 4096; ++i) {
+            cfloat3 p = cf3(rng.range(-3, 3), rng.range(-3, 3), rng.range(-3, 3));
+            float want = sd_sphere(cgrab_point(p, centre, radius, disp, 0.0f, 0), 1.0f);
+            CHECK(tape.eval(p).d == doctest::Approx(want).epsilon(1e-4));
+        }
+    }
+
+    SUBCASE("outside the radius the field is bit-identical to the undeformed one") {
+        clay_test::Lcg rng(99);
+        int leaked = 0;
+        for (int i = 0; i < 20000; ++i) {
+            cfloat3 p = cf3(rng.range(-3, 3), rng.range(-3, 3), rng.range(-3, 3));
+            if (kernel::clength(p - centre) <= radius) continue;
+            if (tape.eval(p).d != base.eval(p).d) ++leaked;
+        }
+        CHECK(leaked == 0);  // finite support is what keeps culling valid
+    }
+
+    SUBCASE("the surface moved toward the pull") {
+        // the old tip is now interior, and material exists beyond it
+        CHECK(base.eval(cf3(1.0f, 0, 0)).d == doctest::Approx(0.0f).epsilon(1e-4));
+        CHECK(tape.eval(cf3(1.0f, 0, 0)).d < -1e-3f);
+        CHECK(tape.eval(cf3(1.2f, 0, 0)).d < base.eval(cf3(1.2f, 0, 0)).d);
+    }
+
+    SUBCASE("the falloff curve shapes the pull") {
+        scene::Document eased;
+        scene::Tape other = grabbed(centre, radius, disp, 5, false, eased);
+        clay_test::Lcg rng(7);
+        int differing = 0, outside_differing = 0;
+        for (int i = 0; i < 4096; ++i) {
+            cfloat3 p = cf3(rng.range(-2, 2), rng.range(-2, 2), rng.range(-2, 2));
+            bool inside = kernel::clength(p - centre) <= radius;
+            if (kernel::cabs(tape.eval(p).d - other.eval(p).d) > 1e-4f) {
+                if (inside) ++differing;
+                else ++outside_differing;
+            }
+        }
+        CHECK(differing > 0);          // the curve changes the result within the region
+        CHECK(outside_differing == 0); // and nowhere else
+    }
+
+    SUBCASE("it is a bound, and tracing slows by the ramp slope") {
+        CHECK(tape.info.is_exact == false);
+        CHECK(tape.safe_step_scale() < 1.0f);
+    }
+}
+
+TEST_CASE("grab's front-facing option leaves the far side where it was") {
+    const cfloat3 centre = cf3(0, 0, 0), disp = cf3(0.6f, 0, 0);
+    scene::Document open_doc, gated_doc, plain;
+    scene::Tape open_grab = grabbed(centre, 2.0f, disp, 0, false, open_doc);
+    scene::Tape gated = grabbed(centre, 2.0f, disp, 0, true, gated_doc);
+    scene::Tape base = plain_sphere(plain);
+
+    // A point well behind the centre relative to the pull direction.
+    cfloat3 behind = cf3(-1.0f, 0, 0);
+    CHECK(open_grab.eval(behind).d != doctest::Approx(base.eval(behind).d).epsilon(1e-4));
+    CHECK(gated.eval(behind).d == doctest::Approx(base.eval(behind).d).epsilon(1e-3));
+    // ...while the near side still moves under both.
+    cfloat3 front = cf3(1.0f, 0, 0);
+    CHECK(gated.eval(front).d != doctest::Approx(base.eval(front).d).epsilon(1e-4));
+}
+
+TEST_CASE("grab's bound contains the pulled geometry") {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::sphere(1.0f), cf3(0, 0, 0));
+    n.deformers.push_back(scene::Deformer::grab(cf3(1.0f, 0, 0), 0.8f, cf3(0.5f, 0.3f, 0), 0));
+    scene::NodeId id = l.sdf->insert(n);
+    scene::Tape tape = scene::compile_document(doc);
+
+    const scene::Node* node = l.sdf->find(id);
+    REQUIRE(node != nullptr);
+    math::Aabb bound = scene::item_geometry_bound(*node, l);
+
+    clay_test::Lcg rng(31);
+    int outside = 0;
+    for (int i = 0; i < 20000; ++i) {
+        cfloat3 p = cf3(rng.range(-3, 3), rng.range(-3, 3), rng.range(-3, 3));
+        if (tape.eval(p).d > 0.0f) continue;
+        if (p.x < bound.min.x || p.x > bound.max.x || p.y < bound.min.y ||
+            p.y > bound.max.y || p.z < bound.min.z || p.z > bound.max.z)
+            ++outside;
+    }
+    CHECK(outside == 0);
+}
+
+TEST_CASE("pose rotates a region about its centre") {
+    const cfloat3 centre = cf3(0, 0.8f, 0), axis = cf3(0, 0, 1);
+    const float radius = 1.0f, angle = 0.7f;
+
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::capped_cylinder(0.3f, 1.0f), cf3(0, 0, 0));
+    n.deformers.push_back(scene::Deformer::pose(centre, radius, axis, angle, 0));
+    l.sdf->insert(n);
+    scene::Tape tape = scene::compile_document(doc);
+
+    SUBCASE("the tape agrees with the kernel applied by hand") {
+        clay_test::Lcg rng(555);
+        for (int i = 0; i < 4096; ++i) {
+            cfloat3 p = cf3(rng.range(-3, 3), rng.range(-3, 3), rng.range(-3, 3));
+            float want = sd_capped_cylinder(cpose_point(p, centre, radius, axis, angle, 0),
+                                            0.3f, 1.0f);
+            CHECK(tape.eval(p).d == doctest::Approx(want).epsilon(1e-4));
+        }
+    }
+
+    SUBCASE("the pivot is unmoved and the far end is untouched") {
+        // exactly at the centre the rotation is by the full angle about a zero
+        // radius, so the point maps to itself
+        CHECK(cpose_point(centre, centre, radius, axis, angle, 0).x ==
+              doctest::Approx(centre.x).epsilon(1e-5));
+        // beyond the radius the map is the identity
+        cfloat3 far = cf3(0, -2.5f, 0);
+        CHECK(cpose_point(far, centre, radius, axis, angle, 0).y ==
+              doctest::Approx(far.y).epsilon(1e-5));
+    }
+
+    SUBCASE("it is a bound and tracing slows") {
+        CHECK(tape.info.is_exact == false);
+        CHECK(tape.safe_step_scale() < 1.0f);
+    }
+}

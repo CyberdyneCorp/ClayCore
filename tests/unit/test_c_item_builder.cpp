@@ -1584,3 +1584,41 @@ TEST_CASE("elongate_axis reaches the C ABI") {
     check_same_field(doc, twin);
     clay_document_destroy(doc);
 }
+
+TEST_CASE("grab and pose reach the C ABI") {
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "l", &layer) == CLAY_OK);
+
+    float r[1] = {1.0f};
+    clay_item* item = clay_item_create(CLAY_PRIM_SPHERE, r, 1);
+    REQUIRE(item != nullptr);
+    const float grab[8] = {1.0f, 0, 0, 0.8f, 0.5f, 0.2f, 0, 0};
+    REQUIRE(clay_item_add_deformer(item, CLAY_DEFORM_GRAB, grab, 8, 0) == CLAY_OK);
+    const float pose[8] = {0, 0.5f, 0, 1.2f, 0, 0, 1.0f, 0.4f};
+    REQUIRE(clay_item_add_deformer(item, CLAY_DEFORM_POSE, pose, 8, 0) == CLAY_OK);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, item, &node) == CLAY_OK);
+    clay_item_destroy(item);
+
+    scene::Document twin;
+    scene::Layer& tl = twin.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::sphere(1.0f), cf3(0, 0, 0));
+    n.deformers.push_back(
+        scene::Deformer::grab(cf3(1.0f, 0, 0), 0.8f, cf3(0.5f, 0.2f, 0), 0, false));
+    n.deformers.push_back(scene::Deformer::pose(cf3(0, 0.5f, 0), 1.2f, cf3(0, 0, 1), 0.4f, 0));
+    tl.sdf->insert(n);
+    check_same_field(doc, twin);
+
+    SUBCASE("a non-positive radius is refused") {
+        clay_item* bad = clay_item_create(CLAY_PRIM_SPHERE, r, 1);
+        REQUIRE(bad != nullptr);
+        const float zero_radius[8] = {0, 0, 0, 0.0f, 1.0f, 0, 0, 0};
+        CHECK(clay_item_add_deformer(bad, CLAY_DEFORM_GRAB, zero_radius, 8, 0) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_item_add_deformer(bad, CLAY_DEFORM_POSE, zero_radius, 8, 0) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+        clay_item_destroy(bad);
+    }
+    clay_document_destroy(doc);
+}

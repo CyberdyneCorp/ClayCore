@@ -1515,3 +1515,86 @@ def test_elongate_axis_round_trips(tmp_path):
     path = tmp_path / "ea.clayspace"
     doc.save(str(path))
     assert np.array_equal(before, clay.load(str(path)).eval(probes))
+
+
+# --- region deformers: grab and pose (add-region-deformers) -----------------
+
+
+def test_grab_moves_only_its_region():
+    grabbed = clay.Document()
+    grabbed.add_sdf_layer("l").add(
+        clay.Sphere(r=1.0).grab(center=(1.0, 0, 0), radius=0.8, displacement=(0.5, 0, 0)))
+    plain = clay.Document()
+    plain.add_sdf_layer("l").add(clay.Sphere(r=1.0))
+
+    rng = np.random.default_rng(4)
+    probes = rng.uniform(-3, 3, size=(4096, 3)).astype(np.float32)
+    a, b = grabbed.eval(probes), plain.eval(probes)
+
+    outside = np.linalg.norm(probes - np.array([1.0, 0, 0], np.float32), axis=1) > 0.8
+    assert np.array_equal(a[outside], b[outside])   # finite support, exactly
+    assert not np.array_equal(a[~outside], b[~outside])
+
+
+def test_grab_pulls_the_surface_toward_the_displacement():
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(
+        clay.Sphere(r=1.0).grab(center=(1.0, 0, 0), radius=0.8, displacement=(0.5, 0, 0)))
+    at = lambda p: float(doc.eval(np.array([p], dtype=np.float32))[0])
+    assert at((1.0, 0, 0)) < 0        # the old tip is now interior
+    assert doc.safe_step_scale() < 1.0
+
+
+def test_grab_front_only_leaves_the_far_side():
+    def build(front):
+        d = clay.Document()
+        d.add_sdf_layer("l").add(clay.Sphere(r=1.0).grab(
+            center=(0, 0, 0), radius=2.0, displacement=(0.6, 0, 0), front_only=front))
+        return d
+    plain = clay.Document(); plain.add_sdf_layer("l").add(clay.Sphere(r=1.0))
+    behind = np.array([[-1.0, 0, 0]], np.float32)
+    assert build(True).eval(behind)[0] == pytest.approx(float(plain.eval(behind)[0]), abs=1e-3)
+    assert build(False).eval(behind)[0] != pytest.approx(float(plain.eval(behind)[0]), abs=1e-3)
+
+
+def test_pose_rotates_a_region():
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Cylinder(r=0.3, h=1.0).pose(
+        center=(0, 0.8, 0), radius=1.0, axis=(0, 0, 1), angle=0.7))
+    assert doc.safe_step_scale() < 1.0
+    # far below the region the shape is where it always was
+    at = lambda p: float(doc.eval(np.array([p], dtype=np.float32))[0])
+    assert at((0.0, -0.9, 0.0)) < 0
+
+
+@pytest.mark.parametrize("call", [
+    lambda: clay.Sphere(r=1.0).grab(center=(0, 0, 0), radius=0.0, displacement=(1, 0, 0)),
+    lambda: clay.Sphere(r=1.0).pose(center=(0, 0, 0), radius=-1.0, axis=(0, 1, 0), angle=1.0),
+])
+def test_region_deformers_refuse_a_non_positive_radius(call):
+    with pytest.raises(ValueError, match="> 0"):
+        call()
+
+
+def test_voxel_grab_moves_material():
+    g = clay.VoxelGrid(voxel_size=0.1)
+    i = g.palette_add("#3399ee")
+    g.set_brush((0, 0, 0), 11, i, shape="sphere")
+    assert g.get((6, 0, 0)) == 0
+    g.sculpt_grab((0, 0, 0), 15, displacement=(0.29, 0.0, 0.0), shape="sphere",
+                  falloff="constant")
+    assert g.get((6, 0, 0)) == i        # leading face advanced
+    assert g.get((-5, 0, 0)) == 0       # trailing face vacated
+
+
+def test_region_deformers_round_trip(tmp_path):
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(
+        clay.Sphere(r=1.0)
+        .grab(center=(0.8, 0, 0), radius=0.9, displacement=(0.3, 0.2, 0), ease=4)
+        .pose(center=(0, 0.5, 0), radius=1.2, axis=(0, 0, 1), angle=0.4, ease=2))
+    probes = np.random.default_rng(19).uniform(-3, 3, size=(1024, 3)).astype(np.float32)
+    before = doc.eval(probes)
+    path = tmp_path / "region.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(probes))

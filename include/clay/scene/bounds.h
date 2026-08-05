@@ -29,6 +29,11 @@ math::Aabb item_local_bounds(const Node& item);
 // both the influence bound and the tape's tracked field info use this.
 float deformer_lipschitz(const Node& item);
 
+// Steepest slope of an easing curve, measured by dense sampling. The curves are
+// arbitrary — back and elastic overshoot — so a constant would not be a safe
+// bound. Shared by the transition weight and the region deformers.
+float ease_max_slope(std::uint8_t ease);
+
 // Whether the item's deformer chain costs exactness for a reason the Lipschitz
 // factor does not capture (elongation on an asymmetric primitive).
 bool deformers_break_exactness(const Node& item);

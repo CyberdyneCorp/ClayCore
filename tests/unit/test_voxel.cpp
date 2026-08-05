@@ -643,3 +643,94 @@ TEST_CASE("sculpting verbs reshape existing material") {
         CHECK(identical);
     }
 }
+
+TEST_CASE("voxel grab translates occupancy through the same map") {
+    auto ball = [](VoxelGrid& g, std::uint8_t c) {
+        g.set_brush({0, 0, 0}, 11, c, voxel::BrushShape::Sphere);
+    };
+
+    SUBCASE("material moves toward the pull and colour comes with it") {
+        VoxelGrid g(0.1f);
+        std::uint8_t c = g.palette_add(cf3(0.2f, 0.7f, 0.9f));
+        ball(g, c);
+        std::size_t before = g.occupied_count();
+
+        voxel::BrushParams p;
+        p.size = 15;
+        p.shape = voxel::BrushShape::Sphere;
+        // Half a cell short of three cells, so the pull is unambiguous.
+        g.sculpt_grab({0, 0, 0}, p, cf3(0.29f, 0.0f, 0.0f));
+
+        CHECK(g.occupied_count() > 0);
+        CHECK(before > 0);
+        // The span moved bodily in +x: the leading face advanced from 5 to 6
+        // and the trailing face vacated -5. Nearest-cell resampling means whole
+        // cells, which is the documented behaviour of a binary representation.
+        CHECK(g.get({6, 0, 0}) == c);
+        CHECK(g.get({-5, 0, 0}) == 0);
+        CHECK(g.get({-4, 0, 0}) == c);
+        // colour travels with the material
+        CHECK(g.palette_color(g.get({6, 0, 0})).y == doctest::Approx(0.7f).epsilon(1e-3));
+    }
+
+    SUBCASE("nothing beyond the footprint changes") {
+        VoxelGrid moved(0.1f), reference(0.1f);
+        std::uint8_t c = moved.palette_add(cf3(1, 1, 1));
+        reference.palette_add(cf3(1, 1, 1));
+        ball(moved, c);
+        ball(reference, c);
+
+        voxel::BrushParams p;
+        p.size = 9;
+        p.shape = voxel::BrushShape::Sphere;
+        moved.sculpt_grab({0, 0, 0}, p, cf3(0.2f, 0, 0));
+
+        int outside_changed = 0;
+        for (int z = -12; z <= 12; ++z)
+            for (int y = -12; y <= 12; ++y)
+                for (int x = -12; x <= 12; ++x) {
+                    // outside the size-9 footprint's radius
+                    if (x * x + y * y + z * z <= 9 * 9) continue;
+                    if (moved.get({x, y, z}) != reference.get({x, y, z})) ++outside_changed;
+                }
+        CHECK(outside_changed == 0);
+    }
+
+    SUBCASE("it agrees with the SDF grab to within the voxel size") {
+        // Voxelize a sphere, grab it; grab the same sphere as an SDF and
+        // rasterize. The two surfaces should land in the same cells, give or
+        // take the one-cell quantisation binary occupancy forces.
+        const float voxel = 0.1f;
+        const float radius_cells = 7.0f;
+        VoxelGrid g(voxel);
+        std::uint8_t c = g.palette_add(cf3(1, 1, 1));
+        g.set_brush({0, 0, 0}, 15, c, voxel::BrushShape::Sphere);
+
+        voxel::BrushParams p;
+        p.size = 21;
+        p.shape = voxel::BrushShape::Sphere;
+        const kernel::cfloat3 disp = cf3(0.3f, 0.0f, 0.0f);
+        g.sculpt_grab({0, 0, 0}, p, disp);
+
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        scene::Node n = clay_test::item(scene::Prim::sphere(radius_cells * voxel), cf3(0, 0, 0));
+        n.deformers.push_back(
+            scene::Deformer::grab(cf3(0, 0, 0), 21.0f * voxel * 0.5f, disp, 0));
+        l.sdf->insert(n);
+        scene::Tape tape = scene::compile_document(doc);
+
+        int disagree = 0, sampled = 0;
+        for (int x = -14; x <= 16; ++x) {
+            // Cell centre in world space.
+            kernel::cfloat3 wp = cf3((x + 0.5f) * voxel, 0.5f * voxel, 0.5f * voxel);
+            bool solid_voxel = g.get({x, 0, 0}) != 0;
+            bool solid_sdf = tape.eval(wp).d < 0.0f;
+            ++sampled;
+            // Allow disagreement only within one cell of the surface.
+            if (solid_voxel != solid_sdf && kernel::cabs(tape.eval(wp).d) > voxel) ++disagree;
+        }
+        CHECK(sampled > 0);
+        CHECK(disagree == 0);
+    }
+}

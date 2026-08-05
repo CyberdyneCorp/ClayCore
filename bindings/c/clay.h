@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 9
+#define CLAY_ABI_MINOR 10
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -144,7 +144,9 @@ typedef enum clay_blend {
  *   ELONGATE  hx hy hz      insert flat sections of half-extent h per axis
  *   BEND_LINEAR ax ay az bx by bz vx vy vz   displace by v, eased along a->b
  *   BEND_RADIAL r0 r1 dz  displace along Y by dz, eased across r0->r1
- *   ELONGATE_AXIS hx hy hz  per-axis stretch; a bound for any primitive */
+ *   ELONGATE_AXIS hx hy hz  per-axis stretch; a bound for any primitive
+ *   GRAB      cx cy cz r dx dy dz front   pull a region; identity past r
+ *   POSE      cx cy cz r ax ay az angle   rotate a region about its centre */
 typedef enum clay_deform {
     CLAY_DEFORM_TWIST = 0,
     CLAY_DEFORM_BEND = 1,
@@ -154,7 +156,9 @@ typedef enum clay_deform {
     CLAY_DEFORM_ELONGATE = 5,
     CLAY_DEFORM_BEND_LINEAR = 6,
     CLAY_DEFORM_BEND_RADIAL = 7,
-    CLAY_DEFORM_ELONGATE_AXIS = 8
+    CLAY_DEFORM_ELONGATE_AXIS = 8,
+    CLAY_DEFORM_GRAB = 9,
+    CLAY_DEFORM_POSE = 10
 } clay_deform;
 
 /* Easing curves are given by index; 0 is linear. Only the taper deformer and
@@ -702,6 +706,12 @@ clay_result clay_voxel_sculpt_flatten(clay_voxel_grid* grid, const int32_t cell[
 /* Move surface cells one step toward the brush centre. */
 clay_result clay_voxel_sculpt_pinch(clay_voxel_grid* grid, const int32_t cell[3],
                                     const clay_brush_params* brush);
+/* Translate occupancy through the same map the SDF grab deformer uses. Binary
+ * occupancy resamples nearest-cell: a displacement larger than a cell moves
+ * material in whole cells rather than flowing. */
+clay_result clay_voxel_sculpt_grab(clay_voxel_grid* grid, const int32_t cell[3],
+                                   const clay_brush_params* brush, const float displacement[3],
+                                   int32_t front_only);
 
 /* -- queries --------------------------------------------------------------- */
 

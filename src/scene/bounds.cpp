@@ -1,3 +1,4 @@
+#include "clay/kernel/ease.h"
 #include "clay/scene/bounds.h"
 
 #include "clay/kernel/exactness.h"
@@ -167,6 +168,22 @@ Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& defor
                 b = Aabb{cf3(-outer, -outer, b.min.z), cf3(outer, outer, b.max.z)};
                 break;
             }
+            case kernel::cdeform_grab: {
+                // Material inside the radius moves by at most the whole
+                // displacement, so dilating the bound by it is conservative.
+                kernel::cfloat3 disp = cf3(kernel::cabs(d.ext[0]), kernel::cabs(d.ext[1]),
+                                           kernel::cabs(d.ext[2]));
+                b = Aabb{b.min - disp, b.max + disp};
+                break;
+            }
+            case kernel::cdeform_pose: {
+                // Rotation about the centre keeps a point's distance from it,
+                // so the chord 2r|sin(theta/2)| bounds how far anything moves.
+                float chord = 2.0f * kernel::cabs(d.c) *
+                              kernel::cabs(kernel::csin(d.ext[3] * 0.5f));
+                b = b.dilated(chord);
+                break;
+            }
             case kernel::cdeform_bend_linear:
                 // displaces by at most the full vector
                 b = Aabb{b.min - cf3(kernel::cabs(d.ext[2]), kernel::cabs(d.ext[3]),
@@ -196,6 +213,19 @@ Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& defor
         }
     }
     return b;
+}
+
+float ease_max_slope(std::uint8_t ease) {
+    const int kSamples = 512;
+    float worst = 1.0f;
+    float prev = kernel::cease(ease, 0.0f);
+    for (int i = 1; i <= kSamples; ++i) {
+        float t = static_cast<float>(i) / static_cast<float>(kSamples);
+        float v = kernel::cease(ease, t);
+        worst = kernel::cmax(worst, kernel::cabs(v - prev) * static_cast<float>(kSamples));
+        prev = v;
+    }
+    return worst * 1.25f;  // sampling headroom
 }
 
 bool deformers_break_exactness(const Node& item) {
@@ -238,6 +268,11 @@ float deformer_lipschitz(const Node& item) {
             float s_max = kernel::cmax(d.b, d.c);
             float height = kernel::cmax(kernel::cabs(d.a - d.k), 1e-6f);
             info = kernel::cfi_taper(info, s_min, s_max, height, radius);
+        } else if (d.type == kernel::cdeform_grab) {
+            float len = kernel::clength(kernel::cf3(d.ext[0], d.ext[1], d.ext[2]));
+            info = kernel::cfi_grab(info, len, d.c, ease_max_slope(d.ease), d.ext[3] != 0.0f);
+        } else if (d.type == kernel::cdeform_pose) {
+            info = kernel::cfi_pose(info, d.ext[3], ease_max_slope(d.ease));
         } else if (d.type == kernel::cdeform_bend_linear) {
             // slope = |v| over the span it ramps across
             float seg = kernel::clength(kernel::cf3(d.c - d.k, d.ext[0] - d.a, d.ext[1] - d.b));

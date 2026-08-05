@@ -293,7 +293,9 @@ struct Deformer {
     // How many extension floats this type carries; the serializer and the
     // reader both take their count from here, dispatching on the type.
     static int ext_count(std::uint8_t type) {
-        return type == kernel::cdeform_bend_linear ? 5 : 0;
+        if (type == kernel::cdeform_bend_linear) return 5;
+        if (type == kernel::cdeform_grab || type == kernel::cdeform_pose) return 4;
+        return 0;
     }
 
 
@@ -373,6 +375,40 @@ struct Deformer {
         d.k = h.x;
         d.a = h.y;
         d.b = h.z;
+        return d;
+    }
+    // Translate a region by `displacement`, weighted from the centre out and
+    // zero past the radius. front_only gates on the half-space the pull heads
+    // into, so the far side of a form does not travel with the near side.
+    static Deformer grab(kernel::cfloat3 centre, float radius, kernel::cfloat3 displacement,
+                         std::uint8_t ease = 0, bool front_only = false) {
+        Deformer d;
+        d.type = kernel::cdeform_grab;
+        d.k = centre.x;
+        d.a = centre.y;
+        d.b = centre.z;
+        d.c = radius;
+        d.ext[0] = displacement.x;
+        d.ext[1] = displacement.y;
+        d.ext[2] = displacement.z;
+        d.ext[3] = front_only ? 1.0f : 0.0f;
+        d.ease = ease;
+        return d;
+    }
+    // Rotate a region about `centre`, weighted the same way.
+    static Deformer pose(kernel::cfloat3 centre, float radius, kernel::cfloat3 axis, float angle,
+                         std::uint8_t ease = 0) {
+        Deformer d;
+        d.type = kernel::cdeform_pose;
+        d.k = centre.x;
+        d.a = centre.y;
+        d.b = centre.z;
+        d.c = radius;
+        d.ext[0] = axis.x;
+        d.ext[1] = axis.y;
+        d.ext[2] = axis.z;
+        d.ext[3] = angle;
+        d.ease = ease;
         return d;
     }
     static Deformer displace(float amplitude, float frequency) {

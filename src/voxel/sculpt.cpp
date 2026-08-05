@@ -62,6 +62,8 @@ inline float falloff_weight(BrushFalloff curve, float d) {
     }
 }
 
+inline float cnearest(float v) { return v < 0.0f ? -std::floor(-v + 0.5f) : std::floor(v + 0.5f); }
+
 // Deterministic per-cell threshold in [0, 1). Same cell + seed => same value
 // on every platform: integer mixing only, no floating point until the end.
 inline float cell_threshold(VoxelCoord c, std::uint32_t seed) {
@@ -232,6 +234,36 @@ void VoxelGrid::sculpt_flatten(VoxelCoord c, const BrushParams& p, kernel::cfloa
             set(w, majority_colour(before, w.x, w.y, w.z));  // hollows fill in
         }
     });
+}
+
+void VoxelGrid::sculpt_grab(VoxelCoord c, const BrushParams& p, kernel::cfloat3 displacement,
+                            bool front_only) {
+    // Pad by the displacement so material pulled in from outside the footprint
+    // is still in the snapshot we read from.
+    int pad = 1 + static_cast<int>(kernel::clength(displacement) /
+                                   kernel::cmax(voxel_size_, 1e-6f));
+    Region before = snapshot(*this, c, p.size, pad);
+
+    BrushExtent e = brush_extent(p.size);
+    float radius = static_cast<float>(p.size) * 0.5f;
+    kernel::cfloat3 centre = kernel::cf3(0, 0, 0);  // offsets are relative to c
+
+    for_each_brush_cell(c, p, [&](VoxelCoord w) {
+        // Where this cell's material came from, in cell units, through the same
+        // map cgrab_point applies to a point.
+        kernel::cfloat3 local = kernel::cf3(static_cast<float>(w.x - c.x),
+                                            static_cast<float>(w.y - c.y),
+                                            static_cast<float>(w.z - c.z));
+        kernel::cfloat3 cells = displacement * (1.0f / kernel::cmax(voxel_size_, 1e-6f));
+        kernel::cfloat3 src = cgrab_point(local, centre, radius, cells,
+                                          front_only ? 1.0f : 0.0f,
+                                          static_cast<int>(p.falloff));
+        VoxelCoord from{c.x + static_cast<std::int32_t>(cnearest(src.x)),
+                        c.y + static_cast<std::int32_t>(cnearest(src.y)),
+                        c.z + static_cast<std::int32_t>(cnearest(src.z))};
+        set(w, before.at(from.x, from.y, from.z));
+    });
+    (void)e;
 }
 
 void VoxelGrid::sculpt_pinch(VoxelCoord c, const BrushParams& p) {

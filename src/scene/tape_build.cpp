@@ -104,22 +104,6 @@ struct Compiler {
 
     // -- field-info bookkeeping ----------------------------------------------
 
-    // Steepest slope of an easing curve, measured by dense sampling — the
-    // curves are arbitrary (back and elastic overshoot), so a constant would
-    // not be a safe bound for the transition weight's Lipschitz factor.
-    static float ease_max_slope(std::uint8_t ease) {
-        const int kSamples = 512;
-        float worst = 1.0f;
-        float prev = kernel::cease(ease, 0.0f);
-        for (int i = 1; i <= kSamples; ++i) {
-            float t = static_cast<float>(i) / static_cast<float>(kSamples);
-            float v = kernel::cease(ease, t);
-            worst = kernel::cmax(worst, kernel::cabs(v - prev) * static_cast<float>(kSamples));
-            prev = v;
-        }
-        return worst * 1.25f;  // sampling headroom
-    }
-
     void fold_info(const Node& item, Op op, bool smooth) {
         kernel::CFieldInfo prim_info =
             prim_is_bound_field(item.prim.type) ? kernel::cfi_bound() : kernel::cfi_exact();

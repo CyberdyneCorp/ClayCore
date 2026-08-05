@@ -99,6 +99,23 @@ CLAY_FN CFieldInfo cfi_wrap_around(CFieldInfo a, float x0, float x1, float thick
     return CFieldInfo{false, a.lipschitz * (1.0f + thickness / cmax(r, 1e-6f))};
 }
 
+// grab: the displacement is ramped over the radius, so the stretch is the
+// displacement magnitude against the distance it ramps across, scaled by the
+// easing curve's steepest slope. The front-facing gate adds a second ramp of
+// its own across half a radius, so it contributes a slope of 2.
+CLAY_FN CFieldInfo cfi_grab(CFieldInfo a, float displacement_len, float radius, float ease_slope,
+                            bool front_gated) {
+    float slope = ease_slope + (front_gated ? 2.0f : 0.0f);
+    return CFieldInfo{false, a.lipschitz * (1.0f + displacement_len * slope / cmax(radius, 1e-6f))};
+}
+
+// pose: a point at distance d from the centre sweeps an arc of d * dtheta, and
+// d is at most the radius inside the support, so the radius cancels and the
+// stretch is bounded by the angle against the easing curve's slope.
+CLAY_FN CFieldInfo cfi_pose(CFieldInfo a, float angle, float ease_slope) {
+    return CFieldInfo{false, a.lipschitz * (1.0f + cabs(angle) * ease_slope)};
+}
+
 // transition (spatial morph of two subtrees): lerped fields are not
 // distances; the mix adds |d1 - d2| · Lipschitz(w). The compiler passes a
 // bound on the field difference over the influence region.

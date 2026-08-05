@@ -75,6 +75,26 @@ std::vector<ParityScene> parity_scenes() {
         l.sdf->insert(n);
         scenes.push_back({name, std::move(doc), 3.0f});
     };
+    {   // grab: a region of a sphere pulled sideways
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node n = item(Prim::sphere(1.0f), cf3(0, 0, 0));
+        n.deformers.push_back(
+            scene::Deformer::grab(cf3(1.0f, 0, 0), 0.8f, cf3(0.4f, 0.2f, 0), 3));
+        l.sdf->insert(n);
+        scenes.push_back({"grab", std::move(doc), 3.0f});
+    }
+
+    {   // pose: a region rotated about its centre
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node n = item(Prim::capped_cylinder(0.3f, 1.0f), cf3(0, 0, 0));
+        n.deformers.push_back(
+            scene::Deformer::pose(cf3(0, 0.8f, 0), 1.0f, cf3(0, 0, 1), 0.7f, 2));
+        l.sdf->insert(n);
+        scenes.push_back({"pose", std::move(doc), 3.0f});
+    }
+
     {   // elongate_axis: an asymmetric primitive stretched per axis
         Document doc;
         Layer& l = doc.add_sdf_layer("l");

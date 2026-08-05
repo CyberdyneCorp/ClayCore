@@ -607,6 +607,36 @@ NB_MODULE(pyclay, m) {
              },
              "y0"_a, "y1"_a, "s0"_a, "s1"_a, "ease"_a = 0,
              "Scale the cross-section from s0 at y0 to s1 at y1 along an easing curve")
+        .def("grab",
+             [](nb::object self, nb::handle center, float radius, nb::handle displacement,
+                int ease, bool front_only) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 if (!(radius > 0.0f))
+                     throw std::invalid_argument("grab radius must be > 0");
+                 p.deformers.push_back(scene::Deformer::grab(
+                     to_f3(center, "center"), radius, to_f3(displacement, "displacement"),
+                     static_cast<std::uint8_t>(ease), front_only));
+                 return self;
+             },
+             "center"_a, "radius"_a, "displacement"_a, "ease"_a = 0, "front_only"_a = false,
+             nb::rv_policy::reference_internal,
+             "Pull a region of surface: displacement weighted from the centre out, "
+             "identity past the radius. front_only leaves the far side of a form "
+             "where it was. The surface travels less than the full displacement.")
+        .def("pose",
+             [](nb::object self, nb::handle center, float radius, nb::handle axis, float angle,
+                int ease) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 if (!(radius > 0.0f))
+                     throw std::invalid_argument("pose radius must be > 0");
+                 p.deformers.push_back(scene::Deformer::pose(
+                     to_f3(center, "center"), radius, to_f3(axis, "axis"), angle,
+                     static_cast<std::uint8_t>(ease)));
+                 return self;
+             },
+             "center"_a, "radius"_a, "axis"_a, "angle"_a, "ease"_a = 0,
+             nb::rv_policy::reference_internal,
+             "Rotate a region about the centre, weighted the same way as grab")
         .def("bend_linear",
              [](nb::object self, nb::handle a, nb::handle b, nb::handle v, int ease) {
                  PyPrim& p = nb::cast<PyPrim&>(self);
@@ -1742,6 +1772,20 @@ NB_MODULE(pyclay, m) {
              "cell"_a, "size"_a, "normal"_a, "offset"_a = 0.0f, "shape"_a = "sphere",
              "falloff"_a = "constant", "strength"_a = 1.0f, "seed"_a = 0u,
              "Pull the surface onto the plane through the brush centre")
+        .def("sculpt_grab",
+             [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle displacement,
+                const std::string& shape, const std::string& falloff, float strength,
+                std::uint32_t seed, bool front_only) {
+                 g.grid().sculpt_grab(to_coord(cell),
+                                      make_brush(n, shape, falloff, strength, seed),
+                                      to_f3(displacement, "displacement"), front_only);
+             },
+             "cell"_a, "size"_a, "displacement"_a, "shape"_a = "sphere",
+             "falloff"_a = "smooth", "strength"_a = 1.0f, "seed"_a = 0u,
+             "front_only"_a = false,
+             "Translate occupancy through the same map the SDF grab uses. Binary "
+             "occupancy means this resamples nearest-cell, so material moves in "
+             "whole cells rather than flowing.")
         .def("sculpt_pinch",
              [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
                 const std::string& falloff, float strength, std::uint32_t seed) {

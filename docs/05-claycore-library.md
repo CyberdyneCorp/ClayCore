@@ -329,6 +329,18 @@ body.add(clay.Cylinder(r=1.2, h=0.15).bend_radial(r0=0.2, r1=1.2, dz=0.6))
 # symmetric or not, at the cost of a flat interior plateau — so it is a bound
 # where elongate would be exact.
 body.add(clay.Cone(h=0.6, r1=0.5, r2=0.1).elongate_axis((0.8, 0.0, 0.0)))
+
+# grab and pose are the region deformers: unlike every other one they have
+# FINITE SUPPORT, so outside the radius the field is untouched and per-brick
+# culling still holds. That is what lets them act like a sculpting brush.
+# front_only stops the far side of a form travelling with the near side.
+body.add(clay.Sphere(r=1.0).grab(center=(1, 0, 0), radius=0.8,
+                                 displacement=(0.5, 0, 0), front_only=True))
+body.add(clay.Cylinder(r=0.3, h=1.0).pose(center=(0, 0.8, 0), radius=1.0,
+                                          axis=(0, 0, 1), angle=0.7))
+
+# the voxel side moves occupancy through the same map
+blocks.sculpt_grab((0, 0, 0), 15, displacement=(0.3, 0.0, 0.0), shape="sphere")
 ```
 
 ```python

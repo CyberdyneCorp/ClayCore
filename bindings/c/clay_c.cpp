@@ -103,6 +103,8 @@ static_assert(CLAY_DEFORM_ELONGATE == static_cast<int>(kernel::cdeform_elongate)
 static_assert(CLAY_DEFORM_BEND_LINEAR == static_cast<int>(kernel::cdeform_bend_linear));
 static_assert(CLAY_DEFORM_BEND_RADIAL == static_cast<int>(kernel::cdeform_bend_radial));
 static_assert(CLAY_DEFORM_ELONGATE_AXIS == static_cast<int>(kernel::cdeform_elongate_axis));
+static_assert(CLAY_DEFORM_GRAB == static_cast<int>(kernel::cdeform_grab));
+static_assert(CLAY_DEFORM_POSE == static_cast<int>(kernel::cdeform_pose));
 
 static_assert(CLAY_PROFILE_CIRCLE == static_cast<int>(kernel::cprofile_circle));
 static_assert(CLAY_PROFILE_BOX == static_cast<int>(kernel::cprofile_box));
@@ -302,8 +304,8 @@ static_assert(sizeof kPrimParams / sizeof kPrimParams[0] == kernel::ctape_prim_c
 constexpr int kProfileParams[] = {1, 2, 1, 1, 3, 2, 0};  // polygon: vertices instead
 static_assert(sizeof kProfileParams / sizeof kProfileParams[0] == kernel::cprofile_polygon + 1);
 
-constexpr int kDeformParams[] = {1, 1, 4, 2, 2, 3, 9, 3, 3};
-static_assert(sizeof kDeformParams / sizeof kDeformParams[0] == kernel::cdeform_elongate_axis + 1);
+constexpr int kDeformParams[] = {1, 1, 4, 2, 2, 3, 9, 3, 3, 8, 8};
+static_assert(sizeof kDeformParams / sizeof kDeformParams[0] == kernel::cdeform_pose + 1);
 
 clay_result check_params(const char* what, const float* params, std::size_t count, int expected) {
     if (count != static_cast<std::size_t>(expected))
@@ -434,6 +436,14 @@ clay_result make_deformer(std::int32_t kind, const float* p, scene::Deformer* ou
     } else if (kind == CLAY_DEFORM_BEND_RADIAL) {
         if (p[0] == p[1]) return fail(CLAY_ERROR_INVALID_ARGUMENT, "bend_radial needs r0 != r1");
         *out = scene::Deformer::bend_radial(p[0], p[1], p[2]);
+    } else if (kind == CLAY_DEFORM_GRAB) {
+        if (!(p[3] > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "grab radius must be > 0");
+        *out = scene::Deformer::grab(kernel::cf3(p[0], p[1], p[2]), p[3],
+                                     kernel::cf3(p[4], p[5], p[6]), 0, p[7] != 0.0f);
+    } else if (kind == CLAY_DEFORM_POSE) {
+        if (!(p[3] > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "pose radius must be > 0");
+        *out = scene::Deformer::pose(kernel::cf3(p[0], p[1], p[2]), p[3],
+                                     kernel::cf3(p[4], p[5], p[6]), p[7]);
     } else if (kind == CLAY_DEFORM_ELONGATE_AXIS) {
         if (p[0] < 0.0f || p[1] < 0.0f || p[2] < 0.0f)
             return fail(CLAY_ERROR_INVALID_ARGUMENT,
@@ -1162,7 +1172,7 @@ clay_result clay_item_set_mirror(clay_item* item, int32_t mirror) {
 clay_result clay_item_add_deformer(clay_item* item, int32_t deform, const float* params,
                                    size_t param_count, int32_t ease) {
     if (!item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item");
-    if (deform < 0 || deform > CLAY_DEFORM_ELONGATE_AXIS)
+    if (deform < 0 || deform > CLAY_DEFORM_POSE)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown deformer kind");
     clay_result r = check_params("deformer", params, param_count, kDeformParams[deform]);
     if (r != CLAY_OK) return r;
@@ -1863,6 +1873,20 @@ clay_result clay_voxel_sculpt_pinch(clay_voxel_grid* grid, const int32_t cell[3]
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
     g->sculpt_pinch(to_coord(cell), p);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_grab(clay_voxel_grid* grid, const int32_t cell[3],
+                                   const clay_brush_params* brush, const float displacement[3],
+                                   int32_t front_only) {
+    if (!displacement) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null displacement");
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    clay_result r = resolve_brush(grid, cell, brush, &g, &p);
+    if (r != CLAY_OK) return r;
+    g->sculpt_grab(to_coord(cell), p,
+                   kernel::cf3(displacement[0], displacement[1], displacement[2]),
+                   front_only != 0);
     return CLAY_OK;
 }
 

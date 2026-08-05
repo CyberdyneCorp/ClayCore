@@ -127,6 +127,13 @@ class VoxelGrid {
     // Move surface cells one step toward the brush centre.
     void sculpt_pinch(VoxelCoord c, const BrushParams& p);
 
+    // Grab: translate occupancy through the same inverse map the SDF grab
+    // deformer uses, so both representations mean the same thing. Occupancy is
+    // binary, so this resamples nearest-cell — a displacement larger than a
+    // cell moves material in whole cells rather than flowing.
+    void sculpt_grab(VoxelCoord c, const BrushParams& p, kernel::cfloat3 displacement,
+                     bool front_only = false);
+
     // -- mirror --------------------------------------------------------------
     // Mirror plane passes through lattice coordinate 0 on each active axis:
     // cell x reflects to -1-x. Ops with `axes` apply the edit and every
