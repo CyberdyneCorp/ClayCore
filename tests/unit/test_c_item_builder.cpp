@@ -1077,3 +1077,191 @@ TEST_CASE("a plane's normal is normalized, as the engine's own constructor does"
     float not_an_aperture[4] = {0.5f, 0.5f, 0.5f, 0.15f};
     CHECK(clay_item_create(CLAY_PRIM_CAPPED_TORUS, not_an_aperture, 4) == nullptr);
 }
+
+// --- editing a placed node (add-edit-commands) -------------------------------
+
+namespace {
+
+// A document with one sphere, plus the node id, through the C ABI.
+struct EditFixture {
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    clay_node_id node = 0;
+
+    EditFixture() {
+        REQUIRE(clay_add_sdf_layer(doc, "body", &layer) == CLAY_OK);
+        float params[1] = {0.5f};
+        clay_item* item = clay_item_create(CLAY_PRIM_SPHERE, params, 1);
+        REQUIRE(item != nullptr);
+        REQUIRE(clay_layer_add_item(doc, layer, item, &node) == CLAY_OK);
+        clay_item_destroy(item);
+    }
+    ~EditFixture() { clay_document_destroy(doc); }
+
+    float at(float x, float y, float z) const {
+        float p[3] = {x, y, z};
+        float d = 0.0f;
+        REQUIRE(clay_eval_points(doc, nullptr, p, 1, &d, nullptr) == CLAY_OK);
+        return d;
+    }
+};
+
+const float kOrigin[3] = {0, 0, 0};
+const float kUpAxis[3] = {0, 1, 0};
+
+}  // namespace
+
+TEST_CASE("a placed node can be retransformed, and keeps its id") {
+    EditFixture f;
+    CHECK(f.at(0, 0, 0) < 0.0f);
+    CHECK(f.at(2, 0, 0) > 0.0f);
+
+    const float moved[3] = {2, 0, 0};
+    REQUIRE(clay_layer_set_transform(f.doc, f.layer, f.node, moved, kUpAxis, 0.0f, 1.0f) ==
+            CLAY_OK);
+    CHECK(f.at(2, 0, 0) < 0.0f);
+    CHECK(f.at(0, 0, 0) > 0.0f);
+
+    // the same id still resolves, which is what lets a UI hold a selection
+    const float red[3] = {1, 0, 0};
+    CHECK(clay_layer_set_color(f.doc, f.layer, f.node, red) == CLAY_OK);
+}
+
+TEST_CASE("editing a node matches the same edit through the scene API") {
+    EditFixture f;
+    const float moved[3] = {1.25f, -0.5f, 0.75f};
+    REQUIRE(clay_layer_set_transform(f.doc, f.layer, f.node, moved, kUpAxis, 0.7f, 1.5f) ==
+            CLAY_OK);
+    REQUIRE(clay_layer_set_op_blend(f.doc, f.layer, f.node, CLAY_OP_ADD, CLAY_BLEND_QUADRATIC,
+                                    0.2f, 0.05f) == CLAY_OK);
+
+    // the twin, built with the engine's own types
+    scene::Document twin;
+    scene::Layer& tl = twin.add_sdf_layer("body");
+    scene::Node n = clay_test::item(scene::Prim::sphere(0.5f), cf3(0, 0, 0));
+    n.xform.position = cf3(1.25f, -0.5f, 0.75f);
+    n.xform.rotation = math::Quat::from_axis_angle(cf3(0, 1, 0), 0.7f);
+    n.xform.scale = 1.5f;
+    n.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.2f};
+    n.rounding = 0.05f;
+    tl.sdf->insert(n);
+
+    check_same_field(f.doc, twin);
+}
+
+TEST_CASE("replacing a primitive keeps the node's modifiers") {
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "l", &layer) == CLAY_OK);
+
+    float params[1] = {0.3f};
+    clay_item* item = clay_item_create(CLAY_PRIM_SPHERE, params, 1);
+    REQUIRE(item != nullptr);
+    REQUIRE(clay_item_set_repeat_radial(item, 6, 1.0f) == CLAY_OK);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, item, &node) == CLAY_OK);
+    clay_item_destroy(item);
+
+    // CLAY_PRIM_BOX params are half-extents; pyclay's Box(size=) takes full
+    // side lengths, so 0.2 here is the same box as clay.Box(size=(0.4,...)).
+    float box[3] = {0.2f, 0.2f, 0.2f};
+    REQUIRE(clay_layer_set_prim(doc, layer, node, CLAY_PRIM_BOX, box, 3) == CLAY_OK);
+
+    // The repetition belongs to the node, so it survives: a lone box would
+    // read -0.2 at the origin, and the array does not.
+    float p[3] = {0, 0, 0};
+    float d = 0.0f;
+    REQUIRE(clay_eval_points(doc, nullptr, p, 1, &d, nullptr) == CLAY_OK);
+    CHECK(d == doctest::Approx(-0.2f).epsilon(1e-4));
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("a stroke can be extended and trimmed in place") {
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "l", &layer) == CLAY_OK);
+
+    clay_item* item = clay_item_create(CLAY_PRIM_STROKE, nullptr, 0);
+    REQUIRE(item != nullptr);
+    const float seed[8] = {-1, 0, 0, 0.3f, 0, 0, 0, 0.3f};
+    REQUIRE(clay_item_set_stroke_points(item, seed, 2) == CLAY_OK);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, item, &node) == CLAY_OK);
+    clay_item_destroy(item);
+
+    auto at = [&](float x) {
+        float p[3] = {x, 0, 0};
+        float d = 0.0f;
+        REQUIRE(clay_eval_points(doc, nullptr, p, 1, &d, nullptr) == CLAY_OK);
+        return d;
+    };
+    CHECK(at(1.0f) > 0.0f);
+
+    const float extra[4] = {1.0f, 0.0f, 0.0f, 0.3f};
+    REQUIRE(clay_layer_append_stroke(doc, layer, node, extra, 1) == CLAY_OK);
+    CHECK(at(1.0f) < 0.0f);
+
+    REQUIRE(clay_layer_trim_stroke(doc, layer, node, 1) == CLAY_OK);
+    CHECK(at(1.0f) > 0.0f);
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("layer visibility, transform and removal") {
+    clay_document* doc = clay_document_create();
+    clay_layer_id a = 0, b = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "a", &a) == CLAY_OK);
+    REQUIRE(clay_add_sdf_layer(doc, "b", &b) == CLAY_OK);
+
+    float r[1] = {1.0f};
+    clay_item* sphere = clay_item_create(CLAY_PRIM_SPHERE, r, 1);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(doc, a, sphere, &node) == CLAY_OK);
+    clay_item_destroy(sphere);
+
+    auto origin = [&]() {
+        float p[3] = {0, 0, 0};
+        float d = 0.0f;
+        REQUIRE(clay_eval_points(doc, nullptr, p, 1, &d, nullptr) == CLAY_OK);
+        return d;
+    };
+    float visible = origin();
+    CHECK(visible < 0.0f);
+
+    REQUIRE(clay_document_set_layer_visible(doc, a, 0) == CLAY_OK);
+    CHECK(origin() > 0.0f);
+    REQUIRE(clay_document_set_layer_visible(doc, a, 1) == CLAY_OK);
+    CHECK(origin() == doctest::Approx(visible));  // restored exactly
+
+    const float lifted[3] = {0, 4, 0};
+    REQUIRE(clay_document_set_layer_transform(doc, a, lifted, kUpAxis, 0.0f, 1.0f) == CLAY_OK);
+    CHECK(origin() > 0.0f);
+
+    REQUIRE(clay_document_move_layer(doc, a, 0) == CLAY_OK);
+    REQUIRE(clay_document_remove_layer(doc, a) == CLAY_OK);
+    CHECK(clay_document_set_layer_visible(doc, a, 1) == CLAY_ERROR_NOT_FOUND);
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("an unknown id is refused and changes nothing") {
+    EditFixture f;
+    const clay_node_id ghost = 9999;
+    float before = f.at(0, 0, 0);
+
+    CHECK(clay_layer_set_transform(f.doc, f.layer, ghost, kOrigin, kUpAxis, 0.0f, 1.0f) ==
+          CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_layer_set_color(f.doc, f.layer, ghost, kOrigin) == CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_layer_set_op_blend(f.doc, f.layer, ghost, CLAY_OP_ADD, CLAY_BLEND_HARD, 0, 0) ==
+          CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_layer_trim_stroke(f.doc, f.layer, ghost, 1) == CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_layer_move(f.doc, f.layer, ghost, 0, -1) == CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_document_remove_layer(f.doc, 9999) == CLAY_ERROR_NOT_FOUND);
+
+    CHECK(f.at(0, 0, 0) == doctest::Approx(before));  // document untouched
+
+    // and a bad value is rejected before anything is applied
+    CHECK(clay_layer_set_transform(f.doc, f.layer, f.node, kOrigin, kUpAxis, 0.0f, 0.0f) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_layer_set_op_blend(f.doc, f.layer, f.node, CLAY_OP_ADD, CLAY_BLEND_HARD, 0,
+                                  -1.0f) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(f.at(0, 0, 0) == doctest::Approx(before));
+}

@@ -193,6 +193,27 @@ from C and therefore from Swift. `tools/check_binding_parity.py` fails CI when a
 `pyclay` capability has no C counterpart and no recorded exemption, so the two
 cannot drift apart again.
 
+Documents can be edited after they are built, not only appended to. Every
+editing entry point applies one command from `scene/commands.h` — the same
+vocabulary the `.clayspace` format records — so a binding edit means exactly
+what a saved document means, and becomes undoable for free once the undo stack
+is exposed:
+
+```python
+node = layer.add(clay.Sphere(r=0.5))       # ids come back from add()
+layer.set_transform(node, position=(2, 0, 0))   # and survive every edit
+layer.set_prim(node, clay.Box(size=(1, 1, 1)))  # modifiers on the node stay
+layer.set_op_blend(node, op=clay.Op.SUBTRACT, blend=clay.Smooth(0.2))
+layer.set_color(node, "#ff8800")
+layer.append_stroke(stroke_node, [(1.0, 0.0, 0.0, 0.3)])   # a drag gesture
+layer.remove(node)
+
+doc.set_layer_visible(layer.id, False)     # exact and reversible
+doc.set_layer_transform(layer.id, position=(0, 4, 0))
+doc.move_layer(layer.id, 0)
+doc.remove_layer(layer.id)
+```
+
 ### Widened surface (implemented)
 
 Beyond the sample above, `pyclay` reaches the rest of the C++ vocabulary:

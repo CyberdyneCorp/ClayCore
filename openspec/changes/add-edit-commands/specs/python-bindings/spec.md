@@ -23,6 +23,6 @@ The module SHALL expose editing of an existing document, not only construction: 
 - **WHEN** points are appended to an existing stroke and then the last N are trimmed
 - **THEN** the stroke's field matches a stroke authored with the surviving points
 
-#### Scenario: Every edit is a command
+#### Scenario: Every edit goes through the command vocabulary
 - **WHEN** any editing entry point is called
-- **THEN** it applies exactly one `scene::Command`, so its semantics match what the document format records
+- **THEN** it applies commands from `scene::Command` rather than mutating the document directly, so its semantics match what the document format records. Layer reorder SHALL be documented as the remove-then-add pair the vocabulary expresses it with; every other edit is a single command.

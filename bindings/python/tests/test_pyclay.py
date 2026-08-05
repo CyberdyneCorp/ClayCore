@@ -1068,3 +1068,157 @@ def test_sculpt_pinch_leaves_the_outside_alone():
             for z in range(-9, 10):
                 if x * x + y * y + z * z > 49:
                     assert g.get((x, y, z)) == reference.get((x, y, z))
+
+
+# --- editing an existing document (add-edit-commands) -----------------------
+
+
+def _sphere_doc(r=0.5):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("body")
+    node = layer.add(clay.Sphere(r=r))
+    return doc, layer, node
+
+
+def _at(doc, point):
+    return float(doc.eval(np.array([point], dtype=np.float32))[0])
+
+
+def test_moving_a_placed_item_keeps_its_id():
+    doc, layer, node = _sphere_doc()
+    assert _at(doc, (0, 0, 0)) < 0 < _at(doc, (2, 0, 0))
+
+    layer.set_transform(node, position=(2, 0, 0))
+    assert _at(doc, (2, 0, 0)) < 0 < _at(doc, (0, 0, 0))
+    assert layer.bounds() is not None
+    # the id survives the edit, which is what lets a UI hold a selection
+    layer.set_color(node, "#ff0000")
+    assert np.allclose(doc.colors(np.array([[2, 0, 0]], np.float32))[0], [1, 0, 0])
+
+
+def test_set_transform_keeps_unspecified_components():
+    doc, layer, node = _sphere_doc()
+    layer.set_transform(node, position=(1, 0, 0), scale=2.0)
+    layer.set_transform(node, position=(0, 1, 0))       # scale must persist
+    assert _at(doc, (0, 1, 0)) == pytest.approx(-1.0, abs=1e-4)  # r=0.5 scaled by 2
+
+
+def test_set_prim_keeps_the_modifiers():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    node = layer.add(clay.Sphere(r=0.3).repeat_radial(count=6, offset=1.0))
+    before = doc.eval(np.array([[0.0, 0.0, 0.0]], np.float32))[0]
+
+    layer.set_prim(node, clay.Box(size=(0.4, 0.4, 0.4)))
+    after = doc.eval(np.array([[0.0, 0.0, 0.0]], np.float32))[0]
+    assert after != before                      # the primitive really changed
+    # the radial array is a property of the node, not the builder, so it stays:
+    # a lone box at the origin would read -0.2 here, the array does not
+    assert after == pytest.approx(-0.2, abs=1e-4)
+
+
+def test_set_op_blend_changes_how_a_node_combines():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=1.0))
+    node = layer.add(clay.Sphere(r=0.6, position=(0.8, 0, 0)))
+    merged = _at(doc, (1.2, 0, 0))
+    assert merged < 0
+
+    layer.set_op_blend(node, op=clay.Op.SUBTRACT)
+    assert _at(doc, (1.2, 0, 0)) > 0            # that lobe is carved away now
+
+
+def test_removing_a_node_leaves_the_others_alone():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    keep = layer.add(clay.Sphere(r=0.5))
+    drop = layer.add(clay.Sphere(r=0.5, position=(3, 0, 0)))
+    assert _at(doc, (3, 0, 0)) < 0
+
+    layer.remove(drop)
+    assert _at(doc, (3, 0, 0)) > 0
+    assert _at(doc, (0, 0, 0)) < 0              # the survivor is untouched
+    layer.set_color(keep, "#00ff00")            # and its id still resolves
+
+
+def test_layer_visibility_round_trips_exactly():
+    doc = clay.Document()
+    a = doc.add_sdf_layer("a")
+    a.add(clay.Sphere(r=1.0))
+    b = doc.add_sdf_layer("b")
+    b.add(clay.Box(size=(1, 1, 1), position=(3, 0, 0)))
+
+    probes = np.random.default_rng(3).uniform(-4, 4, size=(512, 3)).astype(np.float32)
+    before = doc.eval(probes)
+
+    doc.set_layer_visible(a.id, False)
+    hidden = doc.eval(probes)
+    assert not np.array_equal(before, hidden)
+
+    doc.set_layer_visible(a.id, True)
+    assert np.array_equal(before, doc.eval(probes))   # exactly, not approximately
+
+
+def test_layer_transform_and_removal():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.5))
+    doc.set_layer_transform(layer.id, position=(0, 4, 0))
+    assert _at(doc, (0, 4, 0)) < 0
+
+    doc.remove_layer(layer.id)
+    assert _at(doc, (0, 4, 0)) > 0
+
+
+def test_layer_reorder():
+    doc = clay.Document()
+    a = doc.add_sdf_layer("a")
+    b = doc.add_sdf_layer("b")
+    doc.move_layer(b.id, 0)
+    # both layers still evaluate; reorder changes stacking, not membership
+    a.add(clay.Sphere(r=0.5))
+    b.add(clay.Sphere(r=0.5, position=(2, 0, 0)))
+    assert _at(doc, (0, 0, 0)) < 0 and _at(doc, (2, 0, 0)) < 0
+
+
+def test_editing_a_stroke_in_place():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    node = layer.add(clay.Stroke(points=[(-1, 0, 0, 0.3), (0, 0, 0, 0.3)]))
+    assert _at(doc, (1, 0, 0)) > 0
+
+    layer.append_stroke(node, [(1.0, 0.0, 0.0, 0.3)])
+    assert _at(doc, (1, 0, 0)) < 0              # the new point is solid
+
+    layer.trim_stroke(node, 1)
+    assert _at(doc, (1, 0, 0)) > 0              # and trimming takes it back
+
+    # the trimmed stroke matches one authored with only the surviving points
+    reference = clay.Document()
+    reference.add_sdf_layer("l").add(
+        clay.Stroke(points=[(-1, 0, 0, 0.3), (0, 0, 0, 0.3)]))
+    probes = np.random.default_rng(5).uniform(-2, 2, size=(256, 3)).astype(np.float32)
+    assert np.allclose(doc.eval(probes), reference.eval(probes), atol=1e-5)
+
+
+@pytest.mark.parametrize("call", [
+    lambda doc, layer: layer.set_transform(9999, position=(0, 0, 0)),
+    lambda doc, layer: layer.set_color(9999, "#ffffff"),
+    lambda doc, layer: layer.set_op_blend(9999, op=clay.Op.ADD),
+    lambda doc, layer: layer.remove(9999),
+    lambda doc, layer: layer.move(9999),
+    lambda doc, layer: layer.trim_stroke(9999, 1),
+    lambda doc, layer: doc.remove_layer(9999),
+    lambda doc, layer: doc.set_layer_visible(9999, False),
+    lambda doc, layer: doc.set_layer_transform(9999, position=(0, 0, 0)),
+])
+def test_unknown_id_is_refused_and_changes_nothing(call):
+    doc, layer, node = _sphere_doc()
+    probes = np.random.default_rng(11).uniform(-2, 2, size=(128, 3)).astype(np.float32)
+    before = doc.eval(probes)
+
+    with pytest.raises(ValueError):
+        call(doc, layer)
+
+    assert np.array_equal(before, doc.eval(probes))

@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 3
+#define CLAY_ABI_MINOR 4
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -233,6 +233,57 @@ typedef struct clay_item_desc {
 clay_result clay_add_item(clay_document* doc, clay_layer_id layer,
                           const clay_item_desc* item, clay_node_id* out_node);
 clay_result clay_remove_node(clay_document* doc, clay_layer_id layer, clay_node_id node);
+
+/* -- editing a placed node -------------------------------------------------
+ * Everything below addresses an existing node by the id clay_layer_add_item
+ * returned, and applies one command from the engine's vocabulary — the same
+ * one the document format records — so a binding edit means exactly what a
+ * saved document means. An id the document does not hold gives
+ * CLAY_ERROR_NOT_FOUND and leaves the document byte-identical.
+ *
+ * Unlike the Python bindings, which take partial updates, these take the
+ * whole value: C has no idiomatic "leave this one alone" argument. Read the
+ * current state, change what you want, pass all of it back. */
+
+/* Retransform a node. axis/angle give the rotation; scale must be > 0. */
+clay_result clay_layer_set_transform(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                     const float position[3], const float rotation_axis[3],
+                                     float rotation_angle, float scale);
+/* Replace a node's primitive. Its deformers, repetition, profile and stroke
+ * belong to the node, not to the primitive, and survive the edit. */
+clay_result clay_layer_set_prim(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                int32_t prim, const float* params, size_t param_count);
+clay_result clay_layer_set_color(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                 const float rgb[3]);
+/* op is clay_op, blend is clay_blend; rounding must be >= 0. */
+clay_result clay_layer_set_op_blend(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                    int32_t op, int32_t blend, float blend_k, float rounding);
+/* Reparent or reorder. new_parent 0 moves the node to the layer root, and
+ * index < 0 appends. */
+clay_result clay_layer_move(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                            clay_node_id new_parent, int32_t index);
+/* Append (x, y, z, radius) quadruples to a placed stroke: points_xyzr holds
+ * count * 4 floats. */
+clay_result clay_layer_append_stroke(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                     const float* points_xyzr, size_t count);
+/* Remove the last count points from a placed stroke. */
+clay_result clay_layer_trim_stroke(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                   uint32_t count);
+
+/* -- editing layers -------------------------------------------------------- */
+
+clay_result clay_document_remove_layer(clay_document* doc, clay_layer_id layer);
+/* Reorder a layer. The command vocabulary expresses this as remove-then-add,
+ * so it is the one edit that is a pair rather than a single command. */
+clay_result clay_document_move_layer(clay_document* doc, clay_layer_id layer, int32_t index);
+/* A hidden layer contributes nothing to the field; showing it again restores
+ * the original field exactly. */
+clay_result clay_document_set_layer_visible(clay_document* doc, clay_layer_id layer,
+                                            int32_t visible);
+clay_result clay_document_set_layer_transform(clay_document* doc, clay_layer_id layer,
+                                              const float position[3],
+                                              const float rotation_axis[3],
+                                              float rotation_angle, float scale);
 clay_result clay_set_layer_mirror(clay_document* doc, clay_layer_id layer, int32_t axis_x,
                                   int32_t axis_y, int32_t axis_z, float mirror_k);
 

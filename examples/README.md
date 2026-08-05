@@ -175,6 +175,24 @@ depends on a neighbour the same call already changed. Note that inflate
 followed by erode is not an identity — that is a morphological closing, which
 fills small hollows on the way through.
 
+### 10 — editing an existing document
+
+Every other example builds a document and renders it. This one changes one that
+is already there: place items, keep their ids, then move, swap, re-blend,
+recolour and remove them. Each tile starts from the same three blobs, so the
+only difference is which edit ran.
+
+![editing](output/10_editing.png)
+
+Strokes can be grown after they are placed, which is what a drag gesture
+issues.
+
+![extended stroke](output/10_stroke_extended.png)
+
+Node ids come back from `Layer.add` and survive every edit, which is what lets
+a UI hold a selection. Each entry point applies one command from the engine's
+vocabulary — the same one `.clayspace` records.
+
 ## Notes
 
 - **Committed models are budgeted.** `_render.save_model` fails above 400 KiB

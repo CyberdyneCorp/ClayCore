@@ -321,7 +321,7 @@ def contact_sheet(tiles, name, columns=4, caption=None):
 
 
 def render_tile(doc, eye=(2.4, 1.9, 3.0), target=(0.0, 0.0, 0.0),
-                fov_degrees=32.0, size=160, layer=None):
+                fov_degrees=32.0, size=160, layer=None, colors_from_field=False):
     """Render a small square tile for a contact sheet; returns the array.
 
     Pass `layer` to frame the tile automatically from that layer's bounds.
@@ -336,8 +336,10 @@ def render_tile(doc, eye=(2.4, 1.9, 3.0), target=(0.0, 0.0, 0.0),
     image = _background((h, w)).reshape(-1, 3).copy()
     if np.any(hit):
         idx = np.nonzero(hit)[0]
+        position = result["position"][idx]
+        surface_colors = doc.colors(position) if colors_from_field else None
         image[idx] = shade(hit[idx], result["normal"][idx],
-                           result["position"][idx], rays[idx, 3:6])
+                           position, rays[idx, 3:6], surface_colors)
     image = image.reshape(h, w, 3).reshape(h // 2, 2, w // 2, 2, 3).mean(axis=(1, 3))
     return np.power(np.clip(image, 0.0, 1.0), 1.0 / 2.2)
 

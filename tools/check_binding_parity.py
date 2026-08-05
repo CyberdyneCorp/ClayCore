@@ -66,6 +66,7 @@ ALIASES = {
     "Layer.colors": "clay_layer_eval_points",
     "Layer.gradients": "clay_layer_eval_gradients",
     "Layer.mirror": "clay_set_layer_mirror",
+    "Layer.remove": "clay_remove_node",  # named for the node, not the layer
     "Mesh.triangle_count": "clay_mesh_index_count",
     "Mesh.is_watertight": "clay_mesh_validate",
     "Mesh.is_manifold": "clay_mesh_validate",
@@ -143,6 +144,8 @@ EXEMPT = {
     "Layer.name": "reads back the name the caller passed to clay_add_sdf_layer",
     "Layer.resolution": "per-layer meshing hint the C ABI does not author; "
                         "clay_mesh_params carries the resolution a mesh is built at",
+    "Layer.id": "in C the id IS the handle — clay_layer_id is the type every "
+                "layer entry point already takes, so there is nothing to read back",
 }
 
 # String-valued choices pyclay parses out of an argument. They are capabilities

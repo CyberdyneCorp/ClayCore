@@ -23,6 +23,7 @@
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/validate.h"
 #include "clay/pick/pick.h"
+#include "clay/scene/commands.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
@@ -816,6 +817,151 @@ clay_result clay_remove_node(clay_document* doc, clay_layer_id layer_id, clay_no
     if (layer->sdf->remove(node).empty())
         return fail(CLAY_ERROR_NOT_FOUND, "node not found");
     return CLAY_OK;
+}
+
+namespace {
+
+// Every edit below routes through the command vocabulary rather than touching
+// the document, so a C edit means what a saved document means — and becomes
+// undoable for free once the undo stack is exposed. apply() reports failure by
+// returning nullopt and leaves the document untouched.
+clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (!scene::apply(doc->doc.document, cmd))
+        return fail(CLAY_ERROR_NOT_FOUND, what);
+    return CLAY_OK;
+}
+
+clay_result read_transform(const float position[3], const float rotation_axis[3],
+                           float rotation_angle, float scale, math::Transform* out) {
+    if (!position || !rotation_axis) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transform");
+    if (!(scale > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "scale must be > 0");
+    out->position = kernel::cf3(position[0], position[1], position[2]);
+    kernel::cfloat3 axis = kernel::cf3(rotation_axis[0], rotation_axis[1], rotation_axis[2]);
+    if (!(kernel::cdot2(axis) > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "rotation axis must be non-zero");
+    out->rotation = math::Quat::from_axis_angle(axis, rotation_angle);
+    out->scale = scale;
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_layer_set_transform(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                     const float position[3], const float rotation_axis[3],
+                                     float rotation_angle, float scale) {
+    math::Transform xform;
+    clay_result r = read_transform(position, rotation_axis, rotation_angle, scale, &xform);
+    if (r != CLAY_OK) return r;
+    return apply_edit(doc, scene::Command{scene::SetTransformCmd{layer, node, xform}},
+                      "node not found");
+}
+
+clay_result clay_layer_set_prim(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                int32_t prim, const float* params, size_t param_count) {
+    if (!prim_is_known(prim)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown primitive type");
+    clay_result r = check_params("primitive", params, param_count, kPrimParams[prim]);
+    if (r != CLAY_OK) return r;
+    float p[scene::kMaxPrimParams] = {};
+    for (size_t i = 0; i < param_count; ++i) p[i] = params[i];
+    r = canonical_prim_params(prim, p);
+    if (r != CLAY_OK) return r;
+
+    scene::Prim replacement;
+    replacement.type = static_cast<scene::PrimType>(prim);
+    std::memcpy(replacement.params, p, sizeof p);
+    return apply_edit(doc, scene::Command{scene::SetPrimCmd{layer, node, replacement}},
+                      "node not found");
+}
+
+clay_result clay_layer_set_color(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                 const float rgb[3]) {
+    if (!rgb) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null colour");
+    return apply_edit(
+        doc,
+        scene::Command{scene::SetColorCmd{layer, node, kernel::cf3(rgb[0], rgb[1], rgb[2])}},
+        "node not found");
+}
+
+clay_result clay_layer_set_op_blend(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                    int32_t op, int32_t blend, float blend_k, float rounding) {
+    if (!op_is_known(op)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown combine op");
+    if (!blend_is_known(blend)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown blend");
+    if (!(blend_k >= 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "blend k must be >= 0");
+    if (!(rounding >= 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "rounding must be >= 0");
+
+    scene::Blend b;
+    b.profile = static_cast<scene::BlendProfile>(blend);
+    b.k = blend_k;
+    return apply_edit(doc,
+                      scene::Command{scene::SetOpBlendCmd{layer, node,
+                                                          static_cast<scene::Op>(op), b,
+                                                          rounding}},
+                      "node not found");
+}
+
+clay_result clay_layer_move(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                            clay_node_id new_parent, int32_t index) {
+    return apply_edit(
+        doc, scene::Command{scene::MoveNodeCmd{layer, node, new_parent, index}},
+        "node or new parent not found");
+}
+
+clay_result clay_layer_append_stroke(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                     const float* points_xyzr, size_t count) {
+    if (!points_xyzr || count == 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "append_stroke needs at least one point");
+    clay_result r = check_batch("stroke points", count);
+    if (r != CLAY_OK) return r;
+
+    scene::AppendStrokeCmd cmd{layer, node, {}};
+    cmd.points.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        const float* q = points_xyzr + i * 4;
+        if (!(q[3] > 0.0f))
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "stroke radii must be > 0");
+        cmd.points.push_back(scene::StrokePoint{kernel::cf3(q[0], q[1], q[2]), q[3]});
+    }
+    return apply_edit(doc, scene::Command{std::move(cmd)}, "node not found");
+}
+
+clay_result clay_layer_trim_stroke(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                   uint32_t count) {
+    return apply_edit(doc, scene::Command{scene::TrimStrokeCmd{layer, node, count}},
+                      "node not found");
+}
+
+clay_result clay_document_remove_layer(clay_document* doc, clay_layer_id layer) {
+    return apply_edit(doc, scene::Command{scene::RemoveLayerCmd{layer}}, "layer not found");
+}
+
+clay_result clay_document_move_layer(clay_document* doc, clay_layer_id layer, int32_t index) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* found = doc->doc.document.find_layer(layer);
+    if (!found) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    scene::Layer copy = *found;
+    clay_result r = apply_edit(doc, scene::Command{scene::RemoveLayerCmd{layer}},
+                               "layer not found");
+    if (r != CLAY_OK) return r;
+    return apply_edit(doc, scene::Command{scene::AddLayerCmd{std::move(copy), index}},
+                      "layer could not be reinserted");
+}
+
+clay_result clay_document_set_layer_visible(clay_document* doc, clay_layer_id layer,
+                                            int32_t visible) {
+    return apply_edit(doc, scene::Command{scene::SetLayerVisibleCmd{layer, visible != 0}},
+                      "layer not found");
+}
+
+clay_result clay_document_set_layer_transform(clay_document* doc, clay_layer_id layer,
+                                              const float position[3],
+                                              const float rotation_axis[3],
+                                              float rotation_angle, float scale) {
+    math::Transform xform;
+    clay_result r = read_transform(position, rotation_axis, rotation_angle, scale, &xform);
+    if (r != CLAY_OK) return r;
+    return apply_edit(doc, scene::Command{scene::SetLayerTransformCmd{layer, xform}},
+                      "layer not found");
 }
 
 clay_result clay_set_layer_mirror(clay_document* doc, clay_layer_id layer_id, int32_t axis_x,

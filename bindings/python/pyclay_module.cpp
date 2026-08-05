@@ -23,6 +23,7 @@
 #include "clay/mesh/validate.h"
 #include "clay/pick/pick.h"
 #include "clay/scene/bounds.h"
+#include "clay/scene/commands.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
 #include "clay/version.h"
@@ -159,20 +160,21 @@ struct PyPrim {
     scene::Repeat repeat;
 };
 
+math::Quat to_axis_angle(nb::handle rotation_axis_angle) {
+    nb::sequence s;
+    try {
+        s = nb::cast<nb::sequence>(rotation_axis_angle);
+    } catch (const std::exception&) {
+        throw std::invalid_argument("rotation_axis_angle must be ((x, y, z), radians)");
+    }
+    if (nb::len(s) != 2)
+        throw std::invalid_argument("rotation_axis_angle must be ((x, y, z), radians)");
+    return math::Quat::from_axis_angle(to_f3(s[0], "rotation axis"), nb::cast<float>(s[1]));
+}
+
 void place(PyPrim& p, nb::handle position, nb::handle rotation_axis_angle, float scale) {
     if (!position.is_none()) p.xform.position = to_f3(position, "position");
-    if (!rotation_axis_angle.is_none()) {
-        nb::sequence s;
-        try {
-            s = nb::cast<nb::sequence>(rotation_axis_angle);
-        } catch (const std::exception&) {
-            throw std::invalid_argument("rotation_axis_angle must be ((x, y, z), radians)");
-        }
-        if (nb::len(s) != 2)
-            throw std::invalid_argument("rotation_axis_angle must be ((x, y, z), radians)");
-        p.xform.rotation =
-            math::Quat::from_axis_angle(to_f3(s[0], "rotation axis"), nb::cast<float>(s[1]));
-    }
+    if (!rotation_axis_angle.is_none()) p.xform.rotation = to_axis_angle(rotation_axis_angle);
     if (scale <= 0.0f) throw std::invalid_argument("scale must be > 0");
     p.xform.scale = scale;
 }
@@ -255,6 +257,17 @@ struct PyVoxelGrid {
 };
 
 // -- document / layer wrappers ------------------------------------------------
+
+// Every editing entry point goes through the command vocabulary rather than
+// mutating the document, so a binding edit means exactly what the document
+// format records for it — and, once the undo stack is exposed, is undoable
+// for free. apply() returns nullopt when the target does not exist and leaves
+// the document untouched.
+void apply_or_throw(scene::Document& doc, const scene::Command& cmd, const char* what) {
+    if (!scene::apply(doc, cmd))
+        throw std::invalid_argument(std::string(what) +
+                                    ": no node or layer with that id in this document");
+}
 
 struct PyDocument {
     std::shared_ptr<io::ClaySpaceDoc> doc = std::make_shared<io::ClaySpaceDoc>();
@@ -1079,6 +1092,8 @@ NB_MODULE(pyclay, m) {
 
     // -- layer -----------------------------------------------------------------------
     nb::class_<PyLayer>(m, "Layer", "SDF layer: an ordered edit list inside a Document")
+        .def_prop_ro("id", [](const PyLayer& l) { return l.id; },
+                     "The layer's id, which the document-level layer edits take")
         .def_prop_ro("name", [](const PyLayer& l) { return l.layer().name; })
         .def_prop_ro("resolution", [](const PyLayer& l) { return l.layer().resolution; })
         .def("add",
@@ -1130,6 +1145,94 @@ NB_MODULE(pyclay, m) {
              "prim"_a, "op"_a = scene::Op::Add, "blend"_a = nb::none(), "color"_a = nb::none(),
              "rounding"_a = 0.0f, "mirror"_a = false, "transition"_a = nb::none(),
              "Append an edit to the layer; returns the node id")
+        .def("set_transform",
+             [](PyLayer& l, scene::NodeId node, nb::handle position,
+                nb::handle rotation_axis_angle, nb::handle scale) {
+                 const scene::Node* n = l.layer().sdf->find(node);
+                 if (!n) throw std::invalid_argument("no node with that id in this layer");
+                 scene::SetTransformCmd cmd{l.id, node, n->xform};
+                 if (!position.is_none()) cmd.xform.position = to_f3(position, "position");
+                 if (!rotation_axis_angle.is_none())
+                     cmd.xform.rotation = to_axis_angle(rotation_axis_angle);
+                 if (!scale.is_none()) cmd.xform.scale = nb::cast<float>(scale);
+                 apply_or_throw(l.doc->document, scene::Command{cmd}, "set_transform");
+             },
+             "node"_a, "position"_a = nb::none(), "rotation_axis_angle"_a = nb::none(),
+             "scale"_a = nb::none(),
+             "Retransform a placed node; omitted arguments keep their current value")
+        .def("set_prim",
+             [](PyLayer& l, scene::NodeId node, const PyPrim& prim) {
+                 // Only the primitive is replaced: the node's deformers,
+                 // repetition, profile and stroke are its own, not the
+                 // builder's, and survive the edit.
+                 apply_or_throw(l.doc->document,
+                                scene::Command{scene::SetPrimCmd{l.id, node, prim.prim}},
+                                "set_prim");
+             },
+             "node"_a, "prim"_a,
+             "Replace a node's primitive, keeping its deformers, repetition and profile")
+        .def("set_color",
+             [](PyLayer& l, scene::NodeId node, nb::handle color) {
+                 apply_or_throw(
+                     l.doc->document,
+                     scene::Command{scene::SetColorCmd{l.id, node, parse_color(color)}},
+                     "set_color");
+             },
+             "node"_a, "color"_a)
+        .def("set_op_blend",
+             [](PyLayer& l, scene::NodeId node, nb::handle op, nb::handle blend,
+                nb::handle rounding) {
+                 const scene::Node* n = l.layer().sdf->find(node);
+                 if (!n) throw std::invalid_argument("no node with that id in this layer");
+                 scene::SetOpBlendCmd cmd{l.id, node, n->op, n->blend, n->rounding};
+                 if (!op.is_none()) {
+                     cmd.op = nb::cast<scene::Op>(op);
+                     if (cmd.op == scene::Op::None)
+                         throw std::invalid_argument(
+                             "op must be a combine operator, not Op.NONE");
+                 }
+                 if (!blend.is_none()) cmd.blend = nb::cast<const PyBlend&>(blend).b;
+                 if (!rounding.is_none()) {
+                     cmd.rounding = nb::cast<float>(rounding);
+                     if (cmd.rounding < 0.0f)
+                         throw std::invalid_argument("rounding must be >= 0");
+                 }
+                 apply_or_throw(l.doc->document, scene::Command{cmd}, "set_op_blend");
+             },
+             "node"_a, "op"_a = nb::none(), "blend"_a = nb::none(), "rounding"_a = nb::none(),
+             "Change how a placed node combines; omitted arguments keep their value")
+        .def("move",
+             [](PyLayer& l, scene::NodeId node, nb::handle parent, int index) {
+                 scene::NodeId new_parent =
+                     parent.is_none() ? scene::kNoNode : nb::cast<scene::NodeId>(parent);
+                 apply_or_throw(
+                     l.doc->document,
+                     scene::Command{scene::MoveNodeCmd{l.id, node, new_parent, index}}, "move");
+             },
+             "node"_a, "parent"_a = nb::none(), "index"_a = -1,
+             "Reparent or reorder a node; parent=None moves it to the layer root")
+        .def("remove",
+             [](PyLayer& l, scene::NodeId node) {
+                 apply_or_throw(l.doc->document,
+                                scene::Command{scene::RemoveNodeCmd{l.id, node}}, "remove");
+             },
+             "node"_a, "Remove a node and its subtree")
+        .def("append_stroke",
+             [](PyLayer& l, scene::NodeId node, nb::handle points) {
+                 scene::AppendStrokeCmd cmd{l.id, node, to_stroke_points(points)};
+                 if (cmd.points.empty())
+                     throw std::invalid_argument("append_stroke needs at least one point");
+                 apply_or_throw(l.doc->document, scene::Command{cmd}, "append_stroke");
+             },
+             "node"_a, "points"_a,
+             "Append (x, y, z, radius) points to a placed stroke")
+        .def("trim_stroke",
+             [](PyLayer& l, scene::NodeId node, std::uint32_t count) {
+                 apply_or_throw(l.doc->document,
+                                scene::Command{scene::TrimStrokeCmd{l.id, node, count}},
+                                "trim_stroke");
+             },
+             "node"_a, "count"_a, "Remove the last count points from a placed stroke")
         .def("mirror",
              [](PyLayer& l, const std::string& axis, float blend) {
                  if (blend < 0.0f) throw std::invalid_argument("blend must be >= 0");
@@ -1344,7 +1447,52 @@ NB_MODULE(pyclay, m) {
              [](const PyDocument& d, const std::string& path) {
                  check_io(io::save_clayspace_file(*d.doc, path));
              },
-             "path"_a, "Save the document as .clayspace");
+             "path"_a, "Save the document as .clayspace")
+        .def("remove_layer",
+             [](PyDocument& d, scene::LayerId layer) {
+                 apply_or_throw(d.doc->document,
+                                scene::Command{scene::RemoveLayerCmd{layer}}, "remove_layer");
+             },
+             "layer"_a, "Remove a layer and its content")
+        .def("move_layer",
+             [](PyDocument& d, scene::LayerId layer, int index) {
+                 // The vocabulary expresses reorder as remove-then-add, so this
+                 // is the one edit that is a pair of commands rather than one.
+                 const scene::Layer* found = d.doc->document.find_layer(layer);
+                 if (!found)
+                     throw std::invalid_argument("move_layer: no layer with that id");
+                 scene::Layer copy = *found;
+                 apply_or_throw(d.doc->document, scene::Command{scene::RemoveLayerCmd{layer}},
+                                "move_layer");
+                 apply_or_throw(d.doc->document,
+                                scene::Command{scene::AddLayerCmd{std::move(copy), index}},
+                                "move_layer");
+             },
+             "layer"_a, "index"_a, "Reorder a layer (applied as remove then add)")
+        .def("set_layer_visible",
+             [](PyDocument& d, scene::LayerId layer, bool visible) {
+                 apply_or_throw(d.doc->document,
+                                scene::Command{scene::SetLayerVisibleCmd{layer, visible}},
+                                "set_layer_visible");
+             },
+             "layer"_a, "visible"_a,
+             "Show or hide a layer; a hidden layer contributes nothing to the field")
+        .def("set_layer_transform",
+             [](PyDocument& d, scene::LayerId layer, nb::handle position,
+                nb::handle rotation_axis_angle, nb::handle scale) {
+                 const scene::Layer* found = d.doc->document.find_layer(layer);
+                 if (!found)
+                     throw std::invalid_argument("set_layer_transform: no layer with that id");
+                 scene::SetLayerTransformCmd cmd{layer, found->xform};
+                 if (!position.is_none()) cmd.xform.position = to_f3(position, "position");
+                 if (!rotation_axis_angle.is_none())
+                     cmd.xform.rotation = to_axis_angle(rotation_axis_angle);
+                 if (!scale.is_none()) cmd.xform.scale = nb::cast<float>(scale);
+                 apply_or_throw(d.doc->document, scene::Command{cmd}, "set_layer_transform");
+             },
+             "layer"_a, "position"_a = nb::none(), "rotation_axis_angle"_a = nb::none(),
+             "scale"_a = nb::none(),
+             "Retransform a whole layer; omitted arguments keep their current value");
 
     // -- module functions -----------------------------------------------------------
     nb::class_<PyVoxelGrid>(m, "VoxelGrid",
