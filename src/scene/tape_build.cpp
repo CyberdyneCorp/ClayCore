@@ -56,6 +56,9 @@ struct Compiler {
             tape.params.push_back(d.b);
             tape.params.push_back(d.c);
             tape.params.push_back(static_cast<float>(d.ease));
+            // The record is fixed width, so always emit the extension slots;
+            // the types that do not use them read zeros.
+            for (int i = 0; i < 5; ++i) tape.params.push_back(d.ext[i]);
         }
     }
 

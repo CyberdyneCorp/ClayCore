@@ -75,6 +75,25 @@ std::vector<ParityScene> parity_scenes() {
         l.sdf->insert(n);
         scenes.push_back({name, std::move(doc), 3.0f});
     };
+    {   // bend_linear: a slab tilted by a ramped displacement
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node n = item(Prim::box(cf3(0.3f, 1.0f, 0.3f)), cf3(0, 0, 0));
+        n.deformers.push_back(scene::Deformer::bend_linear(
+            cf3(0, -1, 0), cf3(0, 1, 0), cf3(0.8f, 0, 0.2f), 3));
+        l.sdf->insert(n);
+        scenes.push_back({"bend_linear", std::move(doc), 3.0f});
+    }
+
+    {   // bend_radial: a disc whose rim is lifted
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node n = item(Prim::capped_cylinder(1.2f, 0.15f), cf3(0, 0, 0));
+        n.deformers.push_back(scene::Deformer::bend_radial(0.2f, 1.2f, 0.6f, 5));
+        l.sdf->insert(n);
+        scenes.push_back({"bend_radial", std::move(doc), 3.0f});
+    }
+
     {   // elongate: a sphere stretched into a capsule
         Document doc;
         Layer& l = doc.add_sdf_layer("l");

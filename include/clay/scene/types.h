@@ -285,6 +285,17 @@ struct Deformer {
     float b = 1.0f;      // taper: s0
     float c = 1.0f;      // taper: s1
     std::uint8_t ease = 0;
+    // Extension slots for the wide deformers: bend_linear needs nine floats
+    // and k/a/b/c hold four. Written only for the types that use them, so the
+    // document format needs no version bump.
+    float ext[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+    // How many extension floats this type carries; the serializer and the
+    // reader both take their count from here, dispatching on the type.
+    static int ext_count(std::uint8_t type) {
+        return type == kernel::cdeform_bend_linear ? 5 : 0;
+    }
+
 
     static Deformer twist(float radians_per_unit) {
         Deformer d;
@@ -325,6 +336,33 @@ struct Deformer {
         d.k = h.x;
         d.a = h.y;
         d.b = h.z;
+        return d;
+    }
+    // Displace by v, eased along the segment a -> b.
+    static Deformer bend_linear(kernel::cfloat3 a, kernel::cfloat3 b, kernel::cfloat3 v,
+                                std::uint8_t ease = 0) {
+        Deformer d;
+        d.type = kernel::cdeform_bend_linear;
+        d.k = a.x;
+        d.a = a.y;
+        d.b = a.z;
+        d.c = b.x;
+        d.ext[0] = b.y;
+        d.ext[1] = b.z;
+        d.ext[2] = v.x;
+        d.ext[3] = v.y;
+        d.ext[4] = v.z;
+        d.ease = ease;
+        return d;
+    }
+    // Displace along Y by dz, eased across the radial band r0 -> r1.
+    static Deformer bend_radial(float r0, float r1, float dz, std::uint8_t ease = 0) {
+        Deformer d;
+        d.type = kernel::cdeform_bend_radial;
+        d.k = r0;
+        d.a = r1;
+        d.b = dz;
+        d.ease = ease;
         return d;
     }
     static Deformer displace(float amplitude, float frequency) {

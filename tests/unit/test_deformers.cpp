@@ -574,3 +574,112 @@ TEST_CASE("elongating an asymmetric primitive drops exactness but not the step s
     // But the map is non-expansive, so tracing is not slowed.
     CHECK(tape.safe_step_scale() == doctest::Approx(1.0f));
 }
+
+// --- ramped bends (add-bend-opcodes) -----------------------------------------
+
+TEST_CASE("bend_linear displaces only across its span") {
+    const cfloat3 a = cf3(0, -1, 0), b = cf3(0, 1, 0), v = cf3(0.8f, 0, 0.2f);
+    const int ease = 3;
+
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::box(cf3(0.3f, 1.0f, 0.3f)), cf3(0, 0, 0));
+    n.deformers.push_back(scene::Deformer::bend_linear(a, b, v, static_cast<std::uint8_t>(ease)));
+    scene::NodeId id = l.sdf->insert(n);
+    scene::Tape tape = scene::compile_document(doc);
+
+    SUBCASE("the tape agrees with the kernel applied by hand") {
+        clay_test::Lcg rng(818);
+        for (int i = 0; i < 4096; ++i) {
+            cfloat3 p = cf3(rng.range(-2, 2), rng.range(-2, 2), rng.range(-2, 2));
+            float want = sd_box(cbend_linear_point(p, a, b, v, ease), cf3(0.3f, 1.0f, 0.3f));
+            CHECK(tape.eval(p).d == doctest::Approx(want).epsilon(1e-4));
+        }
+    }
+
+    SUBCASE("the ramp runs from nothing to the full vector") {
+        // below the segment start: undisplaced, so the box face is at x = 0.3
+        CHECK(tape.eval(cf3(0.3f, -1.0f, 0)).d == doctest::Approx(0.0f).epsilon(1e-3));
+        // past the end: displaced by the whole vector
+        CHECK(tape.eval(cf3(0.3f + v.x, 1.0f, v.z)).d == doctest::Approx(0.0f).epsilon(1e-3));
+    }
+
+    SUBCASE("the easing curve reaches the field") {
+        scene::Document other;
+        scene::Layer& ol = other.add_sdf_layer("l");
+        scene::Node m = clay_test::item(scene::Prim::box(cf3(0.3f, 1.0f, 0.3f)), cf3(0, 0, 0));
+        m.deformers.push_back(scene::Deformer::bend_linear(a, b, v, 0));  // linear
+        ol.sdf->insert(m);
+        scene::Tape linear = scene::compile_document(other);
+
+        clay_test::Lcg rng(3);
+        int differing = 0;
+        for (int i = 0; i < 2048; ++i) {
+            cfloat3 p = cf3(rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1));
+            if (kernel::cabs(tape.eval(p).d - linear.eval(p).d) > 1e-3f) ++differing;
+        }
+        CHECK(differing > 0);
+    }
+
+    SUBCASE("the bound contains the displaced geometry") {
+        const scene::Node* node = l.sdf->find(id);
+        REQUIRE(node != nullptr);
+        math::Aabb bound = scene::item_geometry_bound(*node, l);
+        clay_test::Lcg rng(64);
+        int outside = 0;
+        for (int i = 0; i < 20000; ++i) {
+            cfloat3 p = cf3(rng.range(-3, 3), rng.range(-3, 3), rng.range(-3, 3));
+            if (tape.eval(p).d > 0.0f) continue;
+            if (p.x < bound.min.x || p.x > bound.max.x || p.y < bound.min.y ||
+                p.y > bound.max.y || p.z < bound.min.z || p.z > bound.max.z)
+                ++outside;
+        }
+        CHECK(outside == 0);
+    }
+
+    SUBCASE("the ramp slope reaches the step scale") {
+        // cfi_bend_linear: L = 1 + |v| / |b - a|
+        float expect = 1.0f / (1.0f + kernel::clength(v) / 2.0f);
+        CHECK(tape.safe_step_scale() == doctest::Approx(expect).epsilon(1e-3));
+    }
+}
+
+TEST_CASE("bend_radial displaces only across its band") {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::capped_cylinder(1.2f, 0.15f), cf3(0, 0, 0));
+    n.deformers.push_back(scene::Deformer::bend_radial(0.2f, 1.2f, 0.6f, 5));
+    l.sdf->insert(n);
+    scene::Tape tape = scene::compile_document(doc);
+
+    SUBCASE("the tape agrees with the kernel applied by hand") {
+        clay_test::Lcg rng(2024);
+        for (int i = 0; i < 4096; ++i) {
+            cfloat3 p = cf3(rng.range(-2, 2), rng.range(-2, 2), rng.range(-2, 2));
+            float want = sd_capped_cylinder(cbend_radial_point(p, 0.2f, 1.2f, 0.6f, 5), 1.2f,
+                                            0.15f);
+            CHECK(tape.eval(p).d == doctest::Approx(want).epsilon(1e-4));
+        }
+    }
+
+    SUBCASE("inside r0 the disc is where it was, past r1 it is lifted") {
+        CHECK(tape.eval(cf3(0, 0, 0)).d < 0.0f);            // centre unmoved
+        CHECK(tape.eval(cf3(1.1f, 0.6f, 0)).d < 0.0f);      // rim lifted by dz
+    }
+}
+
+TEST_CASE("a document saved before the wide deformers still loads") {
+    // The type is written before its parameters, so a deformer that carries no
+    // extension floats decodes exactly as it always did.
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::box(cf3(0.4f, 0.9f, 0.4f)), cf3(0, 0, 0));
+    n.deformers.push_back(scene::Deformer::twist(1.2f));
+    n.deformers.push_back(scene::Deformer::taper(-0.9f, 0.9f, 1.0f, 0.4f, 2));
+    l.sdf->insert(n);
+
+    std::vector<std::uint8_t> bytes = scene::serialize_document(doc);
+    std::optional<scene::Document> back = scene::deserialize_document(bytes.data(), bytes.size());
+    REQUIRE(back.has_value());
+    CHECK(scene::serialize_document(*back) == bytes);
+}

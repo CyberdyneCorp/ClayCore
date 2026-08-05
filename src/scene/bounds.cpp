@@ -167,6 +167,18 @@ Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& defor
                 b = Aabb{cf3(-outer, -outer, b.min.z), cf3(outer, outer, b.max.z)};
                 break;
             }
+            case kernel::cdeform_bend_linear:
+                // displaces by at most the full vector
+                b = Aabb{b.min - cf3(kernel::cabs(d.ext[2]), kernel::cabs(d.ext[3]),
+                                     kernel::cabs(d.ext[4])),
+                         b.max + cf3(kernel::cabs(d.ext[2]), kernel::cabs(d.ext[3]),
+                                     kernel::cabs(d.ext[4]))};
+                break;
+            case kernel::cdeform_bend_radial:
+                // displaces along Y by at most dz
+                b = Aabb{cf3(b.min.x, b.min.y - kernel::cabs(d.b), b.min.z),
+                         cf3(b.max.x, b.max.y + kernel::cabs(d.b), b.max.z)};
+                break;
             case kernel::cdeform_elongate: {
                 // The flat sections are inserted symmetrically, so the shape
                 // grows by h on each side of every axis.
@@ -221,6 +233,13 @@ float deformer_lipschitz(const Node& item) {
             float s_max = kernel::cmax(d.b, d.c);
             float height = kernel::cmax(kernel::cabs(d.a - d.k), 1e-6f);
             info = kernel::cfi_taper(info, s_min, s_max, height, radius);
+        } else if (d.type == kernel::cdeform_bend_linear) {
+            // slope = |v| over the span it ramps across
+            float seg = kernel::clength(kernel::cf3(d.c - d.k, d.ext[0] - d.a, d.ext[1] - d.b));
+            float v_len = kernel::clength(kernel::cf3(d.ext[2], d.ext[3], d.ext[4]));
+            info = kernel::cfi_bend_linear(info, v_len, seg);
+        } else if (d.type == kernel::cdeform_bend_radial) {
+            info = kernel::cfi_bend_radial(info, d.b, d.k, d.a);
         } else if (d.type == kernel::cdeform_wrap) {
             // Stretch grows as the content sits further from the wrap radius,
             // so the content's own radial extent bounds it — the same

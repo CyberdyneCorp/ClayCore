@@ -607,6 +607,31 @@ NB_MODULE(pyclay, m) {
              },
              "y0"_a, "y1"_a, "s0"_a, "s1"_a, "ease"_a = 0,
              "Scale the cross-section from s0 at y0 to s1 at y1 along an easing curve")
+        .def("bend_linear",
+             [](nb::object self, nb::handle a, nb::handle b, nb::handle v, int ease) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 kernel::cfloat3 pa = to_f3(a, "a"), pb = to_f3(b, "b");
+                 if (kernel::cdot2(pb - pa) <= 0.0f)
+                     throw std::invalid_argument(
+                         "bend_linear needs a != b: the segment is the ramp span");
+                 p.deformers.push_back(scene::Deformer::bend_linear(
+                     pa, pb, to_f3(v, "v"), static_cast<std::uint8_t>(ease)));
+                 return self;
+             },
+             "a"_a, "b"_a, "v"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
+             "Displace by v, eased along the segment a -> b")
+        .def("bend_radial",
+             [](nb::object self, float r0, float r1, float dz, int ease) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 if (r0 == r1)
+                     throw std::invalid_argument(
+                         "bend_radial needs r0 != r1: the band is the ramp span");
+                 p.deformers.push_back(
+                     scene::Deformer::bend_radial(r0, r1, dz, static_cast<std::uint8_t>(ease)));
+                 return self;
+             },
+             "r0"_a, "r1"_a, "dz"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
+             "Displace along Y by dz, eased across the radial band r0 -> r1")
         .def("elongate",
              [](nb::object self, nb::handle h) {
                  PyPrim& p = nb::cast<PyPrim&>(self);

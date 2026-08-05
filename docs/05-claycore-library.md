@@ -318,6 +318,12 @@ body.add(clay.Box(size=(6.283, 0.3, 1.0)).wrap_around(-3.1416, 3.1416))
 # a capsule. Alone among the deformers it is exact (on an origin-symmetric
 # primitive), so it costs nothing in step scale.
 body.add(clay.Sphere(r=0.5).elongate((1.0, 0.0, 0.0)))
+
+# the ramped bends displace by an amount that eases across a region: tilt the
+# top of a form, or slump the rim of a disc, without touching the rest
+body.add(clay.Box(size=(0.6, 2.0, 0.6))
+         .bend_linear(a=(0, -1, 0), b=(0, 1, 0), v=(1.0, 0, 0), ease=3))
+body.add(clay.Cylinder(r=1.2, h=0.15).bend_radial(r0=0.2, r1=1.2, dz=0.6))
 ```
 
 ```python

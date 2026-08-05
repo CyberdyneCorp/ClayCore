@@ -1440,3 +1440,48 @@ def test_elongate_round_trips(tmp_path):
     path = tmp_path / "elongated.clayspace"
     doc.save(str(path))
     assert np.array_equal(before, clay.load(str(path)).eval(probes))
+
+
+def test_bend_linear_ramps_across_its_span():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Box(size=(0.6, 2.0, 0.6)).bend_linear(a=(0, -1, 0), b=(0, 1, 0),
+                                                         v=(1.0, 0, 0)))
+    at = lambda p: float(doc.eval(np.array([p], dtype=np.float32))[0])
+    # bottom of the ramp: undisplaced, so the face is at x = 0.3
+    assert at((0.3, -1, 0)) == pytest.approx(0.0, abs=1e-3)
+    # top: displaced by the whole vector
+    assert at((1.3, 1, 0)) == pytest.approx(0.0, abs=1e-3)
+    # slope = |v| / span
+    assert doc.safe_step_scale() == pytest.approx(1 / 1.5, abs=1e-3)
+
+
+def test_bend_radial_lifts_the_rim():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Cylinder(r=1.2, h=0.15).bend_radial(r0=0.2, r1=1.2, dz=0.6))
+    at = lambda p: float(doc.eval(np.array([p], dtype=np.float32))[0])
+    assert at((0, 0, 0)) < 0          # centre unmoved
+    assert at((1.1, 0.6, 0)) < 0      # rim lifted by dz
+
+
+@pytest.mark.parametrize("call", [
+    lambda: clay.Sphere(r=1.0).bend_linear((0, 0, 0), (0, 0, 0), (1, 0, 0)),
+    lambda: clay.Sphere(r=1.0).bend_radial(1.0, 1.0, 0.5),
+])
+def test_degenerate_ramp_span_is_refused(call):
+    with pytest.raises(ValueError, match="!="):
+        call()
+
+
+def test_bend_deformers_round_trip(tmp_path):
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(
+        clay.Box(size=(0.5, 1.5, 0.5))
+        .bend_linear(a=(0, -0.7, 0), b=(0, 0.7, 0), v=(0.4, 0.0, 0.2), ease=4)
+        .bend_radial(r0=0.1, r1=0.9, dz=0.3, ease=2))
+    probes = np.random.default_rng(77).uniform(-2, 2, size=(1024, 3)).astype(np.float32)
+    before = doc.eval(probes)
+    path = tmp_path / "bends.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(probes))

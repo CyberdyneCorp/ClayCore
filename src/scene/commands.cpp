@@ -243,6 +243,10 @@ void write_node(Writer& w, const Node& n) {
         w.pod(d.b);
         w.pod(d.c);
         w.pod(d.ease);
+        // The type is already on the wire, so the reader knows how many
+        // extension floats follow. Old files carry only old types and decode
+        // exactly as before.
+        for (int e = 0; e < Deformer::ext_count(d.type); ++e) w.pod(d.ext[e]);
     }
     w.u32(static_cast<std::uint32_t>(n.children.size()));
     for (NodeId c : n.children) w.pod(c);
@@ -298,6 +302,7 @@ Node read_node(Reader& r) {
         d.b = r.pod<float>();
         d.c = r.pod<float>();
         d.ease = r.pod<std::uint8_t>();
+        for (int e = 0; e < Deformer::ext_count(d.type); ++e) d.ext[e] = r.pod<float>();
         n.deformers.push_back(d);
     }
     std::uint32_t cc = r.u32();

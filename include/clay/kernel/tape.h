@@ -21,6 +21,9 @@
 // so the deformer block sits at a known offset.
 //
 // Deformer record (CLAY_TAPE_DEFORM_FLOATS wide): [type] [k] [a] [b] [c]
+// [ease] then five extension slots, used only by the wide types (bend_linear
+// needs nine parameters). The tape is rebuilt from the document on every
+// compile, so its width costs nothing but transient memory.
 // [ease]. Deformers warp the LOCAL point in authoring order before the
 // primitive's distance function; each may also correct the distance after.
 //
@@ -139,7 +142,7 @@ typedef struct CTapeValueT {
 #define CLAY_TAPE_MAX_STACK 16
 #define CLAY_TAPE_FAR 3.4e37f
 #define CLAY_TAPE_PRIM_PARAMS 7
-#define CLAY_TAPE_DEFORM_FLOATS 6
+#define CLAY_TAPE_DEFORM_FLOATS 11
 #define CLAY_TAPE_PRIM_HEADER 17
 
 // Repetition an item can carry (repeat.h). Applied to the local point
@@ -183,6 +186,8 @@ enum CDeformType {
     cdeform_displace = 3,  // k = amplitude, a = frequency
     cdeform_wrap = 4,      // k = x0, a = x1: bend [x0,x1] about the Z axis
     cdeform_elongate = 5,  // k, a, b = per-axis half-extents to insert
+    cdeform_bend_linear = 6,  // a(k,a,b) b(c,e0,e1) v(e2,e3,e4), eased
+    cdeform_bend_radial = 7,  // k = r0, a = r1, b = dz, eased
 };
 
 // Apply one deformer record to the local point. No deformer corrects the
@@ -203,6 +208,14 @@ CLAY_FN cfloat3 ctape_deform_point(CLAY_DEVICE const float* rec, cfloat3 p) {
         return ctaper_point(p, rec[1], rec[2], rec[3], rec[4], (int)rec[5]);
     }
     if (type == cdeform_wrap) return cwrap_around_point(p, rec[1], rec[2]);
+    if (type == cdeform_bend_linear) {
+        return cbend_linear_point(p, cf3(rec[1], rec[2], rec[3]),
+                                  cf3(rec[4], rec[6], rec[7]),
+                                  cf3(rec[8], rec[9], rec[10]), (int)rec[5]);
+    }
+    if (type == cdeform_bend_radial) {
+        return cbend_radial_point(p, rec[1], rec[2], rec[3], (int)rec[5]);
+    }
     if (type == cdeform_elongate) {
         // The correction rides ctape_deform_offset, which the chain evaluates
         // at this same pre-warp point — exactly what elongation needs.
