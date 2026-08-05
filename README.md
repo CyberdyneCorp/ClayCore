@@ -75,6 +75,12 @@ Backend availability changes speed, never results: every registered backend
 is checked against the CPU scalar reference by the parity suite (1e-4
 relative on distances, 1e-6 for the CPU batch path).
 
+The `cuda` preset targets the installed GPU. When that GPU is newer than the
+CUDA toolkit — an RTX 50-series card against CUDA 12.0, say — nvcc cannot emit
+a cubin for it, so the build falls back to the newest architecture the toolkit
+does know, as PTX only, and the driver JITs it at load. Pass
+`-DCMAKE_CUDA_ARCHITECTURES=...` to choose explicitly.
+
 ## Repository checks
 
 ```sh
