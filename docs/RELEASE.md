@@ -65,9 +65,13 @@ Tracked honestly rather than assumed done:
   Shipping CUDA wheels needs a CUDA build host in the wheel matrix.
 - **Blender-headless FBX validation** runs only as a release-time manual
   check; per-push CI validates exports with assimp instead (task 9.3).
-- **In-app SwiftPM verification** awaits the ClaySpace Xcode project. The
-  xcframework slices build and `tools/check_swift_smoke.sh` compiles and runs a
-  Swift program against the macOS slice — a composed SDF edit, voxel sculpting
-  through a borrowed layer handle, and meshing — so the header is proven
-  consumable from Swift. What remains is opening it inside the real app
-  (task 10.3).
+- **SwiftPM consumption is verified; the app itself is not** (task 10.3).
+  `tools/check_swift_smoke.sh all` builds a Swift program against the macOS
+  slice and against the iOS simulator slice, running the latter *inside a
+  booted simulator* via `simctl spawn`, and `swift run claycore-smoke` drives
+  the same program through the package manifest an app would resolve. All 44
+  checks pass on both, covering every primitive, all nine deformers, editing,
+  undo, voxel sculpting with falloff brushes and the four verbs, meshing,
+  validation, picking and the `.clayspace` round trip. What remains is opening
+  the package in the real ClaySpace Xcode project and running on a device —
+  the simulator is not a device, and only the app can prove the integration.

@@ -89,7 +89,8 @@ python3 tools/check_kernel_dialect.py  # kernel headers stay backend-portable
 python3 tools/check_licenses.py        # permissive-license manifest gate
 python3 examples/run_all.py            # every example runs (needs pyclay built)
 python3 tools/check_binding_parity.py  # the C ABI reaches what pyclay reaches
-./tools/check_swift_smoke.sh           # clay.h is usable from Swift (Apple only)
+./tools/check_swift_smoke.sh all       # Swift on macOS and in the iOS Simulator
+swift run claycore-smoke               # the same, through the SwiftPM manifest
 ```
 
 ## License

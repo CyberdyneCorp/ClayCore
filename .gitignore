@@ -12,3 +12,4 @@ clay_selftest.*
 c_api_smoke*
 c_voxel_stale.*
 .claude/worktrees/
+.build/

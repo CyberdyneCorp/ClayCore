@@ -40,8 +40,12 @@ build_slice() {
     echo "built slice: $name"
 }
 
+# Without an explicit deployment target the macOS slice inherits the host's
+# SDK version, so a library built on a new machine refuses to link into an app
+# targeting anything older. Keep this in step with Package.swift's platforms.
 build_slice macos \
-    -DCMAKE_OSX_ARCHITECTURES=arm64
+    -DCMAKE_OSX_ARCHITECTURES=arm64 \
+    -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
 
 build_slice ios \
     -DCMAKE_SYSTEM_NAME=iOS \
