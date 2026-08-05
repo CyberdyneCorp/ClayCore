@@ -65,6 +65,9 @@ ALIASES = {
     "Layer.eval": "clay_layer_eval_points",
     "Layer.colors": "clay_layer_eval_points",
     "Layer.gradients": "clay_layer_eval_gradients",
+    "Document.undo_enabled": "clay_document_undo_state",
+    "Document.undo_depth": "clay_document_undo_state",   # one C query reports both
+    "Document.redo_depth": "clay_document_undo_state",
     "Layer.mirror": "clay_set_layer_mirror",
     "Layer.remove": "clay_remove_node",  # named for the node, not the layer
     "Mesh.triangle_count": "clay_mesh_index_count",

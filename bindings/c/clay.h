@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 4
+#define CLAY_ABI_MINOR 5
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -233,6 +233,24 @@ typedef struct clay_item_desc {
 clay_result clay_add_item(clay_document* doc, clay_layer_id layer,
                           const clay_item_desc* item, clay_node_id* out_node);
 clay_result clay_remove_node(clay_document* doc, clay_layer_id layer, clay_node_id node);
+
+/* -- undo -----------------------------------------------------------------
+ * Opt-in per document: a document that never enables it behaves exactly as it
+ * did before, and edits made before enabling are not undoable. Once enabled
+ * every editing entry point records its own inverse, so no reachable edit
+ * escapes undo. Nothing to undo is reported through *out_undone, not returned
+ * as a failure, so a UI can drive the buttons without tracking state. */
+clay_result clay_document_enable_undo(clay_document* doc);
+clay_result clay_document_undo(clay_document* doc, int32_t* out_undone);
+clay_result clay_document_redo(clay_document* doc, int32_t* out_redone);
+/* One query for everything a UI needs to label its buttons. Any out pointer
+ * may be NULL. The depths read 0 when undo is not enabled, which *out_enabled
+ * distinguishes from an enabled-but-empty history. */
+clay_result clay_document_undo_state(const clay_document* doc, int32_t* out_enabled,
+                                     size_t* out_undo_depth, size_t* out_redo_depth);
+/* Bracket a burst of edits so they undo as one step. */
+clay_result clay_document_begin_undo_group(clay_document* doc);
+clay_result clay_document_end_undo_group(clay_document* doc);
 
 /* -- editing a placed node -------------------------------------------------
  * Everything below addresses an existing node by the id clay_layer_add_item

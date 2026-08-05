@@ -473,6 +473,9 @@ struct clay_voxel_grid {
 
 struct clay_document {
     io::ClaySpaceDoc doc;
+    // Opt-in undo. Null means off, and a document that never enables it
+    // behaves exactly as it did before the feature existed.
+    std::unique_ptr<scene::UndoStack> undo;
     // Borrowed handles are the document's, one per layer, handed back by
     // address: repeated lookups return the same handle, nothing leaks, and
     // std::map keeps the addresses stable as more layers arrive.
@@ -827,8 +830,11 @@ namespace {
 // returning nullopt and leaves the document untouched.
 clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
-    if (!scene::apply(doc->doc.document, cmd))
-        return fail(CLAY_ERROR_NOT_FOUND, what);
+    // With a stack attached the edit is applied AND its inverse recorded, so
+    // no reachable edit can escape undo.
+    bool ok = doc->undo ? doc->undo->perform(doc->doc.document, cmd)
+                        : static_cast<bool>(scene::apply(doc->doc.document, cmd));
+    if (!ok) return fail(CLAY_ERROR_NOT_FOUND, what);
     return CLAY_OK;
 }
 
@@ -846,6 +852,51 @@ clay_result read_transform(const float position[3], const float rotation_axis[3]
 }
 
 }  // namespace
+
+clay_result clay_document_enable_undo(clay_document* doc) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (!doc->undo) doc->undo = std::make_unique<scene::UndoStack>();
+    return CLAY_OK;
+}
+
+clay_result clay_document_undo(clay_document* doc, int32_t* out_undone) {
+    if (!doc || !out_undone) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
+    // An empty stack is reported, not failed: a UI drives this without having
+    // to track whether anything is left.
+    *out_undone = doc->undo->undo(doc->doc.document) ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_document_redo(clay_document* doc, int32_t* out_redone) {
+    if (!doc || !out_redone) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
+    *out_redone = doc->undo->redo(doc->doc.document) ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_document_undo_state(const clay_document* doc, int32_t* out_enabled,
+                                     size_t* out_undo_depth, size_t* out_redo_depth) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (out_enabled) *out_enabled = doc->undo ? 1 : 0;
+    if (out_undo_depth) *out_undo_depth = doc->undo ? doc->undo->undo_depth() : 0;
+    if (out_redo_depth) *out_redo_depth = doc->undo ? doc->undo->redo_depth() : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_document_begin_undo_group(clay_document* doc) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
+    doc->undo->begin_group();
+    return CLAY_OK;
+}
+
+clay_result clay_document_end_undo_group(clay_document* doc) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
+    doc->undo->end_group();
+    return CLAY_OK;
+}
 
 clay_result clay_layer_set_transform(clay_document* doc, clay_layer_id layer, clay_node_id node,
                                      const float position[3], const float rotation_axis[3],

@@ -258,23 +258,35 @@ struct PyVoxelGrid {
 
 // -- document / layer wrappers ------------------------------------------------
 
+// The undo stack is opt-in and shared by a document and every Layer handle
+// onto it, so an edit made through a layer records into the same history as
+// one made through the document. Null means undo is off, and a document with
+// no stack behaves exactly as it did before the feature existed.
+using UndoRef = std::shared_ptr<scene::UndoStack>;
+
 // Every editing entry point goes through the command vocabulary rather than
 // mutating the document, so a binding edit means exactly what the document
 // format records for it — and, once the undo stack is exposed, is undoable
 // for free. apply() returns nullopt when the target does not exist and leaves
 // the document untouched.
-void apply_or_throw(scene::Document& doc, const scene::Command& cmd, const char* what) {
-    if (!scene::apply(doc, cmd))
+void apply_or_throw(scene::Document& doc, const scene::Command& cmd, const char* what,
+                   const UndoRef* undo = nullptr) {
+    // With a stack attached the edit is applied AND its inverse recorded, so
+    // no reachable edit can escape undo. Without one it is a plain apply.
+    bool ok = (undo && *undo) ? (*undo)->perform(doc, cmd) : static_cast<bool>(scene::apply(doc, cmd));
+    if (!ok)
         throw std::invalid_argument(std::string(what) +
                                     ": no node or layer with that id in this document");
 }
 
 struct PyDocument {
     std::shared_ptr<io::ClaySpaceDoc> doc = std::make_shared<io::ClaySpaceDoc>();
+    std::shared_ptr<UndoRef> undo = std::make_shared<UndoRef>();
 };
 
 struct PyLayer {
     std::shared_ptr<io::ClaySpaceDoc> doc;
+    std::shared_ptr<UndoRef> undo;
     scene::LayerId id = 0;
 
     scene::Layer& layer() const {
@@ -1155,7 +1167,7 @@ NB_MODULE(pyclay, m) {
                  if (!rotation_axis_angle.is_none())
                      cmd.xform.rotation = to_axis_angle(rotation_axis_angle);
                  if (!scale.is_none()) cmd.xform.scale = nb::cast<float>(scale);
-                 apply_or_throw(l.doc->document, scene::Command{cmd}, "set_transform");
+                 apply_or_throw(l.doc->document, scene::Command{cmd}, "set_transform", l.undo.get());
              },
              "node"_a, "position"_a = nb::none(), "rotation_axis_angle"_a = nb::none(),
              "scale"_a = nb::none(),
@@ -1167,7 +1179,7 @@ NB_MODULE(pyclay, m) {
                  // builder's, and survive the edit.
                  apply_or_throw(l.doc->document,
                                 scene::Command{scene::SetPrimCmd{l.id, node, prim.prim}},
-                                "set_prim");
+                                "set_prim", l.undo.get());
              },
              "node"_a, "prim"_a,
              "Replace a node's primitive, keeping its deformers, repetition and profile")
@@ -1176,7 +1188,7 @@ NB_MODULE(pyclay, m) {
                  apply_or_throw(
                      l.doc->document,
                      scene::Command{scene::SetColorCmd{l.id, node, parse_color(color)}},
-                     "set_color");
+                     "set_color", l.undo.get());
              },
              "node"_a, "color"_a)
         .def("set_op_blend",
@@ -1197,7 +1209,7 @@ NB_MODULE(pyclay, m) {
                      if (cmd.rounding < 0.0f)
                          throw std::invalid_argument("rounding must be >= 0");
                  }
-                 apply_or_throw(l.doc->document, scene::Command{cmd}, "set_op_blend");
+                 apply_or_throw(l.doc->document, scene::Command{cmd}, "set_op_blend", l.undo.get());
              },
              "node"_a, "op"_a = nb::none(), "blend"_a = nb::none(), "rounding"_a = nb::none(),
              "Change how a placed node combines; omitted arguments keep their value")
@@ -1207,14 +1219,16 @@ NB_MODULE(pyclay, m) {
                      parent.is_none() ? scene::kNoNode : nb::cast<scene::NodeId>(parent);
                  apply_or_throw(
                      l.doc->document,
-                     scene::Command{scene::MoveNodeCmd{l.id, node, new_parent, index}}, "move");
+                     scene::Command{scene::MoveNodeCmd{l.id, node, new_parent, index}}, "move",
+                     l.undo.get());
              },
              "node"_a, "parent"_a = nb::none(), "index"_a = -1,
              "Reparent or reorder a node; parent=None moves it to the layer root")
         .def("remove",
              [](PyLayer& l, scene::NodeId node) {
                  apply_or_throw(l.doc->document,
-                                scene::Command{scene::RemoveNodeCmd{l.id, node}}, "remove");
+                                scene::Command{scene::RemoveNodeCmd{l.id, node}}, "remove",
+                                l.undo.get());
              },
              "node"_a, "Remove a node and its subtree")
         .def("append_stroke",
@@ -1222,7 +1236,7 @@ NB_MODULE(pyclay, m) {
                  scene::AppendStrokeCmd cmd{l.id, node, to_stroke_points(points)};
                  if (cmd.points.empty())
                      throw std::invalid_argument("append_stroke needs at least one point");
-                 apply_or_throw(l.doc->document, scene::Command{cmd}, "append_stroke");
+                 apply_or_throw(l.doc->document, scene::Command{cmd}, "append_stroke", l.undo.get());
              },
              "node"_a, "points"_a,
              "Append (x, y, z, radius) points to a placed stroke")
@@ -1230,7 +1244,7 @@ NB_MODULE(pyclay, m) {
              [](PyLayer& l, scene::NodeId node, std::uint32_t count) {
                  apply_or_throw(l.doc->document,
                                 scene::Command{scene::TrimStrokeCmd{l.id, node, count}},
-                                "trim_stroke");
+                                "trim_stroke", l.undo.get());
              },
              "node"_a, "count"_a, "Remove the last count points from a placed stroke")
         .def("mirror",
@@ -1290,7 +1304,7 @@ NB_MODULE(pyclay, m) {
                  if (resolution <= 0) throw std::invalid_argument("resolution must be > 0");
                  scene::Layer& l = d.doc->document.add_sdf_layer(name);
                  l.resolution = resolution;
-                 return PyLayer{d.doc, l.id};
+                 return PyLayer{d.doc, d.undo, l.id};
              },
              "name"_a, "resolution"_a = 256)
         .def("eval",
@@ -1451,7 +1465,7 @@ NB_MODULE(pyclay, m) {
         .def("remove_layer",
              [](PyDocument& d, scene::LayerId layer) {
                  apply_or_throw(d.doc->document,
-                                scene::Command{scene::RemoveLayerCmd{layer}}, "remove_layer");
+                                scene::Command{scene::RemoveLayerCmd{layer}}, "remove_layer", d.undo.get());
              },
              "layer"_a, "Remove a layer and its content")
         .def("move_layer",
@@ -1463,17 +1477,17 @@ NB_MODULE(pyclay, m) {
                      throw std::invalid_argument("move_layer: no layer with that id");
                  scene::Layer copy = *found;
                  apply_or_throw(d.doc->document, scene::Command{scene::RemoveLayerCmd{layer}},
-                                "move_layer");
+                                "move_layer", d.undo.get());
                  apply_or_throw(d.doc->document,
                                 scene::Command{scene::AddLayerCmd{std::move(copy), index}},
-                                "move_layer");
+                                "move_layer", d.undo.get());
              },
              "layer"_a, "index"_a, "Reorder a layer (applied as remove then add)")
         .def("set_layer_visible",
              [](PyDocument& d, scene::LayerId layer, bool visible) {
                  apply_or_throw(d.doc->document,
                                 scene::Command{scene::SetLayerVisibleCmd{layer, visible}},
-                                "set_layer_visible");
+                                "set_layer_visible", d.undo.get());
              },
              "layer"_a, "visible"_a,
              "Show or hide a layer; a hidden layer contributes nothing to the field")
@@ -1488,11 +1502,49 @@ NB_MODULE(pyclay, m) {
                  if (!rotation_axis_angle.is_none())
                      cmd.xform.rotation = to_axis_angle(rotation_axis_angle);
                  if (!scale.is_none()) cmd.xform.scale = nb::cast<float>(scale);
-                 apply_or_throw(d.doc->document, scene::Command{cmd}, "set_layer_transform");
+                 apply_or_throw(d.doc->document, scene::Command{cmd}, "set_layer_transform", d.undo.get());
              },
              "layer"_a, "position"_a = nb::none(), "rotation_axis_angle"_a = nb::none(),
              "scale"_a = nb::none(),
-             "Retransform a whole layer; omitted arguments keep their current value");
+             "Retransform a whole layer; omitted arguments keep their current value")
+        .def("enable_undo",
+             [](PyDocument& d) {
+                 if (!*d.undo) *d.undo = std::make_shared<scene::UndoStack>();
+             },
+             "Start recording edits. Off by default, so a document that never "
+             "calls this pays nothing; edits made before it are not undoable.")
+        .def_prop_ro("undo_enabled", [](const PyDocument& d) { return bool(*d.undo); })
+        .def("undo",
+             [](PyDocument& d) {
+                 if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
+                 return (*d.undo)->undo(d.doc->document);
+             },
+             "Reverse the last recorded step; returns False when there is nothing to undo")
+        .def("redo",
+             [](PyDocument& d) {
+                 if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
+                 return (*d.undo)->redo(d.doc->document);
+             },
+             "Reapply the last undone step; returns False when there is nothing to redo")
+        .def_prop_ro("undo_depth",
+                     [](const PyDocument& d) {
+                         return *d.undo ? (*d.undo)->undo_depth() : std::size_t{0};
+                     })
+        .def_prop_ro("redo_depth",
+                     [](const PyDocument& d) {
+                         return *d.undo ? (*d.undo)->redo_depth() : std::size_t{0};
+                     })
+        .def("begin_undo_group",
+             [](PyDocument& d) {
+                 if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
+                 (*d.undo)->begin_group();
+             },
+             "Bracket a burst of edits so they undo as one step")
+        .def("end_undo_group",
+             [](PyDocument& d) {
+                 if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
+                 (*d.undo)->end_group();
+             });
 
     // -- module functions -----------------------------------------------------------
     nb::class_<PyVoxelGrid>(m, "VoxelGrid",

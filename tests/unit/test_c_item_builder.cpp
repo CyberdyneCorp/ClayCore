@@ -1,5 +1,8 @@
 #include <doctest/doctest.h>
 
+#include <fstream>
+#include <cstdio>
+
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -1264,4 +1267,122 @@ TEST_CASE("an unknown id is refused and changes nothing") {
     CHECK(clay_layer_set_op_blend(f.doc, f.layer, f.node, CLAY_OP_ADD, CLAY_BLEND_HARD, 0,
                                   -1.0f) == CLAY_ERROR_INVALID_ARGUMENT);
     CHECK(f.at(0, 0, 0) == doctest::Approx(before));
+}
+
+// --- undo (add-undo-stack) ---------------------------------------------------
+
+namespace {
+
+// The strict form of "the document is unchanged": its serialized bytes.
+std::vector<std::uint8_t> doc_bytes(clay_document* doc) {
+    const char* path = "c_undo_snapshot.clayspace";
+    REQUIRE(clay_document_save(doc, path) == CLAY_OK);
+    std::ifstream in(path, std::ios::binary);
+    std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(in)),
+                                    std::istreambuf_iterator<char>());
+    in.close();
+    std::remove(path);
+    return bytes;
+}
+
+}  // namespace
+
+TEST_CASE("undo is off by default and edits still work") {
+    EditFixture f;
+    std::int32_t enabled = 1;
+    std::size_t undo_depth = 99, redo_depth = 99;
+    REQUIRE(clay_document_undo_state(f.doc, &enabled, &undo_depth, &redo_depth) == CLAY_OK);
+    CHECK(enabled == 0);
+    CHECK(undo_depth == 0);
+    CHECK(redo_depth == 0);
+
+    const float red[3] = {1, 0, 0};
+    CHECK(clay_layer_set_color(f.doc, f.layer, f.node, red) == CLAY_OK);
+
+    std::int32_t undone = 0;
+    CHECK(clay_document_undo(f.doc, &undone) == CLAY_ERROR_INVALID_ARGUMENT);
+}
+
+TEST_CASE("undo restores the document byte for byte") {
+    EditFixture f;
+    REQUIRE(clay_document_enable_undo(f.doc) == CLAY_OK);
+    std::vector<std::uint8_t> before = doc_bytes(f.doc);
+
+    const float moved[3] = {2, 0, 0};
+    REQUIRE(clay_layer_set_transform(f.doc, f.layer, f.node, moved, kUpAxis, 0.0f, 1.0f) ==
+            CLAY_OK);
+    CHECK(doc_bytes(f.doc) != before);
+
+    std::int32_t undone = 0;
+    REQUIRE(clay_document_undo(f.doc, &undone) == CLAY_OK);
+    CHECK(undone == 1);
+    CHECK(doc_bytes(f.doc) == before);
+
+    std::size_t undo_depth = 99, redo_depth = 99;
+    REQUIRE(clay_document_undo_state(f.doc, nullptr, &undo_depth, &redo_depth) == CLAY_OK);
+    CHECK(undo_depth == 0);
+    CHECK(redo_depth == 1);
+
+    std::int32_t redone = 0;
+    REQUIRE(clay_document_redo(f.doc, &redone) == CLAY_OK);
+    CHECK(redone == 1);
+    CHECK(doc_bytes(f.doc) != before);
+}
+
+TEST_CASE("an empty undo stack reports rather than fails") {
+    EditFixture f;
+    REQUIRE(clay_document_enable_undo(f.doc) == CLAY_OK);
+
+    std::int32_t undone = 1;
+    CHECK(clay_document_undo(f.doc, &undone) == CLAY_OK);  // not an error
+    CHECK(undone == 0);
+
+    std::int32_t redone = 1;
+    CHECK(clay_document_redo(f.doc, &redone) == CLAY_OK);
+    CHECK(redone == 0);
+}
+
+TEST_CASE("grouped edits undo as one step") {
+    EditFixture f;
+    REQUIRE(clay_document_enable_undo(f.doc) == CLAY_OK);
+    std::vector<std::uint8_t> before = doc_bytes(f.doc);
+
+    REQUIRE(clay_document_begin_undo_group(f.doc) == CLAY_OK);
+    const float moved[3] = {2, 0, 0};
+    const float red[3] = {1, 0, 0};
+    REQUIRE(clay_layer_set_transform(f.doc, f.layer, f.node, moved, kUpAxis, 0.0f, 1.0f) ==
+            CLAY_OK);
+    REQUIRE(clay_layer_set_color(f.doc, f.layer, f.node, red) == CLAY_OK);
+    REQUIRE(clay_document_end_undo_group(f.doc) == CLAY_OK);
+
+    std::size_t undo_depth = 0;
+    REQUIRE(clay_document_undo_state(f.doc, nullptr, &undo_depth, nullptr) == CLAY_OK);
+    CHECK(undo_depth == 1);
+
+    std::int32_t undone = 0;
+    REQUIRE(clay_document_undo(f.doc, &undone) == CLAY_OK);
+    CHECK(doc_bytes(f.doc) == before);
+}
+
+TEST_CASE("C undo matches the same sequence through the scene API") {
+    EditFixture f;
+    REQUIRE(clay_document_enable_undo(f.doc) == CLAY_OK);
+
+    const float moved[3] = {1.5f, 0.25f, -0.5f};
+    REQUIRE(clay_layer_set_transform(f.doc, f.layer, f.node, moved, kUpAxis, 0.4f, 1.0f) ==
+            CLAY_OK);
+    REQUIRE(clay_layer_set_op_blend(f.doc, f.layer, f.node, CLAY_OP_ADD, CLAY_BLEND_QUADRATIC,
+                                    0.15f, 0.0f) == CLAY_OK);
+    std::int32_t undone = 0;
+    REQUIRE(clay_document_undo(f.doc, &undone) == CLAY_OK);  // drop the op/blend edit
+
+    // the twin: the transform applied, the op/blend edit never made
+    scene::Document twin;
+    scene::Layer& tl = twin.add_sdf_layer("body");
+    scene::Node n = clay_test::item(scene::Prim::sphere(0.5f), cf3(0, 0, 0));
+    n.xform.position = cf3(1.5f, 0.25f, -0.5f);
+    n.xform.rotation = math::Quat::from_axis_angle(cf3(0, 1, 0), 0.4f);
+    tl.sdf->insert(n);
+
+    check_same_field(f.doc, twin);
 }

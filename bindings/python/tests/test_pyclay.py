@@ -1222,3 +1222,135 @@ def test_unknown_id_is_refused_and_changes_nothing(call):
         call(doc, layer)
 
     assert np.array_equal(before, doc.eval(probes))
+
+
+# --- undo and redo (add-undo-stack) -----------------------------------------
+
+
+def _undo_doc():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("body")
+    node = layer.add(clay.Sphere(r=0.5))
+    doc.enable_undo()
+    return doc, layer, node
+
+
+def _snapshot(doc, tmp_path, name):
+    """Serialized bytes — the strict form of 'the document is unchanged'."""
+    path = tmp_path / name
+    doc.save(str(path))
+    return path.read_bytes()
+
+
+def test_undo_is_off_by_default_and_costs_nothing():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    node = layer.add(clay.Sphere(r=0.5))
+    assert doc.undo_enabled is False
+    assert doc.undo_depth == 0 and doc.redo_depth == 0
+
+    layer.set_color(node, "#ff0000")     # edits still work, just unrecorded
+    assert doc.undo_depth == 0
+    with pytest.raises(RuntimeError, match="not enabled"):
+        doc.undo()
+
+
+def test_undo_restores_the_previous_state_bit_identically(tmp_path):
+    doc, layer, node = _undo_doc()
+    before = _snapshot(doc, tmp_path, "before.clayspace")
+
+    layer.set_transform(node, position=(2, 0, 0))
+    assert doc.undo_depth == 1
+    assert _snapshot(doc, tmp_path, "edited.clayspace") != before
+
+    assert doc.undo() is True
+    assert _snapshot(doc, tmp_path, "undone.clayspace") == before
+    assert doc.undo_depth == 0 and doc.redo_depth == 1
+
+
+def test_redo_reapplies(tmp_path):
+    doc, layer, node = _undo_doc()
+    layer.set_transform(node, position=(2, 0, 0))
+    edited = _snapshot(doc, tmp_path, "edited.clayspace")
+
+    doc.undo()
+    assert doc.redo() is True
+    assert _snapshot(doc, tmp_path, "redone.clayspace") == edited
+    assert doc.redo_depth == 0
+
+
+def test_undo_on_an_empty_stack_reports_rather_than_raises():
+    doc, layer, node = _undo_doc()
+    assert doc.undo() is False
+    assert doc.redo() is False
+
+
+def test_a_new_edit_clears_the_redo_stack():
+    doc, layer, node = _undo_doc()
+    layer.set_transform(node, position=(2, 0, 0))
+    doc.undo()
+    assert doc.redo_depth == 1
+
+    layer.set_color(node, "#00ff00")
+    assert doc.redo_depth == 0
+
+
+def test_a_stroke_undoes_as_one_step(tmp_path):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    node = layer.add(clay.Stroke(points=[(-1, 0, 0, 0.3)]))
+    doc.enable_undo()
+    before = _snapshot(doc, tmp_path, "before.clayspace")
+
+    for i in range(6):
+        layer.append_stroke(node, [(-1 + 0.3 * (i + 1), 0.0, 0.0, 0.3)])
+    assert doc.undo_depth == 1, "consecutive stroke appends must coalesce"
+
+    assert doc.undo() is True
+    assert _snapshot(doc, tmp_path, "after.clayspace") == before
+
+
+def test_grouped_edits_undo_together(tmp_path):
+    doc, layer, node = _undo_doc()
+    before = _snapshot(doc, tmp_path, "before.clayspace")
+
+    doc.begin_undo_group()
+    layer.set_transform(node, position=(2, 0, 0))
+    layer.set_color(node, "#ff0000")
+    layer.set_op_blend(node, blend=clay.Smooth(0.3))
+    doc.end_undo_group()
+    assert doc.undo_depth == 1
+
+    assert doc.undo() is True
+    assert _snapshot(doc, tmp_path, "after.clayspace") == before
+
+
+def test_every_edit_kind_is_undoable(tmp_path):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    node = layer.add(clay.Sphere(r=0.5))
+    stroke = layer.add(clay.Stroke(points=[(-1, 0, 0, 0.3), (0, 0, 0, 0.3)]))
+    other = doc.add_sdf_layer("other")
+    doc.enable_undo()
+
+    edits = [
+        lambda: layer.set_transform(node, position=(1, 0, 0)),
+        lambda: layer.set_prim(node, clay.Box(size=(1, 1, 1))),
+        lambda: layer.set_color(node, "#123456"),
+        lambda: layer.set_op_blend(node, op=clay.Op.SUBTRACT),
+        lambda: layer.move(node, index=0),
+        lambda: layer.append_stroke(stroke, [(1.0, 0.0, 0.0, 0.3)]),
+        lambda: layer.trim_stroke(stroke, 1),
+        lambda: layer.remove(node),
+        lambda: doc.set_layer_visible(other.id, False),
+        lambda: doc.set_layer_transform(other.id, position=(0, 3, 0)),
+        lambda: doc.remove_layer(other.id),
+    ]
+    for i, edit in enumerate(edits):
+        before = _snapshot(doc, tmp_path, f"before_{i}.clayspace")
+        depth = doc.undo_depth
+        edit()
+        assert doc.undo_depth == depth + 1, f"edit {i} was not recorded"
+        assert doc.undo() is True
+        assert _snapshot(doc, tmp_path, f"after_{i}.clayspace") == before, f"edit {i}"
+        doc.redo()

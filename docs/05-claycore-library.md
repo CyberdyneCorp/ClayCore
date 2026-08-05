@@ -214,6 +214,27 @@ doc.move_layer(layer.id, 0)
 doc.remove_layer(layer.id)
 ```
 
+Undo is opt-in per document and rides the same commands, so no reachable edit
+escapes it and the app does not reimplement a history over a second vocabulary
+that could disagree with what a saved document records:
+
+```python
+doc.enable_undo()                   # off by default; costs nothing unused
+layer.set_transform(node, position=(2, 0, 0))
+doc.undo()                          # -> True; the document is byte-identical
+doc.redo()
+
+doc.begin_undo_group()              # a compound gesture undoes as one step
+layer.set_color(node, "#ff8800")
+layer.set_op_blend(node, op=clay.Op.SUBTRACT)
+doc.end_undo_group()
+
+doc.undo_depth, doc.redo_depth      # what a UI needs to label its buttons
+```
+
+Consecutive appends to one stroke coalesce automatically, so a drag gesture is
+a single undo step rather than one per sample.
+
 ### Widened surface (implemented)
 
 Beyond the sample above, `pyclay` reaches the rest of the C++ vocabulary:
