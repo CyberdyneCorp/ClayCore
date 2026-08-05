@@ -59,7 +59,7 @@ sculpt with.
 | ~~`add-region-deformers`~~ **landed 2026-08-05** | Grab and pose with finite support, on SDF and voxels. Shipped with **sphere (radial) region weights only**. |
 | `add-pose-line-regions` | The follow-up that shipping sphere-only left open. 3DCoat's Pose *defaults* to a line gradient with 15°-snapped angle — the taper workflow the hard-surface videos lean on — and the study's own draft requirement names it alongside sphere and mask. It needs anchor + end + axis + angle = 10 parameters against the deformer record's 9 slots, so it widens the extension array; contained, but a real change rather than an add. |
 | `add-mask-field` | Paintable per-layer scalar gating edit strength. Unlocks freeze, masked shell, pose-by-selection. Specify representation-independence as an invariant with a regression test: masks silently dying on voxelization is 3DCoat's worst-rated bug and is a free win to avoid. |
-| `add-brush-stroke-engine` | Stroke → spaced, alpha-modulated stamps: spacing, pressure curves, jitter, rotate-along-stroke, taper, buildup vs clamped. One engine so every app tool shares brush feel rather than each synthesizing its own. Version the preset schema from day one — their engine rewrite destroyed user preset libraries. **Fix the interface as "stroke samples in, edit items out" when this is scoped**: that boundary is what would let brushes be scripted later without redesigning the engine, and it costs nothing to honour now. |
+| `add-brush-stroke-engine` | Stroke → spaced, alpha-modulated stamps: spacing, pressure curves, jitter, rotate-along-stroke, taper, buildup vs clamped. One engine so every app tool shares brush feel rather than each synthesizing its own. Version the preset schema from day one — their engine rewrite destroyed user preset libraries. **Fix the interface as "stroke samples in, edit items out" when this is scoped**: emitting ordinary edit-list items rather than a private evaluation path is what gives the brush undo, stroke coalescing and serialization for free, and it keeps the engine's one representation of an edit. |
 | `add-layer-ghost-lock` | Per-layer ghost (visible, unpickable, edit-excluded) and lock. Small, and it properly fixes the "brushes touch everything" complaint that ghosting only works around. |
 
 **Gate:** an artist can block out a form, grab it into shape, freeze a region
@@ -102,13 +102,6 @@ needs them, and listed so they are not mistaken for oversights:
 - **Voxel layers beyond 256³.** The spec guarantees ≥256³ per layer, with a
   memory budget and typed errors past it. There is no streaming story for
   scenes larger than that; per-layer grids have been sufficient so far.
-- **Scripted brushes.** A decision rather than a task: whether brushes should be
-  authorable in an embedded scripting language is not something this repository
-  can settle on its own, and no change is proposed here. The one thing that
-  matters now is keeping `add-brush-stroke-engine`'s interface at "stroke
-  samples in, edit items out", which the row above records — that keeps the
-  option open at no cost.
-
 ## Deliberately not doing
 
 Recorded so they are decisions rather than oversights:
@@ -125,6 +118,10 @@ Recorded so they are decisions rather than oversights:
   upstream; polygon profiles already accept the output.
 - **Cloth, tree and muscle generators, VR, texture painting.** Out of scope;
   the pipeline exit is bake-and-export.
+- **Scripted brushes.** Decided against 2026-08-05: no embedded scripting
+  runtime for authoring brushes. Nothing is lost by the decision — the brush
+  engine's interface above emits ordinary edit items for its own reasons, so a
+  future reversal would extend that boundary rather than redesign it.
 
 ## Requirements taken from their bugs
 
