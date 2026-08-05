@@ -114,15 +114,32 @@ endif()
 
 # -- CUDA backend (tier 2) ---------------------------------------------------
 if(CLAY_BACKEND_CUDA)
+  # only an explicit -DCMAKE_CUDA_ARCHITECTURES survives here; enable_language
+  # below sets the variable to its own default, which is not a user request
+  set(_clay_cuda_arch "${CMAKE_CUDA_ARCHITECTURES}")
   enable_language(CUDA)
   # the host .cpp is compiled by the C++ compiler and needs cuda_runtime.h
   # plus the runtime library; CUDA::cudart carries both
   find_package(CUDAToolkit REQUIRED)
   set(CMAKE_CUDA_STANDARD 20)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-  if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES native)
+  if(NOT _clay_cuda_arch)
+    include(ClayCudaArch)
+    clay_select_cuda_arch(_clay_cuda_arch
+      NATIVE "${CMAKE_CUDA_ARCHITECTURES_NATIVE}"
+      SUPPORTED ${CMAKE_CUDA_ARCHITECTURES_ALL})
+    clay_cuda_arch_is_detected(_clay_gpu_detected "${CMAKE_CUDA_ARCHITECTURES_NATIVE}")
+    if(NOT _clay_gpu_detected)
+      message(STATUS "CUDA: no GPU detected; building ${_clay_cuda_arch} PTX "
+                     "for the driver to JIT")
+    elseif(NOT _clay_cuda_arch STREQUAL CMAKE_CUDA_ARCHITECTURES_NATIVE)
+      message(STATUS "CUDA: GPU arch ${CMAKE_CUDA_ARCHITECTURES_NATIVE} is newer than this "
+                     "toolkit; building ${_clay_cuda_arch} PTX for the driver to JIT")
+    endif()
   endif()
+  # claycore is created before enable_language(CUDA), so its CUDA_ARCHITECTURES
+  # property was initialized empty — set it on the target, not the variable
+  set_target_properties(claycore PROPERTIES CUDA_ARCHITECTURES "${_clay_cuda_arch}")
   target_sources(claycore PRIVATE backends/cuda/clay_kernels.cu backends/cuda/cuda_backend.cpp)
   target_compile_definitions(claycore PRIVATE CLAY_HAS_CUDA=1)
   target_include_directories(claycore PRIVATE backends/cuda)

@@ -35,3 +35,9 @@ clay_apply_warnings(clay_unit_tests)
 clay_apply_sanitizers(clay_unit_tests)
 
 add_test(NAME clay_unit_tests COMMAND clay_unit_tests)
+
+# CUDA architecture selection is pure CMake, so it is tested by script rather
+# than by the C++ suite — and needs neither a CUDA toolkit nor a GPU to run
+add_test(NAME clay_cuda_arch_selection
+  COMMAND ${CMAKE_COMMAND} -DCLAY_CMAKE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/../cmake
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/test_cuda_arch.cmake)
