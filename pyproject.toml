@@ -53,6 +53,12 @@ archs = ["arm64", "x86_64"]
 
 [tool.cibuildwheel.linux]
 archs = ["x86_64", "aarch64"]
+# manylinux2014 ships GCC 10.2, and numpy stopped publishing wheels for it, so
+# pip falls back to building numpy from source and it refuses anything below
+# GCC 10.3. The 2_28 image has a new enough toolchain and matching numpy
+# wheels; the produced claycore wheel is unaffected either way.
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
 
 [tool.cibuildwheel.windows]
 archs = ["AMD64"]
