@@ -513,6 +513,9 @@ namespace {
 
 // Defined with the other edit plumbing below; declared here because the
 // insertion path routes through it too.
+
+// Defined at the end of this namespace: every edit routes through the
+// command vocabulary. Declared here because it is used above.
 clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what);
 
 // The one insertion path: everything authored through this ABI, flat
@@ -785,6 +788,33 @@ clay_item item_from_desc(const clay_item_desc& d) {
     return item;
 }
 
+// Every edit below routes through the command vocabulary rather than touching
+// the document, so a C edit means what a saved document means — and becomes
+// undoable for free once the undo stack is exposed. apply() reports failure by
+// returning nullopt and leaves the document untouched.
+clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    // With a stack attached the edit is applied AND its inverse recorded, so
+    // no reachable edit can escape undo.
+    bool ok = doc->undo ? doc->undo->perform(doc->doc.document, cmd)
+                        : static_cast<bool>(scene::apply(doc->doc.document, cmd));
+    if (!ok) return fail(CLAY_ERROR_NOT_FOUND, what);
+    return CLAY_OK;
+}
+
+clay_result read_transform(const float position[3], const float rotation_axis[3],
+                           float rotation_angle, float scale, math::Transform* out) {
+    if (!position || !rotation_axis) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transform");
+    if (!(scale > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "scale must be > 0");
+    out->position = kernel::cf3(position[0], position[1], position[2]);
+    kernel::cfloat3 axis = kernel::cf3(rotation_axis[0], rotation_axis[1], rotation_axis[2]);
+    if (!(kernel::cdot2(axis) > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "rotation axis must be non-zero");
+    out->rotation = math::Quat::from_axis_angle(axis, rotation_angle);
+    out->scale = scale;
+    return CLAY_OK;
+}
+
 }  // namespace
 
 extern "C" {
@@ -857,36 +887,6 @@ clay_result clay_remove_node(clay_document* doc, clay_layer_id layer_id, clay_no
                       "node not found");
 }
 
-namespace {
-
-// Every edit below routes through the command vocabulary rather than touching
-// the document, so a C edit means what a saved document means — and becomes
-// undoable for free once the undo stack is exposed. apply() reports failure by
-// returning nullopt and leaves the document untouched.
-clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what) {
-    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
-    // With a stack attached the edit is applied AND its inverse recorded, so
-    // no reachable edit can escape undo.
-    bool ok = doc->undo ? doc->undo->perform(doc->doc.document, cmd)
-                        : static_cast<bool>(scene::apply(doc->doc.document, cmd));
-    if (!ok) return fail(CLAY_ERROR_NOT_FOUND, what);
-    return CLAY_OK;
-}
-
-clay_result read_transform(const float position[3], const float rotation_axis[3],
-                           float rotation_angle, float scale, math::Transform* out) {
-    if (!position || !rotation_axis) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transform");
-    if (!(scale > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "scale must be > 0");
-    out->position = kernel::cf3(position[0], position[1], position[2]);
-    kernel::cfloat3 axis = kernel::cf3(rotation_axis[0], rotation_axis[1], rotation_axis[2]);
-    if (!(kernel::cdot2(axis) > 0.0f))
-        return fail(CLAY_ERROR_INVALID_ARGUMENT, "rotation axis must be non-zero");
-    out->rotation = math::Quat::from_axis_angle(axis, rotation_angle);
-    out->scale = scale;
-    return CLAY_OK;
-}
-
-}  // namespace
 
 clay_result clay_document_enable_undo(clay_document* doc) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
