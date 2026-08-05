@@ -52,7 +52,12 @@ test-command = "pytest {project}/bindings/python/tests -q"
 archs = ["arm64", "x86_64"]
 
 [tool.cibuildwheel.linux]
-archs = ["x86_64", "aarch64"]
+# x86_64 only. aarch64 needs QEMU registered in the workflow, and emulated
+# builds of the whole C++ library take the best part of an hour per release
+# for a platform nothing currently targets — the app is iPad and macOS, and
+# desktop Linux use is x86_64. Add docker/setup-qemu-action and put aarch64
+# back when someone actually needs it.
+archs = ["x86_64"]
 # manylinux2014 ships GCC 10.2, and numpy stopped publishing wheels for it, so
 # pip falls back to building numpy from source and it refuses anything below
 # GCC 10.3. The 2_28 image has a new enough toolchain and matching numpy

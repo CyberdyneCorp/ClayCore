@@ -48,12 +48,18 @@ artifacts before publishing.
 
 Tracked honestly rather than assumed done:
 
-- **CUDA device parity has never executed.** The backend compiles under nvcc
-  in CI and the kernel headers pass the CUDA dialect profile, but no NVIDIA
-  device exists on the dev machine or on GitHub runners. Build the `cuda`
-  preset on CUDA hardware and run `ctest --preset cuda`; the parity suite and
-  pyclay's `test_every_registered_backend_matches_cpu` pick the backend up
-  automatically. (openspec task 12.2)
+- **CUDA device parity has executed** (task 12.2, closed by
+  `fix-cuda-arch-selection`). Validated on an RTX 5060 / driver 580 / nvcc
+  12.0: the backend registers, `ctest --preset cuda` passes 4/4, and the parity
+  suite runs 1115 assertions with the device visible against 479 with it hidden
+  — the differential is what proves the extra assertions ran on the GPU rather
+  than passing vacuously. pyclay at 1M points matches the CPU bit-for-bit,
+  which is expected from the same single-source headers compiled `-fmad=false`.
+  *Caveat*: validated through PTX JIT only. A cubin build for sm_120 needs
+  CUDA >= 12.8, so that path is still unexercised.
+- **CI still only compiles CUDA.** GitHub runners have no NVIDIA device, so the
+  device parity above is a manual, hardware-dependent check rather than a gate.
+  Re-run it on CUDA hardware before a release that touches kernels.
 - **CUDA-enabled wheels are not shipped** (task 12.3). Wheels currently carry
   the CPU backend, which per the parity contract changes speed, not results.
   Shipping CUDA wheels needs a CUDA build host in the wheel matrix.
