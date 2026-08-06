@@ -146,9 +146,9 @@ from outside, which the engine did not have.
 
 ### Order, and why
 
-1. **`add-voxel-verbs` + `add-voxel-repair`** — share a connected-component
-   pass, both small, both immediately visible, and neither blocks on a
-   decision. Momentum, and they close the remaining voxel brush gaps.
+1. ~~**`add-voxel-verbs` + `add-voxel-repair`**~~ **done 2026-08-06.** They did
+   share an operation, though not the connected-component pass predicted here
+   — see Track A above.
 2. **`add-loft-opcode` → `add-swept-n`** — independent of Track B, and loft is
    the one row whose blocker ("an item can carry two profiles") is already
    written down as a sentence in the spec.
@@ -178,11 +178,15 @@ tests. Concretely, per row:
 - **Four presets green** (release, metal, opencl, asan-ubsan) plus
   `release_check`.
 
-One gate is missing and should be added with the first of these rows: the
-gallery guards that every *primitive* class has an example
-(`01_primitives.py`), but nothing guards that every *capability* does. The same
-mechanism extends — a named table, so an uncovered capability is an error and
-an exemption is a decision on the record.
+One gate is still missing. The gallery guards that every *primitive* class has
+an example (`01_primitives.py`, which caught `Cut` shipping without one), but
+nothing guards that every *capability* does. The same mechanism extends — a
+named table, so an uncovered capability is an error and an exemption is a
+decision on the record.
+
+**This was supposed to land with the first of these rows and did not.** It is
+outstanding as of the voxel pair, and it is the one item in this section that
+has been stated and not delivered.
 
 ## Phase 3 — the pipeline
 
