@@ -328,3 +328,17 @@ The module SHALL expose resolving a cut frame and shape into an item, and placin
 - **WHEN** a script cuts a circle from a solid and evaluates the document
 - **THEN** the field reports empty inside the circle's sweep and solid outside it
 
+### Requirement: The new verbs from Python
+The module SHALL expose fill-cavities, scrape, smudge and carve-with-alpha, taking the alpha as an (H, W) array.
+
+#### Scenario: Carving with an alpha array
+- **WHEN** a script carves with an (H, W) alpha that is opaque on one half
+- **THEN** material is removed under the opaque half only
+
+### Requirement: Repair from Python
+The module SHALL expose the report and both repairs, with the report as a readable structure rather than a bare count.
+
+#### Scenario: Reporting then repairing
+- **WHEN** a script reports a hollow shell, fills its voids, and reports again
+- **THEN** the first report says not airtight and the second says airtight
+

@@ -269,3 +269,17 @@ The C API SHALL expose a versioned cut descriptor carrying the frame, the shape 
 - **WHEN** a C consumer resolves a cut with a given frame and shape
 - **THEN** the field matches what `pyclay` produces for the same cut
 
+### Requirement: The new verbs across the ABI
+The C API SHALL expose the four verbs, with the alpha as a packed float array plus its width and height.
+
+#### Scenario: A verb means the same through both bindings
+- **WHEN** a C consumer runs each verb with given parameters
+- **THEN** the grid matches what `pyclay` produces for the same call
+
+### Requirement: Repair across the ABI
+The C API SHALL expose the report through a versioned descriptor and both repairs, each taking an optional mask.
+
+#### Scenario: A repair means the same through both bindings
+- **WHEN** a C consumer repairs a grid
+- **THEN** the result matches what `pyclay` produces for the same call
+

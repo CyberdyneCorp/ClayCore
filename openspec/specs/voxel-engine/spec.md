@@ -159,3 +159,114 @@ The mask SHALL be addressed in world units rather than in a layer's cell indices
 - **WHEN** a document carrying a painted mask is saved and reloaded
 - **THEN** sampling at the same world positions returns the same values
 
+### Requirement: Fill cavities
+The module SHALL provide a verb that fills pockets within a brush footprint: an empty cell with at least four of its six face neighbours occupied is inside a cavity rather than beside a surface, and a stated number of passes reaches that many cells deep. A hole passing all the way through the material, an open face, and a wide shallow dent SHALL be left alone — the verb fills pockets, and smoothing is the verb for surface irregularity.
+
+#### Scenario: A pocket is filled
+- **WHEN** fill-cavities runs over a slab with a one-cell pit two cells deep
+- **THEN** the pit is filled and the rest of the slab is unchanged
+
+#### Scenario: A through-hole is not filled
+- **WHEN** fill-cavities runs over a slab pierced all the way through
+- **THEN** the hole remains open
+
+#### Scenario: A wide shallow dent is not a pocket
+- **WHEN** fill-cavities runs over a dent two cells across and one deep
+- **THEN** the dent is left alone, because it is surface irregularity rather than a cavity
+
+### Requirement: Scrape
+The module SHALL provide a verb that flattens the surface onto a plane and smooths it in one pass. Both decisions SHALL be taken from a single snapshot of the region, so that no cell's outcome depends on a neighbour the same call already changed.
+
+#### Scenario: Scrape flattens and smooths together
+- **WHEN** scrape runs over a bumpy slab
+- **THEN** the surface is closer to the plane than before, and rougher features are reduced more than flattening alone reduces them
+
+#### Scenario: Scrape is snapshot-consistent
+- **WHEN** scrape runs twice over the same region from the same state
+- **THEN** the results are identical
+
+### Requirement: Smudge
+The module SHALL provide a verb that drags surface material along a direction, leaving material below the surface where it was. This SHALL differ from grab, which translates every cell in its region: smudge smears a skin, grab moves a lump.
+
+#### Scenario: Smudge moves the surface, not the body
+- **WHEN** smudge runs across a thick block
+- **THEN** the surface shifts along the direction and the block's interior is unchanged
+
+#### Scenario: Smudge differs from grab
+- **WHEN** smudge and grab run over the same block with the same displacement
+- **THEN** the results differ
+
+### Requirement: Carve with an alpha
+The module SHALL provide a verb whose per-cell strength is modulated by a caller-supplied scalar grid, sampled by projecting each cell onto the plane perpendicular to a given direction. The engine SHALL NOT decode images: the caller supplies samples, a width and a height.
+
+#### Scenario: The alpha shapes the carve
+- **WHEN** an alpha grid that is opaque on one half and empty on the other is carved with
+- **THEN** material is removed under the opaque half and left under the empty half
+
+#### Scenario: A uniform alpha is the plain carve
+- **WHEN** an alpha grid whose samples are all one is carved with
+- **THEN** the result matches the same footprint carved without an alpha
+
+#### Scenario: A malformed alpha is refused
+- **WHEN** an alpha grid's dimensions do not match its sample count, or either is zero
+- **THEN** the call is refused and the grid is unchanged
+
+### Requirement: The new verbs honour mask and falloff
+Every verb added here SHALL respect the brush's falloff, strength and optional mask exactly as the existing verbs do.
+
+#### Scenario: A frozen region is spared by every new verb
+- **WHEN** each new verb runs over a fully masked region
+- **THEN** the grid is unchanged, while the same verb without the mask changes it
+
+### Requirement: Repair reports before it repairs
+The module SHALL provide a non-destructive query returning the number of enclosed empty regions, their total cell count, the largest one's cell count, and whether the grid is airtight. A caller SHALL be able to ask this without performing a repair.
+
+#### Scenario: A hollow shell reports its void
+- **WHEN** a hollow box's report is taken
+- **THEN** it reports one enclosed void, of the size of the hollow, and not airtight
+
+#### Scenario: A solid block is airtight
+- **WHEN** a solid block's report is taken
+- **THEN** it reports no enclosed voids and airtight
+
+#### Scenario: A perforated shell is not enclosed
+- **WHEN** a hollow box with a hole through its wall is reported
+- **THEN** the interior is not counted as an enclosed void, because the outside reaches it
+
+### Requirement: Close holes
+The module SHALL provide a repair that seals perforations up to a stated radius by morphological closing over the whole grid. Material SHALL NOT be lost: a closing adds cells and removes none.
+
+#### Scenario: A perforation is sealed
+- **WHEN** close-holes runs with a radius wider than a pierced wall's hole
+- **THEN** the hole is sealed and the interior becomes an enclosed void
+
+#### Scenario: A large opening is left alone
+- **WHEN** close-holes runs with a radius narrower than an opening
+- **THEN** the opening remains
+
+#### Scenario: Closing never removes material
+- **WHEN** close-holes runs over any grid
+- **THEN** every cell occupied before is still occupied
+
+### Requirement: Fill voids
+The module SHALL provide a repair that fills every empty cell not reachable from outside the grid's bounds. Reachability SHALL be over empty cells by face adjacency, seeded outside the occupied bounds, so that enclosure is decided rather than guessed at from local neighbourhoods.
+
+#### Scenario: An enclosed void is filled
+- **WHEN** fill-voids runs on a hollow box
+- **THEN** the interior is solid and the report says airtight
+
+#### Scenario: An open cavity is not filled
+- **WHEN** fill-voids runs on a box with an open mouth
+- **THEN** the cavity remains empty, because the outside reaches it
+
+#### Scenario: Filling colours from the shell
+- **WHEN** an enclosed void inside a single-coloured shell is filled
+- **THEN** the filled cells carry that colour rather than an arbitrary palette entry
+
+### Requirement: Repair honours the mask
+Both repairs SHALL accept an optional mask and SHALL leave fully masked cells untouched, so that a frozen region is not repaired either.
+
+#### Scenario: A frozen region is not repaired
+- **WHEN** fill-voids runs with the void's cells fully masked
+- **THEN** the void is left open
+
