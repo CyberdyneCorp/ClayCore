@@ -1315,7 +1315,11 @@ NB_MODULE(pyclay, m) {
                  new (self) PyLoft();
                  self->prim = scene::Prim::loft(half_depth, ease);
                  for (std::size_t i = 0; i < nb::len(profiles); ++i) {
-                     const PyProfile& p = nb::cast<const PyProfile&>(profiles[i]);
+                     // The element is held in a named object first: binding a
+                     // reference straight to profiles[i] binds it to the
+                     // sequence proxy's temporary, which GCC rightly refuses.
+                     nb::object element = profiles[i];
+                     const PyProfile& p = nb::cast<const PyProfile&>(element);
                      self->profiles.push_back(p.profile);
                      self->profile_polygons.push_back(p.points);
                  }
