@@ -85,13 +85,13 @@ structural gap in it was `add-curve-objects`, which landed 2026-08-06.
 |---|---|
 | ~~`add-cut-tool`~~ **landed 2026-08-06** | The study's P0 and the practitioners' "90% tool" (ZBrush Trim Rect/Circle/Lasso, 3DCoat Cut Off). A frame plus a drawn shape resolves to an ordinary extruded item. **The cut is a prism, not a frustum** — a converging cut has a non-flat face and a result that depends on where the camera stood. **No camera enters the engine**: the caller passes the frame it already has, in world units, and the engine owns the error-prone parts (sweep depth, orientation, which side survives). Keep-inner/keep-outer is the op, not a flag. Angled cut walls are the one named gap: they need a taper about the sweep axis, the same relationship `elongate_axis` has to `elongate`. |
 | ~~`add-curve-objects`~~ **landed 2026-08-06** | Control-point curves: per-point type (hard / Catmull-Rom / B-spline / Bezier with local-space handles), closed curves, and adaptive tessellation to a document-level tolerance. **A curve is not a new primitive** — the stroke opcode already sweeps a sphere along a segment chain exactly and with finite support, so typed points lower into it at compile time. That bought four backends, culling, exactness, picking, undo, masks and the file format for nothing, and an all-hard chain compiles to a bit-identical tape. Also added the versioned scene chunk, so the next field a node gains needs no packing trick. Cross-section sweeps (`add-loft-opcode`, `add-swept-n`) and radius profiles are unblocked but deliberately not included. |
-| `add-sdf-relax` | **The one ZBrush core brush still missing.** Voxels smooth; SDF layers cannot. Not a deformer: convolving a distance field breaks the distance property. Three possible routes and an order-of-magnitude size difference between them — see the plan below. |
-| `add-sampled-fields` | **Prerequisite for three rows below, and it does not exist in any form today.** Build a field from sampled data and let the tape evaluate it. See the plan below. |
+| ~~`add-sdf-relax`~~ **landed 2026-08-06** | The last ZBrush core brush. Settled on the sampled route: a field-space re-blend would have made an edit list mean "shapes plus a rule about how they interact" and still could not smooth a bump inside one item. The roadmap's worry was half right — convolution destroys exactness but cannot raise the Lipschitz bound, and a 1-Lipschitz field is automatically a conservative bound on the distance to its own zero set, so tracing stays safe. Relax **bakes**, which is stated everywhere a caller looks. |
+| ~~`add-sampled-fields`~~ **landed 2026-08-06** | Sparse narrow-band volumes as a tape primitive. The plan's estimate that this needed a resource mechanism was arithmetic on a DENSE grid and 20x too pessimistic; a narrow band is O(area) and rides in the blob. |
 | `add-loft-opcode` | Loft is header-only and flagged in the specs as not tape-expressible; it is 3DCoat's base-mesh generator and the core of their 2026 parametric direction. Needs an item to carry two profiles. |
 | `add-swept-n` | Generalizes loft from two profiles to N across a guide, once two-profile loft is proven. Minor and arguably implied by the row above, but named so it is not assumed done when loft lands. |
 | `add-voxel-verbs` | fill-cavities, scrape (flatten+smooth), smudge, carve-with-alpha — the verbs our four are missing against their voxel set. |
 | `add-voxel-repair` | Close holes and fill interior voids, so a voxel layer can be made airtight before meshing. Lower priority than it sounds: SDF layers are watertight by construction, and the mesh importer's winding-number sign tolerates small holes — this is only for voxel layers that were sculpted into a non-manifold state. Their "Close Invisible Holes + Fill Voids" is the standard pre-bake step. |
-| `add-mesh-to-field-import` | Triangle mesh → field, via BVH distance and generalized winding number for sign. Unlocks scan cleanup, kitbashing, booleans on imported meshes. Density must be specified in voxels-per-unit, decoupled from object scale — their scale↔resolution entanglement is a documented pain. |
+| ~~`add-mesh-to-field-import`~~ **landed 2026-08-06** | Triangle mesh → field, by BVH distance and generalized winding number for sign. Neither binding could LOAD a mesh, only save one, so the import had nothing to import until this row added it. |
 
 ## Phase 2 — the plan for what is left
 
@@ -139,11 +139,14 @@ from outside, which the engine did not have.
 
 ### Track B — gated on a prerequisite
 
-| Change | What will bite |
+**All three landed 2026-08-06.** The dependency chain held: sampled fields
+first, designed with all three consumers in view, then mesh import, then relax.
+
+| Change | What actually bit |
 |---|---|
-| `add-sampled-fields` **(new row)** | Build a narrow-band signed distance field from an inside/outside + closest-point oracle, and make it layer content the tape can evaluate. Three hard parts, none of them the distance transform: **(1)** external resources — a volume referenced by handle, uploaded once, not rebuilt per edit (see Finding 2); **(2)** exactness — a sampled, interpolated field is neither exact nor Lipschitz-1, and it must declare that through `CFieldInfo` or `safe_step_scale` will overstep and the raymarcher will miss surfaces; **(3)** the file format — a volume is orders of magnitude larger than anything `.clayspace` carries today, so it needs its own chunk and a compression story. |
-| `add-mesh-to-field-import` | Triangle mesh → field. Loading is already done (OBJ, PLY, FBX all import today), so the work is a BVH for closest-distance, a generalized winding number for sign, and then `add-sampled-fields` to hold the result. Density in voxels-per-unit, decoupled from object scale — their scale↔resolution entanglement is a documented pain. |
-| `add-sdf-relax` | The last ZBrush core brush. **The design question is open and should be settled before anything is written.** Three routes: (a) round-trip through voxels, which needs `add-sampled-fields` and gives a bake, not a live edit; (b) a field-space local re-blend, which needs no prerequisite but changes what an edit list means; (c) mesh-space extract/smooth/re-import, which needs the same prerequisite as (a) plus meshing round-trip cost. My reading is that (a) is the honest one and that the cheapest version of this row is **making the voxel round trip lossless rather than inventing a field operator** — which is `add-sampled-fields` again. Settle this first; the row's size varies by an order of magnitude across the three answers. |
+| ~~`add-sampled-fields`~~ | The plan's three "hard parts" were mostly not the hard parts. **(1)** No resource mechanism was needed — that estimate assumed dense storage and was 20x too pessimistic; a narrow band is O(area), and the blob is uploaded per eval call rather than per edit. **(3)** No compression story either, for the same reason. **(2)** was real and then some: the exactness contract divides by *where the samples are*, not by the band, because a brick is kept whole and holds samples well beyond it; the interpolant reaches sqrt(3) so declaring Lipschitz 1 would overstep; and two defects were invisible to tests that probed `eval` at points and only appeared on **rendering** it — a flat far-field bound that made the marcher crawl until it ran out of iterations, and a box distance that fell to zero on the sampled box's face so every ray hit an invisible shell. |
+| ~~`add-mesh-to-field-import`~~ | The distance was the easy half, as predicted. The sign was the row: parity breaks on one hole, the closest-triangle pseudonormal is meaningless near an opening, so the generalized winding number with per-node dipole summarization. What the plan missed is that **neither binding could load a mesh** — both could only save one — so the import had nothing to import. Also: the Swift smoke consumes the prebuilt xcframework rather than the working tree, so it had been passing against a stale one. |
+| ~~`add-sdf-relax`~~ | The design question, settled in the proposal, was most of the row. The implementation bit twice on the same misconception in different clothes: a volume's value where it has **no samples is a bound, not a measurement**, so neither smoothing through `eval()` nor averaging bounds in as though they were data is sound. Relax rewrites the stored samples in place. |
 
 ### Order, and why
 
@@ -153,9 +156,12 @@ from outside, which the engine did not have.
 2. ~~**`add-loft-opcode` → `add-swept-n`**~~ **done 2026-08-06.** Loft took N
    profiles rather than two, which turned swept-N from "the same opcode with a
    count" into its own row about guides — see Track A above.
-3. **`add-sampled-fields` → `add-mesh-to-field-import` → `add-sdf-relax`** —
-   the prerequisite designed with all three consumers in view rather than
-   retrofitted around the first one.
+3. ~~**`add-sampled-fields` → `add-mesh-to-field-import` → `add-sdf-relax`**~~
+   **done 2026-08-06.** The prerequisite was designed with all three consumers
+   in view, and it held: neither later row needed it changed.
+
+**Phase 2 is complete.** The gallery went from 15 examples to 21, which is what
+this section said done would look like.
 
 **If kitbashing or scan cleanup is the near-term product need, Track B jumps
 the queue and Track A waits.** That is the only reason to reorder, and it is a
@@ -185,9 +191,10 @@ nothing guards that every *capability* does. The same mechanism extends — a
 named table, so an uncovered capability is an error and an exemption is a
 decision on the record.
 
-**This was supposed to land with the first of these rows and did not.** It is
-outstanding as of the voxel pair, and it is the one item in this section that
-has been stated and not delivered.
+~~**This was supposed to land with the first of these rows and did not.**~~
+**Delivered 2026-08-06** with `add-sampled-fields`: `CAPABILITY_EXAMPLES` in
+`examples/run_all.py` names an example for every living capability, so an
+uncovered one is an error and an exemption is a decision on the record.
 
 ## Phase 3 — the pipeline
 
