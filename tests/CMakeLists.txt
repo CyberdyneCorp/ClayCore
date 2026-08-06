@@ -42,6 +42,8 @@ add_executable(clay_unit_tests
   unit/test_swept.cpp
   unit/test_c_swept.cpp
   unit/test_volume.cpp
+  unit/test_mesh_import.cpp
+  unit/test_c_volume.cpp
   unit/test_c_pick_eval.cpp)
 
 target_link_libraries(clay_unit_tests PRIVATE clay::core doctest::doctest)

@@ -41,6 +41,9 @@ CLASS_PREFIX = {
     "VoxelGrid": ("clay_voxel_", "clay_voxel_grid_"),
     "MaskField": ("clay_mask_",),
     "StrokePreset": ("clay_stroke_preset_",),
+    # An inspection surface with no C counterpart; every member is exempt with
+    # a reason. See CLASS_CTOR['MeshQuery'].
+    "MeshQuery": ("clay_mesh_",),
     "Prim": ("clay_item_", "clay_item_set_", "clay_item_add_"),
     "Stroke": ("clay_item_", "clay_item_set_", "clay_item_add_"),
     # Volume is an item like any other, so it would take the clay_item_
@@ -79,6 +82,8 @@ ALIASES = {
     "Document.colors": "clay_eval_points",  # the colors ride the same call
     "Document.gradients": "clay_eval_gradients",
     "Document.raycast": "clay_raycast_attributed",  # pyclay's reports layer+item too
+    "Volume.from_mesh": "clay_item_volume_from_mesh",
+    "Mesh.from_triangles": "clay_mesh_from_triangles",
     "Layer.add": "clay_layer_add_item",
     "Layer.set_points": "clay_layer_set_stroke_points",
     # closed and the tolerance are one call in C: they only mean anything
@@ -107,6 +112,7 @@ ALIASES = {
     "VoxelGrid.voxel_size": "clay_voxel_size",
     "Blend.k": "clay_item_set_blend",
     "module.load": "clay_document_load",
+    "module.load_mesh": "clay_mesh_load",
     "module.backends": "clay_list_backends",
 }
 
@@ -126,12 +132,15 @@ CLASS_CTOR = {
     "Accumulation": None,
     "StrokePreset": "clay_stroke_preset_defaults",
     "Cut": "clay_cut_create",
-    # CLAY_PRIM_VOLUME exists in clay.h, but nothing in the C ABI builds one
-    # yet: a volume is only reachable by SAMPLING something, and the thing an
-    # app wants to sample is an imported mesh. The constructor lands with mesh
-    # import (add-mesh-to-field-import), which is the row that gives it a
-    # source. Until then Python can bake a volume and C cannot, deliberately.
-    "Volume": None,
+    # Not clay_item_create: a volume needs samples, and that entry point has
+    # none to give. Its producer takes a mesh.
+    "Volume": "clay_item_volume_from_mesh",
+    # A BVH exposed so a SCRIPT can check that the sign behaves — that a hole
+    # does not flip a half-space, that summarizing distant nodes does not move
+    # anything across the surface. The capability an app needs, importing a
+    # mesh as a field, is clay_item_volume_from_mesh; this is the microscope
+    # pointed at it, not a second way to do it.
+    "MeshQuery": None,
     "CutShape": None,
     "Smooth": "CLAY_BLEND_QUADRATIC",
     "Cubic": "CLAY_BLEND_CUBIC",
@@ -178,18 +187,29 @@ CLASS_CTOR = {
 # instead of disappearing, and it fails when one becomes reachable in C or
 # vanishes from pyclay.
 EXEMPT = {
-    "Volume.from_document": "Python-only until mesh import gives the C ABI a "
-                            "source worth sampling; see CLASS_CTOR['Volume']",
+    "MeshQuery.distance": "an inspection surface, not a capability: C imports a "
+                          "mesh with clay_item_volume_from_mesh and evaluates "
+                          "through the document",
+    "MeshQuery.winding_number": "lets a script check the sign behaves — the "
+                                "property the import rests on; not something an "
+                                "app asks for directly",
+    "MeshQuery.signed_distance": "as above",
+    "MeshQuery.contains": "as above",
+    "MeshQuery.triangle_count": "reads back what was handed in, as elsewhere",
+    "Volume.from_document": "sampling a document is a scripting convenience for "
+                            "checking the sampler against a field the caller "
+                            "already has; C samples a MESH, which is what an app "
+                            "imports — see Volume.from_mesh",
     "Volume.eval": "reads the sampled field back before it is placed, so a test "
                    "can tell a sampling error from a placement one; C evaluates "
                    "through the document",
     "Volume.has_samples_at": "inspects the sparse index, as above",
     "Volume.cell_size": "reads a builder's own state back, as above",
     "Volume.band": "reads a builder's own state back, as above",
-    "Volume.brick_count": "reports what the sampling produced; C has no sampler yet",
-    "Volume.sample_count": "reports what the sampling produced; C has no sampler yet",
-    "Volume.megabytes": "reports what the sampling produced; C has no sampler yet",
-    "Volume.bounds": "reports what the sampling produced; C has no sampler yet",
+    "Volume.brick_count": "reads a builder's own state back, as above",
+    "Volume.sample_count": "reads a builder's own state back, as above",
+    "Volume.megabytes": "reads a builder's own state back, as above",
+    "Volume.bounds": "reads a builder's own state back, as above",
     "Prim.repeat": "reads a builder's own state back; clay_item is write-only by "
                    "design, the caller keeps what it set",
     "Prim.deformers": "reads a builder's own state back, as above",

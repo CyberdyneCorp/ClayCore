@@ -34,6 +34,7 @@ EXAMPLES = [
     "16_loft",
     "17_swept",
     "18_sampled_fields",
+    "19_mesh_import",
 ]
 
 
@@ -50,7 +51,7 @@ CAPABILITY_EXAMPLES = {
     "scene-model": "10_editing",
     "brick-cache": None,          # an internal cache; its effect is meshing speed, not a picture
     "evaluation-backends": None,  # the same field on four devices — a parity test, not a render
-    "meshing": "08_meshing_and_io",
+    "meshing": "08_meshing_and_io",  # plus 19_mesh_import for the reverse direction
     "picking": "10_editing",
     "file-io": "08_meshing_and_io",
     "voxel-engine": "15_voxel_verbs_and_repair",

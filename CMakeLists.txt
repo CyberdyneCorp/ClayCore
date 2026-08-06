@@ -44,6 +44,8 @@ add_library(claycore
   src/mesh/dual_contouring.cpp
   src/mesh/validate.cpp
   src/mesh/decimate.cpp
+  src/mesh/bvh.cpp
+  src/mesh/to_field.cpp
   src/pick/pick.cpp
   src/io/clayspace.cpp
   src/io/obj.cpp

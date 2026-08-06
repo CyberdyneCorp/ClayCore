@@ -19,6 +19,8 @@
 #include "clay/mesh/decimate.h"
 #include "clay/mesh/dual_contouring.h"
 #include "clay/mesh/marching.h"
+#include "clay/mesh/bvh.h"
+#include "clay/mesh/to_field.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/validate.h"
 #include "clay/pick/pick.h"
@@ -236,6 +238,13 @@ struct PyCut : PyPrim {};
 
 // -- mesh wrapper ---------------------------------------------------------------
 
+// A BVH over a mesh, exposed as its own object rather than hidden behind the
+// mesh: building it is the expensive part of an import, and an API that hid
+// that would rebuild it per call.
+struct PyMeshQuery {
+    mesh::Bvh bvh;
+};
+
 struct PyMesh {
     mesh::Mesh m;
 };
@@ -259,6 +268,25 @@ void save_mesh_any(const mesh::Mesh& m, const std::string& path) {
     if (ext == "glb") return check_io(io::save_glb_file(m, path));
     throw std::invalid_argument("unsupported mesh extension '." + ext +
                                 "' (supported: .obj, .ply, .fbx, .glb)");
+}
+
+mesh::Mesh load_mesh_any(const std::string& path) {
+    std::size_t dot = path.find_last_of('.');
+    std::string ext = dot == std::string::npos ? "" : path.substr(dot + 1);
+    for (char& c : ext) c = static_cast<char>(std::tolower(c));
+    mesh::Mesh out;
+    if (ext == "obj") {
+        check_io(io::load_obj_file(path, &out));
+    } else if (ext == "ply") {
+        check_io(io::load_ply_file(path, &out));
+    } else if (ext == "fbx") {
+        check_io(io::load_fbx_file(path, &out));
+    } else {
+        // .glb is saved but not loaded; saying so beats a generic failure.
+        throw std::invalid_argument("unsupported mesh extension '." + ext +
+                                    "' for loading (supported: .obj, .ply, .fbx)");
+    }
+    return out;
 }
 
 // A cut's swept region: the document being cut, which is the answer in every
@@ -594,6 +622,22 @@ voxel::VoxelCoord to_coord(nb::handle h) {
 }
 
 enum class Want { Distances, Gradients, Colors };
+
+// (N, 3) points in, (N,) floats out. Shared by everything that answers one
+// number per point without going through a backend.
+template <typename Fn>
+nb::object map_points(nb::handle points, Fn&& fn) {
+    PointsView pts = to_points(points);
+    const std::size_t n = pts.count;
+    float* out = new float[n ? n : 1];
+    nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<float*>(p); });
+    {
+        nb::gil_scoped_release release;
+        for (std::size_t i = 0; i < n; ++i)
+            out[i] = fn(kernel::cf3(pts.data[i * 3], pts.data[i * 3 + 1], pts.data[i * 3 + 2]));
+    }
+    return nb::cast(nb::ndarray<nb::numpy, float>(out, {n}, owner));
+}
 
 nb::object eval_field(const scene::Tape& tape, nb::handle points,
                       const std::string& backend_name, Want want) {
@@ -1471,6 +1515,47 @@ NB_MODULE(pyclay, m) {
              "points"_a,
              "The sampled field itself, before it is placed in a document —\n"
              "so a test can tell a sampling error from a placement one.")
+        .def_static(
+            "from_mesh",
+            [](const PyMesh& mesh, float cell, nb::handle band, float beta, nb::handle position,
+               nb::handle rotation_axis_angle, float scale) {
+                if (mesh.m.triangle_count() == 0)
+                    throw std::invalid_argument("cannot sample a mesh with no triangles");
+                if (cell < 0.0f) throw std::invalid_argument("cell must be >= 0");
+                if (!(beta >= 0.0f)) throw std::invalid_argument("beta must be >= 0");
+                mesh::ImportSettings settings;
+                settings.cell_size = cell;
+                settings.band = band.is_none() ? 0.0f : nb::cast<float>(band);
+                settings.beta = beta;
+
+                std::optional<field::FieldVolume> volume;
+                {
+                    nb::gil_scoped_release release;  // the BVH build is the slow part
+                    volume = mesh::to_field(mesh.m, settings);
+                }
+                if (!volume) throw std::invalid_argument("the mesh could not be sampled");
+
+                PyVolume out;
+                out.prim = scene::Prim::volume();
+                out.volume = std::make_shared<const field::FieldVolume>(std::move(*volume));
+                place(out, position, rotation_axis_angle, scale);
+                return out;
+            },
+            "mesh"_a, "cell"_a = 0.0f, "band"_a = nb::none(), "beta"_a = 2.0f, CLAY_PLACE_ARGS,
+            "Sample a mesh into a field, which is what makes an imported model\n"
+            "something you can WORK on rather than only display.\n\n"
+            "The sign comes from the GENERALIZED WINDING NUMBER, not a ray cast\n"
+            "or the nearest triangle's normal. That matters because real assets\n"
+            "are not watertight: a single hole flips a ray-parity test for a\n"
+            "whole half-space, and the nearest triangle to a point inside a model\n"
+            "may face away when the wall it should have hit is missing. A winding\n"
+            "number degrades continuously instead, passing smoothly through a\n"
+            "half across an opening.\n\n"
+            "`cell` defaults to a fraction of the mesh's longest side, since a\n"
+            "default in world units would be far too fine for a building and far\n"
+            "too coarse for a bolt. `beta` is how far a BVH node must be before\n"
+            "it is summarized by one term rather than descended: larger is more\n"
+            "accurate and slower, and 0 sums every triangle exactly.")
         .def("has_samples_at",
              [](const PyVolume& v, nb::handle point) {
                  return v.volume && v.volume->has_samples_at(to_f3(point, "point"));
@@ -1644,7 +1729,100 @@ NB_MODULE(pyclay, m) {
             return arr;
         });
 
+    m.def("load_mesh",
+          [](const std::string& path) {
+              PyMesh out;
+              {
+                  nb::gil_scoped_release release;
+                  out.m = load_mesh_any(path);
+              }
+              return out;
+          },
+          "path"_a,
+          "Load a mesh by extension: .obj, .ply, .fbx. The counterpart to\n"
+          "Mesh.save, and what gives Volume.from_mesh something to sample.\n"
+          "(.glb is written but not read.)");
+
+    nb::class_<PyMeshQuery>(
+        m, "MeshQuery",
+        "Distance and insideness against a mesh's triangles.\n\n"
+        "The tree is built when this is constructed, not per call, because\n"
+        "building it is the expensive part of an import — an interface that hid\n"
+        "that would rebuild it every query.\n\n"
+        "Insideness is the GENERALIZED WINDING NUMBER, not a ray cast or the\n"
+        "nearest triangle's normal. Both of those are exact on a clean closed\n"
+        "mesh and wrong on the meshes people import: one hole flips a parity\n"
+        "count for a whole half-space, and the nearest triangle to a point\n"
+        "inside a model may face away when the wall it should have hit is\n"
+        "missing. A winding number passes smoothly through a half across an\n"
+        "opening instead.")
+        .def("__init__",
+             [](PyMeshQuery* self, const PyMesh& mesh) {
+                 if (mesh.m.triangle_count() == 0)
+                     throw std::invalid_argument("a mesh with no triangles has no surface");
+                 new (self) PyMeshQuery{mesh::Bvh::build(mesh.m)};
+             },
+             "mesh"_a)
+        .def_prop_ro("triangle_count",
+                     [](const PyMeshQuery& q) { return q.bvh.triangle_count(); })
+        .def("distance",
+             [](const PyMeshQuery& q, nb::handle points) {
+                 return map_points(points, [&](kernel::cfloat3 p) {
+                     return q.bvh.unsigned_distance(p);
+                 });
+             },
+             "points"_a, "Unsigned distance to the surface at (N, 3) points -> (N,)")
+        .def("winding_number",
+             [](const PyMeshQuery& q, nb::handle points, float beta) {
+                 return map_points(points,
+                                   [&](kernel::cfloat3 p) { return q.bvh.winding_number(p, beta); });
+             },
+             "points"_a, "beta"_a = 2.0f,
+             "~1 inside a closed surface, ~0 outside, continuous across a hole.\n"
+             "`beta` is how far a node must be before it stands in for its\n"
+             "triangles; 0 sums every triangle exactly, which is slow and is\n"
+             "what the approximation is checked against.")
+        .def("signed_distance",
+             [](const PyMeshQuery& q, nb::handle points, float beta) {
+                 return map_points(points, [&](kernel::cfloat3 p) {
+                     return q.bvh.signed_distance(p, beta);
+                 });
+             },
+             "points"_a, "beta"_a = 2.0f, "Distance, negated inside -> (N,)")
+        .def("contains",
+             [](const PyMeshQuery& q, nb::handle points, float beta) {
+                 return map_points(points, [&](kernel::cfloat3 p) {
+                     return q.bvh.is_inside(p, beta) ? 1.0f : 0.0f;
+                 });
+             },
+             "points"_a, "beta"_a = 2.0f, "1 where inside, 0 where outside -> (N,)");
+
     nb::class_<PyMesh>(m, "Mesh", "Triangle mesh with numpy buffer views")
+        .def_static(
+            "from_triangles",
+            [](nb::handle positions, nb::handle indices) {
+                PointsView pts = to_points(positions);
+                PyMesh out;
+                out.m.positions.reserve(pts.count);
+                for (std::size_t i = 0; i < pts.count; ++i)
+                    out.m.positions.push_back(
+                        kernel::cf3(pts.data[i * 3], pts.data[i * 3 + 1], pts.data[i * 3 + 2]));
+                nb::object flat = nb::module_::import_("numpy")
+                                      .attr("asarray")(indices, "dtype"_a = "uint32")
+                                      .attr("reshape")(-1);
+                for (nb::handle v : flat) {
+                    std::uint32_t index = nb::cast<std::uint32_t>(v);
+                    if (index >= pts.count)
+                        throw std::invalid_argument("an index points past the vertices");
+                    out.m.indices.push_back(index);
+                }
+                if (out.m.indices.empty() || out.m.indices.size() % 3 != 0)
+                    throw std::invalid_argument("need a whole number of triangles");
+                return out;
+            },
+            "positions"_a, "indices"_a,
+            "Build a mesh from an (N, 3) vertex array and a flat triangle index\n"
+            "array — which is how you hand back a mesh you have edited.")
         .def_prop_ro("positions",
                      [](nb::object self) { return f3_view(self, nb::cast<PyMesh&>(self).m.positions); })
         .def_prop_ro("normals",

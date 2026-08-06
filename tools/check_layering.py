@@ -23,7 +23,7 @@ ALLOWED = {
     "eval": {"kernel", "math", "scene"},
     "brick": {"kernel", "math", "scene", "eval"},
     "voxel": {"kernel", "math", "scene", "mesh"},  # mesh_data.h is a leaf data type
-    "mesh": {"kernel", "math", "scene", "eval", "brick"},
+    "mesh": {"kernel", "math", "scene", "eval", "brick", "field"},
     "brush": {"kernel", "math", "scene", "voxel"},
     "cut": {"kernel", "math", "scene"},
     "field": {"kernel", "math"},  # a sampled field is a leaf payload, below scene

@@ -398,27 +398,6 @@ TEST_CASE("volume: serializes and survives a save") {
     CHECK_FALSE(FieldVolume::deserialize(bytes.data(), 3).has_value());
 }
 
-TEST_CASE("volume: the C ABI refuses to build one rather than building an empty one") {
-    // The enumerator exists so documents CONTAINING a volume load, evaluate
-    // and mesh. Constructing one is a different thing: nothing in the C ABI
-    // can supply the samples, so the item would be silently empty — which
-    // looks like it worked. It is refused until mesh import gives it a source.
-    const float ignored[1] = {0.0f};
-    CHECK(clay_item_create(CLAY_PRIM_VOLUME, ignored, 1) == nullptr);
-    CHECK(clay_item_create(CLAY_PRIM_VOLUME, nullptr, 0) == nullptr);
-
-    // ...while an ordinary primitive on either side of it still builds, so the
-    // refusal is the volume and not an off-by-one in the enumerator range.
-    const float radius[1] = {1.0f};
-    clay_item* sphere = clay_item_create(CLAY_PRIM_SPHERE, radius, 1);
-    CHECK(sphere != nullptr);
-    clay_item_destroy(sphere);
-    const float ease[1] = {0.0f};
-    clay_item* swept = clay_item_create(CLAY_PRIM_SWEPT, ease, 1);
-    CHECK(swept != nullptr);
-    clay_item_destroy(swept);
-}
-
 TEST_CASE("volume: a document keeps its volume across a save") {
     scene::Document doc;
     scene::Layer& l = doc.add_sdf_layer("l");

@@ -329,6 +329,23 @@ baked = clay.Volume.from_document(other_doc, cell=0.04)   # band defaults to 3 c
 body.add(baked, op=clay.Op.SUBTRACT)
 baked.cell_size, baked.band, baked.brick_count, baked.megabytes, baked.bounds
 
+# mesh import: the same sampling, fed by a triangle soup — which is what makes
+# an imported model something you can WORK on rather than only display. The
+# SIGN is the hard half and comes from the generalized winding number, not a
+# ray cast or the nearest triangle's normal: real assets are not watertight,
+# one hole flips a parity test for a whole half-space, and the nearest triangle
+# to a point inside a model may face away when the wall is missing. A winding
+# number passes smoothly through 1/2 across an opening instead.
+# `cell` defaults to a fraction of the mesh's own longest side, since a default
+# in world units suits neither a building nor a bolt.
+body.add(clay.Volume.from_mesh(clay.load_mesh("scan.ply"), cell=0.02))
+
+# and the microscope, when you want to see the sign behave rather than trust it
+q = clay.MeshQuery(mesh)          # the BVH is built HERE, once, not per call
+q.distance(pts), q.signed_distance(pts), q.contains(pts)
+q.winding_number(pts, beta=2.0)   # beta=0 sums every triangle; slow, exact
+clay.Mesh.from_triangles(positions, indices)   # hand back a mesh you edited
+
 # curves: a stroke point carries a type saying how it joins the next, so a
 # stroke is a curve whose points are all hard corners. Typed points tessellate
 # into the same segment chain at compile time, so a curve costs nothing to

@@ -16,7 +16,10 @@
 
 #include "clay/eval/backend.h"
 #include "clay/io/clayspace.h"
+#include <memory>
+
 #include "clay/io/mesh_io.h"
+#include "clay/mesh/to_field.h"
 #include "clay/mesh/decimate.h"
 #include "clay/mesh/dual_contouring.h"
 #include "clay/mesh/marching.h"
@@ -302,6 +305,7 @@ constexpr std::size_t kMeshParamsOriginal =
     offsetof(clay_mesh_params, decimate_ratio) + sizeof(float);
 constexpr std::size_t kBrushParamsOriginal =
     offsetof(clay_brush_params, seed) + sizeof(std::uint32_t);
+constexpr std::size_t kVolumeParamsOriginal = offsetof(clay_volume_params, beta) + sizeof(float);
 
 // Parameters each primitive takes, indexed by clay_prim (= the tape opcode).
 // This is what the clay_prim comments document and what clay_item_create
@@ -1321,15 +1325,13 @@ clay_item* clay_item_create(int32_t prim, const float* params, size_t param_coun
         fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown primitive type");
         return nullptr;
     }
-    // A volume is the one enumerator with no producer here. Nothing in this
-    // ABI can give an item its samples, so one created this way could only
-    // ever be a silently empty item — worse than a refusal, because it looks
-    // like it worked. The enumerator stays valid so that documents CONTAINING
-    // a volume still load, evaluate and mesh; it is construction that is
-    // refused, and only until mesh import gives it a source.
+    // A volume needs samples, and this entry point has no way to supply them:
+    // one built here could only ever be a silently empty item, which looks
+    // like it worked. clay_item_volume_from_mesh is the producer.
     if (prim == CLAY_PRIM_VOLUME) {
         fail(CLAY_ERROR_INVALID_ARGUMENT,
-             "CLAY_PRIM_VOLUME cannot be constructed through this ABI yet");
+             "use clay_item_volume_from_mesh to build a volume; clay_item_create has no "
+             "samples to give it");
         return nullptr;
     }
     if (check_params("primitive", params, param_count, kPrimParams[prim]) != CLAY_OK)
@@ -1942,6 +1944,80 @@ clay_result clay_mesh_save(const clay_mesh* mesh, const char* path) {
     if (ext == "fbx") return from_io(io::save_fbx_file(mesh->data, p));
     if (ext == "glb") return from_io(io::save_glb_file(mesh->data, p));
     return fail(CLAY_ERROR_UNSUPPORTED, "unknown extension: " + ext);
+}
+
+clay_result clay_mesh_load(const char* path, clay_mesh** out_mesh) {
+    if (!path || !out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null path or out_mesh");
+    *out_mesh = nullptr;
+    std::string p(path);
+    std::size_t dot = p.find_last_of('.');
+    std::string ext = dot == std::string::npos ? "" : p.substr(dot + 1);
+    auto loaded = std::make_unique<clay_mesh>();
+    io::IoStatus status;
+    if (ext == "obj") {
+        status = io::load_obj_file(p, &loaded->data);
+    } else if (ext == "ply") {
+        status = io::load_ply_file(p, &loaded->data);
+    } else if (ext == "fbx") {
+        status = io::load_fbx_file(p, &loaded->data);
+    } else {
+        return fail(CLAY_ERROR_UNSUPPORTED, "unknown extension: " + ext);
+    }
+    if (!status.ok()) return from_io(status);
+    *out_mesh = loaded.release();
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_from_triangles(const float* positions, size_t vertex_count,
+                                     const uint32_t* indices, size_t index_count,
+                                     clay_mesh** out_mesh) {
+    if (!out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_mesh");
+    *out_mesh = nullptr;
+    if (!positions || !indices)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null positions or indices");
+    if (vertex_count == 0 || index_count == 0 || index_count % 3 != 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "need a whole number of triangles");
+    auto built = std::make_unique<clay_mesh>();
+    built->data.positions.reserve(vertex_count);
+    for (size_t i = 0; i < vertex_count; ++i)
+        built->data.positions.push_back(
+            kernel::cf3(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]));
+    built->data.indices.assign(indices, indices + index_count);
+    for (std::uint32_t index : built->data.indices)
+        if (index >= vertex_count)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "an index points past the vertices");
+    *out_mesh = built.release();
+    return CLAY_OK;
+}
+
+clay_result clay_item_volume_from_mesh(const clay_mesh* mesh, const clay_volume_params* params,
+                                       clay_item** out_item) {
+    if (!mesh || !params || !out_item)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_item = nullptr;
+    clay_volume_params p;
+    clay_result r = read_desc(params, kVolumeParamsOriginal, &p);
+    if (r != CLAY_OK) return r;
+    if (mesh->data.triangle_count() == 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the mesh has no triangles to sample");
+
+    mesh::ImportSettings settings;
+    settings.cell_size = p.cell_size;
+    settings.band = p.band;
+    settings.padding = p.padding;
+    // Zero here means the default rather than "sum every triangle": summing
+    // exactly is a testing control, and an app that reached it by leaving a
+    // field zeroed would get an import that took minutes.
+    settings.beta = p.beta > 0.0f ? p.beta : 2.0f;
+
+    std::optional<field::FieldVolume> volume = mesh::to_field(mesh->data, settings);
+    if (!volume) return fail(CLAY_ERROR_INVALID_ARGUMENT, "the mesh could not be sampled");
+
+    auto* item = new clay_item();
+    item->node.prim = scene::Prim::volume();
+    item->node.volume = std::make_shared<field::FieldVolume>(std::move(*volume));
+    *out_item = item;
+    return CLAY_OK;
 }
 
 // -- voxel grids (c-abi spec: voxel grids across the ABI) --------------------

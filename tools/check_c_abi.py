@@ -182,10 +182,10 @@ def declared_enum(name: str) -> list[int]:
 # It is a narrow exemption: the value must still round-trip through load,
 # evaluate and mesh, which the rest of the suite covers.
 DECLARED_BUT_NOT_CONSTRUCTIBLE = {
-    "CLAY_PRIM_VOLUME": "a volume is only reachable by SAMPLING something, and "
-                        "nothing in this ABI can supply the samples until mesh "
-                        "import lands; constructing one would give back a "
-                        "silently empty item",
+    "CLAY_PRIM_VOLUME": "built by clay_item_volume_from_mesh, not by "
+                        "clay_item_create: a volume needs samples and that entry "
+                        "point has none to give, so one built there could only "
+                        "ever be a silently empty item",
 }
 
 

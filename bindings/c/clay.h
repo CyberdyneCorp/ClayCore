@@ -112,10 +112,9 @@ typedef enum clay_prim {
      * added with clay_item_add_loft_profile — a guide is not a new kind of
      * curve and a swept profile is not a new kind of profile. (bound) */
     CLAY_PRIM_SWEPT = 32,
-    /* A sampled narrow-band volume. Not constructible through this ABI yet:
-     * nothing produces one until mesh import lands, and an enumerator without
-     * a producer would be a promise the library cannot keep. Documents that
-     * contain one still load, evaluate and mesh. (bound) */
+    /* A sampled narrow-band volume. Not built with clay_item_create, which
+     * has no way to supply the samples: use clay_item_volume_from_mesh, which
+     * is the producer. (bound) */
     CLAY_PRIM_VOLUME = 33
 } clay_prim;
 
@@ -627,6 +626,44 @@ clay_result clay_mesh_validate(const clay_mesh* mesh, int32_t* out_watertight,
 
 /* Save by extension: .obj, .ply, .fbx, .glb */
 clay_result clay_mesh_save(const clay_mesh* mesh, const char* path);
+
+/* Load by extension: .obj, .ply, .fbx. The counterpart to clay_mesh_save, and
+ * what gives clay_item_volume_from_mesh something to sample. */
+clay_result clay_mesh_load(const char* path, clay_mesh** out_mesh);
+
+/* Build a mesh from caller-owned triangles: positions is count*3 floats and
+ * indices is triangle_count*3 vertex indices. Copied, so the caller's buffers
+ * may be freed on return. */
+clay_result clay_mesh_from_triangles(const float* positions, size_t vertex_count,
+                                     const uint32_t* indices, size_t index_count,
+                                     clay_mesh** out_mesh);
+
+/* -- importing a mesh as a field ------------------------------------------- */
+
+typedef struct clay_volume_params {
+    uint32_t struct_size; /* = sizeof(clay_volume_params); required */
+    float cell_size;      /* sample spacing; <= 0 picks from the mesh's own size */
+    float band;           /* half-width of the band kept; <= 0 means three cells */
+    float padding;        /* how far past the mesh's bounds to sample; <= 0 means the band */
+    /* How far a BVH node must be before it is summarized by a single term
+     * rather than descended. Larger is more accurate and slower; <= 0 means
+     * the default. Sampling every triangle exactly is not reachable from here:
+     * it is a testing control, not something an app should ask for. */
+    float beta;
+} clay_volume_params;
+
+/* Samples `mesh` into an item carrying a volume, which is what turns an
+ * imported model into something that can be combined, cut and sculpted.
+ *
+ * The sign comes from the generalized winding number rather than a ray cast or
+ * the nearest triangle's normal, because real assets are not watertight: one
+ * hole flips a parity test for a whole half-space, while a winding number
+ * degrades continuously across an opening.
+ *
+ * The returned item is owned by the caller until it is added to a layer, the
+ * same as clay_item_create. A mesh with no triangles is refused. */
+clay_result clay_item_volume_from_mesh(const clay_mesh* mesh, const clay_volume_params* params,
+                                       clay_item** out_item);
 
 /* -- voxel grids ----------------------------------------------------------- */
 

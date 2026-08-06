@@ -632,6 +632,90 @@ if let reloaded = reloaded {
 }
 try? FileManager.default.removeItem(atPath: outPath)
 
+// -- importing a mesh as a field ---------------------------------------------
+// The capability an app actually reaches for: a downloaded or scanned model
+// turned into something that can be combined, cut and sculpted. The sign comes
+// from a generalized winding number, so a mesh that is not watertight — which
+// is most of them — still imports sensibly.
+
+do {
+    // A closed box as raw triangles, wound outward.
+    let h: Float = 0.6
+    var positions: [Float] = []
+    for i in 0..<8 {
+        positions.append((i & 1) != 0 ? h : -h)
+        positions.append((i & 2) != 0 ? h : -h)
+        positions.append((i & 4) != 0 ? h : -h)
+    }
+    let faces: [[UInt32]] = [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4],
+                             [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]]
+    var indices: [UInt32] = []
+    for f in faces {
+        indices.append(contentsOf: [f[0], f[1], f[2]])
+        indices.append(contentsOf: [f[0], f[2], f[3]])
+    }
+
+    var boxMesh: OpaquePointer? = nil
+    check(clay_mesh_from_triangles(positions, positions.count / 3, indices, indices.count,
+                                   &boxMesh) == CLAY_OK,
+          "built a mesh from triangles")
+
+    var volumeParams = clay_volume_params()
+    volumeParams.struct_size = UInt32(MemoryLayout<clay_volume_params>.size)
+    volumeParams.cell_size = 0.05
+
+    var volumeItem: OpaquePointer? = nil
+    check(clay_item_volume_from_mesh(boxMesh, &volumeParams, &volumeItem) == CLAY_OK
+          && volumeItem != nil,
+          "sampled the mesh into an item")
+
+    guard let importDoc = clay_document_create() else {
+        check(false, "created a document for the import")
+        exit(1)
+    }
+    var importLayer: clay_layer_id = 0
+    check(clay_add_sdf_layer(importDoc, "imported", &importLayer) == CLAY_OK,
+          "added a layer for the import")
+    check(clay_layer_add_item(importDoc, importLayer, volumeItem, nil) == CLAY_OK,
+          "placed the imported volume")
+
+    let inside = evaluate(importDoc, [0, 0, 0])
+    let outside = evaluate(importDoc, [2, 0, 0])
+    check(inside[0] < 0, "the imported field is negative inside the box (\(inside[0]))")
+    check(outside[0] > 0, "the imported field is positive outside it (\(outside[0]))")
+
+    // clay_item_create still refuses a volume: it has no samples to give.
+    var ignored: Float = 0
+    check(clay_item_create(Int32(CLAY_PRIM_VOLUME.rawValue), &ignored, 1) == nil,
+          "clay_item_create will not build a volume")
+
+    // A mesh with no triangles has no surface to measure from.
+    var emptyItem: OpaquePointer? = nil
+    var emptyMesh: OpaquePointer? = nil
+    check(clay_mesh_from_triangles(positions, positions.count / 3, indices, 0, &emptyMesh)
+          == CLAY_ERROR_INVALID_ARGUMENT,
+          "a mesh with no triangles is refused")
+    check(clay_item_volume_from_mesh(nil, &volumeParams, &emptyItem)
+          == CLAY_ERROR_INVALID_ARGUMENT,
+          "a null mesh is refused")
+
+    // And it survives a save, which is what makes an import worth doing.
+    let importPath = NSTemporaryDirectory() + "clay_swift_import.clayspace"
+    check(clay_document_save(importDoc, importPath) == CLAY_OK, "saved the imported document")
+    var importBack: OpaquePointer? = nil
+    check(clay_document_load(importPath, &importBack) == CLAY_OK, "loaded it back")
+    if let importBack = importBack {
+        check(evaluate(importBack, [0, 0, 0])[0] == inside[0],
+              "the round trip preserved the imported field")
+        clay_document_destroy(importBack)
+    }
+    try? FileManager.default.removeItem(atPath: importPath)
+
+    clay_item_destroy(volumeItem)
+    clay_document_destroy(importDoc)
+    clay_mesh_destroy(boxMesh)
+}
+
 // -- result ------------------------------------------------------------------
 
 print("\n\(checks - failures)/\(checks) checks passed")
