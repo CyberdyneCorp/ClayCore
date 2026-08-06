@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 14
+#define CLAY_ABI_MINOR 17
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -401,6 +401,49 @@ clay_result clay_item_set_profile_polygon(clay_item* item, const float* xy, size
 clay_result clay_item_set_stroke_points(clay_item* item, const float* xyzr, size_t count);
 clay_result clay_item_add_stroke_point(clay_item* item, const float position[3], float radius);
 clay_result clay_item_set_stroke_blend_k(clay_item* item, float k);
+
+/* How a point joins the one after it. A stroke is a curve whose points are all
+ * hard corners, so CLAY_POINT_HARD is both the default and exactly what a
+ * chain authored before types existed means. */
+typedef enum clay_point_type {
+    CLAY_POINT_HARD = 0,   /* straight segment to the next point */
+    CLAY_POINT_SPLINE = 1, /* Catmull-Rom, passing through the points */
+    CLAY_POINT_BSPLINE = 2,/* uniform cubic B-spline; approximating, so it rounds corners */
+    CLAY_POINT_BEZIER = 3  /* cubic shaped by the handles below */
+} clay_point_type;
+
+/* The typed form of the call above: `count` points of x, y, z, radius, plus
+ * optional parallel arrays of count clay_point_type values and of count*3
+ * floats for the incoming and outgoing Bezier handles. Passing NULL for an
+ * optional array leaves that field at its default, so
+ * clay_item_set_curve_points(item, xyzr, count, NULL, NULL, NULL) is exactly
+ * clay_item_set_stroke_points.
+ *
+ * Handles are in the item's LOCAL space, relative to their point. 3DCoat keeps
+ * its handles in screen space and its own users call that a wart: the curve
+ * then means something different depending on where the camera was.
+ *
+ * Typed points are tessellated into the same segment chain at compile time, so
+ * a curve costs nothing at evaluation time and no backend knows it exists. */
+clay_result clay_item_set_curve_points(clay_item* item, const float* xyzr, size_t count,
+                                       const int32_t* types, const float* in_handles_xyz,
+                                       const float* out_handles_xyz);
+
+/* Close the chain, and set the tessellation tolerance: the largest distance a
+ * span's midpoint may sit from its chord, which must be > 0. Tolerance is a
+ * property of the DOCUMENT, not of the viewer — two builds have to agree on
+ * what a document means, so it is not a rendering setting. */
+clay_result clay_item_set_curve(clay_item* item, int32_t closed, float tolerance);
+
+/* Replace a placed stroke or curve's whole point list, through the command
+ * vocabulary, so the edit is undoable and refused on a protected layer. A
+ * curve is tens of points: a whole-list replace costs less than the
+ * bookkeeping granular commands would need, and its inverse is exact. */
+clay_result clay_layer_set_stroke_points(clay_document* doc, clay_layer_id layer,
+                                         clay_node_id node, const float* xyzr, size_t count,
+                                         const int32_t* types, const float* in_handles_xyz,
+                                         const float* out_handles_xyz, int32_t closed,
+                                         float tolerance);
 
 /* Parameters of a spatial morph, in world space. Required by the matching
  * transition op and rejected with any other op: linear morphs along the
@@ -819,6 +862,71 @@ clay_result clay_mask_smooth(clay_mask* mask, int32_t iterations);
 clay_result clay_mask_bounds(const clay_mask* mask, int32_t out_min[3], int32_t out_max[3],
                              int32_t* out_has_bounds);
 
+/* -- the cut tool ---------------------------------------------------------- */
+
+/* A shape drawn over the model, resolved into an ordinary edit item.
+ *
+ * The caller gives the FRAME the shape was drawn on — an origin and an
+ * orthonormal basis, which a viewport already has because it needed one to
+ * draw the overlay — and the shape in WORLD units on that frame. Not pixels
+ * and not normalized device coordinates: this engine has no viewport and does
+ * not want one.
+ *
+ * The cut is a PRISM, not a frustum. A shape drawn under a perspective camera
+ * sweeps a converging wedge, and cutting with one would give a cut face that
+ * is not flat and a solid that depends on where the camera was standing. A
+ * trim is a straight cut, as it is in ZBrush and 3DCoat.
+ *
+ * Which side survives is the OP the resolved item is placed with:
+ * CLAY_OP_SUBTRACT removes what the shape covers, CLAY_OP_INTERSECT keeps only
+ * that. A separate flag would be a second way to say one thing. */
+
+typedef enum clay_cut_shape {
+    CLAY_CUT_RECT = 0,
+    CLAY_CUT_CIRCLE = 1,
+    CLAY_CUT_POLYGON = 2 /* outline in polygon_xy, closed implicitly */
+} clay_cut_shape;
+
+typedef struct clay_cut_desc {
+    uint32_t struct_size; /* = sizeof(clay_cut_desc); required */
+    float origin[3];
+    float right[3];   /* unit, in-plane: shape x is measured in these world units */
+    float up[3];      /* unit, in-plane */
+    float forward[3]; /* unit, the sweep direction */
+    int32_t shape;    /* clay_cut_shape */
+    float half_width; /* CLAY_CUT_RECT */
+    float half_height;
+    float radius;   /* CLAY_CUT_CIRCLE */
+    float rounding; /* bevels the cut walls; >= 0 */
+    /* The region being cut, used only to size the sweep so that a cut goes all
+     * the way through instead of stopping inside it. */
+    float region_min[3];
+    float region_max[3];
+    /* Sweep extent either side of the origin along forward. Both zero means
+     * "derive it from the region", which is what a caller wants unless it is
+     * asking for a deliberate partial cut. */
+    float near_extent;
+    float far_extent;
+} clay_cut_desc;
+
+/* Resolve a cut into an item the caller places like any other, or NULL with
+ * the detail in clay_last_error: a frame that is not orthonormal is refused
+ * rather than squared up, because the shape the user saw was drawn in the
+ * frame they think they have. `polygon_xy` is count*2 floats and is read only
+ * for CLAY_CUT_POLYGON. Free the result with clay_item_destroy. */
+clay_item* clay_cut_create(const clay_cut_desc* desc, const float* polygon_xy,
+                           size_t polygon_count);
+
+/* A closed control-point curve drawn in the cut plane, flattened into a
+ * polygon outline through the same tessellator curves use — so a spline lasso
+ * follows the same curve a spline item would. Size-query pattern: call with
+ * out_xy == NULL to receive the vertex count in *count. `points_xyzr` and the
+ * optional `types` are as clay_item_set_curve_points takes them; only x and y
+ * are read, since the outline lies in the cut plane. */
+clay_result clay_cut_polygon_from_curve(const float* points_xyzr, size_t count,
+                                        const int32_t* types, float tolerance, float* out_xy,
+                                        size_t* out_count);
+
 /* -- brush strokes --------------------------------------------------------- */
 
 /* A drag becomes stamps, and a stamp becomes an ordinary edit.
@@ -936,6 +1044,75 @@ clay_result clay_layer_apply_stroke(clay_document* doc, clay_layer_id layer,
                                     const clay_stroke_preset* preset, const clay_item* item,
                                     const clay_mask* mask, clay_node_id* out_nodes,
                                     size_t* count);
+
+/* Fill pockets inside the footprint: an empty cell with at least four of its
+ * six face neighbours occupied is inside a cavity rather than beside a
+ * surface, and `passes` iterations reach that many cells deep. A through-hole,
+ * an open face and a wide shallow dent are left alone — smoothing is the verb
+ * for surface irregularity. `passes` must be > 0.
+ *
+ * This began as a morphological closing, which cannot do the job: a ball of
+ * radius r fits INTO a dent wider than r, so a larger element fills less, and
+ * the erosion reaches through from the void behind a one-cell wall and reopens
+ * every hole the dilation just sealed. */
+clay_result clay_voxel_sculpt_fill_cavities(clay_voxel_grid* grid, const int32_t cell[3],
+                                            const clay_brush_params* brush, int32_t passes);
+
+/* Flatten onto the plane AND smooth, from ONE snapshot. Calling flatten then
+ * smooth is not the same thing: the flatten's output would feed the smooth's
+ * neighbourhood, which is what the snapshot discipline exists to prevent. A
+ * zero-length normal is rejected, as it is for flatten. */
+clay_result clay_voxel_sculpt_scrape(clay_voxel_grid* grid, const int32_t cell[3],
+                                     const clay_brush_params* brush, const float normal[3],
+                                     float offset_cells);
+
+/* Drag SURFACE material along a direction, leaving the interior where it was.
+ * That is the difference from grab, which translates every cell in its region:
+ * grab moves a lump, smudge smears a skin. */
+clay_result clay_voxel_sculpt_smudge(clay_voxel_grid* grid, const int32_t cell[3],
+                                     const clay_brush_params* brush,
+                                     const float displacement[3]);
+
+/* Carve modulated by a caller-supplied alpha: `alpha_width * alpha_height`
+ * samples in [0, 1], row-major, projected onto the plane perpendicular to
+ * `direction`. `index` 0 carves and a non-zero one deposits.
+ *
+ * The engine decodes no images and never will at this boundary: a host that
+ * has an alpha has already loaded the PNG, and handing over the samples costs
+ * it nothing while costing the engine no format zoo. */
+clay_result clay_voxel_sculpt_carve_alpha(clay_voxel_grid* grid, const int32_t cell[3],
+                                          const clay_brush_params* brush, const float* alpha,
+                                          int32_t alpha_width, int32_t alpha_height,
+                                          const float direction[3], int32_t index);
+
+/* -- repair ---------------------------------------------------------------- */
+
+/* What a pre-bake check wants to know, without performing the repair: a
+ * destructive operation whose input is somebody's sculpt should be askable
+ * before it is answerable. */
+typedef struct clay_repair_report {
+    uint32_t struct_size; /* = sizeof(clay_repair_report); required */
+    size_t enclosed_voids; /* empty regions the outside cannot reach */
+    size_t void_cells;     /* their total size */
+    size_t largest_void;
+    int32_t airtight; /* non-zero when there are no enclosed voids at all */
+} clay_repair_report;
+
+clay_result clay_voxel_repair_report(const clay_voxel_grid* grid,
+                                     clay_repair_report* out_report);
+
+/* Seal perforations by the same pocket rule the fill-cavities verb uses. Only
+ * ever adds cells, so no material is lost. `passes` must be > 0; `mask` may be
+ * NULL, and where one is given a fully masked cell is left alone — a repair
+ * that ignored freeze would be the one destructive operation here that does. */
+clay_result clay_voxel_repair_close_holes(clay_voxel_grid* grid, int32_t passes,
+                                          const clay_mask* mask);
+
+/* Fill every empty cell the outside cannot reach, coloured from the shell that
+ * encloses it. Reachability is over EMPTY cells by face adjacency, seeded
+ * outside the occupied bounds, so enclosure is decided rather than guessed at
+ * from a local neighbourhood. */
+clay_result clay_voxel_repair_fill_voids(clay_voxel_grid* grid, const clay_mask* mask);
 
 /* -- queries --------------------------------------------------------------- */
 

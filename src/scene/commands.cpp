@@ -106,6 +106,17 @@ std::optional<Command> apply_one(Document& doc, const TrimStrokeCmd& c) {
     return Command{inverse};
 }
 
+std::optional<Command> apply_one(Document& doc, const SetStrokePointsCmd& c) {
+    SdfContent* content = content_of(doc, c.layer);
+    Node* n = content ? content->find_mut(c.node) : nullptr;
+    if (!n || n->prim.type != PrimType::Stroke) return std::nullopt;
+    SetStrokePointsCmd inverse{c.layer, c.node, n->stroke, n->stroke_closed, n->curve_tolerance};
+    n->stroke = c.points;
+    n->stroke_closed = c.closed;
+    n->curve_tolerance = c.tolerance;
+    return Command{inverse};
+}
+
 std::optional<Command> apply_one(Document& doc, const AddLayerCmd& c) {
     doc.insert_layer(c.layer, c.index);
     return Command{RemoveLayerCmd{c.layer.id}};
@@ -219,10 +230,39 @@ struct Reader {
         return v;
     }
     std::uint32_t u32() { return pod<std::uint32_t>(); }
+
+    // The layout version this stream was written at. Carried on the reader
+    // rather than threaded through read_layer/read_content/read_node, which
+    // would put a parameter on five signatures to be forwarded unchanged.
+    std::uint16_t minor = kSceneMinor;
 };
+
+// StrokePoint carries a uint8 among its floats, so it goes field-wise for the
+// same reason Prim and Blend do: struct-wise writes put indeterminate padding
+// on the wire, which bit a portability check on GCC once already.
+constexpr std::size_t kStrokePointBytes =
+    sizeof(kernel::cfloat3) * 3 + sizeof(float) + sizeof(StrokePointType);
 
 // Prim and Blend contain padding (uint8 + float) — serialize field-wise so
 // indeterminate padding bytes never reach the stream.
+void write_point(Writer& w, const StrokePoint& p) {
+    w.pod(p.pos);
+    w.pod(p.radius);
+    w.pod(p.type);
+    w.pod(p.in_handle);
+    w.pod(p.out_handle);
+}
+
+StrokePoint read_point(Reader& r) {
+    StrokePoint p;
+    p.pos = r.pod<kernel::cfloat3>();
+    p.radius = r.pod<float>();
+    p.type = r.pod<StrokePointType>();
+    p.in_handle = r.pod<kernel::cfloat3>();
+    p.out_handle = r.pod<kernel::cfloat3>();
+    return p;
+}
+
 void write_prim(Writer& w, const Prim& p) {
     w.pod(p.type);
     for (float f : p.params) w.pod(f);
@@ -261,7 +301,11 @@ void write_node(Writer& w, const Node& n) {
     w.pod(n.mirror);
     w.pod(n.stroke_blend_k);
     w.u32(static_cast<std::uint32_t>(n.stroke.size()));
-    for (const StrokePoint& sp : n.stroke) w.pod(sp);
+    // Field-wise: StrokePoint gained a uint8 among its floats, so a struct-wise
+    // write would put indeterminate padding on the wire.
+    for (const StrokePoint& sp : n.stroke) write_point(w, sp);
+    w.pod(n.stroke_closed);
+    w.pod(n.curve_tolerance);
     // Deformer carries uint8 + floats: field-wise, so padding never reaches
     // the stream (the portability trap struct-wise writes hit on GCC).
     w.pod(n.repeat.type);
@@ -307,12 +351,30 @@ Node read_node(Reader& r) {
     n.mirror = r.pod<bool>();
     n.stroke_blend_k = r.pod<float>();
     std::uint32_t sc = r.u32();
-    if (sc > r.remaining / sizeof(StrokePoint)) {
+    // Minor 0 and 1 wrote position + radius only. Reading them as hard corners
+    // with no handles is not a fallback: it is what those points already
+    // meant, so an older document's field is unchanged.
+    const std::size_t point_bytes =
+        r.minor >= 2 ? kStrokePointBytes : (sizeof(kernel::cfloat3) + sizeof(float));
+    if (sc > r.remaining / point_bytes) {
         r.ok = false;
         return n;
     }
     n.stroke.reserve(sc);
-    for (std::uint32_t i = 0; i < sc && r.ok; ++i) n.stroke.push_back(r.pod<StrokePoint>());
+    for (std::uint32_t i = 0; i < sc && r.ok; ++i) {
+        if (r.minor >= 2) {
+            n.stroke.push_back(read_point(r));
+        } else {
+            StrokePoint sp;
+            sp.pos = r.pod<kernel::cfloat3>();
+            sp.radius = r.pod<float>();
+            n.stroke.push_back(sp);
+        }
+    }
+    if (r.minor >= 2) {
+        n.stroke_closed = r.pod<bool>();
+        n.curve_tolerance = r.pod<float>();
+    }
     n.repeat.type = r.pod<std::uint8_t>();
     n.repeat.spacing = r.pod<kernel::cfloat3>();
     n.repeat.counts = r.pod<kernel::cfloat3>();
@@ -450,6 +512,7 @@ enum class Tag : std::uint8_t {
     SetLayerVisible,
     SetLayerTransform,
     SetLayerProtection,
+    SetStrokePoints,
 };
 
 struct SerializeVisitor {
@@ -505,7 +568,16 @@ struct SerializeVisitor {
         w.pod(c.layer);
         w.pod(c.node);
         w.u32(static_cast<std::uint32_t>(c.points.size()));
-        for (const StrokePoint& p : c.points) w.pod(p);
+        for (const StrokePoint& p : c.points) write_point(w, p);
+    }
+    void operator()(const SetStrokePointsCmd& c) {
+        w.pod(Tag::SetStrokePoints);
+        w.pod(c.layer);
+        w.pod(c.node);
+        w.u32(static_cast<std::uint32_t>(c.points.size()));
+        for (const StrokePoint& p : c.points) write_point(w, p);
+        w.pod(c.closed);
+        w.pod(c.tolerance);
     }
     void operator()(const TrimStrokeCmd& c) {
         w.pod(Tag::TrimStroke);
@@ -614,9 +686,20 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
             c.layer = r.pod<LayerId>();
             c.node = r.pod<NodeId>();
             std::uint32_t n = r.u32();
-            if (n > r.remaining / sizeof(StrokePoint)) return std::nullopt;
-            for (std::uint32_t i = 0; i < n && r.ok; ++i)
-                c.points.push_back(r.pod<StrokePoint>());
+            if (n > r.remaining / kStrokePointBytes) return std::nullopt;
+            for (std::uint32_t i = 0; i < n && r.ok; ++i) c.points.push_back(read_point(r));
+            cmd = std::move(c);
+            break;
+        }
+        case Tag::SetStrokePoints: {
+            SetStrokePointsCmd c;
+            c.layer = r.pod<LayerId>();
+            c.node = r.pod<NodeId>();
+            std::uint32_t n = r.u32();
+            if (n > r.remaining / kStrokePointBytes) return std::nullopt;
+            for (std::uint32_t i = 0; i < n && r.ok; ++i) c.points.push_back(read_point(r));
+            c.closed = r.pod<bool>();
+            c.tolerance = r.pod<float>();
             cmd = std::move(c);
             break;
         }
@@ -674,8 +757,10 @@ std::vector<std::uint8_t> serialize_document(const Document& doc) {
     return std::move(w.out);
 }
 
-std::optional<Document> deserialize_document(const std::uint8_t* data, std::size_t size) {
+std::optional<Document> deserialize_document(const std::uint8_t* data, std::size_t size,
+                                             std::uint16_t minor) {
     Reader r{data, size};
+    r.minor = minor;
     std::uint32_t count = r.u32();
     if (!r.ok || count > 100000) return std::nullopt;
     Document doc;

@@ -74,6 +74,19 @@ struct SetLayerVisibleCmd {
     LayerId id = 0;
     bool visible = true;
 };
+// Replace an item's whole point list, plus the two properties that only mean
+// anything alongside it. A curve is tens of points, so a whole-list replace
+// costs less than the bookkeeping six granular commands would need, and its
+// inverse is the previous list — exact by construction rather than by careful
+// arithmetic. Append/Trim stay for the drag case, where the list only grows.
+struct SetStrokePointsCmd {
+    LayerId layer = 0;
+    NodeId node = kNoNode;
+    std::vector<StrokePoint> points;
+    bool closed = false;
+    float tolerance = 0.01f;
+};
+
 // Both flags in one command: they are the same concept at two strengths, and
 // a UI toggling one usually shows the other beside it.
 struct SetLayerProtectionCmd {
@@ -90,7 +103,7 @@ using Command =
     std::variant<AddNodeCmd, RemoveNodeCmd, MoveNodeCmd, SetTransformCmd, SetPrimCmd,
                  SetColorCmd, SetOpBlendCmd, AppendStrokeCmd, TrimStrokeCmd, AddLayerCmd,
                  RemoveLayerCmd, SetLayerVisibleCmd, SetLayerTransformCmd,
-                 SetLayerProtectionCmd>;
+                 SetLayerProtectionCmd, SetStrokePointsCmd>;
 
 // The layer a command would edit, or 0 for one that edits no existing layer
 // (adding a layer creates its target; changing protection is how a protected
@@ -98,6 +111,11 @@ using Command =
 // such layer" and "that layer is protected", and a binding has to tell a
 // caller which of the two it hit.
 LayerId edited_layer(const Command& cmd);
+
+// The scene payload layout this build writes. It tracks the .clayspace
+// container's minor version, which is what a reader is told; io asserts they
+// agree so the two cannot drift.
+inline constexpr std::uint16_t kSceneMinor = 2;
 
 // Apply a command; returns its inverse, or nullopt if the target does not
 // exist or is protected (ghosted or locked). The document is unchanged in
@@ -112,7 +130,11 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size);
 // Whole-document snapshot (used by tests for bit-identity checks and by the
 // io module as the scene chunk payload).
 std::vector<std::uint8_t> serialize_document(const Document& doc);
-std::optional<Document> deserialize_document(const std::uint8_t* data, std::size_t size);
+// `minor` is the container's minor version, so a node can gain a field without
+// inventing a packing trick to stay readable. Defaults to the current layout,
+// which is what a standalone round trip wants.
+std::optional<Document> deserialize_document(const std::uint8_t* data, std::size_t size,
+                                             std::uint16_t minor = kSceneMinor);
 
 // Undo stack over the command vocabulary. perform() applies and records;
 // consecutive AppendStrokeCmds on the same node coalesce into one step, and

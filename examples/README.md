@@ -242,6 +242,108 @@ exactly, and a preset from a newer schema version is refused rather than
 reinterpreted. It also shows what freeze means for a declarative edit — a stamp
 in a masked region produces no item at all.
 
+### 13 — curves
+
+A stroke point carries a type saying how it joins the next: a hard corner, a
+Catmull-Rom spline through the points, an approximating B-spline that rounds
+corners off, or a Bezier shaped by two local-space handles. All four tiles
+below are the *same six control points*.
+
+![point types](output/13_point_types.png)
+
+Typed points are tessellated into the segment chain the engine already
+evaluates, at compile time, so a curve costs nothing at evaluation time and no
+backend knows it exists. The tolerance is the largest distance a span's
+midpoint may sit from its chord, and it is a property of the **document**, not
+of the viewer — two builds have to agree on what a document means.
+
+![tolerance](output/13_tolerance.png)
+
+Bounds come from the tessellated curve rather than the control points. Both
+control points of this arc sit at y = 0; the handles carry the span to y = 1.5,
+and a bound taken from the control points would have culling drop the arc and
+picking miss it.
+
+![bezier arc](output/13_bezier_arc.png)
+
+The example asserts three things rather than showing them: an all-hard chain
+evaluates bit-identically to what it did before types existed, a ray really
+finds the arc outside the control hull, and editing a placed curve undoes
+exactly.
+
+### 14 — the cut tool
+
+A shape drawn over the model, cut through it: rect, circle, polygon, or a
+spline lasso flattened through the curve tessellator.
+
+![cut shapes](output/14_cut_shapes.png)
+
+Which side survives is the **op**, not a parameter of the cut — subtract
+removes what the shape covers, intersect keeps only that. 3DCoat's "Shift =
+keep-outer" modifier is exactly this choice.
+
+![cut sides](output/14_cut_sides.png)
+
+The sweep is sized to the region so a cut goes all the way through; giving the
+extent by hand is how a deliberate partial cut is expressed, and rounding
+bevels the walls.
+
+![cut depth](output/14_cut_depth.png)
+
+Nothing in the cut knows where "the camera" is — only what frame it was handed,
+so the same call from a frame looking down cuts top to bottom.
+
+![cut from above](output/14_cut_from_above.png)
+
+The example asserts the design's load-bearing claim: **a cut is a prism, not a
+frustum**. The same cut resolved from a frame ten times further away gives the
+identical solid. A converging cut would have a face that is not flat and a
+result that depended on where the camera stood.
+
+### 15 — voxel verbs and repair
+
+The four sculpting verbs the study catalogues that were missing, plus the
+pre-bake repair pair.
+
+**fill-cavities is not a morphological closing.** Closing was the first attempt
+and the code found two reasons it is wrong: a ball of radius r *fits into* a
+dent wider than r, so a larger structuring element fills **less**; and a
+closing cannot seal a one-cell perforation in a one-cell wall at all, because
+the erosion reaches through from the void behind it. The rule that works is
+that an empty cell with at least four of its six face neighbours occupied is
+inside a pocket. The right-hand pair below is a shallow dent, deliberately left
+alone — that is the line, and smoothing is the verb for the other side of it.
+
+![fill cavities](output/15_fill_cavities.png)
+
+Scrape flattens and smooths from **one** snapshot. Calling the two verbs in
+sequence would let the flatten's output feed the smooth's neighbourhood, which
+is what the snapshot discipline exists to prevent.
+
+![scrape](output/15_scrape.png)
+
+Smudge drags the *skin* and leaves the interior; grab translates every cell in
+its region. Same displacement, different verbs.
+
+![smudge](output/15_smudge.png)
+
+Carve takes a caller-supplied `(H, W)` alpha, projected along a direction. The
+engine decodes no images — a host that has an alpha has already loaded the PNG.
+
+![carve with an alpha](output/15_carve_alpha.png)
+
+Repair reports before it repairs, because a destructive operation whose input
+is somebody's sculpt should be askable before it is answerable. The renders are
+**cut away**, since the whole point is interior geometry: a pierced shell (the
+outside reaches in, so nothing is enclosed), the same shell with its hole
+sealed (one enclosed void now), and the void filled.
+
+![repair](output/15_repair.png)
+
+Enclosure is decided by a flood over *empty* cells from outside the bounds, not
+guessed at from a local neighbourhood — so a box with a wide mouth is left
+alone, which the example asserts.
+
 ## Notes
 
 - **Committed models are budgeted.** `_render.save_model` fails above 400 KiB

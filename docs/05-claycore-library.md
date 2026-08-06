@@ -266,6 +266,19 @@ blocks.sculpt_smooth((0, 0, 0), 9)
 blocks.sculpt_inflate((0, 0, 0), 9, amount=-1)          # negative = erode
 blocks.sculpt_flatten((0, 0, 0), 9, normal=(0, 1, 0))
 blocks.sculpt_pinch((0, 0, 0), 9)
+# fill-cavities is NOT a morphological closing: a ball of radius r fits INTO a
+# dent wider than r, so a bigger element fills less. The rule is "an empty cell
+# with 4+ occupied face neighbours is inside a pocket".
+blocks.sculpt_fill_cavities((0, 0, 0), 9, passes=2)
+blocks.sculpt_scrape((0, 0, 0), 9, normal=(0, 1, 0))     # flatten + smooth, ONE snapshot
+blocks.sculpt_smudge((0, 0, 0), 9, displacement=(0.2, 0, 0))  # skin, not lump
+blocks.sculpt_carve_alpha((0, 0, 0), 9, alpha=stamp, direction=(0, 1, 0))  # (H,W) floats
+
+# pre-bake repair. The report is non-destructive: a destructive operation whose
+# input is somebody's sculpt should be askable before it is answerable.
+blocks.repair_report()                     # enclosed_voids, void_cells, largest, airtight
+blocks.repair_close_holes(passes=1)        # only ever adds cells
+blocks.repair_fill_voids()                 # enclosure decided by a flood from outside
 # masks freeze a region against any edit: effective strength is
 # strength * (1 - mask). Addressed in WORLD units on their own lattice, so a
 # mask survives a resolution change or a move between representations — the
@@ -284,6 +297,30 @@ brush.resolve(samples)                     # pure: positions/radii/strengths
 blocks.apply_stroke(samples, brush, blocks.palette_add("#cc7744"))
 body.apply_stroke(samples, brush, clay.Sphere(r=1.0), mask=freeze)  # one undo step
 clay.StrokePreset.deserialize(brush.serialize())   # versioned: newer is refused
+
+# curves: a stroke point carries a type saying how it joins the next, so a
+# stroke is a curve whose points are all hard corners. Typed points tessellate
+# into the same segment chain at compile time, so a curve costs nothing to
+# evaluate and no backend knows it exists. Handles are LOCAL space.
+body.add(clay.Stroke(points=pts,                       # (N,4) x,y,z,radius
+                     types="spline",                   # or one per point
+                     closed=True, tolerance=0.005))    # tolerance is a
+                                                       # document property
+body.add(clay.Stroke(points=pts, types="bezier",
+                     in_handles=handles, out_handles=handles))
+body.set_points(node_id, pts, types="hard")            # undoable whole-list edit
+
+# the cut tool: a shape drawn over the model, in WORLD units on the frame the
+# viewport already has. The cut is a PRISM, not a frustum — a converging cut
+# would have a non-flat face and depend on where the camera stood. Which side
+# survives is the OP, not a flag.
+doc.add_sdf_layer("body").add(
+    clay.Cut(origin=(0, 0, -4), right=(1, 0, 0), up=(0, 1, 0), forward=(0, 0, 1),
+             shape=clay.CutShape.circle(0.4),   # or .rect / .polygon / .curve
+             region=doc,                        # sizes the sweep to cut through
+             rounding=0.05),                    # bevelled cut walls
+    op=clay.Op.SUBTRACT)                        # INTERSECT keeps only the inside
+clay.CutShape.curve(control_pts, types="spline")  # a spline lasso
 
 # protection: ghost is "show me this but stay out of my way" (still evaluated,
 # never picked, never edited); lock is "this is finished" (still picked).

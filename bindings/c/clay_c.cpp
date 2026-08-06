@@ -28,6 +28,7 @@
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
 #include "clay/brush/stroke.h"
+#include "clay/cut/cut.h"
 #include "clay/voxel/mask.h"
 
 using namespace clay;
@@ -380,6 +381,12 @@ clay_result check_mirror_axes(std::int32_t axes, std::uint8_t* out) {
 // Defined with the mask entry points below; a brush descriptor may name a
 // mask, so the two resolve together.
 clay_result resolve_mask(const clay_mask* mask, voxel::MaskField** out);
+
+constexpr std::size_t kRepairReportOriginal =
+    offsetof(clay_repair_report, airtight) + sizeof(std::int32_t);
+
+constexpr std::size_t kCutDescOriginal =
+    offsetof(clay_cut_desc, far_extent) + sizeof(float);
 
 constexpr std::size_t kStrokePresetOriginal =
     offsetof(clay_stroke_preset, accumulation) + sizeof(std::int32_t);
@@ -918,6 +925,42 @@ clay_voxel_grid* borrow_layer(clay_document* doc, clay_layer_id layer) {
     return &handle;
 }
 
+bool point_type_is_known(std::int32_t t) {
+    return t >= 0 && t <= static_cast<std::int32_t>(scene::StrokePointType::Bezier);
+}
+
+// The one place a caller's point arrays become StrokePoints, so the plain and
+// the typed setters cannot drift apart in what they accept.
+clay_result read_curve_points(const float* xyzr, std::size_t count, const std::int32_t* types,
+                              const float* in_handles_xyz, const float* out_handles_xyz,
+                              std::vector<scene::StrokePoint>* out) {
+    clay_result r = check_payload("stroke points", xyzr, count);
+    if (r != CLAY_OK) return r;
+    out->clear();
+    out->reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const float* p = xyzr + i * 4;
+        if (p[3] < 0.0f) return fail(CLAY_ERROR_INVALID_ARGUMENT, "stroke radius must be >= 0");
+        scene::StrokePoint sp;
+        sp.pos = kernel::cf3(p[0], p[1], p[2]);
+        sp.radius = p[3];
+        if (types) {
+            if (!point_type_is_known(types[i]))
+                return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                            "unknown point type: " + std::to_string(types[i]));
+            sp.type = static_cast<scene::StrokePointType>(types[i]);
+        }
+        if (in_handles_xyz)
+            sp.in_handle = kernel::cf3(in_handles_xyz[i * 3 + 0], in_handles_xyz[i * 3 + 1],
+                                       in_handles_xyz[i * 3 + 2]);
+        if (out_handles_xyz)
+            sp.out_handle = kernel::cf3(out_handles_xyz[i * 3 + 0], out_handles_xyz[i * 3 + 1],
+                                        out_handles_xyz[i * 3 + 2]);
+        out->push_back(sp);
+    }
+    return CLAY_OK;
+}
+
 clay_mask* borrow_mask_handle(clay_document* doc, clay_layer_id layer) {
     clay_mask& handle = doc->mask_handles[layer];
     handle.doc = doc;
@@ -1408,20 +1451,50 @@ clay_result clay_item_set_profile_polygon(clay_item* item, const float* xy, size
 }
 
 clay_result clay_item_set_stroke_points(clay_item* item, const float* xyzr, size_t count) {
+    return clay_item_set_curve_points(item, xyzr, count, nullptr, nullptr, nullptr);
+}
+
+clay_result clay_item_set_curve_points(clay_item* item, const float* xyzr, size_t count,
+                                       const int32_t* types, const float* in_handles_xyz,
+                                       const float* out_handles_xyz) {
     if (!item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item");
     if (item->node.prim.type != scene::PrimType::Stroke)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "stroke points need CLAY_PRIM_STROKE");
-    clay_result r = check_payload("stroke points", xyzr, count);
-    if (r != CLAY_OK) return r;
     std::vector<scene::StrokePoint> points;
-    points.reserve(count);
-    for (size_t i = 0; i < count; ++i) {
-        const float* p = xyzr + i * 4;
-        if (p[3] < 0.0f) return fail(CLAY_ERROR_INVALID_ARGUMENT, "stroke radius must be >= 0");
-        points.push_back(scene::StrokePoint{kernel::cf3(p[0], p[1], p[2]), p[3]});
-    }
+    clay_result r = read_curve_points(xyzr, count, types, in_handles_xyz, out_handles_xyz,
+                                      &points);
+    if (r != CLAY_OK) return r;
     item->node.stroke = std::move(points);
     return CLAY_OK;
+}
+
+clay_result clay_item_set_curve(clay_item* item, int32_t closed, float tolerance) {
+    if (!item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item");
+    if (item->node.prim.type != scene::PrimType::Stroke)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "curve settings need CLAY_PRIM_STROKE");
+    if (!(tolerance > 0.0f))  // also rejects NaN
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "curve tolerance must be > 0");
+    item->node.stroke_closed = closed != 0;
+    item->node.curve_tolerance = tolerance;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_set_stroke_points(clay_document* doc, clay_layer_id layer,
+                                         clay_node_id node, const float* xyzr, size_t count,
+                                         const int32_t* types, const float* in_handles_xyz,
+                                         const float* out_handles_xyz, int32_t closed,
+                                         float tolerance) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (!(tolerance > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "curve tolerance must be > 0");
+    std::vector<scene::StrokePoint> points;
+    clay_result r = read_curve_points(xyzr, count, types, in_handles_xyz, out_handles_xyz,
+                                      &points);
+    if (r != CLAY_OK) return r;
+    return apply_edit(doc,
+                      scene::Command{scene::SetStrokePointsCmd{layer, node, std::move(points),
+                                                               closed != 0, tolerance}},
+                      "no stroke or curve with that id in that layer");
 }
 
 clay_result clay_item_add_stroke_point(clay_item* item, const float position[3], float radius) {
@@ -1842,6 +1915,108 @@ clay_result clay_document_voxel_layer(clay_document* doc, const char* name,
         return CLAY_OK;
     }
     return fail(CLAY_ERROR_NOT_FOUND, std::string("no voxel layer named ") + name);
+}
+
+// -- the cut tool (c-abi spec: the cut tool) ---------------------------------
+
+clay_item* clay_cut_create(const clay_cut_desc* desc, const float* polygon_xy,
+                           size_t polygon_count) {
+    if (!desc) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "null cut descriptor");
+        return nullptr;
+    }
+    clay_cut_desc d;
+    if (read_desc(desc, kCutDescOriginal, &d) != CLAY_OK) return nullptr;
+
+    cut::CutFrame frame;
+    frame.origin = kernel::cf3(d.origin[0], d.origin[1], d.origin[2]);
+    frame.right = kernel::cf3(d.right[0], d.right[1], d.right[2]);
+    frame.up = kernel::cf3(d.up[0], d.up[1], d.up[2]);
+    frame.forward = kernel::cf3(d.forward[0], d.forward[1], d.forward[2]);
+    if (!frame.is_orthonormal()) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT,
+             "right, up and forward must be orthonormal: the shape was drawn in a frame, and "
+             "squaring it up here would cut somewhere the user did not draw");
+        return nullptr;
+    }
+    if (d.rounding < 0.0f) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "cut rounding must be >= 0");
+        return nullptr;
+    }
+
+    cut::CutShape shape;
+    switch (d.shape) {
+        case CLAY_CUT_CIRCLE:
+            shape = cut::CutShape::circle(d.radius);
+            break;
+        case CLAY_CUT_POLYGON: {
+            if (polygon_count > 0 && !polygon_xy) {
+                fail(CLAY_ERROR_INVALID_ARGUMENT, "null polygon outline");
+                return nullptr;
+            }
+            if (check_batch("polygon vertices", polygon_count) != CLAY_OK) return nullptr;
+            std::vector<kernel::cfloat2> verts;
+            verts.reserve(polygon_count);
+            for (std::size_t i = 0; i < polygon_count; ++i)
+                verts.push_back(kernel::cf2(polygon_xy[i * 2], polygon_xy[i * 2 + 1]));
+            shape = cut::CutShape::from_polygon(std::move(verts));
+            break;
+        }
+        case CLAY_CUT_RECT:
+            shape = cut::CutShape::rect(d.half_width, d.half_height);
+            break;
+        default:
+            fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown cut shape: " + std::to_string(d.shape));
+            return nullptr;
+    }
+
+    cut::CutOptions options;
+    options.rounding = d.rounding;
+    // Both zero is the "derive it" sentinel the header documents: a sweep of
+    // no depth is not a cut anyone means to ask for.
+    if (d.near_extent != 0.0f || d.far_extent != 0.0f) {
+        options.near_extent = d.near_extent;
+        options.far_extent = d.far_extent;
+    }
+
+    math::Aabb region(kernel::cf3(d.region_min[0], d.region_min[1], d.region_min[2]),
+                      kernel::cf3(d.region_max[0], d.region_max[1], d.region_max[2]));
+    std::optional<scene::Node> node = cut::cut_item(frame, shape, region, options);
+    if (!node) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "the cut is degenerate: a shape with no area");
+        return nullptr;
+    }
+    auto* item = new clay_item();
+    item->node = std::move(*node);
+    return item;
+}
+
+clay_result clay_cut_polygon_from_curve(const float* points_xyzr, size_t count,
+                                        const int32_t* types, float tolerance, float* out_xy,
+                                        size_t* out_count) {
+    if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null count");
+    if (!(tolerance > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "tolerance must be > 0");
+    std::vector<scene::StrokePoint> control;
+    clay_result r = read_curve_points(points_xyzr, count, types, nullptr, nullptr, &control);
+    if (r != CLAY_OK) return r;
+
+    cut::CutShape shape = cut::CutShape::from_curve(control, tolerance);
+    const std::size_t needed = shape.polygon.size();
+    if (!out_xy) {
+        *out_count = needed;
+        return CLAY_OK;
+    }
+    if (*out_count < needed) {
+        *out_count = needed;
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "the outline needs " + std::to_string(needed) + " vertices");
+    }
+    for (std::size_t i = 0; i < needed; ++i) {
+        out_xy[i * 2 + 0] = shape.polygon[i].x;
+        out_xy[i * 2 + 1] = shape.polygon[i].y;
+    }
+    *out_count = needed;
+    return CLAY_OK;
 }
 
 // -- brush strokes (c-abi spec: the stroke engine) ---------------------------
@@ -2432,6 +2607,116 @@ clay_result clay_voxel_sculpt_grab(clay_voxel_grid* grid, const int32_t cell[3],
     g->sculpt_grab(to_coord(cell), p,
                    kernel::cf3(displacement[0], displacement[1], displacement[2]),
                    front_only != 0);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_fill_cavities(clay_voxel_grid* grid, const int32_t cell[3],
+                                            const clay_brush_params* brush, int32_t passes) {
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    clay_result r = resolve_brush(grid, cell, brush, &g, &p);
+    if (r != CLAY_OK) return r;
+    if (passes <= 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "passes must be > 0");
+    g->sculpt_fill_cavities(to_coord(cell), p, passes);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_scrape(clay_voxel_grid* grid, const int32_t cell[3],
+                                     const clay_brush_params* brush, const float normal[3],
+                                     float offset_cells) {
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    clay_result r = resolve_brush(grid, cell, brush, &g, &p);
+    if (r != CLAY_OK) return r;
+    if (!normal) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null normal");
+    kernel::cfloat3 n = kernel::cf3(normal[0], normal[1], normal[2]);
+    if (!(kernel::clength(n) >= 1e-12f))  // also rejects NaN
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "scrape normal must not be zero length");
+    g->sculpt_scrape(to_coord(cell), p, n, offset_cells);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_smudge(clay_voxel_grid* grid, const int32_t cell[3],
+                                     const clay_brush_params* brush,
+                                     const float displacement[3]) {
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    clay_result r = resolve_brush(grid, cell, brush, &g, &p);
+    if (r != CLAY_OK) return r;
+    if (!displacement) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null displacement");
+    g->sculpt_smudge(to_coord(cell), p,
+                     kernel::cf3(displacement[0], displacement[1], displacement[2]));
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_carve_alpha(clay_voxel_grid* grid, const int32_t cell[3],
+                                          const clay_brush_params* brush, const float* alpha,
+                                          int32_t alpha_width, int32_t alpha_height,
+                                          const float direction[3], int32_t index) {
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    clay_result r = resolve_brush(grid, cell, brush, &g, &p);
+    if (r != CLAY_OK) return r;
+    if (!direction) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null direction");
+    std::uint8_t slot = 0;
+    r = check_palette_index(index, &slot);
+    if (r != CLAY_OK) return r;
+    if (!g->sculpt_carve_alpha(to_coord(cell), p, alpha, alpha_width, alpha_height,
+                               kernel::cf3(direction[0], direction[1], direction[2]), slot))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the alpha stamp is malformed: a null or empty grid, or a zero-length "
+                    "direction");
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_repair_report(const clay_voxel_grid* grid,
+                                     clay_repair_report* out_report) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (!out_report) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null report");
+    // The descriptor is an OUTPUT, so struct_size is the caller telling us how
+    // much of it exists rather than what it filled in.
+    clay_repair_report probe;
+    r = read_desc(out_report, kRepairReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+
+    voxel::VoxelGrid::RepairReport report = g->repair_report();
+    std::uint32_t declared = out_report->struct_size;
+    *out_report = clay_repair_report{};
+    out_report->struct_size = declared;
+    out_report->enclosed_voids = report.enclosed_voids;
+    out_report->void_cells = report.void_cells;
+    out_report->largest_void = report.largest_void;
+    out_report->airtight = report.airtight ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_repair_close_holes(clay_voxel_grid* grid, int32_t passes,
+                                          const clay_mask* mask) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (passes <= 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "passes must be > 0");
+    voxel::MaskField* m = nullptr;
+    if (mask) {
+        r = resolve_mask(mask, &m);
+        if (r != CLAY_OK) return r;
+    }
+    g->repair_close_holes(passes, m);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_repair_fill_voids(clay_voxel_grid* grid, const clay_mask* mask) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    voxel::MaskField* m = nullptr;
+    if (mask) {
+        r = resolve_mask(mask, &m);
+        if (r != CLAY_OK) return r;
+    }
+    g->repair_fill_voids(m);
     return CLAY_OK;
 }
 

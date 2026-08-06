@@ -1,4 +1,5 @@
 #include "clay/scene/bounds.h"
+#include "clay/scene/curve.h"
 #include "clay/scene/tape.h"
 
 namespace clay {
@@ -12,6 +13,9 @@ namespace {
 struct Compiler {
     Tape tape;
     const CullRegion* cull;
+    // Reused across items so a document full of curves does not allocate a
+    // fresh vector per item; only ever read between assignment and use.
+    std::vector<StrokePoint> scratch_curve;
 
     bool culled(const math::Aabb& bound) const {
         if (!cull) return false;
@@ -177,11 +181,19 @@ struct Compiler {
     void emit_item_instance(const Node& item, const math::cfloat4x4& inv_world, float scale) {
         float round_world = item.rounding * scale;
         if (item.prim.type == PrimType::Stroke) {
+            // Typed points are lowered here into the chain the opcode already
+            // reads. An all-hard open list tessellates to itself, so this is
+            // the identity for every stroke authored before curves existed.
+            const std::vector<StrokePoint>& pts =
+                curve_is_polyline(item.stroke, item.stroke_closed)
+                    ? item.stroke
+                    : (scratch_curve = tessellate_curve(item.stroke, item.stroke_closed,
+                                                        item.curve_tolerance));
             float prim_params[3];
             prim_params[0] = item.stroke_blend_k;
             prim_params[1] = static_cast<float>(tape.blob.size());
-            prim_params[2] = static_cast<float>(item.stroke.size());
-            for (const StrokePoint& sp : item.stroke) {
+            prim_params[2] = static_cast<float>(pts.size());
+            for (const StrokePoint& sp : pts) {
                 tape.blob.push_back(sp.pos.x);
                 tape.blob.push_back(sp.pos.y);
                 tape.blob.push_back(sp.pos.z);

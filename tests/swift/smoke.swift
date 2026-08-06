@@ -160,6 +160,96 @@ var enabled: Int32 = 0, undoDepth = 0, redoDepth = 0
 check(clay_document_undo_state(doc, &enabled, &undoDepth, &redoDepth) == CLAY_OK
         && enabled == 1 && redoDepth == 1, "undo state reports enabled with a redo available")
 
+// -- the cut tool ------------------------------------------------------------
+
+// A block of its own, well clear of the rest of the model: the document's
+// field is every layer combined, so a probe near the origin would be answering
+// a question about the body rather than about the cut.
+let cutX: Float = -10.0
+var cutLayer: clay_layer_id = 0
+check(clay_add_sdf_layer(doc, "cut", &cutLayer) == CLAY_OK, "added a cut layer")
+
+var blockSize: [Float] = [1, 1, 1]
+guard let blockItem = clay_item_create(Int32(CLAY_PRIM_BOX.rawValue), &blockSize, 3) else {
+    check(false, "created the block")
+    exit(1)
+}
+var blockPos: [Float] = [cutX, 0, 0]
+check(clay_item_set_position(blockItem, &blockPos) == CLAY_OK, "placed it")
+check(clay_layer_add_item(doc, cutLayer, blockItem, nil) == CLAY_OK, "added the block")
+clay_item_destroy(blockItem)
+check(evaluate(doc, [cutX, 0, 0])[0] < 0, "the block is solid before the cut")
+
+var cutDesc = clay_cut_desc()
+cutDesc.struct_size = UInt32(MemoryLayout<clay_cut_desc>.size)
+cutDesc.origin = (cutX, 0, -4)
+cutDesc.right = (1, 0, 0)
+cutDesc.up = (0, 1, 0)
+cutDesc.forward = (0, 0, 1)
+cutDesc.shape = Int32(CLAY_CUT_CIRCLE.rawValue)
+cutDesc.radius = 0.4
+cutDesc.region_min = (cutX - 1, -1, -1)
+cutDesc.region_max = (cutX + 1, 1, 1)
+
+guard let cutItem = clay_cut_create(&cutDesc, nil, 0) else {
+    check(false, "resolved the cut")
+    exit(1)
+}
+check(clay_item_set_op(cutItem, Int32(CLAY_OP_SUBTRACT.rawValue)) == CLAY_OK, "cut subtracts")
+check(clay_layer_add_item(doc, cutLayer, cutItem, nil) == CLAY_OK, "placed the cut")
+clay_item_destroy(cutItem)
+
+check(evaluate(doc, [cutX, 0, 0])[0] > 0, "the cut went through the middle")
+check(evaluate(doc, [cutX, 0, 0.9])[0] > 0, "...and out the far face")
+check(evaluate(doc, [cutX + 0.8, 0.8, 0])[0] < 0, "and left the corners alone")
+
+// A frame that is not orthonormal is refused rather than squared up.
+var skewed = cutDesc
+skewed.up = (0.5, 0.5, 0)
+check(clay_cut_create(&skewed, nil, 0) == nil, "a skewed frame is refused")
+
+// -- curves ------------------------------------------------------------------
+
+var curveLayer: clay_layer_id = 0
+check(clay_add_sdf_layer(doc, "curve", &curveLayer) == CLAY_OK, "added a curve layer")
+
+// Placed well clear of the model the rest of this file builds: the document's
+// field is every layer combined, so a probe near the origin would be answering
+// a question about the body, not about the curve.
+let curveX: Float = 10.0
+var curvePoints: [Float] = [curveX - 1, 0, 0, 0.05,
+                            curveX + 0, 1, 0, 0.05,
+                            curveX + 1, 0, 0, 0.05,
+                            curveX + 0, -1, 0, 0.05]
+var pointTypes: [Int32] = Array(repeating: Int32(CLAY_POINT_SPLINE.rawValue), count: 4)
+
+guard let curveItem = clay_item_create(Int32(CLAY_PRIM_STROKE.rawValue), nil, 0) else {
+    check(false, "created a curve item")
+    exit(1)
+}
+check(clay_item_set_curve_points(curveItem, &curvePoints, 4, &pointTypes, nil, nil) == CLAY_OK,
+      "typed control points")
+check(clay_item_set_curve(curveItem, 0, 0.01) == CLAY_OK, "curve tolerance")
+check(clay_item_set_curve(curveItem, 0, 0) != CLAY_OK, "a tolerance of 0 is refused")
+var curveNode: clay_node_id = 0
+check(clay_layer_add_item(doc, curveLayer, curveItem, &curveNode) == CLAY_OK && curveNode != 0,
+      "placed the curve")
+clay_item_destroy(curveItem)
+
+// The Catmull-Rom midpoint of the first span, ~0.088 outside the chord a hard
+// chain would draw, so this only reads as inside if the curve really curved.
+let bulgeAt: [Float] = [curveX - 0.5625, 0.5625, 0.0]
+let bulge = evaluate(doc, bulgeAt)
+check(bulge[0] < 0, "the curve bulges outside its control polygon")
+
+// Editing it is an ordinary edit, so it undoes as one.
+var hardTypes: [Int32] = Array(repeating: Int32(CLAY_POINT_HARD.rawValue), count: 4)
+check(clay_layer_set_stroke_points(doc, curveLayer, curveNode, &curvePoints, 4, &hardTypes,
+                                   nil, nil, 0, 0.01) == CLAY_OK, "replaced the points")
+check(evaluate(doc, bulgeAt)[0] > 0, "the hard chain no longer reaches the bulge")
+check(clay_document_undo(doc, &undone) == CLAY_OK && undone == 1, "undid the curve edit")
+check(evaluate(doc, bulgeAt)[0] == bulge[0], "undo restored the curve exactly")
+
 // -- layer protection --------------------------------------------------------
 
 var isGhost: Int32 = 1
@@ -209,6 +299,64 @@ check(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK && occupied != stamp
       "sculpting changed the occupied set (\(stamped) -> \(occupied))")
 
 check(clay_voxel_grid_destroy(grid) != CLAY_OK, "destroying a borrowed layer handle is refused")
+
+// -- the remaining verbs, and repair -----------------------------------------
+
+// On a grid of their own: the checks after this one assert counts on `grid`,
+// and sculpting it here would move the ground under them.
+guard let verbGrid = clay_voxel_grid_create(0.1) else {
+    check(false, "created a grid for the verbs")
+    exit(1)
+}
+var slabRGB: [Float] = [0.6, 0.6, 0.65]
+var slabIndex: Int32 = 0
+check(clay_voxel_palette_add(verbGrid, &slabRGB, &slabIndex) == CLAY_OK, "slab colour")
+var slabLo: [Int32] = [-8, 0, -8]
+var slabHi: [Int32] = [8, 3, 8]
+check(clay_voxel_fill_box(verbGrid, &slabLo, &slabHi, slabIndex) == CLAY_OK, "filled a slab")
+
+var verbAt: [Int32] = [0, 3, 0]
+check(clay_voxel_sculpt_fill_cavities(verbGrid, &verbAt, &brush, 1) == CLAY_OK, "fill cavities")
+check(clay_voxel_sculpt_fill_cavities(verbGrid, &verbAt, &brush, 0) != CLAY_OK,
+      "zero passes is refused")
+check(clay_voxel_sculpt_scrape(verbGrid, &verbAt, &brush, &up, 0) == CLAY_OK, "scrape")
+var smudgeBy: [Float] = [0.2, 0, 0]
+check(clay_voxel_sculpt_smudge(verbGrid, &verbAt, &brush, &smudgeBy) == CLAY_OK, "smudge")
+var alphaStamp = [Float](repeating: 1.0, count: 16)
+check(clay_voxel_sculpt_carve_alpha(verbGrid, &verbAt, &brush, &alphaStamp, 4, 4, &up, 0)
+      == CLAY_OK, "carve with an alpha")
+var verbCells = 0
+check(clay_voxel_occupied_count(verbGrid, &verbCells) == CLAY_OK && verbCells > 0,
+      "the verbs left \(verbCells) cells")
+check(clay_voxel_grid_destroy(verbGrid) == CLAY_OK, "destroyed the verb grid")
+
+// A hollow shell of its own, so the report is about a known geometry rather
+// than about whatever the sculpting above left behind.
+guard let shellGrid = clay_voxel_grid_create(0.1) else {
+    check(false, "created a shell grid")
+    exit(1)
+}
+var shellRGB: [Float] = [0.8, 0.4, 0.2]
+var shellIndex: Int32 = 0
+check(clay_voxel_palette_add(shellGrid, &shellRGB, &shellIndex) == CLAY_OK, "shell colour")
+var shellLo: [Int32] = [-5, -5, -5]
+var shellHi: [Int32] = [5, 5, 5]
+check(clay_voxel_fill_box(shellGrid, &shellLo, &shellHi, shellIndex) == CLAY_OK, "filled a box")
+var holeLo: [Int32] = [-4, -4, -4]
+var holeHi: [Int32] = [4, 4, 4]
+check(clay_voxel_fill_box(shellGrid, &holeLo, &holeHi, 0) == CLAY_OK, "hollowed it")
+
+var repairReport = clay_repair_report()
+repairReport.struct_size = UInt32(MemoryLayout<clay_repair_report>.size)
+check(clay_voxel_repair_report(shellGrid, &repairReport) == CLAY_OK
+      && repairReport.enclosed_voids == 1 && repairReport.airtight == 0,
+      "the shell reports one enclosed void of \(repairReport.void_cells) cells")
+
+check(clay_voxel_repair_close_holes(shellGrid, 1, nil) == CLAY_OK, "close holes")
+check(clay_voxel_repair_fill_voids(shellGrid, nil) == CLAY_OK, "fill voids")
+check(clay_voxel_repair_report(shellGrid, &repairReport) == CLAY_OK
+      && repairReport.airtight != 0, "the shell is airtight now")
+check(clay_voxel_grid_destroy(shellGrid) == CLAY_OK, "destroyed the shell grid")
 
 // -- masks -------------------------------------------------------------------
 

@@ -52,6 +52,12 @@ UNBOUNDED = [
 ]
 
 
+# Prim classes whose example lives elsewhere because a contact-sheet tile
+# cannot show them: Cut resolves against a frame and a region, so a tile with
+# neither would be showing an extruded box and calling it a cut.
+COVERED_ELSEWHERE = {"Cut": "14_cut.py"}
+
+
 def primitive_classes():
     """Every PyPrim subclass the module exposes, by name."""
     out = set()
@@ -88,11 +94,17 @@ def main():
     R.contact_sheet(unbounded_tiles, "01_primitives_unbounded.png", columns=2,
                     caption="plane and infinite cylinder subtracted from a sphere")
 
-    # Coverage: a primitive class with no tile here is a gap in the gallery.
+    # Coverage: a primitive class with no example anywhere is a gap in the
+    # gallery. A class covered by a different example is named here rather
+    # than exempted silently, so adding one stays a decision on the record.
     shown = {name for name, _ in PRIMITIVES} | {name for name, _ in UNBOUNDED}
-    missing = primitive_classes() - shown
+    missing = primitive_classes() - shown - set(COVERED_ELSEWHERE)
     if missing:
         raise SystemExit(f"primitive classes with no example: {sorted(missing)}")
+    for name, where in sorted(COVERED_ELSEWHERE.items()):
+        if name in shown:
+            raise SystemExit(f"{name} has a tile here now — drop it from COVERED_ELSEWHERE")
+        print(f"  {name} is covered by {where} (it needs a frame, not a tile)")
     print(f"  covered all {len(shown)} primitive classes")
 
     # A single primitive is still a document: mesh and export one.

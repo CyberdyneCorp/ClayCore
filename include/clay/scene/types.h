@@ -441,9 +441,26 @@ struct Deformer {
     }
 };
 
+// How a point joins the one after it. Hard is the original behaviour and
+// stays the default, so a point list written before types existed means what
+// it always meant.
+enum class StrokePointType : std::uint8_t {
+    Hard = 0,   // straight to the next point
+    Spline,     // Catmull-Rom through the control points
+    BSpline,    // uniform cubic B-spline; approximating, so it smooths corners
+    Bezier,     // cubic through the points, shaped by the handles below
+};
+
 struct StrokePoint {
     kernel::cfloat3 pos;
-    float radius;
+    float radius = 0.0f;
+    StrokePointType type = StrokePointType::Hard;
+    // Bezier only, in the item's LOCAL space and relative to pos. 3DCoat keeps
+    // its handles in screen space and its own users call that a wart: the
+    // handles then depend on the camera, so a curve means something different
+    // depending on where you were standing when you edited it.
+    kernel::cfloat3 in_handle = kernel::cf3(0, 0, 0);
+    kernel::cfloat3 out_handle = kernel::cf3(0, 0, 0);
 };
 
 struct Node {
@@ -460,8 +477,13 @@ struct Node {
     float rounding = 0.0f;
     kernel::cfloat3 color = kernel::cf3(0.7f, 0.7f, 0.7f);
     bool mirror = false;  // apply through the layer's active mirror
-    std::vector<StrokePoint> stroke;  // PrimType::Stroke only
+    std::vector<StrokePoint> stroke;  // PrimType::Stroke only — control points
     float stroke_blend_k = 0.0f;      // within-stroke segment smoothing
+    bool stroke_closed = false;       // last point joins back to the first
+    // Maximum distance a tessellated span's midpoint may sit from its chord.
+    // A document property, not a viewer setting: two builds have to agree on
+    // what a document means.
+    float curve_tolerance = 0.01f;
     std::vector<Deformer> deformers;  // applied to the local point, in order
     Transition transition;            // TransitionLinear/Radial ops only
     Repeat repeat;                    // grid / radial array of this item

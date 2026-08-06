@@ -255,3 +255,31 @@ The C API SHALL expose reading and setting a layer's ghost and lock flags, and S
 - **WHEN** a C consumer adds an item to a ghosted layer
 - **THEN** the call returns an error naming the protection and the document is unchanged
 
+### Requirement: Curves across the ABI
+The C API SHALL accept control points with per-point radius, type and handles, a closed flag and a tolerance, and SHALL expose replacing a placed item's points.
+
+#### Scenario: A curve means the same through both bindings
+- **WHEN** a C consumer builds a curve with given control points, types and tolerance
+- **THEN** the field matches what `pyclay` produces for the same curve
+
+### Requirement: Cuts across the ABI
+The C API SHALL expose a versioned cut descriptor carrying the frame, the shape and the extent, resolving it into an item handle the caller places like any other.
+
+#### Scenario: A cut means the same through both bindings
+- **WHEN** a C consumer resolves a cut with a given frame and shape
+- **THEN** the field matches what `pyclay` produces for the same cut
+
+### Requirement: The new verbs across the ABI
+The C API SHALL expose the four verbs, with the alpha as a packed float array plus its width and height.
+
+#### Scenario: A verb means the same through both bindings
+- **WHEN** a C consumer runs each verb with given parameters
+- **THEN** the grid matches what `pyclay` produces for the same call
+
+### Requirement: Repair across the ABI
+The C API SHALL expose the report through a versioned descriptor and both repairs, each taking an optional mask.
+
+#### Scenario: A repair means the same through both bindings
+- **WHEN** a C consumer repairs a grid
+- **THEN** the result matches what `pyclay` produces for the same call
+

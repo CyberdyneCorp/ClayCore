@@ -1962,3 +1962,378 @@ def test_protection_is_undoable():
     assert doc.layer_protection(front.id) == (True, False)
     doc.undo()
     assert doc.layer_protection(front.id) == (False, False)
+
+
+# -- control-point curves (add-curve-objects) --------------------------------
+
+
+_SQUARE = np.array([[-1, 0, 0, 0.05], [0, 1, 0, 0.05], [1, 0, 0, 0.05], [0, -1, 0, 0.05]],
+                   np.float32)
+# The Catmull-Rom midpoint of the first span, against a chord midpoint of
+# (-0.5, 0.5): a bulge of ~0.088, well outside a tube of radius 0.05.
+_BULGE = np.array([[-0.5625, 0.5625, 0.0]], np.float32)
+
+
+def _curve_doc(**kwargs):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    node = layer.add(clay.Stroke(points=_SQUARE, **kwargs))
+    return doc, layer, node
+
+
+def test_a_hard_chain_is_the_stroke_it_always_was():
+    plain, _, _ = _curve_doc()
+    typed, _, _ = _curve_doc(types="hard")
+    probes = np.random.default_rng(11).uniform(-2, 2, size=(512, 3)).astype(np.float32)
+    assert np.array_equal(plain.eval(probes), typed.eval(probes))
+
+
+def test_smooth_points_bulge_outside_the_chain():
+    hard, _, _ = _curve_doc()
+    smooth, _, _ = _curve_doc(types="spline")
+    assert hard.eval(_BULGE)[0] > 0
+    assert smooth.eval(_BULGE)[0] < 0
+    # Catmull-Rom interpolates, so it still passes through every control point.
+    assert all(smooth.eval(_SQUARE[i:i + 1, :3])[0] < 0 for i in range(4))
+
+
+def test_bezier_handles_are_local_space():
+    pts = np.array([[-1, 0, 0, 0.1], [1, 0, 0, 0.1]], np.float32)
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Stroke(
+        points=pts, types="bezier",
+        out_handles=np.array([[0, 2, 0], [0, 0, 0]], np.float32),
+        in_handles=np.array([[0, 0, 0], [0, 2, 0]], np.float32)))
+    # Both handles at +2y put the cubic's peak at y = 1.5.
+    assert doc.eval(np.array([[0, 1.5, 0]], np.float32))[0] < 0
+    assert doc.eval(np.array([[0, 0, 0]], np.float32))[0] > 0
+
+
+def test_a_closed_curve_joins_its_ends():
+    open_doc, _, _ = _curve_doc(types="spline")
+    closed_doc, _, _ = _curve_doc(types="spline", closed=True)
+    # The closing span's Catmull-Rom midpoint. It is not the mirror of the
+    # open curve's: closing changes every span's neighbours, so the whole
+    # curve differs, not only the span that was added.
+    closing = np.array([[-0.625, -0.625, 0.0]], np.float32)
+    assert open_doc.eval(closing)[0] > 0
+    assert closed_doc.eval(closing)[0] < 0
+
+
+def test_tolerance_is_a_document_property_and_deterministic():
+    coarse, _, _ = _curve_doc(types="spline", tolerance=0.2)
+    fine, _, _ = _curve_doc(types="spline", tolerance=0.002)
+    probes = np.random.default_rng(5).uniform(-2, 2, size=(256, 3)).astype(np.float32)
+    assert not np.array_equal(coarse.eval(probes), fine.eval(probes))
+
+    again, _, _ = _curve_doc(types="spline", tolerance=0.002)
+    assert np.array_equal(fine.eval(probes), again.eval(probes))
+
+    with pytest.raises(ValueError):
+        clay.Stroke(points=_SQUARE, tolerance=0.0)
+
+
+def test_per_point_types_and_readback():
+    s = clay.Stroke(points=_SQUARE, types=["hard", "spline", "bezier", "bspline"],
+                    closed=True, tolerance=0.005)
+    assert s.types == ["hard", "spline", "bezier", "bspline"]
+    assert s.closed is True
+    assert s.tolerance == pytest.approx(0.005)
+
+    with pytest.raises(ValueError, match="hard"):
+        clay.Stroke(points=_SQUARE, types="wobble")
+    with pytest.raises(ValueError, match="one entry per point"):
+        clay.Stroke(points=_SQUARE, types=["hard", "spline"])
+
+
+def test_add_point_takes_a_type():
+    s = clay.Stroke().add_point((0, 0, 0), 0.1, type="spline") \
+                     .add_point((1, 0, 0), 0.1, type="bezier", out_handle=(0, 1, 0))
+    assert s.types == ["spline", "bezier"]
+    assert s.point_count == 2
+
+
+def test_editing_a_curve_is_an_ordinary_edit():
+    doc, layer, node = _curve_doc(types="spline")
+    doc.enable_undo()
+    assert doc.eval(_BULGE)[0] < 0
+
+    layer.set_points(node, _SQUARE, types="hard")
+    assert doc.eval(_BULGE)[0] > 0
+    doc.undo()
+    assert doc.eval(_BULGE)[0] < 0
+
+    doc.set_layer_protection(layer.id, locked=True)
+    with pytest.raises(ValueError, match="locked"):
+        layer.set_points(node, _SQUARE, types="hard")
+
+
+def test_curves_round_trip(tmp_path):
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Stroke(
+        points=_SQUARE, types=["bezier", "spline", "bspline", "hard"], closed=True,
+        tolerance=0.004, out_handles=np.array([[0.3, 0.7, -0.2], [0, 0, 0], [0, 0, 0], [0, 0, 0]],
+                                              np.float32)))
+    probes = np.random.default_rng(19).uniform(-2, 2, size=(512, 3)).astype(np.float32)
+    before = doc.eval(probes)
+    path = tmp_path / "curve.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(probes))
+
+
+# -- the cut tool (add-cut-tool) ---------------------------------------------
+
+
+def _block(size=2.0):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Box(size=(size, size, size)))
+    return doc, layer
+
+
+def _front(**kwargs):
+    frame = dict(origin=(0, 0, -4), right=(1, 0, 0), up=(0, 1, 0), forward=(0, 0, 1))
+    frame.update(kwargs)
+    return frame
+
+
+def test_a_cut_makes_a_hole_through():
+    doc, layer = _block()
+    layer.add(clay.Cut(shape=clay.CutShape.rect(0.4, 0.4), region=doc, **_front()),
+              op=clay.Op.SUBTRACT)
+    inside = np.array([[0, 0, -0.9], [0, 0, 0.0], [0, 0, 0.9]], np.float32)
+    outside = np.array([[0.8, 0.8, 0], [-0.8, 0, 0], [0.45, 0, 0]], np.float32)
+    assert (doc.eval(inside) > 0).all()     # through both faces
+    assert (doc.eval(outside) < 0).all()    # and nowhere else
+
+
+# The decision the design rests on: a cut is a prism. If it converged, moving
+# the frame along its own sweep would change the solid.
+def test_the_cut_is_a_prism_not_a_frustum():
+    probes = np.random.default_rng(7).uniform(-1.2, 1.2, size=(512, 3)).astype(np.float32)
+    solids = []
+    for z in (-4.0, -40.0):
+        doc, layer = _block()
+        layer.add(clay.Cut(shape=clay.CutShape.rect(0.4, 0.4), region=doc,
+                           **_front(origin=(0, 0, z))), op=clay.Op.SUBTRACT)
+        solids.append(doc.eval(probes) < 0)
+    assert np.array_equal(solids[0], solids[1])
+
+
+def test_keep_inner_and_keep_outer_are_the_op():
+    probes = np.random.default_rng(3).uniform(-0.9, 0.9, size=(256, 3)).astype(np.float32)
+    results = []
+    for op in (clay.Op.SUBTRACT, clay.Op.INTERSECT):
+        doc, layer = _block()
+        layer.add(clay.Cut(shape=clay.CutShape.circle(0.5), region=doc, **_front()), op=op)
+        results.append(doc.eval(probes) < 0)
+    # Inside the block every point survives exactly one of the two.
+    assert not (results[0] & results[1]).any()
+
+
+def test_an_explicit_extent_cuts_only_that_far():
+    doc, layer = _block()
+    layer.add(clay.Cut(shape=clay.CutShape.rect(0.3, 0.3), region=doc,
+                       near=0.0, far=8.0, **_front(origin=(0, 0, -8))),
+              op=clay.Op.SUBTRACT)
+    assert doc.eval(np.array([[0, 0, -0.5]], np.float32))[0] > 0   # cut here
+    assert doc.eval(np.array([[0, 0, 0.5]], np.float32))[0] < 0    # solid beyond
+
+
+def test_rounding_bevels_the_cut():
+    probe = np.array([[0.45, 0, 0]], np.float32)
+    fields = []
+    for rounding in (0.0, 0.15):
+        doc, layer = _block()
+        layer.add(clay.Cut(shape=clay.CutShape.rect(0.4, 0.4), region=doc, rounding=rounding,
+                           **_front()), op=clay.Op.SUBTRACT)
+        fields.append(float(doc.eval(probe)[0]))
+    assert fields[1] > fields[0]   # a fatter cutter takes more at the wall
+
+
+def test_a_spline_lasso_follows_its_curve():
+    control = np.array([[-0.5, 0, 0, 0], [0, 0.5, 0, 0], [0.5, 0, 0, 0], [0, -0.5, 0, 0]],
+                       np.float32)
+    spline = clay.CutShape.curve(control, types="spline", tolerance=0.005)
+    assert spline.vertex_count > 4
+
+    straight = clay.CutShape.polygon(control[:, :2].copy())
+    # Between the control polygon's chord through (-0.25, 0.25) and the closed
+    # spline's bulge out to (-0.3125, 0.3125).
+    probe = np.array([[-0.28, 0.28, 0.0]], np.float32)
+    fields = []
+    for shape in (straight, spline):
+        doc, layer = _block()
+        layer.add(clay.Cut(shape=shape, region=doc, **_front()), op=clay.Op.SUBTRACT)
+        fields.append(float(doc.eval(probe)[0]))
+    assert fields[0] < 0 < fields[1]
+
+
+def test_a_cut_is_an_ordinary_edit():
+    doc, layer = _block()
+    doc.enable_undo()
+    probe = np.array([[0, 0, 0]], np.float32)
+    assert doc.eval(probe)[0] < 0
+
+    layer.add(clay.Cut(shape=clay.CutShape.circle(0.4), region=doc, **_front()),
+              op=clay.Op.SUBTRACT)
+    assert doc.eval(probe)[0] > 0
+    doc.undo()
+    assert doc.eval(probe)[0] < 0
+
+    doc.set_layer_protection(layer.id, locked=True)
+    with pytest.raises(ValueError, match="locked"):
+        layer.add(clay.Cut(shape=clay.CutShape.circle(0.4), region=doc, **_front()),
+                  op=clay.Op.SUBTRACT)
+
+
+def test_a_cut_takes_the_region_as_a_pair_too():
+    doc, layer = _block()
+    layer.add(clay.Cut(shape=clay.CutShape.rect(0.3, 0.3),
+                       region=((-1, -1, -1), (1, 1, 1)), **_front()), op=clay.Op.SUBTRACT)
+    assert doc.eval(np.array([[0, 0, 0.9]], np.float32))[0] > 0
+
+
+def test_degenerate_cuts_are_refused():
+    doc, _ = _block()
+    with pytest.raises(ValueError, match="orthonormal"):
+        clay.Cut(shape=clay.CutShape.circle(0.3), region=doc, **_front(up=(0.5, 0.5, 0)))
+    with pytest.raises(ValueError, match="orthonormal"):
+        clay.Cut(shape=clay.CutShape.circle(0.3), region=doc, **_front(right=(2, 0, 0)))
+    with pytest.raises(ValueError, match="degenerate"):
+        clay.Cut(shape=clay.CutShape.circle(0.0), region=doc, **_front())
+    # A two-vertex outline is caught by the polygon converter before the cut
+    # ever sees it, with a more specific message than "degenerate".
+    with pytest.raises(ValueError, match="3 vertices"):
+        clay.CutShape.polygon(np.zeros((2, 2), np.float32))
+    # ...and an outline with no area is caught by the cut itself.
+    with pytest.raises(ValueError, match="degenerate"):
+        clay.Cut(shape=clay.CutShape.polygon(np.zeros((3, 2), np.float32)), region=doc,
+                 **_front())
+
+
+# -- the remaining voxel verbs and repair ------------------------------------
+
+
+def _repair_slab(thickness=4, half=8):
+    g = clay.VoxelGrid(0.1)
+    g.fill_box((-half, 0, -half), (half, thickness - 1, half), g.palette_add("#9aa4b0"))
+    return g
+
+
+def _hollow_box(half=5):
+    g = clay.VoxelGrid(0.1)
+    g.fill_box((-half, -half, -half), (half, half, half), g.palette_add("#c8703a"))
+    g.fill_box((-half + 1, -half + 1, -half + 1), (half - 1, half - 1, half - 1), 0)
+    return g
+
+
+def test_fill_cavities_fills_pockets_not_dents():
+    pocket = _repair_slab()
+    pocket.fill_box((0, 2, 0), (0, 3, 0), 0)      # one across, two deep
+    pocket.sculpt_fill_cavities((0, 2, 0), 9, passes=2, shape="cube")
+    assert pocket.get((0, 2, 0)) != 0
+
+    # Two across and one deep is three occupied face neighbours — below the
+    # threshold, and deliberately so: smoothing is the verb for that.
+    dent = _repair_slab()
+    dent.fill_box((-1, 3, -1), (0, 3, 0), 0)
+    before = dent.occupied_count
+    dent.sculpt_fill_cavities((0, 3, 0), 9, passes=2, shape="cube")
+    assert dent.occupied_count == before
+
+
+def test_scrape_flattens_and_smooths():
+    g = _repair_slab()
+    accent = g.palette_add("#d08a52")
+    for x in range(-5, 6, 2):
+        g.set((x, 4, 0), accent)
+    g.set((0, 5, 0), accent)
+    before = g.occupied_count
+    g.sculpt_scrape((0, 4, 0), 13, normal=(0, 1, 0), shape="cube")
+    assert g.occupied_count < before
+    assert g.get((0, 5, 0)) == 0
+
+
+def test_smudge_moves_the_skin_and_grab_moves_the_lump():
+    def block():
+        g = clay.VoxelGrid(0.1)
+        g.fill_box((-6, -6, -6), (6, 6, 6), g.palette_add("#9aa4b0"))
+        return g
+
+    smudged, grabbed, plain = block(), block(), block()
+    smudged.sculpt_smudge((6, 0, 0), 9, displacement=(0.3, 0, 0), shape="cube")
+    grabbed.sculpt_grab((6, 0, 0), 9, displacement=(0.3, 0, 0), shape="cube")
+    assert smudged.occupied_count != plain.occupied_count
+    # The interior is untouched — that is the distinction from grab.
+    assert all(smudged.get((x, 0, 0)) != 0 for x in range(-6, 4))
+
+
+def test_carve_with_an_alpha():
+    def block():
+        g = clay.VoxelGrid(0.1)
+        g.fill_box((-8, -8, -8), (8, 8, 8), g.palette_add("#9aa4b0"))
+        return g
+
+    alpha = np.zeros((8, 8), np.float32)
+    alpha[:, 4:] = 1.0                       # opaque on one half only
+    g = block()
+    g.sculpt_carve_alpha((0, 0, 0), 11, alpha=alpha, direction=(0, 0, 1), shape="cube")
+    assert g.occupied_count < block().occupied_count
+
+    with pytest.raises(ValueError, match="malformed"):
+        g.sculpt_carve_alpha((0, 0, 0), 11, alpha=np.zeros((0, 0), np.float32),
+                             direction=(0, 0, 1))
+    with pytest.raises(ValueError, match="malformed"):
+        g.sculpt_carve_alpha((0, 0, 0), 11, alpha=alpha, direction=(0, 0, 0))
+
+
+def test_repair_reports_before_it_repairs():
+    g = _hollow_box()
+    before = g.occupied_count
+    report = g.repair_report()
+    assert report["enclosed_voids"] == 1
+    assert report["void_cells"] == 9 ** 3
+    assert report["airtight"] is False
+    assert g.occupied_count == before          # non-destructive
+
+    solid = clay.VoxelGrid(0.1)
+    solid.fill_box((-3, -3, -3), (3, 3, 3), solid.palette_add("#ffffff"))
+    assert solid.repair_report()["airtight"] is True
+
+
+def test_close_holes_then_fill_voids():
+    g = _hollow_box()
+    g.set((5, 0, 0), 0)                        # pierce the wall
+    assert g.repair_report()["enclosed_voids"] == 0   # the outside reaches in
+
+    occupied_before = g.occupied_count
+    g.repair_close_holes(passes=1)
+    assert g.repair_report()["enclosed_voids"] == 1   # sealed in now
+    assert g.occupied_count >= occupied_before        # only ever adds
+
+    shell = g.get((5, 5, 5))
+    g.repair_fill_voids()
+    assert g.repair_report()["airtight"] is True
+    assert g.get((0, 0, 0)) == shell                  # coloured from the shell
+
+
+def test_repair_leaves_an_open_cavity_alone():
+    g = _hollow_box()
+    g.fill_box((5, -3, -3), (5, 3, 3), 0)      # a wide mouth
+    before = g.occupied_count
+    g.repair_fill_voids()
+    assert g.occupied_count == before
+
+
+def test_repair_honours_a_mask():
+    mask = clay.MaskField(0.1)
+    for x in range(-6, 7):
+        for y in range(-6, 7):
+            for z in range(-6, 7):
+                mask.set((x, y, z), 1.0)
+    g = _hollow_box()
+    before = g.occupied_count
+    g.repair_fill_voids(mask=mask)
+    assert g.occupied_count == before
+    assert g.repair_report()["airtight"] is False

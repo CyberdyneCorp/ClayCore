@@ -310,3 +310,35 @@ The module SHALL expose reading and setting a layer's ghost and lock flags, and 
 - **WHEN** a script adds an item to a locked layer
 - **THEN** an error is raised and the layer is unchanged
 
+### Requirement: Curves from Python
+The module SHALL expose a curve constructor taking control points with per-point radius and type, optional Bezier handles, a closed flag and a tolerance, and SHALL expose replacing an existing item's points.
+
+#### Scenario: Authoring a curve
+- **WHEN** a script builds a closed spline curve and evaluates the document
+- **THEN** the field is a smooth tube through the control points
+
+#### Scenario: Editing a curve
+- **WHEN** a script replaces a placed curve's points
+- **THEN** the field changes, and undoing restores it
+
+### Requirement: Cuts from Python
+The module SHALL expose resolving a cut frame and shape into an item, and placing it on a layer with a chosen op, defaulting the swept region to the document's own bounds.
+
+#### Scenario: Cutting a hole
+- **WHEN** a script cuts a circle from a solid and evaluates the document
+- **THEN** the field reports empty inside the circle's sweep and solid outside it
+
+### Requirement: The new verbs from Python
+The module SHALL expose fill-cavities, scrape, smudge and carve-with-alpha, taking the alpha as an (H, W) array.
+
+#### Scenario: Carving with an alpha array
+- **WHEN** a script carves with an (H, W) alpha that is opaque on one half
+- **THEN** material is removed under the opaque half only
+
+### Requirement: Repair from Python
+The module SHALL expose the report and both repairs, with the report as a readable structure rather than a bare count.
+
+#### Scenario: Reporting then repairing
+- **WHEN** a script reports a hollow shell, fills its voids, and reports again
+- **THEN** the first report says not airtight and the second says airtight
+

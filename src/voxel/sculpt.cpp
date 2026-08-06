@@ -17,6 +17,9 @@
 namespace clay {
 namespace voxel {
 
+using kernel::cf3;
+using kernel::cfloat3;
+
 namespace {
 
 struct BrushExtent {
@@ -95,6 +98,15 @@ struct Region {
     VoxelCoord lo{}, hi{};
     int nx = 0, ny = 0, nz = 0;
     std::vector<std::uint8_t> cells;
+
+    void set(int x, int y, int z, std::uint8_t v) {
+        if (x < lo.x || y < lo.y || z < lo.z || x > hi.x || y > hi.y || z > hi.z) return;
+        std::size_t i = static_cast<std::size_t>(x - lo.x) +
+                        static_cast<std::size_t>(nx) *
+                            (static_cast<std::size_t>(y - lo.y) +
+                             static_cast<std::size_t>(ny) * static_cast<std::size_t>(z - lo.z));
+        cells[i] = v;
+    }
 
     std::uint8_t at(int x, int y, int z) const {
         if (x < lo.x || y < lo.y || z < lo.z || x > hi.x || y > hi.y || z > hi.z) return 0;
@@ -187,6 +199,43 @@ void for_each_brush_cell(VoxelCoord c, const BrushParams& p, float voxel_size, F
             }
 }
 
+// Fill empty cells that are mostly surrounded by material, `passes` times.
+//
+// This started as a morphological closing, which is the textbook answer and is
+// wrong here for two reasons the code found: a ball of radius r FITS INTO a
+// dent wider than r, so a bigger structuring element fills less rather than
+// more; and a closing cannot seal a one-cell perforation in a one-cell wall at
+// all, because the erosion reaches through from the void behind it. Both cases
+// are exactly what this is for.
+//
+// The rule that does work is local and blunt: an empty cell with at least four
+// of its six face neighbours occupied is inside a pocket, not beside a
+// surface. A flat face gives one, a concave edge two, a corner three — so four
+// is the line between "irregular surface" and "hole", and smoothing is the
+// verb for the former.
+//
+// Shared with repair, which applies the same rule over a whole grid: filling a
+// cavity and sealing a perforation are the same question at two scopes.
+inline constexpr int kPocketNeighbours = 4;
+
+int occupied_face_neighbours(const Region& r, int x, int y, int z) {
+    return (r.at(x + 1, y, z) != 0) + (r.at(x - 1, y, z) != 0) + (r.at(x, y + 1, z) != 0) +
+           (r.at(x, y - 1, z) != 0) + (r.at(x, y, z + 1) != 0) + (r.at(x, y, z - 1) != 0);
+}
+
+void fill_pockets(Region& r, int passes) {
+    for (int step = 0; step < passes; ++step) {
+        Region next = r;
+        for (int z = r.lo.z; z <= r.hi.z; ++z)
+            for (int y = r.lo.y; y <= r.hi.y; ++y)
+                for (int x = r.lo.x; x <= r.hi.x; ++x)
+                    if (r.at(x, y, z) == 0 &&
+                        occupied_face_neighbours(r, x, y, z) >= kPocketNeighbours)
+                        next.set(x, y, z, majority_colour(r, x, y, z));
+        r = std::move(next);
+    }
+}
+
 }  // namespace
 
 void VoxelGrid::set_brush(VoxelCoord c, const BrushParams& p, std::uint8_t index) {
@@ -244,6 +293,118 @@ void VoxelGrid::sculpt_flatten(VoxelCoord c, const BrushParams& p, kernel::cfloa
             set(w, majority_colour(before, w.x, w.y, w.z));  // hollows fill in
         }
     });
+}
+
+void VoxelGrid::sculpt_fill_cavities(VoxelCoord c, const BrushParams& p, int width) {
+    if (width < 1) return;
+    // Padded by the number of passes so a pocket touching the footprint's edge
+    // sees the material on the other side of it.
+    Region closed = snapshot(*this, c, p.size, width + 1);
+    fill_pockets(closed, width);
+    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) {
+        if (get(w) == 0 && closed.at(w.x, w.y, w.z) != 0) set(w, closed.at(w.x, w.y, w.z));
+    });
+}
+
+void VoxelGrid::sculpt_scrape(VoxelCoord c, const BrushParams& p, cfloat3 normal,
+                              float offset_cells) {
+    float len = kernel::clength(normal);
+    if (len < 1e-9f) return;
+    cfloat3 n = normal * (1.0f / len);
+    // ONE snapshot for both decisions. Flattening then smoothing as two calls
+    // would let the flatten's output feed the smooth's neighbourhood, which is
+    // the thing every verb here is written to avoid.
+    Region before = snapshot(*this, c, p.size, 1);
+    float plane = kernel::cdot(cf3(static_cast<float>(c.x) + 0.5f, static_cast<float>(c.y) + 0.5f,
+                                   static_cast<float>(c.z) + 0.5f),
+                               n) +
+                  offset_cells;
+    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) {
+        float height = kernel::cdot(cf3(static_cast<float>(w.x) + 0.5f,
+                                        static_cast<float>(w.y) + 0.5f,
+                                        static_cast<float>(w.z) + 0.5f),
+                                    n) -
+                       plane;
+        bool occupied = before.at(w.x, w.y, w.z) != 0;
+        int neighbours = occupied_neighbours_26(before, w.x, w.y, w.z);
+        if (occupied && height > 0.0f) {
+            set(w, 0);  // proud of the plane: scraped off
+        } else if (occupied && neighbours < 13) {
+            set(w, 0);  // under-supported: the smoothing half
+        } else if (!occupied && height <= 0.0f && neighbours > 13) {
+            set(w, majority_colour(before, w.x, w.y, w.z));  // a hollow below the plane
+        }
+    });
+}
+
+void VoxelGrid::sculpt_smudge(VoxelCoord c, const BrushParams& p, cfloat3 displacement) {
+    // Padded by the displacement so material dragged in from outside the
+    // footprint is seen.
+    int pad = 1 + static_cast<int>(std::ceil(kernel::clength(displacement) / voxel_size_));
+    Region before = snapshot(*this, c, p.size, pad);
+    cfloat3 step = displacement * (1.0f / voxel_size_);
+
+    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) {
+        bool occupied = before.at(w.x, w.y, w.z) != 0;
+        // Only the skin moves. An interior cell has no empty face neighbour,
+        // so it is left exactly where it was — that is the whole difference
+        // from grab, which translates every cell in its region.
+        bool surface = occupied ? has_empty_face_neighbour(before, w.x, w.y, w.z)
+                                : has_occupied_face_neighbour(before, w.x, w.y, w.z);
+        if (!surface) return;
+        VoxelCoord from{w.x - static_cast<std::int32_t>(cnearest(step.x)),
+                        w.y - static_cast<std::int32_t>(cnearest(step.y)),
+                        w.z - static_cast<std::int32_t>(cnearest(step.z))};
+        std::uint8_t source = before.at(from.x, from.y, from.z);
+        // Dragged material lands; behind the drag the skin is left to the
+        // interior it uncovered rather than punched through.
+        if (source != 0) {
+            set(w, source);
+        } else if (occupied && !has_occupied_face_neighbour(before, from.x, from.y, from.z)) {
+            set(w, 0);
+        }
+    });
+}
+
+bool VoxelGrid::sculpt_carve_alpha(VoxelCoord c, const BrushParams& p, const float* alpha,
+                                   int alpha_width, int alpha_height, cfloat3 direction,
+                                   std::uint8_t index) {
+    if (!alpha || alpha_width <= 0 || alpha_height <= 0) return false;
+    float len = kernel::clength(direction);
+    if (len < 1e-9f) return false;
+    cfloat3 n = direction * (1.0f / len);
+    // Any two axes perpendicular to the direction will do: the stamp's own
+    // rotation is the caller's business, and picking one here would be an
+    // opinion the engine has no basis for.
+    cfloat3 helper = std::abs(n.y) < 0.9f ? cf3(0, 1, 0) : cf3(1, 0, 0);
+    cfloat3 u = kernel::cnormalize(kernel::ccross(helper, n));
+    cfloat3 v = kernel::ccross(n, u);
+
+    BrushExtent e = brush_extent(p.size);
+    const float radius = std::max(p.size * 0.5f, 1e-6f);
+    for (int z = e.lo; z <= e.hi; ++z)
+        for (int y = e.lo; y <= e.hi; ++y)
+            for (int x = e.lo; x <= e.hi; ++x) {
+                if (!in_footprint(x, y, z, p.size, e, p.shape)) continue;
+                VoxelCoord w{c.x + x, c.y + y, c.z + z};
+                cfloat3 offset = cf3(static_cast<float>(x), static_cast<float>(y),
+                                     static_cast<float>(z));
+                // Projected onto the plane perpendicular to the direction, then
+                // mapped to the stamp's [0,1] square.
+                float su = (kernel::cdot(offset, u) / radius) * 0.5f + 0.5f;
+                float sv = (kernel::cdot(offset, v) / radius) * 0.5f + 0.5f;
+                if (su < 0.0f || su >= 1.0f || sv < 0.0f || sv >= 1.0f) continue;
+                int ai = std::min(static_cast<int>(su * alpha_width), alpha_width - 1);
+                int aj = std::min(static_cast<int>(sv * alpha_height), alpha_height - 1);
+                float a = std::clamp(alpha[aj * alpha_width + ai], 0.0f, 1.0f);
+                if (a <= 0.0f) continue;
+
+                float weight = falloff_weight(p.falloff, normalized_distance(x, y, z, p.size, e)) *
+                               p.strength * a;
+                if (p.mask) weight *= 1.0f - mask_at(*p.mask, w, voxel_size_);
+                if (passes(w, weight, p.seed)) set(w, index);
+            }
+    return true;
 }
 
 void VoxelGrid::sculpt_grab(VoxelCoord c, const BrushParams& p, kernel::cfloat3 displacement,

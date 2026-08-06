@@ -27,6 +27,7 @@
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
 #include "clay/brush/stroke.h"
+#include "clay/cut/cut.h"
 #include "clay/voxel/mask.h"
 #include "clay/version.h"
 
@@ -162,10 +163,16 @@ struct PyPrim {
     math::Transform xform;
     std::vector<scene::StrokePoint> stroke;
     float stroke_blend_k = 0.0f;
+    bool stroke_closed = false;
+    float curve_tolerance = 0.01f;
     std::vector<scene::Deformer> deformers;
     scene::Profile profile;
     std::vector<kernel::cfloat2> profile_points;
     scene::Repeat repeat;
+    // Only a cut sets this today: it derives its own bevel, and losing it
+    // between constructing the prim and placing it would be a trap. Layer.add
+    // uses it when the caller does not override it.
+    float rounding = 0.0f;
 };
 
 math::Quat to_axis_angle(nb::handle rotation_axis_angle) {
@@ -218,6 +225,7 @@ struct PyTriPrism : PyPrim {};
 struct PyOctahedronCheap : PyPrim {};
 struct PyLNormSphere : PyPrim {};
 struct PyRevolve : PyPrim {};
+struct PyCut : PyPrim {};
 
 // -- mesh wrapper ---------------------------------------------------------------
 
@@ -245,6 +253,11 @@ void save_mesh_any(const mesh::Mesh& m, const std::string& path) {
     throw std::invalid_argument("unsupported mesh extension '." + ext +
                                 "' (supported: .obj, .ply, .fbx, .glb)");
 }
+
+// A cut's swept region: the document being cut, which is the answer in every
+// real use, or an explicit ((lo), (hi)) pair for a caller that wants to bound
+// it by hand.
+math::Aabb to_aabb(nb::handle obj);
 
 // -- stroke engine helpers -----------------------------------------------------
 
@@ -353,6 +366,26 @@ struct PyDocument {
     std::shared_ptr<UndoRef> undo = std::make_shared<UndoRef>();
 };
 
+math::Aabb to_aabb(nb::handle obj) {
+    if (nb::isinstance<PyDocument>(obj)) {
+        math::Aabb b = scene::compile_document(nb::cast<PyDocument&>(obj).doc->document).bounds;
+        if (b.empty())
+            throw std::invalid_argument(
+                "the document is empty, so there is nothing to size the cut against — pass "
+                "an explicit ((lo), (hi)) region");
+        return b;
+    }
+    nb::sequence s;
+    try {
+        s = nb::cast<nb::sequence>(obj);
+    } catch (const std::exception&) {
+        throw std::invalid_argument("region must be a Document or a ((lo), (hi)) pair");
+    }
+    if (nb::len(s) != 2)
+        throw std::invalid_argument("region must be a Document or a ((lo), (hi)) pair");
+    return math::Aabb(to_f3(s[0], "region lo"), to_f3(s[1], "region hi"));
+}
+
 struct PyLayer {
     std::shared_ptr<io::ClaySpaceDoc> doc;
     std::shared_ptr<UndoRef> undo;
@@ -410,6 +443,61 @@ std::vector<kernel::cfloat2> to_polygon(nb::handle obj) {
 }
 
 // (N,4) float32 stroke points: xyz + radius. Sequences of 4-tuples also work.
+scene::StrokePointType parse_point_type(const std::string& t) {
+    if (t == "hard") return scene::StrokePointType::Hard;
+    if (t == "spline") return scene::StrokePointType::Spline;
+    if (t == "bspline") return scene::StrokePointType::BSpline;
+    if (t == "bezier") return scene::StrokePointType::Bezier;
+    throw std::invalid_argument(
+        "point type must be 'hard', 'spline', 'bspline' or 'bezier', got '" + t + "'");
+}
+
+// One name for every point, or one per point. A single string is the common
+// case — a whole curve is usually smooth — and a list is what a per-point
+// editor produces.
+void apply_point_types(std::vector<scene::StrokePoint>& points, nb::handle types) {
+    if (types.is_none()) return;
+    if (nb::isinstance<nb::str>(types)) {
+        scene::StrokePointType t = parse_point_type(nb::cast<std::string>(types));
+        for (scene::StrokePoint& p : points) p.type = t;
+        return;
+    }
+    nb::sequence seq;
+    try {
+        seq = nb::cast<nb::sequence>(types);
+    } catch (const std::exception&) {
+        throw std::invalid_argument("types must be a string or a sequence of strings");
+    }
+    if (nb::len(seq) != points.size())
+        throw std::invalid_argument("types must have one entry per point (" +
+                                    std::to_string(points.size()) + ")");
+    for (std::size_t i = 0; i < points.size(); ++i)
+        points[i].type = parse_point_type(nb::cast<std::string>(seq[i]));
+}
+
+// (N, 3) handles, or None. Only Bezier points read them, but accepting them
+// for every point keeps the arrays parallel to the point list.
+void apply_handles(std::vector<scene::StrokePoint>& points, nb::handle in_handles,
+                   nb::handle out_handles) {
+    auto load = [&](nb::handle h, bool incoming) {
+        if (h.is_none()) return;
+        PointsView v = to_points(h);
+        if (v.count != points.size())
+            throw std::invalid_argument("handles must have one entry per point (" +
+                                        std::to_string(points.size()) + ")");
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            kernel::cfloat3 value =
+                kernel::cf3(v.data[i * 3 + 0], v.data[i * 3 + 1], v.data[i * 3 + 2]);
+            if (incoming)
+                points[i].in_handle = value;
+            else
+                points[i].out_handle = value;
+        }
+    };
+    load(in_handles, true);
+    load(out_handles, false);
+}
+
 std::vector<scene::StrokePoint> to_stroke_points(nb::handle obj) {
     nb::module_ np = nb::module_::import_("numpy");
     nb::object arr = np.attr("ascontiguousarray")(obj, "dtype"_a = "float32");
@@ -1203,31 +1291,151 @@ NB_MODULE(pyclay, m) {
              "profile"_a, "offset"_a = 0.0f, CLAY_PLACE_ARGS);
 #undef CLAY_PLACE_ARGS
 
+    nb::class_<cut::CutShape>(
+        m, "CutShape",
+        "The outline of a cut, in world units on the frame it was drawn on.")
+        .def_static("rect",
+                    [](float half_width, float half_height) {
+                        return cut::CutShape::rect(half_width, half_height);
+                    },
+                    "half_width"_a, "half_height"_a)
+        .def_static("circle", [](float radius) { return cut::CutShape::circle(radius); },
+                    "radius"_a)
+        .def_static("polygon",
+                    [](nb::handle vertices) {
+                        return cut::CutShape::from_polygon(to_polygon(vertices));
+                    },
+                    "vertices"_a, "An (N, 2) outline; it closes implicitly")
+        .def_static("curve",
+                    [](nb::handle points, nb::handle types, float tolerance) {
+                        std::vector<scene::StrokePoint> control = to_stroke_points(points);
+                        apply_point_types(control, types);
+                        return cut::CutShape::from_curve(control, tolerance);
+                    },
+                    "points"_a, "types"_a = "spline", "tolerance"_a = 0.01f,
+                    "A closed control-point curve drawn in the cut plane, flattened "
+                    "through the same tessellator curves use — so a spline lasso "
+                    "follows the same curve a spline item would.")
+        .def_prop_ro("vertex_count",
+                     [](const cut::CutShape& s) { return s.polygon.size(); });
+
+    nb::class_<PyCut, PyPrim>(
+        m, "Cut",
+        "A shape drawn over the model, resolved into an ordinary edit item.\n\n"
+        "Give the frame the shape was drawn on — an origin and an orthonormal\n"
+        "basis, which a viewport already has because it needed one to draw the\n"
+        "overlay — and the shape in WORLD units on that frame. Not pixels and\n"
+        "not normalized device coordinates: the engine has no viewport.\n\n"
+        "The cut is a PRISM, not a frustum. A shape drawn under a perspective\n"
+        "camera sweeps a converging wedge, and cutting with one would give a\n"
+        "cut face that is not flat and a solid that depends on where the camera\n"
+        "stood. A trim is a straight cut, as it is in ZBrush and 3DCoat.\n\n"
+        "Which side survives is the OP you place this with: SUBTRACT removes\n"
+        "what the shape covers, INTERSECT keeps only that.\n\n"
+        "The sweep is sized to `region` — the document's own bounds by default —\n"
+        "so a cut goes all the way through. Passing near/far explicitly is how a\n"
+        "deliberate partial cut is expressed.")
+        .def("__init__",
+             [](PyCut* self, nb::handle origin, nb::handle right, nb::handle up,
+                nb::handle forward, nb::handle shape, nb::handle region, float rounding,
+                nb::handle near_extent, nb::handle far_extent) {
+                 cut::CutFrame frame;
+                 frame.origin = to_f3(origin, "origin");
+                 frame.right = to_f3(right, "right");
+                 frame.up = to_f3(up, "up");
+                 frame.forward = to_f3(forward, "forward");
+                 if (!frame.is_orthonormal())
+                     throw std::invalid_argument(
+                         "right, up and forward must be orthonormal — the shape was drawn in "
+                         "a frame, and silently squaring it up would cut somewhere else");
+
+                 cut::CutOptions options;
+                 options.rounding = rounding;
+                 if (!near_extent.is_none()) options.near_extent = nb::cast<float>(near_extent);
+                 if (!far_extent.is_none()) options.far_extent = nb::cast<float>(far_extent);
+
+                 math::Aabb box = to_aabb(region);
+                 std::optional<scene::Node> item =
+                     cut::cut_item(frame, nb::cast<cut::CutShape&>(shape), box, options);
+                 if (!item)
+                     throw std::invalid_argument("the cut is degenerate: a shape with no area");
+                 new (self) PyCut();
+                 self->prim = item->prim;
+                 self->profile = item->profile;
+                 self->profile_points = item->profile_points;
+                 self->xform = item->xform;
+                 self->rounding = item->rounding;
+             },
+             "origin"_a, "right"_a, "up"_a, "forward"_a, "shape"_a, "region"_a,
+             "rounding"_a = 0.0f, "near"_a = nb::none(), "far"_a = nb::none());
+
     nb::class_<PyStroke, PyPrim>(
         m, "Stroke",
-        "Sculpt stroke: a polyline chain of sphere-swept cones with per-point "
-        "radius. One stroke is ONE edit item, not one per segment.")
+        "A chain of sphere-swept cones with per-point radius — ONE edit item,\n"
+        "not one per segment.\n\n"
+        "This is also the curve object. Each point carries a type saying how it\n"
+        "joins the next: 'hard' (a straight segment, the default and what a\n"
+        "finger drag produces), 'spline' (Catmull-Rom, through the points),\n"
+        "'bspline' (approximating, so it rounds corners off) or 'bezier'\n"
+        "(shaped by in_handles/out_handles). A stroke is a curve whose points\n"
+        "are all hard corners, so an all-hard chain means exactly what it\n"
+        "always did.\n\n"
+        "Typed points are tessellated into the same segment chain at compile\n"
+        "time, to `tolerance` — the largest distance a span's midpoint may sit\n"
+        "from its chord. Tolerance is a property of the document, not of the\n"
+        "viewer: two builds have to agree on what a document means.\n\n"
+        "Handles are in the item's LOCAL space, relative to their point.")
         .def("__init__",
-             [](PyStroke* self, nb::handle points, float blend_k, nb::handle position,
-                nb::handle rotation_axis_angle, float scale) {
+             [](PyStroke* self, nb::handle points, float blend_k, nb::handle types,
+                bool closed, float tolerance, nb::handle in_handles, nb::handle out_handles,
+                nb::handle position, nb::handle rotation_axis_angle, float scale) {
                  new (self) PyStroke();
                  self->prim = scene::Prim::stroke();
                  if (!points.is_none()) self->stroke = to_stroke_points(points);
+                 apply_point_types(self->stroke, types);
+                 apply_handles(self->stroke, in_handles, out_handles);
                  if (blend_k < 0.0f) throw std::invalid_argument("blend_k must be >= 0");
+                 if (!(tolerance > 0.0f)) throw std::invalid_argument("tolerance must be > 0");
                  self->stroke_blend_k = blend_k;
+                 self->stroke_closed = closed;
+                 self->curve_tolerance = tolerance;
                  place(*self, position, rotation_axis_angle, scale);
              },
-             "points"_a = nb::none(), "blend_k"_a = 0.0f, "position"_a = nb::none(),
+             "points"_a = nb::none(), "blend_k"_a = 0.0f, "types"_a = nb::none(),
+             "closed"_a = false, "tolerance"_a = 0.01f, "in_handles"_a = nb::none(),
+             "out_handles"_a = nb::none(), "position"_a = nb::none(),
              "rotation_axis_angle"_a = nb::none(), "scale"_a = 1.0f)
         .def("add_point",
-             [](PyStroke& self, nb::handle position, float radius) {
+             [](PyStroke& self, nb::handle position, float radius, const std::string& type,
+                nb::handle in_handle, nb::handle out_handle) {
                  if (radius < 0.0f) throw std::invalid_argument("radius must be >= 0");
-                 self.stroke.push_back(
-                     scene::StrokePoint{to_f3(position, "stroke point"), radius});
+                 scene::StrokePoint p;
+                 p.pos = to_f3(position, "stroke point");
+                 p.radius = radius;
+                 p.type = parse_point_type(type);
+                 if (!in_handle.is_none()) p.in_handle = to_f3(in_handle, "in_handle");
+                 if (!out_handle.is_none()) p.out_handle = to_f3(out_handle, "out_handle");
+                 self.stroke.push_back(p);
                  return &self;
              },
-             "position"_a, "radius"_a, nb::rv_policy::reference_internal,
+             "position"_a, "radius"_a, "type"_a = "hard", "in_handle"_a = nb::none(),
+             "out_handle"_a = nb::none(), nb::rv_policy::reference_internal,
              "Append one point (chainable) — the incremental authoring path")
+        .def_prop_ro("closed", [](const PyStroke& self) { return self.stroke_closed; })
+        .def_prop_ro("tolerance", [](const PyStroke& self) { return self.curve_tolerance; })
+        .def_prop_ro("types",
+                     [](const PyStroke& self) {
+                         nb::list out;
+                         for (const scene::StrokePoint& p : self.stroke) {
+                             switch (p.type) {
+                                 case scene::StrokePointType::Spline: out.append("spline"); break;
+                                 case scene::StrokePointType::BSpline: out.append("bspline"); break;
+                                 case scene::StrokePointType::Bezier: out.append("bezier"); break;
+                                 default: out.append("hard"); break;
+                             }
+                         }
+                         return out;
+                     })
         .def_prop_ro("point_count",
                      [](const PyStroke& self) { return self.stroke.size(); })
         .def_prop_ro("points", [](const PyStroke& self) {
@@ -1281,7 +1489,7 @@ NB_MODULE(pyclay, m) {
         .def_prop_ro("resolution", [](const PyLayer& l) { return l.layer().resolution; })
         .def("add",
              [](PyLayer& l, const PyPrim& prim, scene::Op op, nb::handle blend, nb::handle color,
-                float rounding, bool mirror, nb::handle transition) {
+                nb::handle rounding, bool mirror, nb::handle transition) {
                  if (op == scene::Op::None)
                      throw std::invalid_argument(
                          "op must be a combine operator, not Op.NONE");
@@ -1290,6 +1498,8 @@ NB_MODULE(pyclay, m) {
                  n.xform = prim.xform;
                  n.stroke = prim.stroke;
                  n.stroke_blend_k = prim.stroke_blend_k;
+                 n.stroke_closed = prim.stroke_closed;
+                 n.curve_tolerance = prim.curve_tolerance;
                  n.deformers = prim.deformers;
                  n.profile = prim.profile;
                  n.profile_points = prim.profile_points;
@@ -1304,8 +1514,10 @@ NB_MODULE(pyclay, m) {
                      }
                  }
                  if (!color.is_none()) n.color = parse_color(color);
-                 if (rounding < 0.0f) throw std::invalid_argument("rounding must be >= 0");
-                 n.rounding = rounding;
+                 // None means "whatever the prim decided", which is 0 for
+                 // every prim that does not decide one.
+                 n.rounding = rounding.is_none() ? prim.rounding : nb::cast<float>(rounding);
+                 if (n.rounding < 0.0f) throw std::invalid_argument("rounding must be >= 0");
                  n.mirror = mirror;
                  if (scene::op_is_transition(op)) {
                      if (transition.is_none())
@@ -1338,8 +1550,27 @@ NB_MODULE(pyclay, m) {
                  return id;
              },
              "prim"_a, "op"_a = scene::Op::Add, "blend"_a = nb::none(), "color"_a = nb::none(),
-             "rounding"_a = 0.0f, "mirror"_a = false, "transition"_a = nb::none(),
+             "rounding"_a = nb::none(), "mirror"_a = false, "transition"_a = nb::none(),
              "Append an edit to the layer; returns the node id")
+        .def("set_points",
+             [](PyLayer& l, scene::NodeId node, nb::handle points, nb::handle types, bool closed,
+                float tolerance, nb::handle in_handles, nb::handle out_handles) {
+                 const scene::Node* n = l.layer().sdf->find(node);
+                 if (!n) throw std::invalid_argument("no node with that id in this layer");
+                 if (!(tolerance > 0.0f)) throw std::invalid_argument("tolerance must be > 0");
+                 std::vector<scene::StrokePoint> pts = to_stroke_points(points);
+                 apply_point_types(pts, types);
+                 apply_handles(pts, in_handles, out_handles);
+                 apply_or_throw(l.doc->document,
+                                scene::Command{scene::SetStrokePointsCmd{
+                                    l.id, node, std::move(pts), closed, tolerance}},
+                                "set_points", l.undo.get());
+             },
+             "node"_a, "points"_a, "types"_a = nb::none(), "closed"_a = false,
+             "tolerance"_a = 0.01f, "in_handles"_a = nb::none(), "out_handles"_a = nb::none(),
+             "Replace a placed stroke or curve's whole point list. A curve is "
+             "tens of points, so a whole-list replace costs less than granular "
+             "commands would and its undo is exact by construction.")
         .def("apply_stroke",
              [](PyLayer& l, nb::handle samples, const brush::StrokePreset& preset,
                 const PyPrim& prim, scene::Op op, nb::handle blend, nb::handle color,
@@ -1348,6 +1579,8 @@ NB_MODULE(pyclay, m) {
                  templ.prim = prim.prim;
                  templ.stroke = prim.stroke;
                  templ.stroke_blend_k = prim.stroke_blend_k;
+                 templ.stroke_closed = prim.stroke_closed;
+                 templ.curve_tolerance = prim.curve_tolerance;
                  templ.deformers = prim.deformers;
                  templ.repeat = prim.repeat;
                  templ.profile = prim.profile;
@@ -2198,6 +2431,102 @@ NB_MODULE(pyclay, m) {
              "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant",
              "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
              "Move surface cells one step toward the brush centre")
+        .def("sculpt_fill_cavities",
+             [](PyVoxelGrid& g, nb::handle cell, int n, int passes, const std::string& shape,
+                const std::string& falloff, float strength, std::uint32_t seed,
+                nb::handle mask) {
+                 g.grid().sculpt_fill_cavities(to_coord(cell),
+                                               make_brush(n, shape, falloff, strength, seed, mask),
+                                               passes);
+             },
+             "cell"_a, "size"_a, "passes"_a = 1, "shape"_a = "sphere", "falloff"_a = "constant",
+             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
+             "Fill pockets: an empty cell with at least four of its six face "
+             "neighbours occupied is inside a cavity rather than beside a surface. "
+             "A through-hole, an open face and a wide shallow dent are left alone — "
+             "smoothing is the verb for surface irregularity.")
+        .def("sculpt_scrape",
+             [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle normal, float offset,
+                const std::string& shape, const std::string& falloff, float strength,
+                std::uint32_t seed, nb::handle mask) {
+                 g.grid().sculpt_scrape(to_coord(cell),
+                                        make_brush(n, shape, falloff, strength, seed, mask),
+                                        to_f3(normal, "normal"), offset);
+             },
+             "cell"_a, "size"_a, "normal"_a, "offset"_a = 0.0f, "shape"_a = "sphere",
+             "falloff"_a = "constant", "strength"_a = 1.0f, "seed"_a = 0u,
+             "mask"_a = nb::none(),
+             "Flatten onto the plane AND smooth, from ONE snapshot. Calling the two "
+             "verbs in sequence is not the same thing: the flatten's output would "
+             "feed the smooth's neighbourhood.")
+        .def("sculpt_smudge",
+             [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle displacement,
+                const std::string& shape, const std::string& falloff, float strength,
+                std::uint32_t seed, nb::handle mask) {
+                 g.grid().sculpt_smudge(to_coord(cell),
+                                        make_brush(n, shape, falloff, strength, seed, mask),
+                                        to_f3(displacement, "displacement"));
+             },
+             "cell"_a, "size"_a, "displacement"_a, "shape"_a = "sphere",
+             "falloff"_a = "smooth", "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
+             "Drag SURFACE material along a direction, leaving the interior where it "
+             "was. That is the difference from grab, which translates every cell in "
+             "its region: grab moves a lump, smudge smears a skin.")
+        .def("sculpt_carve_alpha",
+             [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle alpha, nb::handle direction,
+                std::uint8_t index, const std::string& shape, const std::string& falloff,
+                float strength, std::uint32_t seed, nb::handle mask) {
+                 nb::module_ np = nb::module_::import_("numpy");
+                 nb::object arr = np.attr("ascontiguousarray")(alpha, "dtype"_a = "float32");
+                 nb::ndarray<const float, nb::ndim<2>, nb::c_contig, nb::device::cpu> view;
+                 try {
+                     view = nb::cast<decltype(view)>(arr);
+                 } catch (const std::exception&) {
+                     throw std::invalid_argument("alpha must be an (H, W) float array");
+                 }
+                 if (!g.grid().sculpt_carve_alpha(
+                         to_coord(cell), make_brush(n, shape, falloff, strength, seed, mask),
+                         view.data(), static_cast<int>(view.shape(1)),
+                         static_cast<int>(view.shape(0)), to_f3(direction, "direction"), index))
+                     throw std::invalid_argument(
+                         "the alpha stamp is malformed: an empty grid, or a zero-length "
+                         "direction");
+             },
+             "cell"_a, "size"_a, "alpha"_a, "direction"_a, "index"_a = 0,
+             "shape"_a = "sphere", "falloff"_a = "constant", "strength"_a = 1.0f,
+             "seed"_a = 0u, "mask"_a = nb::none(),
+             "Carve modulated by an (H, W) alpha, projected onto the plane "
+             "perpendicular to `direction`. index 0 carves; a non-zero one deposits. "
+             "The engine decodes no images — a host that has an alpha has already "
+             "loaded the PNG.")
+        .def("repair_report",
+             [](const PyVoxelGrid& g) {
+                 voxel::VoxelGrid::RepairReport r = g.grid().repair_report();
+                 nb::dict out;
+                 out["enclosed_voids"] = r.enclosed_voids;
+                 out["void_cells"] = r.void_cells;
+                 out["largest_void"] = r.largest_void;
+                 out["airtight"] = r.airtight;
+                 return out;
+             },
+             "Non-destructive: what a pre-bake check wants to know without doing the "
+             "repair. A destructive operation whose input is somebody's sculpt should "
+             "be askable before it is answerable.")
+        .def("repair_close_holes",
+             [](PyVoxelGrid& g, int passes, nb::handle mask) {
+                 g.grid().repair_close_holes(passes, borrow_mask(mask));
+             },
+             "passes"_a = 1, "mask"_a = nb::none(),
+             "Seal perforations over the whole grid by the pocket rule. Only ever "
+             "adds cells, so no material is lost.")
+        .def("repair_fill_voids",
+             [](PyVoxelGrid& g, nb::handle mask) {
+                 g.grid().repair_fill_voids(borrow_mask(mask));
+             },
+             "mask"_a = nb::none(),
+             "Fill every empty cell the outside cannot reach, coloured from the shell "
+             "that encloses it. Enclosure is decided by a flood from outside the "
+             "bounds, not guessed at from a local neighbourhood.")
         .def("apply_stroke",
              [](PyVoxelGrid& g, nb::handle samples, const brush::StrokePreset& preset,
                 std::uint8_t index, const std::string& shape, const std::string& falloff,
