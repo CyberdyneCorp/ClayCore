@@ -14,12 +14,12 @@ Last reconciled against `3dcoat_study/MISSING_FEATURES.md` and
 caught five items this file had dropped. Every ClayCore-owned row in their
 catalogue is now represented here or in the deferred list below.
 
-## Where the engine is (2026-08-06, v0.18.0)
+## Where the engine is (2026-08-06, v0.19.0)
 
-14 capabilities, 30 archived changes. Complete enough that the gaps below are
+14 capabilities, 31 archived changes. Complete enough that the gaps below are
 about *sculpting affordances*, not about the field engine:
 
-- 29 primitives + stroke/curve chains, 14 combine ops, 5 blend profiles,
+- 30 primitives + stroke/curve chains, 14 combine ops, 5 blend profiles,
   grid/radial repetition, mirror with blended seam. Every kernel capability is
   reachable from a document — loft was the last one that was not.
 - **12 deformers** — twist, bend, taper, displace, wrap_around, elongate,
@@ -117,7 +117,7 @@ referenced by handle, uploaded once and cached — which means the tape needs a
 notion of external resources it does not have today. That is the real cost of
 the mesh-import row, and it is invisible in "BVH + winding number".
 
-### Track A — ready now, no prerequisites
+### Track A — complete 2026-08-06
 
 **Both voxel rows landed 2026-08-06.** The plan guessed they shared "a
 connected-component pass"; writing them showed the shared operation is a
@@ -150,9 +150,9 @@ from outside, which the engine did not have.
 1. ~~**`add-voxel-verbs` + `add-voxel-repair`**~~ **done 2026-08-06.** They did
    share an operation, though not the connected-component pass predicted here
    — see Track A above.
-2. **`add-loft-opcode` → `add-swept-n`** — independent of Track B, and loft is
-   the one row whose blocker ("an item can carry two profiles") is already
-   written down as a sentence in the spec.
+2. ~~**`add-loft-opcode` → `add-swept-n`**~~ **done 2026-08-06.** Loft took N
+   profiles rather than two, which turned swept-N from "the same opcode with a
+   count" into its own row about guides — see Track A above.
 3. **`add-sampled-fields` → `add-mesh-to-field-import` → `add-sdf-relax`** —
    the prerequisite designed with all three consumers in view rather than
    retrofitted around the first one.

@@ -290,3 +290,10 @@ The C API SHALL expose adding profiles to a loft item, including polygon profile
 - **WHEN** a C consumer builds a loft of the same profiles
 - **THEN** the field matches what `pyclay` produces
 
+### Requirement: Sweeps across the ABI
+The C API SHALL expose setting a swept item's guide points, reusing the curve point encoding, alongside the loft profile calls.
+
+#### Scenario: A sweep means the same through both bindings
+- **WHEN** a C consumer sweeps the same profiles along the same guide
+- **THEN** the field matches what `pyclay` produces
+

@@ -349,3 +349,10 @@ The module SHALL expose a loft taking two or more profiles and a half-depth, wit
 - **WHEN** a script lofts a circle to a box and evaluates the ends
 - **THEN** each end matches its own profile
 
+### Requirement: Sweeps from Python
+The module SHALL expose a swept item taking guide control points with their types and tolerance, and two or more profiles.
+
+#### Scenario: Sweeping a circle along a curve
+- **WHEN** a script sweeps a circle along a spline guide
+- **THEN** the field is material along the guide and empty away from it
+
