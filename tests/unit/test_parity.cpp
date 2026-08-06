@@ -183,6 +183,17 @@ std::vector<ParityScene> parity_scenes() {
         l.sdf->insert(n);
         scenes.push_back({"swept_circle_along_guide", std::move(doc), 3.0f});
     }
+    {   // a sampled volume: the blob carries a brick index and interpolated
+        // samples, so every backend has to walk the same sparse structure
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node n = item(Prim::volume(), cf3(0, 0, 0));
+        auto sphere = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.7f; };
+        n.volume = std::make_shared<field::FieldVolume>(field::FieldVolume::sample(
+            sphere, math::Aabb(cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)), 0.12f, 0.3f));
+        l.sdf->insert(n);
+        scenes.push_back({"sampled_volume_sphere", std::move(doc), 3.0f});
+    }
     lift("revolve_polygon", Prim::revolve(1.2f), Profile::polygon(),
          {cf2(-0.3f, -0.3f), cf2(0.3f, -0.3f), cf2(0.3f, 0.3f), cf2(-0.3f, 0.3f)});
     {

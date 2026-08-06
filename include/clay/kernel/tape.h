@@ -92,6 +92,10 @@ enum CTapeOp {
     // why the frames are in the blob rather than derived here.
     // guide_offset, guide_count, record_offset, profile_count, ease  (bound)
     ctape_swept,
+    // A field SAMPLED onto a sparse narrow-band brick grid rather than given
+    // by a formula. Only bricks that straddle the band store samples; the rest
+    // carry a signed lower bound. blob_offset  (bound)
+    ctape_volume,
     ctape_prim_count,
 
     // Pushes the far field ("empty space"): standard primitive param block,
@@ -350,6 +354,26 @@ enum CProfileType {
 // Profile block layout inside a lift's prim params: [type] [p0..p3].
 #define CLAY_TAPE_PROFILE_FLOATS 5
 
+// Fold "how far outside the sampled box we are" into the value read at the
+// projected point. The distance to the box ALONE is not usable: it falls to
+// zero on the box face, and a sphere tracer reads zero as a surface, so every
+// ray would hit an invisible shell where the sampling stopped.
+//
+// Pythagoras here is exact, not an approximation. The projection onto a box
+// satisfies (p - c) . (s - c) <= 0 for every s in the box, so
+// |p - s|^2 >= |p - c|^2 + |c - s|^2. The positive part covers a box that
+// CLIPS the solid: the zero set then really does include the box face.
+CLAY_FN float ctape_volume_outside(float inner, float outside) {
+    if (outside <= 0.0f) return inner;
+    float reach = cmax(inner, 0.0f);
+    return csqrt(outside * outside + reach * reach);
+}
+
+// Samples per brick edge in a sampled volume. Bricks store one extra sample
+// per axis — a halo — so a trilinear tap inside a brick never needs its
+// neighbour, which is what makes the lookup a single array read.
+#define CLAY_BRICK_DIM 8
+
 CLAY_FN float ctape_profile_dist(CLAY_DEVICE const float* prof, CLAY_DEVICE const float* blob,
                                  cfloat2 p) {
     int type = (int)prof[0];
@@ -422,6 +446,60 @@ CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
         float da = ctape_profile_dist(blob + off + i * CLAY_TAPE_PROFILE_FLOATS, blob, xy);
         float db = ctape_profile_dist(blob + off + (i + 1) * CLAY_TAPE_PROFILE_FLOATS, blob, xy);
         return cop_loft(da, db, u, lp.z, h);
+    }
+    if (op == ctape_volume) {
+        CLAY_DEVICE const float* h = blob + (int)q[0];
+        cfloat3 origin = cf3(h[0], h[1], h[2]);
+        float cell = h[3];
+        int bcx = (int)h[5], bcy = (int)h[6], bcz = (int)h[7];
+        int index_off = (int)h[8], far_off = (int)h[9], data_off = (int)h[10];
+        if (bcx <= 0 || bcy <= 0 || bcz <= 0 || cell <= 0.0f) return CLAY_TAPE_FAR;
+
+        float span_x = (float)(bcx * CLAY_BRICK_DIM) * cell;
+        float span_y = (float)(bcy * CLAY_BRICK_DIM) * cell;
+        float span_z = (float)(bcz * CLAY_BRICK_DIM) * cell;
+        // The point projected onto the sampled box, and how far outside it is.
+        // The lookup below runs on the PROJECTED point, so it always reads a
+        // real brick; the outside distance is folded in afterwards.
+        cfloat3 cp = cf3(cclamp(lp.x, origin.x, origin.x + span_x),
+                         cclamp(lp.y, origin.y, origin.y + span_y),
+                         cclamp(lp.z, origin.z, origin.z + span_z));
+        float outside = clength(lp - cp);
+
+        float gx = (cp.x - origin.x) / cell;
+        float gy = (cp.y - origin.y) / cell;
+        float gz = (cp.z - origin.z) / cell;
+        int cx = (int)cclamp(cfloor(gx), 0.0f, (float)(bcx * CLAY_BRICK_DIM - 1));
+        int cy = (int)cclamp(cfloor(gy), 0.0f, (float)(bcy * CLAY_BRICK_DIM - 1));
+        int cz = (int)cclamp(cfloor(gz), 0.0f, (float)(bcz * CLAY_BRICK_DIM - 1));
+        int bx = cx / CLAY_BRICK_DIM, by = cy / CLAY_BRICK_DIM, bz = cz / CLAY_BRICK_DIM;
+        int slot = (bz * bcy + by) * bcx + bx;
+        int entry = (int)blob[index_off + slot];
+        // An empty brick carries its own signed lower bound: the gap in bricks
+        // to the nearest brick that HAS samples, floored at the band less half
+        // a cell diagonal. A flat band width would be conservative but useless
+        // — the marcher would creep across the empty majority of the region in
+        // steps that never grew. See FieldVolume::far_value().
+        if (entry < 0) return ctape_volume_outside(blob[far_off + slot], outside);
+
+        CLAY_DEVICE const float* block = blob + data_off + entry;
+        int lx = cx - bx * CLAY_BRICK_DIM;
+        int ly = cy - by * CLAY_BRICK_DIM;
+        int lz = cz - bz * CLAY_BRICK_DIM;
+        float fx = cclamp(gx - (float)cx, 0.0f, 1.0f);
+        float fy = cclamp(gy - (float)cy, 0.0f, 1.0f);
+        float fz = cclamp(gz - (float)cz, 0.0f, 1.0f);
+        const int n = CLAY_BRICK_DIM + 1;
+        // The halo is why this needs no neighbouring brick: lx+1 is always in
+        // range, so a trilinear tap is one array read.
+        float c00 = cmix(block[((lz)*n + ly) * n + lx], block[((lz)*n + ly) * n + lx + 1], fx);
+        float c10 =
+            cmix(block[((lz)*n + ly + 1) * n + lx], block[((lz)*n + ly + 1) * n + lx + 1], fx);
+        float c01 =
+            cmix(block[((lz + 1) * n + ly) * n + lx], block[((lz + 1) * n + ly) * n + lx + 1], fx);
+        float c11 = cmix(block[((lz + 1) * n + ly + 1) * n + lx],
+                         block[((lz + 1) * n + ly + 1) * n + lx + 1], fx);
+        return ctape_volume_outside(cmix(cmix(c00, c10, fy), cmix(c01, c11, fy), fz), outside);
     }
     if (op == ctape_swept) {
         int guide_off = (int)q[0];

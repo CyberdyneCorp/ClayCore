@@ -19,15 +19,16 @@ REPO = Path(__file__).resolve().parent.parent
 ALLOWED = {
     "kernel": set(),
     "math": {"kernel"},
-    "scene": {"kernel", "math"},
+    "scene": {"kernel", "math", "field"},
     "eval": {"kernel", "math", "scene"},
     "brick": {"kernel", "math", "scene", "eval"},
     "voxel": {"kernel", "math", "scene", "mesh"},  # mesh_data.h is a leaf data type
     "mesh": {"kernel", "math", "scene", "eval", "brick"},
     "brush": {"kernel", "math", "scene", "voxel"},
     "cut": {"kernel", "math", "scene"},
+    "field": {"kernel", "math"},  # a sampled field is a leaf payload, below scene
     "pick": {"kernel", "math", "scene", "eval", "brick", "voxel"},
-    "io": {"kernel", "math", "scene", "eval", "brick", "voxel", "mesh"},
+    "io": {"kernel", "math", "scene", "eval", "brick", "voxel", "mesh", "field"},
 }
 CORE_MODULES = set(ALLOWED)
 INCLUDE_RE = re.compile(r'#\s*include\s*[<"]clay/(\w+)/')

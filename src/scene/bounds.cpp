@@ -97,6 +97,17 @@ Aabb prim_local_bounds(const Node& item) {
         // no finite extent — item_influence_bound reports infinite instead
         case PrimType::Plane:
         case PrimType::CylinderInfinite: return Aabb::infinite();
+        case PrimType::Volume: {
+            // The sampled box: the surface is inside it by construction.
+            if (item.volume) {
+                math::Aabb vb = item.volume->bounds();
+                if (!vb.empty()) {
+                    b.expand(vb.min);
+                    b.expand(vb.max);
+                }
+            }
+            break;
+        }
         case PrimType::Swept: {
             // The guide's own extent, dilated by the widest profile: the
             // swept surface never leaves that, whatever the frame does.

@@ -111,7 +111,12 @@ typedef enum clay_prim {
      * curve point list (clay_item_set_curve_points), and the profiles are
      * added with clay_item_add_loft_profile — a guide is not a new kind of
      * curve and a swept profile is not a new kind of profile. (bound) */
-    CLAY_PRIM_SWEPT = 32
+    CLAY_PRIM_SWEPT = 32,
+    /* A sampled narrow-band volume. Not constructible through this ABI yet:
+     * nothing produces one until mesh import lands, and an enumerator without
+     * a producer would be a promise the library cannot keep. Documents that
+     * contain one still load, evaluate and mesh. (bound) */
+    CLAY_PRIM_VOLUME = 33
 } clay_prim;
 
 /* Combine ops. For the extended modes (groove..replace) blend_k is the

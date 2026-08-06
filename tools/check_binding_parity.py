@@ -43,6 +43,10 @@ CLASS_PREFIX = {
     "StrokePreset": ("clay_stroke_preset_",),
     "Prim": ("clay_item_", "clay_item_set_", "clay_item_add_"),
     "Stroke": ("clay_item_", "clay_item_set_", "clay_item_add_"),
+    # Volume is an item like any other, so it would take the clay_item_
+    # prefixes — but nothing in C builds or inspects one yet. Every member is
+    # exempt with a reason; see CLASS_CTOR['Volume'].
+    "Volume": ("clay_item_", "clay_item_set_", "clay_item_add_"),
     "Blend": ("clay_item_set_",),
     "Profile": (),
     "Op": (),
@@ -122,6 +126,12 @@ CLASS_CTOR = {
     "Accumulation": None,
     "StrokePreset": "clay_stroke_preset_defaults",
     "Cut": "clay_cut_create",
+    # CLAY_PRIM_VOLUME exists in clay.h, but nothing in the C ABI builds one
+    # yet: a volume is only reachable by SAMPLING something, and the thing an
+    # app wants to sample is an imported mesh. The constructor lands with mesh
+    # import (add-mesh-to-field-import), which is the row that gives it a
+    # source. Until then Python can bake a volume and C cannot, deliberately.
+    "Volume": None,
     "CutShape": None,
     "Smooth": "CLAY_BLEND_QUADRATIC",
     "Cubic": "CLAY_BLEND_CUBIC",
@@ -168,6 +178,18 @@ CLASS_CTOR = {
 # instead of disappearing, and it fails when one becomes reachable in C or
 # vanishes from pyclay.
 EXEMPT = {
+    "Volume.from_document": "Python-only until mesh import gives the C ABI a "
+                            "source worth sampling; see CLASS_CTOR['Volume']",
+    "Volume.eval": "reads the sampled field back before it is placed, so a test "
+                   "can tell a sampling error from a placement one; C evaluates "
+                   "through the document",
+    "Volume.has_samples_at": "inspects the sparse index, as above",
+    "Volume.cell_size": "reads a builder's own state back, as above",
+    "Volume.band": "reads a builder's own state back, as above",
+    "Volume.brick_count": "reports what the sampling produced; C has no sampler yet",
+    "Volume.sample_count": "reports what the sampling produced; C has no sampler yet",
+    "Volume.megabytes": "reports what the sampling produced; C has no sampler yet",
+    "Volume.bounds": "reports what the sampling produced; C has no sampler yet",
     "Prim.repeat": "reads a builder's own state back; clay_item is write-only by "
                    "design, the caller keeps what it set",
     "Prim.deformers": "reads a builder's own state back, as above",

@@ -1,0 +1,121 @@
+#pragma once
+
+// Sampled fields (sdf-kernels spec): a sparse narrow-band signed distance
+// volume, built by sampling any callable and evaluated by the tape.
+//
+// The Phase 2 plan expected this to need a resource mechanism outside the tape,
+// on the grounds that a 256³ volume in the blob would mean re-uploading 33 MB.
+// That assumed DENSE storage. A signed distance field only needs samples near
+// the surface, and a narrow band is O(n²): ~1.6 MB at 256³ and a tenth of that
+// at the resolution an imported prop actually wants — the same order as the
+// stroke chains the blob already carries. So a volume rides in the blob like
+// every other out-of-line payload, and every backend gets it from the shared
+// kernel dialect with no new plumbing.
+//
+// A brick either stores samples or does not exist. A brick that does not exist
+// is recorded as wholly inside or wholly outside, which is what keeps the band
+// sparse — and what lets the field stay correct far from the surface, where a
+// band alone would have no idea which side it was on.
+
+#include <cstdint>
+#include <functional>
+#include <optional>
+#include <vector>
+
+#include "clay/math/geom.h"
+
+namespace clay {
+namespace field {
+
+// Samples per brick edge. Bricks store one extra sample per axis — a halo — so
+// trilinear interpolation inside a brick never needs its neighbour, which is
+// what makes the lookup a single array read.
+inline constexpr int kBrickDim = 8;
+inline constexpr int kBrickSamples = (kBrickDim + 1) * (kBrickDim + 1) * (kBrickDim + 1);
+
+// A brick index entry that is not an offset: the brick has no samples because
+// the whole of it is on one side of the surface. What it reports instead is
+// held per brick in a parallel array, signed by which side it is on.
+inline constexpr std::int32_t kBrickEmpty = -1;
+
+class FieldVolume {
+  public:
+    // Sample `f` over `region` at `cell_size`, keeping samples within `band`
+    // of the surface. `band` should be at least a couple of cells: it is the
+    // distance over which the field stays a real distance rather than a bound,
+    // and a band thinner than the marcher's step is no use to it.
+    static FieldVolume sample(const std::function<float(kernel::cfloat3)>& f,
+                              const math::Aabb& region, float cell_size, float band);
+
+    float cell_size() const { return cell_size_; }
+    float band() const { return band_; }
+    kernel::cfloat3 origin() const { return origin_; }
+    math::Aabb bounds() const;
+    std::size_t brick_count() const { return data_.size() / kBrickSamples; }
+    std::size_t sample_count() const { return data_.size(); }
+    bool empty() const { return index_.empty(); }
+
+    // The field at a world position.
+    //
+    // Where the volume HAS samples this is trilinear interpolation of them.
+    // Interpolating a convex field overshoots — trilinear interpolation lies
+    // above the function it samples by O(cell^2 x curvature) — so the value is
+    // accurate to the sampling but is NOT a lower bound there.
+    //
+    // Where it has NO samples the value is a genuine lower bound, so sphere
+    // tracing cannot overstep across the empty majority of the region.
+    //
+    // The two regions do not meet continuously. Adjacent STORED bricks do —
+    // that is what the halo sample buys — but a stored brick against a skipped
+    // one jumps, from a flat bound up to a real distance. Marching is safe
+    // across it because each side is individually a lower bound or an accurate
+    // distance; gradients across it are not meaningful, and nothing takes them
+    // there, since the seam sits a band away from the surface while normals
+    // are taken at it. Removing the jump would mean storing the bricks the
+    // sparsity exists to avoid.
+    float eval(kernel::cfloat3 p) const;
+
+    // Whether `p` lands in a brick that stores samples. The two halves of
+    // eval()'s contract are not the same thing as "within the band": a brick
+    // spans kBrickDim cells and is kept whole, so a stored brick holds samples
+    // well beyond the band.
+    bool has_samples_at(kernel::cfloat3 p) const;
+
+    // The FLOOR on what a sample-free brick reports — what it says when it is
+    // right next to a brick that has samples. Not the band itself: a brick is
+    // skipped when every SAMPLE in it is beyond the band, and a point between
+    // samples can be up to half a cell diagonal nearer the surface than the
+    // nearest sample is. Reporting the band flat would overestimate by that
+    // much, which is the overstep the sparse index exists to stay clear of.
+    //
+    // Bricks further out report MORE, and must: a marcher told a flat band
+    // width everywhere in the empty majority of the region crawls across it in
+    // steps that never grow, and runs out of iterations before it arrives.
+    // Each empty brick carries its Chebyshev distance in bricks to the nearest
+    // brick that has samples, less one brick for the gap between the boxes —
+    // a genuine lower bound, because the surface only ever lies inside a brick
+    // that has samples.
+    float far_value() const;
+
+    // Flat float layout for the tape's blob. The kernel reads exactly this.
+    std::vector<float> to_blob() const;
+    static std::optional<FieldVolume> from_blob(const std::vector<float>& blob);
+
+    std::vector<std::uint8_t> serialize() const;
+    static std::optional<FieldVolume> deserialize(const std::uint8_t* data, std::size_t size);
+
+  private:
+    void build_far_bounds();
+    float eval_inside(kernel::cfloat3 p) const;
+
+    kernel::cfloat3 origin_ = kernel::cf3(0, 0, 0);
+    float cell_size_ = 0.05f;
+    float band_ = 0.2f;
+    std::int32_t bcount_[3] = {0, 0, 0}; // bricks per axis
+    std::vector<std::int32_t> index_;    // bcount product; offset into data_, or kBrickEmpty
+    std::vector<float> far_;             // per brick; signed lower bound where index_ is empty
+    std::vector<float> data_;            // kBrickSamples per stored brick
+};
+
+}  // namespace field
+}  // namespace clay

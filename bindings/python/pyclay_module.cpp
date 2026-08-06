@@ -28,6 +28,7 @@
 #include "clay/voxel/grid.h"
 #include "clay/brush/stroke.h"
 #include "clay/cut/cut.h"
+#include "clay/field/volume.h"
 #include "clay/voxel/mask.h"
 #include "clay/version.h"
 
@@ -170,6 +171,7 @@ struct PyPrim {
     std::vector<kernel::cfloat2> profile_points;
     std::vector<scene::Profile> profiles;                       // Loft only
     std::vector<std::vector<kernel::cfloat2>> profile_polygons;  // Loft only
+    std::shared_ptr<const field::FieldVolume> volume;            // Volume only
     scene::Repeat repeat;
     // Only a cut sets this today: it derives its own bevel, and losing it
     // between constructing the prim and placing it would be a trap. Layer.add
@@ -229,6 +231,7 @@ struct PyLNormSphere : PyPrim {};
 struct PyRevolve : PyPrim {};
 struct PyLoft : PyPrim {};
 struct PySwept : PyPrim {};
+struct PyVolume : PyPrim {};
 struct PyCut : PyPrim {};
 
 // -- mesh wrapper ---------------------------------------------------------------
@@ -1376,6 +1379,107 @@ NB_MODULE(pyclay, m) {
              "guide"_a, "profiles"_a, "types"_a = nb::none(), "tolerance"_a = 0.01f,
              "ease"_a = 0, "in_handles"_a = nb::none(), "out_handles"_a = nb::none(),
              CLAY_PLACE_ARGS);
+    nb::class_<PyVolume, PyPrim>(
+        m, "Volume",
+        "A field SAMPLED onto a sparse narrow-band grid, and then usable as an\n"
+        "ordinary item: combined, subtracted, transformed, saved.\n\n"
+        "Storage follows the SURFACE, not the region. Only bricks that straddle\n"
+        "the band store samples; the rest record which side they are on, in one\n"
+        "integer each. That is what makes the volume O(area) rather than\n"
+        "O(volume), and it is why the whole thing rides in the tape's blob\n"
+        "instead of needing a resource handle.\n\n"
+        "BOUND, not exact, and the two halves of that are different:\n"
+        "  * where the volume HAS samples, the value is a trilinear\n"
+        "    interpolation. Interpolating a convex field OVERSHOOTS, so it is\n"
+        "    accurate to the sampling but is not a lower bound there.\n"
+        "  * where it has none, the value is a genuine lower bound, so the\n"
+        "    raymarcher cannot overstep across the empty majority.\n"
+        "The error inside the band shrinks with `cell`, so `cell` is a real\n"
+        "control over accuracy rather than a hope. `band` should be at least a\n"
+        "couple of cells; a thinner one is widened rather than obeyed.")
+        .def_static(
+            "from_document",
+            [](nb::handle source, float cell, nb::handle band, nb::handle bounds,
+               nb::handle position, nb::handle rotation_axis_angle, float scale) {
+                if (!(cell > 0.0f)) throw std::invalid_argument("cell must be > 0");
+                float width = band.is_none() ? cell * 3.0f : nb::cast<float>(band);
+                if (!(width > 0.0f)) throw std::invalid_argument("band must be > 0");
+
+                const scene::Document& src = nb::cast<PyDocument&>(source).doc->document;
+                scene::Tape tape = scene::compile_document(src);
+                if (tape.empty())
+                    throw std::invalid_argument("cannot sample an empty document");
+
+                math::Aabb region;
+                if (bounds.is_none()) {
+                    // Padded by the band: sampling exactly to the bounds would
+                    // clip the band at the surface where it is needed most.
+                    region = tape.bounds;
+                    if (region.empty())
+                        throw std::invalid_argument(
+                            "the document has no bounds to sample; pass bounds=");
+                    kernel::cfloat3 pad = kernel::cf3(width, width, width);
+                    region = math::Aabb(region.min - pad, region.max + pad);
+                } else {
+                    region = to_aabb(bounds);
+                }
+
+                PyVolume out;
+                out.prim = scene::Prim::volume();
+                out.volume = std::make_shared<const field::FieldVolume>(field::FieldVolume::sample(
+                    [&tape](kernel::cfloat3 p) { return tape.eval(p).d; }, region, cell, width));
+                place(out, position, rotation_axis_angle, scale);
+                return out;
+            },
+            "document"_a, "cell"_a = 0.05f, "band"_a = nb::none(), "bounds"_a = nb::none(),
+            CLAY_PLACE_ARGS,
+            "Sample a document's field. The default region is the document's\n"
+            "bounds padded by the band.")
+        .def_prop_ro("cell_size",
+                     [](const PyVolume& v) { return v.volume ? v.volume->cell_size() : 0.0f; })
+        .def_prop_ro("band", [](const PyVolume& v) { return v.volume ? v.volume->band() : 0.0f; })
+        .def_prop_ro("brick_count",
+                     [](const PyVolume& v) { return v.volume ? v.volume->brick_count() : 0u; })
+        .def_prop_ro("sample_count",
+                     [](const PyVolume& v) { return v.volume ? v.volume->sample_count() : 0u; })
+        .def_prop_ro("megabytes",
+                     [](const PyVolume& v) {
+                         if (!v.volume) return 0.0;
+                         return static_cast<double>(v.volume->to_blob().size() * sizeof(float)) /
+                                (1024.0 * 1024.0);
+                     },
+                     "What this volume costs in the tape's blob.")
+        .def_prop_ro("bounds",
+                     [](const PyVolume& v) {
+                         math::Aabb b = v.volume ? v.volume->bounds() : math::Aabb();
+                         return nb::make_tuple(nb::make_tuple(b.min.x, b.min.y, b.min.z),
+                                               nb::make_tuple(b.max.x, b.max.y, b.max.z));
+                     })
+        .def("eval",
+             [](const PyVolume& v, nb::handle points) {
+                 PointsView pts = to_points(points);
+                 const std::size_t n = pts.count;
+                 float* out = new float[n ? n : 1];
+                 nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<float*>(p); });
+                 for (std::size_t i = 0; i < n; ++i)
+                     out[i] = v.volume ? v.volume->eval(kernel::cf3(pts.data[i * 3],
+                                                                    pts.data[i * 3 + 1],
+                                                                    pts.data[i * 3 + 2]))
+                                       : 0.0f;
+                 return nb::cast(nb::ndarray<nb::numpy, float>(out, {n}, owner));
+             },
+             "points"_a,
+             "The sampled field itself, before it is placed in a document —\n"
+             "so a test can tell a sampling error from a placement one.")
+        .def("has_samples_at",
+             [](const PyVolume& v, nb::handle point) {
+                 return v.volume && v.volume->has_samples_at(to_f3(point, "point"));
+             },
+             "point"_a,
+             "Whether this point lands in a brick that stores samples. Not the\n"
+             "same as being within the band: a brick is kept whole, so a stored\n"
+             "brick holds samples well beyond it.");
+
 #undef CLAY_PLACE_ARGS
 
     nb::class_<cut::CutShape>(
@@ -1592,6 +1696,7 @@ NB_MODULE(pyclay, m) {
                  n.profile_points = prim.profile_points;
                  n.profiles = prim.profiles;
                  n.profile_polygons = prim.profile_polygons;
+                 n.volume = prim.volume;
                  n.repeat = prim.repeat;
                  n.op = op;
                  if (!blend.is_none()) {
@@ -1676,6 +1781,7 @@ NB_MODULE(pyclay, m) {
                  templ.profile_points = prim.profile_points;
                  templ.profiles = prim.profiles;
                  templ.profile_polygons = prim.profile_polygons;
+                 templ.volume = prim.volume;
                  templ.op = op;
                  if (!blend.is_none()) templ.blend = nb::cast<PyBlend&>(blend).b;
                  if (!color.is_none()) templ.color = parse_color(color);

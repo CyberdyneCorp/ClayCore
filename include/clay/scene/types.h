@@ -9,6 +9,9 @@
 #include <cstdint>
 #include <vector>
 
+#include <memory>
+
+#include "clay/field/volume.h"
 #include "clay/kernel/tape.h"
 #include "clay/math/transform.h"
 
@@ -54,6 +57,7 @@ enum class PrimType : std::uint8_t {
     LNormSphere = kernel::ctape_lnorm_sphere,
     Loft = kernel::ctape_loft,
     Swept = kernel::ctape_swept,
+    Volume = kernel::ctape_volume,
 };
 
 // Primitives with no finite extent: an item using one influences the field
@@ -82,7 +86,7 @@ inline bool prim_is_origin_symmetric(PrimType t) {
 inline bool prim_is_bound_field(PrimType t) {
     return t == PrimType::Ellipsoid || t == PrimType::TriPrism ||
            t == PrimType::OctahedronCheap || t == PrimType::LNormSphere ||
-           t == PrimType::Loft || t == PrimType::Swept;
+           t == PrimType::Loft || t == PrimType::Swept || t == PrimType::Volume;
 }
 
 inline bool prim_is_lift(PrimType t) {
@@ -98,6 +102,10 @@ inline bool prim_is_loft(PrimType t) { return t == PrimType::Loft; }
 // same control-point list a curve item uses — a guide is not a new kind of
 // curve, so it gets the point types, handles and tolerance for free.
 inline bool prim_is_swept(PrimType t) { return t == PrimType::Swept; }
+
+// A sampled volume. Held by shared reference on the Node, so instancing one
+// costs a pointer rather than a copy of its samples.
+inline bool prim_is_volume(PrimType t) { return t == PrimType::Volume; }
 inline bool prim_carries_profiles(PrimType t) { return prim_is_loft(t) || prim_is_swept(t); }
 
 enum class Op : std::uint8_t {
@@ -223,6 +231,9 @@ struct Prim {
     static Prim swept(std::uint8_t ease = 0) {
         return {PrimType::Swept, {static_cast<float>(ease)}};
     }
+    // The samples live on the Node, in `volume`: they are far too large for a
+    // parameter block and are shared rather than copied.
+    static Prim volume() { return {PrimType::Volume, {}}; }
     static Prim revolve(float offset) { return {PrimType::Revolve, {offset}}; }
 
     // -- backfill (add-primitive-backfill) ------------------------------------
@@ -520,6 +531,9 @@ struct Node {
     // they are placed rather than how they are stored.
     std::vector<Profile> profiles;
     std::vector<std::vector<kernel::cfloat2>> profile_polygons;
+    // PrimType::Volume only. Shared, so two items sampling the same source
+    // share one set of samples.
+    std::shared_ptr<const field::FieldVolume> volume;
 
     // group fields
     std::vector<NodeId> children;

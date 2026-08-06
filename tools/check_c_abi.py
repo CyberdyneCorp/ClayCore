@@ -175,6 +175,28 @@ def declared_enum(name: str) -> list[int]:
     return [int(value) for _, value in re.findall(r"(CLAY_\w+)\s*=\s*(\d+)", body)]
 
 
+# Enumerators the header declares that clay_item_create deliberately refuses.
+# An entry here is a claim that the VALUE is real — it appears in saved
+# documents and in the tape, so a header that hid it would leave a C caller
+# staring at an undocumented number — while construction has no producer yet.
+# It is a narrow exemption: the value must still round-trip through load,
+# evaluate and mesh, which the rest of the suite covers.
+DECLARED_BUT_NOT_CONSTRUCTIBLE = {
+    "CLAY_PRIM_VOLUME": "a volume is only reachable by SAMPLING something, and "
+                        "nothing in this ABI can supply the samples until mesh "
+                        "import lands; constructing one would give back a "
+                        "silently empty item",
+}
+
+
+def declared_enum_named(name: str) -> list[tuple[str, int]]:
+    """The same enumeration, keeping the enumerator names."""
+    text = (REPO / "bindings" / "c" / "clay.h").read_text()
+    body = re.search(r"typedef enum %s\s*{(.*?)}\s*%s;" % (name, name), text, re.S).group(1)
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    return [(n, int(v)) for n, v in re.findall(r"(CLAY_\w+)\s*=\s*(\d+)", body)]
+
+
 def prim_sweep(lib) -> list[str]:
     """Every primitive the header declares is one the library builds, and no
     other value is: the enum and the binary cannot drift apart unnoticed."""
@@ -190,8 +212,18 @@ def prim_sweep(lib) -> list[str]:
                 accepted.add(prim)
                 break
     declared = set(declared_enum("clay_prim"))
-    if accepted == declared:
+    exempt = {v for name, v in declared_enum_named("clay_prim")
+              if name in DECLARED_BUT_NOT_CONSTRUCTIBLE}
+    for name in sorted(DECLARED_BUT_NOT_CONSTRUCTIBLE):
+        print(f"c-abi: exempt {name} — {DECLARED_BUT_NOT_CONSTRUCTIBLE[name]}")
+    stale = exempt & accepted
+    if stale:
+        return [f"clay_prim: {sorted(stale)} is listed as not constructible but "
+                f"clay_item_create built one: drop it from "
+                f"DECLARED_BUT_NOT_CONSTRUCTIBLE in tools/check_c_abi.py"]
+    if accepted == declared - exempt:
         return []
+    declared = declared - exempt
     return [f"clay_prim disagrees with the library: declared but rejected "
             f"{sorted(declared - accepted)}, accepted but undeclared {sorted(accepted - declared)}"]
 

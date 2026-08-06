@@ -62,6 +62,9 @@ COVERED_ELSEWHERE = {
                            "would be an extrusion"),
     "Swept": ("17_swept.py", "it needs a guide and two or more profiles, and a "
                              "tile of one would be a lift"),
+    "Volume": ("18_sampled_fields.py", "it has no shape of its own — it samples "
+                                       "another field, so a tile here would be a "
+                                       "coarser copy of whatever it was given"),
 }
 
 

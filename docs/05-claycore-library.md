@@ -316,6 +316,19 @@ body.add(clay.Loft([clay.Profile.circle(r=1.0), clay.Profile.polygon(pts)],
 body.add(clay.Swept(guide_pts, [clay.Profile.circle(r=0.3), clay.Profile.circle(r=0.1)],
                     types="spline", tolerance=0.01))
 
+# volume: a field SAMPLED onto a sparse narrow-band grid, then used as an item.
+# Storage follows the SURFACE, not the region — only bricks straddling the band
+# hold samples, the rest carry a signed lower bound — so it is O(area) and
+# rides in the tape's blob like any other payload rather than behind a resource
+# handle. BOUND, in two halves: where it has samples the value interpolates and
+# OVERSHOOTS (accurate to the sampling, not a lower bound); where it has none it
+# is a genuine lower bound. `cell` is a real dial on accuracy. Not constructible
+# through the C ABI until mesh import gives it a source; documents containing
+# one load, evaluate and mesh everywhere.
+baked = clay.Volume.from_document(other_doc, cell=0.04)   # band defaults to 3 cells
+body.add(baked, op=clay.Op.SUBTRACT)
+baked.cell_size, baked.band, baked.brick_count, baked.megabytes, baked.bounds
+
 # curves: a stroke point carries a type saying how it joins the next, so a
 # stroke is a curve whose points are all hard corners. Typed points tessellate
 # into the same segment chain at compile time, so a curve costs nothing to

@@ -146,7 +146,13 @@ struct Compiler {
             if (!fits) prim_info = kernel::cfi_bound();
         }
 
-        if (prim_is_swept(item.prim.type) && item.profiles.size() >= 2) {
+        if (prim_is_volume(item.prim.type)) {
+            // Interpolated samples are not an exact distance, and where there
+            // are none the value is a lower bound rather than a distance.
+            // The interpolant can also be steeper than the field it samples;
+            // see cfi_volume for why that is sqrt(3) and not 1.
+            prim_info = kernel::cfi_volume();
+        } else if (prim_is_swept(item.prim.type) && item.profiles.size() >= 2) {
             // The guide's tightest turn against the widest profile: a point at
             // perpendicular offset r inside a bend of radius R is compressed
             // by R / (R - r), which diverges as the profile outgrows the bend.
@@ -364,6 +370,13 @@ struct Compiler {
             }
             emit_prim(kernel::ctape_stroke, inv_world, scale, round_world, item.color,
                       prim_params, 3, item.deformers, item.repeat);
+        } else if (prim_is_volume(item.prim.type)) {
+            if (!item.volume || item.volume->empty()) return;  // nothing to read
+            std::vector<float> flat = item.volume->to_blob();
+            float prim_params[1] = {static_cast<float>(tape.blob.size())};
+            tape.blob.insert(tape.blob.end(), flat.begin(), flat.end());
+            emit_prim(kernel::ctape_volume, inv_world, scale, round_world, item.color,
+                      prim_params, 1, item.deformers, item.repeat);
         } else if (prim_is_swept(item.prim.type)) {
             emit_swept(item, inv_world, scale, round_world);
         } else if (prim_is_loft(item.prim.type)) {

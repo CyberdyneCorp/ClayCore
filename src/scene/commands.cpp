@@ -1,6 +1,9 @@
 #include "clay/scene/commands.h"
 
 #include <cstring>
+#include <memory>
+#include <optional>
+#include <vector>
 
 namespace clay {
 namespace scene {
@@ -266,6 +269,30 @@ StrokePoint read_point(Reader& r) {
     return p;
 }
 
+// A node's sampled volume, minor 4 and above. Its own function for the same
+// reason read_point and read_prim are: read_node is a long flat walk over the
+// record, and a nested multi-branch block in the middle of it is where that
+// walk stops being readable.
+void read_volume(Reader& r, Node& n) {
+    std::uint32_t bytes = r.u32();
+    if (bytes > r.remaining) {
+        r.ok = false;
+        return;
+    }
+    if (bytes == 0) return;  // a node without one wrote a zero length
+    std::vector<std::uint8_t> raw(bytes);
+    if (!r.bytes(raw.data(), raw.size())) return;
+    std::optional<field::FieldVolume> v = field::FieldVolume::deserialize(raw.data(), raw.size());
+    // A malformed volume fails the read rather than loading an item that would
+    // silently contribute nothing — a document that had quietly lost a shape is
+    // the harder thing to notice.
+    if (!v) {
+        r.ok = false;
+        return;
+    }
+    n.volume = std::make_shared<field::FieldVolume>(std::move(*v));
+}
+
 void write_prim(Writer& w, const Prim& p) {
     w.pod(p.type);
     for (float f : p.params) w.pod(f);
@@ -340,6 +367,15 @@ void write_node(Writer& w, const Node& n) {
             w.u32(static_cast<std::uint32_t>(pts.size()));
             for (const kernel::cfloat2& v : pts) w.pod(v);
         }
+    }
+    // A sampled volume, minor 4 and above. It goes on the wire as the same
+    // flat float block the tape's blob carries, so there is one layout to keep
+    // right rather than two. A node without one writes a zero length.
+    if (w.minor >= 4) {
+        std::vector<std::uint8_t> volume_bytes;
+        if (n.volume && !n.volume->empty()) volume_bytes = n.volume->serialize();
+        w.u32(static_cast<std::uint32_t>(volume_bytes.size()));
+        w.bytes(volume_bytes.data(), volume_bytes.size());
     }
     w.pod(n.transition.a);
     w.pod(n.transition.b);
@@ -436,6 +472,7 @@ Node read_node(Reader& r) {
             n.profile_polygons.push_back(std::move(pts));
         }
     }
+    if (r.minor >= 4) read_volume(r, n);
     n.transition.a = r.pod<kernel::cfloat3>();
     n.transition.b = r.pod<kernel::cfloat3>();
     n.transition.r0 = r.pod<float>();

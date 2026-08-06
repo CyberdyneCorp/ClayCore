@@ -139,6 +139,17 @@ CLAY_FN CFieldInfo cfi_transition(CFieldInfo a, CFieldInfo b, float diff_bound, 
 // steepens that by its own maximum slope. Reporting Lipschitz 1 here would
 // let the raymarcher step as if the field were a distance and walk through
 // the surface.
+// a sampled volume. Trilinear interpolation of a 1-Lipschitz field: adjacent
+// samples differ by at most the cell size, so each partial derivative of the
+// interpolant is bounded by 1 and the gradient magnitude by sqrt(3). The bound
+// is tight — a corner configuration reaches it.
+//
+// Declaring 1.0 here would not be a rounding choice, it would be wrong: the
+// marcher would take a full step through a region where the interpolant is
+// steeper than the field it was built from, which is exactly the overstep the
+// sparse index is careful to avoid everywhere else.
+CLAY_FN CFieldInfo cfi_volume(void) { return CFieldInfo{false, 1.7320508f}; }
+
 CLAY_FN CFieldInfo cfi_loft(float profile_spread, float depth, float ease_slope) {
     return CFieldInfo{false, 1.0f + profile_spread * ease_slope / cmax(depth, 1e-6f)};
 }

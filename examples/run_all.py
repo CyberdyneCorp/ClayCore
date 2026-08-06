@@ -33,6 +33,7 @@ EXAMPLES = [
     "15_voxel_verbs_and_repair",
     "16_loft",
     "17_swept",
+    "18_sampled_fields",
 ]
 
 
