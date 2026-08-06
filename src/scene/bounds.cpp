@@ -12,11 +12,8 @@ using kernel::cf3;
 using kernel::cfloat3;
 using math::Aabb;
 
-// Half-extent of a 2D profile about its own origin. Factored out because a
-// loft needs it once per profile, and a second copy of this switch would be a
-// second place for a new profile type to be forgotten.
-static kernel::cfloat2 profile_extent(const Profile& profile,
-                                      const std::vector<kernel::cfloat2>& points) {
+kernel::cfloat2 profile_extent_of(const Profile& profile,
+                                  const std::vector<kernel::cfloat2>& points) {
     float ex = 0.0f, ey = 0.0f;
     const float* pp = profile.params;
     switch (profile.type) {
@@ -100,6 +97,27 @@ Aabb prim_local_bounds(const Node& item) {
         // no finite extent — item_influence_bound reports infinite instead
         case PrimType::Plane:
         case PrimType::CylinderInfinite: return Aabb::infinite();
+        case PrimType::Swept: {
+            // The guide's own extent, dilated by the widest profile: the
+            // swept surface never leaves that, whatever the frame does.
+            std::vector<StrokePoint> tess =
+                curve_is_polyline(item.stroke, false)
+                    ? item.stroke
+                    : tessellate_curve(item.stroke, false, item.curve_tolerance);
+            float widest = 0.0f;
+            for (std::size_t i = 0; i < item.profiles.size(); ++i) {
+                const std::vector<kernel::cfloat2>& pts =
+                    i < item.profile_polygons.size() ? item.profile_polygons[i]
+                                                     : std::vector<kernel::cfloat2>{};
+                kernel::cfloat2 e = profile_extent_of(item.profiles[i], pts);
+                widest = kernel::cmax(widest, kernel::cmax(e.x, e.y));
+            }
+            for (const StrokePoint& p : tess) {
+                b.expand(p.pos - cf3(widest, widest, widest));
+                b.expand(p.pos + cf3(widest, widest, widest));
+            }
+            break;
+        }
         case PrimType::Loft: {
             // The union of every profile's extent, lifted to the slab: the
             // interpolated cross-section never leaves the widest of them.
@@ -108,7 +126,7 @@ Aabb prim_local_bounds(const Node& item) {
                 const std::vector<kernel::cfloat2>& pts =
                     i < item.profile_polygons.size() ? item.profile_polygons[i]
                                                      : std::vector<kernel::cfloat2>{};
-                kernel::cfloat2 e = profile_extent(item.profiles[i], pts);
+                kernel::cfloat2 e = profile_extent_of(item.profiles[i], pts);
                 ex = kernel::cmax(ex, e.x);
                 ey = kernel::cmax(ey, e.y);
             }
@@ -120,7 +138,7 @@ Aabb prim_local_bounds(const Node& item) {
         case PrimType::Revolve: {
             // 2D extent of the profile, then lifted: a slab for extrusion,
             // a full circular sweep for revolution
-            kernel::cfloat2 e = profile_extent(item.profile, item.profile_points);
+            kernel::cfloat2 e = profile_extent_of(item.profile, item.profile_points);
             float ex = e.x, ey = e.y;
             if (item.prim.type == PrimType::Extrude) {
                 float h = q[0];

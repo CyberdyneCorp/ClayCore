@@ -199,6 +199,48 @@ var loftScale: Float = 0
 check(clay_layer_safe_step_scale(doc, loftLayer, &loftScale) == CLAY_OK && loftScale < 1.0,
       "a loft drops the safe step scale to \(loftScale) — it is a bound, not a distance")
 
+// -- swept along a guide -----------------------------------------------------
+
+var sweptLayer: clay_layer_id = 0
+check(clay_add_sdf_layer(doc, "swept", &sweptLayer) == CLAY_OK, "added a swept layer")
+
+var sweptEase: [Float] = [0]
+guard let sweptItem = clay_item_create(Int32(CLAY_PRIM_SWEPT.rawValue), &sweptEase, 1) else {
+    check(false, "created a swept item")
+    exit(1)
+}
+// Clear of everything else, as with the loft above.
+let sweptY: Float = 30.0
+var sweptGuide: [Float] = [-1, sweptY, 0, 0,
+                            0, sweptY + 0.7, 0, 0,
+                            1, sweptY, 0, 0]
+var sweptTypes: [Int32] = Array(repeating: Int32(CLAY_POINT_SPLINE.rawValue), count: 3)
+check(clay_item_set_curve_points(sweptItem, &sweptGuide, 3, &sweptTypes, nil, nil) == CLAY_OK,
+      "guide points")
+check(clay_item_set_curve(sweptItem, 0, 0.02) == CLAY_OK, "guide tolerance")
+check(clay_item_set_curve(sweptItem, 1, 0.02) != CLAY_OK,
+      "a closed guide is refused rather than ignored")
+
+check(clay_layer_add_item(doc, sweptLayer, sweptItem, nil) != CLAY_OK,
+      "a sweep with no profiles is refused")
+var sweptWide: [Float] = [0.3]
+var sweptNarrow: [Float] = [0.1]
+check(clay_item_add_loft_profile(sweptItem, Int32(CLAY_PROFILE_CIRCLE.rawValue),
+                                 &sweptWide, 1, nil, 0) == CLAY_OK, "start profile")
+check(clay_item_add_loft_profile(sweptItem, Int32(CLAY_PROFILE_CIRCLE.rawValue),
+                                 &sweptNarrow, 1, nil, 0) == CLAY_OK, "end profile")
+check(clay_layer_add_item(doc, sweptLayer, sweptItem, nil) == CLAY_OK, "placed the sweep")
+clay_item_destroy(sweptItem)
+
+// On the guide there is material; the sweep tapers, so a point that clears the
+// narrow end does not.
+check(evaluate(doc, [0, sweptY + 0.7, 0])[0] < 0, "the sweep follows its guide")
+check(evaluate(doc, [0.95, sweptY + 0.2, 0])[0] > 0, "and it tapers toward the end")
+
+var sweptScale: Float = 0
+check(clay_layer_safe_step_scale(doc, sweptLayer, &sweptScale) == CLAY_OK && sweptScale < 1.0,
+      "a sweep drops the safe step scale to \(sweptScale) — curvature compresses space")
+
 // -- the cut tool ------------------------------------------------------------
 
 // A block of its own, well clear of the rest of the model: the document's

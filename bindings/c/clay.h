@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 18
+#define CLAY_ABI_MINOR 19
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -105,7 +105,13 @@ typedef enum clay_prim {
      * not parameters — a variable number of them cannot fit in a fixed block —
      * so they are added with clay_item_add_loft_profile, two or more of them,
      * and interpolated evenly along Z. (bound) */
-    CLAY_PRIM_LOFT = 31
+    CLAY_PRIM_LOFT = 31,
+    /* Swept: the same profiles as a loft, carried along a GUIDE curve rather
+     * than the Z axis. params is the easing curve. The guide is the item's
+     * curve point list (clay_item_set_curve_points), and the profiles are
+     * added with clay_item_add_loft_profile — a guide is not a new kind of
+     * curve and a swept profile is not a new kind of profile. (bound) */
+    CLAY_PRIM_SWEPT = 32
 } clay_prim;
 
 /* Combine ops. For the extended modes (groove..replace) blend_k is the
@@ -449,7 +455,12 @@ clay_result clay_item_set_curve_points(clay_item* item, const float* xyzr, size_
 /* Close the chain, and set the tessellation tolerance: the largest distance a
  * span's midpoint may sit from its chord, which must be > 0. Tolerance is a
  * property of the DOCUMENT, not of the viewer — two builds have to agree on
- * what a document means, so it is not a rendering setting. */
+ * what a document means, so it is not a rendering setting.
+ *
+ * Also applies to a CLAY_PRIM_SWEPT item's guide, which is an ordinary curve.
+ * A swept guide cannot be CLOSED, and asking for one is refused rather than
+ * ignored: transporting a frame around a loop does not generally return it to
+ * its starting orientation, and the leftover twist is real geometry. */
 clay_result clay_item_set_curve(clay_item* item, int32_t closed, float tolerance);
 
 /* Replace a placed stroke or curve's whole point list, through the command

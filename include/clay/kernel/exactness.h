@@ -143,4 +143,30 @@ CLAY_FN CFieldInfo cfi_loft(float profile_spread, float depth, float ease_slope)
     return CFieldInfo{false, 1.0f + profile_spread * ease_slope / cmax(depth, 1e-6f)};
 }
 
+// swept along a guide. TWO terms, and leaving either out understates the
+// field's steepness:
+//
+//   curvature — the sweep compresses space on the inside of a bend, so a point
+//   at perpendicular offset r inside a bend of radius R is squeezed by
+//   R / (R - r). Same shape as cfi_wrap_around, which is the same geometry.
+//
+//   interpolation — the profiles are lerped along the guide exactly as a
+//   loft's are along Z, so cfi_loft's term applies over the arc length. A
+//   straight guide has no curvature at all, and a sweep that reported only the
+//   curvature term would claim Lipschitz 1 for a tapering tube — the precise
+//   defect this file exists to prevent.
+//
+// When the widest profile reaches the tightest bend radius the sweep folds
+// through itself. That is NOT refused — a guide is editable after the fact, so
+// it has to degrade rather than fail — and the factor is clamped to something
+// large, which makes the raymarcher crawl instead of stepping through a
+// surface it was told was a distance field.
+CLAY_FN CFieldInfo cfi_swept(float profile_extent, float bend_radius, float profile_spread,
+                             float span_len, float ease_slope) {
+    float lerp = 1.0f + profile_spread * ease_slope / cmax(span_len, 1e-6f);
+    float headroom = bend_radius - profile_extent;
+    if (headroom <= 1e-4f) return CFieldInfo{false, 1e4f};
+    return CFieldInfo{false, (bend_radius / headroom) * lerp};
+}
+
 CLAY_NS_END

@@ -53,6 +53,7 @@ enum class PrimType : std::uint8_t {
     OctahedronCheap = kernel::ctape_octahedron_cheap,
     LNormSphere = kernel::ctape_lnorm_sphere,
     Loft = kernel::ctape_loft,
+    Swept = kernel::ctape_swept,
 };
 
 // Primitives with no finite extent: an item using one influences the field
@@ -81,7 +82,7 @@ inline bool prim_is_origin_symmetric(PrimType t) {
 inline bool prim_is_bound_field(PrimType t) {
     return t == PrimType::Ellipsoid || t == PrimType::TriPrism ||
            t == PrimType::OctahedronCheap || t == PrimType::LNormSphere ||
-           t == PrimType::Loft;
+           t == PrimType::Loft || t == PrimType::Swept;
 }
 
 inline bool prim_is_lift(PrimType t) {
@@ -92,6 +93,12 @@ inline bool prim_is_lift(PrimType t) {
 // single `profile` field the lifts above use, so no existing document changes
 // meaning.
 inline bool prim_is_loft(PrimType t) { return t == PrimType::Loft; }
+
+// A sweep carries the SAME profile list a loft does, and its guide is the
+// same control-point list a curve item uses — a guide is not a new kind of
+// curve, so it gets the point types, handles and tolerance for free.
+inline bool prim_is_swept(PrimType t) { return t == PrimType::Swept; }
+inline bool prim_carries_profiles(PrimType t) { return prim_is_loft(t) || prim_is_swept(t); }
 
 enum class Op : std::uint8_t {
     None = 255,  // groups only: children apply inline to the outer chain
@@ -210,6 +217,11 @@ struct Prim {
     // profile's vertices are already out of line.
     static Prim loft(float half_depth, std::uint8_t ease = 0) {
         return {PrimType::Loft, {half_depth, static_cast<float>(ease)}};
+    }
+    // The guide lives in the Node's stroke point list and the profiles in its
+    // profile list; neither fits a fixed parameter block.
+    static Prim swept(std::uint8_t ease = 0) {
+        return {PrimType::Swept, {static_cast<float>(ease)}};
     }
     static Prim revolve(float offset) { return {PrimType::Revolve, {offset}}; }
 

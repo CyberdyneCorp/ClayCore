@@ -32,6 +32,7 @@ EXAMPLES = [
     "14_cut",
     "15_voxel_verbs_and_repair",
     "16_loft",
+    "17_swept",
 ]
 
 
@@ -44,7 +45,7 @@ EXAMPLES = [
 # decision that no example can show it, with the reason — so an exemption is on
 # the record rather than an omission nobody noticed.
 CAPABILITY_EXAMPLES = {
-    "sdf-kernels": "01_primitives",
+    "sdf-kernels": "01_primitives",  # plus 16_loft and 17_swept for the lifts
     "scene-model": "10_editing",
     "brick-cache": None,          # an internal cache; its effect is meshing speed, not a picture
     "evaluation-backends": None,  # the same field on four devices — a parity test, not a render

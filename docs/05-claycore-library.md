@@ -306,6 +306,16 @@ clay.StrokePreset.deserialize(brush.serialize())   # versioned: newer is refused
 body.add(clay.Loft([clay.Profile.circle(r=1.0), clay.Profile.polygon(pts)],
                    half_depth=1.0, ease=3))
 
+# swept: the same profiles carried along a GUIDE curve. The frame is
+# parallel-transported when the item compiles — a Frenet frame flips at an
+# inflection and is undefined where the guide is straight. Profiles are
+# distributed by ARC LENGTH; the ends are the profile itself, flat. BOUND, and
+# its Lipschitz has two terms: curvature R/(R-r) and the profile lerp. A
+# profile wider than the guide's tightest bend folds through itself — not
+# refused, since a guide is editable, but the step scale collapses.
+body.add(clay.Swept(guide_pts, [clay.Profile.circle(r=0.3), clay.Profile.circle(r=0.1)],
+                    types="spline", tolerance=0.01))
+
 # curves: a stroke point carries a type saying how it joins the next, so a
 # stroke is a curve whose points are all hard corners. Typed points tessellate
 # into the same segment chain at compile time, so a curve costs nothing to

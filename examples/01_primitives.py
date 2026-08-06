@@ -60,6 +60,8 @@ COVERED_ELSEWHERE = {
                          "with neither would be an extruded box"),
     "Loft": ("16_loft.py", "it needs two or more profiles, and one tile of one "
                            "would be an extrusion"),
+    "Swept": ("17_swept.py", "it needs a guide and two or more profiles, and a "
+                             "tile of one would be a lift"),
 }
 
 

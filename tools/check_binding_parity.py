@@ -159,6 +159,7 @@ CLASS_CTOR = {
     "Extrude": "CLAY_PRIM_EXTRUDE",
     "Revolve": "CLAY_PRIM_REVOLVE",
     "Loft": "CLAY_PRIM_LOFT",
+    "Swept": "CLAY_PRIM_SWEPT",
     "Stroke": "CLAY_PRIM_STROKE",
 }
 

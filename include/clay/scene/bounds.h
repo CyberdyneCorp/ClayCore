@@ -34,6 +34,13 @@ float deformer_lipschitz(const Node& item);
 // bound. Shared by the transition weight and the region deformers.
 float ease_max_slope(std::uint8_t ease);
 
+// Half-extent of a 2D profile about its own origin. Shared because bounds and
+// the compiler's Lipschitz estimate both need it once per profile, and a
+// second copy of the switch would be a second place for a new profile type to
+// be forgotten.
+kernel::cfloat2 profile_extent_of(const Profile& profile,
+                                  const std::vector<kernel::cfloat2>& points);
+
 // Whether the item's deformer chain costs exactness for a reason the Lipschitz
 // factor does not capture (elongation on an asymmetric primitive).
 bool deformers_break_exactness(const Node& item);

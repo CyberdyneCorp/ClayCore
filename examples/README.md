@@ -371,6 +371,35 @@ like any other item.
 
 ![loft subtracted](output/16_loft_subtracted.png)
 
+### 17 — swept along a guide
+
+The same profiles as a loft, carried along a **guide curve**. The guide is an
+ordinary control-point curve — a guide is not a new kind of curve.
+
+![swept guides](output/17_swept_guides.png)
+
+**The frame is parallel-transported, not derived.** A Frenet frame flips at an
+inflection and is undefined where the curve is straight, so a sweep built on
+one would twist exactly where it should be calmest. Transport is sequential
+along the curve, so the compiler walks the guide once and stores a frame per
+vertex. Below: bend, straighten, bend back, with a flat profile whose
+orientation would be obvious if it flipped — the example asserts it does not.
+
+![swept frame](output/17_swept_frame.png)
+
+Profiles are distributed by **arc length**, so a guide whose points bunch does
+not bunch the profiles. The ends are the profile itself — a flat cap, since a
+profile need not be a circle.
+
+A sweep compresses space on the inside of a bend by `R / (R - r)`, so the safe
+step scale falls as the guide tightens. A profile wider than the guide's
+tightest bend folds the sweep through itself: **not refused**, because a guide
+is editable after the fact, but the step scale collapses to 0.0001 so the
+raymarcher crawls rather than stepping through a surface it was told was a
+distance field. The example prints both, and fails if either stops holding.
+
+![swept carved](output/17_swept_carved.png)
+
 ## Notes
 
 - **Committed models are budgeted.** `_render.save_model` fails above 400 KiB
