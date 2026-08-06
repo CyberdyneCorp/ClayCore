@@ -136,6 +136,22 @@ Document polygon_revolve() {
     return doc;
 }
 
+// Extruded polygon: the other lift opcode, and the shape the cut tool resolves
+// a drawn outline into (cut-tool spec), so a host previewing a trim is
+// previewing this.
+Document polygon_extrude() {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("lift");
+    Node n = item(Prim::extrude(0.4f), cf3(0, 0, 0), kColorA);
+    n.profile = scene::Profile::polygon();
+    n.profile_points = {kernel::cf2(-0.6f, -0.35f), kernel::cf2(0.6f, -0.35f),
+                        kernel::cf2(0.25f, 0.1f),   kernel::cf2(0.6f, 0.55f),
+                        kernel::cf2(-0.6f, 0.55f)};
+    n.rounding = 0.05f;
+    l.sdf->insert(n);
+    return doc;
+}
+
 Document stroke_chain() {
     Document doc;
     Layer& l = doc.add_sdf_layer("stroke");
@@ -146,6 +162,35 @@ Document stroke_chain() {
                 {cf3(-0.2f, 0.35f, -0.15f), 0.20f},
                 {cf3(0.6f, 0.05f, 0.25f), 0.32f}};
     n.stroke_blend_k = 0.06f;
+    l.sdf->insert(n);
+    return doc;
+}
+
+// A control-point curve. Typed points are tessellated into the segment chain
+// the stroke opcode already reads (scene-model: curves are not a new
+// primitive), so what reaches a host is an ordinary stroke item with a much
+// longer blob. Closed, with a document tolerance — both change the point count,
+// which is exactly what a host reading the blob by offset gets wrong.
+Document curve_chain() {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("curve");
+    Node n;
+    n.prim = Prim::stroke();
+    n.color = kColorB;
+    const cfloat3 control[5] = {cf3(-0.8f, -0.4f, 0.0f), cf3(-0.1f, 0.6f, 0.25f),
+                                cf3(0.75f, 0.15f, -0.2f), cf3(0.35f, -0.7f, 0.3f),
+                                cf3(-0.45f, -0.55f, -0.25f)};
+    const float radius[5] = {0.22f, 0.17f, 0.26f, 0.15f, 0.20f};
+    for (int i = 0; i < 5; ++i) {
+        scene::StrokePoint sp;
+        sp.pos = control[i];
+        sp.radius = radius[i];
+        sp.type = scene::StrokePointType::Spline;
+        n.stroke.push_back(sp);
+    }
+    n.stroke_closed = true;
+    n.curve_tolerance = 0.01f;
+    n.stroke_blend_k = 0.04f;
     l.sdf->insert(n);
     return doc;
 }
@@ -367,8 +412,14 @@ std::vector<FixtureCase> kernel_parity_cases() {
              repetition());
     add_case(&cases, "lift_polygon_revolve",
              "revolved polygon profile; the vertices live in the tape blob", polygon_revolve());
+    add_case(&cases, "lift_polygon_extrude",
+             "extruded rounded polygon — what the cut tool resolves a drawn outline into",
+             polygon_extrude());
     add_case(&cases, "stroke_chain", "sphere-swept polyline; the points live in the tape blob",
              stroke_chain());
+    add_case(&cases, "curve_spline_chain",
+             "closed Catmull-Rom curve tessellated into the stroke chain at compile time",
+             curve_chain());
     add_case(&cases, "composed_document",
              "two layers, a blended mirror, a nested group and a paint pass", composed());
     return cases;

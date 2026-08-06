@@ -65,7 +65,9 @@ TEST_CASE("parity fixture: cases cover the drift-prone vocabulary") {
     CHECK(names.count("deformer_region") == 1);
     CHECK(names.count("repetition_finite_grid") == 1);
     CHECK(names.count("lift_polygon_revolve") == 1);
+    CHECK(names.count("lift_polygon_extrude") == 1);
     CHECK(names.count("stroke_chain") == 1);
+    CHECK(names.count("curve_spline_chain") == 1);
     CHECK(names.count("composed_document") == 1);
 }
 

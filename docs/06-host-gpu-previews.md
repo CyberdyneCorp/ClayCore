@@ -71,7 +71,7 @@ It is JSON, schema 1:
 ```json
 {
   "schema": 1,
-  "generator": "claycore 0.14.0",
+  "generator": "claycore 0.17.0",
   "tolerance": {"distance_abs": 1e-05, "distance_rel": 0.0001, "color_abs": 0.0001},
   "cases": [
     {
@@ -98,13 +98,21 @@ That is the same comparison `tests/unit/test_parity.cpp` applies across
 claycore's own backends, at the same tolerances — a host GPU is no more
 bit-exact than ours.
 
-The 32 cases are chosen for what a hand-written preview gets wrong rather than
+The 34 cases are chosen for what a hand-written preview gets wrong rather than
 for coverage of the primitive set: every blend profile against smooth union,
 subtraction and intersection; all nine extended combine modes; the material-mix
 weights of a colored blend; a deformer chain and a region deformer; finite
-repetition; a revolved polygon and a stroke chain (both of which carry data in
-the blob); and one composed multi-layer document with a blended mirror, a
-nested group and a paint pass.
+repetition; both lift opcodes — a revolved polygon and an extruded one, which
+is what the cut tool resolves a drawn outline into; a stroke chain and a closed
+Catmull-Rom curve; and one composed multi-layer document with a blended mirror,
+a nested group and a paint pass.
+
+The last four all carry data in the out-of-line blob, and the curve carries a
+lot of it: control-point curves tessellate into the segment chain the stroke
+opcode already reads, so a five-point curve reaches a host as a 35-point stroke
+item. Nothing about that is visible in the opcode — a host that reads the blob
+by a guessed offset rather than by the item's own point count passes every
+other case and fails this one.
 
 The blend cases probe a ring straddling the seam of two overlapping spheres,
 which is exactly where a wrong support width shows up. `tests/unit/test_parity_fixture.cpp`

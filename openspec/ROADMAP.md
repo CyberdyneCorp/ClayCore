@@ -95,7 +95,7 @@ structural gap in it was `add-curve-objects`, which landed 2026-08-06.
 
 ## Phase 2 — the plan for what is left
 
-Six rows, in two tracks. Written 2026-08-06 after checking the tree rather
+Seven rows, in two tracks. Written 2026-08-06 after checking the tree rather
 than the table: two things are true that the one-line summaries hid.
 
 **Finding 1: three rows share a prerequisite that does not exist.** There is no
@@ -136,6 +136,7 @@ from outside, which the engine did not have.
 | ~~`add-voxel-repair`~~ **landed 2026-08-06** | Report (non-destructive), close holes, fill voids, all mask-gated. Enclosure is decided by a flood over **empty** cells from outside the bounds — `flood_select` walks occupied cells from a seed, which is a different question. |
 | `add-loft-opcode` | The spec says it plainly: "Loft remains header-only until an item can carry two profiles." So this is a Node change (a second profile + its polygon points) and a new tape opcode, which means four backends, a parity corpus row, and exactness analysis — `cop_loft` is already flagged **bound**, not exact, so the tape's field info has to say so or raymarching oversteps. Curves gave it the guide it was waiting for. |
 | `add-swept-n` | Only meaningful once loft is proven. N profiles across a guide is the same opcode with a count, so the risk is entirely in whether loft's item layout generalizes — which is a reason to design loft's storage with N in mind and a reason not to build N first. |
+| `add-tape-abi-export` **(new row)** | Three buffers across the C ABI, and no new math: `add-host-kernel-package` shipped the headers, so the host-side evaluator is `ctape_eval` compiled from our own source and the parity fixture already proves it agrees. What will bite is **lifetime, not content**. The tape is recompiled on every edit (Finding 2 above), so the boundary has to say who owns the buffers and when a handle a host is mid-upload with goes stale — an opaque handle with an explicit release, not a pointer into a `std::vector` that the next edit reallocates. Second: a host that uploads instrs/params/blob must also get `safe_step_scale` and the bounds, or its raymarcher oversteps a tape ours would have stepped conservatively. |
 
 ### Track B — gated on a prerequisite
 
@@ -153,6 +154,10 @@ from outside, which the engine did not have.
 2. **`add-loft-opcode` → `add-swept-n`** — independent of Track B, and loft is
    the one row whose blocker ("an item can carry two profiles") is already
    written down as a sentence in the spec.
+2b. **`add-tape-abi-export`** — orderable anywhere in Track A; listed after loft
+   only because loft is the bigger engine gap. Worth pulling forward the moment
+   a host wants WYSIWYG preview-vs-bake, since the half that used to make it
+   expensive (a host-side evaluator, and a way to trust it) has already landed.
 3. **`add-sampled-fields` → `add-mesh-to-field-import` → `add-sdf-relax`** —
    the prerequisite designed with all three consumers in view rather than
    retrofitted around the first one.
@@ -173,7 +178,7 @@ tests. Concretely, per row:
 - **A numbered example** in `examples/`, run by `examples/run_all.py` in CI, that
   **renders what it does and asserts what it claims** — the existing ones raise
   `SystemExit` when their own claim stops holding, and that is what makes them
-  tests rather than screenshots. Phase 2 takes the gallery from 15 to 21.
+  tests rather than screenshots. Phase 2 takes the gallery from 15 to 22.
 - **Swift smoke coverage** wherever the C ABI grows, run on macOS and in the
   simulator.
 - **Four presets green** (release, metal, opencl, asan-ubsan) plus
