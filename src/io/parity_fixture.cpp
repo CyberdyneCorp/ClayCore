@@ -4,9 +4,11 @@
 
 #include "clay/field/volume.h"
 
-#include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <fstream>
 
 #include "clay/scene/document.h"
@@ -305,11 +307,25 @@ void append_float(std::string* out, float v) {
         *out += "null";
         return;
     }
+    // The shortest form that round-trips: the smallest precision whose text
+    // parses back to the same bits. Nine significant digits always suffice for
+    // a float, so the loop terminates.
+    //
+    // NOT std::to_chars, whose floating-point overload arrived in macOS 13.3
+    // and iOS 16.3 — later than the xcframework's own minimum, which is a
+    // promise about what the library runs on rather than a build detail to be
+    // raised when a source file finds it inconvenient.
     char buf[40];
-    // shortest form that round-trips, and locale-independent — %g would emit a
-    // comma under a host's locale and break the file.
-    std::to_chars_result r = std::to_chars(buf, buf + sizeof(buf), v);
-    out->append(buf, static_cast<std::size_t>(r.ptr - buf));
+    for (int precision = 1; precision <= 9; ++precision) {
+        std::snprintf(buf, sizeof buf, "%.*g", precision, static_cast<double>(v));
+        if (std::strtof(buf, nullptr) == v) break;
+    }
+    // %g writes the host locale's decimal separator, which under a comma
+    // locale would emit JSON no parser accepts. strtof read it back the same
+    // way, so the round-trip test above still held; only the text needs fixing.
+    for (char* c = buf; *c; ++c)
+        if (*c == ',') *c = '.';
+    *out += buf;
 }
 
 void append_floats(std::string* out, const float* values, std::size_t count) {
