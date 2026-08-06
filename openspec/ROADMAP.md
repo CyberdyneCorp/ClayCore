@@ -21,17 +21,21 @@ about *sculpting affordances*, not about the field engine:
 
 - 28 primitives + stroke/curve chains, 14 combine ops, 5 blend profiles,
   grid/radial repetition, mirror with blended seam
-- **9 deformers** — twist, bend, taper, displace, wrap_around, elongate,
-  elongate_axis, bend_linear, bend_radial. Every point-warp implemented in the
-  kernel headers is reachable from a document; there is nothing left stranded.
+- **12 deformers** — twist, bend, taper, displace, wrap_around, elongate,
+  elongate_axis, bend_linear, bend_radial, plus grab, pose and pose_line with
+  finite support. Every point-warp implemented in the kernel headers is
+  reachable from a document; there is nothing left stranded.
 - Voxel engine: palette grids, cube/sphere brushes with 4 falloff curves and
   strength, sculpt verbs smooth / inflate / flatten / pinch, fills, mirrored
   edits, flood select, greedy meshing, SDF↔voxel bridges, paintable mask
   fields gating every verb
 - Brush stroke engine: samples in, edit items out, with versioned presets;
   paintable per-layer mask fields; ghosted and locked layers
+- Control-point curves (hard / Catmull-Rom / B-spline / Bezier, closed,
+  tessellated to a document tolerance) and the cut tool (rect / circle /
+  polygon / spline lasso, swept as a prism)
 - Editing and opt-in undo over one command vocabulary shared with the file
-  format; 217 capabilities gated for binding parity; four backends verified on
+  format; 228 capabilities gated for binding parity; four backends verified on
   device; the Swift package verified in the iOS Simulator
 
 ### Corrections to the study's baseline
@@ -41,16 +45,20 @@ wrong, in our favour:
 
 | Study says | Actually |
 |---|---|
-| 17 archived changes | 20 |
+| 17 archived changes | 27 |
 | `bend_linear` / `bend_radial` exactness kernels "present but unused, fine to leave" (P3) | Both are implemented, tape-expressible and parity-checked as of 2026-08-05 |
 | ABI enumerator `CLAY_DEFORM_WRAP` | `CLAY_DEFORM_WRAP_AROUND` |
 
 ## The gap, in one sentence
 
-Every deformer acts on a whole item, so nothing can push on a *patch* of
-surface — which is the first tool a sculptor reaches for, and the whole
-Manipulation category in both ZBrush (Move, Snake Hook, Nudge) and 3DCoat
-(Move, Pose) at once.
+~~Every deformer acts on a whole item, so nothing can push on a *patch* of
+surface.~~ **Closed 2026-08-05** by `add-region-deformers` and
+`add-pose-line-regions`. The remaining gap is narrower and worth naming
+precisely: **there is no way to relax an SDF surface.** Smoothing a signed
+distance field locally means convolving it, which breaks the distance property
+the evaluator depends on, so it is not a deformer — voxels have
+`sculpt_smooth`, SDF layers have nothing, and the only route today is the
+one-way voxel bridge. See `add-sdf-relax` in Phase 2.
 
 ## Phase 1 — make it sculptable
 
@@ -76,6 +84,7 @@ structural gap in it was `add-curve-objects`, which landed 2026-08-06.
 |---|---|
 | ~~`add-cut-tool`~~ **landed 2026-08-06** | The study's P0 and the practitioners' "90% tool" (ZBrush Trim Rect/Circle/Lasso, 3DCoat Cut Off). A frame plus a drawn shape resolves to an ordinary extruded item. **The cut is a prism, not a frustum** — a converging cut has a non-flat face and a result that depends on where the camera stood. **No camera enters the engine**: the caller passes the frame it already has, in world units, and the engine owns the error-prone parts (sweep depth, orientation, which side survives). Keep-inner/keep-outer is the op, not a flag. Angled cut walls are the one named gap: they need a taper about the sweep axis, the same relationship `elongate_axis` has to `elongate`. |
 | ~~`add-curve-objects`~~ **landed 2026-08-06** | Control-point curves: per-point type (hard / Catmull-Rom / B-spline / Bezier with local-space handles), closed curves, and adaptive tessellation to a document-level tolerance. **A curve is not a new primitive** — the stroke opcode already sweeps a sphere along a segment chain exactly and with finite support, so typed points lower into it at compile time. That bought four backends, culling, exactness, picking, undo, masks and the file format for nothing, and an all-hard chain compiles to a bit-identical tape. Also added the versioned scene chunk, so the next field a node gains needs no packing trick. Cross-section sweeps (`add-loft-opcode`, `add-swept-n`) and radius profiles are unblocked but deliberately not included. |
+| `add-sdf-relax` | **The one ZBrush core brush still missing.** Voxels smooth; SDF layers cannot. Not a deformer: convolving a distance field breaks the distance property, so this needs a decision about what "smooth" means for a declarative edit list — most likely a blend-radius-based local re-blend, or an explicit bake through the voxel bridge with the result kept as a layer. Cheapest honest version may be making the voxel round trip lossless rather than inventing a field operator. |
 | `add-loft-opcode` | Loft is header-only and flagged in the specs as not tape-expressible; it is 3DCoat's base-mesh generator and the core of their 2026 parametric direction. Needs an item to carry two profiles. |
 | `add-swept-n` | Generalizes loft from two profiles to N across a guide, once two-profile loft is proven. Minor and arguably implied by the row above, but named so it is not assumed done when loft lands. |
 | `add-voxel-verbs` | fill-cavities, scrape (flatten+smooth), smudge, carve-with-alpha — the verbs our four are missing against their voxel set. |
