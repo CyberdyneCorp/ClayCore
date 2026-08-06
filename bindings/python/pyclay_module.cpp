@@ -27,6 +27,7 @@
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
 #include "clay/brush/stroke.h"
+#include "clay/cut/cut.h"
 #include "clay/voxel/mask.h"
 #include "clay/version.h"
 
@@ -168,6 +169,10 @@ struct PyPrim {
     scene::Profile profile;
     std::vector<kernel::cfloat2> profile_points;
     scene::Repeat repeat;
+    // Only a cut sets this today: it derives its own bevel, and losing it
+    // between constructing the prim and placing it would be a trap. Layer.add
+    // uses it when the caller does not override it.
+    float rounding = 0.0f;
 };
 
 math::Quat to_axis_angle(nb::handle rotation_axis_angle) {
@@ -220,6 +225,7 @@ struct PyTriPrism : PyPrim {};
 struct PyOctahedronCheap : PyPrim {};
 struct PyLNormSphere : PyPrim {};
 struct PyRevolve : PyPrim {};
+struct PyCut : PyPrim {};
 
 // -- mesh wrapper ---------------------------------------------------------------
 
@@ -247,6 +253,11 @@ void save_mesh_any(const mesh::Mesh& m, const std::string& path) {
     throw std::invalid_argument("unsupported mesh extension '." + ext +
                                 "' (supported: .obj, .ply, .fbx, .glb)");
 }
+
+// A cut's swept region: the document being cut, which is the answer in every
+// real use, or an explicit ((lo), (hi)) pair for a caller that wants to bound
+// it by hand.
+math::Aabb to_aabb(nb::handle obj);
 
 // -- stroke engine helpers -----------------------------------------------------
 
@@ -354,6 +365,26 @@ struct PyDocument {
     std::shared_ptr<io::ClaySpaceDoc> doc = std::make_shared<io::ClaySpaceDoc>();
     std::shared_ptr<UndoRef> undo = std::make_shared<UndoRef>();
 };
+
+math::Aabb to_aabb(nb::handle obj) {
+    if (nb::isinstance<PyDocument>(obj)) {
+        math::Aabb b = scene::compile_document(nb::cast<PyDocument&>(obj).doc->document).bounds;
+        if (b.empty())
+            throw std::invalid_argument(
+                "the document is empty, so there is nothing to size the cut against — pass "
+                "an explicit ((lo), (hi)) region");
+        return b;
+    }
+    nb::sequence s;
+    try {
+        s = nb::cast<nb::sequence>(obj);
+    } catch (const std::exception&) {
+        throw std::invalid_argument("region must be a Document or a ((lo), (hi)) pair");
+    }
+    if (nb::len(s) != 2)
+        throw std::invalid_argument("region must be a Document or a ((lo), (hi)) pair");
+    return math::Aabb(to_f3(s[0], "region lo"), to_f3(s[1], "region hi"));
+}
 
 struct PyLayer {
     std::shared_ptr<io::ClaySpaceDoc> doc;
@@ -1260,6 +1291,84 @@ NB_MODULE(pyclay, m) {
              "profile"_a, "offset"_a = 0.0f, CLAY_PLACE_ARGS);
 #undef CLAY_PLACE_ARGS
 
+    nb::class_<cut::CutShape>(
+        m, "CutShape",
+        "The outline of a cut, in world units on the frame it was drawn on.")
+        .def_static("rect",
+                    [](float half_width, float half_height) {
+                        return cut::CutShape::rect(half_width, half_height);
+                    },
+                    "half_width"_a, "half_height"_a)
+        .def_static("circle", [](float radius) { return cut::CutShape::circle(radius); },
+                    "radius"_a)
+        .def_static("polygon",
+                    [](nb::handle vertices) {
+                        return cut::CutShape::from_polygon(to_polygon(vertices));
+                    },
+                    "vertices"_a, "An (N, 2) outline; it closes implicitly")
+        .def_static("curve",
+                    [](nb::handle points, nb::handle types, float tolerance) {
+                        std::vector<scene::StrokePoint> control = to_stroke_points(points);
+                        apply_point_types(control, types);
+                        return cut::CutShape::from_curve(control, tolerance);
+                    },
+                    "points"_a, "types"_a = "spline", "tolerance"_a = 0.01f,
+                    "A closed control-point curve drawn in the cut plane, flattened "
+                    "through the same tessellator curves use — so a spline lasso "
+                    "follows the same curve a spline item would.")
+        .def_prop_ro("vertex_count",
+                     [](const cut::CutShape& s) { return s.polygon.size(); });
+
+    nb::class_<PyCut, PyPrim>(
+        m, "Cut",
+        "A shape drawn over the model, resolved into an ordinary edit item.\n\n"
+        "Give the frame the shape was drawn on — an origin and an orthonormal\n"
+        "basis, which a viewport already has because it needed one to draw the\n"
+        "overlay — and the shape in WORLD units on that frame. Not pixels and\n"
+        "not normalized device coordinates: the engine has no viewport.\n\n"
+        "The cut is a PRISM, not a frustum. A shape drawn under a perspective\n"
+        "camera sweeps a converging wedge, and cutting with one would give a\n"
+        "cut face that is not flat and a solid that depends on where the camera\n"
+        "stood. A trim is a straight cut, as it is in ZBrush and 3DCoat.\n\n"
+        "Which side survives is the OP you place this with: SUBTRACT removes\n"
+        "what the shape covers, INTERSECT keeps only that.\n\n"
+        "The sweep is sized to `region` — the document's own bounds by default —\n"
+        "so a cut goes all the way through. Passing near/far explicitly is how a\n"
+        "deliberate partial cut is expressed.")
+        .def("__init__",
+             [](PyCut* self, nb::handle origin, nb::handle right, nb::handle up,
+                nb::handle forward, nb::handle shape, nb::handle region, float rounding,
+                nb::handle near_extent, nb::handle far_extent) {
+                 cut::CutFrame frame;
+                 frame.origin = to_f3(origin, "origin");
+                 frame.right = to_f3(right, "right");
+                 frame.up = to_f3(up, "up");
+                 frame.forward = to_f3(forward, "forward");
+                 if (!frame.is_orthonormal())
+                     throw std::invalid_argument(
+                         "right, up and forward must be orthonormal — the shape was drawn in "
+                         "a frame, and silently squaring it up would cut somewhere else");
+
+                 cut::CutOptions options;
+                 options.rounding = rounding;
+                 if (!near_extent.is_none()) options.near_extent = nb::cast<float>(near_extent);
+                 if (!far_extent.is_none()) options.far_extent = nb::cast<float>(far_extent);
+
+                 math::Aabb box = to_aabb(region);
+                 std::optional<scene::Node> item =
+                     cut::cut_item(frame, nb::cast<cut::CutShape&>(shape), box, options);
+                 if (!item)
+                     throw std::invalid_argument("the cut is degenerate: a shape with no area");
+                 new (self) PyCut();
+                 self->prim = item->prim;
+                 self->profile = item->profile;
+                 self->profile_points = item->profile_points;
+                 self->xform = item->xform;
+                 self->rounding = item->rounding;
+             },
+             "origin"_a, "right"_a, "up"_a, "forward"_a, "shape"_a, "region"_a,
+             "rounding"_a = 0.0f, "near"_a = nb::none(), "far"_a = nb::none());
+
     nb::class_<PyStroke, PyPrim>(
         m, "Stroke",
         "A chain of sphere-swept cones with per-point radius — ONE edit item,\n"
@@ -1380,7 +1489,7 @@ NB_MODULE(pyclay, m) {
         .def_prop_ro("resolution", [](const PyLayer& l) { return l.layer().resolution; })
         .def("add",
              [](PyLayer& l, const PyPrim& prim, scene::Op op, nb::handle blend, nb::handle color,
-                float rounding, bool mirror, nb::handle transition) {
+                nb::handle rounding, bool mirror, nb::handle transition) {
                  if (op == scene::Op::None)
                      throw std::invalid_argument(
                          "op must be a combine operator, not Op.NONE");
@@ -1405,8 +1514,10 @@ NB_MODULE(pyclay, m) {
                      }
                  }
                  if (!color.is_none()) n.color = parse_color(color);
-                 if (rounding < 0.0f) throw std::invalid_argument("rounding must be >= 0");
-                 n.rounding = rounding;
+                 // None means "whatever the prim decided", which is 0 for
+                 // every prim that does not decide one.
+                 n.rounding = rounding.is_none() ? prim.rounding : nb::cast<float>(rounding);
+                 if (n.rounding < 0.0f) throw std::invalid_argument("rounding must be >= 0");
                  n.mirror = mirror;
                  if (scene::op_is_transition(op)) {
                      if (transition.is_none())
@@ -1439,7 +1550,7 @@ NB_MODULE(pyclay, m) {
                  return id;
              },
              "prim"_a, "op"_a = scene::Op::Add, "blend"_a = nb::none(), "color"_a = nb::none(),
-             "rounding"_a = 0.0f, "mirror"_a = false, "transition"_a = nb::none(),
+             "rounding"_a = nb::none(), "mirror"_a = false, "transition"_a = nb::none(),
              "Append an edit to the layer; returns the node id")
         .def("set_points",
              [](PyLayer& l, scene::NodeId node, nb::handle points, nb::handle types, bool closed,

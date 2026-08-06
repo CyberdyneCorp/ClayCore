@@ -160,6 +160,54 @@ var enabled: Int32 = 0, undoDepth = 0, redoDepth = 0
 check(clay_document_undo_state(doc, &enabled, &undoDepth, &redoDepth) == CLAY_OK
         && enabled == 1 && redoDepth == 1, "undo state reports enabled with a redo available")
 
+// -- the cut tool ------------------------------------------------------------
+
+// A block of its own, well clear of the rest of the model: the document's
+// field is every layer combined, so a probe near the origin would be answering
+// a question about the body rather than about the cut.
+let cutX: Float = -10.0
+var cutLayer: clay_layer_id = 0
+check(clay_add_sdf_layer(doc, "cut", &cutLayer) == CLAY_OK, "added a cut layer")
+
+var blockSize: [Float] = [1, 1, 1]
+guard let blockItem = clay_item_create(Int32(CLAY_PRIM_BOX.rawValue), &blockSize, 3) else {
+    check(false, "created the block")
+    exit(1)
+}
+var blockPos: [Float] = [cutX, 0, 0]
+check(clay_item_set_position(blockItem, &blockPos) == CLAY_OK, "placed it")
+check(clay_layer_add_item(doc, cutLayer, blockItem, nil) == CLAY_OK, "added the block")
+clay_item_destroy(blockItem)
+check(evaluate(doc, [cutX, 0, 0])[0] < 0, "the block is solid before the cut")
+
+var cutDesc = clay_cut_desc()
+cutDesc.struct_size = UInt32(MemoryLayout<clay_cut_desc>.size)
+cutDesc.origin = (cutX, 0, -4)
+cutDesc.right = (1, 0, 0)
+cutDesc.up = (0, 1, 0)
+cutDesc.forward = (0, 0, 1)
+cutDesc.shape = Int32(CLAY_CUT_CIRCLE.rawValue)
+cutDesc.radius = 0.4
+cutDesc.region_min = (cutX - 1, -1, -1)
+cutDesc.region_max = (cutX + 1, 1, 1)
+
+guard let cutItem = clay_cut_create(&cutDesc, nil, 0) else {
+    check(false, "resolved the cut")
+    exit(1)
+}
+check(clay_item_set_op(cutItem, Int32(CLAY_OP_SUBTRACT.rawValue)) == CLAY_OK, "cut subtracts")
+check(clay_layer_add_item(doc, cutLayer, cutItem, nil) == CLAY_OK, "placed the cut")
+clay_item_destroy(cutItem)
+
+check(evaluate(doc, [cutX, 0, 0])[0] > 0, "the cut went through the middle")
+check(evaluate(doc, [cutX, 0, 0.9])[0] > 0, "...and out the far face")
+check(evaluate(doc, [cutX + 0.8, 0.8, 0])[0] < 0, "and left the corners alone")
+
+// A frame that is not orthonormal is refused rather than squared up.
+var skewed = cutDesc
+skewed.up = (0.5, 0.5, 0)
+check(clay_cut_create(&skewed, nil, 0) == nil, "a skewed frame is refused")
+
 // -- curves ------------------------------------------------------------------
 
 var curveLayer: clay_layer_id = 0

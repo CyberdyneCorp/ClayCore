@@ -2079,3 +2079,134 @@ def test_curves_round_trip(tmp_path):
     path = tmp_path / "curve.clayspace"
     doc.save(str(path))
     assert np.array_equal(before, clay.load(str(path)).eval(probes))
+
+
+# -- the cut tool (add-cut-tool) ---------------------------------------------
+
+
+def _block(size=2.0):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Box(size=(size, size, size)))
+    return doc, layer
+
+
+def _front(**kwargs):
+    frame = dict(origin=(0, 0, -4), right=(1, 0, 0), up=(0, 1, 0), forward=(0, 0, 1))
+    frame.update(kwargs)
+    return frame
+
+
+def test_a_cut_makes_a_hole_through():
+    doc, layer = _block()
+    layer.add(clay.Cut(shape=clay.CutShape.rect(0.4, 0.4), region=doc, **_front()),
+              op=clay.Op.SUBTRACT)
+    inside = np.array([[0, 0, -0.9], [0, 0, 0.0], [0, 0, 0.9]], np.float32)
+    outside = np.array([[0.8, 0.8, 0], [-0.8, 0, 0], [0.45, 0, 0]], np.float32)
+    assert (doc.eval(inside) > 0).all()     # through both faces
+    assert (doc.eval(outside) < 0).all()    # and nowhere else
+
+
+# The decision the design rests on: a cut is a prism. If it converged, moving
+# the frame along its own sweep would change the solid.
+def test_the_cut_is_a_prism_not_a_frustum():
+    probes = np.random.default_rng(7).uniform(-1.2, 1.2, size=(512, 3)).astype(np.float32)
+    solids = []
+    for z in (-4.0, -40.0):
+        doc, layer = _block()
+        layer.add(clay.Cut(shape=clay.CutShape.rect(0.4, 0.4), region=doc,
+                           **_front(origin=(0, 0, z))), op=clay.Op.SUBTRACT)
+        solids.append(doc.eval(probes) < 0)
+    assert np.array_equal(solids[0], solids[1])
+
+
+def test_keep_inner_and_keep_outer_are_the_op():
+    probes = np.random.default_rng(3).uniform(-0.9, 0.9, size=(256, 3)).astype(np.float32)
+    results = []
+    for op in (clay.Op.SUBTRACT, clay.Op.INTERSECT):
+        doc, layer = _block()
+        layer.add(clay.Cut(shape=clay.CutShape.circle(0.5), region=doc, **_front()), op=op)
+        results.append(doc.eval(probes) < 0)
+    # Inside the block every point survives exactly one of the two.
+    assert not (results[0] & results[1]).any()
+
+
+def test_an_explicit_extent_cuts_only_that_far():
+    doc, layer = _block()
+    layer.add(clay.Cut(shape=clay.CutShape.rect(0.3, 0.3), region=doc,
+                       near=0.0, far=8.0, **_front(origin=(0, 0, -8))),
+              op=clay.Op.SUBTRACT)
+    assert doc.eval(np.array([[0, 0, -0.5]], np.float32))[0] > 0   # cut here
+    assert doc.eval(np.array([[0, 0, 0.5]], np.float32))[0] < 0    # solid beyond
+
+
+def test_rounding_bevels_the_cut():
+    probe = np.array([[0.45, 0, 0]], np.float32)
+    fields = []
+    for rounding in (0.0, 0.15):
+        doc, layer = _block()
+        layer.add(clay.Cut(shape=clay.CutShape.rect(0.4, 0.4), region=doc, rounding=rounding,
+                           **_front()), op=clay.Op.SUBTRACT)
+        fields.append(float(doc.eval(probe)[0]))
+    assert fields[1] > fields[0]   # a fatter cutter takes more at the wall
+
+
+def test_a_spline_lasso_follows_its_curve():
+    control = np.array([[-0.5, 0, 0, 0], [0, 0.5, 0, 0], [0.5, 0, 0, 0], [0, -0.5, 0, 0]],
+                       np.float32)
+    spline = clay.CutShape.curve(control, types="spline", tolerance=0.005)
+    assert spline.vertex_count > 4
+
+    straight = clay.CutShape.polygon(control[:, :2].copy())
+    # Between the control polygon's chord through (-0.25, 0.25) and the closed
+    # spline's bulge out to (-0.3125, 0.3125).
+    probe = np.array([[-0.28, 0.28, 0.0]], np.float32)
+    fields = []
+    for shape in (straight, spline):
+        doc, layer = _block()
+        layer.add(clay.Cut(shape=shape, region=doc, **_front()), op=clay.Op.SUBTRACT)
+        fields.append(float(doc.eval(probe)[0]))
+    assert fields[0] < 0 < fields[1]
+
+
+def test_a_cut_is_an_ordinary_edit():
+    doc, layer = _block()
+    doc.enable_undo()
+    probe = np.array([[0, 0, 0]], np.float32)
+    assert doc.eval(probe)[0] < 0
+
+    layer.add(clay.Cut(shape=clay.CutShape.circle(0.4), region=doc, **_front()),
+              op=clay.Op.SUBTRACT)
+    assert doc.eval(probe)[0] > 0
+    doc.undo()
+    assert doc.eval(probe)[0] < 0
+
+    doc.set_layer_protection(layer.id, locked=True)
+    with pytest.raises(ValueError, match="locked"):
+        layer.add(clay.Cut(shape=clay.CutShape.circle(0.4), region=doc, **_front()),
+                  op=clay.Op.SUBTRACT)
+
+
+def test_a_cut_takes_the_region_as_a_pair_too():
+    doc, layer = _block()
+    layer.add(clay.Cut(shape=clay.CutShape.rect(0.3, 0.3),
+                       region=((-1, -1, -1), (1, 1, 1)), **_front()), op=clay.Op.SUBTRACT)
+    assert doc.eval(np.array([[0, 0, 0.9]], np.float32))[0] > 0
+
+
+def test_degenerate_cuts_are_refused():
+    doc, _ = _block()
+    with pytest.raises(ValueError, match="orthonormal"):
+        clay.Cut(shape=clay.CutShape.circle(0.3), region=doc, **_front(up=(0.5, 0.5, 0)))
+    with pytest.raises(ValueError, match="orthonormal"):
+        clay.Cut(shape=clay.CutShape.circle(0.3), region=doc, **_front(right=(2, 0, 0)))
+    with pytest.raises(ValueError, match="degenerate"):
+        clay.Cut(shape=clay.CutShape.circle(0.0), region=doc, **_front())
+    # A two-vertex outline is caught by the polygon converter before the cut
+    # ever sees it, with a more specific message than "degenerate".
+    with pytest.raises(ValueError, match="3 vertices"):
+        clay.CutShape.polygon(np.zeros((2, 2), np.float32))
+    # ...and an outline with no area is caught by the cut itself.
+    with pytest.raises(ValueError, match="degenerate"):
+        clay.Cut(shape=clay.CutShape.polygon(np.zeros((3, 2), np.float32)), region=doc,
+                 **_front())

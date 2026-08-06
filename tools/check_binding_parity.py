@@ -62,6 +62,8 @@ CLASS_STRUCT = {
 # combine op or profile shape in pyclay needs one in clay.h.
 CLASS_ENUM_PREFIX = {
     "Accumulation": "CLAY_ACCUMULATION_",
+    # the shape kinds are an enumerator on the cut descriptor in C
+    "CutShape": "CLAY_CUT_",
     "Op": "CLAY_OP_",
     "Profile": "CLAY_PROFILE_",
     "Prim": "CLAY_DEFORM_",  # the deformer chain; the rest falls to the prefixes
@@ -81,6 +83,7 @@ ALIASES = {
     "Stroke.tolerance": "clay_item_set_curve",
     # per-point types ride the point arrays rather than being set separately
     "Stroke.types": "clay_item_set_curve_points",
+    "CutShape.curve": "clay_cut_polygon_from_curve",
     # the preset is an argument in C, not the receiver, so the name has no
     # _preset_ in it
     "StrokePreset.resolve": "clay_stroke_resolve",
@@ -118,6 +121,8 @@ CLASS_CTOR = {
     "MaskField": "clay_mask_create",
     "Accumulation": None,
     "StrokePreset": "clay_stroke_preset_defaults",
+    "Cut": "clay_cut_create",
+    "CutShape": None,
     "Smooth": "CLAY_BLEND_QUADRATIC",
     "Cubic": "CLAY_BLEND_CUBIC",
     "Circular": "CLAY_BLEND_CIRCULAR",
@@ -164,6 +169,8 @@ EXEMPT = {
     "Prim.repeat": "reads a builder's own state back; clay_item is write-only by "
                    "design, the caller keeps what it set",
     "Prim.deformers": "reads a builder's own state back, as above",
+    "CutShape.vertex_count":
+        "reads a shape's own outline back; in C the caller owns the buffer it passed",
     "Stroke.points": "reads a builder's own state back, as above",
     "Stroke.point_count": "reads a builder's own state back, as above",
     "Profile.point_count": "reads a builder's own state back, as above",

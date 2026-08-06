@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 15
+#define CLAY_ABI_MINOR 16
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -861,6 +861,71 @@ clay_result clay_mask_smooth(clay_mask* mask, int32_t iterations);
  * empty mask, and out_min/out_max are then left alone. */
 clay_result clay_mask_bounds(const clay_mask* mask, int32_t out_min[3], int32_t out_max[3],
                              int32_t* out_has_bounds);
+
+/* -- the cut tool ---------------------------------------------------------- */
+
+/* A shape drawn over the model, resolved into an ordinary edit item.
+ *
+ * The caller gives the FRAME the shape was drawn on — an origin and an
+ * orthonormal basis, which a viewport already has because it needed one to
+ * draw the overlay — and the shape in WORLD units on that frame. Not pixels
+ * and not normalized device coordinates: this engine has no viewport and does
+ * not want one.
+ *
+ * The cut is a PRISM, not a frustum. A shape drawn under a perspective camera
+ * sweeps a converging wedge, and cutting with one would give a cut face that
+ * is not flat and a solid that depends on where the camera was standing. A
+ * trim is a straight cut, as it is in ZBrush and 3DCoat.
+ *
+ * Which side survives is the OP the resolved item is placed with:
+ * CLAY_OP_SUBTRACT removes what the shape covers, CLAY_OP_INTERSECT keeps only
+ * that. A separate flag would be a second way to say one thing. */
+
+typedef enum clay_cut_shape {
+    CLAY_CUT_RECT = 0,
+    CLAY_CUT_CIRCLE = 1,
+    CLAY_CUT_POLYGON = 2 /* outline in polygon_xy, closed implicitly */
+} clay_cut_shape;
+
+typedef struct clay_cut_desc {
+    uint32_t struct_size; /* = sizeof(clay_cut_desc); required */
+    float origin[3];
+    float right[3];   /* unit, in-plane: shape x is measured in these world units */
+    float up[3];      /* unit, in-plane */
+    float forward[3]; /* unit, the sweep direction */
+    int32_t shape;    /* clay_cut_shape */
+    float half_width; /* CLAY_CUT_RECT */
+    float half_height;
+    float radius;   /* CLAY_CUT_CIRCLE */
+    float rounding; /* bevels the cut walls; >= 0 */
+    /* The region being cut, used only to size the sweep so that a cut goes all
+     * the way through instead of stopping inside it. */
+    float region_min[3];
+    float region_max[3];
+    /* Sweep extent either side of the origin along forward. Both zero means
+     * "derive it from the region", which is what a caller wants unless it is
+     * asking for a deliberate partial cut. */
+    float near_extent;
+    float far_extent;
+} clay_cut_desc;
+
+/* Resolve a cut into an item the caller places like any other, or NULL with
+ * the detail in clay_last_error: a frame that is not orthonormal is refused
+ * rather than squared up, because the shape the user saw was drawn in the
+ * frame they think they have. `polygon_xy` is count*2 floats and is read only
+ * for CLAY_CUT_POLYGON. Free the result with clay_item_destroy. */
+clay_item* clay_cut_create(const clay_cut_desc* desc, const float* polygon_xy,
+                           size_t polygon_count);
+
+/* A closed control-point curve drawn in the cut plane, flattened into a
+ * polygon outline through the same tessellator curves use — so a spline lasso
+ * follows the same curve a spline item would. Size-query pattern: call with
+ * out_xy == NULL to receive the vertex count in *count. `points_xyzr` and the
+ * optional `types` are as clay_item_set_curve_points takes them; only x and y
+ * are read, since the outline lies in the cut plane. */
+clay_result clay_cut_polygon_from_curve(const float* points_xyzr, size_t count,
+                                        const int32_t* types, float tolerance, float* out_xy,
+                                        size_t* out_count);
 
 /* -- brush strokes --------------------------------------------------------- */
 

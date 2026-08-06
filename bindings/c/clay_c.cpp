@@ -28,6 +28,7 @@
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
 #include "clay/brush/stroke.h"
+#include "clay/cut/cut.h"
 #include "clay/voxel/mask.h"
 
 using namespace clay;
@@ -380,6 +381,9 @@ clay_result check_mirror_axes(std::int32_t axes, std::uint8_t* out) {
 // Defined with the mask entry points below; a brush descriptor may name a
 // mask, so the two resolve together.
 clay_result resolve_mask(const clay_mask* mask, voxel::MaskField** out);
+
+constexpr std::size_t kCutDescOriginal =
+    offsetof(clay_cut_desc, far_extent) + sizeof(float);
 
 constexpr std::size_t kStrokePresetOriginal =
     offsetof(clay_stroke_preset, accumulation) + sizeof(std::int32_t);
@@ -1908,6 +1912,108 @@ clay_result clay_document_voxel_layer(clay_document* doc, const char* name,
         return CLAY_OK;
     }
     return fail(CLAY_ERROR_NOT_FOUND, std::string("no voxel layer named ") + name);
+}
+
+// -- the cut tool (c-abi spec: the cut tool) ---------------------------------
+
+clay_item* clay_cut_create(const clay_cut_desc* desc, const float* polygon_xy,
+                           size_t polygon_count) {
+    if (!desc) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "null cut descriptor");
+        return nullptr;
+    }
+    clay_cut_desc d;
+    if (read_desc(desc, kCutDescOriginal, &d) != CLAY_OK) return nullptr;
+
+    cut::CutFrame frame;
+    frame.origin = kernel::cf3(d.origin[0], d.origin[1], d.origin[2]);
+    frame.right = kernel::cf3(d.right[0], d.right[1], d.right[2]);
+    frame.up = kernel::cf3(d.up[0], d.up[1], d.up[2]);
+    frame.forward = kernel::cf3(d.forward[0], d.forward[1], d.forward[2]);
+    if (!frame.is_orthonormal()) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT,
+             "right, up and forward must be orthonormal: the shape was drawn in a frame, and "
+             "squaring it up here would cut somewhere the user did not draw");
+        return nullptr;
+    }
+    if (d.rounding < 0.0f) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "cut rounding must be >= 0");
+        return nullptr;
+    }
+
+    cut::CutShape shape;
+    switch (d.shape) {
+        case CLAY_CUT_CIRCLE:
+            shape = cut::CutShape::circle(d.radius);
+            break;
+        case CLAY_CUT_POLYGON: {
+            if (polygon_count > 0 && !polygon_xy) {
+                fail(CLAY_ERROR_INVALID_ARGUMENT, "null polygon outline");
+                return nullptr;
+            }
+            if (check_batch("polygon vertices", polygon_count) != CLAY_OK) return nullptr;
+            std::vector<kernel::cfloat2> verts;
+            verts.reserve(polygon_count);
+            for (std::size_t i = 0; i < polygon_count; ++i)
+                verts.push_back(kernel::cf2(polygon_xy[i * 2], polygon_xy[i * 2 + 1]));
+            shape = cut::CutShape::from_polygon(std::move(verts));
+            break;
+        }
+        case CLAY_CUT_RECT:
+            shape = cut::CutShape::rect(d.half_width, d.half_height);
+            break;
+        default:
+            fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown cut shape: " + std::to_string(d.shape));
+            return nullptr;
+    }
+
+    cut::CutOptions options;
+    options.rounding = d.rounding;
+    // Both zero is the "derive it" sentinel the header documents: a sweep of
+    // no depth is not a cut anyone means to ask for.
+    if (d.near_extent != 0.0f || d.far_extent != 0.0f) {
+        options.near_extent = d.near_extent;
+        options.far_extent = d.far_extent;
+    }
+
+    math::Aabb region(kernel::cf3(d.region_min[0], d.region_min[1], d.region_min[2]),
+                      kernel::cf3(d.region_max[0], d.region_max[1], d.region_max[2]));
+    std::optional<scene::Node> node = cut::cut_item(frame, shape, region, options);
+    if (!node) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "the cut is degenerate: a shape with no area");
+        return nullptr;
+    }
+    auto* item = new clay_item();
+    item->node = std::move(*node);
+    return item;
+}
+
+clay_result clay_cut_polygon_from_curve(const float* points_xyzr, size_t count,
+                                        const int32_t* types, float tolerance, float* out_xy,
+                                        size_t* out_count) {
+    if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null count");
+    if (!(tolerance > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "tolerance must be > 0");
+    std::vector<scene::StrokePoint> control;
+    clay_result r = read_curve_points(points_xyzr, count, types, nullptr, nullptr, &control);
+    if (r != CLAY_OK) return r;
+
+    cut::CutShape shape = cut::CutShape::from_curve(control, tolerance);
+    const std::size_t needed = shape.polygon.size();
+    if (!out_xy) {
+        *out_count = needed;
+        return CLAY_OK;
+    }
+    if (*out_count < needed) {
+        *out_count = needed;
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "the outline needs " + std::to_string(needed) + " vertices");
+    }
+    for (std::size_t i = 0; i < needed; ++i) {
+        out_xy[i * 2 + 0] = shape.polygon[i].x;
+        out_xy[i * 2 + 1] = shape.polygon[i].y;
+    }
+    *out_count = needed;
+    return CLAY_OK;
 }
 
 // -- brush strokes (c-abi spec: the stroke engine) ---------------------------

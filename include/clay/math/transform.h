@@ -26,6 +26,32 @@ struct Quat {
         return Quat{a.x * s, a.y * s, a.z * s, kernel::ccos(radians * 0.5f)};
     }
 
+    // The rotation taking the world axes onto the given orthonormal basis, so
+    // that x -> right, y -> up, z -> forward. Shepperd's method: pick the
+    // largest diagonal term to divide by, which keeps it stable for every
+    // basis rather than only those away from a 180-degree turn.
+    static Quat from_basis(cfloat3 right, cfloat3 up, cfloat3 forward) {
+        float m00 = right.x, m01 = up.x, m02 = forward.x;
+        float m10 = right.y, m11 = up.y, m12 = forward.y;
+        float m20 = right.z, m21 = up.z, m22 = forward.z;
+        float trace = m00 + m11 + m22;
+        Quat q;
+        if (trace > 0.0f) {
+            float s = kernel::csqrt(trace + 1.0f) * 2.0f;
+            q = Quat{(m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, 0.25f * s};
+        } else if (m00 > m11 && m00 > m22) {
+            float s = kernel::csqrt(1.0f + m00 - m11 - m22) * 2.0f;
+            q = Quat{0.25f * s, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s};
+        } else if (m11 > m22) {
+            float s = kernel::csqrt(1.0f + m11 - m00 - m22) * 2.0f;
+            q = Quat{(m01 + m10) / s, 0.25f * s, (m12 + m21) / s, (m02 - m20) / s};
+        } else {
+            float s = kernel::csqrt(1.0f + m22 - m00 - m11) * 2.0f;
+            q = Quat{(m02 + m20) / s, (m12 + m21) / s, 0.25f * s, (m10 - m01) / s};
+        }
+        return q.normalized();
+    }
+
     Quat conjugate() const { return Quat{-x, -y, -z, w}; }
 
     Quat normalized() const {

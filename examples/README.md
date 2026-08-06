@@ -271,6 +271,35 @@ evaluates bit-identically to what it did before types existed, a ray really
 finds the arc outside the control hull, and editing a placed curve undoes
 exactly.
 
+### 14 — the cut tool
+
+A shape drawn over the model, cut through it: rect, circle, polygon, or a
+spline lasso flattened through the curve tessellator.
+
+![cut shapes](output/14_cut_shapes.png)
+
+Which side survives is the **op**, not a parameter of the cut — subtract
+removes what the shape covers, intersect keeps only that. 3DCoat's "Shift =
+keep-outer" modifier is exactly this choice.
+
+![cut sides](output/14_cut_sides.png)
+
+The sweep is sized to the region so a cut goes all the way through; giving the
+extent by hand is how a deliberate partial cut is expressed, and rounding
+bevels the walls.
+
+![cut depth](output/14_cut_depth.png)
+
+Nothing in the cut knows where "the camera" is — only what frame it was handed,
+so the same call from a frame looking down cuts top to bottom.
+
+![cut from above](output/14_cut_from_above.png)
+
+The example asserts the design's load-bearing claim: **a cut is a prism, not a
+frustum**. The same cut resolved from a frame ten times further away gives the
+identical solid. A converging cut would have a face that is not flat and a
+result that depended on where the camera stood.
+
 ## Notes
 
 - **Committed models are budgeted.** `_render.save_model` fails above 400 KiB

@@ -297,6 +297,18 @@ body.add(clay.Stroke(points=pts, types="bezier",
                      in_handles=handles, out_handles=handles))
 body.set_points(node_id, pts, types="hard")            # undoable whole-list edit
 
+# the cut tool: a shape drawn over the model, in WORLD units on the frame the
+# viewport already has. The cut is a PRISM, not a frustum — a converging cut
+# would have a non-flat face and depend on where the camera stood. Which side
+# survives is the OP, not a flag.
+doc.add_sdf_layer("body").add(
+    clay.Cut(origin=(0, 0, -4), right=(1, 0, 0), up=(0, 1, 0), forward=(0, 0, 1),
+             shape=clay.CutShape.circle(0.4),   # or .rect / .polygon / .curve
+             region=doc,                        # sizes the sweep to cut through
+             rounding=0.05),                    # bevelled cut walls
+    op=clay.Op.SUBTRACT)                        # INTERSECT keeps only the inside
+clay.CutShape.curve(control_pts, types="spline")  # a spline lasso
+
 # protection: ghost is "show me this but stay out of my way" (still evaluated,
 # never picked, never edited); lock is "this is finished" (still picked).
 # Neither changes what the document evaluates to, and an edit to a protected
