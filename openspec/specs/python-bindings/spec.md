@@ -321,3 +321,10 @@ The module SHALL expose a curve constructor taking control points with per-point
 - **WHEN** a script replaces a placed curve's points
 - **THEN** the field changes, and undoing restores it
 
+### Requirement: Cuts from Python
+The module SHALL expose resolving a cut frame and shape into an item, and placing it on a layer with a chosen op, defaulting the swept region to the document's own bounds.
+
+#### Scenario: Cutting a hole
+- **WHEN** a script cuts a circle from a solid and evaluates the document
+- **THEN** the field reports empty inside the circle's sweep and solid outside it
+

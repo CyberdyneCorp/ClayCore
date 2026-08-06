@@ -14,9 +14,9 @@ Last reconciled against `3dcoat_study/MISSING_FEATURES.md` and
 caught five items this file had dropped. Every ClayCore-owned row in their
 catalogue is now represented here or in the deferred list below.
 
-## Where the engine is (2026-08-06, v0.15.0)
+## Where the engine is (2026-08-06, v0.16.0)
 
-13 capabilities, 25 archived changes. Complete enough that the gaps below are
+14 capabilities, 26 archived changes. Complete enough that the gaps below are
 about *sculpting affordances*, not about the field engine:
 
 - 28 primitives + stroke/curve chains, 14 combine ops, 5 blend profiles,
