@@ -168,6 +168,8 @@ struct PyPrim {
     std::vector<scene::Deformer> deformers;
     scene::Profile profile;
     std::vector<kernel::cfloat2> profile_points;
+    std::vector<scene::Profile> profiles;                       // Loft only
+    std::vector<std::vector<kernel::cfloat2>> profile_polygons;  // Loft only
     scene::Repeat repeat;
     // Only a cut sets this today: it derives its own bevel, and losing it
     // between constructing the prim and placing it would be a trap. Layer.add
@@ -225,6 +227,8 @@ struct PyTriPrism : PyPrim {};
 struct PyOctahedronCheap : PyPrim {};
 struct PyLNormSphere : PyPrim {};
 struct PyRevolve : PyPrim {};
+struct PyLoft : PyPrim {};
+struct PySwept : PyPrim {};
 struct PyCut : PyPrim {};
 
 // -- mesh wrapper ---------------------------------------------------------------
@@ -1289,6 +1293,89 @@ NB_MODULE(pyclay, m) {
                  place(*self, position, rotation_axis_angle, scale);
              },
              "profile"_a, "offset"_a = 0.0f, CLAY_PLACE_ARGS);
+
+    nb::class_<PyLoft, PyPrim>(
+        m, "Loft",
+        "Two or more profiles interpolated along Z, evenly spaced over the\n"
+        "half-depth. Two is the classic case; more are bracketed, so a\n"
+        "wide-narrow-wide list gives a waist rather than a straight taper.\n\n"
+        "BOUND, not exact: a lerp of two distance fields is not a distance\n"
+        "field. It also raises the Lipschitz factor — interpolating very\n"
+        "different profiles over a shallow depth makes the field change fast\n"
+        "along Z — so the document's safe step scale drops accordingly, which\n"
+        "is what keeps the raymarcher from stepping through the surface.")
+        .def("__init__",
+             [](PyLoft* self, nb::sequence profiles, float half_depth, std::uint8_t ease,
+                nb::handle position, nb::handle rotation_axis_angle, float scale) {
+                 if (nb::len(profiles) < 2)
+                     throw std::invalid_argument("a loft needs two or more profiles");
+                 if (!(half_depth > 0.0f))
+                     throw std::invalid_argument("half_depth must be > 0");
+                 if (ease >= kernel::ease_count)
+                     throw std::invalid_argument("unknown easing curve");
+                 new (self) PyLoft();
+                 self->prim = scene::Prim::loft(half_depth, ease);
+                 for (std::size_t i = 0; i < nb::len(profiles); ++i) {
+                     // The element is held in a named object first: binding a
+                     // reference straight to profiles[i] binds it to the
+                     // sequence proxy's temporary, which GCC rightly refuses.
+                     nb::object element = profiles[i];
+                     const PyProfile& p = nb::cast<const PyProfile&>(element);
+                     self->profiles.push_back(p.profile);
+                     self->profile_polygons.push_back(p.points);
+                 }
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "profiles"_a, "half_depth"_a = 1.0f, "ease"_a = 0, CLAY_PLACE_ARGS);
+
+    nb::class_<PySwept, PyPrim>(
+        m, "Swept",
+        "The same profiles as a Loft, carried along a GUIDE curve instead of\n"
+        "the Z axis. The guide is an ordinary control-point curve — the same\n"
+        "point types, handles and tolerance a Stroke takes — because a guide is\n"
+        "not a new kind of curve.\n\n"
+        "The frame is PARALLEL-TRANSPORTED along the guide when the item is\n"
+        "compiled, not derived per sample: a Frenet frame flips at an\n"
+        "inflection and is undefined where the guide is straight, which would\n"
+        "twist the sweep exactly where it should be calmest.\n\n"
+        "Profiles are distributed by ARC LENGTH, so a guide whose points bunch\n"
+        "does not bunch the profiles. The ends are the profile itself — a flat\n"
+        "cap, since a profile need not be a circle.\n\n"
+        "BOUND, and its Lipschitz comes from curvature: a sweep compresses\n"
+        "space on the inside of a bend by R / (R - r). A profile wider than the\n"
+        "guide's tightest bend folds through itself; that is not refused, since\n"
+        "a guide is editable afterwards, but the safe step scale collapses so\n"
+        "the raymarcher crawls instead of stepping through the surface.")
+        .def("__init__",
+             [](PySwept* self, nb::handle guide, nb::sequence profiles, nb::handle types,
+                float tolerance, std::uint8_t ease, nb::handle in_handles,
+                nb::handle out_handles, nb::handle position, nb::handle rotation_axis_angle,
+                float scale) {
+                 if (nb::len(profiles) < 2)
+                     throw std::invalid_argument("a sweep needs two or more profiles");
+                 if (!(tolerance > 0.0f))
+                     throw std::invalid_argument("tolerance must be > 0");
+                 if (ease >= kernel::ease_count)
+                     throw std::invalid_argument("unknown easing curve");
+                 new (self) PySwept();
+                 self->prim = scene::Prim::swept(ease);
+                 self->stroke = to_stroke_points(guide);
+                 if (self->stroke.size() < 2)
+                     throw std::invalid_argument("a sweep needs a guide of two or more points");
+                 apply_point_types(self->stroke, types);
+                 apply_handles(self->stroke, in_handles, out_handles);
+                 self->curve_tolerance = tolerance;
+                 for (std::size_t i = 0; i < nb::len(profiles); ++i) {
+                     nb::object element = profiles[i];
+                     const PyProfile& p = nb::cast<const PyProfile&>(element);
+                     self->profiles.push_back(p.profile);
+                     self->profile_polygons.push_back(p.points);
+                 }
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "guide"_a, "profiles"_a, "types"_a = nb::none(), "tolerance"_a = 0.01f,
+             "ease"_a = 0, "in_handles"_a = nb::none(), "out_handles"_a = nb::none(),
+             CLAY_PLACE_ARGS);
 #undef CLAY_PLACE_ARGS
 
     nb::class_<cut::CutShape>(
@@ -1503,6 +1590,8 @@ NB_MODULE(pyclay, m) {
                  n.deformers = prim.deformers;
                  n.profile = prim.profile;
                  n.profile_points = prim.profile_points;
+                 n.profiles = prim.profiles;
+                 n.profile_polygons = prim.profile_polygons;
                  n.repeat = prim.repeat;
                  n.op = op;
                  if (!blend.is_none()) {
@@ -1585,6 +1674,8 @@ NB_MODULE(pyclay, m) {
                  templ.repeat = prim.repeat;
                  templ.profile = prim.profile;
                  templ.profile_points = prim.profile_points;
+                 templ.profiles = prim.profiles;
+                 templ.profile_polygons = prim.profile_polygons;
                  templ.op = op;
                  if (!blend.is_none()) templ.blend = nb::cast<PyBlend&>(blend).b;
                  if (!color.is_none()) templ.color = parse_color(color);

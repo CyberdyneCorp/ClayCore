@@ -152,6 +152,37 @@ std::vector<ParityScene> parity_scenes() {
     }
 
     lift("extrude_hexagon", Prim::extrude(0.5f), Profile::hexagon(0.8f));
+    {   // loft: a circle to a polygon, so both the parametric and the
+        // out-of-line profile paths cross every backend
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node n = item(Prim::loft(0.9f, kernel::ease_smoothstep), cf3(0, 0, 0));
+        n.profiles = {Profile::circle(0.8f), Profile::polygon()};
+        n.profile_polygons = {{},
+                              {cf2(-0.5f, -0.5f), cf2(0.5f, -0.5f), cf2(0.5f, 0.5f),
+                               cf2(-0.5f, 0.5f)}};
+        l.sdf->insert(n);
+        scenes.push_back({"loft_circle_to_polygon", std::move(doc), 3.0f});
+    }
+    {   // swept: a tapering circle along a bent spline guide, so the
+        // closest-point search, the transported frames and the arc-length
+        // bracketing all cross every backend
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node n = item(Prim::swept(0), cf3(0, 0, 0));
+        for (kernel::cfloat3 p : {cf3(-1.2f, -0.4f, 0), cf3(-0.4f, 0.5f, 0.2f),
+                                  cf3(0.5f, 0.4f, -0.2f), cf3(1.2f, -0.3f, 0)}) {
+            scene::StrokePoint sp;
+            sp.pos = p;
+            sp.type = scene::StrokePointType::Spline;
+            n.stroke.push_back(sp);
+        }
+        n.curve_tolerance = 0.03f;
+        n.profiles = {Profile::circle(0.35f), Profile::circle(0.12f)};
+        n.profile_polygons = {{}, {}};
+        l.sdf->insert(n);
+        scenes.push_back({"swept_circle_along_guide", std::move(doc), 3.0f});
+    }
     lift("revolve_polygon", Prim::revolve(1.2f), Profile::polygon(),
          {cf2(-0.3f, -0.3f), cf2(0.3f, -0.3f), cf2(0.3f, 0.3f), cf2(-0.3f, 0.3f)});
     {

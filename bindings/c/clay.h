@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 17
+#define CLAY_ABI_MINOR 19
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -100,7 +100,18 @@ typedef enum clay_prim {
     CLAY_PRIM_ICOSAHEDRON = 27,       /* params: r */
     CLAY_PRIM_TRI_PRISM = 28,         /* params: hx hy (bound) */
     CLAY_PRIM_OCTAHEDRON_CHEAP = 29,  /* params: s (bound) */
-    CLAY_PRIM_LNORM_SPHERE = 30       /* params: r n, n >= 2 (bound) */
+    CLAY_PRIM_LNORM_SPHERE = 30,      /* params: r n, n >= 2 (bound) */
+    /* Loft: params are the half-depth and the easing curve. The PROFILES are
+     * not parameters — a variable number of them cannot fit in a fixed block —
+     * so they are added with clay_item_add_loft_profile, two or more of them,
+     * and interpolated evenly along Z. (bound) */
+    CLAY_PRIM_LOFT = 31,
+    /* Swept: the same profiles as a loft, carried along a GUIDE curve rather
+     * than the Z axis. params is the easing curve. The guide is the item's
+     * curve point list (clay_item_set_curve_points), and the profiles are
+     * added with clay_item_add_loft_profile — a guide is not a new kind of
+     * curve and a swept profile is not a new kind of profile. (bound) */
+    CLAY_PRIM_SWEPT = 32
 } clay_prim;
 
 /* Combine ops. For the extended modes (groove..replace) blend_k is the
@@ -394,6 +405,18 @@ clay_result clay_item_set_profile(clay_item* item, int32_t profile, const float*
                                   size_t param_count);
 clay_result clay_item_set_profile_polygon(clay_item* item, const float* xy, size_t count);
 
+/* Append a profile to a CLAY_PRIM_LOFT item. Two or more are required; they
+ * are interpolated evenly along Z in the order added. `params` is the
+ * profile's own parameter block as clay_item_set_profile takes it, and
+ * `polygon_xy` (count*2 floats, or NULL) supplies the vertices when the
+ * profile is CLAY_PROFILE_POLYGON.
+ *
+ * The profiles are not item parameters: a variable number of them cannot fit
+ * in a fixed block, and a polygon's vertices are already out of line. */
+clay_result clay_item_add_loft_profile(clay_item* item, int32_t profile, const float* params,
+                                       size_t param_count, const float* polygon_xy,
+                                       size_t polygon_count);
+
 /* Point chain of a CLAY_PRIM_STROKE item: count points of x, y, z, radius,
  * replacing any previous chain. One point is a sphere and none contributes
  * nothing, as in the Python bindings. blend_k (>= 0) smooths consecutive
@@ -432,7 +455,12 @@ clay_result clay_item_set_curve_points(clay_item* item, const float* xyzr, size_
 /* Close the chain, and set the tessellation tolerance: the largest distance a
  * span's midpoint may sit from its chord, which must be > 0. Tolerance is a
  * property of the DOCUMENT, not of the viewer — two builds have to agree on
- * what a document means, so it is not a rendering setting. */
+ * what a document means, so it is not a rendering setting.
+ *
+ * Also applies to a CLAY_PRIM_SWEPT item's guide, which is an ordinary curve.
+ * A swept guide cannot be CLOSED, and asking for one is refused rather than
+ * ignored: transporting a frame around a loop does not generally return it to
+ * its starting orientation, and the leftover twist is real geometry. */
 clay_result clay_item_set_curve(clay_item* item, int32_t closed, float tolerance);
 
 /* Replace a placed stroke or curve's whole point list, through the command

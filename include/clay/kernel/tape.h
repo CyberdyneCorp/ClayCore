@@ -81,6 +81,17 @@ enum CTapeOp {
     ctape_tri_prism,         // hx, hy      (bound)
     ctape_octahedron_cheap,  // s           (bound)
     ctape_lnorm_sphere,      // r, n        (bound)
+    // Loft: half-depth, ease, blob offset of the profile records, count.
+    // The records are consecutive CLAY_TAPE_PROFILE_FLOATS blocks in the
+    // blob, so a polygon profile's vertices index the blob exactly as they do
+    // for a single-profile lift — carrying N profiles needs no new mechanism.
+    ctape_loft,              // h, ease, record_offset, count   (bound)
+    // Swept: profiles carried along a guide polyline whose frames were
+    // parallel-transported when the item was compiled. Transport is
+    // sequential along the curve, so it cannot be done per sample — which is
+    // why the frames are in the blob rather than derived here.
+    // guide_offset, guide_count, record_offset, profile_count, ease  (bound)
+    ctape_swept,
     ctape_prim_count,
 
     // Pushes the far field ("empty space"): standard primitive param block,
@@ -395,6 +406,86 @@ CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
         // exact lift: profile distance merged with the axial slab
         return cop_extrude(ctape_profile_dist(q, blob, cf2(lp.x, lp.y)), lp.z,
                            q[CLAY_TAPE_PROFILE_FLOATS]);
+    }
+    if (op == ctape_loft) {
+        int off = (int)q[2];
+        int count = (int)q[3];
+        float h = q[0];
+        // Bracket among the profiles: they sit evenly along the depth, so the
+        // span index falls straight out of the normalized height.
+        float t = cclamp((lp.z + h) / cmax(2.0f * h, 1e-9f), 0.0f, 1.0f) * (float)(count - 1);
+        int i = (int)t;
+        if (i > count - 2) i = count - 2;
+        if (i < 0) i = 0;
+        float u = cease((int)q[1], t - (float)i);
+        cfloat2 xy = cf2(lp.x, lp.y);
+        float da = ctape_profile_dist(blob + off + i * CLAY_TAPE_PROFILE_FLOATS, blob, xy);
+        float db = ctape_profile_dist(blob + off + (i + 1) * CLAY_TAPE_PROFILE_FLOATS, blob, xy);
+        return cop_loft(da, db, u, lp.z, h);
+    }
+    if (op == ctape_swept) {
+        int guide_off = (int)q[0];
+        int guide_count = (int)q[1];
+        int rec_off = (int)q[2];
+        int profile_count = (int)q[3];
+        if (guide_count < 2 || profile_count < 2) return CLAY_TAPE_FAR;
+
+        CSweepHit hit = csweep_nearest(blob + guide_off, guide_count, lp);
+        int seg = hit.seg;
+        float t = hit.t;
+
+        CLAY_DEVICE const float* va = blob + guide_off + seg * CLAY_SWEPT_VERTEX_FLOATS;
+        CLAY_DEVICE const float* vb = va + CLAY_SWEPT_VERTEX_FLOATS;
+        cfloat3 a = cf3(va[0], va[1], va[2]);
+        cfloat3 b = cf3(vb[0], vb[1], vb[2]);
+        cfloat3 tangent = b - a;
+        float seg_len = clength(tangent);
+        tangent = seg_len > 1e-9f ? tangent * (1.0f / seg_len) : cf3(0, 0, 1);
+
+        // The two end normals were transported when the item compiled; lerp
+        // and re-orthogonalize, which is enough for a polyline guide and
+        // avoids a slerp in the inner loop.
+        cfloat3 na = cf3(va[3], va[4], va[5]);
+        cfloat3 nb = cf3(vb[3], vb[4], vb[5]);
+        cfloat3 normal = cnormalize(cmix(na, nb, t));
+        normal = cnormalize(normal - tangent * cdot(normal, tangent));
+        cfloat3 binormal = ccross(tangent, normal);
+
+        cfloat3 offset = lp - (a + (b - a) * t);
+        // The tangential part of the offset is only non-zero where the nearest
+        // point was CLAMPED to an end of the guide — everywhere else the
+        // projection makes the offset perpendicular by construction. Beyond an
+        // end it is the overshoot, and dropping it would make the sweep read
+        // as if it extended forever.
+        float axial = cdot(offset, tangent);
+        cfloat3 perp = offset - tangent * axial;
+        cfloat2 xy = cf2(cdot(perp, normal), cdot(perp, binormal));
+        float overshoot = 0.0f;
+        if (seg == 0 && t <= 0.0f) overshoot = cmax(-axial, 0.0f);
+        if (seg == guide_count - 2 && t >= 1.0f) overshoot = cmax(axial, 0.0f);
+
+        // Profiles are distributed by ARC LENGTH, so a guide whose vertices
+        // bunch does not bunch the profiles.
+        float total = blob[guide_off + (guide_count - 1) * CLAY_SWEPT_VERTEX_FLOATS + 6];
+        float s = va[6] + t * seg_len;
+        float u = cclamp(total > 1e-9f ? s / total : 0.0f, 0.0f, 1.0f) *
+                  (float)(profile_count - 1);
+        int i = (int)u;
+        if (i > profile_count - 2) i = profile_count - 2;
+        if (i < 0) i = 0;
+        float f = cease((int)q[4], u - (float)i);
+        float da = ctape_profile_dist(blob + rec_off + i * CLAY_TAPE_PROFILE_FLOATS, blob, xy);
+        float db =
+            ctape_profile_dist(blob + rec_off + (i + 1) * CLAY_TAPE_PROFILE_FLOATS, blob, xy);
+        // The sweep is the tube INTERSECTED with the guide's span, so the
+        // axial term has to be signed: negative inside the span, positive past
+        // an end. `s` is clamped to the guide, so the overshoot from the
+        // nearest-point clamp is added rather than folded in — without it a
+        // point beyond the end would read as though it sat on the end face.
+        float dend = cmax(-s, s - total) + overshoot;
+        float d2 = cmix(da, db, f);
+        cfloat2 w = cf2(d2, dend);
+        return cmin(cmax(w.x, w.y), 0.0f) + clength(cmax(w, cf2(0.0f, 0.0f)));
     }
     if (op == ctape_revolve) {
         // exact lift: evaluate the profile in the (radius - offset, y) plane

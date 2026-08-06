@@ -158,6 +158,8 @@ CLASS_CTOR = {
     "LNormSphere": "CLAY_PRIM_LNORM_SPHERE",
     "Extrude": "CLAY_PRIM_EXTRUDE",
     "Revolve": "CLAY_PRIM_REVOLVE",
+    "Loft": "CLAY_PRIM_LOFT",
+    "Swept": "CLAY_PRIM_SWEPT",
     "Stroke": "CLAY_PRIM_STROKE",
 }
 

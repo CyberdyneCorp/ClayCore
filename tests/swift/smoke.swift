@@ -160,6 +160,87 @@ var enabled: Int32 = 0, undoDepth = 0, redoDepth = 0
 check(clay_document_undo_state(doc, &enabled, &undoDepth, &redoDepth) == CLAY_OK
         && enabled == 1 && redoDepth == 1, "undo state reports enabled with a redo available")
 
+// -- loft --------------------------------------------------------------------
+
+var loftLayer: clay_layer_id = 0
+check(clay_add_sdf_layer(doc, "loft", &loftLayer) == CLAY_OK, "added a loft layer")
+
+var loftParams: [Float] = [1.0, 0.0]   // half-depth, ease
+guard let loftItem = clay_item_create(Int32(CLAY_PRIM_LOFT.rawValue), &loftParams, 2) else {
+    check(false, "created a loft item")
+    exit(1)
+}
+// Placed clear of everything else: the document's field is every layer
+// combined, so a probe near the origin would answer about the body.
+let loftY: Float = 20.0
+var loftPos: [Float] = [0, loftY, 0]
+check(clay_item_set_position(loftItem, &loftPos) == CLAY_OK, "placed the loft")
+
+check(clay_layer_add_item(doc, loftLayer, loftItem, nil) != CLAY_OK,
+      "a loft with no profiles is refused")
+var wideCircle: [Float] = [1.0]
+check(clay_item_add_loft_profile(loftItem, Int32(CLAY_PROFILE_CIRCLE.rawValue),
+                                 &wideCircle, 1, nil, 0) == CLAY_OK, "bottom profile")
+var square: [Float] = [-0.3, -0.3, 0.3, -0.3, 0.3, 0.3, -0.3, 0.3]
+check(clay_item_add_loft_profile(loftItem, Int32(CLAY_PROFILE_POLYGON.rawValue),
+                                 nil, 0, &square, 4) == CLAY_OK, "top profile")
+check(clay_layer_add_item(doc, loftLayer, loftItem, nil) == CLAY_OK, "placed it with two")
+clay_item_destroy(loftItem)
+
+// The loft is a circle at the bottom and a small square at the top: a point
+// well outside the square but inside the circle separates the two ends.
+// The lift axis is Z, not Y — the profile lives in (x, y) and cop_extrude
+// caps along z. The item sits at y = loftY only to keep it clear of the rest
+// of the model.
+check(evaluate(doc, [0.85, loftY, -0.99])[0] < 0, "the loft's near end is the circle")
+check(evaluate(doc, [0.85, loftY, 0.99])[0] > 0, "and its far end is the smaller square")
+
+var loftScale: Float = 0
+check(clay_layer_safe_step_scale(doc, loftLayer, &loftScale) == CLAY_OK && loftScale < 1.0,
+      "a loft drops the safe step scale to \(loftScale) — it is a bound, not a distance")
+
+// -- swept along a guide -----------------------------------------------------
+
+var sweptLayer: clay_layer_id = 0
+check(clay_add_sdf_layer(doc, "swept", &sweptLayer) == CLAY_OK, "added a swept layer")
+
+var sweptEase: [Float] = [0]
+guard let sweptItem = clay_item_create(Int32(CLAY_PRIM_SWEPT.rawValue), &sweptEase, 1) else {
+    check(false, "created a swept item")
+    exit(1)
+}
+// Clear of everything else, as with the loft above.
+let sweptY: Float = 30.0
+var sweptGuide: [Float] = [-1, sweptY, 0, 0,
+                            0, sweptY + 0.7, 0, 0,
+                            1, sweptY, 0, 0]
+var sweptTypes: [Int32] = Array(repeating: Int32(CLAY_POINT_SPLINE.rawValue), count: 3)
+check(clay_item_set_curve_points(sweptItem, &sweptGuide, 3, &sweptTypes, nil, nil) == CLAY_OK,
+      "guide points")
+check(clay_item_set_curve(sweptItem, 0, 0.02) == CLAY_OK, "guide tolerance")
+check(clay_item_set_curve(sweptItem, 1, 0.02) != CLAY_OK,
+      "a closed guide is refused rather than ignored")
+
+check(clay_layer_add_item(doc, sweptLayer, sweptItem, nil) != CLAY_OK,
+      "a sweep with no profiles is refused")
+var sweptWide: [Float] = [0.3]
+var sweptNarrow: [Float] = [0.1]
+check(clay_item_add_loft_profile(sweptItem, Int32(CLAY_PROFILE_CIRCLE.rawValue),
+                                 &sweptWide, 1, nil, 0) == CLAY_OK, "start profile")
+check(clay_item_add_loft_profile(sweptItem, Int32(CLAY_PROFILE_CIRCLE.rawValue),
+                                 &sweptNarrow, 1, nil, 0) == CLAY_OK, "end profile")
+check(clay_layer_add_item(doc, sweptLayer, sweptItem, nil) == CLAY_OK, "placed the sweep")
+clay_item_destroy(sweptItem)
+
+// On the guide there is material; the sweep tapers, so a point that clears the
+// narrow end does not.
+check(evaluate(doc, [0, sweptY + 0.7, 0])[0] < 0, "the sweep follows its guide")
+check(evaluate(doc, [0.95, sweptY + 0.2, 0])[0] > 0, "and it tapers toward the end")
+
+var sweptScale: Float = 0
+check(clay_layer_safe_step_scale(doc, sweptLayer, &sweptScale) == CLAY_OK && sweptScale < 1.0,
+      "a sweep drops the safe step scale to \(sweptScale) — curvature compresses space")
+
 // -- the cut tool ------------------------------------------------------------
 
 // A block of its own, well clear of the rest of the model: the document's
@@ -258,8 +339,18 @@ check(clay_document_layer_protection(doc, layer, &isGhost, &isLocked) == CLAY_OK
       && isGhost == 0 && isLocked == 0, "layers start unprotected")
 
 check(clay_document_set_layer_protection(doc, layer, 0, 1) == CLAY_OK, "locked the layer")
-check(clay_layer_add_item(doc, layer, deformed, nil) == CLAY_ERROR_INVALID_ARGUMENT,
+// A fresh item: `deformed` was destroyed once its edit was added, and reading
+// a destroyed handle is what made this file abort intermittently — freed
+// memory is sometimes still readable and sometimes not.
+var lockProbeParams: [Float] = [0.3]
+guard let lockProbe = clay_item_create(Int32(CLAY_PRIM_SPHERE.rawValue), &lockProbeParams, 1)
+else {
+    check(false, "created a probe item")
+    exit(1)
+}
+check(clay_layer_add_item(doc, layer, lockProbe, nil) == CLAY_ERROR_INVALID_ARGUMENT,
       "a locked layer refuses an edit rather than dropping it")
+clay_item_destroy(lockProbe)
 check(clay_document_set_layer_protection(doc, layer, 0, 0) == CLAY_OK,
       "unlocking works, so locking is not permanent")
 

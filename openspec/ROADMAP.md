@@ -14,13 +14,14 @@ Last reconciled against `3dcoat_study/MISSING_FEATURES.md` and
 caught five items this file had dropped. Every ClayCore-owned row in their
 catalogue is now represented here or in the deferred list below.
 
-## Where the engine is (2026-08-06, v0.17.0)
+## Where the engine is (2026-08-06, v0.19.0)
 
-14 capabilities, 29 archived changes. Complete enough that the gaps below are
+14 capabilities, 31 archived changes. Complete enough that the gaps below are
 about *sculpting affordances*, not about the field engine:
 
-- 28 primitives + stroke/curve chains, 14 combine ops, 5 blend profiles,
-  grid/radial repetition, mirror with blended seam
+- 30 primitives + stroke/curve chains, 14 combine ops, 5 blend profiles,
+  grid/radial repetition, mirror with blended seam. Every kernel capability is
+  reachable from a document — loft was the last one that was not.
 - **12 deformers** — twist, bend, taper, displace, wrap_around, elongate,
   elongate_axis, bend_linear, bend_radial, plus grab, pose and pose_line with
   finite support. Every point-warp implemented in the kernel headers is
@@ -117,7 +118,7 @@ referenced by handle, uploaded once and cached — which means the tape needs a
 notion of external resources it does not have today. That is the real cost of
 the mesh-import row, and it is invisible in "BVH + winding number".
 
-### Track A — ready now, no prerequisites
+### Track A — complete 2026-08-06
 
 **Both voxel rows landed 2026-08-06.** The plan guessed they shared "a
 connected-component pass"; writing them showed the shared operation is a
@@ -134,8 +135,8 @@ from outside, which the engine did not have.
 |---|---|
 | ~~`add-voxel-verbs`~~ **landed 2026-08-06** | fill-cavities, scrape, smudge, carve-with-alpha. Carve takes a **caller-supplied scalar grid** — a host with an alpha has already loaded the PNG, so the engine decodes no images. Scrape flattens and smooths from **one** snapshot, because two calls would let the flatten's output feed the smooth's neighbourhood. |
 | ~~`add-voxel-repair`~~ **landed 2026-08-06** | Report (non-destructive), close holes, fill voids, all mask-gated. Enclosure is decided by a flood over **empty** cells from outside the bounds — `flood_select` walks occupied cells from a seed, which is a different question. |
-| `add-loft-opcode` | The spec says it plainly: "Loft remains header-only until an item can carry two profiles." So this is a Node change (a second profile + its polygon points) and a new tape opcode, which means four backends, a parity corpus row, and exactness analysis — `cop_loft` is already flagged **bound**, not exact, so the tape's field info has to say so or raymarching oversteps. Curves gave it the guide it was waiting for. |
-| `add-swept-n` | Only meaningful once loft is proven. N profiles across a guide is the same opcode with a count, so the risk is entirely in whether loft's item layout generalizes — which is a reason to design loft's storage with N in mind and a reason not to build N first. |
+| ~~`add-loft-opcode`~~ **landed 2026-08-06** | N profiles along Z, not two — nothing about the opcode wanted the limit, and taking N now means the guide row changes where profiles are *placed* rather than how they are *stored*. Three or more are bracketed, so wide-narrow-wide gives a waist. The Lipschitz warning was real: a loft's safe step scale falls from 0.53 to 0.10 as the depth shrinks, and the example fails if that ordering stops holding. `cop_extrude_to` became `cop_loft`, taking the interpolation parameter instead of deriving it, because a signature that derived it could only ever serve exactly two. |
+| ~~`add-swept-n`~~ **landed 2026-08-06** | Profiles carried along a guide, with **parallel-transported** frames computed when the item compiles — a Frenet frame flips at an inflection and is undefined where the guide is straight, and transport is sequential so it cannot be per-sample. Profiles distribute by arc length; the ends are the profile itself, flat, because a profile need not be a circle. The Lipschitz has two terms — curvature `R/(R-r)` **and** the profile lerp — and leaving the second out made a straight tapering sweep report Lipschitz 1, the exact defect the spec warns against. Curvature is estimated by circumradius, not turn-angle-over-arc, which is fooled by tessellation density. Closed guides are out: transport around a loop does not close the seam, and that is refused rather than ignored. |
 | `add-tape-abi-export` **(new row)** | Three buffers across the C ABI, and no new math: `add-host-kernel-package` shipped the headers, so the host-side evaluator is `ctape_eval` compiled from our own source and the parity fixture already proves it agrees. What will bite is **lifetime, not content**. The tape is recompiled on every edit (Finding 2 above), so the boundary has to say who owns the buffers and when a handle a host is mid-upload with goes stale — an opaque handle with an explicit release, not a pointer into a `std::vector` that the next edit reallocates. Second: a host that uploads instrs/params/blob must also get `safe_step_scale` and the bounds, or its raymarcher oversteps a tape ours would have stepped conservatively. |
 
 ### Track B — gated on a prerequisite
@@ -151,13 +152,14 @@ from outside, which the engine did not have.
 1. ~~**`add-voxel-verbs` + `add-voxel-repair`**~~ **done 2026-08-06.** They did
    share an operation, though not the connected-component pass predicted here
    — see Track A above.
-2. **`add-loft-opcode` → `add-swept-n`** — independent of Track B, and loft is
-   the one row whose blocker ("an item can carry two profiles") is already
-   written down as a sentence in the spec.
-2b. **`add-tape-abi-export`** — orderable anywhere in Track A; listed after loft
-   only because loft is the bigger engine gap. Worth pulling forward the moment
-   a host wants WYSIWYG preview-vs-bake, since the half that used to make it
-   expensive (a host-side evaluator, and a way to trust it) has already landed.
+2. ~~**`add-loft-opcode` → `add-swept-n`**~~ **done 2026-08-06.** Loft took N
+   profiles rather than two, which turned swept-N from "the same opcode with a
+   count" into its own row about guides — see Track A above.
+2b. **`add-tape-abi-export`** — the only Track A row still open, and freely
+   orderable against Track B because it adds no math. Worth pulling forward
+   the moment a host wants WYSIWYG preview-vs-bake, since the half that used
+   to make it expensive — a host-side evaluator, and a way to trust it — has
+   already landed.
 3. **`add-sampled-fields` → `add-mesh-to-field-import` → `add-sdf-relax`** —
    the prerequisite designed with all three consumers in view rather than
    retrofitted around the first one.

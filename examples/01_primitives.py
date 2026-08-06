@@ -55,7 +55,14 @@ UNBOUNDED = [
 # Prim classes whose example lives elsewhere because a contact-sheet tile
 # cannot show them: Cut resolves against a frame and a region, so a tile with
 # neither would be showing an extruded box and calling it a cut.
-COVERED_ELSEWHERE = {"Cut": "14_cut.py"}
+COVERED_ELSEWHERE = {
+    "Cut": ("14_cut.py", "it resolves against a frame and a region, so a tile "
+                         "with neither would be an extruded box"),
+    "Loft": ("16_loft.py", "it needs two or more profiles, and one tile of one "
+                           "would be an extrusion"),
+    "Swept": ("17_swept.py", "it needs a guide and two or more profiles, and a "
+                             "tile of one would be a lift"),
+}
 
 
 def primitive_classes():
@@ -101,10 +108,10 @@ def main():
     missing = primitive_classes() - shown - set(COVERED_ELSEWHERE)
     if missing:
         raise SystemExit(f"primitive classes with no example: {sorted(missing)}")
-    for name, where in sorted(COVERED_ELSEWHERE.items()):
+    for name, (where, why) in sorted(COVERED_ELSEWHERE.items()):
         if name in shown:
             raise SystemExit(f"{name} has a tile here now — drop it from COVERED_ELSEWHERE")
-        print(f"  {name} is covered by {where} (it needs a frame, not a tile)")
+        print(f"  {name} is covered by {where}: {why}")
     print(f"  covered all {len(shown)} primitive classes")
 
     # A single primitive is still a document: mesh and export one.

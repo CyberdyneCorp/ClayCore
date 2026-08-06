@@ -30,12 +30,22 @@ TEST_CASE("revolved circle equals torus (exact lift)") {
     }
 }
 
+namespace {
+// The two-profile parameterisation `cop_loft` used to compute for itself. It
+// lives here now because the tape computes it — with more than two profiles
+// it has to bracket first, so a signature that derived it from pz could only
+// ever serve exactly two.
+float loft2(float d2a, float d2b, float pz, float h, int ease) {
+    return cop_loft(d2a, d2b, cease(ease, cclamp((pz + h) / (2.0f * h), 0.0f, 1.0f)), pz, h);
+}
+}  // namespace
+
 TEST_CASE("extrude-to with equal profiles reduces to extrude") {
     clay_test::Lcg rng(63);
     for (int i = 0; i < 200; ++i) {
         cfloat3 p = rng.vec3(-2, 2);
         float d2 = sd_circle2(cf2(p.x, p.y), 0.8f);
-        CHECK(cop_extrude_to(d2, d2, p.z, 1.0f, ease_linear) ==
+        CHECK(loft2(d2, d2, p.z, 1.0f, ease_linear) ==
               doctest::Approx(cop_extrude(d2, p.z, 1.0f)).epsilon(1e-5));
     }
 }
@@ -44,7 +54,7 @@ TEST_CASE("extrude-to (loft) is a conservative bound") {
     auto loft = [](cfloat3 p) {
         float bottom = sd_circle2(cf2(p.x, p.y), 1.0f);
         float top = sd_box2(cf2(p.x, p.y), cf2(0.5f, 0.5f));
-        return cop_extrude_to(bottom, top, p.z, 1.0f, ease_smoothstep);
+        return loft2(bottom, top, p.z, 1.0f, ease_smoothstep);
     };
     clay_test::check_conservative_steps(loft, 1.0f, 3.0f, 400, 63);
 }

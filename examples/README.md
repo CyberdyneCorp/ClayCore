@@ -344,6 +344,62 @@ Enclosure is decided by a flood over *empty* cells from outside the bounds, not
 guessed at from a local neighbourhood — so a box with a wide mouth is left
 alone, which the example asserts.
 
+### 16 — loft
+
+`lift.h` has had a loft since the beginning and no document could use one. The
+spec said why in a sentence: *"Loft remains header-only until an item can carry
+two profiles."*
+
+![loft profiles](output/16_loft_profiles.png)
+
+Three or more profiles are **bracketed, not averaged** — wide-narrow-wide gives
+a waist, because the middle profile is actually reached. That is why this took
+N from the start: nothing about the opcode wanted to be limited to two.
+
+![loft ease](output/16_loft_ease.png)
+
+**A loft is a bound, and its Lipschitz is not one.** Interpolating two distance
+fields does not give a distance field, and the interpolation adds a term
+proportional to how far apart the profiles are over how short a depth they are
+mixed across. The example prints the safe step scale falling as the depth
+shrinks — 0.53, 0.36, 0.22, 0.10 against 1.00 for an exact primitive — and
+fails if that ordering ever stops holding. That number is the raymarcher being
+told to be careful; reporting 1 would have it step through the surface.
+
+Once placed, nothing about a loft is special: it subtracts, blends and deforms
+like any other item.
+
+![loft subtracted](output/16_loft_subtracted.png)
+
+### 17 — swept along a guide
+
+The same profiles as a loft, carried along a **guide curve**. The guide is an
+ordinary control-point curve — a guide is not a new kind of curve.
+
+![swept guides](output/17_swept_guides.png)
+
+**The frame is parallel-transported, not derived.** A Frenet frame flips at an
+inflection and is undefined where the curve is straight, so a sweep built on
+one would twist exactly where it should be calmest. Transport is sequential
+along the curve, so the compiler walks the guide once and stores a frame per
+vertex. Below: bend, straighten, bend back, with a flat profile whose
+orientation would be obvious if it flipped — the example asserts it does not.
+
+![swept frame](output/17_swept_frame.png)
+
+Profiles are distributed by **arc length**, so a guide whose points bunch does
+not bunch the profiles. The ends are the profile itself — a flat cap, since a
+profile need not be a circle.
+
+A sweep compresses space on the inside of a bend by `R / (R - r)`, so the safe
+step scale falls as the guide tightens. A profile wider than the guide's
+tightest bend folds the sweep through itself: **not refused**, because a guide
+is editable after the fact, but the step scale collapses to 0.0001 so the
+raymarcher crawls rather than stepping through a surface it was told was a
+distance field. The example prints both, and fails if either stops holding.
+
+![swept carved](output/17_swept_carved.png)
+
 ## Notes
 
 - **Committed models are budgeted.** `_render.save_model` fails above 400 KiB

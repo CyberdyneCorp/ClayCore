@@ -12,6 +12,32 @@ using kernel::cf3;
 using kernel::cfloat3;
 using math::Aabb;
 
+kernel::cfloat2 profile_extent_of(const Profile& profile,
+                                  const std::vector<kernel::cfloat2>& points) {
+    float ex = 0.0f, ey = 0.0f;
+    const float* pp = profile.params;
+    switch (profile.type) {
+        case kernel::cprofile_circle: ex = ey = pp[0]; break;
+        case kernel::cprofile_box: ex = pp[0]; ey = pp[1]; break;
+        // face radius -> vertex radius
+        case kernel::cprofile_hexagon: ex = ey = pp[0] * 1.1547006f; break;
+        case kernel::cprofile_triangle: ex = ey = pp[0] * 2.0f; break;
+        case kernel::cprofile_trapezoid:
+            ex = kernel::cmax(pp[0], pp[1]);
+            ey = pp[2];
+            break;
+        case kernel::cprofile_vesica: ex = ey = pp[0]; break;
+        case kernel::cprofile_polygon:
+            for (const kernel::cfloat2& v : points) {
+                ex = kernel::cmax(ex, kernel::cabs(v.x));
+                ey = kernel::cmax(ey, kernel::cabs(v.y));
+            }
+            break;
+        default: break;
+    }
+    return kernel::cf2(ex, ey);
+}
+
 Aabb prim_local_bounds(const Node& item) {
     const float* q = item.prim.params;
     Aabb b;
@@ -71,31 +97,49 @@ Aabb prim_local_bounds(const Node& item) {
         // no finite extent — item_influence_bound reports infinite instead
         case PrimType::Plane:
         case PrimType::CylinderInfinite: return Aabb::infinite();
+        case PrimType::Swept: {
+            // The guide's own extent, dilated by the widest profile: the
+            // swept surface never leaves that, whatever the frame does.
+            std::vector<StrokePoint> tess =
+                curve_is_polyline(item.stroke, false)
+                    ? item.stroke
+                    : tessellate_curve(item.stroke, false, item.curve_tolerance);
+            float widest = 0.0f;
+            for (std::size_t i = 0; i < item.profiles.size(); ++i) {
+                const std::vector<kernel::cfloat2>& pts =
+                    i < item.profile_polygons.size() ? item.profile_polygons[i]
+                                                     : std::vector<kernel::cfloat2>{};
+                kernel::cfloat2 e = profile_extent_of(item.profiles[i], pts);
+                widest = kernel::cmax(widest, kernel::cmax(e.x, e.y));
+            }
+            for (const StrokePoint& p : tess) {
+                b.expand(p.pos - cf3(widest, widest, widest));
+                b.expand(p.pos + cf3(widest, widest, widest));
+            }
+            break;
+        }
+        case PrimType::Loft: {
+            // The union of every profile's extent, lifted to the slab: the
+            // interpolated cross-section never leaves the widest of them.
+            float ex = 0.0f, ey = 0.0f;
+            for (std::size_t i = 0; i < item.profiles.size(); ++i) {
+                const std::vector<kernel::cfloat2>& pts =
+                    i < item.profile_polygons.size() ? item.profile_polygons[i]
+                                                     : std::vector<kernel::cfloat2>{};
+                kernel::cfloat2 e = profile_extent_of(item.profiles[i], pts);
+                ex = kernel::cmax(ex, e.x);
+                ey = kernel::cmax(ey, e.y);
+            }
+            b.expand(cf3(-ex, -ey, -q[0]));
+            b.expand(cf3(ex, ey, q[0]));
+            break;
+        }
         case PrimType::Extrude:
         case PrimType::Revolve: {
             // 2D extent of the profile, then lifted: a slab for extrusion,
             // a full circular sweep for revolution
-            float ex = 0.0f, ey = 0.0f;
-            const float* pp = item.profile.params;
-            switch (item.profile.type) {
-                case kernel::cprofile_circle: ex = ey = pp[0]; break;
-                case kernel::cprofile_box: ex = pp[0]; ey = pp[1]; break;
-                // face radius -> vertex radius
-                case kernel::cprofile_hexagon: ex = ey = pp[0] * 1.1547006f; break;
-                case kernel::cprofile_triangle: ex = ey = pp[0] * 2.0f; break;
-                case kernel::cprofile_trapezoid:
-                    ex = kernel::cmax(pp[0], pp[1]);
-                    ey = pp[2];
-                    break;
-                case kernel::cprofile_vesica: ex = ey = pp[0]; break;
-                case kernel::cprofile_polygon:
-                    for (const kernel::cfloat2& v : item.profile_points) {
-                        ex = kernel::cmax(ex, kernel::cabs(v.x));
-                        ey = kernel::cmax(ey, kernel::cabs(v.y));
-                    }
-                    break;
-                default: break;
-            }
+            kernel::cfloat2 e = profile_extent_of(item.profile, item.profile_points);
+            float ex = e.x, ey = e.y;
             if (item.prim.type == PrimType::Extrude) {
                 float h = q[0];
                 b.expand(cf3(-ex, -ey, -h));

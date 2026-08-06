@@ -283,3 +283,17 @@ The C API SHALL expose the report through a versioned descriptor and both repair
 - **WHEN** a C consumer repairs a grid
 - **THEN** the result matches what `pyclay` produces for the same call
 
+### Requirement: Lofts across the ABI
+The C API SHALL expose adding profiles to a loft item, including polygon profiles with their vertices.
+
+#### Scenario: A loft means the same through both bindings
+- **WHEN** a C consumer builds a loft of the same profiles
+- **THEN** the field matches what `pyclay` produces
+
+### Requirement: Sweeps across the ABI
+The C API SHALL expose setting a swept item's guide points, reusing the curve point encoding, alongside the loft profile calls.
+
+#### Scenario: A sweep means the same through both bindings
+- **WHEN** a C consumer sweeps the same profiles along the same guide
+- **THEN** the field matches what `pyclay` produces
+

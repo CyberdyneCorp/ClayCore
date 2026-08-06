@@ -113,9 +113,9 @@ Twist, bend, taper, and displacement SHALL additionally be expressible in the ta
 - **THEN** its safe step scale is at most 1/L, and stepping by that scale never crosses the surface
 
 ### Requirement: Lifts
-`lift.h` SHALL provide exact extrusion and exact revolution of exact 2D profiles (01 §2.6), and extrude-to/loft flagged as bound.
+`lift.h` SHALL provide exact extrusion and exact revolution of exact 2D profiles (01 §2.6), and a loft flagged as bound.
 
-Extrusion and revolution SHALL be expressible in the tape as primitive opcodes carrying a profile, so a document can build profile-driven shapes. Loft remains header-only until an item can carry two profiles.
+Extrusion and revolution SHALL be expressible in the tape as primitive opcodes carrying a profile, so a document can build profile-driven shapes. **Loft SHALL also be expressible in the tape**, as an opcode carrying two or more profiles interpolated along the lift axis. The header SHALL expose the interpolation as a function taking an already-computed parameter, so bracketing among more than two profiles needs no second entry point — a signature that derived the parameter from the height could only ever serve exactly two.
 
 #### Scenario: Revolve preserves exactness
 - **WHEN** an exact 2D profile is revolved
@@ -129,12 +129,34 @@ Extrusion and revolution SHALL be expressible in the tape as primitive opcodes c
 - **WHEN** a tape containing only extrusions and revolutions of exact profiles is compiled
 - **THEN** its field info remains exact and its safe step scale stays 1
 
+#### Scenario: A loft reaches both profiles
+- **WHEN** a loft between two different profiles is evaluated at each end of its depth
+- **THEN** the cross-section there matches the profile at that end
+
+#### Scenario: A loft interpolates between them
+- **WHEN** a loft is evaluated halfway along its depth
+- **THEN** the cross-section lies between the two profiles rather than matching either
+
+#### Scenario: More than two profiles are bracketed
+- **WHEN** a loft carries three profiles and is evaluated at the middle one's position
+- **THEN** the cross-section matches that middle profile, rather than a blend of the outer two
+
 ### Requirement: Exactness and Lipschitz propagation
 The library SHALL track per-node field classification — `exact`, `bound`, or `Lipschitz(L)` — through the expression tree (01 §2.7) and expose the resulting safe step scale for the composed field. No consumer (sphere tracing, meshing, brick fill) SHALL assume |∇f| = 1 unless the tree proves exactness.
+
+A loft SHALL declare itself **not exact**, and SHALL declare a Lipschitz factor accounting for the interpolation along the lift axis: a lerp of two fields adds a term proportional to how far apart they are over the depth they are mixed across, steepened by the easing curve's own maximum slope. Declaring Lipschitz 1 for a loft SHALL be treated as a defect, because the raymarcher would step as though the field were a distance and miss surfaces.
 
 #### Scenario: Composition downgrades correctly
 - **WHEN** an exact primitive is wrapped in a taper (Lipschitz L) and then smooth-unioned with an exact sphere
 - **THEN** the composed tree reports the conservative classification and a safe step scale ≤ 1/L
+
+#### Scenario: A loft is not exact
+- **WHEN** a document containing a loft is compiled
+- **THEN** the tape reports the field as inexact
+
+#### Scenario: Differing profiles over a shorter depth step more carefully
+- **WHEN** two lofts differ only in that one interpolates between the same profiles over a shallower depth
+- **THEN** that one reports the smaller safe step scale
 
 ### Requirement: Stroke items
 The kernel vocabulary SHALL include a stroke construct: a polyline chain of capsules / round cones with per-point radius and color (Dreams-style Pencil smear), plus stamp placement, each carrying its own op + blend + color and applied symmetrically through active mirror planes.
@@ -321,4 +343,52 @@ The tracked field SHALL downgrade to a bound with a Lipschitz factor derived fro
 #### Scenario: Device agreement
 - **WHEN** a line-posed item is evaluated on every registered backend
 - **THEN** each matches the CPU scalar reference within the parity tolerance
+
+### Requirement: Profiles swept along a guide
+The tape SHALL provide an opcode that carries a tessellated guide polyline and two or more 2D profiles, and evaluates a query point by finding the nearest point on the guide, expressing the point in a frame there, and evaluating the profiles interpolated along the guide's arc length.
+
+The frame SHALL be **parallel-transported** along the guide rather than derived per-sample from the curve's own derivatives, so that it does not flip at an inflection point or become undefined where the guide is straight. Transport is sequential, so the frames SHALL be computed once when the item is compiled and interpolated between at evaluation.
+
+Profiles SHALL be distributed by **arc length**, so a guide whose vertices bunch does not bunch the profiles.
+
+#### Scenario: A sweep follows its guide
+- **WHEN** a circle is swept along an L-shaped guide
+- **THEN** material is present along both limbs and absent off them
+
+#### Scenario: The cross-section is the profile
+- **WHEN** a circle of a given radius is swept along a straight guide
+- **THEN** between the guide's endpoints the field matches a capsule of that radius, within tolerance
+
+#### Scenario: The ends are the profile, not a rounded cap
+- **WHEN** a swept item is evaluated past the end of its guide, on the guide's axis
+- **THEN** the distance is the overshoot past a flat end face, because the profile need not be a circle and there is no hemisphere to cap it with
+
+#### Scenario: Profiles interpolate along the guide
+- **WHEN** a wide profile and a narrow one are swept along a straight guide
+- **THEN** the cross-section is wide at the start and narrow at the end
+
+#### Scenario: The frame does not flip where the guide straightens
+- **WHEN** a non-rotationally-symmetric profile is swept along a guide that bends, straightens, then bends back
+- **THEN** the profile's orientation varies smoothly along the whole guide
+
+#### Scenario: A degenerate sweep is refused
+- **WHEN** a sweep is built with fewer than two guide points, or fewer than two profiles
+- **THEN** it is refused
+
+### Requirement: A sweep declares its exactness and curvature cost
+A swept item SHALL declare itself **not exact**, and SHALL declare a Lipschitz factor derived from the guide's tightest bend against the widest profile's extent: a point at perpendicular offset `r` inside a bend of radius `R` is compressed by `R / (R - r)`.
+
+Where the widest profile reaches or exceeds the tightest bend radius the sweep folds through itself. The engine SHALL NOT refuse this — a guide is editable after the fact — and SHALL instead report a correspondingly large Lipschitz, so the raymarcher takes small steps rather than stepping through a surface it was told was a distance field.
+
+#### Scenario: A sweep is not exact
+- **WHEN** a document containing a sweep is compiled
+- **THEN** the tape reports the field as inexact
+
+#### Scenario: A tighter guide steps more carefully
+- **WHEN** the same profile is swept along a gently curved guide and a sharply curved one
+- **THEN** the sharply curved one reports the smaller safe step scale
+
+#### Scenario: An overgrown profile degrades rather than failing
+- **WHEN** a profile wider than the guide's tightest bend radius is swept
+- **THEN** the document still compiles and evaluates, and its safe step scale is very small
 

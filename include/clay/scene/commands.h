@@ -115,7 +115,7 @@ LayerId edited_layer(const Command& cmd);
 // The scene payload layout this build writes. It tracks the .clayspace
 // container's minor version, which is what a reader is told; io asserts they
 // agree so the two cannot drift.
-inline constexpr std::uint16_t kSceneMinor = 2;
+inline constexpr std::uint16_t kSceneMinor = 3;
 
 // Apply a command; returns its inverse, or nullopt if the target does not
 // exist or is protected (ghosted or locked). The document is unchanged in
@@ -129,7 +129,13 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size);
 
 // Whole-document snapshot (used by tests for bit-identity checks and by the
 // io module as the scene chunk payload).
-std::vector<std::uint8_t> serialize_document(const Document& doc);
+// `minor` is the layout to WRITE at, defaulting to the current one. Writing at
+// an older layout is what lets a build produce a file an older one can open —
+// and it is what makes "a minor-1 document reads as hard corners" testable
+// without manufacturing a stream by hand, which only stays correct until the
+// next field is added.
+std::vector<std::uint8_t> serialize_document(const Document& doc,
+                                             std::uint16_t minor = kSceneMinor);
 // `minor` is the container's minor version, so a node can gain a field without
 // inventing a packing trick to stay readable. Defaults to the current layout,
 // which is what a standalone round trip wants.

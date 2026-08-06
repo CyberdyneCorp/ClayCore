@@ -2337,3 +2337,166 @@ def test_repair_honours_a_mask():
     g.repair_fill_voids(mask=mask)
     assert g.occupied_count == before
     assert g.repair_report()["airtight"] is False
+
+
+# -- loft (add-loft-opcode) --------------------------------------------------
+
+
+def _loft_doc(profiles, half_depth=1.0, ease=0):
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Loft(profiles, half_depth=half_depth, ease=ease))
+    return doc
+
+
+def test_a_loft_reaches_both_profiles():
+    doc = _loft_doc([clay.Profile.circle(r=1.0), clay.Profile.circle(r=0.25)])
+    ends = np.array([[0.9, 0, -0.99], [1.1, 0, -0.99],
+                     [0.2, 0, 0.99], [0.4, 0, 0.99]], np.float32)
+    assert (doc.eval(ends) < 0).tolist() == [True, False, True, False]
+
+
+def test_a_loft_interpolates_in_between():
+    doc = _loft_doc([clay.Profile.circle(r=1.0), clay.Profile.circle(r=0.25)])
+    middle = np.array([[0.55, 0, 0.0], [0.7, 0, 0.0]], np.float32)
+    assert (doc.eval(middle) < 0).tolist() == [True, False]
+
+
+def test_more_than_two_profiles_are_bracketed():
+    waisted = _loft_doc([clay.Profile.circle(r=1.0), clay.Profile.circle(r=0.2),
+                         clay.Profile.circle(r=1.0)])
+    straight = _loft_doc([clay.Profile.circle(r=1.0), clay.Profile.circle(r=1.0)])
+    probe = np.array([[0.5, 0, 0.0]], np.float32)
+    assert waisted.eval(probe)[0] > 0      # pinched at the middle profile
+    assert straight.eval(probe)[0] < 0
+
+
+def test_a_loft_takes_polygon_profiles():
+    doc = _loft_doc([clay.Profile.circle(r=0.9),
+                     clay.Profile.polygon([(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)])])
+    probes = np.array([[0.85, 0, -0.99], [0.45, 0.45, 0.99], [0.7, 0.7, 0.99]], np.float32)
+    assert (doc.eval(probes) < 0).tolist() == [True, True, False]
+
+
+# The requirement the raymarcher depends on.
+def test_a_loft_is_a_bound_with_a_real_lipschitz():
+    doc = _loft_doc([clay.Profile.circle(r=1.0), clay.Profile.circle(r=0.25)])
+    assert doc.safe_step_scale() < 1.0
+
+    # The same profiles over a tenth of the depth change ten times as fast
+    # along Z, so the safe step must fall further.
+    shallow = _loft_doc([clay.Profile.circle(r=1.0), clay.Profile.circle(r=0.25)],
+                        half_depth=0.1)
+    assert shallow.safe_step_scale() < doc.safe_step_scale()
+
+    # An exact primitive alone still steps at full rate, so the drop above is
+    # the loft's doing and not a property of every document.
+    plain = clay.Document()
+    plain.add_sdf_layer("l").add(clay.Sphere(r=1.0))
+    assert plain.safe_step_scale() == pytest.approx(1.0)
+
+
+def test_a_loft_round_trips(tmp_path):
+    doc = _loft_doc([clay.Profile.circle(r=0.9),
+                     clay.Profile.polygon([(-0.5, -0.5), (0.5, -0.5), (0.0, 0.6)]),
+                     clay.Profile.box(half_x=0.3, half_y=0.6)], half_depth=1.3, ease=3)
+    probes = np.random.default_rng(31).uniform(-2, 2, size=(1024, 3)).astype(np.float32)
+    before = doc.eval(probes)
+    path = tmp_path / "loft.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(probes))
+
+
+def test_a_degenerate_loft_is_refused():
+    with pytest.raises(ValueError, match="two or more"):
+        clay.Loft([clay.Profile.circle(r=1.0)])
+    with pytest.raises(ValueError, match="two or more"):
+        clay.Loft([])
+    with pytest.raises(ValueError, match="half_depth"):
+        clay.Loft([clay.Profile.circle(r=1.0), clay.Profile.circle(r=0.5)], half_depth=0.0)
+
+
+# -- swept along a guide (add-swept-n) ---------------------------------------
+
+
+_STRAIGHT = np.array([[-1, 0, 0, 0], [1, 0, 0, 0]], np.float32)
+
+
+def _swept_doc(guide, profiles, **kwargs):
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Swept(guide, profiles, **kwargs))
+    return doc
+
+
+def test_a_sweep_along_a_straight_guide_is_a_cylinder():
+    doc = _swept_doc(_STRAIGHT, [clay.Profile.circle(r=0.3), clay.Profile.circle(r=0.3)])
+    # Material on the axis, empty off it, and the ends are FLAT: past the end
+    # the distance is the overshoot, not a rounded capsule's.
+    probes = np.array([[0, 0, 0], [0, 0.5, 0], [-1.4, 0, 0]], np.float32)
+    d = doc.eval(probes)
+    assert d[0] < 0 and d[1] > 0
+    assert d[2] == pytest.approx(0.4, abs=0.02)
+
+
+def test_a_sweep_follows_a_bent_guide():
+    guide = np.array([[-1, 0, 0, 0], [0, 0, 0, 0], [0, 1, 0, 0]], np.float32)
+    doc = _swept_doc(guide, [clay.Profile.circle(r=0.25), clay.Profile.circle(r=0.25)])
+    on = np.array([[-0.6, 0, 0], [0, 0.6, 0]], np.float32)
+    off = np.array([[-0.8, 0.8, 0], [0.8, 0.8, 0]], np.float32)
+    assert (doc.eval(on) < 0).all()
+    assert (doc.eval(off) > 0).all()
+
+
+def test_sweep_profiles_interpolate_along_the_guide():
+    doc = _swept_doc(_STRAIGHT, [clay.Profile.circle(r=0.4), clay.Profile.circle(r=0.1)])
+    probes = np.array([[-0.9, 0.3, 0], [0.9, 0.3, 0], [0.9, 0.07, 0]], np.float32)
+    assert (doc.eval(probes) < 0).tolist() == [True, False, True]
+
+
+def test_a_sweep_is_a_bound_whose_step_tracks_curvature():
+    gentle = _swept_doc(np.array([[-2, 0, 0, 0], [0, 0.3, 0, 0], [2, 0, 0, 0]], np.float32),
+                        [clay.Profile.circle(r=0.2), clay.Profile.circle(r=0.2)])
+    sharp = _swept_doc(np.array([[-2, 0, 0, 0], [0, 1.6, 0, 0], [2, 0, 0, 0]], np.float32),
+                       [clay.Profile.circle(r=0.2), clay.Profile.circle(r=0.2)])
+    assert sharp.safe_step_scale() < gentle.safe_step_scale() < 1.0
+
+    # A profile wider than the guide's tightest bend folds the sweep through
+    # itself. It must still compile and evaluate — a guide is editable after
+    # the fact — and report a tiny step rather than claiming to be a distance.
+    folded = _swept_doc(np.array([[-1, 0, 0, 0], [0, 1.0, 0, 0], [1, 0, 0, 0]], np.float32),
+                        [clay.Profile.circle(r=2.0), clay.Profile.circle(r=2.0)])
+    assert folded.safe_step_scale() < 0.01
+    assert np.isfinite(folded.eval(np.array([[0, 0, 0]], np.float32))[0])
+
+
+def test_a_sweeps_guide_honours_point_types():
+    guide = np.array([[-1, 0, 0, 0], [0, 0.8, 0, 0], [1, 0, 0, 0]], np.float32)
+    hard = _swept_doc(guide, [clay.Profile.circle(r=0.15), clay.Profile.circle(r=0.15)],
+                      types="hard")
+    spline = _swept_doc(guide, [clay.Profile.circle(r=0.15), clay.Profile.circle(r=0.15)],
+                        types="spline")
+    probes = np.random.default_rng(8).uniform(-1.2, 1.2, size=(512, 3)).astype(np.float32)
+    assert not np.array_equal(hard.eval(probes) < 0, spline.eval(probes) < 0)
+
+
+def test_a_sweep_round_trips(tmp_path):
+    guide = np.array([[-1, 0, 0, 0], [0, 0.7, 0.2, 0], [1, 0, -0.2, 0]], np.float32)
+    doc = _swept_doc(guide, [clay.Profile.circle(r=0.3),
+                             clay.Profile.polygon([(-0.2, -0.2), (0.2, -0.2), (0.0, 0.3)]),
+                             clay.Profile.box(half_x=0.2, half_y=0.1)],
+                     types="spline", tolerance=0.01, ease=3)
+    probes = np.random.default_rng(12).uniform(-2, 2, size=(1024, 3)).astype(np.float32)
+    before = doc.eval(probes)
+    path = tmp_path / "swept.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(probes))
+
+
+def test_a_degenerate_sweep_is_refused():
+    with pytest.raises(ValueError, match="two or more profiles"):
+        clay.Swept(_STRAIGHT, [clay.Profile.circle(r=0.3)])
+    with pytest.raises(ValueError, match="two or more points"):
+        clay.Swept(np.array([[0, 0, 0, 0]], np.float32),
+                   [clay.Profile.circle(r=0.3), clay.Profile.circle(r=0.3)])
+    with pytest.raises(ValueError, match="tolerance"):
+        clay.Swept(_STRAIGHT, [clay.Profile.circle(r=0.3), clay.Profile.circle(r=0.3)],
+                   tolerance=0.0)

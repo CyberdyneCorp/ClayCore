@@ -342,3 +342,17 @@ The module SHALL expose the report and both repairs, with the report as a readab
 - **WHEN** a script reports a hollow shell, fills its voids, and reports again
 - **THEN** the first report says not airtight and the second says airtight
 
+### Requirement: Lofts from Python
+The module SHALL expose a loft taking two or more profiles and a half-depth, with an easing curve over the interpolation.
+
+#### Scenario: Lofting a circle to a box
+- **WHEN** a script lofts a circle to a box and evaluates the ends
+- **THEN** each end matches its own profile
+
+### Requirement: Sweeps from Python
+The module SHALL expose a swept item taking guide control points with their types and tolerance, and two or more profiles.
+
+#### Scenario: Sweeping a circle along a curve
+- **WHEN** a script sweeps a circle along a spline guide
+- **THEN** the field is material along the guide and empty away from it
+
