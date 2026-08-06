@@ -346,6 +346,19 @@ q.distance(pts), q.signed_distance(pts), q.contains(pts)
 q.winding_number(pts, beta=2.0)   # beta=0 sums every triangle; slow, exact
 clay.Mesh.from_triangles(positions, indices)   # hand back a mesh you edited
 
+# relax: the last of the core sculpting brushes — voxels always had smoothing,
+# SDF layers had none. RELAX BAKES: what comes back is a volume, not the edit
+# list that went in, and that is inherent rather than a shortcut, because a
+# general relax must smooth a bump in the middle of ONE item and no reweighting
+# of an edit list expresses that.
+# Smoothing destroys EXACTNESS but cannot break the Lipschitz bound — an average
+# cannot vary faster than what it averages — and a field whose slope is bounded
+# by 1 is automatically a conservative bound on the distance to its own zero
+# set, so the raymarcher stays correct.
+smooth = baked.relaxed(strength=1.0, radius_cells=3, iterations=4)
+smooth = baked.relaxed(radius_cells=3, centre=(0, 0.7, 0),   # a brush, not a
+                       region_radius=0.35, falloff=0.2)      # filter
+
 # curves: a stroke point carries a type saying how it joins the next, so a
 # stroke is a curve whose points are all hard corners. Typed points tessellate
 # into the same segment chain at compile time, so a curve costs nothing to

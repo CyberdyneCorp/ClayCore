@@ -30,6 +30,7 @@
 #include "clay/voxel/grid.h"
 #include "clay/brush/stroke.h"
 #include "clay/cut/cut.h"
+#include "clay/field/relax.h"
 #include "clay/field/volume.h"
 #include "clay/voxel/mask.h"
 #include "clay/version.h"
@@ -1556,6 +1557,53 @@ NB_MODULE(pyclay, m) {
             "too coarse for a bolt. `beta` is how far a BVH node must be before\n"
             "it is summarized by one term rather than descended: larger is more\n"
             "accurate and slower, and 0 sums every triangle exactly.")
+        .def(
+            "relaxed",
+            [](const PyVolume& self, float strength, int radius_cells, int iterations,
+               nb::handle centre, float region_radius, float falloff) {
+                if (!self.volume) throw std::invalid_argument("nothing to relax");
+                if (!(strength >= 0.0f && strength <= 1.0f))
+                    throw std::invalid_argument("strength must be between 0 and 1");
+                if (radius_cells < 1) throw std::invalid_argument("radius_cells must be >= 1");
+                if (iterations < 1) throw std::invalid_argument("iterations must be >= 1");
+                field::RelaxSettings settings;
+                settings.strength = strength;
+                settings.radius_cells = radius_cells;
+                settings.iterations = iterations;
+                if (!centre.is_none()) settings.centre = to_f3(centre, "centre");
+                settings.region_radius = region_radius;
+                settings.falloff = falloff;
+
+                PyVolume out;
+                out.prim = self.prim;
+                out.xform = self.xform;
+                {
+                    nb::gil_scoped_release release;
+                    out.volume = std::make_shared<const field::FieldVolume>(
+                        field::relax(*self.volume, settings));
+                }
+                return out;
+            },
+            "strength"_a = 1.0f, "radius_cells"_a = 1, "iterations"_a = 1,
+            "centre"_a = nb::none(), "region_radius"_a = 0.0f, "falloff"_a = 0.0f,
+            "Smooth this volume, returning a new one. The last of the core\n"
+            "sculpting brushes: voxels had smoothing, SDF layers had none.\n\n"
+            "RELAX BAKES, and that is worth knowing before you pick a cell\n"
+            "size. What comes back is a sampled volume, not the edit list that\n"
+            "went in — the items are gone, and with them the ability to go back\n"
+            "and change a radius. That is inherent to smoothing a field rather\n"
+            "than a shortcut: a general relax has to be able to smooth a bump in\n"
+            "the middle of ONE item, which no reweighting of an edit list can\n"
+            "express. The resolution the shape now has is the one you chose.\n\n"
+            "Smoothing destroys EXACTNESS — the result no longer reports the\n"
+            "true distance to its own surface — but it cannot break the\n"
+            "Lipschitz bound, because an average cannot vary faster than the\n"
+            "thing it averages. And a field whose slope is bounded by one is\n"
+            "automatically a conservative bound on the distance to its own zero\n"
+            "set, so the raymarcher stays correct.\n\n"
+            "`region_radius` of 0 relaxes everywhere, which is a filter; give it\n"
+            "a centre and a radius and it is a brush. The falloff is widened if\n"
+            "it is too narrow to hide the seam the kernel makes.")
         .def("has_samples_at",
              [](const PyVolume& v, nb::handle point) {
                  return v.volume && v.volume->has_samples_at(to_f3(point, "point"));

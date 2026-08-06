@@ -711,6 +711,24 @@ do {
     }
     try? FileManager.default.removeItem(atPath: importPath)
 
+    // Relax: the reachable workflow from an app is import-then-smooth, since
+    // this ABI builds a volume from a mesh.
+    var relaxParams = clay_relax_params()
+    relaxParams.struct_size = UInt32(MemoryLayout<clay_relax_params>.size)
+    relaxParams.strength = 1.0
+    relaxParams.radius_cells = 2
+    relaxParams.iterations = 2
+    check(clay_item_volume_relax(volumeItem, &relaxParams) == CLAY_OK,
+          "relaxed the imported volume")
+
+    // ...and asking to relax something that is not a volume is refused rather
+    // than quietly doing nothing.
+    var sphereRadius: Float = 1.0
+    let plainItem = clay_item_create(Int32(CLAY_PRIM_SPHERE.rawValue), &sphereRadius, 1)
+    check(clay_item_volume_relax(plainItem, &relaxParams) == CLAY_ERROR_INVALID_ARGUMENT,
+          "relaxing a non-volume item is refused")
+    clay_item_destroy(plainItem)
+
     clay_item_destroy(volumeItem)
     clay_document_destroy(importDoc)
     clay_mesh_destroy(boxMesh)

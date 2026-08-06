@@ -1,0 +1,115 @@
+// Relaxing a sampled field (sdf-kernels spec, add-sdf-relax). See
+// include/clay/field/relax.h for why smoothing keeps the property sphere
+// tracing depends on even though it destroys exactness.
+
+#include "clay/field/relax.h"
+
+#include <algorithm>
+#include <cmath>
+#include <array>
+#include <optional>
+#include <vector>
+
+namespace clay {
+namespace field {
+
+using kernel::cf3;
+using kernel::cfloat3;
+
+namespace {
+
+// The cell-aligned taps within `radius` cells. Integer offsets, because relax
+// works on the stored samples rather than on world positions.
+struct Stencil {
+    std::vector<std::array<int, 3>> offsets;
+    std::vector<float> weights;
+};
+
+Stencil build_stencil(int radius_cells) {
+    Stencil s;
+    const int r = std::max(1, radius_cells);
+    const float limit = static_cast<float>(r) + 0.001f;
+    float total = 0.0f;
+    for (int z = -r; z <= r; ++z)
+        for (int y = -r; y <= r; ++y)
+            for (int x = -r; x <= r; ++x) {
+                float distance = std::sqrt(static_cast<float>(x * x + y * y + z * z));
+                if (distance > limit) continue;  // a ball, not a cube
+                s.offsets.push_back({x, y, z});
+                // Uniform within the ball. A curvature-weighted variant is
+                // additive and deliberately not here.
+                s.weights.push_back(1.0f);
+                total += 1.0f;
+            }
+    for (float& w : s.weights) w /= total;
+    return s;
+}
+
+// How much of the smoothed value to take at `p`. Outside the region this is
+// zero and the field is left exactly as it was.
+float region_weight(const RelaxSettings& settings, cfloat3 p) {
+    if (!(settings.region_radius > 0.0f)) return 1.0f;  // everywhere
+    float distance = kernel::clength(p - settings.centre);
+    if (distance <= settings.region_radius) return 1.0f;
+    // A hard edge would leave a visible rim where the smoothed field meets the
+    // untouched one, so the effect tapers.
+    float taper = std::max(settings.falloff, 1e-4f);
+    float t = (distance - settings.region_radius) / taper;
+    if (t >= 1.0f) return 0.0f;
+    return 1.0f - t * t * (3.0f - 2.0f * t);  // smoothstep
+}
+
+}  // namespace
+
+FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings) {
+    if (v.empty()) return v;
+
+    const float cell = v.cell_size();
+    const float strength = std::clamp(settings.strength, 0.0f, 1.0f);
+    const int iterations = std::max(1, settings.iterations);
+    const int radius = std::max(1, settings.radius_cells);
+    const Stencil stencil = build_stencil(radius);
+
+    RelaxSettings tuned = settings;
+    // A taper narrower than the kernel cannot hide the seam the kernel makes,
+    // and one of zero would step. Both are silently widened rather than obeyed.
+    tuned.falloff = std::max(settings.falloff, cell * static_cast<float>(radius) * 2.0f);
+
+    FieldVolume current = v;
+    for (int pass = 0; pass < iterations; ++pass) {
+        const FieldVolume previous = current;
+        current.rewrite([&previous, &stencil, &tuned, strength](int gx, int gy, int gz,
+                                                                float old) {
+            float here = previous.sample_at(gx, gy, gz).value_or(old);
+            float weight = region_weight(tuned, previous.cell_position(gx, gy, gz));
+            if (weight <= 0.0f) return here;
+
+            // Only taps that EXIST count. A brick with no samples is not a
+            // measurement of zero, it is the absence of one, and renormalizing
+            // over the taps that are there smooths with the data rather than
+            // dragging the edge of the band inward.
+            float averaged = 0.0f;
+            float total = 0.0f;
+            for (std::size_t i = 0; i < stencil.offsets.size(); ++i) {
+                const auto& d = stencil.offsets[i];
+                std::optional<float> tap = previous.sample_at(gx + d[0], gy + d[1], gz + d[2]);
+                if (!tap) continue;
+                averaged += stencil.weights[i] * *tap;
+                total += stencil.weights[i];
+            }
+            if (total <= 0.0f) return here;
+            return here + (averaged / total - here) * (strength * weight);
+        });
+    }
+
+    // Smoothing MOVES the surface, and the sample-free bricks were classified
+    // against where it used to be. Their bounds would otherwise overstate the
+    // distance to the surface that is there now, which is the one thing a
+    // bound may never do. A pass cannot move it further than the kernel
+    // reaches, so that is the margin.
+    current.shrink_band(static_cast<float>(radius) * cell * static_cast<float>(iterations));
+    return current;
+}
+
+}  // namespace field
+}  // namespace clay

@@ -83,6 +83,7 @@ ALIASES = {
     "Document.gradients": "clay_eval_gradients",
     "Document.raycast": "clay_raycast_attributed",  # pyclay's reports layer+item too
     "Volume.from_mesh": "clay_item_volume_from_mesh",
+    "Volume.relaxed": "clay_item_volume_relax",
     "Mesh.from_triangles": "clay_mesh_from_triangles",
     "Layer.add": "clay_layer_add_item",
     "Layer.set_points": "clay_layer_set_stroke_points",

@@ -35,6 +35,7 @@ EXAMPLES = [
     "17_swept",
     "18_sampled_fields",
     "19_mesh_import",
+    "20_relax",
 ]
 
 

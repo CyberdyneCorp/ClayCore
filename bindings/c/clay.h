@@ -665,6 +665,30 @@ typedef struct clay_volume_params {
 clay_result clay_item_volume_from_mesh(const clay_mesh* mesh, const clay_volume_params* params,
                                        clay_item** out_item);
 
+typedef struct clay_relax_params {
+    uint32_t struct_size;  /* = sizeof(clay_relax_params); required */
+    float strength;        /* how much of the smoothed value to take, 0..1, per pass */
+    int32_t radius_cells;  /* averaging radius in cells; <= 0 means 1 */
+    int32_t iterations;    /* passes; <= 0 means 1 */
+    float centre[3];       /* where it acts */
+    float region_radius;   /* 0 relaxes everywhere, which is a filter not a brush */
+    float falloff;         /* taper at the region's edge; widened if too narrow to hide the seam */
+} clay_relax_params;
+
+/* Smooths an item that carries a volume, in place. The last of the core
+ * sculpting brushes: voxel layers had smoothing, SDF layers had none.
+ *
+ * Smoothing destroys EXACTNESS — the field no longer reports the true distance
+ * to its own surface — but it cannot break the Lipschitz bound, because an
+ * average cannot vary faster than the thing it averages, and a field whose
+ * slope is bounded by one is automatically a conservative bound on the distance
+ * to its own zero set. So the raymarcher stays correct.
+ *
+ * The item must carry a volume; anything else is refused rather than ignored.
+ * From this ABI that means an imported mesh, which is the workflow an app
+ * wants: bring in a scan, then smooth it. */
+clay_result clay_item_volume_relax(clay_item* item, const clay_relax_params* params);
+
 /* -- voxel grids ----------------------------------------------------------- */
 
 /* Palette-indexed colored voxels on an integer lattice: cell (x, y, z) covers

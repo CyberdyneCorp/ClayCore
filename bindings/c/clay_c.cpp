@@ -4,6 +4,7 @@
 
 #include "clay.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
@@ -19,6 +20,7 @@
 #include <memory>
 
 #include "clay/io/mesh_io.h"
+#include "clay/field/relax.h"
 #include "clay/mesh/to_field.h"
 #include "clay/mesh/decimate.h"
 #include "clay/mesh/dual_contouring.h"
@@ -306,6 +308,7 @@ constexpr std::size_t kMeshParamsOriginal =
 constexpr std::size_t kBrushParamsOriginal =
     offsetof(clay_brush_params, seed) + sizeof(std::uint32_t);
 constexpr std::size_t kVolumeParamsOriginal = offsetof(clay_volume_params, beta) + sizeof(float);
+constexpr std::size_t kRelaxParamsOriginal = offsetof(clay_relax_params, falloff) + sizeof(float);
 
 // Parameters each primitive takes, indexed by clay_prim (= the tape opcode).
 // This is what the clay_prim comments document and what clay_item_create
@@ -2017,6 +2020,29 @@ clay_result clay_item_volume_from_mesh(const clay_mesh* mesh, const clay_volume_
     item->node.prim = scene::Prim::volume();
     item->node.volume = std::make_shared<field::FieldVolume>(std::move(*volume));
     *out_item = item;
+    return CLAY_OK;
+}
+
+clay_result clay_item_volume_relax(clay_item* item, const clay_relax_params* params) {
+    if (!item || !params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    clay_relax_params p;
+    clay_result r = read_desc(params, kRelaxParamsOriginal, &p);
+    if (r != CLAY_OK) return r;
+    // Refused rather than ignored: an item that is not a volume has no samples
+    // to smooth, and quietly returning OK would look like it worked.
+    if (item->node.prim.type != scene::PrimType::Volume || !item->node.volume)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this item carries no volume to relax");
+
+    field::RelaxSettings settings;
+    settings.strength = std::clamp(p.strength, 0.0f, 1.0f);
+    settings.radius_cells = p.radius_cells > 0 ? p.radius_cells : 1;
+    settings.iterations = p.iterations > 0 ? p.iterations : 1;
+    settings.centre = kernel::cf3(p.centre[0], p.centre[1], p.centre[2]);
+    settings.region_radius = p.region_radius;
+    settings.falloff = p.falloff;
+
+    item->node.volume =
+        std::make_shared<field::FieldVolume>(field::relax(*item->node.volume, settings));
     return CLAY_OK;
 }
 

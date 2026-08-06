@@ -254,6 +254,87 @@ float FieldVolume::eval(cfloat3 p) const {
     return std::sqrt(outside * outside + reach * reach);
 }
 
+// -- rewriting the samples ----------------------------------------------------
+
+namespace {
+
+// Where a global cell coordinate lives, per axis. A coordinate on a brick face
+// belongs to TWO bricks — the top of the lower one and the bottom of the upper
+// — so it can have two answers, and each axis decides independently. Trying to
+// share one "prefer the lower" flag across all three axes lands on the
+// diagonal neighbour instead of the four bricks that actually share the face.
+struct AxisSlot {
+    int brick[2];
+    int local[2];
+    int count;
+};
+
+AxisSlot locate(int g, int bcount) {
+    AxisSlot slot{{0, 0}, {0, 0}, 0};
+    if (g < 0 || g > bcount * kBrickDim) return slot;
+    int b = g / kBrickDim;
+    int l = g - b * kBrickDim;
+    if (b < bcount) {
+        slot.brick[slot.count] = b;
+        slot.local[slot.count] = l;
+        ++slot.count;
+    }
+    if (l == 0 && b > 0) {  // the same sample, as the brick below's halo
+        slot.brick[slot.count] = b - 1;
+        slot.local[slot.count] = kBrickDim;
+        ++slot.count;
+    }
+    return slot;
+}
+
+}  // namespace
+
+std::optional<float> FieldVolume::sample_at(int gx, int gy, int gz) const {
+    if (empty()) return std::nullopt;
+    AxisSlot sx = locate(gx, bcount_[0]);
+    AxisSlot sy = locate(gy, bcount_[1]);
+    AxisSlot sz = locate(gz, bcount_[2]);
+    // Up to eight bricks share a sample on a corner; any that stores it answers,
+    // and they agree because the halo holds the same value.
+    for (int iz = 0; iz < sz.count; ++iz)
+        for (int iy = 0; iy < sy.count; ++iy)
+            for (int ix = 0; ix < sx.count; ++ix) {
+                std::size_t slot = static_cast<std::size_t>(
+                    (sz.brick[iz] * bcount_[1] + sy.brick[iy]) * bcount_[0] + sx.brick[ix]);
+                std::int32_t entry = index_[slot];
+                if (entry < 0) continue;
+                return data_[static_cast<std::size_t>(entry) +
+                             sample_index(sx.local[ix], sy.local[iy], sz.local[iz])];
+            }
+    return std::nullopt;
+}
+
+void FieldVolume::rewrite(const std::function<float(int, int, int, float)>& fn) {
+    const int n = kBrickDim + 1;
+    for (std::size_t slot = 0; slot < index_.size(); ++slot) {
+        std::int32_t entry = index_[slot];
+        if (entry < 0) continue;
+        const int bx = static_cast<int>(slot) % bcount_[0];
+        const int by = (static_cast<int>(slot) / bcount_[0]) % bcount_[1];
+        const int bz = static_cast<int>(slot) / (bcount_[0] * bcount_[1]);
+        for (int i = 0; i < kBrickSamples; ++i) {
+            const int lx = i % n, ly = (i / n) % n, lz = i / (n * n);
+            std::size_t at = static_cast<std::size_t>(entry) + static_cast<std::size_t>(i);
+            data_[at] =
+                fn(bx * kBrickDim + lx, by * kBrickDim + ly, bz * kBrickDim + lz, data_[at]);
+        }
+    }
+}
+
+void FieldVolume::shrink_band(float by) {
+    if (!(by > 0.0f)) return;
+    // Never below the sample spacing: a band thinner than that says nothing the
+    // samples do not already, and drives far_value() to zero, which stalls a
+    // marcher rather than stepping it.
+    band_ = std::max(band_ - by, cell_size_ * 2.0f);
+    build_far_bounds();
+}
+
 // -- blob layout --------------------------------------------------------------
 // [0..2] origin  [3] cell size  [4] band  [5..7] brick counts
 // [8] index offset  [9] far-bound offset  [10] data offset, all absolute

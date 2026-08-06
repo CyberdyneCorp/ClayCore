@@ -97,6 +97,43 @@ class FieldVolume {
     // that has samples.
     float far_value() const;
 
+    // -- rewriting the samples in place ------------------------------------
+    //
+    // For an operator that transforms a field into another field over the same
+    // lattice. Going through eval() instead would be a trap: the value where
+    // there are no samples is a flat BOUND, not a distance, and re-sampling a
+    // field that mixes the two bakes the boundary between them into adjacent
+    // samples one cell apart — turning a brick-face artifact into a genuinely
+    // steep interpolant. Working on the stored samples never sees it.
+
+    // The stored sample at global cell coordinates, or nothing where the brick
+    // holding it has none. A sample on a brick face lives in both neighbours;
+    // either copy answers, and they agree.
+    std::optional<float> sample_at(int gx, int gy, int gz) const;
+
+    // Replace every stored sample with `fn(gx, gy, gz, old)`, keeping the
+    // brick structure. Halo duplicates cannot drift apart along a shared face
+    // because `fn` is a function of the GLOBAL coordinate, so both copies of a
+    // shared sample are handed the same question. The old value comes along so
+    // that "leave this one alone" needs no lookup and cannot be spelt as zero.
+    void rewrite(const std::function<float(int, int, int, float)>& fn);
+
+    // Narrow the band, and with it what a sample-free brick may claim. An
+    // operator that MOVES the surface must do this by however far it moved:
+    // the empty bricks were classified against the old surface, and their
+    // bounds would otherwise overstate the distance to the new one.
+    void shrink_band(float by);
+
+    // World position of a global cell coordinate.
+    kernel::cfloat3 cell_position(int gx, int gy, int gz) const {
+        return origin_ + kernel::cf3(static_cast<float>(gx), static_cast<float>(gy),
+                                     static_cast<float>(gz)) *
+                             cell_size_;
+    }
+
+    // Samples along each axis: bricks times their edge, plus the halo.
+    int sample_extent(int axis) const { return bcount_[axis] * kBrickDim + 1; }
+
     // Flat float layout for the tape's blob. The kernel reads exactly this.
     std::vector<float> to_blob() const;
     static std::optional<FieldVolume> from_blob(const std::vector<float>& blob);

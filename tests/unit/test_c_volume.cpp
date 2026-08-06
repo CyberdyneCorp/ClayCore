@@ -214,3 +214,59 @@ TEST_CASE("c volume: a mesh loads from a file and imports") {
         CHECK(nothing == nullptr);
     }
 }
+
+TEST_CASE("c volume: an imported shape can be smoothed") {
+    // The workflow an app reaches for: bring in a scan, then smooth it. From
+    // this ABI a volume comes from a mesh, so that is the shape relax gets.
+    clay_mesh* mesh = build_box_mesh(0.6f);
+    clay_volume_params params = volume_params(0.04f);
+    clay_item* item = nullptr;
+    REQUIRE(clay_item_volume_from_mesh(mesh, &params, &item) == CLAY_OK);
+
+    clay_relax_params relax;
+    std::memset(&relax, 0, sizeof relax);
+    relax.struct_size = static_cast<std::uint32_t>(sizeof relax);
+    relax.strength = 1.0f;
+    relax.radius_cells = 2;
+    relax.iterations = 2;
+    REQUIRE(clay_item_volume_relax(item, &relax) == CLAY_OK);
+
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "l", &layer) == CLAY_OK);
+    REQUIRE(clay_layer_add_item(doc, layer, item, nullptr) == CLAY_OK);
+
+    // Still a box, with its corners rounded off — which is what smoothing a
+    // box does, and the reason to check a corner rather than a face.
+    CHECK(eval_c(doc, cf3(0, 0, 0)) < 0.0f);
+    CHECK(eval_c(doc, cf3(2.0f, 0, 0)) > 0.0f);
+    CHECK(std::abs(eval_c(doc, cf3(0.6f, 0, 0))) < 0.08f);
+
+    clay_item_destroy(item);
+    clay_document_destroy(doc);
+    clay_mesh_destroy(mesh);
+}
+
+TEST_CASE("c volume: relaxing something that is not a volume is refused") {
+    // Silently returning OK would look like it worked, and the caller would
+    // wonder why nothing got smoother.
+    const float radius[1] = {1.0f};
+    clay_item* sphere = clay_item_create(CLAY_PRIM_SPHERE, radius, 1);
+    REQUIRE(sphere != nullptr);
+
+    clay_relax_params relax;
+    std::memset(&relax, 0, sizeof relax);
+    relax.struct_size = static_cast<std::uint32_t>(sizeof relax);
+    relax.strength = 1.0f;
+    CHECK(clay_item_volume_relax(sphere, &relax) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_item_volume_relax(nullptr, &relax) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_item_volume_relax(sphere, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    SUBCASE("and a descriptor without its struct_size is refused") {
+        clay_relax_params blank;
+        std::memset(&blank, 0, sizeof blank);
+        CHECK(clay_item_volume_relax(sphere, &blank) == CLAY_ERROR_INVALID_ARGUMENT);
+    }
+
+    clay_item_destroy(sphere);
+}
