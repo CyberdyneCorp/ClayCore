@@ -54,12 +54,13 @@ wrong, in our favour:
 
 ~~Every deformer acts on a whole item, so nothing can push on a *patch* of
 surface.~~ **Closed 2026-08-05** by `add-region-deformers` and
-`add-pose-line-regions`. The remaining gap is narrower and worth naming
-precisely: **there is no way to relax an SDF surface.** Smoothing a signed
-distance field locally means convolving it, which breaks the distance property
-the evaluator depends on, so it is not a deformer — voxels have
-`sculpt_smooth`, SDF layers have nothing, and the only route today is the
-one-way voxel bridge. See `add-sdf-relax` in Phase 2.
+`add-pose-line-regions`. ~~The remaining gap is narrower and worth naming
+precisely: there is no way to relax an SDF surface.~~ **Closed 2026-08-06** by
+`add-sdf-relax`. The reasoning here was half wrong and worth keeping for that:
+convolving a distance field does break exactness, but it cannot raise the
+Lipschitz bound, and a 1-Lipschitz field is automatically a conservative bound
+on the distance to its own zero set — so the evaluator stays correct. Relax is
+still not a deformer; it bakes to a sampled volume.
 
 ## Phase 1 — make it sculptable
 
@@ -87,10 +88,10 @@ structural gap in it was `add-curve-objects`, which landed 2026-08-06.
 | ~~`add-curve-objects`~~ **landed 2026-08-06** | Control-point curves: per-point type (hard / Catmull-Rom / B-spline / Bezier with local-space handles), closed curves, and adaptive tessellation to a document-level tolerance. **A curve is not a new primitive** — the stroke opcode already sweeps a sphere along a segment chain exactly and with finite support, so typed points lower into it at compile time. That bought four backends, culling, exactness, picking, undo, masks and the file format for nothing, and an all-hard chain compiles to a bit-identical tape. Also added the versioned scene chunk, so the next field a node gains needs no packing trick. Cross-section sweeps (`add-loft-opcode`, `add-swept-n`) and radius profiles are unblocked but deliberately not included. |
 | ~~`add-sdf-relax`~~ **landed 2026-08-06** | The last ZBrush core brush. Settled on the sampled route: a field-space re-blend would have made an edit list mean "shapes plus a rule about how they interact" and still could not smooth a bump inside one item. The roadmap's worry was half right — convolution destroys exactness but cannot raise the Lipschitz bound, and a 1-Lipschitz field is automatically a conservative bound on the distance to its own zero set, so tracing stays safe. Relax **bakes**, which is stated everywhere a caller looks. |
 | ~~`add-sampled-fields`~~ **landed 2026-08-06** | Sparse narrow-band volumes as a tape primitive. The plan's estimate that this needed a resource mechanism was arithmetic on a DENSE grid and 20x too pessimistic; a narrow band is O(area) and rides in the blob. |
-| `add-loft-opcode` | Loft is header-only and flagged in the specs as not tape-expressible; it is 3DCoat's base-mesh generator and the core of their 2026 parametric direction. Needs an item to carry two profiles. |
-| `add-swept-n` | Generalizes loft from two profiles to N across a guide, once two-profile loft is proven. Minor and arguably implied by the row above, but named so it is not assumed done when loft lands. |
-| `add-voxel-verbs` | fill-cavities, scrape (flatten+smooth), smudge, carve-with-alpha — the verbs our four are missing against their voxel set. |
-| `add-voxel-repair` | Close holes and fill interior voids, so a voxel layer can be made airtight before meshing. Lower priority than it sounds: SDF layers are watertight by construction, and the mesh importer's winding-number sign tolerates small holes — this is only for voxel layers that were sculpted into a non-manifold state. Their "Close Invisible Holes + Fill Voids" is the standard pre-bake step. |
+| ~~`add-loft-opcode`~~ **landed 2026-08-06** | Took N profiles rather than two — nothing about the opcode wanted the limit. Loft is header-only and flagged in the specs as not tape-expressible; it is 3DCoat's base-mesh generator and the core of their 2026 parametric direction. Needs an item to carry two profiles. |
+| ~~`add-swept-n`~~ **landed 2026-08-06** | Turned out to be its own row about GUIDES, not "the same opcode with a count", because loft already took N. Generalizes loft from two profiles to N across a guide, once two-profile loft is proven. Minor and arguably implied by the row above, but named so it is not assumed done when loft lands. |
+| ~~`add-voxel-verbs`~~ **landed 2026-08-06** | fill-cavities, scrape (flatten+smooth), smudge, carve-with-alpha — the verbs our four are missing against their voxel set. |
+| ~~`add-voxel-repair`~~ **landed 2026-08-06** | Close holes and fill interior voids, so a voxel layer can be made airtight before meshing. Lower priority than it sounds: SDF layers are watertight by construction, and the mesh importer's winding-number sign tolerates small holes — this is only for voxel layers that were sculpted into a non-manifold state. Their "Close Invisible Holes + Fill Voids" is the standard pre-bake step. |
 | ~~`add-mesh-to-field-import`~~ **landed 2026-08-06** | Triangle mesh → field, by BVH distance and generalized winding number for sign. Neither binding could LOAD a mesh, only save one, so the import had nothing to import until this row added it. |
 
 ## Phase 2 — the plan for what is left
