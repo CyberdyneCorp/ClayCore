@@ -134,6 +134,64 @@ class VoxelGrid {
     // Move surface cells one step toward the brush centre.
     void sculpt_pinch(VoxelCoord c, const BrushParams& p);
 
+    // Fill pockets inside the footprint: an empty cell with at least four of
+    // its six face neighbours occupied is inside a cavity rather than beside a
+    // surface, and `passes` iterations reach that many cells deep. A
+    // through-hole and an open face have too few occupied neighbours to
+    // qualify, which is what makes this "fill the pockets" rather than "fill
+    // everything". This is the same rule repair_close_holes applies over a
+    // whole grid.
+    void sculpt_fill_cavities(VoxelCoord c, const BrushParams& p, int passes = 1);
+
+    // Flatten onto the plane AND smooth, from ONE snapshot. Calling the two
+    // verbs in sequence is not the same thing: the flatten's output would feed
+    // the smooth's neighbourhood, which is exactly what the snapshot
+    // discipline exists to prevent.
+    void sculpt_scrape(VoxelCoord c, const BrushParams& p, kernel::cfloat3 normal,
+                       float offset_cells = 0.0f);
+
+    // Drag SURFACE material along a direction, leaving the interior where it
+    // was. That is what separates it from grab, which translates every cell in
+    // the region: grab moves a lump, smudge smears a skin.
+    void sculpt_smudge(VoxelCoord c, const BrushParams& p, kernel::cfloat3 displacement);
+
+    // A caller-supplied scalar stamp modulating the footprint's per-cell
+    // strength. `alpha` is width*height samples in [0,1], row-major, sampled
+    // by projecting each cell onto the plane perpendicular to `direction`.
+    // The engine decodes no images: a host that has an alpha has already
+    // loaded a PNG, and handing over the samples costs it nothing.
+    //
+    // index 0 carves (the usual use); a non-zero index deposits instead.
+    // Returns false for a malformed stamp — mismatched dimensions or a zero
+    // extent — rather than stamping something the caller did not describe.
+    bool sculpt_carve_alpha(VoxelCoord c, const BrushParams& p, const float* alpha,
+                            int alpha_width, int alpha_height, kernel::cfloat3 direction,
+                            std::uint8_t index = 0);
+
+    // -- repair --------------------------------------------------------------
+    // What a pre-bake check wants to know, without performing the fix: a
+    // destructive operation whose input is somebody's sculpt should be
+    // askable before it is answerable.
+    struct RepairReport {
+        std::size_t enclosed_voids = 0;  // empty regions the outside cannot reach
+        std::size_t void_cells = 0;      // their total size
+        std::size_t largest_void = 0;
+        bool airtight = false;           // no enclosed voids at all
+    };
+    RepairReport repair_report() const;
+
+    // Seal perforations by the same pocket rule, over the whole grid: a
+    // pierced wall's hole has four occupied face neighbours and fills, while a
+    // wide opening has one or two and does not. Only ever adds cells, so no
+    // material is lost.
+    void repair_close_holes(int passes = 1, const MaskField* mask = nullptr);
+
+    // Fill every empty cell the outside cannot reach, colouring from the shell
+    // that encloses it. Reachability is over EMPTY cells by face adjacency,
+    // seeded outside the occupied bounds — enclosure is decided rather than
+    // guessed at from a local neighbourhood.
+    void repair_fill_voids(const MaskField* mask = nullptr);
+
     // Grab: translate occupancy through the same inverse map the SDF grab
     // deformer uses, so both representations mean the same thing. Occupancy is
     // binary, so this resamples nearest-cell — a displacement larger than a

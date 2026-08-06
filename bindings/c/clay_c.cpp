@@ -382,6 +382,9 @@ clay_result check_mirror_axes(std::int32_t axes, std::uint8_t* out) {
 // mask, so the two resolve together.
 clay_result resolve_mask(const clay_mask* mask, voxel::MaskField** out);
 
+constexpr std::size_t kRepairReportOriginal =
+    offsetof(clay_repair_report, airtight) + sizeof(std::int32_t);
+
 constexpr std::size_t kCutDescOriginal =
     offsetof(clay_cut_desc, far_extent) + sizeof(float);
 
@@ -2604,6 +2607,116 @@ clay_result clay_voxel_sculpt_grab(clay_voxel_grid* grid, const int32_t cell[3],
     g->sculpt_grab(to_coord(cell), p,
                    kernel::cf3(displacement[0], displacement[1], displacement[2]),
                    front_only != 0);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_fill_cavities(clay_voxel_grid* grid, const int32_t cell[3],
+                                            const clay_brush_params* brush, int32_t passes) {
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    clay_result r = resolve_brush(grid, cell, brush, &g, &p);
+    if (r != CLAY_OK) return r;
+    if (passes <= 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "passes must be > 0");
+    g->sculpt_fill_cavities(to_coord(cell), p, passes);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_scrape(clay_voxel_grid* grid, const int32_t cell[3],
+                                     const clay_brush_params* brush, const float normal[3],
+                                     float offset_cells) {
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    clay_result r = resolve_brush(grid, cell, brush, &g, &p);
+    if (r != CLAY_OK) return r;
+    if (!normal) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null normal");
+    kernel::cfloat3 n = kernel::cf3(normal[0], normal[1], normal[2]);
+    if (!(kernel::clength(n) >= 1e-12f))  // also rejects NaN
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "scrape normal must not be zero length");
+    g->sculpt_scrape(to_coord(cell), p, n, offset_cells);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_smudge(clay_voxel_grid* grid, const int32_t cell[3],
+                                     const clay_brush_params* brush,
+                                     const float displacement[3]) {
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    clay_result r = resolve_brush(grid, cell, brush, &g, &p);
+    if (r != CLAY_OK) return r;
+    if (!displacement) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null displacement");
+    g->sculpt_smudge(to_coord(cell), p,
+                     kernel::cf3(displacement[0], displacement[1], displacement[2]));
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_carve_alpha(clay_voxel_grid* grid, const int32_t cell[3],
+                                          const clay_brush_params* brush, const float* alpha,
+                                          int32_t alpha_width, int32_t alpha_height,
+                                          const float direction[3], int32_t index) {
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    clay_result r = resolve_brush(grid, cell, brush, &g, &p);
+    if (r != CLAY_OK) return r;
+    if (!direction) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null direction");
+    std::uint8_t slot = 0;
+    r = check_palette_index(index, &slot);
+    if (r != CLAY_OK) return r;
+    if (!g->sculpt_carve_alpha(to_coord(cell), p, alpha, alpha_width, alpha_height,
+                               kernel::cf3(direction[0], direction[1], direction[2]), slot))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the alpha stamp is malformed: a null or empty grid, or a zero-length "
+                    "direction");
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_repair_report(const clay_voxel_grid* grid,
+                                     clay_repair_report* out_report) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (!out_report) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null report");
+    // The descriptor is an OUTPUT, so struct_size is the caller telling us how
+    // much of it exists rather than what it filled in.
+    clay_repair_report probe;
+    r = read_desc(out_report, kRepairReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+
+    voxel::VoxelGrid::RepairReport report = g->repair_report();
+    std::uint32_t declared = out_report->struct_size;
+    *out_report = clay_repair_report{};
+    out_report->struct_size = declared;
+    out_report->enclosed_voids = report.enclosed_voids;
+    out_report->void_cells = report.void_cells;
+    out_report->largest_void = report.largest_void;
+    out_report->airtight = report.airtight ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_repair_close_holes(clay_voxel_grid* grid, int32_t passes,
+                                          const clay_mask* mask) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (passes <= 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "passes must be > 0");
+    voxel::MaskField* m = nullptr;
+    if (mask) {
+        r = resolve_mask(mask, &m);
+        if (r != CLAY_OK) return r;
+    }
+    g->repair_close_holes(passes, m);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_repair_fill_voids(clay_voxel_grid* grid, const clay_mask* mask) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    voxel::MaskField* m = nullptr;
+    if (mask) {
+        r = resolve_mask(mask, &m);
+        if (r != CLAY_OK) return r;
+    }
+    g->repair_fill_voids(m);
     return CLAY_OK;
 }
 

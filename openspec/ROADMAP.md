@@ -118,10 +118,21 @@ the mesh-import row, and it is invisible in "BVH + winding number".
 
 ### Track A — ready now, no prerequisites
 
+**Both voxel rows landed 2026-08-06.** The plan guessed they shared "a
+connected-component pass"; writing them showed the shared operation is a
+**pocket-fill rule**, and that the obvious implementation — morphological
+closing — is wrong for both. A ball of radius r fits *into* a dent wider than
+r, so a larger structuring element fills less rather than more; and a closing
+cannot seal a one-cell perforation in a one-cell wall at all, because the
+erosion reaches through from the void behind it. The rule that works is that an
+empty cell with at least four of its six face neighbours occupied is inside a
+pocket. Only fill-voids needed a flood, and it needed one over *empty* cells
+from outside, which the engine did not have.
+
 | Change | What will bite |
 |---|---|
-| `add-voxel-verbs` | fill-cavities, scrape (flatten+smooth), smudge, carve-with-alpha. The four we have all read a snapshot before writing so no cell's outcome depends on a neighbour the same call changed; these must keep that. Carve-with-alpha needs an alpha source, and there is no texture pipeline — either it takes a caller-supplied scalar buffer or it waits, and that is a scoping decision to make before starting, not during. |
-| `add-voxel-repair` | Close holes, fill interior voids. Shares a connected-component pass with fill-cavities above, so the two are cheaper together than apart — but they are separate specs: repair is about topology, verbs are about sculpting. Deciding "interior" needs a flood from outside the bounds, which is the same machinery `flood_select` has and a different seed policy. |
+| ~~`add-voxel-verbs`~~ **landed 2026-08-06** | fill-cavities, scrape, smudge, carve-with-alpha. Carve takes a **caller-supplied scalar grid** — a host with an alpha has already loaded the PNG, so the engine decodes no images. Scrape flattens and smooths from **one** snapshot, because two calls would let the flatten's output feed the smooth's neighbourhood. |
+| ~~`add-voxel-repair`~~ **landed 2026-08-06** | Report (non-destructive), close holes, fill voids, all mask-gated. Enclosure is decided by a flood over **empty** cells from outside the bounds — `flood_select` walks occupied cells from a seed, which is a different question. |
 | `add-loft-opcode` | The spec says it plainly: "Loft remains header-only until an item can carry two profiles." So this is a Node change (a second profile + its polygon points) and a new tape opcode, which means four backends, a parity corpus row, and exactness analysis — `cop_loft` is already flagged **bound**, not exact, so the tape's field info has to say so or raymarching oversteps. Curves gave it the guide it was waiting for. |
 | `add-swept-n` | Only meaningful once loft is proven. N profiles across a guide is the same opcode with a count, so the risk is entirely in whether loft's item layout generalizes — which is a reason to design loft's storage with N in mind and a reason not to build N first. |
 

@@ -2431,6 +2431,102 @@ NB_MODULE(pyclay, m) {
              "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant",
              "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
              "Move surface cells one step toward the brush centre")
+        .def("sculpt_fill_cavities",
+             [](PyVoxelGrid& g, nb::handle cell, int n, int passes, const std::string& shape,
+                const std::string& falloff, float strength, std::uint32_t seed,
+                nb::handle mask) {
+                 g.grid().sculpt_fill_cavities(to_coord(cell),
+                                               make_brush(n, shape, falloff, strength, seed, mask),
+                                               passes);
+             },
+             "cell"_a, "size"_a, "passes"_a = 1, "shape"_a = "sphere", "falloff"_a = "constant",
+             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
+             "Fill pockets: an empty cell with at least four of its six face "
+             "neighbours occupied is inside a cavity rather than beside a surface. "
+             "A through-hole, an open face and a wide shallow dent are left alone — "
+             "smoothing is the verb for surface irregularity.")
+        .def("sculpt_scrape",
+             [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle normal, float offset,
+                const std::string& shape, const std::string& falloff, float strength,
+                std::uint32_t seed, nb::handle mask) {
+                 g.grid().sculpt_scrape(to_coord(cell),
+                                        make_brush(n, shape, falloff, strength, seed, mask),
+                                        to_f3(normal, "normal"), offset);
+             },
+             "cell"_a, "size"_a, "normal"_a, "offset"_a = 0.0f, "shape"_a = "sphere",
+             "falloff"_a = "constant", "strength"_a = 1.0f, "seed"_a = 0u,
+             "mask"_a = nb::none(),
+             "Flatten onto the plane AND smooth, from ONE snapshot. Calling the two "
+             "verbs in sequence is not the same thing: the flatten's output would "
+             "feed the smooth's neighbourhood.")
+        .def("sculpt_smudge",
+             [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle displacement,
+                const std::string& shape, const std::string& falloff, float strength,
+                std::uint32_t seed, nb::handle mask) {
+                 g.grid().sculpt_smudge(to_coord(cell),
+                                        make_brush(n, shape, falloff, strength, seed, mask),
+                                        to_f3(displacement, "displacement"));
+             },
+             "cell"_a, "size"_a, "displacement"_a, "shape"_a = "sphere",
+             "falloff"_a = "smooth", "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
+             "Drag SURFACE material along a direction, leaving the interior where it "
+             "was. That is the difference from grab, which translates every cell in "
+             "its region: grab moves a lump, smudge smears a skin.")
+        .def("sculpt_carve_alpha",
+             [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle alpha, nb::handle direction,
+                std::uint8_t index, const std::string& shape, const std::string& falloff,
+                float strength, std::uint32_t seed, nb::handle mask) {
+                 nb::module_ np = nb::module_::import_("numpy");
+                 nb::object arr = np.attr("ascontiguousarray")(alpha, "dtype"_a = "float32");
+                 nb::ndarray<const float, nb::ndim<2>, nb::c_contig, nb::device::cpu> view;
+                 try {
+                     view = nb::cast<decltype(view)>(arr);
+                 } catch (const std::exception&) {
+                     throw std::invalid_argument("alpha must be an (H, W) float array");
+                 }
+                 if (!g.grid().sculpt_carve_alpha(
+                         to_coord(cell), make_brush(n, shape, falloff, strength, seed, mask),
+                         view.data(), static_cast<int>(view.shape(1)),
+                         static_cast<int>(view.shape(0)), to_f3(direction, "direction"), index))
+                     throw std::invalid_argument(
+                         "the alpha stamp is malformed: an empty grid, or a zero-length "
+                         "direction");
+             },
+             "cell"_a, "size"_a, "alpha"_a, "direction"_a, "index"_a = 0,
+             "shape"_a = "sphere", "falloff"_a = "constant", "strength"_a = 1.0f,
+             "seed"_a = 0u, "mask"_a = nb::none(),
+             "Carve modulated by an (H, W) alpha, projected onto the plane "
+             "perpendicular to `direction`. index 0 carves; a non-zero one deposits. "
+             "The engine decodes no images — a host that has an alpha has already "
+             "loaded the PNG.")
+        .def("repair_report",
+             [](const PyVoxelGrid& g) {
+                 voxel::VoxelGrid::RepairReport r = g.grid().repair_report();
+                 nb::dict out;
+                 out["enclosed_voids"] = r.enclosed_voids;
+                 out["void_cells"] = r.void_cells;
+                 out["largest_void"] = r.largest_void;
+                 out["airtight"] = r.airtight;
+                 return out;
+             },
+             "Non-destructive: what a pre-bake check wants to know without doing the "
+             "repair. A destructive operation whose input is somebody's sculpt should "
+             "be askable before it is answerable.")
+        .def("repair_close_holes",
+             [](PyVoxelGrid& g, int passes, nb::handle mask) {
+                 g.grid().repair_close_holes(passes, borrow_mask(mask));
+             },
+             "passes"_a = 1, "mask"_a = nb::none(),
+             "Seal perforations over the whole grid by the pocket rule. Only ever "
+             "adds cells, so no material is lost.")
+        .def("repair_fill_voids",
+             [](PyVoxelGrid& g, nb::handle mask) {
+                 g.grid().repair_fill_voids(borrow_mask(mask));
+             },
+             "mask"_a = nb::none(),
+             "Fill every empty cell the outside cannot reach, coloured from the shell "
+             "that encloses it. Enclosure is decided by a flood from outside the "
+             "bounds, not guessed at from a local neighbourhood.")
         .def("apply_stroke",
              [](PyVoxelGrid& g, nb::handle samples, const brush::StrokePreset& preset,
                 std::uint8_t index, const std::string& shape, const std::string& falloff,

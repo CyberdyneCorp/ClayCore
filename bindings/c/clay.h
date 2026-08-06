@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 16
+#define CLAY_ABI_MINOR 17
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -1044,6 +1044,75 @@ clay_result clay_layer_apply_stroke(clay_document* doc, clay_layer_id layer,
                                     const clay_stroke_preset* preset, const clay_item* item,
                                     const clay_mask* mask, clay_node_id* out_nodes,
                                     size_t* count);
+
+/* Fill pockets inside the footprint: an empty cell with at least four of its
+ * six face neighbours occupied is inside a cavity rather than beside a
+ * surface, and `passes` iterations reach that many cells deep. A through-hole,
+ * an open face and a wide shallow dent are left alone — smoothing is the verb
+ * for surface irregularity. `passes` must be > 0.
+ *
+ * This began as a morphological closing, which cannot do the job: a ball of
+ * radius r fits INTO a dent wider than r, so a larger element fills less, and
+ * the erosion reaches through from the void behind a one-cell wall and reopens
+ * every hole the dilation just sealed. */
+clay_result clay_voxel_sculpt_fill_cavities(clay_voxel_grid* grid, const int32_t cell[3],
+                                            const clay_brush_params* brush, int32_t passes);
+
+/* Flatten onto the plane AND smooth, from ONE snapshot. Calling flatten then
+ * smooth is not the same thing: the flatten's output would feed the smooth's
+ * neighbourhood, which is what the snapshot discipline exists to prevent. A
+ * zero-length normal is rejected, as it is for flatten. */
+clay_result clay_voxel_sculpt_scrape(clay_voxel_grid* grid, const int32_t cell[3],
+                                     const clay_brush_params* brush, const float normal[3],
+                                     float offset_cells);
+
+/* Drag SURFACE material along a direction, leaving the interior where it was.
+ * That is the difference from grab, which translates every cell in its region:
+ * grab moves a lump, smudge smears a skin. */
+clay_result clay_voxel_sculpt_smudge(clay_voxel_grid* grid, const int32_t cell[3],
+                                     const clay_brush_params* brush,
+                                     const float displacement[3]);
+
+/* Carve modulated by a caller-supplied alpha: `alpha_width * alpha_height`
+ * samples in [0, 1], row-major, projected onto the plane perpendicular to
+ * `direction`. `index` 0 carves and a non-zero one deposits.
+ *
+ * The engine decodes no images and never will at this boundary: a host that
+ * has an alpha has already loaded the PNG, and handing over the samples costs
+ * it nothing while costing the engine no format zoo. */
+clay_result clay_voxel_sculpt_carve_alpha(clay_voxel_grid* grid, const int32_t cell[3],
+                                          const clay_brush_params* brush, const float* alpha,
+                                          int32_t alpha_width, int32_t alpha_height,
+                                          const float direction[3], int32_t index);
+
+/* -- repair ---------------------------------------------------------------- */
+
+/* What a pre-bake check wants to know, without performing the repair: a
+ * destructive operation whose input is somebody's sculpt should be askable
+ * before it is answerable. */
+typedef struct clay_repair_report {
+    uint32_t struct_size; /* = sizeof(clay_repair_report); required */
+    size_t enclosed_voids; /* empty regions the outside cannot reach */
+    size_t void_cells;     /* their total size */
+    size_t largest_void;
+    int32_t airtight; /* non-zero when there are no enclosed voids at all */
+} clay_repair_report;
+
+clay_result clay_voxel_repair_report(const clay_voxel_grid* grid,
+                                     clay_repair_report* out_report);
+
+/* Seal perforations by the same pocket rule the fill-cavities verb uses. Only
+ * ever adds cells, so no material is lost. `passes` must be > 0; `mask` may be
+ * NULL, and where one is given a fully masked cell is left alone — a repair
+ * that ignored freeze would be the one destructive operation here that does. */
+clay_result clay_voxel_repair_close_holes(clay_voxel_grid* grid, int32_t passes,
+                                          const clay_mask* mask);
+
+/* Fill every empty cell the outside cannot reach, coloured from the shell that
+ * encloses it. Reachability is over EMPTY cells by face adjacency, seeded
+ * outside the occupied bounds, so enclosure is decided rather than guessed at
+ * from a local neighbourhood. */
+clay_result clay_voxel_repair_fill_voids(clay_voxel_grid* grid, const clay_mask* mask);
 
 /* -- queries --------------------------------------------------------------- */
 

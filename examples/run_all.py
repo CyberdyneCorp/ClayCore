@@ -30,6 +30,7 @@ EXAMPLES = [
     "12_strokes",
     "13_curves",
     "14_cut",
+    "15_voxel_verbs_and_repair",
 ]
 
 

@@ -266,6 +266,19 @@ blocks.sculpt_smooth((0, 0, 0), 9)
 blocks.sculpt_inflate((0, 0, 0), 9, amount=-1)          # negative = erode
 blocks.sculpt_flatten((0, 0, 0), 9, normal=(0, 1, 0))
 blocks.sculpt_pinch((0, 0, 0), 9)
+# fill-cavities is NOT a morphological closing: a ball of radius r fits INTO a
+# dent wider than r, so a bigger element fills less. The rule is "an empty cell
+# with 4+ occupied face neighbours is inside a pocket".
+blocks.sculpt_fill_cavities((0, 0, 0), 9, passes=2)
+blocks.sculpt_scrape((0, 0, 0), 9, normal=(0, 1, 0))     # flatten + smooth, ONE snapshot
+blocks.sculpt_smudge((0, 0, 0), 9, displacement=(0.2, 0, 0))  # skin, not lump
+blocks.sculpt_carve_alpha((0, 0, 0), 9, alpha=stamp, direction=(0, 1, 0))  # (H,W) floats
+
+# pre-bake repair. The report is non-destructive: a destructive operation whose
+# input is somebody's sculpt should be askable before it is answerable.
+blocks.repair_report()                     # enclosed_voids, void_cells, largest, airtight
+blocks.repair_close_holes(passes=1)        # only ever adds cells
+blocks.repair_fill_voids()                 # enclosure decided by a flood from outside
 # masks freeze a region against any edit: effective strength is
 # strength * (1 - mask). Addressed in WORLD units on their own lattice, so a
 # mask survives a resolution change or a move between representations — the

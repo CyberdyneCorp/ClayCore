@@ -300,6 +300,64 @@ check(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK && occupied != stamp
 
 check(clay_voxel_grid_destroy(grid) != CLAY_OK, "destroying a borrowed layer handle is refused")
 
+// -- the remaining verbs, and repair -----------------------------------------
+
+// On a grid of their own: the checks after this one assert counts on `grid`,
+// and sculpting it here would move the ground under them.
+guard let verbGrid = clay_voxel_grid_create(0.1) else {
+    check(false, "created a grid for the verbs")
+    exit(1)
+}
+var slabRGB: [Float] = [0.6, 0.6, 0.65]
+var slabIndex: Int32 = 0
+check(clay_voxel_palette_add(verbGrid, &slabRGB, &slabIndex) == CLAY_OK, "slab colour")
+var slabLo: [Int32] = [-8, 0, -8]
+var slabHi: [Int32] = [8, 3, 8]
+check(clay_voxel_fill_box(verbGrid, &slabLo, &slabHi, slabIndex) == CLAY_OK, "filled a slab")
+
+var verbAt: [Int32] = [0, 3, 0]
+check(clay_voxel_sculpt_fill_cavities(verbGrid, &verbAt, &brush, 1) == CLAY_OK, "fill cavities")
+check(clay_voxel_sculpt_fill_cavities(verbGrid, &verbAt, &brush, 0) != CLAY_OK,
+      "zero passes is refused")
+check(clay_voxel_sculpt_scrape(verbGrid, &verbAt, &brush, &up, 0) == CLAY_OK, "scrape")
+var smudgeBy: [Float] = [0.2, 0, 0]
+check(clay_voxel_sculpt_smudge(verbGrid, &verbAt, &brush, &smudgeBy) == CLAY_OK, "smudge")
+var alphaStamp = [Float](repeating: 1.0, count: 16)
+check(clay_voxel_sculpt_carve_alpha(verbGrid, &verbAt, &brush, &alphaStamp, 4, 4, &up, 0)
+      == CLAY_OK, "carve with an alpha")
+var verbCells = 0
+check(clay_voxel_occupied_count(verbGrid, &verbCells) == CLAY_OK && verbCells > 0,
+      "the verbs left \(verbCells) cells")
+check(clay_voxel_grid_destroy(verbGrid) == CLAY_OK, "destroyed the verb grid")
+
+// A hollow shell of its own, so the report is about a known geometry rather
+// than about whatever the sculpting above left behind.
+guard let shellGrid = clay_voxel_grid_create(0.1) else {
+    check(false, "created a shell grid")
+    exit(1)
+}
+var shellRGB: [Float] = [0.8, 0.4, 0.2]
+var shellIndex: Int32 = 0
+check(clay_voxel_palette_add(shellGrid, &shellRGB, &shellIndex) == CLAY_OK, "shell colour")
+var shellLo: [Int32] = [-5, -5, -5]
+var shellHi: [Int32] = [5, 5, 5]
+check(clay_voxel_fill_box(shellGrid, &shellLo, &shellHi, shellIndex) == CLAY_OK, "filled a box")
+var holeLo: [Int32] = [-4, -4, -4]
+var holeHi: [Int32] = [4, 4, 4]
+check(clay_voxel_fill_box(shellGrid, &holeLo, &holeHi, 0) == CLAY_OK, "hollowed it")
+
+var repairReport = clay_repair_report()
+repairReport.struct_size = UInt32(MemoryLayout<clay_repair_report>.size)
+check(clay_voxel_repair_report(shellGrid, &repairReport) == CLAY_OK
+      && repairReport.enclosed_voids == 1 && repairReport.airtight == 0,
+      "the shell reports one enclosed void of \(repairReport.void_cells) cells")
+
+check(clay_voxel_repair_close_holes(shellGrid, 1, nil) == CLAY_OK, "close holes")
+check(clay_voxel_repair_fill_voids(shellGrid, nil) == CLAY_OK, "fill voids")
+check(clay_voxel_repair_report(shellGrid, &repairReport) == CLAY_OK
+      && repairReport.airtight != 0, "the shell is airtight now")
+check(clay_voxel_grid_destroy(shellGrid) == CLAY_OK, "destroyed the shell grid")
+
 // -- masks -------------------------------------------------------------------
 
 var mask: OpaquePointer? = nil

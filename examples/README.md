@@ -300,6 +300,50 @@ frustum**. The same cut resolved from a frame ten times further away gives the
 identical solid. A converging cut would have a face that is not flat and a
 result that depended on where the camera stood.
 
+### 15 — voxel verbs and repair
+
+The four sculpting verbs the study catalogues that were missing, plus the
+pre-bake repair pair.
+
+**fill-cavities is not a morphological closing.** Closing was the first attempt
+and the code found two reasons it is wrong: a ball of radius r *fits into* a
+dent wider than r, so a larger structuring element fills **less**; and a
+closing cannot seal a one-cell perforation in a one-cell wall at all, because
+the erosion reaches through from the void behind it. The rule that works is
+that an empty cell with at least four of its six face neighbours occupied is
+inside a pocket. The right-hand pair below is a shallow dent, deliberately left
+alone — that is the line, and smoothing is the verb for the other side of it.
+
+![fill cavities](output/15_fill_cavities.png)
+
+Scrape flattens and smooths from **one** snapshot. Calling the two verbs in
+sequence would let the flatten's output feed the smooth's neighbourhood, which
+is what the snapshot discipline exists to prevent.
+
+![scrape](output/15_scrape.png)
+
+Smudge drags the *skin* and leaves the interior; grab translates every cell in
+its region. Same displacement, different verbs.
+
+![smudge](output/15_smudge.png)
+
+Carve takes a caller-supplied `(H, W)` alpha, projected along a direction. The
+engine decodes no images — a host that has an alpha has already loaded the PNG.
+
+![carve with an alpha](output/15_carve_alpha.png)
+
+Repair reports before it repairs, because a destructive operation whose input
+is somebody's sculpt should be askable before it is answerable. The renders are
+**cut away**, since the whole point is interior geometry: a pierced shell (the
+outside reaches in, so nothing is enclosed), the same shell with its hole
+sealed (one enclosed void now), and the void filled.
+
+![repair](output/15_repair.png)
+
+Enclosure is decided by a flood over *empty* cells from outside the bounds, not
+guessed at from a local neighbourhood — so a box with a wide mouth is left
+alone, which the example asserts.
+
 ## Notes
 
 - **Committed models are budgeted.** `_render.save_model` fails above 400 KiB

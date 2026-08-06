@@ -2210,3 +2210,130 @@ def test_degenerate_cuts_are_refused():
     with pytest.raises(ValueError, match="degenerate"):
         clay.Cut(shape=clay.CutShape.polygon(np.zeros((3, 2), np.float32)), region=doc,
                  **_front())
+
+
+# -- the remaining voxel verbs and repair ------------------------------------
+
+
+def _repair_slab(thickness=4, half=8):
+    g = clay.VoxelGrid(0.1)
+    g.fill_box((-half, 0, -half), (half, thickness - 1, half), g.palette_add("#9aa4b0"))
+    return g
+
+
+def _hollow_box(half=5):
+    g = clay.VoxelGrid(0.1)
+    g.fill_box((-half, -half, -half), (half, half, half), g.palette_add("#c8703a"))
+    g.fill_box((-half + 1, -half + 1, -half + 1), (half - 1, half - 1, half - 1), 0)
+    return g
+
+
+def test_fill_cavities_fills_pockets_not_dents():
+    pocket = _repair_slab()
+    pocket.fill_box((0, 2, 0), (0, 3, 0), 0)      # one across, two deep
+    pocket.sculpt_fill_cavities((0, 2, 0), 9, passes=2, shape="cube")
+    assert pocket.get((0, 2, 0)) != 0
+
+    # Two across and one deep is three occupied face neighbours — below the
+    # threshold, and deliberately so: smoothing is the verb for that.
+    dent = _repair_slab()
+    dent.fill_box((-1, 3, -1), (0, 3, 0), 0)
+    before = dent.occupied_count
+    dent.sculpt_fill_cavities((0, 3, 0), 9, passes=2, shape="cube")
+    assert dent.occupied_count == before
+
+
+def test_scrape_flattens_and_smooths():
+    g = _repair_slab()
+    accent = g.palette_add("#d08a52")
+    for x in range(-5, 6, 2):
+        g.set((x, 4, 0), accent)
+    g.set((0, 5, 0), accent)
+    before = g.occupied_count
+    g.sculpt_scrape((0, 4, 0), 13, normal=(0, 1, 0), shape="cube")
+    assert g.occupied_count < before
+    assert g.get((0, 5, 0)) == 0
+
+
+def test_smudge_moves_the_skin_and_grab_moves_the_lump():
+    def block():
+        g = clay.VoxelGrid(0.1)
+        g.fill_box((-6, -6, -6), (6, 6, 6), g.palette_add("#9aa4b0"))
+        return g
+
+    smudged, grabbed, plain = block(), block(), block()
+    smudged.sculpt_smudge((6, 0, 0), 9, displacement=(0.3, 0, 0), shape="cube")
+    grabbed.sculpt_grab((6, 0, 0), 9, displacement=(0.3, 0, 0), shape="cube")
+    assert smudged.occupied_count != plain.occupied_count
+    # The interior is untouched — that is the distinction from grab.
+    assert all(smudged.get((x, 0, 0)) != 0 for x in range(-6, 4))
+
+
+def test_carve_with_an_alpha():
+    def block():
+        g = clay.VoxelGrid(0.1)
+        g.fill_box((-8, -8, -8), (8, 8, 8), g.palette_add("#9aa4b0"))
+        return g
+
+    alpha = np.zeros((8, 8), np.float32)
+    alpha[:, 4:] = 1.0                       # opaque on one half only
+    g = block()
+    g.sculpt_carve_alpha((0, 0, 0), 11, alpha=alpha, direction=(0, 0, 1), shape="cube")
+    assert g.occupied_count < block().occupied_count
+
+    with pytest.raises(ValueError, match="malformed"):
+        g.sculpt_carve_alpha((0, 0, 0), 11, alpha=np.zeros((0, 0), np.float32),
+                             direction=(0, 0, 1))
+    with pytest.raises(ValueError, match="malformed"):
+        g.sculpt_carve_alpha((0, 0, 0), 11, alpha=alpha, direction=(0, 0, 0))
+
+
+def test_repair_reports_before_it_repairs():
+    g = _hollow_box()
+    before = g.occupied_count
+    report = g.repair_report()
+    assert report["enclosed_voids"] == 1
+    assert report["void_cells"] == 9 ** 3
+    assert report["airtight"] is False
+    assert g.occupied_count == before          # non-destructive
+
+    solid = clay.VoxelGrid(0.1)
+    solid.fill_box((-3, -3, -3), (3, 3, 3), solid.palette_add("#ffffff"))
+    assert solid.repair_report()["airtight"] is True
+
+
+def test_close_holes_then_fill_voids():
+    g = _hollow_box()
+    g.set((5, 0, 0), 0)                        # pierce the wall
+    assert g.repair_report()["enclosed_voids"] == 0   # the outside reaches in
+
+    occupied_before = g.occupied_count
+    g.repair_close_holes(passes=1)
+    assert g.repair_report()["enclosed_voids"] == 1   # sealed in now
+    assert g.occupied_count >= occupied_before        # only ever adds
+
+    shell = g.get((5, 5, 5))
+    g.repair_fill_voids()
+    assert g.repair_report()["airtight"] is True
+    assert g.get((0, 0, 0)) == shell                  # coloured from the shell
+
+
+def test_repair_leaves_an_open_cavity_alone():
+    g = _hollow_box()
+    g.fill_box((5, -3, -3), (5, 3, 3), 0)      # a wide mouth
+    before = g.occupied_count
+    g.repair_fill_voids()
+    assert g.occupied_count == before
+
+
+def test_repair_honours_a_mask():
+    mask = clay.MaskField(0.1)
+    for x in range(-6, 7):
+        for y in range(-6, 7):
+            for z in range(-6, 7):
+                mask.set((x, y, z), 1.0)
+    g = _hollow_box()
+    before = g.occupied_count
+    g.repair_fill_voids(mask=mask)
+    assert g.occupied_count == before
+    assert g.repair_report()["airtight"] is False
