@@ -2,6 +2,8 @@
 
 #include "clay/io/parity_fixture.h"
 
+#include "clay/field/volume.h"
+
 #include <charconv>
 #include <cmath>
 #include <cstdint>
@@ -186,6 +188,32 @@ Document swept_guide() {
     n.curve_tolerance = 0.02f;
     n.profiles = {scene::Profile::circle(0.28f), scene::Profile::circle(0.12f)};
     n.profile_polygons.resize(n.profiles.size());
+    l.sdf->insert(n);
+    return doc;
+}
+
+// A sampled narrow-band volume. Unlike every other case here the tape carries
+// no formula at all — the blob holds a brick index, per-brick bounds and the
+// samples, and the opcode is a lookup. It is the case a hand-written preview is
+// most likely to get subtly wrong, because there are three things to agree on
+// rather than one: the trilinear tap inside a stored brick, the signed lower
+// bound a sample-free brick reports instead, and how the outside-the-box
+// distance folds together with the field at the projected point.
+Document sampled_volume() {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("volume");
+    Node n;
+    n.prim = Prim::volume();
+    n.color = kColorB;
+    // A torus rather than a sphere: it puts sample-free bricks INSIDE the
+    // sampled box as well as outside, so the bound path is exercised on both
+    // sides of the surface.
+    n.volume = std::make_shared<field::FieldVolume>(field::FieldVolume::sample(
+        [](kernel::cfloat3 p) {
+            float q = std::sqrt(p.x * p.x + p.z * p.z) - 0.55f;
+            return std::sqrt(q * q + p.y * p.y) - 0.22f;
+        },
+        math::Aabb(cf3(-1.0f, -0.45f, -1.0f), cf3(1.0f, 0.45f, 1.0f)), 0.06f, 0.2f));
     l.sdf->insert(n);
     return doc;
 }
@@ -459,6 +487,9 @@ std::vector<FixtureCase> kernel_parity_cases() {
     add_case(&cases, "lift_swept_guide",
              "profiles carried along a guide on parallel-transported frames, in the blob",
              swept_guide());
+    add_case(&cases, "sampled_volume",
+             "a narrow-band volume: no formula, a brick index and samples in the blob",
+             sampled_volume());
     add_case(&cases, "stroke_chain", "sphere-swept polyline; the points live in the tape blob",
              stroke_chain());
     add_case(&cases, "curve_spline_chain",
