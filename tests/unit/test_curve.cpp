@@ -302,41 +302,22 @@ TEST_CASE("curve: round trips through the document format") {
 }
 
 // The version on the scene chunk is what lets a node gain a field without a
-// packing trick. This builds an actual minor-1 stream — the layout no build
-// writes any more — and requires the reader to make hard corners of it.
+// packing trick. The stream is WRITTEN at the old layout rather than spliced
+// out of a current one: a splice only stays correct until the next field is
+// added anywhere else in the record, which is exactly what happened when the
+// loft profile list arrived.
 TEST_CASE("curve: an older document loads with hard corners") {
     scene::Document doc;
     scene::Layer& layer = doc.add_sdf_layer("l");
-    // Distinctive coordinates so the point block can be located in the stream
-    // unambiguously rather than by a hard-coded offset that unrelated node
-    // fields would silently invalidate.
-    std::vector<StrokePoint> pts = {pt(cf3(1234.5f, -4321.25f, 777.125f), 0.375f),
-                                    pt(cf3(-1234.5f, 4321.25f, -777.125f), 0.5f)};
-    layer.sdf->insert(curve_node(pts, false, 0.01f));
+    std::vector<StrokePoint> pts = {pt(cf3(1234.5f, -4321.25f, 777.125f), 0.375f,
+                                       StrokePointType::Spline),
+                                    pt(cf3(-1234.5f, 4321.25f, -777.125f), 0.5f,
+                                       StrokePointType::Bezier)};
+    pts[0].out_handle = cf3(1, 2, 3);
+    layer.sdf->insert(curve_node(pts, true, 0.004f));
+
+    std::vector<std::uint8_t> older = scene::serialize_document(doc, 1);
     std::vector<std::uint8_t> current = scene::serialize_document(doc);
-
-    // Locate the first point by its position bytes.
-    std::uint8_t needle[12];
-    std::memcpy(needle, &pts[0].pos, 12);
-    auto found = std::search(current.begin(), current.end(), needle, needle + 12);
-    REQUIRE(found != current.end());
-    REQUIRE(std::search(found + 1, current.end(), needle, needle + 12) == current.end());
-
-    const std::size_t points_at = static_cast<std::size_t>(found - current.begin());
-    REQUIRE(points_at >= 4);  // the u32 count sits immediately before
-    const std::size_t new_block = pts.size() * 41 + sizeof(bool) + sizeof(float);
-    REQUIRE(points_at + new_block <= current.size());
-
-    // Rewrite the block the way minor 1 wrote it: position and radius only,
-    // and no closed flag or tolerance after the points.
-    std::vector<std::uint8_t> older(current.begin(), current.begin() + points_at);
-    for (const StrokePoint& p : pts) {
-        const std::uint8_t* pos = reinterpret_cast<const std::uint8_t*>(&p.pos);
-        older.insert(older.end(), pos, pos + 12);
-        const std::uint8_t* radius = reinterpret_cast<const std::uint8_t*>(&p.radius);
-        older.insert(older.end(), radius, radius + 4);
-    }
-    older.insert(older.end(), current.begin() + points_at + new_block, current.end());
     CHECK(older.size() < current.size());
 
     auto back = scene::deserialize_document(older.data(), older.size(), 1);
@@ -346,13 +327,24 @@ TEST_CASE("curve: an older document loads with hard corners") {
     REQUIRE(n);
     REQUIRE(n->stroke.size() == pts.size());
     for (std::size_t i = 0; i < pts.size(); ++i) {
-        CHECK(n->stroke[i].type == StrokePointType::Hard);
+        // Position and radius survive because minor 1 carried them; the type,
+        // the handles, closed and the tolerance take their defaults, which is
+        // what those points already meant before the fields existed.
         CHECK(n->stroke[i].pos.x == doctest::Approx(pts[i].pos.x));
         CHECK(n->stroke[i].radius == doctest::Approx(pts[i].radius));
+        CHECK(n->stroke[i].type == StrokePointType::Hard);
+        CHECK(n->stroke[i].out_handle.y == doctest::Approx(0.0f));
     }
     CHECK_FALSE(n->stroke_closed);
     CHECK(n->curve_tolerance == doctest::Approx(scene::Node{}.curve_tolerance));
 
-    // ...and the field it evaluates to is exactly what it always was.
-    CHECK(scene::compile_document(*back).blob == scene::compile_document(doc).blob);
+    SUBCASE("the current layout keeps everything") {
+        auto full = scene::deserialize_document(current.data(), current.size());
+        REQUIRE(full.has_value());
+        const scene::Node* m = full->layers[0].sdf->find(full->layers[0].sdf->roots[0]);
+        REQUIRE(m);
+        CHECK(m->stroke[0].type == StrokePointType::Spline);
+        CHECK(m->stroke[0].out_handle.y == doctest::Approx(2.0f));
+        CHECK(m->stroke_closed);
+    }
 }

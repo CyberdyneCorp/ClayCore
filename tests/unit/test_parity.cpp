@@ -152,6 +152,18 @@ std::vector<ParityScene> parity_scenes() {
     }
 
     lift("extrude_hexagon", Prim::extrude(0.5f), Profile::hexagon(0.8f));
+    {   // loft: a circle to a polygon, so both the parametric and the
+        // out-of-line profile paths cross every backend
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node n = item(Prim::loft(0.9f, kernel::ease_smoothstep), cf3(0, 0, 0));
+        n.profiles = {Profile::circle(0.8f), Profile::polygon()};
+        n.profile_polygons = {{},
+                              {cf2(-0.5f, -0.5f), cf2(0.5f, -0.5f), cf2(0.5f, 0.5f),
+                               cf2(-0.5f, 0.5f)}};
+        l.sdf->insert(n);
+        scenes.push_back({"loft_circle_to_polygon", std::move(doc), 3.0f});
+    }
     lift("revolve_polygon", Prim::revolve(1.2f), Profile::polygon(),
          {cf2(-0.3f, -0.3f), cf2(0.3f, -0.3f), cf2(0.3f, 0.3f), cf2(-0.3f, 0.3f)});
     {

@@ -146,6 +146,21 @@ struct Compiler {
             if (!fits) prim_info = kernel::cfi_bound();
         }
 
+        if (prim_is_loft(item.prim.type) && item.profiles.size() >= 2) {
+            // Interpolating two profile fields along Z adds |da - db| over the
+            // depth they are mixed across. The profiles' combined extent
+            // bounds how far apart the two fields can be where it matters, and
+            // the easing curve steepens the ramp by its own maximum slope.
+            math::Aabb local = prim_local_bounds(item);
+            float spread = local.empty() ? 0.0f
+                                         : kernel::clength(kernel::cf2(local.extent().x,
+                                                                       local.extent().y));
+            float depth = kernel::cmax(2.0f * item.prim.params[0], 1e-6f) /
+                          kernel::cmax((float)(item.profiles.size() - 1), 1.0f);
+            prim_info = kernel::cfi_loft(
+                spread, depth, ease_max_slope(static_cast<std::uint8_t>(item.prim.params[1])));
+        }
+
         // domain warps break the metric: fold the chain's Lipschitz factor
         // (shared with the influence bound) so the safe step scale drops
         float deform_l = deformer_lipschitz(item);
@@ -201,6 +216,45 @@ struct Compiler {
             }
             emit_prim(kernel::ctape_stroke, inv_world, scale, round_world, item.color,
                       prim_params, 3, item.deformers, item.repeat);
+        } else if (prim_is_loft(item.prim.type)) {
+            // The profile records go to the blob consecutively, so a polygon
+            // profile's vertices index the blob exactly as they do for a
+            // single-profile lift — carrying N of them needs no new mechanism.
+            // The vertices are written FIRST so their offsets are known by the
+            // time the record that points at them is written.
+            const std::size_t count = item.profiles.size();
+            std::vector<std::size_t> vertex_offsets(count, 0);
+            for (std::size_t i = 0; i < count; ++i) {
+                if (!item.profiles[i].is_polygon()) continue;
+                vertex_offsets[i] = tape.blob.size();
+                const std::vector<kernel::cfloat2>& pts =
+                    i < item.profile_polygons.size() ? item.profile_polygons[i]
+                                                     : std::vector<kernel::cfloat2>{};
+                for (const kernel::cfloat2& v : pts) {
+                    tape.blob.push_back(v.x);
+                    tape.blob.push_back(v.y);
+                }
+            }
+            std::size_t records = tape.blob.size();
+            for (std::size_t i = 0; i < count; ++i) {
+                const Profile& profile = item.profiles[i];
+                tape.blob.push_back(static_cast<float>(profile.type));
+                if (profile.is_polygon()) {
+                    const std::vector<kernel::cfloat2>& pts =
+                        i < item.profile_polygons.size() ? item.profile_polygons[i]
+                                                         : std::vector<kernel::cfloat2>{};
+                    tape.blob.push_back(static_cast<float>(vertex_offsets[i]));
+                    tape.blob.push_back(static_cast<float>(pts.size()));
+                    tape.blob.push_back(0.0f);
+                    tape.blob.push_back(0.0f);
+                } else {
+                    for (int k = 0; k < 4; ++k) tape.blob.push_back(profile.params[k]);
+                }
+            }
+            float prim_params[4] = {item.prim.params[0], item.prim.params[1],
+                                    static_cast<float>(records), static_cast<float>(count)};
+            emit_prim(kernel::ctape_loft, inv_world, scale, round_world, item.color, prim_params,
+                      4, item.deformers, item.repeat);
         } else if (prim_is_lift(item.prim.type)) {
             // [profile type][p0..p3][lift param]; polygon vertices go to the
             // out-of-line pool as consecutive (x, y) pairs

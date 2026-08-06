@@ -52,6 +52,7 @@ enum class PrimType : std::uint8_t {
     TriPrism = kernel::ctape_tri_prism,
     OctahedronCheap = kernel::ctape_octahedron_cheap,
     LNormSphere = kernel::ctape_lnorm_sphere,
+    Loft = kernel::ctape_loft,
 };
 
 // Primitives with no finite extent: an item using one influences the field
@@ -79,12 +80,18 @@ inline bool prim_is_origin_symmetric(PrimType t) {
 
 inline bool prim_is_bound_field(PrimType t) {
     return t == PrimType::Ellipsoid || t == PrimType::TriPrism ||
-           t == PrimType::OctahedronCheap || t == PrimType::LNormSphere;
+           t == PrimType::OctahedronCheap || t == PrimType::LNormSphere ||
+           t == PrimType::Loft;
 }
 
 inline bool prim_is_lift(PrimType t) {
     return t == PrimType::Extrude || t == PrimType::Revolve;
 }
+
+// A loft carries its profiles in the item's profile LIST rather than in the
+// single `profile` field the lifts above use, so no existing document changes
+// meaning.
+inline bool prim_is_loft(PrimType t) { return t == PrimType::Loft; }
 
 enum class Op : std::uint8_t {
     None = 255,  // groups only: children apply inline to the outer chain
@@ -198,6 +205,12 @@ struct Prim {
     // Lifts carry their profile in Node::profile / Node::profile_points; the
     // single prim param is the lift's own (half-depth or axis offset).
     static Prim extrude(float half_depth) { return {PrimType::Extrude, {half_depth}}; }
+    // The profiles themselves live on the Node, in `profiles`: a variable
+    // number of them cannot fit in a fixed parameter block, and a polygon
+    // profile's vertices are already out of line.
+    static Prim loft(float half_depth, std::uint8_t ease = 0) {
+        return {PrimType::Loft, {half_depth, static_cast<float>(ease)}};
+    }
     static Prim revolve(float offset) { return {PrimType::Revolve, {offset}}; }
 
     // -- backfill (add-primitive-backfill) ------------------------------------
@@ -489,6 +502,12 @@ struct Node {
     Repeat repeat;                    // grid / radial array of this item
     Profile profile;                  // Extrude/Revolve prims only
     std::vector<kernel::cfloat2> profile_points;  // polygon profile vertices
+    // PrimType::Loft only: two or more profiles interpolated along Z, each
+    // with its own polygon vertices at the matching index. Sized for any N
+    // from the start, so carrying profiles along a guide later changes where
+    // they are placed rather than how they are stored.
+    std::vector<Profile> profiles;
+    std::vector<std::vector<kernel::cfloat2>> profile_polygons;
 
     // group fields
     std::vector<NodeId> children;

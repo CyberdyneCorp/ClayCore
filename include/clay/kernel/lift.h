@@ -22,12 +22,17 @@ CLAY_FN cfloat2 crevolve_point(cfloat3 p, float o) {
     return cf2(clength(cf2(p.x, p.z)) - o, p.y);
 }
 
-// Extrude-to / loft (bound): interpolate two profile distances along Z with
-// an easing curve, then cap. d2a = bottom profile distance, d2b = top.
-CLAY_FN float cop_extrude_to(float d2a, float d2b, float pz, float h, int ease_type) {
-    float t = cease(ease_type, cclamp((pz + h) / (2.0f * h), 0.0f, 1.0f));
-    float d2 = cmix(d2a, d2b, t);
-    return cop_extrude(d2, pz, h);
+// Extrude-to / loft (BOUND): interpolate two profile distances and cap with
+// the slab. `u` is the already-eased parameter between the two, which the
+// caller computes — with more than two profiles it has to bracket first, and
+// a signature that derived u from pz could only ever serve exactly two.
+//
+// Bound, not exact: a lerp of two distance fields is not a distance field.
+// The interpolation also adds a Lipschitz term proportional to how far apart
+// the two fields are over the depth they are mixed across, which the compiler
+// declares — see cfi_loft.
+CLAY_FN float cop_loft(float d2a, float d2b, float u, float pz, float h) {
+    return cop_extrude(cmix(d2a, d2b, u), pz, h);
 }
 
 CLAY_NS_END

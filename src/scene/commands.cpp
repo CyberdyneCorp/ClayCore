@@ -200,6 +200,9 @@ namespace {
 
 struct Writer {
     std::vector<std::uint8_t> out;
+    // The layout version being written. Mirrors Reader::minor so the two
+    // gates sit side by side and cannot drift apart.
+    std::uint16_t minor = kSceneMinor;
     void bytes(const void* p, std::size_t n) {
         const auto* b = static_cast<const std::uint8_t*>(p);
         out.insert(out.end(), b, b + n);
@@ -303,9 +306,17 @@ void write_node(Writer& w, const Node& n) {
     w.u32(static_cast<std::uint32_t>(n.stroke.size()));
     // Field-wise: StrokePoint gained a uint8 among its floats, so a struct-wise
     // write would put indeterminate padding on the wire.
-    for (const StrokePoint& sp : n.stroke) write_point(w, sp);
-    w.pod(n.stroke_closed);
-    w.pod(n.curve_tolerance);
+    for (const StrokePoint& sp : n.stroke)
+        if (w.minor >= 2) {
+            write_point(w, sp);
+        } else {
+            w.pod(sp.pos);
+            w.pod(sp.radius);
+        }
+    if (w.minor >= 2) {
+        w.pod(n.stroke_closed);
+        w.pod(n.curve_tolerance);
+    }
     // Deformer carries uint8 + floats: field-wise, so padding never reaches
     // the stream (the portability trap struct-wise writes hit on GCC).
     w.pod(n.repeat.type);
@@ -315,6 +326,21 @@ void write_node(Writer& w, const Node& n) {
     for (float f : n.profile.params) w.pod(f);
     w.u32(static_cast<std::uint32_t>(n.profile_points.size()));
     for (const kernel::cfloat2& v : n.profile_points) w.pod(v);
+    // Loft's profile list, written and read only at minor 3 and above. Where
+    // it sits in the record does not matter precisely because both sides are
+    // told the version — which is what versioning the scene chunk bought.
+    if (w.minor >= 3) {
+        w.u32(static_cast<std::uint32_t>(n.profiles.size()));
+        for (std::size_t i = 0; i < n.profiles.size(); ++i) {
+            w.pod(n.profiles[i].type);
+            for (float f : n.profiles[i].params) w.pod(f);
+            const std::vector<kernel::cfloat2>& pts =
+                i < n.profile_polygons.size() ? n.profile_polygons[i]
+                                              : std::vector<kernel::cfloat2>{};
+            w.u32(static_cast<std::uint32_t>(pts.size()));
+            for (const kernel::cfloat2& v : pts) w.pod(v);
+        }
+    }
     w.pod(n.transition.a);
     w.pod(n.transition.b);
     w.pod(n.transition.r0);
@@ -387,6 +413,29 @@ Node read_node(Reader& r) {
     }
     for (std::uint32_t i = 0; i < pc && r.ok; ++i)
         n.profile_points.push_back(r.pod<kernel::cfloat2>());
+    if (r.minor >= 3) {
+        std::uint32_t profile_count = r.u32();
+        if (profile_count > r.remaining / (sizeof(std::uint8_t) + 4 * sizeof(float))) {
+            r.ok = false;
+            return n;
+        }
+        for (std::uint32_t i = 0; i < profile_count && r.ok; ++i) {
+            Profile profile;
+            profile.type = r.pod<std::uint8_t>();
+            for (float& f : profile.params) f = r.pod<float>();
+            n.profiles.push_back(profile);
+            std::uint32_t vc = r.u32();
+            if (vc > r.remaining / sizeof(kernel::cfloat2)) {
+                r.ok = false;
+                return n;
+            }
+            std::vector<kernel::cfloat2> pts;
+            pts.reserve(vc);
+            for (std::uint32_t v = 0; v < vc && r.ok; ++v)
+                pts.push_back(r.pod<kernel::cfloat2>());
+            n.profile_polygons.push_back(std::move(pts));
+        }
+    }
     n.transition.a = r.pod<kernel::cfloat3>();
     n.transition.b = r.pod<kernel::cfloat3>();
     n.transition.r0 = r.pod<float>();
@@ -750,8 +799,9 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
     return cmd;
 }
 
-std::vector<std::uint8_t> serialize_document(const Document& doc) {
+std::vector<std::uint8_t> serialize_document(const Document& doc, std::uint16_t minor) {
     Writer w;
+    w.minor = minor;
     w.u32(static_cast<std::uint32_t>(doc.layers.size()));
     for (const Layer& l : doc.layers) write_layer(w, l);
     return std::move(w.out);

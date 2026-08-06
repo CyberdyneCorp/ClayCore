@@ -81,6 +81,11 @@ enum CTapeOp {
     ctape_tri_prism,         // hx, hy      (bound)
     ctape_octahedron_cheap,  // s           (bound)
     ctape_lnorm_sphere,      // r, n        (bound)
+    // Loft: half-depth, ease, blob offset of the profile records, count.
+    // The records are consecutive CLAY_TAPE_PROFILE_FLOATS blocks in the
+    // blob, so a polygon profile's vertices index the blob exactly as they do
+    // for a single-profile lift — carrying N profiles needs no new mechanism.
+    ctape_loft,              // h, ease, record_offset, count   (bound)
     ctape_prim_count,
 
     // Pushes the far field ("empty space"): standard primitive param block,
@@ -395,6 +400,22 @@ CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
         // exact lift: profile distance merged with the axial slab
         return cop_extrude(ctape_profile_dist(q, blob, cf2(lp.x, lp.y)), lp.z,
                            q[CLAY_TAPE_PROFILE_FLOATS]);
+    }
+    if (op == ctape_loft) {
+        int off = (int)q[2];
+        int count = (int)q[3];
+        float h = q[0];
+        // Bracket among the profiles: they sit evenly along the depth, so the
+        // span index falls straight out of the normalized height.
+        float t = cclamp((lp.z + h) / cmax(2.0f * h, 1e-9f), 0.0f, 1.0f) * (float)(count - 1);
+        int i = (int)t;
+        if (i > count - 2) i = count - 2;
+        if (i < 0) i = 0;
+        float u = cease((int)q[1], t - (float)i);
+        cfloat2 xy = cf2(lp.x, lp.y);
+        float da = ctape_profile_dist(blob + off + i * CLAY_TAPE_PROFILE_FLOATS, blob, xy);
+        float db = ctape_profile_dist(blob + off + (i + 1) * CLAY_TAPE_PROFILE_FLOATS, blob, xy);
+        return cop_loft(da, db, u, lp.z, h);
     }
     if (op == ctape_revolve) {
         // exact lift: evaluate the profile in the (radius - offset, y) plane

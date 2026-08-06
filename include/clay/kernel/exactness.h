@@ -133,4 +133,14 @@ CLAY_FN CFieldInfo cfi_transition(CFieldInfo a, CFieldInfo b, float diff_bound, 
     return CFieldInfo{false, l};
 }
 
+// loft: interpolating two profile fields along the lift axis is the same
+// situation cfi_transition describes, in one dimension instead of three. The
+// mix adds |da - db| / (depth it is mixed across), and an easing curve
+// steepens that by its own maximum slope. Reporting Lipschitz 1 here would
+// let the raymarcher step as if the field were a distance and walk through
+// the surface.
+CLAY_FN CFieldInfo cfi_loft(float profile_spread, float depth, float ease_slope) {
+    return CFieldInfo{false, 1.0f + profile_spread * ease_slope / cmax(depth, 1e-6f)};
+}
+
 CLAY_NS_END

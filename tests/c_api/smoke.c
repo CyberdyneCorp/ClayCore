@@ -293,7 +293,9 @@ static const struct {
             {CLAY_PRIM_ICOSAHEDRON, 1, {0.4f}},
             {CLAY_PRIM_TRI_PRISM, 2, {0.3f, 0.2f}},
             {CLAY_PRIM_OCTAHEDRON_CHEAP, 1, {0.4f}},
-            {CLAY_PRIM_LNORM_SPHERE, 2, {0.4f, 4.0f}}};
+            {CLAY_PRIM_LNORM_SPHERE, 2, {0.4f, 4.0f}},
+            /* half-depth and ease; the profiles are out of line, added below */
+            {CLAY_PRIM_LOFT, 2, {0.5f, 0.0f}}};
 
 #define ZOO_COUNT (sizeof kZoo / sizeof kZoo[0])
 
@@ -308,6 +310,13 @@ static clay_item* zoo_item(size_t i) {
         r = clay_item_set_stroke_points(one, chain, 2);
     if (kZoo[i].prim == CLAY_PRIM_EXTRUDE || kZoo[i].prim == CLAY_PRIM_REVOLVE)
         r = clay_item_set_profile(one, CLAY_PROFILE_HEXAGON, profile, 1);
+    if (kZoo[i].prim == CLAY_PRIM_LOFT) {
+        static const float wide[1] = {0.5f};
+        static const float narrow[1] = {0.15f};
+        r = clay_item_add_loft_profile(one, CLAY_PROFILE_CIRCLE, wide, 1, NULL, 0);
+        if (r == CLAY_OK)
+            r = clay_item_add_loft_profile(one, CLAY_PROFILE_CIRCLE, narrow, 1, NULL, 0);
+    }
     if (r != CLAY_OK) {
         clay_item_destroy(one);
         return NULL;

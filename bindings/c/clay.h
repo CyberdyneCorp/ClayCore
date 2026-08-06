@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 17
+#define CLAY_ABI_MINOR 18
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -100,7 +100,12 @@ typedef enum clay_prim {
     CLAY_PRIM_ICOSAHEDRON = 27,       /* params: r */
     CLAY_PRIM_TRI_PRISM = 28,         /* params: hx hy (bound) */
     CLAY_PRIM_OCTAHEDRON_CHEAP = 29,  /* params: s (bound) */
-    CLAY_PRIM_LNORM_SPHERE = 30       /* params: r n, n >= 2 (bound) */
+    CLAY_PRIM_LNORM_SPHERE = 30,      /* params: r n, n >= 2 (bound) */
+    /* Loft: params are the half-depth and the easing curve. The PROFILES are
+     * not parameters — a variable number of them cannot fit in a fixed block —
+     * so they are added with clay_item_add_loft_profile, two or more of them,
+     * and interpolated evenly along Z. (bound) */
+    CLAY_PRIM_LOFT = 31
 } clay_prim;
 
 /* Combine ops. For the extended modes (groove..replace) blend_k is the
@@ -393,6 +398,18 @@ clay_result clay_item_set_repeat_radial(clay_item* item, int32_t count, float of
 clay_result clay_item_set_profile(clay_item* item, int32_t profile, const float* params,
                                   size_t param_count);
 clay_result clay_item_set_profile_polygon(clay_item* item, const float* xy, size_t count);
+
+/* Append a profile to a CLAY_PRIM_LOFT item. Two or more are required; they
+ * are interpolated evenly along Z in the order added. `params` is the
+ * profile's own parameter block as clay_item_set_profile takes it, and
+ * `polygon_xy` (count*2 floats, or NULL) supplies the vertices when the
+ * profile is CLAY_PROFILE_POLYGON.
+ *
+ * The profiles are not item parameters: a variable number of them cannot fit
+ * in a fixed block, and a polygon's vertices are already out of line. */
+clay_result clay_item_add_loft_profile(clay_item* item, int32_t profile, const float* params,
+                                       size_t param_count, const float* polygon_xy,
+                                       size_t polygon_count);
 
 /* Point chain of a CLAY_PRIM_STROKE item: count points of x, y, z, radius,
  * replacing any previous chain. One point is a sphere and none contributes

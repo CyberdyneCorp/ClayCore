@@ -24,6 +24,11 @@
 // AGAINST the minor rather than assuming the current layout, so the next field
 // a node gains needs no packing trick: minor 0 and 1 documents read their
 // points as hard corners, which is what they already meant.
+//
+// Minor 3 adds a loft's profile list to a node. It sits in the middle of the
+// node record rather than at the end, which is fine precisely because the
+// reader is told the version — that is the whole point of decoding against the
+// minor instead of guessing from the bytes.
 
 #include <map>
 #include <optional>
@@ -39,7 +44,7 @@ namespace clay {
 namespace io {
 
 inline constexpr std::uint16_t kClaySpaceMajor = 1;
-inline constexpr std::uint16_t kClaySpaceMinor = 2;
+inline constexpr std::uint16_t kClaySpaceMinor = 3;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).

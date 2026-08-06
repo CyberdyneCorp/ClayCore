@@ -298,6 +298,14 @@ blocks.apply_stroke(samples, brush, blocks.palette_add("#cc7744"))
 body.apply_stroke(samples, brush, clay.Sphere(r=1.0), mask=freeze)  # one undo step
 clay.StrokePreset.deserialize(brush.serialize())   # versioned: newer is refused
 
+# loft: two or more profiles interpolated along Z, evenly spaced. Three or more
+# are BRACKETED, so wide-narrow-wide gives a waist rather than a straight
+# taper. A loft is a BOUND, and its Lipschitz is not 1 — interpolating very
+# different profiles over a shallow depth makes the field change fast along the
+# axis, so the document's safe step scale drops and the raymarcher slows down.
+body.add(clay.Loft([clay.Profile.circle(r=1.0), clay.Profile.polygon(pts)],
+                   half_depth=1.0, ease=3))
+
 # curves: a stroke point carries a type saying how it joins the next, so a
 # stroke is a curve whose points are all hard corners. Typed points tessellate
 # into the same segment chain at compile time, so a curve costs nothing to

@@ -73,8 +73,9 @@ static_assert(CLAY_PRIM_TRI_PRISM == static_cast<int>(scene::PrimType::TriPrism)
 static_assert(CLAY_PRIM_OCTAHEDRON_CHEAP ==
               static_cast<int>(scene::PrimType::OctahedronCheap));
 static_assert(CLAY_PRIM_LNORM_SPHERE == static_cast<int>(scene::PrimType::LNormSphere));
+static_assert(CLAY_PRIM_LOFT == static_cast<int>(scene::PrimType::Loft));
 // The tape's own count: a new opcode without a clay_prim entry fails here.
-static_assert(CLAY_PRIM_LNORM_SPHERE + 1 == kernel::ctape_prim_count);
+static_assert(CLAY_PRIM_LOFT + 1 == kernel::ctape_prim_count);
 
 static_assert(CLAY_OP_ADD == static_cast<int>(scene::Op::Add));
 static_assert(CLAY_OP_SUBTRACT == static_cast<int>(scene::Op::Subtract));
@@ -192,6 +193,7 @@ bool prim_is_known(std::int32_t v) {
         case scene::PrimType::Icosahedron:
         case scene::PrimType::TriPrism:
         case scene::PrimType::OctahedronCheap:
+        case scene::PrimType::Loft:
         case scene::PrimType::LNormSphere: return true;
     }
     return false;
@@ -301,8 +303,10 @@ constexpr std::size_t kBrushParamsOriginal =
 // This is what the clay_prim comments document and what clay_item_create
 // requires: a stroke's points and a lift's profile are out-of-line, so those
 // entries count only the lift's own parameter.
+// Loft takes 2: the half-depth and the ease. Its profiles are added
+// separately, since a fixed block cannot carry a variable number of them.
 constexpr int kPrimParams[] = {1, 3, 4, 4, 2, 7, 2, 3, 3, 3, 3, 1, 2, 1, 0, 1,
-                               1, 4, 3, 3, 3, 4, 2, 3, 3, 1, 1, 1, 2, 1, 2};
+                               1, 4, 3, 3, 3, 4, 2, 3, 3, 1, 1, 1, 2, 1, 2, 2};
 static_assert(sizeof kPrimParams / sizeof kPrimParams[0] == kernel::ctape_prim_count);
 
 constexpr int kProfileParams[] = {1, 2, 1, 1, 3, 2, 0};  // polygon: vertices instead
@@ -587,7 +591,7 @@ clay_result make_deformer(std::int32_t kind, const float* p, scene::Deformer* ou
 clay_result validate_item_desc(const clay_item_desc& d) {
     if (!prim_is_known(d.prim)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown primitive type");
     scene::PrimType prim = static_cast<scene::PrimType>(d.prim);
-    if (prim == scene::PrimType::Stroke || scene::prim_is_lift(prim))
+    if (prim == scene::PrimType::Stroke || scene::prim_is_lift(prim) || scene::prim_is_loft(prim))
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "primitive needs out-of-line data");
     if (!op_is_known(d.op)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown combine op");
     if (scene::op_is_transition(static_cast<scene::Op>(d.op)))
@@ -691,6 +695,13 @@ clay_result insert_node(clay_document* doc, clay_layer_id layer_id, scene::Node 
 // The transition cross-check the Python bindings do in Layer.add: a morph op
 // needs parameters, of its own kind, and no other op accepts them.
 clay_result validate_item(const clay_item& item) {
+    // A loft with fewer than two profiles has nothing to interpolate between.
+    // Refused here rather than compiled into a shape the caller did not ask
+    // for — the tape would read a record that was never written.
+    if (scene::prim_is_loft(item.node.prim.type) && item.node.profiles.size() < 2)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "a loft needs two or more profiles: add them with "
+                    "clay_item_add_loft_profile");
     bool morph = scene::op_is_transition(item.node.op);
     if (morph && !item.has_transition)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "transition ops need transition parameters");
@@ -1431,6 +1442,37 @@ clay_result clay_item_set_profile(clay_item* item, int32_t profile, const float*
     for (size_t i = 0; i < param_count; ++i) p.params[i] = params[i];
     item->node.profile = p;
     item->node.profile_points.clear();
+    return CLAY_OK;
+}
+
+clay_result clay_item_add_loft_profile(clay_item* item, int32_t profile, const float* params,
+                                       size_t param_count, const float* polygon_xy,
+                                       size_t polygon_count) {
+    if (!item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item");
+    if (!scene::prim_is_loft(item->node.prim.type))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "loft profiles need CLAY_PRIM_LOFT");
+    if (profile < 0 || profile > CLAY_PROFILE_POLYGON)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown profile kind");
+
+    scene::Profile p{static_cast<std::uint8_t>(profile), {}};
+    std::vector<kernel::cfloat2> vertices;
+    if (profile == CLAY_PROFILE_POLYGON) {
+        // Three vertices is the least that bounds an area; fewer describes no
+        // cross-section, which is a caller mistake rather than an empty one.
+        if (polygon_count < 3 || !polygon_xy)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "a polygon profile needs 3+ vertices");
+        clay_result r = check_batch("polygon vertices", polygon_count);
+        if (r != CLAY_OK) return r;
+        vertices.reserve(polygon_count);
+        for (size_t i = 0; i < polygon_count; ++i)
+            vertices.push_back(kernel::cf2(polygon_xy[i * 2], polygon_xy[i * 2 + 1]));
+    } else {
+        clay_result r = check_params("profile", params, param_count, kProfileParams[profile]);
+        if (r != CLAY_OK) return r;
+        for (size_t i = 0; i < param_count; ++i) p.params[i] = params[i];
+    }
+    item->node.profiles.push_back(p);
+    item->node.profile_polygons.push_back(std::move(vertices));
     return CLAY_OK;
 }
 
