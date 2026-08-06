@@ -40,9 +40,15 @@ git push origin v1.0.0
 
 `.github/workflows/release.yml` then re-runs the checklist on Linux, builds
 wheels for macOS/Linux/Windows via cibuildwheel, builds the
-`claycore.xcframework` with its SwiftPM checksum, and opens a **draft**
-GitHub release with everything attached. Drafts are deliberate: review the
-artifacts before publishing.
+`claycore.xcframework` with its SwiftPM checksum, packages
+`claycore-kernels.zip` (the kernel headers plus the host parity fixture — see
+`docs/06-host-gpu-previews.md`), and opens a **draft** GitHub release with
+everything attached. Drafts are deliberate: review the artifacts before
+publishing.
+
+A host consuming the kernels artifact pins it by release tag, so a release
+that changes kernel math changes the fixture too: regenerate and re-run it on
+the host side rather than assuming the previous one still passes.
 
 ## Open items before v1.0
 

@@ -31,6 +31,16 @@ jobs:
       - name: C ABI FFI check (hygiene + ctypes)
         if: matrix.os == 'ubuntu-latest'
         run: python3 tools/check_c_abi.py build/cpu-only/libclay_shared.so
+      # the artifact a host GPU preview consumes: kernel headers verbatim plus
+      # the parity fixture it asserts against (docs/06-host-gpu-previews.md)
+      - name: Package the kernels artifact
+        if: matrix.os == 'ubuntu-latest'
+        run: python3 tools/package_kernels.py --clay build/cpu-only/clay
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          name: claycore-kernels
+          path: dist/claycore-kernels
       - name: Validate GLB with the official Khronos glTF validator
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -48,6 +58,10 @@ jobs:
         run: cmake --build --preset metal
       - name: Test (Metal parity runs when the runner exposes a Metal device)
         run: ctest --test-dir build/metal --output-on-failure -C Release
+      # the only runner that can compile the headers as REAL MSL — including
+      # the worked example the kernels artifact ships to host apps
+      - name: Kernel dialect (native Metal profile)
+        run: python3 tools/check_kernel_dialect.py
 
   sanitizers:
     name: ASan + UBSan (ubuntu)
@@ -68,8 +82,15 @@ jobs:
       - uses: actions/checkout@v4
       - name: Module layering
         run: python3 tools/check_layering.py
+      # includes the emulated Metal profile: the kernel headers are published
+      # for host shaders, so an MSL-only break must fail here and not wait for
+      # the macOS job
       - name: Kernel dialect
         run: python3 tools/check_kernel_dialect.py --compiler g++
+      - name: Kernels artifact (headers copy out and compile standalone)
+        run: |
+          python3 tools/package_kernels.py
+          python3 tools/package_kernels.py --verify
       - name: License manifest
         run: python3 tools/check_licenses.py
       # no build here, so the gate reads pyclay's surface out of its nanobind

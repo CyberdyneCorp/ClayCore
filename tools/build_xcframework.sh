@@ -6,6 +6,12 @@
 # backend is wired per-app during Xcode integration (the app links
 # Metal.framework and enables CLAY_BACKEND_METAL in its build); the C ABI
 # and results are identical either way — backends change speed, not values.
+#
+# Each slice's Headers also carries the kernel dialect under clay/kernel/, so
+# an app drawing its own GPU preview compiles ClayCore's distance functions
+# rather than copying them (build-packaging: published kernels artifact). The
+# module map still declares only clay.h — the kernel headers are shader source
+# for the Metal compiler, not part of the Swift module.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -16,6 +22,8 @@ rm -rf "$DIST/claycore.xcframework" "$STAGE"
 mkdir -p "$DIST" "$STAGE/headers"
 
 cp bindings/c/clay.h "$STAGE/headers/"
+mkdir -p "$STAGE/headers/clay/kernel"
+cp include/clay/kernel/*.h "$STAGE/headers/clay/kernel/"
 cat > "$STAGE/headers/module.modulemap" <<'EOF'
 module claycore {
     header "clay.h"

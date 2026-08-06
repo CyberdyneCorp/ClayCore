@@ -93,10 +93,11 @@ structural gap in it was `add-curve-objects`, which landed 2026-08-06.
 | ~~`add-voxel-verbs`~~ **landed 2026-08-06** | fill-cavities, scrape (flatten+smooth), smudge, carve-with-alpha — the verbs our four are missing against their voxel set. |
 | ~~`add-voxel-repair`~~ **landed 2026-08-06** | Close holes and fill interior voids, so a voxel layer can be made airtight before meshing. Lower priority than it sounds: SDF layers are watertight by construction, and the mesh importer's winding-number sign tolerates small holes — this is only for voxel layers that were sculpted into a non-manifold state. Their "Close Invisible Holes + Fill Voids" is the standard pre-bake step. |
 | ~~`add-mesh-to-field-import`~~ **landed 2026-08-06** | Triangle mesh → field, by BVH distance and generalized winding number for sign. Neither binding could LOAD a mesh, only save one, so the import had nothing to import until this row added it. |
+| `add-tape-abi-export` | The compiled tape (instrs / params / blob) across the C ABI, so a host can upload a **live** document to its own GPU. `add-host-kernel-package` did the hard half — the headers ship, so the host-side evaluator is `ctape_eval` compiled from our own source, and the parity fixture already proves it agrees. What is left is three buffers and their lifetime across the boundary. Blocks WYSIWYG preview-vs-bake for any host that draws its own frames. |
 
 ## Phase 2 — the plan for what is left
 
-Six rows, in two tracks. Written 2026-08-06 after checking the tree rather
+Seven rows, in two tracks. Written 2026-08-06 after checking the tree rather
 than the table: two things are true that the one-line summaries hid.
 
 **Finding 1: three rows share a prerequisite that does not exist.** There is no
@@ -137,6 +138,7 @@ from outside, which the engine did not have.
 | ~~`add-voxel-repair`~~ **landed 2026-08-06** | Report (non-destructive), close holes, fill voids, all mask-gated. Enclosure is decided by a flood over **empty** cells from outside the bounds — `flood_select` walks occupied cells from a seed, which is a different question. |
 | ~~`add-loft-opcode`~~ **landed 2026-08-06** | N profiles along Z, not two — nothing about the opcode wanted the limit, and taking N now means the guide row changes where profiles are *placed* rather than how they are *stored*. Three or more are bracketed, so wide-narrow-wide gives a waist. The Lipschitz warning was real: a loft's safe step scale falls from 0.53 to 0.10 as the depth shrinks, and the example fails if that ordering stops holding. `cop_extrude_to` became `cop_loft`, taking the interpolation parameter instead of deriving it, because a signature that derived it could only ever serve exactly two. |
 | ~~`add-swept-n`~~ **landed 2026-08-06** | Profiles carried along a guide, with **parallel-transported** frames computed when the item compiles — a Frenet frame flips at an inflection and is undefined where the guide is straight, and transport is sequential so it cannot be per-sample. Profiles distribute by arc length; the ends are the profile itself, flat, because a profile need not be a circle. The Lipschitz has two terms — curvature `R/(R-r)` **and** the profile lerp — and leaving the second out made a straight tapering sweep report Lipschitz 1, the exact defect the spec warns against. Curvature is estimated by circumradius, not turn-angle-over-arc, which is fooled by tessellation density. Closed guides are out: transport around a loop does not close the seam, and that is refused rather than ignored. |
+| `add-tape-abi-export` **(new row)** | Three buffers across the C ABI, and no new math: `add-host-kernel-package` shipped the headers, so the host-side evaluator is `ctape_eval` compiled from our own source and the parity fixture already proves it agrees. What will bite is **lifetime, not content**. The tape is recompiled on every edit (Finding 2 above), so the boundary has to say who owns the buffers and when a handle a host is mid-upload with goes stale — an opaque handle with an explicit release, not a pointer into a `std::vector` that the next edit reallocates. Second: a host that uploads instrs/params/blob must also get `safe_step_scale` and the bounds, or its raymarcher oversteps a tape ours would have stepped conservatively. |
 
 ### Track B — gated on a prerequisite
 
@@ -160,9 +162,14 @@ first, designed with all three consumers in view, then mesh import, then relax.
 3. ~~**`add-sampled-fields` → `add-mesh-to-field-import` → `add-sdf-relax`**~~
    **done 2026-08-06.** The prerequisite was designed with all three consumers
    in view, and it held: neither later row needed it changed.
+4. **`add-tape-abi-export`** — the one row of this phase still open, and freely
+   orderable because it adds no math. Worth pulling forward the moment a host
+   wants WYSIWYG preview-vs-bake, since the half that used to make it expensive
+   — a host-side evaluator, and a way to trust it — landed with
+   `add-host-kernel-package`.
 
-**Phase 2 is complete.** The gallery went from 15 examples to 21, which is what
-this section said done would look like.
+**Every Phase 2 row except `add-tape-abi-export` is complete.** The gallery went
+from 15 examples to 21, which is what this section said done would look like.
 
 **If kitbashing or scan cleanup is the near-term product need, Track B jumps
 the queue and Track A waits.** That is the only reason to reorder, and it is a
@@ -180,7 +187,7 @@ tests. Concretely, per row:
 - **A numbered example** in `examples/`, run by `examples/run_all.py` in CI, that
   **renders what it does and asserts what it claims** — the existing ones raise
   `SystemExit` when their own claim stops holding, and that is what makes them
-  tests rather than screenshots. Phase 2 takes the gallery from 15 to 21.
+  tests rather than screenshots. Phase 2 takes the gallery from 15 to 22.
 - **Swift smoke coverage** wherever the C ABI grows, run on macOS and in the
   simulator.
 - **Four presets green** (release, metal, opencl, asan-ubsan) plus

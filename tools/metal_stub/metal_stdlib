@@ -1,0 +1,91 @@
+// Stand-in <metal_stdlib> for the EMULATED Metal profile of
+// tools/check_kernel_dialect.py — the same host-emulation trick the CUDA
+// profile uses, and for the same reason: without it, a break in the Metal
+// branch of shim.h waits for an Apple runner to be noticed, while every other
+// backend is gated on every push.
+//
+// It provides what the kernel dialect actually asks of MSL — the float2/3/4
+// vector types with their arithmetic, and the `metal::` scalar builtins —
+// and nothing else. It is NOT a Metal implementation and must never be
+// compiled into anything shipped: `xcrun metal` (the macOS profile of the
+// same script) remains the authority on what real MSL accepts, including the
+// address-space qualifiers this file defines away.
+
+#pragma once
+
+#include <cmath>
+#include <cstdint>
+
+// MSL address spaces have no C++ spelling. Only a real metal compile can
+// check them, so the emulated profile erases them.
+#define thread
+#define device
+#define threadgroup
+
+#define CLAY_METAL_STUB_VEC_OPS(V)                                                       \
+    inline V operator+(V a, V b) { return V::from(a, b, [](float x, float y) { return x + y; }); } \
+    inline V operator-(V a, V b) { return V::from(a, b, [](float x, float y) { return x - y; }); } \
+    inline V operator*(V a, V b) { return V::from(a, b, [](float x, float y) { return x * y; }); } \
+    inline V operator/(V a, V b) { return V::from(a, b, [](float x, float y) { return x / y; }); } \
+    inline V operator*(V a, float s) { return a * V(s); }                                 \
+    inline V operator*(float s, V a) { return V(s) * a; }                                 \
+    inline V operator/(V a, float s) { return a / V(s); }                                 \
+    inline V operator-(V a) { return V(0.0f) - a; }
+
+struct float2 {
+    float x = 0.0f, y = 0.0f;
+    float2() = default;
+    explicit float2(float s) : x(s), y(s) {}
+    float2(float x_, float y_) : x(x_), y(y_) {}
+    template <typename F>
+    static float2 from(float2 a, float2 b, F f) {
+        return float2(f(a.x, b.x), f(a.y, b.y));
+    }
+};
+
+struct float3 {
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+    float3() = default;
+    explicit float3(float s) : x(s), y(s), z(s) {}
+    float3(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
+    template <typename F>
+    static float3 from(float3 a, float3 b, F f) {
+        return float3(f(a.x, b.x), f(a.y, b.y), f(a.z, b.z));
+    }
+};
+
+struct float4 {
+    float x = 0.0f, y = 0.0f, z = 0.0f, w = 0.0f;
+    float4() = default;
+    explicit float4(float s) : x(s), y(s), z(s), w(s) {}
+    float4(float x_, float y_, float z_, float w_) : x(x_), y(y_), z(z_), w(w_) {}
+    template <typename F>
+    static float4 from(float4 a, float4 b, F f) {
+        return float4(f(a.x, b.x), f(a.y, b.y), f(a.z, b.z), f(a.w, b.w));
+    }
+};
+
+CLAY_METAL_STUB_VEC_OPS(float2)
+CLAY_METAL_STUB_VEC_OPS(float3)
+CLAY_METAL_STUB_VEC_OPS(float4)
+
+namespace metal {
+
+inline float fmin(float a, float b) { return a < b ? a : b; }
+inline float fmax(float a, float b) { return a > b ? a : b; }
+inline float clamp(float v, float lo, float hi) { return fmin(fmax(v, lo), hi); }
+inline float fabs(float v) { return ::fabsf(v); }
+inline float sign(float v) { return (v > 0.0f) ? 1.0f : ((v < 0.0f) ? -1.0f : 0.0f); }
+inline float floor(float v) { return ::floorf(v); }
+inline float round(float v) { return ::roundf(v); }
+inline float sqrt(float v) { return ::sqrtf(v); }
+inline float sin(float v) { return ::sinf(v); }
+inline float cos(float v) { return ::cosf(v); }
+inline float tan(float v) { return ::tanf(v); }
+inline float acos(float v) { return ::acosf(v); }
+inline float atan2(float y, float x) { return ::atan2f(y, x); }
+inline float pow(float b, float e) { return ::powf(b, e); }
+inline float exp2(float v) { return ::exp2f(v); }
+inline float fmod(float a, float b) { return ::fmodf(a, b); }
+
+}  // namespace metal

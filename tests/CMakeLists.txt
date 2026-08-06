@@ -13,6 +13,7 @@ add_executable(clay_unit_tests
   unit/test_extended_blends.cpp
   unit/test_commands.cpp
   unit/test_parity.cpp
+  unit/test_parity_fixture.cpp
   unit/test_brick.cpp
   unit/test_voxel.cpp
   unit/test_mask.cpp
