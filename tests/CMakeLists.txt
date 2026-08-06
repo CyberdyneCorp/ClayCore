@@ -15,6 +15,7 @@ add_executable(clay_unit_tests
   unit/test_parity.cpp
   unit/test_brick.cpp
   unit/test_voxel.cpp
+  unit/test_c_voxel_undo.cpp
   unit/test_mask.cpp
   unit/test_stroke_engine.cpp
   unit/test_mesh.cpp

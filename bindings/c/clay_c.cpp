@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstring>
 #include <map>
+#include <unordered_map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -647,6 +648,30 @@ struct clay_document {
     // std::map keeps the addresses stable as more layers arrive.
     std::map<clay_layer_id, clay_voxel_grid> voxel_handles;
     std::map<clay_layer_id, clay_mask> mask_handles;
+
+    // -- interleaved undo journal (openspec add-voxel-undo) ------------------
+    // scene::UndoStack stays voxel-agnostic by the layering rule, so the
+    // document interleaves its steps with voxel cell diffs here: each journal
+    // step is one scene UndoStack step, one batch of voxel diffs, or (inside
+    // a group) both — the two touch disjoint state, so order within a step
+    // does not matter. Invariant: the number of steps with `scene` set equals
+    // undo->undo_depth() (and likewise on the redo side), so popping the
+    // journal and delegating scene steps can never drift.
+    struct VoxelDiff {
+        clay_layer_id layer = 0;
+        std::vector<voxel::VoxelCoord> coords;
+        std::vector<std::uint8_t> before;
+        std::vector<std::uint8_t> after;
+    };
+    struct UndoStep {
+        bool scene = false;
+        std::vector<VoxelDiff> voxels;  // one entry per touched layer
+        bool empty() const { return !scene && voxels.empty(); }
+    };
+    std::vector<UndoStep> undo_journal;
+    std::vector<UndoStep> redo_journal;
+    bool journal_grouping = false;
+    UndoStep open_group;  // accumulates between begin/end_undo_group
 };
 
 struct clay_mesh {
@@ -1029,10 +1054,148 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
                         std::string("layer ") + std::to_string(target) + " is " +
                             (l->ghost ? "ghosted" : "locked") + " and takes no edits");
     }
-    bool ok = doc->undo ? doc->undo->perform(doc->doc.document, cmd)
-                        : static_cast<bool>(scene::apply(doc->doc.document, cmd));
-    if (!ok) return fail(CLAY_ERROR_NOT_FOUND, what);
+    if (!doc->undo) {
+        if (!scene::apply(doc->doc.document, cmd)) return fail(CLAY_ERROR_NOT_FOUND, what);
+        return CLAY_OK;
+    }
+    std::size_t depth_before = doc->undo->undo_depth();
+    if (!doc->undo->perform(doc->doc.document, cmd)) return fail(CLAY_ERROR_NOT_FOUND, what);
+    // Mirror the stack's step accounting into the journal: inside a group the
+    // open step absorbs it; a coalesced command (AppendStroke) leaves the
+    // depth unchanged and the journal top already names that scene step.
+    doc->redo_journal.clear();
+    if (doc->journal_grouping) {
+        doc->open_group.scene = true;
+    } else if (doc->undo->undo_depth() > depth_before) {
+        clay_document::UndoStep step;
+        step.scene = true;
+        doc->undo_journal.push_back(std::move(step));
+    }
     return CLAY_OK;
+}
+
+// Journal-aware grouping, shared by the public bracket entry points and the
+// internal ones (clay_layer_apply_stroke): every group must open and close
+// through here or the journal drifts from the scene stack.
+void journal_begin_group(clay_document* doc) {
+    doc->undo->begin_group();
+    doc->journal_grouping = true;
+    doc->open_group = clay_document::UndoStep{};
+}
+
+void journal_end_group(clay_document* doc) {
+    doc->undo->end_group();
+    doc->journal_grouping = false;
+    if (!doc->open_group.empty()) {
+        doc->undo_journal.push_back(std::move(doc->open_group));
+        doc->redo_journal.clear();
+        doc->undo->clear_redo();
+    }
+    doc->open_group = clay_document::UndoStep{};
+}
+
+// Record one voxel diff as (or into) an undo step. The scene stack's redo is
+// cleared alongside the journal's: a fresh edit of EITHER kind invalidates
+// redo of both, or a later scene redo would replay against the wrong journal.
+void record_voxel_step(clay_document* doc, clay_document::VoxelDiff diff) {
+    if (diff.coords.empty()) return;
+    doc->redo_journal.clear();
+    doc->undo->clear_redo();
+    std::vector<clay_document::VoxelDiff>* target = nullptr;
+    if (doc->journal_grouping) {
+        target = &doc->open_group.voxels;
+    } else {
+        doc->undo_journal.push_back(clay_document::UndoStep{});
+        target = &doc->undo_journal.back().voxels;
+    }
+    for (clay_document::VoxelDiff& existing : *target) {
+        if (existing.layer != diff.layer) continue;
+        // Merge (grouped drags): first-touch `before` wins, latest `after`.
+        std::unordered_map<voxel::VoxelCoord, std::size_t, voxel::VoxelCoordHash> where;
+        where.reserve(existing.coords.size());
+        for (std::size_t i = 0; i < existing.coords.size(); ++i) where[existing.coords[i]] = i;
+        for (std::size_t i = 0; i < diff.coords.size(); ++i) {
+            auto found = where.find(diff.coords[i]);
+            if (found == where.end()) {
+                existing.coords.push_back(diff.coords[i]);
+                existing.before.push_back(diff.before[i]);
+                existing.after.push_back(diff.after[i]);
+            } else {
+                existing.after[found->second] = diff.after[i];
+            }
+        }
+        return;
+    }
+    target->push_back(std::move(diff));
+}
+
+// Apply one side of a step's voxel diffs to the document's grids.
+void apply_voxel_diffs(clay_document* doc, const clay_document::UndoStep& step, bool to_before) {
+    for (const clay_document::VoxelDiff& diff : step.voxels) {
+        auto grid = doc->doc.voxel_layers.find(diff.layer);
+        if (grid == doc->doc.voxel_layers.end()) continue;
+        const std::vector<std::uint8_t>& slots = to_before ? diff.before : diff.after;
+        for (std::size_t i = 0; i < diff.coords.size(); ++i)
+            grid->second.set(diff.coords[i], slots[i]);
+    }
+}
+
+// -- voxel edit capture -------------------------------------------------------
+// Every mutating voxel entry point below wraps its engine call with a region
+// capture: snapshot the cells the verb can write (writes are bounded by the
+// brush footprint — pads in sculpt.cpp are read-side), let it run, and journal
+// the cells that changed. Standalone grids and undo-disabled documents skip
+// straight to the engine call. Repair passes stay direct: they are grid-wide
+// and out of the add-voxel-undo scope.
+
+std::vector<voxel::VoxelCoord> region_box(voxel::VoxelCoord a, voxel::VoxelCoord b) {
+    voxel::VoxelCoord lo{std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z)};
+    voxel::VoxelCoord hi{std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z)};
+    std::vector<voxel::VoxelCoord> out;
+    out.reserve(static_cast<std::size_t>(hi.x - lo.x + 1) * (hi.y - lo.y + 1) *
+                (hi.z - lo.z + 1));
+    for (std::int32_t z = lo.z; z <= hi.z; ++z)
+        for (std::int32_t y = lo.y; y <= hi.y; ++y)
+            for (std::int32_t x = lo.x; x <= hi.x; ++x) out.push_back({x, y, z});
+    return out;
+}
+
+// The size-n footprint spans -((n-1)/2) ..= n/2 per axis (grid.h).
+std::vector<voxel::VoxelCoord> region_footprint(voxel::VoxelCoord c, int size) {
+    std::int32_t lo = -((size - 1) / 2), hi = size / 2;
+    return region_box({c.x + lo, c.y + lo, c.z + lo}, {c.x + hi, c.y + hi, c.z + hi});
+}
+
+std::vector<voxel::VoxelCoord> region_mirrors(voxel::VoxelCoord c, std::uint8_t axes) {
+    std::vector<voxel::VoxelCoord> out;
+    for (std::uint8_t combo = 0; combo < 8; ++combo) {
+        if ((combo & ~axes) != 0) continue;
+        out.push_back(voxel::VoxelGrid::mirrored(c, combo));
+    }
+    return out;
+}
+
+template <typename Fn>
+void voxel_edit_with_undo(clay_voxel_grid* grid, voxel::VoxelGrid* g,
+                          std::vector<voxel::VoxelCoord> region, Fn&& mutate) {
+    clay_document* doc = grid ? grid->doc : nullptr;
+    if (!doc || !doc->undo) {
+        mutate();
+        return;
+    }
+    std::vector<std::uint8_t> before(region.size());
+    for (std::size_t i = 0; i < region.size(); ++i) before[i] = g->get(region[i]);
+    mutate();
+    clay_document::VoxelDiff diff;
+    diff.layer = grid->layer;
+    for (std::size_t i = 0; i < region.size(); ++i) {
+        std::uint8_t now = g->get(region[i]);
+        if (now == before[i]) continue;
+        diff.coords.push_back(region[i]);
+        diff.before.push_back(before[i]);
+        diff.after.push_back(now);
+    }
+    record_voxel_step(doc, std::move(diff));
 }
 
 clay_result read_transform(const float position[3], const float rotation_axis[3],
@@ -1130,16 +1293,34 @@ clay_result clay_document_enable_undo(clay_document* doc) {
 clay_result clay_document_undo(clay_document* doc, int32_t* out_undone) {
     if (!doc || !out_undone) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
     if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
-    // An empty stack is reported, not failed: a UI drives this without having
-    // to track whether anything is left.
-    *out_undone = doc->undo->undo(doc->doc.document) ? 1 : 0;
+    // An empty journal is reported, not failed: a UI drives this without
+    // having to track whether anything is left.
+    if (doc->undo_journal.empty()) {
+        *out_undone = 0;
+        return CLAY_OK;
+    }
+    clay_document::UndoStep step = std::move(doc->undo_journal.back());
+    doc->undo_journal.pop_back();
+    if (step.scene) doc->undo->undo(doc->doc.document);
+    apply_voxel_diffs(doc, step, /*to_before=*/true);
+    doc->redo_journal.push_back(std::move(step));
+    *out_undone = 1;
     return CLAY_OK;
 }
 
 clay_result clay_document_redo(clay_document* doc, int32_t* out_redone) {
     if (!doc || !out_redone) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
     if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
-    *out_redone = doc->undo->redo(doc->doc.document) ? 1 : 0;
+    if (doc->redo_journal.empty()) {
+        *out_redone = 0;
+        return CLAY_OK;
+    }
+    clay_document::UndoStep step = std::move(doc->redo_journal.back());
+    doc->redo_journal.pop_back();
+    if (step.scene) doc->undo->redo(doc->doc.document);
+    apply_voxel_diffs(doc, step, /*to_before=*/false);
+    doc->undo_journal.push_back(std::move(step));
+    *out_redone = 1;
     return CLAY_OK;
 }
 
@@ -1147,22 +1328,25 @@ clay_result clay_document_undo_state(const clay_document* doc, int32_t* out_enab
                                      size_t* out_undo_depth, size_t* out_redo_depth) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     if (out_enabled) *out_enabled = doc->undo ? 1 : 0;
-    if (out_undo_depth) *out_undo_depth = doc->undo ? doc->undo->undo_depth() : 0;
-    if (out_redo_depth) *out_redo_depth = doc->undo ? doc->undo->redo_depth() : 0;
+    // Journal steps count voxel edits alongside scene steps (an open group
+    // counts once as soon as it holds anything).
+    std::size_t open = (doc->undo && doc->journal_grouping && !doc->open_group.empty()) ? 1 : 0;
+    if (out_undo_depth) *out_undo_depth = doc->undo ? doc->undo_journal.size() + open : 0;
+    if (out_redo_depth) *out_redo_depth = doc->undo ? doc->redo_journal.size() : 0;
     return CLAY_OK;
 }
 
 clay_result clay_document_begin_undo_group(clay_document* doc) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
-    doc->undo->begin_group();
+    journal_begin_group(doc);
     return CLAY_OK;
 }
 
 clay_result clay_document_end_undo_group(clay_document* doc) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
-    doc->undo->end_group();
+    journal_end_group(doc);
     return CLAY_OK;
 }
 
@@ -1644,8 +1828,10 @@ clay_result clay_layer_apply_stroke(clay_document* doc, clay_layer_id layer_id,
         *layer->sdf, brush::resolve_stroke(samples, p), item->node, m);
 
     // One AddNodeCmd per stamp inside a single undo group, so a whole stroke
-    // is one step to undo. Grouping is the stack's, not this module's.
-    if (doc->undo) doc->undo->begin_group();
+    // is one step to undo. Routed through the journal-aware brackets so the
+    // step counts once there too; a caller's open group is left alone.
+    bool own_group = doc->undo && !doc->journal_grouping;
+    if (own_group) journal_begin_group(doc);
     std::size_t capacity = count ? *count : 0;
     std::size_t written = 0;
     for (scene::Node& node : nodes) {
@@ -1660,7 +1846,7 @@ clay_result clay_layer_apply_stroke(clay_document* doc, clay_layer_id layer_id,
         if (out_nodes && written < capacity) out_nodes[written] = id;
         ++written;
     }
-    if (doc->undo) doc->undo->end_group();
+    if (own_group) journal_end_group(doc);
     if (count) *count = written;
     return r;
 }
@@ -2485,7 +2671,7 @@ clay_result clay_voxel_set(clay_voxel_grid* grid, const int32_t cell[3], int32_t
     std::uint8_t slot = 0;
     clay_result r = resolve_at_index(grid, cell, index, &g, &slot);
     if (r != CLAY_OK) return r;
-    g->set(to_coord(cell), slot);
+    voxel_edit_with_undo(grid, g, {to_coord(cell)}, [&] { g->set(to_coord(cell), slot); });
     return CLAY_OK;
 }
 
@@ -2493,7 +2679,7 @@ clay_result clay_voxel_erase(clay_voxel_grid* grid, const int32_t cell[3]) {
     voxel::VoxelGrid* g = nullptr;
     clay_result r = resolve_at(grid, cell, &g);
     if (r != CLAY_OK) return r;
-    g->erase(to_coord(cell));
+    voxel_edit_with_undo(grid, g, {to_coord(cell)}, [&] { g->erase(to_coord(cell)); });
     return CLAY_OK;
 }
 
@@ -2502,7 +2688,7 @@ clay_result clay_voxel_paint(clay_voxel_grid* grid, const int32_t cell[3], int32
     std::uint8_t slot = 0;
     clay_result r = resolve_at_index(grid, cell, index, &g, &slot);
     if (r != CLAY_OK) return r;
-    g->paint(to_coord(cell), slot);
+    voxel_edit_with_undo(grid, g, {to_coord(cell)}, [&] { g->paint(to_coord(cell), slot); });
     return CLAY_OK;
 }
 
@@ -2514,7 +2700,11 @@ clay_result clay_voxel_set_many(clay_voxel_grid* grid, const int32_t* cells_xyz,
     if (r != CLAY_OK) return r;
     r = check_palette_index(index, &slot);
     if (r != CLAY_OK) return r;
-    for (size_t i = 0; i < count; ++i) g->set(to_coord(cells_xyz + i * 3), slot);
+    std::vector<voxel::VoxelCoord> region(count);
+    for (size_t i = 0; i < count; ++i) region[i] = to_coord(cells_xyz + i * 3);
+    voxel_edit_with_undo(grid, g, std::move(region), [&] {
+        for (size_t i = 0; i < count; ++i) g->set(to_coord(cells_xyz + i * 3), slot);
+    });
     return CLAY_OK;
 }
 
@@ -2522,7 +2712,11 @@ clay_result clay_voxel_erase_many(clay_voxel_grid* grid, const int32_t* cells_xy
     voxel::VoxelGrid* g = nullptr;
     clay_result r = resolve_batch(grid, cells_xyz, count, &g);
     if (r != CLAY_OK) return r;
-    for (size_t i = 0; i < count; ++i) g->erase(to_coord(cells_xyz + i * 3));
+    std::vector<voxel::VoxelCoord> region(count);
+    for (size_t i = 0; i < count; ++i) region[i] = to_coord(cells_xyz + i * 3);
+    voxel_edit_with_undo(grid, g, std::move(region), [&] {
+        for (size_t i = 0; i < count; ++i) g->erase(to_coord(cells_xyz + i * 3));
+    });
     return CLAY_OK;
 }
 
@@ -2533,7 +2727,8 @@ clay_result clay_voxel_fill_box(clay_voxel_grid* grid, const int32_t a[3], const
     clay_result r = resolve_at_index(grid, a, index, &g, &slot);
     if (r != CLAY_OK) return r;
     if (!b) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cell");
-    g->fill_box(to_coord(a), to_coord(b), slot);
+    voxel_edit_with_undo(grid, g, region_box(to_coord(a), to_coord(b)),
+                         [&] { g->fill_box(to_coord(a), to_coord(b), slot); });
     return CLAY_OK;
 }
 
@@ -2544,7 +2739,8 @@ clay_result clay_voxel_fill_line(clay_voxel_grid* grid, const int32_t a[3], cons
     clay_result r = resolve_at_index(grid, a, index, &g, &slot);
     if (r != CLAY_OK) return r;
     if (!b) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cell");
-    g->fill_line(to_coord(a), to_coord(b), slot);
+    voxel_edit_with_undo(grid, g, region_box(to_coord(a), to_coord(b)),
+                         [&] { g->fill_line(to_coord(a), to_coord(b), slot); });
     return CLAY_OK;
 }
 
@@ -2557,7 +2753,8 @@ clay_result clay_voxel_set_mirrored(clay_voxel_grid* grid, const int32_t cell[3]
     if (r != CLAY_OK) return r;
     r = check_mirror_axes(axes, &mask);
     if (r != CLAY_OK) return r;
-    g->set_mirrored(to_coord(cell), slot, mask);
+    voxel_edit_with_undo(grid, g, region_mirrors(to_coord(cell), mask),
+                         [&] { g->set_mirrored(to_coord(cell), slot, mask); });
     return CLAY_OK;
 }
 
@@ -2570,7 +2767,8 @@ clay_result clay_voxel_paint_mirrored(clay_voxel_grid* grid, const int32_t cell[
     if (r != CLAY_OK) return r;
     r = check_mirror_axes(axes, &mask);
     if (r != CLAY_OK) return r;
-    g->paint_mirrored(to_coord(cell), slot, mask);
+    voxel_edit_with_undo(grid, g, region_mirrors(to_coord(cell), mask),
+                         [&] { g->paint_mirrored(to_coord(cell), slot, mask); });
     return CLAY_OK;
 }
 
@@ -2583,7 +2781,8 @@ clay_result clay_voxel_set_brush(clay_voxel_grid* grid, const int32_t cell[3],
     if (r != CLAY_OK) return r;
     r = check_palette_index(index, &slot);
     if (r != CLAY_OK) return r;
-    g->set_brush(to_coord(cell), p, slot);
+    voxel_edit_with_undo(grid, g, region_footprint(to_coord(cell), p.size),
+                         [&] { g->set_brush(to_coord(cell), p, slot); });
     return CLAY_OK;
 }
 
@@ -2593,7 +2792,8 @@ clay_result clay_voxel_erase_brush(clay_voxel_grid* grid, const int32_t cell[3],
     voxel::BrushParams p;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
-    g->erase_brush(to_coord(cell), p);
+    voxel_edit_with_undo(grid, g, region_footprint(to_coord(cell), p.size),
+                         [&] { g->erase_brush(to_coord(cell), p); });
     return CLAY_OK;
 }
 
@@ -2606,7 +2806,8 @@ clay_result clay_voxel_paint_brush(clay_voxel_grid* grid, const int32_t cell[3],
     if (r != CLAY_OK) return r;
     r = check_palette_index(index, &slot);
     if (r != CLAY_OK) return r;
-    g->paint_brush(to_coord(cell), p, slot);
+    voxel_edit_with_undo(grid, g, region_footprint(to_coord(cell), p.size),
+                         [&] { g->paint_brush(to_coord(cell), p, slot); });
     return CLAY_OK;
 }
 
@@ -2616,7 +2817,8 @@ clay_result clay_voxel_sculpt_smooth(clay_voxel_grid* grid, const int32_t cell[3
     voxel::BrushParams p;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
-    g->sculpt_smooth(to_coord(cell), p);
+    voxel_edit_with_undo(grid, g, region_footprint(to_coord(cell), p.size),
+                         [&] { g->sculpt_smooth(to_coord(cell), p); });
     return CLAY_OK;
 }
 
@@ -2626,7 +2828,8 @@ clay_result clay_voxel_sculpt_inflate(clay_voxel_grid* grid, const int32_t cell[
     voxel::BrushParams p;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
-    g->sculpt_inflate(to_coord(cell), p, amount);
+    voxel_edit_with_undo(grid, g, region_footprint(to_coord(cell), p.size),
+                         [&] { g->sculpt_inflate(to_coord(cell), p, amount); });
     return CLAY_OK;
 }
 
@@ -2644,7 +2847,8 @@ clay_result clay_voxel_sculpt_flatten(clay_voxel_grid* grid, const int32_t cell[
     // is rejected here the way a plane primitive's is.
     if (kernel::cdot2(n) <= 0.0f)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "flatten needs a non-zero normal");
-    g->sculpt_flatten(to_coord(cell), p, n, offset_cells);
+    voxel_edit_with_undo(grid, g, region_footprint(to_coord(cell), p.size),
+                         [&] { g->sculpt_flatten(to_coord(cell), p, n, offset_cells); });
     return CLAY_OK;
 }
 
@@ -2654,7 +2858,8 @@ clay_result clay_voxel_sculpt_pinch(clay_voxel_grid* grid, const int32_t cell[3]
     voxel::BrushParams p;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
-    g->sculpt_pinch(to_coord(cell), p);
+    voxel_edit_with_undo(grid, g, region_footprint(to_coord(cell), p.size),
+                         [&] { g->sculpt_pinch(to_coord(cell), p); });
     return CLAY_OK;
 }
 
@@ -2666,9 +2871,11 @@ clay_result clay_voxel_sculpt_grab(clay_voxel_grid* grid, const int32_t cell[3],
     voxel::BrushParams p;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
-    g->sculpt_grab(to_coord(cell), p,
-                   kernel::cf3(displacement[0], displacement[1], displacement[2]),
-                   front_only != 0);
+    voxel_edit_with_undo(grid, g, region_footprint(to_coord(cell), p.size), [&] {
+        g->sculpt_grab(to_coord(cell), p,
+                       kernel::cf3(displacement[0], displacement[1], displacement[2]),
+                       front_only != 0);
+    });
     return CLAY_OK;
 }
 
@@ -2679,7 +2886,8 @@ clay_result clay_voxel_sculpt_fill_cavities(clay_voxel_grid* grid, const int32_t
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
     if (passes <= 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "passes must be > 0");
-    g->sculpt_fill_cavities(to_coord(cell), p, passes);
+    voxel_edit_with_undo(grid, g, region_footprint(to_coord(cell), p.size),
+                         [&] { g->sculpt_fill_cavities(to_coord(cell), p, passes); });
     return CLAY_OK;
 }
 
@@ -2694,7 +2902,8 @@ clay_result clay_voxel_sculpt_scrape(clay_voxel_grid* grid, const int32_t cell[3
     kernel::cfloat3 n = kernel::cf3(normal[0], normal[1], normal[2]);
     if (!(kernel::clength(n) >= 1e-12f))  // also rejects NaN
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "scrape normal must not be zero length");
-    g->sculpt_scrape(to_coord(cell), p, n, offset_cells);
+    voxel_edit_with_undo(grid, g, region_footprint(to_coord(cell), p.size),
+                         [&] { g->sculpt_scrape(to_coord(cell), p, n, offset_cells); });
     return CLAY_OK;
 }
 
@@ -2706,8 +2915,9 @@ clay_result clay_voxel_sculpt_smudge(clay_voxel_grid* grid, const int32_t cell[3
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
     if (!displacement) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null displacement");
-    g->sculpt_smudge(to_coord(cell), p,
-                     kernel::cf3(displacement[0], displacement[1], displacement[2]));
+    voxel_edit_with_undo(grid, g, region_footprint(to_coord(cell), p.size),
+                         [&] { g->sculpt_smudge(to_coord(cell), p,
+                     kernel::cf3(displacement[0], displacement[1], displacement[2])); });
     return CLAY_OK;
 }
 

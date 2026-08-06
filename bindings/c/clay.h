@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 19
+#define CLAY_ABI_MINOR 20
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -265,7 +265,9 @@ clay_result clay_remove_node(clay_document* doc, clay_layer_id layer, clay_node_
  * Opt-in per document: a document that never enables it behaves exactly as it
  * did before, and edits made before enabling are not undoable. Once enabled
  * every editing entry point records its own inverse, so no reachable edit
- * escapes undo. Nothing to undo is reported through *out_undone, not returned
+ * escapes undo — including voxel edits on document layers (0.20): brushes,
+ * fills and sculpt verbs journal their cell diffs and interleave with scene
+ * steps in order; standalone grids and grid-wide repair passes stay direct. Nothing to undo is reported through *out_undone, not returned
  * as a failure, so a UI can drive the buttons without tracking state. */
 clay_result clay_document_enable_undo(clay_document* doc);
 clay_result clay_document_undo(clay_document* doc, int32_t* out_undone);

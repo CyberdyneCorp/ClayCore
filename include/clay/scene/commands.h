@@ -152,6 +152,9 @@ class UndoStack {
     bool redo(Document& doc);
     void begin_group();
     void end_group();
+    // A non-command edit elsewhere (a voxel diff in the C binding's journal)
+    // invalidates redo the same way perform() does.
+    void clear_redo() { redo_.clear(); }
     std::size_t undo_depth() const { return undo_.size(); }
     std::size_t redo_depth() const { return redo_.size(); }
 
