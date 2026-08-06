@@ -152,6 +152,44 @@ Document polygon_extrude() {
     return doc;
 }
 
+// Loft: N profiles interpolated along Z. The field is a lerp of two distance
+// fields, so it is a BOUND — the tape's safe_step_scale drops well below 1 and
+// a host that assumes 1 raymarches through the surface. Three profiles, so the
+// bracketing path is exercised rather than the two-profile shortcut.
+Document loft_profiles() {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("loft");
+    Node n = item(Prim::loft(0.7f, 3), cf3(0, 0, 0), kColorA);
+    n.profiles = {scene::Profile::circle(0.75f), scene::Profile::box(0.25f, 0.25f),
+                  scene::Profile::circle(0.6f)};
+    n.profile_polygons.resize(n.profiles.size());
+    l.sdf->insert(n);
+    return doc;
+}
+
+// Swept: the same profile list carried along a guide, with parallel-transported
+// frames baked into the blob when the item compiles. Its Lipschitz factor
+// carries both a curvature and an interpolation term, so like the loft above it
+// is a case about safe_step_scale as much as about distance.
+Document swept_guide() {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("swept");
+    Node n = item(Prim::swept(3), cf3(0, 0, 0), kColorB);
+    const cfloat3 guide[4] = {cf3(-0.9f, -0.5f, 0.0f), cf3(-0.3f, 0.25f, 0.2f),
+                              cf3(0.4f, 0.45f, -0.15f), cf3(0.95f, -0.2f, 0.1f)};
+    for (int i = 0; i < 4; ++i) {
+        scene::StrokePoint sp;
+        sp.pos = guide[i];
+        sp.type = scene::StrokePointType::Spline;
+        n.stroke.push_back(sp);
+    }
+    n.curve_tolerance = 0.02f;
+    n.profiles = {scene::Profile::circle(0.28f), scene::Profile::circle(0.12f)};
+    n.profile_polygons.resize(n.profiles.size());
+    l.sdf->insert(n);
+    return doc;
+}
+
 Document stroke_chain() {
     Document doc;
     Layer& l = doc.add_sdf_layer("stroke");
@@ -415,6 +453,12 @@ std::vector<FixtureCase> kernel_parity_cases() {
     add_case(&cases, "lift_polygon_extrude",
              "extruded rounded polygon — what the cut tool resolves a drawn outline into",
              polygon_extrude());
+    add_case(&cases, "lift_loft_profiles",
+             "three profiles interpolated along Z; a bound, so safe_step_scale is not 1",
+             loft_profiles());
+    add_case(&cases, "lift_swept_guide",
+             "profiles carried along a guide on parallel-transported frames, in the blob",
+             swept_guide());
     add_case(&cases, "stroke_chain", "sphere-swept polyline; the points live in the tape blob",
              stroke_chain());
     add_case(&cases, "curve_spline_chain",

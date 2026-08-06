@@ -66,9 +66,32 @@ TEST_CASE("parity fixture: cases cover the drift-prone vocabulary") {
     CHECK(names.count("repetition_finite_grid") == 1);
     CHECK(names.count("lift_polygon_revolve") == 1);
     CHECK(names.count("lift_polygon_extrude") == 1);
+    CHECK(names.count("lift_loft_profiles") == 1);
+    CHECK(names.count("lift_swept_guide") == 1);
     CHECK(names.count("stroke_chain") == 1);
     CHECK(names.count("curve_spline_chain") == 1);
     CHECK(names.count("composed_document") == 1);
+}
+
+// A host that raymarches an exported tape has to step by the tape's own
+// safe_step_scale, not by 1. That only bites on a bound field, so the fixture
+// must actually contain one — otherwise every case would pass for a host that
+// hardcodes 1 and the export field would be decorative.
+TEST_CASE("parity fixture: a bound case pins safe_step_scale below 1") {
+    std::vector<io::FixtureCase> cases = io::kernel_parity_cases();
+    std::size_t bound = 0;
+    for (const io::FixtureCase& c : cases) {
+        CAPTURE(c.name);
+        CHECK(c.tape.safe_step_scale() > 0.0f);
+        CHECK(c.tape.safe_step_scale() <= 1.0f);
+        if (!c.tape.info.is_exact && c.tape.safe_step_scale() < 1.0f) ++bound;
+    }
+    CHECK(bound > 0);
+
+    // and it reaches the file, where a consumer can read it
+    std::string json = io::kernel_parity_fixture_json(cases);
+    CHECK(json.find("\"safe_step_scale\":") != std::string::npos);
+    CHECK(json.find("\"is_exact\":false") != std::string::npos);
 }
 
 TEST_CASE("parity fixture: expectations are what the tape evaluates") {

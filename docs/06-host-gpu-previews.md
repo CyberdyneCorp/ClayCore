@@ -71,7 +71,7 @@ It is JSON, schema 1:
 ```json
 {
   "schema": 1,
-  "generator": "claycore 0.17.0",
+  "generator": "claycore 0.19.0",
   "tolerance": {"distance_abs": 1e-05, "distance_rel": 0.0001, "color_abs": 0.0001},
   "cases": [
     {
@@ -98,21 +98,29 @@ That is the same comparison `tests/unit/test_parity.cpp` applies across
 claycore's own backends, at the same tolerances — a host GPU is no more
 bit-exact than ours.
 
-The 34 cases are chosen for what a hand-written preview gets wrong rather than
+The 36 cases are chosen for what a hand-written preview gets wrong rather than
 for coverage of the primitive set: every blend profile against smooth union,
 subtraction and intersection; all nine extended combine modes; the material-mix
 weights of a colored blend; a deformer chain and a region deformer; finite
-repetition; both lift opcodes — a revolved polygon and an extruded one, which
-is what the cut tool resolves a drawn outline into; a stroke chain and a closed
-Catmull-Rom curve; and one composed multi-layer document with a blended mirror,
-a nested group and a paint pass.
+repetition; all four lift opcodes — a revolved polygon, an extruded one (what
+the cut tool resolves a drawn outline into), a three-profile loft and a sweep
+along a guide; a stroke chain and a closed Catmull-Rom curve; and one composed
+multi-layer document with a blended mirror, a nested group and a paint pass.
 
-The last four all carry data in the out-of-line blob, and the curve carries a
-lot of it: control-point curves tessellate into the segment chain the stroke
-opcode already reads, so a five-point curve reaches a host as a 35-point stroke
-item. Nothing about that is visible in the opcode — a host that reads the blob
-by a guessed offset rather than by the item's own point count passes every
-other case and fails this one.
+Six of those carry data in the out-of-line blob, and two carry a lot of it:
+control-point curves tessellate into the segment chain the stroke opcode
+already reads, so a five-point curve reaches a host as a 35-point stroke item,
+and a sweep's guide arrives as parallel-transported frames, seven floats a
+vertex. Nothing about either is visible in the opcode — a host that reads the
+blob by a guessed offset rather than by the item's own count passes every other
+case and fails these.
+
+**Step by `safe_step_scale`, never by 1.** A loft is a lerp of two distance
+fields and a sweep compresses space on the inside of a bend, so neither is a
+distance field; the tape says so, and the fixture exports it. The loft case
+comes out at 0.117 and the sweep at 0.015 — a host raymarching either as if
+`|∇f| = 1` steps straight through the surface. The suite asserts the fixture
+contains such a case, so this cannot quietly become untestable.
 
 The blend cases probe a ring straddling the seam of two overlapping spheres,
 which is exactly where a wrong support width shows up. `tests/unit/test_parity_fixture.cpp`
@@ -122,6 +130,19 @@ fixture, so the gate cannot quietly stop discriminating.
 Floats are written in the shortest form that round-trips, so a consumer reading
 them back gets the bits claycore evaluated. Export is deterministic: two runs
 of one build produce identical files, and a diff means the engine changed.
+
+## The dialect moves, and it is versioned
+
+Kernel headers may evolve freely within a major (`build-packaging`:
+Versioning). Pin the artifact by release tag, and on an upgrade regenerate the
+fixture and re-run it rather than assuming the previous one still passes.
+
+`add-loft-opcode` is the first release where that mattered: `cop_extrude_to`
+became `cop_loft`, taking the interpolation parameter instead of deriving it
+from `pz`, because the old signature could only ever serve exactly two
+profiles. A host calling the old name gets a compile error, which is the
+outcome to want — the alternative, a silently different meaning, is the failure
+this whole document is about.
 
 ## What is not here yet
 
