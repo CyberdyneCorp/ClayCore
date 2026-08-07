@@ -34,6 +34,23 @@ import _render as R
 
 VOXEL_SIZE = 0.1
 
+# Straddling the slab's +x face rather than buried in it: an interior stamp is a
+# no-op for inflate and pinch, which would make the "it does something unmasked"
+# half of the check below unsatisfiable.
+EDGE = (9, 0, 0)
+
+
+def _cells(grid, lo=(-13, -7, -9), hi=(13, 7, 9)):
+    """Every cell in a region, so two grids can be compared by CONTENT.
+
+    Not by occupied count: pinch, grab and smudge MOVE material rather than
+    adding or removing it, and a count would call that "unchanged".
+    """
+    return tuple(grid.get((x, y, z))
+                 for x in range(lo[0], hi[0] + 1)
+                 for y in range(lo[1], hi[1] + 1)
+                 for z in range(lo[2], hi[2] + 1))
+
 
 def slab():
     """A block of material with a raised band, so an edit is easy to read."""
@@ -42,6 +59,14 @@ def slab():
     accent = grid.palette_add("#c07a52")
     grid.fill_box((-10, -4, -6), (10, 1, 6), stone)
     grid.fill_box((-10, 2, -2), (10, 3, 2), accent)
+    return grid
+
+
+def pocketed():
+    """A slab with a voxel punched out of its interior: an enclosed cell with
+    all six face neighbours occupied, which is what fill_cavities acts on."""
+    grid = slab()
+    grid.erase((8, 0, 0))
     return grid
 
 
@@ -189,6 +214,92 @@ def main():
     if stroked.sample((0.0, 0.0, 0.0)) > 0.1:
         raise SystemExit("target=0 did not release the mask")
     print("  and the same call with target=0 releases it again")
+
+    # --- every sculpting verb, not a hand-picked few ------------------------
+    # The gating lives in the one footprint walk every verb shares, so no verb
+    # can quietly skip it — including one added after the mask was.
+    #
+    # Each verb runs TWICE, masked and not, and both halves are asserted. A
+    # check on the masked run alone would pass for a verb that does nothing at
+    # all, which is exactly the failure a gating test is likeliest to hide.
+    # (verb, the grid it needs). Most want a plain slab; fill_cavities wants a
+    # cavity, and giving it one is not a courtesy — on a plain slab it does
+    # nothing at all, and the check below would then be asserting nothing.
+    verbs = {
+        "smooth":        (lambda g, m: g.sculpt_smooth(EDGE, 9, mask=m), slab),
+        "inflate":       (lambda g, m: g.sculpt_inflate(EDGE, 9, amount=1, mask=m), slab),
+        "flatten":       (lambda g, m: g.sculpt_flatten(EDGE, 9, normal=(0, 1, 0), mask=m),
+                          slab),
+        "pinch":         (lambda g, m: g.sculpt_pinch(EDGE, 9, mask=m), slab),
+        "magnify":       (lambda g, m: g.sculpt_magnify(EDGE, 9, mask=m), slab),
+        "scrape":        (lambda g, m: g.sculpt_scrape(EDGE, 9, normal=(0, 1, 0), mask=m),
+                          slab),
+        "smudge":        (lambda g, m: g.sculpt_smudge(EDGE, 9, displacement=(0.3, 0, 0),
+                                                       mask=m), slab),
+        "grab":          (lambda g, m: g.sculpt_grab(EDGE, 9, displacement=(0.3, 0, 0),
+                                                     mask=m), slab),
+        "fill_cavities": (lambda g, m: g.sculpt_fill_cavities(EDGE, 9, passes=1, mask=m),
+                          pocketed),
+        "carve_alpha":   (lambda g, m: g.sculpt_carve_alpha(
+            EDGE, 9, alpha=np.ones((4, 4), np.float32), direction=(0, 1, 0), mask=m), slab),
+    }
+
+    # A mask over everything the brush can reach, so "untouched" is the whole
+    # footprint rather than part of it.
+    over_all = clay.MaskField(cell_size=VOXEL_SIZE)
+    over_all.fill(((-2.0, -2.0, -2.0), (2.0, 2.0, 2.0)), 1.0)
+
+    for name, (verb, source) in verbs.items():
+        reference = _cells(source())
+
+        moved = source()
+        verb(moved, None)
+        held = source()
+        verb(held, over_all)
+
+        acts = _cells(moved) != reference
+        frozen = _cells(held) == reference
+        print(f"  {name:<14} unmasked: {'changes it' if acts else 'DOES NOTHING':<11} "
+              f"masked: {'untouched' if frozen else 'LEAKED'}")
+        if not acts:
+            raise SystemExit(f"{name} did nothing even unmasked, so the mask "
+                             f"check below proves nothing")
+        if not frozen:
+            raise SystemExit(f"{name} edited through a fully masked region")
+
+    # ...and a partial mask attenuates rather than freezing, on a verb rather
+    # than on a stamp.
+    grades = []
+    for level in (0.0, 0.5, 1.0):
+        soft = clay.MaskField(cell_size=VOXEL_SIZE)
+        soft.fill(((-2.0, -2.0, -2.0), (2.0, 2.0, 2.0)), level)
+        grid = slab()
+        grid.sculpt_inflate(EDGE, 9, amount=1, mask=soft)
+        grades.append(grid.occupied_count)
+        print(f"  inflate under a mask of {level:<4} -> {grid.occupied_count} cells")
+    if not (grades[0] > grades[1] > grades[2]):
+        raise SystemExit("a partial mask did not sit between open and frozen")
+
+    sheet = []
+    for label, m in (("unmasked", None), ("half masked", None), ("frozen", over_all)):
+        soft = m
+        if label == "half masked":
+            soft = clay.MaskField(cell_size=VOXEL_SIZE)
+            soft.fill(((-2.0, -2.0, -2.0), (2.0, 2.0, 2.0)), 0.5)
+        grid = slab()
+        grid.sculpt_inflate(EDGE, 15, amount=2, mask=soft)
+        eye, target = R.voxel_camera(grid, VOXEL_SIZE, azimuth=34.0, elevation=24.0)
+        sheet.append(R.render_voxels_array(grid, eye=eye, target=target,
+                                           width=230, height=200))
+    # The middle tile looks NOISIER than the left one, and that is the mask
+    # working rather than failing: voxel occupancy is binary, so a half weight
+    # cannot be stored as half a cell. It comes out as fractional COVERAGE,
+    # dithered deterministically against the cell hash — the same way a falloff
+    # does. Fewer cells change, scattered rather than shaved.
+    R.contact_sheet(sheet, "11_mask_verbs.png", columns=3,
+                    caption="inflate unmasked, under a half mask (fractional "
+                            "coverage, dithered), and frozen — every sculpting "
+                            "verb reads the mask, not a chosen few")
 
     # --- the complement invert() cannot take --------------------------------
     # invert() flips only what has been PAINTED — a sparse unbounded lattice has
