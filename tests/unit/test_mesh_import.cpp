@@ -20,16 +20,21 @@ using mesh::Mesh;
 
 namespace {
 
+// Not M_PI: that is a POSIX extension, and MSVC defines it only when
+// _USE_MATH_DEFINES is set before <cmath> — which a header included earlier in
+// the translation unit can silently defeat. A constant cannot be undefined.
+constexpr float kPi = 3.14159265358979323846f;
+
 // A UV sphere. `rings` controls the tessellation, which is also how the tests
 // tell an approximation error from a tessellation error.
 Mesh sphere_mesh(float r = 1.0f, int rings = 24, kernel::cfloat3 centre = kernel::cf3(0, 0, 0)) {
     Mesh m;
     const int segments = rings * 2;
     for (int i = 0; i <= rings; ++i) {
-        float phi = static_cast<float>(M_PI) * static_cast<float>(i) / static_cast<float>(rings);
+        float phi = kPi * static_cast<float>(i) / static_cast<float>(rings);
         for (int j = 0; j <= segments; ++j) {
             float theta =
-                2.0f * static_cast<float>(M_PI) * static_cast<float>(j) / static_cast<float>(segments);
+                2.0f * kPi * static_cast<float>(j) / static_cast<float>(segments);
             m.positions.push_back(centre + cf3(r * std::sin(phi) * std::cos(theta),
                                                r * std::cos(phi),
                                                r * std::sin(phi) * std::sin(theta)));
@@ -88,7 +93,7 @@ TEST_CASE("mesh import: distance matches the analytic shape") {
     // The angular circumradius of a facet, not one step: a triangle spans a
     // half-step in latitude AND a half-step in longitude, so the point of the
     // sphere furthest from its chord is a diagonal away, not an edge away.
-    const float step = static_cast<float>(M_PI) / static_cast<float>(rings);
+    const float step = kPi / static_cast<float>(rings);
     const float sagitta = r * (1.0f - std::cos(step * 0.5f * std::sqrt(2.0f)));
     INFO("sagitta at " << rings << " rings: " << sagitta);
 

@@ -440,7 +440,12 @@ TEST_CASE("volume: an older document still reads") {
     for (const auto& [id, c] : back->layers[0].sdf->nodes())
         if (c.prim.type == scene::PrimType::Volume) got = &c;
     REQUIRE(got != nullptr);
-    CHECK(got->volume == nullptr);
+    // Reduced to a bool before the assertion: comparing the shared_ptr inside
+    // the macro makes doctest try to stringify it, and MSVC's <memory> declares
+    // an operator<< for shared_ptr that then fails to deduce a template
+    // argument. A bool is stringifiable everywhere.
+    const bool carries_a_volume = static_cast<bool>(got->volume);
+    CHECK_FALSE(carries_a_volume);
     CHECK(got->rounding == doctest::Approx(0.03f));
     CHECK(got->transition.r0 == doctest::Approx(0.25f));
 }

@@ -63,9 +63,25 @@ Tracked honestly rather than assumed done:
   which is expected from the same single-source headers compiled `-fmad=false`.
   *Caveat*: validated through PTX JIT only. A cubin build for sm_120 needs
   CUDA >= 12.8, so that path is still unexercised.
-- **CI still only compiles CUDA.** GitHub runners have no NVIDIA device, so the
-  device parity above is a manual, hardware-dependent check rather than a gate.
-  Re-run it on CUDA hardware before a release that touches kernels.
+- **CI no longer builds CUDA or OpenCL at all** (changed 2026-08-07). Neither
+  runner has the hardware that would make those jobs mean what their names
+  said: the CUDA job compiled against no device, and the OpenCL job ran parity
+  against pocl, whose arithmetic *is* the CPU's — so it agreed with the CPU
+  backend almost by construction. What still gates every push is
+  `check_kernel_dialect.py`, which compiles every kernel header under the CPU,
+  CUDA and Metal profiles plus the OpenCL amalgamation, so a dialect break
+  fails in seconds on any runner.
+
+  The consequence is that **three things are now manual and hardware-dependent**
+  rather than gated, and all three must be run before a release that touches
+  kernels:
+  1. CUDA device parity (as below).
+  2. The nvcc build of the backend, including its architecture auto-detection.
+  3. That the OpenCL backend registers and passes parity on a real device.
+
+  `python3 tools/release_check.py` run on a machine with those devices present
+  covers all three, because it runs parity against every backend registered in
+  that build.
 - **CUDA-enabled wheels are not shipped** (task 12.3). Wheels currently carry
   the CPU backend, which per the parity contract changes speed, not results.
   Shipping CUDA wheels needs a CUDA build host in the wheel matrix.

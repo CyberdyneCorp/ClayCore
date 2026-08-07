@@ -107,59 +107,23 @@ jobs:
       - name: Configure with all dependencies
         run: cmake --preset cpu-only -DCLAY_FETCH_ALL_DEPS=ON
 
-  opencl:
-    name: OpenCL backend (pocl device, parity)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install OpenCL runtime (pocl provides a CPU device)
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q ocl-icd-opencl-dev pocl-opencl-icd clinfo
-          clinfo --list
-      - name: Configure + build
-        run: |
-          cmake --preset opencl
-          cmake --build --preset opencl
-      - name: Test (parity runs against the registered OpenCL device)
-        run: ctest --preset opencl
-      - name: Confirm the backend actually registered
-        run: |
-          ./build/opencl/clay selftest
-          python3 - <<'PY'
-          import ctypes, sys
-          lib = ctypes.CDLL("./build/opencl/libclay_shared.so")
-          lib.clay_list_backends.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_size_t)]
-          n = ctypes.c_size_t(0)
-          lib.clay_list_backends(None, ctypes.byref(n))
-          buf = ctypes.create_string_buffer(n.value)
-          lib.clay_list_backends(buf, ctypes.byref(n))
-          names = buf.value.decode()
-          print("registered backends:", names)
-          sys.exit(0 if "opencl" in names else 1)
-          PY
-
-  cuda:
-    name: CUDA backend (nvcc compile — device parity needs hardware)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Jimver/cuda-toolkit@v0.2.19
-        with:
-          cuda: '12.5.0'
-          method: 'network'
-          sub-packages: '["nvcc", "cudart"]'
-      # pinning the arch above hides the auto-detection path, which is where
-      # "CUDA_ARCHITECTURES is empty for target claycore" came from; configure
-      # once without a pin so the fallback is exercised against a real toolkit
-      - name: Configure with auto-detected architecture
-        run: cmake -S . -B build/cuda-autoarch -DCLAY_BACKEND_CUDA=ON -DCMAKE_BUILD_TYPE=Release
-      - name: Configure + build (no GPU on the runner; codegen only)
-        run: |
-          cmake --preset cuda -DCMAKE_CUDA_ARCHITECTURES=75
-          cmake --build --preset cuda
-      - name: Test (CUDA registers only where a device exists; CPU path still gated)
-        run: ctest --preset cuda
+  # OpenCL and CUDA no longer run here.
+  #
+  # Neither runner has the hardware that would make the test mean what its name
+  # says. The CUDA job compiled with nvcc against no device, so it proved
+  # codegen and nothing about execution; the OpenCL job ran parity against
+  # pocl, which is a CPU implementation — it exercised the OpenCL *plumbing*
+  # but its arithmetic was the CPU's, so agreement was close to tautological.
+  # Both cost minutes on every push to re-confirm what the dialect gate already
+  # checks statically: check_kernel_dialect.py compiles every kernel header
+  # under the CPU, CUDA and Metal profiles plus the OpenCL amalgamation, so a
+  # dialect break still fails here, on every runner, in seconds.
+  #
+  # What genuinely goes away is the nvcc *build* of the backend (and its
+  # architecture auto-detection), and the check that the OpenCL backend
+  # registers at runtime. Those need real devices, and docs/RELEASE.md already
+  # carries them as manual, hardware-dependent checks to run before a release
+  # that touches kernels.
 
   python:
     name: pyclay (build, pytest, wheel install)
