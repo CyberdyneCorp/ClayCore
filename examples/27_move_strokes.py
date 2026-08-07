@@ -110,6 +110,14 @@ def main():
     R.contact_sheet(tiles, "27_move_buds.png", columns=4, caption=", ".join(labels) +
                     " — every one buds a lump rather than drawing a lobe out")
 
+    # The literal subject: a sphere with three Move strokes at a large area.
+    # Kept as its own render because it is the thing that gets asked for, and
+    # what it actually produces is the point of this example.
+    R.render(moved(1.1, 1.1), "27_move_strokes.png", eye=(4.2, 2.2, 4.2), target=TARGET,
+             caption="a sphere with three Move strokes at a large area (radius 1.1, "
+                     "displacement 1.1) — the surface is displaced, not stretched, so "
+                     "each stroke buds a lump instead of drawing a lobe out")
+
     gentle = reach_along(moved(0.5, 1.1), DIRS[0]) - 1.0
     hard = reach_along(moved(0.5, 2.5), DIRS[0]) - 1.0
     print(f"  more than doubling the drag adds {hard - gentle:+.3f} to the reach: the "
