@@ -79,7 +79,7 @@ def plate_only(plate, color="#c8843f"):
 
 
 def main():
-    R.banner("24 mask extrude — a plate pulled off a masked patch")
+    R.banner("25 mask extrude — a plate pulled off a masked patch")
 
     EYE, TARGET = (1.6, 1.5, 1.9), (0.0, 0.15, 0.0)
 
@@ -123,7 +123,7 @@ def main():
     if float(plate.eval(np.array([[0.0, -RADIUS, 0.0]], np.float32))[0]) <= 0.0:
         raise SystemExit("the extract leaked onto the unmasked side")
 
-    R.render(with_plate(plate), "24_extract.png", eye=EYE, target=TARGET,
+    R.render(with_plate(plate), "25_extract.png", eye=EYE, target=TARGET,
              colors_from_field=True)
 
     # --- each side means what it says ----------------------------------------
@@ -141,7 +141,7 @@ def main():
                                     target=(0.0, 0.55, 0.0), width=230, height=215,
                                     colors_from_field=True))
         labels.append(side)
-    R.contact_sheet(tiles, "24_extract_sides.png", columns=3,
+    R.contact_sheet(tiles, "25_extract_sides.png", columns=3,
                     caption="the extract alone, " + ", ".join(labels) +
                             " — each on its own side of the sphere's surface")
 
@@ -164,7 +164,7 @@ def main():
         tiles.append(R.render_array(plate_only(piece), eye=(0.9, 1.35, 1.1),
                                     target=(0.0, 0.55, 0.0), width=230, height=215,
                                     colors_from_field=True))
-    R.contact_sheet(tiles, "24_extract_rim.png", columns=3,
+    R.contact_sheet(tiles, "25_extract_rim.png", columns=3,
                     caption="hard rim, rounded rim, and a rim from a blurred mask")
     if mask.painted_count != before:
         raise SystemExit("the extrude modified the mask it was given")
@@ -206,7 +206,7 @@ def main():
         raise SystemExit("the two representations no longer agree")
 
     eye, target = R.voxel_camera(extract, VOXEL_SIZE, azimuth=34.0, elevation=24.0)
-    R.render_voxels(extract, "24_extract_voxels.png", eye=eye, target=target)
+    R.render_voxels(extract, "25_extract_voxels.png", eye=eye, target=target)
 
     # --- refusals ------------------------------------------------------------
     # A mask that misses the surface is the common mistake, and an empty result
@@ -221,7 +221,7 @@ def main():
         else:
             raise SystemExit(f"{label} should not have produced an extract")
 
-    R.export_model(with_plate(plate), "24_extract.ply", resolution=72)
+    R.export_model(with_plate(plate), "25_extract.ply", resolution=72)
 
 
 def _far_mask():

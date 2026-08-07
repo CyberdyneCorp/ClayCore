@@ -305,17 +305,17 @@ void save_mesh_any(const mesh::Mesh& m, const std::string& path) {
                                 "' (supported: .obj, .ply, .fbx, .glb)");
 }
 
-mesh::Mesh load_mesh_any(const std::string& path) {
+mesh::Mesh load_mesh_any(const std::string& path, const io::ImportBudget& limits) {
     std::size_t dot = path.find_last_of('.');
     std::string ext = dot == std::string::npos ? "" : path.substr(dot + 1);
     for (char& c : ext) c = static_cast<char>(std::tolower(c));
     mesh::Mesh out;
     if (ext == "obj") {
-        check_io(io::load_obj_file(path, &out));
+        check_io(io::load_obj_file(path, &out, limits));
     } else if (ext == "ply") {
-        check_io(io::load_ply_file(path, &out));
+        check_io(io::load_ply_file(path, &out, limits));
     } else if (ext == "fbx") {
-        check_io(io::load_fbx_file(path, &out));
+        check_io(io::load_fbx_file(path, &out, limits));
     } else {
         // .glb is saved but not loaded; saying so beats a generic failure.
         throw std::invalid_argument("unsupported mesh extension '." + ext +
@@ -856,6 +856,34 @@ NB_MODULE(pyclay, m) {
              },
              "y0"_a, "y1"_a, "s0"_a, "s1"_a, "ease"_a = 0,
              "Scale the cross-section from s0 at y0 to s1 at y1 along an easing curve")
+        .def("noise",
+             [](nb::object self, float amplitude, float frequency, int octaves, float gain,
+                std::uint32_t seed) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 if (octaves < 1) throw std::invalid_argument("noise needs at least one octave");
+                 if (!(frequency > 0.0f))
+                     throw std::invalid_argument("noise frequency must be > 0");
+                 p.deformers.push_back(
+                     scene::Deformer::noise(amplitude, frequency, octaves, gain, seed));
+                 return self;
+             },
+             "amplitude"_a, "frequency"_a, "octaves"_a = 4, "gain"_a = 0.5f, "seed"_a = 0u,
+             nb::rv_policy::reference_internal,
+             "Fractal gradient noise, offsetting the distance — the irregular\n"
+             "sibling of `displace`, whose sine is regular by construction and\n"
+             "gives an even corrugation instead.\n\n"
+             "The hash is INTEGER, and that is not an implementation detail: a\n"
+             "float hash amplifies the units-in-the-last-place difference between\n"
+             "each backend's `sin` into an O(1) difference, so it could not agree\n"
+             "across CPU, Metal, CUDA and OpenCL. Integer operations give the same\n"
+             "bits everywhere.\n\n"
+             "The SEED is an ordinary parameter, not global state: two items with\n"
+             "the same seed look the same, and an item's appearance never depends\n"
+             "on the order it was compiled in.\n\n"
+             "The fractal is normalized, so raising `octaves` adds finer detail\n"
+             "without growing the overall deviation — `amplitude` stays the one\n"
+             "control for how far the surface moves. Offsetting the distance\n"
+             "costs the marcher: the step scale drops with amplitude x frequency.")
         .def("magnify",
              [](nb::object self, nb::handle center, float radius, float strength, int ease) {
                  PyPrim& p = nb::cast<PyPrim&>(self);
@@ -2037,18 +2065,25 @@ NB_MODULE(pyclay, m) {
           "then drops (a horn).");
 
     m.def("load_mesh",
-          [](const std::string& path) {
+          [](const std::string& path, std::size_t max_vertices, std::size_t max_triangles) {
+              io::ImportBudget limits;
+              // 0 means the library's default rather than "allow nothing".
+              if (max_vertices) limits.max_vertices = max_vertices;
+              if (max_triangles) limits.max_triangles = max_triangles;
               PyMesh out;
               {
                   nb::gil_scoped_release release;
-                  out.m = load_mesh_any(path);
+                  out.m = load_mesh_any(path, limits);
               }
               return out;
           },
-          "path"_a,
-          "Load a mesh by extension: .obj, .ply, .fbx. The counterpart to\n"
-          "Mesh.save, and what gives Volume.from_mesh something to sample.\n"
-          "(.glb is written but not read.)");
+          "path"_a, "max_vertices"_a = 0, "max_triangles"_a = 0,
+          "Load a mesh by extension: .obj, .ply, .fbx, matched case-insensitively.\n"
+          "The counterpart to Mesh.save, and what gives Volume.from_mesh\n"
+          "something to sample. (.glb is written but not read.)\n\n"
+          "The budget is checked against the file's DECLARED counts before\n"
+          "anything is allocated, which is the point: a malformed or hostile\n"
+          "file can claim a billion triangles. 0 means the library's default.");
 
     nb::class_<PyMeshQuery>(
         m, "MeshQuery",

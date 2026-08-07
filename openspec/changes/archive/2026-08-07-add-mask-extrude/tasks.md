@@ -12,7 +12,7 @@
 - [x] 1.6 Tests: thickness measures right, each mode sits on the right side, the
       rim rounds, the two representations agree, a ray still lands, the declared
       Lipschitz holds, and every refusal returns nothing rather than crashing
-- [x] 1.7 `examples/24_mask_extrude.py` plus its `CAPABILITY_EXAMPLES` entry;
+- [x] 1.7 `examples/25_mask_extrude.py` plus its `CAPABILITY_EXAMPLES` entry;
       docs, roadmap, full verification
 
 Found while building:

@@ -54,6 +54,15 @@
 
 CLAY_NS_BEGIN
 
+// The dialect's only integer type, and the reason it exists: a lattice noise
+// has to hash its coordinates, and a FLOAT hash cannot be made to agree across
+// backends. Cross-backend parity is tolerance-based (1e-6 on the CPU backends,
+// 1e-4 on the GPU ones), which is comfortable for ordinary arithmetic and fatal
+// for `fract(sin(...) * 43758)`: a units-in-the-last-place disagreement in sin
+// becomes an O(1) disagreement after the multiply and the fractional part. The
+// same integer operations give the same bits everywhere, so the hash is integer.
+typedef std::uint32_t cuint;
+
 struct cfloat2 {
     float x, y;
 };
@@ -133,6 +142,8 @@ CLAY_NS_END
 
 CLAY_NS_BEGIN
 
+typedef unsigned int cuint;  // see the CPU branch for why the dialect has one
+
 using cfloat2 = ::float2;
 using cfloat3 = ::float3;
 using cfloat4 = ::float4;
@@ -177,6 +188,8 @@ CLAY_NS_END
 #define CLAY_DEVICE __global
 #define CLAY_NS_BEGIN
 #define CLAY_NS_END
+
+typedef uint cuint;  // see the CPU branch for why the dialect has one
 
 typedef float2 cfloat2;
 typedef float3 cfloat3;

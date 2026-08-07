@@ -81,6 +81,32 @@ CLAY_FN CFieldInfo cfi_displace(CFieldInfo a, float lg) {
     return CFieldInfo{false, a.lipschitz + lg};
 }
 
+// noise: offsetting the distance raises the slope by the offset's gradient, as
+// displace does — but summed over the OCTAVES, because each octave has twice
+// the frequency of the last and so twice the gradient for the same amplitude.
+//
+// With the fractal normalized by its total weight, octave i contributes
+// amplitude * frequency * (2*gain)^i / sum(gain^j). At the usual gain of 0.5
+// that is flat across octaves, so the count multiplies rather than converges —
+// which is exactly why a caller who raises octaves finds the marcher slowing.
+// kGradient is the steepest a unit-amplitude gradient noise gets.
+CLAY_FN CFieldInfo cfi_noise(CFieldInfo a, float amplitude, float frequency, int octaves,
+                             float gain) {
+    const float kGradient = 2.0f;
+    float weight = 0.0f;
+    float slope = 0.0f;
+    float amp = 1.0f;
+    float freq = 1.0f;
+    for (int i = 0; i < octaves; ++i) {
+        weight = weight + amp;
+        slope = slope + amp * freq;
+        amp = amp * gain;
+        freq = freq * 2.0f;
+    }
+    float g = weight > 0.0f ? slope / weight : 0.0f;
+    return CFieldInfo{false, a.lipschitz + cabs(amplitude) * cabs(frequency) * g * kGradient};
+}
+
 // bend_linear displacing by vector v over segment length len: worst-case
 // warp gradient grows by |v|/len.
 CLAY_FN CFieldInfo cfi_bend_linear(CFieldInfo a, float v_len, float seg_len) {

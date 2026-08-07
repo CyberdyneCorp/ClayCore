@@ -105,6 +105,26 @@ std::vector<ParityScene> parity_scenes() {
         scenes.push_back({"pose", std::move(doc), 3.0f});
     }
 
+    {   // noise: the case the integer hash exists for. A float hash would put
+        // each backend's own `sin` inside a chaotic amplifier, and this corpus
+        // holds every backend to 1e-4 — it would fail here first.
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node n = item(Prim::sphere(0.8f), cf3(0, 0, 0));
+        n.deformers.push_back(scene::Deformer::noise(0.09f, 5.0f, 4, 0.5f, 17u));
+        l.sdf->insert(n);
+        scenes.push_back({"noise_fractal", std::move(doc), 3.0f});
+    }
+
+    {   // magnify: a radial scale about a point, with finite support
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node n = item(Prim::round_box(cf3(0.5f, 0.4f, 0.5f), 0.12f), cf3(0, 0, 0));
+        n.deformers.push_back(scene::Deformer::magnify(cf3(0.3f, 0.2f, 0), 0.7f, 0.45f, 2));
+        l.sdf->insert(n);
+        scenes.push_back({"magnify", std::move(doc), 3.0f});
+    }
+
     {   // elongate_axis: an asymmetric primitive stretched per axis
         Document doc;
         Layer& l = doc.add_sdf_layer("l");

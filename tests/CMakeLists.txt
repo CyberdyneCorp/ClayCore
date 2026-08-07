@@ -49,6 +49,7 @@ add_executable(clay_unit_tests
   unit/test_flatten.cpp
   unit/test_snakehook.cpp
   unit/test_magnify.cpp
+  unit/test_noise.cpp
   unit/test_mask_brush.cpp
   unit/test_mask_extrude.cpp
   unit/test_c_mask_brush.cpp

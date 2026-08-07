@@ -83,10 +83,12 @@ ALIASES = {
     "Document.gradients": "clay_eval_gradients",
     "Document.raycast": "clay_raycast_attributed",  # pyclay's reports layer+item too
     "Volume.from_mesh": "clay_item_volume_from_mesh",
+    "Volume.from_document": "clay_item_volume_from_document",
     "Volume.relaxed": "clay_item_volume_relax",
     "Volume.flattened": "clay_item_volume_flatten",
     "Volume.flattened_from": "clay_item_volume_flatten",
     "Prim.magnify": "CLAY_DEFORM_MAGNIFY",
+    "Prim.noise": "CLAY_DEFORM_NOISE",
     "Mesh.from_triangles": "clay_mesh_from_triangles",
     "Layer.add": "clay_layer_add_item",
     "Layer.set_points": "clay_layer_set_stroke_points",
@@ -204,10 +206,7 @@ EXEMPT = {
     "MeshQuery.signed_distance": "as above",
     "MeshQuery.contains": "as above",
     "MeshQuery.triangle_count": "reads back what was handed in, as elsewhere",
-    "Volume.from_document": "sampling a document is a scripting convenience for "
-                            "checking the sampler against a field the caller "
-                            "already has; C samples a MESH, which is what an app "
-                            "imports — see Volume.from_mesh",
+
     "Volume.eval": "reads the sampled field back before it is placed, so a test "
                    "can tell a sampling error from a placement one; C evaluates "
                    "through the document",

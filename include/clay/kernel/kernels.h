@@ -24,6 +24,7 @@
 #include "clay/kernel/shim.h"
 
 #include "clay/kernel/ease.h"
+#include "clay/kernel/noise.h"
 #include "clay/kernel/ops.h"
 #include "clay/kernel/prim2d.h"
 #include "clay/kernel/prim3d.h"
