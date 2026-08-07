@@ -33,7 +33,6 @@
 #include "clay/scene/bounds.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
-#include "clay/brush/grab.h"
 #include "clay/brush/stroke.h"
 #include "clay/cut/cut.h"
 #include "clay/voxel/mask.h"
@@ -314,8 +313,6 @@ constexpr std::size_t kMeshParamsOriginal =
 constexpr std::size_t kBrushParamsOriginal =
     offsetof(clay_brush_params, seed) + sizeof(std::uint32_t);
 constexpr std::size_t kVolumeParamsOriginal = offsetof(clay_volume_params, beta) + sizeof(float);
-constexpr std::size_t kGrabParamsOriginal =
-    offsetof(clay_grab_params, front_only) + sizeof(std::int32_t);
 constexpr std::size_t kRelaxParamsOriginal = offsetof(clay_relax_params, falloff) + sizeof(float);
 constexpr std::size_t kFlattenParamsOriginal =
     offsetof(clay_flatten_params, falloff) + sizeof(float);
@@ -1185,63 +1182,6 @@ clay_result clay_document_begin_undo_group(clay_document* doc) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
     doc->undo->begin_group();
-    return CLAY_OK;
-}
-
-namespace {
-
-clay_result grab_settings_from(const clay_grab_params* params, brush::GrabSettings* out) {
-    clay_grab_params p;
-    clay_result r = read_desc(params, kGrabParamsOriginal, &p);
-    if (r != CLAY_OK) return r;
-    out->centre = kernel::cf3(p.centre[0], p.centre[1], p.centre[2]);
-    out->radius = p.radius;
-    out->displacement = kernel::cf3(p.displacement[0], p.displacement[1], p.displacement[2]);
-    out->ease = static_cast<std::uint8_t>(p.ease);
-    out->front_only = p.front_only != 0;
-    return CLAY_OK;
-}
-
-}  // namespace
-
-clay_result clay_document_grab(clay_document* doc, const clay_grab_params* params,
-                               size_t* out_items) {
-    if (!doc || !params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
-    brush::GrabSettings s;
-    clay_result r = grab_settings_from(params, &s);
-    if (r != CLAY_OK) return r;
-
-    std::vector<brush::GrabTarget> plan = brush::grab_document(doc->doc.document, s);
-    // One undo step: a Move is one gesture however many items it reached.
-    if (doc->undo) doc->undo->begin_group();
-    std::size_t applied = 0;
-    for (const brush::GrabTarget& t : plan) {
-        r = apply_edit(doc,
-                       scene::Command{scene::SetDeformersCmd{t.layer, t.node, t.deformers}},
-                       "layer or node not found");
-        if (r != CLAY_OK) break;
-        ++applied;
-    }
-    if (doc->undo) doc->undo->end_group();
-    if (out_items) *out_items = applied;
-    return r;
-}
-
-clay_result clay_document_grab_preview(const clay_document* doc, const clay_grab_params* params,
-                                       uint32_t* out_layers, uint32_t* out_nodes,
-                                       size_t capacity, size_t* out_count) {
-    if (!doc || !params || !out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
-    brush::GrabSettings s;
-    clay_result r = grab_settings_from(params, &s);
-    if (r != CLAY_OK) return r;
-
-    std::vector<brush::GrabTarget> plan = brush::grab_document(doc->doc.document, s);
-    *out_count = plan.size();
-    if (!out_layers && !out_nodes) return CLAY_OK;  // size query
-    for (std::size_t i = 0; i < plan.size() && i < capacity; ++i) {
-        if (out_layers) out_layers[i] = plan[i].layer;
-        if (out_nodes) out_nodes[i] = plan[i].node;
-    }
     return CLAY_OK;
 }
 

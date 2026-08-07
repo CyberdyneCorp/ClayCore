@@ -36,7 +36,6 @@ add_executable(clay_unit_tests
   unit/test_c_curve.cpp
   unit/test_cut.cpp
   unit/test_c_cut.cpp
-  unit/test_c_grab.cpp
   unit/test_voxel_repair.cpp
   unit/test_c_voxel_repair.cpp
   unit/test_loft.cpp
@@ -52,7 +51,6 @@ add_executable(clay_unit_tests
   unit/test_magnify.cpp
   unit/test_noise.cpp
   unit/test_relief.cpp
-  unit/test_document_grab.cpp
   unit/test_c_pick_eval.cpp)
 
 target_link_libraries(clay_unit_tests PRIVATE clay::core doctest::doctest)

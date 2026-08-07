@@ -28,7 +28,6 @@
 #include "clay/scene/commands.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
-#include "clay/brush/grab.h"
 #include "clay/brush/stroke.h"
 #include "clay/cut/cut.h"
 #include "clay/field/flatten.h"
@@ -2702,62 +2701,6 @@ NB_MODULE(pyclay, m) {
              "layer"_a, "position"_a = nb::none(), "rotation_axis_angle"_a = nb::none(),
              "scale"_a = nb::none(),
              "Retransform a whole layer; omitted arguments keep their current value")
-        .def("grab",
-             [](PyDocument& d, nb::handle centre, float radius, nb::handle displacement,
-                int ease, bool front_only) {
-                 brush::GrabSettings s;
-                 s.centre = to_f3(centre, "centre");
-                 s.radius = radius;
-                 s.displacement = to_f3(displacement, "displacement");
-                 s.ease = static_cast<std::uint8_t>(ease);
-                 s.front_only = front_only;
-                 std::vector<brush::GrabTarget> plan = brush::grab_document(d.doc->document, s);
-                 // One undo step: a Move is one gesture however many items it
-                 // happened to reach.
-                 UndoRef undo = *d.undo;
-                 if (undo) undo->begin_group();
-                 for (const brush::GrabTarget& t : plan)
-                     apply_or_throw(d.doc->document,
-                                    scene::Command{scene::SetDeformersCmd{t.layer, t.node,
-                                                                          t.deformers}},
-                                    "grab", d.undo.get());
-                 if (undo) undo->end_group();
-                 return plan.size();
-             },
-             "centre"_a, "radius"_a, "displacement"_a, "ease"_a = 0, "front_only"_a = false,
-             "Drag the SURFACE, in world units; returns how many items it reached.\n\n"
-             "This is the difference between the `grab` deformer and a Move brush.\n"
-             "The deformer drags ONE item's own field and takes its centre in that\n"
-             "item's LOCAL frame, so on a form built from several items it pulls\n"
-             "one item's share and leaves the rest behind. This maps the world\n"
-             "drag into every item it reaches, which is exactly a field-level\n"
-             "grab — combine ops are pointwise in the deformed point, so warping\n"
-             "every operand identically is the same as warping their combination.\n\n"
-             "Items the drag cannot touch are skipped: a grab costs exactness and\n"
-             "step scale, and outside its radius the warp is the identity.\n\n"
-             "A drag COALESCES. During one drag the centre and radius are fixed\n"
-             "and only the displacement grows, so calling this repeatedly with a\n"
-             "growing displacement replaces the trailing grab rather than piling\n"
-             "deformers up. A different centre starts a new one.\n\n"
-             "The whole gesture is one undo step. Hidden and protected layers are\n"
-             "skipped, so it never fails part-way through.")
-        .def("grab_preview",
-             [](PyDocument& d, nb::handle centre, float radius, nb::handle displacement,
-                int ease, bool front_only) {
-                 brush::GrabSettings s;
-                 s.centre = to_f3(centre, "centre");
-                 s.radius = radius;
-                 s.displacement = to_f3(displacement, "displacement");
-                 s.ease = static_cast<std::uint8_t>(ease);
-                 s.front_only = front_only;
-                 nb::list out;
-                 for (const brush::GrabTarget& t : brush::grab_document(d.doc->document, s))
-                     out.append(nb::make_tuple(t.layer, t.node));
-                 return out;
-             },
-             "centre"_a, "radius"_a, "displacement"_a, "ease"_a = 0, "front_only"_a = false,
-             "Which (layer_id, node_id) a grab would edit, without touching the\n"
-             "document — so a host can preview a Move before committing it.")
         .def("enable_undo",
              [](PyDocument& d) {
                  if (!*d.undo) *d.undo = std::make_shared<scene::UndoStack>();

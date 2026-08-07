@@ -40,7 +40,6 @@ add_library(claycore
   src/voxel/sculpt.cpp
   src/voxel/mask.cpp
   src/voxel/repair.cpp
-  src/brush/grab.cpp
   src/brush/stroke.cpp
   src/mesh/marching.cpp
   src/mesh/surface_nets.cpp
