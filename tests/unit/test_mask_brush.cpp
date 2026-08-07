@@ -37,19 +37,19 @@ std::vector<StrokeSample> drag_x(float from, float to, int samples = 24) {
     return out;
 }
 
-// The world volume a mask covers above a threshold, so two masks at different
-// resolutions can be compared without either's lattice entering the answer.
-float masked_volume(const MaskField& m, float threshold = 0.5f) {
+// The WORLD extent a mask spans on one axis. Two masks at different
+// resolutions are compared through this rather than through their painted
+// volume: a discretized sphere of 8 cells and one of 16 differ in volume by
+// more than the conversion being tested does, so a volume comparison measures
+// the lattice rather than the footprint and needs a tolerance loose enough to
+// hide the bug. An extent is the width the conversion actually fixes, and it
+// agrees to within a cell.
+float masked_extent(const MaskField& m, int axis) {
     auto lo = m.bounds_min();
     auto hi = m.bounds_max();
     if (!lo || !hi) return 0.0f;
-    const float cell = m.cell_size();
-    std::size_t count = 0;
-    for (std::int32_t z = lo->z; z <= hi->z; ++z)
-        for (std::int32_t y = lo->y; y <= hi->y; ++y)
-            for (std::int32_t x = lo->x; x <= hi->x; ++x)
-                if (m.get({x, y, z}) >= threshold) ++count;
-    return static_cast<float>(count) * cell * cell * cell;
+    const auto on = [](voxel::VoxelCoord c, int a) { return a == 0 ? c.x : (a == 1 ? c.y : c.z); };
+    return static_cast<float>(on(*hi, axis) - on(*lo, axis) + 1) * m.cell_size();
 }
 
 // A mask reaches a field verb as a callable, which is what keeps a sampled
@@ -98,11 +98,19 @@ TEST_CASE("mask brush: the mask's resolution does not change the stroke's width"
     brush::apply_to_mask(coarse, stamps, 1.0f);
     brush::apply_to_mask(fine, stamps, 1.0f);
 
-    const float a = masked_volume(coarse);
-    const float b = masked_volume(fine);
-    REQUIRE(a > 0.0f);
-    // Same world region, to within the coarser lattice's ability to describe it.
-    CHECK(std::abs(a - b) / a < 0.15f);
+    // Across the stroke, the width IS the brush diameter, and it must not move
+    // when the lattice under it changes. Tolerance is one coarse cell, which is
+    // the most a lattice can disagree about where an edge falls.
+    for (int axis : {1, 2}) {  // Y and Z; the drag runs along X
+        const float a = masked_extent(coarse, axis);
+        const float b = masked_extent(fine, axis);
+        REQUIRE(a > 0.0f);
+        CHECK(a == doctest::Approx(preset.radius * 2.0f).epsilon(0.2));
+        CHECK(std::abs(a - b) <= coarse.cell_size() + 1e-4f);
+    }
+    // ...and along it, the path length plus that same diameter.
+    CHECK(std::abs(masked_extent(coarse, 0) - masked_extent(fine, 0)) <=
+          coarse.cell_size() + 1e-4f);
 }
 
 TEST_CASE("mask brush: erasing is the same call") {

@@ -244,6 +244,10 @@ TEST_CASE("c mask extrude: a plate comes off a layer, and off a grid") {
     REQUIRE(clay_add_sdf_layer(doc, "plate", &shell) == CLAY_OK);
     clay_node_id placed = 0;
     CHECK(clay_layer_add_item(doc, shell, plate, &placed) == CLAY_OK);
+    // add_item COPIES the composed edit and leaves the builder untouched, so
+    // the item is still the caller's to destroy — the same rule every other
+    // clay_item producer follows.
+    clay_item_destroy(plate);
 
     // And the same verb on voxels, which owns its result.
     CGrid g(0.03f);

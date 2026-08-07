@@ -188,17 +188,21 @@ bool MaskField::region_is_walkable(const math::Aabb& region) const {
     // float, and `is_infinite` only catches the exact sentinel. Counting first
     // is what turns "an arithmetic mistake upstream" into a refusal rather than
     // into a loop over garbage bounds.
+    // Named per axis rather than indexed through &min.x: walking off the end of
+    // one member into the next is undefined however reliably it works, and the
+    // three cases are three lines.
+    const double scale = 1.0 / static_cast<double>(cell_size_);
     double cells = 1.0;
-    for (int axis = 0; axis < 3; ++axis) {
-        const double lo = (&region.min.x)[axis] / static_cast<double>(cell_size_);
-        const double hi = (&region.max.x)[axis] / static_cast<double>(cell_size_);
+    const auto axis = [&cells, scale](float low, float high) {
+        const double lo = low * scale, hi = high * scale;
         if (!(lo > -2147483648.0 && hi < 2147483647.0)) return false;
         const double span = std::floor(hi) - std::floor(lo) + 1.0;
         if (span > kMaxRegionCells) return false;
         cells *= span;
-        if (cells > kMaxRegionCells) return false;
-    }
-    return true;
+        return cells <= kMaxRegionCells;
+    };
+    return axis(region.min.x, region.max.x) && axis(region.min.y, region.max.y) &&
+           axis(region.min.z, region.max.z);
 }
 
 void MaskField::fill(const math::Aabb& region, float value) {
