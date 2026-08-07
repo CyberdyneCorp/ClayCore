@@ -14,30 +14,37 @@ Last reconciled against `3dcoat_study/MISSING_FEATURES.md` and
 caught five items this file had dropped. Every ClayCore-owned row in their
 catalogue is now represented here or in the deferred list below.
 
-## Where the engine is (2026-08-06, v0.19.0)
+## Where the engine is (2026-08-07, v0.22.1)
 
-14 capabilities, 31 archived changes. Complete enough that the gaps below are
+14 capabilities, 44 archived changes. Complete enough that the gaps below are
 about *sculpting affordances*, not about the field engine:
 
-- 30 primitives + stroke/curve chains, 14 combine ops, 5 blend profiles,
+- 30 primitives + stroke/curve chains, **16 combine ops**, 5 blend profiles,
   grid/radial repetition, mirror with blended seam. Every kernel capability is
-  reachable from a document — loft was the last one that was not.
-- **12 deformers** — twist, bend, taper, displace, wrap_around, elongate,
+  reachable from a document — loft was the last one that was not. Relief and
+  incise are the only ops whose item is a REGION rather than geometry.
+- **14 deformers** — twist, bend, taper, displace, wrap_around, elongate,
   elongate_axis, bend_linear, bend_radial, plus grab, pose and pose_line with
-  finite support. Every point-warp implemented in the kernel headers is
-  reachable from a document; there is nothing left stranded.
+  finite support, plus magnify (signed: magnify and pinch are one deformation)
+  and noise. Every point-warp implemented in the kernel headers is reachable
+  from a document; there is nothing left stranded.
 - Voxel engine: palette grids, cube/sphere brushes with 4 falloff curves and
-  strength, sculpt verbs smooth / inflate / flatten / pinch, fills, mirrored
-  edits, flood select, greedy meshing, SDF↔voxel bridges, paintable mask
-  fields gating every verb
+  strength, **10 sculpt verbs** — smooth, inflate, flatten, pinch, magnify,
+  scrape, smudge, grab, fill_cavities and carve_alpha — fills, mirrored edits,
+  flood select, greedy meshing, SDF↔voxel bridges, paintable mask fields
+  gating every verb
 - Brush stroke engine: samples in, edit items out, with versioned presets;
   paintable per-layer mask fields; ghosted and locked layers
 - Control-point curves (hard / Catmull-Rom / B-spline / Bezier, closed,
   tessellated to a document tolerance) and the cut tool (rect / circle /
   polygon / spline lasso, swept as a prism)
 - Editing and opt-in undo over one command vocabulary shared with the file
-  format; 228 capabilities gated for binding parity; four backends verified on
-  device; the Swift package verified in the iOS Simulator
+  format — including an item's deformer chain, which `SetDeformersCmd` made an
+  ordinary edit; **268 capabilities** gated for binding parity; the Swift
+  package verified in the iOS Simulator
+- Four backends registered. **CPU and Metal are verified on device as of
+  v0.22.1**; CUDA and OpenCL are manual hardware checks (docs/RELEASE.md) and
+  were not re-verified for it
 
 ### Corrections to the study's baseline
 
@@ -212,11 +219,13 @@ tractable, and each one is a row rather than a project.
 
 | Change | Notes |
 |---|---|
+| ~~`extend-parity-fixture-coverage`~~ **landed 2026-08-07** | The host parity fixture shipped the new kernel headers but no case exercising them, so a host pinning `claycore-kernels.zip` got a green fixture that said nothing about relief, incise, noise or magnify — worse than absent coverage, because it reads as validation. Five cases, both directions of each signed pair. Every combine op now has a case (16 of 16), gated by a test that scans the compiled tapes rather than case names. Deformer kinds (5 of 14) and primitive families are still short, which the spec now states rather than implies. Shipped in v0.22.1. |
+| ~~`add-surface-relief`~~ **landed 2026-08-07** | ZBrush's Standard and ClayBuildup building a surface up, and Crease and DamStandard cutting into one. The first ops whose item is a **region** rather than geometry: they offset the accumulated field by an amplitude weighted by the item's own field, so the surface already built moves along its own normal and the item contributes no shape. Scoped as ONE op with a signed amplitude, which cannot work — the amplitude rides on `blend_k`, validated non-negative in three places including the blend constructor, which has no op to be aware of. Two ops sharing one kernel branch instead, which is also the convention add/subtract and engrave/emboss already follow. The item's rounding does **double duty**: it is the falloff width and it rounds the region's own field, so the reach is region + rounding + falloff. |
 | ~~`add-sdf-flatten`~~ **landed 2026-08-07** | Voxels have `sculpt_flatten`; SDF layers have nothing but the cut tool, which is global to its prism and has no falloff. Raised first as "add the Clip brush" and **that framing was wrong**: as a solid, ZBrush's Clip is exactly Trim — the clamp map sends everything past the plane onto it, and the image has no volume. Clip's distinctive look is a zero-thickness fin a field cannot represent and users delete anyway. Flatten is the verb with no equivalent today. The Lipschitz argument was the expected difficulty and not the real one. Flatten cannot rewrite a volume's samples the way relax does at all — a band tracks the surface only while the surface stays inside it, and flatten moves it many band widths, so the isosurface came apart. It samples a fresh volume instead, which makes the blend closed-form. The region also turned out to be **required**: where flatten's weight is one the result IS the plane, so with no region it replaces the shape with a half-space. |
 | ~~`add-snakehook`~~ **landed 2026-08-07** | Horns and tendrils. The claim that it "needs geometry that GROWS along a drag" was wrong: the stroke opcode already sweeps a sphere along a chain with a radius per point, which IS a tendril once the radii taper — and the field stays EXACT, so it costs the raymarcher nothing. It became a resolver, like the cut tool. What it owns is the arc-length taper and prepending the anchor; what it does not is pushing that anchor inward, which was specified and measured to do nothing. |
 | ~~`add-magnify-pinch`~~ **landed 2026-08-07** | Scoped as `add-magnify-blob`; Blob was carved out and is blocked on `add-noise-field`, because its irregular response is the brush and the `displace` deformer's sine is regular by construction. Magnify and pinch turned out to be ONE deformation with a signed strength, which is what Maxon's own page says. The centre of a radial scale is its fixed point, which caught the tests twice in the same shape. |
 | ~~`add-noise-field`~~ **landed 2026-08-07** | Gradient noise on an integer lattice. The three open decisions answered each other: parity is tolerance-based (1e-6 CPU / 1e-4 GPU), and a float hash turns each backend's own `sin` into an O(1) disagreement, so the hash had to be INTEGER — which decided the noise and forced the dialect's first integer type into the shim. The seed is a plain deformer parameter. Blob is now unblocked. |
-| ~~`add-move-brush`~~ **landed 2026-08-07** | ZBrush's Move for SDF layers. The deformation was never missing — `grab` has been there since `add-region-deformers` — but three things stood between it and a brush, all of them the kind of geometric step the cut tool and snakehook exist to absorb. A deformer is per ITEM and its centre is in that item's LOCAL frame, so grabbing one item of a blended form pulls its share and leaves the rest (measured: 0.070 and 0.000 on two blended balls). The warp has to go at the FRONT of the chain, because `deformers[0]` is the outermost warp on the geometry and one appended behind an existing deformer has its region weight read at a point that deformer already moved. And there was **nowhere to put the result**: the command vocabulary had no way to change a node's deformers at all, so a deformer could only be set when its node was created — `SetDeformersCmd` is the other half of this row. The expected hard part, accumulating a transform chain through groups, turned out not to exist: a group's transform never reaches its children, which is worth knowing on its own. |
+| ~~`add-move-brush`~~ **landed 2026-08-07** | ZBrush's Move for SDF layers. The deformation was never missing — `grab` has been there since `add-region-deformers` — but three things stood between it and a brush, all of them the kind of geometric step the cut tool and snakehook exist to absorb. A deformer is per ITEM and its centre is in that item's LOCAL frame, so grabbing one item of a blended form pulls its share and leaves the rest (measured: 0.070 and 0.000 on two blended balls). The warp has to go at the FRONT of the chain, because `deformers[0]` is the outermost warp on the geometry and one appended behind an existing deformer has its region weight read at a point that deformer already moved. And there was **nowhere to put the result**: the command vocabulary had no way to change a node's deformers at all, so a deformer could only be set when its node was created — `SetDeformersCmd` is the other half of this row. The expected hard part, accumulating a transform chain through groups, turned out not to exist: a group's transform never reaches its children, which is worth knowing on its own. Followed by `add-move-drag-continuity`: a Move is a stream of drags, not one, and each frame prepended another warp — 120 of them on a two-second drag at 60fps, each multiplying into the declared Lipschitz. A drag now coalesces on its fixed centre and radius, and can be previewed. |
 | `add-blob-brush` | Now unblocked by `add-noise-field`. ZBrush's Blob: an irregular surface response under a brush region, which is noise applied locally rather than to a whole item. |
 
 Not planned: Morph (needs a stored morph target, which is a document concept

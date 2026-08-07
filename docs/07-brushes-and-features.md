@@ -134,8 +134,9 @@ does nothing to it.
 ZBrush's Move drags the **surface**. The two coincide only while the region
 under the cursor belongs to a single item. On a form smooth-unioned from
 several — the normal case for a blocked-out sculpt — grabbing one item pulls its
-share and leaves the rest behind: on two blended balls, grabbing the left lifts
-its side by 0.118 and the right by only 0.022.
+share and leaves the rest behind. Measured on two balls of radius 0.5 at
+x = ±0.45 smooth-unioned at k = 0.25, with a grab of radius 0.8 and displacement
+0.4 on the left item alone: **the left side rises 0.070 and the right 0.000**.
 
 The fix is to apply the **same warp to every contributing item**, mapping the
 world drag into each item's frame:
