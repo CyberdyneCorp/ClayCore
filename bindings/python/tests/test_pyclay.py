@@ -366,6 +366,79 @@ def test_relief_support_is_finite_and_costs_the_marcher():
     assert steep.safe_step_scale() < ball(clay.Op.RELIEF).safe_step_scale()
 
 
+def _bump_and_dent():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.8))
+    layer.add(clay.Sphere(r=0.28, position=(0.25, 0.72, 0)))
+    layer.add(clay.Sphere(r=0.26, position=(-0.3, 0.66, 0)), op=clay.Op.SUBTRACT)
+    return doc
+
+
+def _flat_top(doc, x):
+    ys = np.arange(1.4, -0.2, -0.002, dtype=np.float32)
+    pts = np.stack([np.full_like(ys, x), ys, np.zeros_like(ys)], axis=1)
+    out = np.nonzero(doc.eval(pts) <= 0)[0]
+    return float(ys[out[0]]) if len(out) else float("nan")
+
+
+def _flattened(src, mode):
+    vol = clay.Volume.flattened_from(src, plane_point=(0, 0.78, 0), plane_normal=(0, 1, 0),
+                                     strength=1.0, centre=(0, 0.78, 0), region_radius=0.9,
+                                     falloff=0.25, cell=0.01, band=0.12, mode=mode)
+    doc = clay.Document()
+    doc.add_sdf_layer("f").add(vol)
+    return doc
+
+
+def test_flatten_cut_only_is_hpolish():
+    """Cutting WITHOUT filling is the whole hard-surface brush.
+
+    It is what leaves a crisp facet against untouched surface; filling the
+    hollows beside a facet is what a polish must not do.
+    """
+    src = _bump_and_dent()
+    dent_x, bump_x, plane = -0.30, 0.25, 0.778
+
+    cut = _flattened(src, "cut")
+    assert _flat_top(cut, dent_x) == pytest.approx(_flat_top(src, dent_x), abs=1e-3)
+    assert _flat_top(cut, bump_x) == pytest.approx(plane, abs=0.01)
+
+
+def test_flatten_fill_only_is_the_dual():
+    src = _bump_and_dent()
+    dent_x, bump_x, plane = -0.30, 0.25, 0.778
+
+    fill = _flattened(src, "fill")
+    assert _flat_top(fill, dent_x) == pytest.approx(plane, abs=0.01)
+    assert _flat_top(fill, bump_x) == pytest.approx(_flat_top(src, bump_x), abs=1e-3)
+
+
+def test_flatten_defaults_to_two_sided():
+    src = _bump_and_dent()
+    rng = np.random.default_rng(3)
+    probes = rng.uniform(-1.0, 1.2, size=(3000, 3)).astype(np.float32)
+
+    implicit = clay.Volume.flattened_from(src, plane_point=(0, 0.78, 0),
+                                          plane_normal=(0, 1, 0), strength=1.0,
+                                          centre=(0, 0.78, 0), region_radius=0.9,
+                                          falloff=0.25, cell=0.01, band=0.12)
+    doc = clay.Document(); doc.add_sdf_layer("f").add(implicit)
+    assert np.array_equal(doc.eval(probes), _flattened(src, "two_sided").eval(probes))
+    # ...and both sides really do move, which is what makes it two-sided.
+    two = _flattened(src, "two_sided")
+    assert _flat_top(two, -0.30) > _flat_top(src, -0.30) + 0.2     # hollow filled
+    assert _flat_top(two, 0.25) < _flat_top(src, 0.25) - 0.1       # bump cut
+
+
+def test_flatten_refuses_an_unknown_mode():
+    src = _bump_and_dent()
+    with pytest.raises(ValueError, match="two_sided"):
+        clay.Volume.flattened_from(src, plane_point=(0, 0.78, 0), plane_normal=(0, 1, 0),
+                                   region_radius=0.9, falloff=0.25, cell=0.02,
+                                   mode="polish")
+
+
 def test_voxel_grid_edits_and_queries():
     g = clay.VoxelGrid(voxel_size=0.5)
     red = g.palette_add("#ff0000")

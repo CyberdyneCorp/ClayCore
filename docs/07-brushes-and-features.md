@@ -211,7 +211,7 @@ parameters.
 | Operation | What it does | Key parameters |
 |---|---|---|
 | `field::relax` | Smooth the field — the ZBrush Smooth brush. Averages over a cell neighbourhood | strength, `radius_cells`, iterations, centre, `region_radius`, falloff |
-| `field::flatten` | Pull the surface onto a plane. **Two-sided**: material on the normal's side goes *and* hollows on the other side fill | plane point + normal, strength, centre, `region_radius`, falloff |
+| `field::flatten` | Pull the surface onto a plane. `mode` picks which side it acts on: two-sided (ZBrush Flatten), cut-only (hPolish, Planar, Trim) or fill-only | plane point + normal, strength, centre, `region_radius`, falloff, `mode` |
 
 Both take a region with a falloff. A `region_radius` of zero means:
 
@@ -227,6 +227,22 @@ the raymarcher stays correct. Flatten's region blends under a weight that varies
 across it, which *can* be steeper than the source — so it measures the Lipschitz
 its samples actually have rather than assuming one, and the document's safe step
 scale drops to match.
+
+**Which side it acts on is the whole hard-surface family.** Two-sided is ZBrush's
+Flatten: material above the plane goes *and* hollows below it fill. Cut-only is
+hPolish, Planar and the Trim brushes — cutting *without* filling is what leaves a
+crisp facet against untouched surface, and filling the hollows beside a facet is
+what a polish must not do. Fill-only is the dual, and closes a scanned hole flat
+without touching the surface around it. The three differ by one clamp on the
+blend term, which is why it is a mode rather than three entry points.
+
+Measured across a flank carrying a hollow, with the plane at x = 0.5:
+
+| y | source | two-sided | cut | fill |
+|---|---|---|---|---|
+| −0.10 | 0.576 | 0.498 | **0.498** cut | 0.576 kept |
+| 0.00 | 0.375 (hollow) | 0.498 | **0.375** kept | 0.498 filled |
+| 0.30 | 0.513 | 0.498 | **0.498** cut | 0.513 kept |
 
 `flatten` has two overloads. Prefer the one taking a **document sampler**: a
 volume's band tracks the surface only while the surface stays inside it, and
@@ -336,7 +352,8 @@ parity — the mechanism usually differs even where the result matches.
 | Pinch | `magnify` (negative), `sculpt_pinch` | One signed strength, not two verbs |
 | Magnify | `magnify` (positive), `sculpt_magnify` | Maxon's own page calls them inverses |
 | Smooth | `field::relax`, `sculpt_smooth` | Bakes on the SDF side |
-| Flatten | `field::flatten`, `sculpt_flatten` | Two-sided; region required on the SDF side |
+| Flatten | `field::flatten` (two-sided), `sculpt_flatten` | Region required on the SDF side |
+| hPolish, Planar, Trim | `field::flatten` in **cut-only** mode | Planes down without filling, which is what keeps the facet crisp |
 | Trim (Rect/Circle/Lasso) | `cut::cut_item` | The practitioners' "90% tool" |
 | Clip | `cut::cut_item` | **As a solid, Clip is exactly Trim.** Clip's distinctive look is a zero-thickness fin a field cannot represent and users delete anyway |
 | SnakeHook | `brush::snakehook` | Adds material rather than pulling it |

@@ -744,6 +744,22 @@ typedef struct clay_relax_params {
  * wants: bring in a scan, then smooth it. */
 clay_result clay_item_volume_relax(clay_item* item, const clay_relax_params* params);
 
+/* Which side of its plane a flatten acts on.
+ *
+ * CLAY_FLATTEN_TWO_SIDED is ZBrush's Flatten: material above the plane goes AND
+ * hollows below it fill. CLAY_FLATTEN_CUT_ONLY is the hard-surface family —
+ * hPolish, Planar, the Trim brushes — where cutting WITHOUT filling is the whole
+ * brush: it leaves a crisp facet against untouched surface, and filling the
+ * hollows beside a facet is what a polish must not do. CLAY_FLATTEN_FILL_ONLY is
+ * the dual, and fills a scanned hole flat without touching the surface around
+ * it. The three differ by one clamp, which is why this is a mode rather than
+ * three entry points. */
+typedef enum clay_flatten_mode {
+    CLAY_FLATTEN_TWO_SIDED = 0,
+    CLAY_FLATTEN_CUT_ONLY = 1,
+    CLAY_FLATTEN_FILL_ONLY = 2
+} clay_flatten_mode;
+
 typedef struct clay_flatten_params {
     uint32_t struct_size;  /* = sizeof(clay_flatten_params); required */
     float plane_point[3];  /* a point on the plane to flatten onto */
@@ -754,6 +770,9 @@ typedef struct clay_flatten_params {
                             * replaces the shape with a half-space rather than
                             * flattening it — a ball comes back as a box */
     float falloff;         /* taper at the region's edge; widened when too narrow to declare */
+    /* Which side of the plane to act on; APPENDED, so a descriptor sized to the
+     * layout that predates it still describes a two-sided flatten. */
+    int32_t mode;          /* clay_flatten_mode */
 } clay_flatten_params;
 
 /* Pulls an item's volume onto a plane, in place. The verb SDF layers were

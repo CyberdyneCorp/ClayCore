@@ -2275,6 +2275,10 @@ clay_result clay_item_volume_flatten(clay_item* item, const clay_flatten_params*
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "region_radius must be > 0");
     settings.region_radius = p.region_radius;
     settings.falloff = p.falloff;
+    if (p.mode < 0 || p.mode > CLAY_FLATTEN_FILL_ONLY)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "unknown flatten mode: " + std::to_string(p.mode));
+    settings.mode = static_cast<field::FlattenMode>(p.mode);
 
     item->node.volume =
         std::make_shared<field::FieldVolume>(field::flatten(*item->node.volume, settings));

@@ -1663,8 +1663,8 @@ NB_MODULE(pyclay, m) {
             "flattened_from",
             [](nb::handle source, nb::handle plane_point, nb::handle plane_normal, float cell,
                nb::handle band, nb::handle bounds, float strength, nb::handle centre,
-               float region_radius, float falloff, nb::handle position,
-               nb::handle rotation_axis_angle, float scale) {
+               float region_radius, float falloff, const std::string& mode,
+               nb::handle position, nb::handle rotation_axis_angle, float scale) {
                 if (!(cell > 0.0f)) throw std::invalid_argument("cell must be > 0");
                 if (!(strength >= 0.0f && strength <= 1.0f))
                     throw std::invalid_argument("strength must be between 0 and 1");
@@ -1674,6 +1674,12 @@ NB_MODULE(pyclay, m) {
                 if (!(kernel::clength(settings.plane_normal) > 1e-6f))
                     throw std::invalid_argument("plane_normal must not be zero length");
                 settings.strength = strength;
+                if (mode == "two_sided") settings.mode = field::FlattenMode::TwoSided;
+                else if (mode == "cut") settings.mode = field::FlattenMode::CutOnly;
+                else if (mode == "fill") settings.mode = field::FlattenMode::FillOnly;
+                else
+                    throw std::invalid_argument(
+                        "mode must be 'two_sided', 'cut' or 'fill', got '" + mode + "'");
                 if (!centre.is_none()) settings.centre = to_f3(centre, "centre");
                 if (!(region_radius > 0.0f))
                     throw std::invalid_argument(
@@ -1713,11 +1719,18 @@ NB_MODULE(pyclay, m) {
             "document"_a, "plane_point"_a, "plane_normal"_a, "cell"_a = 0.05f,
             "band"_a = nb::none(), "bounds"_a = nb::none(), "strength"_a = 1.0f,
             "centre"_a = nb::none(), "region_radius"_a = 0.0f, "falloff"_a = 0.0f,
-            CLAY_PLACE_ARGS,
+            "mode"_a = "two_sided", CLAY_PLACE_ARGS,
             "Sample a document with a flatten applied, in one pass — the verb SDF\n"
             "layers were missing, since voxels have had sculpt_flatten all along.\n\n"
-            "TWO-SIDED, matching the voxel verb: material on the normal's side\n"
-            "goes AND hollows on the other side fill. It is not a subtract, and\n"
+            "TWO-SIDED by default, matching the voxel verb: material on the\n"
+            "normal's side goes AND hollows on the other side fill. It is not a\n"
+            "subtract, and\n"
+            "\n"
+            "`mode` picks which side it acts on: 'two_sided' (ZBrush Flatten),\n"
+            "'cut' (only removes — hPolish, Planar, the Trim family, where\n"
+            "cutting WITHOUT filling is what leaves a crisp facet against\n"
+            "untouched surface) or 'fill' (only deposits, which fills a scanned\n"
+            "hole flat without touching the surface around it).\n"
             "it is not ZBrush's Clip — as a solid, Clip is exactly Trim, which\n"
             "Cut already does.\n\n"
             "This SAMPLES rather than editing an existing volume, and the\n"

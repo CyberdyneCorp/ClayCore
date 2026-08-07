@@ -61,7 +61,14 @@ FieldVolume flatten(const std::function<float(cfloat3)>& source, const math::Aab
             // fills. At full weight the field IS the half-space, so the surface
             // IS the plane.
             const float plane = kernel::cdot(normal, p - point);
-            return here + (plane - here) * weight;
+            // One clamp is the whole difference between the three modes. The
+            // term is positive where the plane is further out than the surface
+            // — material to remove — and negative where it is further in.
+            float toward = plane - here;
+            if (settings.mode == FlattenMode::CutOnly) toward = kernel::cmax(toward, 0.0f);
+            else if (settings.mode == FlattenMode::FillOnly)
+                toward = kernel::cmin(toward, 0.0f);
+            return here + toward * weight;
         },
         region, cell_size, band);
 
