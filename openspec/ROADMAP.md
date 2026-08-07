@@ -204,6 +204,22 @@ decision on the record.
 `examples/run_all.py` names an example for every living capability, so an
 uncovered one is an error and an exemption is a decision on the record.
 
+## Sculpting verbs still missing on SDF layers
+
+`add-sdf-relax` closed the first of these; the pattern it established — sample,
+rewrite the stored samples under a region, hand back a volume — makes the rest
+tractable, and each one is a row rather than a project.
+
+| Change | Notes |
+|---|---|
+| `add-sdf-flatten` **(scoped 2026-08-07)** | Voxels have `sculpt_flatten`; SDF layers have nothing but the cut tool, which is global to its prism and has no falloff. Raised first as "add the Clip brush" and **that framing was wrong**: as a solid, ZBrush's Clip is exactly Trim — the clamp map sends everything past the plane onto it, and the image has no volume. Clip's distinctive look is a zero-thickness fin a field cannot represent and users delete anyway. Flatten is the verb with no equivalent today. The work is in the Lipschitz argument, not the blend: a varying weight adds `(q − d)·∇w`, so the per-pass movement has to be bounded and iterated. |
+| `add-snakehook` | The largest remaining gap for a sculpting app: pulling out horns and tendrils. Needs geometry that GROWS along a drag rather than a stamp with fixed support, so unlike the rows above it is not a rewrite of samples under a region. |
+| `add-magnify-blob` | Magnify is Pinch's inverse and nearly free given Pinch. Blob is not — its irregular response wants a noise source the engine does not have. |
+
+Not planned: Morph (needs a stored morph target, which is a document concept
+rather than a brush), Elastic and ZProject (both mesh-era ideas that do not
+survive the representation change intact).
+
 ## Phase 3 — the pipeline
 
 | Change | Notes |
