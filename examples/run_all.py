@@ -41,6 +41,7 @@ EXAMPLES = [
     "23_magnify",
     "24_noise",
     "25_relief",
+    "26_mask_extrude",
 ]
 
 
@@ -60,8 +61,8 @@ CAPABILITY_EXAMPLES = {
     "meshing": "08_meshing_and_io",  # plus 19_mesh_import for the reverse direction
     "picking": "10_editing",
     "file-io": "08_meshing_and_io",
-    "voxel-engine": "15_voxel_verbs_and_repair",
-    "brush-engine": "12_strokes",
+    "voxel-engine": "15_voxel_verbs_and_repair",  # plus 11_masks and 26_mask_extrude
+    "brush-engine": "12_strokes",   # plus 11_masks for the mask brush
     "cut-tool": "14_cut",
     "python-bindings": None,      # every example IS this capability
     "c-abi": None,                # exercised from Swift and C, not from the gallery

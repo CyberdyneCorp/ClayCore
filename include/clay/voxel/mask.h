@@ -72,6 +72,28 @@ class MaskField {
     void contract(int steps = 1);  // grey erosion, 6-neighbourhood min
     void smooth(int iterations = 1);
 
+    // -- bounded region operations -------------------------------------------
+    // The complement `invert()` cannot express. Inverting the painted region is
+    // the only thing a sparse unbounded lattice CAN do, and it is not what "mask
+    // a limb, invert, sculpt everything else" means: the untouched storage stays
+    // unmasked, and the boundary lands on chunk edges rather than on the painted
+    // region. So the caller supplies the finite region the complement is taken
+    // over — it always has one, from a grid's bounds or an item's.
+    //
+    // A cell is in the region when its CENTRE is. Both cost the region's volume
+    // in cells, so both are no-ops for a region `region_is_walkable` rejects —
+    // ask first if you need to tell "did nothing" from "could not".
+    void fill(const math::Aabb& region, float value);
+    void invert_within(const math::Aabb& region);
+
+    // Whether fill and invert_within can walk this region on this lattice.
+    // False for an empty one, and for one whose cell count exceeds the budget
+    // below — a bound rather than a hang, since a caller that passes a
+    // near-infinite box has made an arithmetic mistake rather than a request,
+    // and the cell indices for one do not fit in the lattice's own int32.
+    static constexpr double kMaxRegionCells = 268435456.0;  // 1 << 28
+    bool region_is_walkable(const math::Aabb& region) const;
+
     // -- queries -------------------------------------------------------------
     std::size_t painted_count() const;  // cells with a nonzero value
     bool empty() const { return chunks_.empty(); }

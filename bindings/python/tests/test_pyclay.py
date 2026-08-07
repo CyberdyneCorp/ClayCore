@@ -1828,6 +1828,219 @@ def test_mask_rejects_a_bad_cell_size():
         clay.MaskField(0.0)
 
 
+# -- the mask brush (add-mask-stroke-brush) ----------------------------------
+
+
+def _mask_drag(x0=-0.4, x1=0.4, n=17):
+    return np.array([[x0 + (x1 - x0) * i / (n - 1), 0.0, 0.0, 1.0]
+                     for i in range(n)], np.float32)
+
+
+def test_mask_apply_stroke_paints_a_band():
+    m = clay.MaskField(0.05)
+    preset = clay.StrokePreset(radius=0.15, spacing=0.3)
+    stamps = m.apply_stroke(_mask_drag(), preset, target=1.0)
+    assert stamps > 1
+    assert m.sample((0.0, 0.0, 0.0)) > 0.5
+    assert m.sample((0.0, 1.0, 0.0)) == pytest.approx(0.0)
+
+
+def test_mask_stroke_width_does_not_track_the_mask_resolution():
+    """The conversion apply_stroke exists to own: a stamp's radius is in WORLD
+    units, a mask footprint is in mask cells."""
+    preset = clay.StrokePreset(radius=0.2, spacing=0.25)
+    samples = _mask_drag()
+    volumes = []
+    for cell in (0.05, 0.025):
+        m = clay.MaskField(cell)
+        m.apply_stroke(samples, preset, target=1.0)
+        volumes.append(m.painted_count * cell ** 3)
+    assert abs(volumes[0] - volumes[1]) / volumes[0] < 0.2
+
+
+def test_mask_stroke_erases_with_the_same_call():
+    m = clay.MaskField(0.05)
+    preset = clay.StrokePreset(radius=0.2, spacing=0.3)
+    m.apply_stroke(_mask_drag(), preset, target=1.0)
+    assert m.sample((0.0, 0.0, 0.0)) > 0.9
+    m.apply_stroke(_mask_drag(), preset, target=0.0)
+    assert m.sample((0.0, 0.0, 0.0)) < 0.1
+
+
+def test_mask_invert_within_takes_a_bounded_complement():
+    m = clay.MaskField(0.1)
+    m.paint((0.05, 0.05, 0.05), size=3, shape="sphere")
+    m.invert_within(((-1, -1, -1), (1, 1, 1)))
+    assert m.sample((0.05, 0.05, 0.05)) < 0.1     # what was painted is released
+    assert m.sample((0.55, 0.55, 0.55)) > 0.9     # the rest of the box is frozen
+    assert m.sample((3.0, 0.0, 0.0)) == pytest.approx(0.0)   # outside it, nothing
+
+
+def test_mask_fill_and_emptying():
+    m = clay.MaskField(0.1)
+    box = ((-0.3, -0.3, -0.3), (0.3, 0.3, 0.3))
+    m.fill(box, 0.5)
+    assert m.sample((0.05, 0.05, 0.05)) == pytest.approx(0.5, abs=0.01)
+    m.fill(box, 0.0)
+    assert m.empty
+
+
+def test_relax_freezes_against_a_mask():
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Sphere(0.6))
+    volume = clay.Volume.from_document(doc, cell=0.04, band=0.16,
+                                       bounds=((-1, -1, -1), (1, 1, 1)))
+    settings = dict(strength=1.0, radius_cells=2, iterations=3,
+                    centre=(0.55, 0.0, 0.0), region_radius=0.5, falloff=0.2)
+
+    freeze = clay.MaskField(0.05)
+    freeze.fill(((0.0, -1.2, -1.2), (1.4, 1.2, 1.2)), 1.0)
+
+    probe = np.array([[0.55, 0.0, 0.0]], np.float32)
+    before = float(volume.eval(probe)[0])
+    moved = float(volume.relaxed(**settings).eval(probe)[0])
+    held = float(volume.relaxed(**settings, mask=freeze).eval(probe)[0])
+
+    assert moved != before                # the relax without the mask acts
+    assert held == before                 # and with it, exactly nothing moves
+
+
+def test_flatten_freezes_against_a_mask():
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Sphere(0.6))
+    common = dict(plane_point=(0.0, 0.4, 0.0), plane_normal=(0.0, 1.0, 0.0),
+                  cell=0.04, band=0.16, bounds=((-1, -1, -1), (1, 1, 1)),
+                  centre=(0.0, 0.6, 0.0), region_radius=0.4, falloff=0.2)
+
+    freeze = clay.MaskField(0.05)
+    freeze.fill(((-1, 0.0, -1), (1, 1, 1)), 1.0)
+
+    def surface_y(volume):
+        ys = np.arange(0.9, 0.0, -0.002, dtype=np.float32)
+        pts = np.stack([np.zeros_like(ys), ys, np.zeros_like(ys)], axis=1)
+        inside = np.nonzero(volume.eval(pts) <= 0.0)[0]
+        return float(ys[inside[0]])
+
+    open_y = surface_y(clay.Volume.flattened_from(doc, **common))
+    held_y = surface_y(clay.Volume.flattened_from(doc, **common, mask=freeze))
+    assert open_y < 0.55                       # pulled down onto the plane
+    assert held_y == pytest.approx(0.6, abs=0.02)   # left where the sphere put it
+
+
+# -- mask extrude (add-mask-extrude) -----------------------------------------
+
+
+def _capped_body(cell=0.03):
+    doc = clay.Document()
+    doc.add_sdf_layer("body").add(clay.Sphere(0.6))
+    mask = doc.add_mask("body", cell_size=cell)
+    mask.paint((0.0, 0.6, 0.0), size=int(round(0.64 / cell)), shape="sphere",
+               falloff="constant")
+    return doc, mask
+
+
+def test_mask_to_field_measures_the_masked_region():
+    _doc, mask = _capped_body()
+    measured = mask.to_field(band=0.25, pad=0.3)
+    values = measured.eval(np.array([[0.0, 0.6, 0.0], [0.45, 0.6, 0.0]], np.float32))
+    assert values[0] < 0.0          # inside the masked region
+    assert values[1] > 0.0          # outside it
+
+
+def test_mask_to_field_refuses_an_empty_mask():
+    with pytest.raises(ValueError):
+        clay.MaskField(0.05).to_field()
+
+
+def test_mask_extrude_pulls_a_plate_off_a_document():
+    doc, mask = _capped_body()
+    plate = doc.mask_extrude(mask, thickness=0.12, side="outward")
+
+    ys = np.arange(1.2, 0.0, -0.002, dtype=np.float32)
+    pts = np.stack([np.zeros_like(ys), ys, np.zeros_like(ys)], axis=1)
+    crossings = np.nonzero(np.diff(np.signbit(plate.eval(pts))))[0]
+    assert len(crossings) == 2
+    outer, inner = float(ys[crossings[0]]), float(ys[crossings[1]])
+    assert inner == pytest.approx(0.6, abs=0.05)          # sits on the surface
+    assert outer - inner == pytest.approx(0.12, abs=0.04)  # is that thick
+
+    # Nothing on the unmasked side.
+    assert float(plate.eval(np.array([[0.0, -0.6, 0.0]], np.float32))[0]) > 0.0
+
+
+def test_mask_extrude_sides_land_on_the_right_side():
+    doc, mask = _capped_body()
+    probe_out = np.array([[0.0, 0.65, 0.0]], np.float32)
+    probe_in = np.array([[0.0, 0.55, 0.0]], np.float32)
+
+    out = doc.mask_extrude(mask, thickness=0.12, side="outward")
+    inward = doc.mask_extrude(mask, thickness=0.12, side="inward")
+    assert float(out.eval(probe_out)[0]) < 0.0
+    assert float(out.eval(probe_in)[0]) > 0.0
+    assert float(inward.eval(probe_in)[0]) < 0.0
+    assert float(inward.eval(probe_out)[0]) > 0.0
+
+
+def test_mask_extrude_leaves_the_mask_alone():
+    doc, mask = _capped_body()
+    before = mask.painted_count
+    doc.mask_extrude(mask, thickness=0.12, border_smooth=2)
+    assert mask.painted_count == before
+
+
+def test_mask_extrude_refuses_what_it_cannot_do():
+    doc, mask = _capped_body()
+    with pytest.raises(ValueError):
+        doc.mask_extrude(clay.MaskField(0.03), thickness=0.12)   # empty
+    with pytest.raises(ValueError):
+        doc.mask_extrude(mask, thickness=0.0)                    # no thickness
+    with pytest.raises(ValueError):
+        doc.mask_extrude(mask, thickness=0.12, side="sideways")  # not a side
+
+    away = clay.MaskField(0.03)
+    away.fill(((4.0, 4.0, 4.0), (4.4, 4.4, 4.4)), 1.0)
+    with pytest.raises(ValueError):
+        doc.mask_extrude(away, thickness=0.12)                   # misses the surface
+
+
+def test_voxel_mask_extrude_agrees_with_the_field_one():
+    """What a document means must not depend on how it is stored."""
+    cell = 0.03
+    doc, mask = _capped_body(cell)
+
+    grid = clay.VoxelGrid(cell)
+    stone = grid.palette_add("#6f7d8c")
+    n = int(np.ceil(0.6 / cell)) + 2
+    span = np.arange(-n, n + 1)
+    gx, gy, gz = np.meshgrid(span, span, span, indexing="ij")
+    coords = np.stack([gx, gy, gz], axis=-1).reshape(-1, 3)
+    centres = (coords + 0.5) * cell
+    grid.set_many(coords[np.linalg.norm(centres, axis=1) <= 0.6].astype(np.int32), stone)
+
+    extract = grid.mask_extrude(mask, thickness=0.12, side="outward")
+    assert extract.occupied_count > 0
+    assert grid.occupied_count > extract.occupied_count   # the source is untouched
+    # The colour came along rather than defaulting.
+    assert extract.palette_size == 2
+
+    plate = doc.mask_extrude(mask, thickness=0.12, side="outward", cell_size=cell)
+    (lo, hi) = extract.bounds()
+    claimed = [(x, y, z)
+               for x in range(lo[0], hi[0] + 1)
+               for y in range(lo[1], hi[1] + 1)
+               for z in range(lo[2], hi[2] + 1)
+               if extract.get((x, y, z)) != 0]
+    centres = (np.array(claimed, np.float32) + 0.5) * cell
+    agreeing = float(np.mean(plate.eval(centres) < cell))
+    assert agreeing > 0.95
+
+
+def test_voxel_mask_extrude_refuses_an_empty_grid():
+    _doc, mask = _capped_body()
+    with pytest.raises(ValueError):
+        clay.VoxelGrid(0.03).mask_extrude(mask, thickness=0.12)
+
+
 # -- brush stroke engine (add-brush-stroke-engine) ---------------------------
 
 

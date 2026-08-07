@@ -184,8 +184,10 @@ parameters.
 |---|---|---|
 | `field::relax` | Smooth the field — the ZBrush Smooth brush. Averages over a cell neighbourhood | strength, `radius_cells`, iterations, centre, `region_radius`, falloff |
 | `field::flatten` | Pull the surface onto a plane. **Two-sided**: material on the normal's side goes *and* hollows on the other side fill | plane point + normal, strength, centre, `region_radius`, falloff |
+| `brush::mask_extrude` | Pull a masked patch of a surface off as a solid — ZBrush's Extract | thickness, side, threshold, `border_round`, `border_smooth`, cell size, band |
 
-Both take a region with a falloff. A `region_radius` of zero means:
+Relax and flatten both take a region with a falloff. A `region_radius` of zero
+means:
 
 - for **relax**, "everywhere" — which is a filter rather than a brush;
 - for **flatten**, *refused*. Flatten is local by nature: where its weight is one
@@ -205,6 +207,36 @@ volume's band tracks the surface only while the surface stays inside it, and
 flatten moves it many band widths, so flattening a volume in place is accurate
 only near the band it came from. The volume overload exists for imported meshes,
 where there is no document behind the surface.
+
+Both also take an optional **mask**, and it freezes exactly: a fully masked
+sample keeps its source value verbatim rather than nearly so, because a frozen
+region that drifts by a rounding error per iteration is a frozen region that has
+moved. It arrives as a *callable* rather than as a `MaskField` — a sampled field
+is a leaf that sits below `scene` while a mask sits above it, so naming the type
+in `field/` would make `field → voxel → scene → field` a cycle.
+
+**Mask extrude takes no region at all**, and that is the point rather than an
+omission: *the mask is the region*, so the painted area bounds the work and the
+volume it samples is smaller than either of the others'. It has two paths that
+agree to within a voxel — an SDF one that samples, and a voxel one that stays in
+cell space and keeps the palette, since a grid already knows which of its cells
+are on its surface. The side is `Outward` (a plate sitting on the surface),
+`Inward` (a pocket) or `Centred`.
+
+The one thing it needed that did not already exist is `brush::mask_to_field`. A
+mask is a `[0,1]` scalar on a lattice and **not a distance field**: composing one
+into a field expression directly puts a near-vertical step in the result and the
+Lipschitz bound stops meaning anything. So the mask is *measured* first, by an
+exact Euclidean distance transform — not a chamfer, whose error is anisotropic,
+which would leave the rim showing flats where the lattice has them. After that
+the extrude is ordinary op composition: the shell of the source intersected with
+the masked region, with `border_round` giving the soft rim.
+
+It **refuses** rather than returning something empty when the mask is empty,
+never reaches the surface, or the wall is thinner than a cell. A mask that
+misses is the common mistake, and an empty result would read as a bug in the
+caller's painting rather than in their aim. `border_smooth` acts on a *copy*, so
+extracting twice at two thicknesses cannot silently change the border.
 
 ---
 
@@ -235,10 +267,17 @@ the shape of a horn.
 
 ## 5. The stroke engine
 
-Samples in, edit items out. `resolve_stroke` is the pure core; the consumers
-apply the resulting stamps to a voxel grid or turn them into SDF nodes. Because
-stamps become ordinary edits, undo, coalescing and serialization apply
-unchanged.
+Samples in, edit items out. `resolve_stroke` is the pure core; three consumers
+take the resulting stamps — `apply_to_grid` writes voxels, `stamps_to_nodes`
+turns them into SDF nodes, and `apply_to_mask` paints a mask. Because stamps
+become ordinary edits, undo, coalescing and serialization apply unchanged.
+
+Masking is therefore the **same gesture** as sculpting, resolved by the same
+code: everything in the table below reaches a mask stroke. `apply_to_mask` takes
+a *target* rather than a direction, so painting and erasing are one call, and it
+owns the conversion from a stamp's **world** radius to a footprint sized in
+**mask cells** — a caller doing that by hand gets a stroke whose width tracks the
+mask's resolution instead of the brush's radius.
 
 | Feature | Field | What it does |
 |---|---|---|
@@ -312,7 +351,8 @@ parity — the mechanism usually differs even where the result matches.
 | Clip | `cut::cut_item` | **As a solid, Clip is exactly Trim.** Clip's distinctive look is a zero-thickness fin a field cannot represent and users delete anyway |
 | SnakeHook | `brush::snakehook` | Adds material rather than pulling it |
 | Surface Noise | `noise` deformer | Integer hash, so all four backends agree |
-| Mask | mask fields, layer lock/ghost | Paintable, survives resolution changes |
+| Mask | mask fields, layer lock/ghost | Painted by the stroke engine like any brush; freezes every verb on both representations; survives resolution changes |
+| Extract | `brush::mask_extrude` | The mask is the region — no radius to supply. Outward, inward or centred, with a roundable rim |
 | Alphas | `sculpt_carve_alpha` | Voxel side only so far |
 | Blob | — | Not yet: `add-blob-brush`, unblocked by the noise field |
 | Slice / Knife (polygroup splits) | — | Splitting without removing volume has no single-solid equivalent; it needs two items |
@@ -336,6 +376,10 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Snakehook | `brush::snakehook` | `clay.snakehook(...)` | `clay_item_create` + `clay_item_set_curve_points` |
 | Voxel verbs | `VoxelGrid::sculpt_*` | `VoxelGrid.sculpt_*` | `clay_voxel_sculpt_*` |
 | Masks | `voxel::MaskField` | `clay.MaskField` | `clay_mask_*` |
+| Mask brush | `brush::apply_to_mask` | `MaskField.apply_stroke(...)` | `clay_mask_apply_stroke` |
+| Bounded complement | `MaskField::fill`, `invert_within` | `MaskField.fill/.invert_within` | `clay_mask_fill`, `clay_mask_invert_within` |
+| Mask as a distance | `brush::mask_to_field` | `MaskField.to_field(...)` | `clay_mask_to_field` |
+| Mask extrude | `brush::mask_extrude` | `Document.mask_extrude(...)`, `VoxelGrid.mask_extrude(...)` | `clay_document_mask_extrude`, `clay_voxel_mask_extrude` |
 
 Snakehook has no dedicated C entry point on purpose: it is a **resolver** that
 produces an ordinary stroke item, and the C ABI already builds those. A separate

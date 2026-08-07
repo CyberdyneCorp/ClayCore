@@ -288,6 +288,18 @@ freeze.paint((0.5, 0, 0), size=9, falloff="smooth")     # target=1 masks, 0 eras
 freeze.expand(1); freeze.smooth(1); freeze.invert()     # region operations
 blocks.erase_brush((0, 0, 0), 15, mask=freeze)          # masked cells untouched
 freeze.sample_many(points)                              # (N,3) -> (N,) in [0,1]
+# masking is a GESTURE: the same stroke engine resolves it, so spacing,
+# pressure, taper and steady stroke reach a mask stroke. The footprint comes
+# from each stamp's WORLD radius, so the stroke's width does not track the
+# mask's resolution.
+freeze.apply_stroke(samples, brush, target=1.0)         # target=0 erases
+# invert() flips only what has been PAINTED — an unbounded sparse lattice has
+# no finite complement — so "mask this, edit everything else" takes the region
+# from the caller, who always has one.
+freeze.invert_within(((-1, -1, -1), (1, 1, 1)))
+freeze.fill(((-1, -1, -1), (1, 1, 1)), 0.0)             # 0 releases the region
+# and the freeze reaches the field verbs, not only the voxel ones
+volume.relaxed(centre=(0.5, 0, 0), region_radius=0.4, mask=freeze)
 # strokes: a drag becomes stamps, and a stamp becomes an ordinary edit —
 # which is what gives a brush undo, coalescing and serialization for free
 brush = clay.StrokePreset(radius=0.15, spacing=0.25, pressure_size=1.0,
@@ -297,6 +309,22 @@ brush.resolve(samples)                     # pure: positions/radii/strengths
 blocks.apply_stroke(samples, brush, blocks.palette_add("#cc7744"))
 body.apply_stroke(samples, brush, clay.Sphere(r=1.0), mask=freeze)  # one undo step
 clay.StrokePreset.deserialize(brush.serialize())   # versioned: newer is refused
+
+# mask extrude: mask a patch of a surface and pull it off as a solid — ZBrush's
+# Extract. THE MASK IS THE REGION, so unlike relax and flatten there is no
+# region_radius: the painted region bounds itself. The one new mechanism is
+# measuring the mask — a [0,1] scalar on a lattice is not a distance field, so
+# composing one directly would put a step in the result and the Lipschitz bound
+# would stop meaning anything. After that it is ordinary op composition.
+freeze.to_field(band=0.2, pad=0.3)                # the measured mask, as a Volume
+plate = doc.mask_extrude(freeze, thickness=0.12,  # 'outward' | 'inward' | 'centred'
+                         side="outward", border_round=0.05, border_smooth=2)
+shell.add(plate)                                  # an ordinary item
+blocks.mask_extrude(freeze, thickness=0.12)       # the voxel path: cell space,
+                                                  # keeps the palette, agrees to
+                                                  # within a voxel
+# It BAKES, and it refuses rather than returning something empty when the mask
+# misses the surface — the common mistake, and the one an empty result hides.
 
 # snakehook: pull a horn or a tendril out of a form — the brush that turns a
 # sphere into a creature. NOT a new kind of geometry: the stroke opcode already

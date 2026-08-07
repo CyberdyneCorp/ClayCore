@@ -138,6 +138,27 @@ std::size_t apply_to_grid(voxel::VoxelGrid& grid, const std::vector<Stamp>& stam
                           voxel::BrushFalloff falloff = voxel::BrushFalloff::Smooth,
                           const voxel::MaskField* mask = nullptr);
 
+// Paint a mask from the same stamps. The third consumer, and the one that makes
+// masking a GESTURE rather than a data structure: spacing, pressure, taper,
+// steady stroke and jitter reach a mask stroke because they are resolved before
+// anything knows what a stamp will become.
+//
+// `target` is where each cell moves TO — 1 masks and 0 releases — so painting
+// and erasing are the same call, as they are on MaskField::paint.
+//
+// It owns the one conversion a caller would get wrong: a Stamp carries a WORLD
+// radius while a mask footprint is sized in MASK CELLS, so a caller doing it by
+// hand gets a stroke whose width changes when the mask's resolution does.
+//
+// No mask parameter: a mask does not gate its own painting.
+//
+// Accumulation means what it says, against a field whose paint moves toward the
+// target rather than adding to it: Buildup approaches the target as stamps
+// overlap and cannot pass it, Clamped reaches it once however many overlap.
+std::size_t apply_to_mask(voxel::MaskField& mask, const std::vector<Stamp>& stamps, float target,
+                          voxel::BrushShape shape = voxel::BrushShape::Sphere,
+                          voxel::BrushFalloff falloff = voxel::BrushFalloff::Smooth);
+
 // Turn stamps into edit-list nodes: one node per stamp, `templ` copied and
 // re-placed at the stamp's transform, with its radius scaled.
 //

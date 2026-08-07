@@ -33,6 +33,7 @@
 #include "clay/scene/bounds.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
+#include "clay/brush/mask_extrude.h"
 #include "clay/brush/stroke.h"
 #include "clay/cut/cut.h"
 #include "clay/voxel/mask.h"
@@ -316,6 +317,8 @@ constexpr std::size_t kVolumeParamsOriginal = offsetof(clay_volume_params, beta)
 constexpr std::size_t kRelaxParamsOriginal = offsetof(clay_relax_params, falloff) + sizeof(float);
 constexpr std::size_t kFlattenParamsOriginal =
     offsetof(clay_flatten_params, falloff) + sizeof(float);
+constexpr std::size_t kMaskExtrudeParamsOriginal =
+    offsetof(clay_mask_extrude_params, band) + sizeof(float);
 constexpr std::size_t kImportBudgetOriginal =
     offsetof(clay_import_budget, max_triangles) + sizeof(std::uint64_t);
 
@@ -2127,6 +2130,16 @@ clay_result clay_item_volume_relax(clay_item* item, const clay_relax_params* par
     settings.centre = kernel::cf3(p.centre[0], p.centre[1], p.centre[2]);
     settings.region_radius = p.region_radius;
     settings.falloff = p.falloff;
+    // Absent from a shorter struct_size, in which case read_desc has already
+    // zeroed it and there is no mask — which is what an older caller means.
+    if (p.mask) {
+        voxel::MaskField* m = nullptr;
+        r = resolve_mask(p.mask, &m);
+        if (r != CLAY_OK) return r;
+        // The engine takes a callable rather than a mask type, so a sampled
+        // field stays a leaf module. Borrowed: the handle outlives the call.
+        settings.mask = [m](kernel::cfloat3 q) { return m->sample(q); };
+    }
 
     item->node.volume =
         std::make_shared<field::FieldVolume>(field::relax(*item->node.volume, settings));
@@ -2157,6 +2170,14 @@ clay_result clay_item_volume_flatten(clay_item* item, const clay_flatten_params*
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "region_radius must be > 0");
     settings.region_radius = p.region_radius;
     settings.falloff = p.falloff;
+    if (p.mask) {
+        voxel::MaskField* m = nullptr;
+        r = resolve_mask(p.mask, &m);
+        if (r != CLAY_OK) return r;
+        // The engine takes a callable rather than a mask type, so a sampled
+        // field stays a leaf module. Borrowed: the handle outlives the call.
+        settings.mask = [m](kernel::cfloat3 q) { return m->sample(q); };
+    }
 
     item->node.volume =
         std::make_shared<field::FieldVolume>(field::flatten(*item->node.volume, settings));
@@ -2645,6 +2666,188 @@ clay_result clay_mask_bounds(const clay_mask* mask, int32_t out_min[3], int32_t 
         out_max[1] = hi->y;
         out_max[2] = hi->z;
     }
+    return CLAY_OK;
+}
+
+namespace {
+
+// The bounded region both forms take. Refused rather than clamped when it is
+// empty or unbounded: the cost of the operation is the box's volume in cells,
+// so an infinite one is not a request that can be honoured.
+clay_result read_box(const voxel::MaskField& mask, const float box_min[3],
+                     const float box_max[3], math::Aabb* out) {
+    if (!box_min || !box_max) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null box");
+    *out = math::Aabb(kernel::cf3(box_min[0], box_min[1], box_min[2]),
+                      kernel::cf3(box_max[0], box_max[1], box_max[2]));
+    if (out->empty())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "box_min must not exceed box_max on any axis");
+    // Typed here rather than silently doing nothing, which is what the engine
+    // does with a region it cannot walk: a C caller has no other way to tell
+    // "the box was empty" from "the box was too big to mean anything".
+    if (!mask.region_is_walkable(*out))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this box spans more mask cells than can be walked; it is unbounded or a "
+                    "coordinate is wrong");
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_mask_fill(clay_mask* mask, const float box_min[3], const float box_max[3],
+                           float value) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    math::Aabb box;
+    r = read_box(*m, box_min, box_max, &box);
+    if (r != CLAY_OK) return r;
+    m->fill(box, value);
+    return CLAY_OK;
+}
+
+clay_result clay_mask_invert_within(clay_mask* mask, const float box_min[3],
+                                    const float box_max[3]) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    math::Aabb box;
+    r = read_box(*m, box_min, box_max, &box);
+    if (r != CLAY_OK) return r;
+    m->invert_within(box);
+    return CLAY_OK;
+}
+
+clay_result clay_mask_apply_stroke(clay_mask* mask, const float* samples_xyzpt,
+                                   size_t sample_count, const clay_stroke_preset* preset,
+                                   float target, int32_t shape, int32_t falloff,
+                                   size_t* out_applied) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    if (!brush_shape_is_known(shape))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown brush shape: " + std::to_string(shape));
+    if (!brush_falloff_is_known(falloff))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "unknown brush falloff: " + std::to_string(falloff));
+
+    std::vector<brush::StrokeSample> samples;
+    brush::StrokePreset p;
+    r = read_stroke(samples_xyzpt, sample_count, preset, &samples, &p);
+    if (r != CLAY_OK) return r;
+
+    std::size_t applied = brush::apply_to_mask(*m, brush::resolve_stroke(samples, p), target,
+                                               static_cast<voxel::BrushShape>(shape),
+                                               static_cast<voxel::BrushFalloff>(falloff));
+    if (out_applied) *out_applied = applied;
+    return CLAY_OK;
+}
+
+// -- mask extrude (c-abi spec: mask extrude) ---------------------------------
+
+namespace {
+
+clay_result read_extrude(const clay_mask_extrude_params* params, brush::MaskExtrudeSettings* out) {
+    if (!params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null extrude parameters");
+    clay_mask_extrude_params p;
+    clay_result r = read_desc(params, kMaskExtrudeParamsOriginal, &p);
+    if (r != CLAY_OK) return r;
+    if (!(p.thickness > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "thickness must be > 0");
+    if (p.side < CLAY_EXTRUDE_OUTWARD || p.side > CLAY_EXTRUDE_CENTRED)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown extrude side: " + std::to_string(p.side));
+    out->thickness = p.thickness;
+    out->side = static_cast<brush::ExtrudeSide>(p.side);
+    out->threshold = p.threshold > 0.0f ? p.threshold : 0.5f;
+    out->border_round = p.border_round > 0.0f ? p.border_round : 0.0f;
+    out->border_smooth = p.border_smooth > 0 ? p.border_smooth : 0;
+    out->cell_size = p.cell_size > 0.0f ? p.cell_size : 0.0f;
+    out->band = p.band > 0.0f ? p.band : 0.0f;
+    return CLAY_OK;
+}
+
+// One message for every way an extrude can come back with nothing, because from
+// here they are one thing: the caller asked for a solid that does not exist.
+clay_result no_extract() {
+    return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                "nothing to extrude: the mask is empty, does not reach the surface, or the wall "
+                "is thinner than a cell");
+}
+
+}  // namespace
+
+clay_result clay_mask_to_field(const clay_mask* mask, float threshold, float band, float pad,
+                               float cell_size, clay_item** out_item) {
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    if (!out_item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_item");
+    std::optional<field::FieldVolume> volume = brush::mask_to_field(
+        *m, threshold > 0.0f ? threshold : 0.5f, band > 0.0f ? band : 0.0f,
+        pad > 0.0f ? pad : 0.0f, cell_size > 0.0f ? cell_size : 0.0f);
+    if (!volume)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "nothing painted at or above the threshold: there is no region to measure");
+    auto* item = new clay_item();
+    item->node.prim = scene::Prim::volume();
+    item->node.volume = std::make_shared<field::FieldVolume>(std::move(*volume));
+    *out_item = item;
+    return CLAY_OK;
+}
+
+clay_result clay_document_mask_extrude(clay_document* doc, clay_layer_id layer,
+                                       const clay_mask* mask,
+                                       const clay_mask_extrude_params* params,
+                                       clay_item** out_item) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (!out_item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_item");
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    brush::MaskExtrudeSettings settings;
+    r = read_extrude(params, &settings);
+    if (r != CLAY_OK) return r;
+
+    scene::Tape tape;
+    r = compile_one_layer(doc, layer, &tape);
+    if (r != CLAY_OK) return r;
+    // The source is the layer's own field rather than a volume, so it stays
+    // EXACT: a volume reports a bound outside its band, and sampling one would
+    // record the boundary between bound and distance as part of the shape.
+    if (tape.empty())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this layer has no field to extrude from");
+
+    std::optional<field::FieldVolume> volume = brush::mask_extrude(
+        [&tape](kernel::cfloat3 p) { return tape.eval(p).d; }, *m, settings);
+    if (!volume) return no_extract();
+
+    auto* item = new clay_item();
+    item->node.prim = scene::Prim::volume();
+    item->node.volume = std::make_shared<field::FieldVolume>(std::move(*volume));
+    *out_item = item;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_mask_extrude(const clay_voxel_grid* grid, const clay_mask* mask,
+                                    const clay_mask_extrude_params* params,
+                                    clay_voxel_grid** out_grid) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    voxel::MaskField* m = nullptr;
+    r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    if (!out_grid) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_grid");
+    brush::MaskExtrudeSettings settings;
+    r = read_extrude(params, &settings);
+    if (r != CLAY_OK) return r;
+
+    std::optional<voxel::VoxelGrid> extract = brush::mask_extrude(*g, *m, settings);
+    if (!extract) return no_extract();
+
+    // Owned by the caller, on the same rule clay_voxel_grid_create follows: a
+    // handle a document does not hold is one the caller destroys.
+    auto* handle = new clay_voxel_grid();
+    handle->owned = new voxel::VoxelGrid(std::move(*extract));
+    *out_grid = handle;
     return CLAY_OK;
 }
 
