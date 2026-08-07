@@ -133,6 +133,10 @@ class VoxelGrid {
                         float offset_cells = 0.0f);
     // Move surface cells one step toward the brush centre.
     void sculpt_pinch(VoxelCoord c, const BrushParams& p);
+    // ...and one step away from it: the inverse, sharing pinch's walk so the
+    // two cannot drift apart. The SDF side spells the pair as one signed
+    // strength for the same reason.
+    void sculpt_magnify(VoxelCoord c, const BrushParams& p);
 
     // Fill pockets inside the footprint: an empty cell with at least four of
     // its six face neighbours occupied is inside a cavity rather than beside a

@@ -207,6 +207,9 @@ enum CDeformType {
     cdeform_grab = 9,      // centre(k,a,b) radius(c) disp(e0,e1,e2) front(e3)
     cdeform_pose = 10,     // centre(k,a,b) radius(c) axis(e0,e1,e2) angle(e3)
     cdeform_pose_line = 11,  // a(k,a,b) b(c,e0,e1) axis(e2,e3,e4) angle(e5)
+    // Radial scale about a centre. One signed strength: positive magnifies,
+    // negative pinches. centre(k,a,b) radius(c) strength(e0)
+    cdeform_magnify = 12,
 };
 
 // Apply one deformer record to the local point. No deformer corrects the
@@ -246,6 +249,9 @@ CLAY_FN cfloat3 ctape_deform_point(CLAY_DEVICE const float* rec, cfloat3 p) {
     if (type == cdeform_pose) {
         return cpose_point(p, cf3(rec[1], rec[2], rec[3]), rec[4],
                            cf3(rec[6], rec[7], rec[8]), rec[9], (int)rec[5]);
+    }
+    if (type == cdeform_magnify) {
+        return cmagnify_point(p, cf3(rec[1], rec[2], rec[3]), rec[4], rec[6], (int)rec[5]);
     }
     if (type == cdeform_elongate_axis)
         return celongate_axis_point(p, cf3(rec[1], rec[2], rec[3]));

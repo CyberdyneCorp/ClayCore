@@ -97,6 +97,32 @@ CLAY_FN cfloat3 cgrab_point(cfloat3 p, cfloat3 centre, float radius, cfloat3 dis
     return p - displacement * w;   // inverse map: sample where the material came from
 }
 
+// Magnify and pinch: a RADIAL SCALE about a centre, with finite support.
+//
+// One deformation, one signed strength. Maxon's own page has it — "Magnify:
+// pushes vertices away from cursor; inverse of Pinch" — so giving the two
+// directions separate opcodes would be building the same thing twice with the
+// sign flipped.
+//
+// Inverse map, like grab: to make the surface read as pushed AWAY from the
+// centre, sample NEARER it. `strength` is the fraction of the offset removed at
+// the centre of the region, so 0.5 samples at half the radius there and the
+// shape reads as twice the size; a negative one pushes the sample outward and
+// the shape gathers.
+//
+// The scale is clamped away from zero. At a factor of zero every point in the
+// region would sample the centre, collapsing the neighbourhood to one value —
+// a flat blob whose surface is wherever that value's isosurface happens to
+// fall, which is not a magnification of anything.
+CLAY_FN cfloat3 cmagnify_point(cfloat3 p, cfloat3 centre, float radius, float strength,
+                               int ease_type) {
+    cfloat3 v = p - centre;
+    float w = cregion_weight(p, centre, radius, ease_type);
+    if (w <= 0.0f) return p;  // finite support: untouched outside the radius
+    float scale = cmax(1.0f - strength * w, 0.05f);
+    return centre + v * scale;
+}
+
 // pose along a line: the weight ramps from the anchor to the end along the
 // projection onto the segment, and the rotation is about the axis THROUGH the
 // anchor, so the anchor is a fixed point.

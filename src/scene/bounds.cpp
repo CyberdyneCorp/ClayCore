@@ -276,6 +276,18 @@ Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& defor
                 b = swept;
                 break;
             }
+            case kernel::cdeform_magnify: {
+                // The inverse map samples at centre + v * scale, so material at
+                // q appears at centre + (q - centre) / scale: MAGNIFYING pushes
+                // it outward by |q - centre| * (1/scale - 1), and inside the
+                // support that offset is at most the radius. Pinching moves
+                // material inward, which cannot grow the bound, so it dilates by
+                // nothing rather than by a negative amount.
+                float scale = kernel::cmax(1.0f - d.ext[0], 0.05f);
+                float growth = kernel::cmax(kernel::cabs(d.c) * (1.0f / scale - 1.0f), 0.0f);
+                b = b.dilated(growth);
+                break;
+            }
             case kernel::cdeform_pose: {
                 // Rotation about the centre keeps a point's distance from it,
                 // so the chord 2r|sin(theta/2)| bounds how far anything moves.
@@ -390,6 +402,8 @@ float deformer_lipschitz(const Node& item) {
             }
             info = kernel::cfi_pose_line(info, d.ext[5], extent,
                                          kernel::clength(end - anchor), ease_max_slope(d.ease));
+        } else if (d.type == kernel::cdeform_magnify) {
+            info = kernel::cfi_magnify(info, d.ext[0], ease_max_slope(d.ease));
         } else if (d.type == kernel::cdeform_pose) {
             info = kernel::cfi_pose(info, d.ext[3], ease_max_slope(d.ease));
         } else if (d.type == kernel::cdeform_bend_linear) {

@@ -116,6 +116,7 @@ static_assert(CLAY_DEFORM_BEND_LINEAR == static_cast<int>(kernel::cdeform_bend_l
 static_assert(CLAY_DEFORM_BEND_RADIAL == static_cast<int>(kernel::cdeform_bend_radial));
 static_assert(CLAY_DEFORM_ELONGATE_AXIS == static_cast<int>(kernel::cdeform_elongate_axis));
 static_assert(CLAY_DEFORM_GRAB == static_cast<int>(kernel::cdeform_grab));
+static_assert(CLAY_DEFORM_MAGNIFY == static_cast<int>(kernel::cdeform_magnify));
 static_assert(CLAY_DEFORM_POSE == static_cast<int>(kernel::cdeform_pose));
 static_assert(CLAY_DEFORM_POSE_LINE == static_cast<int>(kernel::cdeform_pose_line));
 
@@ -326,8 +327,8 @@ static_assert(sizeof kPrimParams / sizeof kPrimParams[0] == kernel::ctape_prim_c
 constexpr int kProfileParams[] = {1, 2, 1, 1, 3, 2, 0};  // polygon: vertices instead
 static_assert(sizeof kProfileParams / sizeof kProfileParams[0] == kernel::cprofile_polygon + 1);
 
-constexpr int kDeformParams[] = {1, 1, 4, 2, 2, 3, 9, 3, 3, 8, 8, 10};
-static_assert(sizeof kDeformParams / sizeof kDeformParams[0] == kernel::cdeform_pose_line + 1);
+constexpr int kDeformParams[] = {1, 1, 4, 2, 2, 3, 9, 3, 3, 8, 8, 10, 5};
+static_assert(sizeof kDeformParams / sizeof kDeformParams[0] == kernel::cdeform_magnify + 1);
 
 clay_result check_params(const char* what, const float* params, std::size_t count, int expected) {
     if (count != static_cast<std::size_t>(expected))
@@ -572,6 +573,9 @@ clay_result make_deformer(std::int32_t kind, const float* p, scene::Deformer* ou
         if (!(kernel::cdot2(b - a) > 0.0f))
             return fail(CLAY_ERROR_INVALID_ARGUMENT, "pose_line needs a != b");
         *out = scene::Deformer::pose_line(a, b, kernel::cf3(p[6], p[7], p[8]), p[9]);
+    } else if (kind == CLAY_DEFORM_MAGNIFY) {
+        if (!(p[3] > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "magnify radius must be > 0");
+        *out = scene::Deformer::magnify(kernel::cf3(p[0], p[1], p[2]), p[3], p[4]);
     } else if (kind == CLAY_DEFORM_POSE) {
         if (!(p[3] > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "pose radius must be > 0");
         *out = scene::Deformer::pose(kernel::cf3(p[0], p[1], p[2]), p[3],
@@ -2803,6 +2807,16 @@ clay_result clay_voxel_sculpt_pinch(clay_voxel_grid* grid, const int32_t cell[3]
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
     g->sculpt_pinch(to_coord(cell), p);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_magnify(clay_voxel_grid* grid, const int32_t cell[3],
+                                      const clay_brush_params* brush) {
+    voxel::VoxelGrid* g = nullptr;
+    voxel::BrushParams p;
+    clay_result r = resolve_brush(grid, cell, brush, &g, &p);
+    if (r != CLAY_OK) return r;
+    g->sculpt_magnify(to_coord(cell), p);
     return CLAY_OK;
 }
 

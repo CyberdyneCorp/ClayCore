@@ -313,6 +313,16 @@ body.add(clay.snakehook(anchor=pick_point, inward=-pick_normal, path=drag_pts,
                         base_radius=0.2, tip_fraction=0.15, taper_curve=0.6),
          blend=clay.Smooth(0.08))
 
+# magnify and pinch: ONE deformation, one signed strength — positive swells the
+# surface away from the centre, negative gathers it toward. Maxon's own page
+# says so ("Magnify: ... inverse of Pinch"), so there is no separate pinch.
+# The centre of the scale is its FIXED POINT: a scale about a point on the
+# surface bulges the form around it and leaves that point exactly where it was.
+# Support is finite, which is what keeps influence bounds tight; scaling space
+# is not distance preserving, so the safe step scale drops with the strength.
+clay.RoundBox(size=..., r=...).magnify(center=(0, 0, 0), radius=0.95, strength=0.45)
+grid.sculpt_magnify(cell, size=3)   # the voxel inverse of sculpt_pinch
+
 # loft: two or more profiles interpolated along Z, evenly spaced. Three or more
 # are BRACKETED, so wide-narrow-wide gives a waist rather than a straight
 # taper. A loft is a BOUND, and its Lipschitz is not 1 — interpolating very

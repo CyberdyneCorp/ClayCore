@@ -817,6 +817,26 @@ NB_MODULE(pyclay, m) {
              },
              "y0"_a, "y1"_a, "s0"_a, "s1"_a, "ease"_a = 0,
              "Scale the cross-section from s0 at y0 to s1 at y1 along an easing curve")
+        .def("magnify",
+             [](nb::object self, nb::handle center, float radius, float strength, int ease) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 if (!(radius > 0.0f))
+                     throw std::invalid_argument("magnify radius must be > 0");
+                 p.deformers.push_back(scene::Deformer::magnify(
+                     to_f3(center, "center"), radius, strength,
+                     static_cast<std::uint8_t>(ease)));
+                 return self;
+             },
+             "center"_a, "radius"_a, "strength"_a, "ease"_a = 0,
+             nb::rv_policy::reference_internal,
+             "Magnify and pinch, which are the same deformation: a radial scale\n"
+             "about `center` with finite support. ONE SIGNED STRENGTH covers both\n"
+             "— positive swells the surface away from the centre, negative gathers\n"
+             "it toward — so there is no separate pinch to go looking for.\n\n"
+             "Scaling space is not distance preserving, so the field stops being\n"
+             "exact and the document's safe step scale drops with the strength.\n"
+             "Support is finite: outside the radius nothing changes, which is what\n"
+             "keeps item influence bounds tight.")
         .def("grab",
              [](nb::object self, nb::handle center, float radius, nb::handle displacement,
                 int ease, bool front_only) {
@@ -3041,6 +3061,16 @@ NB_MODULE(pyclay, m) {
              "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant",
              "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
              "Move surface cells one step toward the brush centre")
+        .def("sculpt_magnify",
+             [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
+                const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
+                 g.grid().sculpt_magnify(to_coord(cell),
+                                         make_brush(n, shape, falloff, strength, seed, mask));
+             },
+             "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant",
+             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
+             "Move surface cells one step AWAY from the brush centre: pinch's\n"
+             "inverse, sharing its walk so the two cannot drift apart")
         .def("sculpt_fill_cavities",
              [](PyVoxelGrid& g, nb::handle cell, int n, int passes, const std::string& shape,
                 const std::string& falloff, float strength, std::uint32_t seed,

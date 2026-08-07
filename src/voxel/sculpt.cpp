@@ -437,30 +437,59 @@ void VoxelGrid::sculpt_grab(VoxelCoord c, const BrushParams& p, kernel::cfloat3 
     (void)e;
 }
 
-void VoxelGrid::sculpt_pinch(VoxelCoord c, const BrushParams& p) {
-    Region before = snapshot(*this, c, p.size, 1);
-    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) {
+namespace {
+
+// One cell along the dominant axis, toward the brush centre or away from it.
+// Returns false where there is no dominant axis to step along, which is the
+// cell sitting on the centre itself.
+bool radial_step(VoxelCoord centre, VoxelCoord w, bool inward, VoxelCoord* target) {
+    const int sign = inward ? 1 : -1;
+    int dx = centre.x - w.x, dy = centre.y - w.y, dz = centre.z - w.z;
+    int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy, az = dz < 0 ? -dz : dz;
+    *target = w;
+    if (ax >= ay && ax >= az && ax > 0) {
+        target->x += (dx > 0 ? 1 : -1) * sign;
+    } else if (ay >= az && ay > 0) {
+        target->y += (dy > 0 ? 1 : -1) * sign;
+    } else if (az > 0) {
+        target->z += (dz > 0 ? 1 : -1) * sign;
+    } else {
+        return false;  // on the centre: no direction to step
+    }
+    return true;
+}
+
+// Pinch and magnify are the same walk with the step reversed, which is what
+// "magnify is the inverse of pinch" means concretely. Sharing the body is how
+// the two stay each other's inverse as either changes.
+void radial_sculpt(VoxelGrid& grid, VoxelCoord c, const BrushParams& p, float voxel_size,
+                   bool inward) {
+    Region before = snapshot(grid, c, p.size, 1);
+    for_each_brush_cell(c, p, voxel_size, [&](VoxelCoord w) {
         if (before.at(w.x, w.y, w.z) == 0) return;
         if (!has_empty_face_neighbour(before, w.x, w.y, w.z)) return;  // interior
 
-        // Step one cell along the dominant axis toward the brush centre.
-        int dx = c.x - w.x, dy = c.y - w.y, dz = c.z - w.z;
-        int ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy, az = dz < 0 ? -dz : dz;
-        VoxelCoord target = w;
-        if (ax >= ay && ax >= az && ax > 0) {
-            target.x += dx > 0 ? 1 : -1;
-        } else if (ay >= az && ay > 0) {
-            target.y += dy > 0 ? 1 : -1;
-        } else if (az > 0) {
-            target.z += dz > 0 ? 1 : -1;
-        } else {
-            return;  // already at the centre
-        }
+        VoxelCoord target;
+        if (!radial_step(c, w, inward, &target)) return;
 
         std::uint8_t colour = before.at(w.x, w.y, w.z);
-        set(w, 0);
-        if (before.at(target.x, target.y, target.z) == 0) set(target, colour);
+        grid.set(w, 0);
+        if (before.at(target.x, target.y, target.z) == 0) grid.set(target, colour);
     });
+}
+
+}  // namespace
+
+void VoxelGrid::sculpt_pinch(VoxelCoord c, const BrushParams& p) {
+    radial_sculpt(*this, c, p, voxel_size_, true);
+}
+
+// Magnify: the inverse of pinch, and deliberately the same walk with the step
+// reversed. Maxon's own page has it that way — "Magnify: pushes vertices away
+// from cursor; inverse of Pinch" — and the SDF side spells it as one signed
+// strength for the same reason.
+void VoxelGrid::sculpt_magnify(VoxelCoord c, const BrushParams& p) {
+    radial_sculpt(*this, c, p, voxel_size_, false);
 }
 
 }  // namespace voxel

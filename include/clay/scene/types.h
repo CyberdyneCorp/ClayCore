@@ -332,6 +332,7 @@ struct Deformer {
         if (type == kernel::cdeform_bend_linear) return 5;
         if (type == kernel::cdeform_pose_line) return 6;
         if (type == kernel::cdeform_grab || type == kernel::cdeform_pose) return 4;
+        if (type == kernel::cdeform_magnify) return 1;
         return 0;
     }
 
@@ -417,6 +418,24 @@ struct Deformer {
     // Translate a region by `displacement`, weighted from the centre out and
     // zero past the radius. front_only gates on the half-space the pull heads
     // into, so the far side of a form does not travel with the near side.
+    // Magnify and pinch, which are the same deformation: a radial scale about
+    // `centre` with finite support. A POSITIVE strength swells the surface away
+    // from the centre, a negative one gathers it toward. Maxon's own page has
+    // it — "Magnify: pushes vertices away from cursor; inverse of Pinch" — so
+    // one signed parameter is the honest interface rather than two verbs.
+    static Deformer magnify(kernel::cfloat3 centre, float radius, float strength,
+                            std::uint8_t ease = 0) {
+        Deformer d;
+        d.type = kernel::cdeform_magnify;
+        d.k = centre.x;
+        d.a = centre.y;
+        d.b = centre.z;
+        d.c = radius;
+        d.ext[0] = strength;
+        d.ease = ease;
+        return d;
+    }
+
     static Deformer grab(kernel::cfloat3 centre, float radius, kernel::cfloat3 displacement,
                          std::uint8_t ease = 0, bool front_only = false) {
         Deformer d;

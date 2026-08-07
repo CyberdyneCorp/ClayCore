@@ -175,7 +175,11 @@ typedef enum clay_deform {
     CLAY_DEFORM_ELONGATE_AXIS = 8,
     CLAY_DEFORM_GRAB = 9,
     CLAY_DEFORM_POSE = 10,
-    CLAY_DEFORM_POSE_LINE = 11
+    CLAY_DEFORM_POSE_LINE = 11,
+    /* Radial scale about a centre: centre(3), radius, strength. ONE signed
+     * strength covers both directions — positive magnifies, negative pinches —
+     * because they are the same deformation. */
+    CLAY_DEFORM_MAGNIFY = 12
 } clay_deform;
 
 /* Easing curves are given by index; 0 is linear. Only the taper deformer and
@@ -903,6 +907,11 @@ clay_result clay_voxel_sculpt_flatten(clay_voxel_grid* grid, const int32_t cell[
 /* Move surface cells one step toward the brush centre. */
 clay_result clay_voxel_sculpt_pinch(clay_voxel_grid* grid, const int32_t cell[3],
                                     const clay_brush_params* brush);
+/* ...and one step away from it: pinch's inverse, sharing its walk so the two
+ * cannot drift apart. The SDF side spells the pair as one signed strength on
+ * CLAY_DEFORM_MAGNIFY for the same reason. */
+clay_result clay_voxel_sculpt_magnify(clay_voxel_grid* grid, const int32_t cell[3],
+                                      const clay_brush_params* brush);
 /* Translate occupancy through the same map the SDF grab deformer uses. Binary
  * occupancy resamples nearest-cell: a displacement larger than a cell moves
  * material in whole cells rather than flowing. */

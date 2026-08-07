@@ -116,6 +116,20 @@ CLAY_FN CFieldInfo cfi_pose(CFieldInfo a, float angle, float ease_slope) {
     return CFieldInfo{false, a.lipschitz * (1.0f + cabs(angle) * ease_slope)};
 }
 
+// magnify / pinch: a radial scale is not distance preserving, and it stretches
+// most where the falloff is steepest. Along the radius the map is r -> r * s(r)
+// with s = 1 - strength * w, so the derivative is s + r * ds/dr, and ds/dr is
+// bounded by |strength| * (the easing curve's slope) / radius. With r at most
+// the radius inside the support, the radius cancels and what is left is the
+// strength against that slope — the same shape cfi_pose ends up with, for the
+// same reason.
+//
+// Both signs cost: magnifying stretches space and pinching compresses it, and
+// the marcher has to survive either.
+CLAY_FN CFieldInfo cfi_magnify(CFieldInfo a, float strength, float ease_slope) {
+    return CFieldInfo{false, a.lipschitz * (1.0f + cabs(strength) * (1.0f + ease_slope))};
+}
+
 // pose along a line: the angle ramps over the segment, so a point at distance
 // `extent` from the axis is dragged tangentially by extent * dtheta/ds. The
 // ramp runs over the segment length, hence the division by it.
