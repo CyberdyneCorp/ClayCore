@@ -120,6 +120,15 @@ std::optional<Command> apply_one(Document& doc, const SetStrokePointsCmd& c) {
     return Command{inverse};
 }
 
+std::optional<Command> apply_one(Document& doc, const SetDeformersCmd& c) {
+    SdfContent* content = content_of(doc, c.layer);
+    Node* n = content ? content->find_mut(c.node) : nullptr;
+    if (!n) return std::nullopt;
+    SetDeformersCmd inverse{c.layer, c.node, n->deformers};
+    n->deformers = c.deformers;
+    return Command{inverse};
+}
+
 std::optional<Command> apply_one(Document& doc, const AddLayerCmd& c) {
     doc.insert_layer(c.layer, c.index);
     return Command{RemoveLayerCmd{c.layer.id}};
@@ -318,6 +327,45 @@ Blend read_blend(Reader& r) {
 }
 
 // Node has std::vectors — serialize field-wise.
+// One encoding for a deformer chain, used by both a whole node and the command
+// that replaces a chain on its own — so the two cannot drift apart.
+void write_deformers(Writer& w, const std::vector<Deformer>& ds) {
+    w.u32(static_cast<std::uint32_t>(ds.size()));
+    for (const Deformer& d : ds) {
+        w.pod(d.type);
+        w.pod(d.k);
+        w.pod(d.a);
+        w.pod(d.b);
+        w.pod(d.c);
+        w.pod(d.ease);
+        // The type is already on the wire, so the reader knows how many
+        // extension floats follow. Old files carry only old types and decode
+        // exactly as before.
+        for (int e = 0; e < Deformer::ext_count(d.type); ++e) w.pod(d.ext[e]);
+    }
+}
+
+std::vector<Deformer> read_deformers(Reader& r) {
+    std::vector<Deformer> ds;
+    std::uint32_t dc = r.u32();
+    if (dc > r.remaining / 6) {  // smallest possible encoded deformer
+        r.ok = false;
+        return ds;
+    }
+    for (std::uint32_t i = 0; i < dc && r.ok; ++i) {
+        Deformer d;
+        d.type = r.pod<std::uint8_t>();
+        d.k = r.pod<float>();
+        d.a = r.pod<float>();
+        d.b = r.pod<float>();
+        d.c = r.pod<float>();
+        d.ease = r.pod<std::uint8_t>();
+        for (int e = 0; e < Deformer::ext_count(d.type); ++e) d.ext[e] = r.pod<float>();
+        ds.push_back(d);
+    }
+    return ds;
+}
+
 void write_node(Writer& w, const Node& n) {
     w.pod(n.id);
     w.pod(n.is_group);
@@ -382,19 +430,7 @@ void write_node(Writer& w, const Node& n) {
     w.pod(n.transition.r0);
     w.pod(n.transition.r1);
     w.pod(n.transition.ease);
-    w.u32(static_cast<std::uint32_t>(n.deformers.size()));
-    for (const Deformer& d : n.deformers) {
-        w.pod(d.type);
-        w.pod(d.k);
-        w.pod(d.a);
-        w.pod(d.b);
-        w.pod(d.c);
-        w.pod(d.ease);
-        // The type is already on the wire, so the reader knows how many
-        // extension floats follow. Old files carry only old types and decode
-        // exactly as before.
-        for (int e = 0; e < Deformer::ext_count(d.type); ++e) w.pod(d.ext[e]);
-    }
+    write_deformers(w, n.deformers);
     w.u32(static_cast<std::uint32_t>(n.children.size()));
     for (NodeId c : n.children) w.pod(c);
 }
@@ -478,22 +514,8 @@ Node read_node(Reader& r) {
     n.transition.r0 = r.pod<float>();
     n.transition.r1 = r.pod<float>();
     n.transition.ease = r.pod<std::uint8_t>();
-    std::uint32_t dc = r.u32();
-    if (dc > r.remaining / 6) {  // smallest possible encoded deformer
-        r.ok = false;
-        return n;
-    }
-    for (std::uint32_t i = 0; i < dc && r.ok; ++i) {
-        Deformer d;
-        d.type = r.pod<std::uint8_t>();
-        d.k = r.pod<float>();
-        d.a = r.pod<float>();
-        d.b = r.pod<float>();
-        d.c = r.pod<float>();
-        d.ease = r.pod<std::uint8_t>();
-        for (int e = 0; e < Deformer::ext_count(d.type); ++e) d.ext[e] = r.pod<float>();
-        n.deformers.push_back(d);
-    }
+    n.deformers = read_deformers(r);
+    if (!r.ok) return n;
     std::uint32_t cc = r.u32();
     if (cc > r.remaining / sizeof(NodeId)) {
         r.ok = false;
@@ -599,6 +621,7 @@ enum class Tag : std::uint8_t {
     SetLayerTransform,
     SetLayerProtection,
     SetStrokePoints,
+    SetDeformers,
 };
 
 struct SerializeVisitor {
@@ -664,6 +687,12 @@ struct SerializeVisitor {
         for (const StrokePoint& p : c.points) write_point(w, p);
         w.pod(c.closed);
         w.pod(c.tolerance);
+    }
+    void operator()(const SetDeformersCmd& c) {
+        w.pod(Tag::SetDeformers);
+        w.pod(c.layer);
+        w.pod(c.node);
+        write_deformers(w, c.deformers);
     }
     void operator()(const TrimStrokeCmd& c) {
         w.pod(Tag::TrimStroke);
@@ -775,6 +804,14 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
             if (n > r.remaining / kStrokePointBytes) return std::nullopt;
             for (std::uint32_t i = 0; i < n && r.ok; ++i) c.points.push_back(read_point(r));
             cmd = std::move(c);
+            break;
+        }
+        case Tag::SetDeformers: {
+            SetDeformersCmd c;
+            c.layer = r.pod<LayerId>();
+            c.node = r.pod<NodeId>();
+            c.deformers = read_deformers(r);
+            cmd = c;
             break;
         }
         case Tag::SetStrokePoints: {

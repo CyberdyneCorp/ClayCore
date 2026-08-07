@@ -87,6 +87,21 @@ struct SetStrokePointsCmd {
     float tolerance = 0.01f;
 };
 
+// Replace an item's whole deformer chain. Without this a deformer can only
+// reach a document inside a whole Node at creation, and changing one means
+// removing and re-adding the node — too expensive for a live drag, and dishonest
+// about what actually changed.
+//
+// Whole-chain replace for the same reason SetStrokePointsCmd replaces a whole
+// point list: a chain is a handful of records, so replacing it costs less than
+// the bookkeeping granular commands would need, and its inverse is the previous
+// chain — exact by construction rather than by careful arithmetic.
+struct SetDeformersCmd {
+    LayerId layer = 0;
+    NodeId node = kNoNode;
+    std::vector<Deformer> deformers;
+};
+
 // Both flags in one command: they are the same concept at two strengths, and
 // a UI toggling one usually shows the other beside it.
 struct SetLayerProtectionCmd {
@@ -103,7 +118,7 @@ using Command =
     std::variant<AddNodeCmd, RemoveNodeCmd, MoveNodeCmd, SetTransformCmd, SetPrimCmd,
                  SetColorCmd, SetOpBlendCmd, AppendStrokeCmd, TrimStrokeCmd, AddLayerCmd,
                  RemoveLayerCmd, SetLayerVisibleCmd, SetLayerTransformCmd,
-                 SetLayerProtectionCmd, SetStrokePointsCmd>;
+                 SetLayerProtectionCmd, SetStrokePointsCmd, SetDeformersCmd>;
 
 // The layer a command would edit, or 0 for one that edits no existing layer
 // (adding a layer creates its target; changing protection is how a protected
@@ -115,7 +130,7 @@ LayerId edited_layer(const Command& cmd);
 // The scene payload layout this build writes. It tracks the .clayspace
 // container's minor version, which is what a reader is told; io asserts they
 // agree so the two cannot drift.
-inline constexpr std::uint16_t kSceneMinor = 4;
+inline constexpr std::uint16_t kSceneMinor = 5;
 
 // Apply a command; returns its inverse, or nullopt if the target does not
 // exist or is protected (ghosted or locked). The document is unchanged in

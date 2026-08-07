@@ -120,7 +120,7 @@ bounded like any other item. `front_only` on `grab` gates the pull on the
 half-space it heads into, so the far side of a form does not travel with the
 near side.
 
-### Grab, pose and magnify are per item, and local
+### Grab, pose and magnify are per item, and local — and what to use instead
 
 This is the one thing to know before wiring a Move brush to `grab`, and it is
 easy to miss because nothing errors.
@@ -153,12 +153,28 @@ scale is uniform by design, so a spherical falloff stays spherical under it.
 Measured on two blended balls with a world drag centred between them, the lift
 is symmetric and peaks at the world centre.
 
-What the engine does **not** yet do is own that mapping. The cut tool and
-snakehook exist precisely to keep an error-prone geometric step out of every
-caller; there is no equivalent resolver for a document-wide grab, so a host
-writing a Move brush is doing the transform itself today. Voxel grids do have a
-true region-level `sculpt_grab`, so the asymmetry is between the two
-representations, not a limit of the field.
+**`Document.grab` owns that mapping**, so a host writing a Move brush does not.
+It is a resolver like `cut_item` and `snakehook`: a world drag in, a plan of
+ordinary edits out, and the document untouched until the plan is applied.
+
+| | |
+|---|---|
+| Reaches | only items whose influence bound meets the drag — a grab costs exactness and step scale, and outside its radius the warp is the identity |
+| Coalesces | during one drag the centre and radius are fixed and only the displacement grows, so a trailing grab with the same centre and radius is replaced rather than appended. Ten frames of a drag give the field, and the step scale, of one |
+| Undo | one gesture is one step, however many items it reached |
+| Skips | hidden and protected layers, so a plan never fails part-way through |
+| Symmetry | inherited: a mirrored item evaluates the same local chain for every copy, so a drag moves the mirrored side with it |
+
+`grab_local` is exposed too — the same drag expressed in one item's frame — for
+a caller doing its own enumeration.
+
+`SetDeformersCmd` is what made this expressible: before it, deformers could only
+reach a document inside a whole `Node` at creation, so changing one meant
+removing and re-adding the node.
+
+Voxel grids have their own region-level `sculpt_grab`, which translates
+occupancy through the same inverse map, so both representations mean the same
+thing by a Move. See [`examples/26_move.py`](../examples/26_move.py).
 
 `magnify`'s **centre is its fixed point** — a radial scale about a point on the
 surface bulges the neighbourhood *around* it and leaves the point itself exactly
@@ -217,6 +233,7 @@ written, so a host can preview the result before committing it.
 |---|---|---|
 | `cut::cut_item` | A shape drawn on a frame (rect, circle, polygon, spline lasso) becomes an extruded item sized to cut through | a `Node`, or nothing for a non-orthonormal frame or a zero-area shape |
 | `brush::snakehook` | A drag from a surface anchor becomes a tapered stroke item — a horn, tendril or spike | a `Node`, or nothing for an empty path or degenerate normal |
+| `brush::grab_document` | A world-space drag becomes per-item deformers that move the surface as one — the Move brush | a plan of `(layer, node, chain)`, empty when the drag reaches nothing |
 
 **The cut is a prism, not a frustum.** A converging cut has a non-flat face and
 a result that depends on where the camera stood, so the sweep is parallel and
@@ -302,7 +319,7 @@ parity — the mechanism usually differs even where the result matches.
 | Standard, ClayBuildup | `Op::Relief` | Displaces the accumulated surface along its normal |
 | Crease, DamStandard | `Op::Incise` | The same op, cutting in — a thin region gives the line |
 | Inflate | `Op::Relief`, `sculpt_inflate` | Moving the surface along its own normal *is* relief; the voxel verb dilates and erodes by cells |
-| Move | `grab` deformer | Per **item**, in that item's **local** space — see the note below. `front_only` keeps the far side from travelling |
+| Move | `Document.grab` resolver | Drags the **surface**. The `grab` deformer underneath it is per-item and local — see the note below |
 | Rotate | `pose` / `pose_line` | Radial, or ramped along a line |
 | Pinch | `magnify` (negative), `sculpt_pinch` | One signed strength, not two verbs |
 | Magnify | `magnify` (positive), `sculpt_magnify` | Maxon's own page calls them inverses |
@@ -334,6 +351,7 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Flatten | `field::flatten` | `Volume.flattened_from(...)` | `clay_item_volume_flatten` |
 | Cut tool | `cut::cut_item`, `cut::CutShape` | `clay.Cut(...)`, `clay.CutShape.rect/circle/from_polygon/from_curve` | `clay_cut_create`, `clay_cut_polygon_from_curve` |
 | Snakehook | `brush::snakehook` | `clay.snakehook(...)` | `clay_item_create` + `clay_item_set_curve_points` |
+| Document grab (Move) | `brush::grab_document`, `grab_local` | `Document.grab(...)`, `Document.grab_preview(...)` | `clay_document_grab`, `clay_document_grab_preview` |
 | Voxel verbs | `VoxelGrid::sculpt_*` | `VoxelGrid.sculpt_*` | `clay_voxel_sculpt_*` |
 | Masks | `voxel::MaskField` | `clay.MaskField` | `clay_mask_*` |
 

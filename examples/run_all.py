@@ -41,6 +41,7 @@ EXAMPLES = [
     "23_magnify",
     "24_noise",
     "25_relief",
+    "26_move",
 ]
 
 

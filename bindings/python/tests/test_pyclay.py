@@ -366,6 +366,108 @@ def test_relief_support_is_finite_and_costs_the_marcher():
     assert steep.safe_step_scale() < ball(clay.Op.RELIEF).safe_step_scale()
 
 
+def _two_balls():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    for x in (-0.35, 0.35):
+        layer.add(clay.Sphere(r=0.5, position=(x, 0, 0)), blend=clay.Smooth(0.25))
+    return doc
+
+
+def _top_at(doc, x):
+    """Where the surface crosses, scanning DOWN from above the form."""
+    ys = np.arange(1.6, -1.0, -0.002, dtype=np.float32)
+    pts = np.stack([np.full_like(ys, x), ys, np.zeros_like(ys)], axis=1)
+    inside = np.nonzero(doc.eval(pts) <= 0)[0]
+    return float(ys[inside[0]]) if len(inside) else float("nan")
+
+
+def test_grab_moves_the_surface_not_one_item():
+    # The distinction the whole thing exists for: the grab DEFORMER drags one
+    # item's own field in that item's LOCAL frame, so on a form built from
+    # several items it pulls one item's share and leaves the rest behind.
+    plain = _two_balls()
+    moved = _two_balls()
+    assert moved.grab(centre=(0, 0, 0), radius=1.2, displacement=(0, 0.4, 0)) == 2
+
+    lift = [_top_at(moved, x) - _top_at(plain, x) for x in (-0.5, -0.2, 0.2, 0.5)]
+    assert all(v > 0.05 for v in lift), lift
+    assert max(lift) - min(lift) < 0.05, lift  # one surface, not two items
+
+    # ...and grabbing a single item is visibly lopsided by comparison.
+    one = _two_balls()
+    body = clay.Sphere(r=0.5, position=(-0.35, 0, 0))
+    body.grab(center=(0.35, 0, 0), radius=1.2, displacement=(0, 0.4, 0))
+    lop = clay.Document()
+    ll = lop.add_sdf_layer("l")
+    ll.add(body, blend=clay.Smooth(0.25))
+    ll.add(clay.Sphere(r=0.5, position=(0.35, 0, 0)), blend=clay.Smooth(0.25))
+    tilt = ((_top_at(lop, -0.35) - _top_at(plain, -0.35))
+            - (_top_at(lop, 0.35) - _top_at(plain, 0.35)))
+    even = ((_top_at(moved, -0.35) - _top_at(plain, -0.35))
+            - (_top_at(moved, 0.35) - _top_at(plain, 0.35)))
+    assert tilt > 0.04 and abs(even) < 0.01, (tilt, even)
+
+
+def test_grab_preview_touches_nothing_and_culls():
+    doc = _two_balls()
+    doc.add_sdf_layer("far").add(clay.Sphere(r=0.3, position=(6, 0, 0)))
+    rng = np.random.default_rng(2)
+    probes = rng.uniform(-1.4, 1.4, size=(3000, 3)).astype(np.float32)
+    before = doc.eval(probes)
+
+    plan = doc.grab_preview(centre=(0, 0, 0), radius=1.2, displacement=(0, 0.4, 0))
+    assert len(plan) == 2  # the distant item is out of reach
+    assert all(isinstance(t, tuple) and len(t) == 2 for t in plan)
+    assert np.array_equal(doc.eval(probes), before)  # previewing changed nothing
+
+
+def test_grab_coalesces_over_a_drag():
+    # During one drag the centre and radius are fixed and only the displacement
+    # grows, so frames must replace rather than pile up: three frames ending at
+    # 0.4 must equal a single drag of 0.4.
+    stepped = _two_balls()
+    for d in (0.1, 0.25, 0.4):
+        stepped.grab(centre=(0, 0, 0), radius=1.2, displacement=(0, d, 0))
+    once = _two_balls()
+    once.grab(centre=(0, 0, 0), radius=1.2, displacement=(0, 0.4, 0))
+
+    rng = np.random.default_rng(5)
+    probes = rng.uniform(-1.3, 1.3, size=(4000, 3)).astype(np.float32)
+    assert np.allclose(stepped.eval(probes), once.eval(probes), atol=1e-6)
+    assert stepped.safe_step_scale() == pytest.approx(once.safe_step_scale())
+
+
+def test_grab_is_one_undo_step():
+    doc = _two_balls()
+    doc.enable_undo()
+    plain = _two_balls()
+    assert doc.grab(centre=(0, 0, 0), radius=1.2, displacement=(0, 0.4, 0)) == 2
+    assert doc.undo_depth == 1  # two items reached, one gesture
+    assert _top_at(doc, 0.0) > _top_at(plain, 0.0) + 0.05
+    assert doc.undo()
+    assert _top_at(doc, 0.0) == pytest.approx(_top_at(plain, 0.0), abs=1e-3)
+
+
+def test_grab_skips_hidden_and_protected_layers():
+    doc = clay.Document()
+    doc.add_sdf_layer("visible").add(clay.Sphere(r=0.5))
+    hidden = doc.add_sdf_layer("hidden")
+    hidden.add(clay.Sphere(r=0.5))
+    locked = doc.add_sdf_layer("locked")
+    locked.add(clay.Sphere(r=0.5))
+    doc.set_layer_visible(hidden.id, False)
+    doc.set_layer_protection(locked.id, ghost=False, locked=True)
+    # Never fails part-way through: everything planned is an edit that is taken.
+    assert doc.grab(centre=(0, 0, 0), radius=1.0, displacement=(0, 0.2, 0)) == 1
+
+
+def test_grab_with_no_reach_is_not_an_error():
+    doc = _two_balls()
+    assert doc.grab(centre=(9, 9, 9), radius=0.5, displacement=(0, 0.2, 0)) == 0
+    assert doc.grab(centre=(0, 0, 0), radius=0.0, displacement=(0, 0.2, 0)) == 0
+
+
 def test_voxel_grid_edits_and_queries():
     g = clay.VoxelGrid(voxel_size=0.5)
     red = g.palette_add("#ff0000")

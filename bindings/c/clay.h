@@ -302,6 +302,59 @@ clay_result clay_document_undo_state(const clay_document* doc, int32_t* out_enab
 clay_result clay_document_begin_undo_group(clay_document* doc);
 clay_result clay_document_end_undo_group(clay_document* doc);
 
+/* -- document grab (the Move brush) ---------------------------------------- */
+
+/* A world-space drag that moves the SURFACE.
+ *
+ * This is the difference between the grab DEFORMER and a Move brush. The
+ * deformer drags one item's own field and takes its centre in that item's LOCAL
+ * frame, so on a form built from several items it pulls one item's share and
+ * leaves the rest behind. This maps the world drag into every item it reaches,
+ * which is exactly a field-level grab: combine ops are pointwise in the
+ * deformed point, so warping every operand identically is the same as warping
+ * their combination, and Transform's uniform scale keeps a spherical falloff
+ * spherical.
+ *
+ * Everything is in WORLD units, which is the point — a host has the drag in
+ * world space already, and turning it into per-item local frames is the
+ * error-prone step this owns. */
+typedef struct clay_grab_params {
+    uint32_t struct_size;  /* = sizeof(clay_grab_params); required */
+    float centre[3];       /* where the drag started, in world units */
+    float radius;          /* its reach; <= 0 touches nothing */
+    float displacement[3]; /* how far it has moved so far */
+    int32_t ease;          /* falloff curve index, as the deformer takes it */
+    int32_t front_only;    /* gate on the half-space the pull heads into */
+} clay_grab_params;
+
+/* Apply a drag; *out_items receives how many items it reached (may be NULL).
+ *
+ * Items the drag cannot touch are skipped: a grab costs exactness and step
+ * scale, and outside its radius the warp is the identity, so an item whose
+ * influence bound misses the sphere is provably unaffected. Hidden and
+ * protected layers are skipped too, so this never fails part-way through.
+ *
+ * A drag COALESCES. During one drag the centre and radius are fixed and only
+ * the displacement grows, so calling this repeatedly with a growing
+ * displacement replaces the trailing grab rather than piling deformers up —
+ * otherwise a chain would grow by one record per frame. A different centre
+ * starts a new one.
+ *
+ * A drag that reaches nothing reports CLAY_OK having edited nothing: an artist
+ * dragging in empty space made no mistake. The whole gesture is one undo step
+ * when a stack is attached. */
+clay_result clay_document_grab(clay_document* doc, const clay_grab_params* params,
+                               size_t* out_items);
+
+/* Which items a drag WOULD edit, without touching the document, so a host can
+ * preview a Move before committing it. Size-query pattern: call with
+ * out_layers == NULL and out_nodes == NULL to receive the count in *out_count,
+ * then again with buffers of that size. */
+clay_result clay_document_grab_preview(const clay_document* doc,
+                                       const clay_grab_params* params, uint32_t* out_layers,
+                                       uint32_t* out_nodes, size_t capacity,
+                                       size_t* out_count);
+
 /* -- editing a placed node -------------------------------------------------
  * Everything below addresses an existing node by the id clay_layer_add_item
  * returned, and applies one command from the engine's vocabulary — the same
