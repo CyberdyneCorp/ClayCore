@@ -171,6 +171,18 @@ never reaches its children**: a sphere under a group translated to `x = 2`
 evaluates at the origin. Worth knowing in its own right — a group carrying a
 transform silently does nothing.
 
+**A drag coalesces.** A Move is not one call — a host re-applies it every frame
+with a longer displacement. A drag holds its centre and radius fixed and grows
+only its displacement, so those two identify the gesture and `moved_chain`
+*replaces* that gesture's warp rather than stacking another in front of it.
+Without this a two-second drag at 60fps leaves 120 warps on every item it
+touched, each one multiplying into the declared Lipschitz. A different centre is
+a different gesture and is kept beside the first.
+
+`move_brush` is pure, so a drag can be **previewed** — `Layer.move_surface_preview`
+and `clay_layer_move_surface_preview` return the nodes it would warp without
+touching the document.
+
 Applying the result needs `SetDeformersCmd`, which is new too: the command
 vocabulary could not change a node's deformers at all, so a deformer could only
 be set when its node was created.
@@ -351,7 +363,7 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Cut tool | `cut::cut_item`, `cut::CutShape` | `clay.Cut(...)`, `clay.CutShape.rect/circle/from_polygon/from_curve` | `clay_cut_create`, `clay_cut_polygon_from_curve` |
 | Snakehook | `brush::snakehook` | `clay.snakehook(...)` | `clay_item_create` + `clay_item_set_curve_points` |
 | Voxel verbs | `VoxelGrid::sculpt_*` | `VoxelGrid.sculpt_*` | `clay_voxel_sculpt_*` |
-| Move brush | `brush::move_brush`, `moved_chain` | `Layer.move_surface(...)` | `clay_layer_move_surface` |
+| Move brush | `brush::move_brush`, `moved_chain` | `Layer.move_surface(...)`, `.move_surface_preview(...)` | `clay_layer_move_surface`, `clay_layer_move_surface_preview` |
 | Deformers on a placed node | `scene::SetDeformersCmd` | (through `move_surface`) | `clay_layer_add_deformer` |
 | Masks | `voxel::MaskField` | `clay.MaskField` | `clay_mask_*` |
 
