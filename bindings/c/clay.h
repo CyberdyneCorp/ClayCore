@@ -138,7 +138,17 @@ typedef enum clay_op {
     CLAY_OP_SHELL = 10,
     CLAY_OP_REPLACE = 11,
     CLAY_OP_TRANSITION_LINEAR = 12, /* morph along a segment */
-    CLAY_OP_TRANSITION_RADIAL = 13  /* morph over an XZ radius */
+    CLAY_OP_TRANSITION_RADIAL = 13, /* morph over an XZ radius */
+    /* Surface relief: the item is a REGION, and blend_k is the amplitude by
+     * which the surface accumulated BEFORE it moves along its own normal. The
+     * item's rounding is the falloff width, the same convention groove and
+     * tongue use. Support is finite, so influence bounds and culling are
+     * unaffected.
+     *
+     * A pair rather than one signed amplitude, because blend_k is required
+     * non-negative — and because add/subtract and engrave/emboss are pairs. */
+    CLAY_OP_RELIEF = 14, /* build up: ZBrush Standard, ClayBuildup */
+    CLAY_OP_INCISE = 15  /* cut in:   Crease, DamStandard */
 } clay_op;
 
 typedef enum clay_blend {

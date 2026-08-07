@@ -132,6 +132,18 @@ enum CCombineMode {
     // never culls them. Extra params follow the shared four (see below).
     ccombine_transition_linear = 12,
     ccombine_transition_radial = 13,
+    // Surface RELIEF: offsets the accumulated field by an amplitude, weighted
+    // by the item's own field used as a REGION — the same trick paint plays for
+    // colour. k = amplitude, r2 = falloff width.
+    //
+    // TWO ops rather than one signed amplitude, which is what this was first
+    // designed as. blend_k is validated non-negative in three places including
+    // the blend constructor, which has no op to be aware of — so the sign has
+    // nowhere to live. It is also the convention already here: add/subtract and
+    // engrave/emboss are pairs of ops, not one op with a sign. They share the
+    // branch below so they cannot drift apart.
+    ccombine_relief = 14,  // build the surface up  (ZBrush Standard, ClayBuildup)
+    ccombine_incise = 15,  // cut into it           (Crease, DamStandard)
 };
 
 enum CBlendProfile {
@@ -308,6 +320,9 @@ CLAY_FN float ctape_blend_support(int profile, float k) {
 // outside its bound (support 0). The blend profile is ignored by these
 // modes.
 CLAY_FN float ccombine_extended_support(int mode, float k, float r2) {
+    // Relief reaches exactly as far as its falloff, and no further: the weight
+    // is zero beyond it, so influence bounds stay tight and culling still works.
+    if (mode == ccombine_relief || mode == ccombine_incise) return cmax(r2, 0.0f);
     if (mode == ccombine_groove || mode == ccombine_tongue) return cmax(r2, 0.0f);
     if (mode == ccombine_inset || mode == ccombine_replace) return 0.0f;
     return cmax(k, 0.0f);
@@ -625,6 +640,24 @@ CLAY_FN CTapeValue ctape_combine_values(CTapeValue a, CTapeValue b, int mode, in
         float support = cmax(ctape_blend_support(profile, k), k);
         float w = 1.0f - cclamp(b.d / cmax(support, 1e-6f), 0.0f, 1.0f);
         r.color = cmix(a.color, b.color, w);
+    } else if (mode == ccombine_relief || mode == ccombine_incise) {
+        // The item is a REGION, not a shape. Its own field gives the weight,
+        // exactly as paint's does — full inside, tapering across the falloff,
+        // and zero beyond it.
+        //
+        // Offsetting the accumulated distance moves its isosurface along that
+        // field's own gradient, which IS the surface normal. So this displaces
+        // the existing surface along its normal rather than approximating it.
+        float width = cmax(r2, 1e-6f);
+        float w = 1.0f - cclamp(b.d / width, 0.0f, 1.0f);
+        // Smoothstep rather than linear: a linear taper leaves a visible crease
+        // at the region's rim, where the weight's slope jumps from 1/width to 0.
+        w = w * w * (3.0f - 2.0f * w);
+        // One branch, two directions: relief lifts the surface out along its
+        // normal, incise pushes it in. Sharing the body is how they stay each
+        // other's inverse as either changes.
+        r.d = a.d - (mode == ccombine_relief ? k : -k) * w;
+        // The colour follows the material the relief moved, not the region's.
     } else if (mode == ccombine_groove) {
         r.d = op_groove(a.d, b.d, k, r2);
     } else if (mode == ccombine_tongue) {

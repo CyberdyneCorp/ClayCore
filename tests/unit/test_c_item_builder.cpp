@@ -802,11 +802,13 @@ TEST_CASE("every primitive builds the field the scene model builds") {
 
 TEST_CASE("every combine op builds the field the scene model builds") {
     // Including the eight extended modes, whose radius is blend_k and whose
-    // channel half-width (groove, tongue) is the item's rounding.
+    // channel half-width (groove, tongue) is the item's rounding — and relief
+    // and incise, which read the same two fields as amplitude and falloff.
     const std::int32_t kOps[] = {CLAY_OP_ADD,     CLAY_OP_SUBTRACT, CLAY_OP_INTERSECT,
                                  CLAY_OP_PAINT,   CLAY_OP_GROOVE,   CLAY_OP_TONGUE,
                                  CLAY_OP_PIPE,    CLAY_OP_ENGRAVE,  CLAY_OP_EMBOSS,
-                                 CLAY_OP_INSET,   CLAY_OP_SHELL,    CLAY_OP_REPLACE};
+                                 CLAY_OP_INSET,   CLAY_OP_SHELL,    CLAY_OP_REPLACE,
+                                 CLAY_OP_RELIEF,  CLAY_OP_INCISE};
     float base_params[1] = {0.9f};
     float item_params[3] = {0.35f, 0.35f, 1.2f};
     float where[3] = {0.4f, 0.0f, 0.0f};

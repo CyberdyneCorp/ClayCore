@@ -42,17 +42,26 @@ tapering to nothing across a stated width, and exactly zero beyond it. The item
 is therefore a *region*, and any primitive can be one — a sphere for a round
 brush, a box for a chisel, an extruded polygon for a stamp outline.
 
-A signed amplitude covers both directions, as magnify and pinch do: positive
-builds the surface up (Standard, ClayBuildup), negative cuts it in (Crease,
-DamStandard). Two ops would be the same thing twice.
+**Two ops, not one signed amplitude.** This was scoped the other way, arguing
+from magnify and pinch, and that was the wrong precedent: a deformer carries its
+parameters in a free-form float array where a sign costs nothing, while an op
+carries `blend_k`, which is validated non-negative in three places — including
+the blend constructor, which has no op to be aware of. The sign has nowhere to
+live.
+
+It is also the convention already here. Add and subtract are a pair; so are
+engrave and emboss. Relief (build up: Standard, ClayBuildup) and Incise (cut in:
+Crease, DamStandard) follow them, and share one kernel branch with the sign
+chosen from the mode, so they cannot drift apart — the same way `sculpt_pinch`
+and `sculpt_magnify` share one walk.
 
 ## Where the parameters live
 
 The existing convention rather than a new one. `clay.h` already documents that
 "for the extended modes blend_k is the mode's radius or depth, and groove and
 tongue additionally read the item's rounding as the channel half-width". Relief
-follows it: **blend_k is the amplitude** (signed) and **the item's rounding is
-the falloff width**.
+follows it: **blend_k is the amplitude** and **the item's rounding is the
+falloff width**.
 
 ## What this buys, and what it does not
 

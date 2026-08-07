@@ -735,6 +735,12 @@ NB_MODULE(pyclay, m) {
         .value("INSET", scene::Op::Inset)
         .value("SHELL", scene::Op::Shell)
         .value("REPLACE", scene::Op::Replace)
+        // Surface relief: the item is a REGION, not a shape. blend_k is the
+        // amplitude by which the surface accumulated BEFORE it moves along its
+        // own normal, and the item's rounding is the falloff width. A PAIR
+        // rather than one signed amplitude, because blend_k cannot be negative.
+        .value("RELIEF", scene::Op::Relief)
+        .value("INCISE", scene::Op::Incise)
         // spatial morphs: need a transition= argument, and are NON-LOCAL
         // (never culled) because their weight reaches arbitrarily far
         .value("TRANSITION_LINEAR", scene::Op::TransitionLinear)

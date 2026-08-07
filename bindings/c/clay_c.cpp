@@ -228,6 +228,8 @@ bool op_is_known(std::int32_t v) {
         case scene::Op::Inset:
         case scene::Op::Shell:
         case scene::Op::Replace:
+        case scene::Op::Relief:
+        case scene::Op::Incise:
         case scene::Op::TransitionLinear:
         case scene::Op::TransitionRadial: return true;
         case scene::Op::None: return false;

@@ -50,6 +50,7 @@ add_executable(clay_unit_tests
   unit/test_snakehook.cpp
   unit/test_magnify.cpp
   unit/test_noise.cpp
+  unit/test_relief.cpp
   unit/test_c_pick_eval.cpp)
 
 target_link_libraries(clay_unit_tests PRIVATE clay::core doctest::doctest)
