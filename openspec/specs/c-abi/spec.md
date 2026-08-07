@@ -312,3 +312,35 @@ The C API SHALL expose setting a swept item's guide points, reusing the curve po
 - **WHEN** a C caller samples a mesh with no triangles, or passes a non-positive cell size
 - **THEN** the call fails with an invalid-argument error
 
+### Requirement: Masking through the C ABI is a stroke
+The ABI SHALL expose the stroke engine's mask consumer beside the ones that write voxels and emit items, so a host paints a mask with the drag it already resolved rather than by looping single stamps and re-deriving spacing itself.
+
+It SHALL also expose the bounded fill and invert, and SHALL accept an optional mask on the relax and flatten parameter blocks — added at the END of those structs, with `struct_size` deciding whether the field is present, so a caller compiled against the older layout keeps working unchanged.
+
+#### Scenario: A host paints a mask along a drag
+- **WHEN** a host resolves a stroke and applies it to a mask
+- **THEN** the mask is painted along the path and the call reports how many stamps ran
+
+#### Scenario: An older caller is unaffected
+- **WHEN** relax or flatten is called with a `struct_size` from before the mask field existed
+- **THEN** the call succeeds and behaves exactly as it did, with no mask
+
+#### Scenario: Inverting within a box
+- **WHEN** a host inverts a mask within a world-space box
+- **THEN** the complement is taken over that box and nothing outside it changes
+
+### Requirement: Mask extrude through the C ABI
+The ABI SHALL expose the mask-to-distance conversion and both extrudes — into a volume item and into a voxel grid — with a versioned parameter block carrying the thickness, side, threshold, rim rounding, border smoothing and sampling, as the relax and flatten blocks already do.
+
+A refused extrude SHALL report a typed error rather than handing back an empty item, so a host distinguishes "the mask missed the surface" from "the surface is small".
+
+The result SHALL be a handle the CALLER owns, on the same lifetime rule the rest of the voxel and volume surface follows.
+
+#### Scenario: A host extracts a plate
+- **WHEN** a host paints a mask on a layer and extrudes it
+- **THEN** it receives a new item or grid holding the plate, and the source layer is untouched
+
+#### Scenario: A refusal is typed
+- **WHEN** an extrude is asked for with an empty mask
+- **THEN** the call returns a typed error and produces no handle
+
