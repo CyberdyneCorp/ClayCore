@@ -516,3 +516,10 @@ It SHALL also state that the surface moves less than the displacement asked for,
 - **WHEN** a script with undo enabled moves a form and undoes it
 - **THEN** the document is back where it started in a single step
 
+### Requirement: Previewing a move from Python
+The module SHALL expose previewing a drag, returning the nodes it would warp without touching the document.
+
+#### Scenario: A script previews before committing
+- **WHEN** a script previews a drag and then applies it
+- **THEN** the preview leaves the document unchanged and names the same nodes the move reports
+
