@@ -9,6 +9,14 @@ named here only where ClayCore has to provide something for them.
 Living requirements are in `openspec/specs/`; this file is the plan, not the
 contract. A row becomes real when it becomes a change in `openspec/changes/`.
 
+Where the engine stands against the tools it gets compared to — Blender, ZBrush
+and 3DCoat — is in `docs/sculpt_comparison.md`: what it wins outright, what is
+missing before an app built on it could compete, and which non-goals cap the
+ceiling on purpose. The short version is that the brush vocabulary landed and
+the **workflow tier** did not: masking that protects a surface from any
+operation, sculpt layers, and alphas on SDF layers are document concepts this
+file's brush rows were never going to deliver.
+
 Last reconciled against `3dcoat_study/MISSING_FEATURES.md` and
 `3DCOAT_FEATURE_STUDY.md` on 2026-08-05, after a review from the study's authors
 caught five items this file had dropped. Every ClayCore-owned row in their

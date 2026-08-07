@@ -16,7 +16,7 @@ I/O; Python (`pyclay`) and C-ABI/Swift bindings.
 claycore is the engine core of **ClaySpace** (iPad sculpting app) and stands
 alone for tools, pipelines, CI, and research.
 
-- Spec: `openspec/specs/` — the living requirements (eleven capabilities,
+- Spec: `openspec/specs/` — the living requirements (14 capabilities,
   from `sdf-kernels` to `build-packaging`).
 - Math reference: `docs/01-sdf-math-foundations.md`.
 - Architecture: `docs/05-claycore-library.md`.
@@ -25,6 +25,9 @@ alone for tools, pipelines, CI, and research.
   with the parity fixture.
 - Brushes and features: `docs/07-brushes-and-features.md` — every sculpting
   verb, what it does, how it is parameterised, and its ZBrush equivalent.
+- Where we stand: `docs/sculpt_comparison.md` — claycore against Blender,
+  ZBrush and 3DCoat, what it wins outright, and what is missing before an app
+  built on it could compete.
 - Releasing: `docs/RELEASE.md`.
 - Examples: `examples/` — runnable scripts with committed renders.
 - Roadmap: `openspec/ROADMAP.md` — what is missing and in what order.
@@ -48,16 +51,19 @@ write PNGs with the standard library.
 ## What ships today
 
 Per-verb detail — what each brush does and how it is parameterised — is in
-[`docs/07-brushes-and-features.md`](docs/07-brushes-and-features.md).
+[`docs/07-brushes-and-features.md`](docs/07-brushes-and-features.md). How this
+compares to Blender, ZBrush and 3DCoat, and what is still missing, is in
+[`docs/sculpt_comparison.md`](docs/sculpt_comparison.md).
 
 | Area | Capability |
 |---|---|
-| Kernels | 24 exact + 4 bound 3D primitives (including the unbounded plane and infinite cylinder), 9 exact 2D profiles with extrude/revolve lifts, N-profile lofts, and sweeps along a guide with parallel-transported frames, hard/quadratic/cubic/circular/chamfer blends plus 8 extended modes (groove, tongue, pipe, engrave, emboss, inset, shell, replace), transforms, mirrors, grid and radial repetition, deformers (twist/bend/taper/displace/wrap-around/linear+radial ramps, plus grab and pose with finite support) and elongation (exact about the origin, per-axis for any primitive), spatial morphs, all reachable from a document, lifts, 33 easing curves, stroke chains and control-point curves (hard/spline/B-spline/Bezier points with local-space handles, closed, tessellated to a document tolerance), per-node exactness/Lipschitz tracking |
+| Kernels | 24 exact + 4 bound 3D primitives (including the unbounded plane and infinite cylinder), 9 exact 2D profiles with extrude/revolve lifts, N-profile lofts, and sweeps along a guide with parallel-transported frames, hard/quadratic/cubic/circular/chamfer blends plus 8 extended modes (groove, tongue, pipe, engrave, emboss, inset, shell, replace) and relief/incise, whose item is a REGION rather than geometry, transforms, mirrors, grid and radial repetition, 14 deformers (twist/bend/taper/displace/wrap-around/linear+radial ramps, plus grab, pose, pose-line and magnify with finite support, and fractal gradient noise on an integer hash) and elongation (exact about the origin, per-axis for any primitive), spatial morphs, all reachable from a document, lifts, 33 easing curves, stroke chains and control-point curves (hard/spline/B-spline/Bezier points with local-space handles, closed, tessellated to a document tolerance), per-node exactness/Lipschitz tracking |
 | Tools | Cut tool: a shape drawn on a frame (rect, circle, polygon, spline lasso) resolved into an ordinary extruded item — a prism, not a frustum; the sweep is sized to cut through, keep-inner/keep-outer is the op, rounding bevels the walls |
 | Brushes | Stroke engine: samples in, edit items out — arc-length spacing, pressure curves, deterministic jitter, taper, rotate-along-stroke, steady stroke, buildup vs clamped; versioned presets; strokes become ordinary edits, so undo, coalescing and serialization apply unchanged |
+| Sculpting | Resolvers that turn a gesture into an ordinary edit — the Move brush (drags the *assembled* surface, coalescing over a drag and previewable), snakehook tendrils, and the cut tool; baked field operations relax and flatten, which sample a region into a narrow-band volume and declare the Lipschitz they measured |
 | Scene | Layers with visibility plus ghost (shown, unpickable, uneditable) and lock (shown and pickable, uneditable), ordered edit lists, nested groups, shared-content instancing, editing placed nodes (retransform, swap primitive, recolour, re-blend, move, remove) and layers (visibility, transform, reorder, remove) through one command vocabulary, opt-in undo/redo with stroke coalescing and grouping, influence bounds, flat postfix tape with per-brick culling, invertible+serializable undo commands |
 | Evaluation | CPU (reference + threaded batch), Metal, CUDA, OpenCL — one interface, runtime registry, tolerance-gated parity |
-| Storage | Sparse fp16 narrow-band brick cache with dirty tracking, LOD mips, memory budget; palette-indexed colored voxel grids with cube/sphere brushes, falloff curves and strength, sculpting verbs (smooth, inflate/erode, flatten, pinch, fill-cavities, scrape, smudge, carve-with-alpha), pre-bake repair (report, close holes, fill voids), box and line fills, mirrored edits and flood select; paintable per-layer mask fields that freeze a region against any edit and survive resolution changes |
+| Storage | Sparse fp16 narrow-band brick cache with dirty tracking, LOD mips, memory budget; palette-indexed colored voxel grids with cube/sphere brushes, falloff curves and strength, 10 sculpting verbs (smooth, inflate/erode, flatten, pinch, magnify, grab, fill-cavities, scrape, smudge, carve-with-alpha), pre-bake repair (report, close holes, fill voids), box and line fills, mirrored edits and flood select; paintable per-layer mask fields that freeze a region against any edit and survive resolution changes |
 | Meshing | Marching tetrahedra (watertight + 2-manifold by construction), surface nets preview, flagged dual contouring, meshoptimizer decimation, validation, vertex colors/normals/UVs |
 | Picking | Scene and brick raycast with layer/item attribution, surface snapping, voxel cell/face picking, selection bounds |
 | I/O | `.clayspace` documents, OBJ+MTL, PLY, FBX (ufbx import + binary writer), glTF 2.0 GLB |
