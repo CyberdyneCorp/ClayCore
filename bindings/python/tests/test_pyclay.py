@@ -2643,6 +2643,83 @@ def test_move_surface_coalesces_over_a_drag():
     assert stepped.safe_step_scale() == pytest.approx(once.safe_step_scale())
 
 
+def _reach_along(doc, direction, hi=4.0):
+    u = np.array(direction, np.float32)
+    u = u / np.linalg.norm(u)
+    ts = np.arange(0.0, hi, 0.002, dtype=np.float32)
+    pts = (ts[:, None] * u[None, :]).astype(np.float32)
+    inside = np.nonzero(doc.eval(pts) <= 0)[0]
+    return float(np.linalg.norm(pts[inside[-1]])) if len(inside) else float("nan")
+
+
+def test_move_surface_buds_rather_than_stretching():
+    """A mesh stretches; a field moves what is already there.
+
+    grab samples the field at p - w*d, so where the weight is one the material is
+    rigidly displaced and where it falls to zero nothing happens. A big pull buds
+    a lump off the surface rather than drawing a lobe out of it, and pulling
+    harder does not help: the reach is bounded by the falloff, not by the drag.
+    """
+    def pulled(radius, displacement):
+        doc = clay.Document()
+        layer = doc.add_sdf_layer("l")
+        layer.add(clay.Sphere(r=1.0))
+        layer.move_surface((1.0, 0, 0), (displacement, 0, 0), radius=radius)
+        return doc
+
+    gentle = _reach_along(pulled(0.5, 1.1), (1, 0, 0)) - 1.0
+    hard = _reach_along(pulled(0.5, 2.5), (1, 0, 0)) - 1.0
+    assert gentle > 0.0                       # it does move the surface
+    assert gentle < 0.5                       # ...by far less than the 1.1 asked for
+    assert hard < gentle * 1.5, (gentle, hard)  # and 2x the drag is not 2x the reach
+
+
+def test_move_surface_drags_compound_the_step_scale():
+    """A stroke is many drags, and each one costs the marcher multiplicatively.
+
+    Coalescing covers frames of ONE drag, where the centre and radius are fixed.
+    A stroke walks the centre outward, so those stack by design — every grab
+    multiplies the declared Lipschitz. A host pulling a long lobe has to
+    consolidate (bake the chain into a volume) rather than keep appending.
+    """
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=1.0))
+    scales = [doc.safe_step_scale()]
+    for i in range(9):
+        layer.move_surface((1.0 + 0.25 * i, 0, 0), (0.25, 0, 0), radius=0.5)
+        scales.append(doc.safe_step_scale())
+
+    assert all(b < a for a, b in zip(scales, scales[1:]))   # strictly decaying
+    assert scales[9] < 0.05                                  # nine drags: >20x cost
+    # Geometric, not linear: the per-drag ratio is roughly constant.
+    ratios = [b / a for a, b in zip(scales[1:], scales[2:])]
+    assert max(ratios) - min(ratios) < 0.05, ratios
+
+
+def test_snakehook_grows_what_move_cannot():
+    """The verb for pulling a lobe out is snakehook, and it stays exact."""
+    u = np.array([1.0, 0.0, 0.0], np.float32)
+
+    move_doc = clay.Document()
+    ml = move_doc.add_sdf_layer("l")
+    ml.add(clay.Sphere(r=1.0))
+    ml.move_surface((1.0, 0, 0), (1.1, 0, 0), radius=0.8)
+
+    hook_doc = clay.Document()
+    hl = hook_doc.add_sdf_layer("l")
+    hl.add(clay.Sphere(r=1.0))
+    path = np.array([u * t for t in np.linspace(1.05, 2.5, 7)], np.float32)
+    hl.add(clay.snakehook((1.0, 0, 0), (-1.0, 0, 0), path, base_radius=0.55,
+                          tip_fraction=0.12, taper_curve=0.9), blend=clay.Smooth(0.35))
+
+    assert _reach_along(hook_doc, (1, 0, 0)) > _reach_along(move_doc, (1, 0, 0)) + 0.5
+    # ...and adding material keeps the field exact, where displacing it does not:
+    # one Move already costs the marcher more than 2x, before a stroke stacks any.
+    assert hook_doc.safe_step_scale() == pytest.approx(1.0)
+    assert move_doc.safe_step_scale() < 0.5
+
+
 def test_move_surface_is_one_undo_step():
     doc, layer = _blended_form()
     doc.enable_undo()

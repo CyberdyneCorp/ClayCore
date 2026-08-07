@@ -73,7 +73,7 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 | Standard, ClayBuildup | `Op::Relief` | ✅ |
 | Crease, DamStandard | `Op::Incise` | ✅ |
 | Inflate | `Op::Relief`, `sculpt_inflate` | ✅ |
-| Move | `brush::move_brush` | ✅ drags the assembled surface |
+| Move | `brush::move_brush` | 🟡 drags the assembled surface, but **buds rather than stretches** on a large pull, and a stroke's drags compound the step scale — see below |
 | Rotate | `pose`, `pose_line` | ✅ |
 | Pinch / Magnify | `magnify` (signed), `sculpt_pinch` / `sculpt_magnify` | ✅ one deformation, one sign |
 | Smooth | `field::relax`, `sculpt_smooth` | ✅ bakes on the SDF side |
@@ -82,6 +82,7 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 | SnakeHook | `brush::snakehook` | ✅ adds material rather than pulling it |
 | Surface Noise | `noise` deformer | ✅ integer hash, so all backends agree |
 | Blob | — | ⬜ `add-blob-brush`, unblocked |
+| Pulling a lobe out | `brush::snakehook` | ✅ the verb for growing form; Move is the verb for nudging it |
 | Morph | — | ⬜ needs a stored morph target — a *document* concept |
 | Layers | — | ⬜ the same missing concept |
 | Alphas | `sculpt_carve_alpha` | 🟡 voxel only |
@@ -128,6 +129,38 @@ and that is the shape of the gap.
 | **Masking as a field concept** | Masks are stored beside *voxel* content and reach SDF edits only through the stroke engine, where a masked stamp is dropped or attenuated | ZBrush masking protects the **surface** from *any* operation. Nothing here gates an arbitrary op, or protects an existing surface from the next boolean. The single biggest missing concept. |
 | **Sculpt layers / morph targets** | Absent | A layer that records a pass and replays it at an intensity is a *document* concept, not a brush. Its absence is why Morph is filed "not planned". |
 | **Alphas on SDF layers** | `sculpt_carve_alpha` is voxel only | Detail work in all three tools is alpha-driven. |
+
+### Tier 1b — Move is not a mesh Move, and a stroke compounds
+
+Worth its own entry because it is the one place a ZBrush user's expectation
+breaks against the representation rather than against a missing feature.
+
+**A mesh stretches; a field moves what is already there.** ZBrush's Move drags a
+region of vertices and the sheet between them stretches. `grab` samples the field
+at `p - w·d`, so where the weight is one the material is rigidly displaced and
+where it falls to zero nothing happens. A large pull **buds a lump** off the
+surface rather than drawing a lobe out of it, and pulling harder barely helps:
+measured on a unit sphere, a displacement of 1.1 gains +0.34 and one of 2.5 gains
++0.42, because the falloff bounds the reach rather than the drag.
+
+**And a stroke is many drags.** An artist walks the brush outward; each drag is
+another grab on the chain and each multiplies the declared Lipschitz, so the safe
+step scale decays **geometrically** — about ×0.615 per drag:
+
+| drags | 1 | 3 | 6 | 9 |
+|---|---|---|---|---|
+| step scale | 0.615 | 0.233 | 0.054 | 0.013 (79× marching cost) |
+
+Coalescing covers frames of *one* drag, where the centre and radius are fixed; a
+stroke moves the centre, so those stack by design. A host pulling a long lobe has
+to **consolidate** — bake the chain into a volume with
+`clay_item_volume_from_document` — rather than keep appending. There is no policy
+for that today, which is the Tier 3 consolidation gap seen from the other side.
+
+The verb for *growing* form is `snakehook`, which sweeps a tapered item along the
+drag: it reaches as far as the drag goes and the field stays exact (step scale
+1.0 with three lobes on it, against 0.05 for the Move version).
+`examples/27_move_strokes.py` builds both and measures them.
 
 ### Tier 2 — finishing an asset
 

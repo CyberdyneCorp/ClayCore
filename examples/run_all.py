@@ -42,6 +42,7 @@ EXAMPLES = [
     "24_noise",
     "25_relief",
     "26_move_brush",
+    "27_move_strokes",
 ]
 
 
