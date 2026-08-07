@@ -120,6 +120,46 @@ bounded like any other item. `front_only` on `grab` gates the pull on the
 half-space it heads into, so the far side of a form does not travel with the
 near side.
 
+### Grab, pose and magnify are per item, and local
+
+This is the one thing to know before wiring a Move brush to `grab`, and it is
+easy to miss because nothing errors.
+
+A deformer is emitted into the tape **per item** and applied to that item's
+**local** point. So `grab` drags one item's own field, not the accumulated
+surface, and its `centre` is in the item's frame — a centre of `(0, 0, 0)` grabs
+the middle of a sphere sitting at world `x = 1.5`, and a centre of `(1.5, 0, 0)`
+does nothing to it.
+
+ZBrush's Move drags the **surface**. The two coincide only while the region
+under the cursor belongs to a single item. On a form smooth-unioned from
+several — the normal case for a blocked-out sculpt — grabbing one item pulls its
+share and leaves the rest behind: on two blended balls, grabbing the left lifts
+its side by 0.118 and the right by only 0.022.
+
+The fix is to apply the **same warp to every contributing item**, mapping the
+world drag into each item's frame:
+
+```
+local_centre = inverse(item.xform) * world_centre
+local_disp   = inverse(item.xform.rotation) * world_disp / item.xform.scale
+local_radius = world_radius / item.xform.scale
+```
+
+That reconstructs a true field-level grab **exactly**, for two reasons worth
+stating: combine ops are pointwise in the deformed point, so warping every
+operand identically is the same as warping their combination; and `Transform`'s
+scale is uniform by design, so a spherical falloff stays spherical under it.
+Measured on two blended balls with a world drag centred between them, the lift
+is symmetric and peaks at the world centre.
+
+What the engine does **not** yet do is own that mapping. The cut tool and
+snakehook exist precisely to keep an error-prone geometric step out of every
+caller; there is no equivalent resolver for a document-wide grab, so a host
+writing a Move brush is doing the transform itself today. Voxel grids do have a
+true region-level `sculpt_grab`, so the asymmetry is between the two
+representations, not a limit of the field.
+
 `magnify`'s **centre is its fixed point** — a radial scale about a point on the
 surface bulges the neighbourhood *around* it and leaves the point itself exactly
 where it was. This surprises people (and caught the tests first); see
@@ -262,7 +302,7 @@ parity — the mechanism usually differs even where the result matches.
 | Standard, ClayBuildup | `Op::Relief` | Displaces the accumulated surface along its normal |
 | Crease, DamStandard | `Op::Incise` | The same op, cutting in — a thin region gives the line |
 | Inflate | `Op::Relief`, `sculpt_inflate` | Moving the surface along its own normal *is* relief; the voxel verb dilates and erodes by cells |
-| Move | `grab` deformer | Finite support, `front_only` for the near side |
+| Move | `grab` deformer | Per **item**, in that item's **local** space — see the note below. `front_only` keeps the far side from travelling |
 | Rotate | `pose` / `pose_line` | Radial, or ramped along a line |
 | Pinch | `magnify` (negative), `sculpt_pinch` | One signed strength, not two verbs |
 | Magnify | `magnify` (positive), `sculpt_magnify` | Maxon's own page calls them inverses |
