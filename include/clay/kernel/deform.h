@@ -7,6 +7,7 @@
 // Every deformer's Lipschitz factor is provided by clay/kernel/exactness.h
 // so consumers scale their steps; kernels here only warp.
 
+#include "clay/kernel/noise.h"
 #include "clay/kernel/shim.h"
 #include "clay/kernel/ease.h"
 

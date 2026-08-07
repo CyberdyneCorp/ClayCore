@@ -39,6 +39,7 @@ EXAMPLES = [
     "21_flatten",
     "22_snakehook",
     "23_magnify",
+    "24_noise",
 ]
 
 

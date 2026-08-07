@@ -276,6 +276,12 @@ Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& defor
                 b = swept;
                 break;
             }
+            case kernel::cdeform_noise:
+                // The surface can move by the amplitude either way, so the
+                // bound grows by it. The fractal is normalized to [-1, 1], so
+                // the amplitude really is the whole excursion.
+                b = b.dilated(kernel::cabs(d.k));
+                break;
             case kernel::cdeform_magnify: {
                 // The inverse map samples at centre + v * scale, so material at
                 // q appears at centre + (q - centre) / scale: MAGNIFYING pushes
@@ -402,6 +408,8 @@ float deformer_lipschitz(const Node& item) {
             }
             info = kernel::cfi_pose_line(info, d.ext[5], extent,
                                          kernel::clength(end - anchor), ease_max_slope(d.ease));
+        } else if (d.type == kernel::cdeform_noise) {
+            info = kernel::cfi_noise(info, d.k, d.a, static_cast<int>(d.b), d.c);
         } else if (d.type == kernel::cdeform_magnify) {
             info = kernel::cfi_magnify(info, d.ext[0], ease_max_slope(d.ease));
         } else if (d.type == kernel::cdeform_pose) {

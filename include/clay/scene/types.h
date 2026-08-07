@@ -333,6 +333,7 @@ struct Deformer {
         if (type == kernel::cdeform_pose_line) return 6;
         if (type == kernel::cdeform_grab || type == kernel::cdeform_pose) return 4;
         if (type == kernel::cdeform_magnify) return 1;
+        if (type == kernel::cdeform_noise) return 1;
         return 0;
     }
 
@@ -418,6 +419,23 @@ struct Deformer {
     // Translate a region by `displacement`, weighted from the centre out and
     // zero past the radius. front_only gates on the half-space the pull heads
     // into, so the far side of a form does not travel with the near side.
+    // Fractal gradient noise, offsetting the distance — the irregular sibling
+    // of `displace`, whose sine is regular by construction. The seed is an
+    // ordinary parameter rather than global state, so two items with the same
+    // seed look the same and an item's appearance never depends on the order it
+    // was compiled in.
+    static Deformer noise(float amplitude, float frequency, int octaves = 4,
+                          float gain = 0.5f, std::uint32_t seed = 0) {
+        Deformer d;
+        d.type = kernel::cdeform_noise;
+        d.k = amplitude;
+        d.a = frequency;
+        d.b = static_cast<float>(octaves);
+        d.c = gain;
+        d.ext[0] = static_cast<float>(seed);
+        return d;
+    }
+
     // Magnify and pinch, which are the same deformation: a radial scale about
     // `centre` with finite support. A POSITIVE strength swells the surface away
     // from the centre, a negative one gathers it toward. Maxon's own page has

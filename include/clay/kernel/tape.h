@@ -210,6 +210,10 @@ enum CDeformType {
     // Radial scale about a centre. One signed strength: positive magnifies,
     // negative pinches. centre(k,a,b) radius(c) strength(e0)
     cdeform_magnify = 12,
+    // Fractal gradient noise as a distance OFFSET, like displace — but
+    // irregular, which is the whole point. k = amplitude, a = frequency,
+    // b = octaves, c = gain, e0 = seed
+    cdeform_noise = 13,
 };
 
 // Apply one deformer record to the local point. No deformer corrects the
@@ -271,6 +275,12 @@ CLAY_FN float ctape_deform_offset(CLAY_DEVICE const float* rec, cfloat3 p) {
         float correction = 0.0f;
         celongate_point(p, cf3(rec[1], rec[2], rec[3]), &correction);
         return correction;
+    }
+    if (type == cdeform_noise) {
+        int octaves = (int)rec[3];
+        if (octaves < 1) octaves = 1;
+        if (octaves > 8) octaves = 8;  // past this the octaves are below a cell
+        return rec[1] * cnoise_fbm(p * rec[2], octaves, rec[4], (cuint)rec[6]);
     }
     if (type != cdeform_displace) return 0.0f;
     float amp = rec[1];

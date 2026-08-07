@@ -323,6 +323,19 @@ body.add(clay.snakehook(anchor=pick_point, inward=-pick_normal, path=drag_pts,
 clay.RoundBox(size=..., r=...).magnify(center=(0, 0, 0), radius=0.95, strength=0.45)
 grid.sculpt_magnify(cell, size=3)   # the voxel inverse of sculpt_pinch
 
+# noise: irregularity — the irregular sibling of `displace`, whose sine is
+# regular by construction and gives an even corrugation instead. The HASH IS
+# INTEGER, and that is not an implementation detail: cross-backend parity is
+# tolerance-based (1e-6 CPU / 1e-4 GPU), and a float hash multiplies each
+# backend's own `sin` by ~43758 and takes a fractional part, turning a 1e-7
+# difference into an O(1) one. Integer ops give the same bits everywhere, which
+# is why the shim now carries `cuint`.
+# The SEED is a plain parameter, not global state. The fractal is normalized, so
+# `octaves` adds detail and `amplitude` stays the one control over how far the
+# surface moves. Offsetting the distance costs the marcher: the step scale drops
+# with amplitude x frequency, summed over the octaves.
+clay.Sphere(r=0.7).noise(amplitude=0.09, frequency=5.0, octaves=4, gain=0.5, seed=17)
+
 # loft: two or more profiles interpolated along Z, evenly spaced. Three or more
 # are BRACKETED, so wide-narrow-wide gives a waist rather than a straight
 # taper. A loft is a BOUND, and its Lipschitz is not 1 — interpolating very
