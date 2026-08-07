@@ -117,6 +117,7 @@ static_assert(CLAY_DEFORM_BEND_RADIAL == static_cast<int>(kernel::cdeform_bend_r
 static_assert(CLAY_DEFORM_ELONGATE_AXIS == static_cast<int>(kernel::cdeform_elongate_axis));
 static_assert(CLAY_DEFORM_GRAB == static_cast<int>(kernel::cdeform_grab));
 static_assert(CLAY_DEFORM_MAGNIFY == static_cast<int>(kernel::cdeform_magnify));
+static_assert(CLAY_DEFORM_NOISE == static_cast<int>(kernel::cdeform_noise));
 static_assert(CLAY_DEFORM_POSE == static_cast<int>(kernel::cdeform_pose));
 static_assert(CLAY_DEFORM_POSE_LINE == static_cast<int>(kernel::cdeform_pose_line));
 
@@ -313,6 +314,8 @@ constexpr std::size_t kVolumeParamsOriginal = offsetof(clay_volume_params, beta)
 constexpr std::size_t kRelaxParamsOriginal = offsetof(clay_relax_params, falloff) + sizeof(float);
 constexpr std::size_t kFlattenParamsOriginal =
     offsetof(clay_flatten_params, falloff) + sizeof(float);
+constexpr std::size_t kImportBudgetOriginal =
+    offsetof(clay_import_budget, max_triangles) + sizeof(std::uint64_t);
 
 // Parameters each primitive takes, indexed by clay_prim (= the tape opcode).
 // This is what the clay_prim comments document and what clay_item_create
@@ -327,8 +330,8 @@ static_assert(sizeof kPrimParams / sizeof kPrimParams[0] == kernel::ctape_prim_c
 constexpr int kProfileParams[] = {1, 2, 1, 1, 3, 2, 0};  // polygon: vertices instead
 static_assert(sizeof kProfileParams / sizeof kProfileParams[0] == kernel::cprofile_polygon + 1);
 
-constexpr int kDeformParams[] = {1, 1, 4, 2, 2, 3, 9, 3, 3, 8, 8, 10, 5};
-static_assert(sizeof kDeformParams / sizeof kDeformParams[0] == kernel::cdeform_magnify + 1);
+constexpr int kDeformParams[] = {1, 1, 4, 2, 2, 3, 9, 3, 3, 8, 8, 10, 5, 5};
+static_assert(sizeof kDeformParams / sizeof kDeformParams[0] == kernel::cdeform_noise + 1);
 
 clay_result check_params(const char* what, const float* params, std::size_t count, int expected) {
     if (count != static_cast<std::size_t>(expected))
@@ -573,6 +576,11 @@ clay_result make_deformer(std::int32_t kind, const float* p, scene::Deformer* ou
         if (!(kernel::cdot2(b - a) > 0.0f))
             return fail(CLAY_ERROR_INVALID_ARGUMENT, "pose_line needs a != b");
         *out = scene::Deformer::pose_line(a, b, kernel::cf3(p[6], p[7], p[8]), p[9]);
+    } else if (kind == CLAY_DEFORM_NOISE) {
+        if (!(p[2] >= 1.0f))
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "noise needs at least one octave");
+        *out = scene::Deformer::noise(p[0], p[1], static_cast<int>(p[2]), p[3],
+                                      static_cast<std::uint32_t>(p[4]));
     } else if (kind == CLAY_DEFORM_MAGNIFY) {
         if (!(p[3] > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "magnify radius must be > 0");
         *out = scene::Deformer::magnify(kernel::cf3(p[0], p[1], p[2]), p[3], p[4]);
@@ -1956,20 +1964,37 @@ clay_result clay_mesh_save(const clay_mesh* mesh, const char* path) {
     return fail(CLAY_ERROR_UNSUPPORTED, "unknown extension: " + ext);
 }
 
-clay_result clay_mesh_load(const char* path, clay_mesh** out_mesh) {
+clay_result clay_mesh_load(const char* path, const clay_import_budget* budget,
+                           clay_mesh** out_mesh) {
     if (!path || !out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null path or out_mesh");
     *out_mesh = nullptr;
+
+    io::ImportBudget limits;
+    if (budget) {
+        clay_import_budget b;
+        clay_result r = read_desc(budget, kImportBudgetOriginal, &b);
+        if (r != CLAY_OK) return r;
+        // Zero means "the library's default" rather than "allow nothing",
+        // which is what a zeroed struct would otherwise say.
+        if (b.max_vertices) limits.max_vertices = static_cast<std::size_t>(b.max_vertices);
+        if (b.max_triangles) limits.max_triangles = static_cast<std::size_t>(b.max_triangles);
+    }
+
     std::string p(path);
     std::size_t dot = p.find_last_of('.');
     std::string ext = dot == std::string::npos ? "" : p.substr(dot + 1);
+    // Case-insensitive: a file called MODEL.OBJ is an OBJ file, and the Python
+    // loader has always accepted one. The C ABI refusing it was a plain bug.
+    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
     auto loaded = std::make_unique<clay_mesh>();
     io::IoStatus status;
     if (ext == "obj") {
-        status = io::load_obj_file(p, &loaded->data);
+        status = io::load_obj_file(p, &loaded->data, limits);
     } else if (ext == "ply") {
-        status = io::load_ply_file(p, &loaded->data);
+        status = io::load_ply_file(p, &loaded->data, limits);
     } else if (ext == "fbx") {
-        status = io::load_fbx_file(p, &loaded->data);
+        status = io::load_fbx_file(p, &loaded->data, limits);
     } else {
         return fail(CLAY_ERROR_UNSUPPORTED, "unknown extension: " + ext);
     }
@@ -2026,6 +2051,59 @@ clay_result clay_item_volume_from_mesh(const clay_mesh* mesh, const clay_volume_
     auto* item = new clay_item();
     item->node.prim = scene::Prim::volume();
     item->node.volume = std::make_shared<field::FieldVolume>(std::move(*volume));
+    *out_item = item;
+    return CLAY_OK;
+}
+
+clay_result clay_item_volume_from_document(const clay_document* doc,
+                                           const clay_volume_params* params,
+                                           const float region_min[3], const float region_max[3],
+                                           clay_item** out_item) {
+    if (!doc || !params || !out_item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_item = nullptr;
+    clay_volume_params p;
+    clay_result r = read_desc(params, kVolumeParamsOriginal, &p);
+    if (r != CLAY_OK) return r;
+
+    scene::Tape tape = scene::compile_document(doc->doc.document);
+    if (tape.empty()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty document");
+
+    const float cell = p.cell_size > 0.0f ? p.cell_size : 0.0f;
+    if (!(cell > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "cell_size must be > 0: a document has no intrinsic scale to derive one "
+                    "from the way a mesh's bounds give one");
+    const float band = p.band > 0.0f ? p.band : cell * 3.0f;
+    const float padding = p.padding > 0.0f ? p.padding : band;
+
+    math::Aabb region;
+    if (region_min && region_max) {
+        region = math::Aabb(kernel::cf3(region_min[0], region_min[1], region_min[2]),
+                            kernel::cf3(region_max[0], region_max[1], region_max[2]));
+    } else {
+        region = tape.bounds;
+        if (region.empty() || region.is_infinite())
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "unbounded scene; pass a region");
+        // Padded by the band: sampling exactly to the bounds would clip the
+        // band at the surface, which is where it is needed most.
+        kernel::cfloat3 pad = kernel::cf3(padding, padding, padding);
+        region = math::Aabb(region.min - pad, region.max + pad);
+    }
+    if (region.empty()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty region");
+
+    field::FieldVolume volume = field::FieldVolume::sample(
+        [&tape](kernel::cfloat3 q) { return tape.eval(q).d; }, region, cell, band);
+    // brick_count, not empty(): a volume covering only empty space still has a
+    // full brick index, it just stores no samples. It evaluates perfectly well
+    // as "at least this far from anything" — and returning one from a BAKE
+    // means the caller picked a region with no surface in it and would get an
+    // item that silently contributes nothing.
+    if (volume.brick_count() == 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the region contains no surface to sample");
+
+    auto* item = new clay_item();
+    item->node.prim = scene::Prim::volume();
+    item->node.volume = std::make_shared<field::FieldVolume>(std::move(volume));
     *out_item = item;
     return CLAY_OK;
 }

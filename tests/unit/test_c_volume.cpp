@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -188,7 +189,7 @@ TEST_CASE("c volume: a mesh loads from a file and imports") {
     REQUIRE(clay_mesh_save(built, path) == CLAY_OK);
 
     clay_mesh* loaded = nullptr;
-    REQUIRE(clay_mesh_load(path, &loaded) == CLAY_OK);
+    REQUIRE(clay_mesh_load(path, nullptr, &loaded) == CLAY_OK);  // NULL = defaults
     REQUIRE(loaded != nullptr);
     CHECK(clay_mesh_index_count(loaded) == clay_mesh_index_count(built));
 
@@ -210,7 +211,7 @@ TEST_CASE("c volume: a mesh loads from a file and imports") {
 
     SUBCASE("an unknown extension is reported rather than guessed at") {
         clay_mesh* nothing = nullptr;
-        CHECK(clay_mesh_load("model.xyzzy", &nothing) == CLAY_ERROR_UNSUPPORTED);
+        CHECK(clay_mesh_load("model.xyzzy", nullptr, &nothing) == CLAY_ERROR_UNSUPPORTED);
         CHECK(nothing == nullptr);
     }
 }
@@ -347,4 +348,152 @@ TEST_CASE("c volume: flatten refuses what it cannot do") {
         clay_item_destroy(item);
         clay_mesh_destroy(mesh);
     }
+}
+
+TEST_CASE("c volume: a document can be baked, which is what relax and flatten needed") {
+    // Issue #7 items 2 and 5 were both left half-done by the same absence: the
+    // C ABI could build a volume from a MESH but not from a document, so an app
+    // could smooth an imported scan and not its own sculpt, and could not
+    // consolidate a long edit list into one item.
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "l", &layer) == CLAY_OK);
+    const float radius[1] = {0.6f};
+    clay_item* ball = clay_item_create(CLAY_PRIM_SPHERE, radius, 1);
+    REQUIRE(clay_layer_add_item(doc, layer, ball, nullptr) == CLAY_OK);
+    clay_item_destroy(ball);
+
+    clay_volume_params params = volume_params(0.04f);
+    clay_item* baked = nullptr;
+    REQUIRE(clay_item_volume_from_document(doc, &params, nullptr, nullptr, &baked) == CLAY_OK);
+    REQUIRE(baked != nullptr);
+
+    clay_document* out = clay_document_create();
+    clay_layer_id baked_layer = 0;
+    REQUIRE(clay_add_sdf_layer(out, "baked", &baked_layer) == CLAY_OK);
+    REQUIRE(clay_layer_add_item(out, baked_layer, baked, nullptr) == CLAY_OK);
+
+    // The baked field is the document's field.
+    CHECK(eval_c(out, cf3(0, 0, 0)) < 0.0f);
+    CHECK(eval_c(out, cf3(2.0f, 0, 0)) > 0.0f);
+    CHECK(std::abs(eval_c(out, cf3(0.6f, 0, 0))) < 0.05f);
+
+    SUBCASE("and it can then be relaxed, which was the point") {
+        clay_relax_params relax;
+        std::memset(&relax, 0, sizeof relax);
+        relax.struct_size = static_cast<std::uint32_t>(sizeof relax);
+        relax.strength = 1.0f;
+        relax.radius_cells = 2;
+        relax.iterations = 2;
+        CHECK(clay_item_volume_relax(baked, &relax) == CLAY_OK);
+    }
+
+    SUBCASE("and flattened") {
+        clay_flatten_params flat;
+        std::memset(&flat, 0, sizeof flat);
+        flat.struct_size = static_cast<std::uint32_t>(sizeof flat);
+        flat.plane_point[1] = 0.4f;
+        flat.plane_normal[1] = 1.0f;
+        flat.strength = 1.0f;
+        flat.centre[1] = 0.5f;
+        flat.region_radius = 0.4f;
+        flat.falloff = 0.25f;
+        CHECK(clay_item_volume_flatten(baked, &flat) == CLAY_OK);
+    }
+
+    clay_item_destroy(baked);
+    clay_document_destroy(out);
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("c volume: baking a document refuses what it cannot do") {
+    clay_volume_params params = volume_params(0.05f);
+    clay_item* item = nullptr;
+
+    CHECK(clay_item_volume_from_document(nullptr, &params, nullptr, nullptr, &item) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+
+    clay_document* empty = clay_document_create();
+    CHECK(clay_item_volume_from_document(empty, &params, nullptr, nullptr, &item) ==
+          CLAY_ERROR_INVALID_ARGUMENT);  // nothing to sample
+
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(empty, "l", &layer) == CLAY_OK);
+    const float radius[1] = {0.5f};
+    clay_item* ball = clay_item_create(CLAY_PRIM_SPHERE, radius, 1);
+    REQUIRE(clay_layer_add_item(empty, layer, ball, nullptr) == CLAY_OK);
+    clay_item_destroy(ball);
+
+    SUBCASE("a document has no intrinsic scale, so a cell size is required") {
+        // Unlike a mesh, whose bounds give one. Guessing here would silently
+        // pick a resolution the caller never chose, and the resolution IS the
+        // shape after a bake.
+        clay_volume_params guess = volume_params(0.0f);
+        CHECK(clay_item_volume_from_document(empty, &guess, nullptr, nullptr, &item) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+    }
+
+    SUBCASE("a region with no surface in it is refused rather than returning nothing") {
+        const float lo[3] = {8.0f, 8.0f, 8.0f};
+        const float hi[3] = {9.0f, 9.0f, 9.0f};
+        CHECK(clay_item_volume_from_document(empty, &params, lo, hi, &item) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+    }
+
+    SUBCASE("an explicit region is honoured") {
+        const float lo[3] = {-0.8f, -0.8f, -0.8f};
+        const float hi[3] = {0.8f, 0.8f, 0.8f};
+        clay_item* scoped = nullptr;
+        CHECK(clay_item_volume_from_document(empty, &params, lo, hi, &scoped) == CLAY_OK);
+        CHECK(scoped != nullptr);
+        clay_item_destroy(scoped);
+    }
+
+    clay_document_destroy(empty);
+}
+
+TEST_CASE("c volume: the import budget is settable, and the extension is case-insensitive") {
+    clay_mesh* built = build_box_mesh(0.5f);
+    const char* upper = "c_volume_roundtrip.OBJ";
+    REQUIRE(clay_mesh_save(built, "c_volume_roundtrip.obj") == CLAY_OK);
+    // A file called MODEL.OBJ is an OBJ file. Python's loader always accepted
+    // one; the C ABI refusing it was a plain bug.
+    std::rename("c_volume_roundtrip.obj", upper);
+    clay_mesh* loaded = nullptr;
+    CHECK(clay_mesh_load(upper, nullptr, &loaded) == CLAY_OK);
+    CHECK(loaded != nullptr);
+    if (loaded) clay_mesh_destroy(loaded);
+
+    SUBCASE("and a budget too small is refused before anything is allocated") {
+        clay_import_budget tight;
+        std::memset(&tight, 0, sizeof tight);
+        tight.struct_size = static_cast<std::uint32_t>(sizeof tight);
+        tight.max_vertices = 2;  // a box has eight
+        clay_mesh* refused = nullptr;
+        CHECK(clay_mesh_load(upper, &tight, &refused) == CLAY_ERROR_BUDGET_EXCEEDED);
+        CHECK(refused == nullptr);
+    }
+
+    SUBCASE("and a generous one loads") {
+        clay_import_budget roomy;
+        std::memset(&roomy, 0, sizeof roomy);
+        roomy.struct_size = static_cast<std::uint32_t>(sizeof roomy);
+        roomy.max_vertices = 1000;
+        roomy.max_triangles = 1000;
+        clay_mesh* fine = nullptr;
+        CHECK(clay_mesh_load(upper, &roomy, &fine) == CLAY_OK);
+        if (fine) clay_mesh_destroy(fine);
+    }
+
+    SUBCASE("and a zeroed field means the default rather than allow-nothing") {
+        clay_import_budget zeroed;
+        std::memset(&zeroed, 0, sizeof zeroed);
+        zeroed.struct_size = static_cast<std::uint32_t>(sizeof zeroed);
+        clay_mesh* fine = nullptr;
+        CHECK(clay_mesh_load(upper, &zeroed, &fine) == CLAY_OK);
+        if (fine) clay_mesh_destroy(fine);
+    }
+
+    std::remove(upper);
+    clay_mesh_destroy(built);
 }

@@ -113,8 +113,8 @@ typedef enum clay_prim {
      * curve and a swept profile is not a new kind of profile. (bound) */
     CLAY_PRIM_SWEPT = 32,
     /* A sampled narrow-band volume. Not built with clay_item_create, which
-     * has no way to supply the samples: use clay_item_volume_from_mesh, which
-     * is the producer. (bound) */
+     * has no way to supply the samples: the producers are
+     * clay_item_volume_from_mesh and clay_item_volume_from_document. (bound) */
     CLAY_PRIM_VOLUME = 33
 } clay_prim;
 
@@ -179,7 +179,12 @@ typedef enum clay_deform {
     /* Radial scale about a centre: centre(3), radius, strength. ONE signed
      * strength covers both directions — positive magnifies, negative pinches —
      * because they are the same deformation. */
-    CLAY_DEFORM_MAGNIFY = 12
+    CLAY_DEFORM_MAGNIFY = 12,
+    /* Fractal gradient noise as a distance offset: amplitude, frequency,
+     * octaves, gain, seed. The irregular sibling of CLAY_DEFORM_DISPLACE,
+     * whose sine is regular by construction. The seed is an ordinary parameter,
+     * not global state, so the same seed always gives the same field. */
+    CLAY_DEFORM_NOISE = 13
 } clay_deform;
 
 /* Easing curves are given by index; 0 is linear. Only the taper deformer and
@@ -631,9 +636,24 @@ clay_result clay_mesh_validate(const clay_mesh* mesh, int32_t* out_watertight,
 /* Save by extension: .obj, .ply, .fbx, .glb */
 clay_result clay_mesh_save(const clay_mesh* mesh, const char* path);
 
-/* Load by extension: .obj, .ply, .fbx. The counterpart to clay_mesh_save, and
- * what gives clay_item_volume_from_mesh something to sample. */
-clay_result clay_mesh_load(const char* path, clay_mesh** out_mesh);
+/* Guardrails for an importer, checked against the file's DECLARED counts before
+ * anything is allocated — which is the point: a malformed or hostile file can
+ * claim a billion triangles, and the check has to happen before the allocation
+ * rather than after it. Zero on a field means the library's default. */
+typedef struct clay_import_budget {
+    uint32_t struct_size; /* = sizeof(clay_import_budget); required */
+    uint64_t max_vertices;
+    uint64_t max_triangles;
+} clay_import_budget;
+
+/* Load by extension: .obj, .ply, .fbx, matched case-insensitively. The
+ * counterpart to clay_mesh_save, and what gives clay_item_volume_from_mesh
+ * something to sample.
+ *
+ * `budget` may be NULL for the library's defaults. Exceeding it returns
+ * CLAY_ERROR_BUDGET_EXCEEDED rather than allocating. */
+clay_result clay_mesh_load(const char* path, const clay_import_budget* budget,
+                           clay_mesh** out_mesh);
 
 /* Build a mesh from caller-owned triangles: positions is count*3 floats and
  * indices is triangle_count*3 vertex indices. Copied, so the caller's buffers
@@ -668,6 +688,27 @@ typedef struct clay_volume_params {
  * same as clay_item_create. A mesh with no triangles is refused. */
 clay_result clay_item_volume_from_mesh(const clay_mesh* mesh, const clay_volume_params* params,
                                        clay_item** out_item);
+
+/* Samples a DOCUMENT's own field into an item carrying a volume — baking what
+ * an edit list evaluates to, rather than importing something from outside.
+ *
+ * This is what makes the volume operations reachable from an app at all. Relax
+ * and flatten act on a volume, and until now the only way to get one through
+ * this ABI was from a mesh, so an app could smooth an imported scan but not its
+ * own sculpt. It is also the consolidation step for a long session: a document
+ * with thousands of stroke items bakes to one volume, dropping the history and
+ * the per-item tape cost while keeping the shape.
+ *
+ * The cost is the one baking always has: the items are gone, and with them the
+ * ability to go back and change a radius. `cell_size` is the resolution the
+ * shape now has, so it is the caller's decision to make deliberately.
+ *
+ * `region` is an optional (min[3], max[3]) pair, or NULL for the document's own
+ * bounds padded by the band. Sampling an empty document is refused. */
+clay_result clay_item_volume_from_document(const clay_document* doc,
+                                           const clay_volume_params* params,
+                                           const float region_min[3], const float region_max[3],
+                                           clay_item** out_item);
 
 typedef struct clay_relax_params {
     uint32_t struct_size;  /* = sizeof(clay_relax_params); required */

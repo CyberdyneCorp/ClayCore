@@ -29,7 +29,11 @@ forward-refuse).
    silent: say so in the release notes, and make the library reject the older
    layout instead of misreading it. **0.2.0 is such a release** — the leading
    `struct_size` shifted every field of `clay_item_desc` and
-   `clay_mesh_params`, so ABI 0.1.0 binaries must recompile.
+   `clay_mesh_params`, so ABI 0.1.0 binaries must recompile. **0.22.0 is
+   another**: `clay_mesh_load` gained a nullable `const clay_import_budget*`
+   between its path and its out-parameter, so a caller compiled against 0.21.0
+   gets a compile error rather than a misread — the arity changed, so there is
+   no way for old code to link and behave differently.
 
 ## Tagging
 

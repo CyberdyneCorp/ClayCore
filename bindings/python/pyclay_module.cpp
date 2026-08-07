@@ -272,17 +272,17 @@ void save_mesh_any(const mesh::Mesh& m, const std::string& path) {
                                 "' (supported: .obj, .ply, .fbx, .glb)");
 }
 
-mesh::Mesh load_mesh_any(const std::string& path) {
+mesh::Mesh load_mesh_any(const std::string& path, const io::ImportBudget& limits) {
     std::size_t dot = path.find_last_of('.');
     std::string ext = dot == std::string::npos ? "" : path.substr(dot + 1);
     for (char& c : ext) c = static_cast<char>(std::tolower(c));
     mesh::Mesh out;
     if (ext == "obj") {
-        check_io(io::load_obj_file(path, &out));
+        check_io(io::load_obj_file(path, &out, limits));
     } else if (ext == "ply") {
-        check_io(io::load_ply_file(path, &out));
+        check_io(io::load_ply_file(path, &out, limits));
     } else if (ext == "fbx") {
-        check_io(io::load_fbx_file(path, &out));
+        check_io(io::load_fbx_file(path, &out, limits));
     } else {
         // .glb is saved but not loaded; saying so beats a generic failure.
         throw std::invalid_argument("unsupported mesh extension '." + ext +
@@ -2013,18 +2013,25 @@ NB_MODULE(pyclay, m) {
           "then drops (a horn).");
 
     m.def("load_mesh",
-          [](const std::string& path) {
+          [](const std::string& path, std::size_t max_vertices, std::size_t max_triangles) {
+              io::ImportBudget limits;
+              // 0 means the library's default rather than "allow nothing".
+              if (max_vertices) limits.max_vertices = max_vertices;
+              if (max_triangles) limits.max_triangles = max_triangles;
               PyMesh out;
               {
                   nb::gil_scoped_release release;
-                  out.m = load_mesh_any(path);
+                  out.m = load_mesh_any(path, limits);
               }
               return out;
           },
-          "path"_a,
-          "Load a mesh by extension: .obj, .ply, .fbx. The counterpart to\n"
-          "Mesh.save, and what gives Volume.from_mesh something to sample.\n"
-          "(.glb is written but not read.)");
+          "path"_a, "max_vertices"_a = 0, "max_triangles"_a = 0,
+          "Load a mesh by extension: .obj, .ply, .fbx, matched case-insensitively.\n"
+          "The counterpart to Mesh.save, and what gives Volume.from_mesh\n"
+          "something to sample. (.glb is written but not read.)\n\n"
+          "The budget is checked against the file's DECLARED counts before\n"
+          "anything is allocated, which is the point: a malformed or hostile\n"
+          "file can claim a billion triangles. 0 means the library's default.");
 
     nb::class_<PyMeshQuery>(
         m, "MeshQuery",

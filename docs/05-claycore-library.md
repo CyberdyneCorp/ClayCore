@@ -377,6 +377,9 @@ baked.cell_size, baked.band, baked.brick_count, baked.megabytes, baked.bounds
 # `cell` defaults to a fraction of the mesh's own longest side, since a default
 # in world units suits neither a building nor a bolt.
 body.add(clay.Volume.from_mesh(clay.load_mesh("scan.ply"), cell=0.02))
+# the budget is checked against the file's DECLARED counts before anything is
+# allocated — a malformed file can claim a billion triangles. 0 = the default.
+clay.load_mesh("untrusted.obj", max_vertices=2_000_000, max_triangles=4_000_000)
 
 # and the microscope, when you want to see the sign behave rather than trust it
 q = clay.MeshQuery(mesh)          # the BVH is built HERE, once, not per call
