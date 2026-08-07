@@ -203,3 +203,62 @@ TEST_CASE("parity fixture: a support-k quadratic smin is rejected") {
     }
     CHECK(checked == 3);  // union, subtract, intersect
 }
+
+TEST_CASE("fixture: every combine op the kernel implements has a case") {
+    // Scanned from the COMPILED TAPES, not from case names: a name is a label a
+    // human chose, and the question is which math a consumer actually gets to
+    // check. An op that ships without a case leaves the fixture reading as
+    // validation while asserting nothing about it.
+    //
+    // The layout is emit_prim's: 12 transform floats, scale, rounding, 3 colour,
+    // CLAY_TAPE_PRIM_PARAMS prim params, 7 repeat floats, then the deformer
+    // count. If that ever changes this fails loudly, which is correct.
+    std::set<int> ops;
+    for (const io::FixtureCase& c : io::kernel_parity_cases())
+        for (const kernel::CTapeInstr& in : c.tape.instrs)
+            if (in.op == kernel::ctape_combine)
+                ops.insert(static_cast<int>(c.tape.params[in.param_offset]));
+
+    const struct {
+        int mode;
+        const char* name;
+    } kOps[] = {
+        {kernel::ccombine_add, "add"},
+        {kernel::ccombine_subtract, "subtract"},
+        {kernel::ccombine_intersect, "intersect"},
+        {kernel::ccombine_paint, "paint"},
+        {kernel::ccombine_groove, "groove"},
+        {kernel::ccombine_tongue, "tongue"},
+        {kernel::ccombine_pipe, "pipe"},
+        {kernel::ccombine_engrave, "engrave"},
+        {kernel::ccombine_emboss, "emboss"},
+        {kernel::ccombine_inset, "inset"},
+        {kernel::ccombine_shell, "shell"},
+        {kernel::ccombine_replace, "replace"},
+        {kernel::ccombine_transition_linear, "transition_linear"},
+        {kernel::ccombine_transition_radial, "transition_radial"},
+        {kernel::ccombine_relief, "relief"},
+        {kernel::ccombine_incise, "incise"},
+    };
+    // Every mode from add to the last one is listed, so a new op added without a
+    // row here fails this rather than slipping past unnoticed.
+    REQUIRE(static_cast<int>(sizeof kOps / sizeof kOps[0]) == kernel::ccombine_incise + 1);
+
+    for (const auto& op : kOps) {
+        INFO("combine op: " << op.name);
+        CHECK(ops.count(op.mode) == 1);
+    }
+}
+
+TEST_CASE("fixture: a case reaches the geometry it exists to exercise") {
+    // A case whose probes all sit in empty space records agreement about
+    // nothing. Every case must put at least one probe near a surface.
+    for (const io::FixtureCase& c : io::kernel_parity_cases()) {
+        INFO("case: " << c.name);
+        REQUIRE_FALSE(c.distances.empty());
+        float nearest = 1e9f;
+        for (float d : c.distances) nearest = std::min(nearest, std::abs(d));
+        CHECK(nearest < 0.25f);
+    }
+}
+

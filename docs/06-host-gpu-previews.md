@@ -98,7 +98,7 @@ That is the same comparison `tests/unit/test_parity.cpp` applies across
 claycore's own backends, at the same tolerances — a host GPU is no more
 bit-exact than ours.
 
-The 36 cases are chosen for what a hand-written preview gets wrong rather than
+The 42 cases are chosen for what a hand-written preview gets wrong rather than
 for coverage of the primitive set: every blend profile against smooth union,
 subtraction and intersection; all nine extended combine modes; the material-mix
 weights of a colored blend; a deformer chain and a region deformer; finite
@@ -106,6 +106,28 @@ repetition; all four lift opcodes — a revolved polygon, an extruded one (what
 the cut tool resolves a drawn outline into), a three-profile loft and a sweep
 along a guide; a stroke chain and a closed Catmull-Rom curve; and one composed
 multi-layer document with a blended mirror, a nested group and a paint pass.
+
+Five more cover the ops and deformers added since that list was first written.
+**Relief and incise** are the only ops whose second operand is a *region* rather
+than geometry — a host that unions or carves it disagrees on the first probe —
+and they are two cases rather than one because they share a kernel branch with
+the sign taken from the mode, so a backend can reproduce one and invert the
+other. **Magnify and pinch** are two cases for the same reason. **Noise** exists
+mostly to catch one specific mistake: a host that reaches for the familiar
+`fract(sin(dot(p, k)) * 43758.5453)` hash instead of compiling ours diverges by
+O(1) rather than by a tolerance, because that hash is a chaotic amplifier and
+the backends disagree about `sin` in the last place.
+
+Each of those five is sized so it moves *some* probes and leaves others alone —
+relief moves 17 of 32, magnify 14 — because the untouched probes are what
+exercise the **finite support**. A case that moved every probe could not catch a
+host whose falloff reaches too far.
+
+**Every combine op the kernel implements now has a case**, and the suite checks
+that by scanning the compiled tapes rather than the case names, so an op added
+without one is a gate failure. Deformer kinds and primitive families are not yet
+held to that standard — the set exercises 5 of 14 deformers — so a passing
+fixture says less about those than it does about the combine modes.
 
 Six of those carry data in the out-of-line blob, and two carry a lot of it:
 control-point curves tessellate into the segment chain the stroke opcode

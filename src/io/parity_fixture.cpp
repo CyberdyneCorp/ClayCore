@@ -442,6 +442,51 @@ void add_blend_cases(std::vector<FixtureCase>* cases) {
     }
 }
 
+// Relief and incise: the item is a REGION, not geometry. A host that treats the
+// second operand as a shape to union or carve disagrees on the first probe.
+// The region sits on the +Y pole, where the fixture's ring probes already are.
+Document relief_pair(Op op) {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("relief");
+    l.sdf->insert(item(Prim::sphere(0.9f), cf3(0, 0, 0), kColorA));
+    // Sized so it reaches 17 of the 32 probes and leaves 15 alone: the untouched
+    // half is what exercises the FINITE SUPPORT, which a region covering every
+    // probe could not catch.
+    Node region = item(Prim::sphere(0.75f), cf3(0, 0.9f, 0), kColorB, op,
+                       Blend{BlendProfile::Quadratic, 0.18f});
+    region.rounding = 0.35f;  // the falloff width, and it rounds the region too
+    l.sdf->insert(region);
+    return doc;
+}
+
+// The integer-hashed gradient noise. This case earns its place by catching the
+// failure the design exists to avoid: a host that reaches for the familiar
+// fract(sin(dot(p, k)) * 43758.5453) hash instead of compiling ours diverges by
+// O(1), not by a tolerance, because a chaotic amplifier turns the backends'
+// last-place disagreement in sin() into a different number entirely.
+Document noise_deformer() {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("noise");
+    Node n = item(Prim::sphere(0.9f), cf3(0, 0, 0), kColorB);
+    n.deformers.push_back(scene::Deformer::noise(0.12f, 3.0f, 4, 0.5f, 7u));
+    l.sdf->insert(n);
+    return doc;
+}
+
+// Magnify and pinch are one deformation with a signed strength, so both signs:
+// a backend can reproduce the swell and invert the gather.
+Document magnify_deformer(float strength) {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("magnify");
+    Node n = item(Prim::sphere(0.9f), cf3(0, 0, 0), kColorA);
+    // Off the origin on purpose: centred on the sphere's own middle the scale is
+    // symmetric and the falloff barely shows. Here it reaches 14 probes and
+    // leaves 18, so the support is exercised as well as the deformation.
+    n.deformers.push_back(scene::Deformer::magnify(cf3(0, 0.45f, 0), 1.2f, strength, 3));
+    l.sdf->insert(n);
+    return doc;
+}
+
 void add_extended_cases(std::vector<FixtureCase>* cases) {
     const struct {
         const char* name;
@@ -511,6 +556,24 @@ std::vector<FixtureCase> kernel_parity_cases() {
     add_case(&cases, "curve_spline_chain",
              "closed Catmull-Rom curve tessellated into the stroke chain at compile time",
              curve_chain());
+    add_case(&cases, "relief_build_up",
+             "the item is a REGION: the surface accumulated before it moves OUT along "
+             "its own normal by k; rounding is the falloff width",
+             relief_pair(Op::Relief));
+    add_case(&cases, "relief_cut_in",
+             "the same region cutting IN — one kernel branch with the sign from the "
+             "mode, so a backend can reproduce one and invert the other",
+             relief_pair(Op::Incise));
+    add_case(&cases, "deformer_noise",
+             "fractal gradient noise on an INTEGER hash; a float sin() hash diverges "
+             "by O(1) between backends rather than by a tolerance",
+             noise_deformer());
+    add_case(&cases, "deformer_magnify",
+             "radial scale about a point on the surface, swelling outward", 
+             magnify_deformer(0.5f));
+    add_case(&cases, "deformer_pinch",
+             "the same deformation gathering inward — the sign is the whole difference",
+             magnify_deformer(-0.5f));
     add_case(&cases, "composed_document",
              "two layers, a blended mirror, a nested group and a paint pass", composed());
     return cases;
