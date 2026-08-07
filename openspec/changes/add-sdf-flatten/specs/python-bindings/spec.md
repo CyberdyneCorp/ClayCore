@@ -5,7 +5,7 @@ Delta for `add-sdf-flatten`.
 ## ADDED Requirements
 
 ### Requirement: Flattening from Python
-The module SHALL expose flattening a volume against a plane, with the plane, the strength, the step, the iteration count and the region under the caller's control.
+The module SHALL expose flattening against a plane, sampling from a DOCUMENT, with the plane, the strength and the region under the caller's control. It SHALL also expose flattening a volume, for a shape with no document behind it — an imported mesh.
 
 The binding SHALL state that flatten BAKES, for the same reason relax does, and SHALL state that the plane is the caller's to supply — the engine has no camera and does no picking.
 
@@ -14,8 +14,12 @@ The binding SHALL state that flatten BAKES, for the same reason relax does, and 
 - **THEN** the document's field has a facet on that plane
 
 #### Scenario: The parameters do what they say
-- **WHEN** a script flattens the same shape with increasing iterations
+- **WHEN** a script flattens the same shape with increasing strength
 - **THEN** the surface is progressively closer to the plane
+
+#### Scenario: A region-less request is refused
+- **WHEN** a script asks to flatten with no region
+- **THEN** it gets an error rather than a shape replaced by a half-space
 
 #### Scenario: A degenerate plane is refused
 - **WHEN** a script passes a zero-length plane normal

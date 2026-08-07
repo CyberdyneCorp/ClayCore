@@ -20,6 +20,7 @@
 #include <memory>
 
 #include "clay/io/mesh_io.h"
+#include "clay/field/flatten.h"
 #include "clay/field/relax.h"
 #include "clay/mesh/to_field.h"
 #include "clay/mesh/decimate.h"
@@ -309,6 +310,8 @@ constexpr std::size_t kBrushParamsOriginal =
     offsetof(clay_brush_params, seed) + sizeof(std::uint32_t);
 constexpr std::size_t kVolumeParamsOriginal = offsetof(clay_volume_params, beta) + sizeof(float);
 constexpr std::size_t kRelaxParamsOriginal = offsetof(clay_relax_params, falloff) + sizeof(float);
+constexpr std::size_t kFlattenParamsOriginal =
+    offsetof(clay_flatten_params, falloff) + sizeof(float);
 
 // Parameters each primitive takes, indexed by clay_prim (= the tape opcode).
 // This is what the clay_prim comments document and what clay_item_create
@@ -2043,6 +2046,36 @@ clay_result clay_item_volume_relax(clay_item* item, const clay_relax_params* par
 
     item->node.volume =
         std::make_shared<field::FieldVolume>(field::relax(*item->node.volume, settings));
+    return CLAY_OK;
+}
+
+clay_result clay_item_volume_flatten(clay_item* item, const clay_flatten_params* params) {
+    if (!item || !params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    clay_flatten_params p;
+    clay_result r = read_desc(params, kFlattenParamsOriginal, &p);
+    if (r != CLAY_OK) return r;
+    if (item->node.prim.type != scene::PrimType::Volume || !item->node.volume)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this item carries no volume to flatten");
+
+    field::FlattenSettings settings;
+    settings.plane_point = kernel::cf3(p.plane_point[0], p.plane_point[1], p.plane_point[2]);
+    settings.plane_normal = kernel::cf3(p.plane_normal[0], p.plane_normal[1], p.plane_normal[2]);
+    // A zero normal describes no plane. Refused here rather than shaping the
+    // field by an arbitrary direction, which would look like it worked.
+    if (!(kernel::clength(settings.plane_normal) > 1e-6f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "plane_normal must not be zero length");
+    settings.strength = std::clamp(p.strength, 0.0f, 1.0f);
+    settings.centre = kernel::cf3(p.centre[0], p.centre[1], p.centre[2]);
+    // Flatten is local: where its weight is one the result IS the plane, so
+    // with no region it replaces the shape with a half-space rather than
+    // flattening it.
+    if (!(p.region_radius > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "region_radius must be > 0");
+    settings.region_radius = p.region_radius;
+    settings.falloff = p.falloff;
+
+    item->node.volume =
+        std::make_shared<field::FieldVolume>(field::flatten(*item->node.volume, settings));
     return CLAY_OK;
 }
 

@@ -270,3 +270,81 @@ TEST_CASE("c volume: relaxing something that is not a volume is refused") {
 
     clay_item_destroy(sphere);
 }
+
+TEST_CASE("c volume: an imported shape can be faceted") {
+    // The verb SDF layers were missing. From this ABI a volume comes from a
+    // mesh, so that is the shape flatten gets.
+    clay_mesh* mesh = build_box_mesh(0.6f);
+    clay_volume_params params = volume_params(0.04f);
+    clay_item* item = nullptr;
+    REQUIRE(clay_item_volume_from_mesh(mesh, &params, &item) == CLAY_OK);
+
+    clay_flatten_params flat;
+    std::memset(&flat, 0, sizeof flat);
+    flat.struct_size = static_cast<std::uint32_t>(sizeof flat);
+    flat.plane_point[1] = 0.45f;   // below the box's top face at 0.6
+    flat.plane_normal[1] = 1.0f;
+    flat.strength = 1.0f;
+    // A region is required: flatten is local, and with none it would replace
+    // the box with a half-space rather than facet it.
+    flat.centre[1] = 0.6f;
+    flat.region_radius = 0.5f;
+    flat.falloff = 0.3f;
+    // One call: the volume is re-sampled with the flatten applied, so the new
+    // band brackets the facet rather than where the surface used to be.
+    REQUIRE(clay_item_volume_flatten(item, &flat) == CLAY_OK);
+
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "l", &layer) == CLAY_OK);
+    REQUIRE(clay_layer_add_item(doc, layer, item, nullptr) == CLAY_OK);
+
+    CHECK(eval_c(doc, cf3(0, 0, 0)) < 0.0f);          // still solid inside
+    CHECK(eval_c(doc, cf3(0, 0.58f, 0)) > 0.0f);      // the top was taken down
+    CHECK(std::abs(eval_c(doc, cf3(0, 0.45f, 0))) < 0.07f);  // ...to about the plane
+
+    clay_item_destroy(item);
+    clay_document_destroy(doc);
+    clay_mesh_destroy(mesh);
+}
+
+TEST_CASE("c volume: flatten refuses what it cannot do") {
+    const float radius[1] = {1.0f};
+    clay_item* sphere = clay_item_create(CLAY_PRIM_SPHERE, radius, 1);
+    REQUIRE(sphere != nullptr);
+
+    clay_flatten_params flat;
+    std::memset(&flat, 0, sizeof flat);
+    flat.struct_size = static_cast<std::uint32_t>(sizeof flat);
+    flat.plane_normal[1] = 1.0f;
+    flat.region_radius = 0.5f;
+
+    CHECK(clay_item_volume_flatten(sphere, &flat) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_item_volume_flatten(nullptr, &flat) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_item_volume_flatten(sphere, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    clay_item_destroy(sphere);
+
+    SUBCASE("and no region, which would replace the shape rather than facet it") {
+        clay_mesh* mesh = build_box_mesh(0.5f);
+        clay_volume_params params = volume_params(0.05f);
+        clay_item* item = nullptr;
+        REQUIRE(clay_item_volume_from_mesh(mesh, &params, &item) == CLAY_OK);
+        clay_flatten_params global = flat;
+        global.region_radius = 0.0f;
+        CHECK(clay_item_volume_flatten(item, &global) == CLAY_ERROR_INVALID_ARGUMENT);
+        clay_item_destroy(item);
+        clay_mesh_destroy(mesh);
+    }
+
+    SUBCASE("and a zero normal, which describes no plane") {
+        clay_mesh* mesh = build_box_mesh(0.5f);
+        clay_volume_params params = volume_params(0.05f);
+        clay_item* item = nullptr;
+        REQUIRE(clay_item_volume_from_mesh(mesh, &params, &item) == CLAY_OK);
+        clay_flatten_params zero = flat;
+        zero.plane_normal[1] = 0.0f;
+        CHECK(clay_item_volume_flatten(item, &zero) == CLAY_ERROR_INVALID_ARGUMENT);
+        clay_item_destroy(item);
+        clay_mesh_destroy(mesh);
+    }
+}

@@ -25,29 +25,36 @@ Flattening SHALL mean the same thing it means for voxels: material on the plane'
 - **WHEN** a flattened volume is placed in a document
 - **THEN** it combines, saves and evaluates exactly as any other volume does
 
-### Requirement: A bounded step keeps the field traceable
-A single pass SHALL move a sample's value by no more than a stated step, and repeated passes SHALL be how a surface travels further. The falloff SHALL be widened where it is too narrow for the step it was given, rather than obeyed into producing a field that cannot be traced. The resulting field SHALL declare a Lipschitz bound it actually satisfies.
+### Requirement: Flatten samples a new volume rather than editing one
+Flatten SHALL build its result by SAMPLING a source field with the plane blended in, so that the new band brackets the flattened surface. It SHALL NOT transform an existing volume's stored samples in place.
 
-This is why: blending a field toward a plane under a weight that varies across a region adds a term proportional to how far the value moves times the gradient of the weight. Left unbounded that makes the field steeper than it declares, and a raymarcher steps through a field steeper than its declared bound. Bounding the per-pass movement caps that term however far the surface ultimately travels.
+This is why: a narrow band tracks the surface only while the surface stays inside it. Smoothing moves the surface by less than a cell, so `relax` can rewrite samples where they lie. Flatten moves it by many band widths, and once the surface has walked outside the band there are no samples left describing where it now is — the isosurface comes apart. Sampling builds the band around the flattened surface instead, and makes the blend closed-form: no iteration, no step budget, no band to narrow afterwards.
+
+Where an exact source exists — a document's field — flatten SHALL prefer it to a volume, because a volume reports a lower bound rather than a distance outside its own band, and sampling a field that mixes the two records the boundary between them as part of the shape.
+
+#### Scenario: The band brackets the flattened surface
+- **WHEN** a shape is flattened so its surface moves well beyond the original band
+- **THEN** the result stores samples at the new surface, and none where the old one was
+
+#### Scenario: A ray still finds the surface
+- **WHEN** a ray is marched at a flattened volume
+- **THEN** it stops at the facet rather than passing through it
+
+### Requirement: The declared Lipschitz is measured, not assumed
+A region blends under a weight that varies across it, which adds a term proportional to how far the value moves times the gradient of the weight — so flatten CAN make the field steeper than its source. The result SHALL declare a Lipschitz bound its samples actually satisfy, and that bound SHALL be measured from the samples produced rather than bounded in advance.
 
 #### Scenario: The declared bound is not exceeded
 - **WHEN** the steepest slope of a flattened volume is measured inside the sampled region
 - **THEN** it does not exceed what the tape declares for that volume
 
-#### Scenario: A ray still finds the surface
-- **WHEN** a ray is marched at a flattened volume
-- **THEN** it stops at the surface rather than passing through it
+#### Scenario: A tighter taper declares more
+- **WHEN** the same flatten is applied with a narrow falloff and with a generous one
+- **THEN** the narrow one declares the higher Lipschitz, and the document's safe step scale drops accordingly
 
-#### Scenario: More passes travel further
-- **WHEN** the same shape is flattened with one pass and with several
-- **THEN** the surface is closer to the plane after several, and one pass moves it by no more than the step
+### Requirement: Flatten acts where it is aimed, and a region is required
+Flatten SHALL REQUIRE a region — a centre, a radius and a falloff. Outside it the field SHALL be unchanged, and the transition SHALL taper rather than step, so flattening does not leave a rim.
 
-#### Scenario: A narrow falloff is widened rather than obeyed
-- **WHEN** flatten is asked for a falloff too narrow for the step it was given
-- **THEN** the falloff used is widened, and the resulting field still satisfies its declared bound
-
-### Requirement: Flatten acts where it is aimed
-Flatten SHALL accept a region — a centre, a radius and a falloff — so that it puts a facet on part of a shape rather than reshaping all of it. Outside the region the field SHALL be unchanged, and the transition SHALL taper rather than step, so flattening does not leave a rim.
+The region is not optional, because flatten is local by nature: where its weight is one the result IS the plane. Blending with no region at full strength therefore does not flatten a shape, it replaces it with a half-space — a ball comes back as a box. A request with no region SHALL be refused rather than honoured into destroying the shape.
 
 #### Scenario: Outside the region nothing moves
 - **WHEN** a shape is flattened with a region covering only part of it
@@ -56,3 +63,7 @@ Flatten SHALL accept a region — a centre, a radius and a falloff — so that i
 #### Scenario: The region's edge does not leave a rim
 - **WHEN** the change the flatten made is examined across the boundary of the region
 - **THEN** it varies continuously rather than stepping
+
+#### Scenario: A request with no region is refused
+- **WHEN** flatten is asked for with a region radius of zero
+- **THEN** it is refused, and the shape is not replaced by a half-space

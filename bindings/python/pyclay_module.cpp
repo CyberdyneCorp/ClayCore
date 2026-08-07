@@ -30,6 +30,7 @@
 #include "clay/voxel/grid.h"
 #include "clay/brush/stroke.h"
 #include "clay/cut/cut.h"
+#include "clay/field/flatten.h"
 #include "clay/field/relax.h"
 #include "clay/field/volume.h"
 #include "clay/voxel/mask.h"
@@ -1565,7 +1566,6 @@ NB_MODULE(pyclay, m) {
                 if (!(strength >= 0.0f && strength <= 1.0f))
                     throw std::invalid_argument("strength must be between 0 and 1");
                 if (radius_cells < 1) throw std::invalid_argument("radius_cells must be >= 1");
-                if (iterations < 1) throw std::invalid_argument("iterations must be >= 1");
                 field::RelaxSettings settings;
                 settings.strength = strength;
                 settings.radius_cells = radius_cells;
@@ -1604,6 +1604,138 @@ NB_MODULE(pyclay, m) {
             "`region_radius` of 0 relaxes everywhere, which is a filter; give it\n"
             "a centre and a radius and it is a brush. The falloff is widened if\n"
             "it is too narrow to hide the seam the kernel makes.")
+        .def_static(
+            "flattened_from",
+            [](nb::handle source, nb::handle plane_point, nb::handle plane_normal, float cell,
+               nb::handle band, nb::handle bounds, float strength, nb::handle centre,
+               float region_radius, float falloff, nb::handle position,
+               nb::handle rotation_axis_angle, float scale) {
+                if (!(cell > 0.0f)) throw std::invalid_argument("cell must be > 0");
+                if (!(strength >= 0.0f && strength <= 1.0f))
+                    throw std::invalid_argument("strength must be between 0 and 1");
+                field::FlattenSettings settings;
+                settings.plane_point = to_f3(plane_point, "plane_point");
+                settings.plane_normal = to_f3(plane_normal, "plane_normal");
+                if (!(kernel::clength(settings.plane_normal) > 1e-6f))
+                    throw std::invalid_argument("plane_normal must not be zero length");
+                settings.strength = strength;
+                if (!centre.is_none()) settings.centre = to_f3(centre, "centre");
+                if (!(region_radius > 0.0f))
+                    throw std::invalid_argument(
+                        "region_radius must be > 0: flatten is local, and with no region it "
+                        "replaces the shape with a half-space rather than flattening it");
+                settings.region_radius = region_radius;
+                settings.falloff = falloff;
+
+                const scene::Document& src = nb::cast<PyDocument&>(source).doc->document;
+                scene::Tape tape = scene::compile_document(src);
+                if (tape.empty())
+                    throw std::invalid_argument("cannot flatten an empty document");
+                const float width = band.is_none() ? cell * 3.0f : nb::cast<float>(band);
+
+                math::Aabb where;
+                if (bounds.is_none()) {
+                    where = tape.bounds;
+                    if (where.empty())
+                        throw std::invalid_argument("the document has no bounds; pass bounds=");
+                    kernel::cfloat3 pad = kernel::cf3(width, width, width);
+                    where = math::Aabb(where.min - pad, where.max + pad);
+                } else {
+                    where = to_aabb(bounds);
+                }
+
+                PyVolume out;
+                out.prim = scene::Prim::volume();
+                {
+                    nb::gil_scoped_release release;
+                    out.volume = std::make_shared<const field::FieldVolume>(field::flatten(
+                        [&tape](kernel::cfloat3 p) { return tape.eval(p).d; }, where, cell, width,
+                        settings));
+                }
+                place(out, position, rotation_axis_angle, scale);
+                return out;
+            },
+            "document"_a, "plane_point"_a, "plane_normal"_a, "cell"_a = 0.05f,
+            "band"_a = nb::none(), "bounds"_a = nb::none(), "strength"_a = 1.0f,
+            "centre"_a = nb::none(), "region_radius"_a = 0.0f, "falloff"_a = 0.0f,
+            CLAY_PLACE_ARGS,
+            "Sample a document with a flatten applied, in one pass — the verb SDF\n"
+            "layers were missing, since voxels have had sculpt_flatten all along.\n\n"
+            "TWO-SIDED, matching the voxel verb: material on the normal's side\n"
+            "goes AND hollows on the other side fill. It is not a subtract, and\n"
+            "it is not ZBrush's Clip — as a solid, Clip is exactly Trim, which\n"
+            "Cut already does.\n\n"
+            "This SAMPLES rather than editing an existing volume, and the\n"
+            "difference matters. Flatten moves the surface by many band widths,\n"
+            "and a band cannot follow one that walks out of it — there would be\n"
+            "no samples left where the surface ended up. Sampling builds the band\n"
+            "around the flattened surface instead. Sampling from the DOCUMENT\n"
+            "rather than from a volume also keeps the source exact: a volume\n"
+            "reports a bound rather than a distance outside its own band.\n\n"
+            "A region blends under a weight that varies across it, which can make\n"
+            "the field steeper than a plain sampling — so the result declares the\n"
+            "Lipschitz its samples actually have, measured, and the document's\n"
+            "safe step scale drops to match. FLATTEN BAKES, as relax does.")
+        .def(
+            "flattened",
+            [](const PyVolume& self, nb::handle plane_point, nb::handle plane_normal,
+               float strength, nb::handle centre, float region_radius, float falloff) {
+                if (!self.volume) throw std::invalid_argument("nothing to flatten");
+                if (!(strength >= 0.0f && strength <= 1.0f))
+                    throw std::invalid_argument("strength must be between 0 and 1");
+                field::FlattenSettings settings;
+                settings.plane_point = to_f3(plane_point, "plane_point");
+                settings.plane_normal = to_f3(plane_normal, "plane_normal");
+                if (!(kernel::clength(settings.plane_normal) > 1e-6f))
+                    throw std::invalid_argument("plane_normal must not be zero length");
+                settings.strength = strength;
+                if (!centre.is_none()) settings.centre = to_f3(centre, "centre");
+                if (!(region_radius > 0.0f))
+                    throw std::invalid_argument(
+                        "region_radius must be > 0: flatten is local, and with no region it "
+                        "replaces the shape with a half-space rather than flattening it");
+                settings.region_radius = region_radius;
+                settings.falloff = falloff;
+
+                PyVolume out;
+                out.prim = self.prim;
+                out.xform = self.xform;
+                {
+                    nb::gil_scoped_release release;
+                    out.volume = std::make_shared<const field::FieldVolume>(
+                        field::flatten(*self.volume, settings));
+                }
+                return out;
+            },
+            "plane_point"_a, "plane_normal"_a, "strength"_a = 1.0f, "centre"_a = nb::none(),
+            "region_radius"_a = 0.0f, "falloff"_a = 0.0f,
+            "Pull the surface onto a plane, returning a new volume. The verb SDF\n"
+            "layers were missing: voxels have had sculpt_flatten all along.\n\n"
+            "TWO-SIDED, matching the voxel verb: material on the normal's side\n"
+            "goes AND hollows on the other side fill. It is not a subtract.\n\n"
+            "The volume is RE-SAMPLED with the flatten applied, so the new band\n"
+            "brackets the flattened surface rather than the original one — a\n"
+            "band cannot follow a surface that walks out of it. Accurate while\n"
+            "the surface stays near the band it came from; past that a volume\n"
+            "reports a bound rather than a distance. Where a document exists,\n"
+            "sample from that instead.\n\n"
+            "This is NOT ZBrush's Clip. Clip moves vertices onto the plane rather\n"
+            "than deleting them, and the solid that bounds is exactly Trim — the\n"
+            "projected part lies ON the plane and has no volume. Clip's look is a\n"
+            "zero-thickness fin, which a field cannot represent. Use a Cut for\n"
+            "that; this is the brush that leaves surrounding form intact.\n\n"
+            "A region blends under a weight that varies across it, which CAN make\n"
+            "the field steeper than a plain volume — so unlike relax, the result\n"
+            "declares a raised Lipschitz and the document's safe step scale drops.\n"
+            "The plane is yours to supply: no camera and no picking enters the\n"
+            "engine, the same rule Cut follows. FLATTEN BAKES, as relax does.")
+        .def_prop_ro("sample_lipschitz",
+                     [](const PyVolume& v) {
+                         return v.volume ? v.volume->sample_lipschitz() : 1.0f;
+                     },
+                     "How fast the stored samples may vary: 1 for a sampled\n"
+                     "distance field, more for one a region-limited brush has\n"
+                     "steepened. The document's step scale follows it.")
         .def("has_samples_at",
              [](const PyVolume& v, nb::handle point) {
                  return v.volume && v.volume->has_samples_at(to_f3(point, "point"));

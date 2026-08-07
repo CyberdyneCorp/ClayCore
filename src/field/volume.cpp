@@ -326,6 +326,29 @@ void FieldVolume::rewrite(const std::function<float(int, int, int, float)>& fn) 
     }
 }
 
+float FieldVolume::measure_sample_lipschitz() const {
+    if (empty()) return 1.0f;
+    const int nx = sample_extent(0), ny = sample_extent(1), nz = sample_extent(2);
+    const std::size_t total = static_cast<std::size_t>(nx) * ny * nz;
+    // Only the three forward neighbours: the reverse ones are the same pairs
+    // seen from the other end.
+    constexpr int kForward[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+
+    float steepest = 0.0f;
+    for (std::size_t i = 0; i < total; ++i) {
+        const int gx = static_cast<int>(i) % nx;
+        const int gy = (static_cast<int>(i) / nx) % ny;
+        const int gz = static_cast<int>(i) / (nx * ny);
+        const std::optional<float> here = sample_at(gx, gy, gz);
+        if (!here) continue;
+        for (const auto& d : kForward) {
+            const std::optional<float> next = sample_at(gx + d[0], gy + d[1], gz + d[2]);
+            if (next) steepest = std::max(steepest, std::abs(*next - *here));
+        }
+    }
+    return std::max(1.0f, steepest / cell_size_);
+}
+
 void FieldVolume::shrink_band(float by) {
     if (!(by > 0.0f)) return;
     // Never below the sample spacing: a band thinner than that says nothing the
@@ -340,10 +363,17 @@ void FieldVolume::shrink_band(float by) {
 // [8] index offset  [9] far-bound offset  [10] data offset, all absolute
 // within this block. The index and the far bounds are one entry per brick and
 // are read together; the samples follow.
+//
+// [11] sample Lipschitz, present only when the index offset says the header is
+// that long. The header SIZE is the index offset, so the layout describes its
+// own length: a reader that predates this field sees an index offset of 11 and
+// finds its three offsets exactly where it always did, and a reader that
+// postdates it can tell the two apart without a version number to keep in
+// step with anything else.
 
 std::vector<float> FieldVolume::to_blob() const {
     std::vector<float> out;
-    const std::size_t header = 11;
+    const std::size_t header = 12;
     out.resize(header);
     out[0] = origin_.x;
     out[1] = origin_.y;
@@ -356,6 +386,7 @@ std::vector<float> FieldVolume::to_blob() const {
     out[8] = static_cast<float>(header);
     out[9] = static_cast<float>(header + index_.size());
     out[10] = static_cast<float>(header + index_.size() + far_.size());
+    out[11] = sample_lipschitz_;
     for (std::int32_t e : index_) out.push_back(static_cast<float>(e));
     out.insert(out.end(), far_.begin(), far_.end());
     out.insert(out.end(), data_.begin(), data_.end());
@@ -374,6 +405,9 @@ std::optional<FieldVolume> FieldVolume::from_blob(const std::vector<float>& blob
     std::size_t index_off = static_cast<std::size_t>(blob[8]);
     std::size_t far_off = static_cast<std::size_t>(blob[9]);
     std::size_t data_off = static_cast<std::size_t>(blob[10]);
+    // The header size IS the index offset, so a blob written before the
+    // Lipschitz field simply does not have one and reads as 1.
+    v.sample_lipschitz_ = index_off > 11 ? std::max(blob[11], 1.0f) : 1.0f;
     std::size_t index_size =
         static_cast<std::size_t>(v.bcount_[0]) * v.bcount_[1] * v.bcount_[2];
     if (index_off + index_size > blob.size() || far_off + index_size > blob.size() ||

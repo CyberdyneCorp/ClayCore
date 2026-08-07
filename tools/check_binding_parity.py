@@ -84,6 +84,8 @@ ALIASES = {
     "Document.raycast": "clay_raycast_attributed",  # pyclay's reports layer+item too
     "Volume.from_mesh": "clay_item_volume_from_mesh",
     "Volume.relaxed": "clay_item_volume_relax",
+    "Volume.flattened": "clay_item_volume_flatten",
+    "Volume.flattened_from": "clay_item_volume_flatten",
     "Mesh.from_triangles": "clay_mesh_from_triangles",
     "Layer.add": "clay_layer_add_item",
     "Layer.set_points": "clay_layer_set_stroke_points",
@@ -211,6 +213,9 @@ EXEMPT = {
     "Volume.sample_count": "reads a builder's own state back, as above",
     "Volume.megabytes": "reads a builder's own state back, as above",
     "Volume.bounds": "reads a builder's own state back, as above",
+    "Volume.sample_lipschitz": "reads back what an operator declared about its own "
+                               "result; in C the step scale it feeds is already "
+                               "reachable through the document",
     "Prim.repeat": "reads a builder's own state back; clay_item is write-only by "
                    "design, the caller keeps what it set",
     "Prim.deformers": "reads a builder's own state back, as above",

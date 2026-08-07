@@ -151,7 +151,7 @@ struct Compiler {
             // are none the value is a lower bound rather than a distance.
             // The interpolant can also be steeper than the field it samples;
             // see cfi_volume for why that is sqrt(3) and not 1.
-            prim_info = kernel::cfi_volume();
+            prim_info = kernel::cfi_volume(item.volume ? item.volume->sample_lipschitz() : 1.0f);
         } else if (prim_is_swept(item.prim.type) && item.profiles.size() >= 2) {
             // The guide's tightest turn against the widest profile: a point at
             // perpendicular offset r inside a bend of radius R is compressed

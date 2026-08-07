@@ -48,6 +48,13 @@ class FieldVolume {
                               const math::Aabb& region, float cell_size, float band);
 
     float cell_size() const { return cell_size_; }
+
+    // How fast the stored samples may vary. 1 for a volume sampled from a
+    // distance field; more for one an operator has steepened, which any brush
+    // confined to a region does. Read by the compiler to declare the field's
+    // Lipschitz bound — see cfi_volume.
+    float sample_lipschitz() const { return sample_lipschitz_; }
+    void set_sample_lipschitz(float v) { sample_lipschitz_ = v > 1.0f ? v : 1.0f; }
     float band() const { return band_; }
     kernel::cfloat3 origin() const { return origin_; }
     math::Aabb bounds() const;
@@ -134,6 +141,12 @@ class FieldVolume {
     // Samples along each axis: bricks times their edge, plus the halo.
     int sample_extent(int axis) const { return bcount_[axis] * kBrickDim + 1; }
 
+    // The steepest slope between neighbouring STORED samples, over the cell
+    // size. Measured, not assumed: an operator that builds a volume from a
+    // blend can read back what it actually produced instead of bounding it in
+    // advance and hoping the bound was generous enough.
+    float measure_sample_lipschitz() const;
+
     // Flat float layout for the tape's blob. The kernel reads exactly this.
     std::vector<float> to_blob() const;
     static std::optional<FieldVolume> from_blob(const std::vector<float>& blob);
@@ -148,6 +161,7 @@ class FieldVolume {
     kernel::cfloat3 origin_ = kernel::cf3(0, 0, 0);
     float cell_size_ = 0.05f;
     float band_ = 0.2f;
+    float sample_lipschitz_ = 1.0f;
     std::int32_t bcount_[3] = {0, 0, 0}; // bricks per axis
     std::vector<std::int32_t> index_;    // bcount product; offset into data_, or kBrickEmpty
     std::vector<float> far_;             // per brick; signed lower bound where index_ is empty

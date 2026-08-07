@@ -32,6 +32,7 @@ add_library(claycore
   src/cut/cut.cpp
   src/field/volume.cpp
   src/field/relax.cpp
+  src/field/flatten.cpp
   src/scene/commands.cpp
   src/scene/tape_build.cpp
   src/brick/cache.cpp

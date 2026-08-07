@@ -148,7 +148,16 @@ CLAY_FN CFieldInfo cfi_transition(CFieldInfo a, CFieldInfo b, float diff_bound, 
 // marcher would take a full step through a region where the interpolant is
 // steeper than the field it was built from, which is exactly the overstep the
 // sparse index is careful to avoid everywhere else.
-CLAY_FN CFieldInfo cfi_volume(void) { return CFieldInfo{false, 1.7320508f}; }
+// `sample_lipschitz` is how fast the STORED SAMPLES may vary, which is 1 for a
+// volume sampled from a distance field but more for one an operator has
+// steepened. A brush is the usual way that happens: any effect confined to a
+// region blends under a weight that varies across it, and that adds a term
+// proportional to how far the value moves times the gradient of the weight.
+// An operator that does so declares it here rather than letting the marcher
+// find out.
+CLAY_FN CFieldInfo cfi_volume(float sample_lipschitz) {
+    return CFieldInfo{false, 1.7320508f * cmax(sample_lipschitz, 1.0f)};
+}
 
 CLAY_FN CFieldInfo cfi_loft(float profile_spread, float depth, float ease_slope) {
     return CFieldInfo{false, 1.0f + profile_spread * ease_slope / cmax(depth, 1e-6f)};

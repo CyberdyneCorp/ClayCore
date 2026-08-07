@@ -359,6 +359,23 @@ smooth = baked.relaxed(strength=1.0, radius_cells=3, iterations=4)
 smooth = baked.relaxed(radius_cells=3, centre=(0, 0.7, 0),   # a brush, not a
                        region_radius=0.35, falloff=0.2)      # filter
 
+# flatten: put a facet on part of a shape, which a Cut cannot — a cut is global
+# to its prism and has no falloff. Two-sided, matching the voxel sculpt_flatten:
+# material on the normal's side goes AND hollows on the other side fill.
+# It SAMPLES rather than editing a volume, because flatten moves the surface by
+# many band widths and a band cannot follow one that walks out of it. Sample
+# from the DOCUMENT where you can: a volume reports a bound, not a distance,
+# outside its own band.
+# A REGION IS REQUIRED. Where flatten's weight is 1 the result IS the plane, so
+# with no region it would replace the shape with a half-space — a ball comes
+# back as a box. Not ZBrush's Clip either: as a solid, Clip is exactly Trim.
+facet = clay.Volume.flattened_from(doc, plane_point=(0, 0.55, 0),
+                                   plane_normal=(0, 1, 0), cell=0.025,
+                                   centre=(0, 0.62, 0), region_radius=0.3,
+                                   falloff=0.25, strength=1.0)
+facet.sample_lipschitz          # measured, not assumed: a tight taper is steeper
+imported.flattened(...)         # a volume source, for a mesh with no document
+
 # curves: a stroke point carries a type saying how it joins the next, so a
 # stroke is a curve whose points are all hard corners. Typed points tessellate
 # into the same segment chain at compile time, so a curve costs nothing to

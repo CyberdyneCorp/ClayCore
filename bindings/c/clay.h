@@ -689,6 +689,36 @@ typedef struct clay_relax_params {
  * wants: bring in a scan, then smooth it. */
 clay_result clay_item_volume_relax(clay_item* item, const clay_relax_params* params);
 
+typedef struct clay_flatten_params {
+    uint32_t struct_size;  /* = sizeof(clay_flatten_params); required */
+    float plane_point[3];  /* a point on the plane to flatten onto */
+    float plane_normal[3]; /* unit; material on this side goes. Zero length is refused */
+    float strength;        /* 1 puts the surface on the plane, 0 changes nothing */
+    float centre[3];       /* where it acts */
+    float region_radius;   /* REQUIRED > 0: flatten is local, and with no region it
+                            * replaces the shape with a half-space rather than
+                            * flattening it — a ball comes back as a box */
+    float falloff;         /* taper at the region's edge; widened when too narrow to declare */
+} clay_flatten_params;
+
+/* Pulls an item's volume onto a plane, in place. The verb SDF layers were
+ * missing: voxel grids have had clay_voxel_sculpt_flatten all along.
+ *
+ * TWO-SIDED, matching the voxel verb: material on the normal's side goes AND
+ * hollows on the other side fill. It is not a subtract, and it is not ZBrush's
+ * Clip — as a solid, Clip is exactly Trim, which clay_cut already does.
+ *
+ * The item's volume is RE-SAMPLED with the flatten applied, so the new band
+ * brackets the flattened surface rather than the original one. Accurate while
+ * the surface stays near the band it came from: past that a volume reports a
+ * bound rather than a distance, and the facet is placed against the bound.
+ *
+ * A region blends under a weight that varies across it, so the result may be
+ * steeper than a plain volume; it declares that, and the document's safe step
+ * scale drops to match. The item must carry a volume; anything else is refused
+ * rather than ignored. */
+clay_result clay_item_volume_flatten(clay_item* item, const clay_flatten_params* params);
+
 /* -- voxel grids ----------------------------------------------------------- */
 
 /* Palette-indexed colored voxels on an integer lattice: cell (x, y, z) covers

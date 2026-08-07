@@ -273,7 +273,7 @@ TEST_CASE("volume: empty space opens up as it gets emptier") {
     }
 
     SUBCASE("so crossing the region takes a sane number of steps") {
-        const float scale = kernel::csafe_step_scale(kernel::cfi_volume());
+        const float scale = kernel::csafe_step_scale(kernel::cfi_volume(1.0f));
         float t = 0.0f;
         int steps = 0;
         for (; steps < 1000 && t < 2.2f; ++steps) {

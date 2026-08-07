@@ -36,6 +36,7 @@ EXAMPLES = [
     "18_sampled_fields",
     "19_mesh_import",
     "20_relax",
+    "21_flatten",
 ]
 
 
