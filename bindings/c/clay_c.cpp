@@ -1659,10 +1659,14 @@ clay_result clay_layer_add_item(clay_document* doc, clay_layer_id layer_id, cons
     return insert_node(doc, layer_id, item->node, out_node);
 }
 
-clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
-                                    const float centre[3],
-                            const float displacement[3], const clay_move_params* params,
-                            size_t* out_applied) {
+namespace {
+
+// The half both entry points share: validate, find the layer, resolve. Kept in
+// one place so a preview can never disagree with the move it is previewing.
+clay_result resolve_move(const clay_document* doc, clay_layer_id layer, const float centre[3],
+                         const float displacement[3], const clay_move_params* params,
+                         const scene::Layer** out_layer,
+                         std::vector<brush::MoveWarp>* out_warps) {
     if (!doc || !centre || !displacement)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document, centre or displacement");
     if (!params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null move parameters");
@@ -1682,10 +1686,41 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
     settings.ease = static_cast<std::uint8_t>(p.ease);
     settings.front_only = p.front_only != 0;
 
-    const std::vector<brush::MoveWarp> warps =
-        brush::move_brush(*l, kernel::cf3(centre[0], centre[1], centre[2]),
-                          kernel::cf3(displacement[0], displacement[1], displacement[2]),
-                          settings);
+    *out_layer = l;
+    *out_warps = brush::move_brush(*l, kernel::cf3(centre[0], centre[1], centre[2]),
+                                   kernel::cf3(displacement[0], displacement[1],
+                                               displacement[2]),
+                                   settings);
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_layer_move_surface_preview(const clay_document* doc, clay_layer_id layer,
+                                            const float centre[3],
+                                            const float displacement[3],
+                                            const clay_move_params* params,
+                                            clay_node_id* out_nodes, size_t capacity,
+                                            size_t* out_count) {
+    if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_count");
+    const scene::Layer* l = nullptr;
+    std::vector<brush::MoveWarp> warps;
+    clay_result r = resolve_move(doc, layer, centre, displacement, params, &l, &warps);
+    if (r != CLAY_OK) return r;
+    *out_count = warps.size();
+    if (!out_nodes) return CLAY_OK;  // size query
+    for (std::size_t i = 0; i < warps.size() && i < capacity; ++i)
+        out_nodes[i] = warps[i].node;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
+                                    const float centre[3], const float displacement[3],
+                                    const clay_move_params* params, size_t* out_applied) {
+    const scene::Layer* l = nullptr;
+    std::vector<brush::MoveWarp> warps;
+    clay_result r = resolve_move(doc, layer, centre, displacement, params, &l, &warps);
+    if (r != CLAY_OK) return r;
 
     // One group for the whole drag: it is one gesture, and undoing it item by
     // item would be the implementation showing through.

@@ -2612,6 +2612,37 @@ def test_a_grab_on_one_item_is_not_a_move():
     assert _top(doc, 0.45) - before[0.45] == pytest.approx(0.0, abs=0.005)  # the other does not
 
 
+def test_move_surface_preview_names_the_nodes_and_touches_nothing():
+    doc, layer = _blended_form()
+    rng = np.random.default_rng(12)
+    probes = rng.uniform(-1.3, 1.3, size=(3000, 3)).astype(np.float32)
+    before = doc.eval(probes)
+
+    planned = layer.move_surface_preview((0, 0, 0), (0, 0.4, 0), radius=0.8)
+    assert len(planned) == 2
+    assert np.array_equal(doc.eval(probes), before)      # resolving is pure
+
+    touched = layer.move_surface((0, 0, 0), (0, 0.4, 0), radius=0.8)
+    assert sorted(touched) == sorted(planned)            # and it agreed
+
+
+def test_move_surface_coalesces_over_a_drag():
+    # One drag holds its centre and radius and only grows the displacement, so
+    # frames replace rather than stack: five frames ending at 0.4 must be the
+    # same field as a single drag of 0.4.
+    stepped, stepped_layer = _blended_form()
+    for d in (0.08, 0.16, 0.24, 0.32, 0.4):
+        stepped_layer.move_surface((0, 0, 0), (0, d, 0), radius=1.2)
+    once, once_layer = _blended_form()
+    once_layer.move_surface((0, 0, 0), (0, 0.4, 0), radius=1.2)
+
+    rng = np.random.default_rng(21)
+    probes = rng.uniform(-1.3, 1.3, size=(4000, 3)).astype(np.float32)
+    assert np.allclose(stepped.eval(probes), once.eval(probes), atol=1e-6)
+    # ...and the marcher does not pay for the frame count either.
+    assert stepped.safe_step_scale() == pytest.approx(once.safe_step_scale())
+
+
 def test_move_surface_is_one_undo_step():
     doc, layer = _blended_form()
     doc.enable_undo()

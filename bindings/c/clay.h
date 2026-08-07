@@ -1241,6 +1241,17 @@ typedef struct clay_move_params {
  * is taken at the sample point rather than at its preimage, so a drag of 0.5
  * over a radius of 0.8 moves a tip about 0.31. That is grab's documented
  * behaviour and the pull is monotonic, so a UI can calibrate against it. */
+/* Which nodes a move WOULD warp, without touching the document, so a host can
+ * preview a drag before committing it. Size-query pattern: call with
+ * out_nodes == NULL to receive the count in *out_count, then again with a
+ * buffer of that size. */
+clay_result clay_layer_move_surface_preview(const clay_document* doc, clay_layer_id layer,
+                                            const float centre[3],
+                                            const float displacement[3],
+                                            const clay_move_params* params,
+                                            clay_node_id* out_nodes, size_t capacity,
+                                            size_t* out_count);
+
 clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
                                     const float centre[3],
                             const float displacement[3], const clay_move_params* params,

@@ -2291,6 +2291,26 @@ NB_MODULE(pyclay, m) {
              "Resolve a stroke and append one edit per stamp; returns their node "
              "ids. The prim is the stamp template, scaled to each stamp's radius. "
              "The whole stroke is one undo step, and a masked stamp emits nothing.")
+        .def("move_surface_preview",
+             [](PyLayer& l, nb::handle centre, nb::handle displacement, float radius,
+                int ease, bool front_only) {
+                 if (!(radius > 0.0f)) throw std::invalid_argument("radius must be > 0");
+                 brush::MoveSettings settings;
+                 settings.radius = radius;
+                 settings.ease = static_cast<std::uint8_t>(ease);
+                 settings.front_only = front_only;
+                 std::vector<scene::NodeId> nodes;
+                 for (const brush::MoveWarp& w :
+                      brush::move_brush(l.layer(), to_f3(centre, "centre"),
+                                        to_f3(displacement, "displacement"), settings))
+                     nodes.push_back(w.node);
+                 return nodes;
+             },
+             "centre"_a, "displacement"_a, "radius"_a = 0.3f, "ease"_a = 0,
+             "front_only"_a = false,
+             "Which nodes a move WOULD warp, without touching the document — so a\n"
+             "host can preview a drag, or show what it is about to affect, before\n"
+             "committing it. Resolving is pure; applying is what changes things.")
         .def("move_surface",
              [](PyLayer& l, nb::handle centre, nb::handle displacement, float radius,
                 int ease, bool front_only) {

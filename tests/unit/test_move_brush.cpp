@@ -351,3 +351,99 @@ TEST_CASE("move: a whole drag is one undo step") {
     for (float y = -1.0f; y <= 1.0f; y += 0.05f)
         CHECK(after.eval(cf3(0, y, 0)).d == doctest::Approx(before.eval(cf3(0, y, 0)).d));
 }
+
+// -- a live drag ---------------------------------------------------------------
+
+TEST_CASE("move: a drag coalesces instead of stacking one warp per frame") {
+    // A drag holds its centre and radius fixed and only grows the displacement.
+    // Appending per frame would grow the chain without bound and compound the
+    // declared Lipschitz with every frame of it, so the leading warp of the
+    // same drag is REPLACED.
+    Document stepped = two_balls();
+    for (float d : {0.08f, 0.16f, 0.24f, 0.32f, 0.4f}) {
+        const std::vector<MoveWarp> warps =
+            brush::move_brush(stepped.layers.front(), cf3(0, 0, 0), cf3(0, d, 0),
+                              MoveSettings{1.2f, 0, false});
+        REQUIRE(warps.size() == 2);
+        REQUIRE(apply_move(stepped, 1, warps) == 2);
+    }
+    for (NodeId id : stepped.layers.front().sdf->roots) {
+        CAPTURE(id);
+        CHECK(stepped.layers.front().sdf->find(id)->deformers.size() == 1);
+    }
+
+    // ...and five frames ending at 0.4 are the same field as one drag of 0.4,
+    // which is the property that actually matters: it catches a stacking bug
+    // whether or not the chain length happens to look right.
+    Document once = two_balls();
+    REQUIRE(apply_move(once, 1,
+                       brush::move_brush(once.layers.front(), cf3(0, 0, 0), cf3(0, 0.4f, 0),
+                                         MoveSettings{1.2f, 0, false})) == 2);
+    Tape a = compile_document(stepped);
+    Tape b = compile_document(once);
+    for (float x = -1.2f; x <= 1.2f; x += 0.053f)
+        for (float y = -1.0f; y <= 1.2f; y += 0.061f) {
+            const cfloat3 p = cf3(x, y, 0.07f);
+            CAPTURE(x);
+            CAPTURE(y);
+            CHECK(a.eval(p).d == doctest::Approx(b.eval(p).d));
+        }
+    CHECK(kernel::csafe_step_scale(a.info) == doctest::Approx(kernel::csafe_step_scale(b.info)));
+}
+
+TEST_CASE("move: a different drag is kept beside the first, not folded into it") {
+    Document doc = two_balls();
+    REQUIRE(apply_move(doc, 1,
+                       brush::move_brush(doc.layers.front(), cf3(0, 0, 0), cf3(0, 0.3f, 0),
+                                         MoveSettings{1.2f, 0, false})) == 2);
+    // A different centre is a different gesture: it must not replace the first.
+    const std::vector<MoveWarp> second =
+        brush::move_brush(doc.layers.front(), cf3(0.4f, 0.2f, 0), cf3(0.2f, 0, 0),
+                          MoveSettings{0.9f, 0, false});
+    REQUIRE_FALSE(second.empty());
+    const Node* n = doc.layers.front().sdf->find(second.front().node);
+    REQUIRE(n != nullptr);
+    CHECK(brush::moved_chain(*n, second.front()).size() == n->deformers.size() + 1);
+}
+
+TEST_CASE("move: a drag on a chain it does not own leaves that chain alone") {
+    // Coalescing keys on the leading warp being the SAME drag. An item carrying
+    // an unrelated deformer must keep it, and the move must still go in front.
+    Document doc = two_balls();
+    Node* first = doc.layers.front().sdf->find_mut(doc.layers.front().sdf->roots.front());
+    REQUIRE(first != nullptr);
+    first->deformers.push_back(Deformer::twist(0.9f));
+
+    const std::vector<MoveWarp> warps =
+        brush::move_brush(doc.layers.front(), cf3(0, 0, 0), cf3(0, 0.3f, 0),
+                          MoveSettings{1.2f, 0, false});
+    REQUIRE_FALSE(warps.empty());
+    const std::vector<Deformer> chain = brush::moved_chain(*first, warps.front());
+    REQUIRE(chain.size() == 2);
+    CHECK(chain[0].type == kernel::cdeform_grab);   // the move, outermost
+    CHECK(chain[1].type == kernel::cdeform_twist);  // what was already there
+}
+
+TEST_CASE("move: a moved document still loads at every earlier scene minor") {
+    // SetDeformersCmd took kSceneMinor to 5. The NODE encoding is untouched, so
+    // every earlier minor must still read — and a document carrying a deformer
+    // chain is the case that would break first if it ever did.
+    //
+    // Read at the minor it was WRITTEN at, which is what the container does:
+    // the scene payload carries no version of its own, and .clayspace passes
+    // the one from its own header down.
+    Document doc = two_balls();
+    REQUIRE(apply_move(doc, 1,
+                       brush::move_brush(doc.layers.front(), cf3(0, 0, 0), cf3(0, 0.3f, 0),
+                                         MoveSettings{1.2f, 0, false})) == 2);
+    const float reference = compile_document(doc).eval(cf3(0, 0.5f, 0)).d;
+
+    for (std::uint16_t minor : {std::uint16_t(2), std::uint16_t(3), std::uint16_t(4),
+                                kSceneMinor}) {
+        CAPTURE(minor);
+        const std::vector<std::uint8_t> bytes = serialize_document(doc, minor);
+        auto back = deserialize_document(bytes.data(), bytes.size(), minor);
+        REQUIRE(back.has_value());
+        CHECK(compile_document(*back).eval(cf3(0, 0.5f, 0)).d == doctest::Approx(reference));
+    }
+}

@@ -67,6 +67,14 @@ void collect(const scene::SdfContent& content, const scene::Layer& layer,
     }
 }
 
+// Is the chain's leading warp this same drag, one frame earlier?
+bool continues_drag(const scene::Node& node, const scene::Deformer& fresh) {
+    if (node.deformers.empty()) return false;
+    const scene::Deformer& lead = node.deformers.front();
+    return lead.type == kernel::cdeform_grab && lead.k == fresh.k && lead.a == fresh.a &&
+           lead.b == fresh.b && lead.c == fresh.c;
+}
+
 }  // namespace
 
 std::vector<MoveWarp> move_brush(const scene::Layer& layer, cfloat3 world_centre,
@@ -88,7 +96,14 @@ std::vector<scene::Deformer> moved_chain(const scene::Node& node, const MoveWarp
     std::vector<scene::Deformer> chain;
     chain.reserve(node.deformers.size() + 1);
     chain.push_back(warp.deformer);
-    chain.insert(chain.end(), node.deformers.begin(), node.deformers.end());
+    // ...and REPLACING the leading warp when it belongs to the drag still in
+    // progress, rather than stacking another on top of it. A drag holds its
+    // centre and radius fixed and only grows the displacement, so those two
+    // identify it without a drag id having to be threaded through. Without
+    // this a drag appends one deformer per frame: the chain grows without
+    // bound, and the declared Lipschitz compounds with every frame of it.
+    const std::size_t skip = continues_drag(node, warp.deformer) ? 1u : 0u;
+    chain.insert(chain.end(), node.deformers.begin() + skip, node.deformers.end());
     return chain;
 }
 

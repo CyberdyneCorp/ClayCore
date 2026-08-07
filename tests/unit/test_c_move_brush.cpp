@@ -186,3 +186,111 @@ TEST_CASE("c move: magnify and noise are reachable from C at all") {
           CLAY_ERROR_INVALID_ARGUMENT);
     clay_item_destroy(item);
 }
+
+TEST_CASE("c abi: every declared deformer kind is actually reachable") {
+    // The general form of the bug above, which is what stops the NEXT deformer
+    // being declared, documented and refused at the door. Naming the two that
+    // were broken would not have caught them before they were broken; walking
+    // the whole enumeration does.
+    //
+    // Parameter counts are the ones clay.h documents for each kind. If a new
+    // deformer lands without extending the bound, or with a count the boundary
+    // disagrees with, this fails and says which.
+    // Each kind gets parameters that are VALID for it, not one generic array:
+    // several validate their contents as well as their count — noise refuses
+    // fewer than one octave, magnify refuses a radius that is not > 0 — so a
+    // shared array would report "unreachable" for what is really a bad value.
+    struct Kind {
+        std::int32_t deform;
+        const char* name;
+        int count;
+        float params[10];
+    };
+    const Kind kinds[] = {
+        {CLAY_DEFORM_TWIST, "twist", 1, {1.2f}},
+        {CLAY_DEFORM_BEND, "bend", 1, {0.8f}},
+        {CLAY_DEFORM_TAPER, "taper", 4, {-0.5f, 0.5f, 1.0f, 0.4f}},
+        {CLAY_DEFORM_DISPLACE, "displace", 2, {0.1f, 4.0f}},
+        {CLAY_DEFORM_WRAP_AROUND, "wrap_around", 2, {-0.5f, 0.5f}},
+        {CLAY_DEFORM_ELONGATE, "elongate", 3, {0.2f, 0.1f, 0.0f}},
+        {CLAY_DEFORM_BEND_LINEAR, "bend_linear", 9,
+         {0.0f, -0.5f, 0.0f, 0.0f, 0.5f, 0.0f, 1.0f, 0.0f, 0.0f}},
+        {CLAY_DEFORM_BEND_RADIAL, "bend_radial", 3, {0.2f, 0.6f, 0.3f}},
+        {CLAY_DEFORM_ELONGATE_AXIS, "elongate_axis", 3, {0.2f, 0.1f, 0.0f}},
+        {CLAY_DEFORM_GRAB, "grab", 8, {0.0f, 0.3f, 0.0f, 0.5f, 0.1f, 0.2f, 0.0f, 0.0f}},
+        {CLAY_DEFORM_POSE, "pose", 8, {0.0f, 0.3f, 0.0f, 0.5f, 0.0f, 1.0f, 0.0f, 0.6f}},
+        {CLAY_DEFORM_POSE_LINE, "pose_line", 10,
+         {0.0f, -0.4f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 1.0f, 0.0f, 0.7f}},
+        {CLAY_DEFORM_MAGNIFY, "magnify", 5, {0.0f, 0.0f, 0.0f, 0.4f, 0.5f}},
+        {CLAY_DEFORM_NOISE, "noise", 5, {0.15f, 2.0f, 4.0f, 0.5f, 7.0f}},
+    };
+    // Every enumerator from 0 to the last is covered, so a new kind added
+    // without a row here fails this rather than slipping through untested.
+    REQUIRE(static_cast<int>(sizeof kinds / sizeof kinds[0]) == CLAY_DEFORM_NOISE + 1);
+
+    const float radius[1] = {0.5f};
+    for (const Kind& k : kinds) {
+        CAPTURE(k.deform);
+        INFO("kind: " << k.name);
+        clay_item* item = clay_item_create(CLAY_PRIM_SPHERE, radius, 1);
+        REQUIRE(item != nullptr);
+        CHECK(clay_item_add_deformer(item, k.deform, k.params, k.count, 0) == CLAY_OK);
+        // ...and the documented count is the one the boundary enforces.
+        CHECK(clay_item_add_deformer(item, k.deform, k.params, k.count + 1, 0) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+        clay_item_destroy(item);
+    }
+}
+
+TEST_CASE("c move: previewing a drag names the nodes and touches nothing") {
+    CDoc doc;
+    const clay_layer_id layer = blended_form(doc.doc);
+    const float centre[3] = {0.0f, 0.0f, 0.0f};
+    const float displacement[3] = {0.0f, 0.35f, 0.0f};
+    clay_move_params p = move_params(1.2f);
+
+    std::size_t count = 0;
+    REQUIRE(clay_layer_move_surface_preview(doc.doc, layer, centre, displacement, &p, nullptr,
+                                            0, &count) == CLAY_OK);
+    CHECK(count == 2);
+
+    clay_node_id nodes[2] = {0, 0};
+    REQUIRE(clay_layer_move_surface_preview(doc.doc, layer, centre, displacement, &p, nodes,
+                                            2, &count) == CLAY_OK);
+    CHECK(nodes[0] != nodes[1]);
+
+    // The document is untouched: the same probe reads the same before and after.
+    const float probe[3] = {0.0f, 0.5f, 0.0f};
+    float before = 0.0f, after = 0.0f;
+    REQUIRE(clay_eval_points(doc.doc, nullptr, probe, 1, &before, nullptr) == CLAY_OK);
+    REQUIRE(clay_layer_move_surface_preview(doc.doc, layer, centre, displacement, &p, nodes, 2,
+                                            &count) == CLAY_OK);
+    REQUIRE(clay_eval_points(doc.doc, nullptr, probe, 1, &after, nullptr) == CLAY_OK);
+    CHECK(before == doctest::Approx(after));
+
+    // ...and the preview agrees with what the move then does.
+    std::size_t applied = 0;
+    REQUIRE(clay_layer_move_surface(doc.doc, layer, centre, displacement, &p, &applied) ==
+            CLAY_OK);
+    CHECK(applied == count);
+}
+
+TEST_CASE("c move: a preview refuses what the move refuses") {
+    CDoc doc;
+    const clay_layer_id layer = blended_form(doc.doc);
+    const float centre[3] = {0, 0, 0};
+    const float displacement[3] = {0, 0.3f, 0};
+    std::size_t count = 0;
+
+    clay_move_params bad = move_params(0.0f);  // radius must be > 0
+    CHECK(clay_layer_move_surface_preview(doc.doc, layer, centre, displacement, &bad, nullptr,
+                                          0, &count) == CLAY_ERROR_INVALID_ARGUMENT);
+    clay_move_params p = move_params(1.0f);
+    CHECK(clay_layer_move_surface_preview(doc.doc, 4242, centre, displacement, &p, nullptr, 0,
+                                          &count) == CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_layer_move_surface_preview(doc.doc, layer, centre, displacement, &p, nullptr, 0,
+                                          nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    p.struct_size = 0;
+    CHECK(clay_layer_move_surface_preview(doc.doc, layer, centre, displacement, &p, nullptr, 0,
+                                          &count) == CLAY_ERROR_INVALID_ARGUMENT);
+}
