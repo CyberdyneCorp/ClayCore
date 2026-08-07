@@ -23,6 +23,8 @@ alone for tools, pipelines, CI, and research.
 - Host GPU previews: `docs/06-host-gpu-previews.md` — compile claycore's
   kernels into your own shaders instead of copying them, and gate the result
   with the parity fixture.
+- Brushes and features: `docs/07-brushes-and-features.md` — every sculpting
+  verb, what it does, how it is parameterised, and its ZBrush equivalent.
 - Releasing: `docs/RELEASE.md`.
 - Examples: `examples/` — runnable scripts with committed renders.
 - Roadmap: `openspec/ROADMAP.md` — what is missing and in what order.
@@ -44,6 +46,9 @@ write PNGs with the standard library.
 | Voxel brushes, fills and palettes | Morphing a box into a sphere |
 
 ## What ships today
+
+Per-verb detail — what each brush does and how it is parameterised — is in
+[`docs/07-brushes-and-features.md`](docs/07-brushes-and-features.md).
 
 | Area | Capability |
 |---|---|
