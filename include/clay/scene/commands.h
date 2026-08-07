@@ -87,6 +87,26 @@ struct SetStrokePointsCmd {
     float tolerance = 0.01f;
 };
 
+// A node's whole deformer chain, replaced. Whole-list for SetStrokePointsCmd's
+// reason: a chain is a handful of records, so replacing it costs less than the
+// bookkeeping granular commands would need, and its inverse is the previous list
+// — exact by construction.
+//
+// Without this a deformer could only be set when its node was created, so no
+// verb built on one could act on an existing sculpt, and any that tried would
+// escape undo.
+//
+// ORDER IS THE CONTRACT: deformers apply in authoring order, so `deformers[0]`
+// warps the point first and is therefore the OUTERMOST warp on the resulting
+// geometry. A verb that means to move the assembled shape puts its deformer at
+// the FRONT; one appended at the back has its region weight evaluated at a point
+// the earlier deformers already moved.
+struct SetDeformersCmd {
+    LayerId layer = 0;
+    NodeId node = kNoNode;
+    std::vector<Deformer> deformers;
+};
+
 // Both flags in one command: they are the same concept at two strengths, and
 // a UI toggling one usually shows the other beside it.
 struct SetLayerProtectionCmd {
@@ -103,7 +123,7 @@ using Command =
     std::variant<AddNodeCmd, RemoveNodeCmd, MoveNodeCmd, SetTransformCmd, SetPrimCmd,
                  SetColorCmd, SetOpBlendCmd, AppendStrokeCmd, TrimStrokeCmd, AddLayerCmd,
                  RemoveLayerCmd, SetLayerVisibleCmd, SetLayerTransformCmd,
-                 SetLayerProtectionCmd, SetStrokePointsCmd>;
+                 SetLayerProtectionCmd, SetStrokePointsCmd, SetDeformersCmd>;
 
 // The layer a command would edit, or 0 for one that edits no existing layer
 // (adding a layer creates its target; changing protection is how a protected

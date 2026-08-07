@@ -28,6 +28,7 @@
 #include "clay/scene/commands.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
+#include "clay/brush/move.h"
 #include "clay/brush/stroke.h"
 #include "clay/cut/cut.h"
 #include "clay/field/flatten.h"
@@ -2290,6 +2291,54 @@ NB_MODULE(pyclay, m) {
              "Resolve a stroke and append one edit per stamp; returns their node "
              "ids. The prim is the stamp template, scaled to each stamp's radius. "
              "The whole stroke is one undo step, and a masked stamp emits nothing.")
+        .def("move_surface",
+             [](PyLayer& l, nb::handle centre, nb::handle displacement, float radius,
+                int ease, bool front_only) {
+                 if (!(radius > 0.0f)) throw std::invalid_argument("radius must be > 0");
+                 brush::MoveSettings settings;
+                 settings.radius = radius;
+                 settings.ease = static_cast<std::uint8_t>(ease);
+                 settings.front_only = front_only;
+
+                 const std::vector<brush::MoveWarp> warps =
+                     brush::move_brush(l.layer(), to_f3(centre, "centre"),
+                                       to_f3(displacement, "displacement"), settings);
+
+                 // One undo group for the whole drag: it is one gesture.
+                 UndoRef undo = l.undo ? *l.undo : UndoRef();
+                 if (undo) undo->begin_group();
+                 std::vector<scene::NodeId> touched;
+                 for (const brush::MoveWarp& w : warps) {
+                     const scene::Node* n = l.layer().sdf->find(w.node);
+                     if (!n) continue;
+                     apply_or_throw(l.doc->document,
+                                    scene::Command{scene::SetDeformersCmd{
+                                        l.id, w.node, brush::moved_chain(*n, w)}},
+                                    "move_surface", l.undo.get());
+                     touched.push_back(w.node);
+                 }
+                 if (undo) undo->end_group();
+                 return touched;
+             },
+             "centre"_a, "displacement"_a, "radius"_a = 0.3f, "ease"_a = 0,
+             "front_only"_a = false,
+             "Drag this layer's assembled SURFACE — ZBrush's Move. Returns the\n"
+             "nodes that took a warp.\n\n"
+             "NOT the same as `prim.grab(...)`, and the difference is the reason\n"
+             "this exists. A deformer is per ITEM and its centre is in that\n"
+             "item's LOCAL frame, so a grab drags one item's own field: on a form\n"
+             "blended from several, it pulls that item's share and leaves the\n"
+             "rest behind. Nothing errors — it just looks wrong. This resolves\n"
+             "the drag against every item the region reaches, maps it into each\n"
+             "one's frame, and puts it at the FRONT of each chain, which is where\n"
+             "a warp has to go to act on the assembled shape.\n\n"
+             "The whole drag is ONE undo step however many items it touched.\n\n"
+             "The surface moves LESS than the displacement you ask for: the\n"
+             "region weight is taken at the sample point rather than at its\n"
+             "preimage, so a drag of 0.5 over a radius of 0.8 moves a tip about\n"
+             "0.31. That is `grab`'s deliberate behaviour — the true preimage\n"
+             "costs an iteration per sample and buys nothing a sculptor can feel\n"
+             "— and the pull is monotonic, so a UI can calibrate against it.")
         .def("set_transform",
              [](PyLayer& l, scene::NodeId node, nb::handle position,
                 nb::handle rotation_axis_angle, nb::handle scale) {

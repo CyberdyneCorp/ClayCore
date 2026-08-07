@@ -1210,6 +1210,57 @@ clay_result clay_voxel_apply_stroke(clay_voxel_grid* grid, const float* samples_
                                     int32_t index, int32_t shape, int32_t falloff,
                                     const clay_mask* mask, size_t* out_applied);
 
+/* -- the Move brush -------------------------------------------------------- */
+
+typedef struct clay_move_params {
+    uint32_t struct_size; /* = sizeof(clay_move_params); required */
+    float radius;         /* the drag's radius in WORLD units; must be > 0 */
+    int32_t ease;         /* falloff curve across the region */
+    int32_t front_only;   /* non-zero: do not drag the far side of a form */
+} clay_move_params;
+
+/* Drag a layer's assembled SURFACE — ZBrush's Move. Named apart from
+ * clay_layer_move, which reparents a node in the tree: these move different
+ * things and confusing them would be easy.
+ *
+ * NOT the same as putting a grab deformer on an item, which is what a host
+ * reaching for clay_item_add_deformer gets. A deformer is per ITEM and its
+ * centre is in that item's LOCAL frame, so a grab drags one item's own field:
+ * on a form blended from several, it pulls that item's share and leaves the
+ * rest behind. This resolves the drag against every item the region reaches,
+ * maps it into each one's frame, and puts it at the FRONT of each chain —
+ * which is where a warp has to go to act on the assembled shape.
+ *
+ * With undo enabled the whole drag is ONE step however many items it touched.
+ *
+ * *out_applied receives how many items took a warp, so a host can tell "the
+ * drag reached nothing" from "the drag did nothing visible". A drag that
+ * reaches nothing succeeds and changes nothing.
+ *
+ * The surface moves LESS than the displacement asked for — the region weight
+ * is taken at the sample point rather than at its preimage, so a drag of 0.5
+ * over a radius of 0.8 moves a tip about 0.31. That is grab's documented
+ * behaviour and the pull is monotonic, so a UI can calibrate against it. */
+clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
+                                    const float centre[3],
+                            const float displacement[3], const clay_move_params* params,
+                            size_t* out_applied);
+
+/* Add one domain warp to a node ALREADY IN a document, undoably.
+ *
+ * clay_item_add_deformer builds an item; this edits a placed one, which
+ * nothing could do before — a deformer could only be set when its node was
+ * created, so no verb built on one could touch an existing sculpt.
+ *
+ * `at_front` non-zero puts the warp at the head of the chain rather than the
+ * tail. It matters: deformers apply in authoring order, so the FIRST is the
+ * outermost warp on the geometry, and one appended at the back has its region
+ * weight read at a point the earlier deformers already moved. A warp meant to
+ * act on the finished shape goes at the front. */
+clay_result clay_layer_add_deformer(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                    int32_t deform, const float* params, size_t param_count,
+                                    int32_t ease, int32_t at_front);
+
 /* Resolve a stroke and append one edit per stamp to a layer, using `item` as
  * the stamp template scaled to each stamp's radius. The builder is left
  * untouched. With undo enabled the whole stroke is ONE step.

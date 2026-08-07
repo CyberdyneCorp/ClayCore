@@ -153,12 +153,27 @@ scale is uniform by design, so a spherical falloff stays spherical under it.
 Measured on two blended balls with a world drag centred between them, the lift
 is symmetric and peaks at the world centre.
 
-What the engine does **not** yet do is own that mapping. The cut tool and
-snakehook exist precisely to keep an error-prone geometric step out of every
-caller; there is no equivalent resolver for a document-wide grab, so a host
-writing a Move brush is doing the transform itself today. Voxel grids do have a
-true region-level `sculpt_grab`, so the asymmetry is between the two
-representations, not a limit of the field.
+`brush::move_brush` owns that mapping — the resolver the cut tool and snakehook
+are. It takes a world centre, radius and displacement, and returns one `grab`
+per contributing item, each already in that item's frame. Items the drag cannot
+reach get nothing, since a warp outside its own support is a no-op that still
+costs a tape record.
+
+**A third thing it owns: the warp goes at the FRONT of the chain.** Deformers
+apply in authoring order, so `deformers[0]` is the outermost warp on the
+geometry. One appended at the back has its region weight read at a point the
+earlier deformers already moved, so the drag acts somewhere other than where it
+was aimed — invisible until an item has two deformers.
+
+There is also nothing to accumulate. `compile_group` passes the layer through
+and `emit_item` uses `layer.xform * item.xform`, so **a group's own transform
+never reaches its children**: a sphere under a group translated to `x = 2`
+evaluates at the origin. Worth knowing in its own right — a group carrying a
+transform silently does nothing.
+
+Applying the result needs `SetDeformersCmd`, which is new too: the command
+vocabulary could not change a node's deformers at all, so a deformer could only
+be set when its node was created.
 
 `magnify`'s **centre is its fixed point** — a radial scale about a point on the
 surface bulges the neighbourhood *around* it and leaves the point itself exactly
@@ -217,6 +232,7 @@ written, so a host can preview the result before committing it.
 |---|---|---|
 | `cut::cut_item` | A shape drawn on a frame (rect, circle, polygon, spline lasso) becomes an extruded item sized to cut through | a `Node`, or nothing for a non-orthonormal frame or a zero-area shape |
 | `brush::snakehook` | A drag from a surface anchor becomes a tapered stroke item — a horn, tendril or spike | a `Node`, or nothing for an empty path or degenerate normal |
+| `brush::move_brush` | A world-space drag becomes the per-item warps that move the ASSEMBLED surface | one `grab` per contributing item, in that item's own frame |
 
 **The cut is a prism, not a frustum.** A converging cut has a non-flat face and
 a result that depends on where the camera stood, so the sweep is parallel and
@@ -302,7 +318,7 @@ parity — the mechanism usually differs even where the result matches.
 | Standard, ClayBuildup | `Op::Relief` | Displaces the accumulated surface along its normal |
 | Crease, DamStandard | `Op::Incise` | The same op, cutting in — a thin region gives the line |
 | Inflate | `Op::Relief`, `sculpt_inflate` | Moving the surface along its own normal *is* relief; the voxel verb dilates and erodes by cells |
-| Move | `grab` deformer | Per **item**, in that item's **local** space — see the note below. `front_only` keeps the far side from travelling |
+| Move | `brush::move_brush` | Drags the assembled surface. The raw `grab` deformer is per **item** and **local** — see the note below |
 | Rotate | `pose` / `pose_line` | Radial, or ramped along a line |
 | Pinch | `magnify` (negative), `sculpt_pinch` | One signed strength, not two verbs |
 | Magnify | `magnify` (positive), `sculpt_magnify` | Maxon's own page calls them inverses |
@@ -335,6 +351,8 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Cut tool | `cut::cut_item`, `cut::CutShape` | `clay.Cut(...)`, `clay.CutShape.rect/circle/from_polygon/from_curve` | `clay_cut_create`, `clay_cut_polygon_from_curve` |
 | Snakehook | `brush::snakehook` | `clay.snakehook(...)` | `clay_item_create` + `clay_item_set_curve_points` |
 | Voxel verbs | `VoxelGrid::sculpt_*` | `VoxelGrid.sculpt_*` | `clay_voxel_sculpt_*` |
+| Move brush | `brush::move_brush`, `moved_chain` | `Layer.move_surface(...)` | `clay_layer_move_surface` |
+| Deformers on a placed node | `scene::SetDeformersCmd` | (through `move_surface`) | `clay_layer_add_deformer` |
 | Masks | `voxel::MaskField` | `clay.MaskField` | `clay_mask_*` |
 
 Snakehook has no dedicated C entry point on purpose: it is a **resolver** that

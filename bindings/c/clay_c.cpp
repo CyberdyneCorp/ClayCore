@@ -33,6 +33,7 @@
 #include "clay/scene/bounds.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
+#include "clay/brush/move.h"
 #include "clay/brush/stroke.h"
 #include "clay/cut/cut.h"
 #include "clay/voxel/mask.h"
@@ -316,6 +317,8 @@ constexpr std::size_t kVolumeParamsOriginal = offsetof(clay_volume_params, beta)
 constexpr std::size_t kRelaxParamsOriginal = offsetof(clay_relax_params, falloff) + sizeof(float);
 constexpr std::size_t kFlattenParamsOriginal =
     offsetof(clay_flatten_params, falloff) + sizeof(float);
+constexpr std::size_t kMoveParamsOriginal =
+    offsetof(clay_move_params, front_only) + sizeof(std::int32_t);
 constexpr std::size_t kImportBudgetOriginal =
     offsetof(clay_import_budget, max_triangles) + sizeof(std::uint64_t);
 
@@ -1430,7 +1433,11 @@ clay_result clay_item_set_mirror(clay_item* item, int32_t mirror) {
 clay_result clay_item_add_deformer(clay_item* item, int32_t deform, const float* params,
                                    size_t param_count, int32_t ease) {
     if (!item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item");
-    if (deform < 0 || deform > CLAY_DEFORM_POSE_LINE)
+    // NOISE, not POSE_LINE. The bound was not moved when magnify and noise were
+    // added, so both were declared, documented, given parameter counts, handled
+    // by make_deformer — and refused here. The binding parity gate cannot see
+    // it: it checks that the ENUMERATOR exists, not that a call accepts it.
+    if (deform < 0 || deform > CLAY_DEFORM_NOISE)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown deformer kind");
     clay_result r = check_params("deformer", params, param_count, kDeformParams[deform]);
     if (r != CLAY_OK) return r;
@@ -1650,6 +1657,82 @@ clay_result clay_layer_add_item(clay_document* doc, clay_layer_id layer_id, cons
     clay_result r = validate_item(*item);
     if (r != CLAY_OK) return r;
     return insert_node(doc, layer_id, item->node, out_node);
+}
+
+clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
+                                    const float centre[3],
+                            const float displacement[3], const clay_move_params* params,
+                            size_t* out_applied) {
+    if (!doc || !centre || !displacement)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document, centre or displacement");
+    if (!params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null move parameters");
+    clay_move_params p;
+    clay_result r = read_desc(params, kMoveParamsOriginal, &p);
+    if (r != CLAY_OK) return r;
+    if (!(p.radius > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "radius must be > 0");
+    if ((r = check_ease(p.ease)) != CLAY_OK) return r;
+
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "no layer with id " + std::to_string(layer));
+    if (l->kind != scene::LayerKind::Sdf || !l->sdf)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this layer holds no SDF content to move");
+
+    brush::MoveSettings settings;
+    settings.radius = p.radius;
+    settings.ease = static_cast<std::uint8_t>(p.ease);
+    settings.front_only = p.front_only != 0;
+
+    const std::vector<brush::MoveWarp> warps =
+        brush::move_brush(*l, kernel::cf3(centre[0], centre[1], centre[2]),
+                          kernel::cf3(displacement[0], displacement[1], displacement[2]),
+                          settings);
+
+    // One group for the whole drag: it is one gesture, and undoing it item by
+    // item would be the implementation showing through.
+    if (doc->undo) doc->undo->begin_group();
+    std::size_t applied = 0;
+    for (const brush::MoveWarp& w : warps) {
+        const scene::Node* n = l->sdf->find(w.node);
+        if (!n) continue;
+        scene::SetDeformersCmd cmd{layer, w.node, brush::moved_chain(*n, w)};
+        r = apply_edit(doc, scene::Command{cmd}, "node not found");
+        if (r != CLAY_OK) {
+            if (doc->undo) doc->undo->end_group();
+            return r;
+        }
+        ++applied;
+    }
+    if (doc->undo) doc->undo->end_group();
+    if (out_applied) *out_applied = applied;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_add_deformer(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                    int32_t deform, const float* params, size_t param_count,
+                                    int32_t ease, int32_t at_front) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (deform < 0 || deform > CLAY_DEFORM_NOISE)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown deformer kind");
+    clay_result r = check_params("deformer", params, param_count, kDeformParams[deform]);
+    if (r != CLAY_OK) return r;
+    if ((r = check_ease(ease)) != CLAY_OK) return r;
+    scene::Deformer d;
+    if ((r = make_deformer(deform, params, &d)) != CLAY_OK) return r;
+    d.ease = static_cast<std::uint8_t>(ease);
+
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l || !l->sdf) return fail(CLAY_ERROR_NOT_FOUND, "no SDF layer with that id");
+    const scene::Node* n = l->sdf->find(node);
+    if (!n) return fail(CLAY_ERROR_NOT_FOUND, "no node with that id in this layer");
+
+    std::vector<scene::Deformer> chain = n->deformers;
+    if (at_front != 0) {
+        chain.insert(chain.begin(), d);
+    } else {
+        chain.push_back(d);
+    }
+    return apply_edit(doc, scene::Command{scene::SetDeformersCmd{layer, node, std::move(chain)}},
+                      "node not found");
 }
 
 clay_result clay_layer_apply_stroke(clay_document* doc, clay_layer_id layer_id,

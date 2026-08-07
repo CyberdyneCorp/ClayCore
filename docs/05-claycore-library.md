@@ -298,6 +298,16 @@ blocks.apply_stroke(samples, brush, blocks.palette_add("#cc7744"))
 body.apply_stroke(samples, brush, clay.Sphere(r=1.0), mask=freeze)  # one undo step
 clay.StrokePreset.deserialize(brush.serialize())   # versioned: newer is refused
 
+# the Move brush: drag the assembled SURFACE, which is not what putting a grab
+# on one item does. A deformer is per ITEM and its centre is in that item's own
+# frame, so a grab pulls one item's share of a blended form and leaves the rest.
+# This maps the drag into every contributing item's frame and puts it at the
+# FRONT of each chain — deformers apply in authoring order, so the first is the
+# outermost warp on the geometry. One undo step however many items it touches.
+layer.move_surface((0, 0, 0), (0, 0.4, 0), radius=0.8)   # -> the nodes warped
+# The surface moves LESS than you ask for: grab weights at the sample point
+# rather than at its preimage. Monotonic, so a UI can calibrate.
+
 # snakehook: pull a horn or a tendril out of a form — the brush that turns a
 # sphere into a creature. NOT a new kind of geometry: the stroke opcode already
 # sweeps a sphere along a chain with a radius per point, and that IS a tendril
