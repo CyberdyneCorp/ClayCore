@@ -345,5 +345,66 @@ std::vector<scene::Node> stamps_to_nodes(scene::SdfContent& content,
     return nodes;
 }
 
+// -- snakehook ----------------------------------------------------------------
+
+namespace {
+
+// Cumulative arc length along the path, so the taper follows distance rather
+// than sample count. A hand moves at an uneven speed, and tapering by index
+// would make how fast the gesture was decide how thick the tendril is — the
+// same defect the swept opcode had to avoid when distributing profiles.
+std::vector<float> arc_lengths(const std::vector<kernel::cfloat3>& path) {
+    std::vector<float> along(path.size(), 0.0f);
+    for (std::size_t i = 1; i < path.size(); ++i)
+        along[i] = along[i - 1] + kernel::clength(path[i] - path[i - 1]);
+    return along;
+}
+
+}  // namespace
+
+std::optional<scene::Node> snakehook(kernel::cfloat3 anchor, kernel::cfloat3 inward,
+                                     const std::vector<kernel::cfloat3>& path,
+                                     const SnakehookSettings& settings) {
+    if (path.empty()) return std::nullopt;
+    // The normal is still required, and still checked: a caller that cannot say
+    // which way is into the body has not picked a surface, and resolving
+    // anyway would quietly accept a bad pick.
+    if (!(kernel::clength(inward) > 1e-6f)) return std::nullopt;
+    if (!(settings.base_radius > 0.0f)) return std::nullopt;
+
+    const std::vector<float> along = arc_lengths(path);
+    const float total = along.back();
+    // A tap has to leave a mark, the same rule resolve_stroke follows: a drag
+    // shorter than a step is a small tendril rather than nothing.
+    const float span = std::max(total, settings.base_radius * 0.25f);
+
+    const float tip = std::max(settings.base_radius * std::clamp(settings.tip_fraction, 0.0f, 1.0f),
+                               settings.min_tip_radius);
+    const float curve = settings.taper_curve > 0.0f ? settings.taper_curve : 1.0f;
+
+    scene::Node n;
+    n.prim = scene::Prim::stroke();
+    n.curve_tolerance = settings.tolerance > 0.0f ? settings.tolerance : 0.01f;
+
+    // The base, at the point the user actually touched — which is not where the
+    // first drag sample is: a pick reports the surface, and the first sample
+    // arrives a frame later with the finger already moving.
+    scene::StrokePoint root;
+    root.pos = anchor;
+    root.radius = settings.base_radius;
+    root.type = scene::StrokePointType::Spline;
+    n.stroke.push_back(root);
+
+    for (std::size_t i = 0; i < path.size(); ++i) {
+        scene::StrokePoint p;
+        p.pos = path[i];
+        const float t = std::clamp(along[i] / span, 0.0f, 1.0f);
+        p.radius = tip + (settings.base_radius - tip) * std::pow(1.0f - t, curve);
+        p.type = scene::StrokePointType::Spline;
+        n.stroke.push_back(p);
+    }
+    return n;
+}
+
 }  // namespace brush
 }  // namespace clay

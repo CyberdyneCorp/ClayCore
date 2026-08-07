@@ -1909,6 +1909,61 @@ NB_MODULE(pyclay, m) {
             return arr;
         });
 
+    m.def("snakehook",
+          [](nb::handle anchor, nb::handle inward, nb::handle path, float base_radius,
+             float tip_fraction, float min_tip_radius, float taper_curve, float tolerance) {
+              brush::SnakehookSettings settings;
+              settings.base_radius = base_radius;
+              settings.tip_fraction = tip_fraction;
+              settings.min_tip_radius = min_tip_radius;
+              settings.taper_curve = taper_curve;
+              settings.tolerance = tolerance;
+
+              PointsView pts = to_points(path);
+              std::vector<kernel::cfloat3> drag;
+              drag.reserve(pts.count);
+              for (std::size_t i = 0; i < pts.count; ++i)
+                  drag.push_back(kernel::cf3(pts.data[i * 3], pts.data[i * 3 + 1],
+                                             pts.data[i * 3 + 2]));
+
+              std::optional<scene::Node> node =
+                  brush::snakehook(to_f3(anchor, "anchor"), to_f3(inward, "inward"), drag,
+                                   settings);
+              if (!node)
+                  throw std::invalid_argument(
+                      "a snakehook needs a drag with points, a non-zero inward normal and a "
+                      "base radius > 0");
+
+              PyStroke out;
+              out.prim = node->prim;
+              out.stroke = node->stroke;
+              out.curve_tolerance = node->curve_tolerance;
+              return out;
+          },
+          "anchor"_a, "inward"_a, "path"_a, "base_radius"_a = 0.2f, "tip_fraction"_a = 0.15f,
+          "min_tip_radius"_a = 0.01f, "taper_curve"_a = 1.0f, "tolerance"_a = 0.01f,
+          "Pull a horn, a tendril or a spike out of a form: the brush that makes\n"
+          "a sphere into a creature. Returns an ordinary Stroke, so undo,\n"
+          "coalescing, saving, picking and masks all apply to it unchanged.\n\n"
+          "NOT a new kind of geometry. The stroke opcode already sweeps a sphere\n"
+          "along a chain with a radius per point, and that IS a tendril once the\n"
+          "radii taper — the field even stays EXACT, so unlike a loft or a sweep\n"
+          "a tendril costs the raymarcher nothing. What this adds is the step\n"
+          "that turns a drag into that item, so a tendril does not detach from\n"
+          "the surface or bead along its length.\n\n"
+          "It ADDS material rather than moving it. ZBrush pulls existing surface,\n"
+          "so the body dimples slightly where the tendril came from; this grows a\n"
+          "tendril and leaves the body alone. The difference shows only at the\n"
+          "base.\n\n"
+          "`anchor` is the surface point the drag started from and `inward` points\n"
+          "into the body — you have both from the pick you already did, and no\n"
+          "camera enters here. The anchor is PREPENDED to the path, so the\n"
+          "tendril begins where the user touched rather than where the first drag\n"
+          "sample landed a frame later. The taper follows ARC LENGTH, so how fast the\n"
+          "gesture was does not decide how thick the tendril is. `taper_curve`\n"
+          "above 1 thins away quickly (a whip); below 1 holds the thickness and\n"
+          "then drops (a horn).");
+
     m.def("load_mesh",
           [](const std::string& path) {
               PyMesh out;

@@ -298,6 +298,21 @@ blocks.apply_stroke(samples, brush, blocks.palette_add("#cc7744"))
 body.apply_stroke(samples, brush, clay.Sphere(r=1.0), mask=freeze)  # one undo step
 clay.StrokePreset.deserialize(brush.serialize())   # versioned: newer is refused
 
+# snakehook: pull a horn or a tendril out of a form — the brush that turns a
+# sphere into a creature. NOT a new kind of geometry: the stroke opcode already
+# sweeps a sphere along a chain with a radius per point, and that IS a tendril
+# once the radii taper, so the field stays EXACT and a tendril costs the
+# raymarcher nothing. What this adds is the step that turns a drag into the item.
+# The anchor is prepended, so the tendril starts where the user touched rather
+# than where the first drag sample landed a frame later. The taper follows ARC
+# LENGTH, so gesture speed does not decide thickness. taper_curve above 1 thins
+# away fast (a whip); below 1 holds and then drops (a horn).
+# It ADDS material rather than moving it: ZBrush pulls existing surface, so its
+# body dimples at the base and ours does not.
+body.add(clay.snakehook(anchor=pick_point, inward=-pick_normal, path=drag_pts,
+                        base_radius=0.2, tip_fraction=0.15, taper_curve=0.6),
+         blend=clay.Smooth(0.08))
+
 # loft: two or more profiles interpolated along Z, evenly spaced. Three or more
 # are BRACKETED, so wide-narrow-wide gives a waist rather than a straight
 # taper. A loft is a BOUND, and its Lipschitz is not 1 — interpolating very

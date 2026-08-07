@@ -152,5 +152,69 @@ std::vector<scene::Node> stamps_to_nodes(scene::SdfContent& content,
                                          const scene::Node& templ,
                                          const voxel::MaskField* mask = nullptr);
 
+// -- snakehook ----------------------------------------------------------------
+//
+// Pulling a horn, a tendril or a spike out of a form: the brush that makes a
+// sphere into a creature.
+//
+// NOT a new mechanism, which is worth saying because it was scoped as one. The
+// stroke opcode already sweeps a sphere along a segment chain with a radius per
+// point, and that IS a tendril when the radii taper — a tapered stroke
+// smooth-unioned onto a body reads as a snakehook, and the field stays exact,
+// unlike a loft or a sweep. What did not exist is the step that turns a DRAG
+// into that item. Same argument as the cut tool: leaving it to each caller
+// means each one answers "where does it anchor" and "how does the radius taper"
+// differently, and a tendril that detaches from the surface or beads along its
+// length is the result.
+//
+// It ADDS material rather than moving it. ZBrush pulls existing surface, so the
+// body dimples slightly where the tendril came from; this grows a tendril and
+// leaves the body alone. The difference shows only at the base, and conserving
+// volume is a different brush rather than a better snakehook.
+
+struct SnakehookSettings {
+    // The tendril's radius where it leaves the surface, in world units.
+    float base_radius = 0.2f;
+
+    // Where it ends, as a fraction of the base. Floored below so a tendril
+    // finishes in a point that exists rather than one too small for the
+    // sampling to carry.
+    float tip_fraction = 0.15f;
+    float min_tip_radius = 0.01f;
+
+    // Shapes the taper along arc length, as (1 - t) raised to it: 1 is linear,
+    // ABOVE 1 thins away quickly and leaves a long thin whip, BELOW 1 holds the
+    // thickness and then drops, which is the shape of a horn.
+    float taper_curve = 1.0f;
+
+    // Tessellation tolerance for the path, the same document-level quantity a
+    // curve uses.
+    float tolerance = 0.01f;
+};
+
+// Resolve a drag into a tendril. `anchor` is the point on the surface the drag
+// started from and `inward` points into the body from there — the caller has
+// both from the pick it already did, so no camera and no picking enters here.
+// `path` is the drag, in world units.
+//
+// The anchor is PREPENDED to the path, so the tendril begins where the user
+// touched rather than wherever the first drag sample happened to land. Those
+// differ: a pick reports the surface, and the first sample arrives a frame
+// later with the finger already moving.
+//
+// It is NOT pushed inward. That was tried, as a fraction of the base radius,
+// on the theory that a tendril anchored on the surface would leave a neck. It
+// does not: the sweep from a surface point already overlaps the body by its own
+// radius, so a deeper anchor only adds material where the body is solid
+// anyway. Measured — the field around the base is identical at every depth.
+//
+// Pure: no document is read or touched, so a caller can preview a tendril
+// before committing it. Returns nothing for a drag with no points, a path with
+// no length, or a degenerate normal, rather than an item that would sit at the
+// origin or contribute nothing.
+std::optional<scene::Node> snakehook(kernel::cfloat3 anchor, kernel::cfloat3 inward,
+                                     const std::vector<kernel::cfloat3>& path,
+                                     const SnakehookSettings& settings = {});
+
 }  // namespace brush
 }  // namespace clay

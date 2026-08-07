@@ -37,6 +37,7 @@ EXAMPLES = [
     "19_mesh_import",
     "20_relax",
     "21_flatten",
+    "22_snakehook",
 ]
 
 
