@@ -41,6 +41,7 @@
 
 #include <functional>
 
+#include "clay/field/relax.h"  // MaskGate
 #include "clay/field/volume.h"
 
 namespace clay {
@@ -66,6 +67,11 @@ struct FlattenSettings {
     // Over what distance the effect tapers to nothing at the region's edge. A
     // taper of zero would step, and a step is a rim on the surface.
     float falloff = 0.0f;
+
+    // Optional freeze, as on RelaxSettings and for the same reason: a fully
+    // masked sample keeps the source's value, so a frozen region stays where
+    // the source put it rather than moving onto the plane.
+    MaskGate mask;
 };
 
 // Sample `source` with the flatten applied. The result declares the Lipschitz

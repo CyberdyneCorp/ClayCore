@@ -582,6 +582,84 @@ check(clay_voxel_apply_stroke(grid, &strokeSamples, strokeCount, &preset, index,
       "a mask over the path froze the whole stroke (\(stampCount) stamps dropped)")
 check(clay_mask_destroy(freeze) == CLAY_OK, "destroyed the caller-owned mask")
 
+// -- the mask brush ----------------------------------------------------------
+// Painting a mask with the drag a host already resolved, rather than by looping
+// single stamps and re-deriving the spacing itself.
+
+let painted = clay_mask_create(0.05)
+check(painted != nil, "created a mask to stroke into")
+var maskApplied = 0
+check(clay_mask_apply_stroke(painted, &strokeSamples, strokeCount, &preset, 1.0,
+                             Int32(CLAY_BRUSH_SHAPE_SPHERE.rawValue),
+                             Int32(CLAY_BRUSH_FALLOFF_SMOOTH.rawValue),
+                             &maskApplied) == CLAY_OK && maskApplied == stampCount,
+      "painted a mask along a drag (\(maskApplied) stamps)")
+var strokedPainted = 0
+check(clay_mask_painted_count(painted, &strokedPainted) == CLAY_OK && strokedPainted > 0,
+      "the stroke left \(strokedPainted) masked cells")
+
+// The bounded complement: what clay_mask_invert structurally cannot do.
+var boxLo: [Float] = [-1, -1, -1]
+var boxHi: [Float] = [1, 1, 1]
+check(clay_mask_invert_within(painted, &boxLo, &boxHi) == CLAY_OK,
+      "took the complement over a box")
+var farPoint: [Float] = [0.9, 0.9, 0.9]
+var farValue: Float = 0
+check(clay_mask_sample(painted, &farPoint, &farValue) == CLAY_OK && farValue > 0.9,
+      "everything else in the box is frozen now")
+
+var fillValue: Float = 0
+check(clay_mask_fill(painted, &boxLo, &boxHi, 0.0) == CLAY_OK, "released the box")
+check(clay_mask_sample(painted, &farPoint, &fillValue) == CLAY_OK && fillValue < 0.1,
+      "filling with zero released it")
+check(clay_mask_destroy(painted) == CLAY_OK, "destroyed the stroked mask")
+
+// -- mask extrude ------------------------------------------------------------
+// A plate pulled off a masked patch, on both representations.
+
+let extrudeMask = clay_mask_create(0.03)
+check(extrudeMask != nil, "created a mask to extrude from")
+var capLo: [Float] = [-0.3, 0.35, -0.3]
+var capHi: [Float] = [0.3, 1.2, 0.3]
+check(clay_mask_fill(extrudeMask, &capLo, &capHi, 1.0) == CLAY_OK, "masked a cap")
+
+var extrudeParams = clay_mask_extrude_params()
+extrudeParams.struct_size = UInt32(MemoryLayout<clay_mask_extrude_params>.size)
+extrudeParams.thickness = 0.12
+extrudeParams.side = Int32(CLAY_EXTRUDE_OUTWARD.rawValue)
+
+var measured: OpaquePointer? = nil
+check(clay_mask_to_field(extrudeMask, 0.5, 0.2, 0.3, 0.0, &measured) == CLAY_OK
+        && measured != nil,
+      "measured the mask as a distance field")
+if let measured = measured { clay_item_destroy(measured) }
+
+var plate: OpaquePointer? = nil
+check(clay_document_mask_extrude(doc, layer, extrudeMask, &extrudeParams, &plate) == CLAY_OK
+        && plate != nil,
+      "extruded a plate off the sdf layer")
+if let plate = plate { clay_item_destroy(plate) }
+
+var extract: OpaquePointer? = nil
+check(clay_voxel_mask_extrude(grid, extrudeMask, &extrudeParams, &extract) == CLAY_OK
+        && extract != nil,
+      "extruded a plate off the voxel grid")
+if let extract = extract {
+    var extractCells = 0
+    check(clay_voxel_occupied_count(extract, &extractCells) == CLAY_OK && extractCells > 0,
+          "the voxel extract holds \(extractCells) cells")
+    check(clay_voxel_grid_destroy(extract) == CLAY_OK, "destroyed the caller-owned extract")
+}
+
+// A refusal is typed rather than an empty handle.
+let emptyMask = clay_mask_create(0.03)
+var refused: OpaquePointer? = nil
+check(clay_document_mask_extrude(doc, layer, emptyMask, &extrudeParams, &refused)
+        == CLAY_ERROR_INVALID_ARGUMENT,
+      "an empty mask is refused with a typed error")
+check(clay_mask_destroy(emptyMask) == CLAY_OK, "destroyed the empty mask")
+check(clay_mask_destroy(extrudeMask) == CLAY_OK, "destroyed the extrude mask")
+
 // -- meshing -----------------------------------------------------------------
 
 var meshParams = clay_mesh_params()

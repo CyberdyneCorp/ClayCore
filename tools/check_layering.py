@@ -24,7 +24,11 @@ ALLOWED = {
     "brick": {"kernel", "math", "scene", "eval"},
     "voxel": {"kernel", "math", "scene", "mesh"},  # mesh_data.h is a leaf data type
     "mesh": {"kernel", "math", "scene", "eval", "brick", "field"},
-    "brush": {"kernel", "math", "scene", "voxel"},
+    # brush -> field is mask extrude: the join of a mask (above scene) and a
+    # sampled field (below it). It cannot live in field without making
+    # field -> voxel -> scene -> field a cycle, and brush already sits above
+    # both. Nothing in field knows about brush.
+    "brush": {"kernel", "math", "scene", "voxel", "field"},
     "cut": {"kernel", "math", "scene"},
     "field": {"kernel", "math"},  # a sampled field is a leaf payload, below scene
     "pick": {"kernel", "math", "scene", "eval", "brick", "voxel"},

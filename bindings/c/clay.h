@@ -644,6 +644,10 @@ clay_result clay_mesh_from_triangles(const float* positions, size_t vertex_count
 
 /* -- importing a mesh as a field ------------------------------------------- */
 
+/* Declared here rather than with the mask entry points below, because the
+ * relax and flatten parameter blocks freeze against one. See -- masks --. */
+typedef struct clay_mask clay_mask; /* opaque */
+
 typedef struct clay_volume_params {
     uint32_t struct_size; /* = sizeof(clay_volume_params); required */
     float cell_size;      /* sample spacing; <= 0 picks from the mesh's own size */
@@ -677,6 +681,12 @@ typedef struct clay_relax_params {
     float centre[3];       /* where it acts */
     float region_radius;   /* 0 relaxes everywhere, which is a filter not a brush */
     float falloff;         /* taper at the region's edge; widened if too narrow to hide the seam */
+    /* Optional freeze, exactly as the voxel verbs take one: the weight at a
+     * sample is scaled by (1 - mask) at its WORLD position, so a fully masked
+     * sample keeps its value verbatim. NULL for none. Appended after the
+     * original layout, so struct_size decides whether it is read at all and a
+     * caller compiled before it existed is unaffected. */
+    const clay_mask* mask;
 } clay_relax_params;
 
 /* Smooths an item that carries a volume, in place. The last of the core
@@ -703,6 +713,8 @@ typedef struct clay_flatten_params {
                             * replaces the shape with a half-space rather than
                             * flattening it — a ball comes back as a box */
     float falloff;         /* taper at the region's edge; widened when too narrow to declare */
+    /* Optional freeze; see clay_relax_params.mask. NULL for none. */
+    const clay_mask* mask;
 } clay_flatten_params;
 
 /* Pulls an item's volume onto a plane, in place. The verb SDF layers were
@@ -794,7 +806,8 @@ typedef enum clay_brush_falloff {
  * descriptor rather than a request, and unlike the Python bindings this
  * boundary rejects it instead of stamping nothing. A strength at or above 1
  * is the full footprint. */
-typedef struct clay_mask clay_mask; /* opaque; see -- masks -- below */
+/* clay_mask is declared above, with the volume parameters that freeze against
+ * one; the entry points are in -- masks -- below. */
 
 typedef struct clay_brush_params {
     uint32_t struct_size; /* = sizeof(clay_brush_params); required, see above */
@@ -995,6 +1008,97 @@ clay_result clay_mask_smooth(clay_mask* mask, int32_t iterations);
 clay_result clay_mask_bounds(const clay_mask* mask, int32_t out_min[3], int32_t out_max[3],
                              int32_t* out_has_bounds);
 
+/* Fill a world-space box with a value, and take the complement over one.
+ *
+ * These are the BOUNDED forms clay_mask_invert cannot be. Inverting the painted
+ * region is the only thing a sparse unbounded lattice can do, and it is not
+ * what "mask a limb, invert, sculpt everything else" means: the untouched
+ * storage stays unmasked and the boundary lands on chunk edges rather than on
+ * the painted region. So the caller supplies the finite region — it always has
+ * one, from a grid's bounds or an item's.
+ *
+ * A cell belongs to the box when its CENTRE does. An empty or unbounded box is
+ * refused: the cost of both calls is the box's volume in cells. */
+clay_result clay_mask_fill(clay_mask* mask, const float box_min[3], const float box_max[3],
+                           float value);
+clay_result clay_mask_invert_within(clay_mask* mask, const float box_min[3],
+                                    const float box_max[3]);
+
+/* clay_mask_apply_stroke — painting a mask along a drag — lives with the other
+ * stroke consumers below, since it needs clay_stroke_preset. */
+
+/* -- mask extrude ---------------------------------------------------------- */
+
+/* Mask a patch of a surface and pull it off as a solid of a chosen thickness.
+ * ZBrush calls it Extract, 3DCoat reaches it through Extrude from a frozen
+ * area, and it is what a mask is FOR once it can do more than freeze.
+ *
+ * THE MASK IS THE REGION. Relax and flatten both need a region_radius because
+ * they have no other way to know where to act; this does not, because the
+ * painted region bounds itself. */
+
+/* Which side of the source surface the new material sits on. */
+typedef enum clay_extrude_side {
+    CLAY_EXTRUDE_OUTWARD = 0, /* the plate sits ON the surface */
+    CLAY_EXTRUDE_INWARD = 1,  /* the pocket */
+    CLAY_EXTRUDE_CENTRED = 2, /* straddles it */
+} clay_extrude_side;
+
+typedef struct clay_mask_extrude_params {
+    uint32_t struct_size;  /* = sizeof(clay_mask_extrude_params); required */
+    float thickness;       /* wall thickness in world units; must be > 0 */
+    int32_t side;          /* clay_extrude_side */
+    float threshold;       /* what counts as masked; <= 0 means 0.5 */
+    float border_round;    /* rounding radius on the rim; 0 is a hard edge */
+    int32_t border_smooth; /* smoothing passes on a COPY of the mask; the caller's is kept */
+    float cell_size;       /* sampling of the result; <= 0 means the mask's own */
+    float band;            /* <= 0 means three cells */
+} clay_mask_extrude_params;
+
+/* The mask, measured: signed distance to the boundary of the masked region,
+ * negative inside, as an item carrying a volume.
+ *
+ * This is the conversion the extrude is built on, exposed because a host wants
+ * to preview that border. A mask is a [0,1] scalar on a lattice and not a
+ * distance field; composing one into a field expression directly would put a
+ * step in the result and the Lipschitz bound would become a fiction.
+ *
+ * `pad` widens the sampled region past the masked one, `band` and `cell_size`
+ * are the usual sampling controls, and <= 0 takes the default for each. The
+ * returned item is owned by the caller until it is added to a layer. An empty
+ * mask is refused. */
+clay_result clay_mask_to_field(const clay_mask* mask, float threshold, float band, float pad,
+                               float cell_size, clay_item** out_item);
+
+/* Extrude the masked patch of a layer's surface into a new item carrying a
+ * volume. The layer is sampled, so what comes back is a snapshot rather than
+ * something that tracks the source — the same bargain flatten makes.
+ *
+ * Refused, with a typed error rather than an empty item, when the mask is
+ * empty, the thickness is not positive, the wall is thinner than a cell, or the
+ * masked region never reaches the surface. That last one is the common mistake
+ * and the one an empty item would disguise.
+ *
+ * The mask and the source layer are both left unmodified. */
+clay_result clay_document_mask_extrude(clay_document* doc, clay_layer_id layer,
+                                       const clay_mask* mask,
+                                       const clay_mask_extrude_params* params,
+                                       clay_item** out_item);
+
+/* The same verb on a voxel grid, in CELL space: the masked cells of the
+ * source's surface, thickened, carrying the source's colours. It does not go
+ * through a sampled field — a grid already knows which of its cells are on its
+ * surface, so resampling would cost a conversion and lose the palette.
+ *
+ * The two agree to within a voxel, which is the point. cell_size and band are
+ * ignored here; the grid's own resolution is the only one available.
+ *
+ * The returned grid is owned by the CALLER — destroy it with
+ * clay_voxel_grid_destroy — and neither the source nor the mask is modified. */
+clay_result clay_voxel_mask_extrude(const clay_voxel_grid* grid, const clay_mask* mask,
+                                    const clay_mask_extrude_params* params,
+                                    clay_voxel_grid** out_grid);
+
 /* -- the cut tool ---------------------------------------------------------- */
 
 /* A shape drawn over the model, resolved into an ordinary edit item.
@@ -1158,6 +1262,25 @@ clay_result clay_voxel_apply_stroke(clay_voxel_grid* grid, const float* samples_
                                     size_t sample_count, const clay_stroke_preset* preset,
                                     int32_t index, int32_t shape, int32_t falloff,
                                     const clay_mask* mask, size_t* out_applied);
+
+/* Resolve a stroke and paint it into a mask. The third stroke consumer, and
+ * what makes masking the same gesture as sculpting: spacing, pressure, taper,
+ * steady stroke and jitter reach a mask stroke because they are resolved before
+ * anything knows what a stamp will become.
+ *
+ * `target` is where each cell moves TO — 1 masks and 0 releases — so painting
+ * and erasing are the same call.
+ *
+ * The footprint comes from each stamp's WORLD radius, converted to MASK cells
+ * here rather than by the caller: a caller doing it by hand gets a stroke whose
+ * width tracks the mask's resolution instead of the brush's radius.
+ *
+ * There is no mask argument: a mask does not gate its own painting, so every
+ * stamp runs and *out_applied is the stamp count. */
+clay_result clay_mask_apply_stroke(clay_mask* mask, const float* samples_xyzpt,
+                                   size_t sample_count, const clay_stroke_preset* preset,
+                                   float target, int32_t shape, int32_t falloff,
+                                   size_t* out_applied);
 
 /* Resolve a stroke and append one edit per stamp to a layer, using `item` as
  * the stamp template scaled to each stamp's radius. The builder is left

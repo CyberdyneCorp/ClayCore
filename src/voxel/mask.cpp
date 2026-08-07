@@ -158,6 +158,73 @@ void MaskField::invert() {
     }
 }
 
+// -- bounded region operations -----------------------------------------------
+
+namespace {
+
+// The cells whose centres can lie in `region`, or nothing when there is no such
+// finite set. Shared by fill and invert_within so the two cannot disagree about
+// where a region's edge is.
+struct CellRange {
+    VoxelCoord lo, hi;
+};
+
+std::optional<CellRange> cells_of(const MaskField& m, const math::Aabb& region) {
+    if (!m.region_is_walkable(region)) return std::nullopt;
+    return CellRange{m.cell_at(region.min), m.cell_at(region.max)};
+}
+
+bool centre_in(const math::Aabb& region, cfloat3 p) {
+    return p.x >= region.min.x && p.x <= region.max.x && p.y >= region.min.y &&
+           p.y <= region.max.y && p.z >= region.min.z && p.z <= region.max.z;
+}
+
+}  // namespace
+
+bool MaskField::region_is_walkable(const math::Aabb& region) const {
+    if (region.empty()) return false;
+    // In double, and per axis before the product: a box near FLT_MAX overflows
+    // the lattice's own int32 cell indices long before its volume overflows a
+    // float, and `is_infinite` only catches the exact sentinel. Counting first
+    // is what turns "an arithmetic mistake upstream" into a refusal rather than
+    // into a loop over garbage bounds.
+    double cells = 1.0;
+    for (int axis = 0; axis < 3; ++axis) {
+        const double lo = (&region.min.x)[axis] / static_cast<double>(cell_size_);
+        const double hi = (&region.max.x)[axis] / static_cast<double>(cell_size_);
+        if (!(lo > -2147483648.0 && hi < 2147483647.0)) return false;
+        const double span = std::floor(hi) - std::floor(lo) + 1.0;
+        if (span > kMaxRegionCells) return false;
+        cells *= span;
+        if (cells > kMaxRegionCells) return false;
+    }
+    return true;
+}
+
+void MaskField::fill(const math::Aabb& region, float value) {
+    std::optional<CellRange> r = cells_of(*this, region);
+    if (!r) return;
+    for (std::int32_t z = r->lo.z; z <= r->hi.z; ++z)
+        for (std::int32_t y = r->lo.y; y <= r->hi.y; ++y)
+            for (std::int32_t x = r->lo.x; x <= r->hi.x; ++x) {
+                VoxelCoord c{x, y, z};
+                if (centre_in(region, cell_centre(c))) set(c, value);
+            }
+}
+
+void MaskField::invert_within(const math::Aabb& region) {
+    std::optional<CellRange> r = cells_of(*this, region);
+    if (!r) return;
+    for (std::int32_t z = r->lo.z; z <= r->hi.z; ++z)
+        for (std::int32_t y = r->lo.y; y <= r->hi.y; ++y)
+            for (std::int32_t x = r->lo.x; x <= r->hi.x; ++x) {
+                VoxelCoord c{x, y, z};
+                // Unpainted cells are inverted too — that is the entire point of
+                // the bounded form, and what invert() structurally cannot do.
+                if (centre_in(region, cell_centre(c))) set(c, 1.0f - get(c));
+            }
+}
+
 // Dense scratch over the painted region padded by `pad`, so a dilation or a
 // blur can grow past the currently allocated chunks. `reduce` sees the padded
 // buffer and returns the new value for one cell.

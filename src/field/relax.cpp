@@ -10,6 +10,7 @@
 #include <optional>
 #include <vector>
 
+
 namespace clay {
 namespace field {
 
@@ -59,6 +60,14 @@ float region_weight(const RelaxSettings& settings, cfloat3 p) {
     return 1.0f - t * t * (3.0f - 2.0f * t);  // smoothstep
 }
 
+// The freeze. Scaling by (1 - mask) means a fully masked sample takes weight
+// zero and relax returns it verbatim rather than nearly so — a frozen region
+// that drifts by a rounding error per iteration is a frozen region that moves.
+float mask_gate(const MaskGate& mask, cfloat3 p) {
+    if (!mask) return 1.0f;
+    return 1.0f - std::clamp(mask(p), 0.0f, 1.0f);
+}
+
 }  // namespace
 
 FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings) {
@@ -81,7 +90,8 @@ FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings) {
         current.rewrite([&previous, &stencil, &tuned, strength](int gx, int gy, int gz,
                                                                 float old) {
             float here = previous.sample_at(gx, gy, gz).value_or(old);
-            float weight = region_weight(tuned, previous.cell_position(gx, gy, gz));
+            const cfloat3 at = previous.cell_position(gx, gy, gz);
+            float weight = region_weight(tuned, at) * mask_gate(tuned.mask, at);
             if (weight <= 0.0f) return here;
 
             // Only taps that EXIST count. A brick with no samples is not a

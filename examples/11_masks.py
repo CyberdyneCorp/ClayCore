@@ -17,7 +17,16 @@ against, and world addressing is what makes it unrepresentable here.
 One boundary, so nothing is expected that is not delivered: a mask gates edits
 where they are AUTHORED. Voxel edits consume it per cell at edit time. It does
 not retroactively protect a region from SDF items already in the edit list.
+
+Masking is also a GESTURE, not just a data structure. A mask is painted along a
+drag by the same stroke engine that resolves a sculpting stroke — same spacing,
+pressure, taper, steady stroke and jitter — so the last sections here are about
+the brush rather than the field: painting a band, taking the complement over a
+region (which plain `invert` structurally cannot do), and freezing an SDF layer
+against `relax`.
 """
+
+import numpy as np
 
 import pyclay as clay
 
@@ -120,7 +129,6 @@ def main():
     mask = doc.add_mask("clay", cell_size=VOXEL_SIZE)
     mask.paint((0.4, 0.2, 0.0), size=13, shape="sphere", falloff="smooth")
 
-    import numpy as np
     probes = np.array([[0.4, 0.2, 0.0], [0.15, 0.2, 0.0], [3.0, 3.0, 3.0]], np.float32)
     reference = mask.sample_many(probes)
 
@@ -143,7 +151,98 @@ def main():
         raise SystemExit("the mask did not survive a save/load round trip")
     print("  and through a save/load round trip: True")
 
+    # --- masking as a gesture: a stroke paints the mask ---------------------
+    # The same resolve_stroke a sculpting stroke goes through, so a mask stroke
+    # tapers and spaces the way a brush stroke does. The footprint comes from
+    # each stamp's WORLD radius, which is why the same stroke covers the same
+    # region on two masks at different resolutions.
+    preset = clay.StrokePreset(radius=0.35, spacing=0.25, taper_start=0.2,
+                               taper_end=0.2)
+    samples = [(x, 0.0, 0.0, 1.0, 0.0)
+               for x in np.linspace(-1.0, 1.0, 24, dtype=np.float32)]
+
+    widths = []
+    for cell in (VOXEL_SIZE, VOXEL_SIZE / 2.0):
+        painted = clay.MaskField(cell_size=cell)
+        stamps = painted.apply_stroke(samples, preset, target=1.0)
+        covered = painted.painted_count
+        volume = covered * cell ** 3
+        widths.append(volume)
+        print(f"  a stroke of {stamps} stamps on a {cell:.3f} mask covers "
+              f"{covered} cells = {volume:.4f} cubic units")
+    if abs(widths[0] - widths[1]) / widths[0] > 0.2:
+        raise SystemExit("the stroke's width tracked the mask's resolution, "
+                         "which is the bug the world-radius conversion prevents")
+
+    stroked = clay.MaskField(cell_size=VOXEL_SIZE)
+    stroked.apply_stroke(samples, preset, target=1.0)
+    band = slab()
+    band.erase_brush((0, 0, 0), 21, shape="sphere", falloff="smooth", seed=4,
+                     mask=stroked)
+    print(f"  a stroke-painted mask spares {band.occupied_count - cut.occupied_count} "
+          f"cells the same cut would have taken")
+    if band.occupied_count <= cut.occupied_count:
+        raise SystemExit("the stroked mask spared nothing")
+
+    # ...and erasing is the same call, with the target at the other end.
+    stroked.apply_stroke(samples, preset, target=0.0)
+    if stroked.sample((0.0, 0.0, 0.0)) > 0.1:
+        raise SystemExit("target=0 did not release the mask")
+    print("  and the same call with target=0 releases it again")
+
+    # --- the complement invert() cannot take --------------------------------
+    # invert() flips only what has been PAINTED — a sparse unbounded lattice has
+    # no finite complement — so "mask this, edit everything else" needs the
+    # region from the caller, who always has one.
+    limb = clay.MaskField(cell_size=VOXEL_SIZE)
+    limb.paint((0.0, 0.0, 0.0), size=9, shape="sphere", falloff="constant")
+    region = ((-1.2, -0.6, -0.8), (1.2, 0.4, 0.8))
+    limb.invert_within(region)
+    inside = limb.sample((0.0, 0.0, 0.0))
+    beside = limb.sample((0.8, 0.0, 0.0))
+    outside = limb.sample((3.0, 0.0, 0.0))
+    print(f"  invert_within: what was painted reads {inside:.2f}, the rest of the "
+          f"region {beside:.2f}, past the region {outside:.2f}")
+    if not (inside < 0.1 < beside and outside < 0.1):
+        raise SystemExit("the bounded complement is not bounded, or not a complement")
+
+    # --- the freeze reaches the SDF verbs too -------------------------------
+    # relax and flatten rewrite a sampled field, and until now nothing gated
+    # them: a masked region inside their sphere was not actually frozen.
+    bumpy = clay.Volume.from_document(
+        _rippled(), cell=0.03, band=0.12,
+        bounds=((-1.1, -1.1, -1.1), (1.1, 1.1, 1.1)))
+    settings = dict(strength=1.0, radius_cells=2, iterations=3,
+                    centre=(0.55, 0.0, 0.0), region_radius=0.5, falloff=0.2)
+
+    freeze_right = clay.MaskField(cell_size=0.05)
+    freeze_right.fill(((0.0, -1.2, -1.2), (1.4, 1.2, 1.2)), 1.0)
+
+    probe = np.array([[0.55, 0.0, 0.0]], np.float32)
+    original = float(bumpy.eval(probe)[0])
+    smoothed = float(bumpy.relaxed(**settings).eval(probe)[0])
+    held = float(bumpy.relaxed(**settings, mask=freeze_right).eval(probe)[0])
+    print(f"  relax at the probe: {original:+.5f} -> {smoothed:+.5f} unmasked, "
+          f"{held:+.5f} frozen")
+    if held != original:
+        raise SystemExit("a frozen sample moved — freezing has to be exact, "
+                         "not merely close")
+    if smoothed == original:
+        raise SystemExit("the unmasked relax did nothing, so the test proves nothing")
+
     R.save_model(masked.mesh(), "11_masked.ply")
+
+
+def _rippled():
+    """A sphere with a fine ripple: something relax can visibly remove."""
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    for i in range(12):
+        a = i * 6.283 / 12.0
+        layer.add(clay.Sphere(0.14).at(
+            (0.62 * float(np.cos(a)), 0.0, 0.62 * float(np.sin(a)))))
+    layer.add(clay.Sphere(0.6))
+    return doc
 
 
 if __name__ == "__main__":
