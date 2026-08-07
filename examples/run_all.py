@@ -41,6 +41,7 @@ EXAMPLES = [
     "23_magnify",
     "24_noise",
     "25_relief",
+    "26_move_brush",
 ]
 
 
@@ -61,7 +62,7 @@ CAPABILITY_EXAMPLES = {
     "picking": "10_editing",
     "file-io": "08_meshing_and_io",
     "voxel-engine": "15_voxel_verbs_and_repair",
-    "brush-engine": "12_strokes",
+    "brush-engine": "12_strokes",   # plus 26_move_brush
     "cut-tool": "14_cut",
     "python-bindings": None,      # every example IS this capability
     "c-abi": None,                # exercised from Swift and C, not from the gallery

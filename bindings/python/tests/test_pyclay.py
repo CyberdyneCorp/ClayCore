@@ -2561,3 +2561,91 @@ def test_a_degenerate_sweep_is_refused():
     with pytest.raises(ValueError, match="tolerance"):
         clay.Swept(_STRAIGHT, [clay.Profile.circle(r=0.3), clay.Profile.circle(r=0.3)],
                    tolerance=0.0)
+
+
+# -- the Move brush (add-move-brush) -----------------------------------------
+
+
+def _blended_form():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    for x in (-0.45, 0.45):
+        layer.add(clay.Sphere(0.5).at((x, 0, 0)), blend=clay.Smooth(0.25))
+    return doc, layer
+
+
+def _top(doc, x):
+    ys = np.arange(1.6, -1.6, -0.002, dtype=np.float32)
+    pts = np.stack([np.full_like(ys, x), ys, np.zeros_like(ys)], axis=1)
+    inside = np.nonzero(doc.eval(pts) <= 0.0)[0]
+    return float(ys[inside[0]])
+
+
+def test_move_surface_drags_a_blended_form_as_one():
+    base, _ = _blended_form()
+    before = {x: _top(base, x) for x in (-0.45, 0.0, 0.45)}
+
+    doc, layer = _blended_form()
+    touched = layer.move_surface((0, 0, 0), (0, 0.4, 0), radius=0.8)
+    assert len(touched) == 2                    # both items take a share
+
+    lift = {x: _top(doc, x) - before[x] for x in (-0.45, 0.0, 0.45)}
+    assert lift[-0.45] > 0.0 and lift[0.45] > 0.0
+    assert lift[-0.45] == pytest.approx(lift[0.45], abs=0.005)   # symmetric
+    assert lift[0.0] >= max(lift[-0.45], lift[0.45])             # peaks at the centre
+
+
+def test_a_grab_on_one_item_is_not_a_move():
+    """The reason move_surface exists: a grab is per item and local."""
+    base, _ = _blended_form()
+    before = {x: _top(base, x) for x in (-0.45, 0.45)}
+
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    for x in (-0.45, 0.45):
+        ball = clay.Sphere(0.5).at((x, 0, 0))
+        if x < 0:
+            ball.grab(center=(0, 0, 0), radius=0.8, displacement=(0, 0.4, 0))
+        layer.add(ball, blend=clay.Smooth(0.25))
+
+    assert _top(doc, -0.45) - before[-0.45] > 0.02      # its own side moves
+    assert _top(doc, 0.45) - before[0.45] == pytest.approx(0.0, abs=0.005)  # the other does not
+
+
+def test_move_surface_is_one_undo_step():
+    doc, layer = _blended_form()
+    doc.enable_undo()
+    before = _top(doc, 0.0)
+
+    touched = layer.move_surface((0, 0, 0), (0, 0.4, 0), radius=0.8)
+    assert len(touched) == 2
+    assert _top(doc, 0.0) > before
+    assert doc.undo_depth == 1          # one gesture, one step
+    assert doc.undo() is True
+    assert _top(doc, 0.0) == pytest.approx(before)
+
+
+def test_move_surface_skips_what_it_cannot_reach():
+    doc, layer = _blended_form()
+    layer.add(clay.Sphere(0.3).at((50.0, 0, 0)))
+    assert len(layer.move_surface((0, 0, 0), (0, 0.4, 0), radius=0.8)) == 2
+
+
+def test_move_surface_refuses_a_drag_that_is_not_one():
+    _doc, layer = _blended_form()
+    with pytest.raises(ValueError):
+        layer.move_surface((0, 0, 0), (0, 0.4, 0), radius=0.0)
+    assert layer.move_surface((0, 0, 0), (0, 0, 0), radius=0.8) == []
+
+
+def test_move_surface_pull_is_monotonic_and_short():
+    base, _ = _blended_form()
+    before = _top(base, 0.0)
+    previous = 0.0
+    for d in (0.1, 0.2, 0.4):
+        doc, layer = _blended_form()
+        layer.move_surface((0, 0, 0), (0, d, 0), radius=0.8)
+        lift = _top(doc, 0.0) - before
+        assert lift > previous      # further every time...
+        assert lift < d             # ...but never the whole displacement
+        previous = lift
