@@ -10,6 +10,83 @@ using kernel::CTapeInstr;
 
 namespace {
 
+// Repetition preserves exactness only when the item plus its rounding and blend
+// influence fits inside its half-cell (docs/01 2.4). Checked rather than
+// assumed: an overflowing array is a bound field, not a distance.
+bool repeat_preserves_exactness(const Node& item) {
+    math::Aabb local = prim_local_bounds(item);
+    float influence =
+        kernel::cmax(item.rounding, 0.0f) + kernel::cmax(item.blend.support(), item.blend.k);
+    if (item.repeat.type == kernel::crepeat_radial) {
+        int count = static_cast<int>(item.repeat.spacing.x);
+        float ring = kernel::cabs(item.repeat.spacing.y);
+        float reach = 0.0f;
+        if (!local.empty()) {
+            for (int i = 0; i < 4; ++i) {
+                float x = (i & 1) ? local.max.x : local.min.x;
+                float z = (i & 2) ? local.max.z : local.min.z;
+                reach = kernel::cmax(reach, kernel::clength(kernel::cf2(x, z)));
+            }
+        }
+        // the copy must fit inside its angular sector at its radius
+        float sector_reach =
+            ring * kernel::csin(3.14159265f / kernel::cmax((float)count, 2.0f));
+        return count >= 2 && (reach + influence) <= sector_reach;
+    }
+    if (local.empty()) return true;
+    const float sx = item.repeat.spacing.x, sy = item.repeat.spacing.y,
+                sz = item.repeat.spacing.z;
+    float hx = kernel::cmax(kernel::cabs(local.min.x), kernel::cabs(local.max.x));
+    float hy = kernel::cmax(kernel::cabs(local.min.y), kernel::cabs(local.max.y));
+    float hz = kernel::cmax(kernel::cabs(local.min.z), kernel::cabs(local.max.z));
+    return (hx + influence) <= sx * 0.5f && (hy + influence) <= sy * 0.5f &&
+           (hz + influence) <= sz * 0.5f;
+}
+
+// The guide's tightest turn against the widest profile: a point at perpendicular
+// offset r inside a bend of radius R is compressed by R / (R - r), which diverges
+// as the profile outgrows the bend. Not refused — a guide is editable after the
+// fact — so it degrades to a very small step instead.
+kernel::CFieldInfo swept_field_info(const Node& item) {
+    std::vector<StrokePoint> guide = curve_is_polyline(item.stroke, false)
+                                         ? item.stroke
+                                         : tessellate_curve(item.stroke, false,
+                                                            item.curve_tolerance);
+    // The CIRCUMRADIUS of each consecutive triple, not the turn angle over the
+    // arc: the angle estimate is fooled by tessellation density, reading a
+    // finely-sampled gentle curve as a tight one because short segments
+    // accumulate angle. A circumradius is the radius of the circle through the
+    // three points and is stable however finely the guide is sampled.
+    float tightest = 1e6f;
+    float total_len = 0.0f;
+    for (std::size_t i = 1; i < guide.size(); ++i)
+        total_len += kernel::clength(guide[i].pos - guide[i - 1].pos);
+    for (std::size_t i = 1; i + 1 < guide.size(); ++i) {
+        kernel::cfloat3 u = guide[i].pos - guide[i - 1].pos;
+        kernel::cfloat3 v = guide[i + 1].pos - guide[i].pos;
+        kernel::cfloat3 w = guide[i + 1].pos - guide[i - 1].pos;
+        float lu = kernel::clength(u), lv = kernel::clength(v), lw = kernel::clength(w);
+        float area2 = kernel::clength(kernel::ccross(u, v));  // 2 * triangle area
+        if (area2 < 1e-9f) continue;                          // collinear: straight
+        tightest = kernel::cmin(tightest, lu * lv * lw / (2.0f * area2));
+    }
+    float widest = 0.0f;
+    for (std::size_t i = 0; i < item.profiles.size(); ++i) {
+        const std::vector<kernel::cfloat2>& pts =
+            i < item.profile_polygons.size() ? item.profile_polygons[i]
+                                             : std::vector<kernel::cfloat2>{};
+        kernel::cfloat2 e = profile_extent_of(item.profiles[i], pts);
+        widest = kernel::cmax(widest, kernel::cmax(e.x, e.y));
+    }
+    // The profiles are lerped along the guide the way a loft's are along Z, so
+    // that term applies over the arc length between them.
+    float spread = 2.0f * widest;
+    float span = kernel::cmax(total_len, 1e-6f) /
+                 kernel::cmax((float)(item.profiles.size() - 1), 1.0f);
+    return kernel::cfi_swept(widest, tightest, spread, span,
+                             ease_max_slope(static_cast<std::uint8_t>(item.prim.params[0])));
+}
+
 struct Compiler {
     Tape tape;
     const CullRegion* cull;
@@ -108,43 +185,15 @@ struct Compiler {
 
     // -- field-info bookkeeping ----------------------------------------------
 
-    void fold_info(const Node& item, Op op, bool smooth) {
+    // `round_world` is the item's rounding in WORLD units, which relief reads
+    // as its falloff width. Passed in rather than recomputed from item.rounding:
+    // that one is local, and dividing an amplitude by a width that is too large
+    // understates the slope — the direction that makes a marcher overstep.
+    void fold_info(const Node& item, Op op, bool smooth, float round_world) {
         kernel::CFieldInfo prim_info =
             prim_is_bound_field(item.prim.type) ? kernel::cfi_bound() : kernel::cfi_exact();
-        // Repetition preserves exactness only when the item plus its rounding
-        // and blend influence fits inside its half-cell (docs/01 2.4). Check
-        // it rather than assume it: an overflowing array is a bound field.
-        if (item.repeat.active()) {
-            math::Aabb local = prim_local_bounds(item);
-            float influence = kernel::cmax(item.rounding, 0.0f) +
-                              kernel::cmax(item.blend.support(), item.blend.k);
-            bool fits = true;
-            if (item.repeat.type == kernel::crepeat_radial) {
-                int count = static_cast<int>(item.repeat.spacing.x);
-                float ring = kernel::cabs(item.repeat.spacing.y);
-                float reach = 0.0f;
-                if (!local.empty()) {
-                    for (int i = 0; i < 4; ++i) {
-                        float x = (i & 1) ? local.max.x : local.min.x;
-                        float z = (i & 2) ? local.max.z : local.min.z;
-                        reach = kernel::cmax(reach, kernel::clength(kernel::cf2(x, z)));
-                    }
-                }
-                // the copy must fit inside its angular sector at its radius
-                float sector_reach = ring * kernel::csin(3.14159265f /
-                                                         kernel::cmax((float)count, 2.0f));
-                fits = count >= 2 && (reach + influence) <= sector_reach;
-            } else if (!local.empty()) {
-                const float sx = item.repeat.spacing.x, sy = item.repeat.spacing.y,
-                            sz = item.repeat.spacing.z;
-                float hx = kernel::cmax(kernel::cabs(local.min.x), kernel::cabs(local.max.x));
-                float hy = kernel::cmax(kernel::cabs(local.min.y), kernel::cabs(local.max.y));
-                float hz = kernel::cmax(kernel::cabs(local.min.z), kernel::cabs(local.max.z));
-                fits = (hx + influence) <= sx * 0.5f && (hy + influence) <= sy * 0.5f &&
-                       (hz + influence) <= sz * 0.5f;
-            }
-            if (!fits) prim_info = kernel::cfi_bound();
-        }
+        if (item.repeat.active() && !repeat_preserves_exactness(item))
+            prim_info = kernel::cfi_bound();
 
         if (prim_is_volume(item.prim.type)) {
             // Interpolated samples are not an exact distance, and where there
@@ -153,50 +202,7 @@ struct Compiler {
             // see cfi_volume for why that is sqrt(3) and not 1.
             prim_info = kernel::cfi_volume(item.volume ? item.volume->sample_lipschitz() : 1.0f);
         } else if (prim_is_swept(item.prim.type) && item.profiles.size() >= 2) {
-            // The guide's tightest turn against the widest profile: a point at
-            // perpendicular offset r inside a bend of radius R is compressed
-            // by R / (R - r), which diverges as the profile outgrows the bend.
-            // Not refused — a guide is editable after the fact — so it
-            // degrades to a very small step instead.
-            std::vector<StrokePoint> guide =
-                curve_is_polyline(item.stroke, false)
-                    ? item.stroke
-                    : tessellate_curve(item.stroke, false, item.curve_tolerance);
-            // The CIRCUMRADIUS of each consecutive triple, not the turn angle
-            // over the arc: the angle estimate is fooled by tessellation
-            // density, reading a finely-sampled gentle curve as a tight one
-            // because short segments accumulate angle. A circumradius is the
-            // radius of the circle through the three points and is stable
-            // however finely the guide is sampled.
-            float tightest = 1e6f;
-            float total_len = 0.0f;
-            for (std::size_t i = 1; i < guide.size(); ++i)
-                total_len += kernel::clength(guide[i].pos - guide[i - 1].pos);
-            for (std::size_t i = 1; i + 1 < guide.size(); ++i) {
-                kernel::cfloat3 u = guide[i].pos - guide[i - 1].pos;
-                kernel::cfloat3 v = guide[i + 1].pos - guide[i].pos;
-                kernel::cfloat3 w = guide[i + 1].pos - guide[i - 1].pos;
-                float lu = kernel::clength(u), lv = kernel::clength(v), lw = kernel::clength(w);
-                float area2 = kernel::clength(kernel::ccross(u, v));  // 2 * triangle area
-                if (area2 < 1e-9f) continue;                          // collinear: straight
-                tightest = kernel::cmin(tightest, lu * lv * lw / (2.0f * area2));
-            }
-            float widest = 0.0f;
-            for (std::size_t i = 0; i < item.profiles.size(); ++i) {
-                const std::vector<kernel::cfloat2>& pts =
-                    i < item.profile_polygons.size() ? item.profile_polygons[i]
-                                                     : std::vector<kernel::cfloat2>{};
-                kernel::cfloat2 e = profile_extent_of(item.profiles[i], pts);
-                widest = kernel::cmax(widest, kernel::cmax(e.x, e.y));
-            }
-            // The profiles are lerped along the guide the way a loft's are
-            // along Z, so that term applies over the arc length between them.
-            float spread = 2.0f * widest;
-            float span = kernel::cmax(total_len, 1e-6f) /
-                         kernel::cmax((float)(item.profiles.size() - 1), 1.0f);
-            prim_info = kernel::cfi_swept(
-                widest, tightest, spread, span,
-                ease_max_slope(static_cast<std::uint8_t>(item.prim.params[0])));
+            prim_info = swept_field_info(item);
         } else if (prim_is_loft(item.prim.type) && item.profiles.size() >= 2) {
             // Interpolating two profile fields along Z adds |da - db| over the
             // depth they are mixed across. The profiles' combined extent
@@ -234,6 +240,12 @@ struct Compiler {
                                             1e-6f);
             span /= kernel::cmax(ease_max_slope(item.transition.ease), 1e-6f);
             tape.info = kernel::cfi_transition(tape.info, prim_info, diff_bound, span);
+        } else if (op == Op::Relief || op == Op::Incise) {
+            // Relief does not blend two fields — it offsets the accumulated one
+            // by a weighted amplitude, so its cost is that term's gradient, not
+            // a blend's. The item's own field never reaches the result, which
+            // is why prim_info plays no part here.
+            tape.info = kernel::cfi_relief(tape.info, item.blend.k, round_world);
         } else if (op_is_extended(op))
             tape.info = kernel::cfi_extended_blend(tape.info, prim_info, op_is_diagonal(op));
         else
@@ -461,7 +473,8 @@ struct Compiler {
                     emit_combine(n->op, n->blend,
                                  n->rounding * layer.xform.scale * n->xform.scale,
                                  &n->transition);
-                fold_info(*n, (have_acc || seeded) ? n->op : Op::Add, smooth && have_acc);
+                fold_info(*n, (have_acc || seeded) ? n->op : Op::Add, smooth && have_acc,
+                          n->rounding * layer.xform.scale * n->xform.scale);
                 have_acc = true;
             }
         }

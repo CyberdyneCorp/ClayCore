@@ -127,6 +127,15 @@ enum class Op : std::uint8_t {
     Inset = kernel::ccombine_inset,
     Shell = kernel::ccombine_shell,
     Replace = kernel::ccombine_replace,
+    // Surface relief: the item is a REGION, and blend.k is the amplitude by
+    // which the surface accumulated BEFORE it moves along its own normal. The
+    // node's rounding is the falloff width, the convention groove and tongue
+    // already use.
+    //
+    // A pair rather than one signed amplitude, because blend.k cannot be
+    // negative — and because add/subtract and engrave/emboss are pairs too.
+    Relief = kernel::ccombine_relief,  // build up
+    Incise = kernel::ccombine_incise,  // cut in
     // Spatial morphs (Node::transition carries their parameters). NON-LOCAL:
     // the weight reaches arbitrarily far, so these report infinite influence
     // and are never culled — see op_is_local below.
@@ -152,8 +161,12 @@ struct Transition {
 };
 
 inline bool op_is_extended(Op op) {
-    return static_cast<int>(op) >= kernel::ccombine_groove &&
-           static_cast<int>(op) <= kernel::ccombine_replace;
+    // A range plus one, deliberately: the transitions sit numerically between
+    // Replace and Relief and are NOT extended — they are non-local, and
+    // sweeping them into this predicate would let culling drop them.
+    return (static_cast<int>(op) >= kernel::ccombine_groove &&
+            static_cast<int>(op) <= kernel::ccombine_replace) ||
+           op == Op::Relief || op == Op::Incise;
 }
 
 // Diagonal modes mix both gradients (Lipschitz up to sqrt(2); exactness.h).

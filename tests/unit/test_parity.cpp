@@ -116,6 +116,19 @@ std::vector<ParityScene> parity_scenes() {
         scenes.push_back({"noise_fractal", std::move(doc), 3.0f});
     }
 
+    {   // relief: an item used as a REGION, displacing the field accumulated
+        // before it — the op that reads the accumulator rather than adding to it
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        l.sdf->insert(item(Prim::sphere(0.8f), cf3(0, 0, 0)));
+        Node region = item(Prim::sphere(0.4f), cf3(0.2f, 0.7f, 0));
+        region.op = scene::Op::Relief;
+        region.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.13f};
+        region.rounding = 0.22f;
+        l.sdf->insert(region);
+        scenes.push_back({"relief", std::move(doc), 3.0f});
+    }
+
     {   // magnify: a radial scale about a point, with finite support
         Document doc;
         Layer& l = doc.add_sdf_layer("l");

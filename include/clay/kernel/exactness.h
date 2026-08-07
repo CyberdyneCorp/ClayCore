@@ -195,6 +195,17 @@ CLAY_FN CFieldInfo cfi_transition(CFieldInfo a, CFieldInfo b, float diff_bound, 
 // proportional to how far the value moves times the gradient of the weight.
 // An operator that does so declares it here rather than letting the marcher
 // find out.
+// relief: the accumulated field is offset by amplitude * w(b.d), and w varies
+// over the falloff width, so the slope gains |amplitude| / width times the
+// weight curve's own steepest slope. A smoothstep peaks at 1.5.
+//
+// That ratio is the whole cost model: a deep relief through a narrow falloff is
+// a steep field, and the marcher pays for it by a declared amount rather than
+// by stepping through the surface.
+CLAY_FN CFieldInfo cfi_relief(CFieldInfo a, float amplitude, float width) {
+    return CFieldInfo{false, a.lipschitz + cabs(amplitude) * 1.5f / cmax(width, 1e-6f)};
+}
+
 CLAY_FN CFieldInfo cfi_volume(float sample_lipschitz) {
     return CFieldInfo{false, 1.7320508f * cmax(sample_lipschitz, 1.0f)};
 }

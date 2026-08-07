@@ -72,5 +72,5 @@ why it samples a smaller volume than either of them.
 - New `include/clay/field/mask_extrude.h`, `src/field/mask_extrude.cpp`.
 - `bindings/c/clay.h`, `bindings/c/clay_c.cpp`, `bindings/python/pyclay_module.cpp`.
 - New `tests/unit/test_mask_extrude.cpp`, `tests/unit/test_c_mask_extrude.cpp`;
-  new `examples/25_mask_extrude.py` and its entry in `CAPABILITY_EXAMPLES`;
+  new `examples/26_mask_extrude.py` and its entry in `CAPABILITY_EXAMPLES`;
   docs and roadmap.

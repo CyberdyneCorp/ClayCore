@@ -40,7 +40,8 @@ EXAMPLES = [
     "22_snakehook",
     "23_magnify",
     "24_noise",
-    "25_mask_extrude",
+    "25_relief",
+    "26_mask_extrude",
 ]
 
 
@@ -60,7 +61,7 @@ CAPABILITY_EXAMPLES = {
     "meshing": "08_meshing_and_io",  # plus 19_mesh_import for the reverse direction
     "picking": "10_editing",
     "file-io": "08_meshing_and_io",
-    "voxel-engine": "15_voxel_verbs_and_repair",  # plus 11_masks and 25_mask_extrude
+    "voxel-engine": "15_voxel_verbs_and_repair",  # plus 11_masks and 26_mask_extrude
     "brush-engine": "12_strokes",   # plus 11_masks for the mask brush
     "cut-tool": "14_cut",
     "python-bindings": None,      # every example IS this capability

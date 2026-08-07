@@ -254,7 +254,8 @@ def test_stroke_numpy_batch_form():
 
 
 @pytest.mark.parametrize("op", ["GROOVE", "TONGUE", "PIPE", "ENGRAVE",
-                                "EMBOSS", "INSET", "SHELL", "REPLACE"])
+                                "EMBOSS", "INSET", "SHELL", "REPLACE",
+                                "RELIEF", "INCISE"])
 def test_extended_ops_evaluate_and_round_trip(op, tmp_path):
     doc = clay.Document()
     body = doc.add_sdf_layer("body")
@@ -303,6 +304,66 @@ def test_extended_ops_differ_from_each_other():
     # engrave only carves (field rises), emboss only adds (field falls)
     assert np.all(engrave >= base - 1e-5)
     assert np.all(emboss <= base + 1e-5)
+
+
+def test_relief_and_incise_are_a_region_not_a_shape():
+    # The distinction that makes these two ops different from every other one:
+    # the item is a REGION selecting where the already-accumulated surface moves,
+    # not geometry that is itself added or subtracted.
+    def ball(op=None):
+        doc = clay.Document()
+        layer = doc.add_sdf_layer("l")
+        layer.add(clay.Sphere(r=0.7))
+        if op is not None:
+            layer.add(clay.Sphere(r=0.35, position=(0, 0.7, 0)),
+                      op=op, blend=clay.Smooth(0.12), rounding=0.25)
+        return doc
+
+    def top(doc):
+        ys = np.arange(0.2, 1.4, 0.001, dtype=np.float32)
+        pts = np.stack([np.zeros_like(ys), ys, np.zeros_like(ys)], axis=1)
+        return float(ys[np.nonzero(doc.eval(pts) > 0.0)[0][0]])
+
+    base = top(ball())
+    up = top(ball(clay.Op.RELIEF))
+    down = top(ball(clay.Op.INCISE))
+    # Offsetting a distance field moves its isosurface along its own gradient by
+    # exactly the offset, so both directions land the full amplitude away.
+    assert up - base == pytest.approx(0.12, abs=0.01)
+    assert base - down == pytest.approx(0.12, abs=0.01)
+
+    # A relief item on its own has nothing to displace, so it is not a surface.
+    solo = clay.Document()
+    solo.add_sdf_layer("l").add(clay.Sphere(r=0.35), op=clay.Op.RELIEF,
+                                blend=clay.Smooth(0.12), rounding=0.25)
+    rng = np.random.default_rng(4)
+    assert np.all(solo.eval(rng.uniform(-1, 1, size=(2000, 3)).astype(np.float32)) > 0)
+
+
+def test_relief_support_is_finite_and_costs_the_marcher():
+    def ball(op=None, amplitude=0.12, width=0.25):
+        doc = clay.Document()
+        layer = doc.add_sdf_layer("l")
+        layer.add(clay.Sphere(r=0.7))
+        if op is not None:
+            layer.add(clay.Sphere(r=0.35, position=(0, 0.7, 0)),
+                      op=op, blend=clay.Smooth(amplitude), rounding=width)
+        return doc
+
+    rng = np.random.default_rng(9)
+    probes = rng.uniform(-1.5, 1.5, size=(8000, 3)).astype(np.float32)
+    # Radius + rounding + falloff: the rounding does double duty here exactly as
+    # it does for groove and tongue — it rounds the region's own field AND is the
+    # falloff width, so the taper sits outside the rounded surface.
+    outside = np.linalg.norm(probes - np.array([0, 0.7, 0], np.float32), axis=1) > 0.85
+    delta = np.abs(ball(clay.Op.RELIEF).eval(probes[outside])
+                   - ball().eval(probes[outside]))
+    assert delta.max() < 1e-5, "influence bounds and brick culling trust this"
+
+    # Offsetting the distance is not distance preserving, and the tape says so.
+    assert ball().safe_step_scale() > ball(clay.Op.RELIEF).safe_step_scale()
+    steep = ball(clay.Op.RELIEF, amplitude=0.2, width=0.1)
+    assert steep.safe_step_scale() < ball(clay.Op.RELIEF).safe_step_scale()
 
 
 def test_voxel_grid_edits_and_queries():
