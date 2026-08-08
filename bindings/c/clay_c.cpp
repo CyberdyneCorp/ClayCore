@@ -36,6 +36,7 @@
 #include "clay/voxel/grid.h"
 #include "clay/brush/move.h"
 #include "clay/brush/stroke.h"
+#include "clay/brush/tube.h"
 #include "clay/cut/cut.h"
 #include "clay/voxel/mask.h"
 
@@ -415,6 +416,8 @@ clay_result resolve_mask(const clay_mask* mask, voxel::MaskField** out);
 constexpr std::size_t kRepairReportOriginal =
     offsetof(clay_repair_report, airtight) + sizeof(std::int32_t);
 
+constexpr std::size_t kTubeParamsOriginal =
+    offsetof(clay_tube_params, blend_k) + sizeof(float);
 constexpr std::size_t kCutDescOriginal =
     offsetof(clay_cut_desc, far_extent) + sizeof(float);
 
@@ -2426,6 +2429,62 @@ clay_item* clay_cut_create(const clay_cut_desc* desc, const float* polygon_xy,
     std::optional<scene::Node> node = cut::cut_item(frame, shape, region, options);
     if (!node) {
         fail(CLAY_ERROR_INVALID_ARGUMENT, "the cut is degenerate: a shape with no area");
+        return nullptr;
+    }
+    auto* item = new clay_item();
+    item->node = std::move(*node);
+    return item;
+}
+
+clay_item* clay_tube_create(const float* points_xyz, size_t count,
+                            const clay_tube_params* params, int32_t profile,
+                            const float* profile_params, size_t profile_param_count) {
+    if (!points_xyz || !params || count < 2) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "a tube needs at least two points");
+        return nullptr;
+    }
+    clay_tube_params p;
+    if (read_desc(params, kTubeParamsOriginal, &p) != CLAY_OK) return nullptr;
+    if (p.point_type < 0 || p.point_type > CLAY_POINT_BEZIER) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown point type");
+        return nullptr;
+    }
+
+    brush::TubeSettings settings;
+    settings.point_type = static_cast<scene::StrokePointType>(p.point_type);
+    settings.radius_start = p.radius_start;
+    settings.radius_mid = p.radius_mid;
+    settings.radius_end = p.radius_end;
+    settings.closed = p.closed != 0;
+    settings.tolerance = p.tolerance > 0.0f ? p.tolerance : 0.01f;
+    settings.blend_k = p.blend_k;
+
+    std::vector<kernel::cfloat3> path;
+    path.reserve(count);
+    for (std::size_t i = 0; i < count; ++i)
+        path.push_back(kernel::cf3(points_xyz[i * 3], points_xyz[i * 3 + 1],
+                                   points_xyz[i * 3 + 2]));
+
+    std::optional<scene::Node> node;
+    if (profile >= 0) {
+        if (profile > CLAY_PROFILE_POLYGON || profile == CLAY_PROFILE_POLYGON) {
+            fail(CLAY_ERROR_INVALID_ARGUMENT,
+                 "a tube profile must be a parametric kind, not a polygon");
+            return nullptr;
+        }
+        if (check_params("profile", profile_params, profile_param_count,
+                         kProfileParams[profile]) != CLAY_OK)
+            return nullptr;
+        scene::Profile prof{static_cast<std::uint8_t>(profile), {}};
+        for (std::size_t i = 0; i < profile_param_count; ++i)
+            prof.params[i] = profile_params[i];
+        node = brush::tube_with_profile(path, {prof}, settings);
+    } else {
+        node = brush::tube(path, settings);
+    }
+    if (!node) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT,
+             "a tube needs at least two points and a radius > 0 somewhere");
         return nullptr;
     }
     auto* item = new clay_item();

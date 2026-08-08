@@ -695,6 +695,86 @@ def test_move_topological_refuses_what_is_not_a_move():
                                              displacement=(0.1, 0, 0), radius=0.3, cell=0.0)
 
 
+_TUBE_PATH = np.array([[-0.62, -0.18, 0.10], [-0.26, 0.30, -0.12],
+                       [0.14, -0.05, 0.16], [0.52, 0.34, -0.08]], np.float32)
+
+
+def _tube_doc(**kwargs):
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.tube(_TUBE_PATH, **kwargs))
+    return doc
+
+
+def _across(doc, point, reach=0.5):
+    ts = np.arange(-reach, reach, 0.002, dtype=np.float32)
+    pts = np.array(point, np.float32)[None, :] + ts[:, None] * np.array([0, 0, 1], np.float32)
+    inside = np.nonzero(doc.eval(pts.astype(np.float32)) <= 0)[0]
+    return float(ts[inside[-1]] - ts[inside[0]]) if len(inside) else 0.0
+
+
+def test_tube_follows_its_path_and_stays_exact():
+    """A round tube is a swept SPHERE, so it costs the raymarcher nothing."""
+    doc = _tube_doc(radius=0.09)
+    assert doc.safe_step_scale() == pytest.approx(1.0)
+    # the path is inside it
+    assert float(doc.eval(np.array([_TUBE_PATH[1]], np.float32))[0]) > -1.0
+
+
+def test_tube_radius_varies_and_follows_arc_length():
+    doc = _tube_doc(point_type="hard", radius=0.14, radius_mid=0.09, radius_end=0.03)
+    widths = [_across(doc, p) for p in (_TUBE_PATH[0], _TUBE_PATH[1], _TUBE_PATH[3])]
+    assert all(a > b for a, b in zip(widths, widths[1:])), widths
+    assert widths[0] == pytest.approx(0.28, abs=0.03)
+    assert widths[-1] == pytest.approx(0.06, abs=0.03)
+
+    # By ARC LENGTH: bunching the control points must not bunch the taper.
+    even = np.array([[t, 0.0, 0.0] for t in np.linspace(-0.6, 0.6, 5)], np.float32)
+    bunched = np.array([[t, 0.0, 0.0] for t in (-0.6, -0.5, -0.4, 0.0, 0.6)], np.float32)
+    kw = dict(point_type="hard", radius=0.16, radius_mid=0.10, radius_end=0.04)
+    mid = np.array([0.0, 0.0, 0.0], np.float32)
+
+    def doc_of(path):
+        d = clay.Document()
+        d.add_sdf_layer("l").add(clay.tube(path, **kw))
+        return d
+
+    assert _across(doc_of(even), mid) == pytest.approx(_across(doc_of(bunched), mid), abs=0.02)
+
+
+def test_tube_profile_chooses_the_representation():
+    """A circle is free; anything else is a swept item and costs step scale."""
+    assert _tube_doc(radius=0.09).safe_step_scale() == pytest.approx(1.0)
+    for profile in (clay.Profile.box(0.09, 0.05), clay.Profile.hexagon(0.09)):
+        doc = _tube_doc(profile=profile)
+        assert doc.safe_step_scale() < 1.0
+
+
+def test_tube_point_type_is_the_smoothness_toggle():
+    """A B-spline APPROXIMATES its control points; a hard chain passes through."""
+    at_corner = {k: float(_tube_doc(point_type=k, radius=0.09)
+                          .eval(np.array([_TUBE_PATH[1]], np.float32))[0])
+                 for k in ("hard", "spline", "bspline")}
+    assert at_corner["hard"] < 0.0                    # the corner is inside the tube
+    assert at_corner["bspline"] > at_corner["hard"]   # ...and outside the B-spline one
+
+
+def test_tube_closed_joins_and_refuses_what_is_not_a_path():
+    ring = np.array([[np.cos(a) * 0.4, np.sin(a) * 0.4, 0.0]
+                     for a in np.linspace(0, 2 * np.pi, 7)[:-1]], np.float32)
+    closed = clay.Document()
+    closed.add_sdf_layer("l").add(clay.tube(ring, radius=0.07, closed=True))
+    opened = clay.Document()
+    opened.add_sdf_layer("l").add(clay.tube(ring, radius=0.07, closed=False))
+    # The join fills the gap between the last point and the first.
+    gap = np.array([[0.4 * np.cos(-0.5), 0.4 * np.sin(-0.5), 0.0]], np.float32)
+    assert float(closed.eval(gap)[0]) < float(opened.eval(gap)[0])
+
+    with pytest.raises(ValueError, match="at least two points"):
+        clay.tube(_TUBE_PATH[:1], radius=0.1)
+    with pytest.raises(ValueError, match="radius"):
+        clay.tube(_TUBE_PATH, radius=0.0, radius_mid=0.0, radius_end=0.0)
+
+
 def test_voxel_grid_edits_and_queries():
     g = clay.VoxelGrid(voxel_size=0.5)
     red = g.palette_add("#ff0000")

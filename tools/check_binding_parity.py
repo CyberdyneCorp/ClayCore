@@ -125,6 +125,7 @@ ALIASES = {
     "module.snakehook": "clay_item_set_curve_points",
     "CutShape.trim": "clay_cut_polygon_from_open_curve",
     "Volume.moved_topologically_from": "clay_item_volume_move_topological",
+    "module.tube": "clay_tube_create",
     "module.backends": "clay_list_backends",
 }
 

@@ -273,6 +273,7 @@ written, so a host can preview the result before committing it.
 | `cut::cut_item` | A shape drawn on a frame (rect, circle, polygon, spline lasso, **open trim curve**) becomes an extruded item sized to cut through | a `Node`, or nothing for a non-orthonormal frame or a zero-area shape |
 | `brush::snakehook` | A drag from a surface anchor becomes a tapered stroke item — a horn, tendril or spike | a `Node`, or nothing for an empty path or degenerate normal |
 | `brush::move_brush` | A world-space drag becomes the per-item warps that move the ASSEMBLED surface | one `grab` per contributing item, in that item's own frame |
+| `brush::tube` | Nomad Sculpt's Tubes: a drawn path becomes a rope, pipe or tentacle — a swept SPHERE (exact) with no profile, a swept item (bound) with one | a `Node`, or nothing for fewer than two points or no positive radius |
 
 **The cut is a prism, not a frustum.** A converging cut has a non-flat face and
 a result that depends on where the camera stood, so the sweep is parallel and
@@ -288,6 +289,17 @@ points give different polygons and different fields. `side` names the half the
 outline covers; the op still decides its fate, so covering *above* and
 subtracting keeps the same material as covering *below* and intersecting. See
 [`examples/30_trim_curve.py`](../examples/30_trim_curve.py).
+
+**The Tube tool joins things that already existed.** The smooth/sharp toggle is
+the curve's own `StrokePointType`; a varying radius is the stroke opcode's
+per-point radius; a non-circular cross-section is `Prim::swept`; a closed tube is
+`stroke_closed`. What the resolver adds is the radius distributed by **arc
+length** — so a path whose control points bunch does not bunch the taper — and
+the choice of representation, which is the cross-section itself rather than a
+flag: no profile is a swept sphere and stays **exact** at step scale 1.0, while a
+box or hexagon is a swept item at about 0.55. There is no "Validate" step,
+because a tube is an ordinary item from the start rather than a live curve
+waiting to become geometry. See [`examples/32_tube.py`](../examples/32_tube.py).
 
 **Snakehook adds material rather than moving it.** ZBrush pulls existing
 surface, so the body dimples slightly where the tendril came from; this grows a

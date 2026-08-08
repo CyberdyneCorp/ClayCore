@@ -47,6 +47,7 @@ EXAMPLES = [
     "29_claybuildup_smooth",
     "30_trim_curve",
     "31_move_topological",
+    "32_tube",
 ]
 
 

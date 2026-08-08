@@ -85,6 +85,7 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 | hPolish, Planar, Trim | `field::flatten` cut-only | 🟡 planes down without filling, but **single-pass**: chaining bakes samples a volume and degrades |
 | Trim / Clip | `cut::cut_item` | ✅ as a solid, Clip *is* Trim |
 | SnakeHook | `brush::snakehook` | ✅ adds material rather than pulling it |
+| Tubes (Nomad Sculpt) | `brush::tube` | ✅ path, B-spline toggle, variable radius, profile, closed — a round tube stays exact |
 | Surface Noise | `noise` deformer | ✅ integer hash, so all backends agree |
 | Blob | — | ⬜ `add-blob-brush`, unblocked |
 | Pulling a lobe out | `brush::snakehook` | ✅ the verb for growing form; Move is the verb for nudging it |

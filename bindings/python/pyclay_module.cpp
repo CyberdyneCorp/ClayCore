@@ -30,6 +30,7 @@
 #include "clay/voxel/grid.h"
 #include "clay/brush/move.h"
 #include "clay/brush/stroke.h"
+#include "clay/brush/tube.h"
 #include "clay/cut/cut.h"
 #include "clay/field/flatten.h"
 #include "clay/field/move_topological.h"
@@ -2068,6 +2069,90 @@ NB_MODULE(pyclay, m) {
             }
             return arr;
         });
+
+    m.def("tube",
+          [](nb::handle path, const std::string& point_type, float radius, nb::handle radius_mid,
+             nb::handle radius_end, bool closed, nb::handle profile, float tolerance,
+             float blend_k) -> nb::object {
+              PointsView pts = to_points(path);
+              std::vector<kernel::cfloat3> points;
+              points.reserve(pts.count);
+              for (std::size_t i = 0; i < pts.count; ++i)
+                  points.push_back(kernel::cf3(pts.data[i * 3], pts.data[i * 3 + 1],
+                                               pts.data[i * 3 + 2]));
+
+              brush::TubeSettings settings;
+              settings.point_type = parse_point_type(point_type);
+              settings.radius_start = radius;
+              settings.radius_mid = radius_mid.is_none() ? radius : nb::cast<float>(radius_mid);
+              settings.radius_end = radius_end.is_none() ? radius : nb::cast<float>(radius_end);
+              settings.closed = closed;
+              settings.tolerance = tolerance;
+              settings.blend_k = blend_k;
+
+              if (!profile.is_none()) {
+                  // Profiles cross as PyProfile, which carries its polygon points
+                  // alongside the engine's Profile — a polygon profile is the two
+                  // together, so unwrapping only the first would lose the shape.
+                  std::vector<scene::Profile> profiles;
+                  std::vector<std::vector<kernel::cfloat2>> polygons;
+                  auto take = [&](nb::handle h) {
+                      const PyProfile& p = nb::cast<const PyProfile&>(h);
+                      profiles.push_back(p.profile);
+                      polygons.push_back(p.points);
+                  };
+                  if (nb::isinstance<PyProfile>(profile)) take(profile);
+                  else
+                      for (nb::handle h : nb::cast<nb::sequence>(profile)) take(h);
+                  std::optional<scene::Node> node =
+                      brush::tube_with_profile(points, profiles, settings);
+                  if (!node)
+                      throw std::invalid_argument(
+                          "a profiled tube needs at least two points and a profile");
+                  PySwept out;
+                  out.prim = node->prim;
+                  out.stroke = node->stroke;
+                  out.stroke_closed = node->stroke_closed;
+                  out.curve_tolerance = node->curve_tolerance;
+                  out.profiles = node->profiles;
+                  out.profile_polygons = node->profile_polygons;
+                  // The resolver duplicates a lone profile so a sweep has two to
+                  // interpolate between; the polygons have to follow it.
+                  while (polygons.size() < out.profiles.size())
+                      polygons.push_back(polygons.empty() ? std::vector<kernel::cfloat2>{}
+                                                          : polygons.back());
+                  out.profile_polygons = polygons;
+                  return nb::cast(out);
+              }
+
+              std::optional<scene::Node> node = brush::tube(points, settings);
+              if (!node)
+                  throw std::invalid_argument(
+                      "a tube needs at least two points and a radius > 0 somewhere");
+              PyStroke out;
+              out.prim = node->prim;
+              out.stroke = node->stroke;
+              out.stroke_closed = node->stroke_closed;
+              out.stroke_blend_k = node->stroke_blend_k;
+              out.curve_tolerance = node->curve_tolerance;
+              return nb::cast(out);
+          },
+          "path"_a, "point_type"_a = "bspline", "radius"_a = 0.08f,
+          "radius_mid"_a = nb::none(), "radius_end"_a = nb::none(), "closed"_a = false,
+          "profile"_a = nb::none(), "tolerance"_a = 0.01f, "blend_k"_a = 0.0f,
+          "Nomad Sculpt's Tubes: a drawn path becomes a rope, pipe, tentacle or\n"
+          "hair strand along it.\n\n"
+          "`point_type` is the smooth/sharp toggle — 'hard' turns at each control\n"
+          "point, 'bspline' rounds through them — because a tube's path is the\n"
+          "same kind of curve every other item takes, not a new one.\n\n"
+          "`radius`, `radius_mid` and `radius_end` are Nomad's three handles, and\n"
+          "are interpolated by ARC LENGTH so a path whose points bunch does not\n"
+          "bunch the taper. Omitting the last two gives a uniform tube.\n\n"
+          "With no `profile` this is a swept SPHERE, which is an exact distance\n"
+          "field: the safe step scale stays 1. A `profile` (or a list of them)\n"
+          "makes it a swept item instead — a square or custom cross-section, at\n"
+          "the cost of a bound field and a step scale below 1. That choice is the\n"
+          "profile itself rather than a separate flag.");
 
     m.def("snakehook",
           [](nb::handle anchor, nb::handle inward, nb::handle path, float base_radius,

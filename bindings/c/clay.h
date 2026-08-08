@@ -1153,6 +1153,40 @@ clay_item* clay_cut_create(const clay_cut_desc* desc, const float* polygon_xy,
  * out_xy == NULL to receive the vertex count in *count. `points_xyzr` and the
  * optional `types` are as clay_item_set_curve_points takes them; only x and y
  * are read, since the outline lies in the cut plane. */
+/* -- the Tube tool --------------------------------------------------------- */
+
+/* Nomad Sculpt's Tubes: a drawn path becomes a rope, pipe, tentacle or hair
+ * strand along it.
+ *
+ * `point_type` is the smooth/sharp toggle and is the curve's own point type
+ * (CLAY_POINT_*), because a tube's path is the same kind of curve every other
+ * item takes. The three radii are Nomad's handles and are interpolated by ARC
+ * LENGTH, so a path whose control points bunch does not bunch the taper.
+ *
+ * With no profile the tube is a swept SPHERE — an exact distance field, so the
+ * safe step scale stays 1. Give a profile and it becomes a swept item instead:
+ * a square or hexagonal cross-section at the cost of a bound field. That choice
+ * is the profile rather than a separate flag. */
+typedef struct clay_tube_params {
+    uint32_t struct_size;  /* = sizeof(clay_tube_params); required */
+    int32_t point_type;    /* CLAY_POINT_HARD / _SPLINE / _BSPLINE / _BEZIER */
+    float radius_start;
+    float radius_mid;
+    float radius_end;
+    int32_t closed;
+    float tolerance;
+    float blend_k;         /* smoothing between consecutive segments; 0 is plain */
+} clay_tube_params;
+
+/* Resolve a path into a tube. `points_xyz` is count*3 floats.
+ *
+ * `profile` is CLAY_PROFILE_* with its parameters in profile_params, or < 0 for
+ * a round tube. Returns NULL for fewer than two points, or a radius that is
+ * positive nowhere. Free the result with clay_item_destroy. */
+clay_item* clay_tube_create(const float* points_xyz, size_t count,
+                            const clay_tube_params* params, int32_t profile,
+                            const float* profile_params, size_t profile_param_count);
+
 /* Which half of the frame a trim's outline covers. The OP still decides that
  * half's fate: CLAY_OP_SUBTRACT removes it, CLAY_OP_INTERSECT keeps only it. */
 typedef enum clay_trim_side {
