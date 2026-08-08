@@ -1830,6 +1830,40 @@ NB_MODULE(pyclay, m) {
                         return cut::CutShape::from_polygon(to_polygon(vertices));
                     },
                     "vertices"_a, "An (N, 2) outline; it closes implicitly")
+        .def_static("trim",
+                    [](nb::handle points, const std::string& side, nb::handle extent,
+                       nb::handle types, float tolerance) {
+                        std::vector<scene::StrokePoint> control = to_stroke_points(points);
+                        apply_point_types(control, types);
+                        cut::CutShape::Side which;
+                        if (side == "below") which = cut::CutShape::Side::Below;
+                        else if (side == "above") which = cut::CutShape::Side::Above;
+                        else if (side == "left") which = cut::CutShape::Side::Left;
+                        else if (side == "right") which = cut::CutShape::Side::Right;
+                        else
+                            throw std::invalid_argument(
+                                "side must be 'below', 'above', 'left' or 'right', got '" +
+                                side + "'");
+                        kernel::cfloat3 e = to_f3(extent, "extent");
+                        cut::CutShape shape = cut::CutShape::from_open_curve(
+                            control, which, kernel::cf2(e.x, e.y), tolerance);
+                        if (shape.polygon.empty())
+                            throw std::invalid_argument(
+                                "a trim needs at least two control points");
+                        return shape;
+                    },
+                    "points"_a, "side"_a = "below", "extent"_a = nb::make_tuple(4.0f, 4.0f, 0.0f),
+                    "types"_a = "spline", "tolerance"_a = 0.01f,
+                    "ZBrush's Trim Curve: an OPEN stroke drawn across the form,\n"
+                    "closed against the frame's bounds on the side it covers.\n\n"
+                    "NOT `curve`, which tessellates CLOSED and is a spline lasso —\n"
+                    "joining a trim stroke's endpoints cuts a sliver between them\n"
+                    "instead of dividing the frame. Different shapes from the same\n"
+                    "points, so different constructors.\n\n"
+                    "`side` names which half the outline COVERS; the op still\n"
+                    "decides its fate, as it does for every cut: SUBTRACT removes\n"
+                    "that half, INTERSECT keeps only it. `extent` is how far the\n"
+                    "closing edge reaches, in the frame's units.")
         .def_static("curve",
                     [](nb::handle points, nb::handle types, float tolerance) {
                         std::vector<scene::StrokePoint> control = to_stroke_points(points);

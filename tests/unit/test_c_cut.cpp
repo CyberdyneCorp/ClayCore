@@ -224,3 +224,48 @@ TEST_CASE("c cut: invalid descriptors are refused") {
     CHECK(clay_cut_polygon_from_curve(control, 2, nullptr, 0.01f, nullptr, nullptr) ==
           CLAY_ERROR_INVALID_ARGUMENT);
 }
+
+TEST_CASE("c cut: an open trim curve closes against the frame bounds") {
+    // ZBrush's Trim Curve. The size-query pattern first, as the lasso uses.
+    std::vector<float> pts;
+    for (int i = 0; i < 7; ++i) {
+        const float x = -1.2f + 0.4f * static_cast<float>(i);
+        pts.push_back(x);
+        pts.push_back(0.2f * std::sin(x * 2.6f));
+        pts.push_back(0.0f);
+        pts.push_back(0.0f);
+    }
+    const float extent[2] = {3.0f, 3.0f};
+
+    std::size_t n = 0;
+    REQUIRE(clay_cut_polygon_from_open_curve(pts.data(), 7, nullptr, CLAY_TRIM_BELOW, extent,
+                                             0.01f, nullptr, &n) == CLAY_OK);
+    REQUIRE(n > 7);  // the stroke, plus the two vertices that close it
+
+    std::vector<float> xy(n * 2);
+    REQUIRE(clay_cut_polygon_from_open_curve(pts.data(), 7, nullptr, CLAY_TRIM_BELOW, extent,
+                                             0.01f, xy.data(), &n) == CLAY_OK);
+    // The closing edge runs along the bound on the side being covered.
+    CHECK(xy[(n - 1) * 2 + 1] == doctest::Approx(-3.0f));
+    CHECK(xy[(n - 2) * 2 + 1] == doctest::Approx(-3.0f));
+
+    SUBCASE("the other side closes the other way") {
+        std::size_t m = 0;
+        REQUIRE(clay_cut_polygon_from_open_curve(pts.data(), 7, nullptr, CLAY_TRIM_ABOVE,
+                                                 extent, 0.01f, nullptr, &m) == CLAY_OK);
+        std::vector<float> up(m * 2);
+        REQUIRE(clay_cut_polygon_from_open_curve(pts.data(), 7, nullptr, CLAY_TRIM_ABOVE,
+                                                 extent, 0.01f, up.data(), &m) == CLAY_OK);
+        CHECK(up[(m - 1) * 2 + 1] == doctest::Approx(3.0f));
+    }
+
+    SUBCASE("and it refuses what is not a stroke") {
+        std::size_t m = 0;
+        CHECK(clay_cut_polygon_from_open_curve(pts.data(), 1, nullptr, CLAY_TRIM_BELOW, extent,
+                                               0.01f, nullptr, &m) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_cut_polygon_from_open_curve(pts.data(), 7, nullptr, 99, extent, 0.01f,
+                                               nullptr, &m) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_cut_polygon_from_open_curve(pts.data(), 7, nullptr, CLAY_TRIM_BELOW, extent,
+                                               0.0f, nullptr, &m) == CLAY_ERROR_INVALID_ARGUMENT);
+    }
+}

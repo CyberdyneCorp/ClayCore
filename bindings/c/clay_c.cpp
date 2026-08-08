@@ -2407,6 +2407,42 @@ clay_item* clay_cut_create(const clay_cut_desc* desc, const float* polygon_xy,
     return item;
 }
 
+clay_result clay_cut_polygon_from_open_curve(const float* points_xyzr, size_t count,
+                                             const int32_t* types, int32_t side,
+                                             const float extent_xy[2], float tolerance,
+                                             float* out_xy, size_t* out_count) {
+    if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null count");
+    if (!extent_xy) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null extent");
+    if (!(tolerance > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "tolerance must be > 0");
+    if (side < 0 || side > CLAY_TRIM_RIGHT)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown trim side: " + std::to_string(side));
+    std::vector<scene::StrokePoint> control;
+    clay_result r = read_curve_points(points_xyzr, count, types, nullptr, nullptr, &control);
+    if (r != CLAY_OK) return r;
+
+    cut::CutShape shape = cut::CutShape::from_open_curve(
+        control, static_cast<cut::CutShape::Side>(side),
+        kernel::cf2(extent_xy[0], extent_xy[1]), tolerance);
+    if (shape.polygon.empty())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a trim needs at least two control points");
+    const std::size_t needed = shape.polygon.size();
+    if (!out_xy) {
+        *out_count = needed;
+        return CLAY_OK;
+    }
+    if (*out_count < needed) {
+        *out_count = needed;
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "the outline needs " + std::to_string(needed) + " vertices");
+    }
+    for (std::size_t i = 0; i < needed; ++i) {
+        out_xy[i * 2 + 0] = shape.polygon[i].x;
+        out_xy[i * 2 + 1] = shape.polygon[i].y;
+    }
+    *out_count = needed;
+    return CLAY_OK;
+}
+
 clay_result clay_cut_polygon_from_curve(const float* points_xyzr, size_t count,
                                         const int32_t* types, float tolerance, float* out_xy,
                                         size_t* out_count) {

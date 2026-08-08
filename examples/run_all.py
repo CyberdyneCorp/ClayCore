@@ -45,6 +45,7 @@ EXAMPLES = [
     "27_move_strokes",
     "28_hpolish",
     "29_claybuildup_smooth",
+    "30_trim_curve",
 ]
 
 

@@ -537,6 +537,63 @@ def test_relax_is_the_smooth_brush():
     assert smoothed.sample_lipschitz <= 1.05
 
 
+_TRIM_STROKE = np.array([[x, 0.22 * np.sin(x * 2.6), 0.0, 0.0]
+                         for x in np.linspace(-1.3, 1.3, 11)], np.float32)
+
+
+def _trimmed(side, op=None, shape=None):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.RoundBox(size=(1.0, 0.9, 0.75), r=0.22))
+    cut = shape if shape is not None else clay.CutShape.trim(
+        _TRIM_STROKE, side=side, extent=(3.0, 3.0, 0.0))
+    layer.add(clay.Cut(origin=(0, 0, -3.0), right=(1, 0, 0), up=(0, 1, 0),
+                       forward=(0, 0, 1), shape=cut, region=doc),
+              op=op if op is not None else clay.Op.SUBTRACT)
+    return doc
+
+
+def test_trim_curve_takes_one_side():
+    at = lambda d, y: float(d.eval(np.array([[0.0, y, 0.0]], np.float32))[0])
+    below, above = _trimmed("below"), _trimmed("above")
+    # The side the outline covers is the side subtract removes.
+    assert at(below, -0.30) > 0 and at(below, 0.30) < 0
+    assert at(above, -0.30) < 0 and at(above, 0.30) > 0
+
+
+def test_trim_curve_shape_and_op_are_separate():
+    """Covering above and subtracting keeps the same material as covering below
+    and intersecting — compared as SOLIDS, since subtract is max(a, -b) and
+    intersect is max(a, b) and those differ outside the surface."""
+    rng = np.random.default_rng(11)
+    cloud = rng.uniform(-1.2, 1.2, size=(5000, 3)).astype(np.float32)
+    a = _trimmed("above", clay.Op.SUBTRACT).eval(cloud)
+    b = _trimmed("below", clay.Op.INTERSECT).eval(cloud)
+    assert float(np.mean((a < 0) == (b < 0))) > 0.999
+
+
+def test_trim_curve_is_not_a_closed_lasso():
+    """The reason these are separate constructors: closing a trim stroke joins
+    its endpoints and cuts a sliver instead of dividing the frame."""
+    rng = np.random.default_rng(5)
+    probes = rng.uniform(-1.1, 1.1, size=(4000, 3)).astype(np.float32)
+    trim = _trimmed("below").eval(probes)
+    lasso = _trimmed("below", shape=clay.CutShape.curve(_TRIM_STROKE)).eval(probes)
+    assert float(np.abs(trim - lasso).max()) > 0.05
+    assert int((lasso < 0).sum()) != int((trim < 0).sum())
+
+
+def test_trim_curve_is_an_ordinary_exact_item():
+    assert _trimmed("below").safe_step_scale() == pytest.approx(1.0)
+
+
+def test_trim_curve_refuses_a_stroke_that_is_not_one():
+    with pytest.raises(ValueError, match="two control points"):
+        clay.CutShape.trim(_TRIM_STROKE[:1], side="below", extent=(3.0, 3.0, 0.0))
+    with pytest.raises(ValueError, match="side must be"):
+        clay.CutShape.trim(_TRIM_STROKE, side="sideways", extent=(3.0, 3.0, 0.0))
+
+
 def test_voxel_grid_edits_and_queries():
     g = clay.VoxelGrid(voxel_size=0.5)
     red = g.palette_add("#ff0000")

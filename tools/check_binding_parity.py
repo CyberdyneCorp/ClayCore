@@ -123,6 +123,7 @@ ALIASES = {
     # C ABI builds those with clay_item_create + clay_item_set_curve_points.
     # Adding a C entry point would be a second way to say the same thing.
     "module.snakehook": "clay_item_set_curve_points",
+    "CutShape.trim": "clay_cut_polygon_from_open_curve",
     "module.backends": "clay_list_backends",
 }
 

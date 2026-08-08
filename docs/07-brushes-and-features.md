@@ -269,7 +269,7 @@ written, so a host can preview the result before committing it.
 
 | Resolver | What it does | Returns |
 |---|---|---|
-| `cut::cut_item` | A shape drawn on a frame (rect, circle, polygon, spline lasso) becomes an extruded item sized to cut through | a `Node`, or nothing for a non-orthonormal frame or a zero-area shape |
+| `cut::cut_item` | A shape drawn on a frame (rect, circle, polygon, spline lasso, **open trim curve**) becomes an extruded item sized to cut through | a `Node`, or nothing for a non-orthonormal frame or a zero-area shape |
 | `brush::snakehook` | A drag from a surface anchor becomes a tapered stroke item — a horn, tendril or spike | a `Node`, or nothing for an empty path or degenerate normal |
 | `brush::move_brush` | A world-space drag becomes the per-item warps that move the ASSEMBLED surface | one `grab` per contributing item, in that item's own frame |
 
@@ -278,6 +278,15 @@ a result that depends on where the camera stood, so the sweep is parallel and
 the caller passes the frame. Keep-inner versus keep-outer is *the op* — place
 the result with `Subtract` or `Intersect` — not a separate flag, which would be
 a second way to say one thing.
+
+**A trim curve is an open stroke, and that is not a flag on the lasso.**
+`CutShape::from_curve` tessellates *closed*, so it is a spline lasso and the cut
+is its inside. A trim stroke's endpoints must stay apart, because what closes the
+outline is the frame's own bound on the side being discarded. The same control
+points give different polygons and different fields. `side` names the half the
+outline covers; the op still decides its fate, so covering *above* and
+subtracting keeps the same material as covering *below* and intersecting. See
+[`examples/30_trim_curve.py`](../examples/30_trim_curve.py).
 
 **Snakehook adds material rather than moving it.** ZBrush pulls existing
 surface, so the body dimples slightly where the tendril came from; this grows a
@@ -380,6 +389,7 @@ parity — the mechanism usually differs even where the result matches.
 | Flatten | `field::flatten` (two-sided), `sculpt_flatten` | Region required on the SDF side |
 | hPolish, Planar, Trim | `field::flatten` in **cut-only** mode | Planes down without filling, which is what keeps the facet crisp |
 | Trim (Rect/Circle/Lasso) | `cut::cut_item` | The practitioners' "90% tool" |
+| Trim Curve | `CutShape::from_open_curve` | An OPEN stroke closed against the frame bounds — not the lasso constructor, which closes the stroke and cuts a sliver |
 | Clip | `cut::cut_item` | **As a solid, Clip is exactly Trim.** Clip's distinctive look is a zero-thickness fin a field cannot represent and users delete anyway |
 | SnakeHook | `brush::snakehook` | Adds material rather than pulling it |
 | Surface Noise | `noise` deformer | Integer hash, so all four backends agree |

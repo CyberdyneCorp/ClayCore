@@ -1126,6 +1126,31 @@ clay_item* clay_cut_create(const clay_cut_desc* desc, const float* polygon_xy,
  * out_xy == NULL to receive the vertex count in *count. `points_xyzr` and the
  * optional `types` are as clay_item_set_curve_points takes them; only x and y
  * are read, since the outline lies in the cut plane. */
+/* Which half of the frame a trim's outline covers. The OP still decides that
+ * half's fate: CLAY_OP_SUBTRACT removes it, CLAY_OP_INTERSECT keeps only it. */
+typedef enum clay_trim_side {
+    CLAY_TRIM_BELOW = 0,
+    CLAY_TRIM_ABOVE = 1,
+    CLAY_TRIM_LEFT = 2,
+    CLAY_TRIM_RIGHT = 3
+} clay_trim_side;
+
+/* ZBrush's Trim Curve: an OPEN stroke drawn across the form, flattened and then
+ * closed against the frame's own bounds on the side it covers, so the result is
+ * an ordinary polygon outline for clay_cut_create.
+ *
+ * NOT clay_cut_polygon_from_curve with a flag. That one tessellates CLOSED and
+ * is a spline lasso: joining a trim stroke's endpoints cuts a sliver between
+ * them instead of dividing the frame. Different shapes from the same points.
+ *
+ * `extent_xy` is how far the closing edge reaches in the frame's own units.
+ * Size-query pattern, as the lasso flattener uses: call with out_xy == NULL to
+ * receive the vertex count in *out_count. */
+clay_result clay_cut_polygon_from_open_curve(const float* points_xyzr, size_t count,
+                                             const int32_t* types, int32_t side,
+                                             const float extent_xy[2], float tolerance,
+                                             float* out_xy, size_t* out_count);
+
 clay_result clay_cut_polygon_from_curve(const float* points_xyzr, size_t count,
                                         const int32_t* types, float tolerance, float* out_xy,
                                         size_t* out_count);
