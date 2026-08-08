@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 
+
 namespace clay {
 namespace field {
 
@@ -25,6 +26,14 @@ float region_weight(const FlattenSettings& s, cfloat3 p) {
     const float t = (distance - s.region_radius) / std::max(s.falloff, 1e-4f);
     if (t >= 1.0f) return 0.0f;
     return 1.0f - t * t * (3.0f - 2.0f * t);  // smoothstep
+}
+
+// The freeze: a fully masked sample takes weight zero, so the source's value
+// comes back untouched and the surface there stays where the source put it
+// rather than being drawn onto the plane.
+float mask_gate(const MaskGate& mask, cfloat3 p) {
+    if (!mask) return 1.0f;
+    return 1.0f - std::clamp(mask(p), 0.0f, 1.0f);
 }
 
 }  // namespace
@@ -52,7 +61,7 @@ FieldVolume flatten(const std::function<float(cfloat3)>& source, const math::Aab
 
     FieldVolume out = FieldVolume::sample(
         [&source, &settings, normal, point, strength](cfloat3 p) {
-            const float weight = region_weight(settings, p) * strength;
+            const float weight = region_weight(settings, p) * strength * mask_gate(settings.mask, p);
             const float here = source(p);
             if (weight <= 0.0f) return here;
             // The plane is itself a signed distance function, so blending

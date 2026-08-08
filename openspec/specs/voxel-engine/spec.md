@@ -281,3 +281,47 @@ Voxel layers have `sculpt_pinch`, which moves surface cells one step toward the 
 - **WHEN** a shape is pinched and then magnified with the same brush
 - **THEN** the result is closer to the original than either operation alone
 
+### Requirement: A mask can be inverted over a finite region
+The mask SHALL support inverting over a caller-supplied region, and filling one with a constant. Over that region the result SHALL be `1 - value` for every cell in it, painted or not, and cells outside it SHALL be untouched. The boundary SHALL be the region the caller gave, never the storage's chunk grid.
+
+Inverting a sparse unbounded lattice is not a representable operation, which is why `invert` is defined over what has been painted. That leaves the most common masking gesture — mask a region, invert, and edit everything else — unexpressible, because the complement a caller means is bounded by the model rather than by what has been touched.
+
+`invert` SHALL keep its existing meaning: the two answer different questions, and a caller who worked around the unbounded one must not have it silently redefined.
+
+#### Scenario: Everything else becomes masked
+- **WHEN** a blob is painted, and the mask is inverted within a box containing it
+- **THEN** the blob's cells read unmasked and the rest of the box reads fully masked
+
+#### Scenario: The region's edge is the region's edge
+- **WHEN** a mask is inverted within a box whose faces do not lie on the storage's chunk boundaries
+- **THEN** the transition happens at the box's faces, and nothing outside the box changes
+
+#### Scenario: Filling a region
+- **WHEN** a region is filled with a value
+- **THEN** every cell whose centre lies in it reads that value, and the field is empty again when the value is zero
+
+### Requirement: Mask extrude on a voxel grid
+A voxel layer SHALL support the same extrude its SDF counterpart does, in cell space rather than by sampling a field: the masked cells of the source's surface, thickened by the requested amount, returned as a new grid carrying the source's colours.
+
+It SHALL NOT go through a sampled field. A grid already knows which cells are on its surface, so resampling would cost a conversion and lose the palette for nothing.
+
+The two representations SHALL agree: the same shape, mask and settings SHALL give extracts whose solid regions match to within a voxel, so that what a document means does not depend on which representation it is stored in.
+
+The source grid and the mask SHALL both be left unmodified.
+
+#### Scenario: A plate comes off a voxel ball
+- **WHEN** a cap of a voxel ball is masked and extruded outward at a thickness
+- **THEN** the new grid holds cells on that cap, roughly `thickness / voxel_size` deep, and none away from the mask
+
+#### Scenario: Colour comes along
+- **WHEN** a coloured region is extruded
+- **THEN** the extract's cells carry the colours the source had under the mask
+
+#### Scenario: The representations agree
+- **WHEN** the same shape is extruded as an SDF field and as a voxel grid with the same mask and settings
+- **THEN** the two solids occupy the same region to within a voxel
+
+#### Scenario: The source survives
+- **WHEN** an extrude is taken
+- **THEN** the source grid and the mask are exactly as they were
+

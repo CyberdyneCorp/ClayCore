@@ -488,6 +488,38 @@ The binding SHALL state that one signed strength covers both directions, so a ca
 - **WHEN** the same call is made with a negative strength
 - **THEN** the surface gathers toward the centre instead
 
+### Requirement: Masking from Python is a stroke
+The module SHALL let a script paint a mask from a resolved stroke, invert a mask within a box, and fill a box with a value. It SHALL accept a mask on the volume relax and flatten entry points.
+
+The binding SHALL state that the footprint is derived from the stamp's world radius, so a script does not go looking for a size in mask cells and find none.
+
+#### Scenario: A script paints a mask along a stroke
+- **WHEN** a script resolves a stroke and applies it to a mask
+- **THEN** the mask reads masked along the path
+
+#### Scenario: A script freezes a region and relaxes around it
+- **WHEN** a script relaxes a volume with a mask covering part of the relaxed region
+- **THEN** the field under the mask is unchanged and the field beside it is smoothed
+
+### Requirement: Mask extrude from Python
+The module SHALL let a script convert a mask to a field and extrude a masked patch of a document or of a voxel grid into a new one.
+
+The binding SHALL state that the mask is the region — there is no region radius to supply, unlike relax and flatten — because that is the first thing a script author will go looking for.
+
+A refusal SHALL raise rather than return an empty result.
+
+#### Scenario: A script extracts a plate from a document
+- **WHEN** a script masks part of a document's surface and extrudes it
+- **THEN** it gets back a volume holding the plate, which meshes and evaluates like any other
+
+#### Scenario: A script extracts from voxels
+- **WHEN** a script extrudes a masked region of a voxel grid
+- **THEN** it gets back a new grid holding the extract, with the source's colours
+
+#### Scenario: An impossible extrude raises
+- **WHEN** a script extrudes with an empty mask
+- **THEN** the call raises rather than returning something empty
+
 ### Requirement: Noise from Python
 The module SHALL expose the noise deformer on items alongside the others, with the amplitude, frequency, octaves, gain and seed under the caller's control.
 

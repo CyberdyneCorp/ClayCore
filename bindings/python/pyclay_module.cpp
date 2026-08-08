@@ -28,6 +28,7 @@
 #include "clay/scene/commands.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
+#include "clay/brush/mask_extrude.h"
 #include "clay/brush/move.h"
 #include "clay/brush/stroke.h"
 #include "clay/brush/tube.h"
@@ -89,6 +90,35 @@ voxel::BrushShape parse_brush_shape(const std::string& shape) {
     throw std::invalid_argument("shape must be 'cube' or 'sphere', got '" + shape + "'");
 }
 
+brush::ExtrudeSide parse_extrude_side(const std::string& side) {
+    if (side == "outward") return brush::ExtrudeSide::Outward;
+    if (side == "inward") return brush::ExtrudeSide::Inward;
+    // One spelling per side, deliberately. Every string pyclay accepts is a
+    // capability the C ABI has to be able to name, and an alias would be a
+    // second enumerator meaning exactly what the first one does.
+    if (side == "centred") return brush::ExtrudeSide::Centred;
+    throw std::invalid_argument("side must be 'outward', 'inward' or 'centred', got '" + side +
+                                "'");
+}
+
+// Shared by every extrude entry point so the two representations cannot end up
+// reading their arguments differently.
+brush::MaskExtrudeSettings extrude_settings(float thickness, const std::string& side,
+                                            float threshold, float border_round,
+                                            int border_smooth, nb::handle cell_size,
+                                            nb::handle band) {
+    if (!(thickness > 0.0f)) throw std::invalid_argument("thickness must be > 0");
+    brush::MaskExtrudeSettings s;
+    s.thickness = thickness;
+    s.side = parse_extrude_side(side);
+    s.threshold = threshold;
+    s.border_round = border_round;
+    s.border_smooth = border_smooth;
+    if (!cell_size.is_none()) s.cell_size = nb::cast<float>(cell_size);
+    if (!band.is_none()) s.band = nb::cast<float>(band);
+    return s;
+}
+
 voxel::BrushFalloff parse_falloff(const std::string& falloff) {
     if (falloff == "constant") return voxel::BrushFalloff::Constant;
     if (falloff == "linear") return voxel::BrushFalloff::Linear;
@@ -102,6 +132,9 @@ voxel::BrushFalloff parse_falloff(const std::string& falloff) {
 // voxel types, but every brush entry point resolves a mask through here.
 struct PyMaskField;
 const voxel::MaskField* borrow_mask(nb::handle mask);
+// The field verbs take a callable rather than a mask type, so a sampled field
+// stays a leaf module. Empty when no mask was given, which costs nothing.
+field::MaskGate mask_gate_of(nb::handle mask);
 
 voxel::BrushParams make_brush(int size, const std::string& shape, const std::string& falloff,
                               float strength, std::uint32_t seed, nb::handle mask = nb::handle()) {
@@ -359,6 +392,12 @@ struct PyMaskField {
         return it->second;
     }
 };
+
+field::MaskGate mask_gate_of(nb::handle mask) {
+    const voxel::MaskField* m = borrow_mask(mask);
+    if (!m) return {};
+    return [m](kernel::cfloat3 p) { return m->sample(p); };
+}
 
 const voxel::MaskField* borrow_mask(nb::handle mask) {
     if (!mask.is_valid() || mask.is_none()) return nullptr;
@@ -1618,7 +1657,7 @@ NB_MODULE(pyclay, m) {
         .def(
             "relaxed",
             [](const PyVolume& self, float strength, int radius_cells, int iterations,
-               nb::handle centre, float region_radius, float falloff) {
+               nb::handle centre, float region_radius, float falloff, nb::handle mask) {
                 if (!self.volume) throw std::invalid_argument("nothing to relax");
                 if (!(strength >= 0.0f && strength <= 1.0f))
                     throw std::invalid_argument("strength must be between 0 and 1");
@@ -1630,6 +1669,7 @@ NB_MODULE(pyclay, m) {
                 if (!centre.is_none()) settings.centre = to_f3(centre, "centre");
                 settings.region_radius = region_radius;
                 settings.falloff = falloff;
+                settings.mask = mask_gate_of(mask);
 
                 PyVolume out;
                 out.prim = self.prim;
@@ -1643,6 +1683,7 @@ NB_MODULE(pyclay, m) {
             },
             "strength"_a = 1.0f, "radius_cells"_a = 1, "iterations"_a = 1,
             "centre"_a = nb::none(), "region_radius"_a = 0.0f, "falloff"_a = 0.0f,
+            "mask"_a = nb::none(),
             "Smooth this volume, returning a new one. The last of the core\n"
             "sculpting brushes: voxels had smoothing, SDF layers had none.\n\n"
             "RELAX BAKES, and that is worth knowing before you pick a cell\n"
@@ -1660,7 +1701,11 @@ NB_MODULE(pyclay, m) {
             "set, so the raymarcher stays correct.\n\n"
             "`region_radius` of 0 relaxes everywhere, which is a filter; give it\n"
             "a centre and a radius and it is a brush. The falloff is widened if\n"
-            "it is too narrow to hide the seam the kernel makes.")
+            "it is too narrow to hide the seam the kernel makes.\n\n"
+            "`mask` freezes: a fully masked sample keeps its value verbatim, so\n"
+            "the region a mask covers is left exactly as it was rather than\n"
+            "nearly so. Sampled in world units, which is what lets one mask\n"
+            "freeze a voxel layer and an SDF layer at the same time.")
         .def_static(
             "moved_topologically_from",
             [](nb::handle source, nb::handle anchor, nb::handle displacement, float radius,
@@ -1723,7 +1768,8 @@ NB_MODULE(pyclay, m) {
             [](nb::handle source, nb::handle plane_point, nb::handle plane_normal, float cell,
                nb::handle band, nb::handle bounds, float strength, nb::handle centre,
                float region_radius, float falloff, const std::string& mode,
-               nb::handle position, nb::handle rotation_axis_angle, float scale) {
+               nb::handle position, nb::handle rotation_axis_angle, float scale,
+               nb::handle mask) {
                 if (!(cell > 0.0f)) throw std::invalid_argument("cell must be > 0");
                 if (!(strength >= 0.0f && strength <= 1.0f))
                     throw std::invalid_argument("strength must be between 0 and 1");
@@ -1746,6 +1792,7 @@ NB_MODULE(pyclay, m) {
                         "replaces the shape with a half-space rather than flattening it");
                 settings.region_radius = region_radius;
                 settings.falloff = falloff;
+                settings.mask = mask_gate_of(mask);
 
                 const scene::Document& src = nb::cast<PyDocument&>(source).doc->document;
                 scene::Tape tape = scene::compile_document(src);
@@ -1778,7 +1825,7 @@ NB_MODULE(pyclay, m) {
             "document"_a, "plane_point"_a, "plane_normal"_a, "cell"_a = 0.05f,
             "band"_a = nb::none(), "bounds"_a = nb::none(), "strength"_a = 1.0f,
             "centre"_a = nb::none(), "region_radius"_a = 0.0f, "falloff"_a = 0.0f,
-            "mode"_a = "two_sided", CLAY_PLACE_ARGS,
+            "mode"_a = "two_sided", CLAY_PLACE_ARGS, "mask"_a = nb::none(),
             "Sample a document with a flatten applied, in one pass — the verb SDF\n"
             "layers were missing, since voxels have had sculpt_flatten all along.\n\n"
             "TWO-SIDED by default, matching the voxel verb: material on the\n"
@@ -1802,11 +1849,15 @@ NB_MODULE(pyclay, m) {
             "A region blends under a weight that varies across it, which can make\n"
             "the field steeper than a plain sampling — so the result declares the\n"
             "Lipschitz its samples actually have, measured, and the document's\n"
-            "safe step scale drops to match. FLATTEN BAKES, as relax does.")
+            "safe step scale drops to match. FLATTEN BAKES, as relax does.\n\n"
+            "`mask` freezes: where it is one the source comes back untouched, so\n"
+            "the surface there stays where the source put it rather than being\n"
+            "drawn onto the plane.")
         .def(
             "flattened",
             [](const PyVolume& self, nb::handle plane_point, nb::handle plane_normal,
-               float strength, nb::handle centre, float region_radius, float falloff) {
+               float strength, nb::handle centre, float region_radius, float falloff,
+               nb::handle mask) {
                 if (!self.volume) throw std::invalid_argument("nothing to flatten");
                 if (!(strength >= 0.0f && strength <= 1.0f))
                     throw std::invalid_argument("strength must be between 0 and 1");
@@ -1823,6 +1874,7 @@ NB_MODULE(pyclay, m) {
                         "replaces the shape with a half-space rather than flattening it");
                 settings.region_radius = region_radius;
                 settings.falloff = falloff;
+                settings.mask = mask_gate_of(mask);
 
                 PyVolume out;
                 out.prim = self.prim;
@@ -1835,7 +1887,7 @@ NB_MODULE(pyclay, m) {
                 return out;
             },
             "plane_point"_a, "plane_normal"_a, "strength"_a = 1.0f, "centre"_a = nb::none(),
-            "region_radius"_a = 0.0f, "falloff"_a = 0.0f,
+            "region_radius"_a = 0.0f, "falloff"_a = 0.0f, "mask"_a = nb::none(),
             "Pull the surface onto a plane, returning a new volume. The verb SDF\n"
             "layers were missing: voxels have had sculpt_flatten all along.\n\n"
             "TWO-SIDED, matching the voxel verb: material on the normal's side\n"
@@ -1855,7 +1907,8 @@ NB_MODULE(pyclay, m) {
             "the field steeper than a plain volume — so unlike relax, the result\n"
             "declares a raised Lipschitz and the document's safe step scale drops.\n"
             "The plane is yours to supply: no camera and no picking enters the\n"
-            "engine, the same rule Cut follows. FLATTEN BAKES, as relax does.")
+            "engine, the same rule Cut follows. FLATTEN BAKES, as relax does.\n\n"
+            "`mask` freezes, exactly as it does on relax.")
         .def_prop_ro("sample_lipschitz",
                      [](const PyVolume& v) {
                          return v.volume ? v.volume->sample_lipschitz() : 1.0f;
@@ -2790,6 +2843,65 @@ NB_MODULE(pyclay, m) {
                  return false;
              },
              "name"_a, "Drop a layer's mask; returns whether there was one")
+        .def("mask_extrude",
+             [](const PyDocument& d, nb::handle mask, float thickness, const std::string& side,
+                float threshold, float border_round, int border_smooth, nb::handle cell_size,
+                nb::handle band, nb::handle layer) {
+                 const voxel::MaskField* m = borrow_mask(mask);
+                 if (!m) throw std::invalid_argument("mask must be a MaskField");
+                 brush::MaskExtrudeSettings settings = extrude_settings(
+                     thickness, side, threshold, border_round, border_smooth, cell_size, band);
+
+                 // Sampled from a TAPE rather than from a volume, so the source
+                 // stays exact: a volume reports a bound outside its own band,
+                 // and sampling one would record the seam between bound and
+                 // distance as part of the extracted shape.
+                 scene::Tape tape;
+                 if (layer.is_none()) {
+                     tape = scene::compile_document(d.doc->document);
+                 } else {
+                     const std::string name = nb::cast<std::string>(layer);
+                     const scene::Layer* found = nullptr;
+                     for (const scene::Layer& l : d.doc->document.layers)
+                         if (l.name == name) found = &l;
+                     if (!found) throw std::invalid_argument("no layer named '" + name + "'");
+                     tape = scene::compile_layer(*found);
+                 }
+                 if (tape.empty())
+                     throw std::invalid_argument("there is no field here to extrude from");
+
+                 std::optional<field::FieldVolume> volume;
+                 {
+                     nb::gil_scoped_release release;
+                     volume = brush::mask_extrude(
+                         [&tape](kernel::cfloat3 p) { return tape.eval(p).d; }, *m, settings);
+                 }
+                 if (!volume)
+                     throw std::invalid_argument(
+                         "nothing to extrude: the mask is empty, does not reach the surface, or "
+                         "the wall is thinner than a cell");
+                 PyVolume out;
+                 out.prim = scene::Prim::volume();
+                 out.volume = std::make_shared<const field::FieldVolume>(std::move(*volume));
+                 return out;
+             },
+             "mask"_a, "thickness"_a, "side"_a = "outward", "threshold"_a = 0.5f,
+             "border_round"_a = 0.0f, "border_smooth"_a = 0, "cell_size"_a = nb::none(),
+             "band"_a = nb::none(), "layer"_a = nb::none(),
+             "Mask a patch of the surface and pull it off as a solid — ZBrush's\n"
+             "Extract, 3DCoat's extrude from a frozen area. Returns a Volume you\n"
+             "add to a layer like any other item.\n\n"
+             "THE MASK IS THE REGION. There is no region_radius here, unlike\n"
+             "relax and flatten: the painted region bounds itself, which is also\n"
+             "why this samples a smaller volume than either of them.\n\n"
+             "`side` is 'outward' (the plate sits on the surface), 'inward' (the\n"
+             "pocket) or 'centred'. `border_round` softens the rim and\n"
+             "`border_smooth` blurs a COPY of the mask first — your mask is never\n"
+             "modified.\n\n"
+             "It BAKES, as relax and flatten do: what comes back is a sampled\n"
+             "volume with no link back to the source. Raises rather than\n"
+             "returning something empty when the mask misses the surface, which\n"
+             "is the common mistake and the one an empty result would disguise.")
         .def("voxel_layer",
              [](const PyDocument& d, const std::string& name) -> nb::object {
                  for (const scene::Layer& l : d.doc->document.layers) {
@@ -3221,7 +3333,73 @@ NB_MODULE(pyclay, m) {
                  return nb::make_tuple(nb::make_tuple(lo->x, lo->y, lo->z),
                                        nb::make_tuple(hi->x, hi->y, hi->z));
              },
-             "Inclusive cell bounds of the painted region, or None");
+             "Inclusive cell bounds of the painted region, or None")
+        .def("fill",
+             [](PyMaskField& m, nb::handle region, float value) {
+                 m.field().fill(to_aabb(region), value);
+             },
+             "region"_a, "value"_a = 1.0f,
+             "Set every cell whose centre lies in a ((lo), (hi)) world box. "
+             "Filling with 0 releases the region.")
+        .def("invert_within",
+             [](PyMaskField& m, nb::handle region) { m.field().invert_within(to_aabb(region)); },
+             "region"_a,
+             "Take the complement over a ((lo), (hi)) world box — the bounded\n"
+             "form invert() cannot be, and the one 'mask a limb, invert, sculpt\n"
+             "everything else' actually means. invert() flips only what has been\n"
+             "painted, because a sparse unbounded lattice has no finite\n"
+             "complement; here the caller supplies the region, which it always\n"
+             "has from a grid's or an item's bounds.")
+        .def("apply_stroke",
+             [](PyMaskField& m, nb::handle samples, const brush::StrokePreset& preset,
+                float target, const std::string& shape, const std::string& falloff) {
+                 std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
+                 voxel::BrushShape s = parse_brush_shape(shape);
+                 voxel::BrushFalloff f = parse_falloff(falloff);
+                 voxel::MaskField& field = m.field();
+                 nb::gil_scoped_release release;
+                 return brush::apply_to_mask(field, brush::resolve_stroke(in, preset), target, s,
+                                             f);
+             },
+             "samples"_a, "preset"_a, "target"_a = 1.0f, "shape"_a = "sphere",
+             "falloff"_a = "smooth",
+             "Resolve a stroke and paint it into the mask — masking as the same\n"
+             "gesture as sculpting, with the same spacing, pressure, taper,\n"
+             "steady stroke and jitter.\n\n"
+             "`target` is where each cell moves TO, so target=1 masks and\n"
+             "target=0 erases: painting and releasing are one call.\n\n"
+             "The footprint comes from each stamp's WORLD radius; there is no\n"
+             "size in mask cells to pass, because a caller converting it by hand\n"
+             "gets a stroke whose width tracks the mask's resolution rather than\n"
+             "the brush's radius.")
+        .def("to_field",
+             [](const PyMaskField& m, float threshold, nb::handle band, float pad,
+                nb::handle cell_size) {
+                 const float cell =
+                     cell_size.is_none() ? 0.0f : nb::cast<float>(cell_size);
+                 const float width = band.is_none() ? 0.0f : nb::cast<float>(band);
+                 std::optional<field::FieldVolume> volume =
+                     brush::mask_to_field(m.field(), threshold, width, pad, cell);
+                 if (!volume)
+                     throw std::invalid_argument(
+                         "nothing painted at or above the threshold: there is no region to "
+                         "measure");
+                 PyVolume out;
+                 out.prim = scene::Prim::volume();
+                 out.volume = std::make_shared<const field::FieldVolume>(std::move(*volume));
+                 return out;
+             },
+             "threshold"_a = 0.5f, "band"_a = nb::none(), "pad"_a = 0.0f,
+             "cell_size"_a = nb::none(),
+             "Measure the mask: signed distance to the boundary of the masked\n"
+             "region, negative inside, as an ordinary Volume.\n\n"
+             "This is what mask extrude is built on, and it is here because a\n"
+             "host wants to preview that border. A mask is a [0,1] scalar on a\n"
+             "lattice and NOT a distance field — composing one into a field\n"
+             "expression directly would put a step in the result and the\n"
+             "Lipschitz bound would stop meaning anything.\n\n"
+             "`pad` widens the sampled region past the masked one; anything that\n"
+             "reaches outside the mask needs it.");
 
     nb::class_<PyVoxelGrid>(m, "VoxelGrid",
                             "Palette-indexed colored voxel grid (chunked, sparse)")
@@ -3490,6 +3668,39 @@ NB_MODULE(pyclay, m) {
              "mask"_a = nb::none(),
              "Resolve a stroke and stamp it into the grid; returns how many stamps "
              "ran. Masked stamps are dropped, so a frozen region receives nothing.")
+        .def("mask_extrude",
+             [](const PyVoxelGrid& g, nb::handle mask, float thickness, const std::string& side,
+                float threshold, int border_smooth) {
+                 const voxel::MaskField* m = borrow_mask(mask);
+                 if (!m) throw std::invalid_argument("mask must be a MaskField");
+                 brush::MaskExtrudeSettings settings = extrude_settings(
+                     thickness, side, threshold, 0.0f, border_smooth, nb::none(), nb::none());
+                 const voxel::VoxelGrid& src = g.grid();
+                 std::optional<voxel::VoxelGrid> extract;
+                 {
+                     nb::gil_scoped_release release;
+                     extract = brush::mask_extrude(src, *m, settings);
+                 }
+                 if (!extract)
+                     throw std::invalid_argument(
+                         "nothing to extrude: the mask is empty, is not on the surface, or the "
+                         "grid is");
+                 PyVoxelGrid out;
+                 out.owned = std::make_shared<voxel::VoxelGrid>(std::move(*extract));
+                 return out;
+             },
+             "mask"_a, "thickness"_a, "side"_a = "outward", "threshold"_a = 0.5f,
+             "border_smooth"_a = 0,
+             "Mask extrude in CELL space: the masked cells of this grid's\n"
+             "surface, thickened, as a new grid carrying this one's colours.\n\n"
+             "It does not go through a sampled field — a grid already knows which\n"
+             "of its cells are on its surface, so resampling would cost a\n"
+             "conversion and lose the palette. The result agrees with\n"
+             "Document.mask_extrude to within a voxel, which is the point: what a\n"
+             "document means must not depend on how it is stored.\n\n"
+             "`border_round`, `cell_size` and `band` have no meaning here; the\n"
+             "grid's own resolution is the only one there is. Neither this grid\n"
+             "nor the mask is modified.")
         .def("fill_box",
              [](PyVoxelGrid& g, nb::handle a, nb::handle b, std::uint8_t index) {
                  g.grid().fill_box(to_coord(a), to_coord(b), index);

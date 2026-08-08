@@ -23,10 +23,20 @@
 // Relax BAKES. What comes back is a volume, not the edit list that went in.
 // That is inherent to relaxing a field, not a shortcut taken here.
 
+#include <functional>
+
 #include "clay/field/volume.h"
 
 namespace clay {
 namespace field {
+
+// An optional freeze, taken as a CALLABLE rather than as a mask type. A sampled
+// field is a leaf — it sits below `scene`, while a mask sits above it — so
+// naming voxel::MaskField here would make field -> voxel -> scene -> field a
+// cycle. What a verb actually needs from a mask is a scalar at a world point,
+// and that is what this is: 0 lets an edit through, 1 freezes it. Empty means
+// no mask, which costs nothing.
+using MaskGate = std::function<float(kernel::cfloat3)>;
 
 struct RelaxSettings {
     // How much of the smoothed value to take, per iteration. 1 replaces the
@@ -49,6 +59,14 @@ struct RelaxSettings {
     // Over what distance the effect tapers to nothing at the region's edge.
     // Zero would leave a visible rim; it is clamped to something that will not.
     float falloff = 0.0f;
+
+    // Optional freeze, exactly as the voxel verbs take one: the weight at a
+    // sample is scaled by (1 - mask) at that sample's WORLD position, so a
+    // fully masked sample keeps its value verbatim. Sampling in world units
+    // rather than in this volume's cells costs nothing and is the whole reason
+    // the mask lattice is addressed that way — one mask can freeze a voxel
+    // layer and an SDF layer at once.
+    MaskGate mask;
 };
 
 // Smooth `v`, returning a new volume sampled over the same region at the same

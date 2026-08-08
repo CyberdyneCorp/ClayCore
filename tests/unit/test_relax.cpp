@@ -154,7 +154,7 @@ TEST_CASE("relax: the slope does not grow") {
 
 TEST_CASE("relax: a ray still finds the surface") {
     FieldVolume smoothed = field::relax(bumpy_volume(), RelaxSettings{1.0f, 2, 2, cf3(0, 0, 0),
-                                                                     0.0f, 0.0f});
+                                                                     0.0f, 0.0f, {}});
     scene::Tape tape = compile_volume(smoothed);
     const float scale = kernel::csafe_step_scale(tape.info);
 

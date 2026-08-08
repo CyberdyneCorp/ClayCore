@@ -319,6 +319,30 @@ std::size_t apply_to_grid(voxel::VoxelGrid& grid, const std::vector<Stamp>& stam
     return applied;
 }
 
+std::size_t apply_to_mask(voxel::MaskField& mask, const std::vector<Stamp>& stamps, float target,
+                          voxel::BrushShape shape, voxel::BrushFalloff falloff) {
+    const float cell = mask.cell_size();
+    for (const Stamp& s : stamps) {
+        voxel::BrushParams p;
+        // The conversion this function exists for: a world radius becomes a
+        // footprint in MASK cells, by the same rounding apply_to_grid uses for
+        // voxel cells, so a stroke covers the same world region at any mask
+        // resolution.
+        p.size = std::max(static_cast<int>(std::lround(s.radius * 2.0f / cell)), 1);
+        p.shape = shape;
+        p.falloff = falloff;
+        p.strength = s.strength;
+        // `seed` stays 0: a mask stores the fractional weight directly rather
+        // than dithering it, so there is nothing for a per-stamp seed to
+        // decorrelate.
+        mask.paint(s.position, p, target);
+    }
+    // Every stamp runs. There is no gate to drop one, unlike the other two
+    // consumers, so the count is the stamp count and is returned for symmetry
+    // rather than because it can differ.
+    return stamps.size();
+}
+
 std::vector<scene::Node> stamps_to_nodes(scene::SdfContent& content,
                                          const std::vector<Stamp>& stamps,
                                          const scene::Node& templ,

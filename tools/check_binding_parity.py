@@ -263,6 +263,7 @@ STRING_CHOICES = (
     ("parse_brush_shape", "brush shape", "CLAY_BRUSH_SHAPE_"),
     ("parse_falloff", "brush falloff", "CLAY_BRUSH_FALLOFF_"),
     ("parse_axis", "mirror axis", "CLAY_MIRROR_"),
+    ("parse_extrude_side", "mask extrude side", "CLAY_EXTRUDE_"),
     ("mesh_document", "mesher", "CLAY_MESHER_"),
 )
 

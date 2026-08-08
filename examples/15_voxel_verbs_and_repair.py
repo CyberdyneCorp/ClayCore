@@ -4,6 +4,11 @@ Four sculpting verbs already existed — smooth, inflate, flatten, pinch. These
 are the four the study catalogues that were missing, plus the pre-bake repair
 pair.
 
+Every verb below takes an optional `mask=`, and none of them is shown with one
+here — that lives in `11_masks.py`, which runs all ten twice, masked and not.
+The gating is not per-verb: it sits in the one footprint walk they share, so a
+verb added after the mask was inherits it rather than having to remember it.
+
 Two things here are worth reading rather than only looking at.
 
 **fill-cavities is not a morphological closing.** Closing is the textbook

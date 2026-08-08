@@ -42,6 +42,7 @@
 #include <cstdint>
 #include <functional>
 
+#include "clay/field/relax.h"  // MaskGate
 #include "clay/field/volume.h"
 
 namespace clay {
@@ -89,6 +90,10 @@ struct FlattenSettings {
     // Defaults to the two-sided behaviour, so a caller that does not ask for a
     // mode gets exactly what it got before modes existed.
     FlattenMode mode = FlattenMode::TwoSided;
+    // Optional freeze, as on RelaxSettings and for the same reason: a fully
+    // masked sample keeps the source's value, so a frozen region stays where
+    // the source put it rather than moving onto the plane.
+    MaskGate mask;
 };
 
 // Sample `source` with the flatten applied. The result declares the Lipschitz
