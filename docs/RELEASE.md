@@ -34,6 +34,11 @@ forward-refuse).
    between its path and its out-parameter, so a caller compiled against 0.21.0
    gets a compile error rather than a misread — the arity changed, so there is
    no way for old code to link and behave differently.
+   **0.24.0 is not such a release**: it is purely additive. Every existing
+   signature and struct layout is byte-identical to 0.23.0, and what is new —
+   the `clay_brick_cache_*` surface, `clay_eval_grid`, and the node/layer
+   influence bounds — only adds symbols and new structs, so code compiled
+   against 0.23.0 keeps linking and behaving as it did.
 
 ## Tagging
 
@@ -91,6 +96,20 @@ Tracked honestly rather than assumed done:
   Shipping CUDA wheels needs a CUDA build host in the wheel matrix.
 - **Blender-headless FBX validation** runs only as a release-time manual
   check; per-push CI validates exports with assimp instead (task 9.3).
+- **The brick cache is exposed but has never run on a device** (added 0.24.0).
+  The incremental path is measured on desktop CPU — a brush dab re-evaluates 8
+  bricks against 384 for a full fill, and that count stays flat as the model
+  grows — but the design's premise is that `eval_bricks` goes to Metal while the
+  per-brick tape compile stays on the CPU, and that split has not been timed on
+  Apple silicon. Until it has, the header's advice to fan out over requests one
+  brick per worker is reasoning, not measurement, and it says so. Run
+  `clay_brick_cache_eval_requests` against the Metal backend on the target iPad
+  before believing any of the numbers here transfer.
+- **pyclay does not reach the brick cache** (added 0.24.0).
+  `check_binding_parity.py` prints it as an outstanding follow-up on every run
+  rather than filing it as an exemption, because that gate runs one way — pyclay
+  to C — and a C-only addition cannot fail it. A Python binding wants a buffer
+  protocol for the fp16 payloads and a numpy view over the request array.
 - **SwiftPM consumption is verified; the app itself is not** (task 10.3).
   `tools/check_swift_smoke.sh all` builds a Swift program against the macOS
   slice and against the iOS simulator slice, running the latter *inside a
