@@ -105,6 +105,13 @@ Scenes do not become shader code. The `scene` module compiles an edit list into 
 | Backend | Host layer | Kernel path | Status/notes |
 |---|---|---|---|
 | **CPU** | thread pool, batch API | same headers, scalar + SIMD (Apple `simd` / SSE-NEON via `xsimd`) | reference; always available |
+
+The CPU pool over-decomposes a batch into several chunks per worker rather than
+one, so its atomic claim counter load-balances: a core that finishes early takes
+more work instead of idling. That matters most where the cores are not
+interchangeable — a mobile SoC pairing performance and efficiency cores — and it
+halves a preview `raycast_many`. Batches below the caller's minimum chunk size
+are untouched, so a single pick or a small brush batch still runs inline.
 | **Metal** | `metal-cpp` (pure C++, no ObjC in core) | headers compiled as MSL; argument buffers for tapes | tier-1: the iPad app |
 | **CUDA** | CUDA runtime or NVRTC JIT | same headers under `__device__` | tier-2: desktop/pipeline/ML workloads |
 | **OpenCL** | OpenCL 3.0 | kernel headers constrained to the C-compatible subset (macro-mapped to OpenCL C) | tier-3, best-effort; Vulkan compute is the likely long-term replacement and slots into the same backend interface |

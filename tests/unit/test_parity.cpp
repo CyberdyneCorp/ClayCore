@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "clay/eval/backend.h"
+#include "clay/scene/bounds.h"
 #include "kernel_utils.h"
 #include "scene_utils.h"
 
@@ -404,6 +405,137 @@ TEST_CASE("parity: raycast hits agree with reference sphere tracing") {
             CHECK(got[i].hit == ref[i].hit);
             if (got[i].hit && ref[i].hit)
                 CHECK(cabs(got[i].t - ref[i].t) < 5e-3f);
+        }
+    }
+}
+
+TEST_CASE("batch dispatch covers every element exactly once, at every size") {
+    // The thread pool over-decomposes into several chunks per worker so its
+    // atomic claim counter can rebalance across unequal cores. That changes the
+    // chunk arithmetic, whose failure mode is a gap (an element nobody
+    // computed) or an overlap (one computed twice) — neither of which shows up
+    // as a crash, only as a wrong value at a size nobody happened to test.
+    //
+    // The sizes below straddle every boundary that arithmetic has: the
+    // min_chunk floors the CPU backend passes (16 for rays, 256 for points),
+    // one either side of them, exact multiples of the chunk count, and primes
+    // that divide evenly into nothing.
+    scene::Document doc = gnarly_document();
+    scene::Tape tape = scene::compile_document(doc);
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    REQUIRE(cpu != nullptr);
+
+    const std::size_t sizes[] = {1,   2,   15,   16,   17,   31,   255,  256,   257,
+                                 511, 512, 1000, 1023, 1024, 1025, 4096, 10007};
+    for (std::size_t n : sizes) {
+        CAPTURE(n);
+        std::vector<float> points(n * 3);
+        for (std::size_t i = 0; i < n; ++i) {
+            // a deterministic spread over the gnarly scene's extent
+            float t = static_cast<float>(i);
+            points[i * 3 + 0] = -1.4f + 0.0037f * t;
+            points[i * 3 + 1] = -1.1f + 0.0053f * t;
+            points[i * 3 + 2] = -0.9f + 0.0071f * t;
+        }
+        // Poison the output so an element nobody wrote is detectable rather
+        // than accidentally correct.
+        const float kPoison = -12345.678f;
+        std::vector<float> got(n, kPoison);
+        eval::PointQuery q;
+        q.points_xyz = points.data();
+        q.count = n;
+        REQUIRE(cpu->eval_points(tape, q, eval::PointResults{got.data(), nullptr, nullptr}) ==
+                eval::Status::Ok);
+        for (std::size_t i = 0; i < n; ++i) {
+            const float expected =
+                tape.eval(cf3(points[i * 3], points[i * 3 + 1], points[i * 3 + 2])).d;
+            REQUIRE(got[i] != kPoison);  // gap: never written
+            REQUIRE(got[i] == expected); // overlap or misrouted range
+        }
+    }
+}
+
+TEST_CASE("culling never drops an item whose influence is not local") {
+    // compile_document now derives cullability from item_influence_is_local
+    // rather than from a second call to item_influence_bound. The two must
+    // agree: an item the predicate calls non-local has an INFINITE influence
+    // bound and may never be culled, however far the cull region is from its
+    // geometry. Getting this wrong drops the item from per-brick tapes only,
+    // so the whole-document tape would still look right.
+    const scene::Layer bare;
+
+    SUBCASE("the predicate and the bound agree on every non-local kind") {
+        scene::Node intersect = clay_test::item(scene::Prim::sphere(0.2f), cf3(0, 0, 0));
+        intersect.op = scene::Op::Intersect;
+        scene::Node repeated = clay_test::item(scene::Prim::sphere(0.2f), cf3(0, 0, 0));
+        repeated.repeat = scene::Repeat::grid_infinite(cf3(0.5f, 0.5f, 0.5f));
+        scene::Node unbounded =
+            clay_test::item(scene::Prim::plane(cf3(0, 1, 0), 0.0f), cf3(0, 0, 0));
+
+        for (const scene::Node* n : {&intersect, &repeated, &unbounded}) {
+            CHECK_FALSE(scene::item_influence_is_local(*n));
+            CHECK(scene::item_influence_bound(*n, bare).is_infinite());
+        }
+        // ...and an ordinary item is local, with a finite bound
+        scene::Node plain = clay_test::item(scene::Prim::sphere(0.2f), cf3(0, 0, 0));
+        CHECK(scene::item_influence_is_local(plain));
+        CHECK_FALSE(scene::item_influence_bound(plain, bare).is_infinite());
+    }
+
+    // The compile-level check uses only the Add-op kinds. An Intersect is
+    // dropped by the empty-chain guard above the cull test when everything
+    // before it culls away — correctly, and for a reason that has nothing to
+    // do with influence bounds — so it cannot distinguish the two behaviours.
+    scene::CullRegion far;
+    far.region = math::Aabb{cf3(40.0f, 40.0f, 40.0f), cf3(41.0f, 41.0f, 41.0f)};
+
+    SUBCASE("an infinite grid repeat survives a distant cull region") {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        l.sdf->insert(clay_test::item(scene::Prim::box(cf3(0.3f, 0.3f, 0.3f)), cf3(0, 0, 0)));
+        scene::Node repeated = clay_test::item(scene::Prim::sphere(0.2f), cf3(0, 0, 0));
+        repeated.repeat = scene::Repeat::grid_infinite(cf3(0.5f, 0.5f, 0.5f));
+        l.sdf->insert(repeated);
+
+        scene::Tape culled = scene::compile_document(doc, &far);
+        scene::Tape whole = scene::compile_document(doc);
+        CHECK_FALSE(culled.empty());                        // the repeat stayed
+        CHECK(culled.instrs.size() < whole.instrs.size());  // the box went
+    }
+
+    SUBCASE("an unbounded primitive survives a distant cull region") {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        l.sdf->insert(clay_test::item(scene::Prim::box(cf3(0.3f, 0.3f, 0.3f)), cf3(0, 0, 0)));
+        l.sdf->insert(clay_test::item(scene::Prim::plane(cf3(0, 1, 0), 0.0f), cf3(0, 0, 0)));
+
+        scene::Tape culled = scene::compile_document(doc, &far);
+        scene::Tape whole = scene::compile_document(doc);
+        CHECK_FALSE(culled.empty());                        // the plane stayed
+        CHECK(culled.instrs.size() < whole.instrs.size());  // the box went
+    }
+
+    SUBCASE("a purely local document culls away to nothing") {
+        scene::Document local;
+        scene::Layer& ll = local.add_sdf_layer("l");
+        ll.sdf->insert(clay_test::item(scene::Prim::sphere(0.2f), cf3(0, 0, 0)));
+        CHECK(scene::compile_document(local, &far).empty());
+    }
+
+    SUBCASE("culling changes nothing a whole-document compile would see") {
+        // The cull region covering everything must give the same tape as no
+        // cull region at all — the guard is a filter, not a transform.
+        scene::Document doc = gnarly_document();
+        scene::CullRegion all;
+        all.region = math::Aabb{cf3(-1000, -1000, -1000), cf3(1000, 1000, 1000)};
+        scene::Tape a = scene::compile_document(doc, &all);
+        scene::Tape b = scene::compile_document(doc);
+        REQUIRE(a.instrs.size() == b.instrs.size());
+        CHECK(a.params == b.params);
+        CHECK(a.blob == b.blob);
+        for (std::size_t i = 0; i < a.instrs.size(); ++i) {
+            CHECK(a.instrs[i].op == b.instrs[i].op);
+            CHECK(a.instrs[i].param_offset == b.instrs[i].param_offset);
         }
     }
 }
