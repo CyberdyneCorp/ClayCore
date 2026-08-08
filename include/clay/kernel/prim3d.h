@@ -108,6 +108,13 @@ CLAY_FN float sd_capped_cone(cfloat3 p, float h, float r1, float r2) {
 
 // Sphere-swept cone along Y: base sphere radius r1 at origin, top r2 at height h.
 CLAY_FN float sd_round_cone(cfloat3 p, float r1, float r2, float h) {
+    // When the radii differ by more than the height, one end sphere CONTAINS
+    // the other: there is no conical flank to measure against, and the shape is
+    // simply the larger sphere. Falling through computes csqrt of a negative
+    // radicand and returns NaN, which every combine op then propagates — one
+    // such item turns the whole document into NaN.
+    if (cabs(r1 - r2) >= h)
+        return (r1 >= r2) ? clength(p) - r1 : clength(p - cf3(0.0f, h, 0.0f)) - r2;
     float b = (r1 - r2) / h;
     float a = csqrt(1.0f - b * b);
     cfloat2 q = cf2(clength(cf2(p.x, p.z)), p.y);
@@ -123,6 +130,12 @@ CLAY_FN float sd_round_cone_ab(cfloat3 p, cfloat3 a, cfloat3 b, float r1, float 
     float l2 = cdot(ba, ba);
     float rr = r1 - r2;
     float a2 = l2 - rr * rr;
+    // Same containment case as sd_round_cone, and the same reason it matters:
+    // this is the stroke-segment kernel, so a tapered two-point stroke whose
+    // radii differ by more than its length lands here. It also covers coincident
+    // endpoints, where l2 is zero and il2 below would be infinite.
+    if (a2 <= 0.0f)
+        return (r1 >= r2) ? clength(p - a) - r1 : clength(p - b) - r2;
     float il2 = 1.0f / l2;
     cfloat3 pa = p - a;
     float y = cdot(pa, ba);

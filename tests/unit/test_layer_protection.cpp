@@ -274,3 +274,73 @@ TEST_CASE("c protection: the flags across the ABI") {
     clay_item_destroy(item);
     clay_document_destroy(doc);
 }
+
+TEST_CASE("c protection: mirroring is an edit, so a locked layer refuses it") {
+    // clay_set_layer_mirror wrote the flags straight into the layer, so it
+    // neither honoured the lock every other layer edit checks nor recorded
+    // anything on the undo stack.
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "body", &layer) == CLAY_OK);
+    REQUIRE(clay_document_enable_undo(doc) == CLAY_OK);
+
+    const float radius[1] = {1.0f};
+    clay_item* item = clay_item_create(CLAY_PRIM_SPHERE, radius, 1);
+    REQUIRE(item != nullptr);
+    REQUIRE(clay_layer_add_item(doc, layer, item, nullptr) == CLAY_OK);
+
+    REQUIRE(clay_set_layer_mirror(doc, layer, 1, 0, 0, 0.0f) == CLAY_OK);
+
+    // undoable, unlike before: the edit reached the stack at all
+    std::int32_t undone = 0;
+    REQUIRE(clay_document_undo(doc, &undone) == CLAY_OK);
+    CHECK(undone == 1);
+
+    // and refused on a locked layer
+    REQUIRE(clay_document_set_layer_protection(doc, layer, 0, 1) == CLAY_OK);
+    CHECK(clay_set_layer_mirror(doc, layer, 1, 1, 1, 0.5f) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_document_set_layer_protection(doc, layer, 0, 0) == CLAY_OK);
+    CHECK(clay_set_layer_mirror(doc, layer, 1, 0, 0, 0.0f) == CLAY_OK);
+
+    CHECK(clay_set_layer_mirror(doc, 999, 1, 0, 0, 0.0f) == CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_set_layer_mirror(nullptr, layer, 1, 0, 0, 0.0f) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    clay_item_destroy(item);
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("c layers: moving one is a single undo step") {
+    // The move was a remove followed by an insert pushed as two entries, so one
+    // undo applied only the remove and the layer disappeared.
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+    clay_layer_id a = 0, b = 0, c = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "a", &a) == CLAY_OK);
+    REQUIRE(clay_add_sdf_layer(doc, "b", &b) == CLAY_OK);
+    REQUIRE(clay_add_sdf_layer(doc, "c", &c) == CLAY_OK);
+    REQUIRE(clay_document_enable_undo(doc) == CLAY_OK);
+
+    // The ABI has no layer enumeration, but a lookup tells existence apart from
+    // absence — and the layer VANISHING is exactly what the bug did.
+    auto exists = [&](clay_layer_id id) {
+        std::int32_t ghost = 0, locked = 0;
+        return clay_document_layer_protection(doc, id, &ghost, &locked) == CLAY_OK;
+    };
+    REQUIRE(exists(a));
+    REQUIRE(exists(b));
+    REQUIRE(exists(c));
+
+    REQUIRE(clay_document_move_layer(doc, c, 0) == CLAY_OK);
+    REQUIRE(exists(c));
+
+    std::int32_t undone = 0;
+    REQUIRE(clay_document_undo(doc, &undone) == CLAY_OK);
+    CHECK(undone == 1);
+    // one undo restores the order AND keeps every layer
+    CHECK(exists(a));
+    CHECK(exists(b));
+    CHECK(exists(c));
+
+    clay_document_destroy(doc);
+}

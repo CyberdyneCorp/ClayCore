@@ -147,7 +147,14 @@ The document tree the app and specs already define, owned here so every consumer
 - **PLY**: reader/writer with vertex colors (interchange with SDF Modeler/MagicaCSG ecosystems).
 - **glTF/GLB**: writer (cgltf or custom) — engine-friendly, wheel-friendly.
 - **USDZ**: *not* in claycore (Apple Model I/O owns it in the app shell); claycore exposes the mesh+attribute buffers those APIs consume.
-- Import guardrails: triangle budgets, malformed-file fuzzing, no allocation bombs.
+- Import guardrails: triangle budgets, malformed-file fuzzing, no allocation
+  bombs. A `*_file` loader prices the file's length against
+  `ImportBudget::max_file_bytes` before it sizes a buffer, so a path that is not
+  a readable regular file is an `IoStatus` rather than a termination — a
+  directory opens for reading and reports its length as `LONG_MAX`. A loader
+  never returns a mesh whose normals, colors or uvs are non-empty and a
+  different length than its positions; an attribute a file supplies for only
+  some of its objects is dropped rather than returned short.
 
 ## 9. Picking & interaction math (`clay::pick`)
 

@@ -1,9 +1,12 @@
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <cstring>
+#include <optional>
 #include <vector>
 
 #include "clay.h"
+#include "clay/scene/commands.h"
 #include "clay/scene/tape.h"
 
 // The C ABI loft surface (c-abi spec). A loft built through the boundary and
@@ -134,4 +137,66 @@ TEST_CASE("c loft: invalid uses are refused") {
     clay_item_destroy(extrude);
     clay_item_destroy(item);
     clay_document_destroy(doc);
+}
+
+TEST_CASE("c loft: set_prim cannot turn a node into a loft") {
+    // clay_layer_set_prim replaces only Node::prim, so it has no way to supply
+    // profiles. It used to accept CLAY_PRIM_LOFT anyway, leaving a loft with
+    // zero profiles that the tape read as a record never written — evaluating
+    // the document segfaulted.
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "l", &layer) == CLAY_OK);
+
+    const float radius[1] = {1.0f};
+    clay_item* sphere = clay_item_create(CLAY_PRIM_SPHERE, radius, 1);
+    REQUIRE(sphere != nullptr);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, sphere, &node) == CLAY_OK);
+
+    const float loft[2] = {1.0f, 0.0f};
+    CHECK(clay_layer_set_prim(doc, layer, node, CLAY_PRIM_LOFT, loft, 2) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    // The other primitives that carry out-of-line data are refused too.
+    const float one[1] = {0.5f};
+    CHECK(clay_layer_set_prim(doc, layer, node, CLAY_PRIM_STROKE, one, 1) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_layer_set_prim(doc, layer, node, CLAY_PRIM_EXTRUDE, one, 1) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_layer_set_prim(doc, layer, node, CLAY_PRIM_SWEPT, loft, 2) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+
+    // The node still evaluates, and an ordinary replacement still works.
+    float d = 0.0f;
+    const float origin[3] = {0, 0, 0};
+    CHECK(clay_eval_points(doc, nullptr, origin, 1, &d, nullptr) == CLAY_OK);
+    CHECK(d == doctest::Approx(-1.0f));
+    const float box[3] = {0.5f, 0.5f, 0.5f};
+    CHECK(clay_layer_set_prim(doc, layer, node, CLAY_PRIM_BOX, box, 3) == CLAY_OK);
+
+    clay_item_destroy(sphere);
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("loft tape: fewer than two profiles evaluates far, not out of bounds") {
+    // A document off disk can carry any profile count; the kernel used to read
+    // two records unconditionally, dereferencing a null blob at count 0.
+    for (int profiles = 0; profiles < 2; ++profiles) {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        scene::Node n;
+        n.prim = scene::Prim::loft(0.7f, 0);
+        for (int i = 0; i < profiles; ++i) n.profiles.push_back(scene::Profile::circle(0.75f));
+        l.sdf->insert(n);
+
+        std::vector<std::uint8_t> bytes = scene::serialize_document(doc);
+        std::optional<scene::Document> back =
+            scene::deserialize_document(bytes.data(), bytes.size(), scene::kSceneMinor);
+        REQUIRE(back.has_value());
+
+        scene::Tape tape = scene::compile_document(*back);
+        const float d = tape.eval(cf3(0.2f, 0.0f, 0.0f)).d;
+        CHECK(std::isfinite(d));
+        CHECK(d > 0.0f);  // a loft that cannot be interpolated contributes nothing
+    }
 }

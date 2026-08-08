@@ -44,9 +44,11 @@ Mesh weld_positions(const Mesh& m) {
         seen.emplace(k, idx);
         remap[i] = idx;
         out.positions.push_back(m.positions[i]);
-        if (!m.normals.empty()) out.normals.push_back(m.normals[i]);
-        if (!m.colors.empty()) out.colors.push_back(m.colors[i]);
-        if (!m.uvs.empty()) out.uvs.push_back(m.uvs[i]);
+        // Size equality, not emptiness: a short attribute array indexes out of
+        // bounds here, and the second pass below already compares sizes.
+        if (m.normals.size() == m.positions.size()) out.normals.push_back(m.normals[i]);
+        if (m.colors.size() == m.positions.size()) out.colors.push_back(m.colors[i]);
+        if (m.uvs.size() == m.positions.size()) out.uvs.push_back(m.uvs[i]);
     }
     out.indices.reserve(m.indices.size());
     for (std::size_t t = 0; t < m.triangle_count(); ++t) {
