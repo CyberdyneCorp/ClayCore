@@ -415,3 +415,14 @@ The flatten descriptor SHALL carry the mode, appended so that a caller compiled 
 - **WHEN** a descriptor names a mode the ABI does not define
 - **THEN** it is refused rather than silently treated as two-sided
 
+### Requirement: Flattening a trim curve across the C ABI
+The ABI SHALL expose flattening an OPEN control-point curve into a trim outline, beside the closed-lasso flattener it already has, following the same size-query convention. An unknown side, a tolerance that is not positive, or fewer points than describe a stroke SHALL be refused.
+
+#### Scenario: A host flattens a trim
+- **WHEN** a host flattens an open curve for a side
+- **THEN** it receives an outline whose closing edge runs along the frame bound on that side
+
+#### Scenario: The other side closes the other way
+- **WHEN** the same curve is flattened for the opposite side
+- **THEN** the closing edge runs along the opposite bound
+

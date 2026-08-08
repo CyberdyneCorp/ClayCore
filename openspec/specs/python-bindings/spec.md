@@ -530,3 +530,10 @@ The module SHALL expose the flatten mode, defaulting to two-sided, and SHALL nam
 - **WHEN** a script flattens in cut-only mode over a surface with a hollow in it
 - **THEN** the hollow is untouched and the high material is planed off
 
+### Requirement: Trimming from Python
+The module SHALL expose building a trim shape from an open curve and the side it covers, alongside the closed-lasso constructor, and SHALL say which is which so a caller does not reach for the lasso when it means a trim.
+
+#### Scenario: A script trims a form in half
+- **WHEN** a script resolves an open curve as a trim and places it with subtract
+- **THEN** one side of the form is removed and the other is untouched
+
