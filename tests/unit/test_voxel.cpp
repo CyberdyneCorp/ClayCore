@@ -137,6 +137,34 @@ TEST_CASE("serialization: palette+RLE round trip is lossless and canonical") {
         CHECK_FALSE(VoxelGrid::deserialize(bytes.data(), cut).has_value());
 }
 
+TEST_CASE("greedy meshing costs the material, not the bounding box") {
+    // The sweep ran over the occupied BOUNDING BOX, which for a sparse grid is
+    // not the material: two voxels far apart on two axes made it enormous, so
+    // meshing 24 triangles cost cubic time and a mask sized from a coordinate
+    // difference that overflowed int first. A deserialized grid may carry any
+    // chunk keys, so this was reachable from a file.
+    //
+    // The assertion is that this returns at all: on the dense sweep the same
+    // call took roughly a minute at n = 800 and grew cubically from there.
+    for (int n : {100, 800, 5000}) {
+        VoxelGrid g(0.1f);
+        std::uint8_t idx = g.palette_add(cf3(1, 1, 1));
+        g.set({0, 0, 0}, idx);
+        g.set({n, n, n}, idx);
+        mesh::Mesh m = g.mesh_greedy();
+        INFO("separation " << n);
+        CHECK(m.triangle_count() == 24);  // two cubes: six quads each, two tris a quad
+        CHECK(m.positions.size() == 48);
+    }
+
+    // and the merge itself is unchanged on material that is actually connected
+    VoxelGrid solid(0.1f);
+    std::uint8_t idx = solid.palette_add(cf3(1, 0, 0));
+    solid.fill_box({0, 0, 0}, {3, 3, 3}, idx);
+    mesh::Mesh m = solid.mesh_greedy();
+    CHECK(m.triangle_count() == 12);  // each 4x4 face merges to one quad
+}
+
 TEST_CASE("serialization: a voxel size that is not a positive real is refused") {
     // Every world<->cell conversion divides by the voxel size and casts the
     // result to int32. A payload carrying zero or a non-finite size made that

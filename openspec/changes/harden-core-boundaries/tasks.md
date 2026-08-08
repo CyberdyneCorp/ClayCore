@@ -120,6 +120,74 @@ is most prone to, and each now has a test.
       string, holding both live — twice the file at peak, for the one loader
       whose input is text. `read_whole_file` reads into either directly.
 
+## 12. Performance, done last and only once the tests were in place
+
+Both of these are the same defect wearing a performance costume: a sparse
+structure processed over its bounding box. Both were reachable from the same
+untrusted payload the rest of this change hardened, because a deserialized grid
+or mask may carry chunk keys arbitrarily far apart.
+
+- [x] 12.1 `VoxelGrid::mesh_greedy` sweeps per occupied CHUNK SLAB rather than
+      over the occupied bounding box. A slice belongs to exactly one slab, so
+      every occupied cell in it lies in that slab's (u, v) extent and the merge
+      sees the same mask contents — the output is byte-identical, verified by
+      hashing the exported PLY before and after.
+      Measured, two voxels apart on three axes: 800 cells apart went from
+      51,684 ms to 8.1 ms (~6,350x), and the old curve was cubic — 5.9, 15.6,
+      107, 812, 6,455, 51,684 ms for 25/50/100/200/400/800.
+- [x] 12.2 `MaskField::neighbourhood_op` works one clipped block per occupied
+      chunk instead of two dense buffers over the painted bounding box, with a
+      one-cell read halo and staging applied only after every block is
+      computed — the dense version took one snapshot before writing any of it,
+      and a cell in two blocks' overlap must not see the other's output.
+      Neighbours are still clamped at the PADDED BOUNDING BOX, not at a block
+      edge, which is what keeps `contract` and `smooth` identical rather than
+      only `expand`. Hashes of all three verbs match before and after.
+      Measured, two blobs apart on three axes: 1000 cells apart went from
+      45,431 ms to 3.7 ms (~12,000x).
+- [x] 12.3 The blocks are CLIPPED to the padded box rather than taken whole.
+      A first attempt processed a full chunk per key and made the common case
+      SLOWER — a brush stamp's box is smaller than one chunk, so 0.22 ms became
+      11.6 ms. Clipped, the compact case is 0.38 ms, and the sparse case keeps
+      its win.
+- [x] 12.4 Tests: both regression tests run in milliseconds on the new code and
+      do not complete within 60 seconds on the old, which is the assertion.
+
+## 13. Complexity, measured rather than eyeballed
+
+Measured with lizard (cyclomatic), against the project's 25-35 band for
+parser-and-kernel-shaped code.
+
+- [x] 13.1 `load_ply` was the worst real offender at CCN 72 before this change
+      and 81 after it — the guards in sections 2 and 9 landed in a function that
+      already carried the vertex-property ladder and the fan triangulation
+      twice, once per payload format. Split into `read_header`,
+      `read_binary_payload` and `read_ascii_payload` over a shared `PlyVertex`,
+      `assign_property`, `push_vertex` and `fan_triangulate`: the two formats
+      differ in how they READ a number and in nothing else.
+      CCN 81 -> 27, with the helpers at 14 / 10 / 11. Output byte-identical,
+      verified by hashing an exported PLY before and after.
+- [x] 13.2 Honest accounting of what this change ADDED: the sparse rewrites in
+      section 12 raised `mesh_greedy` from 29 to 35 and `neighbourhood_op` from
+      18 to 24. Both remain inside the band for this kind of code, and the cost
+      buys the removal of a whole class of blow-up, but neither got cheaper to
+      read and that is worth stating rather than burying.
+
+Not done, and deliberately: the remaining lizard warnings are pre-existing and
+untouched by this change — `ctape_prim_dist` (53), `prim_local_bounds` (47),
+`field::solve` (41, which also carries its 26-neighbour relaxation twice),
+`cease` (35), `mesh::validate` (34), `deformer_lipschitz` (27). Splitting them
+is a refactor with its own risk and no defect behind it, so it does not belong
+in a change whose subject is what the library does with input it did not write.
+The nanobind registration block reads as 254 but is a flat list of bindings.
+
+Not done, and deliberately: `BrickCache::mark_dirty` has the same unbounded
+shape (one map entry per brick in a caller-supplied AABB, no cap, no eviction).
+It is a caller-supplied region rather than a file-supplied one, so it is not on
+the untrusted path the rest of this change is about, and capping it is a policy
+decision about eviction that belongs with whoever owns the cache's memory
+budget.
+
 ## Found while building
 
 - [x] 7.1 The test reference evaluator built a six-float deformer record where

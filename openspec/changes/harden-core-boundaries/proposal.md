@@ -65,6 +65,20 @@ measured by what it still lets through, and every bound added here is derived
 from the format's own guarantees or the API's own documented promises rather
 than from a number that looked large enough.
 
+## Two of these were filed as performance problems
+
+`VoxelGrid::mesh_greedy` and `MaskField::neighbourhood_op` both process a sparse
+structure over its bounding box. That reads as a performance issue, and it is
+one — 51 seconds to emit twelve quads. But a bounding box is computed as a
+difference of two lattice coordinates, and a deserialized grid or mask may carry
+chunk keys arbitrarily far apart, so the same code path overflows a 32-bit
+integer and then asks for an allocation no allocator can satisfy. Without
+exceptions that ends the process.
+
+So they are fixed here rather than deferred, and they are fixed by making the
+work sparse rather than by adding a limit: a limit would refuse a document that
+is perfectly valid, which is the mistake section 11 is about.
+
 ## What it is not
 
 Not a new validation layer, and not a budget system. The refusals reuse the
