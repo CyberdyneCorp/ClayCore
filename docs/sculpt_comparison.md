@@ -78,7 +78,7 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 | Pinch / Magnify | `magnify` (signed), `sculpt_pinch` / `sculpt_magnify` | ✅ one deformation, one sign |
 | Smooth | `field::relax`, `sculpt_smooth` | ✅ bakes on the SDF side |
 | Flatten | `field::flatten`, `sculpt_flatten` | ✅ region required on the SDF side |
-| hPolish, Planar, Trim | `field::flatten` cut-only | ✅ planes down without filling |
+| hPolish, Planar, Trim | `field::flatten` cut-only | 🟡 planes down without filling, but **single-pass**: chaining bakes samples a volume and degrades |
 | Trim / Clip | `cut::cut_item` | ✅ as a solid, Clip *is* Trim |
 | SnakeHook | `brush::snakehook` | ✅ adds material rather than pulling it |
 | Surface Noise | `noise` deformer | ✅ integer hash, so all backends agree |

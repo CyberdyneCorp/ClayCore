@@ -244,6 +244,16 @@ Measured across a flank carrying a hollow, with the plane at x = 0.5:
 | 0.00 | 0.375 (hollow) | 0.498 | **0.375** kept | 0.498 filled |
 | 0.30 | 0.513 | 0.498 | **0.498** cut | 0.513 kept |
 
+**hPolish is a single-pass verb today.** A flatten bakes, and sampling the
+*document* gives an exact source and a 1-Lipschitz result. Chaining a second pass
+samples the first pass's *volume*, where outside the band a volume reports a
+lower bound rather than a distance — so the blend works from the wrong value. The
+declared Lipschitz goes 1.00 → 14.0 on the second pass whatever the falloff, and
+by the third the form is visibly corrupt rather than merely expensive. Polishing
+several faces of a form wants the cut tool (an Intersect against a prism is exact
+and stays exact) or a consolidation step the engine does not have yet.
+[`examples/28_hpolish.py`](../examples/28_hpolish.py) measures it.
+
 `flatten` has two overloads. Prefer the one taking a **document sampler**: a
 volume's band tracks the surface only while the surface stays inside it, and
 flatten moves it many band widths, so flattening a volume in place is accurate

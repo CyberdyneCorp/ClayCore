@@ -239,6 +239,31 @@ Not planned: Morph (needs a stored morph target, which is a document concept
 rather than a brush), Elastic and ZProject (both mesh-era ideas that do not
 survive the representation change intact).
 
+## Consolidation, which two brushes now need
+
+Two verbs have hit the same wall from opposite sides, so it is worth naming as a
+row rather than as two footnotes.
+
+**Move** stacks a grab per drag, and a stroke is many drags: the declared
+Lipschitz compounds and the safe step scale decays geometrically, about x0.615
+per drag — 79x the marching cost by nine drags. Coalescing covers frames of one
+drag, where the centre and radius are fixed; a stroke moves the centre.
+
+**hPolish** bakes, and a second pass samples the first pass's volume rather than
+the document. Outside the band a volume reports a lower bound rather than a
+distance, so the blend works from the wrong value: the Lipschitz goes 1.00 to
+14.0 on the second pass whatever the falloff, and by the third the form is
+visibly corrupt rather than merely expensive.
+
+`clay_item_volume_from_document` can collapse an edit list into one volume, so
+the mechanism exists. What does not exist is a POLICY — when a host should
+consolidate, what it costs, and how a baked region rejoins an edit list that is
+still parametric everywhere else. Both brushes are usable for single gestures
+today and neither is usable as a stroke, which is what a sculpting app needs.
+
+Measured in `examples/27_move_strokes.py` and `examples/28_hpolish.py`, both of
+which fail if the degradation stops being what they claim.
+
 ## Phase 3 — the pipeline
 
 | Change | Notes |
