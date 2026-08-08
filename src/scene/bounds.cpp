@@ -498,15 +498,20 @@ Aabb item_geometry_bound(const Node& item, const Layer& layer) {
     return bound.dilated(kernel::cmax(round_world, 0.0f) + combine);
 }
 
-Aabb item_influence_bound(const Node& item, const Layer& layer) {
+bool item_influence_is_local(const Node& item) {
     // Non-local ops (intersect, the spatial morphs) change the field
     // arbitrarily far from the item: claiming a finite bound would let
     // per-brick culling drop them and silently corrupt the result.
-    if (!op_is_local(item.op)) return Aabb::infinite();
+    if (!op_is_local(item.op)) return false;
     // an infinite grid produces copies arbitrarily far away
-    if (item.repeat.is_infinite_grid()) return Aabb::infinite();
+    if (item.repeat.is_infinite_grid()) return false;
     // so do primitives with no finite extent (plane, infinite cylinder)
-    if (prim_is_unbounded(item.prim.type)) return Aabb::infinite();
+    if (prim_is_unbounded(item.prim.type)) return false;
+    return true;
+}
+
+Aabb item_influence_bound(const Node& item, const Layer& layer) {
+    if (!item_influence_is_local(item)) return Aabb::infinite();
     return item_geometry_bound(item, layer);
 }
 

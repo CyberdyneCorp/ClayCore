@@ -5,7 +5,9 @@
 #include "clay.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <mutex>
 #include <cstddef>
 #include <cstring>
 #include <map>
@@ -682,6 +684,59 @@ struct clay_document {
     // std::map keeps the addresses stable as more layers arrive.
     std::map<clay_layer_id, clay_voxel_grid> voxel_handles;
     std::map<clay_layer_id, clay_mask> mask_handles;
+
+    // -- compiled tape cache -------------------------------------------------
+    //
+    // Every read of the field used to recompile the whole document: eval,
+    // gradients, safe step scale, meshing, and picking each paid O(document)
+    // before doing any work. On the interactive path that dominates — a sculpt
+    // grows a node per brush stamp, so the cost of LOOKING grew with everything
+    // the artist had already drawn.
+    //
+    // Keyed on a revision the mutating entry points bump through touch(). The
+    // dangerous direction is under-bumping (a stale field, silently), so the
+    // rule is to bump on anything that could possibly matter: an unnecessary
+    // bump costs one recompile, which is exactly the old behaviour.
+    //
+    // Handed out as a shared_ptr rather than a reference because two threads
+    // calling clay_eval_points on one document worked before this cache existed
+    // — compile_document takes a const Document& and returned a fresh tape — and
+    // that must keep working. A caller holding a snapshot is unaffected by
+    // another thread invalidating and rebuilding.
+    std::atomic<std::uint64_t> revision{1};
+
+    void touch() { revision.fetch_add(1, std::memory_order_relaxed); }
+
+    std::shared_ptr<const scene::Tape> tape() const {
+        return cached(tape_cache_, tape_revision_,
+                      [this] { return scene::compile_document(doc.document); });
+    }
+
+    // Picking excludes ghosted layers, so it is a different tape and gets its
+    // own slot rather than sharing one that would thrash between the two.
+    std::shared_ptr<const scene::Tape> pickable_tape() const {
+        return cached(pick_cache_, pick_revision_,
+                      [this] { return pick::pickable_tape(doc.document); });
+    }
+
+  private:
+    template <typename Build>
+    std::shared_ptr<const scene::Tape> cached(std::shared_ptr<const scene::Tape>& slot,
+                                              std::uint64_t& slot_revision, Build build) const {
+        const std::uint64_t now = revision.load(std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        if (!slot || slot_revision != now) {
+            slot = std::make_shared<const scene::Tape>(build());
+            slot_revision = now;
+        }
+        return slot;
+    }
+
+    mutable std::mutex cache_mutex_;
+    mutable std::shared_ptr<const scene::Tape> tape_cache_;
+    mutable std::uint64_t tape_revision_ = 0;
+    mutable std::shared_ptr<const scene::Tape> pick_cache_;
+    mutable std::uint64_t pick_revision_ = 0;
 };
 
 struct clay_mesh {
@@ -1067,6 +1122,9 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
     bool ok = doc->undo ? doc->undo->perform(doc->doc.document, cmd)
                         : static_cast<bool>(scene::apply(doc->doc.document, cmd));
     if (!ok) return fail(CLAY_ERROR_NOT_FOUND, what);
+    // The funnel every command-based edit passes through, so the tape cache is
+    // invalidated in one place for all of them.
+    doc->touch();
     return CLAY_OK;
 }
 
@@ -1168,6 +1226,9 @@ clay_result clay_document_undo(clay_document* doc, int32_t* out_undone) {
     // An empty stack is reported, not failed: a UI drives this without having
     // to track whether anything is left.
     *out_undone = doc->undo->undo(doc->doc.document) ? 1 : 0;
+    // Undo and redo replay commands straight onto the document rather than
+    // through apply_edit, so they invalidate here.
+    if (*out_undone) doc->touch();
     return CLAY_OK;
 }
 
@@ -1175,6 +1236,7 @@ clay_result clay_document_redo(clay_document* doc, int32_t* out_redone) {
     if (!doc || !out_redone) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
     if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
     *out_redone = doc->undo->redo(doc->doc.document) ? 1 : 0;
+    if (*out_redone) doc->touch();
     return CLAY_OK;
 }
 
@@ -1865,7 +1927,7 @@ clay_result clay_eval_points(const clay_document* doc, const char* backend,
                              float* out_colors_rgb) {
     if (!doc || !points_xyz || !out_distances)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null buffer");
-    return eval_into(scene::compile_document(doc->doc.document), backend, points_xyz, count,
+    return eval_into(*doc->tape(), backend, points_xyz, count,
                      eval::PointResults{out_distances, nullptr, out_colors_rgb});
 }
 
@@ -1874,7 +1936,7 @@ clay_result clay_eval_gradients(const clay_document* doc, const char* backend,
                                 float* out_gradients_xyz) {
     if (!doc || !points_xyz || !out_gradients_xyz)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null buffer");
-    return gradients_into(scene::compile_document(doc->doc.document), backend, points_xyz,
+    return gradients_into(*doc->tape(), backend, points_xyz,
                           count, out_gradients_xyz);
 }
 
@@ -1904,7 +1966,7 @@ clay_result clay_layer_eval_gradients(const clay_document* doc, clay_layer_id la
 clay_result clay_safe_step_scale(const clay_document* doc, float* out_scale) {
     if (!doc || !out_scale)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out pointer");
-    *out_scale = scene::compile_document(doc->doc.document).safe_step_scale();
+    *out_scale = doc->tape()->safe_step_scale();
     return CLAY_OK;
 }
 
@@ -1925,7 +1987,8 @@ clay_result clay_raycast(const clay_document* doc, const float origin[3], const 
     if (!doc || !origin || !dir || !out_hit)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
     eval::Backend* b = eval::Registry::instance().find("cpu");
-    scene::Tape tape = pick::pickable_tape(doc->doc.document);
+    std::shared_ptr<const scene::Tape> tape_ref = doc->pickable_tape();
+    const scene::Tape& tape = *tape_ref;
     float ray[6] = {origin[0], origin[1], origin[2], dir[0], dir[1], dir[2]};
     eval::RayQuery q{ray, 1, 0.0f, 1e6f, 1e-4f, 256};
     eval::RayHit hit;
@@ -1948,7 +2011,8 @@ clay_result clay_raycast_many(const clay_document* doc, const float* rays_origin
     clay_result r = normalize_rays(rays_origin_dir, count, &rays);
     if (r != CLAY_OK) return r;
     eval::Backend* b = eval::Registry::instance().find("cpu");
-    scene::Tape tape = pick::pickable_tape(doc->doc.document);
+    std::shared_ptr<const scene::Tape> tape_ref = doc->pickable_tape();
+    const scene::Tape& tape = *tape_ref;
     std::vector<eval::RayHit> hits(count ? count : 1);
     eval::RayQuery q{rays.data(), count, 0.0f, 1e6f, 1e-4f, 256};
     if (b->raycast(tape, q, hits.data()) != eval::Status::Ok)
@@ -1984,7 +2048,8 @@ clay_result clay_snap_to_surface(const clay_document* doc, const float* points_x
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or points");
     clay_result r = check_batch("points", count);
     if (r != CLAY_OK) return r;
-    scene::Tape tape = pick::pickable_tape(doc->doc.document);
+    std::shared_ptr<const scene::Tape> tape_ref = doc->pickable_tape();
+    const scene::Tape& tape = *tape_ref;
     for (size_t i = 0; i < count; ++i) {
         kernel::cfloat3 p =
             kernel::cf3(points_xyz[i * 3], points_xyz[i * 3 + 1], points_xyz[i * 3 + 2]);
@@ -2027,7 +2092,8 @@ clay_result clay_document_mesh(const clay_document* doc, const clay_mesh_params*
     clay_mesh_params p;
     clay_result r = read_desc(params, kMeshParamsOriginal, &p);
     if (r != CLAY_OK) return r;
-    scene::Tape tape = scene::compile_document(doc->doc.document);
+    std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
+    const scene::Tape& tape = *tape_ref;
     if (tape.empty()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty document");
     math::Aabb region = tape.bounds;
     if (region.empty() || region.is_infinite())
@@ -2224,7 +2290,8 @@ clay_result clay_item_volume_from_document(const clay_document* doc,
     clay_result r = read_desc(params, kVolumeParamsOriginal, &p);
     if (r != CLAY_OK) return r;
 
-    scene::Tape tape = scene::compile_document(doc->doc.document);
+    std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
+    const scene::Tape& tape = *tape_ref;
     if (tape.empty()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty document");
 
     const float cell = p.cell_size > 0.0f ? p.cell_size : 0.0f;
@@ -2374,6 +2441,7 @@ clay_result clay_document_add_voxel_layer(clay_document* doc, const char* name, 
     if (!doc || !name) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or name");
     if (!(voxel_size > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "voxel_size must be > 0");
     scene::Layer& layer = doc->doc.document.add_sdf_layer(name);
+    doc->touch();
     layer.kind = scene::LayerKind::Voxel;
     layer.sdf.reset();  // a voxel layer carries no SDF content
     doc->doc.voxel_layers.emplace(layer.id, voxel::VoxelGrid(voxel_size));
@@ -3379,7 +3447,8 @@ clay_result clay_voxel_rasterize(clay_voxel_grid* grid, const clay_document* doc
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     if ((region_min == nullptr) != (region_max == nullptr))
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "a region needs both a min and a max");
-    scene::Tape tape = scene::compile_document(doc->doc.document);
+    std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
+    const scene::Tape& tape = *tape_ref;
     math::Aabb box = tape.bounds;
     if (region_min)
         box = math::Aabb{kernel::cf3(region_min[0], region_min[1], region_min[2]),
