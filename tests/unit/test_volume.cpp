@@ -382,6 +382,67 @@ TEST_CASE("volume: the blob round trips") {
         lying[5] = 1e6f;  // an impossible brick count
         CHECK_FALSE(FieldVolume::from_blob(lying).has_value());
     }
+
+    SUBCASE("a blob whose index ENTRY runs past the samples is refused") {
+        // The section offsets were checked but the per-brick entries were not,
+        // so one hostile entry became an arbitrary-offset read of 729 floats
+        // in eval_inside and in the tape. Reachable by loading a .clayspace.
+        const std::size_t index_off = static_cast<std::size_t>(flat[8]);
+        const std::size_t index_size = static_cast<std::size_t>(flat[5]) *
+                                       static_cast<std::size_t>(flat[6]) *
+                                       static_cast<std::size_t>(flat[7]);
+        for (float bad : {5e8f, -7.0f}) {
+            std::vector<float> lying = flat;
+            bool poisoned = false;
+            for (std::size_t i = 0; i < index_size; ++i)
+                if (lying[index_off + i] >= 0.0f) {
+                    lying[index_off + i] = bad;
+                    poisoned = true;
+                }
+            REQUIRE(poisoned);
+            CHECK_FALSE(FieldVolume::from_blob(lying).has_value());
+        }
+    }
+
+    SUBCASE("an empty-brick entry is still accepted") {
+        // kBrickEmpty is the one negative value that is legal, so the new
+        // bounds check must not reject an ordinary sparse volume.
+        CHECK(FieldVolume::from_blob(flat).has_value());
+    }
+
+    SUBCASE("an entry off by less than a brick is snapped, not refused") {
+        // Index entries are stored as float. Past 2^24 a float cannot hold
+        // consecutive integers, so a large volume reads its own offsets back
+        // rounded — and a bounds check written as an exact comparison then
+        // refuses the LAST brick of any volume big enough to matter, which
+        // means a document this library wrote will not reopen.
+        //
+        // Every stored brick starts on a kBrickSamples boundary, so the reader
+        // snaps to that boundary. Perturbing an entry by a fraction of a brick
+        // stands in for the float's own rounding at scale.
+        const std::size_t index_off = static_cast<std::size_t>(flat[8]);
+        const std::size_t index_size = static_cast<std::size_t>(flat[5]) *
+                                       static_cast<std::size_t>(flat[6]) *
+                                       static_cast<std::size_t>(flat[7]);
+        for (float nudge : {1.0f, -1.0f, 4.0f}) {
+            std::vector<float> jittered = flat;
+            for (std::size_t i = 0; i < index_size; ++i)
+                if (jittered[index_off + i] > 0.0f) jittered[index_off + i] += nudge;
+            auto v2 = FieldVolume::from_blob(jittered);
+            REQUIRE(v2.has_value());
+            // and it reads the same field, i.e. it snapped to the true offset
+            for (float x = -1.1f; x <= 1.1f; x += 0.31f)
+                CHECK(v2->eval(cf3(x, 0.1f, 0.2f)) ==
+                      doctest::Approx(v.eval(cf3(x, 0.1f, 0.2f))));
+        }
+    }
+
+    SUBCASE("the last brick, which ends exactly at the end of the data, is accepted") {
+        // The boundary case the exact comparison got wrong.
+        auto v2 = FieldVolume::from_blob(flat);
+        REQUIRE(v2.has_value());
+        CHECK(v2->brick_count() == v.brick_count());
+    }
 }
 
 TEST_CASE("volume: serializes and survives a save") {

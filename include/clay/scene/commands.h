@@ -118,12 +118,21 @@ struct SetLayerTransformCmd {
     LayerId id = 0;
     math::Transform xform;
 };
+// Mirroring is an edit like any other: it changes what the layer evaluates to.
+// It was written straight into the layer, which meant it neither respected the
+// lock nor landed on the undo stack.
+struct SetLayerMirrorCmd {
+    LayerId id = 0;
+    std::uint8_t axes = 0;  // kMirrorX|Y|Z
+    float k = 0.0f;
+};
 
 using Command =
     std::variant<AddNodeCmd, RemoveNodeCmd, MoveNodeCmd, SetTransformCmd, SetPrimCmd,
                  SetColorCmd, SetOpBlendCmd, AppendStrokeCmd, TrimStrokeCmd, AddLayerCmd,
                  RemoveLayerCmd, SetLayerVisibleCmd, SetLayerTransformCmd,
-                 SetLayerProtectionCmd, SetStrokePointsCmd, SetDeformersCmd>;
+                 SetLayerProtectionCmd, SetStrokePointsCmd, SetDeformersCmd,
+                 SetLayerMirrorCmd>;
 
 // The layer a command would edit, or 0 for one that edits no existing layer
 // (adding a layer creates its target; changing protection is how a protected

@@ -165,43 +165,99 @@ template <typename Fn>
 void MaskField::neighbourhood_op(int pad, Fn&& reduce) {
     std::optional<VoxelCoord> lo = bounds_min(), hi = bounds_max();
     if (!lo || !hi) return;
-    VoxelCoord a{lo->x - pad, lo->y - pad, lo->z - pad};
-    VoxelCoord b{hi->x + pad, hi->y + pad, hi->z + pad};
-    std::size_t nx = static_cast<std::size_t>(b.x - a.x + 1);
-    std::size_t ny = static_cast<std::size_t>(b.y - a.y + 1);
-    std::size_t nz = static_cast<std::size_t>(b.z - a.z + 1);
-    std::vector<std::uint8_t> src(nx * ny * nz, 0);
-    auto at = [&](std::size_t x, std::size_t y, std::size_t z) { return (z * ny + y) * nx + x; };
-    for (std::size_t z = 0; z < nz; ++z)
-        for (std::size_t y = 0; y < ny; ++y)
-            for (std::size_t x = 0; x < nx; ++x)
-                src[at(x, y, z)] = quantize(get({a.x + static_cast<std::int32_t>(x),
-                                                 a.y + static_cast<std::int32_t>(y),
-                                                 a.z + static_cast<std::int32_t>(z)}));
+    // The padded bounding box still decides WHERE the operation applies and
+    // where a neighbour is clamped to the cell itself. What it no longer does
+    // is get allocated: a mask is sparse and its bounding box is not, so two
+    // painted specks far apart used to size two dense buffers spanning
+    // everything between them — seconds and gigabytes for a few hundred cells,
+    // and an int overflow in `b.x - a.x + 1` before that for coordinates a
+    // deserialized mask may legitimately carry.
+    const VoxelCoord a{lo->x - pad, lo->y - pad, lo->z - pad};
+    const VoxelCoord b{hi->x + pad, hi->y + pad, hi->z + pad};
 
-    std::vector<std::uint8_t> dst(src.size(), 0);
-    for (std::size_t z = 0; z < nz; ++z)
-        for (std::size_t y = 0; y < ny; ++y)
-            for (std::size_t x = 0; x < nx; ++x) {
-                // 6-neighbourhood plus self, clamped at the padded border.
-                std::uint8_t self = src[at(x, y, z)];
-                std::uint8_t n[6] = {
-                    x > 0 ? src[at(x - 1, y, z)] : self,
-                    x + 1 < nx ? src[at(x + 1, y, z)] : self,
-                    y > 0 ? src[at(x, y - 1, z)] : self,
-                    y + 1 < ny ? src[at(x, y + 1, z)] : self,
-                    z > 0 ? src[at(x, y, z - 1)] : self,
-                    z + 1 < nz ? src[at(x, y, z + 1)] : self,
-                };
-                dst[at(x, y, z)] = reduce(self, n);
-            }
+    // Cells worth visiting: every occupied chunk grown by the pad. Anything
+    // further out reads as empty and reduces to itself, which set() drops.
+    // Chunk keys are snapshotted because staging is applied afterwards and
+    // set() may create chunks.
+    std::vector<VoxelCoord> keys;
+    keys.reserve(chunks_.size());
+    for (const auto& [key, chunk] : chunks_) keys.push_back(key);
 
-    for (std::size_t z = 0; z < nz; ++z)
-        for (std::size_t y = 0; y < ny; ++y)
-            for (std::size_t x = 0; x < nx; ++x)
-                set({a.x + static_cast<std::int32_t>(x), a.y + static_cast<std::int32_t>(y),
-                     a.z + static_cast<std::int32_t>(z)},
-                    dst[at(x, y, z)] / 255.0f);
+    // One dense window per occupied chunk rather than one over everything: the
+    // window is read with a halo of pad+1 so a staged cell's own neighbours are
+    // always inside it, and the result is staged whole and applied afterwards.
+    // Applying as we go would let one chunk's pad ring read another's output,
+    // where the dense sweep took a single snapshot before writing any of it.
+    // Each chunk's block is CLIPPED to the padded box. That keeps the compact
+    // case as cheap as the dense sweep was — a brush stamp's box is smaller
+    // than one chunk, and processing a whole chunk for it would be slower, not
+    // faster — while a far-apart pair costs one bounded block per chunk instead
+    // of everything between them.
+    struct Block {
+        VoxelCoord lo;                   // world coords of the block's origin
+        int nx = 0, ny = 0, nz = 0;
+        std::vector<std::uint8_t> dst;
+    };
+    std::vector<Block> staged;
+    staged.reserve(keys.size());
+    std::vector<std::uint8_t> src;
+
+    for (const VoxelCoord& key : keys) {
+        Block blk;
+        blk.lo = {std::max(key.x * kChunkDim - pad, a.x), std::max(key.y * kChunkDim - pad, a.y),
+                  std::max(key.z * kChunkDim - pad, a.z)};
+        const VoxelCoord blk_hi{std::min(key.x * kChunkDim + kChunkDim - 1 + pad, b.x),
+                            std::min(key.y * kChunkDim + kChunkDim - 1 + pad, b.y),
+                            std::min(key.z * kChunkDim + kChunkDim - 1 + pad, b.z)};
+        blk.nx = blk_hi.x - blk.lo.x + 1;
+        blk.ny = blk_hi.y - blk.lo.y + 1;
+        blk.nz = blk_hi.z - blk.lo.z + 1;
+        if (blk.nx <= 0 || blk.ny <= 0 || blk.nz <= 0) continue;
+
+        // Read with a one-cell halo so a block cell's own neighbours are always
+        // in the buffer; the halo is read, never written.
+        const int wx = blk.nx + 2, wy = blk.ny + 2, wz = blk.nz + 2;
+        src.assign(static_cast<std::size_t>(wx) * wy * wz, 0);
+        auto wat = [&](int x, int y, int z) {
+            return (static_cast<std::size_t>(z) * wy + y) * wx + x;
+        };
+        for (int z = 0; z < wz; ++z)
+            for (int y = 0; y < wy; ++y)
+                for (int x = 0; x < wx; ++x)
+                    src[wat(x, y, z)] =
+                        quantize(get({blk.lo.x + x - 1, blk.lo.y + y - 1, blk.lo.z + z - 1}));
+
+        blk.dst.assign(static_cast<std::size_t>(blk.nx) * blk.ny * blk.nz, 0);
+        for (int z = 0; z < blk.nz; ++z)
+            for (int y = 0; y < blk.ny; ++y)
+                for (int x = 0; x < blk.nx; ++x) {
+                    const std::int32_t gx = blk.lo.x + x, gy = blk.lo.y + y, gz = blk.lo.z + z;
+                    // 6-neighbourhood plus self, clamped at the PADDED BOUNDING
+                    // BOX exactly as the dense sweep clamped at its buffer edge
+                    // — this block's own edge is not a boundary of anything.
+                    const std::uint8_t self = src[wat(x + 1, y + 1, z + 1)];
+                    const std::uint8_t n[6] = {
+                        gx > a.x ? src[wat(x, y + 1, z + 1)] : self,
+                        gx < b.x ? src[wat(x + 2, y + 1, z + 1)] : self,
+                        gy > a.y ? src[wat(x + 1, y, z + 1)] : self,
+                        gy < b.y ? src[wat(x + 1, y + 2, z + 1)] : self,
+                        gz > a.z ? src[wat(x + 1, y + 1, z)] : self,
+                        gz < b.z ? src[wat(x + 1, y + 1, z + 2)] : self,
+                    };
+                    blk.dst[(static_cast<std::size_t>(z) * blk.ny + y) * blk.nx + x] =
+                        reduce(self, n);
+                }
+        staged.push_back(std::move(blk));
+    }
+
+    // Applied only now: a cell in two blocks' overlap gets the same answer from
+    // both, but neither may read the other's output.
+    for (const Block& blk : staged)
+        for (int z = 0; z < blk.nz; ++z)
+            for (int y = 0; y < blk.ny; ++y)
+                for (int x = 0; x < blk.nx; ++x)
+                    set({blk.lo.x + x, blk.lo.y + y, blk.lo.z + z},
+                        blk.dst[(static_cast<std::size_t>(z) * blk.ny + y) * blk.nx + x] / 255.0f);
 }
 
 void MaskField::expand(int steps) {
@@ -331,9 +387,14 @@ std::optional<MaskField> MaskField::deserialize(const std::uint8_t* data, std::s
     if (!get32(&bits) || !get32(&chunk_count)) return std::nullopt;
     float cell_size;
     std::memcpy(&cell_size, &bits, 4);
-    if (!(cell_size > 0.0f)) return std::nullopt;
+    // `!(cell_size > 0)` rejects NaN and zero; infinity needs saying too, since
+    // a world coordinate divided by it floors to a cell of zero everywhere.
+    if (!(cell_size > 0.0f) || !std::isfinite(cell_size)) return std::nullopt;
 
     MaskField m(cell_size);
+    // Same decode-amplification bound as VoxelGrid: 16 header bytes plus a
+    // 2-byte run per chunk, against 32 KiB of decoded cells.
+    if (chunk_count > (size - pos) / 18) return std::nullopt;
     const std::size_t chunk_cells = static_cast<std::size_t>(kChunkDim) * kChunkDim * kChunkDim;
     for (std::uint32_t n = 0; n < chunk_count; ++n) {
         std::uint32_t kx, ky, kz, run_bytes;

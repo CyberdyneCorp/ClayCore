@@ -63,7 +63,13 @@ std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc);
 IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc* out);
 
 IoStatus save_clayspace_file(const ClaySpaceDoc& doc, const std::string& path);
-IoStatus load_clayspace_file(const std::string& path, ClaySpaceDoc* out);
+// The budget's max_file_bytes bounds what will be read into memory before the
+// buffer is sized. It is a parameter rather than a fixed ceiling because a
+// document carrying sampled volumes is large by nature, and nothing here caps
+// what save_clayspace_file will WRITE — a reader that could not raise the
+// ceiling would be unable to reopen a document this library had just written.
+IoStatus load_clayspace_file(const std::string& path, ClaySpaceDoc* out,
+                             const ImportBudget& budget = {});
 
 // Scene payload codec shared with the command vocabulary (scene chunk =
 // serialize_document; exposed for tests and the C ABI).

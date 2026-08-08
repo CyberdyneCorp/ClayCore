@@ -1214,6 +1214,14 @@ clay_result clay_layer_set_transform(clay_document* doc, clay_layer_id layer, cl
 clay_result clay_layer_set_prim(clay_document* doc, clay_layer_id layer, clay_node_id node,
                                 int32_t prim, const float* params, size_t param_count) {
     if (!prim_is_known(prim)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown primitive type");
+    // The same refusal validate_item_desc makes: this entry point replaces only
+    // Node::prim, so it has no way to supply a stroke, profiles or a volume.
+    // Letting it through turned a node into a loft with zero profiles, which
+    // the tape then read as a record that was never written.
+    scene::PrimType replaced = static_cast<scene::PrimType>(prim);
+    if (replaced == scene::PrimType::Stroke || scene::prim_is_lift(replaced) ||
+        scene::prim_carries_profiles(replaced) || scene::prim_is_volume(replaced))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "primitive needs out-of-line data");
     clay_result r = check_params("primitive", params, param_count, kPrimParams[prim]);
     if (r != CLAY_OK) return r;
     float p[scene::kMaxPrimParams] = {};
@@ -1222,7 +1230,7 @@ clay_result clay_layer_set_prim(clay_document* doc, clay_layer_id layer, clay_no
     if (r != CLAY_OK) return r;
 
     scene::Prim replacement;
-    replacement.type = static_cast<scene::PrimType>(prim);
+    replacement.type = replaced;
     std::memcpy(replacement.params, p, sizeof p);
     return apply_edit(doc, scene::Command{scene::SetPrimCmd{layer, node, replacement}},
                       "node not found");
@@ -1294,11 +1302,17 @@ clay_result clay_document_move_layer(clay_document* doc, clay_layer_id layer, in
     const scene::Layer* found = doc->doc.document.find_layer(layer);
     if (!found) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
     scene::Layer copy = *found;
+    // One group, so one undo puts the layer back where it was. Ungrouped, the
+    // undo stack held a remove and an insert separately and a single undo
+    // applied only the remove — the layer vanished.
+    if (doc->undo) doc->undo->begin_group();
     clay_result r = apply_edit(doc, scene::Command{scene::RemoveLayerCmd{layer}},
                                "layer not found");
-    if (r != CLAY_OK) return r;
-    return apply_edit(doc, scene::Command{scene::AddLayerCmd{std::move(copy), index}},
-                      "layer could not be reinserted");
+    if (r == CLAY_OK)
+        r = apply_edit(doc, scene::Command{scene::AddLayerCmd{std::move(copy), index}},
+                       "layer could not be reinserted");
+    if (doc->undo) doc->undo->end_group();
+    return r;
 }
 
 clay_result clay_document_set_layer_visible(clay_document* doc, clay_layer_id layer,
@@ -1337,14 +1351,15 @@ clay_result clay_document_set_layer_transform(clay_document* doc, clay_layer_id 
 
 clay_result clay_set_layer_mirror(clay_document* doc, clay_layer_id layer_id, int32_t axis_x,
                                   int32_t axis_y, int32_t axis_z, float mirror_k) {
-    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
-    scene::Layer* layer = doc->doc.document.find_layer(layer_id);
-    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
-    layer->mirror_axes = static_cast<std::uint8_t>((axis_x ? scene::kMirrorX : 0) |
-                                                   (axis_y ? scene::kMirrorY : 0) |
-                                                   (axis_z ? scene::kMirrorZ : 0));
-    layer->mirror_k = mirror_k;
-    return CLAY_OK;
+    // Through the command vocabulary like every other layer edit: writing the
+    // fields directly skipped the lock check that apply_edit makes and left
+    // nothing on the undo stack, so a mirror could neither be refused on a
+    // locked layer nor undone.
+    const std::uint8_t axes = static_cast<std::uint8_t>((axis_x ? scene::kMirrorX : 0) |
+                                                        (axis_y ? scene::kMirrorY : 0) |
+                                                        (axis_z ? scene::kMirrorZ : 0));
+    return apply_edit(doc, scene::Command{scene::SetLayerMirrorCmd{layer_id, axes, mirror_k}},
+                      "layer not found");
 }
 
 // -- item builder (c-abi spec: item builder for composed edits) --------------
@@ -2023,6 +2038,24 @@ clay_result clay_document_mesh(const clay_document* doc, const clay_mesh_params*
         kernel::cfloat3 ext = region.extent();
         voxel = kernel::cmax(ext.x, kernel::cmax(ext.y, ext.z)) / static_cast<float>(res);
     }
+    // The mesher samples a DENSE grid over the region, so the caller's voxel
+    // size decides an allocation. Priced in cells and refused up front: an
+    // over-fine size used to reach the allocator and terminate the host.
+    if (!(voxel > 0.0f) || !std::isfinite(voxel))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "voxel size must be finite and > 0");
+    {
+        // The mesher's own ceiling, not the batch limit: CLAY_MAX_BATCH bounds
+        // how many items cross this boundary in one call, which is a different
+        // quantity, and it is far below the resolution 512 this API documents.
+        kernel::cfloat3 ext = region.extent();
+        const double cells = (static_cast<double>(ext.x) / voxel + 2.0) *
+                             (static_cast<double>(ext.y) / voxel + 2.0) *
+                             (static_cast<double>(ext.z) / voxel + 2.0);
+        if (!(cells <= static_cast<double>(mesh::kMaxGridSamples)))
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "the requested resolution needs more than " +
+                            std::to_string(mesh::kMaxGridSamples) + " grid samples");
+    }
     mesh::Mesh m;
     r = mesh_with(p.mesher, p.experimental != 0, tape, region, voxel, &m);
     if (r != CLAY_OK) return r;
@@ -2443,6 +2476,10 @@ clay_item* clay_tube_create(const float* points_xyz, size_t count,
         fail(CLAY_ERROR_INVALID_ARGUMENT, "a tube needs at least two points");
         return nullptr;
     }
+    // The upper bound every other out-of-line payload is held to. Without it a
+    // bogus count reserved for itself and std::bad_alloc reached the host as a
+    // terminate, since the library builds -fno-exceptions.
+    if (check_payload("tube points", points_xyz, count) != CLAY_OK) return nullptr;
     clay_tube_params p;
     if (read_desc(params, kTubeParamsOriginal, &p) != CLAY_OK) return nullptr;
     if (p.point_type < 0 || p.point_type > CLAY_POINT_BEZIER) {

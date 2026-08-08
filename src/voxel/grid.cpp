@@ -316,6 +316,11 @@ std::optional<VoxelGrid> VoxelGrid::deserialize(const std::uint8_t* data, std::s
     std::uint32_t palette_count;
     if (!getf(&vs) || !get32(&palette_count) || palette_count == 0 || palette_count > 256)
         return std::nullopt;
+    // Every world<->cell conversion divides by the voxel size, and the result
+    // is cast to int32. A payload carrying zero, a negative or a non-finite
+    // size made that cast undefined; MaskField::deserialize already refuses the
+    // same way. `!(vs > 0)` also rejects NaN.
+    if (!(vs > 0.0f) || !std::isfinite(vs)) return std::nullopt;
     VoxelGrid grid(vs);
     grid.palette_.resize(palette_count, cf3(0, 0, 0));
     for (std::uint32_t i = 0; i < palette_count; ++i)
@@ -324,6 +329,11 @@ std::optional<VoxelGrid> VoxelGrid::deserialize(const std::uint8_t* data, std::s
             return std::nullopt;
     std::uint32_t chunk_count;
     if (!get32(&chunk_count)) return std::nullopt;
+    // A chunk costs 16 header bytes plus at least 3 for one run, but decodes to
+    // 32 KiB — roughly 1700x. Bounding the count by what the remaining payload
+    // could possibly describe keeps that ratio from turning a small file into
+    // gigabytes of chunks before the first short read is noticed.
+    if (chunk_count > (size - pos) / 19) return std::nullopt;
     const std::size_t chunk_cells = static_cast<std::size_t>(kChunkDim) * kChunkDim * kChunkDim;
     for (std::uint32_t c = 0; c < chunk_count; ++c) {
         std::uint32_t kx, ky, kz, rle_size;
@@ -376,17 +386,51 @@ mesh::Mesh VoxelGrid::mesh_greedy() const {
         return c;
     };
 
+    // The sweep runs per occupied CHUNK SLAB rather than over the whole
+    // occupied bounding box. A grid is sparse by construction, and a bounding
+    // box is not: two voxels far apart on two axes made the box — and the
+    // per-slice mask sized from it — enormous, which cost cubic time and, from
+    // a payload whose chunk keys are simply far apart, overflowed the int in
+    // `u1 - u0 + 1` before allocating a mask no allocator could satisfy.
+    //
+    // Grouping by slab is exact rather than an approximation: a slice belongs
+    // to exactly ONE slab along the sweep axis, so every occupied cell in that
+    // slice lies in that slab's (u, v) extent. Cells outside it are empty and
+    // emit nothing, so the merge sees the same mask contents and produces the
+    // same quads it always did.
+    struct Slab {
+        int u0 = 0, u1 = 0, v0 = 0, v1 = 0;
+    };
+    auto axis_of = [](VoxelCoord c, int axis) { return axis == 0 ? c.x : (axis == 1 ? c.y : c.z); };
+    auto u_of = [](VoxelCoord c, int axis) { return axis == 0 ? c.y : c.x; };
+    auto v_of = [](VoxelCoord c, int axis) { return axis == 2 ? c.y : c.z; };
+
     for (const Dir& dir : dirs) {
-        int a0, a1, u0, u1, v0, v1;
-        if (dir.axis == 0) {
-            a0 = b0->x; a1 = b1->x; u0 = b0->y; u1 = b1->y; v0 = b0->z; v1 = b1->z;
-        } else if (dir.axis == 1) {
-            a0 = b0->y; a1 = b1->y; u0 = b0->x; u1 = b1->x; v0 = b0->z; v1 = b1->z;
-        } else {
-            a0 = b0->z; a1 = b1->z; u0 = b0->x; u1 = b1->x; v0 = b0->y; v1 = b1->y;
+        // slab index along the sweep axis -> the (u, v) box its chunks span
+        std::map<int, Slab> slabs;
+        for (const auto& [key, chunk] : chunks_) {
+            if (chunk.occupied <= 0) continue;
+            const int sa = axis_of(key, dir.axis);
+            const int cu = u_of(key, dir.axis) * kChunkDim;
+            const int cv = v_of(key, dir.axis) * kChunkDim;
+            auto it = slabs.find(sa);
+            if (it == slabs.end()) {
+                slabs.emplace(sa, Slab{cu, cu + kChunkDim - 1, cv, cv + kChunkDim - 1});
+                continue;
+            }
+            it->second.u0 = std::min(it->second.u0, cu);
+            it->second.u1 = std::max(it->second.u1, cu + kChunkDim - 1);
+            it->second.v0 = std::min(it->second.v0, cv);
+            it->second.v1 = std::max(it->second.v1, cv + kChunkDim - 1);
         }
-        int nu = u1 - u0 + 1, nv = v1 - v0 + 1;
-        std::vector<std::uint8_t> mask(static_cast<std::size_t>(nu) * nv);
+
+        std::vector<std::uint8_t> mask;
+        for (const auto& [slab_index, slab] : slabs) {
+        const int u0 = slab.u0, v0 = slab.v0;
+        const int nu = slab.u1 - slab.u0 + 1, nv = slab.v1 - slab.v0 + 1;
+        mask.assign(static_cast<std::size_t>(nu) * nv, 0);
+        const int a0 = slab_index * kChunkDim;
+        const int a1 = a0 + kChunkDim - 1;
 
         for (int a = a0; a <= a1; ++a) {
             // build exposure mask for this slice
@@ -430,6 +474,7 @@ mesh::Mesh VoxelGrid::mesh_greedy() const {
                             mask[static_cast<std::size_t>(v + dv) * nu + u + du] = 0;
                     u += w;
                 }
+        }
         }
     }
     return out;
