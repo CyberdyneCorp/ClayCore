@@ -298,12 +298,12 @@ unchanged.
 | Feature | Field | What it does |
 |---|---|---|
 | Spacing | `spacing` | Distance between stamps as a fraction of brush **diameter**. 0.25 is dense; 1.0 places them just touching |
-| Pressure | `pressure.size`, `.strength`, `.curve` | Exponents on normalized pressure. 0 disables a channel — that is what "size only" and "flow only" brushes are |
+| Pressure | `pressure.size`, `.strength`, `.curve` | Exponents on normalized pressure. 0 disables a channel — that is what "size only" and "flow only" brushes are. On an SDF layer the **strength** channel reaches relief and incise only — see below |
 | Jitter | `jitter_position`, `jitter_size`, `jitter_rotation`, `seed` | Derived from the stamp index and seed, **never from a random source**, so a stroke resolves identically everywhere |
 | Rotate along stroke | `rotate_along_stroke` | Turns each stamp to follow the path; only matters for stamps that are not rotationally symmetric |
 | Taper | `taper_start`, `taper_end` | Fraction of stroke length over which the radius ramps in and out |
 | Steady stroke | `steady` | "Lazy mouse" — the emission point trails the cursor, smoothing a shaky path |
-| Accumulation | `accumulation` | `Buildup`: passing twice acts twice. `Clamped`: the stroke reaches its strength once, however many stamps overlap |
+| Accumulation | `accumulation` | `Buildup`: passing twice acts twice. `Clamped`: the stroke reaches its strength once, however many stamps overlap. Same caveat as strength on an SDF layer |
 | Base | `radius`, `strength` | What pressure, taper and jitter modulate |
 
 Presets serialize with a **schema version from the first release** rather than
@@ -311,6 +311,20 @@ one retrofitted later: presets outlive engine versions, and a library of them
 silently reinterpreted by a later build is the failure that number prevents.
 Deserialization accepts its own version and earlier ones, and **refuses a newer
 one** rather than reading a prefix and pretending.
+
+**A stamp's strength reaches an SDF item only where `blend.k` is an amount.**
+For relief and incise it is the amplitude, and half an amplitude is exactly half
+the displacement — so pressure and accumulation mean something, and ClayBuildup
+gets the buildup it is named for. Every other op reads `blend.k` as a radius, a
+depth or a half-thickness: scaling those would change the *shape* rather than
+the amount, silently and differently per op, because a union at half strength is
+not a smaller union. Those ops ignore strength.
+
+**A stroke carries `rounding`**, which matters more than it sounds: groove and
+tongue read it as the channel half-width and relief and incise as the falloff
+width. A stroke that drops it leaves relief declaring an amplitude over ~1e-6,
+and the step scale collapses from 0.118 to 2.8e-06 — the geometry is there and
+nothing can march it. See [`examples/29_claybuildup_smooth.py`](../examples/29_claybuildup_smooth.py).
 
 A tap has to leave a mark: a single sample, or a path shorter than one spacing,
 yields exactly one stamp at the start.
@@ -354,7 +368,8 @@ parity — the mechanism usually differs even where the result matches.
 
 | ZBrush | claycore | Note |
 |---|---|---|
-| Standard, ClayBuildup | `Op::Relief` | Displaces the accumulated surface along its normal |
+| Standard | `Op::Relief` | Displaces the accumulated surface along its normal |
+| ClayBuildup | `Op::Relief` along a stroke | Buildup accumulation scales each stamp's amplitude, so overlapping stamps deposit twice |
 | Crease, DamStandard | `Op::Incise` | The same op, cutting in — a thin region gives the line |
 | Inflate | `Op::Relief`, `sculpt_inflate` | Moving the surface along its own normal *is* relief; the voxel verb dilates and erodes by cells |
 | Move | `brush::move_brush` | Drags the assembled surface. Nudges form rather than growing it: a large pull buds rather than stretches, and a stroke's drags compound the step scale — use `snakehook` to pull a lobe out |

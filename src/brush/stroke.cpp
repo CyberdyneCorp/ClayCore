@@ -340,6 +340,17 @@ std::vector<scene::Node> stamps_to_nodes(scene::SdfContent& content,
         // The template's own scale is the unit the radius is expressed in, so
         // a template authored at radius 1 scales straight to the stamp's.
         node.xform.scale = s.radius;
+        // A stamp's STRENGTH reaches an item only where blend.k is an AMOUNT.
+        // For relief and incise it is the amplitude — how far the accumulated
+        // surface moves along its own normal — and half an amplitude is exactly
+        // half the displacement, so pressure and accumulation mean something.
+        //
+        // Every other op reads blend.k as a radius, a depth or a half-thickness.
+        // Scaling those would change the SHAPE rather than the amount, silently
+        // and differently per op: a union at half strength is not a smaller
+        // union. They ignore strength, which is why this is not applied above.
+        if (node.op == scene::Op::Relief || node.op == scene::Op::Incise)
+            node.blend.k = templ.blend.k * s.strength;
         nodes.push_back(std::move(node));
     }
     return nodes;

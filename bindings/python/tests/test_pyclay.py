@@ -439,6 +439,104 @@ def test_flatten_refuses_an_unknown_mode():
                                    mode="polish")
 
 
+def _relief_stroke(amplitude=0.06, rounding=0.30, spacing=0.6, n=9,
+                   accumulation=None, strength=1.0, op=None):
+    """A ClayBuildup stroke: relief stamps carried along a path."""
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.7))
+    samples = np.array([[x, 0.72, 0.0, 1.0, 0.0] for x in np.linspace(-0.35, 0.35, n)],
+                       np.float32)
+    preset = clay.StrokePreset()
+    preset.radius = 0.16
+    preset.spacing = spacing
+    preset.strength = strength
+    if accumulation is not None:
+        preset.accumulation = accumulation
+    layer.apply_stroke(samples, preset, clay.Sphere(r=1.0),
+                       op=op if op is not None else clay.Op.RELIEF,
+                       blend=clay.Smooth(amplitude), rounding=rounding)
+    return doc
+
+
+def _ridge_top(doc, x=0.0):
+    ys = np.arange(1.4, -0.2, -0.002, dtype=np.float32)
+    pts = np.stack([np.full_like(ys, x), ys, np.zeros_like(ys)], axis=1)
+    inside = np.nonzero(doc.eval(pts) <= 0)[0]
+    return float(ys[inside[0]]) if len(inside) else float("nan")
+
+
+def test_apply_stroke_carries_rounding_to_relief_stamps():
+    """Regression: rounding IS the relief falloff, and the stroke dropped it.
+
+    With it lost, cfi_relief declares the amplitude over ~1e-6, so the step scale
+    collapses to zero: the geometry is there and nothing can march it.
+    """
+    lost = _relief_stroke(rounding=0.0)
+    kept = _relief_stroke(rounding=0.30)
+    # 2.8e-06 against 0.118: four orders of magnitude, which is the difference
+    # between a field a marcher can walk and one it cannot.
+    assert lost.safe_step_scale() < 1e-4
+    assert kept.safe_step_scale() > 0.05
+    # ...and both actually deposit, so this is about the declared field, not the shape.
+    assert _ridge_top(kept) > 0.7
+
+
+def test_claybuildup_accumulation_reaches_relief():
+    """Buildup is the control the brush is named for.
+
+    A stamp's strength scales an item's amplitude for relief and incise, where
+    blend.k IS an amount. Without it buildup and clamped were identical.
+    """
+    dense = dict(amplitude=0.05, rounding=0.30, spacing=0.25, n=13)
+    build = _relief_stroke(accumulation=clay.Accumulation.BUILDUP, **dense)
+    clamp = _relief_stroke(accumulation=clay.Accumulation.CLAMPED, **dense)
+    assert _ridge_top(build) > _ridge_top(clamp) + 0.05
+
+    # ...and a lighter touch deposits less.
+    light = _relief_stroke(accumulation=clay.Accumulation.BUILDUP, strength=0.4, **dense)
+    assert _ridge_top(light) < _ridge_top(build) - 0.02
+
+
+def test_stroke_strength_does_not_reach_a_boolean():
+    """A union at half strength is not a smaller union.
+
+    blend.k is a radius for add, so scaling it by a stroke's strength would
+    change the shape rather than the amount. Booleans ignore it.
+    """
+    dense = dict(amplitude=0.05, rounding=0.30, spacing=0.25, n=13, op=clay.Op.ADD)
+    build = _relief_stroke(accumulation=clay.Accumulation.BUILDUP, **dense)
+    clamp = _relief_stroke(accumulation=clay.Accumulation.CLAMPED, **dense)
+    assert _ridge_top(build) == pytest.approx(_ridge_top(clamp), abs=1e-3)
+
+
+def test_relax_is_the_smooth_brush():
+    """Smooth: averaging softens, sized to the feature, and stays 1-Lipschitz."""
+    built = _relief_stroke(amplitude=0.08, rounding=0.22, spacing=0.5)
+    rough = clay.Volume.from_document(built, cell=0.02)
+
+    def lift(volume):
+        doc = clay.Document()
+        doc.add_sdf_layer("s").add(volume)
+        return _ridge_top(doc) - 0.698
+
+    lifts = [lift(rough)]
+    for cells in (3, 6, 10):
+        lifts.append(lift(rough.relaxed(radius_cells=cells, iterations=4,
+                                        centre=(0, 0.80, 0), region_radius=0.55,
+                                        falloff=0.2)))
+    # A wider averaging radius softens more — the control is the kernel against
+    # the feature size, not the pass count.
+    assert all(a >= b - 1e-3 for a, b in zip(lifts, lifts[1:])), lifts
+    assert lifts[0] > lifts[-1] + 0.1
+
+    # Averaging destroys exactness but cannot RAISE the Lipschitz bound, which is
+    # what keeps the raymarcher correct over a relaxed field.
+    smoothed = rough.relaxed(radius_cells=6, iterations=4, centre=(0, 0.80, 0),
+                             region_radius=0.55, falloff=0.2)
+    assert smoothed.sample_lipschitz <= 1.05
+
+
 def test_voxel_grid_edits_and_queries():
     g = clay.VoxelGrid(voxel_size=0.5)
     red = g.palette_add("#ff0000")

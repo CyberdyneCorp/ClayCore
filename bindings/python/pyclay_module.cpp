@@ -2256,7 +2256,7 @@ NB_MODULE(pyclay, m) {
         .def("apply_stroke",
              [](PyLayer& l, nb::handle samples, const brush::StrokePreset& preset,
                 const PyPrim& prim, scene::Op op, nb::handle blend, nb::handle color,
-                nb::handle mask) {
+                float rounding, nb::handle mask) {
                  scene::Node templ;
                  templ.prim = prim.prim;
                  templ.stroke = prim.stroke;
@@ -2271,6 +2271,12 @@ NB_MODULE(pyclay, m) {
                  templ.profile_polygons = prim.profile_polygons;
                  templ.volume = prim.volume;
                  templ.op = op;
+                 // Rounding is not decoration for every op: groove and tongue read
+                 // it as the channel half-width, and relief and incise as the
+                 // FALLOFF WIDTH. Dropping it left those strokes declaring an
+                 // amplitude over ~1e-6, so the step scale collapsed to zero and
+                 // the geometry could not be marched at all.
+                 templ.rounding = rounding > 0.0f ? rounding : prim.rounding;
                  if (!blend.is_none()) templ.blend = nb::cast<PyBlend&>(blend).b;
                  if (!color.is_none()) templ.color = parse_color(color);
 
@@ -2300,7 +2306,7 @@ NB_MODULE(pyclay, m) {
                  return ids;
              },
              "samples"_a, "preset"_a, "prim"_a, "op"_a = scene::Op::Add, "blend"_a = nb::none(),
-             "color"_a = nb::none(), "mask"_a = nb::none(),
+             "color"_a = nb::none(), "rounding"_a = 0.0f, "mask"_a = nb::none(),
              "Resolve a stroke and append one edit per stamp; returns their node "
              "ids. The prim is the stamp template, scaled to each stamp's radius. "
              "The whole stroke is one undo step, and a masked stamp emits nothing.")

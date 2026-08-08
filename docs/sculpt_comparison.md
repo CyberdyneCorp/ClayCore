@@ -70,7 +70,9 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 
 | Brush (ZBrush name) | claycore | Status |
 |---|---|---|
-| Standard, ClayBuildup | `Op::Relief` | ✅ |
+| Standard | `Op::Relief` | ✅ |
+| ClayBuildup | `Op::Relief` along a stroke | ✅ buildup accumulation scales each stamp's amplitude |
+| Smooth (as a pair with the above) | `field::relax` | ✅ the blockout pair — see `examples/29_claybuildup_smooth.py` |
 | Crease, DamStandard | `Op::Incise` | ✅ |
 | Inflate | `Op::Relief`, `sculpt_inflate` | ✅ |
 | Move | `brush::move_brush` | 🟡 drags the assembled surface, but **buds rather than stretches** on a large pull, and a stroke's drags compound the step scale — see below |
