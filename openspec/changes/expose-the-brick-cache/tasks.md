@@ -101,10 +101,27 @@
 
 ## Known and not fixed here
 
-Recorded rather than quietly carried. None is reachable without first marking a
-region far larger than a sculpt does, and each wants a decision this change is
-not the place for:
+Recorded rather than quietly carried, and each wants a decision this change is
+not the place for. The first is a performance ceiling an ordinary sculpt walks
+into; the rest are correctness edges no sculpt reaches without first marking a
+region far larger than one does:
 
+- **A dab's brick count is flat; its cost is linear in the document.** Found by
+  measuring on Apple silicon (M2 Max, 2026-08-08), and the one finding here with
+  consequences for a large sculpt. `clay_brick_cache_eval_requests` compiles a
+  culled tape per brick, and that compile walks every node: ~64 ns per item per
+  brick, dead linear across a 24x range. The count claim this change proves is
+  unaffected — a dab dirties 22–24 bricks at every model size — but the time is
+  not: 2.6 ms at 100 items, 8.8 ms at 2400, holding density constant so only the
+  document's size varies. At 2400 items the cull pass alone is ~3.6 ms of that,
+  and the same rate puts a 10,000-item sculpt past the 4–8 ms interactive budget
+  on culling alone. This is structurally the cost `cache-the-compiled-tape`
+  removed from document reads, reappearing ~24x per dab, and the tape cache
+  cannot help: consecutive bricks want different cull regions, as
+  `clay_eval_grid` documents. Fanning out over requests buys about a factor of
+  two, which lowers the constant and leaves the slope. Removing the slope wants
+  a spatial index over a layer's items, built once per edit and queried per
+  brick instead of scanned — a scene-model change, and a proposal of its own.
 - The staging cliff above is documented, not removed. Removing it needs
   `BrickCache::take_dirty` to take a capacity so it pops at most that many keys
   and bumps only their generations — an engine API change.

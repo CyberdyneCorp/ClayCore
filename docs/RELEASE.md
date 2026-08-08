@@ -96,15 +96,40 @@ Tracked honestly rather than assumed done:
   Shipping CUDA wheels needs a CUDA build host in the wheel matrix.
 - **Blender-headless FBX validation** runs only as a release-time manual
   check; per-push CI validates exports with assimp instead (task 9.3).
-- **The brick cache is exposed but has never run on a device** (added 0.24.0).
-  The incremental path is measured on desktop CPU — a brush dab re-evaluates 8
-  bricks against 384 for a full fill, and that count stays flat as the model
-  grows — but the design's premise is that `eval_bricks` goes to Metal while the
-  per-brick tape compile stays on the CPU, and that split has not been timed on
-  Apple silicon. Until it has, the header's advice to fan out over requests one
-  brick per worker is reasoning, not measurement, and it says so. Run
-  `clay_brick_cache_eval_requests` against the Metal backend on the target iPad
-  before believing any of the numbers here transfer.
+- **The brick cache is exposed and now timed on Apple silicon, but not on a
+  tablet** (added 0.24.0, measured 2026-08-08). The design's premise was that
+  `eval_bricks` goes to Metal while the per-brick tape compile stays on the CPU.
+  Measured on an M2 Max (8P + 4E, macOS 26, `--preset metal`), **that premise is
+  wrong for bricks**: a brick is 8³ = 512 samples, too little work to cover a
+  dispatch and a per-call allocation, so Metal costs 288 µs per brick against
+  the CPU's 114 µs and never wins at any thread count. Sweeping the grid size
+  puts the crossover at 16³ — from there Metal wins, reaching 10× at 32³ and
+  20× at 128³. So the two workloads want opposite backends: keep
+  `clay_brick_cache_eval_requests` on `"cpu"`, and send preview grids of 32³ and
+  up to `"metal"`. The header's advice to fan out over requests one brick per
+  worker *is* now measurement: it takes a 216-brick fill from 24.7 ms to 8.2 ms
+  on twelve workers, a 3.0x speedup. Metal and the CPU agree exactly over a full
+  fill (max abs difference 0.0), so this is a speed result, not a parity one.
+
+  What is still untested is a *tablet*. An M2 Max has twelve cores, active
+  cooling and a 34 GB unified pool; an iPad has fewer cores, a hard thermal
+  ceiling and a memory budget that kills apps rather than swapping. The fan-out
+  gain assumes cores that stay at clock, and the 16³ crossover is the number
+  most likely to move on a GPU with a different dispatch cost. Re-measure both
+  on the target iPad before wiring up the split.
+- **A brush dab's brick COUNT is flat, but its cost is not** (added 0.24.0).
+  The count claim holds as designed and as tested: holding density constant
+  while the document grows from 100 to 2400 items, a dab keeps dirtying 22–24
+  bricks. Its *time* does not stay flat — 2.6 ms to 8.8 ms over that same range,
+  because `clay_brick_cache_eval_requests` compiles a culled tape per brick and
+  that compile walks every node in the document, measured at ~64 ns per item per
+  brick across a 24x range. A dab pays it ~24 times, so at 2400 items culling
+  alone is ~3.6 ms before a sample is evaluated, and the same rate puts a
+  10,000-item sculpt past the 4–8 ms interactive budget on culling alone.
+  Fanning out buys back about a factor of two, which lowers the constant without
+  changing the slope. Removing the slope needs a spatial index over items, built
+  once per edit and shared across the dab's bricks; the tape cache cannot help,
+  because consecutive bricks want different cull regions.
 - **pyclay does not reach the brick cache** (added 0.24.0).
   `check_binding_parity.py` prints it as an outstanding follow-up on every run
   rather than filing it as an exemption, because that gate runs one way — pyclay

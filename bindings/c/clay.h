@@ -1849,11 +1849,18 @@ clay_result clay_brick_cache_take_dirty(clay_brick_cache* cache,
  * clay_brick_cache_submit, and still decides how many requests to run and
  * where. Fan out over REQUESTS, one brick per worker: the CPU backend already
  * splits a single grid's z axis over a process-wide pool, and a brick is 8
- * slices of 64 samples, so a per-brick call is already a small dispatch.
+ * slices of 64 samples, so a per-brick call is already a small dispatch. That
+ * is measured, not reasoned: on an M2 Max it takes a 216-brick fill from
+ * 24.7 ms to 8.2 ms on twelve workers.
  *
- * Naming a GPU backend here is not a promise of a speedup: the Metal backend
- * allocates per call, and per-brick dispatch may lose to the CPU outright.
- * Measure before changing the string. */
+ * PASS "cpu" HERE. Naming a GPU backend is not a promise of a speedup, and for
+ * a brick it is a promise of the opposite: the Metal backend allocates per
+ * call, and 512 samples is too little work to cover the dispatch. Measured on
+ * an M2 Max, Metal costs 288 us per brick against the CPU's 114 us and does not
+ * win at any thread count. The crossover is at 16^3 — clay_eval_grid on a
+ * preview grid of 32^3 or more is where "metal" pays, by 10x and up. Both
+ * backends produce the same field; this is speed, not results. Re-measure
+ * before changing the string on a device that is not an M-series Mac. */
 clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char* backend,
                                            const clay_brick_request* requests, size_t count,
                                            float* out_values, size_t values_capacity);
