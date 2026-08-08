@@ -11,6 +11,8 @@
 
 #include "clay/io/mesh_io.h"
 
+#include "file_bytes.h"
+
 namespace clay {
 namespace io {
 
@@ -354,7 +356,12 @@ IoStatus load_fbx(const std::uint8_t* data, std::size_t size, mesh::Mesh* out,
     }
     ufbx_free_scene(scene);
     if (!status.ok()) return status;
-    if (!any_colors) m.colors.clear();
+    // vertex_color/vertex_normal are PER MESH NODE but everything here
+    // accumulates into one Mesh, so a scene where only some nodes are painted
+    // (an ordinary export) leaves a short attribute array. mesh_data.h states
+    // these are empty or positions.size() and consumers rely on it, so an
+    // attribute that did not come out aligned is dropped rather than shipped.
+    if (!any_colors || m.colors.size() != m.positions.size()) m.colors.clear();
     if (m.normals.size() != m.positions.size()) m.normals.clear();
     if (m.triangle_count() > budget.max_triangles)
         return IoStatus::fail(IoError::BudgetExceeded, "triangle budget");
@@ -366,33 +373,14 @@ IoStatus load_fbx(const std::uint8_t* data, std::size_t size, mesh::Mesh* out,
 // files
 // ---------------------------------------------------------------------------
 
-namespace {
-
-IoStatus write_bytes(const std::string& path, const std::vector<std::uint8_t>& bytes) {
-    std::FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f) return IoStatus::fail(IoError::WriteFailed, path);
-    std::size_t written = std::fwrite(bytes.data(), 1, bytes.size(), f);
-    std::fclose(f);
-    return written == bytes.size() ? IoStatus::success()
-                                   : IoStatus::fail(IoError::WriteFailed, path);
-}
-
-}  // namespace
-
 IoStatus save_fbx_file(const mesh::Mesh& m, const std::string& path) {
-    return write_bytes(path, save_fbx(m));
+    return detail::write_whole_file(path, save_fbx(m));
 }
 
 IoStatus load_fbx_file(const std::string& path, mesh::Mesh* out, const ImportBudget& budget) {
-    std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return IoStatus::fail(IoError::FileNotFound, path);
-    std::fseek(f, 0, SEEK_END);
-    long size = std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size > 0 ? size : 0));
-    std::size_t read = std::fread(bytes.data(), 1, bytes.size(), f);
-    std::fclose(f);
-    if (read != bytes.size()) return IoStatus::fail(IoError::ReadFailed, path);
+    std::vector<std::uint8_t> bytes;
+    IoStatus s = detail::read_whole_file(path, &bytes, budget.max_file_bytes);
+    if (!s.ok()) return s;
     return load_fbx(bytes.data(), bytes.size(), out, budget);
 }
 

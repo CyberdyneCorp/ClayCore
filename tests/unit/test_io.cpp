@@ -1,5 +1,7 @@
 #include <doctest/doctest.h>
 
+#include <filesystem>
+
 #include "clay/io/clayspace.h"
 #include "clay/io/mesh_io.h"
 #include "clay/mesh/marching.h"
@@ -168,6 +170,74 @@ TEST_CASE("import guardrails: PLY allocation bomb rejected before allocating") {
                                   bomb.size(), &out, io::ImportBudget{});
     CHECK_FALSE(s.ok());
     CHECK(out.positions.capacity() < 1000000);  // no giant reservation happened
+}
+
+TEST_CASE("ply: a header with no trailing newline stays inside the buffer") {
+    // The header scan stepped over the newline after "end_header" without
+    // checking there was one, leaving header_end at size + 1: the header string
+    // was built from one byte past the buffer (an ASan heap-buffer-overflow
+    // READ), and the ascii body then wrapped size - header_end to SIZE_MAX and
+    // aborted in std::string. A PLY with CR-only line endings, or one truncated
+    // just past its header, is enough to reach it.
+    for (const char* fmt : {"ascii", "binary_little_endian"}) {
+        std::string s = std::string("ply\nformat ") + fmt + " 1.0\nend_headerX";
+        mesh::Mesh out;
+        // The assertion is that this returns at all, rather than reading out of
+        // bounds or terminating; an empty declaration is legitimately an empty
+        // mesh, so either status is acceptable.
+        io::IoStatus r = io::load_ply(reinterpret_cast<const std::uint8_t*>(s.data()), s.size(),
+                                      &out, io::ImportBudget{});
+        CHECK(out.positions.empty());
+        CHECK((r.ok() || r.error == io::IoError::Malformed));
+    }
+}
+
+TEST_CASE("ply: a vertex element with no properties cannot fake a payload fit") {
+    // vstride was zero, so "declared counts exceed payload" compared
+    // vertex_count * 0 against the file size and passed for any count.
+    std::string bomb =
+        "ply\nformat ascii 1.0\nelement vertex 50000000\n"
+        "element face 0\nproperty list uchar int vertex_indices\nend_header\n";
+    mesh::Mesh out;
+    io::IoStatus s = io::load_ply(reinterpret_cast<const std::uint8_t*>(bomb.data()),
+                                  bomb.size(), &out, io::ImportBudget{});
+    CHECK_FALSE(s.ok());
+    CHECK(s.error == io::IoError::Malformed);
+    CHECK(out.positions.capacity() < 1000000);
+}
+
+TEST_CASE("ply: the payload-fit guard covers ascii, not only binary") {
+    // The guardrail was gated on `binary`, so an ascii header could declare
+    // tens of millions of vertices behind a 160-byte file and get as far as
+    // reserving for them.
+    std::string over =
+        "ply\nformat ascii 1.0\nelement vertex 40000000\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "element face 0\nproperty list uchar int vertex_indices\nend_header\n";
+    mesh::Mesh out;
+    io::IoStatus s = io::load_ply(reinterpret_cast<const std::uint8_t*>(over.data()),
+                                  over.size(), &out, io::ImportBudget{});
+    CHECK_FALSE(s.ok());
+    CHECK(s.error == io::IoError::Malformed);
+    CHECK(out.positions.capacity() < 1000000);
+}
+
+TEST_CASE("loaders refuse a path that is not a regular file") {
+    // fopen("rb") succeeds on a directory and glibc then tells LONG_MAX rather
+    // than failing, so every *_file loader sized a buffer from it and took the
+    // process down with std::bad_alloc (the library builds -fno-exceptions).
+    const std::string dir = "clay_not_a_file_dir";
+    std::filesystem::create_directory(dir);
+
+    mesh::Mesh m;
+    for (auto load : {&io::load_ply_file, &io::load_obj_file, &io::load_fbx_file}) {
+        io::IoStatus s = load(dir, &m, io::ImportBudget{});
+        CHECK_FALSE(s.ok());
+    }
+    io::ClaySpaceDoc cs;
+    CHECK_FALSE(io::load_clayspace_file(dir, &cs).ok());
+
+    std::filesystem::remove(dir);
 }
 
 TEST_CASE("import fuzz: mutated files never crash the loaders") {

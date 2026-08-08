@@ -316,6 +316,11 @@ std::optional<VoxelGrid> VoxelGrid::deserialize(const std::uint8_t* data, std::s
     std::uint32_t palette_count;
     if (!getf(&vs) || !get32(&palette_count) || palette_count == 0 || palette_count > 256)
         return std::nullopt;
+    // Every world<->cell conversion divides by the voxel size, and the result
+    // is cast to int32. A payload carrying zero, a negative or a non-finite
+    // size made that cast undefined; MaskField::deserialize already refuses the
+    // same way. `!(vs > 0)` also rejects NaN.
+    if (!(vs > 0.0f) || !std::isfinite(vs)) return std::nullopt;
     VoxelGrid grid(vs);
     grid.palette_.resize(palette_count, cf3(0, 0, 0));
     for (std::uint32_t i = 0; i < palette_count; ++i)
@@ -324,6 +329,11 @@ std::optional<VoxelGrid> VoxelGrid::deserialize(const std::uint8_t* data, std::s
             return std::nullopt;
     std::uint32_t chunk_count;
     if (!get32(&chunk_count)) return std::nullopt;
+    // A chunk costs 16 header bytes plus at least 3 for one run, but decodes to
+    // 32 KiB — roughly 1700x. Bounding the count by what the remaining payload
+    // could possibly describe keeps that ratio from turning a small file into
+    // gigabytes of chunks before the first short read is noticed.
+    if (chunk_count > (size - pos) / 19) return std::nullopt;
     const std::size_t chunk_cells = static_cast<std::size_t>(kChunkDim) * kChunkDim * kChunkDim;
     for (std::uint32_t c = 0; c < chunk_count; ++c) {
         std::uint32_t kx, ky, kz, rle_size;

@@ -382,6 +382,33 @@ TEST_CASE("volume: the blob round trips") {
         lying[5] = 1e6f;  // an impossible brick count
         CHECK_FALSE(FieldVolume::from_blob(lying).has_value());
     }
+
+    SUBCASE("a blob whose index ENTRY runs past the samples is refused") {
+        // The section offsets were checked but the per-brick entries were not,
+        // so one hostile entry became an arbitrary-offset read of 729 floats
+        // in eval_inside and in the tape. Reachable by loading a .clayspace.
+        const std::size_t index_off = static_cast<std::size_t>(flat[8]);
+        const std::size_t index_size = static_cast<std::size_t>(flat[5]) *
+                                       static_cast<std::size_t>(flat[6]) *
+                                       static_cast<std::size_t>(flat[7]);
+        for (float bad : {5e8f, -7.0f}) {
+            std::vector<float> lying = flat;
+            bool poisoned = false;
+            for (std::size_t i = 0; i < index_size; ++i)
+                if (lying[index_off + i] >= 0.0f) {
+                    lying[index_off + i] = bad;
+                    poisoned = true;
+                }
+            REQUIRE(poisoned);
+            CHECK_FALSE(FieldVolume::from_blob(lying).has_value());
+        }
+    }
+
+    SUBCASE("an empty-brick entry is still accepted") {
+        // kBrickEmpty is the one negative value that is legal, so the new
+        // bounds check must not reject an ordinary sparse volume.
+        CHECK(FieldVolume::from_blob(flat).has_value());
+    }
 }
 
 TEST_CASE("volume: serializes and survives a save") {

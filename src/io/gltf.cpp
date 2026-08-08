@@ -9,6 +9,8 @@
 
 #include "clay/io/mesh_io.h"
 
+#include "file_bytes.h"
+
 namespace clay {
 namespace io {
 
@@ -182,13 +184,7 @@ std::vector<std::uint8_t> save_glb(const mesh::Mesh& m) {
 }
 
 IoStatus save_glb_file(const mesh::Mesh& m, const std::string& path) {
-    std::vector<std::uint8_t> bytes = save_glb(m);
-    std::FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f) return IoStatus::fail(IoError::WriteFailed, path);
-    std::size_t written = std::fwrite(bytes.data(), 1, bytes.size(), f);
-    std::fclose(f);
-    return written == bytes.size() ? IoStatus::success()
-                                   : IoStatus::fail(IoError::WriteFailed, path);
+    return detail::write_whole_file(path, save_glb(m));
 }
 
 }  // namespace io

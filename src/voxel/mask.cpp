@@ -331,9 +331,14 @@ std::optional<MaskField> MaskField::deserialize(const std::uint8_t* data, std::s
     if (!get32(&bits) || !get32(&chunk_count)) return std::nullopt;
     float cell_size;
     std::memcpy(&cell_size, &bits, 4);
-    if (!(cell_size > 0.0f)) return std::nullopt;
+    // `!(cell_size > 0)` rejects NaN and zero; infinity needs saying too, since
+    // a world coordinate divided by it floors to a cell of zero everywhere.
+    if (!(cell_size > 0.0f) || !std::isfinite(cell_size)) return std::nullopt;
 
     MaskField m(cell_size);
+    // Same decode-amplification bound as VoxelGrid: 16 header bytes plus a
+    // 2-byte run per chunk, against 32 KiB of decoded cells.
+    if (chunk_count > (size - pos) / 18) return std::nullopt;
     const std::size_t chunk_cells = static_cast<std::size_t>(kChunkDim) * kChunkDim * kChunkDim;
     for (std::uint32_t n = 0; n < chunk_count; ++n) {
         std::uint32_t kx, ky, kz, run_bytes;

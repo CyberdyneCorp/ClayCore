@@ -413,9 +413,19 @@ std::optional<FieldVolume> FieldVolume::from_blob(const std::vector<float>& blob
     if (index_off + index_size > blob.size() || far_off + index_size > blob.size() ||
         data_off > blob.size())
         return std::nullopt;
+    // Each index entry is an offset into the sample data that eval_inside and
+    // the tape both read kBrickSamples floats from. Checking the offsets that
+    // bound the sections is not enough: one entry pointing past the samples is
+    // an arbitrary-offset read, and a blob off a disk carries any value.
+    const std::size_t data_size = blob.size() - data_off;
     v.index_.reserve(index_size);
-    for (std::size_t i = 0; i < index_size; ++i)
-        v.index_.push_back(static_cast<std::int32_t>(blob[index_off + i]));
+    for (std::size_t i = 0; i < index_size; ++i) {
+        const std::int32_t e = static_cast<std::int32_t>(blob[index_off + i]);
+        if (e != kBrickEmpty &&
+            (e < 0 || static_cast<std::size_t>(e) + kBrickSamples > data_size))
+            return std::nullopt;
+        v.index_.push_back(e);
+    }
     v.far_.assign(blob.begin() + static_cast<std::ptrdiff_t>(far_off),
                   blob.begin() + static_cast<std::ptrdiff_t>(far_off + index_size));
     v.data_.assign(blob.begin() + static_cast<std::ptrdiff_t>(data_off), blob.end());

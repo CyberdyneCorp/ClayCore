@@ -1,5 +1,7 @@
 #include <doctest/doctest.h>
 
+#include <cstring>
+#include <limits>
 #include <map>
 #include <set>
 
@@ -133,6 +135,60 @@ TEST_CASE("serialization: palette+RLE round trip is lossless and canonical") {
     // truncated input rejected
     for (std::size_t cut : {std::size_t(0), bytes.size() / 2, bytes.size() - 1})
         CHECK_FALSE(VoxelGrid::deserialize(bytes.data(), cut).has_value());
+}
+
+TEST_CASE("serialization: a voxel size that is not a positive real is refused") {
+    // Every world<->cell conversion divides by the voxel size and casts the
+    // result to int32. A payload carrying zero or a non-finite size made that
+    // cast undefined (UBSan: "negation of -2147483648 cannot be represented"),
+    // reachable by opening a .clayspace. MaskField already refused the same.
+    auto payload = [](float vs) {
+        std::vector<std::uint8_t> b;
+        auto put32 = [&](std::uint32_t v) {
+            for (int i = 0; i < 4; ++i) b.push_back(static_cast<std::uint8_t>(v >> (i * 8)));
+        };
+        auto putf = [&](float f) {
+            std::uint32_t v;
+            std::memcpy(&v, &f, 4);
+            put32(v);
+        };
+        putf(vs);
+        put32(1);                          // palette_count
+        putf(1.0f), putf(1.0f), putf(1.0f);  // palette[0]
+        put32(0);                          // chunk_count
+        return b;
+    };
+
+    const float inf = std::numeric_limits<float>::infinity();
+    for (float bad : {0.0f, -0.25f, inf, -inf, std::numeric_limits<float>::quiet_NaN()}) {
+        std::vector<std::uint8_t> b = payload(bad);
+        CHECK_FALSE(VoxelGrid::deserialize(b.data(), b.size()).has_value());
+    }
+    // a legitimate size still round-trips
+    std::vector<std::uint8_t> good = payload(0.25f);
+    auto g = VoxelGrid::deserialize(good.data(), good.size());
+    REQUIRE(g.has_value());
+    CHECK(g->voxel_size() == doctest::Approx(0.25f));
+}
+
+TEST_CASE("serialization: a chunk count the payload cannot describe is refused") {
+    // A chunk costs 19 bytes on disk and decodes to 32 KiB, so an unbounded
+    // count let a small file allocate its way to gigabytes before the first
+    // short read was noticed.
+    std::vector<std::uint8_t> b;
+    auto put32 = [&](std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) b.push_back(static_cast<std::uint8_t>(v >> (i * 8)));
+    };
+    auto putf = [&](float f) {
+        std::uint32_t v;
+        std::memcpy(&v, &f, 4);
+        put32(v);
+    };
+    putf(0.1f);
+    put32(1);
+    putf(1.0f), putf(1.0f), putf(1.0f);
+    put32(30000000);  // chunk_count with nothing behind it
+    CHECK_FALSE(VoxelGrid::deserialize(b.data(), b.size()).has_value());
 }
 
 TEST_CASE("greedy meshing is lossless: exposed faces covered exactly once") {

@@ -52,6 +52,7 @@ add_library(claycore
   src/mesh/bvh.cpp
   src/mesh/to_field.cpp
   src/pick/pick.cpp
+  src/io/file_bytes.cpp
   src/io/clayspace.cpp
   src/io/parity_fixture.cpp
   src/io/obj.cpp

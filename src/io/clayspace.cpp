@@ -5,6 +5,8 @@
 
 #include "clay/scene/commands.h"
 
+#include "file_bytes.h"
+
 namespace clay {
 namespace io {
 
@@ -176,29 +178,13 @@ IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc
 }
 
 IoStatus save_clayspace_file(const ClaySpaceDoc& doc, const std::string& path) {
-    std::vector<std::uint8_t> bytes = save_clayspace(doc);
-    std::FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f) return IoStatus::fail(IoError::WriteFailed, path);
-    std::size_t written = std::fwrite(bytes.data(), 1, bytes.size(), f);
-    std::fclose(f);
-    if (written != bytes.size()) return IoStatus::fail(IoError::WriteFailed, path);
-    return IoStatus::success();
+    return detail::write_whole_file(path, save_clayspace(doc));
 }
 
 IoStatus load_clayspace_file(const std::string& path, ClaySpaceDoc* out) {
-    std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return IoStatus::fail(IoError::FileNotFound, path);
-    std::fseek(f, 0, SEEK_END);
-    long size = std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
-    if (size < 0) {
-        std::fclose(f);
-        return IoStatus::fail(IoError::ReadFailed, path);
-    }
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
-    std::size_t read = std::fread(bytes.data(), 1, bytes.size(), f);
-    std::fclose(f);
-    if (read != bytes.size()) return IoStatus::fail(IoError::ReadFailed, path);
+    std::vector<std::uint8_t> bytes;
+    IoStatus s = detail::read_whole_file(path, &bytes);
+    if (!s.ok()) return s;
     return load_clayspace(bytes.data(), bytes.size(), out);
 }
 

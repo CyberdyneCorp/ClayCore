@@ -5,6 +5,8 @@
 
 #include "clay/io/mesh_io.h"
 
+#include "file_bytes.h"
+
 namespace clay {
 namespace io {
 
@@ -153,7 +155,11 @@ IoStatus load_ply(const std::uint8_t* data, std::size_t size, mesh::Mesh* out,
         if (std::memcmp(text + i, "end_header", 10) == 0) {
             header_end = i + 10;
             while (header_end < size && text[header_end] != '\n') ++header_end;
-            ++header_end;
+            // Only step over the newline if there IS one. A file whose header
+            // is not newline-terminated used to leave header_end at size + 1,
+            // which over-read the buffer building the header string below and
+            // then wrapped `size - header_end` to SIZE_MAX in the ascii body.
+            if (header_end < size) ++header_end;
             break;
         }
     if (header_end == 0) return IoStatus::fail(IoError::Malformed, "no end_header");
@@ -210,6 +216,16 @@ IoStatus load_ply(const std::uint8_t* data, std::size_t size, mesh::Mesh* out,
         if (s == 0) return IoStatus::fail(IoError::Malformed, "unknown property type");
         vstride += s;
     }
+    // A vertex element with no properties has a stride of zero, which made the
+    // payload check below vacuous: any vertex_count "fit" in any file.
+    if (vertex_count > 0 && vstride == 0)
+        return IoStatus::fail(IoError::Malformed, "vertex element declares no properties");
+    // Each vertex costs vstride bytes when binary; in ascii it still costs at
+    // least one byte of digit plus one separator per property, so both forms
+    // have a floor the declared count has to fit under.
+    const std::size_t per_vertex = binary ? vstride : 2 * vprops.size();
+    if (vertex_count > (size - header_end) / (per_vertex ? per_vertex : 1))
+        return IoStatus::fail(IoError::Malformed, "declared counts exceed payload");
     if (binary && header_end + vertex_count * vstride + face_count > size)
         return IoStatus::fail(IoError::Malformed, "declared counts exceed payload");
 
@@ -312,39 +328,13 @@ IoStatus load_ply(const std::uint8_t* data, std::size_t size, mesh::Mesh* out,
     return IoStatus::success();
 }
 
-namespace {
-
-IoStatus write_bytes_file(const std::string& path, const std::vector<std::uint8_t>& bytes) {
-    std::FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f) return IoStatus::fail(IoError::WriteFailed, path);
-    std::size_t written = std::fwrite(bytes.data(), 1, bytes.size(), f);
-    std::fclose(f);
-    return written == bytes.size() ? IoStatus::success()
-                                   : IoStatus::fail(IoError::WriteFailed, path);
-}
-
-IoStatus read_bytes_file(const std::string& path, std::vector<std::uint8_t>* bytes) {
-    std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return IoStatus::fail(IoError::FileNotFound, path);
-    std::fseek(f, 0, SEEK_END);
-    long size = std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
-    bytes->resize(static_cast<std::size_t>(size > 0 ? size : 0));
-    std::size_t read = std::fread(bytes->data(), 1, bytes->size(), f);
-    std::fclose(f);
-    return read == bytes->size() ? IoStatus::success()
-                                 : IoStatus::fail(IoError::ReadFailed, path);
-}
-
-}  // namespace
-
 IoStatus save_ply_file(const mesh::Mesh& m, const std::string& path, bool binary) {
-    return write_bytes_file(path, save_ply(m, binary));
+    return detail::write_whole_file(path, save_ply(m, binary));
 }
 
 IoStatus load_ply_file(const std::string& path, mesh::Mesh* out, const ImportBudget& budget) {
     std::vector<std::uint8_t> bytes;
-    IoStatus s = read_bytes_file(path, &bytes);
+    IoStatus s = detail::read_whole_file(path, &bytes, budget.max_file_bytes);
     if (!s.ok()) return s;
     return load_ply(bytes.data(), bytes.size(), out, budget);
 }

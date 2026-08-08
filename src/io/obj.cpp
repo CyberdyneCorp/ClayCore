@@ -4,6 +4,8 @@
 
 #include "clay/io/mesh_io.h"
 
+#include "file_bytes.h"
+
 namespace clay {
 namespace io {
 
@@ -140,19 +142,6 @@ IoStatus load_obj(const std::string& text, mesh::Mesh* out, const ImportBudget& 
     return IoStatus::success();
 }
 
-namespace {
-
-IoStatus write_text_file(const std::string& path, const std::string& text) {
-    std::FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f) return IoStatus::fail(IoError::WriteFailed, path);
-    std::size_t written = std::fwrite(text.data(), 1, text.size(), f);
-    std::fclose(f);
-    return written == text.size() ? IoStatus::success()
-                                  : IoStatus::fail(IoError::WriteFailed, path);
-}
-
-}  // namespace
-
 IoStatus save_obj_file(const mesh::Mesh& m, const std::string& path, bool with_mtl) {
     std::string mtl_path;
     std::string mtl_name;
@@ -163,23 +152,17 @@ IoStatus save_obj_file(const mesh::Mesh& m, const std::string& path, bool with_m
         mtl_path += ".mtl";
         std::size_t slash = mtl_path.find_last_of("/\\");
         mtl_name = slash == std::string::npos ? mtl_path : mtl_path.substr(slash + 1);
-        IoStatus s = write_text_file(mtl_path, save_mtl());
+        IoStatus s = detail::write_whole_file(mtl_path, save_mtl());
         if (!s.ok()) return s;
     }
-    return write_text_file(path, save_obj(m, "claycore", mtl_name));
+    return detail::write_whole_file(path, save_obj(m, "claycore", mtl_name));
 }
 
 IoStatus load_obj_file(const std::string& path, mesh::Mesh* out, const ImportBudget& budget) {
-    std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return IoStatus::fail(IoError::FileNotFound, path);
-    std::fseek(f, 0, SEEK_END);
-    long size = std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
-    std::string text(static_cast<std::size_t>(size > 0 ? size : 0), '\0');
-    std::size_t read = std::fread(text.data(), 1, text.size(), f);
-    std::fclose(f);
-    if (read != text.size()) return IoStatus::fail(IoError::ReadFailed, path);
-    return load_obj(text, out, budget);
+    std::vector<std::uint8_t> bytes;
+    IoStatus s = detail::read_whole_file(path, &bytes, budget.max_file_bytes);
+    if (!s.ok()) return s;
+    return load_obj(std::string(bytes.begin(), bytes.end()), out, budget);
 }
 
 MeshBufferView buffer_view(const mesh::Mesh& m) {

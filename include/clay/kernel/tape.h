@@ -466,6 +466,11 @@ CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
         int off = (int)q[2];
         int count = (int)q[3];
         float h = q[0];
+        // Two records are always read below, so fewer than two profiles would
+        // read a record that was never written — a null blob when the loft is
+        // the only item. ctape_swept guards the same way; a document loaded
+        // from disk can carry any count.
+        if (count < 2) return CLAY_TAPE_FAR;
         // Bracket among the profiles: they sit evenly along the depth, so the
         // span index falls straight out of the normalized height.
         float t = cclamp((lp.z + h) / cmax(2.0f * h, 1e-9f), 0.0f, 1.0f) * (float)(count - 1);
