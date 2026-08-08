@@ -55,7 +55,8 @@ add_executable(clay_unit_tests
   unit/test_c_move_brush.cpp
   unit/test_relief.cpp
   unit/test_c_pick_eval.cpp
-  unit/test_c_tape_cache.cpp)
+  unit/test_c_tape_cache.cpp
+  unit/test_c_brick.cpp)
 
 target_link_libraries(clay_unit_tests PRIVATE clay::core doctest::doctest)
 # the C ABI tests consume the public header as a C consumer would

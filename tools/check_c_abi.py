@@ -31,6 +31,12 @@ REPO = Path(__file__).resolve().parent.parent
 ARRAY_ELEMENT_STRUCTS = {
     "clay_stroke_sample",  # packed float[5] per sample, passed as a bare float*
     "clay_stamp",          # packed float[10] per stamp, an output buffer
+    # 44 bytes that ARE brick::BrickRequest, asserted field by field with
+    # offsetof in bindings/c/clay_c.cpp. A refill hands out thousands at once
+    # and the drain is a single memcpy out of the engine's own vector; a
+    # struct_size per element would forbid that copy and negotiate a layout
+    # whose whole point is that it is fixed.
+    "clay_brick_request",
 }
 
 
@@ -505,6 +511,262 @@ def voxel_ownership_exercise(lib, doc) -> list[str]:
     return errors
 
 
+class BrickConfig(ctypes.Structure):
+    """clay_brick_config as a bindings generator would emit it."""
+
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("dim", ctypes.c_int32),
+        ("voxel_size", ctypes.c_float),
+        ("band_voxels", ctypes.c_int32),
+        ("memory_budget", ctypes.c_uint64),
+    ]
+
+
+class BrickStats(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("tracked_bricks", ctypes.c_uint64),
+        ("surface_bricks", ctypes.c_uint64),
+        ("dirty_bricks", ctypes.c_uint64),
+        ("memory_usage", ctypes.c_uint64),
+        ("memory_budget", ctypes.c_uint64),
+    ]
+
+
+class BrickRequest(ctypes.Structure):
+    """clay_brick_request: an array ELEMENT, so no struct_size to negotiate.
+
+    Spelled out because this is the layout the drain memcpys into a caller's
+    buffer; if it ever stops being brick::BrickRequest, the C++ side's
+    offsetof assertions fail and so does the flow below.
+    """
+
+    _fields_ = [
+        ("key", ctypes.c_int32 * 3),
+        ("generation", ctypes.c_uint32),
+        ("origin", ctypes.c_float * 3),
+        ("spacing", ctypes.c_float),
+        ("dims", ctypes.c_int32 * 3),
+        ("band", ctypes.c_float),
+    ]
+
+
+class BrickMeshParams(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("normals", ctypes.c_int32),
+        ("colors", ctypes.c_int32),
+        ("gradient_eps", ctypes.c_float),
+    ]
+
+
+def brick_types(lib) -> None:
+    """argtypes for the brick surface, as a generated binding would emit."""
+    u32p = ctypes.POINTER(ctypes.c_uint32)
+    szp = ctypes.POINTER(ctypes.c_size_t)
+    i32p = ctypes.POINTER(ctypes.c_int32)
+    fp = ctypes.POINTER(ctypes.c_float)
+    lib.clay_brick_config_defaults.argtypes = [ctypes.POINTER(BrickConfig)]
+    lib.clay_brick_cache_create.argtypes = [ctypes.POINTER(BrickConfig)]
+    lib.clay_brick_cache_create.restype = ctypes.c_void_p
+    lib.clay_brick_cache_destroy.argtypes = [ctypes.c_void_p]
+    lib.clay_brick_cache_stats.argtypes = [ctypes.c_void_p, ctypes.POINTER(BrickStats)]
+    lib.clay_brick_cache_config.argtypes = [ctypes.c_void_p, ctypes.POINTER(BrickConfig)]
+    lib.clay_brick_cache_mark_dirty.argtypes = [ctypes.c_void_p, fp, fp]
+    lib.clay_brick_cache_mark_dirty_layer.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                                      ctypes.c_uint32]
+    lib.clay_brick_cache_mark_dirty_nodes.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                                      ctypes.c_uint32, u32p, ctypes.c_size_t,
+                                                      szp]
+    lib.clay_brick_cache_take_dirty.argtypes = [ctypes.c_void_p, ctypes.POINTER(BrickRequest),
+                                                szp, szp]
+    lib.clay_brick_cache_eval_requests.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                                   ctypes.POINTER(BrickRequest),
+                                                   ctypes.c_size_t, fp, ctypes.c_size_t]
+    lib.clay_brick_cache_submit.argtypes = [ctypes.c_void_p, ctypes.POINTER(BrickRequest),
+                                            ctypes.c_size_t, fp, ctypes.c_size_t, i32p, szp]
+    lib.clay_brick_cache_surface_bricks.argtypes = [ctypes.c_void_p, i32p, szp]
+    lib.clay_brick_cache_read_bricks.argtypes = [ctypes.c_void_p, ctypes.c_int32, i32p,
+                                                 ctypes.c_size_t, i32p,
+                                                 ctypes.POINTER(ctypes.c_uint16),
+                                                 ctypes.c_size_t]
+    lib.clay_brick_cache_mesh.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                          ctypes.POINTER(BrickMeshParams),
+                                          ctypes.POINTER(ctypes.c_void_p)]
+    lib.clay_layer_node_influence_bound.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                                    ctypes.c_uint32, fp, fp, i32p, i32p]
+
+
+def brick_cache_exercise(lib) -> list[str]:
+    """The refill loop an iPad app runs, driven across the FFI boundary.
+
+    A sphere, a cache, and the one path the header documents: mark ->
+    take_dirty -> eval_requests -> submit. This is the flow the whole section
+    exists for, so a generated binding that cannot walk it is a broken ABI
+    whatever the individual symbols resolve to.
+    """
+    errors = []
+    brick_types(lib)
+    doc = lib.clay_document_create()
+    layer = ctypes.c_uint32(0)
+    if lib.clay_add_sdf_layer(doc, b"bricks", ctypes.byref(layer)) != 0:
+        lib.clay_document_destroy(doc)
+        return ["clay_add_sdf_layer failed for the brick exercise"]
+    item = ItemDesc()
+    item.struct_size = ctypes.sizeof(ItemDesc)
+    item.prim = 0  # CLAY_PRIM_SPHERE
+    item.params[0] = 0.4
+    item.rotation[3] = 1.0
+    item.scale = 1.0
+    node = ctypes.c_uint32(0)
+    if lib.clay_add_item(doc, layer.value, ctypes.byref(item), ctypes.byref(node)) != 0:
+        lib.clay_document_destroy(doc)
+        return ["clay_add_item failed for the brick exercise"]
+
+    config = BrickConfig()
+    if lib.clay_brick_config_defaults(ctypes.byref(config)) != 0:
+        lib.clay_document_destroy(doc)
+        return ["clay_brick_config_defaults failed"]
+    if config.struct_size != ctypes.sizeof(BrickConfig):
+        errors.append(f"clay_brick_config_defaults declared struct_size {config.struct_size}, "
+                      f"not {ctypes.sizeof(BrickConfig)} — the layouts disagree")
+    zeroed = BrickConfig()  # setting struct_size is mandatory here too
+    if lib.clay_brick_cache_create(ctypes.byref(zeroed)):
+        errors.append("clay_brick_cache_create accepted a zeroed descriptor")
+    cache = lib.clay_brick_cache_create(ctypes.byref(config))
+    if not cache:
+        lib.clay_document_destroy(doc)
+        return errors + ["clay_brick_cache_create rejected the engine's own defaults"]
+    per = config.dim ** 3
+
+    # the influence bound is what a host dirties, and it is finite here
+    lo, hi = (ctypes.c_float * 3)(), (ctypes.c_float * 3)()
+    has, infinite = ctypes.c_int32(0), ctypes.c_int32(0)
+    if lib.clay_layer_node_influence_bound(doc, layer.value, node.value, lo, hi,
+                                           ctypes.byref(has), ctypes.byref(infinite)) != 0:
+        errors.append("clay_layer_node_influence_bound failed on a plain sphere")
+    elif has.value != 1 or infinite.value != 0:
+        errors.append(f"a sphere's influence bound reports has={has.value} "
+                      f"infinite={infinite.value}")
+
+    stats = BrickStats()
+    stats.struct_size = ctypes.sizeof(BrickStats)
+    if lib.clay_brick_cache_mark_dirty_layer(cache, doc, layer.value) != 0:
+        errors.append("clay_brick_cache_mark_dirty_layer failed")
+    lib.clay_brick_cache_stats(cache, ctypes.byref(stats))
+    pending = stats.dirty_bricks
+    if pending == 0:
+        errors.append("marking a sphere's layer dirtied no bricks")
+
+    # a region three floats cannot honestly name is refused before anything is
+    # inserted: the guard the whole section rests on
+    big_lo = (ctypes.c_float * 3)(-1e6, -1e6, -1e6)
+    big_hi = (ctypes.c_float * 3)(1e6, 1e6, 1e6)
+    if lib.clay_brick_cache_mark_dirty(cache, big_lo, big_hi) != 1:
+        errors.append("clay_brick_cache_mark_dirty accepted a region spanning 1e19 bricks")
+    if lib.clay_brick_cache_mark_dirty(cache, big_lo, None) != 1:
+        errors.append("clay_brick_cache_mark_dirty accepted one bound without the other")
+    lib.clay_brick_cache_stats(cache, ctypes.byref(stats))
+    if stats.dirty_bricks != pending:
+        errors.append("a refused mark_dirty still changed the cache")
+
+    # the drain is capacity-in/count-out and never a size query
+    chunk = 16
+    reqs = (BrickRequest * chunk)()
+    values = (ctypes.c_float * (chunk * per))()
+    results = (ctypes.c_int32 * chunk)()
+    count, remaining = ctypes.c_size_t(chunk), ctypes.c_size_t(0)
+    if lib.clay_brick_cache_take_dirty(cache, None, ctypes.byref(count),
+                                        ctypes.byref(remaining)) != 1:
+        errors.append("clay_brick_cache_take_dirty read a NULL buffer as a size query")
+    taken = accepted_total = 0
+    while True:
+        count.value = chunk
+        if lib.clay_brick_cache_take_dirty(cache, reqs, ctypes.byref(count),
+                                           ctypes.byref(remaining)) != 0:
+            errors.append("clay_brick_cache_take_dirty failed")
+            break
+        if count.value == 0:
+            break
+        n = count.value
+        if reqs[0].dims[0] != config.dim or reqs[0].spacing != config.voxel_size:
+            errors.append("a request's lattice does not match the cache's configuration")
+        # float32 on both sides: compare through ctypes rather than in Python's
+        # double, or the product differs in the last bits and reads as a fault
+        want_band = ctypes.c_float(config.voxel_size * config.band_voxels).value
+        if reqs[0].band != want_band:
+            errors.append(
+                f"a request carries band {reqs[0].band}, expected {want_band}")
+        if lib.clay_brick_cache_eval_requests(doc, None, reqs, n, values, n * per) != 0:
+            errors.append("clay_brick_cache_eval_requests failed")
+            break
+        got = ctypes.c_size_t(0)
+        if lib.clay_brick_cache_submit(cache, reqs, n, values, n * per, results,
+                                       ctypes.byref(got)) != 0:
+            errors.append("clay_brick_cache_submit failed")
+            break
+        taken += n
+        accepted_total += got.value
+        if remaining.value == 0:
+            break
+    if taken != pending:
+        errors.append(f"the drain handed out {taken} requests for {pending} dirty bricks")
+    if accepted_total != taken:
+        errors.append(f"{taken - accepted_total} of {taken} submissions were not accepted")
+
+    # a count that is not exactly count * dim^3 is refused rather than trusted
+    if lib.clay_brick_cache_submit(cache, reqs, 1, values, per - 1, results, None) != 1:
+        errors.append("clay_brick_cache_submit accepted a short value buffer")
+
+    lib.clay_brick_cache_stats(cache, ctypes.byref(stats))
+    if stats.dirty_bricks != 0 or stats.surface_bricks == 0:
+        errors.append(f"after a full refill: dirty={stats.dirty_bricks} "
+                      f"surface={stats.surface_bricks}")
+    if stats.surface_bricks >= stats.tracked_bricks:
+        errors.append("every tracked brick stores a lattice: empty space is not free")
+    if stats.memory_usage != stats.surface_bricks * per * 2:
+        errors.append(f"memory_usage {stats.memory_usage} is not {stats.surface_bricks} "
+                      f"bricks of {per} halves")
+
+    # the section's one size query, then a zero-copy read at a fixed stride
+    keys_count = ctypes.c_size_t(0)
+    if lib.clay_brick_cache_surface_bricks(cache, None, ctypes.byref(keys_count)) != 0:
+        errors.append("clay_brick_cache_surface_bricks size query failed")
+    elif keys_count.value != stats.surface_bricks:
+        errors.append("surface_bricks and the stats disagree on the count")
+    n = keys_count.value
+    keys = (ctypes.c_int32 * (n * 3))()
+    filled = ctypes.c_size_t(n)
+    if lib.clay_brick_cache_surface_bricks(cache, keys, ctypes.byref(filled)) != 0:
+        errors.append("clay_brick_cache_surface_bricks rejected an adequate buffer")
+    states = (ctypes.c_int32 * n)()
+    halves = (ctypes.c_uint16 * (n * per))()
+    if lib.clay_brick_cache_read_bricks(cache, 0, keys, n, states, halves, n * per) != 0:
+        errors.append("clay_brick_cache_read_bricks failed")
+    elif any(s != 2 for s in states):  # CLAY_BRICK_SURFACE
+        errors.append("a brick listed as a surface brick did not read back as one")
+    if lib.clay_brick_cache_read_bricks(cache, 2, keys, 1, states, None, 0) != 1:
+        errors.append("clay_brick_cache_read_bricks accepted an lod above 1")
+
+    mesh_params = BrickMeshParams()
+    mesh_params.struct_size = ctypes.sizeof(BrickMeshParams)
+    mesh_params.normals = 2  # CLAY_NORMAL_GRADIENT
+    mesh_params.colors = 1
+    mesh = ctypes.c_void_p(0)
+    if lib.clay_brick_cache_mesh(cache, doc, ctypes.byref(mesh_params),
+                                 ctypes.byref(mesh)) != 0 or not mesh.value:
+        errors.append("clay_brick_cache_mesh failed on a filled cache")
+    elif lib.clay_mesh_vertex_count(mesh) == 0:
+        errors.append("the brick mesh of a filled cache has no vertices")
+    lib.clay_mesh_destroy(mesh)
+
+    lib.clay_brick_cache_destroy(cache)
+    lib.clay_brick_cache_destroy(None)  # releasing a null handle is a no-op
+    lib.clay_document_destroy(doc)
+    return errors
+
+
 def ffi_exercise(lib_path: str) -> list[str]:
     lib = ctypes.CDLL(lib_path)
     errors = exports_exercise(lib)
@@ -588,6 +850,7 @@ def ffi_exercise(lib_path: str) -> list[str]:
             errors += prim_sweep(lib)
             errors += voxel_exercise(lib)
             errors += voxel_ownership_exercise(lib, doc)
+            errors += brick_cache_exercise(lib)
         lib.clay_document_destroy(doc)
         lib.clay_document_destroy(None)  # releasing a null handle is a no-op
     return errors

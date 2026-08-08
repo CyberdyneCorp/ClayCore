@@ -238,6 +238,23 @@ EXEMPT = {
                 "layer entry point already takes, so there is nothing to read back",
 }
 
+# The OTHER direction, which this gate does not enforce and deliberately does
+# not: the C ABI legitimately carries plumbing pyclay has no need of, so a
+# C-only entry point is not a defect. A whole SUBSYSTEM reachable only from C
+# is different — it is a gap somebody owes work on — so those are named here
+# and printed on every run rather than being invisible because the comparison
+# runs one way. An entry is a follow-up, not an exemption: nothing fails while
+# one is listed, and removing it is the point.
+C_ONLY_FOLLOW_UPS = {
+    "BrickCache": "the incremental sculpting path (brick::BrickCache) is reachable from C "
+                  "as clay_brick_cache_* since ABI 0.24.0 — mark_dirty, take_dirty, "
+                  "eval_requests, submit — and from pyclay not at all. A Python binding "
+                  "wants a buffer protocol for the fp16 payloads and a numpy view of a "
+                  "request array, which is its own change with its own tests; until then "
+                  "the incremental path is covered in C++ and C only, and a pyclay script "
+                  "cannot reproduce an app's refill.",
+}
+
 # String-valued choices pyclay parses out of an argument. They are capabilities
 # too — a new brush shape is a new thing the C ABI must be able to name — and
 # they land on C enumerators rather than entry points.
@@ -487,6 +504,9 @@ def main() -> int:
         print(f"parity: {e}", file=sys.stderr)
     for capability in sorted(used):
         print(f"parity: exempt {capability} — {EXEMPT[capability]}")
+    for capability in sorted(C_ONLY_FOLLOW_UPS):
+        print(f"parity: C-only, pyclay follow-up — {capability}: "
+              f"{C_ONLY_FOLLOW_UPS[capability]}")
     if args.show_unreached:
         for name in unreached(surface, functions):
             print(f"parity: C-only {name}")

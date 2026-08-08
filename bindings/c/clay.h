@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 23
+#define CLAY_ABI_MINOR 24
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -1539,6 +1539,464 @@ clay_result clay_voxel_raycast(const clay_voxel_grid* grid, const float origin[3
 clay_result clay_voxel_build_plane_pick(const clay_voxel_grid* grid, const float origin[3],
                                         const float dir[3], int32_t plane_cell,
                                         int32_t* out_hit, int32_t out_cell[3]);
+
+/* -- influence bounds ------------------------------------------------------ */
+
+/* The world-space box outside which an item cannot change the field.
+ *
+ * NOT clay_layer_bounds, which is deliberately tight — the box to frame a
+ * camera on. This is the box to DIRTY, and it differs in exactly three ways,
+ * which is what the engine actually does (src/scene/bounds.cpp):
+ *   - a GROUP's bound is dilated by the group's own blend support, so a child
+ *     blended into its siblings does not leave a stale seam;
+ *   - an INVISIBLE node contributes nothing;
+ *   - some nodes have NO finite influence and say so, rather than claiming
+ *     one: a non-local op (intersect, the spatial morphs) anywhere in the
+ *     subtree, an infinite grid repeat, or an unbounded primitive (a plane, an
+ *     infinite cylinder).
+ * A plain LOCAL item's influence bound IS its geometry bound — already
+ * dilated by rounding and blend support, as every bound here is. Nothing is
+ * dilated by a deformer chain's Lipschitz factor; the engine does not do that.
+ *
+ * Three states through two flags, spelled as clay_layer_bounds spells them:
+ *   *out_has_bounds 0            nothing to dirty; out_min/out_max untouched
+ *   1, *out_infinite 0           the finite box in out_min/out_max
+ *   1, *out_infinite 1           unbounded; out_min/out_max are left alone,
+ *                                and the honest response is to dirty
+ *                                everything, which is what passing NULL to
+ *                                clay_brick_cache_mark_dirty means
+ * A node the layer does not hold, or one that is hidden, reports no bounds
+ * rather than failing: a selection outlives the nodes in it. A layer the
+ * document does not hold is CLAY_ERROR_NOT_FOUND. */
+clay_result clay_layer_node_influence_bound(const clay_document* doc, clay_layer_id layer,
+                                            clay_node_id node, float out_min[3],
+                                            float out_max[3], int32_t* out_has_bounds,
+                                            int32_t* out_infinite);
+/* The union over a layer's root nodes — what a first, full fill dirties. A
+ * layer that shows nothing reports *out_has_bounds 0. */
+clay_result clay_layer_influence_bound(const clay_document* doc, clay_layer_id layer,
+                                       float out_min[3], float out_max[3],
+                                       int32_t* out_has_bounds, int32_t* out_infinite);
+
+/* -- dense grid evaluation ------------------------------------------------- */
+
+/* nx*ny*nz lattice samples at origin + spacing * (i, j, k), x fastest — the
+ * shape every backend already implements (eval::GridQuery) and the one thing
+ * this ABI could not ask for. clay_eval_points can sample the same points,
+ * but only as an unstructured batch against a tape compiled for the whole
+ * document; a grid carries its own region, so the tape can be CULLED to it,
+ * and that culling is where the brick cache's measured win lives. */
+typedef struct clay_grid_query {
+    uint32_t struct_size; /* = sizeof(clay_grid_query); required */
+    float origin[3];      /* world position of sample (0, 0, 0) */
+    float spacing;        /* world units between samples; must be finite and > 0 */
+    int32_t dims[3];      /* nx, ny, nz; each > 0, product <= CLAY_MAX_BATCH */
+} clay_grid_query;
+
+/* Evaluates the grid into out_values (dims product floats, x fastest), with
+ * out_colors_rgb (three times that) optional as it is on clay_eval_points.
+ * backend NULL = "cpu".
+ *
+ * region_min/region_max are an optional CULL region: items whose influence
+ * cannot reach it are dropped from the compiled tape, so a small grid in a
+ * large scene costs what the grid covers rather than what the document holds.
+ * Both NULL compiles the whole document. Passing one without the other is
+ * rejected, as it is on clay_voxel_rasterize, as is a region that is empty or
+ * carries a non-finite bound. The culled tape is compiled per call and not
+ * cached: consecutive bricks want different regions, so a cache keyed on the
+ * document alone would thrash.
+ *
+ * value_count is the caller's buffer length in FLOATS and must equal the dims
+ * product exactly — the one argument this ABI cannot check against the
+ * caller's memory, so it is required rather than inferred. */
+clay_result clay_eval_grid(const clay_document* doc, const char* backend,
+                           const clay_grid_query* grid, const float region_min[3],
+                           const float region_max[3], float* out_values,
+                           float* out_colors_rgb, size_t value_count);
+
+/* -- the brick cache ------------------------------------------------------- */
+
+/* What makes sculpting INCREMENTAL. The field is kept as a sparse grid of
+ * dim^3 fp16 bricks in a narrow band around the surface; an edit dirties the
+ * bricks its influence bound reaches and only those are re-evaluated. Every
+ * other brick is left BIT-IDENTICAL, which is the property the whole design
+ * exists to provide.
+ *
+ * The cache evaluates nothing and owns no thread. It hands out plain-data
+ * REQUESTS — a brick key, a generation, and the lattice to sample — and takes
+ * the resulting distances back. Which backend runs them, on which thread, in
+ * what order, and how many per frame is the host's business. There is exactly
+ * one path:
+ *
+ *     mark_dirty -> take_dirty -> eval_requests -> submit
+ *
+ * The generation is what makes an in-flight request safe. Re-dirtying a brick
+ * bumps its generation, so a result computed against the older scene is
+ * REJECTED at submit rather than overwriting newer state. That is an ordinary
+ * outcome of an interactive session, not a failure, so it arrives through
+ * out_results and the call still returns CLAY_OK — the same choice
+ * clay_document_undo makes for "nothing to undo".
+ *
+ * THREADING. A cache handle takes no lock and adds none: the C++ class is a
+ * hash map and a vector with no synchronization, and a lock here would be a
+ * threading policy the consumer did not ask for. So every call on ONE handle
+ * must be serialized by the host, const readers included — a concurrent
+ * submit may be rehashing the map a reader is walking. Two handles share
+ * nothing. clay_brick_cache_eval_requests takes no cache at all and is
+ * free-threaded: it may run on any number of threads against one const
+ * document, which is safe for the same reason clay_eval_points is, and is NOT
+ * safe concurrently with a mutating clay_document_* / clay_layer_* call.
+ *
+ * The cache knows nothing about a document, and no edit invalidates anything
+ * in it. A host that edits and does not mark the edit's influence bound dirty
+ * keeps stale bricks, and nothing here can detect that: prefer
+ * clay_brick_cache_mark_dirty_nodes, which computes the bound itself. */
+
+typedef struct clay_brick_cache clay_brick_cache; /* opaque */
+
+/* What a brick holds. Inside and Outside are implicit — the state IS the
+ * data, no lattice is allocated — which is why empty space costs nothing. */
+typedef enum clay_brick_state {
+    CLAY_BRICK_INSIDE = 0,  /* uniformly d <= -band */
+    CLAY_BRICK_OUTSIDE = 1, /* uniformly d >= +band */
+    CLAY_BRICK_SURFACE = 2, /* the band crosses it: dim^3 fp16 samples */
+    /* This boundary's own value, with no engine counterpart (as clay_mesher
+     * has none): the cache holds nothing for the key — it was never marked, or
+     * was marked and never submitted. clay_brick_cache_read_bricks reports it
+     * and leaves that brick's slice of the output untouched. */
+    CLAY_BRICK_MISSING = 3
+} clay_brick_state;
+
+/* What became of a submission. Only ACCEPTED changed the cache. */
+typedef enum clay_brick_submit {
+    CLAY_BRICK_SUBMIT_ACCEPTED = 0,
+    /* The brick was re-dirtied while this request was in flight, or the cache
+     * no longer tracks it. Expected, and not an error: drop the values and
+     * wait for the request the next clay_brick_cache_take_dirty hands you. */
+    CLAY_BRICK_SUBMIT_STALE = 1,
+    /* Storing this brick would put the cache over its memory budget. Every
+     * brick already stored stays valid and sampleable, and the ceiling is
+     * never breached; the brick simply stays unevaluated. */
+    CLAY_BRICK_SUBMIT_BUDGET_EXCEEDED = 2
+} clay_brick_submit;
+
+/* Every field belongs to the original layout and none has a default: a
+ * struct_size shorter than this is rejected outright, as it is for
+ * clay_brush_params. Zero is not a resolution and not a voxel size, so a
+ * zeroed descriptor is a mistake rather than a request — start from
+ * clay_brick_config_defaults and override what you care about. */
+typedef struct clay_brick_config {
+    uint32_t struct_size; /* = sizeof(clay_brick_config); required */
+    int32_t dim;          /* lattice samples per brick axis; 8 or 16 */
+    float voxel_size;     /* world units between lattice samples; finite and > 0 */
+    int32_t band_voxels;  /* half-width of the kept band, in voxels; > 0 */
+    /* Bytes of SURFACE-brick payload the cache may hold; 0 is unlimited,
+     * exactly as brick::BrickConfig has it. It bounds the fp16 lattices and
+     * nothing else: the per-brick bookkeeping grows with how much space has
+     * ever been marked dirty, which clay_brick_stats.tracked_bricks reports
+     * and this does not cover. */
+    uint64_t memory_budget;
+} clay_brick_config;
+
+/* Fills a descriptor with the engine's defaults, struct_size included: 8^3
+ * bricks, 0.05 world units per voxel, a 3-voxel band, no budget. */
+clay_result clay_brick_config_defaults(clay_brick_config* out_config);
+
+/* Everything a host needs to draw a progress bar or decide whether to raise
+ * the budget, in one versioned descriptor so a counter can be appended later
+ * without a new entry point. Reading it walks the tracked bricks to count the
+ * surface ones, so it is O(tracked) rather than free — once a frame, not once
+ * a brick. */
+typedef struct clay_brick_stats {
+    uint32_t struct_size;    /* = sizeof(clay_brick_stats); required */
+    uint64_t tracked_bricks; /* keys the cache holds bookkeeping for */
+    uint64_t surface_bricks; /* of those, the ones storing an fp16 lattice */
+    uint64_t dirty_bricks;   /* waiting to be handed out, plus any drained but
+                              * not yet taken by clay_brick_cache_take_dirty */
+    uint64_t memory_usage;   /* bytes of surface-brick payload held */
+    uint64_t memory_budget;  /* what the cache was created with; 0 = unlimited */
+} clay_brick_stats;
+
+/* One evaluation request, and the only thing that crosses between the cache
+ * and the host's evaluator.
+ *
+ * An array ELEMENT, not a versioned descriptor: it carries no struct_size for
+ * the same reason clay_stamp does not — a caller receives thousands at once,
+ * its layout is fixed, and changing that layout is a break rather than
+ * something to negotiate. The layout is byte-for-byte brick::BrickRequest,
+ * asserted with offsetof in bindings/c/clay_c.cpp, so a drain is one memcpy
+ * and no field is transcribed.
+ *
+ * origin/spacing/dims/band are derivable from the key and the config, and are
+ * carried anyway so that the host and the library cannot disagree about them.
+ * band matters as much as the lattice does: the tape must be culled against the
+ * brick DILATED by the band, because a sample keeps its true distance whenever
+ * that distance is within the band, so an item a band outside the brick still
+ * decides samples inside it. Culling on the bare brick drops it and the brick
+ * is then classified empty instead of carrying the surface's approach.
+ * Pass the request back to clay_brick_cache_submit UNMODIFIED. */
+typedef struct clay_brick_request {
+    int32_t key[3];      /* brick coordinate; brick (x,y,z) starts at key * dim * voxel_size */
+    uint32_t generation; /* what submit checks; opaque to the host */
+    float origin[3];     /* world position of lattice sample (0, 0, 0) */
+    float spacing;       /* = config.voxel_size */
+    int32_t dims[3];     /* = config.dim on every axis */
+    float band;          /* = config.band_voxels * config.voxel_size */
+} clay_brick_request;
+
+/* A cache the caller owns. Returns NULL on invalid configuration, with the
+ * detail in clay_last_error(). Free with clay_brick_cache_destroy. There is
+ * no borrowed form: a cache belongs to whoever made it, never to a document,
+ * so this takes no document and destroy returns void as
+ * clay_document_destroy does rather than the clay_result
+ * clay_voxel_grid_destroy needs to refuse a borrow.
+ *
+ * Destroying a cache invalidates every clay_brick_request still in flight, in
+ * the sense that submitting one afterwards is a use-after-free this ABI
+ * cannot detect; a request is otherwise a self-contained value. */
+clay_brick_cache* clay_brick_cache_create(const clay_brick_config* config);
+void clay_brick_cache_destroy(clay_brick_cache* cache);
+
+/* The configuration the cache was created with, and its counters. Both
+ * descriptors are OUTPUTS, so struct_size is the caller declaring how much of
+ * the struct exists; the library writes only that prefix. */
+clay_result clay_brick_cache_config(const clay_brick_cache* cache,
+                                    clay_brick_config* out_config);
+clay_result clay_brick_cache_stats(const clay_brick_cache* cache, clay_brick_stats* out_stats);
+
+/* Marks every brick whose band-dilated volume meets the region, tracking
+ * bricks it has not seen before. Pass an edit's INFLUENCE bound, not its
+ * geometry bound — clay_layer_node_influence_bound is where one comes from,
+ * and clay_brick_cache_mark_dirty_nodes does both steps for you.
+ *
+ * region_min and region_max BOTH NULL dirty everything the cache tracks —
+ * what a host does after an edit whose influence is infinite, and the only
+ * way to say it: an explicit region carrying an infinity is rejected, because
+ * a region derived from a camera frustum or a degenerate selection box
+ * arrives that way by accident rather than on purpose. Passing one without
+ * the other is rejected, as it is on clay_voxel_rasterize.
+ *
+ * A region is also refused when it spans more than CLAY_MAX_BATCH bricks, or
+ * when a brick coordinate in it would not fit in an int32_t. Three floats
+ * name that many bricks easily — a region of 1e6 world units at a brick size
+ * of 0.4 is 1e19 of them — and each one costs a tracked entry, so the span is
+ * computed in 64-bit and checked BEFORE anything is inserted. A refused call
+ * leaves the cache exactly as it was. */
+clay_result clay_brick_cache_mark_dirty(clay_brick_cache* cache, const float region_min[3],
+                                        const float region_max[3]);
+
+/* The same, with the bound computed from the document — the documented
+ * default, because the region is the single most likely thing to get silently
+ * wrong and a bound that is too tight leaves visibly stale bricks at a blend
+ * seam. `nodes` is count node ids; one the layer does not hold, or a hidden
+ * one, contributes nothing. A node whose influence is infinite dirties
+ * everything the cache tracks.
+ *
+ * *out_marked (may be NULL) receives how many ids contributed a bound. Every
+ * bound is computed and span-checked before any of them is marked, so a
+ * refusal leaves the cache untouched rather than half-dirtied. */
+clay_result clay_brick_cache_mark_dirty_nodes(clay_brick_cache* cache,
+                                              const clay_document* doc, clay_layer_id layer,
+                                              const clay_node_id* nodes, size_t count,
+                                              size_t* out_marked);
+/* The union over a layer — what a first, full fill marks. A layer that shows
+ * nothing marks nothing, which is not an error. */
+clay_result clay_brick_cache_mark_dirty_layer(clay_brick_cache* cache,
+                                              const clay_document* doc, clay_layer_id layer);
+
+/* Drains dirty bricks into requests, bumping each brick's generation.
+ *
+ * Capacity in, count out — the clay_layer_apply_stroke shape, not a size
+ * query: *count is the caller's buffer capacity in REQUESTS going in and the
+ * number written coming out, and *out_remaining (may be NULL) is how many are
+ * still queued afterwards. out_requests == NULL is CLAY_ERROR_INVALID_ARGUMENT
+ * and never a size query, so there is no BUFFER_TOO_SMALL retry loop. Call it
+ * in a loop until *out_remaining is 0, or bound the work per frame by stopping
+ * early — the rest stay queued.
+ *
+ * Your capacity bounds what is COPIED OUT, not what the library allocates. The
+ * engine's drain is all-or-nothing, so the first call after a large mark stages
+ * every queued request inside the library — asking for one request after a
+ * million-brick mark still stages the million, at sizeof(clay_brick_request)
+ * each, and the staging is held until the queue is fully drained. Size the
+ * regions you mark accordingly; a frame budget on this call does not bound the
+ * memory. Removing that cliff needs a capacity-aware drain in the engine.
+ *
+ * A request is a VALUE and stays submittable until its brick is dirtied
+ * again, at which point submitting it is merely STALE. It may be copied,
+ * queued, sent to any number of worker threads and held across frames; it
+ * contains no pointer. */
+clay_result clay_brick_cache_take_dirty(clay_brick_cache* cache,
+                                        clay_brick_request* out_requests, size_t* count,
+                                        size_t* out_remaining);
+
+/* Evaluates `count` requests against a document and nothing else: for each
+ * one it derives the cull region from the request's own lattice, compiles the
+ * per-brick culled tape and runs it through `backend` (NULL = "cpu"). Brick i
+ * fills out_values[i * dim^3 ...] whatever order the work is done in, so
+ * values_capacity must be exactly count * dim^3 floats.
+ *
+ * Each request is culled against its own brick DILATED by its own band, which
+ * is what clay_brick_cache_cull_region returns. The band rides on the request
+ * rather than being passed in, so there is no way to supply the wrong one: a
+ * band of zero would silently drop items that decide samples inside the brick
+ * and classify it empty, and a value a caller has to remember to thread through
+ * is a value that will one day arrive as zero.
+ *
+ * It takes NO cache handle: it does not submit, does not touch a cache and
+ * starts no thread, so it is free-threaded and any number of threads may run
+ * it against one const document at once. The host still calls
+ * clay_brick_cache_submit, and still decides how many requests to run and
+ * where. Fan out over REQUESTS, one brick per worker: the CPU backend already
+ * splits a single grid's z axis over a process-wide pool, and a brick is 8
+ * slices of 64 samples, so a per-brick call is already a small dispatch.
+ *
+ * Naming a GPU backend here is not a promise of a speedup: the Metal backend
+ * allocates per call, and per-brick dispatch may lose to the CPU outright.
+ * Measure before changing the string. */
+clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char* backend,
+                                           const clay_brick_request* requests, size_t count,
+                                           float* out_values, size_t values_capacity);
+
+/* Submits the evaluated distances for `count` requests: each brick's values
+ * are classified (inside / outside / surface), clamped to the band and
+ * quantized to fp16. `values` is count * dim^3 floats in the grids' own
+ * order, x fastest, brick i at i * dim^3, and values_capacity must equal that
+ * product exactly. count == 1 is the per-worker case and costs nothing.
+ *
+ * out_results (count clay_brick_submit values) and out_accepted (how many were
+ * ACCEPTED) are both optional, but not both at once: a caller that skips both
+ * cannot tell whether anything landed. The call returns CLAY_OK for all three
+ * outcomes — a stale result is the generation counter doing its job, and a
+ * budget refusal is the ceiling doing its job. The return code is reserved for
+ * a malformed call: a null pointer, a values_capacity that is not exactly
+ * count * dim^3, or a request whose spacing or dims do not match the cache's
+ * configuration, which means it was modified or came from a different cache.
+ *
+ * The values are not scanned for NaN, and a request's origin is not
+ * re-derived from its key. A backend that produces a NaN classifies the brick
+ * as surface and stores a NaN half; validating dim^3 floats per brick on the
+ * refill path would cost a pass over every brick in the scene to catch a
+ * backend bug, which is the cost this cache exists to remove. */
+clay_result clay_brick_cache_submit(clay_brick_cache* cache,
+                                    const clay_brick_request* requests, size_t count,
+                                    const float* values, size_t values_capacity,
+                                    int32_t* out_results, size_t* out_accepted);
+
+/* The world box a brick's lattice covers, and the box its evaluation should be
+ * CULLED against — the brick dilated by the band. Hand the second one to
+ * clay_eval_grid as the cull region when driving evaluation yourself;
+ * clay_brick_cache_eval_requests does it for you. Any key answers, tracked or
+ * not: these are arithmetic on the configuration. */
+clay_result clay_brick_cache_brick_bounds(const clay_brick_cache* cache, const int32_t key[3],
+                                          float out_min[3], float out_max[3]);
+clay_result clay_brick_cache_cull_region(const clay_brick_cache* cache, const int32_t key[3],
+                                         float out_min[3], float out_max[3]);
+
+/* One decoded lattice sample, band-clamped: -band inside, +band outside, and
+ * +band for a brick the cache has not evaluated. i, j, k are in [0, dim). The
+ * direct mirror of the C++ sample(); read a whole brick with
+ * clay_brick_cache_read_bricks. */
+clay_result clay_brick_cache_sample(const clay_brick_cache* cache, const int32_t key[3],
+                                    int32_t i, int32_t j, int32_t k, float* out_value);
+
+/* Reads whole bricks in their STORED form — dim^3 IEEE binary16 values per
+ * key, the engine's own bits unconverted, which is what a GPU texture upload
+ * wants and half the bytes of the decoded form. `keys_xyz` is count packed
+ * int32 triples, exactly as clay_voxel_flood_select returns cells.
+ *
+ * The stride is FIXED at dim^3: brick i occupies out_halves[i * dim^3 ...]
+ * whatever its state, so out_halves can be an MTLBuffer's contents and the
+ * upload is one memcpy with no packing pass. values_capacity must be exactly
+ * count * dim^3, or 0 when out_halves is NULL and only the states are wanted.
+ *
+ * out_states (count clay_brick_state values) says what each key held. It may
+ * be NULL when only the payload is wanted, but not together with out_halves:
+ * a call that writes neither has nothing to report. A uniform brick is FILLED
+ * with the band value of its sign, so an uploader never branches;
+ * CLAY_BRICK_MISSING means the cache holds nothing for that key and its dim^3
+ * elements are LEFT UNTOUCHED — the one state where the buffer is not
+ * written.
+ *
+ * `lod` is 0 for the full-resolution brick or 1 for its mip. A value above 1
+ * is rejected rather than clamped: there is one mip level, and silently
+ * answering level 0 for a request for level 4 would put a brick twice the
+ * intended size on screen. */
+clay_result clay_brick_cache_read_bricks(const clay_brick_cache* cache, int32_t lod,
+                                         const int32_t* keys_xyz, size_t count,
+                                         int32_t* out_states, uint16_t* out_halves,
+                                         size_t values_capacity);
+
+/* Every brick that stores samples, through the size-query pattern, as packed
+ * int32 triples exactly like clay_voxel_flood_select: call with out_keys_xyz
+ * == NULL for the count in *count, then again with a buffer of count*3
+ * values. This is the ONE size query in this section — the drain is not, and
+ * refuses a NULL buffer. The order is the cache's own and is not stable
+ * across calls that mutate it. */
+clay_result clay_brick_cache_surface_bricks(const clay_brick_cache* cache,
+                                            int32_t* out_keys_xyz, size_t* count);
+
+/* -- LOD mips -------------------------------------------------------------- */
+
+/* A coarse brick covering 2x2x2 full-resolution bricks, subsampled from them
+ * rather than evaluated: same lattice size, twice the spacing. Read it with
+ * clay_brick_cache_read_bricks at lod 1.
+ *
+ * Buildable only when all eight children are evaluated AND clean. *out_built
+ * is 0 when they are not — an ordinary "not yet", reported like every other
+ * expected negative here rather than as a failure. Dirtying any child drops
+ * the mip, so a mip is never downsampled from stale data. */
+clay_result clay_brick_cache_build_mip(clay_brick_cache* cache, const int32_t coarse_key[3],
+                                       int32_t* out_built);
+/* 1 when a valid mip exists for the coarse key, 0 when the region is only
+ * available at full resolution — the cheap way to ask before reading. */
+clay_result clay_brick_cache_current_lod(const clay_brick_cache* cache,
+                                         const int32_t coarse_key[3], int32_t* out_lod);
+
+/* -- what the bricks are for ----------------------------------------------- */
+
+/* How a brick mesh is built. Only the fields mesh::MeshingOptions actually
+ * has: this is NOT clay_mesh_params, whose voxel_size, resolution and mesher
+ * mean nothing here — the lattice is the cache's and the mesher is the
+ * marching one, both already decided. */
+typedef enum clay_normal_mode {
+    CLAY_NORMAL_NONE = 0,     /* no normals */
+    CLAY_NORMAL_FACE = 1,     /* area-weighted face normals; needs no document */
+    CLAY_NORMAL_GRADIENT = 2  /* the field gradient, so blends read smooth */
+} clay_normal_mode;
+
+typedef struct clay_brick_mesh_params {
+    uint32_t struct_size; /* = sizeof(clay_brick_mesh_params); required */
+    int32_t normals;      /* clay_normal_mode */
+    int32_t colors;       /* 0/1: sample the document's colour field per vertex */
+    float gradient_eps;   /* tetrahedron-tap half-width; <= 0 means the default */
+} clay_brick_mesh_params;
+
+/* Meshes the cache's surface bricks — marching only the cells those bricks
+ * own, which is the point: a re-mesh costs what the SURFACE covers, not what
+ * the scene's bounding box does.
+ *
+ * `doc` may be NULL, and then no tape is compiled: the mesh has positions and
+ * face normals and no colours. Gradient normals and colours are attributes of
+ * the FIELD, so asking for either without a document is rejected rather than
+ * quietly downgraded. Behind the same owner handle as clay_document_mesh and
+ * freed with clay_mesh_destroy. A cache holding no surface bricks yields an
+ * EMPTY mesh rather than an error, as clay_voxel_mesh does for an empty grid:
+ * a cache that has not been filled yet is an ordinary state of a session. */
+clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_document* doc,
+                                  const clay_brick_mesh_params* params, clay_mesh** out_mesh);
+
+/* Raycast the cached bricks: trilinear samples inside surface bricks, a brick
+ * DDA across the rest — so the cost is the ray's path through the band rather
+ * than a march against the whole document's tape. Position and normal only;
+ * clay_raycast_attributed is the call that names what was hit.
+ *
+ * The direction is normalized here, and a zero-length one is rejected. A ray
+ * that hits nothing sets *out_hit to 0 and is not an error; every out pointer
+ * but out_hit may be NULL. */
+clay_result clay_brick_cache_raycast(const clay_brick_cache* cache, const float origin[3],
+                                     const float dir[3], int32_t* out_hit, float* out_t,
+                                     float out_position[3], float out_normal[3]);
 
 #ifdef __cplusplus
 } /* extern "C" */

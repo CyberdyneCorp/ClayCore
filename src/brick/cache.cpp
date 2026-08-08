@@ -29,7 +29,17 @@ void BrickCache::mark_dirty(const math::Aabb& world_bound) {
 
     if (world_bound.is_infinite()) {
         dirty_.clear();
-        for (auto& [key, t] : bricks_) dirty_one(key, t);
+        // The queue is dropped but the queued FLAGS survive it, and dirty_one
+        // only pushes a brick that is not already queued. Without clearing the
+        // flag first, every brick that was already waiting is stranded: never
+        // re-queued by this call and never again by any later one, so the cache
+        // serves its stale samples for the rest of its life and only being
+        // destroyed recovers. Reached by the documented way to say "this edit's
+        // influence is unbounded".
+        for (auto& [key, t] : bricks_) {
+            t.queued = false;
+            dirty_one(key, t);
+        }
         return;
     }
     if (world_bound.empty()) return;
@@ -63,6 +73,7 @@ std::vector<BrickRequest> BrickCache::take_dirty() {
         req.grid.origin = brick_bounds(key).min;
         req.grid.spacing = config_.voxel_size;
         req.grid.nx = req.grid.ny = req.grid.nz = config_.dim;
+        req.band = config_.band();
         out.push_back(req);
     }
     dirty_.clear();

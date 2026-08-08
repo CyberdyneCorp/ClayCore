@@ -63,6 +63,13 @@ struct BrickRequest {
     BrickKey key;
     std::uint32_t generation = 0;
     eval::GridQuery grid;
+    // The band this brick's values will be clamped to, carried so that whoever
+    // evaluates the request culls against the right region without needing the
+    // cache. A sample keeps its true distance whenever that distance is within
+    // the band, so the tape must be culled against the brick DILATED by it —
+    // an item a band outside the brick still decides samples inside it. Same
+    // reason the lattice rides along: so the two sides cannot disagree.
+    float band = 0.0f;
 };
 
 enum class SubmitResult { Accepted, Stale, BudgetExceeded };
@@ -97,6 +104,11 @@ class BrickCache {
     std::vector<BrickKey> surface_bricks() const;
     std::size_t memory_usage() const { return surface_bytes_; }
     std::size_t dirty_count() const { return dirty_.size(); }
+    // Bricks tracked at all — evaluated, implicit and never-evaluated alike.
+    // memory_usage() bounds only the fp16 payloads, so this is the count that
+    // makes visible that the per-key bookkeeping grows with how much space has
+    // ever been marked dirty, OUTSIDE the memory budget.
+    std::size_t tracked_count() const { return bricks_.size(); }
 
     // -- LOD mips ------------------------------------------------------------
     // A level-1 mip brick covers 2x2x2 full-res bricks by subsampling every
