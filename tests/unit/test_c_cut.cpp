@@ -224,3 +224,98 @@ TEST_CASE("c cut: invalid descriptors are refused") {
     CHECK(clay_cut_polygon_from_curve(control, 2, nullptr, 0.01f, nullptr, nullptr) ==
           CLAY_ERROR_INVALID_ARGUMENT);
 }
+
+TEST_CASE("c cut: an open trim curve closes against the frame bounds") {
+    // ZBrush's Trim Curve. The size-query pattern first, as the lasso uses.
+    std::vector<float> pts;
+    for (int i = 0; i < 7; ++i) {
+        const float x = -1.2f + 0.4f * static_cast<float>(i);
+        pts.push_back(x);
+        pts.push_back(0.2f * std::sin(x * 2.6f));
+        pts.push_back(0.0f);
+        pts.push_back(0.0f);
+    }
+    const float extent[2] = {3.0f, 3.0f};
+
+    std::size_t n = 0;
+    REQUIRE(clay_cut_polygon_from_open_curve(pts.data(), 7, nullptr, CLAY_TRIM_BELOW, extent,
+                                             0.01f, nullptr, &n) == CLAY_OK);
+    REQUIRE(n > 7);  // the stroke, plus the two vertices that close it
+
+    std::vector<float> xy(n * 2);
+    REQUIRE(clay_cut_polygon_from_open_curve(pts.data(), 7, nullptr, CLAY_TRIM_BELOW, extent,
+                                             0.01f, xy.data(), &n) == CLAY_OK);
+    // The closing edge runs along the bound on the side being covered.
+    CHECK(xy[(n - 1) * 2 + 1] == doctest::Approx(-3.0f));
+    CHECK(xy[(n - 2) * 2 + 1] == doctest::Approx(-3.0f));
+
+    SUBCASE("the other side closes the other way") {
+        std::size_t m = 0;
+        REQUIRE(clay_cut_polygon_from_open_curve(pts.data(), 7, nullptr, CLAY_TRIM_ABOVE,
+                                                 extent, 0.01f, nullptr, &m) == CLAY_OK);
+        std::vector<float> up(m * 2);
+        REQUIRE(clay_cut_polygon_from_open_curve(pts.data(), 7, nullptr, CLAY_TRIM_ABOVE,
+                                                 extent, 0.01f, up.data(), &m) == CLAY_OK);
+        CHECK(up[(m - 1) * 2 + 1] == doctest::Approx(3.0f));
+    }
+
+    SUBCASE("and it refuses what is not a stroke") {
+        std::size_t m = 0;
+        CHECK(clay_cut_polygon_from_open_curve(pts.data(), 1, nullptr, CLAY_TRIM_BELOW, extent,
+                                               0.01f, nullptr, &m) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_cut_polygon_from_open_curve(pts.data(), 7, nullptr, 99, extent, 0.01f,
+                                               nullptr, &m) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_cut_polygon_from_open_curve(pts.data(), 7, nullptr, CLAY_TRIM_BELOW, extent,
+                                               0.0f, nullptr, &m) == CLAY_ERROR_INVALID_ARGUMENT);
+    }
+}
+
+TEST_CASE("c abi: a tube resolves from a path") {
+    // Nomad's Tubes across the boundary. The round tube must stay EXACT, which
+    // is the property that makes it the cheap one to reach for.
+    const float path[12] = {-0.6f, 0.0f, 0.0f, -0.2f, 0.35f, 0.0f,
+                            0.2f,  -0.1f, 0.0f, 0.6f, 0.3f,  0.0f};
+    clay_tube_params p;
+    std::memset(&p, 0, sizeof p);
+    p.struct_size = static_cast<std::uint32_t>(sizeof p);
+    p.point_type = CLAY_POINT_BSPLINE;
+    p.radius_start = 0.14f;
+    p.radius_mid = 0.09f;
+    p.radius_end = 0.03f;
+    p.tolerance = 0.01f;
+
+    clay_item* round_tube = clay_tube_create(path, 4, &p, -1, nullptr, 0);
+    REQUIRE(round_tube != nullptr);
+
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "l", &layer) == CLAY_OK);
+    REQUIRE(clay_layer_add_item(doc, layer, round_tube, nullptr) == CLAY_OK);
+    clay_item_destroy(round_tube);
+    float scale = 0.0f;
+    REQUIRE(clay_safe_step_scale(doc, &scale) == CLAY_OK);
+    CHECK(scale == doctest::Approx(1.0f));  // a swept sphere is exact
+    clay_document_destroy(doc);
+
+    SUBCASE("a profile makes it a swept item, and costs step scale") {
+        const float box[2] = {0.09f, 0.05f};
+        clay_item* shaped = clay_tube_create(path, 4, &p, CLAY_PROFILE_BOX, box, 2);
+        REQUIRE(shaped != nullptr);
+        clay_document* d2 = clay_document_create();
+        clay_layer_id l2 = 0;
+        REQUIRE(clay_add_sdf_layer(d2, "l", &l2) == CLAY_OK);
+        REQUIRE(clay_layer_add_item(d2, l2, shaped, nullptr) == CLAY_OK);
+        clay_item_destroy(shaped);
+        float s2 = 0.0f;
+        REQUIRE(clay_safe_step_scale(d2, &s2) == CLAY_OK);
+        CHECK(s2 < 1.0f);
+        clay_document_destroy(d2);
+    }
+
+    SUBCASE("and it refuses what is not a path") {
+        CHECK(clay_tube_create(path, 1, &p, -1, nullptr, 0) == nullptr);
+        clay_tube_params zero = p;
+        zero.radius_start = zero.radius_mid = zero.radius_end = 0.0f;
+        CHECK(clay_tube_create(path, 4, &zero, -1, nullptr, 0) == nullptr);
+    }
+}

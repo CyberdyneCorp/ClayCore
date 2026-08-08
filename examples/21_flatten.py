@@ -118,6 +118,50 @@ def main():
         labels.append(f"strength {strength}")
     R.contact_sheet(tiles, "21_flatten_strokes.png", columns=4, caption=", ".join(labels))
 
+    # --- which side it acts on: Flatten, hPolish, and the dual ----------------
+    # Cutting WITHOUT filling is the whole hard-surface family — hPolish, Planar,
+    # the Trim brushes. It is what leaves a crisp facet against untouched
+    # surface, and filling the hollows beside a facet is what a polish must not
+    # do. The three differ by one clamp on the blend term.
+    #
+    # Aimed at the DENTED side, where the difference is visible: the ball has a
+    # bump above the plane and a hollow below it.
+    SIDE = dict(plane_point=(0.5, 0, 0), plane_normal=(1, 0, 0),
+                centre=(0.5, 0.1, 0), region_radius=0.34, falloff=0.25)
+    in_dent = np.array([[0.45, 0.1, 0.0]], np.float32)
+
+    def flank_x(volume, y, z=0.0):
+        """Where the flank sits, marching in along -X."""
+        xs = np.arange(1.2, -0.2, -0.003, dtype=np.float32)
+        pts = np.stack([xs, np.full_like(xs, y), np.full_like(xs, z)], axis=1)
+        inside = np.nonzero(volume.eval(pts) <= 0.0)[0]
+        return float(xs[inside[0]]) if len(inside) else float("nan")
+
+    modes = {m: faceted(src, mode=m, **SIDE) for m in ("two_sided", "cut", "fill")}
+    print("  the flank profile — the plane is at x = 0.5, and y = 0.0-0.2 is the hollow:")
+    print(f"    {'y':>6}{'source':>10}{'two_sided':>11}{'cut':>9}{'fill':>9}")
+    for y in (-0.10, 0.00, 0.10, 0.20, 0.30):
+        row = "".join(f"{flank_x(v, y):>{11 if k == 'two_sided' else 9}.3f}"
+                      for k, v in modes.items())
+        print(f"    {y:>6.2f}{flank_x(base, y):>10.3f}{row}")
+
+    tiles = [R.render_array(volume_doc(modes[m]), eye=(2.6, 1.2, 1.6), target=(0.3, 0.1, 0),
+                            width=205, height=195) for m in ("two_sided", "cut", "fill")]
+    R.contact_sheet(tiles, "21_flatten_modes.png", columns=3,
+                    caption="two_sided (ZBrush Flatten) planes the flank and closes the "
+                            "hollow; cut (hPolish/Planar/Trim) planes the flank and leaves "
+                            "the hollow as a crater; fill closes the hollow and leaves the "
+                            "proud material standing as a rim")
+
+    # cut must leave the hollow empty; fill must close it.
+    if faceted(src, mode="cut", **SIDE).eval(in_dent)[0] <= 0.0:
+        raise SystemExit("cut-only filled a hollow — that is Flatten, not hPolish")
+    if faceted(src, mode="fill", **SIDE).eval(in_dent)[0] >= 0.0:
+        raise SystemExit("fill-only did not close the hollow")
+    # ...and cut still planes what stands proud.
+    if abs(surface_height(faceted(src, mode="cut", **PLANE)) - HEIGHT) > 0.05:
+        raise SystemExit("cut-only stopped planing the bump onto the plane")
+
     if not all(a >= b - 1e-3 for a, b in zip(heights, heights[1:])):
         raise SystemExit("more strength stopped moving the surface toward the plane")
     if abs(heights[-1] - HEIGHT) > 0.04:

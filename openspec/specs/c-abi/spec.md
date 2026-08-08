@@ -406,3 +406,83 @@ It SHALL follow the existing parameter convention rather than introducing one: t
 - **WHEN** a document containing a relief item is saved and reloaded
 - **THEN** the field is unchanged
 
+### Requirement: A host can move a surface through the C ABI
+The ABI SHALL expose the Move brush as one call taking a world centre, radius and displacement and applying the resolved warps to a layer, and SHALL report how many items were affected so a host can tell "the drag missed everything" from "the drag did nothing visible".
+
+It SHALL also expose replacing a node's deformer chain, since that is the mutation the Move is built on and a host has no other way to reach it: `clay_item_add_deformer` acts on a builder, not on a node already in a document.
+
+With undo enabled the whole move SHALL be ONE step however many items it touched, using the existing grouping — a drag is one gesture, and undoing it item by item would be an artifact of the implementation showing through.
+
+#### Scenario: A host drags a blended form
+- **WHEN** a host resolves a drag over a layer built from several blended items
+- **THEN** the surface moves as one, and the call reports how many items took a warp
+
+#### Scenario: One gesture, one undo step
+- **WHEN** a move touching several items is undone
+- **THEN** the whole drag reverts in a single step
+
+#### Scenario: A drag that reaches nothing
+- **WHEN** a drag is placed far from every item
+- **THEN** the call succeeds, reports zero items affected, and changes nothing
+
+### Requirement: Previewing a move across the C ABI
+The ABI SHALL expose previewing a drag, following the size-query convention every other list-returning entry point here uses. It SHALL validate its arguments exactly as applying the move does, so a preview cannot succeed where the move would be refused.
+
+#### Scenario: A host previews before committing
+- **WHEN** a host previews a drag
+- **THEN** it receives the nodes the move would warp, and the document is unchanged
+
+#### Scenario: A preview refuses what the move refuses
+- **WHEN** a preview is asked with a radius that is not positive, an unknown layer, or a malformed descriptor
+- **THEN** it fails with the same code applying the move would give
+
+### Requirement: Flatten mode across the C ABI
+The flatten descriptor SHALL carry the mode, appended so that a caller compiled against the previous layout still describes a two-sided flatten and still works.
+
+#### Scenario: An older descriptor still means two-sided
+- **WHEN** a caller passes a descriptor sized to the layout that predates the mode
+- **THEN** the call succeeds and performs a two-sided flatten
+
+#### Scenario: An unknown mode is refused
+- **WHEN** a descriptor names a mode the ABI does not define
+- **THEN** it is refused rather than silently treated as two-sided
+
+### Requirement: Flattening a trim curve across the C ABI
+The ABI SHALL expose flattening an OPEN control-point curve into a trim outline, beside the closed-lasso flattener it already has, following the same size-query convention. An unknown side, a tolerance that is not positive, or fewer points than describe a stroke SHALL be refused.
+
+#### Scenario: A host flattens a trim
+- **WHEN** a host flattens an open curve for a side
+- **THEN** it receives an outline whose closing edge runs along the frame bound on that side
+
+#### Scenario: The other side closes the other way
+- **WHEN** the same curve is flattened for the opposite side
+- **THEN** the closing edge runs along the opposite bound
+
+### Requirement: A topological move across the C ABI
+The ABI SHALL expose applying a topological move to an item carrying a volume, with its parameters in a versioned descriptor struct as every other multi-parameter entry point here uses. An item that carries no volume, a radius that is not positive, or an unknown easing curve SHALL be refused rather than ignored.
+
+#### Scenario: A host moves one part and not its neighbour
+- **WHEN** a host applies a topological move to a volume holding two parts close in space and joined only through a distant path
+- **THEN** only the part connected to the anchor along the material moves
+
+#### Scenario: It refuses what it cannot do
+- **WHEN** the call names an item with no volume, or a radius that is not positive
+- **THEN** it is refused rather than silently doing nothing
+
+### Requirement: Resolving a tube across the C ABI
+The ABI SHALL expose resolving a path into a tube, with its settings in a versioned descriptor struct, returning an ordinary item the caller owns. A parametric profile SHALL select the swept representation and its absence the exact swept-sphere one, as it does elsewhere.
+
+Fewer points than describe a path, a radius positive nowhere, an unknown point type, or a polygon profile SHALL be refused rather than yielding an item that contributes nothing.
+
+#### Scenario: A round tube stays exact across the boundary
+- **WHEN** a host resolves a tube with no profile and adds it to a document
+- **THEN** the document's safe step scale is 1
+
+#### Scenario: A profiled tube declares its cost
+- **WHEN** the same path is resolved with a box profile
+- **THEN** the safe step scale is below 1
+
+#### Scenario: Degenerate input is refused
+- **WHEN** a tube is asked for from one point, or with every radius zero
+- **THEN** no item is returned
+

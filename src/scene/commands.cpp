@@ -120,6 +120,12 @@ std::optional<Command> apply_one(Document& doc, const SetStrokePointsCmd& c) {
     return Command{inverse};
 }
 
+std::optional<Command> apply_one(Document& doc, const SetDeformersCmd& c) {
+    return apply_field(
+        doc, c, [](SetDeformersCmd& inv, const Node& n) { inv.deformers = n.deformers; },
+        [](Node& n, const SetDeformersCmd& cc) { n.deformers = cc.deformers; });
+}
+
 std::optional<Command> apply_one(Document& doc, const AddLayerCmd& c) {
     doc.insert_layer(c.layer, c.index);
     return Command{RemoveLayerCmd{c.layer.id}};
@@ -157,6 +163,15 @@ std::optional<Command> apply_one(Document& doc, const SetLayerTransformCmd& c) {
     return Command{inverse};
 }
 
+std::optional<Command> apply_one(Document& doc, const SetLayerMirrorCmd& c) {
+    Layer* l = doc.find_layer(c.id);
+    if (!l) return std::nullopt;
+    SetLayerMirrorCmd inverse{c.id, l->mirror_axes, l->mirror_k};
+    l->mirror_axes = c.axes;
+    l->mirror_k = c.k;
+    return Command{inverse};
+}
+
 }  // namespace
 
 namespace {
@@ -174,7 +189,8 @@ LayerId edited_layer(const Command& cmd) {
                 return kNoLayer;
             else if constexpr (std::is_same_v<C, RemoveLayerCmd> ||
                                std::is_same_v<C, SetLayerVisibleCmd> ||
-                               std::is_same_v<C, SetLayerTransformCmd>)
+                               std::is_same_v<C, SetLayerTransformCmd> ||
+                               std::is_same_v<C, SetLayerMirrorCmd>)
                 return c.id;
             else
                 return c.layer;
@@ -318,6 +334,24 @@ Blend read_blend(Reader& r) {
 }
 
 // Node has std::vectors — serialize field-wise.
+// One codec for a deformer chain, used by a node and by the command that
+// replaces one. Two copies of this would be two things to keep in step.
+void write_deformers(Writer& w, const std::vector<Deformer>& deformers) {
+    w.u32(static_cast<std::uint32_t>(deformers.size()));
+    for (const Deformer& d : deformers) {
+        w.pod(d.type);
+        w.pod(d.k);
+        w.pod(d.a);
+        w.pod(d.b);
+        w.pod(d.c);
+        w.pod(d.ease);
+        // The type is already on the wire, so the reader knows how many
+        // extension floats follow. Old files carry only old types and decode
+        // exactly as before.
+        for (int e = 0; e < Deformer::ext_count(d.type); ++e) w.pod(d.ext[e]);
+    }
+}
+
 void write_node(Writer& w, const Node& n) {
     w.pod(n.id);
     w.pod(n.is_group);
@@ -382,21 +416,30 @@ void write_node(Writer& w, const Node& n) {
     w.pod(n.transition.r0);
     w.pod(n.transition.r1);
     w.pod(n.transition.ease);
-    w.u32(static_cast<std::uint32_t>(n.deformers.size()));
-    for (const Deformer& d : n.deformers) {
-        w.pod(d.type);
-        w.pod(d.k);
-        w.pod(d.a);
-        w.pod(d.b);
-        w.pod(d.c);
-        w.pod(d.ease);
-        // The type is already on the wire, so the reader knows how many
-        // extension floats follow. Old files carry only old types and decode
-        // exactly as before.
-        for (int e = 0; e < Deformer::ext_count(d.type); ++e) w.pod(d.ext[e]);
-    }
+    write_deformers(w, n.deformers);
     w.u32(static_cast<std::uint32_t>(n.children.size()));
     for (NodeId c : n.children) w.pod(c);
+}
+
+std::vector<Deformer> read_deformers(Reader& r) {
+    std::vector<Deformer> out;
+    std::uint32_t dc = r.u32();
+    if (dc > r.remaining / 6) {  // smallest possible encoded deformer
+        r.ok = false;
+        return out;
+    }
+    for (std::uint32_t i = 0; i < dc && r.ok; ++i) {
+        Deformer d;
+        d.type = r.pod<std::uint8_t>();
+        d.k = r.pod<float>();
+        d.a = r.pod<float>();
+        d.b = r.pod<float>();
+        d.c = r.pod<float>();
+        d.ease = r.pod<std::uint8_t>();
+        for (int e = 0; e < Deformer::ext_count(d.type); ++e) d.ext[e] = r.pod<float>();
+        out.push_back(d);
+    }
+    return out;
 }
 
 Node read_node(Reader& r) {
@@ -478,22 +521,7 @@ Node read_node(Reader& r) {
     n.transition.r0 = r.pod<float>();
     n.transition.r1 = r.pod<float>();
     n.transition.ease = r.pod<std::uint8_t>();
-    std::uint32_t dc = r.u32();
-    if (dc > r.remaining / 6) {  // smallest possible encoded deformer
-        r.ok = false;
-        return n;
-    }
-    for (std::uint32_t i = 0; i < dc && r.ok; ++i) {
-        Deformer d;
-        d.type = r.pod<std::uint8_t>();
-        d.k = r.pod<float>();
-        d.a = r.pod<float>();
-        d.b = r.pod<float>();
-        d.c = r.pod<float>();
-        d.ease = r.pod<std::uint8_t>();
-        for (int e = 0; e < Deformer::ext_count(d.type); ++e) d.ext[e] = r.pod<float>();
-        n.deformers.push_back(d);
-    }
+    n.deformers = read_deformers(r);
     std::uint32_t cc = r.u32();
     if (cc > r.remaining / sizeof(NodeId)) {
         r.ok = false;
@@ -599,6 +627,8 @@ enum class Tag : std::uint8_t {
     SetLayerTransform,
     SetLayerProtection,
     SetStrokePoints,
+    SetDeformers,
+    SetLayerMirror,
 };
 
 struct SerializeVisitor {
@@ -665,6 +695,12 @@ struct SerializeVisitor {
         w.pod(c.closed);
         w.pod(c.tolerance);
     }
+    void operator()(const SetDeformersCmd& c) {
+        w.pod(Tag::SetDeformers);
+        w.pod(c.layer);
+        w.pod(c.node);
+        write_deformers(w, c.deformers);
+    }
     void operator()(const TrimStrokeCmd& c) {
         w.pod(Tag::TrimStroke);
         w.pod(c.layer);
@@ -695,6 +731,12 @@ struct SerializeVisitor {
         w.pod(Tag::SetLayerTransform);
         w.pod(c.id);
         w.pod(c.xform);
+    }
+    void operator()(const SetLayerMirrorCmd& c) {
+        w.pod(Tag::SetLayerMirror);
+        w.pod(c.id);
+        w.pod(c.axes);
+        w.pod(c.k);
     }
 };
 
@@ -789,6 +831,14 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
             cmd = std::move(c);
             break;
         }
+        case Tag::SetDeformers: {
+            SetDeformersCmd c;
+            c.layer = r.pod<LayerId>();
+            c.node = r.pod<NodeId>();
+            c.deformers = read_deformers(r);
+            cmd = std::move(c);
+            break;
+        }
         case Tag::TrimStroke: {
             TrimStrokeCmd c;
             c.layer = r.pod<LayerId>();
@@ -826,6 +876,14 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
             SetLayerTransformCmd c;
             c.id = r.pod<LayerId>();
             c.xform = r.pod<math::Transform>();
+            cmd = c;
+            break;
+        }
+        case Tag::SetLayerMirror: {
+            SetLayerMirrorCmd c;
+            c.id = r.pod<LayerId>();
+            c.axes = r.pod<std::uint8_t>();
+            c.k = r.pod<float>();
             cmd = c;
             break;
         }

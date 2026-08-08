@@ -134,8 +134,9 @@ does nothing to it.
 ZBrush's Move drags the **surface**. The two coincide only while the region
 under the cursor belongs to a single item. On a form smooth-unioned from
 several — the normal case for a blocked-out sculpt — grabbing one item pulls its
-share and leaves the rest behind: on two blended balls, grabbing the left lifts
-its side by 0.118 and the right by only 0.022.
+share and leaves the rest behind. Measured on two balls of radius 0.5 at
+x = ±0.45 smooth-unioned at k = 0.25, with a grab of radius 0.8 and displacement
+0.4 on the left item alone: **the left side rises 0.070 and the right 0.000**.
 
 The fix is to apply the **same warp to every contributing item**, mapping the
 world drag into each item's frame:
@@ -153,12 +154,39 @@ scale is uniform by design, so a spherical falloff stays spherical under it.
 Measured on two blended balls with a world drag centred between them, the lift
 is symmetric and peaks at the world centre.
 
-What the engine does **not** yet do is own that mapping. The cut tool and
-snakehook exist precisely to keep an error-prone geometric step out of every
-caller; there is no equivalent resolver for a document-wide grab, so a host
-writing a Move brush is doing the transform itself today. Voxel grids do have a
-true region-level `sculpt_grab`, so the asymmetry is between the two
-representations, not a limit of the field.
+`brush::move_brush` owns that mapping — the resolver the cut tool and snakehook
+are. It takes a world centre, radius and displacement, and returns one `grab`
+per contributing item, each already in that item's frame. Items the drag cannot
+reach get nothing, since a warp outside its own support is a no-op that still
+costs a tape record.
+
+**A third thing it owns: the warp goes at the FRONT of the chain.** Deformers
+apply in authoring order, so `deformers[0]` is the outermost warp on the
+geometry. One appended at the back has its region weight read at a point the
+earlier deformers already moved, so the drag acts somewhere other than where it
+was aimed — invisible until an item has two deformers.
+
+There is also nothing to accumulate. `compile_group` passes the layer through
+and `emit_item` uses `layer.xform * item.xform`, so **a group's own transform
+never reaches its children**: a sphere under a group translated to `x = 2`
+evaluates at the origin. Worth knowing in its own right — a group carrying a
+transform silently does nothing.
+
+**A drag coalesces.** A Move is not one call — a host re-applies it every frame
+with a longer displacement. A drag holds its centre and radius fixed and grows
+only its displacement, so those two identify the gesture and `moved_chain`
+*replaces* that gesture's warp rather than stacking another in front of it.
+Without this a two-second drag at 60fps leaves 120 warps on every item it
+touched, each one multiplying into the declared Lipschitz. A different centre is
+a different gesture and is kept beside the first.
+
+`move_brush` is pure, so a drag can be **previewed** — `Layer.move_surface_preview`
+and `clay_layer_move_surface_preview` return the nodes it would warp without
+touching the document.
+
+Applying the result needs `SetDeformersCmd`, which is new too: the command
+vocabulary could not change a node's deformers at all, so a deformer could only
+be set when its node was created.
 
 `magnify`'s **centre is its fixed point** — a radial scale about a point on the
 surface bulges the neighbourhood *around* it and leaves the point itself exactly
@@ -183,7 +211,8 @@ parameters.
 | Operation | What it does | Key parameters |
 |---|---|---|
 | `field::relax` | Smooth the field — the ZBrush Smooth brush. Averages over a cell neighbourhood | strength, `radius_cells`, iterations, centre, `region_radius`, falloff |
-| `field::flatten` | Pull the surface onto a plane. **Two-sided**: material on the normal's side goes *and* hollows on the other side fill | plane point + normal, strength, centre, `region_radius`, falloff |
+| `field::move_topological` | ZBrush's Move Topological: a drag weighted by distance ALONG THE MATERIAL, so a part close in space but far along the surface is not dragged | anchor, geodesic radius, displacement, ease |
+| `field::flatten` | Pull the surface onto a plane. `mode` picks which side it acts on: two-sided (ZBrush Flatten), cut-only (hPolish, Planar, Trim) or fill-only | plane point + normal, strength, centre, `region_radius`, falloff, `mode`, mask |
 | `brush::mask_extrude` | Pull a masked patch of a surface off as a solid — ZBrush's Extract | thickness, side, threshold, `border_round`, `border_smooth`, cell size, band |
 
 Relax and flatten both take a region with a falloff. A `region_radius` of zero
@@ -201,6 +230,32 @@ the raymarcher stays correct. Flatten's region blends under a weight that varies
 across it, which *can* be steeper than the source — so it measures the Lipschitz
 its samples actually have rather than assuming one, and the document's safe step
 scale drops to match.
+
+**Which side it acts on is the whole hard-surface family.** Two-sided is ZBrush's
+Flatten: material above the plane goes *and* hollows below it fill. Cut-only is
+hPolish, Planar and the Trim brushes — cutting *without* filling is what leaves a
+crisp facet against untouched surface, and filling the hollows beside a facet is
+what a polish must not do. Fill-only is the dual, and closes a scanned hole flat
+without touching the surface around it. The three differ by one clamp on the
+blend term, which is why it is a mode rather than three entry points.
+
+Measured across a flank carrying a hollow, with the plane at x = 0.5:
+
+| y | source | two-sided | cut | fill |
+|---|---|---|---|---|
+| −0.10 | 0.576 | 0.498 | **0.498** cut | 0.576 kept |
+| 0.00 | 0.375 (hollow) | 0.498 | **0.375** kept | 0.498 filled |
+| 0.30 | 0.513 | 0.498 | **0.498** cut | 0.513 kept |
+
+**hPolish is a single-pass verb today.** A flatten bakes, and sampling the
+*document* gives an exact source and a 1-Lipschitz result. Chaining a second pass
+samples the first pass's *volume*, where outside the band a volume reports a
+lower bound rather than a distance — so the blend works from the wrong value. The
+declared Lipschitz goes 1.00 → 14.0 on the second pass whatever the falloff, and
+by the third the form is visibly corrupt rather than merely expensive. Polishing
+several faces of a form wants the cut tool (an Intersect against a prism is exact
+and stays exact) or a consolidation step the engine does not have yet.
+[`examples/28_hpolish.py`](../examples/28_hpolish.py) measures it.
 
 `flatten` has two overloads. Prefer the one taking a **document sampler**: a
 volume's band tracks the surface only while the surface stays inside it, and
@@ -247,14 +302,36 @@ written, so a host can preview the result before committing it.
 
 | Resolver | What it does | Returns |
 |---|---|---|
-| `cut::cut_item` | A shape drawn on a frame (rect, circle, polygon, spline lasso) becomes an extruded item sized to cut through | a `Node`, or nothing for a non-orthonormal frame or a zero-area shape |
+| `cut::cut_item` | A shape drawn on a frame (rect, circle, polygon, spline lasso, **open trim curve**) becomes an extruded item sized to cut through | a `Node`, or nothing for a non-orthonormal frame or a zero-area shape |
 | `brush::snakehook` | A drag from a surface anchor becomes a tapered stroke item — a horn, tendril or spike | a `Node`, or nothing for an empty path or degenerate normal |
+| `brush::move_brush` | A world-space drag becomes the per-item warps that move the ASSEMBLED surface | one `grab` per contributing item, in that item's own frame |
+| `brush::tube` | Nomad Sculpt's Tubes: a drawn path becomes a rope, pipe or tentacle — a swept SPHERE (exact) with no profile, a swept item (bound) with one | a `Node`, or nothing for fewer than two points or no positive radius |
 
 **The cut is a prism, not a frustum.** A converging cut has a non-flat face and
 a result that depends on where the camera stood, so the sweep is parallel and
 the caller passes the frame. Keep-inner versus keep-outer is *the op* — place
 the result with `Subtract` or `Intersect` — not a separate flag, which would be
 a second way to say one thing.
+
+**A trim curve is an open stroke, and that is not a flag on the lasso.**
+`CutShape::from_curve` tessellates *closed*, so it is a spline lasso and the cut
+is its inside. A trim stroke's endpoints must stay apart, because what closes the
+outline is the frame's own bound on the side being discarded. The same control
+points give different polygons and different fields. `side` names the half the
+outline covers; the op still decides its fate, so covering *above* and
+subtracting keeps the same material as covering *below* and intersecting. See
+[`examples/30_trim_curve.py`](../examples/30_trim_curve.py).
+
+**The Tube tool joins things that already existed.** The smooth/sharp toggle is
+the curve's own `StrokePointType`; a varying radius is the stroke opcode's
+per-point radius; a non-circular cross-section is `Prim::swept`; a closed tube is
+`stroke_closed`. What the resolver adds is the radius distributed by **arc
+length** — so a path whose control points bunch does not bunch the taper — and
+the choice of representation, which is the cross-section itself rather than a
+flag: no profile is a swept sphere and stays **exact** at step scale 1.0, while a
+box or hexagon is a swept item at about 0.55. There is no "Validate" step,
+because a tube is an ordinary item from the start rather than a live curve
+waiting to become geometry. See [`examples/32_tube.py`](../examples/32_tube.py).
 
 **Snakehook adds material rather than moving it.** ZBrush pulls existing
 surface, so the body dimples slightly where the tendril came from; this grows a
@@ -282,12 +359,12 @@ mask's resolution instead of the brush's radius.
 | Feature | Field | What it does |
 |---|---|---|
 | Spacing | `spacing` | Distance between stamps as a fraction of brush **diameter**. 0.25 is dense; 1.0 places them just touching |
-| Pressure | `pressure.size`, `.strength`, `.curve` | Exponents on normalized pressure. 0 disables a channel — that is what "size only" and "flow only" brushes are |
+| Pressure | `pressure.size`, `.strength`, `.curve` | Exponents on normalized pressure. 0 disables a channel — that is what "size only" and "flow only" brushes are. On an SDF layer the **strength** channel reaches relief and incise only — see below |
 | Jitter | `jitter_position`, `jitter_size`, `jitter_rotation`, `seed` | Derived from the stamp index and seed, **never from a random source**, so a stroke resolves identically everywhere |
 | Rotate along stroke | `rotate_along_stroke` | Turns each stamp to follow the path; only matters for stamps that are not rotationally symmetric |
 | Taper | `taper_start`, `taper_end` | Fraction of stroke length over which the radius ramps in and out |
 | Steady stroke | `steady` | "Lazy mouse" — the emission point trails the cursor, smoothing a shaky path |
-| Accumulation | `accumulation` | `Buildup`: passing twice acts twice. `Clamped`: the stroke reaches its strength once, however many stamps overlap |
+| Accumulation | `accumulation` | `Buildup`: passing twice acts twice. `Clamped`: the stroke reaches its strength once, however many stamps overlap. Same caveat as strength on an SDF layer |
 | Base | `radius`, `strength` | What pressure, taper and jitter modulate |
 
 Presets serialize with a **schema version from the first release** rather than
@@ -295,6 +372,20 @@ one retrofitted later: presets outlive engine versions, and a library of them
 silently reinterpreted by a later build is the failure that number prevents.
 Deserialization accepts its own version and earlier ones, and **refuses a newer
 one** rather than reading a prefix and pretending.
+
+**A stamp's strength reaches an SDF item only where `blend.k` is an amount.**
+For relief and incise it is the amplitude, and half an amplitude is exactly half
+the displacement — so pressure and accumulation mean something, and ClayBuildup
+gets the buildup it is named for. Every other op reads `blend.k` as a radius, a
+depth or a half-thickness: scaling those would change the *shape* rather than
+the amount, silently and differently per op, because a union at half strength is
+not a smaller union. Those ops ignore strength.
+
+**A stroke carries `rounding`**, which matters more than it sounds: groove and
+tongue read it as the channel half-width and relief and incise as the falloff
+width. A stroke that drops it leaves relief declaring an amplitude over ~1e-6,
+and the step scale collapses from 0.118 to 2.8e-06 — the geometry is there and
+nothing can march it. See [`examples/29_claybuildup_smooth.py`](../examples/29_claybuildup_smooth.py).
 
 A tap has to leave a mark: a single sample, or a path shorter than one spacing,
 yields exactly one stamp at the start.
@@ -338,16 +429,20 @@ parity — the mechanism usually differs even where the result matches.
 
 | ZBrush | claycore | Note |
 |---|---|---|
-| Standard, ClayBuildup | `Op::Relief` | Displaces the accumulated surface along its normal |
+| Standard | `Op::Relief` | Displaces the accumulated surface along its normal |
+| ClayBuildup | `Op::Relief` along a stroke | Buildup accumulation scales each stamp's amplitude, so overlapping stamps deposit twice |
 | Crease, DamStandard | `Op::Incise` | The same op, cutting in — a thin region gives the line |
 | Inflate | `Op::Relief`, `sculpt_inflate` | Moving the surface along its own normal *is* relief; the voxel verb dilates and erodes by cells |
-| Move | `grab` deformer | Per **item**, in that item's **local** space — see the note below. `front_only` keeps the far side from travelling |
+| Move Topological | `field::move_topological` | Geodesic falloff — the radius is travel across the surface, so it cannot step over a gap. Bakes |
+| Move | `brush::move_brush` | Drags the assembled surface. Nudges form rather than growing it: a large pull buds rather than stretches, and a stroke's drags compound the step scale — use `snakehook` to pull a lobe out |
 | Rotate | `pose` / `pose_line` | Radial, or ramped along a line |
 | Pinch | `magnify` (negative), `sculpt_pinch` | One signed strength, not two verbs |
 | Magnify | `magnify` (positive), `sculpt_magnify` | Maxon's own page calls them inverses |
 | Smooth | `field::relax`, `sculpt_smooth` | Bakes on the SDF side |
-| Flatten | `field::flatten`, `sculpt_flatten` | Two-sided; region required on the SDF side |
+| Flatten | `field::flatten` (two-sided), `sculpt_flatten` | Region required on the SDF side |
+| hPolish, Planar, Trim | `field::flatten` in **cut-only** mode | Planes down without filling, which is what keeps the facet crisp |
 | Trim (Rect/Circle/Lasso) | `cut::cut_item` | The practitioners' "90% tool" |
+| Trim Curve | `CutShape::from_open_curve` | An OPEN stroke closed against the frame bounds — not the lasso constructor, which closes the stroke and cuts a sliver |
 | Clip | `cut::cut_item` | **As a solid, Clip is exactly Trim.** Clip's distinctive look is a zero-thickness fin a field cannot represent and users delete anyway |
 | SnakeHook | `brush::snakehook` | Adds material rather than pulling it |
 | Surface Noise | `noise` deformer | Integer hash, so all four backends agree |
@@ -375,6 +470,8 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Cut tool | `cut::cut_item`, `cut::CutShape` | `clay.Cut(...)`, `clay.CutShape.rect/circle/from_polygon/from_curve` | `clay_cut_create`, `clay_cut_polygon_from_curve` |
 | Snakehook | `brush::snakehook` | `clay.snakehook(...)` | `clay_item_create` + `clay_item_set_curve_points` |
 | Voxel verbs | `VoxelGrid::sculpt_*` | `VoxelGrid.sculpt_*` | `clay_voxel_sculpt_*` |
+| Move brush | `brush::move_brush`, `moved_chain` | `Layer.move_surface(...)`, `.move_surface_preview(...)` | `clay_layer_move_surface`, `clay_layer_move_surface_preview` |
+| Deformers on a placed node | `scene::SetDeformersCmd` | (through `move_surface`) | `clay_layer_add_deformer` |
 | Masks | `voxel::MaskField` | `clay.MaskField` | `clay_mask_*` |
 | Mask brush | `brush::apply_to_mask` | `MaskField.apply_stroke(...)` | `clay_mask_apply_stroke` |
 | Bounded complement | `MaskField::fill`, `invert_within` | `MaskField.fill/.invert_within` | `clay_mask_fill`, `clay_mask_invert_within` |

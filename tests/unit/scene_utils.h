@@ -40,8 +40,15 @@ inline CTapeValue ref_eval_item(const scene::Node& item, const scene::Layer& lay
         // each deformer's distance contribution
         float offset = 0.0f;
         for (const scene::Deformer& def : item.deformers) {
-            float rec[6] = {static_cast<float>(def.type), def.k, def.a,
-                            def.b, def.c, static_cast<float>(def.ease)};
+            // Full tape width. A six-float record left the extension slots off
+            // the end, so every deformer that uses them — noise, grab, pose,
+            // pose_line, magnify, bend_linear — was compared against whatever
+            // sat past the array (GCC flagged the rec[6] read; the project
+            // demotes -Warray-bounds for a libstdc++ false positive, which hid
+            // this real one).
+            float rec[CLAY_TAPE_DEFORM_FLOATS] = {static_cast<float>(def.type), def.k, def.a,
+                                                  def.b, def.c, static_cast<float>(def.ease)};
+            for (int e = 0; e < scene::Deformer::ext_count(def.type); ++e) rec[6 + e] = def.ext[e];
             offset += ctape_deform_offset(rec, lp);
             lp = ctape_deform_point(rec, lp);
         }

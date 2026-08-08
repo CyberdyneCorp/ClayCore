@@ -14,6 +14,7 @@
 
 using namespace clay;
 using field::FieldVolume;
+using field::FlattenMode;
 using field::FlattenSettings;
 using kernel::cf3;
 
@@ -357,4 +358,111 @@ TEST_CASE("flatten: the sample Lipschitz survives a round trip") {
         CHECK(legacy->sample_lipschitz() == doctest::Approx(1.0f));
         CHECK(legacy->brick_count() == after.brick_count());
     }
+}
+
+// -- one-sided modes (hPolish, Planar, the Trim family) -----------------------
+
+TEST_CASE("flatten: cut-only planes the bump and leaves the hollow alone") {
+    // The whole difference between Flatten and hPolish. Cutting WITHOUT filling
+    // is what leaves a crisp facet against untouched surface; filling the
+    // hollows beside a facet is what a polish must not do.
+    FlattenSettings settings;
+    settings.plane_point = cf3(0.5f, 0, 0);
+    settings.plane_normal = cf3(1, 0, 0);
+    settings.centre = cf3(0.5f, 0.1f, 0);
+    settings.region_radius = 0.3f;
+    settings.falloff = 0.25f;
+
+    FieldVolume before = bumpy_ball();
+    const kernel::cfloat3 in_dent = cf3(0.45f, 0.1f, 0);
+    REQUIRE(before.eval(in_dent) > 0.0f);  // a hollow: empty
+
+    settings.mode = FlattenMode::CutOnly;
+    FieldVolume cut = flatten_source(settings);
+    INFO("dent reads " << before.eval(in_dent) << " before, " << cut.eval(in_dent)
+                       << " after a cut-only flatten");
+    CHECK(cut.eval(in_dent) > 0.0f);  // still empty — untouched
+
+    SUBCASE("and it still cuts what stands proud of the plane") {
+        FlattenSettings high;
+        high.plane_point = cf3(0, 0.55f, 0);
+        high.plane_normal = cf3(0, 1, 0);
+        high.centre = cf3(0, 0.55f, 0);
+        high.region_radius = 0.4f;
+        high.falloff = 0.2f;
+        high.mode = FlattenMode::CutOnly;
+        FieldVolume planed = flatten_source(high);
+        CHECK(surface_height(planed, 0, 0) ==
+              doctest::Approx(0.55f).epsilon(0.0).scale(1.0).epsilon(0.05));
+    }
+}
+
+TEST_CASE("flatten: fill-only is the dual — it fills the hollow and spares the bump") {
+    FlattenSettings settings;
+    settings.plane_point = cf3(0.5f, 0, 0);
+    settings.plane_normal = cf3(1, 0, 0);
+    settings.centre = cf3(0.5f, 0.1f, 0);
+    settings.region_radius = 0.3f;
+    settings.falloff = 0.25f;
+    settings.mode = FlattenMode::FillOnly;
+
+    const kernel::cfloat3 in_dent = cf3(0.45f, 0.1f, 0);
+    CHECK(flatten_source(settings).eval(in_dent) < 0.0f);  // filled
+
+    FlattenSettings high;
+    high.plane_point = cf3(0, 0.55f, 0);
+    high.plane_normal = cf3(0, 1, 0);
+    high.centre = cf3(0, 0.55f, 0);
+    high.region_radius = 0.4f;
+    high.falloff = 0.2f;
+    high.mode = FlattenMode::FillOnly;
+    // The bump stands proud of the plane, and fill-only must not touch it.
+    CHECK(surface_height(flatten_source(high), 0, 0) ==
+          doctest::Approx(surface_height(bumpy_ball(), 0, 0)).epsilon(0.02));
+}
+
+TEST_CASE("flatten: asking for no mode is what it always was") {
+    // The default has to be the old behaviour, or every existing caller changes
+    // meaning under them.
+    FlattenSettings settings;
+    settings.plane_point = cf3(0, 0.55f, 0);
+    settings.plane_normal = cf3(0, 1, 0);
+    settings.centre = cf3(0, 0.55f, 0);
+    settings.region_radius = 0.4f;
+    settings.falloff = 0.2f;
+    CHECK(settings.mode == FlattenMode::TwoSided);
+
+    FieldVolume implicit = flatten_source(settings);
+    settings.mode = FlattenMode::TwoSided;
+    FieldVolume explicit_ = flatten_source(settings);
+    for (float x = -0.3f; x <= 0.3f; x += 0.05f)
+        for (float y = 0.2f; y <= 0.9f; y += 0.07f) {
+            CAPTURE(x);
+            CAPTURE(y);
+            CHECK(implicit.eval(cf3(x, y, 0.02f)) ==
+                  doctest::Approx(explicit_.eval(cf3(x, y, 0.02f))));
+        }
+}
+
+TEST_CASE("flatten: a one-sided result is no steeper than the two-sided one") {
+    // The clamp removes movement; it cannot add any. Measured rather than
+    // assumed, because the declared Lipschitz is what the marcher trusts.
+    FlattenSettings settings;
+    settings.plane_point = cf3(0, 0.55f, 0);
+    settings.plane_normal = cf3(0, 1, 0);
+    settings.centre = cf3(0, 0.55f, 0);
+    settings.region_radius = 0.4f;
+    settings.falloff = 0.2f;
+
+    FieldVolume two = flatten_source(settings);
+    settings.mode = FlattenMode::CutOnly;
+    FieldVolume cut = flatten_source(settings);
+    settings.mode = FlattenMode::FillOnly;
+    FieldVolume fill = flatten_source(settings);
+
+    INFO("lipschitz: two-sided " << two.sample_lipschitz() << ", cut "
+                                 << cut.sample_lipschitz() << ", fill "
+                                 << fill.sample_lipschitz());
+    CHECK(cut.sample_lipschitz() <= two.sample_lipschitz() + 1e-3f);
+    CHECK(fill.sample_lipschitz() <= two.sample_lipschitz() + 1e-3f);
 }

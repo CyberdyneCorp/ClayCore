@@ -23,6 +23,7 @@
 // on that frame — not pixels, not normalized device coordinates. The engine
 // has no viewport and should not learn about one.
 
+#include <cstdint>
 #include <optional>
 #include <vector>
 
@@ -67,6 +68,26 @@ struct CutShape {
     // tolerance a curve would.
     static CutShape from_curve(const std::vector<scene::StrokePoint>& control_points,
                                float tolerance = 0.01f);
+
+    // Which half of the frame a trim's outline covers. The OP still decides
+    // that half's fate — subtract removes it, intersect keeps only it — exactly
+    // as it does for every other cut shape.
+    enum class Side : std::uint8_t { Below = 0, Above = 1, Left = 2, Right = 3 };
+
+    // ZBrush's Trim Curve: an OPEN stroke drawn across the form, closed against
+    // the frame's own bounds on the side it covers.
+    //
+    // Not from_curve with a flag. That one tessellates CLOSED, which is a spline
+    // lasso: joining a trim stroke's endpoints cuts a sliver between them
+    // instead of dividing the frame. The two are different shapes from the same
+    // points, so they are different entry points.
+    //
+    // `extent` is how far the closing edge reaches in the frame's own units —
+    // large enough to cover the region being cut. Returns an empty polygon for
+    // fewer points than describe a stroke.
+    static CutShape from_open_curve(const std::vector<scene::StrokePoint>& control_points,
+                                    Side side, kernel::cfloat2 extent,
+                                    float tolerance = 0.01f);
 };
 
 struct CutOptions {

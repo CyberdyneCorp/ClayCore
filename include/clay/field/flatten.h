@@ -39,6 +39,7 @@
 //
 // Flatten BAKES, for the reason relax does.
 
+#include <cstdint>
 #include <functional>
 
 #include "clay/field/relax.h"  // MaskGate
@@ -46,6 +47,24 @@
 
 namespace clay {
 namespace field {
+
+// Which side of the plane the operation acts on.
+//
+// TwoSided is ZBrush's Flatten: material above the plane goes AND hollows below
+// it fill. CutOnly is the hard-surface family — hPolish, Planar, the Trim
+// brushes — where cutting WITHOUT filling is the whole brush: it is what leaves
+// a crisp facet against untouched surface, and filling the hollows beside a
+// facet is precisely what a polish must not do. FillOnly is the dual, free once
+// the clamp exists, and is what fills a scanned hole flat without touching the
+// surface around it.
+//
+// The three differ by one clamp on the blend term, which is why this is a mode
+// rather than three entry points.
+enum class FlattenMode : std::uint8_t {
+    TwoSided = 0,
+    CutOnly = 1,
+    FillOnly = 2,
+};
 
 struct FlattenSettings {
     // The plane to flatten onto: a point on it, and a normal whose positive
@@ -68,6 +87,9 @@ struct FlattenSettings {
     // taper of zero would step, and a step is a rim on the surface.
     float falloff = 0.0f;
 
+    // Defaults to the two-sided behaviour, so a caller that does not ask for a
+    // mode gets exactly what it got before modes existed.
+    FlattenMode mode = FlattenMode::TwoSided;
     // Optional freeze, as on RelaxSettings and for the same reason: a fully
     // masked sample keeps the source's value, so a frozen region stays where
     // the source put it rather than moving onto the plane.

@@ -5,6 +5,8 @@
 
 #include "clay/io/mesh_io.h"
 
+#include "file_bytes.h"
+
 namespace clay {
 namespace io {
 
@@ -142,27 +144,56 @@ double read_scalar(const std::uint8_t* p, const std::string& type) {
     return v;
 }
 
-}  // namespace
+// One vertex being assembled. The two payload formats differ in how they READ
+// a number and in nothing else, so which field a property name lands in, how a
+// finished vertex reaches the mesh, and how a polygon is triangulated are
+// written once here rather than once per format.
+struct PlyVertex {
+    float x = 0, y = 0, z = 0;
+    float nx = 0, ny = 0, nz = 0;
+    float r = 1, g = 1, b = 1;
+};
 
-IoStatus load_ply(const std::uint8_t* data, std::size_t size, mesh::Mesh* out,
-                  const ImportBudget& budget) {
-    // parse header text
-    const char* text = reinterpret_cast<const char*>(data);
-    std::size_t header_end = 0;
-    for (std::size_t i = 0; i + 10 < size; ++i)
-        if (std::memcmp(text + i, "end_header", 10) == 0) {
-            header_end = i + 10;
-            while (header_end < size && text[header_end] != '\n') ++header_end;
-            ++header_end;
-            break;
-        }
-    if (header_end == 0) return IoStatus::fail(IoError::Malformed, "no end_header");
+void assign_property(PlyVertex& v, const std::string& name, float value) {
+    if (name == "x") v.x = value;
+    else if (name == "y") v.y = value;
+    else if (name == "z") v.z = value;
+    else if (name == "nx") v.nx = value;
+    else if (name == "ny") v.ny = value;
+    else if (name == "nz") v.nz = value;
+    else if (name == "red") v.r = value / 255.0f;
+    else if (name == "green") v.g = value / 255.0f;
+    else if (name == "blue") v.b = value / 255.0f;
+}
 
+void push_vertex(mesh::Mesh& m, const PlyVertex& v, bool has_normals, bool has_colors) {
+    m.positions.push_back(cf3(v.x, v.y, v.z));
+    if (has_normals) m.normals.push_back(cf3(v.nx, v.ny, v.nz));
+    if (has_colors) m.colors.push_back(cf3(v.r, v.g, v.b));
+}
+
+// Fan from the first corner; a polygon of fewer than three corners yields none.
+void fan_triangulate(mesh::Mesh& m, const std::vector<std::uint32_t>& face) {
+    for (std::size_t i = 1; i + 1 < face.size(); ++i) {
+        m.indices.push_back(face[0]);
+        m.indices.push_back(face[i]);
+        m.indices.push_back(face[i + 1]);
+    }
+}
+
+// What the header said, parsed apart from the payload so neither carries the
+// other's control flow.
+struct PlyHeader {
+    bool binary = false;
+    std::size_t vertex_count = 0;
+    std::size_t face_count = 0;
+    std::vector<PlyProperty> vprops;
+    std::string unsupported_element;
+};
+
+IoStatus read_header(const char* text, std::size_t header_end, PlyHeader* out) {
     std::istringstream header(std::string(text, header_end));
     std::string line;
-    bool binary = false;
-    std::size_t vertex_count = 0, face_count = 0;
-    std::vector<PlyProperty> vprops;
     std::string current;
     while (std::getline(header, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -173,16 +204,21 @@ IoStatus load_ply(const std::uint8_t* data, std::size_t size, mesh::Mesh* out,
             std::string fmt;
             ls >> fmt;
             if (fmt == "binary_little_endian")
-                binary = true;
+                out->binary = true;
             else if (fmt != "ascii")
                 return IoStatus::fail(IoError::Unsupported, "big-endian ply");
         } else if (tok == "element") {
             std::string name;
-            std::size_t count;
+            std::size_t count = 0;
             ls >> name >> count;
             current = name;
-            if (name == "vertex") vertex_count = count;
-            if (name == "face") face_count = count;
+            if (name == "vertex") out->vertex_count = count;
+            else if (name == "face") out->face_count = count;
+            // Only vertex and face are read, but EVERY declared element has a
+            // payload in the stream. One this reader skips is not skipped in
+            // the bytes: the vertex data would be read from the wrong offset
+            // and the mesh would come out silently wrong. Refuse instead.
+            else if (count > 0) out->unsupported_element = name;
         } else if (tok == "property" && current == "vertex") {
             PlyProperty p;
             std::string t;
@@ -194,157 +230,160 @@ IoStatus load_ply(const std::uint8_t* data, std::size_t size, mesh::Mesh* out,
                 p.type = t;
                 ls >> p.name;
             }
-            vprops.push_back(p);
+            out->vprops.push_back(p);
         }
     }
-    if (vertex_count > budget.max_vertices)
-        return IoStatus::fail(IoError::BudgetExceeded, "vertex budget");
-    if (face_count > budget.max_triangles)
-        return IoStatus::fail(IoError::BudgetExceeded, "face budget");
-
-    // allocation-bomb guardrail: declared counts must fit the payload
-    std::size_t vstride = 0;
-    for (const PlyProperty& p : vprops) {
-        if (p.is_list) return IoStatus::fail(IoError::Unsupported, "list vertex property");
-        std::size_t s = scalar_size(p.type);
-        if (s == 0) return IoStatus::fail(IoError::Malformed, "unknown property type");
-        vstride += s;
-    }
-    if (binary && header_end + vertex_count * vstride + face_count > size)
-        return IoStatus::fail(IoError::Malformed, "declared counts exceed payload");
-
-    mesh::Mesh m;
-    m.positions.reserve(vertex_count);
-    bool has_colors = false, has_normals = false;
-    for (const PlyProperty& p : vprops) {
-        if (p.name == "red") has_colors = true;
-        if (p.name == "nx") has_normals = true;
-    }
-
-    if (binary) {
-        const std::uint8_t* p = data + header_end;
-        const std::uint8_t* end = data + size;
-        for (std::size_t v = 0; v < vertex_count; ++v) {
-            if (p + vstride > end) return IoStatus::fail(IoError::Malformed, "truncated verts");
-            float x = 0, y = 0, z = 0, nx = 0, ny = 0, nz = 0, r = 1, g = 1, b = 1;
-            std::size_t off = 0;
-            for (const PlyProperty& prop : vprops) {
-                double val = read_scalar(p + off, prop.type);
-                off += scalar_size(prop.type);
-                float fval = static_cast<float>(val);
-                if (prop.name == "x") x = fval;
-                else if (prop.name == "y") y = fval;
-                else if (prop.name == "z") z = fval;
-                else if (prop.name == "nx") nx = fval;
-                else if (prop.name == "ny") ny = fval;
-                else if (prop.name == "nz") nz = fval;
-                else if (prop.name == "red") r = fval / 255.0f;
-                else if (prop.name == "green") g = fval / 255.0f;
-                else if (prop.name == "blue") b = fval / 255.0f;
-            }
-            p += vstride;
-            m.positions.push_back(cf3(x, y, z));
-            if (has_normals) m.normals.push_back(cf3(nx, ny, nz));
-            if (has_colors) m.colors.push_back(cf3(r, g, b));
-        }
-        for (std::size_t f = 0; f < face_count; ++f) {
-            if (p + 1 > end) return IoStatus::fail(IoError::Malformed, "truncated faces");
-            std::uint8_t n = *p++;
-            if (p + static_cast<std::size_t>(n) * 4 > end)
-                return IoStatus::fail(IoError::Malformed, "truncated face indices");
-            std::vector<std::uint32_t> face(n);
-            for (std::uint8_t i = 0; i < n; ++i) {
-                std::int32_t idx;
-                std::memcpy(&idx, p, 4);
-                p += 4;
-                if (idx < 0 || static_cast<std::size_t>(idx) >= vertex_count)
-                    return IoStatus::fail(IoError::Malformed, "face index out of range");
-                face[i] = static_cast<std::uint32_t>(idx);
-            }
-            for (std::uint8_t i = 1; i + 1 < n; ++i) {
-                m.indices.push_back(face[0]);
-                m.indices.push_back(face[i]);
-                m.indices.push_back(face[i + 1]);
-            }
-        }
-    } else {
-        std::istringstream body(std::string(text + header_end, size - header_end));
-        for (std::size_t v = 0; v < vertex_count; ++v) {
-            float x = 0, y = 0, z = 0, nx = 0, ny = 0, nz = 0, r = 1, g = 1, b = 1;
-            for (const PlyProperty& prop : vprops) {
-                double val;
-                if (!(body >> val)) return IoStatus::fail(IoError::Malformed, "truncated verts");
-                float fval = static_cast<float>(val);
-                if (prop.name == "x") x = fval;
-                else if (prop.name == "y") y = fval;
-                else if (prop.name == "z") z = fval;
-                else if (prop.name == "nx") nx = fval;
-                else if (prop.name == "ny") ny = fval;
-                else if (prop.name == "nz") nz = fval;
-                else if (prop.name == "red") r = fval / 255.0f;
-                else if (prop.name == "green") g = fval / 255.0f;
-                else if (prop.name == "blue") b = fval / 255.0f;
-            }
-            m.positions.push_back(cf3(x, y, z));
-            if (has_normals) m.normals.push_back(cf3(nx, ny, nz));
-            if (has_colors) m.colors.push_back(cf3(r, g, b));
-        }
-        for (std::size_t f = 0; f < face_count; ++f) {
-            std::size_t n;
-            if (!(body >> n) || n > 255)
-                return IoStatus::fail(IoError::Malformed, "bad face count");
-            std::vector<std::uint32_t> face(n);
-            for (std::size_t i = 0; i < n; ++i) {
-                long idx;
-                if (!(body >> idx) || idx < 0 ||
-                    static_cast<std::size_t>(idx) >= vertex_count)
-                    return IoStatus::fail(IoError::Malformed, "face index out of range");
-                face[i] = static_cast<std::uint32_t>(idx);
-            }
-            for (std::size_t i = 1; i + 1 < n; ++i) {
-                m.indices.push_back(face[0]);
-                m.indices.push_back(face[i]);
-                m.indices.push_back(face[i + 1]);
-            }
-        }
-    }
-    *out = std::move(m);
     return IoStatus::success();
 }
 
-namespace {
-
-IoStatus write_bytes_file(const std::string& path, const std::vector<std::uint8_t>& bytes) {
-    std::FILE* f = std::fopen(path.c_str(), "wb");
-    if (!f) return IoStatus::fail(IoError::WriteFailed, path);
-    std::size_t written = std::fwrite(bytes.data(), 1, bytes.size(), f);
-    std::fclose(f);
-    return written == bytes.size() ? IoStatus::success()
-                                   : IoStatus::fail(IoError::WriteFailed, path);
+IoStatus read_binary_payload(const std::uint8_t* data, std::size_t size, std::size_t header_end,
+                             const PlyHeader& h, std::size_t vstride, bool has_normals,
+                             bool has_colors, mesh::Mesh& m) {
+    const std::uint8_t* p = data + header_end;
+    const std::uint8_t* end = data + size;
+    for (std::size_t v = 0; v < h.vertex_count; ++v) {
+        if (p + vstride > end) return IoStatus::fail(IoError::Malformed, "truncated verts");
+        PlyVertex vert;
+        std::size_t off = 0;
+        for (const PlyProperty& prop : h.vprops) {
+            assign_property(vert, prop.name, static_cast<float>(read_scalar(p + off, prop.type)));
+            off += scalar_size(prop.type);
+        }
+        p += vstride;
+        push_vertex(m, vert, has_normals, has_colors);
+    }
+    for (std::size_t f = 0; f < h.face_count; ++f) {
+        if (p + 1 > end) return IoStatus::fail(IoError::Malformed, "truncated faces");
+        const std::uint8_t n = *p++;
+        if (p + static_cast<std::size_t>(n) * 4 > end)
+            return IoStatus::fail(IoError::Malformed, "truncated face indices");
+        std::vector<std::uint32_t> face(n);
+        for (std::uint8_t i = 0; i < n; ++i) {
+            std::int32_t idx;
+            std::memcpy(&idx, p, 4);
+            p += 4;
+            if (idx < 0 || static_cast<std::size_t>(idx) >= h.vertex_count)
+                return IoStatus::fail(IoError::Malformed, "face index out of range");
+            face[i] = static_cast<std::uint32_t>(idx);
+        }
+        fan_triangulate(m, face);
+    }
+    return IoStatus::success();
 }
 
-IoStatus read_bytes_file(const std::string& path, std::vector<std::uint8_t>* bytes) {
-    std::FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return IoStatus::fail(IoError::FileNotFound, path);
-    std::fseek(f, 0, SEEK_END);
-    long size = std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
-    bytes->resize(static_cast<std::size_t>(size > 0 ? size : 0));
-    std::size_t read = std::fread(bytes->data(), 1, bytes->size(), f);
-    std::fclose(f);
-    return read == bytes->size() ? IoStatus::success()
-                                 : IoStatus::fail(IoError::ReadFailed, path);
+IoStatus read_ascii_payload(const char* text, std::size_t size, std::size_t header_end,
+                            const PlyHeader& h, bool has_normals, bool has_colors,
+                            mesh::Mesh& m) {
+    std::istringstream body(std::string(text + header_end, size - header_end));
+    for (std::size_t v = 0; v < h.vertex_count; ++v) {
+        PlyVertex vert;
+        for (const PlyProperty& prop : h.vprops) {
+            double val;
+            if (!(body >> val)) return IoStatus::fail(IoError::Malformed, "truncated verts");
+            assign_property(vert, prop.name, static_cast<float>(val));
+        }
+        push_vertex(m, vert, has_normals, has_colors);
+    }
+    for (std::size_t f = 0; f < h.face_count; ++f) {
+        std::size_t n;
+        if (!(body >> n) || n > 255) return IoStatus::fail(IoError::Malformed, "bad face count");
+        std::vector<std::uint32_t> face(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            long idx;
+            if (!(body >> idx) || idx < 0 || static_cast<std::size_t>(idx) >= h.vertex_count)
+                return IoStatus::fail(IoError::Malformed, "face index out of range");
+            face[i] = static_cast<std::uint32_t>(idx);
+        }
+        fan_triangulate(m, face);
+    }
+    return IoStatus::success();
 }
 
 }  // namespace
 
+IoStatus load_ply(const std::uint8_t* data, std::size_t size, mesh::Mesh* out,
+                  const ImportBudget& budget) {
+    // parse header text
+    const char* text = reinterpret_cast<const char*>(data);
+    std::size_t header_end = 0;
+    for (std::size_t i = 0; i + 10 < size; ++i)
+        if (std::memcmp(text + i, "end_header", 10) == 0) {
+            header_end = i + 10;
+            while (header_end < size && text[header_end] != '\n') ++header_end;
+            // Only step over the newline if there IS one. A file whose header
+            // is not newline-terminated used to leave header_end at size + 1,
+            // which over-read the buffer building the header string below and
+            // then wrapped `size - header_end` to SIZE_MAX in the ascii body.
+            if (header_end < size) ++header_end;
+            break;
+        }
+    if (header_end == 0) return IoStatus::fail(IoError::Malformed, "no end_header");
+
+    PlyHeader h;
+    IoStatus hs = read_header(text, header_end, &h);
+    if (!hs.ok()) return hs;
+
+    if (!h.unsupported_element.empty())
+        return IoStatus::fail(IoError::Unsupported,
+                              "ply element '" + h.unsupported_element +
+                                  "' is not read, and its payload would displace the vertices");
+    if (h.vertex_count > budget.max_vertices)
+        return IoStatus::fail(IoError::BudgetExceeded, "vertex budget");
+    if (h.face_count > budget.max_triangles)
+        return IoStatus::fail(IoError::BudgetExceeded, "face budget");
+
+    // allocation-bomb guardrail: declared counts must fit the payload
+    std::size_t vstride = 0;
+    for (const PlyProperty& prop : h.vprops) {
+        if (prop.is_list) return IoStatus::fail(IoError::Unsupported, "list vertex property");
+        std::size_t width = scalar_size(prop.type);
+        if (width == 0) return IoStatus::fail(IoError::Malformed, "unknown property type");
+        vstride += width;
+    }
+    // A vertex element with no properties has a stride of zero, which made the
+    // payload check below vacuous: any vertex_count "fit" in any file.
+    if (h.vertex_count > 0 && vstride == 0)
+        return IoStatus::fail(IoError::Malformed, "vertex element declares no properties");
+    // Each vertex costs vstride bytes when binary; in ascii it still costs at
+    // least one byte of digit plus one separator per property, so both forms
+    // have a floor the declared count has to fit under.
+    //
+    // The ascii floor is exactly tight (n digits + n-1 spaces + 1 newline), so
+    // it is relaxed by one byte: the PLY spec does not require the final line
+    // to be newline-terminated, and an otherwise well-formed file that ends
+    // without one would be refused by an exact comparison.
+    const std::size_t per_vertex = h.binary ? vstride : 2 * h.vprops.size();
+    const std::size_t available = size - header_end + (h.binary ? 0 : 1);
+    if (per_vertex > 0 && h.vertex_count > available / per_vertex)
+        return IoStatus::fail(IoError::Malformed, "declared counts exceed payload");
+    if (h.binary && header_end + h.vertex_count * vstride + h.face_count > size)
+        return IoStatus::fail(IoError::Malformed, "declared counts exceed payload");
+
+    bool has_colors = false, has_normals = false;
+    for (const PlyProperty& prop : h.vprops) {
+        if (prop.name == "red") has_colors = true;
+        if (prop.name == "nx") has_normals = true;
+    }
+
+    mesh::Mesh m;
+    m.positions.reserve(h.vertex_count);
+    IoStatus ps = h.binary ? read_binary_payload(data, size, header_end, h, vstride, has_normals,
+                                                 has_colors, m)
+                           : read_ascii_payload(text, size, header_end, h, has_normals,
+                                                has_colors, m);
+    if (!ps.ok()) return ps;
+
+    *out = std::move(m);
+    return IoStatus::success();
+}
+
 IoStatus save_ply_file(const mesh::Mesh& m, const std::string& path, bool binary) {
-    return write_bytes_file(path, save_ply(m, binary));
+    return detail::write_whole_file(path, save_ply(m, binary));
 }
 
 IoStatus load_ply_file(const std::string& path, mesh::Mesh* out, const ImportBudget& budget) {
     std::vector<std::uint8_t> bytes;
-    IoStatus s = read_bytes_file(path, &bytes);
+    IoStatus s = detail::read_whole_file(path, &bytes, budget.max_file_bytes);
     if (!s.ok()) return s;
     return load_ply(bytes.data(), bytes.size(), out, budget);
 }

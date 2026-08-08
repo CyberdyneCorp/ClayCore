@@ -533,3 +533,53 @@ The binding SHALL state that the seed is an ordinary parameter rather than globa
 - **WHEN** the same script runs twice
 - **THEN** it produces the same field both times
 
+### Requirement: The Move brush from Python
+The module SHALL let a script drag a layer's surface with a world centre, radius and displacement, and SHALL report which nodes took a warp.
+
+The binding SHALL state that this differs from putting a `grab` on one item — that a grab is per item and in that item's own frame, so it pulls one item's share of a blended form and leaves the rest — because a script author reaching for `prim.grab(...)` will otherwise not find out until the result looks wrong.
+
+It SHALL also state that the surface moves less than the displacement asked for, and why.
+
+#### Scenario: A script drags a blended form
+- **WHEN** a script moves a layer built from two blended items, centred between them
+- **THEN** both sides move and the result is symmetric about the drag's centre
+
+#### Scenario: The whole drag is one undo step
+- **WHEN** a script with undo enabled moves a form and undoes it
+- **THEN** the document is back where it started in a single step
+
+### Requirement: Previewing a move from Python
+The module SHALL expose previewing a drag, returning the nodes it would warp without touching the document.
+
+#### Scenario: A script previews before committing
+- **WHEN** a script previews a drag and then applies it
+- **THEN** the preview leaves the document unchanged and names the same nodes the move reports
+
+### Requirement: Choosing a flatten mode from Python
+The module SHALL expose the flatten mode, defaulting to two-sided, and SHALL name the vendor brushes the one-sided modes correspond to so a caller can find them.
+
+#### Scenario: A script polishes without filling
+- **WHEN** a script flattens in cut-only mode over a surface with a hollow in it
+- **THEN** the hollow is untouched and the high material is planed off
+
+### Requirement: Trimming from Python
+The module SHALL expose building a trim shape from an open curve and the side it covers, alongside the closed-lasso constructor, and SHALL say which is which so a caller does not reach for the lasso when it means a trim.
+
+#### Scenario: A script trims a form in half
+- **WHEN** a script resolves an open curve as a trim and places it with subtract
+- **THEN** one side of the form is removed and the other is untouched
+
+### Requirement: A topological move from Python
+The module SHALL expose sampling a document through a topological move, with the anchor, geodesic radius, displacement and easing under the caller's control, and SHALL say how it differs from the Euclidean move so a caller knows which one it wants.
+
+#### Scenario: A script moves one finger and not its neighbour
+- **WHEN** a script applies a topological move to one of two adjacent parts
+- **THEN** only the part connected to the anchor along the material moves
+
+### Requirement: Drawing a tube from Python
+The module SHALL expose resolving a path into a tube, with the point type, the start/middle/end radii, closure and an optional profile under the caller's control, and SHALL say which choices cost exactness.
+
+#### Scenario: A script draws a tapered tube
+- **WHEN** a script resolves a path with a wide start and a narrow end
+- **THEN** it receives an item that tapers along its length and can be added to a layer
+

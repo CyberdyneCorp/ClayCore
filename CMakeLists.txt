@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(claycore
-  VERSION 0.21.0
+  VERSION 0.24.0
   DESCRIPTION "Portable C++20 SDF + voxel engine library"
   LANGUAGES C CXX)  # C: ufbx
 
@@ -33,6 +33,7 @@ add_library(claycore
   src/field/volume.cpp
   src/field/relax.cpp
   src/field/flatten.cpp
+  src/field/move_topological.cpp
   src/scene/commands.cpp
   src/scene/tape_build.cpp
   src/brick/cache.cpp
@@ -42,6 +43,8 @@ add_library(claycore
   src/voxel/repair.cpp
   src/brush/stroke.cpp
   src/brush/mask_extrude.cpp
+  src/brush/tube.cpp
+  src/brush/move.cpp
   src/mesh/marching.cpp
   src/mesh/surface_nets.cpp
   src/mesh/dual_contouring.cpp
@@ -50,6 +53,7 @@ add_library(claycore
   src/mesh/bvh.cpp
   src/mesh/to_field.cpp
   src/pick/pick.cpp
+  src/io/file_bytes.cpp
   src/io/clayspace.cpp
   src/io/parity_fixture.cpp
   src/io/obj.cpp

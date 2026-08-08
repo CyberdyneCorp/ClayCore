@@ -29,9 +29,12 @@
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
 #include "clay/brush/mask_extrude.h"
+#include "clay/brush/move.h"
 #include "clay/brush/stroke.h"
+#include "clay/brush/tube.h"
 #include "clay/cut/cut.h"
 #include "clay/field/flatten.h"
+#include "clay/field/move_topological.h"
 #include "clay/field/relax.h"
 #include "clay/field/volume.h"
 #include "clay/voxel/mask.h"
@@ -1704,11 +1707,69 @@ NB_MODULE(pyclay, m) {
             "nearly so. Sampled in world units, which is what lets one mask\n"
             "freeze a voxel layer and an SDF layer at the same time.")
         .def_static(
+            "moved_topologically_from",
+            [](nb::handle source, nb::handle anchor, nb::handle displacement, float radius,
+               int ease, float cell, nb::handle band, nb::handle bounds, nb::handle position,
+               nb::handle rotation_axis_angle, float scale) {
+                if (!(cell > 0.0f)) throw std::invalid_argument("cell must be > 0");
+                if (!(radius > 0.0f)) throw std::invalid_argument("radius must be > 0");
+                field::TopologicalMoveSettings settings;
+                settings.anchor = to_f3(anchor, "anchor");
+                settings.displacement = to_f3(displacement, "displacement");
+                settings.radius = radius;
+                settings.ease = static_cast<std::uint8_t>(ease);
+
+                const scene::Document& src = nb::cast<PyDocument&>(source).doc->document;
+                scene::Tape tape = scene::compile_document(src);
+                if (tape.empty())
+                    throw std::invalid_argument("cannot move an empty document");
+                const float width = band.is_none() ? cell * 3.0f : nb::cast<float>(band);
+
+                math::Aabb where;
+                if (bounds.is_none()) {
+                    where = tape.bounds;
+                    if (where.empty())
+                        throw std::invalid_argument("the document has no bounds; pass bounds=");
+                    const float pad = width + radius + kernel::clength(settings.displacement);
+                    kernel::cfloat3 p3 = kernel::cf3(pad, pad, pad);
+                    where = math::Aabb(where.min - p3, where.max + p3);
+                } else {
+                    where = to_aabb(bounds);
+                }
+
+                PyVolume out;
+                out.prim = scene::Prim::volume();
+                {
+                    nb::gil_scoped_release release;
+                    out.volume = std::make_shared<const field::FieldVolume>(
+                        field::move_topological(
+                            [&tape](kernel::cfloat3 p) { return tape.eval(p).d; }, where, cell,
+                            width, settings));
+                }
+                place(out, position, rotation_axis_angle, scale);
+                return out;
+            },
+            "document"_a, "anchor"_a, "displacement"_a, "radius"_a = 0.3f, "ease"_a = 0,
+            "cell"_a = 0.02f, "band"_a = nb::none(), "bounds"_a = nb::none(),
+            CLAY_PLACE_ARGS,
+            "ZBrush's Move Topological: a drag whose falloff is weighted by\n"
+            "distance ALONG THE MATERIAL rather than through space.\n\n"
+            "`radius` is therefore a distance of travel across the surface, not a\n"
+            "straight line — so it cannot step over a gap however narrow. On two\n"
+            "fingers 0.32 apart joined only through a palm, a Euclidean drag at\n"
+            "radius 0.5 pulls the neighbour; this does not, because along the\n"
+            "material the neighbour is about 1.5 away.\n\n"
+            "It BAKES, for the reason relax and flatten do: the weight is a solved\n"
+            "grid rather than a closed form. Reach for `Layer.move_surface` when\n"
+            "the form has no parts close in space and far along the surface — it\n"
+            "is cheaper, and it does not bake.")
+        .def_static(
             "flattened_from",
             [](nb::handle source, nb::handle plane_point, nb::handle plane_normal, float cell,
                nb::handle band, nb::handle bounds, float strength, nb::handle centre,
-               float region_radius, float falloff, nb::handle position,
-               nb::handle rotation_axis_angle, float scale, nb::handle mask) {
+               float region_radius, float falloff, const std::string& mode,
+               nb::handle position, nb::handle rotation_axis_angle, float scale,
+               nb::handle mask) {
                 if (!(cell > 0.0f)) throw std::invalid_argument("cell must be > 0");
                 if (!(strength >= 0.0f && strength <= 1.0f))
                     throw std::invalid_argument("strength must be between 0 and 1");
@@ -1718,6 +1779,12 @@ NB_MODULE(pyclay, m) {
                 if (!(kernel::clength(settings.plane_normal) > 1e-6f))
                     throw std::invalid_argument("plane_normal must not be zero length");
                 settings.strength = strength;
+                if (mode == "two_sided") settings.mode = field::FlattenMode::TwoSided;
+                else if (mode == "cut") settings.mode = field::FlattenMode::CutOnly;
+                else if (mode == "fill") settings.mode = field::FlattenMode::FillOnly;
+                else
+                    throw std::invalid_argument(
+                        "mode must be 'two_sided', 'cut' or 'fill', got '" + mode + "'");
                 if (!centre.is_none()) settings.centre = to_f3(centre, "centre");
                 if (!(region_radius > 0.0f))
                     throw std::invalid_argument(
@@ -1758,11 +1825,18 @@ NB_MODULE(pyclay, m) {
             "document"_a, "plane_point"_a, "plane_normal"_a, "cell"_a = 0.05f,
             "band"_a = nb::none(), "bounds"_a = nb::none(), "strength"_a = 1.0f,
             "centre"_a = nb::none(), "region_radius"_a = 0.0f, "falloff"_a = 0.0f,
-            CLAY_PLACE_ARGS, "mask"_a = nb::none(),
+            "mode"_a = "two_sided", CLAY_PLACE_ARGS, "mask"_a = nb::none(),
             "Sample a document with a flatten applied, in one pass — the verb SDF\n"
             "layers were missing, since voxels have had sculpt_flatten all along.\n\n"
-            "TWO-SIDED, matching the voxel verb: material on the normal's side\n"
-            "goes AND hollows on the other side fill. It is not a subtract, and\n"
+            "TWO-SIDED by default, matching the voxel verb: material on the\n"
+            "normal's side goes AND hollows on the other side fill. It is not a\n"
+            "subtract, and\n"
+            "\n"
+            "`mode` picks which side it acts on: 'two_sided' (ZBrush Flatten),\n"
+            "'cut' (only removes — hPolish, Planar, the Trim family, where\n"
+            "cutting WITHOUT filling is what leaves a crisp facet against\n"
+            "untouched surface) or 'fill' (only deposits, which fills a scanned\n"
+            "hole flat without touching the surface around it).\n"
             "it is not ZBrush's Clip — as a solid, Clip is exactly Trim, which\n"
             "Cut already does.\n\n"
             "This SAMPLES rather than editing an existing volume, and the\n"
@@ -1868,6 +1942,40 @@ NB_MODULE(pyclay, m) {
                         return cut::CutShape::from_polygon(to_polygon(vertices));
                     },
                     "vertices"_a, "An (N, 2) outline; it closes implicitly")
+        .def_static("trim",
+                    [](nb::handle points, const std::string& side, nb::handle extent,
+                       nb::handle types, float tolerance) {
+                        std::vector<scene::StrokePoint> control = to_stroke_points(points);
+                        apply_point_types(control, types);
+                        cut::CutShape::Side which;
+                        if (side == "below") which = cut::CutShape::Side::Below;
+                        else if (side == "above") which = cut::CutShape::Side::Above;
+                        else if (side == "left") which = cut::CutShape::Side::Left;
+                        else if (side == "right") which = cut::CutShape::Side::Right;
+                        else
+                            throw std::invalid_argument(
+                                "side must be 'below', 'above', 'left' or 'right', got '" +
+                                side + "'");
+                        kernel::cfloat3 e = to_f3(extent, "extent");
+                        cut::CutShape shape = cut::CutShape::from_open_curve(
+                            control, which, kernel::cf2(e.x, e.y), tolerance);
+                        if (shape.polygon.empty())
+                            throw std::invalid_argument(
+                                "a trim needs at least two control points");
+                        return shape;
+                    },
+                    "points"_a, "side"_a = "below", "extent"_a = nb::make_tuple(4.0f, 4.0f, 0.0f),
+                    "types"_a = "spline", "tolerance"_a = 0.01f,
+                    "ZBrush's Trim Curve: an OPEN stroke drawn across the form,\n"
+                    "closed against the frame's bounds on the side it covers.\n\n"
+                    "NOT `curve`, which tessellates CLOSED and is a spline lasso —\n"
+                    "joining a trim stroke's endpoints cuts a sliver between them\n"
+                    "instead of dividing the frame. Different shapes from the same\n"
+                    "points, so different constructors.\n\n"
+                    "`side` names which half the outline COVERS; the op still\n"
+                    "decides its fate, as it does for every cut: SUBTRACT removes\n"
+                    "that half, INTERSECT keeps only it. `extent` is how far the\n"
+                    "closing edge reaches, in the frame's units.")
         .def_static("curve",
                     [](nb::handle points, nb::handle types, float tolerance) {
                         std::vector<scene::StrokePoint> control = to_stroke_points(points);
@@ -2014,6 +2122,90 @@ NB_MODULE(pyclay, m) {
             }
             return arr;
         });
+
+    m.def("tube",
+          [](nb::handle path, const std::string& point_type, float radius, nb::handle radius_mid,
+             nb::handle radius_end, bool closed, nb::handle profile, float tolerance,
+             float blend_k) -> nb::object {
+              PointsView pts = to_points(path);
+              std::vector<kernel::cfloat3> points;
+              points.reserve(pts.count);
+              for (std::size_t i = 0; i < pts.count; ++i)
+                  points.push_back(kernel::cf3(pts.data[i * 3], pts.data[i * 3 + 1],
+                                               pts.data[i * 3 + 2]));
+
+              brush::TubeSettings settings;
+              settings.point_type = parse_point_type(point_type);
+              settings.radius_start = radius;
+              settings.radius_mid = radius_mid.is_none() ? radius : nb::cast<float>(radius_mid);
+              settings.radius_end = radius_end.is_none() ? radius : nb::cast<float>(radius_end);
+              settings.closed = closed;
+              settings.tolerance = tolerance;
+              settings.blend_k = blend_k;
+
+              if (!profile.is_none()) {
+                  // Profiles cross as PyProfile, which carries its polygon points
+                  // alongside the engine's Profile — a polygon profile is the two
+                  // together, so unwrapping only the first would lose the shape.
+                  std::vector<scene::Profile> profiles;
+                  std::vector<std::vector<kernel::cfloat2>> polygons;
+                  auto take = [&](nb::handle h) {
+                      const PyProfile& p = nb::cast<const PyProfile&>(h);
+                      profiles.push_back(p.profile);
+                      polygons.push_back(p.points);
+                  };
+                  if (nb::isinstance<PyProfile>(profile)) take(profile);
+                  else
+                      for (nb::handle h : nb::cast<nb::sequence>(profile)) take(h);
+                  std::optional<scene::Node> node =
+                      brush::tube_with_profile(points, profiles, settings);
+                  if (!node)
+                      throw std::invalid_argument(
+                          "a profiled tube needs at least two points and a profile");
+                  PySwept out;
+                  out.prim = node->prim;
+                  out.stroke = node->stroke;
+                  out.stroke_closed = node->stroke_closed;
+                  out.curve_tolerance = node->curve_tolerance;
+                  out.profiles = node->profiles;
+                  out.profile_polygons = node->profile_polygons;
+                  // The resolver duplicates a lone profile so a sweep has two to
+                  // interpolate between; the polygons have to follow it.
+                  while (polygons.size() < out.profiles.size())
+                      polygons.push_back(polygons.empty() ? std::vector<kernel::cfloat2>{}
+                                                          : polygons.back());
+                  out.profile_polygons = polygons;
+                  return nb::cast(out);
+              }
+
+              std::optional<scene::Node> node = brush::tube(points, settings);
+              if (!node)
+                  throw std::invalid_argument(
+                      "a tube needs at least two points and a radius > 0 somewhere");
+              PyStroke out;
+              out.prim = node->prim;
+              out.stroke = node->stroke;
+              out.stroke_closed = node->stroke_closed;
+              out.stroke_blend_k = node->stroke_blend_k;
+              out.curve_tolerance = node->curve_tolerance;
+              return nb::cast(out);
+          },
+          "path"_a, "point_type"_a = "bspline", "radius"_a = 0.08f,
+          "radius_mid"_a = nb::none(), "radius_end"_a = nb::none(), "closed"_a = false,
+          "profile"_a = nb::none(), "tolerance"_a = 0.01f, "blend_k"_a = 0.0f,
+          "Nomad Sculpt's Tubes: a drawn path becomes a rope, pipe, tentacle or\n"
+          "hair strand along it.\n\n"
+          "`point_type` is the smooth/sharp toggle — 'hard' turns at each control\n"
+          "point, 'bspline' rounds through them — because a tube's path is the\n"
+          "same kind of curve every other item takes, not a new one.\n\n"
+          "`radius`, `radius_mid` and `radius_end` are Nomad's three handles, and\n"
+          "are interpolated by ARC LENGTH so a path whose points bunch does not\n"
+          "bunch the taper. Omitting the last two gives a uniform tube.\n\n"
+          "With no `profile` this is a swept SPHERE, which is an exact distance\n"
+          "field: the safe step scale stays 1. A `profile` (or a list of them)\n"
+          "makes it a swept item instead — a square or custom cross-section, at\n"
+          "the cost of a bound field and a step scale below 1. That choice is the\n"
+          "profile itself rather than a separate flag.");
 
     m.def("snakehook",
           [](nb::handle anchor, nb::handle inward, nb::handle path, float base_radius,
@@ -2294,7 +2486,7 @@ NB_MODULE(pyclay, m) {
         .def("apply_stroke",
              [](PyLayer& l, nb::handle samples, const brush::StrokePreset& preset,
                 const PyPrim& prim, scene::Op op, nb::handle blend, nb::handle color,
-                nb::handle mask) {
+                float rounding, nb::handle mask) {
                  scene::Node templ;
                  templ.prim = prim.prim;
                  templ.stroke = prim.stroke;
@@ -2309,6 +2501,12 @@ NB_MODULE(pyclay, m) {
                  templ.profile_polygons = prim.profile_polygons;
                  templ.volume = prim.volume;
                  templ.op = op;
+                 // Rounding is not decoration for every op: groove and tongue read
+                 // it as the channel half-width, and relief and incise as the
+                 // FALLOFF WIDTH. Dropping it left those strokes declaring an
+                 // amplitude over ~1e-6, so the step scale collapsed to zero and
+                 // the geometry could not be marched at all.
+                 templ.rounding = rounding > 0.0f ? rounding : prim.rounding;
                  if (!blend.is_none()) templ.blend = nb::cast<PyBlend&>(blend).b;
                  if (!color.is_none()) templ.color = parse_color(color);
 
@@ -2338,10 +2536,78 @@ NB_MODULE(pyclay, m) {
                  return ids;
              },
              "samples"_a, "preset"_a, "prim"_a, "op"_a = scene::Op::Add, "blend"_a = nb::none(),
-             "color"_a = nb::none(), "mask"_a = nb::none(),
+             "color"_a = nb::none(), "rounding"_a = 0.0f, "mask"_a = nb::none(),
              "Resolve a stroke and append one edit per stamp; returns their node "
              "ids. The prim is the stamp template, scaled to each stamp's radius. "
              "The whole stroke is one undo step, and a masked stamp emits nothing.")
+        .def("move_surface_preview",
+             [](PyLayer& l, nb::handle centre, nb::handle displacement, float radius,
+                int ease, bool front_only) {
+                 if (!(radius > 0.0f)) throw std::invalid_argument("radius must be > 0");
+                 brush::MoveSettings settings;
+                 settings.radius = radius;
+                 settings.ease = static_cast<std::uint8_t>(ease);
+                 settings.front_only = front_only;
+                 std::vector<scene::NodeId> nodes;
+                 for (const brush::MoveWarp& w :
+                      brush::move_brush(l.layer(), to_f3(centre, "centre"),
+                                        to_f3(displacement, "displacement"), settings))
+                     nodes.push_back(w.node);
+                 return nodes;
+             },
+             "centre"_a, "displacement"_a, "radius"_a = 0.3f, "ease"_a = 0,
+             "front_only"_a = false,
+             "Which nodes a move WOULD warp, without touching the document — so a\n"
+             "host can preview a drag, or show what it is about to affect, before\n"
+             "committing it. Resolving is pure; applying is what changes things.")
+        .def("move_surface",
+             [](PyLayer& l, nb::handle centre, nb::handle displacement, float radius,
+                int ease, bool front_only) {
+                 if (!(radius > 0.0f)) throw std::invalid_argument("radius must be > 0");
+                 brush::MoveSettings settings;
+                 settings.radius = radius;
+                 settings.ease = static_cast<std::uint8_t>(ease);
+                 settings.front_only = front_only;
+
+                 const std::vector<brush::MoveWarp> warps =
+                     brush::move_brush(l.layer(), to_f3(centre, "centre"),
+                                       to_f3(displacement, "displacement"), settings);
+
+                 // One undo group for the whole drag: it is one gesture.
+                 UndoRef undo = l.undo ? *l.undo : UndoRef();
+                 if (undo) undo->begin_group();
+                 std::vector<scene::NodeId> touched;
+                 for (const brush::MoveWarp& w : warps) {
+                     const scene::Node* n = l.layer().sdf->find(w.node);
+                     if (!n) continue;
+                     apply_or_throw(l.doc->document,
+                                    scene::Command{scene::SetDeformersCmd{
+                                        l.id, w.node, brush::moved_chain(*n, w)}},
+                                    "move_surface", l.undo.get());
+                     touched.push_back(w.node);
+                 }
+                 if (undo) undo->end_group();
+                 return touched;
+             },
+             "centre"_a, "displacement"_a, "radius"_a = 0.3f, "ease"_a = 0,
+             "front_only"_a = false,
+             "Drag this layer's assembled SURFACE — ZBrush's Move. Returns the\n"
+             "nodes that took a warp.\n\n"
+             "NOT the same as `prim.grab(...)`, and the difference is the reason\n"
+             "this exists. A deformer is per ITEM and its centre is in that\n"
+             "item's LOCAL frame, so a grab drags one item's own field: on a form\n"
+             "blended from several, it pulls that item's share and leaves the\n"
+             "rest behind. Nothing errors — it just looks wrong. This resolves\n"
+             "the drag against every item the region reaches, maps it into each\n"
+             "one's frame, and puts it at the FRONT of each chain, which is where\n"
+             "a warp has to go to act on the assembled shape.\n\n"
+             "The whole drag is ONE undo step however many items it touched.\n\n"
+             "The surface moves LESS than the displacement you ask for: the\n"
+             "region weight is taken at the sample point rather than at its\n"
+             "preimage, so a drag of 0.5 over a radius of 0.8 moves a tip about\n"
+             "0.31. That is `grab`'s deliberate behaviour — the true preimage\n"
+             "costs an iteration per sample and buys nothing a sculptor can feel\n"
+             "— and the pull is monotonic, so a UI can calibrate against it.")
         .def("set_transform",
              [](PyLayer& l, scene::NodeId node, nb::handle position,
                 nb::handle rotation_axis_angle, nb::handle scale) {

@@ -366,6 +366,415 @@ def test_relief_support_is_finite_and_costs_the_marcher():
     assert steep.safe_step_scale() < ball(clay.Op.RELIEF).safe_step_scale()
 
 
+def _bump_and_dent():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.8))
+    layer.add(clay.Sphere(r=0.28, position=(0.25, 0.72, 0)))
+    layer.add(clay.Sphere(r=0.26, position=(-0.3, 0.66, 0)), op=clay.Op.SUBTRACT)
+    return doc
+
+
+def _flat_top(doc, x):
+    ys = np.arange(1.4, -0.2, -0.002, dtype=np.float32)
+    pts = np.stack([np.full_like(ys, x), ys, np.zeros_like(ys)], axis=1)
+    out = np.nonzero(doc.eval(pts) <= 0)[0]
+    return float(ys[out[0]]) if len(out) else float("nan")
+
+
+def _flattened(src, mode):
+    vol = clay.Volume.flattened_from(src, plane_point=(0, 0.78, 0), plane_normal=(0, 1, 0),
+                                     strength=1.0, centre=(0, 0.78, 0), region_radius=0.9,
+                                     falloff=0.25, cell=0.01, band=0.12, mode=mode)
+    doc = clay.Document()
+    doc.add_sdf_layer("f").add(vol)
+    return doc
+
+
+def test_flatten_cut_only_is_hpolish():
+    """Cutting WITHOUT filling is the whole hard-surface brush.
+
+    It is what leaves a crisp facet against untouched surface; filling the
+    hollows beside a facet is what a polish must not do.
+    """
+    src = _bump_and_dent()
+    dent_x, bump_x, plane = -0.30, 0.25, 0.778
+
+    cut = _flattened(src, "cut")
+    assert _flat_top(cut, dent_x) == pytest.approx(_flat_top(src, dent_x), abs=1e-3)
+    assert _flat_top(cut, bump_x) == pytest.approx(plane, abs=0.01)
+
+
+def test_flatten_fill_only_is_the_dual():
+    src = _bump_and_dent()
+    dent_x, bump_x, plane = -0.30, 0.25, 0.778
+
+    fill = _flattened(src, "fill")
+    assert _flat_top(fill, dent_x) == pytest.approx(plane, abs=0.01)
+    assert _flat_top(fill, bump_x) == pytest.approx(_flat_top(src, bump_x), abs=1e-3)
+
+
+def test_flatten_defaults_to_two_sided():
+    src = _bump_and_dent()
+    rng = np.random.default_rng(3)
+    probes = rng.uniform(-1.0, 1.2, size=(3000, 3)).astype(np.float32)
+
+    implicit = clay.Volume.flattened_from(src, plane_point=(0, 0.78, 0),
+                                          plane_normal=(0, 1, 0), strength=1.0,
+                                          centre=(0, 0.78, 0), region_radius=0.9,
+                                          falloff=0.25, cell=0.01, band=0.12)
+    doc = clay.Document(); doc.add_sdf_layer("f").add(implicit)
+    assert np.array_equal(doc.eval(probes), _flattened(src, "two_sided").eval(probes))
+    # ...and both sides really do move, which is what makes it two-sided.
+    two = _flattened(src, "two_sided")
+    assert _flat_top(two, -0.30) > _flat_top(src, -0.30) + 0.2     # hollow filled
+    assert _flat_top(two, 0.25) < _flat_top(src, 0.25) - 0.1       # bump cut
+
+
+def test_flatten_refuses_an_unknown_mode():
+    src = _bump_and_dent()
+    with pytest.raises(ValueError, match="two_sided"):
+        clay.Volume.flattened_from(src, plane_point=(0, 0.78, 0), plane_normal=(0, 1, 0),
+                                   region_radius=0.9, falloff=0.25, cell=0.02,
+                                   mode="polish")
+
+
+def _relief_stroke(amplitude=0.06, rounding=0.30, spacing=0.6, n=9,
+                   accumulation=None, strength=1.0, op=None):
+    """A ClayBuildup stroke: relief stamps carried along a path."""
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.7))
+    samples = np.array([[x, 0.72, 0.0, 1.0, 0.0] for x in np.linspace(-0.35, 0.35, n)],
+                       np.float32)
+    preset = clay.StrokePreset()
+    preset.radius = 0.16
+    preset.spacing = spacing
+    preset.strength = strength
+    if accumulation is not None:
+        preset.accumulation = accumulation
+    layer.apply_stroke(samples, preset, clay.Sphere(r=1.0),
+                       op=op if op is not None else clay.Op.RELIEF,
+                       blend=clay.Smooth(amplitude), rounding=rounding)
+    return doc
+
+
+def _ridge_top(doc, x=0.0):
+    ys = np.arange(1.4, -0.2, -0.002, dtype=np.float32)
+    pts = np.stack([np.full_like(ys, x), ys, np.zeros_like(ys)], axis=1)
+    inside = np.nonzero(doc.eval(pts) <= 0)[0]
+    return float(ys[inside[0]]) if len(inside) else float("nan")
+
+
+def test_apply_stroke_carries_rounding_to_relief_stamps():
+    """Regression: rounding IS the relief falloff, and the stroke dropped it.
+
+    With it lost, cfi_relief declares the amplitude over ~1e-6, so the step scale
+    collapses to zero: the geometry is there and nothing can march it.
+    """
+    lost = _relief_stroke(rounding=0.0)
+    kept = _relief_stroke(rounding=0.30)
+    # 2.8e-06 against 0.118: four orders of magnitude, which is the difference
+    # between a field a marcher can walk and one it cannot.
+    assert lost.safe_step_scale() < 1e-4
+    assert kept.safe_step_scale() > 0.05
+    # ...and both actually deposit, so this is about the declared field, not the shape.
+    assert _ridge_top(kept) > 0.7
+
+
+def test_claybuildup_accumulation_reaches_relief():
+    """Buildup is the control the brush is named for.
+
+    A stamp's strength scales an item's amplitude for relief and incise, where
+    blend.k IS an amount. Without it buildup and clamped were identical.
+    """
+    dense = dict(amplitude=0.05, rounding=0.30, spacing=0.25, n=13)
+    build = _relief_stroke(accumulation=clay.Accumulation.BUILDUP, **dense)
+    clamp = _relief_stroke(accumulation=clay.Accumulation.CLAMPED, **dense)
+    assert _ridge_top(build) > _ridge_top(clamp) + 0.05
+
+    # ...and a lighter touch deposits less.
+    light = _relief_stroke(accumulation=clay.Accumulation.BUILDUP, strength=0.4, **dense)
+    assert _ridge_top(light) < _ridge_top(build) - 0.02
+
+
+def test_stroke_strength_does_not_reach_a_boolean():
+    """A union at half strength is not a smaller union.
+
+    blend.k is a radius for add, so scaling it by a stroke's strength would
+    change the shape rather than the amount. Booleans ignore it.
+    """
+    dense = dict(amplitude=0.05, rounding=0.30, spacing=0.25, n=13, op=clay.Op.ADD)
+    build = _relief_stroke(accumulation=clay.Accumulation.BUILDUP, **dense)
+    clamp = _relief_stroke(accumulation=clay.Accumulation.CLAMPED, **dense)
+    assert _ridge_top(build) == pytest.approx(_ridge_top(clamp), abs=1e-3)
+
+
+def test_relax_is_the_smooth_brush():
+    """Smooth: averaging softens, sized to the feature, and stays 1-Lipschitz."""
+    built = _relief_stroke(amplitude=0.08, rounding=0.22, spacing=0.5)
+    rough = clay.Volume.from_document(built, cell=0.02)
+
+    def lift(volume):
+        doc = clay.Document()
+        doc.add_sdf_layer("s").add(volume)
+        return _ridge_top(doc) - 0.698
+
+    lifts = [lift(rough)]
+    for cells in (3, 6, 10):
+        lifts.append(lift(rough.relaxed(radius_cells=cells, iterations=4,
+                                        centre=(0, 0.80, 0), region_radius=0.55,
+                                        falloff=0.2)))
+    # A wider averaging radius softens more — the control is the kernel against
+    # the feature size, not the pass count.
+    assert all(a >= b - 1e-3 for a, b in zip(lifts, lifts[1:])), lifts
+    assert lifts[0] > lifts[-1] + 0.1
+
+    # Averaging destroys exactness but cannot RAISE the Lipschitz bound, which is
+    # what keeps the raymarcher correct over a relaxed field.
+    smoothed = rough.relaxed(radius_cells=6, iterations=4, centre=(0, 0.80, 0),
+                             region_radius=0.55, falloff=0.2)
+    assert smoothed.sample_lipschitz <= 1.05
+
+
+_TRIM_STROKE = np.array([[x, 0.22 * np.sin(x * 2.6), 0.0, 0.0]
+                         for x in np.linspace(-1.3, 1.3, 11)], np.float32)
+
+
+def _trimmed(side, op=None, shape=None):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.RoundBox(size=(1.0, 0.9, 0.75), r=0.22))
+    cut = shape if shape is not None else clay.CutShape.trim(
+        _TRIM_STROKE, side=side, extent=(3.0, 3.0, 0.0))
+    layer.add(clay.Cut(origin=(0, 0, -3.0), right=(1, 0, 0), up=(0, 1, 0),
+                       forward=(0, 0, 1), shape=cut, region=doc),
+              op=op if op is not None else clay.Op.SUBTRACT)
+    return doc
+
+
+def test_trim_curve_takes_one_side():
+    at = lambda d, y: float(d.eval(np.array([[0.0, y, 0.0]], np.float32))[0])
+    below, above = _trimmed("below"), _trimmed("above")
+    # The side the outline covers is the side subtract removes.
+    assert at(below, -0.30) > 0 and at(below, 0.30) < 0
+    assert at(above, -0.30) < 0 and at(above, 0.30) > 0
+
+
+def test_trim_curve_shape_and_op_are_separate():
+    """Covering above and subtracting keeps the same material as covering below
+    and intersecting — compared as SOLIDS, since subtract is max(a, -b) and
+    intersect is max(a, b) and those differ outside the surface."""
+    rng = np.random.default_rng(11)
+    cloud = rng.uniform(-1.2, 1.2, size=(5000, 3)).astype(np.float32)
+    a = _trimmed("above", clay.Op.SUBTRACT).eval(cloud)
+    b = _trimmed("below", clay.Op.INTERSECT).eval(cloud)
+    assert float(np.mean((a < 0) == (b < 0))) > 0.999
+
+
+def test_trim_curve_is_not_a_closed_lasso():
+    """The reason these are separate constructors: closing a trim stroke joins
+    its endpoints and cuts a sliver instead of dividing the frame."""
+    rng = np.random.default_rng(5)
+    probes = rng.uniform(-1.1, 1.1, size=(4000, 3)).astype(np.float32)
+    trim = _trimmed("below").eval(probes)
+    lasso = _trimmed("below", shape=clay.CutShape.curve(_TRIM_STROKE)).eval(probes)
+    assert float(np.abs(trim - lasso).max()) > 0.05
+    assert int((lasso < 0).sum()) != int((trim < 0).sum())
+
+
+def test_trim_curve_is_an_ordinary_exact_item():
+    assert _trimmed("below").safe_step_scale() == pytest.approx(1.0)
+
+
+def test_trim_curve_refuses_a_stroke_that_is_not_one():
+    with pytest.raises(ValueError, match="two control points"):
+        clay.CutShape.trim(_TRIM_STROKE[:1], side="below", extent=(3.0, 3.0, 0.0))
+    with pytest.raises(ValueError, match="side must be"):
+        clay.CutShape.trim(_TRIM_STROKE, side="sideways", extent=(3.0, 3.0, 0.0))
+
+
+def _two_fingers():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.40, position=(0, -0.38, 0)))
+    for x in (-0.26, 0.26):
+        layer.add(clay.Stroke(points=np.array([[x, -0.15, 0, 0.12],
+                                               [x, 0.58, 0, 0.10]], np.float32)),
+                  blend=clay.Smooth(0.03))
+    return doc, layer
+
+
+def _spans(doc, y=0.45):
+    xs = np.arange(-1.2, 1.2, 0.002, dtype=np.float32)
+    pts = np.stack([xs, np.full_like(xs, y), np.zeros_like(xs)], axis=1)
+    inside = np.nonzero(doc.eval(pts) <= 0)[0]
+    if not len(inside):
+        return []
+    out, start = [], inside[0]
+    for a, b in zip(inside, inside[1:]):
+        if b != a + 1:
+            out.append((float(xs[start]), float(xs[a])))
+            start = b
+    out.append((float(xs[start]), float(xs[inside[-1]])))
+    return out
+
+
+def _topological(source, radius, displacement=(-0.25, 0, 0), cell=0.015):
+    vol = clay.Volume.moved_topologically_from(
+        source, anchor=(-0.26, 0.45, 0), displacement=displacement, radius=radius, cell=cell)
+    doc = clay.Document()
+    doc.add_sdf_layer("t").add(vol)
+    return doc, vol
+
+
+def test_move_topological_leaves_the_neighbour_alone():
+    """The whole brush: two fingers close in space, far along the material."""
+    base, _ = _two_fingers()
+    before = _spans(base)
+    assert len(before) == 2
+
+    euclid, layer = _two_fingers()
+    layer.move_surface((-0.26, 0.45, 0), (-0.25, 0, 0), radius=0.50)
+    after_e = _spans(euclid)
+
+    topo, _ = _topological(base, 0.50)
+    after_t = _spans(topo)
+    assert len(after_t) == 2, after_t
+
+    # Euclidean drags the far finger; topological does not.
+    assert abs(after_e[1][0] - before[1][0]) > 0.05
+    assert after_t[1] == pytest.approx(before[1], abs=0.01)
+    # ...and the grabbed finger moves, keeping its width: it translates.
+    assert after_t[0][0] < before[0][0] - 0.1
+    assert (after_t[0][1] - after_t[0][0]) == pytest.approx(before[0][1] - before[0][0],
+                                                            abs=0.05)
+
+
+def test_move_topological_radius_runs_along_the_material():
+    """A distance, not a mask: raise it past the path through the palm and the
+    far finger comes into reach."""
+    base, _ = _two_fingers()
+    before = _spans(base)
+    near = _spans(_topological(base, 0.5, cell=0.02)[0])
+    far = _spans(_topological(base, 2.2, cell=0.02)[0])
+    assert near[-1][0] == pytest.approx(before[1][0], abs=0.01)
+    assert far[-1][0] < before[1][0] - 0.02
+
+
+def test_move_topological_that_reaches_nothing_changes_nothing():
+    base, _ = _two_fingers()
+    rng = np.random.default_rng(4)
+    probes = rng.uniform(-0.9, 0.9, size=(2000, 3)).astype(np.float32)
+    # Explicit, identical BOUNDS for both: the default padding grows with the
+    # displacement, so two calls with different drags cover different regions
+    # and comparing them would measure the padding rather than the move.
+    box = ((-1.1, -1.0, -0.6), (1.1, 1.1, 0.6))
+    away = clay.Volume.moved_topologically_from(base, anchor=(0, 5.0, 0),
+                                                displacement=(0.2, 0, 0), radius=0.4,
+                                                cell=0.02, bounds=box)
+    still = clay.Volume.moved_topologically_from(base, anchor=(-0.26, 0.45, 0),
+                                                 displacement=(0, 0, 0), radius=0.4,
+                                                 cell=0.02, bounds=box)
+    plain = clay.Volume.from_document(base, cell=0.02, bounds=box)
+    # Compared only NEAR THE SURFACE: a narrow-band volume reports a clamped
+    # bound further out, so probes in open space would measure the band.
+    near = np.abs(plain.eval(probes)) < 0.05
+    assert near.sum() > 50
+    assert np.allclose(away.eval(probes)[near], plain.eval(probes)[near], atol=1e-5)
+    assert np.allclose(still.eval(probes)[near], plain.eval(probes)[near], atol=1e-5)
+
+
+def test_move_topological_refuses_what_is_not_a_move():
+    base, _ = _two_fingers()
+    with pytest.raises(ValueError, match="radius must be > 0"):
+        clay.Volume.moved_topologically_from(base, anchor=(0, 0, 0),
+                                             displacement=(0.1, 0, 0), radius=0.0)
+    with pytest.raises(ValueError, match="cell must be > 0"):
+        clay.Volume.moved_topologically_from(base, anchor=(0, 0, 0),
+                                             displacement=(0.1, 0, 0), radius=0.3, cell=0.0)
+
+
+_TUBE_PATH = np.array([[-0.62, -0.18, 0.10], [-0.26, 0.30, -0.12],
+                       [0.14, -0.05, 0.16], [0.52, 0.34, -0.08]], np.float32)
+
+
+def _tube_doc(**kwargs):
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.tube(_TUBE_PATH, **kwargs))
+    return doc
+
+
+def _across(doc, point, reach=0.5):
+    ts = np.arange(-reach, reach, 0.002, dtype=np.float32)
+    pts = np.array(point, np.float32)[None, :] + ts[:, None] * np.array([0, 0, 1], np.float32)
+    inside = np.nonzero(doc.eval(pts.astype(np.float32)) <= 0)[0]
+    return float(ts[inside[-1]] - ts[inside[0]]) if len(inside) else 0.0
+
+
+def test_tube_follows_its_path_and_stays_exact():
+    """A round tube is a swept SPHERE, so it costs the raymarcher nothing."""
+    doc = _tube_doc(radius=0.09)
+    assert doc.safe_step_scale() == pytest.approx(1.0)
+    # the path is inside it
+    assert float(doc.eval(np.array([_TUBE_PATH[1]], np.float32))[0]) > -1.0
+
+
+def test_tube_radius_varies_and_follows_arc_length():
+    doc = _tube_doc(point_type="hard", radius=0.14, radius_mid=0.09, radius_end=0.03)
+    widths = [_across(doc, p) for p in (_TUBE_PATH[0], _TUBE_PATH[1], _TUBE_PATH[3])]
+    assert all(a > b for a, b in zip(widths, widths[1:])), widths
+    assert widths[0] == pytest.approx(0.28, abs=0.03)
+    assert widths[-1] == pytest.approx(0.06, abs=0.03)
+
+    # By ARC LENGTH: bunching the control points must not bunch the taper.
+    even = np.array([[t, 0.0, 0.0] for t in np.linspace(-0.6, 0.6, 5)], np.float32)
+    bunched = np.array([[t, 0.0, 0.0] for t in (-0.6, -0.5, -0.4, 0.0, 0.6)], np.float32)
+    kw = dict(point_type="hard", radius=0.16, radius_mid=0.10, radius_end=0.04)
+    mid = np.array([0.0, 0.0, 0.0], np.float32)
+
+    def doc_of(path):
+        d = clay.Document()
+        d.add_sdf_layer("l").add(clay.tube(path, **kw))
+        return d
+
+    assert _across(doc_of(even), mid) == pytest.approx(_across(doc_of(bunched), mid), abs=0.02)
+
+
+def test_tube_profile_chooses_the_representation():
+    """A circle is free; anything else is a swept item and costs step scale."""
+    assert _tube_doc(radius=0.09).safe_step_scale() == pytest.approx(1.0)
+    for profile in (clay.Profile.box(0.09, 0.05), clay.Profile.hexagon(0.09)):
+        doc = _tube_doc(profile=profile)
+        assert doc.safe_step_scale() < 1.0
+
+
+def test_tube_point_type_is_the_smoothness_toggle():
+    """A B-spline APPROXIMATES its control points; a hard chain passes through."""
+    at_corner = {k: float(_tube_doc(point_type=k, radius=0.09)
+                          .eval(np.array([_TUBE_PATH[1]], np.float32))[0])
+                 for k in ("hard", "spline", "bspline")}
+    assert at_corner["hard"] < 0.0                    # the corner is inside the tube
+    assert at_corner["bspline"] > at_corner["hard"]   # ...and outside the B-spline one
+
+
+def test_tube_closed_joins_and_refuses_what_is_not_a_path():
+    ring = np.array([[np.cos(a) * 0.4, np.sin(a) * 0.4, 0.0]
+                     for a in np.linspace(0, 2 * np.pi, 7)[:-1]], np.float32)
+    closed = clay.Document()
+    closed.add_sdf_layer("l").add(clay.tube(ring, radius=0.07, closed=True))
+    opened = clay.Document()
+    opened.add_sdf_layer("l").add(clay.tube(ring, radius=0.07, closed=False))
+    # The join fills the gap between the last point and the first.
+    gap = np.array([[0.4 * np.cos(-0.5), 0.4 * np.sin(-0.5), 0.0]], np.float32)
+    assert float(closed.eval(gap)[0]) < float(opened.eval(gap)[0])
+
+    with pytest.raises(ValueError, match="at least two points"):
+        clay.tube(_TUBE_PATH[:1], radius=0.1)
+    with pytest.raises(ValueError, match="radius"):
+        clay.tube(_TUBE_PATH, radius=0.0, radius_mid=0.0, radius_end=0.0)
+
+
 def test_voxel_grid_edits_and_queries():
     g = clay.VoxelGrid(voxel_size=0.5)
     red = g.palette_add("#ff0000")
@@ -2774,3 +3183,199 @@ def test_a_degenerate_sweep_is_refused():
     with pytest.raises(ValueError, match="tolerance"):
         clay.Swept(_STRAIGHT, [clay.Profile.circle(r=0.3), clay.Profile.circle(r=0.3)],
                    tolerance=0.0)
+
+
+# -- the Move brush (add-move-brush) -----------------------------------------
+
+
+def _blended_form():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    for x in (-0.45, 0.45):
+        layer.add(clay.Sphere(0.5).at((x, 0, 0)), blend=clay.Smooth(0.25))
+    return doc, layer
+
+
+def _top(doc, x):
+    ys = np.arange(1.6, -1.6, -0.002, dtype=np.float32)
+    pts = np.stack([np.full_like(ys, x), ys, np.zeros_like(ys)], axis=1)
+    inside = np.nonzero(doc.eval(pts) <= 0.0)[0]
+    return float(ys[inside[0]])
+
+
+def test_move_surface_drags_a_blended_form_as_one():
+    base, _ = _blended_form()
+    before = {x: _top(base, x) for x in (-0.45, 0.0, 0.45)}
+
+    doc, layer = _blended_form()
+    touched = layer.move_surface((0, 0, 0), (0, 0.4, 0), radius=0.8)
+    assert len(touched) == 2                    # both items take a share
+
+    lift = {x: _top(doc, x) - before[x] for x in (-0.45, 0.0, 0.45)}
+    assert lift[-0.45] > 0.0 and lift[0.45] > 0.0
+    assert lift[-0.45] == pytest.approx(lift[0.45], abs=0.005)   # symmetric
+    assert lift[0.0] >= max(lift[-0.45], lift[0.45])             # peaks at the centre
+
+
+def test_a_grab_on_one_item_is_not_a_move():
+    """The reason move_surface exists: a grab is per item and local."""
+    base, _ = _blended_form()
+    before = {x: _top(base, x) for x in (-0.45, 0.45)}
+
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    for x in (-0.45, 0.45):
+        ball = clay.Sphere(0.5).at((x, 0, 0))
+        if x < 0:
+            ball.grab(center=(0, 0, 0), radius=0.8, displacement=(0, 0.4, 0))
+        layer.add(ball, blend=clay.Smooth(0.25))
+
+    assert _top(doc, -0.45) - before[-0.45] > 0.02      # its own side moves
+    assert _top(doc, 0.45) - before[0.45] == pytest.approx(0.0, abs=0.005)  # the other does not
+
+
+def test_move_surface_preview_names_the_nodes_and_touches_nothing():
+    doc, layer = _blended_form()
+    rng = np.random.default_rng(12)
+    probes = rng.uniform(-1.3, 1.3, size=(3000, 3)).astype(np.float32)
+    before = doc.eval(probes)
+
+    planned = layer.move_surface_preview((0, 0, 0), (0, 0.4, 0), radius=0.8)
+    assert len(planned) == 2
+    assert np.array_equal(doc.eval(probes), before)      # resolving is pure
+
+    touched = layer.move_surface((0, 0, 0), (0, 0.4, 0), radius=0.8)
+    assert sorted(touched) == sorted(planned)            # and it agreed
+
+
+def test_move_surface_coalesces_over_a_drag():
+    # One drag holds its centre and radius and only grows the displacement, so
+    # frames replace rather than stack: five frames ending at 0.4 must be the
+    # same field as a single drag of 0.4.
+    stepped, stepped_layer = _blended_form()
+    for d in (0.08, 0.16, 0.24, 0.32, 0.4):
+        stepped_layer.move_surface((0, 0, 0), (0, d, 0), radius=1.2)
+    once, once_layer = _blended_form()
+    once_layer.move_surface((0, 0, 0), (0, 0.4, 0), radius=1.2)
+
+    rng = np.random.default_rng(21)
+    probes = rng.uniform(-1.3, 1.3, size=(4000, 3)).astype(np.float32)
+    assert np.allclose(stepped.eval(probes), once.eval(probes), atol=1e-6)
+    # ...and the marcher does not pay for the frame count either.
+    assert stepped.safe_step_scale() == pytest.approx(once.safe_step_scale())
+
+
+def _reach_along(doc, direction, hi=4.0):
+    u = np.array(direction, np.float32)
+    u = u / np.linalg.norm(u)
+    ts = np.arange(0.0, hi, 0.002, dtype=np.float32)
+    pts = (ts[:, None] * u[None, :]).astype(np.float32)
+    inside = np.nonzero(doc.eval(pts) <= 0)[0]
+    return float(np.linalg.norm(pts[inside[-1]])) if len(inside) else float("nan")
+
+
+def test_move_surface_buds_rather_than_stretching():
+    """A mesh stretches; a field moves what is already there.
+
+    grab samples the field at p - w*d, so where the weight is one the material is
+    rigidly displaced and where it falls to zero nothing happens. A big pull buds
+    a lump off the surface rather than drawing a lobe out of it, and pulling
+    harder does not help: the reach is bounded by the falloff, not by the drag.
+    """
+    def pulled(radius, displacement):
+        doc = clay.Document()
+        layer = doc.add_sdf_layer("l")
+        layer.add(clay.Sphere(r=1.0))
+        layer.move_surface((1.0, 0, 0), (displacement, 0, 0), radius=radius)
+        return doc
+
+    gentle = _reach_along(pulled(0.5, 1.1), (1, 0, 0)) - 1.0
+    hard = _reach_along(pulled(0.5, 2.5), (1, 0, 0)) - 1.0
+    assert gentle > 0.0                       # it does move the surface
+    assert gentle < 0.5                       # ...by far less than the 1.1 asked for
+    assert hard < gentle * 1.5, (gentle, hard)  # and 2x the drag is not 2x the reach
+
+
+def test_move_surface_drags_compound_the_step_scale():
+    """A stroke is many drags, and each one costs the marcher multiplicatively.
+
+    Coalescing covers frames of ONE drag, where the centre and radius are fixed.
+    A stroke walks the centre outward, so those stack by design — every grab
+    multiplies the declared Lipschitz. A host pulling a long lobe has to
+    consolidate (bake the chain into a volume) rather than keep appending.
+    """
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=1.0))
+    scales = [doc.safe_step_scale()]
+    for i in range(9):
+        layer.move_surface((1.0 + 0.25 * i, 0, 0), (0.25, 0, 0), radius=0.5)
+        scales.append(doc.safe_step_scale())
+
+    assert all(b < a for a, b in zip(scales, scales[1:]))   # strictly decaying
+    assert scales[9] < 0.05                                  # nine drags: >20x cost
+    # Geometric, not linear: the per-drag ratio is roughly constant.
+    ratios = [b / a for a, b in zip(scales[1:], scales[2:])]
+    assert max(ratios) - min(ratios) < 0.05, ratios
+
+
+def test_snakehook_grows_what_move_cannot():
+    """The verb for pulling a lobe out is snakehook, and it stays exact."""
+    u = np.array([1.0, 0.0, 0.0], np.float32)
+
+    move_doc = clay.Document()
+    ml = move_doc.add_sdf_layer("l")
+    ml.add(clay.Sphere(r=1.0))
+    ml.move_surface((1.0, 0, 0), (1.1, 0, 0), radius=0.8)
+
+    hook_doc = clay.Document()
+    hl = hook_doc.add_sdf_layer("l")
+    hl.add(clay.Sphere(r=1.0))
+    path = np.array([u * t for t in np.linspace(1.05, 2.5, 7)], np.float32)
+    hl.add(clay.snakehook((1.0, 0, 0), (-1.0, 0, 0), path, base_radius=0.55,
+                          tip_fraction=0.12, taper_curve=0.9), blend=clay.Smooth(0.35))
+
+    assert _reach_along(hook_doc, (1, 0, 0)) > _reach_along(move_doc, (1, 0, 0)) + 0.5
+    # ...and adding material keeps the field exact, where displacing it does not:
+    # one Move already costs the marcher more than 2x, before a stroke stacks any.
+    assert hook_doc.safe_step_scale() == pytest.approx(1.0)
+    assert move_doc.safe_step_scale() < 0.5
+
+
+def test_move_surface_is_one_undo_step():
+    doc, layer = _blended_form()
+    doc.enable_undo()
+    before = _top(doc, 0.0)
+
+    touched = layer.move_surface((0, 0, 0), (0, 0.4, 0), radius=0.8)
+    assert len(touched) == 2
+    assert _top(doc, 0.0) > before
+    assert doc.undo_depth == 1          # one gesture, one step
+    assert doc.undo() is True
+    assert _top(doc, 0.0) == pytest.approx(before)
+
+
+def test_move_surface_skips_what_it_cannot_reach():
+    doc, layer = _blended_form()
+    layer.add(clay.Sphere(0.3).at((50.0, 0, 0)))
+    assert len(layer.move_surface((0, 0, 0), (0, 0.4, 0), radius=0.8)) == 2
+
+
+def test_move_surface_refuses_a_drag_that_is_not_one():
+    _doc, layer = _blended_form()
+    with pytest.raises(ValueError):
+        layer.move_surface((0, 0, 0), (0, 0.4, 0), radius=0.0)
+    assert layer.move_surface((0, 0, 0), (0, 0, 0), radius=0.8) == []
+
+
+def test_move_surface_pull_is_monotonic_and_short():
+    base, _ = _blended_form()
+    before = _top(base, 0.0)
+    previous = 0.0
+    for d in (0.1, 0.2, 0.4):
+        doc, layer = _blended_form()
+        layer.move_surface((0, 0, 0), (0, d, 0), radius=0.8)
+        lift = _top(doc, 0.0) - before
+        assert lift > previous      # further every time...
+        assert lift < d             # ...but never the whole displacement
+        previous = lift

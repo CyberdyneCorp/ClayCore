@@ -50,6 +50,18 @@ bool deformers_break_exactness(const Node& item);
 // is what meshing and raycast clipping want.
 math::Aabb item_geometry_bound(const Node& item, const Layer& layer);
 
+// Whether an item's influence is confined to its own geometry. False means the
+// item changes the field arbitrarily far away — a non-local op, an infinite
+// grid repeat, or a primitive with no finite extent — and no finite bound may
+// be claimed for it, so culling must never drop it.
+//
+// Exposed so a caller that already holds the geometry bound can decide
+// cullability without recomputing the bound. It is the ONE definition of the
+// test: item_influence_bound below is written in terms of it, so a new
+// non-local op or unbounded primitive cannot leave a second copy stale (which
+// would silently drop the item from per-brick tapes only).
+bool item_influence_is_local(const Node& item);
+
 // World-space INFLUENCE bound: the geometry bound for local ops, infinite
 // for ops that change the field arbitrarily far away (intersect, the spatial
 // morphs). This is what per-brick culling must consult.

@@ -115,6 +115,35 @@ TEST_CASE("mask: region operations") {
     }
 }
 
+TEST_CASE("mask: region ops cost the painted cells, not the bounding box") {
+    // expand/contract/smooth sized two dense buffers from the painted BOUNDING
+    // BOX, which is not the paint: two small blobs far apart cost everything
+    // between them — 45 seconds and 2 GB at a separation of 1000 — and the
+    // coordinate difference overflowed int before that. A deserialized mask
+    // may carry any chunk keys, so a file could reach it.
+    voxel::BrushParams p;
+    p.size = 5;
+    p.shape = voxel::BrushShape::Sphere;
+    p.falloff = voxel::BrushFalloff::Constant;
+    p.strength = 1.0f;
+
+    for (int sep : {50, 1000, 20000}) {
+        voxel::MaskField m(0.1f);
+        m.paint(VoxelCoord{0, 0, 0}, p, 1.0f);
+        m.paint(VoxelCoord{sep, sep, sep}, p, 1.0f);
+        const std::size_t painted = m.painted_count();
+        REQUIRE(painted > 0);
+
+        m.expand(1);
+        INFO("separation " << sep);
+        // both blobs grew, and nothing in between was touched
+        CHECK(m.painted_count() > painted);
+        CHECK(m.get({sep / 2, sep / 2, sep / 2}) == doctest::Approx(0.0f));
+        CHECK(m.get({0, 0, 0}) == doctest::Approx(1.0f));
+        CHECK(m.get({sep, sep, sep}) == doctest::Approx(1.0f));
+    }
+}
+
 TEST_CASE("mask: a frozen region survives an edit") {
     // Material everywhere over x in [-8, 8]; mask the x < 0 half solid, then
     // erase across the whole span.

@@ -1,5 +1,7 @@
 #include <doctest/doctest.h>
 
+#include <limits>
+
 #include "clay/mesh/dual_contouring.h"
 #include "clay/mesh/marching.h"
 #include "clay/mesh/surface_nets.h"
@@ -43,6 +45,32 @@ scene::Tape cross_tape() {
 }
 
 }  // namespace
+
+TEST_CASE("mesh_tape: a resolution it cannot afford is refused, not allocated") {
+    // The dense lattice is sized from the caller's voxel size. Without a
+    // ceiling, a fine one either overflows the float-to-int conversion or ends
+    // the process in the allocator — the library builds without exceptions, so
+    // std::bad_alloc reaches std::terminate rather than returning.
+    scene::Tape t = sphere_tape(1.0f);
+    const math::Aabb region{cf3(-1.5f, -1.5f, -1.5f), cf3(1.5f, 1.5f, 1.5f)};
+
+    for (float bad : {0.0f, -0.1f, 1e-7f, std::numeric_limits<float>::infinity(),
+                      std::numeric_limits<float>::quiet_NaN()}) {
+        Mesh m = mesh::mesh_tape(t, region, bad);
+        CHECK(m.empty());
+    }
+
+    // a resolution it can afford still meshes
+    Mesh ok = mesh::mesh_tape(t, region, 0.1f);
+    CHECK_FALSE(ok.empty());
+
+    // The ceiling has to clear what the API DOCUMENTS, not merely something
+    // comfortable: docs/05-claycore-library.md's headline call meshes at
+    // resolution 512, which is 514^3 lattice points over a cubic region. Set
+    // too low, the guard turns the documented usage into an error.
+    static_assert(mesh::kMaxGridSamples >= 514ull * 514ull * 514ull,
+                  "the grid ceiling must admit the documented resolution of 512");
+}
 
 TEST_CASE("surface nets: sphere preview is lighter than marching, outward-oriented") {
     scene::Tape tape = sphere_tape(1.0f);

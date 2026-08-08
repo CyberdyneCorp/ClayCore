@@ -9,27 +9,38 @@ named here only where ClayCore has to provide something for them.
 Living requirements are in `openspec/specs/`; this file is the plan, not the
 contract. A row becomes real when it becomes a change in `openspec/changes/`.
 
+Where the engine stands against the tools it gets compared to — Blender, ZBrush
+and 3DCoat — is in `docs/sculpt_comparison.md`: what it wins outright, what is
+missing before an app built on it could compete, and which non-goals cap the
+ceiling on purpose. The short version is that the brush vocabulary landed and
+the **workflow tier** did not: masking that protects a surface from any
+operation, sculpt layers, and alphas on SDF layers are document concepts this
+file's brush rows were never going to deliver.
+
 Last reconciled against `3dcoat_study/MISSING_FEATURES.md` and
 `3DCOAT_FEATURE_STUDY.md` on 2026-08-05, after a review from the study's authors
 caught five items this file had dropped. Every ClayCore-owned row in their
 catalogue is now represented here or in the deferred list below.
 
-## Where the engine is (2026-08-06, v0.19.0)
+## Where the engine is (2026-08-07, v0.22.1)
 
-14 capabilities, 31 archived changes. Complete enough that the gaps below are
+14 capabilities, 44 archived changes. Complete enough that the gaps below are
 about *sculpting affordances*, not about the field engine:
 
-- 30 primitives + stroke/curve chains, 14 combine ops, 5 blend profiles,
+- 30 primitives + stroke/curve chains, **16 combine ops**, 5 blend profiles,
   grid/radial repetition, mirror with blended seam. Every kernel capability is
-  reachable from a document — loft was the last one that was not.
-- **12 deformers** — twist, bend, taper, displace, wrap_around, elongate,
+  reachable from a document — loft was the last one that was not. Relief and
+  incise are the only ops whose item is a REGION rather than geometry.
+- **14 deformers** — twist, bend, taper, displace, wrap_around, elongate,
   elongate_axis, bend_linear, bend_radial, plus grab, pose and pose_line with
-  finite support. Every point-warp implemented in the kernel headers is
-  reachable from a document; there is nothing left stranded.
+  finite support, plus magnify (signed: magnify and pinch are one deformation)
+  and noise. Every point-warp implemented in the kernel headers is reachable
+  from a document; there is nothing left stranded.
 - Voxel engine: palette grids, cube/sphere brushes with 4 falloff curves and
-  strength, sculpt verbs smooth / inflate / flatten / pinch, fills, mirrored
-  edits, flood select, greedy meshing, SDF↔voxel bridges, paintable mask
-  fields gating every verb
+  strength, **10 sculpt verbs** — smooth, inflate, flatten, pinch, magnify,
+  scrape, smudge, grab, fill_cavities and carve_alpha — fills, mirrored edits,
+  flood select, greedy meshing, SDF↔voxel bridges, paintable mask fields
+  gating every verb
 - Brush stroke engine: samples in, edit items out, with versioned presets;
   paintable per-layer mask fields, painted along a stroke by that same engine,
   freezing every verb on both representations, with a bounded complement and
@@ -38,8 +49,12 @@ about *sculpting affordances*, not about the field engine:
   tessellated to a document tolerance) and the cut tool (rect / circle /
   polygon / spline lasso, swept as a prism)
 - Editing and opt-in undo over one command vocabulary shared with the file
-  format; 228 capabilities gated for binding parity; four backends verified on
-  device; the Swift package verified in the iOS Simulator
+  format — including an item's deformer chain, which `SetDeformersCmd` made an
+  ordinary edit; **268 capabilities** gated for binding parity; the Swift
+  package verified in the iOS Simulator
+- Four backends registered. **CPU and Metal are verified on device as of
+  v0.22.1**; CUDA and OpenCL are manual hardware checks (docs/RELEASE.md) and
+  were not re-verified for it
 
 ### Corrections to the study's baseline
 
@@ -214,17 +229,44 @@ tractable, and each one is a row rather than a project.
 
 | Change | Notes |
 |---|---|
+| ~~`add-surface-relief`~~ **landed 2026-08-07** | ZBrush's Standard and ClayBuildup building a surface up, and Crease and DamStandard cutting into one. The first ops whose item is a **region** rather than geometry: they offset the accumulated field by an amplitude weighted by the item's own field, so the surface already built moves along its own normal and the item contributes no shape. Scoped as ONE op with a signed amplitude, which cannot work — the amplitude rides on `blend_k`, validated non-negative in three places including the blend constructor, which has no op to be aware of. Two ops sharing one kernel branch instead, which is also the convention add/subtract and engrave/emboss already follow. The item's rounding does **double duty**: it is the falloff width and it rounds the region's own field, so the reach is region + rounding + falloff. |
 | ~~`add-sdf-flatten`~~ **landed 2026-08-07** | Voxels have `sculpt_flatten`; SDF layers have nothing but the cut tool, which is global to its prism and has no falloff. Raised first as "add the Clip brush" and **that framing was wrong**: as a solid, ZBrush's Clip is exactly Trim — the clamp map sends everything past the plane onto it, and the image has no volume. Clip's distinctive look is a zero-thickness fin a field cannot represent and users delete anyway. Flatten is the verb with no equivalent today. The Lipschitz argument was the expected difficulty and not the real one. Flatten cannot rewrite a volume's samples the way relax does at all — a band tracks the surface only while the surface stays inside it, and flatten moves it many band widths, so the isosurface came apart. It samples a fresh volume instead, which makes the blend closed-form. The region also turned out to be **required**: where flatten's weight is one the result IS the plane, so with no region it replaces the shape with a half-space. |
 | ~~`add-snakehook`~~ **landed 2026-08-07** | Horns and tendrils. The claim that it "needs geometry that GROWS along a drag" was wrong: the stroke opcode already sweeps a sphere along a chain with a radius per point, which IS a tendril once the radii taper — and the field stays EXACT, so it costs the raymarcher nothing. It became a resolver, like the cut tool. What it owns is the arc-length taper and prepending the anchor; what it does not is pushing that anchor inward, which was specified and measured to do nothing. |
 | ~~`add-magnify-pinch`~~ **landed 2026-08-07** | Scoped as `add-magnify-blob`; Blob was carved out and is blocked on `add-noise-field`, because its irregular response is the brush and the `displace` deformer's sine is regular by construction. Magnify and pinch turned out to be ONE deformation with a signed strength, which is what Maxon's own page says. The centre of a radial scale is its fixed point, which caught the tests twice in the same shape. |
 | ~~`add-mask-stroke-brush`~~ **landed 2026-08-07** | The mask field landed with the right shape and without the two things that make it a *brush*. It had no stroke consumer — `apply_to_grid` and `stamps_to_nodes` were the only two — so painting a mask along a drag meant re-implementing spacing, pressure and taper per caller, and getting the one non-obvious conversion (a stamp's WORLD radius into a footprint in MASK cells) differently each time. And **the freeze did not reach `relax` or `flatten`**: they take a sphere region and nothing else, so "a mask blocks any effect of sculpting" was false for exactly the verbs SDF layers gained most recently — a bug, not a gap. Also `invert_within`: `invert()` flips only the chunks that have been touched, which is correct for an unbounded sparse lattice and is *not* what "mask a limb, invert, sculpt everything else" means. The field verbs take the mask as a CALLABLE, not as a `MaskField`: a sampled field is a leaf below `scene` while a mask sits above it, so naming the type there would have made field → voxel → scene → field a cycle. |
 | ~~`add-mask-extrude`~~ **landed 2026-08-07** | ZBrush's Extract, and what a mask is *for* once it can do more than freeze. Almost nothing new was needed: `op_shell_union`'s operand is already the shell of a field, `FieldVolume` is already blob-carried and backend-portable, and `flatten` already established "sample a fresh volume and hand it back". The one real blocker was that **a mask is a [0,1] scalar on a lattice and not a distance field** — composing one directly puts a step in the result and the Lipschitz bound becomes a fiction — so `mask_to_field` measures it with an exact Euclidean distance transform first. THE MASK IS THE REGION: no `region_radius`, unlike relax and flatten, because the painted region bounds itself. Two paths that must agree — SDF samples, voxels stay in cell space and keep their palette — checked against each other rather than asserted. It lives in `brush` rather than `field` for the cycle above. Not done: no parametric link back to the source (that needs a tape op referencing another layer), no rim profile, no mesh-level extract (meshing the result already works). |
 | ~~`add-noise-field`~~ **landed 2026-08-07** | Gradient noise on an integer lattice. The three open decisions answered each other: parity is tolerance-based (1e-6 CPU / 1e-4 GPU), and a float hash turns each backend's own `sin` into an O(1) disagreement, so the hash had to be INTEGER — which decided the noise and forced the dialect's first integer type into the shim. The seed is a plain deformer parameter. Blob is now unblocked. |
+| ~~`add-move-brush`~~ **landed 2026-08-07** | ZBrush's Move for SDF layers. The deformation was never missing — `grab` has been there since `add-region-deformers` — but three things stood between it and a brush, all of them the kind of geometric step the cut tool and snakehook exist to absorb. A deformer is per ITEM and its centre is in that item's LOCAL frame, so grabbing one item of a blended form pulls its share and leaves the rest (measured: 0.070 and 0.000 on two blended balls). The warp has to go at the FRONT of the chain, because `deformers[0]` is the outermost warp on the geometry and one appended behind an existing deformer has its region weight read at a point that deformer already moved. And there was **nowhere to put the result**: the command vocabulary had no way to change a node's deformers at all, so a deformer could only be set when its node was created — `SetDeformersCmd` is the other half of this row. The expected hard part, accumulating a transform chain through groups, turned out not to exist: a group's transform never reaches its children, which is worth knowing on its own. Followed by `add-move-drag-continuity`: a Move is a stream of drags, not one, and each frame prepended another warp — 120 of them on a two-second drag at 60fps, each multiplying into the declared Lipschitz. A drag now coalesces on its fixed centre and radius, and can be previewed. |
 | `add-blob-brush` | Now unblocked by `add-noise-field`. ZBrush's Blob: an irregular surface response under a brush region, which is noise applied locally rather than to a whole item. |
 
 Not planned: Morph (needs a stored morph target, which is a document concept
 rather than a brush), Elastic and ZProject (both mesh-era ideas that do not
 survive the representation change intact).
+
+## Consolidation, which two brushes now need
+
+Two verbs have hit the same wall from opposite sides, so it is worth naming as a
+row rather than as two footnotes.
+
+**Move** stacks a grab per drag, and a stroke is many drags: the declared
+Lipschitz compounds and the safe step scale decays geometrically, about x0.615
+per drag — 79x the marching cost by nine drags. Coalescing covers frames of one
+drag, where the centre and radius are fixed; a stroke moves the centre.
+
+**hPolish** bakes, and a second pass samples the first pass's volume rather than
+the document. Outside the band a volume reports a lower bound rather than a
+distance, so the blend works from the wrong value: the Lipschitz goes 1.00 to
+14.0 on the second pass whatever the falloff, and by the third the form is
+visibly corrupt rather than merely expensive.
+
+`clay_item_volume_from_document` can collapse an edit list into one volume, so
+the mechanism exists. What does not exist is a POLICY — when a host should
+consolidate, what it costs, and how a baked region rejoins an edit list that is
+still parametric everywhere else. Both brushes are usable for single gestures
+today and neither is usable as a stroke, which is what a sculpting app needs.
+
+Measured in `examples/27_move_strokes.py` and `examples/28_hpolish.py`, both of
+which fail if the degradation stops being what they claim.
 
 ## Phase 3 — the pipeline
 

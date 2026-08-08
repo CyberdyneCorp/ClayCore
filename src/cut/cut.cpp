@@ -103,6 +103,47 @@ CutShape CutShape::from_polygon(std::vector<cfloat2> vertices) {
     return s;
 }
 
+CutShape CutShape::from_open_curve(const std::vector<scene::StrokePoint>& control_points,
+                                   Side side, cfloat2 extent, float tolerance) {
+    if (control_points.size() < 2) return from_polygon({});
+
+    // OPEN, which is the whole difference from from_curve: a trim stroke's
+    // endpoints must stay apart so the closing edge can run along the frame.
+    std::vector<scene::StrokePoint> tess =
+        scene::tessellate_curve(control_points, /*closed=*/false, tolerance);
+    if (tess.size() < 2) return from_polygon({});
+
+    std::vector<cfloat2> verts;
+    verts.reserve(tess.size() + 2);
+    for (const scene::StrokePoint& p : tess) verts.push_back(cf2(p.pos.x, p.pos.y));
+
+    // Close it against the frame bound on the side being covered. The stroke is
+    // assumed to span the region it divides, which is how a trim is drawn; one
+    // that stops short leaves this edge visible, and that is the caller's to see.
+    const cfloat2& first = verts.front();
+    const cfloat2& last = verts.back();
+    const float ex = kernel::cabs(extent.x), ey = kernel::cabs(extent.y);
+    switch (side) {
+        case Side::Below:
+            verts.push_back(cf2(last.x, -ey));
+            verts.push_back(cf2(first.x, -ey));
+            break;
+        case Side::Above:
+            verts.push_back(cf2(last.x, ey));
+            verts.push_back(cf2(first.x, ey));
+            break;
+        case Side::Left:
+            verts.push_back(cf2(-ex, last.y));
+            verts.push_back(cf2(-ex, first.y));
+            break;
+        case Side::Right:
+            verts.push_back(cf2(ex, last.y));
+            verts.push_back(cf2(ex, first.y));
+            break;
+    }
+    return from_polygon(std::move(verts));
+}
+
 CutShape CutShape::from_curve(const std::vector<scene::StrokePoint>& control_points,
                               float tolerance) {
     // Flattened through the curve tessellator rather than a private routine:

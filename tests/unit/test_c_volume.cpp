@@ -497,3 +497,50 @@ TEST_CASE("c volume: the import budget is settable, and the extension is case-in
     std::remove(upper);
     clay_mesh_destroy(built);
 }
+
+TEST_CASE("c abi: a flatten descriptor from before modes still means two-sided") {
+    // The mode was APPENDED to clay_flatten_params. A caller compiled against
+    // the previous layout sizes struct_size to it and must keep working, with
+    // the two-sided behaviour it was written against — not read a mode out of
+    // whatever follows its buffer.
+    const float box[3] = {0.5f, 0.6f, 0.5f};
+
+    // The pre-mode layout ends at `falloff`.
+    const std::size_t pre_mode = offsetof(clay_flatten_params, falloff) + sizeof(float);
+    REQUIRE(pre_mode < sizeof(clay_flatten_params));  // the mode really is appended
+
+    clay_flatten_params flat;
+    std::memset(&flat, 0, sizeof flat);
+    flat.struct_size = static_cast<std::uint32_t>(pre_mode);
+    flat.plane_point[1] = 0.45f;
+    flat.plane_normal[1] = 1.0f;
+    flat.strength = 1.0f;
+    flat.centre[1] = 0.6f;
+    flat.region_radius = 0.5f;
+    flat.falloff = 0.3f;
+    flat.mode = CLAY_FLATTEN_CUT_ONLY;  // past the declared size: must be ignored
+
+    // Nothing to flatten here, so this asserts the DESCRIPTOR is accepted and
+    // the out-of-range mode is not read, rather than the flatten's result.
+    clay_item* not_a_volume = clay_item_create(CLAY_PRIM_SPHERE, box, 1);
+    REQUIRE(not_a_volume != nullptr);
+    // Refused for carrying no volume — not for a malformed descriptor.
+    CHECK(clay_item_volume_flatten(not_a_volume, &flat) == CLAY_ERROR_INVALID_ARGUMENT);
+    clay_item_destroy(not_a_volume);
+}
+
+TEST_CASE("c abi: an unknown flatten mode is refused") {
+    const float radius[1] = {0.5f};
+    clay_item* item = clay_item_create(CLAY_PRIM_SPHERE, radius, 1);
+    REQUIRE(item != nullptr);
+    clay_flatten_params flat;
+    std::memset(&flat, 0, sizeof flat);
+    flat.struct_size = static_cast<std::uint32_t>(sizeof flat);
+    flat.plane_normal[1] = 1.0f;
+    flat.strength = 1.0f;
+    flat.region_radius = 0.5f;
+    flat.falloff = 0.2f;
+    flat.mode = 99;
+    CHECK(clay_item_volume_flatten(item, &flat) == CLAY_ERROR_INVALID_ARGUMENT);
+    clay_item_destroy(item);
+}
