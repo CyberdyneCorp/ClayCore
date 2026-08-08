@@ -71,7 +71,13 @@ A loader SHALL NOT return a mesh whose normals, colors or uvs array is non-empty
 ## MODIFIED Requirements
 
 ### Requirement: Import guardrails
+All importers SHALL enforce triangle/vertex budgets (configurable), survive malformed-file fuzzing without crashes or unbounded allocation, and fail with error codes — never exceptions across the ABI.
+
 Loaders SHALL validate declared counts against the actual payload size BEFORE allocating, and SHALL bound the memory a payload can decode into as well as the bytes it occupies. A run-length encoded payload SHALL be refused when its declared record count exceeds what the remaining bytes could describe.
+
+#### Scenario: Malformed file rejected safely
+- **WHEN** a fuzzed/truncated FBX, OBJ, or PLY file is imported
+- **THEN** the importer returns an error code with bounded memory use (no crash, no allocation bomb)
 
 #### Scenario: A run-length payload cannot claim more records than it has bytes
 - **WHEN** a voxel or mask payload declares a chunk count larger than its remaining bytes could encode
