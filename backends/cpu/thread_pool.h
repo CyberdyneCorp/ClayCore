@@ -28,8 +28,22 @@ class ThreadPool {
                       const std::function<void(std::size_t, std::size_t)>& fn) {
         if (n == 0) return;
         std::size_t workers = threads_.size() + 1;  // + calling thread
-        std::size_t chunk = (n + workers - 1) / workers;
+        // One chunk per worker meant the atomic claim counter in run() never
+        // rebalanced: each thread took exactly one chunk and a thread that
+        // finished early parked instead of picking up more. The cores are not
+        // interchangeable — a phone or tablet SoC pairs fast cores with
+        // efficiency cores, and the OS may also be running something else on
+        // one of them — so the call took as long as its slowest chunk.
+        //
+        // Over-decomposing gives the counter something to balance with. The
+        // extra chunks are close to free: dispatch cost is dominated by the
+        // wakeup, which is per CALL rather than per chunk, and each chunk is
+        // one more fetch_add. min_chunk still floors it, so a small batch is
+        // unaffected and work per chunk stays worth the claim.
+        constexpr std::size_t kChunksPerWorker = 8;
+        std::size_t chunk = (n + workers * kChunksPerWorker - 1) / (workers * kChunksPerWorker);
         if (chunk < min_chunk) chunk = min_chunk;
+        if (chunk == 0) chunk = 1;
         std::size_t num_tasks = (n + chunk - 1) / chunk;
         if (num_tasks <= 1) {
             fn(0, n);

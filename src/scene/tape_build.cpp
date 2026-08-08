@@ -461,10 +461,20 @@ struct Compiler {
                 // carving/painting with nothing beneath produces nothing;
                 // material-creating modes seed the chain against empty space
                 if (!have_acc && n->op != Op::Add && !op_creates_material(n->op)) continue;
-                if (culled(item_influence_bound(*n, layer))) continue;
+                // ONE geometry bound per item. It used to be computed twice:
+                // item_influence_bound returns item_geometry_bound for a local
+                // item, and the next line asked for item_geometry_bound again.
+                // Both calls do the real work — for a stroke or a sweep they
+                // re-tessellate the curve — so the second was pure waste on
+                // every compile, culled or not.
+                const math::Aabb geometry = item_geometry_bound(*n, layer);
+                // A non-local item has an infinite influence bound and so can
+                // never be culled; item_influence_is_local is the single
+                // definition of that test, shared with item_influence_bound.
+                if (cull && item_influence_is_local(*n) && culled(geometry)) continue;
                 // tape.bounds is the geometric extent meshing and raycast
                 // clipping use — never infinite, even for non-local ops
-                tape.bounds.expand(item_geometry_bound(*n, layer));
+                tape.bounds.expand(geometry);
                 bool seeded = !have_acc && n->op != Op::Add;
                 if (seeded) emit_empty(n->color);
                 emit_item(*n, layer);

@@ -252,3 +252,39 @@ TEST_CASE("memory budget: predictable failure, usage query, data intact") {
         CHECK(b->values.size() == static_cast<std::size_t>(8 * 8 * 8));
     }
 }
+
+TEST_CASE("dirty everything re-queues bricks that were already waiting") {
+    // Regression. The infinite branch of mark_dirty cleared the queue and then
+    // re-added through dirty_one, which pushes only a brick that is not already
+    // queued — and the queued FLAGS survived the clear. Every brick already
+    // waiting was therefore dropped and could never be re-queued by any later
+    // call: the cache served its stale samples for the rest of its life, and
+    // only destroying it recovered. It is reached by the documented way of
+    // saying "this edit's influence is unbounded", which is what a plane or an
+    // intersect op produces.
+    BrickCache cache(BrickConfig{8, 0.05f, 3, 0});
+
+    // queue a region and deliberately do NOT drain it
+    cache.mark_dirty(math::Aabb{cf3(0, 0, 0), cf3(0.1f, 0.1f, 0.1f)});
+    const std::size_t tracked = cache.tracked_count();
+    REQUIRE(tracked > 0);
+    REQUIRE(cache.dirty_count() == tracked);
+
+    cache.mark_dirty(math::Aabb::infinite());
+    CHECK(cache.dirty_count() == tracked);  // everything tracked, still queued
+
+    // ...and it stays true however many times it is said
+    cache.mark_dirty(math::Aabb::infinite());
+    CHECK(cache.dirty_count() == tracked);
+    CHECK(cache.take_dirty().size() == tracked);
+
+    // the same after a full round trip, where the flags start clean
+    BrickCache drained(BrickConfig{8, 0.05f, 3, 0});
+    drained.mark_dirty(math::Aabb{cf3(0, 0, 0), cf3(0.1f, 0.1f, 0.1f)});
+    std::vector<float> values(8 * 8 * 8, 1.0f);
+    for (const BrickRequest& req : drained.take_dirty())
+        REQUIRE(drained.submit(req, values.data()) == SubmitResult::Accepted);
+    REQUIRE(drained.dirty_count() == 0);
+    drained.mark_dirty(math::Aabb::infinite());
+    CHECK(drained.dirty_count() == drained.tracked_count());
+}

@@ -105,6 +105,13 @@ Scenes do not become shader code. The `scene` module compiles an edit list into 
 | Backend | Host layer | Kernel path | Status/notes |
 |---|---|---|---|
 | **CPU** | thread pool, batch API | same headers, scalar + SIMD (Apple `simd` / SSE-NEON via `xsimd`) | reference; always available |
+
+The CPU pool over-decomposes a batch into several chunks per worker rather than
+one, so its atomic claim counter load-balances: a core that finishes early takes
+more work instead of idling. That matters most where the cores are not
+interchangeable — a mobile SoC pairing performance and efficiency cores — and it
+halves a preview `raycast_many`. Batches below the caller's minimum chunk size
+are untouched, so a single pick or a small brush batch still runs inline.
 | **Metal** | `metal-cpp` (pure C++, no ObjC in core) | headers compiled as MSL; argument buffers for tapes | tier-1: the iPad app |
 | **CUDA** | CUDA runtime or NVRTC JIT | same headers under `__device__` | tier-2: desktop/pipeline/ML workloads |
 | **OpenCL** | OpenCL 3.0 | kernel headers constrained to the C-compatible subset (macro-mapped to OpenCL C) | tier-3, best-effort; Vulkan compute is the likely long-term replacement and slots into the same backend interface |
@@ -571,6 +578,8 @@ Use cases the bindings are designed for: authoring the spec's golden-scene test 
 Flat, stable, versioned C API over documents, evaluation, meshing, and I/O — the boundary the Swift app links against (alongside or instead of direct Swift-C++ interop), and the FFI story for C#/Rust/anything. Opaque handles, error codes, caller-owned buffers; no C++ types cross it.
 
 Authoring reaches what `pyclay` reaches: an opaque **item builder** (`clay_item_create` → setters → `clay_layer_add_item`) carries the chained modifiers and variable-length payloads no fixed struct can express, and the flat `clay_item_desc` path is sugar over it. Every descriptor struct starts with a `uint32_t struct_size` the caller sets and the library reads only up to, so fields are appended without a major bump; setting it is mandatory, and a value that is not a declared layout is rejected rather than misread.
+
+**The incremental path is reachable too** (`clay_brick_cache_*`, ABI minor 24): the brick cache of §8 is an opaque handle created from a `clay_brick_config` and never bound to a document, with exactly one refill loop — `mark_dirty` → `take_dirty` → `eval_requests` → `submit` — plus brick readback in the stored fp16 bits at a fixed `dim³` stride, statistics, LOD mips, `mesh_bricks` and `raycast_bricks`. It mirrors `brick::BrickCache` member for member and adds no policy: no thread, no lock, no refill driver, no ordering or eviction knob, because the consumer owns queues and scheduling. A request is a plain value whose layout *is* `brick::BrickRequest` (asserted with `offsetof`), so a drain is a `memcpy` and a request may be queued, copied and evaluated on any thread. It carries its lattice *and its band*, because the tape must be culled against the brick dilated by the band — a sample keeps its true distance whenever that distance is within the band, so an item a band outside the brick still decides samples inside it, and a band passed separately is a band that will one day arrive as zero. Three supporting calls come with it, none of which existed before: `clay_eval_grid` (dense lattice evaluation with an optional cull region — the per-brick fill primitive), and `clay_layer_node_influence_bound` / `clay_layer_influence_bound`, which report the box an edit must *dirty* (wider than `clay_layer_bounds`, and flagged when unbounded). Marking is validated in 64-bit before the engine converts the region: a span above `CLAY_MAX_BATCH` or a brick coordinate outside `int32` is refused with the cache untouched, since three caller floats can otherwise name 10<sup>19</sup> bricks.
 
 ## 12. Dependencies (all permissive, all C/C++)
 
