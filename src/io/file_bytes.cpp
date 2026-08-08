@@ -6,8 +6,11 @@ namespace clay {
 namespace io {
 namespace detail {
 
-IoStatus read_whole_file(const std::string& path, std::vector<std::uint8_t>* bytes,
-                         std::size_t max_bytes) {
+namespace {
+
+// The whole read, over whichever contiguous byte container the caller wants.
+template <typename Buffer>
+IoStatus read_into(const std::string& path, Buffer* out, std::size_t max_bytes) {
     std::FILE* f = std::fopen(path.c_str(), "rb");
     if (!f) return IoStatus::fail(IoError::FileNotFound, path);
 
@@ -32,14 +35,25 @@ IoStatus read_whole_file(const std::string& path, std::vector<std::uint8_t>* byt
         return IoStatus::fail(IoError::ReadFailed, path);
     }
 
-    bytes->resize(static_cast<std::size_t>(size));
-    const std::size_t read = std::fread(bytes->data(), 1, bytes->size(), f);
+    out->resize(static_cast<std::size_t>(size));
+    const std::size_t read = out->empty() ? 0 : std::fread(out->data(), 1, out->size(), f);
     std::fclose(f);
-    if (read != bytes->size()) {
-        bytes->clear();
+    if (read != out->size()) {
+        out->clear();
         return IoStatus::fail(IoError::ReadFailed, path);
     }
     return IoStatus::success();
+}
+
+}  // namespace
+
+IoStatus read_whole_file(const std::string& path, std::vector<std::uint8_t>* bytes,
+                         std::size_t max_bytes) {
+    return read_into(path, bytes, max_bytes);
+}
+
+IoStatus read_whole_file(const std::string& path, std::string* text, std::size_t max_bytes) {
+    return read_into(path, text, max_bytes);
 }
 
 IoStatus write_whole_file(const std::string& path, const void* data, std::size_t size) {

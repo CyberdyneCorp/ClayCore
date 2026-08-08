@@ -39,6 +39,28 @@ The PLY reader SHALL check a declared vertex count against the bytes actually pr
 - **WHEN** a PLY declares a vertex element carrying no properties and a non-zero count
 - **THEN** the reader refuses it as `Malformed`
 
+#### Scenario: A well-formed file need not end with a newline
+- **WHEN** an ascii PLY whose final line carries no trailing newline is loaded
+- **THEN** it loads, because the format does not require one and the payload floor must not be tighter than the format
+
+### Requirement: An element the reader does not read is refused
+The PLY reader SHALL refuse a file declaring a non-empty element it does not read, rather than ignoring the declaration. Only the declaration is skipped, not the bytes: the payload of an unread element stays in the stream and displaces the vertex data, so ignoring it returns a silently wrong mesh.
+
+#### Scenario: An element declared before the vertices
+- **WHEN** a PLY declares a non-empty element the reader does not understand
+- **THEN** it is refused as `Unsupported`
+
+### Requirement: A document's read ceiling is the caller's to raise
+`load_clayspace_file` SHALL take an import budget, so the ceiling on what it reads into memory can be raised. Nothing caps what `save_clayspace_file` writes, and a document carrying sampled volumes is large by nature, so a fixed reader ceiling would make a document this library had just written permanently unopenable.
+
+#### Scenario: A budget below the file size refuses it
+- **WHEN** a document is loaded with a `max_file_bytes` smaller than the file
+- **THEN** it returns `BudgetExceeded`
+
+#### Scenario: The same document loads under the default
+- **WHEN** the same document is loaded with the default budget
+- **THEN** it loads
+
 ### Requirement: An imported mesh satisfies the mesh invariant
 A loader SHALL NOT return a mesh whose normals, colors or uvs array is non-empty and of a different length than its positions array. Where a source file supplies an attribute for only some of its objects, the loader SHALL drop that attribute rather than return a short one.
 

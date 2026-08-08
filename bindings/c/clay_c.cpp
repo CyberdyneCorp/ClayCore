@@ -1302,11 +1302,17 @@ clay_result clay_document_move_layer(clay_document* doc, clay_layer_id layer, in
     const scene::Layer* found = doc->doc.document.find_layer(layer);
     if (!found) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
     scene::Layer copy = *found;
+    // One group, so one undo puts the layer back where it was. Ungrouped, the
+    // undo stack held a remove and an insert separately and a single undo
+    // applied only the remove — the layer vanished.
+    if (doc->undo) doc->undo->begin_group();
     clay_result r = apply_edit(doc, scene::Command{scene::RemoveLayerCmd{layer}},
                                "layer not found");
-    if (r != CLAY_OK) return r;
-    return apply_edit(doc, scene::Command{scene::AddLayerCmd{std::move(copy), index}},
-                      "layer could not be reinserted");
+    if (r == CLAY_OK)
+        r = apply_edit(doc, scene::Command{scene::AddLayerCmd{std::move(copy), index}},
+                       "layer could not be reinserted");
+    if (doc->undo) doc->undo->end_group();
+    return r;
 }
 
 clay_result clay_document_set_layer_visible(clay_document* doc, clay_layer_id layer,
@@ -1345,14 +1351,15 @@ clay_result clay_document_set_layer_transform(clay_document* doc, clay_layer_id 
 
 clay_result clay_set_layer_mirror(clay_document* doc, clay_layer_id layer_id, int32_t axis_x,
                                   int32_t axis_y, int32_t axis_z, float mirror_k) {
-    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
-    scene::Layer* layer = doc->doc.document.find_layer(layer_id);
-    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
-    layer->mirror_axes = static_cast<std::uint8_t>((axis_x ? scene::kMirrorX : 0) |
-                                                   (axis_y ? scene::kMirrorY : 0) |
-                                                   (axis_z ? scene::kMirrorZ : 0));
-    layer->mirror_k = mirror_k;
-    return CLAY_OK;
+    // Through the command vocabulary like every other layer edit: writing the
+    // fields directly skipped the lock check that apply_edit makes and left
+    // nothing on the undo stack, so a mirror could neither be refused on a
+    // locked layer nor undone.
+    const std::uint8_t axes = static_cast<std::uint8_t>((axis_x ? scene::kMirrorX : 0) |
+                                                        (axis_y ? scene::kMirrorY : 0) |
+                                                        (axis_z ? scene::kMirrorZ : 0));
+    return apply_edit(doc, scene::Command{scene::SetLayerMirrorCmd{layer_id, axes, mirror_k}},
+                      "layer not found");
 }
 
 // -- item builder (c-abi spec: item builder for composed edits) --------------
@@ -2037,14 +2044,17 @@ clay_result clay_document_mesh(const clay_document* doc, const clay_mesh_params*
     if (!(voxel > 0.0f) || !std::isfinite(voxel))
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "voxel size must be finite and > 0");
     {
+        // The mesher's own ceiling, not the batch limit: CLAY_MAX_BATCH bounds
+        // how many items cross this boundary in one call, which is a different
+        // quantity, and it is far below the resolution 512 this API documents.
         kernel::cfloat3 ext = region.extent();
         const double cells = (static_cast<double>(ext.x) / voxel + 2.0) *
                              (static_cast<double>(ext.y) / voxel + 2.0) *
                              (static_cast<double>(ext.z) / voxel + 2.0);
-        if (!(cells <= static_cast<double>(CLAY_MAX_BATCH)))
+        if (!(cells <= static_cast<double>(mesh::kMaxGridSamples)))
             return fail(CLAY_ERROR_INVALID_ARGUMENT,
                         "the requested resolution needs more than " +
-                            std::to_string(CLAY_MAX_BATCH) + " grid samples");
+                            std::to_string(mesh::kMaxGridSamples) + " grid samples");
     }
     mesh::Mesh m;
     r = mesh_with(p.mesher, p.experimental != 0, tape, region, voxel, &m);

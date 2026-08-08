@@ -181,9 +181,10 @@ IoStatus save_clayspace_file(const ClaySpaceDoc& doc, const std::string& path) {
     return detail::write_whole_file(path, save_clayspace(doc));
 }
 
-IoStatus load_clayspace_file(const std::string& path, ClaySpaceDoc* out) {
+IoStatus load_clayspace_file(const std::string& path, ClaySpaceDoc* out,
+                             const ImportBudget& budget) {
     std::vector<std::uint8_t> bytes;
-    IoStatus s = detail::read_whole_file(path, &bytes);
+    IoStatus s = detail::read_whole_file(path, &bytes, budget.max_file_bytes);
     if (!s.ok()) return s;
     return load_clayspace(bytes.data(), bytes.size(), out);
 }

@@ -163,6 +163,15 @@ std::optional<Command> apply_one(Document& doc, const SetLayerTransformCmd& c) {
     return Command{inverse};
 }
 
+std::optional<Command> apply_one(Document& doc, const SetLayerMirrorCmd& c) {
+    Layer* l = doc.find_layer(c.id);
+    if (!l) return std::nullopt;
+    SetLayerMirrorCmd inverse{c.id, l->mirror_axes, l->mirror_k};
+    l->mirror_axes = c.axes;
+    l->mirror_k = c.k;
+    return Command{inverse};
+}
+
 }  // namespace
 
 namespace {
@@ -180,7 +189,8 @@ LayerId edited_layer(const Command& cmd) {
                 return kNoLayer;
             else if constexpr (std::is_same_v<C, RemoveLayerCmd> ||
                                std::is_same_v<C, SetLayerVisibleCmd> ||
-                               std::is_same_v<C, SetLayerTransformCmd>)
+                               std::is_same_v<C, SetLayerTransformCmd> ||
+                               std::is_same_v<C, SetLayerMirrorCmd>)
                 return c.id;
             else
                 return c.layer;
@@ -618,6 +628,7 @@ enum class Tag : std::uint8_t {
     SetLayerProtection,
     SetStrokePoints,
     SetDeformers,
+    SetLayerMirror,
 };
 
 struct SerializeVisitor {
@@ -720,6 +731,12 @@ struct SerializeVisitor {
         w.pod(Tag::SetLayerTransform);
         w.pod(c.id);
         w.pod(c.xform);
+    }
+    void operator()(const SetLayerMirrorCmd& c) {
+        w.pod(Tag::SetLayerMirror);
+        w.pod(c.id);
+        w.pod(c.axes);
+        w.pod(c.k);
     }
 };
 
@@ -859,6 +876,14 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
             SetLayerTransformCmd c;
             c.id = r.pod<LayerId>();
             c.xform = r.pod<math::Transform>();
+            cmd = c;
+            break;
+        }
+        case Tag::SetLayerMirror: {
+            SetLayerMirrorCmd c;
+            c.id = r.pod<LayerId>();
+            c.axes = r.pod<std::uint8_t>();
+            c.k = r.pod<float>();
             cmd = c;
             break;
         }

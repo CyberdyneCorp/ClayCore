@@ -1,5 +1,7 @@
 #include <doctest/doctest.h>
 
+#include <cmath>
+
 #include "clay/kernel/prim3d.h"
 #include "kernel_utils.h"
 
@@ -83,6 +85,39 @@ TEST_CASE("round cone: cap distances") {
         float ab = sd_round_cone_ab(p, cf3(0, 0, 0), cf3(0, 1, 0), 0.5f, 0.25f);
         CHECK(v == doctest::Approx(ab).epsilon(1e-4));
     }
+}
+
+TEST_CASE("round cone: one end containing the other is the larger sphere, not NaN") {
+    // |r1 - r2| > h leaves no conical flank. The flank formula took csqrt of a
+    // negative radicand and returned NaN, and every combine op propagates NaN,
+    // so a single such item turned a whole document into NaN. A tapered
+    // two-point stroke reaches the ab form the same way.
+    clay_test::Lcg rng(4241);
+    for (int i = 0; i < 200; ++i) {
+        cfloat3 p = rng.vec3(-3, 3);
+
+        // base sphere swallows the tip
+        float big_base = sd_round_cone(p, 1.0f, 0.05f, 0.1f);
+        CHECK(std::isfinite(big_base));
+        CHECK(big_base == doctest::Approx(clength(p) - 1.0f).epsilon(1e-4));
+
+        // tip sphere swallows the base
+        float big_tip = sd_round_cone(p, 0.05f, 1.0f, 0.1f);
+        CHECK(std::isfinite(big_tip));
+        CHECK(big_tip == doctest::Approx(clength(p - cf3(0, 0.1f, 0)) - 1.0f).epsilon(1e-4));
+
+        // the ab form agrees, and survives coincident endpoints
+        float ab = sd_round_cone_ab(p, cf3(0, 0, 0), cf3(0, 0.1f, 0), 1.0f, 0.05f);
+        CHECK(std::isfinite(ab));
+        CHECK(ab == doctest::Approx(big_base).epsilon(1e-4));
+
+        float degenerate = sd_round_cone_ab(p, cf3(0, 0, 0), cf3(0, 0, 0), 0.5f, 0.5f);
+        CHECK(std::isfinite(degenerate));
+        CHECK(degenerate == doctest::Approx(clength(p) - 0.5f).epsilon(1e-4));
+    }
+
+    // and the well-formed cone is untouched
+    CHECK(sd_round_cone(cf3(0, -1, 0), 0.5f, 0.25f, 1.0f) == doctest::Approx(0.5f).epsilon(kTol));
 }
 
 TEST_CASE("plane: signed distance") {

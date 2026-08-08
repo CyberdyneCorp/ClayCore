@@ -14,3 +14,16 @@ Delta for `harden-core-boundaries`.
 #### Scenario: An aligned mesh keeps its attributes
 - **WHEN** a mesh whose attributes match its position count is decimated
 - **THEN** the attributes are carried through as before
+
+### Requirement: A mesher prices the grid its resolution implies
+`mesh_tape` SHALL reject a voxel size that is not finite and positive, and a resolution whose implied dense lattice exceeds the module's documented sample ceiling, returning an empty mesh rather than sizing the allocation from the caller's number.
+
+The ceiling SHALL admit the resolution the library's documentation advertises; a guard that turns documented usage into an error is a worse defect than the one it prevents.
+
+#### Scenario: An over-fine voxel size yields an empty mesh
+- **WHEN** `mesh_tape` is called with a voxel size so fine that the region needs more than the ceiling of lattice points
+- **THEN** it returns an empty mesh and does not allocate the lattice
+
+#### Scenario: A non-finite voxel size yields an empty mesh
+- **WHEN** `mesh_tape` is called with a voxel size of zero, a negative, an infinity or a not-a-number
+- **THEN** it returns an empty mesh

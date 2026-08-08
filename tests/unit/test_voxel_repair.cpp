@@ -301,6 +301,23 @@ TEST_CASE("repair: close holes seals perforations and never removes material") {
         untouched.repair_close_holes(0);
         CHECK(untouched.serialize() == before);
     }
+
+    SUBCASE("an absurd pass count is clamped, not allocated") {
+        // Each pass padded the dense working window by one cell per axis, so
+        // the buffer was cubic in the caller's number — and the padded corner
+        // overflowed int before the allocation was even reached. A pass cannot
+        // reach further than the grid's own longest side, so the result must
+        // equal what that many passes already produced.
+        VoxelGrid huge = hollow_box();
+        huge.set({5, 0, 0}, 0);
+        huge.repair_close_holes(1000000);
+
+        VoxelGrid saturated = hollow_box();
+        saturated.set({5, 0, 0}, 0);
+        saturated.repair_close_holes(13);  // the box spans 13 cells
+
+        CHECK(huge.serialize() == saturated.serialize());
+    }
 }
 
 TEST_CASE("repair: fill voids fills the enclosed and spares the open") {

@@ -55,6 +55,71 @@
 - [x] 6.2 `clay_document_mesh` prices the dense grid its resolution implies and
       refuses one above the batch ceiling
 
+## 8. Degenerate kernels
+
+- [x] 8.1 `sd_round_cone` returns the enclosing sphere when one end sphere
+      contains the other, instead of csqrt of a negative radicand — one such
+      item returned NaN, and NaN propagates through every combine op, so it
+      turned the whole document into NaN
+- [x] 8.2 `sd_round_cone_ab` gets the same case, which also covers coincident
+      endpoints; it is the stroke-segment kernel, so a tapered two-point stroke
+      reaches it
+
+## 9. Edits that escaped the vocabulary
+
+- [x] 9.1 `SetLayerMirrorCmd`: mirroring went straight into the layer, so it
+      neither honoured the lock every other layer edit checks nor reached the
+      undo stack. Append-only tag; the document format serializes layers, not
+      commands, so nothing versioned moves.
+- [x] 9.2 `clay_document_move_layer` groups its remove and insert — ungrouped,
+      one undo applied only the remove and the layer vanished
+- [x] 9.3 `mesh_tape` prices its own dense lattice, not only the C ABI above it
+- [x] 9.4 `repair_close_holes` clamps `passes` to the grid's longest side: the
+      window grew cubically in it and the padded corner overflowed int first
+- [x] 9.5 PLY refuses an element it does not read rather than leaving its
+      payload in front of the vertices and returning a silently wrong mesh
+
+## 10. Tests that asserted nothing
+
+- [x] 10.1 The C ABI sculpt-verb parity fixture ran verbs at size 7 inside a
+      size-9 solid stamp, entirely in the interior, so smooth, inflate and
+      pinch changed ZERO cells and the comparison held for any implementation.
+      Verb size raised past the stamp, a spur added for smooth to dissolve, and
+      each verb now has to change the grid.
+- [x] 10.2 Proven by mutation: stubbing `sculpt_smooth` to a no-op fails the
+      test. The parity comparison alone does NOT catch it — both sides call the
+      same engine, so a broken verb stays in agreement with itself.
+- [x] 10.3 `clay_voxel_sculpt_magnify` and `clay_voxel_sculpt_grab` had no test
+      at all; both now have parity coverage and refusal cases
+- [x] 10.4 The "did something" assertion compares the whole grid, not the
+      occupied COUNT — magnify and grab move material without adding any
+
+## 11. Regressions this change introduced, found by review
+
+Every one of these was a guard added above that was too tight. They are listed
+because "the fix broke a working case" is the failure mode a hardening change
+is most prone to, and each now has a test.
+
+- [x] 11.1 `FieldVolume::from_blob` refused any volume above 2^24 samples.
+      Index entries are stored as float, and past 2^24 a float cannot hold
+      consecutive integers, so a large volume reads its own offsets back
+      rounded — the exact bound then fired on the LAST brick and a document
+      this library had written would not reopen. Entries are snapped to their
+      kBrickSamples boundary, which is where they always are.
+- [x] 11.2 `clay_document_mesh` capped the grid at CLAY_MAX_BATCH, which caps
+      `resolution` at about 253 — the docs advertise 512. CLAY_MAX_BATCH bounds
+      how many items cross the boundary in one call, a different quantity. The
+      ceiling is now the mesher's own, set from what the API promises.
+- [x] 11.3 The ascii PLY payload floor was exactly the cost of a
+      newline-terminated line, so a well-formed file whose last line has no
+      trailing newline — which the PLY spec does not require — was refused.
+- [x] 11.4 `load_clayspace_file` gained a 2 GiB ceiling no caller could raise,
+      while `save_clayspace_file` had no matching cap: claycore would write a
+      document it then refused to read. It takes an `ImportBudget` now.
+- [x] 11.5 `load_obj_file` read into a byte vector and then copied it into a
+      string, holding both live — twice the file at peak, for the one loader
+      whose input is text. `read_whole_file` reads into either directly.
+
 ## Found while building
 
 - [x] 7.1 The test reference evaluator built a six-float deformer record where

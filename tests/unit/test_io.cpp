@@ -222,6 +222,80 @@ TEST_CASE("ply: the payload-fit guard covers ascii, not only binary") {
     CHECK(out.positions.capacity() < 1000000);
 }
 
+TEST_CASE("ply: a well-formed ascii file need not end with a newline") {
+    // The ascii payload floor is exactly the cost of a newline-terminated
+    // vertex line, so an exact comparison refuses a file that is one byte
+    // under — and the PLY spec does not require the final line to be
+    // terminated. A guard that rejects well-formed files is worse than the
+    // over-declaration it was added to catch.
+    for (int n : {1, 2, 3}) {
+        std::string body;
+        for (int i = 0; i < n; ++i) {
+            body += std::to_string(i) + " 0 0";
+            if (i + 1 < n) body += "\n";  // deliberately no trailing newline
+        }
+        std::string s = "ply\nformat ascii 1.0\nelement vertex " + std::to_string(n) +
+                        "\nproperty float x\nproperty float y\nproperty float z\n"
+                        "element face 0\nproperty list uchar int vertex_indices\nend_header\n" +
+                        body;
+        mesh::Mesh out;
+        io::IoStatus r = io::load_ply(reinterpret_cast<const std::uint8_t*>(s.data()), s.size(),
+                                      &out, io::ImportBudget{});
+        INFO("vertex count " << n);
+        CHECK(r.ok());
+        CHECK(out.positions.size() == static_cast<std::size_t>(n));
+    }
+}
+
+TEST_CASE("clayspace: the read ceiling is the caller's to raise") {
+    // A document carrying sampled volumes is large by nature and nothing caps
+    // what save_clayspace_file writes, so a fixed reader ceiling would make a
+    // document this library had just written permanently unopenable.
+    io::ClaySpaceDoc cs = sample_clayspace();
+    const std::string path = "clay_budget_probe.clayspace";
+    REQUIRE(io::save_clayspace_file(cs, path).ok());
+
+    io::ImportBudget tiny;
+    tiny.max_file_bytes = 16;
+    io::ClaySpaceDoc back;
+    io::IoStatus refused = io::load_clayspace_file(path, &back, tiny);
+    CHECK_FALSE(refused.ok());
+    CHECK(refused.error == io::IoError::BudgetExceeded);
+
+    CHECK(io::load_clayspace_file(path, &back).ok());  // the default admits it
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("ply: an element this reader does not read is refused, not skipped") {
+    // Only vertex and face are read, but every declared element has a payload
+    // in the stream. One declared before vertex used to leave its bytes in
+    // front of the vertex data, so every vertex was read from the wrong offset
+    // and the mesh came back silently wrong.
+    std::string with_camera =
+        "ply\nformat ascii 1.0\n"
+        "element camera 1\nproperty float view_px\n"
+        "element vertex 1\nproperty float x\nproperty float y\nproperty float z\n"
+        "element face 0\nproperty list uchar int vertex_indices\nend_header\n"
+        "0.5\n1 2 3\n";
+    mesh::Mesh out;
+    io::IoStatus s = io::load_ply(reinterpret_cast<const std::uint8_t*>(with_camera.data()),
+                                  with_camera.size(), &out, io::ImportBudget{});
+    CHECK_FALSE(s.ok());
+    CHECK(s.error == io::IoError::Unsupported);
+
+    // a vertex+face file is still read, and an empty extra element is harmless
+    std::string plain =
+        "ply\nformat ascii 1.0\nelement vertex 3\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "element face 1\nproperty list uchar int vertex_indices\nend_header\n"
+        "0 0 0\n1 0 0\n0 1 0\n3 0 1 2\n";
+    CHECK(io::load_ply(reinterpret_cast<const std::uint8_t*>(plain.data()), plain.size(), &out,
+                       io::ImportBudget{})
+              .ok());
+    CHECK(out.positions.size() == 3);
+    CHECK(out.triangle_count() == 1);
+}
+
 TEST_CASE("loaders refuse a path that is not a regular file") {
     // fopen("rb") succeeds on a directory and glibc then tells LONG_MAX rather
     // than failing, so every *_file loader sized a buffer from it and took the

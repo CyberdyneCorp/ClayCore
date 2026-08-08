@@ -170,6 +170,16 @@ VoxelGrid::RepairReport VoxelGrid::repair_report() const {
 
 void VoxelGrid::repair_close_holes(int passes, const MaskField* mask) {
     if (passes < 1) return;
+    // Each pass grows the window by one cell on every axis, so the working
+    // buffer is cubic in `passes` — and the padded corner overflows int before
+    // the allocation is even attempted. A pass cannot usefully reach further
+    // than the grid's own longest side: past that every empty cell inside the
+    // window has already been decided. Clamping there bounds both.
+    std::optional<VoxelCoord> lo = bounds_min(), hi = bounds_max();
+    if (!lo || !hi) return;
+    const int span = std::max({hi->x - lo->x, hi->y - lo->y, hi->z - lo->z}) + 1;
+    passes = std::min(passes, span);
+
     Window w;
     if (!build_window(*this, passes + 1, &w)) return;
 

@@ -38,3 +38,27 @@ A function taking a caller-supplied count and a pointer SHALL check both against
 #### Scenario: A sane resolution still meshes
 - **WHEN** `clay_document_mesh` is asked for an ordinary resolution
 - **THEN** it meshes as before
+
+#### Scenario: The documented resolution is not refused
+- **WHEN** `clay_document_mesh` is asked for the resolution the library's own documentation advertises
+- **THEN** it meshes
+
+The ceiling SHALL be the mesher's own limit rather than the batch limit: the batch limit bounds how many items cross the boundary in one call, which is a different quantity and far below what this call legitimately needs.
+
+### Requirement: Mirroring a layer is an ordinary layer edit
+`clay_set_layer_mirror` SHALL apply through the command vocabulary, so that it refuses a protected layer as every other layer edit does and is recorded on the undo stack.
+
+#### Scenario: A locked layer refuses a mirror
+- **WHEN** `clay_set_layer_mirror` names a locked layer
+- **THEN** it returns `CLAY_ERROR_INVALID_ARGUMENT` and the layer is unchanged
+
+#### Scenario: A mirror can be undone
+- **WHEN** a mirror is set with undo enabled and then undone
+- **THEN** the layer returns to its previous mirror state
+
+### Requirement: Moving a layer is one undo step
+`clay_document_move_layer` SHALL group the removal and reinsertion it performs, so that a single undo restores the previous order with every layer still present.
+
+#### Scenario: One undo restores the order
+- **WHEN** a layer is moved with undo enabled and undone once
+- **THEN** the document has the same layers it had before the move, in the same order

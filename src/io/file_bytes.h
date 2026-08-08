@@ -29,6 +29,12 @@ namespace detail {
 IoStatus read_whole_file(const std::string& path, std::vector<std::uint8_t>* bytes,
                          std::size_t max_bytes = ImportBudget{}.max_file_bytes);
 
+// Same, into a string. A text loader consumes one, and going through the byte
+// vector would hold both buffers live at once — twice the file's size at peak,
+// for the only loaders whose input is text.
+IoStatus read_whole_file(const std::string& path, std::string* text,
+                         std::size_t max_bytes = ImportBudget{}.max_file_bytes);
+
 IoStatus write_whole_file(const std::string& path, const void* data, std::size_t size);
 
 inline IoStatus write_whole_file(const std::string& path,

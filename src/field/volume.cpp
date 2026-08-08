@@ -420,11 +420,23 @@ std::optional<FieldVolume> FieldVolume::from_blob(const std::vector<float>& blob
     const std::size_t data_size = blob.size() - data_off;
     v.index_.reserve(index_size);
     for (std::size_t i = 0; i < index_size; ++i) {
-        const std::int32_t e = static_cast<std::int32_t>(blob[index_off + i]);
-        if (e != kBrickEmpty &&
-            (e < 0 || static_cast<std::size_t>(e) + kBrickSamples > data_size))
-            return std::nullopt;
-        v.index_.push_back(e);
+        const float raw = blob[index_off + i];
+        if (raw < 0.0f) {
+            // kBrickEmpty is the one negative value that is legal.
+            if (static_cast<std::int32_t>(raw) != kBrickEmpty) return std::nullopt;
+            v.index_.push_back(kBrickEmpty);
+            continue;
+        }
+        // Entries are offsets into the sample data, and every stored brick
+        // starts on a kBrickSamples boundary. Past 2^24 a float can no longer
+        // hold consecutive integers, so a large volume reads its own offsets
+        // back rounded — recovering the boundary is what makes the bound below
+        // exact rather than off by the float's spacing.
+        const std::int64_t units =
+            static_cast<std::int64_t>(std::llround(raw / static_cast<double>(kBrickSamples)));
+        const std::int64_t e = units * kBrickSamples;
+        if (e < 0 || static_cast<std::size_t>(e) + kBrickSamples > data_size) return std::nullopt;
+        v.index_.push_back(static_cast<std::int32_t>(e));
     }
     v.far_.assign(blob.begin() + static_cast<std::ptrdiff_t>(far_off),
                   blob.begin() + static_cast<std::ptrdiff_t>(far_off + index_size));

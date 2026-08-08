@@ -409,6 +409,40 @@ TEST_CASE("volume: the blob round trips") {
         // bounds check must not reject an ordinary sparse volume.
         CHECK(FieldVolume::from_blob(flat).has_value());
     }
+
+    SUBCASE("an entry off by less than a brick is snapped, not refused") {
+        // Index entries are stored as float. Past 2^24 a float cannot hold
+        // consecutive integers, so a large volume reads its own offsets back
+        // rounded — and a bounds check written as an exact comparison then
+        // refuses the LAST brick of any volume big enough to matter, which
+        // means a document this library wrote will not reopen.
+        //
+        // Every stored brick starts on a kBrickSamples boundary, so the reader
+        // snaps to that boundary. Perturbing an entry by a fraction of a brick
+        // stands in for the float's own rounding at scale.
+        const std::size_t index_off = static_cast<std::size_t>(flat[8]);
+        const std::size_t index_size = static_cast<std::size_t>(flat[5]) *
+                                       static_cast<std::size_t>(flat[6]) *
+                                       static_cast<std::size_t>(flat[7]);
+        for (float nudge : {1.0f, -1.0f, 4.0f}) {
+            std::vector<float> jittered = flat;
+            for (std::size_t i = 0; i < index_size; ++i)
+                if (jittered[index_off + i] > 0.0f) jittered[index_off + i] += nudge;
+            auto v2 = FieldVolume::from_blob(jittered);
+            REQUIRE(v2.has_value());
+            // and it reads the same field, i.e. it snapped to the true offset
+            for (float x = -1.1f; x <= 1.1f; x += 0.31f)
+                CHECK(v2->eval(cf3(x, 0.1f, 0.2f)) ==
+                      doctest::Approx(v.eval(cf3(x, 0.1f, 0.2f))));
+        }
+    }
+
+    SUBCASE("the last brick, which ends exactly at the end of the data, is accepted") {
+        // The boundary case the exact comparison got wrong.
+        auto v2 = FieldVolume::from_blob(flat);
+        REQUIRE(v2.has_value());
+        CHECK(v2->brick_count() == v.brick_count());
+    }
 }
 
 TEST_CASE("volume: serializes and survives a save") {

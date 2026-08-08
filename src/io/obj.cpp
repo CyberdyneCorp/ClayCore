@@ -159,10 +159,10 @@ IoStatus save_obj_file(const mesh::Mesh& m, const std::string& path, bool with_m
 }
 
 IoStatus load_obj_file(const std::string& path, mesh::Mesh* out, const ImportBudget& budget) {
-    std::vector<std::uint8_t> bytes;
-    IoStatus s = detail::read_whole_file(path, &bytes, budget.max_file_bytes);
+    std::string text;
+    IoStatus s = detail::read_whole_file(path, &text, budget.max_file_bytes);
     if (!s.ok()) return s;
-    return load_obj(std::string(bytes.begin(), bytes.end()), out, budget);
+    return load_obj(text, out, budget);
 }
 
 MeshBufferView buffer_view(const mesh::Mesh& m) {

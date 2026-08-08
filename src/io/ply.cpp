@@ -170,6 +170,7 @@ IoStatus load_ply(const std::uint8_t* data, std::size_t size, mesh::Mesh* out,
     std::size_t vertex_count = 0, face_count = 0;
     std::vector<PlyProperty> vprops;
     std::string current;
+    std::string unsupported_element;
     while (std::getline(header, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         std::istringstream ls(line);
@@ -188,7 +189,12 @@ IoStatus load_ply(const std::uint8_t* data, std::size_t size, mesh::Mesh* out,
             ls >> name >> count;
             current = name;
             if (name == "vertex") vertex_count = count;
-            if (name == "face") face_count = count;
+            else if (name == "face") face_count = count;
+            // Only vertex and face are read, but EVERY declared element has a
+            // payload in the stream. One this reader skips is not skipped in
+            // the bytes: the vertex data would be read from the wrong offset
+            // and the mesh would come out silently wrong. Refuse instead.
+            else if (count > 0) unsupported_element = name;
         } else if (tok == "property" && current == "vertex") {
             PlyProperty p;
             std::string t;
@@ -203,6 +209,10 @@ IoStatus load_ply(const std::uint8_t* data, std::size_t size, mesh::Mesh* out,
             vprops.push_back(p);
         }
     }
+    if (!unsupported_element.empty())
+        return IoStatus::fail(IoError::Unsupported,
+                              "ply element '" + unsupported_element +
+                                  "' is not read, and its payload would displace the vertices");
     if (vertex_count > budget.max_vertices)
         return IoStatus::fail(IoError::BudgetExceeded, "vertex budget");
     if (face_count > budget.max_triangles)
@@ -223,8 +233,14 @@ IoStatus load_ply(const std::uint8_t* data, std::size_t size, mesh::Mesh* out,
     // Each vertex costs vstride bytes when binary; in ascii it still costs at
     // least one byte of digit plus one separator per property, so both forms
     // have a floor the declared count has to fit under.
+    //
+    // The ascii floor is exactly tight (n digits + n-1 spaces + 1 newline), so
+    // it is relaxed by one byte: the PLY spec does not require the final line
+    // to be newline-terminated, and an otherwise well-formed file that ends
+    // without one would be refused by an exact comparison.
     const std::size_t per_vertex = binary ? vstride : 2 * vprops.size();
-    if (vertex_count > (size - header_end) / (per_vertex ? per_vertex : 1))
+    const std::size_t available = size - header_end + (binary ? 0 : 1);
+    if (per_vertex > 0 && vertex_count > available / per_vertex)
         return IoStatus::fail(IoError::Malformed, "declared counts exceed payload");
     if (binary && header_end + vertex_count * vstride + face_count > size)
         return IoStatus::fail(IoError::Malformed, "declared counts exceed payload");

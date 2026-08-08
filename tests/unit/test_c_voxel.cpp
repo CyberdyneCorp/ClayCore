@@ -177,8 +177,12 @@ TEST_CASE("a falloff brush dithers onto the same cells through both bindings") {
 TEST_CASE("the sculpting verbs reshape what the engine reshapes") {
     clay_brush_params stamp =
         brush(9, CLAY_BRUSH_SHAPE_SPHERE, CLAY_BRUSH_FALLOFF_CONSTANT, 1.0f, 0);
+    // The verb footprint has to REACH THE SURFACE. At size 7 inside a size-9
+    // solid stamp it sat entirely in the interior, where a majority filter and
+    // a dilation both have nothing to do: smooth, inflate and pinch changed
+    // zero cells and the parity comparison below held for any implementation.
     clay_brush_params verb =
-        brush(7, CLAY_BRUSH_SHAPE_SPHERE, CLAY_BRUSH_FALLOFF_CONSTANT, 1.0f, 0);
+        brush(11, CLAY_BRUSH_SHAPE_SPHERE, CLAY_BRUSH_FALLOFF_CONSTANT, 1.0f, 0);
     const float normal[3] = {0.0f, 1.0f, 0.0f};
 
     CGrid c(0.1f);
@@ -189,6 +193,13 @@ TEST_CASE("the sculpting verbs reshape what the engine reshapes") {
     std::uint8_t ref_index = ref.palette_add(kernel::cf3(0.8f, 0.4f, 0.2f));
     REQUIRE(clay_voxel_set_brush(c.grid, kOrigin, &stamp, index) == CLAY_OK);
     ref.set_brush({0, 0, 0}, ref_brush(stamp), ref_index);
+    // A spur for smooth to dissolve, so the majority filter has a decision to
+    // make rather than a uniform interior to agree with.
+    const std::int32_t spur[3] = {6, 0, 0};
+    REQUIRE(clay_voxel_set(c.grid, spur, index) == CLAY_OK);
+    ref.set({6, 0, 0}, ref_index);
+
+    const std::vector<std::uint8_t> before = ref.serialize();
 
     SUBCASE("smooth") {
         REQUIRE(clay_voxel_sculpt_smooth(c.grid, kOrigin, &verb) == CLAY_OK);
@@ -209,6 +220,59 @@ TEST_CASE("the sculpting verbs reshape what the engine reshapes") {
     SUBCASE("pinch") {
         REQUIRE(clay_voxel_sculpt_pinch(c.grid, kOrigin, &verb) == CLAY_OK);
         ref.sculpt_pinch({0, 0, 0}, ref_brush(verb));
+    }
+    // Every verb must have DONE something, or the parity check below is
+    // comparing two untouched grids and would pass whatever the verb does.
+    // Compared on the whole grid rather than the occupied COUNT: a verb that
+    // moves material without adding any (magnify, grab) leaves the count alone.
+    CHECK(ref.serialize() != before);
+    check_same_grid(c.grid, ref);
+}
+
+TEST_CASE("magnify and grab cross the ABI like the other verbs") {
+    // These two were the only ABI sculpt verbs with no test at all: magnify is
+    // pinch's inverse and shares its walk, and grab drives the same map the SDF
+    // grab deformer uses, so a drift in either is invisible without parity.
+    clay_brush_params stamp =
+        brush(9, CLAY_BRUSH_SHAPE_SPHERE, CLAY_BRUSH_FALLOFF_CONSTANT, 1.0f, 0);
+    clay_brush_params verb =
+        brush(11, CLAY_BRUSH_SHAPE_SPHERE, CLAY_BRUSH_FALLOFF_CONSTANT, 1.0f, 0);
+
+    CGrid c(0.1f);
+    voxel::VoxelGrid ref(0.1f);
+    const float clay_color[3] = {0.8f, 0.4f, 0.2f};
+    std::int32_t index = 0;
+    REQUIRE(clay_voxel_palette_add(c.grid, clay_color, &index) == CLAY_OK);
+    std::uint8_t ref_index = ref.palette_add(kernel::cf3(0.8f, 0.4f, 0.2f));
+    REQUIRE(clay_voxel_set_brush(c.grid, kOrigin, &stamp, index) == CLAY_OK);
+    ref.set_brush({0, 0, 0}, ref_brush(stamp), ref_index);
+    const std::vector<std::uint8_t> before = ref.serialize();
+
+    SUBCASE("magnify pushes the surface out") {
+        REQUIRE(clay_voxel_sculpt_magnify(c.grid, kOrigin, &verb) == CLAY_OK);
+        ref.sculpt_magnify({0, 0, 0}, ref_brush(verb));
+        CHECK(ref.serialize() != before);
+    }
+    SUBCASE("grab translates occupancy") {
+        const float displacement[3] = {0.25f, 0.0f, 0.0f};
+        REQUIRE(clay_voxel_sculpt_grab(c.grid, kOrigin, &verb, displacement, 0) == CLAY_OK);
+        ref.sculpt_grab({0, 0, 0}, ref_brush(verb), kernel::cf3(0.25f, 0, 0), false);
+        CHECK(ref.serialize() != before);
+    }
+    SUBCASE("grab front_only is not the same edit") {
+        const float displacement[3] = {0.25f, 0.0f, 0.0f};
+        REQUIRE(clay_voxel_sculpt_grab(c.grid, kOrigin, &verb, displacement, 1) == CLAY_OK);
+        ref.sculpt_grab({0, 0, 0}, ref_brush(verb), kernel::cf3(0.25f, 0, 0), true);
+    }
+    SUBCASE("refusals") {
+        const float displacement[3] = {0.25f, 0.0f, 0.0f};
+        CHECK(clay_voxel_sculpt_magnify(nullptr, kOrigin, &verb) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_voxel_sculpt_magnify(c.grid, kOrigin, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_voxel_sculpt_grab(nullptr, kOrigin, &verb, displacement, 0) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_voxel_sculpt_grab(c.grid, kOrigin, &verb, nullptr, 0) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+        return;  // the refusals changed nothing, so there is nothing to compare
     }
     check_same_grid(c.grid, ref);
 }

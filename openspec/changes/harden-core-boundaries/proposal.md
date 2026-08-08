@@ -43,6 +43,28 @@ whatever sat past the array. GCC had been reporting this; the project's
 `-Wno-error=array-bounds` demotion, added for a libstdc++ false positive, was
 hiding a real one alongside it.
 
+## The failure mode this change is most prone to
+
+A guard that is too tight is worse than the hole it closes: the hole needs a
+malformed file to reach, the guard refuses a real one. Five of the guards added
+here were too tight, and every one was caught by reviewing the change rather
+than by the tests, because the tests only knew about the malformed cases.
+
+The worst of them bounded a sampled volume's brick index against its sample
+data with an exact comparison. Index entries are stored as `float`, and past
+2^24 a float can no longer hold consecutive integers, so a large volume reads
+its own offsets back rounded — the bound then fired on the last brick and a
+document this library had just written would not reopen. Another capped the
+meshing grid at the C ABI's batch limit, which is a bound on how many items
+cross the boundary in one call and caps `resolution` at about 253; the
+documentation's headline example asks for 512.
+
+Both are recorded in `tasks.md` under section 11, with the tests that now hold
+them, because the lesson is not about those two lines. A hardening change is
+measured by what it still lets through, and every bound added here is derived
+from the format's own guarantees or the API's own documented promises rather
+than from a number that looked large enough.
+
 ## What it is not
 
 Not a new validation layer, and not a budget system. The refusals reuse the

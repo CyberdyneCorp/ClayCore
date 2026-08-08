@@ -1,5 +1,7 @@
 #include "clay/mesh/marching.h"
 
+#include <cmath>
+
 #include <unordered_map>
 
 #include "clay/eval/backend.h"
@@ -175,6 +177,16 @@ Mesh mesh_lattice(const std::function<float(int, int, int)>& sample, int cell_mi
 Mesh mesh_tape(const scene::Tape& tape, const math::Aabb& region, float voxel_size,
                const MeshingOptions& options) {
     if (region.empty() || region.is_infinite()) return {};
+    // The lattice below is sized from voxel_size, so it is the caller's number
+    // that decides the allocation. Priced in double before anything is cast to
+    // int: a size fine enough to overflow the int conversion is undefined, and
+    // one merely enormous ends the process in the allocator.
+    if (!(voxel_size > 0.0f) || !std::isfinite(voxel_size)) return {};
+    const double dx = static_cast<double>(region.max.x - region.min.x) / voxel_size + 2.0;
+    const double dy = static_cast<double>(region.max.y - region.min.y) / voxel_size + 2.0;
+    const double dz = static_cast<double>(region.max.z - region.min.z) / voxel_size + 2.0;
+    if (!(dx * dy * dz <= static_cast<double>(kMaxGridSamples))) return {};
+
     int nx = static_cast<int>(kernel::cround((region.max.x - region.min.x) / voxel_size)) + 1;
     int ny = static_cast<int>(kernel::cround((region.max.y - region.min.y) / voxel_size)) + 1;
     int nz = static_cast<int>(kernel::cround((region.max.z - region.min.z) / voxel_size)) + 1;

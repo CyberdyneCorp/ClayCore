@@ -34,9 +34,23 @@ struct MeshingOptions {
 Mesh mesh_lattice(const std::function<float(int, int, int)>& sample, int cell_min[3],
                   int cell_max[3], kernel::cfloat3 origin, float spacing);
 
+// Ceiling on the dense sample grid a single mesh_tape call will allocate.
+// The grid is sized from the caller's voxel size, so without a ceiling an
+// over-fine size ends the process in the allocator rather than returning —
+// the library builds without exceptions.
+//
+// Set from what the API PROMISES, not from what is comfortable: the documented
+// headline call meshes at resolution 512, which is 514^3 = 136M lattice points
+// over a cubic region. The ceiling has to clear that, so it is 2^28 (268M
+// samples, about 1 GB of float) — a guard against a runaway request, not a
+// working budget.
+inline constexpr std::size_t kMaxGridSamples = 1u << 28;
+
 // Mesh a tape over a world region at the given voxel size (dense evaluation
 // through the CPU reference; backends provide accelerated variants via
-// Backend::mesh).
+// Backend::mesh). Returns an empty mesh for an empty or infinite region, for a
+// voxel size that is not finite and positive, and for one so fine that the
+// region needs more than kMaxGridSamples lattice points.
 Mesh mesh_tape(const scene::Tape& tape, const math::Aabb& region, float voxel_size,
                const MeshingOptions& options = {});
 
