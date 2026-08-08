@@ -33,6 +33,7 @@ add_library(claycore
   src/field/volume.cpp
   src/field/relax.cpp
   src/field/flatten.cpp
+  src/field/move_topological.cpp
   src/scene/commands.cpp
   src/scene/tape_build.cpp
   src/brick/cache.cpp

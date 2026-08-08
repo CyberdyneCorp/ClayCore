@@ -21,6 +21,7 @@
 
 #include "clay/io/mesh_io.h"
 #include "clay/field/flatten.h"
+#include "clay/field/move_topological.h"
 #include "clay/field/relax.h"
 #include "clay/mesh/to_field.h"
 #include "clay/mesh/decimate.h"
@@ -315,6 +316,8 @@ constexpr std::size_t kBrushParamsOriginal =
     offsetof(clay_brush_params, seed) + sizeof(std::uint32_t);
 constexpr std::size_t kVolumeParamsOriginal = offsetof(clay_volume_params, beta) + sizeof(float);
 constexpr std::size_t kRelaxParamsOriginal = offsetof(clay_relax_params, falloff) + sizeof(float);
+constexpr std::size_t kTopologicalMoveParamsOriginal =
+    offsetof(clay_topological_move_params, ease) + sizeof(std::int32_t);
 constexpr std::size_t kFlattenParamsOriginal =
     offsetof(clay_flatten_params, falloff) + sizeof(float);
 constexpr std::size_t kMoveParamsOriginal =
@@ -2248,6 +2251,29 @@ clay_result clay_item_volume_relax(clay_item* item, const clay_relax_params* par
 
     item->node.volume =
         std::make_shared<field::FieldVolume>(field::relax(*item->node.volume, settings));
+    return CLAY_OK;
+}
+
+clay_result clay_item_volume_move_topological(clay_item* item,
+                                             const clay_topological_move_params* params) {
+    if (!item || !params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    clay_topological_move_params p;
+    clay_result r = read_desc(params, kTopologicalMoveParamsOriginal, &p);
+    if (r != CLAY_OK) return r;
+    if (!(p.radius > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "radius must be > 0");
+    if ((r = check_ease(p.ease)) != CLAY_OK) return r;
+    if (item->node.prim.type != scene::PrimType::Volume || !item->node.volume)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this item carries no volume to move");
+
+    field::TopologicalMoveSettings settings;
+    settings.anchor = kernel::cf3(p.anchor[0], p.anchor[1], p.anchor[2]);
+    settings.radius = p.radius;
+    settings.displacement =
+        kernel::cf3(p.displacement[0], p.displacement[1], p.displacement[2]);
+    settings.ease = static_cast<std::uint8_t>(p.ease);
+
+    item->node.volume = std::make_shared<field::FieldVolume>(
+        field::move_topological(*item->node.volume, settings));
     return CLAY_OK;
 }
 

@@ -32,6 +32,7 @@
 #include "clay/brush/stroke.h"
 #include "clay/cut/cut.h"
 #include "clay/field/flatten.h"
+#include "clay/field/move_topological.h"
 #include "clay/field/relax.h"
 #include "clay/field/volume.h"
 #include "clay/voxel/mask.h"
@@ -1659,6 +1660,63 @@ NB_MODULE(pyclay, m) {
             "`region_radius` of 0 relaxes everywhere, which is a filter; give it\n"
             "a centre and a radius and it is a brush. The falloff is widened if\n"
             "it is too narrow to hide the seam the kernel makes.")
+        .def_static(
+            "moved_topologically_from",
+            [](nb::handle source, nb::handle anchor, nb::handle displacement, float radius,
+               int ease, float cell, nb::handle band, nb::handle bounds, nb::handle position,
+               nb::handle rotation_axis_angle, float scale) {
+                if (!(cell > 0.0f)) throw std::invalid_argument("cell must be > 0");
+                if (!(radius > 0.0f)) throw std::invalid_argument("radius must be > 0");
+                field::TopologicalMoveSettings settings;
+                settings.anchor = to_f3(anchor, "anchor");
+                settings.displacement = to_f3(displacement, "displacement");
+                settings.radius = radius;
+                settings.ease = static_cast<std::uint8_t>(ease);
+
+                const scene::Document& src = nb::cast<PyDocument&>(source).doc->document;
+                scene::Tape tape = scene::compile_document(src);
+                if (tape.empty())
+                    throw std::invalid_argument("cannot move an empty document");
+                const float width = band.is_none() ? cell * 3.0f : nb::cast<float>(band);
+
+                math::Aabb where;
+                if (bounds.is_none()) {
+                    where = tape.bounds;
+                    if (where.empty())
+                        throw std::invalid_argument("the document has no bounds; pass bounds=");
+                    const float pad = width + radius + kernel::clength(settings.displacement);
+                    kernel::cfloat3 p3 = kernel::cf3(pad, pad, pad);
+                    where = math::Aabb(where.min - p3, where.max + p3);
+                } else {
+                    where = to_aabb(bounds);
+                }
+
+                PyVolume out;
+                out.prim = scene::Prim::volume();
+                {
+                    nb::gil_scoped_release release;
+                    out.volume = std::make_shared<const field::FieldVolume>(
+                        field::move_topological(
+                            [&tape](kernel::cfloat3 p) { return tape.eval(p).d; }, where, cell,
+                            width, settings));
+                }
+                place(out, position, rotation_axis_angle, scale);
+                return out;
+            },
+            "document"_a, "anchor"_a, "displacement"_a, "radius"_a = 0.3f, "ease"_a = 0,
+            "cell"_a = 0.02f, "band"_a = nb::none(), "bounds"_a = nb::none(),
+            CLAY_PLACE_ARGS,
+            "ZBrush's Move Topological: a drag whose falloff is weighted by\n"
+            "distance ALONG THE MATERIAL rather than through space.\n\n"
+            "`radius` is therefore a distance of travel across the surface, not a\n"
+            "straight line — so it cannot step over a gap however narrow. On two\n"
+            "fingers 0.32 apart joined only through a palm, a Euclidean drag at\n"
+            "radius 0.5 pulls the neighbour; this does not, because along the\n"
+            "material the neighbour is about 1.5 away.\n\n"
+            "It BAKES, for the reason relax and flatten do: the weight is a solved\n"
+            "grid rather than a closed form. Reach for `Layer.move_surface` when\n"
+            "the form has no parts close in space and far along the surface — it\n"
+            "is cheaper, and it does not bake.")
         .def_static(
             "flattened_from",
             [](nb::handle source, nb::handle plane_point, nb::handle plane_normal, float cell,

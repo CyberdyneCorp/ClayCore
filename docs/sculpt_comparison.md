@@ -76,6 +76,8 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 | Crease, DamStandard | `Op::Incise` | ✅ |
 | Inflate | `Op::Relief`, `sculpt_inflate` | ✅ |
 | Move | `brush::move_brush` | 🟡 drags the assembled surface, but **buds rather than stretches** on a large pull, and a stroke's drags compound the step scale — see below |
+| Move Topological | `field::move_topological` | ✅ geodesic falloff; bakes, so single-gesture |
+| Trim Curve | `CutShape::from_open_curve` | ✅ (listed above) |
 | Rotate | `pose`, `pose_line` | ✅ |
 | Pinch / Magnify | `magnify` (signed), `sculpt_pinch` / `sculpt_magnify` | ✅ one deformation, one sign |
 | Smooth | `field::relax`, `sculpt_smooth` | ✅ bakes on the SDF side |

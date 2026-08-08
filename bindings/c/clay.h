@@ -793,6 +793,33 @@ typedef struct clay_flatten_params {
  * rather than ignored. */
 clay_result clay_item_volume_flatten(clay_item* item, const clay_flatten_params* params);
 
+typedef struct clay_topological_move_params {
+    uint32_t struct_size;  /* = sizeof(clay_topological_move_params); required */
+    float anchor[3];       /* a point on or near the surface — what a pick gives */
+    float radius;          /* the reach, measured ALONG THE MATERIAL; > 0 */
+    float displacement[3]; /* how far to drag, in world units */
+    int32_t ease;          /* falloff curve index */
+} clay_topological_move_params;
+
+/* ZBrush's Move Topological: a drag whose falloff is weighted by distance along
+ * the MATERIAL rather than through space, so a part close in space but far along
+ * the surface is not dragged with it.
+ *
+ * `radius` is therefore a distance of travel across the surface, not a straight
+ * line, and cannot step over a gap however narrow. Measured on two fingers 0.32
+ * apart joined only through a palm: a Euclidean drag at radius 0.5 pulls the far
+ * one, this does not, and raising the radius past the path through the palm
+ * brings it into reach — which is what makes the weight a distance and not a
+ * mask.
+ *
+ * The item must carry a volume; anything else is refused rather than ignored.
+ * It re-samples that volume with the move applied, and declares the Lipschitz
+ * the result measured. clay_layer_move_surface is the cheaper Euclidean move and
+ * does not bake — prefer it unless the form has parts close in space and far
+ * along the surface. */
+clay_result clay_item_volume_move_topological(clay_item* item,
+                                              const clay_topological_move_params* params);
+
 /* -- voxel grids ----------------------------------------------------------- */
 
 /* Palette-indexed colored voxels on an integer lattice: cell (x, y, z) covers

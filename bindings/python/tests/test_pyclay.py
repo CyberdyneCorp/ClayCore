@@ -594,6 +594,107 @@ def test_trim_curve_refuses_a_stroke_that_is_not_one():
         clay.CutShape.trim(_TRIM_STROKE, side="sideways", extent=(3.0, 3.0, 0.0))
 
 
+def _two_fingers():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.40, position=(0, -0.38, 0)))
+    for x in (-0.26, 0.26):
+        layer.add(clay.Stroke(points=np.array([[x, -0.15, 0, 0.12],
+                                               [x, 0.58, 0, 0.10]], np.float32)),
+                  blend=clay.Smooth(0.03))
+    return doc, layer
+
+
+def _spans(doc, y=0.45):
+    xs = np.arange(-1.2, 1.2, 0.002, dtype=np.float32)
+    pts = np.stack([xs, np.full_like(xs, y), np.zeros_like(xs)], axis=1)
+    inside = np.nonzero(doc.eval(pts) <= 0)[0]
+    if not len(inside):
+        return []
+    out, start = [], inside[0]
+    for a, b in zip(inside, inside[1:]):
+        if b != a + 1:
+            out.append((float(xs[start]), float(xs[a])))
+            start = b
+    out.append((float(xs[start]), float(xs[inside[-1]])))
+    return out
+
+
+def _topological(source, radius, displacement=(-0.25, 0, 0), cell=0.015):
+    vol = clay.Volume.moved_topologically_from(
+        source, anchor=(-0.26, 0.45, 0), displacement=displacement, radius=radius, cell=cell)
+    doc = clay.Document()
+    doc.add_sdf_layer("t").add(vol)
+    return doc, vol
+
+
+def test_move_topological_leaves_the_neighbour_alone():
+    """The whole brush: two fingers close in space, far along the material."""
+    base, _ = _two_fingers()
+    before = _spans(base)
+    assert len(before) == 2
+
+    euclid, layer = _two_fingers()
+    layer.move_surface((-0.26, 0.45, 0), (-0.25, 0, 0), radius=0.50)
+    after_e = _spans(euclid)
+
+    topo, _ = _topological(base, 0.50)
+    after_t = _spans(topo)
+    assert len(after_t) == 2, after_t
+
+    # Euclidean drags the far finger; topological does not.
+    assert abs(after_e[1][0] - before[1][0]) > 0.05
+    assert after_t[1] == pytest.approx(before[1], abs=0.01)
+    # ...and the grabbed finger moves, keeping its width: it translates.
+    assert after_t[0][0] < before[0][0] - 0.1
+    assert (after_t[0][1] - after_t[0][0]) == pytest.approx(before[0][1] - before[0][0],
+                                                            abs=0.05)
+
+
+def test_move_topological_radius_runs_along_the_material():
+    """A distance, not a mask: raise it past the path through the palm and the
+    far finger comes into reach."""
+    base, _ = _two_fingers()
+    before = _spans(base)
+    near = _spans(_topological(base, 0.5, cell=0.02)[0])
+    far = _spans(_topological(base, 2.2, cell=0.02)[0])
+    assert near[-1][0] == pytest.approx(before[1][0], abs=0.01)
+    assert far[-1][0] < before[1][0] - 0.02
+
+
+def test_move_topological_that_reaches_nothing_changes_nothing():
+    base, _ = _two_fingers()
+    rng = np.random.default_rng(4)
+    probes = rng.uniform(-0.9, 0.9, size=(2000, 3)).astype(np.float32)
+    # Explicit, identical BOUNDS for both: the default padding grows with the
+    # displacement, so two calls with different drags cover different regions
+    # and comparing them would measure the padding rather than the move.
+    box = ((-1.1, -1.0, -0.6), (1.1, 1.1, 0.6))
+    away = clay.Volume.moved_topologically_from(base, anchor=(0, 5.0, 0),
+                                                displacement=(0.2, 0, 0), radius=0.4,
+                                                cell=0.02, bounds=box)
+    still = clay.Volume.moved_topologically_from(base, anchor=(-0.26, 0.45, 0),
+                                                 displacement=(0, 0, 0), radius=0.4,
+                                                 cell=0.02, bounds=box)
+    plain = clay.Volume.from_document(base, cell=0.02, bounds=box)
+    # Compared only NEAR THE SURFACE: a narrow-band volume reports a clamped
+    # bound further out, so probes in open space would measure the band.
+    near = np.abs(plain.eval(probes)) < 0.05
+    assert near.sum() > 50
+    assert np.allclose(away.eval(probes)[near], plain.eval(probes)[near], atol=1e-5)
+    assert np.allclose(still.eval(probes)[near], plain.eval(probes)[near], atol=1e-5)
+
+
+def test_move_topological_refuses_what_is_not_a_move():
+    base, _ = _two_fingers()
+    with pytest.raises(ValueError, match="radius must be > 0"):
+        clay.Volume.moved_topologically_from(base, anchor=(0, 0, 0),
+                                             displacement=(0.1, 0, 0), radius=0.0)
+    with pytest.raises(ValueError, match="cell must be > 0"):
+        clay.Volume.moved_topologically_from(base, anchor=(0, 0, 0),
+                                             displacement=(0.1, 0, 0), radius=0.3, cell=0.0)
+
+
 def test_voxel_grid_edits_and_queries():
     g = clay.VoxelGrid(voxel_size=0.5)
     red = g.palette_add("#ff0000")

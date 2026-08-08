@@ -211,6 +211,7 @@ parameters.
 | Operation | What it does | Key parameters |
 |---|---|---|
 | `field::relax` | Smooth the field — the ZBrush Smooth brush. Averages over a cell neighbourhood | strength, `radius_cells`, iterations, centre, `region_radius`, falloff |
+| `field::move_topological` | ZBrush's Move Topological: a drag weighted by distance ALONG THE MATERIAL, so a part close in space but far along the surface is not dragged | anchor, geodesic radius, displacement, ease |
 | `field::flatten` | Pull the surface onto a plane. `mode` picks which side it acts on: two-sided (ZBrush Flatten), cut-only (hPolish, Planar, Trim) or fill-only | plane point + normal, strength, centre, `region_radius`, falloff, `mode` |
 
 Both take a region with a falloff. A `region_radius` of zero means:
@@ -381,6 +382,7 @@ parity — the mechanism usually differs even where the result matches.
 | ClayBuildup | `Op::Relief` along a stroke | Buildup accumulation scales each stamp's amplitude, so overlapping stamps deposit twice |
 | Crease, DamStandard | `Op::Incise` | The same op, cutting in — a thin region gives the line |
 | Inflate | `Op::Relief`, `sculpt_inflate` | Moving the surface along its own normal *is* relief; the voxel verb dilates and erodes by cells |
+| Move Topological | `field::move_topological` | Geodesic falloff — the radius is travel across the surface, so it cannot step over a gap. Bakes |
 | Move | `brush::move_brush` | Drags the assembled surface. Nudges form rather than growing it: a large pull buds rather than stretches, and a stroke's drags compound the step scale — use `snakehook` to pull a lobe out |
 | Rotate | `pose` / `pose_line` | Radial, or ramped along a line |
 | Pinch | `magnify` (negative), `sculpt_pinch` | One signed strength, not two verbs |
