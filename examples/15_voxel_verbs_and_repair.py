@@ -102,6 +102,51 @@ def main():
                     caption="pocket before/after, then a shallow dent before/after "
                             "(left alone on purpose)")
 
+    # --- the gesture that actually produces cavities -------------------------
+    # Issue #18: a host shipped this verb as a brush and it "correctly did
+    # nothing for every gesture a user is likely to make". The pits above are
+    # the shape every test builds, and they are also why the verb looks
+    # unreachable: nobody draws a 1-cell pit on purpose.
+    #
+    # The gesture that does produce them is the ordinary one. Occupancy is
+    # binary, so any strength or falloff below 1 is DITHERED against a hash of
+    # the cell coordinate — a soft stamp lays down a pepper of single-cell
+    # holes THROUGH the material it deposits, and each one is a cavity by the
+    # four-neighbour rule. A dragged soft stroke is therefore a cavity factory,
+    # and the artist never sees the holes because greedy meshing renders six
+    # faces around every one of them.
+    soft = clay.VoxelGrid(voxel_size=VOXEL_SIZE)
+    clay_c = soft.palette_add("#9aa4b0")
+    for i in range(12):
+        soft.set_brush((-6 + i, 0, 0), 13, clay_c, shape="sphere",
+                       falloff="smooth", strength=0.65, seed=3)
+    before_cells = soft.occupied_count
+    before_tris = soft.mesh().triangle_count
+    voids = soft.repair_report()["enclosed_voids"]
+    changed = soft.change_count
+    for x in range(-8, 9, 2):
+        soft.sculpt_fill_cavities((x, 0, 0), 15, passes=2)
+    added = soft.occupied_count - before_cells
+    after_tris = soft.mesh().triangle_count
+
+    print(f"  a dragged SOFT stroke: {before_cells} cells, "
+          f"{voids} enclosed voids")
+    print(f"    fill-cavities added {added} cells "
+          f"(change_count agrees: {soft.change_count - changed})")
+    print(f"    greedy mesh {before_tris} -> {after_tris} triangles "
+          f"({100 * (after_tris - before_tris) / before_tris:+.0f}%)")
+
+    # The two verbs are not substitutes, and this is the sharpest case: the
+    # dither's holes are open to the outside, so the flood reaches every one of
+    # them and fill-voids has nothing to do. Narrow is not the same as sealed.
+    if voids != 0:
+        raise SystemExit("a dithered stamp should leave OPEN holes, not sealed voids")
+    if added <= 0 or after_tris >= before_tris:
+        raise SystemExit("fill-cavities stopped paying for itself on a soft stroke")
+    eye, target = R.voxel_camera(soft, VOXEL_SIZE, azimuth=28.0, elevation=30.0)
+    R.render_voxels(soft, "15_soft_stroke_cavities.png", eye=eye, target=target,
+                    caption="a dragged soft stroke, after fill-cavities")
+
     # --- scrape vs flatten ---------------------------------------------------
     def bumpy():
         g = slab()

@@ -188,6 +188,10 @@ The verb SHALL decide from that local neighbourhood alone, which places it on fr
 - **WHEN** fill-cavities runs over a dent two cells across and one deep
 - **THEN** the dent is left alone, because it is surface irregularity rather than a cavity
 
+#### Scenario: A dithered soft stamp is the everyday input
+- **WHEN** a soft stamp with a strength below 1 lays down material, so its dither leaves single-cell holes through that material, and fill-cavities runs over it
+- **THEN** those holes are filled, and the enclosed-void count was zero throughout — they are open to the outside, so fill-voids would have reached none of them
+
 #### Scenario: A sealed void is fill-voids' work
 - **WHEN** fill-cavities runs over a hollow box whose interior the outside cannot reach
 - **THEN** the interior is unchanged, because a local rule cannot see a wide sealed void, and fill-voids fills it instead
