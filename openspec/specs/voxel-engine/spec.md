@@ -160,19 +160,37 @@ The mask SHALL be addressed in world units rather than in a layer's cell indices
 - **THEN** sampling at the same world positions returns the same values
 
 ### Requirement: Fill cavities
-The module SHALL provide a verb that fills pockets within a brush footprint: an empty cell with at least four of its six face neighbours occupied is inside a cavity rather than beside a surface, and a stated number of passes reaches that many cells deep. A hole passing all the way through the material, an open face, and a wide shallow dent SHALL be left alone — the verb fills pockets, and smoothing is the verb for surface irregularity.
+The module SHALL provide a verb that fills pockets within a brush footprint: an empty cell with at least four of its six face neighbours occupied is inside a cavity rather than beside a surface, and a stated number of passes reaches that many cells deep. An open face and a wide shallow dent SHALL be left alone — the verb fills pockets, and smoothing is the verb for surface irregularity.
+
+A hole passing all the way through the material SHALL be left alone **where it is wider than one cell**. The rule counts face neighbours and nothing else, so it cannot distinguish a pinhole from a pocket: a one-cell perforation has its four lateral neighbours occupied and is filled, as close-holes fills a pierced wall. The exemption is a statement about width, not about topology.
+
+A number of passes larger than the model's longest side SHALL be clamped to it. The working buffer is cubic in the pass count, so an unclamped value overflows the padded extent before the allocation is attempted, and past that side length every empty cell in the window has already been decided.
+
+The verb SHALL decide from that local neighbourhood alone, which places it on freehand voxel work rather than on imported geometry: a dithered soft stamp, a narrow erase, magnify and grab all leave cells that satisfy the rule, while the void a boolean or a rasterized mesh leaves is sealed and wide, has no cell with four occupied face neighbours, and is fill-voids' work.
 
 #### Scenario: A pocket is filled
 - **WHEN** fill-cavities runs over a slab with a one-cell pit two cells deep
 - **THEN** the pit is filled and the rest of the slab is unchanged
 
 #### Scenario: A through-hole is not filled
-- **WHEN** fill-cavities runs over a slab pierced all the way through
+- **WHEN** fill-cavities runs over a slab pierced all the way through by a hole more than one cell across
 - **THEN** the hole remains open
+
+#### Scenario: A one-cell perforation is filled
+- **WHEN** fill-cavities runs over a slab pierced all the way through by a single-cell hole
+- **THEN** the hole is filled, because a local neighbour count cannot tell a pinhole from a pocket
+
+#### Scenario: An oversized pass count is bounded
+- **WHEN** fill-cavities is asked for more passes than the model's longest side
+- **THEN** it behaves as though asked for that many, rather than sizing a working buffer from the number given
 
 #### Scenario: A wide shallow dent is not a pocket
 - **WHEN** fill-cavities runs over a dent two cells across and one deep
 - **THEN** the dent is left alone, because it is surface irregularity rather than a cavity
+
+#### Scenario: A sealed void is fill-voids' work
+- **WHEN** fill-cavities runs over a hollow box whose interior the outside cannot reach
+- **THEN** the interior is unchanged, because a local rule cannot see a wide sealed void, and fill-voids fills it instead
 
 ### Requirement: Scrape
 The module SHALL provide a verb that flattens the surface onto a plane and smooths it in one pass. Both decisions SHALL be taken from a single snapshot of the region, so that no cell's outcome depends on a neighbour the same call already changed.

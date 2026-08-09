@@ -297,6 +297,13 @@ void VoxelGrid::sculpt_flatten(VoxelCoord c, const BrushParams& p, kernel::cfloa
 
 void VoxelGrid::sculpt_fill_cavities(VoxelCoord c, const BrushParams& p, int width) {
     if (width < 1) return;
+    // Same bound repair_close_holes takes, and for the same reason: the padding
+    // below makes the working buffer cubic in the pass count, so a large one
+    // overflows the padded corner before the allocation is even attempted. A
+    // pass cannot usefully reach further than the model's longest side either.
+    std::optional<VoxelCoord> lo = bounds_min(), hi = bounds_max();
+    if (!lo || !hi) return;
+    width = std::min(width, std::max({hi->x - lo->x, hi->y - lo->y, hi->z - lo->z}) + 1);
     // Padded by the number of passes so a pocket touching the footprint's edge
     // sees the material on the other side of it.
     Region closed = snapshot(*this, c, p.size, width + 1);

@@ -1523,14 +1523,28 @@ clay_result clay_layer_apply_stroke(clay_document* doc, clay_layer_id layer,
 
 /* Fill pockets inside the footprint: an empty cell with at least four of its
  * six face neighbours occupied is inside a cavity rather than beside a
- * surface, and `passes` iterations reach that many cells deep. A through-hole,
- * an open face and a wide shallow dent are left alone — smoothing is the verb
- * for surface irregularity. `passes` must be > 0.
+ * surface, and `passes` iterations reach that many cells deep. An open face and
+ * a wide shallow dent are left alone — smoothing is the verb for surface
+ * irregularity. `passes` must be > 0; larger than the model's longest side is
+ * clamped, since past that every cell in the window is already decided.
+ *
+ * A through-hole is left alone only where it is WIDER THAN ONE CELL. The rule
+ * is local and counts neighbours, so it cannot tell a pinhole from a pocket: a
+ * one-cell perforation has its four lateral neighbours occupied and fills, the
+ * same way repair's close-holes seals a pierced wall. Anything two cells or
+ * more across stays open.
  *
  * This began as a morphological closing, which cannot do the job: a ball of
  * radius r fits INTO a dent wider than r, so a larger element fills less, and
  * the erosion reaches through from the void behind a one-cell wall and reopens
- * every hole the dilation just sealed. */
+ * every hole the dilation just sealed.
+ *
+ * The geometry it acts on is freehand voxel work: a soft stamp's dither leaves
+ * single-cell holes through the material it deposits, and a narrow erase,
+ * magnify or grab leaves the same. A boolean or a rasterized mesh does not —
+ * the void it leaves is sealed, so no cell there has four occupied neighbours
+ * and this verb sees nothing. That is clay_voxel_repair_fill_voids' job: this
+ * one fills what is NARROW, that one fills what is SEALED. */
 clay_result clay_voxel_sculpt_fill_cavities(clay_voxel_grid* grid, const int32_t cell[3],
                                             const clay_brush_params* brush, int32_t passes);
 
