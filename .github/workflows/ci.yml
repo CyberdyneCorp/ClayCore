@@ -62,6 +62,13 @@ jobs:
       # the worked example the kernels artifact ships to host apps
       - name: Kernel dialect (native Metal profile)
         run: python3 tools/check_kernel_dialect.py
+      # Swift used to compile only in the release workflow, so anything that
+      # broke tests/swift/smoke.swift passed every PR and failed on the tag —
+      # which is exactly what happened to v0.24.0. Type-checking needs the
+      # header alone, no xcframework, so it costs seconds here; building and
+      # RUNNING the smoke against the real slices stays release-time.
+      - name: Swift smoke type-check (clay.h is consumable from Swift)
+        run: ./tools/check_swift_smoke.sh typecheck
 
   sanitizers:
     name: ASan + UBSan (ubuntu)

@@ -3,14 +3,21 @@
 # the xcframework, proving clay.h is consumable from Swift and not merely valid
 # C — and that the engine runs on the platform ClaySpace ships to.
 #
-# Two targets:
+# Three targets:
+#   typecheck — compiles nothing and links nothing: it type-checks smoke.swift
+#            against bindings/c/clay.h alone, so it needs no xcframework and
+#            takes seconds. This is the per-push one. It cannot prove the engine
+#            RUNS, but it catches everything that stops the source compiling,
+#            which is the failure a merge introduces silently — two branches
+#            adding a top-level binding of the same name is a textual clean
+#            merge and a Swift redeclaration error.
 #   macos  — builds and runs against the macos-arm64 slice on this machine.
 #   sim    — builds against the ios-arm64-simulator slice and runs the binary
 #            inside a booted simulator via `simctl spawn`. This is the one that
 #            proves the iOS slice works, rather than merely linking.
 #
-# Apple-only and slow (it needs the xcframework), so this is a release-time and
-# on-demand check rather than a per-push one.
+# Apple-only throughout. macos/sim need the xcframework and are slow, so they
+# stay release-time and on-demand; typecheck is cheap enough for every push.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -27,7 +34,9 @@ if ! command -v swiftc >/dev/null 2>&1; then
   exit 0
 fi
 
-if [[ ! -d "dist/claycore.xcframework/macos-arm64" ]]; then
+# typecheck reads the header straight from the source tree, so it must not
+# trigger a several-minute xcframework build to do it.
+if [[ "$target" != "typecheck" && ! -d "dist/claycore.xcframework/macos-arm64" ]]; then
   echo "swift smoke: building the xcframework first"
   ./tools/build_xcframework.sh
 fi
@@ -114,9 +123,25 @@ print(c[-1] if c else "")' || true)"
   return $status
 }
 
+run_typecheck() {
+  local dir="$work/typecheck"
+  mkdir -p "$dir/claycore"
+  cp bindings/c/clay.h "$dir/claycore/"
+  cat > "$dir/claycore/module.modulemap" <<'MAP'
+module claycore {
+    header "clay.h"
+    export *
+}
+MAP
+  echo "== typecheck =="
+  swiftc -typecheck -I "$dir" tests/swift/smoke.swift
+  echo "swift smoke: typecheck OK (smoke.swift compiles against bindings/c/clay.h)"
+}
+
 case "$target" in
+  typecheck) run_typecheck ;;
   macos) run_macos ;;
   sim|simulator) run_simulator ;;
   all) run_macos; echo; run_simulator ;;
-  *) echo "usage: $0 [macos|sim|all]" >&2; exit 2 ;;
+  *) echo "usage: $0 [typecheck|macos|sim|all]" >&2; exit 2 ;;
 esac
