@@ -586,33 +586,33 @@ check(clay_mask_destroy(freeze) == CLAY_OK, "destroyed the caller-owned mask")
 // Painting a mask with the drag a host already resolved, rather than by looping
 // single stamps and re-deriving the spacing itself.
 
-let painted = clay_mask_create(0.05)
-check(painted != nil, "created a mask to stroke into")
+let strokeMask = clay_mask_create(0.05)
+check(strokeMask != nil, "created a mask to stroke into")
 var maskApplied = 0
-check(clay_mask_apply_stroke(painted, &strokeSamples, strokeCount, &preset, 1.0,
+check(clay_mask_apply_stroke(strokeMask, &strokeSamples, strokeCount, &preset, 1.0,
                              Int32(CLAY_BRUSH_SHAPE_SPHERE.rawValue),
                              Int32(CLAY_BRUSH_FALLOFF_SMOOTH.rawValue),
                              &maskApplied) == CLAY_OK && maskApplied == stampCount,
-      "painted a mask along a drag (\(maskApplied) stamps)")
+      "strokeMask a mask along a drag (\(maskApplied) stamps)")
 var strokedPainted = 0
-check(clay_mask_painted_count(painted, &strokedPainted) == CLAY_OK && strokedPainted > 0,
+check(clay_mask_painted_count(strokeMask, &strokedPainted) == CLAY_OK && strokedPainted > 0,
       "the stroke left \(strokedPainted) masked cells")
 
 // The bounded complement: what clay_mask_invert structurally cannot do.
 var boxLo: [Float] = [-1, -1, -1]
 var boxHi: [Float] = [1, 1, 1]
-check(clay_mask_invert_within(painted, &boxLo, &boxHi) == CLAY_OK,
+check(clay_mask_invert_within(strokeMask, &boxLo, &boxHi) == CLAY_OK,
       "took the complement over a box")
 var farPoint: [Float] = [0.9, 0.9, 0.9]
 var farValue: Float = 0
-check(clay_mask_sample(painted, &farPoint, &farValue) == CLAY_OK && farValue > 0.9,
+check(clay_mask_sample(strokeMask, &farPoint, &farValue) == CLAY_OK && farValue > 0.9,
       "everything else in the box is frozen now")
 
 var fillValue: Float = 0
-check(clay_mask_fill(painted, &boxLo, &boxHi, 0.0) == CLAY_OK, "released the box")
-check(clay_mask_sample(painted, &farPoint, &fillValue) == CLAY_OK && fillValue < 0.1,
+check(clay_mask_fill(strokeMask, &boxLo, &boxHi, 0.0) == CLAY_OK, "released the box")
+check(clay_mask_sample(strokeMask, &farPoint, &fillValue) == CLAY_OK && fillValue < 0.1,
       "filling with zero released it")
-check(clay_mask_destroy(painted) == CLAY_OK, "destroyed the stroked mask")
+check(clay_mask_destroy(strokeMask) == CLAY_OK, "destroyed the stroked mask")
 
 // -- mask extrude ------------------------------------------------------------
 // A plate pulled off a masked patch, on both representations.
