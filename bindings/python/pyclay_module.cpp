@@ -2473,6 +2473,21 @@ NB_MODULE(pyclay, m) {
                  std::vector<scene::StrokePoint> pts = to_stroke_points(points);
                  apply_point_types(pts, types);
                  apply_handles(pts, in_handles, out_handles);
+                 // A sweep's guide is the same point list, so this edits one —
+                 // but the two things Swept refuses at construction stay
+                 // refused here. Closed: transporting a frame around a loop
+                 // does not close the seam, and the leftover twist is real.
+                 // Under two points: the sweep emits no tape record and simply
+                 // vanishes, which no caller asked for.
+                 if (scene::prim_is_swept(n->prim.type)) {
+                     if (closed)
+                         throw std::invalid_argument(
+                             "a swept guide cannot be closed: transporting a frame around a loop "
+                             "does not close the seam");
+                     if (pts.size() < 2)
+                         throw std::invalid_argument(
+                             "a sweep needs a guide of two or more points");
+                 }
                  apply_or_throw(l.doc->document,
                                 scene::Command{scene::SetStrokePointsCmd{
                                     l.id, node, std::move(pts), closed, tolerance}},

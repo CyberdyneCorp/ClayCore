@@ -257,6 +257,27 @@ TEST_CASE("curve: editing the points is an ordinary edit") {
         CHECK_FALSE(scene::apply(doc, scene::Command{bad}));
     }
 
+    SUBCASE("and it edits a swept guide, which is the same point list") {
+        // Stroke-only left a placed sweep's guide unreachable: the guide is an
+        // ordinary curve, so replacing it is the ordinary curve edit.
+        scene::Node sweep;
+        sweep.prim = scene::Prim::swept(0);
+        sweep.stroke = square();
+        sweep.profiles = {scene::Profile::circle(0.2f), scene::Profile::circle(0.1f)};
+        sweep.profile_polygons.resize(2);
+        sweep.id = doc.find_layer(layer)->sdf->reserve_id();
+        scene::NodeId wid = sweep.id;
+        doc.find_layer(layer)->sdf->insert(sweep);
+
+        scene::SetStrokePointsCmd guide{layer, wid, square(0.2f, StrokePointType::Spline), false,
+                                        0.005f};
+        REQUIRE(scene::apply(doc, scene::Command{guide}));
+        const scene::Node* n = doc.find_layer(layer)->sdf->find(wid);
+        REQUIRE(n);
+        CHECK(n->stroke[0].type == StrokePointType::Spline);
+        CHECK(n->curve_tolerance == doctest::Approx(0.005f));
+    }
+
     SUBCASE("the command round trips through its own encoding") {
         std::vector<std::uint8_t> bytes = scene::serialize(scene::Command{cmd});
         auto back = scene::deserialize(bytes.data(), bytes.size());

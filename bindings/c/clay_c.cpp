@@ -1150,6 +1150,44 @@ clay_result read_curve_points(const float* xyzr, std::size_t count, const std::i
     return CLAY_OK;
 }
 
+// The one place StrokePoints become a caller's arrays, so the readback and the
+// setters above cannot drift apart in what they mean. xyzr is required, as it
+// is there; the other three are the same optional parallel arrays.
+void write_curve_points(const std::vector<scene::StrokePoint>& points, float* xyzr,
+                        std::int32_t* types, float* in_handles_xyz, float* out_handles_xyz) {
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        const scene::StrokePoint& p = points[i];
+        write_f3(xyzr + i * 4, p.pos);
+        xyzr[i * 4 + 3] = p.radius;
+        if (types) types[i] = static_cast<std::int32_t>(p.type);
+        if (in_handles_xyz) write_f3(in_handles_xyz + i * 3, p.in_handle);
+        if (out_handles_xyz) write_f3(out_handles_xyz + i * 3, p.out_handle);
+    }
+}
+
+// Resolving a placed curve for READING. Protection guards edits, so a ghosted
+// or locked layer resolves here like any other; the typed errors are the ones
+// the setters already report for the same mistakes.
+clay_result find_curve_node(const clay_document* doc, clay_layer_id layer, clay_node_id node,
+                            const scene::Node** out) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    const scene::Node* n = l->sdf ? l->sdf->find(node) : nullptr;
+    if (!n) return fail(CLAY_ERROR_NOT_FOUND, "no stroke or curve with that id in that layer");
+    if (n->is_group || !scene::prim_carries_curve(n->prim.type))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "curve points need CLAY_PRIM_STROKE or CLAY_PRIM_SWEPT");
+    *out = n;
+    return CLAY_OK;
+}
+
+bool node_is_swept(const clay_document* doc, clay_layer_id layer, clay_node_id node) {
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    const scene::Node* n = (l && l->sdf) ? l->sdf->find(node) : nullptr;
+    return n && scene::prim_is_swept(n->prim.type);
+}
+
 clay_mask* borrow_mask_handle(clay_document* doc, clay_layer_id layer) {
     clay_mask& handle = doc->mask_handles[layer];
     handle.doc = doc;
@@ -2028,6 +2066,21 @@ clay_result clay_layer_set_stroke_points(clay_document* doc, clay_layer_id layer
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     if (!(tolerance > 0.0f))
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "curve tolerance must be > 0");
+    // Both of a swept guide's invariants became reachable here once the command
+    // accepted swept nodes, and neither breaks loudly on its own: a closed
+    // guide tessellates and bakes the twist seam, and a guide of under two
+    // points emits no tape record at all, so the sweep silently disappears.
+    // validate_item refuses both when the item is placed; the placed-node path
+    // must not be a back door around either.
+    if (node_is_swept(doc, layer, node)) {
+        if (closed != 0)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "a swept guide cannot be closed: transporting a frame around a loop does "
+                        "not close the seam");
+        if (count < 2)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "a sweep needs a guide of two or more points");
+    }
     std::vector<scene::StrokePoint> points;
     clay_result r = read_curve_points(xyzr, count, types, in_handles_xyz, out_handles_xyz,
                                       &points);
@@ -2036,6 +2089,36 @@ clay_result clay_layer_set_stroke_points(clay_document* doc, clay_layer_id layer
                       scene::Command{scene::SetStrokePointsCmd{layer, node, std::move(points),
                                                                closed != 0, tolerance}},
                       "no stroke or curve with that id in that layer");
+}
+
+clay_result clay_layer_stroke_points(const clay_document* doc, clay_layer_id layer,
+                                     clay_node_id node, float* out_xyzr, size_t* count,
+                                     int32_t* out_types, float* out_in_handles_xyz,
+                                     float* out_out_handles_xyz, int32_t* out_closed,
+                                     float* out_tolerance) {
+    if (!count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null count");
+    // Nothing sizes the parallel arrays on a size query, so passing one is a
+    // caller that meant to read and got the buffer wrong: refused, not ignored.
+    if (!out_xyzr && (out_types || out_in_handles_xyz || out_out_handles_xyz))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a size query takes no point buffers");
+    const scene::Node* n = nullptr;
+    clay_result r = find_curve_node(doc, layer, node, &n);
+    if (r != CLAY_OK) return r;
+
+    const std::size_t needed = n->stroke.size();
+    if (out_xyzr && *count < needed) {
+        *count = needed;
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "the curve has " + std::to_string(needed) + " points");
+    }
+    // Written on the size query too, so one call answers "how many, and closed?".
+    if (out_closed) *out_closed = n->stroke_closed ? 1 : 0;
+    if (out_tolerance) *out_tolerance = n->curve_tolerance;
+    if (out_xyzr)
+        write_curve_points(n->stroke, out_xyzr, out_types, out_in_handles_xyz,
+                           out_out_handles_xyz);
+    *count = needed;
+    return CLAY_OK;
 }
 
 clay_result clay_item_add_stroke_point(clay_item* item, const float position[3], float radius) {

@@ -166,8 +166,29 @@ static int check_builder_payloads(void) {
     REQUIRE(clay_item_set_stroke_blend_k(stroke, 0.04f) == CLAY_OK);
     REQUIRE(clay_item_set_stroke_blend_k(stroke, -0.1f) == CLAY_ERROR_INVALID_ARGUMENT);
     memset(chain, 0, sizeof chain);
-    REQUIRE(clay_layer_add_item(composed, layer, stroke, NULL) == CLAY_OK);
+    clay_node_id stroke_node = 0;
+    REQUIRE(clay_layer_add_item(composed, layer, stroke, &stroke_node) == CLAY_OK);
     clay_item_destroy(stroke);
+
+    /* Reading the placed chain back is what a host that reloaded this document
+     * would do, and here it also shows the payload really was copied: `chain`
+     * was zeroed above and the builder destroyed. */
+    size_t point_count = 0;
+    int32_t stroke_closed = -1;
+    REQUIRE(clay_layer_stroke_points(composed, layer, stroke_node, NULL, &point_count, NULL,
+                                     NULL, NULL, &stroke_closed, NULL) == CLAY_OK);
+    REQUIRE(point_count == 4);
+    REQUIRE(stroke_closed == 0);
+    float read_back[16] = {0};
+    size_t capacity = 1;
+    REQUIRE(clay_layer_stroke_points(composed, layer, stroke_node, read_back, &capacity, NULL,
+                                     NULL, NULL, NULL, NULL) == CLAY_ERROR_BUFFER_TOO_SMALL);
+    REQUIRE(capacity == 4);
+    REQUIRE(clay_layer_stroke_points(composed, layer, stroke_node, read_back, &capacity, NULL,
+                                     NULL, NULL, NULL, NULL) == CLAY_OK);
+    REQUIREF(read_back[0] == -0.6f && read_back[3] == 0.20f,
+             "the first control point survived: (%g, %g, %g, %g)", read_back[0], read_back[1],
+             read_back[2], read_back[3]);
 
     float half_depth[1] = {0.25f};
     float bad_depth[1] = {0.0f};

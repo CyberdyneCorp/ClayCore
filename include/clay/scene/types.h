@@ -107,6 +107,9 @@ inline bool prim_is_swept(PrimType t) { return t == PrimType::Swept; }
 // costs a pointer rather than a copy of its samples.
 inline bool prim_is_volume(PrimType t) { return t == PrimType::Volume; }
 inline bool prim_carries_profiles(PrimType t) { return prim_is_loft(t) || prim_is_swept(t); }
+// The stroke list means control points for both of them, so anything that
+// reads or replaces a point list asks this rather than naming Stroke alone.
+inline bool prim_carries_curve(PrimType t) { return t == PrimType::Stroke || prim_is_swept(t); }
 
 enum class Op : std::uint8_t {
     None = 255,  // groups only: children apply inline to the outer chain
@@ -563,7 +566,9 @@ struct Node {
     float rounding = 0.0f;
     kernel::cfloat3 color = kernel::cf3(0.7f, 0.7f, 0.7f);
     bool mirror = false;  // apply through the layer's active mirror
-    std::vector<StrokePoint> stroke;  // PrimType::Stroke only — control points
+    // Control points, for a Stroke and for a Swept guide alike — a guide is an
+    // ordinary curve, so it uses the same list rather than one of its own.
+    std::vector<StrokePoint> stroke;
     float stroke_blend_k = 0.0f;      // within-stroke segment smoothing
     bool stroke_closed = false;       // last point joins back to the first
     // Maximum distance a tessellated span's midpoint may sit from its chord.

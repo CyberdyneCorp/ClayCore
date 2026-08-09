@@ -489,12 +489,46 @@ clay_result clay_item_set_curve(clay_item* item, int32_t closed, float tolerance
 /* Replace a placed stroke or curve's whole point list, through the command
  * vocabulary, so the edit is undoable and refused on a protected layer. A
  * curve is tens of points: a whole-list replace costs less than the
- * bookkeeping granular commands would need, and its inverse is exact. */
+ * bookkeeping granular commands would need, and its inverse is exact.
+ *
+ * Also edits a CLAY_PRIM_SWEPT node's guide, which is the same list, and keeps
+ * the two rules clay_layer_add_item enforces on one: closing it is refused for
+ * the reason clay_item_set_curve refuses it, and so is cutting it below two
+ * points, which would leave the sweep with nothing to follow. */
 clay_result clay_layer_set_stroke_points(clay_document* doc, clay_layer_id layer,
                                          clay_node_id node, const float* xyzr, size_t count,
                                          const int32_t* types, const float* in_handles_xyz,
                                          const float* out_handles_xyz, int32_t closed,
                                          float tolerance);
+
+/* Read a placed stroke or curve's point list back — the exact arguments the
+ * call above takes, so what comes out goes straight back in. The item builder
+ * is deliberately write-only: the host that filled it already knows what it
+ * put there. A host that RELOADS a document knows nothing, and without this it
+ * cannot edit a curve — or a swept tube's guide — it did not author.
+ *
+ * Size-query pattern, as clay_cut_polygon_from_curve uses: call with
+ * out_xyzr == NULL to receive the point count in *count, then again with a
+ * buffer of count*4 floats. *count is the capacity in POINTS going in and the
+ * count written coming out; a buffer that is too small gets
+ * CLAY_ERROR_BUFFER_TOO_SMALL with the needed count in *count and writes
+ * nothing. The three optional arrays are sized off that same count and each may
+ * be NULL exactly as on the setter, but a size query takes none of them —
+ * nothing sizes them yet, so passing one is refused rather than ignored.
+ * out_closed and out_tolerance may be NULL and are written on the size query
+ * too, so one call answers "how many points, and is it closed".
+ *
+ * The points come back AS AUTHORED, not tessellated: tessellation happens when
+ * the document is compiled, so a readback is the control points and round trips
+ * through the setter unchanged.
+ *
+ * Reading is not editing: a ghosted, locked or hidden layer answers normally,
+ * because protection refuses edits. */
+clay_result clay_layer_stroke_points(const clay_document* doc, clay_layer_id layer,
+                                     clay_node_id node, float* out_xyzr, size_t* count,
+                                     int32_t* out_types, float* out_in_handles_xyz,
+                                     float* out_out_handles_xyz, int32_t* out_closed,
+                                     float* out_tolerance);
 
 /* Parameters of a spatial morph, in world space. Required by the matching
  * transition op and rejected with any other op: linear morphs along the
