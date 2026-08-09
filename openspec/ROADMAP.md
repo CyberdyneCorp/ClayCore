@@ -221,7 +221,18 @@ decision on the record.
 `examples/run_all.py` names an example for every living capability, so an
 uncovered one is an error and an exemption is a decision on the record.
 
-## Sculpting verbs still missing on SDF layers
+## Sculpting verbs on SDF layers — all landed
+
+Read the table before concluding anything is missing here. Every row below
+except `add-blob-brush` has **landed**, and the surface is not on `Layer`:
+`Volume.relaxed` is the smooth verb, `Volume.flattened` / `flattened_from` is
+flatten, `Volume.moved_topologically_from` and `Layer.move_surface` are Move,
+`clay.snakehook` is the tendril, and `MaskField` is a full mask brush with
+`mask=` accepted by the region verbs. An audit that looks only at `dir(Layer)`
+and `dir(VoxelGrid)` concludes the SDF side is empty and is wrong; that mistake
+was made on 2026-08-09 and is recorded here so it is not repeated.
+
+What these verbs cannot do is CHAIN — see the consolidation row below.
 
 `add-sdf-relax` closed the first of these; the pattern it established — sample,
 rewrite the stored samples under a region, hand back a volume — makes the rest
@@ -260,13 +271,33 @@ distance, so the blend works from the wrong value: the Lipschitz goes 1.00 to
 visibly corrupt rather than merely expensive.
 
 `clay_item_volume_from_document` can collapse an edit list into one volume, so
-the mechanism exists. What does not exist is a POLICY — when a host should
+the mechanism exists. What does not exist is a POLICY — proposed as
+`add-consolidation-policy` — when a host should
 consolidate, what it costs, and how a baked region rejoins an edit list that is
 still parametric everywhere else. Both brushes are usable for single gestures
 today and neither is usable as a stroke, which is what a sculpting app needs.
 
 Measured in `examples/27_move_strokes.py` and `examples/28_hpolish.py`, both of
 which fail if the degradation stops being what they claim.
+
+## The sculpting ceiling, proposed 2026-08-09
+
+Four changes raised by trying to sculpt two complete assets end to end
+(`examples/34_organic_character.py`, `examples/35_hard_surface_helmet.py`).
+They are ordered by how much each one costs a sculptor today.
+
+| Change | Why it ranks here |
+|---|---|
+| `add-multi-resolution` | **The ceiling, and the only one that is not additive.** `VoxelGrid` takes its cell size in the constructor and there is no resample, resize, subdivide or adaptive refinement anywhere in `voxel/`, `mesh/` or `brick/` — the brick cache is a sparse narrow band, not an LOD hierarchy. So the finest detail in a model must be chosen before the first stroke and paid for everywhere, and cannot be added locally afterwards. This removes the loop sculpting is made of: block out coarse, subdivide, refine. Recommends discrete levels over an octree, because the falloff dither hashes a CELL COORDINATE and the parity suite enforces that strokes reproduce across platforms — a uniform lattice per level keeps that property, an adaptive one puts it in question. Do it first: retrofitting levels under verbs, a file format and an ABI that all assume one cell size is harder than building on them. |
+| `add-consolidation-policy` | The SDF verbs exist and do not chain. Each samples the document and hands back a volume, so the second call samples a VOLUME, which outside its band reports a lower bound rather than a distance. Measured and pinned by examples: hPolish goes 1.00 -> 14.0 Lipschitz on the second pass and is corrupt by the third; Move decays x0.615 per drag, 79x by nine. A sculpting app is made of strokes and these are gestures. |
+| `add-representation-round-trip` | The bridge runs one way. SDF to voxel is `rasterize_tape`; voxel back is only mesh -> `to_field` -> volume, which resamples onto a frozen lattice and drops the palette. So a sculptor picks a representation and lives inside its half of the toolkit, when the natural workflow is to keep moving between them. Honest framing is a conversion, not a view: quantisation and lost procedural history are the price and the spec should say so. |
+| `add-sculpt-layers` | No way to record a pass and dial it back. Undo is a stack — removing an old pass discards everything after it; a sculpt layer is addressable. Partial strength on binary occupancy is the interesting part, and the answer is the dither the falloff brushes already use. |
+
+Two changes proposed on the same day were **withdrawn as wrong**:
+`add-sdf-sculpt-verbs` and `add-sdf-masking`. Both were raised from an audit
+that read `dir(Layer)` and `dir(VoxelGrid)`, missed `Volume` and `MaskField`
+entirely, and concluded the SDF side had neither verbs nor masks. It has both.
+The real gap in that area is consolidation, above.
 
 ## Phase 3 — the pipeline
 
