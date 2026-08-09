@@ -299,6 +299,82 @@ that read `dir(Layer)` and `dir(VoxelGrid)`, missed `Volume` and `MaskField`
 entirely, and concluded the SDF side had neither verbs nor masks. It has both.
 The real gap in that area is consolidation, above.
 
+## What can run in parallel, and what cannot
+
+Six changes are open. The constraint is not their size — it is that three of
+them rewrite the same object and three do not touch it at all.
+
+### Three are disjoint in code and can run together
+
+| Change | Touches | Contends with |
+|---|---|---|
+| `expose-scene-groups` | the binding surface and example 35 | nothing; the engine already implements groups, so there is no engine change |
+| `add-consolidation-policy` | `sdf-kernels`, the scene commands, `Volume`, examples 27 and 28 | nothing; never touches `VoxelGrid` |
+| `add-mesh-layers` | `scene-model`, `io/clayspace`, export | nothing; never touches `VoxelGrid` or the field chain |
+
+Three separate areas — the binding surface, the SDF field chain, the document
+and its format. The only files all three share are `bindings/c/clay.h` and the
+`c-abi` spec, and both are append-only: new declarations at the end, new
+requirements at the end.
+
+`expose-scene-groups` is much the smallest of the three and needs no engine
+work at all, so it is the natural one to run alongside something large.
+
+### Three contend on `VoxelGrid` and must serialise
+
+    add-multi-resolution  ->  add-sculpt-layers
+                          ->  add-representation-round-trip
+
+`add-multi-resolution` goes **first and alone**. It is the only non-additive
+change in the set: it changes what a grid *is*, which reaches storage, the
+footprint walk every verb shares, meshing, the brick cache and the ABI. Anything
+else editing `VoxelGrid` at the same time is being written against a foundation
+that is still moving.
+
+Once it has landed the other two can run together, because they touch different
+parts of the grid — sculpt layers touch history and storage, the round trip
+touches conversion — and both need the level rule to exist before they can be
+specified. Each says so in its own open questions.
+
+### The format version is the cross-group trap
+
+    kClaySpaceMinor = 4     include/clay/io/clayspace.h:47
+    kSceneMinor     = 4     include/clay/scene/commands.h:147
+    static_assert(kClaySpaceMinor == scene::kSceneMinor)   src/io/clayspace.cpp:18
+
+**Three of the six add a `.clayspace` chunk and will each want to bump 4 to 5**
+— `add-mesh-layers` from the parallel group, `add-multi-resolution` and
+`add-sculpt-layers` from the serialised one. Two of them bumping independently
+is a one-line textual conflict with a bad outcome: a document that claims minor
+5 while carrying only one of the two features.
+
+So the minors are **assigned here rather than taken on a first-come basis**, and
+each change's tasks carry its own number:
+
+| Change | `.clayspace` minor |
+|---|---|
+| `add-mesh-layers` | 5 |
+| `add-multi-resolution` | 6 |
+| `add-sculpt-layers` | 7 |
+
+`add-consolidation-policy` and `expose-scene-groups` need no bump — volumes and
+groups both already serialise. `add-representation-round-trip` needs one only if
+it introduces a new layer kind, which is one of its open questions; if it does,
+it takes 8.
+
+### The plan
+
+**Wave 1, four in flight:** `add-multi-resolution` on its own track, and
+`expose-scene-groups`, `add-consolidation-policy` and `add-mesh-layers` beside
+it.
+
+**Wave 2:** `add-sculpt-layers` and `add-representation-round-trip`, once
+multi-resolution has landed.
+
+That is the most parallelism the dependency structure actually allows. Running
+more means rebasing voxel work onto a moving foundation, which costs more than
+the concurrency buys.
+
 ## Phase 3 — the pipeline
 
 | Change | Notes |
