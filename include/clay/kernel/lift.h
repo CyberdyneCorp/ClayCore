@@ -56,6 +56,25 @@ typedef struct CSweepHitT {
 // A loop over segments, which is what ctape_stroke already does per sample —
 // the same cost and the same pattern, so a sweep is not new ground for the
 // evaluator even though it is new geometry.
+//
+// How much closer a segment must be to WIN, as a fraction of the incumbent's
+// squared distance. Not a micro-optimisation — it is what makes the choice
+// reproducible across backends.
+//
+// Any point whose nearest guide point is a shared VERTEX — the outside of
+// every bend — is equidistant from the two segments meeting there, by
+// construction. Those two carry different tangents, so they build different
+// frames and resolve the profile at different arc lengths: which one wins can
+// be worth several percent of the result, not an ulp. Yet the comparison that
+// decides it is a knife edge, and backends disagree in the last ulp (an FMA
+// contraction one compiler made and another did not is enough). Requiring a
+// relative improvement keeps the earliest of a tied group everywhere.
+//
+// The margin has three orders of magnitude of room on both sides: cross-backend
+// noise measured ~1e-7 relative, while the gap to the next genuinely different
+// segment is ~7e-3 on a guide tessellated to a 0.03 curve tolerance.
+#define CLAY_SWEEP_TIE_REL 1e-5f
+
 CLAY_FN CSweepHit csweep_nearest(CLAY_DEVICE const float* guide, int count, cfloat3 p) {
     int best = 0;
     float best_t = 0.0f;
@@ -70,7 +89,7 @@ CLAY_FN CSweepHit csweep_nearest(CLAY_DEVICE const float* guide, int count, cflo
         float t = len2 > 1e-12f ? cclamp(cdot(p - a, ab) / len2, 0.0f, 1.0f) : 0.0f;
         cfloat3 offset = p - (a + ab * t);
         float d2 = cdot(offset, offset);
-        if (d2 < best_d2) {
+        if (d2 < best_d2 - CLAY_SWEEP_TIE_REL * best_d2) {
             best_d2 = d2;
             best = i;
             best_t = t;

@@ -6,7 +6,9 @@ TBD - created by archiving change add-claycore-v1. Update Purpose after archive.
 ### Requirement: CMake presets and platform matrix
 The library SHALL build with CMake presets `cpu-only` (macOS/Linux/Windows), `+metal` (Apple), `+cuda`, and `+opencl`, with warnings-as-errors everywhere and ASan/UBSan jobs in CI. The core SHALL be headless: no UI, windowing, or Apple frameworks in `include/clay/` or `src/` (Apple dependencies are confined to `backends/metal/` and packaging).
 
-The `+cuda` preset SHALL configure whenever a CUDA toolkit is present, however new the installed GPU is. When the detected GPU architecture is one the toolkit can target, the build SHALL target it directly. When it is not — a GPU newer than the toolkit — the build SHALL target the newest architecture the toolkit supports as PTX only, so the driver JIT-compiles for the actual device, and SHALL report both architectures at configure time. An explicit `CMAKE_CUDA_ARCHITECTURES` SHALL override the selection. The selected architecture SHALL be applied to the `claycore` target itself, since the target is created before the CUDA language is enabled and no longer inherits the variable.
+The `+cuda` preset SHALL configure whenever a CUDA toolkit is present, however new the installed GPU is. When the detected GPU architecture is one the toolkit can target, the build SHALL target it directly. When it is not — a GPU newer than the toolkit — the build SHALL target the newest architecture the toolkit supports as PTX only, so the driver JIT-compiles for the actual device, and SHALL report both architectures at configure time. An explicit `CMAKE_CUDA_ARCHITECTURES` SHALL override the selection. The selected architecture SHALL be applied to the `claycore` target itself, since the target is created before the CUDA language is enabled and no longer inherits the variable, and SHALL also be applied to the targets created afterwards that device-link against it, so no dependent target links for a different architecture than the code it consumes.
+
+The selection SHALL be made on every configure of a build directory, not only the first. `enable_language(CUDA)` writes its own default into the **cache**, so from the second configure onwards the variable is always set; the build SHALL distinguish that default from a user request rather than treating any set value as explicit. Re-configuring an existing build directory — which `tools/release_check.py --build-dir` does on the directory it is given — SHALL therefore keep the detected architecture rather than silently falling back to the toolkit default.
 
 #### Scenario: Three-OS headless build
 - **WHEN** CI builds `cpu-only` on macOS, Linux, and Windows runners
@@ -19,6 +21,10 @@ The `+cuda` preset SHALL configure whenever a CUDA toolkit is present, however n
 #### Scenario: Explicit architecture wins
 - **WHEN** the build is configured with `-DCMAKE_CUDA_ARCHITECTURES=<arch>`
 - **THEN** that value is used unchanged and no fallback is applied
+
+#### Scenario: The detected architecture survives a re-configure
+- **WHEN** a build directory configured on a GPU newer than the toolkit is configured a second time without `-DCMAKE_CUDA_ARCHITECTURES`
+- **THEN** the same PTX-only architecture is selected and reported again, rather than the toolkit's own default being mistaken for an explicit request
 
 ### Requirement: Module dependency rule
 Module layering SHALL be enforced (by include checks in CI): `kernel` depends on nothing; `scene`/`brick`/`mesh`/`voxel`/`pick` depend only on `kernel`+`math`; backends depend on `eval`; `io` and bindings sit on top; no module depends on a backend.

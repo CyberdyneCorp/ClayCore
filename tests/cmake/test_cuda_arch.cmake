@@ -53,6 +53,36 @@ expect_arch("NATIVE holds CMake's no-device message" "90-virtual"
   NATIVE "No CUDA devices found.-real"
   SUPPORTED 50-real 80-real 90)
 
+# Regression: the auto-detection has to survive a RE-configure. Every gate that
+# reuses a build directory — tools/release_check.py re-runs `cmake -S -B` on the
+# one it is given — hits this path, and it failed silently: enable_language(CUDA)
+# writes its default into the cache, the old `if(NOT CMAKE_CUDA_ARCHITECTURES)`
+# guard read that back as a user request, and the second configure built the
+# toolkit default (sm_52 cubin+PTX) instead of the detected 90-virtual. Nothing
+# errored, because compute_52 PTX still JITs on an sm_120 device.
+function(expect_user_request label expected)
+  cmake_parse_arguments(PARSE_ARGV 2 arg "" "CURRENT;DEFAULT" "")
+  clay_cuda_arch_is_user_request(actual CURRENT "${arg_CURRENT}" DEFAULT "${arg_DEFAULT}")
+  if(actual STREQUAL expected)
+    message(STATUS "ok   — ${label}: ${actual}")
+  else()
+    message(SEND_ERROR "FAIL — ${label}: expected '${expected}', got '${actual}'")
+  endif()
+endfunction()
+
+# First configure: nothing in the cache yet, so nothing to honour.
+expect_user_request("first configure, no -D" FALSE CURRENT "" DEFAULT "")
+
+# Re-configure with no -D: the cache holds enable_language's recorded default,
+# which must NOT suppress the auto-detection. This is the regression.
+expect_user_request("re-configure, cache holds the default" FALSE
+  CURRENT "52" DEFAULT "52")
+
+# A real -D still wins, on the first configure and on every one after it.
+expect_user_request("explicit -D on a fresh build dir" TRUE CURRENT "80-real" DEFAULT "")
+expect_user_request("explicit -D differing from the default" TRUE
+  CURRENT "90-virtual" DEFAULT "52")
+
 foreach(native "120-real" "89" "89-virtual")
   clay_cuda_arch_is_detected(detected "${native}")
   if(detected)

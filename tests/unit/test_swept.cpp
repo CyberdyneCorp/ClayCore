@@ -241,3 +241,62 @@ TEST_CASE("swept: round trips through the document format") {
     CHECK(scene::compile_document(back.document).blob ==
           scene::compile_document(file.document).blob);
 }
+
+// Regression (v0.24.0 GPU gates): the OpenCL backend disagreed with the scalar
+// reference by 7.7% on the swept parity scene — three of 4096 points, all of
+// them outside a bend. The cause was not the OpenCL arithmetic. Any point whose
+// nearest guide point is a shared VERTEX is equidistant from the two segments
+// meeting there, and those two carry different tangents, so they build
+// different frames and resolve the profile at different arc lengths. The winner
+// was decided by `d2 < best_d2` with no margin, and the two d2 are not
+// reliably identical: the segment that clamps to its FAR end reconstructs that
+// vertex as `a + ab * 1`, which need not round to the vertex the next segment
+// starts from. One ulp there is worth several percent of the result, and
+// backends round it differently.
+TEST_CASE("swept: the guide segment pick does not turn on the last ulp") {
+    using kernel::cf3;
+    // guide vertex layout is pos(3), transported normal(3), arc length(1)
+    auto guide_of = [](kernel::cfloat3 v0, kernel::cfloat3 v1, kernel::cfloat3 v2) {
+        return std::vector<float>{v0.x, v0.y, v0.z, 0, 0, 1, 0,  //
+                                  v1.x, v1.y, v1.z, 0, 0, 1, 1,  //
+                                  v2.x, v2.y, v2.z, 0, 0, 1, 2};
+    };
+
+    const kernel::cfloat3 v0 = cf3(-1, 0, 0);
+    const kernel::cfloat3 v1 = cf3(0, 0, 0);
+    // p sits in the outer cone of the corner at v1, so BOTH segments clamp to
+    // v1 and are exactly equidistant.
+    const kernel::cfloat3 p = cf3(1, -1, 0);
+
+    SUBCASE("an exact tie keeps the earlier segment") {
+        // second leg perpendicular to (p - v1): the tie is exact, not merely close
+        std::vector<float> guide = guide_of(v0, v1, cf3(0.70710678f, 0.70710678f, 0));
+        kernel::CSweepHit hit = kernel::csweep_nearest(guide.data(), 3, p);
+        CHECK(hit.seg == 0);
+    }
+
+    SUBCASE("a sub-margin lead does not flip the pick") {
+        // Tilt the second leg towards p just enough to make its squared distance
+        // ~1e-7 smaller in relative terms — the size of the cross-backend
+        // rounding noise, and far below the ~7e-3 gap to the next genuinely
+        // different segment. The earlier segment must still win, or the same
+        // scene evaluates differently on two backends.
+        const float lambda = 3.16e-4f;
+        kernel::cfloat3 dir = cf3(1.0f + lambda, 1.0f - lambda, 0.0f);
+        float inv_len = 1.0f / std::sqrt(kernel::cdot(dir, dir));
+        std::vector<float> guide = guide_of(v0, v1, dir * inv_len);
+
+        kernel::CSweepHit hit = kernel::csweep_nearest(guide.data(), 3, p);
+        CHECK(hit.seg == 0);
+
+        // ...and the lead really is inside the margin, so the test is pinning
+        // the tie-break rather than an ordinary "segment 0 is nearer" case.
+        kernel::cfloat3 ab = dir * inv_len;
+        float t = kernel::cclamp(kernel::cdot(p - v1, ab) / kernel::cdot(ab, ab), 0.0f, 1.0f);
+        kernel::cfloat3 off = p - (v1 + ab * t);
+        float d2_second = kernel::cdot(off, off);
+        float d2_first = kernel::cdot(p - v1, p - v1);
+        CHECK(d2_second < d2_first);
+        CHECK((d2_first - d2_second) < CLAY_SWEEP_TIE_REL * d2_first);
+    }
+}
