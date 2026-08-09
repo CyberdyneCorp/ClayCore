@@ -351,6 +351,8 @@ The frame SHALL be **parallel-transported** along the guide rather than derived 
 
 Profiles SHALL be distributed by **arc length**, so a guide whose vertices bunch does not bunch the profiles.
 
+The nearest-segment search SHALL resolve ties deterministically. Any query point whose nearest guide point is a vertex shared by two segments is equidistant from both by construction — this is every point outside a bend, not a rare case — and the two carry different tangents, so they build different frames and resolve the profile at different arc lengths. A bare "strictly nearer" comparison decides that on the last ulp, which backends do not agree on. A segment SHALL therefore be required to be nearer by a **relative margin** that comfortably exceeds cross-backend rounding while staying far below the separation between genuinely different segments, so the earliest of a tied group wins everywhere.
+
 #### Scenario: A sweep follows its guide
 - **WHEN** a circle is swept along an L-shaped guide
 - **THEN** material is present along both limbs and absent off them
@@ -370,6 +372,10 @@ Profiles SHALL be distributed by **arc length**, so a guide whose vertices bunch
 #### Scenario: The frame does not flip where the guide straightens
 - **WHEN** a non-rotationally-symmetric profile is swept along a guide that bends, straightens, then bends back
 - **THEN** the profile's orientation varies smoothly along the whole guide
+
+#### Scenario: Tied guide segments resolve the same way on every backend
+- **WHEN** a query point lies outside a bend, so its nearest guide point is the vertex shared by two segments, and their squared distances differ only by rounding
+- **THEN** the same segment is chosen regardless of that rounding, and every registered backend agrees with the scalar reference within the parity tolerance
 
 #### Scenario: A degenerate sweep is refused
 - **WHEN** a sweep is built with fewer than two guide points, or fewer than two profiles
