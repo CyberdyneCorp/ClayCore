@@ -400,8 +400,49 @@ distance field. The example prints both, and fails if either stops holding.
 
 ![swept carved](output/17_swept_carved.png)
 
+### 34 — an organic character
+
+A heroic figure taken from blockout to finish, one render per stage: masses,
+limbs, muscle, wardrobe, detail. The organic disciplines in one place —
+authored symmetry (`layer.mirror("x")` plus `mirror=True`, so the left arm IS
+the right arm), smooth blending sized to *disappear*, `taper` doing what a
+constant-radius capsule cannot, and RELIEF/INCISE using an item as a **region**
+rather than a shape, which is why a pec swells the chest instead of sitting on
+it as a lump.
+
+![organic stages](output/34_stages.png)
+
+The cape is a swept profile — profiles distribute by arc length, so the flare
+is smooth rather than stepped at the guide vertices — and the hair is a stroke
+preset with taper, the same call a host makes when a stylus drags.
+
+![organic turnaround](output/34_turnaround.png)
+
+### 35 — a hard-surface helmet
+
+The opposite discipline. On an organic sculpt the blend radius is chosen to be
+invisible; here **the seam is the design**, so the combine mode does the work a
+brush does next door. `Chamfer` bevels a seam where `Smooth` would fillet it,
+and the extended modes are seam treatments rather than volume operations:
+GROOVE cuts a panel gap, TONGUE raises a lip, INSET steps a plate down inside
+its border, PIPE leaves the bead a cable gland has.
+
+![hard-surface stages](output/35_stages.png)
+
+Every repeated feature is authored once — the vent slots and the bolt ring are
+single items with `repeat_grid` / `repeat_radial`, so the tape carries one
+instruction rather than forty. The last panel is the voxel half of hard
+surface, where there are no seams to shape and the verbs are subtractive
+instead: `sculpt_flatten`, `sculpt_scrape`, and `sculpt_fill_cavities` closing
+the pinholes a dithered stamp leaves.
+
+![hard-surface turnaround](output/35_turnaround.png)
+
 ## Notes
 
+- **This page documents 00-17 and the two showcase examples.** The gallery
+  text has drifted behind the scripts; 18-33 run in CI and regenerate their
+  output, they just have no section here yet.
 - **Committed models are budgeted.** `_render.save_model` fails above 400 KiB
   so the repository does not accumulate large binaries; `export_model` is the
   one place meshing settings are tuned. Binary PLY is much smaller than ASCII

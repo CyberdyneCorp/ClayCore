@@ -178,10 +178,43 @@ def shade(hit, normal, position, view_dir, colors=None):
     return np.clip(lit, 0.0, 1.0)
 
 
+def occlusion(doc, position, normal, samples=10, reach=0.10, seed=11):
+    """Fraction of a hemisphere of short rays that hit something nearby.
+
+    `shade` reads a surface entirely through its normal, which is enough for a
+    smooth form and not enough for a hard-surface one: a panel gap has almost
+    the same normal as the plate either side of it, so it lights identically
+    and disappears. What separates them is that the gap is OCCLUDED — and the
+    document already traces rays, so occlusion is just more rays.
+
+    Deterministic: the gallery is committed, so the sample directions come from
+    a fixed seed rather than fresh randomness.
+    """
+    rng = np.random.default_rng(seed)
+    occ = np.zeros(len(position), dtype=np.float32)
+    origin = position + normal * (reach * 0.04)
+    for _ in range(samples):
+        d = rng.normal(size=position.shape).astype(np.float32)
+        d /= np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-8)
+        # Fold each direction into the surface's own hemisphere.
+        d = np.where((np.sum(d * normal, axis=1) < 0.0)[:, None], -d, d)
+        probe = np.concatenate([origin, d], axis=1).astype(np.float32)
+        r = doc.raycast_many(probe)
+        near = np.linalg.norm(r["position"] - origin, axis=1) < reach
+        occ += (r["hit"] & near).astype(np.float32)
+    return occ / float(samples)
+
+
 def render_array(doc, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
                  fov_degrees=35.0, colors_from_field=False,
-                 width=WIDTH, height=HEIGHT, supersample=SUPERSAMPLE):
-    """Raycast and shade `doc`, returning the (H, W, 3) image array."""
+                 width=WIDTH, height=HEIGHT, supersample=SUPERSAMPLE,
+                 ao=0, ao_reach=0.10, ao_strength=0.85):
+    """Raycast and shade `doc`, returning the (H, W, 3) image array.
+
+    `ao` is the number of occlusion rays per pixel, 0 to skip it. Off by
+    default: it costs a raycast pass per sample, and only earns that on a model
+    whose detail is cavities rather than curvature.
+    """
     rays, (h, w) = camera_rays(eye, target, fov_degrees=fov_degrees,
                                width=width, height=height, supersample=supersample)
     result = doc.raycast_many(rays)
@@ -200,7 +233,11 @@ def render_array(doc, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
         if colors_from_field:
             surface_colors = doc.colors(position)
 
-        flat[idx] = shade(hit[idx], normal, position, view_dir, surface_colors)
+        lit = shade(hit[idx], normal, position, view_dir, surface_colors)
+        if ao:
+            occ = occlusion(doc, position, normal, samples=ao, reach=ao_reach)
+            lit = lit * (1.0 - ao_strength * occ)[:, None]
+        flat[idx] = lit
 
     image = flat.reshape(h, w, 3)
 
@@ -321,10 +358,12 @@ def contact_sheet(tiles, name, columns=4, caption=None):
 
 
 def render_tile(doc, eye=(2.4, 1.9, 3.0), target=(0.0, 0.0, 0.0),
-                fov_degrees=32.0, size=160, layer=None, colors_from_field=False):
+                fov_degrees=32.0, size=160, layer=None, colors_from_field=False,
+                ao=0, ao_reach=0.10, ao_strength=0.85):
     """Render a small square tile for a contact sheet; returns the array.
 
     Pass `layer` to frame the tile automatically from that layer's bounds.
+    `ao` is as render_array takes it.
     """
     if layer is not None:
         eye, target = layer_camera(layer, fov_degrees=fov_degrees)
@@ -337,9 +376,13 @@ def render_tile(doc, eye=(2.4, 1.9, 3.0), target=(0.0, 0.0, 0.0),
     if np.any(hit):
         idx = np.nonzero(hit)[0]
         position = result["position"][idx]
+        normal = result["normal"][idx]
         surface_colors = doc.colors(position) if colors_from_field else None
-        image[idx] = shade(hit[idx], result["normal"][idx],
-                           position, rays[idx, 3:6], surface_colors)
+        lit = shade(hit[idx], normal, position, rays[idx, 3:6], surface_colors)
+        if ao:
+            occ = occlusion(doc, position, normal, samples=ao, reach=ao_reach)
+            lit = lit * (1.0 - ao_strength * occ)[:, None]
+        image[idx] = lit
     image = image.reshape(h, w, 3).reshape(h // 2, 2, w // 2, 2, 3).mean(axis=(1, 3))
     return np.power(np.clip(image, 0.0, 1.0), 1.0 / 2.2)
 
