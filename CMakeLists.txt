@@ -130,17 +130,31 @@ endif()
 
 # -- CUDA backend (tier 2) ---------------------------------------------------
 if(CLAY_BACKEND_CUDA)
+  include(ClayCudaArch)
   # only an explicit -DCMAKE_CUDA_ARCHITECTURES survives here; enable_language
   # below sets the variable to its own default, which is not a user request
   set(_clay_cuda_arch "${CMAKE_CUDA_ARCHITECTURES}")
   enable_language(CUDA)
+  # enable_language wrote that default into the CACHE, so on every RE-configure
+  # of this build directory the variable comes back set and looks exactly like a
+  # user's -D. Record the default once — and only when it is not already
+  # carrying a real request — so the check below can tell them apart. Without
+  # this the auto-detection runs on the first configure and never again.
+  if(NOT DEFINED CLAY_CUDA_ARCH_TOOLKIT_DEFAULT AND NOT _clay_cuda_arch)
+    set(CLAY_CUDA_ARCH_TOOLKIT_DEFAULT "${CMAKE_CUDA_ARCHITECTURES}" CACHE INTERNAL
+        "enable_language(CUDA)'s own default, kept to tell it from a user request")
+  endif()
+  clay_cuda_arch_is_user_request(_clay_cuda_arch_requested
+    CURRENT "${_clay_cuda_arch}" DEFAULT "${CLAY_CUDA_ARCH_TOOLKIT_DEFAULT}")
+  if(NOT _clay_cuda_arch_requested)
+    set(_clay_cuda_arch "")
+  endif()
   # the host .cpp is compiled by the C++ compiler and needs cuda_runtime.h
   # plus the runtime library; CUDA::cudart carries both
   find_package(CUDAToolkit REQUIRED)
   set(CMAKE_CUDA_STANDARD 20)
   set(CMAKE_CUDA_STANDARD_REQUIRED ON)
   if(NOT _clay_cuda_arch)
-    include(ClayCudaArch)
     clay_select_cuda_arch(_clay_cuda_arch
       NATIVE "${CMAKE_CUDA_ARCHITECTURES_NATIVE}"
       SUPPORTED ${CMAKE_CUDA_ARCHITECTURES_ALL})
@@ -156,6 +170,14 @@ if(CLAY_BACKEND_CUDA)
   # claycore is created before enable_language(CUDA), so its CUDA_ARCHITECTURES
   # property was initialized empty — set it on the target, not the variable
   set_target_properties(claycore PROPERTIES CUDA_ARCHITECTURES "${_clay_cuda_arch}")
+  # Everything created below (clay_shared, clay_bench, the test executables)
+  # device-links against claycore's separable CUDA objects, so each needs an
+  # architecture of its own and takes it from this variable at creation time.
+  # Point it at the SAME selection: a dependent target must not device-link for
+  # a different arch than the code it links, and relying on whatever
+  # enable_language left in the cache leaves them empty — which fails generation
+  # outright — whenever that entry is absent.
+  set(CMAKE_CUDA_ARCHITECTURES "${_clay_cuda_arch}")
   target_sources(claycore PRIVATE backends/cuda/clay_kernels.cu backends/cuda/cuda_backend.cpp)
   target_compile_definitions(claycore PRIVATE CLAY_HAS_CUDA=1)
   target_include_directories(claycore PRIVATE backends/cuda)

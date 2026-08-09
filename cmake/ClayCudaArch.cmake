@@ -27,6 +27,34 @@ function(clay_cuda_arch_is_detected out_var native)
   endif()
 endfunction()
 
+# Whether a CMAKE_CUDA_ARCHITECTURES value is a real user request or just
+# enable_language(CUDA)'s own default read back out of the cache.
+#
+# enable_language writes its default into the CACHE, so from the SECOND
+# configure of a build directory onwards the variable is always set and a bare
+# `if(NOT CMAKE_CUDA_ARCHITECTURES)` can no longer tell a user's -D from that
+# default. The auto-detection then silently stops running and the build drops
+# to the toolkit default arch — which still loads, because the default is built
+# with PTX the driver can JIT, so nothing fails loudly. Comparing against the
+# default recorded on the first configure is what keeps the two apart.
+#
+#   clay_cuda_arch_is_user_request(<out_var> CURRENT <value> DEFAULT <default>)
+#
+# DEFAULT is empty when none has been recorded yet — a first configure, or a
+# build directory whose first configure already carried an explicit -D. Any
+# non-empty CURRENT is a user request in that case.
+function(clay_cuda_arch_is_user_request out_var)
+  cmake_parse_arguments(PARSE_ARGV 1 arg "" "CURRENT;DEFAULT" "")
+
+  if(NOT arg_CURRENT)
+    set(${out_var} FALSE PARENT_SCOPE)
+  elseif(arg_DEFAULT AND arg_CURRENT STREQUAL arg_DEFAULT)
+    set(${out_var} FALSE PARENT_SCOPE)
+  else()
+    set(${out_var} TRUE PARENT_SCOPE)
+  endif()
+endfunction()
+
 function(clay_select_cuda_arch out_var)
   cmake_parse_arguments(PARSE_ARGV 1 arg "" "NATIVE" "SUPPORTED")
 
