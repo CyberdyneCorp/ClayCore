@@ -3934,6 +3934,14 @@ clay_result clay_voxel_occupied_count(const clay_voxel_grid* grid, size_t* out_c
     return CLAY_OK;
 }
 
+clay_result clay_voxel_change_count(const clay_voxel_grid* grid, uint64_t* out_count) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (out_count) *out_count = g->change_count();
+    return CLAY_OK;
+}
+
 clay_result clay_voxel_bounds(const clay_voxel_grid* grid, int32_t out_min[3],
                               int32_t out_max[3], int32_t* out_has_bounds) {
     voxel::VoxelGrid* g = nullptr;

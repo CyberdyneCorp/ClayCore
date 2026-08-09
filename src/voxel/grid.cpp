@@ -66,6 +66,9 @@ void VoxelGrid::set(VoxelCoord c, std::uint8_t index) {
         it->second.data.assign(static_cast<std::size_t>(kChunkDim) * kChunkDim * kChunkDim, 0);
     }
     std::uint8_t& cell = it->second.data[chunk_offset(c)];
+    // Every verb funnels its writes through here, so one compare instruments
+    // all of them. The early return above is already a no-change case.
+    if (cell != index) ++change_count_;
     if (cell == 0 && index != 0) ++it->second.occupied;
     if (cell != 0 && index == 0) --it->second.occupied;
     cell = index;

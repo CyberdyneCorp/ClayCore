@@ -407,7 +407,7 @@ already changed.
 | `sculpt_magnify` | ...and one step away — the inverse, sharing pinch's walk so the two cannot drift apart |
 | `sculpt_scrape` | Flatten **and** smooth from one snapshot. Calling both in sequence is not the same thing |
 | `sculpt_smudge` | Drag **surface** material along a direction, leaving the interior. Grab moves a lump; smudge smears a skin |
-| `sculpt_grab` | Translate occupancy through the same inverse map the SDF `grab` deformer uses, so both representations mean the same thing |
+| `sculpt_grab` | Translate occupancy through the same inverse map the SDF `grab` deformer uses, so both representations mean the same thing. Resampling is nearest-cell and rounds **per axis**, so a displacement under half a cell on every axis moves nothing — a drag fed raw pointer deltas is dead until the host accumulates them past `voxel_size` |
 | `sculpt_fill_cavities` | Fill pockets: an empty cell with ≥4 of its 6 face neighbours occupied is inside a cavity. A through-hole does not qualify |
 | `sculpt_carve_alpha` | A caller-supplied scalar stamp modulating per-cell strength. **The engine decodes no images** — a host with an alpha has already loaded a PNG |
 | `repair_report` | What a pre-bake check wants to know, without performing the fix |
@@ -419,6 +419,18 @@ Every verb takes `BrushParams`: `size`, shape (`Cube`/`Sphere`), falloff
 **mask**. Where a mask is given the effective weight is scaled by `1 − mask`, so
 a fully masked cell is untouched by *every* verb rather than by a hand-picked
 few.
+
+**Any verb here can be a valid call that changes nothing** — a sub-cell grab or
+smudge, a flatten on an already-flat region, a dithered stamp that misses every
+cell it was offered, a footprint over empty space. None of that is an error and
+none of it is reported as one. To tell a live edit from a dead one, read
+`VoxelGrid::change_count()` (`clay_voxel_change_count`, `grid.change_count` in
+pyclay) before and after: it counts cell writes that actually changed a cell,
+is monotone, and only the difference means anything. `occupied_count` is not a
+substitute — grab and magnify move material without adding any, so the count
+can be identical across an edit that moved a whole lump. The one caveat is
+`sculpt_pinch` and `sculpt_magnify`, which may revisit a cell within one call
+and so give an upper bound rather than an exact tally.
 
 ---
 
@@ -471,6 +483,7 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Snakehook | `brush::snakehook` | `clay.snakehook(...)` | `clay_item_create` + `clay_item_set_curve_points` |
 | Tube | `brush::tube` | `clay.tube(...)` | `clay_tube_create` |
 | Voxel verbs | `VoxelGrid::sculpt_*` | `VoxelGrid.sculpt_*` | `clay_voxel_sculpt_*` |
+| Did an edit change anything | `VoxelGrid::change_count()` | `VoxelGrid.change_count` | `clay_voxel_change_count` |
 | Move brush | `brush::move_brush`, `moved_chain` | `Layer.move_surface(...)`, `.move_surface_preview(...)` | `clay_layer_move_surface`, `clay_layer_move_surface_preview` |
 | Move Topological | `field::move_topological` | `Volume.moved_topologically_from(...)` | `clay_item_volume_move_topological` |
 | Deformers on a placed node | `scene::SetDeformersCmd` | (through `move_surface`) | `clay_layer_add_deformer` |

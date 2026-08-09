@@ -3413,6 +3413,15 @@ NB_MODULE(pyclay, m) {
         .def_prop_ro("voxel_size", [](const PyVoxelGrid& g) { return g.grid().voxel_size(); })
         .def_prop_ro("occupied_count",
                      [](const PyVoxelGrid& g) { return g.grid().occupied_count(); })
+        .def_prop_ro("change_count",
+                     [](const PyVoxelGrid& g) { return g.grid().change_count(); },
+                     "Cell writes that actually changed a cell, since construction.\n"
+                     "Monotone and never reset, so only the difference between two\n"
+                     "reads means anything: it is how you tell an edit that did\n"
+                     "nothing — a sub-cell grab, a flatten on flat ground — from one\n"
+                     "that did. occupied_count cannot, since grab and magnify\n"
+                     "conserve material. Exact per cell except for pinch and\n"
+                     "magnify, which may revisit a cell and so over-count.")
         .def_prop_ro("palette_size",
                      [](const PyVoxelGrid& g) { return g.grid().palette_size(); })
         .def("palette_add",

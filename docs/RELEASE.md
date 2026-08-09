@@ -63,6 +63,15 @@ forward-refuse).
    before. It is called out here because "purely additive" is otherwise read as
    "no struct changed size", and a host that hard-codes a descriptor size
    rather than using `sizeof` would be surprised.
+   `report-voxel-edit-effect` is the mildest kind of additive and does not make
+   whichever release carries it a breaking one: it adds `clay_voxel_change_count`,
+   changes no signature, removes nothing, and grows no struct. Every sculpt verb
+   behaves exactly as it did, including the ones that can legally do nothing;
+   what changed is that a host can now SEE that they did nothing, by reading the
+   counter before and after rather than diffing the grid. No new `clay_result`
+   value was added, and that was the point: an existing entry point returning a
+   new non-zero code would turn a success into a failure for every caller
+   already compiled.
 
 ## Tagging
 

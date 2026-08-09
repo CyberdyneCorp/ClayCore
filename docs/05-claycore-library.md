@@ -580,7 +580,10 @@ body.add(clay.Cylinder(r=0.3, h=1.0).pose(center=(0, 0.8, 0), radius=1.0,
 body.add(clay.Capsule(a=(0, -1, 0), b=(0, 1, 0), r=0.25).pose_line(
     a=(0, -1, 0), b=(0, 1, 0), axis=(0, 0, 1), angle=0.8))
 
-# the voxel side moves occupancy through the same map
+# the voxel side moves occupancy through the same map. Occupancy is binary, so
+# the resample is nearest-cell and rounds PER AXIS: accumulate a drag in the
+# host until it clears half a cell (blocks.voxel_size) or the call is a legal
+# no-op. blocks.change_count, read either side, says which it was.
 blocks.sculpt_grab((0, 0, 0), 15, displacement=(0.3, 0.0, 0.0), shape="sphere")
 ```
 
