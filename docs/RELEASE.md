@@ -73,6 +73,17 @@ forward-refuse).
    new non-zero code would turn a success into a failure for every caller
    already compiled.
 
+   **0.24.2 carries two new symbols under a PATCH number**, which is worth
+   stating plainly because nothing else in this list does it. It adds
+   `clay_voxel_change_count` and `clay_layer_stroke_points`, and widens the
+   placed-curve setter to accept a swept guide — an edit that previously
+   returned an error and now succeeds. Every one of those is additive: no
+   signature changed, nothing was removed, no struct grew, and code compiled
+   against 0.24.1 keeps linking and behaving as it did. The direction that does
+   NOT hold is downgrade — a host that builds against 0.24.2 and links 0.24.1
+   gets undefined symbols, which a patch number would not normally warn anyone
+   about. Read the symbol list rather than the number when pinning.
+
 ## Tagging
 
 ```sh
