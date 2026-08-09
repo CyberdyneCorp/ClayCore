@@ -486,3 +486,126 @@ Fewer points than describe a path, a radius positive nowhere, an unknown point t
 - **WHEN** a tube is asked for from one point, or with every radius zero
 - **THEN** no item is returned
 
+### Requirement: Replacing a primitive refuses the kinds that carry out-of-line data
+`clay_layer_set_prim` SHALL refuse a stroke, a lift, a loft, a sweep or a volume, with `CLAY_ERROR_INVALID_ARGUMENT`. That entry point replaces a node's primitive alone and has no way to supply the payload those kinds read, so accepting one leaves a node the evaluator cannot evaluate.
+
+This is the refusal `clay_add_item` already makes for the same set through the flat descriptor.
+
+#### Scenario: A node cannot be turned into a loft
+- **WHEN** `clay_layer_set_prim` is called with `CLAY_PRIM_LOFT`
+- **THEN** it returns `CLAY_ERROR_INVALID_ARGUMENT` and the node is unchanged
+
+#### Scenario: The document still evaluates afterwards
+- **WHEN** a refused replacement is followed by evaluating the document
+- **THEN** evaluation returns the original primitive's field
+
+#### Scenario: An ordinary replacement still works
+- **WHEN** `clay_layer_set_prim` is called with a primitive whose parameters fit the params block
+- **THEN** it succeeds as before
+
+### Requirement: Every out-of-line count is bounded
+A function taking a caller-supplied count and a pointer SHALL check both against the batch ceiling before reserving for them, so that a bogus count is refused rather than reaching the allocator. An allocation failure cannot be reported across this boundary: the library builds without exceptions, so it would end the host process.
+
+#### Scenario: A tube with an impossible point count
+- **WHEN** `clay_tube_create` is given a count above the batch limit
+- **THEN** it returns null with `CLAY_ERROR_INVALID_ARGUMENT` and the host continues
+
+### Requirement: A requested meshing resolution is priced before it is allocated
+`clay_document_mesh` SHALL reject a voxel size that is not finite and positive, and SHALL reject a resolution whose implied dense sample grid exceeds the batch ceiling, before any meshing begins.
+
+#### Scenario: An over-fine resolution is refused
+- **WHEN** `clay_document_mesh` is asked for a voxel size that implies more than the ceiling of grid samples over the scene bounds
+- **THEN** it returns `CLAY_ERROR_INVALID_ARGUMENT` rather than attempting the allocation
+
+#### Scenario: A sane resolution still meshes
+- **WHEN** `clay_document_mesh` is asked for an ordinary resolution
+- **THEN** it meshes as before
+
+#### Scenario: The documented resolution is not refused
+- **WHEN** `clay_document_mesh` is asked for the resolution the library's own documentation advertises
+- **THEN** it meshes
+
+The ceiling SHALL be the mesher's own limit rather than the batch limit: the batch limit bounds how many items cross the boundary in one call, which is a different quantity and far below what this call legitimately needs.
+
+### Requirement: Mirroring a layer is an ordinary layer edit
+`clay_set_layer_mirror` SHALL apply through the command vocabulary, so that it refuses a protected layer as every other layer edit does and is recorded on the undo stack.
+
+#### Scenario: A locked layer refuses a mirror
+- **WHEN** `clay_set_layer_mirror` names a locked layer
+- **THEN** it returns `CLAY_ERROR_INVALID_ARGUMENT` and the layer is unchanged
+
+#### Scenario: A mirror can be undone
+- **WHEN** a mirror is set with undo enabled and then undone
+- **THEN** the layer returns to its previous mirror state
+
+### Requirement: Moving a layer is one undo step
+`clay_document_move_layer` SHALL group the removal and reinsertion it performs, so that a single undo restores the previous order with every layer still present.
+
+#### Scenario: One undo restores the order
+- **WHEN** a layer is moved with undo enabled and undone once
+- **THEN** the document has the same layers it had before the move, in the same order
+
+### Requirement: A document reuses its compiled tape until it changes
+A document SHALL compile its tape once and reuse it for every read until something changes what that tape would contain. Reads are on the interactive path and compiling is proportional to the whole document, which grows with every brush stamp, so recompiling per read makes looking at a sculpt cost more the longer it has been worked on.
+
+The tape picking uses excludes ghosted layers and is therefore a different tape; it SHALL be remembered separately rather than sharing one slot that would be rebuilt alternately by the two.
+
+#### Scenario: Repeated reads of an unchanged document compile once
+- **WHEN** the field is read many times without any intervening edit
+- **THEN** every read returns what a fresh compile would have returned
+
+#### Scenario: Picking and evaluation do not evict each other
+- **WHEN** picking and field evaluation are interleaved on an unchanged document
+- **THEN** neither causes the other to recompile
+
+### Requirement: Every mutation is visible to the next read
+Any entry point that changes what the compiled tape would contain SHALL invalidate the remembered tape. This includes edits applied through the command vocabulary, undo and redo, and any layer added outside that vocabulary.
+
+Failing to invalidate is silent: the call succeeds, nothing reports an error, and every later read answers with the field as it was before the edit. An entry point that invalidates unnecessarily merely recompiles, which is the behaviour that existed before any of this was remembered — so where it is not obvious, the tape SHALL be invalidated.
+
+#### Scenario: Each mutating entry point is reflected
+- **WHEN** the field is read, mutated through any entry point that changes it, and read again
+- **THEN** the second read differs from the first
+
+#### Scenario: Undo restores the previous field exactly
+- **WHEN** an edit is undone
+- **THEN** the field reads exactly as it did before that edit, and redoing restores it again
+
+#### Scenario: Ghosting changes picking and not evaluation
+- **WHEN** a layer is ghosted
+- **THEN** picking stops reporting it while the evaluated field is unchanged
+
+### Requirement: A document stays readable from several threads at once
+Reading a document from more than one thread concurrently SHALL remain safe. It was safe before the tape was remembered, because compiling took the document by const reference and returned a fresh result, and remembering the result SHALL NOT take that away.
+
+A reader SHALL receive a snapshot that stays valid for the duration of its call, so that another thread invalidating and rebuilding cannot pull the tape out from under it.
+
+#### Scenario: Concurrent readers agree
+- **WHEN** several threads evaluate and pick against one unchanged document at once
+- **THEN** every reader gets the same answer a single-threaded reader would
+
+### Requirement: The brick cache across the C ABI
+The ABI SHALL expose the brick cache as an opaque handle the caller creates from a versioned configuration descriptor and destroys, never bound to a document, alongside the three calls that make it usable: dense-grid evaluation with an optional cull region, and the influence bound of a node and of a layer.
+
+There SHALL be exactly one refill path — mark dirty, drain requests, evaluate, submit — with the drain taking a capacity and reporting a count and a remainder rather than accepting a NULL buffer as a size query, and with the outcome of a submission (accepted, stale, over budget) crossing as an out-parameter with a success return, on the same footing as "nothing to undo".
+
+The handle SHALL take no lock and start no thread; the header SHALL state that calls on one handle are the host's to serialize and that the batched evaluation call, which takes no handle, is free-threaded against one const document.
+
+A dirty region SHALL be validated in 64-bit before the engine converts it: a non-finite or empty region, a brick coordinate outside `int32`, and a span above the batch ceiling SHALL each be refused with the cache left unchanged. Dirtying everything the cache tracks SHALL be spelled as the absence of a region, never as a region carrying an infinity.
+
+#### Scenario: A host refills from the header alone
+- **WHEN** a consumer with only `clay.h` marks a layer's influence bound dirty, drains the requests in fixed-size chunks, evaluates them and submits the values
+- **THEN** every brick is accepted, the pending count reaches zero, and the surface bricks read back at a fixed stride in the engine's own fp16 bits
+
+#### Scenario: A count is never inferred
+- **WHEN** a value buffer is passed whose length is not exactly the request count times the brick's sample count
+- **THEN** the call is refused rather than reading or writing what the caller did not allocate
+
+#### Scenario: A request carries everything its evaluation needs
+- **WHEN** a request is drained and evaluated
+- **THEN** the lattice AND the band come with it, so the evaluator culls against the brick dilated by the band without consulting the cache, and there is no value a caller can supply wrongly
+
+#### Scenario: The bound to dirty is not the bound to frame on
+- **WHEN** a consumer asks for a node's influence bound
+- **THEN** it receives a box no tighter than the layer bounds query reports, and an explicit flag for the items whose influence is unbounded
+
