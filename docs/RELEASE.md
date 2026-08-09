@@ -34,6 +34,13 @@ forward-refuse).
    between its path and its out-parameter, so a caller compiled against 0.21.0
    gets a compile error rather than a misread — the arity changed, so there is
    no way for old code to link and behave differently.
+   **Neither is 0.24.1**: it changes no signatures at all. It corrects the
+   swept guide's segment tie-break, so a scene containing a sweep can evaluate
+   marginally differently at a guide corner — a behaviour change, not an ABI
+   one. (0.24.0 was tagged and drafted but never published: it failed its own
+   parity gate on a real OpenCL device, which is what 0.24.1 fixes. The tag
+   remains for the record.)
+
    **0.24.0 is not such a release**: it is additive. Every signature that
    existed in 0.23.0 is unchanged, nothing was removed, and every field that
    existed keeps its offset, so code compiled against 0.23.0 keeps linking and
