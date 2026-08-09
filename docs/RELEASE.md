@@ -34,11 +34,28 @@ forward-refuse).
    between its path and its out-parameter, so a caller compiled against 0.21.0
    gets a compile error rather than a misread — the arity changed, so there is
    no way for old code to link and behave differently.
-   **0.24.0 is not such a release**: it is purely additive. Every existing
-   signature and struct layout is byte-identical to 0.23.0, and what is new —
-   the `clay_brick_cache_*` surface, `clay_eval_grid`, and the node/layer
-   influence bounds — only adds symbols and new structs, so code compiled
-   against 0.23.0 keeps linking and behaving as it did.
+   **0.24.0 is not such a release**: it is additive. Every signature that
+   existed in 0.23.0 is unchanged, nothing was removed, and every field that
+   existed keeps its offset, so code compiled against 0.23.0 keeps linking and
+   behaving as it did. It adds 29 symbols, from three changes:
+
+   - the `clay_brick_cache_*` surface, `clay_eval_grid`, and the node/layer
+     influence bounds (`expose-the-brick-cache`);
+   - the mask brush (`clay_mask_apply_stroke`), the bounded complement
+     (`clay_mask_fill`, `clay_mask_invert_within`), the measured mask
+     (`clay_mask_to_field`) and mask extrude (`clay_document_mask_extrude`,
+     `clay_voxel_mask_extrude`) (`add-mask-stroke-brush`, `add-mask-extrude`);
+   - tightened validation at the boundaries, which changes which inputs are
+     REFUSED rather than which are accepted (`harden-core-boundaries`).
+
+   Two descriptor structs GREW rather than staying byte-identical:
+   `clay_relax_params` and `clay_flatten_params` each gained a trailing
+   optional `mask`. That is the versioned-descriptor pattern doing its job —
+   `struct_size` decides whether the field is read — so a caller compiled
+   against 0.23.0 passes the shorter descriptor and gets exactly what it got
+   before. It is called out here because "purely additive" is otherwise read as
+   "no struct changed size", and a host that hard-codes a descriptor size
+   rather than using `sizeof` would be surprised.
 
 ## Tagging
 
