@@ -818,3 +818,125 @@ TEST_CASE("voxel grab translates occupancy through the same map") {
         CHECK(disagree == 0);
     }
 }
+
+TEST_CASE("a sub-cell drag is a valid edit that changes nothing, and reports so") {
+    // Grab and smudge round their source PER AXIS, so a displacement under
+    // half a cell on every axis resolves each cell to itself and writes back
+    // the index already there. That is legal and common — every per-sample
+    // delta of a slow drag is sub-cell — and occupied_count() is blind to it,
+    // because both verbs conserve material. change_count() is the observable
+    // that separates a dead drag from a live one.
+    const float voxel = 0.12f;
+    auto ball = [&](VoxelGrid& g) {
+        g.set_brush({0, 0, 0}, 11, g.palette_add(cf3(0.2f, 0.7f, 0.9f)),
+                    voxel::BrushShape::Sphere);
+    };
+    voxel::BrushParams p;
+    p.size = 15;
+    p.shape = voxel::BrushShape::Sphere;
+
+    // 0.05 world units is 0.42 of a cell on each axis, and 0.72 of a cell
+    // long: the length clears half a cell and the edit still moves nothing,
+    // which is what "per axis" means.
+    const kernel::cfloat3 dead = cf3(0.05f, 0.05f, 0.05f);
+    const kernel::cfloat3 live = cf3(0.2f, 0.0f, 0.0f);  // 1.67 cells
+
+    SUBCASE("grab") {
+        VoxelGrid g(voxel);
+        ball(g);
+        const std::vector<std::uint8_t> before = g.serialize();
+        const std::uint64_t changes = g.change_count();
+        const std::size_t occupied = g.occupied_count();
+
+        g.sculpt_grab({0, 0, 0}, p, dead);
+        CHECK(g.serialize() == before);
+        CHECK(g.change_count() == changes);
+        CHECK(g.occupied_count() == occupied);
+
+        g.sculpt_grab({0, 0, 0}, p, live);
+        CHECK(g.serialize() != before);
+        CHECK(g.change_count() > changes);
+    }
+
+    SUBCASE("smudge") {
+        VoxelGrid g(voxel);
+        ball(g);
+        const std::vector<std::uint8_t> before = g.serialize();
+        const std::uint64_t changes = g.change_count();
+
+        g.sculpt_smudge({0, 0, 0}, p, dead);
+        CHECK(g.serialize() == before);
+        CHECK(g.change_count() == changes);
+
+        g.sculpt_smudge({0, 0, 0}, p, live);
+        CHECK(g.serialize() != before);
+        CHECK(g.change_count() > changes);
+    }
+
+    // A brush far wider than the ball, so the falloff is nearly flat across it
+    // and the pull is close to a rigid translation. That is the configuration
+    // in which grab visibly conserves material, and it is where the old
+    // observable fails hardest.
+    voxel::BrushParams wide;
+    wide.size = 51;
+    wide.shape = voxel::BrushShape::Sphere;
+
+    SUBCASE("occupied_count reads the same whether the drag moved anything") {
+        // 1.15 cells: over the ball the weighted pull stays inside
+        // [0.90, 1.15] cells, so every cell resolves one step back and the
+        // ball translates rigidly.
+        VoxelGrid g(voxel);
+        ball(g);
+        const std::vector<std::uint8_t> before = g.serialize();
+        const std::uint64_t changes = g.change_count();
+        const std::size_t occupied = g.occupied_count();
+
+        g.sculpt_grab({0, 0, 0}, wide, dead);
+        const std::size_t after_dead = g.occupied_count();
+        g.sculpt_grab({0, 0, 0}, wide, cf3(0.138f, 0.0f, 0.0f));
+
+        CHECK(g.serialize() != before);
+        CHECK(g.change_count() > changes);
+        // Both edits leave the count at its starting value, so a host watching
+        // it cannot tell the drag that did nothing from the one that moved the
+        // whole ball. That is the gap change_count() closes.
+        CHECK(after_dead == occupied);
+        CHECK(g.occupied_count() == occupied);
+    }
+
+    SUBCASE("front_only widens the dead zone rather than narrowing it") {
+        // The front gate is 0.5 on the plane through the centre and peaks at
+        // 0.5625 of the ungated pull once the falloff is folded in, so a
+        // displacement that moves material ungated can still move none with
+        // the gate on. 0.75 of a cell is inside that band.
+        VoxelGrid gated(voxel), open(voxel);
+        ball(gated);
+        ball(open);
+        // The counter is monotone from construction, so the ball's own writes
+        // are in it; only the difference across the verb means anything.
+        const std::uint64_t gated_before = gated.change_count();
+        const std::uint64_t open_before = open.change_count();
+        const kernel::cfloat3 marginal = cf3(0.09f, 0.0f, 0.0f);
+
+        open.sculpt_grab({0, 0, 0}, wide, marginal, false);
+        gated.sculpt_grab({0, 0, 0}, wide, marginal, true);
+        CHECK(open.change_count() > open_before);
+        CHECK(gated.change_count() == gated_before);
+    }
+
+    SUBCASE("rewriting a cell with the index it already holds is not a change") {
+        VoxelGrid g(voxel);
+        std::uint8_t c = g.palette_add(cf3(1, 0, 0));
+        g.set({0, 0, 0}, c);
+        const std::uint64_t changes = g.change_count();
+        CHECK(changes == 1);
+
+        g.set({0, 0, 0}, c);
+        g.erase({4, 4, 4});  // already empty, inside the chunk that does exist
+        g.erase({100, 100, 100});  // no chunk at all: set() returns before the compare
+        CHECK(g.change_count() == changes);
+
+        g.set({0, 0, 0}, 0);
+        CHECK(g.change_count() == changes + 1);
+    }
+}

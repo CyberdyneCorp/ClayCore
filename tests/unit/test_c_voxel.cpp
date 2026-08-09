@@ -264,8 +264,34 @@ TEST_CASE("magnify and grab cross the ABI like the other verbs") {
         REQUIRE(clay_voxel_sculpt_grab(c.grid, kOrigin, &verb, displacement, 1) == CLAY_OK);
         ref.sculpt_grab({0, 0, 0}, ref_brush(verb), kernel::cf3(0.25f, 0, 0), true);
     }
+    SUBCASE("a sub-cell drag succeeds and reports that it moved nothing") {
+        // The dead zone the header documents. Rounding is per axis, so 0.02 at
+        // a voxel size of 0.1 is a fifth of a cell on each of the three and
+        // resolves every cell to itself. CLAY_OK either way, which is why the
+        // count is the only thing that separates the two calls below.
+        std::uint64_t start = 0, after_dead = 0, after_live = 0;
+        REQUIRE(clay_voxel_change_count(c.grid, &start) == CLAY_OK);
+        CHECK(start == ref.change_count());
+
+        const float sub_cell[3] = {0.02f, 0.02f, 0.02f};
+        REQUIRE(clay_voxel_sculpt_grab(c.grid, kOrigin, &verb, sub_cell, 0) == CLAY_OK);
+        ref.sculpt_grab({0, 0, 0}, ref_brush(verb), kernel::cf3(0.02f, 0.02f, 0.02f), false);
+        REQUIRE(clay_voxel_change_count(c.grid, &after_dead) == CLAY_OK);
+        CHECK(after_dead == start);
+        CHECK(ref.serialize() == before);
+
+        const float whole_cells[3] = {0.25f, 0.0f, 0.0f};
+        REQUIRE(clay_voxel_sculpt_grab(c.grid, kOrigin, &verb, whole_cells, 0) == CLAY_OK);
+        ref.sculpt_grab({0, 0, 0}, ref_brush(verb), kernel::cf3(0.25f, 0, 0), false);
+        REQUIRE(clay_voxel_change_count(c.grid, &after_live) == CLAY_OK);
+        CHECK(after_live > start);
+        CHECK(after_live == ref.change_count());
+    }
     SUBCASE("refusals") {
         const float displacement[3] = {0.25f, 0.0f, 0.0f};
+        std::uint64_t changes = 0;
+        CHECK(clay_voxel_change_count(nullptr, &changes) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_voxel_change_count(c.grid, nullptr) == CLAY_OK);
         CHECK(clay_voxel_sculpt_magnify(nullptr, kOrigin, &verb) == CLAY_ERROR_INVALID_ARGUMENT);
         CHECK(clay_voxel_sculpt_magnify(c.grid, kOrigin, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
         CHECK(clay_voxel_sculpt_grab(nullptr, kOrigin, &verb, displacement, 0) ==

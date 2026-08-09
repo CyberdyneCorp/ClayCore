@@ -213,6 +213,14 @@ class VoxelGrid {
 
     // -- queries -------------------------------------------------------------
     std::size_t occupied_count() const;
+
+    // Cell writes that actually changed a cell, since this grid was
+    // constructed. Monotone; only the DIFFERENCE between two reads means
+    // anything. Every verb writes through set(), so this is how a caller tells
+    // "the edit did nothing" from "the edit did something" without diffing the
+    // grid — which for a verb that conserves material is the only other way to
+    // ask, since occupied_count() cannot see a lump move.
+    std::uint64_t change_count() const { return change_count_; }
     // inclusive cell-index bounds of occupied voxels (nullopt when empty)
     std::optional<VoxelCoord> bounds_min() const;
     std::optional<VoxelCoord> bounds_max() const;
@@ -256,6 +264,7 @@ class VoxelGrid {
                    std::uint8_t idx) const;
 
     float voxel_size_;
+    std::uint64_t change_count_ = 0;
     std::vector<kernel::cfloat3> palette_;
     std::unordered_map<VoxelCoord, Chunk, VoxelCoordHash> chunks_;
 };

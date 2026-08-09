@@ -1001,7 +1001,17 @@ clay_result clay_voxel_paint_brush(clay_voxel_grid* grid, const int32_t cell[3],
 
 /* These reshape existing material instead of stamping a footprint. Each reads
  * a snapshot of the region first, so a cell's outcome never depends on a
- * neighbour the same call already changed. */
+ * neighbour the same call already changed.
+ *
+ * EVERY verb here can be a perfectly valid call that changes nothing: a
+ * flatten on an already-flat region, a smudge shorter than a cell, a dithered
+ * stamp that misses every cell it was offered, a footprint over empty space.
+ * All of them return CLAY_OK, because they did what they were asked. There is
+ * no "valid but had no effect" result code and there will not be one — an
+ * existing entry point returning a new non-zero value would turn a success
+ * into a failure for every caller already compiled. Read
+ * clay_voxel_change_count before and after instead; the difference is what
+ * moved. */
 
 /* Majority filter over the 26-neighbourhood: spurs dissolve, notches fill. */
 clay_result clay_voxel_sculpt_smooth(clay_voxel_grid* grid, const int32_t cell[3],
@@ -1026,7 +1036,27 @@ clay_result clay_voxel_sculpt_magnify(clay_voxel_grid* grid, const int32_t cell[
                                       const clay_brush_params* brush);
 /* Translate occupancy through the same map the SDF grab deformer uses. Binary
  * occupancy resamples nearest-cell: a displacement larger than a cell moves
- * material in whole cells rather than flowing. */
+ * material in whole cells rather than flowing, and one shorter than half a
+ * cell rounds back to the cell it started in and moves nothing at all. That is
+ * not an error and is not reported as one — the call did exactly what it was
+ * asked, which is why a drag tool fed raw pointer deltas looks dead: at a
+ * voxel_size of 0.12 every per-sample delta of a slow drag is sub-cell, and
+ * every call returns CLAY_OK.
+ *
+ * The rounding is PER AXIS, so a pull of 0.4 cells on each of the three is
+ * 0.69 cells long and still moves nothing. Half a cell on the largest
+ * component is the necessary condition, not a sufficient one: away from the
+ * centre the falloff shrinks the pull further, front_only halves it at the
+ * centre outright (the front gate is 0.5 on the plane through it, so the dead
+ * zone is twice as wide), and material that moves into a cell holding the same
+ * index changes nothing either way.
+ *
+ * So there are two things to reach for. clay_voxel_size gives the cell size,
+ * which is what a host accumulates its drag against before calling — the verb
+ * is stateless and has no gesture to accumulate over, so that belongs in the
+ * host. And clay_voxel_change_count, read before and after, says what actually
+ * happened. clay_voxel_occupied_count is not a substitute: grab conserves
+ * material, so a lump dragged a whole cell can leave it identical. */
 clay_result clay_voxel_sculpt_grab(clay_voxel_grid* grid, const int32_t cell[3],
                                    const clay_brush_params* brush, const float displacement[3],
                                    int32_t front_only);
@@ -1544,7 +1574,11 @@ clay_result clay_voxel_sculpt_scrape(clay_voxel_grid* grid, const int32_t cell[3
 
 /* Drag SURFACE material along a direction, leaving the interior where it was.
  * That is the difference from grab, which translates every cell in its region:
- * grab moves a lump, smudge smears a skin. */
+ * grab moves a lump, smudge smears a skin.
+ *
+ * It shares grab's nearest-cell rounding and so shares its dead zone: a
+ * displacement under half a cell on every axis reads each cell's source as
+ * itself and writes back what was already there. CLAY_OK, nothing moved. */
 clay_result clay_voxel_sculpt_smudge(clay_voxel_grid* grid, const int32_t cell[3],
                                      const clay_brush_params* brush,
                                      const float displacement[3]);
@@ -1593,6 +1627,42 @@ clay_result clay_voxel_repair_fill_voids(clay_voxel_grid* grid, const clay_mask*
 /* -- queries --------------------------------------------------------------- */
 
 clay_result clay_voxel_occupied_count(const clay_voxel_grid* grid, size_t* out_count);
+
+/* Cell writes that actually CHANGED a cell, since the grid was constructed.
+ *
+ * Why this exists: an edit that is entirely legal and entirely without effect
+ * is normal here, not exotic. A sub-cell grab or smudge rounds back to where
+ * it started; a flatten meets an already-flat region; a dithered stamp misses
+ * every cell; a footprint lands on empty space. Each returns CLAY_OK, which is
+ * correct and also unhelpful to a host trying to tell "the drag reached
+ * nothing" from "the drag did something". Diffing the grid is the only other
+ * way to ask, and clay_voxel_occupied_count cannot answer it at all: grab and
+ * magnify conserve material, so the count is identical either way.
+ *
+ * A changed cell is a write that changed the stored palette index — 0 to n, n
+ * to 0, n to m. Rewriting a cell with the index it already holds is not
+ * counted, so clay_voxel_palette_set, which recolours without touching voxel
+ * data, does not move it either.
+ *
+ * Monotone and never reset, so only the DIFFERENCE between two reads means
+ * anything; a grid handed back by clay_voxel_mask_extrude starts wherever its
+ * construction left it. Two guarantees, of deliberately different strength:
+ *   - delta == 0 exactly when the grid is byte-identical to before the
+ *     bracketed calls. Universal — every verb writes through one funnel.
+ *   - delta is the exact number of changed cells for every verb that writes
+ *     each cell at most once, which is all of them except pinch and magnify.
+ *     Those two clear a cell and write its colour into a neighbour the same
+ *     call may visit later, so a cell can be counted twice and a 0->n->0 round
+ *     trip can leave delta > 0 with the grid unchanged. For those it is an
+ *     upper bound.
+ *
+ * This is NOT the unit of the out_applied parameters elsewhere in this header:
+ * those count stamps run or items warped, this counts cells changed.
+ *
+ * uint64 rather than size_t deliberately — it is never reset, and a 32-bit
+ * host would wrap it in a long session. A NULL out_count is tolerated. */
+clay_result clay_voxel_change_count(const clay_voxel_grid* grid, uint64_t* out_count);
+
 /* Inclusive cell bounds of the occupied voxels. *out_has_bounds is 0 for an
  * empty grid, and out_min/out_max are then left alone. */
 clay_result clay_voxel_bounds(const clay_voxel_grid* grid, int32_t out_min[3],
