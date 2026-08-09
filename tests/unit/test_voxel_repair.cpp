@@ -109,6 +109,37 @@ TEST_CASE("verbs: fill cavities fills dents but not through-holes") {
         CHECK(g.serialize() == before);
     }
 
+    SUBCASE("a dithered soft stamp is what actually produces cavities") {
+        // Issue #18: a host shipped the verb as a brush and it did nothing for
+        // every gesture their users made. The pits the other cases build are
+        // not gestures — nobody draws a 1-cell pit. A SOFT stamp is, and it is
+        // a cavity factory: occupancy is binary, so a sub-1 strength dithers
+        // against a hash of the cell coordinate and leaves single-cell holes
+        // through the material it just deposited.
+        VoxelGrid g(0.1f);
+        std::uint8_t stone = g.palette_add(cf3(0.6f, 0.6f, 0.65f));
+        BrushParams soft;
+        soft.size = 13;
+        soft.shape = BrushShape::Sphere;
+        soft.falloff = BrushFalloff::Smooth;
+        soft.strength = 0.65f;
+        soft.seed = 3;
+        for (int i = 0; i < 12; ++i) g.set_brush({-6 + i, 0, 0}, soft, stone);
+
+        // The holes are OPEN to the outside, so the flood reaches every one and
+        // fill-voids has nothing to do. Narrow is not sealed: this is the case
+        // that shows the two verbs are not substitutes.
+        VoxelGrid::RepairReport before = g.repair_report();
+        CHECK(before.enclosed_voids == 0);
+
+        std::size_t occupied = g.occupied_count();
+        std::uint64_t changed = g.change_count();
+        for (int x = -8; x <= 8; x += 2) g.sculpt_fill_cavities({x, 0, 0}, brush(15), 2);
+
+        CHECK(g.occupied_count() > occupied);
+        CHECK(g.change_count() - changed == g.occupied_count() - occupied);
+    }
+
     SUBCASE("a sealed void is fill-voids' work, not this verb's") {
         // What a boolean or a rasterized mesh leaves. The interior is wide, so
         // no cell in it has four occupied face neighbours and a local rule can

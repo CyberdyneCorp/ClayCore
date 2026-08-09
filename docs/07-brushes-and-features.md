@@ -408,7 +408,7 @@ already changed.
 | `sculpt_scrape` | Flatten **and** smooth from one snapshot. Calling both in sequence is not the same thing |
 | `sculpt_smudge` | Drag **surface** material along a direction, leaving the interior. Grab moves a lump; smudge smears a skin |
 | `sculpt_grab` | Translate occupancy through the same inverse map the SDF `grab` deformer uses, so both representations mean the same thing. Resampling is nearest-cell and rounds **per axis**, so a displacement under half a cell on every axis moves nothing — a drag fed raw pointer deltas is dead until the host accumulates them past `voxel_size` |
-| `sculpt_fill_cavities` | Fill pockets: an empty cell with ≥4 of its 6 face neighbours occupied is inside a cavity. A through-hole does not qualify |
+| `sculpt_fill_cavities` | Fill pockets: an empty cell with ≥4 of its 6 face neighbours occupied is inside a cavity. The rule is local, so it fills what is **narrow**, not what is enclosed — a through-hole wider than one cell does not qualify, a one-cell perforation does. Its everyday input is a **dithered soft stamp**, which leaves single-cell holes through its own deposit; closing them cut a test stroke's greedy mesh by 27%. `repair_fill_voids` is the one for sealed voids, and neither substitutes for the other |
 | `sculpt_carve_alpha` | A caller-supplied scalar stamp modulating per-cell strength. **The engine decodes no images** — a host with an alpha has already loaded a PNG |
 | `repair_report` | What a pre-bake check wants to know, without performing the fix |
 | `repair_close_holes` | Seal perforations by the same pocket rule. Only ever adds cells |

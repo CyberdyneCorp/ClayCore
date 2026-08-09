@@ -1603,9 +1603,16 @@ clay_result clay_layer_apply_stroke(clay_document* doc, clay_layer_id layer,
  * the erosion reaches through from the void behind a one-cell wall and reopens
  * every hole the dilation just sealed.
  *
- * The geometry it acts on is freehand voxel work: a soft stamp's dither leaves
- * single-cell holes through the material it deposits, and a narrow erase,
- * magnify or grab leaves the same. A boolean or a rasterized mesh does not —
+ * The geometry it acts on is freehand voxel work, and the everyday source is
+ * the soft stamp: occupancy is binary, so any strength or falloff below 1 is
+ * DITHERED against a hash of the cell coordinate, which leaves a pepper of
+ * single-cell holes through the material it just deposited. A narrow erase,
+ * magnify or grab leaves the same. This is not cosmetic — greedy meshing emits
+ * six faces around every one of those holes, so closing them measurably cuts
+ * the mesh a bake has to carry.
+ *
+ * Whether a call did anything is answerable rather than guessable: bracket it
+ * with clay_voxel_change_count. A boolean or a rasterized mesh does not —
  * the void it leaves is sealed, so no cell there has four occupied neighbours
  * and this verb sees nothing. That is clay_voxel_repair_fill_voids' job: this
  * one fills what is NARROW, that one fills what is SEALED. */
