@@ -74,11 +74,51 @@ TEST_CASE("verbs: fill cavities fills dents but not through-holes") {
         CHECK(g.get({0, 0, 0}) == 0);
     }
 
+    SUBCASE("a one-cell perforation IS filled") {
+        // The exemption above is about width, not topology, and the case above
+        // only ever exercised a seven-cell hole. Pierce the slab with a single
+        // cell and its four lateral neighbours are occupied, so the rule fires
+        // — a local neighbour count cannot tell a pinhole from a pocket, which
+        // is the same reason repair's close-holes seals a pierced wall.
+        VoxelGrid g = slab();
+        g.fill_box({0, 0, 0}, {0, 2, 0}, 0);
+        REQUIRE(g.get({0, 1, 0}) == 0);
+        g.sculpt_fill_cavities({0, 1, 0}, brush(15), 1);
+        CHECK(g.get({0, 1, 0}) != 0);
+    }
+
+    SUBCASE("an oversized pass count is bounded, not sized from") {
+        // The working buffer is cubic in the pass count and padded by it, so an
+        // unclamped value overflows the padded corner before the allocation is
+        // attempted. Past the model's longest side every empty cell in the
+        // window is already decided, so clamping there costs no behaviour:
+        // asking for a huge count must equal asking for that side length.
+        VoxelGrid huge = slab();
+        VoxelGrid bounded = slab();
+        huge.fill_box({0, 0, 0}, {0, 2, 0}, 0);
+        bounded.fill_box({0, 0, 0}, {0, 2, 0}, 0);
+        huge.sculpt_fill_cavities({0, 1, 0}, brush(15), 1 << 20);
+        bounded.sculpt_fill_cavities({0, 1, 0}, brush(15), 17);  // 8*2+1, the span
+        CHECK(huge.serialize() == bounded.serialize());
+    }
+
     SUBCASE("an open surface is left alone") {
         VoxelGrid g = slab();
         std::vector<std::uint8_t> before = g.serialize();
         g.sculpt_fill_cavities({0, 5, 0}, brush(9), 1);  // above the slab entirely
         CHECK(g.serialize() == before);
+    }
+
+    SUBCASE("a sealed void is fill-voids' work, not this verb's") {
+        // What a boolean or a rasterized mesh leaves. The interior is wide, so
+        // no cell in it has four occupied face neighbours and a local rule can
+        // see nothing at all — which is why repair decides enclosure globally.
+        VoxelGrid g = hollow_box();
+        std::vector<std::uint8_t> before = g.serialize();
+        g.sculpt_fill_cavities({0, 0, 0}, brush(15), 2);
+        CHECK(g.serialize() == before);
+        g.repair_fill_voids();
+        CHECK(g.get({0, 0, 0}) != 0);
     }
 }
 
