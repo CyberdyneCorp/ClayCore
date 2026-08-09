@@ -331,6 +331,28 @@ check(evaluate(doc, bulgeAt)[0] > 0, "the hard chain no longer reaches the bulge
 check(clay_document_undo(doc, &undone) == CLAY_OK && undone == 1, "undid the curve edit")
 check(evaluate(doc, bulgeAt)[0] == bulge[0], "undo restored the curve exactly")
 
+// And reading it back: what a host that reloaded this document would have to do
+// before it could edit a curve it did not author. Size query, then fill.
+var readCount = 0
+var readClosed: Int32 = -1
+var readTolerance: Float = -1
+check(clay_layer_stroke_points(doc, curveLayer, curveNode, nil, &readCount, nil, nil, nil,
+                               &readClosed, &readTolerance) == CLAY_OK
+      && readCount == 4 && readClosed == 0 && readTolerance == 0.01,
+      "sized the placed curve, and learned it is open")
+var readPoints = [Float](repeating: 0, count: readCount * 4)
+var readTypes = [Int32](repeating: -1, count: readCount)
+var readCapacity = readCount
+let filled = clay_layer_stroke_points(doc, curveLayer, curveNode, &readPoints, &readCapacity,
+                                      &readTypes, nil, nil, nil, nil)
+let allSpline = readTypes == pointTypes
+check(filled == CLAY_OK && readCapacity == 4 && readPoints == curvePoints && allSpline,
+      "read the placed curve back exactly as it was authored")
+var tooSmall = 1
+check(clay_layer_stroke_points(doc, curveLayer, curveNode, &readPoints, &tooSmall, nil, nil, nil,
+                               nil, nil) == CLAY_ERROR_BUFFER_TOO_SMALL && tooSmall == 4,
+      "a short buffer reports what it needed")
+
 // -- layer protection --------------------------------------------------------
 
 var isGhost: Int32 = 1

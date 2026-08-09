@@ -112,7 +112,10 @@ std::optional<Command> apply_one(Document& doc, const TrimStrokeCmd& c) {
 std::optional<Command> apply_one(Document& doc, const SetStrokePointsCmd& c) {
     SdfContent* content = content_of(doc, c.layer);
     Node* n = content ? content->find_mut(c.node) : nullptr;
-    if (!n || n->prim.type != PrimType::Stroke) return std::nullopt;
+    // A swept guide is the same control-point list, so it is the same edit. It
+    // was Stroke-only, which left a placed sweep's guide unreachable: the only
+    // way to change it was to rebuild the item and replace the node.
+    if (!n || !prim_carries_curve(n->prim.type)) return std::nullopt;
     SetStrokePointsCmd inverse{c.layer, c.node, n->stroke, n->stroke_closed, n->curve_tolerance};
     n->stroke = c.points;
     n->stroke_closed = c.closed;

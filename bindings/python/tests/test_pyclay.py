@@ -3174,6 +3174,28 @@ def test_a_sweep_round_trips(tmp_path):
     assert np.array_equal(before, clay.load(str(path)).eval(probes))
 
 
+def test_a_placed_sweeps_guide_is_an_ordinary_curve_edit():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    profiles = [clay.Profile.circle(r=0.3), clay.Profile.circle(r=0.3)]
+    node = layer.add(clay.Swept(_STRAIGHT, profiles))
+    probe = np.array([[0, 0.7, 0]], np.float32)
+    assert doc.eval(probe)[0] > 0
+
+    bent = np.array([[-1, 0, 0, 0], [0, 0.8, 0, 0], [1, 0, 0, 0]], np.float32)
+    layer.set_points(node, bent, types="spline")
+    assert doc.eval(probe)[0] < 0
+
+    # But not closed, which Swept itself has never offered.
+    with pytest.raises(ValueError, match="cannot be closed"):
+        layer.set_points(node, bent, types="spline", closed=True)
+
+    # Nor cut below two points: the sweep would emit nothing and vanish.
+    with pytest.raises(ValueError, match="two or more points"):
+        layer.set_points(node, bent[:1])
+    assert doc.eval(probe)[0] < 0
+
+
 def test_a_degenerate_sweep_is_refused():
     with pytest.raises(ValueError, match="two or more profiles"):
         clay.Swept(_STRAIGHT, [clay.Profile.circle(r=0.3)])

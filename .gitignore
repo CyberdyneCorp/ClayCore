@@ -12,5 +12,6 @@ clay_selftest*
 c_api_smoke*
 c_voxel_stale.*
 c_volume_roundtrip.*
+c_curve_readback.*
 .claude/worktrees/
 .build/

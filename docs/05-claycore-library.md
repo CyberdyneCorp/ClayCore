@@ -207,6 +207,13 @@ from C and therefore from Swift. `tools/check_binding_parity.py` fails CI when a
 `pyclay` capability has no C counterpart and no recorded exemption, so the two
 cannot drift apart again.
 
+The builders are write-only on purpose — the host that filled one already knows
+what it put there — so the ABI has no `clay_item_*` getter. Reading a PLACED
+node is a different question, asked by a host that reloaded a document and has
+only ids: `clay_layer_stroke_points` returns a curve's control points as
+authored, taking the arguments `clay_layer_set_stroke_points` takes, so what
+comes out goes straight back in.
+
 Documents can be edited after they are built, not only appended to. Every
 editing entry point applies one command from `scene/commands.h` — the same
 vocabulary the `.clayspace` format records — so a binding edit means exactly
@@ -479,6 +486,11 @@ body.add(clay.Stroke(points=pts,                       # (N,4) x,y,z,radius
 body.add(clay.Stroke(points=pts, types="bezier",
                      in_handles=handles, out_handles=handles))
 body.set_points(node_id, pts, types="hard")            # undoable whole-list edit
+                                                       # also reshapes a placed
+                                                       # Swept's guide, which is
+                                                       # the same point list —
+                                                       # but never closed, and
+                                                       # never under two points
 
 # the cut tool: a shape drawn over the model, in WORLD units on the frame the
 # viewport already has. The cut is a PRISM, not a frustum — a converging cut
