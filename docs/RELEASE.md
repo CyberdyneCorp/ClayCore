@@ -80,13 +80,35 @@ the host side rather than assuming the previous one still passes.
 
 Tracked honestly rather than assumed done:
 
-- **CUDA device parity has executed** (task 12.2, closed by
-  `fix-cuda-arch-selection`). Validated on an RTX 5060 / driver 580 / nvcc
-  12.0: the backend registers, `ctest --preset cuda` passes 4/4, and the parity
-  suite runs 1115 assertions with the device visible against 479 with it hidden
-  — the differential is what proves the extra assertions ran on the GPU rather
-  than passing vacuously. pyclay at 1M points matches the CPU bit-for-bit,
-  which is expected from the same single-source headers compiled `-fmad=false`.
+- **CUDA and OpenCL device parity have both executed** (task 12.2, closed by
+  `fix-cuda-arch-selection`; re-run for v0.24.0 on 2026-08-09). Validated on an
+  RTX 5060 / driver 580 / nvcc 12.0, configuring one build directory with
+  `-DCLAY_BACKEND_CUDA=ON -DCLAY_BACKEND_OPENCL=ON` and pointing
+  `tools/release_check.py --build-dir` at it. Both backends register and match
+  the scalar reference. pyclay at 1M points matches the CPU bit-for-bit, which
+  is expected from the same single-source headers compiled `-fmad=false`.
+
+  Read the differential in **assertions, never test cases**. The parity loops
+  run *inside* the doctest cases, so `-tc=*parity*,*registry*` reports 11 cases
+  whether or not a GPU backend registered — a CPU-only run reports 11 too, and
+  a backend that failed to register passes vacuously. Only the assertion count
+  moves:
+
+  | Registered backends | Assertions | Added by the backend |
+  |---|---|---|
+  | CPU only | 836,831 | — |
+  | CPU + CUDA | 838,909 | +2,078 |
+  | CPU + CUDA + OpenCL | 840,796 | +1,887 |
+
+  Hide a device to take the control run: `OCL_ICD_VENDORS=/nonexistent` for
+  OpenCL. Note that `CUDA_VISIBLE_DEVICES=""` hides **both** where the NVIDIA
+  ICD is the only one installed, so it is not a CUDA-only control.
+
+  (Earlier revisions of this file recorded 1115 against 479. Those numbers
+  predate `fadb595`, which extended the host parity fixture to the current
+  kernel set and grew the counts by roughly 750x. The differential logic was
+  unchanged; only the absolute figures were stale.)
+
   *Caveat*: validated through PTX JIT only. A cubin build for sm_120 needs
   CUDA >= 12.8, so that path is still unexercised.
 - **CI no longer builds CUDA or OpenCL at all** (changed 2026-08-07). Neither
