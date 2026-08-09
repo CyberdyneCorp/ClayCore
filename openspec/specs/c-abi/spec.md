@@ -256,11 +256,31 @@ The C API SHALL expose reading and setting a layer's ghost and lock flags, and S
 - **THEN** the call returns an error naming the protection and the document is unchanged
 
 ### Requirement: Curves across the ABI
-The C API SHALL accept control points with per-point radius, type and handles, a closed flag and a tolerance, and SHALL expose replacing a placed item's points.
+The C API SHALL accept control points with per-point radius, type and handles, a closed flag and a tolerance, and SHALL expose replacing a placed item's points and READING them back. The readback SHALL take the same arguments as the replace, with the count as an in/out pointer, and SHALL follow the size-query convention: a null point buffer answers with the count, an undersized buffer yields a too-small error carrying the needed count and writes nothing, and the optional parallel arrays are each independently omittable. The points SHALL come back as authored rather than tessellated, so that feeding a readback into the replace leaves the document unchanged. A guide belonging to a swept item SHALL be readable and replaceable through the same calls, since a guide is an ordinary curve, and the replace SHALL enforce on it the same rules placing a swept item enforces: a guide SHALL NOT be closed, and SHALL NOT be left with fewer than two points. Reading SHALL NOT be refused on a protected or hidden layer, because protection refuses edits.
 
 #### Scenario: A curve means the same through both bindings
 - **WHEN** a C consumer builds a curve with given control points, types and tolerance
 - **THEN** the field matches what `pyclay` produces for the same curve
+
+#### Scenario: A reloaded document's curve round trips
+- **WHEN** a host reads a placed curve's points back and feeds them straight into the replace
+- **THEN** every point, type and handle comes back unchanged and the field is what it was
+
+#### Scenario: A profiled tube's guide is reachable
+- **WHEN** a host reads back a node built by the tube call with a profile
+- **THEN** it receives the guide's control points, and replacing them reshapes the tube
+
+#### Scenario: A guide keeps the rules its item was placed under
+- **WHEN** the replace would close a swept item's guide, or leave it under two points
+- **THEN** it is refused with the reason, and the guide is what it was
+
+#### Scenario: A protected layer still answers a read
+- **WHEN** a curve on a ghosted or locked layer is read back
+- **THEN** the points are returned, while an edit to the same curve is still refused
+
+#### Scenario: A short buffer says what it needed
+- **WHEN** a host asks for the points with a buffer smaller than the point count
+- **THEN** the call reports too-small, writes nothing, and leaves the needed count in the count argument
 
 ### Requirement: Cuts across the ABI
 The C API SHALL expose a versioned cut descriptor carrying the frame, the shape and the extent, resolving it into an item handle the caller places like any other.
@@ -608,4 +628,36 @@ A dirty region SHALL be validated in 64-bit before the engine converts it: a non
 #### Scenario: The bound to dirty is not the bound to frame on
 - **WHEN** a consumer asks for a node's influence bound
 - **THEN** it receives a box no tighter than the layer bounds query reports, and an explicit flag for the items whose influence is unbounded
+
+### Requirement: A voxel edit's effect is readable across the ABI
+The ABI SHALL expose the grid's change count as a query alongside the occupied count, taking a `uint64_t` out-parameter rather than a `size_t` because the counter is never reset and a 32-bit host would wrap it in a long session. A NULL out-parameter SHALL be tolerated, matching the other grid queries; a NULL grid SHALL be refused with an invalid-argument error.
+
+The header SHALL state why it exists — sub-cell drags and other effect-free edits are legal and common, and neither the result code nor the occupied count can distinguish them — what it counts, that it is monotone and meaningful only as a difference, the pinch/magnify upper bound, and that its unit is cells changed and NOT the stamps-run or items-warped unit of the `out_applied` parameters elsewhere in the header.
+
+This SHALL be a single grid-level query rather than a per-verb sibling: an entry point differing from an existing one only by an extra out-parameter would be two ways to say one thing, and covering the verbs that share the blind spot would take eleven of them plus one per verb added later.
+
+#### Scenario: A drag that reached nothing is distinguishable from one that did
+- **WHEN** a host reads the change count, applies a sub-cell grab, reads it again, applies a supra-cell grab and reads it a third time
+- **THEN** the first difference is zero, the second is non-zero, and both calls returned success
+
+#### Scenario: The counter agrees with the engine
+- **WHEN** the same sequence of edits is applied across the ABI and directly on the engine's grid
+- **THEN** the count read across the ABI equals the engine's
+
+#### Scenario: A NULL grid is refused, a NULL out-parameter is not
+- **WHEN** the query is called with a NULL grid, and again with a valid grid and a NULL out-parameter
+- **THEN** the first is refused with an invalid-argument error and the second succeeds
+
+### Requirement: A valid edit with no effect stays CLAY_OK
+An entry point whose call was well-formed and whose effect was nothing SHALL return `CLAY_OK`. No `clay_result` value SHALL be added to mean "valid but had no effect": the enum is ABI-stable, and an existing entry point returning a new non-zero value would make every already-compiled caller treat a success as a failure. An outcome that a host wants to observe SHALL arrive through an out-parameter or a query, on the same footing as a rejected brick submission and as "nothing to undo".
+
+The sculpting-verbs section of the header SHALL state this once for all of them, rather than leaving each verb to imply it: a flatten on an already-flat region, a sub-cell smudge, a dithered stamp that misses every cell and a footprint over empty space are all ordinary successes.
+
+#### Scenario: A sub-cell grab succeeds
+- **WHEN** a grab crosses the ABI with a displacement shorter than half a cell on every axis
+- **THEN** the call returns `CLAY_OK` and the grid is unchanged
+
+#### Scenario: No new result code appears
+- **WHEN** the result enum is compared against the previous ABI minor
+- **THEN** it holds the same values, so a caller compiled against the older header still classifies every outcome as it did
 

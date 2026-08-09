@@ -194,7 +194,7 @@ Tessellation SHALL be deterministic: the same control points and tolerance SHALL
 - **THEN** subdivision stops at the bound rather than growing without limit
 
 ### Requirement: Editing a curve is an ordinary edit
-Replacing an item's point list SHALL be expressed as a command, so that it is undoable, serializable and refused on a protected layer like every other edit. Its inverse SHALL restore the previous list exactly.
+Replacing an item's point list SHALL be expressed as a command, so that it is undoable, serializable and refused on a protected layer like every other edit. Its inverse SHALL restore the previous list exactly. The command SHALL apply to a swept item's guide as well as to a stroke, since a guide is the same control-point list and not a new kind of curve; a node that carries no such list SHALL still be refused.
 
 #### Scenario: Editing a curve is undoable
 - **WHEN** a curve's points are replaced and the edit is undone
@@ -203,6 +203,14 @@ Replacing an item's point list SHALL be expressed as a command, so that it is un
 #### Scenario: A protected layer refuses a curve edit
 - **WHEN** a curve on a locked layer has its points replaced
 - **THEN** the edit is refused and the curve is unchanged
+
+#### Scenario: A placed sweep's guide is editable
+- **WHEN** a swept item's points are replaced with a differently shaped guide
+- **THEN** the edit applies, and its inverse restores the guide that was there
+
+#### Scenario: A node with no point list is refused
+- **WHEN** the replace names a primitive that carries no control points
+- **THEN** it fails and the document is untouched
 
 ### Requirement: Curve bounds cover the tessellated curve
 An item's bounds SHALL be computed from the tessellated points rather than from the control points, because a spline may pass outside the polygon its control points form. Picking and per-brick culling SHALL therefore not miss a curve that bulges beyond its control points.
