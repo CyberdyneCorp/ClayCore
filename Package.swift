@@ -21,7 +21,15 @@ let package = Package(
     ],
     targets: [
         .binaryTarget(name: "claycore", path: "dist/claycore.xcframework"),
+        // Metal and Foundation are what the Metal backend inside the archive
+        // needs. A binaryTarget cannot carry linker settings, so they are
+        // declared by the target that links it — an app consuming this package
+        // needs the same two, and gets undefined symbols without them.
         .executableTarget(name: "claycore-smoke", dependencies: ["claycore"],
-                          path: "tests/swift"),
+                          path: "tests/swift",
+                          linkerSettings: [
+                              .linkedFramework("Metal"),
+                              .linkedFramework("Foundation"),
+                          ]),
     ]
 )

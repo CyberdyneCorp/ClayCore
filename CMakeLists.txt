@@ -105,8 +105,27 @@ if(CLAY_BACKEND_METAL AND APPLE)
   set(CLAY_METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/clay_kernels.air)
   set(CLAY_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/clay_kernels.metallib)
   set(CLAY_METALLIB_C ${CMAKE_CURRENT_BINARY_DIR}/clay_metallib_embedded.cpp)
+
+  # A metallib is PLATFORM-SPECIFIC: one built for macOS does not load on iOS.
+  # Hardcoding `-sdk macosx` here was survivable only while the Metal backend
+  # was never in an iOS build; the moment the xcframework enables it, a macOS
+  # metallib lands inside the iOS slices, newLibrary rejects it at runtime,
+  # MetalBackend::create() returns nullptr, and the backend silently does not
+  # register — a CPU-only framework again, one level harder to see. Derive the
+  # SDK from what is actually being built for.
+  if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
+      set(CLAY_METAL_SDK iphonesimulator)
+    else()
+      set(CLAY_METAL_SDK iphoneos)
+    endif()
+  else()
+    set(CLAY_METAL_SDK macosx)
+  endif()
+  message(STATUS "claycore: compiling Metal kernels for SDK ${CLAY_METAL_SDK}")
+
   add_custom_command(OUTPUT ${CLAY_METAL_AIR}
-    COMMAND ${XCRUN} -sdk macosx metal -c
+    COMMAND ${XCRUN} -sdk ${CLAY_METAL_SDK} metal -c
             ${CMAKE_CURRENT_SOURCE_DIR}/backends/metal/clay_kernels.metal
             -I ${CMAKE_CURRENT_SOURCE_DIR}/include
             -I ${CMAKE_CURRENT_SOURCE_DIR}/backends/metal
@@ -114,9 +133,9 @@ if(CLAY_BACKEND_METAL AND APPLE)
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/backends/metal/clay_kernels.metal
             ${CMAKE_CURRENT_SOURCE_DIR}/backends/metal/metal_shared.h
             ${CLAY_KERNEL_HEADERS}
-    COMMENT "Compiling claycore kernels to MSL (single-source)")
+    COMMENT "Compiling claycore kernels to MSL for ${CLAY_METAL_SDK} (single-source)")
   add_custom_command(OUTPUT ${CLAY_METALLIB}
-    COMMAND ${XCRUN} -sdk macosx metallib ${CLAY_METAL_AIR} -o ${CLAY_METALLIB}
+    COMMAND ${XCRUN} -sdk ${CLAY_METAL_SDK} metallib ${CLAY_METAL_AIR} -o ${CLAY_METALLIB}
     DEPENDS ${CLAY_METAL_AIR})
   add_custom_command(OUTPUT ${CLAY_METALLIB_C}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_binary.py
