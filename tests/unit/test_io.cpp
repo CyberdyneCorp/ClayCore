@@ -129,8 +129,7 @@ TEST_CASE("FBX: writer output round-trips through ufbx with geometry intact") {
     io::IoStatus s = io::load_fbx(bytes.data(), bytes.size(), &back);
     REQUIRE(s.ok());
     CHECK(back.triangle_count() == m.triangle_count());
-    // geometry preserved: volume and area agree (import splits vertices per
-    // corner, so counts differ but the surface must not)
+    // geometry preserved: volume and area agree
     CHECK(mesh::signed_volume(back) == doctest::Approx(mesh::signed_volume(m)).epsilon(1e-4));
     CHECK(mesh::surface_area(back) == doctest::Approx(mesh::surface_area(m)).epsilon(1e-4));
     // colors survived
@@ -142,6 +141,45 @@ TEST_CASE("FBX: writer output round-trips through ufbx with geometry intact") {
     }
     CHECK(found_red);
     CHECK(found_blue);
+}
+
+TEST_CASE("FBX: import welds, rather than emitting a vertex per triangle corner") {
+    // Issue #38. load_fbx appended a vertex for every triangle CORNER and
+    // shared none of them, so an import carried triangle_count * 3 vertices
+    // whatever the file stored: six times the memory of the welded mesh here,
+    // and no two triangles sharing a vertex for anything downstream that walks
+    // adjacency. ufbx addresses each attribute by corner, which makes appending
+    // per corner the straightforward reading of its API and is how this got in.
+    //
+    // The surface was never wrong, so area and volume could not catch it. What
+    // pins it is the vertex COUNT, checked against the two readers that had it
+    // right all along — the same model through three formats should not depend
+    // on the extension.
+    const mesh::Mesh m = sample_mesh();
+    REQUIRE(m.triangle_count() > 100);  // enough sharing for the difference to bite
+
+    std::vector<std::uint8_t> bytes = io::save_fbx(m, "clay_export");
+    mesh::Mesh back;
+    REQUIRE(io::load_fbx(bytes.data(), bytes.size(), &back).ok());
+
+    mesh::Mesh via_obj, via_ply;
+    REQUIRE(io::load_obj(io::save_obj(m, "clay", "clay.mtl"), &via_obj).ok());
+    const std::vector<std::uint8_t> ply = io::save_ply(m);
+    REQUIRE(io::load_ply(ply.data(), ply.size(), &via_ply).ok());
+
+    CHECK(back.triangle_count() == m.triangle_count());
+    CHECK(back.positions.size() == m.positions.size());
+    CHECK(back.positions.size() == via_obj.positions.size());
+    CHECK(back.positions.size() == via_ply.positions.size());
+    // The thing the count is a proxy for: corners genuinely share storage.
+    CHECK(back.positions.size() < back.indices.size());
+
+    // Welding must not move the surface, and must keep the attributes lined up
+    // with the vertices they now describe.
+    CHECK(mesh::signed_volume(back) == doctest::Approx(mesh::signed_volume(m)).epsilon(1e-4));
+    CHECK(mesh::surface_area(back) == doctest::Approx(mesh::surface_area(m)).epsilon(1e-4));
+    CHECK(back.colors.size() == back.positions.size());
+    for (std::uint32_t i : back.indices) REQUIRE(i < back.positions.size());
 }
 
 TEST_CASE("import guardrails: budgets") {
