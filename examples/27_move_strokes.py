@@ -26,7 +26,7 @@ and a three-stroke sculpt at that rate is not marchable at all. Coalescing
 covers frames of ONE drag, where the centre and radius are fixed; a stroke moves
 the centre, so it stacks by design. That decay is what this example pins, so it
 is measured here in its raw form; `Layer.consolidate` is what a host calls to
-pay it off, and `examples/36_consolidation.py` measures the same nine drags
+pay it off, and `examples/38_consolidation.py` measures the same nine drags
 before and after.
 
 **What does reproduce the reference is `snakehook`**, and the last section shows

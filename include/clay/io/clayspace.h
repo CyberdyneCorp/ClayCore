@@ -7,7 +7,8 @@
 //
 // Chunks: 'SCNE' scene command/document payload, 'VOXL' one voxel layer
 // (u32 layer id + VoxelGrid stream), 'MASK' one layer's mask field (u32 layer
-// id + MaskField stream), 'THMB' thumbnail bytes (PNG,
+// id + MaskField stream), 'MESH' one mesh layer's triangles (u32 layer id +
+// mesh stream, see io/mesh_io.h), 'THMB' thumbnail bytes (PNG,
 // passthrough), 'CAMB' camera bookmarks (passthrough). Unknown chunks are
 // skipped (backward-open); a higher major version refuses to load
 // (forward-refuse) with no partial document.
@@ -29,6 +30,18 @@
 // node record rather than at the end, which is fine precisely because the
 // reader is told the version — that is the whole point of decoding against the
 // minor instead of guessing from the bytes.
+//
+// Minor 4 adds a node's sampled volume. A build that predates it reads a
+// document containing one as though the node carried no volume, so a sampled
+// item vanishes rather than being misread; re-saving there drops it for good.
+//
+// Minor 5 gives the layer record's kind byte a third value, `mesh`, and adds
+// the 'MESH' chunk carrying that layer's triangles. A build that predates it
+// opens such a document — the chunk is unknown and skipped, and the unfamiliar
+// kind reads into the enum's fixed uint8_t underlying type and is ignored at
+// every `kind == Sdf` gate, exactly as a voxel layer already is. It loses the
+// mesh layers if it saves again, which is the same loss minors 1, 2 and 4
+// carry and the reason the minor moved rather than the major.
 
 #include <map>
 #include <optional>
@@ -36,6 +49,7 @@
 #include <vector>
 
 #include "clay/io/result.h"
+#include "clay/mesh/mesh_data.h"
 #include "clay/scene/document.h"
 #include "clay/voxel/grid.h"
 #include "clay/voxel/mask.h"
@@ -44,7 +58,7 @@ namespace clay {
 namespace io {
 
 inline constexpr std::uint16_t kClaySpaceMajor = 1;
-inline constexpr std::uint16_t kClaySpaceMinor = 4;
+inline constexpr std::uint16_t kClaySpaceMinor = 5;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).
@@ -55,6 +69,18 @@ struct ClaySpaceDoc {
     // mask's presence cannot change what the document evaluates to — the
     // structural version of "masking gates authoring, not evaluation".
     std::map<scene::LayerId, voxel::MaskField> masks;
+    // A mesh layer's triangles, for the same reason and one more: the layering
+    // table withholds clay/mesh from clay::scene, so imported geometry
+    // physically cannot enter the evaluated document. Stored exactly as the
+    // importer returned it — no welding, reordering, renormalizing or
+    // reindexing — so the round trip is an identity.
+    //
+    // An entry is never erased when its layer is removed, because the inverse
+    // of a layer removal restores a Layer by value and cannot carry a payload.
+    // save_clayspace writes a chunk only for an id that is still a mesh layer
+    // and load_clayspace drops a chunk that names none, which is what keeps an
+    // orphan harmless without breaking undo within a session.
+    std::map<scene::LayerId, mesh::Mesh> mesh_layers;
     std::vector<std::uint8_t> thumbnail_png;      // optional passthrough
     std::vector<std::uint8_t> camera_bookmarks;   // optional passthrough
 };

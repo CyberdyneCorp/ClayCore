@@ -29,7 +29,7 @@ corrupt rather than merely expensive.
 That degradation is what this example exists to pin, so it stays measured here
 in its raw form. The cure is `Layer.consolidate`, which collapses the chain and
 **redistances** it so the next pass has a distance field to sample —
-`examples/36_consolidation.py` runs the same chain both ways. The other route is
+`examples/38_consolidation.py` runs the same chain both ways. The other route is
 the cut tool, where an Intersect against a prism is exact and stays exact.
 """
 
@@ -154,7 +154,7 @@ def main():
         "28_hpolish_chained.png", columns=3,
         caption="one pass is a crisp facet; two pulls the form concave; three breaks it "
                 "— chaining bakes samples a volume rather than the document, which is "
-                "what consolidating between passes fixes (36_consolidation)")
+                "what consolidating between passes fixes (38_consolidation)")
 
     R.export_model(facet, "28_hpolish.ply", resolution=80, decimate=0.08)
 

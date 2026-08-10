@@ -51,6 +51,31 @@ IoStatus load_fbx_file(const std::string& path, mesh::Mesh* out, const ImportBud
 std::vector<std::uint8_t> save_glb(const mesh::Mesh& m);
 IoStatus save_glb_file(const mesh::Mesh& m, const std::string& path);
 
+// -- .clayspace mesh stream ---------------------------------------------------
+// The payload a document's MESH chunk carries: u32 vertex count, u32 index
+// count, u8 attribute mask (1 normals, 2 colors, 4 uvs), then the float arrays
+// little-endian, then u32 indices. Uncompressed — triangle data does not
+// run-length encode usefully, and a general compressor would be a dependency
+// in readers that are deliberately dependency-free.
+//
+// A free function rather than a member of mesh::Mesh (which VoxelGrid and
+// MaskField would suggest): mesh::Mesh is a plain interchange struct with no
+// invariants of its own, and io already owns every byte format that touches it.
+//
+// Written exactly as held and read back element for element, so the document
+// round trip is an identity rather than a re-derivation.
+inline constexpr std::uint8_t kMeshHasNormals = 1;
+inline constexpr std::uint8_t kMeshHasColors = 2;
+inline constexpr std::uint8_t kMeshHasUvs = 4;
+
+std::vector<std::uint8_t> save_mesh_stream(const mesh::Mesh& m);
+// Validates the declared counts against the bytes actually present BEFORE
+// allocating, and every index against the vertex count before returning: a
+// document's meshes are handed to a host as borrowed contiguous buffers, so an
+// index past the vertex array in a file this library did not write becomes an
+// out-of-bounds read in the host.
+IoStatus load_mesh_stream(const std::uint8_t* data, std::size_t size, mesh::Mesh* out);
+
 // -- platform buffer view (file-io spec: USDZ exclusion) ---------------------
 // Contiguous typed arrays, zero conversion — what Model I/O and engine
 // importers consume directly.

@@ -260,7 +260,7 @@ expensive. [`examples/28_hpolish.py`](../examples/28_hpolish.py) measures that.
 set — and hands back a source that is a distance field again, so the next pass
 starts where the first one did. Six passes hold the declared Lipschitz at
 √3 instead of reaching 32, and the memory does not creep.
-[`examples/36_consolidation.py`](../examples/36_consolidation.py) measures both
+[`examples/38_consolidation.py`](../examples/38_consolidation.py) measures both
 halves. Baking WITHOUT redistancing does not do it: steepness is a property of
 the field, and resampling reproduces it.
 

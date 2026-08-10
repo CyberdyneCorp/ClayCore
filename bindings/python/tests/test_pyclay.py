@@ -874,6 +874,65 @@ def test_voxel_layer_in_document_round_trip(tmp_path):
     assert back.palette_color(idx)[0] > 0.9
 
 
+def _tetrahedron():
+    """No two coordinates alike, so a transposed or truncated buffer shows."""
+    return clay.Mesh.from_triangles(
+        np.array([(0, 0, 0), (1, 0, 0), (0, 2, 0), (0, 0, 3)], np.float32),
+        np.array([0, 1, 2, 0, 1, 3, 0, 2, 3, 1, 2, 3], np.uint32))
+
+
+def test_mesh_layer_carries_triangles_verbatim(tmp_path):
+    doc = clay.Document()
+    doc.add_sdf_layer("body").add(clay.Sphere(r=0.5))
+    carried = doc.add_mesh_layer(_tetrahedron(), "scan")
+    assert carried.triangle_count == 4
+    assert carried.bounds == ((0.0, 0.0, 0.0), (1.0, 2.0, 3.0))
+    assert carried.layer == doc.mesh_layer("scan").layer
+
+    path = tmp_path / "carried.clayspace"
+    doc.save(str(path))
+    back = clay.load(str(path)).mesh_layer("scan")
+    assert back is not None
+    assert np.array_equal(back.positions, carried.positions)
+    assert np.array_equal(back.indices, carried.indices)
+    # absent attributes stay absent rather than being filled in
+    assert back.normals.shape == (0, 3) and back.uvs.shape == (0, 2)
+
+
+def test_mesh_layer_does_not_change_what_the_document_evaluates_to():
+    plain = clay.Document()
+    plain.add_sdf_layer("body").add(clay.Sphere(r=0.5))
+    with_mesh = clay.Document()
+    with_mesh.add_sdf_layer("body").add(clay.Sphere(r=0.5))
+    with_mesh.add_mesh_layer(_tetrahedron(), "scan")
+
+    probes = np.random.default_rng(5).uniform(-2, 2, size=(500, 3)).astype(np.float32)
+    assert np.array_equal(plain.eval(probes), with_mesh.eval(probes))
+
+
+def test_mesh_layer_buffers_are_views_and_the_transform_does_not_move_them():
+    doc = clay.Document()
+    carried = doc.add_mesh_layer(_tetrahedron(), "scan", scale=2.0)
+    assert carried.bounds[1] == (2.0, 4.0, 6.0)  # the import scale is baked in
+    assert np.asarray(carried.positions).base is not None  # a view, not a copy
+
+    before = np.asarray(carried.positions).copy()
+    doc.set_layer_transform(carried.layer, position=(9.0, 0.0, 0.0))
+    assert np.array_equal(carried.positions, before)
+
+
+def test_mesh_layer_lookup_misses_and_a_standalone_mesh_has_no_layer():
+    doc = clay.Document()
+    doc.add_sdf_layer("body").add(clay.Sphere(r=0.5))
+    assert doc.mesh_layer("scan") is None
+    assert doc.mesh_layer("body") is None  # an SDF layer is not a mesh layer
+    assert _tetrahedron().layer is None
+    # An empty grid meshes to nothing, which is the one way to reach a mesh
+    # with no triangles — a document has nothing to carry, so it refuses.
+    with pytest.raises(ValueError):
+        doc.add_mesh_layer(clay.VoxelGrid(0.1).mesh(), "empty")
+
+
 def test_sdf_rasterized_into_voxels():
     doc = clay.Document()
     layer = doc.add_sdf_layer("l")

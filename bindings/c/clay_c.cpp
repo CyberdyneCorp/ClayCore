@@ -379,6 +379,8 @@ constexpr std::size_t kMoveParamsOriginal =
     offsetof(clay_move_params, front_only) + sizeof(std::int32_t);
 constexpr std::size_t kImportBudgetOriginal =
     offsetof(clay_import_budget, max_triangles) + sizeof(std::uint64_t);
+constexpr std::size_t kMeshLayerDescOriginal =
+    offsetof(clay_mesh_layer_desc, import_scale) + sizeof(float);
 constexpr std::size_t kGridQueryOriginal =
     offsetof(clay_grid_query, dims) + 3 * sizeof(std::int32_t);
 constexpr std::size_t kBrickConfigOriginal =
@@ -734,6 +736,16 @@ struct clay_mask {
     clay_layer_id layer = 0;
 };
 
+// The same discriminator, one shape different: a standalone mesh is held by
+// value because every producer in this file builds one in place, and `data` is
+// simply unused by a borrow. Declared above clay_document because the document
+// keeps a map of these by value.
+struct clay_mesh {
+    mesh::Mesh data;               // the owned mesh; empty on a borrow
+    clay_document* doc = nullptr;  // non-null: borrowed from a mesh layer
+    clay_layer_id layer = 0;
+};
+
 struct clay_document {
     io::ClaySpaceDoc doc;
     // Opt-in undo. Null means off, and a document that never enables it
@@ -744,6 +756,7 @@ struct clay_document {
     // std::map keeps the addresses stable as more layers arrive.
     std::map<clay_layer_id, clay_voxel_grid> voxel_handles;
     std::map<clay_layer_id, clay_mask> mask_handles;
+    std::map<clay_layer_id, clay_mesh> mesh_handles;
 
     // -- compiled tape cache -------------------------------------------------
     //
@@ -797,10 +810,6 @@ struct clay_document {
     mutable std::uint64_t tape_revision_ = 0;
     mutable std::shared_ptr<const scene::Tape> pick_cache_;
     mutable std::uint64_t pick_revision_ = 0;
-};
-
-struct clay_mesh {
-    mesh::Mesh data;
 };
 
 // The item builder is a scene::Node under construction. Whether a transition
@@ -907,6 +916,23 @@ clay_result resolve(const clay_voxel_grid* grid, voxel::VoxelGrid** out) {
     if (it == grid->doc->doc.voxel_layers.end())  // no removal call exists yet
         return fail(CLAY_ERROR_NOT_FOUND, "voxel layer is no longer in its document");
     *out = &it->second;
+    return CLAY_OK;
+}
+
+// The mesh a handle stands for, or null when a borrow names a layer the
+// document no longer carries. The read accessors return no status, so they
+// answer 0/null through this rather than pretending the handle is empty.
+const mesh::Mesh* mesh_data(const clay_mesh* mesh) {
+    if (!mesh) return nullptr;
+    if (!mesh->doc) return &mesh->data;
+    auto it = mesh->doc->doc.mesh_layers.find(mesh->layer);
+    return it == mesh->doc->doc.mesh_layers.end() ? nullptr : &it->second;
+}
+
+clay_result resolve_mesh(const clay_mesh* mesh, const mesh::Mesh** out) {
+    if (!mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh");
+    *out = mesh_data(mesh);
+    if (!*out) return fail(CLAY_ERROR_NOT_FOUND, "the mesh layer is no longer in its document");
     return CLAY_OK;
 }
 
@@ -1110,6 +1136,13 @@ clay_result mesh_with(std::int32_t mesher, bool experimental, const scene::Tape&
 
 clay_voxel_grid* borrow_layer(clay_document* doc, clay_layer_id layer) {
     clay_voxel_grid& handle = doc->voxel_handles[layer];
+    handle.doc = doc;
+    handle.layer = layer;
+    return &handle;
+}
+
+clay_mesh* borrow_mesh_layer(clay_document* doc, clay_layer_id layer) {
+    clay_mesh& handle = doc->mesh_handles[layer];
     handle.doc = doc;
     handle.layer = layer;
     return &handle;
@@ -2729,55 +2762,85 @@ clay_result clay_document_mesh(const clay_document* doc, const clay_mesh_params*
     return CLAY_OK;
 }
 
-void clay_mesh_destroy(clay_mesh* mesh) { delete mesh; }
+void clay_mesh_destroy(clay_mesh* mesh) {
+    // A borrowed handle belongs to its document, which keeps it by address.
+    if (mesh && !mesh->doc) delete mesh;
+}
 
 size_t clay_mesh_vertex_count(const clay_mesh* mesh) {
-    return mesh ? mesh->data.positions.size() : 0;
+    const mesh::Mesh* m = mesh_data(mesh);
+    return m ? m->positions.size() : 0;
 }
 size_t clay_mesh_index_count(const clay_mesh* mesh) {
-    return mesh ? mesh->data.indices.size() : 0;
+    const mesh::Mesh* m = mesh_data(mesh);
+    return m ? m->indices.size() : 0;
 }
 const float* clay_mesh_positions(const clay_mesh* mesh) {
-    return mesh && !mesh->data.positions.empty() ? &mesh->data.positions[0].x : nullptr;
+    const mesh::Mesh* m = mesh_data(mesh);
+    return m && !m->positions.empty() ? &m->positions[0].x : nullptr;
 }
 // !empty() before the size comparison, not instead of it: clay_voxel_mesh is
 // the one call that hands back a mesh with nothing in it, and indexing an
 // empty vector to take the address of its first field is undefined even when
 // the result is never dereferenced.
 const float* clay_mesh_normals(const clay_mesh* mesh) {
-    return mesh && !mesh->data.normals.empty() &&
-                   mesh->data.normals.size() == mesh->data.positions.size()
-               ? &mesh->data.normals[0].x
+    const mesh::Mesh* m = mesh_data(mesh);
+    return m && !m->normals.empty() && m->normals.size() == m->positions.size()
+               ? &m->normals[0].x
                : nullptr;
 }
 const float* clay_mesh_colors(const clay_mesh* mesh) {
-    return mesh && !mesh->data.colors.empty() &&
-                   mesh->data.colors.size() == mesh->data.positions.size()
-               ? &mesh->data.colors[0].x
+    const mesh::Mesh* m = mesh_data(mesh);
+    return m && !m->colors.empty() && m->colors.size() == m->positions.size()
+               ? &m->colors[0].x
                : nullptr;
 }
+const float* clay_mesh_uvs(const clay_mesh* mesh) {
+    const mesh::Mesh* m = mesh_data(mesh);
+    return m && !m->uvs.empty() && m->uvs.size() == m->positions.size() ? &m->uvs[0].x : nullptr;
+}
 const uint32_t* clay_mesh_indices(const clay_mesh* mesh) {
-    return mesh && !mesh->data.indices.empty() ? mesh->data.indices.data() : nullptr;
+    const mesh::Mesh* m = mesh_data(mesh);
+    return m && !m->indices.empty() ? m->indices.data() : nullptr;
+}
+
+clay_result clay_mesh_bounds(const clay_mesh* mesh, float out_min[3], float out_max[3]) {
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh, &m);
+    if (r != CLAY_OK) return r;
+    if (!out_min || !out_max) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_min or out_max");
+    if (m->positions.empty())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "an empty mesh has no bounds");
+    math::Aabb box;  // default-constructed is the empty box
+    for (const kernel::cfloat3& p : m->positions) box.expand(p);
+    write_f3(out_min, box.min);
+    write_f3(out_max, box.max);
+    return CLAY_OK;
 }
 
 clay_result clay_mesh_validate(const clay_mesh* mesh, int32_t* out_watertight,
                                int32_t* out_manifold) {
-    if (!mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh");
-    mesh::ValidationReport r = mesh::validate(mesh->data);
-    if (out_watertight) *out_watertight = r.watertight ? 1 : 0;
-    if (out_manifold) *out_manifold = r.manifold ? 1 : 0;
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh, &m);
+    if (r != CLAY_OK) return r;
+    mesh::ValidationReport report = mesh::validate(*m);
+    if (out_watertight) *out_watertight = report.watertight ? 1 : 0;
+    if (out_manifold) *out_manifold = report.manifold ? 1 : 0;
     return CLAY_OK;
 }
 
 clay_result clay_mesh_save(const clay_mesh* mesh, const char* path) {
-    if (!mesh || !path) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh or path");
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh, &m);
+    if (r != CLAY_OK) return r;
+    if (!path) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null path");
     std::string p(path);
     std::size_t dot = p.find_last_of('.');
     std::string ext = dot == std::string::npos ? "" : p.substr(dot + 1);
-    if (ext == "obj") return from_io(io::save_obj_file(mesh->data, p));
-    if (ext == "ply") return from_io(io::save_ply_file(mesh->data, p));
-    if (ext == "fbx") return from_io(io::save_fbx_file(mesh->data, p));
-    if (ext == "glb") return from_io(io::save_glb_file(mesh->data, p));
+    if (ext == "obj") return from_io(io::save_obj_file(*m, p));
+    if (ext == "ply") return from_io(io::save_ply_file(*m, p));
+    if (ext == "fbx") return from_io(io::save_fbx_file(*m, p));
+    if (ext == "glb") return from_io(io::save_glb_file(*m, p));
     return fail(CLAY_ERROR_UNSUPPORTED, "unknown extension: " + ext);
 }
 
@@ -2844,13 +2907,15 @@ clay_result clay_mesh_from_triangles(const float* positions, size_t vertex_count
 
 clay_result clay_item_volume_from_mesh(const clay_mesh* mesh, const clay_volume_params* params,
                                        clay_item** out_item) {
-    if (!mesh || !params || !out_item)
-        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    if (!params || !out_item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
     *out_item = nullptr;
-    clay_volume_params p;
-    clay_result r = read_desc(params, kVolumeParamsOriginal, &p);
+    const mesh::Mesh* src = nullptr;
+    clay_result r = resolve_mesh(mesh, &src);
     if (r != CLAY_OK) return r;
-    if (mesh->data.triangle_count() == 0)
+    clay_volume_params p;
+    r = read_desc(params, kVolumeParamsOriginal, &p);
+    if (r != CLAY_OK) return r;
+    if (src->triangle_count() == 0)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "the mesh has no triangles to sample");
 
     mesh::ImportSettings settings;
@@ -2862,7 +2927,7 @@ clay_result clay_item_volume_from_mesh(const clay_mesh* mesh, const clay_volume_
     // field zeroed would get an import that took minutes.
     settings.beta = p.beta > 0.0f ? p.beta : 2.0f;
 
-    std::optional<field::FieldVolume> volume = mesh::to_field(mesh->data, settings);
+    std::optional<field::FieldVolume> volume = mesh::to_field(*src, settings);
     if (!volume) return fail(CLAY_ERROR_INVALID_ARGUMENT, "the mesh could not be sampled");
 
     auto* item = new clay_item();
@@ -3071,6 +3136,94 @@ clay_result clay_document_voxel_layer(clay_document* doc, const char* name,
         return CLAY_OK;
     }
     return fail(CLAY_ERROR_NOT_FOUND, std::string("no voxel layer named ") + name);
+}
+
+// -- mesh layers (c-abi spec: mesh layers across the ABI) --------------------
+
+namespace {
+
+// What a document may CARRY, not what a file may decode into: the loader's
+// 50M vertices is 600 MB of positions alone, which is not a default a document
+// should inherit. Zero on a field means this default, as everywhere else.
+constexpr std::size_t kMeshLayerMaxVertices = 8u * 1000 * 1000;
+constexpr std::size_t kMeshLayerMaxTriangles = 16u * 1000 * 1000;
+
+clay_result check_attach_budget(const mesh::Mesh& m, const clay_mesh_layer_desc& d) {
+    std::size_t max_vertices =
+        d.max_vertices ? static_cast<std::size_t>(d.max_vertices) : kMeshLayerMaxVertices;
+    std::size_t max_triangles =
+        d.max_triangles ? static_cast<std::size_t>(d.max_triangles) : kMeshLayerMaxTriangles;
+    if (m.positions.size() > max_vertices)
+        return fail(CLAY_ERROR_BUDGET_EXCEEDED,
+                    "the mesh has " + std::to_string(m.positions.size()) +
+                        " vertices, over the attach budget of " + std::to_string(max_vertices));
+    if (m.triangle_count() > max_triangles)
+        return fail(CLAY_ERROR_BUDGET_EXCEEDED,
+                    "the mesh has " + std::to_string(m.triangle_count()) +
+                        " triangles, over the attach budget of " + std::to_string(max_triangles));
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_document_add_mesh_layer(clay_document* doc, const clay_mesh* mesh,
+                                         const clay_mesh_layer_desc* desc,
+                                         clay_layer_id* out_layer, clay_mesh** out_mesh) {
+    if (!doc || !desc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or descriptor");
+    const mesh::Mesh* src = nullptr;
+    clay_result r = resolve_mesh(mesh, &src);
+    if (r != CLAY_OK) return r;
+    clay_mesh_layer_desc d;
+    r = read_desc(desc, kMeshLayerDescOriginal, &d);
+    if (r != CLAY_OK) return r;
+    if (!d.name) return fail(CLAY_ERROR_INVALID_ARGUMENT, "a mesh layer needs a name");
+    if (src->triangle_count() == 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the mesh has no triangles to carry");
+    r = check_attach_budget(*src, d);
+    if (r != CLAY_OK) return r;
+
+    // Copied, and the import scale baked in, before the layer exists: a
+    // failure past this point would leave a layer with no geometry.
+    mesh::Mesh stored = *src;
+    if (d.import_scale > 0.0f && d.import_scale != 1.0f)
+        for (kernel::cfloat3& p : stored.positions) p = p * d.import_scale;
+
+    // Through the command vocabulary, like clay_add_sdf_layer, so an enabled
+    // undo stack records the attach. A mesh layer carries no SDF content.
+    scene::Layer layer;
+    layer.id = doc->doc.document.reserve_layer_id();
+    layer.name = d.name;
+    layer.kind = scene::LayerKind::Mesh;
+    clay_layer_id id = layer.id;
+    r = apply_edit(doc, scene::Command{scene::AddLayerCmd{std::move(layer), -1}},
+                   "the mesh layer could not be added");
+    if (r != CLAY_OK) return r;
+    // Beside the document, keyed by layer id: undoing the attach removes the
+    // layer and leaves this entry, which save_clayspace then does not write.
+    doc->doc.mesh_layers.insert_or_assign(id, std::move(stored));
+    if (out_layer) *out_layer = id;
+    if (out_mesh) *out_mesh = borrow_mesh_layer(doc, id);
+    return CLAY_OK;
+}
+
+clay_result clay_document_mesh_layer(clay_document* doc, const char* name,
+                                     clay_layer_id* out_layer, clay_mesh** out_mesh) {
+    if (!doc || !name) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or name");
+    for (const scene::Layer& layer : doc->doc.document.layers) {
+        if (layer.name != name || layer.kind != scene::LayerKind::Mesh) continue;
+        if (!doc->doc.mesh_layers.count(layer.id)) continue;
+        if (out_layer) *out_layer = layer.id;
+        if (out_mesh) *out_mesh = borrow_mesh_layer(doc, layer.id);
+        return CLAY_OK;
+    }
+    return fail(CLAY_ERROR_NOT_FOUND, std::string("no mesh layer named ") + name);
+}
+
+clay_result clay_mesh_layer(const clay_mesh* mesh, clay_layer_id* out_layer) {
+    if (!mesh || !out_layer) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh or out_layer");
+    if (!mesh->doc) return fail(CLAY_ERROR_NOT_FOUND, "this mesh is not a document layer");
+    *out_layer = mesh->layer;
+    return CLAY_OK;
 }
 
 // -- the cut tool (c-abi spec: the cut tool) ---------------------------------

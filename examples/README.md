@@ -438,9 +438,30 @@ the pinholes a dithered stamp leaves.
 
 ![hard-surface turnaround](output/35_turnaround.png)
 
+### 36 — a mesh a document carries
+
+`19` imports a model so it can be *sculpted*: the triangles become a distance
+field and stop being triangles. This is the other reason to import one — a
+scan, a scale reference, a kit part — where the requirement is the opposite,
+and the model has to leave the pipeline as what it entered as. A **mesh layer**
+stores the triangles verbatim, saves them inside the `.clayspace`, and is never
+evaluated.
+
+![mesh layer parts](output/36_mesh_layers_parts.png)
+
+Left is what the document's own field contains, which is the sculpt and nothing
+else: the geometry lives beside the document, where the module layering keeps
+`clay::scene` from ever seeing it, so "a mesh layer does not change what the
+document evaluates to" is structural rather than a promise. The middle and
+right panels resample the carried triangles purely to draw them — the very
+approximation a mesh layer exists to avoid — and show that moving the layer
+moves what gets exported, not what is stored.
+
+![mesh layer and sculpt](output/36_mesh_layers.png)
+
 ## Notes
 
-- **This page documents 00-17 and the two showcase examples.** The gallery
+- **This page documents 00-17, the two showcase examples and 36.** The gallery
   text has drifted behind the scripts; 18-33 run in CI and regenerate their
   output, they just have no section here yet.
 - **Committed models are budgeted.** `_render.save_model` fails above 400 KiB

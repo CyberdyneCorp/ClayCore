@@ -194,7 +194,7 @@ def main():
     if abs(surface_along(held, FACES[0]) - 0.44) > 0.04:
         raise SystemExit("six consolidated passes moved the facet off its plane")
 
-    R.contact_sheet(plain_tiles + held_tiles, "36_consolidation_chain.png", columns=3,
+    R.contact_sheet(plain_tiles + held_tiles, "38_consolidation_chain.png", columns=3,
                     caption="passes 1, 3 and 6 without consolidating (top) and with it "
                             "(bottom) — chaining bakes samples a volume rather than a "
                             "distance field, so the third pass is corrupt and by the sixth "
@@ -243,12 +243,12 @@ def main():
     if not surface_along(doc, (1, 0, 0)) < bite:
         raise SystemExit("the absorbed items came back unparametric")
 
-    R.render(held, "36_consolidation.png", eye=(2.3, 1.6, 2.3), target=TARGET,
+    R.render(held, "38_consolidation.png", eye=(2.3, 1.6, 2.3), target=TARGET,
              caption="six hPolish passes on a sphere, consolidated after each — the chain "
                      "holds its declared Lipschitz at sqrt(3) instead of multiplying, so "
                      "the seventh pass costs what the first did")
 
-    R.export_model(held, "36_consolidation.ply", resolution=80, decimate=0.08)
+    R.export_model(held, "38_consolidation.ply", resolution=80, decimate=0.08)
 
 
 if __name__ == "__main__":

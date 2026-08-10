@@ -284,8 +284,21 @@ struct PyMeshQuery {
     mesh::Bvh bvh;
 };
 
+// Owns a mesh, or borrows the one a document holds for a mesh layer, mirroring
+// PyVoxelGrid so a layer's triangles are read straight out of the document
+// rather than copied per access.
 struct PyMesh {
-    mesh::Mesh m;
+    mesh::Mesh m;                           // the owned mesh; empty on a borrow
+    std::shared_ptr<io::ClaySpaceDoc> doc;  // non-null: borrowed from a mesh layer
+    scene::LayerId layer = 0;
+
+    const mesh::Mesh& data() const {
+        if (!doc) return m;
+        auto it = doc->mesh_layers.find(layer);
+        if (it == doc->mesh_layers.end())
+            throw std::runtime_error("mesh layer was removed from its document");
+        return it->second;
+    }
 };
 
 // Zero-copy (owner-tracked) view over a vector of cfloat3 (plain x,y,z floats).
@@ -295,6 +308,14 @@ nb::object f3_view(nb::object owner, const std::vector<kernel::cfloat3>& v) {
         return np.attr("empty")(nb::make_tuple(0, 3), "dtype"_a = "float32");
     }
     return nb::cast(nb::ndarray<nb::numpy, const float>(&v.front().x, {v.size(), 3}, owner));
+}
+
+nb::object f2_view(nb::object owner, const std::vector<kernel::cfloat2>& v) {
+    if (v.empty()) {
+        nb::module_ np = nb::module_::import_("numpy");
+        return np.attr("empty")(nb::make_tuple(0, 2), "dtype"_a = "float32");
+    }
+    return nb::cast(nb::ndarray<nb::numpy, const float>(&v.front().x, {v.size(), 2}, owner));
 }
 
 void save_mesh_any(const mesh::Mesh& m, const std::string& path) {
@@ -1648,7 +1669,7 @@ NB_MODULE(pyclay, m) {
             "from_mesh",
             [](const PyMesh& mesh, float cell, nb::handle band, float beta, nb::handle position,
                nb::handle rotation_axis_angle, float scale) {
-                if (mesh.m.triangle_count() == 0)
+                if (mesh.data().triangle_count() == 0)
                     throw std::invalid_argument("cannot sample a mesh with no triangles");
                 if (cell < 0.0f) throw std::invalid_argument("cell must be >= 0");
                 if (!(beta >= 0.0f)) throw std::invalid_argument("beta must be >= 0");
@@ -1660,7 +1681,7 @@ NB_MODULE(pyclay, m) {
                 std::optional<field::FieldVolume> volume;
                 {
                     nb::gil_scoped_release release;  // the BVH build is the slow part
-                    volume = mesh::to_field(mesh.m, settings);
+                    volume = mesh::to_field(mesh.data(), settings);
                 }
                 if (!volume) throw std::invalid_argument("the mesh could not be sampled");
 
@@ -2329,9 +2350,9 @@ NB_MODULE(pyclay, m) {
         "opening instead.")
         .def("__init__",
              [](PyMeshQuery* self, const PyMesh& mesh) {
-                 if (mesh.m.triangle_count() == 0)
+                 if (mesh.data().triangle_count() == 0)
                      throw std::invalid_argument("a mesh with no triangles has no surface");
-                 new (self) PyMeshQuery{mesh::Bvh::build(mesh.m)};
+                 new (self) PyMeshQuery{mesh::Bvh::build(mesh.data())};
              },
              "mesh"_a)
         .def_prop_ro("triangle_count",
@@ -2395,30 +2416,60 @@ NB_MODULE(pyclay, m) {
             "Build a mesh from an (N, 3) vertex array and a flat triangle index\n"
             "array — which is how you hand back a mesh you have edited.")
         .def_prop_ro("positions",
-                     [](nb::object self) { return f3_view(self, nb::cast<PyMesh&>(self).m.positions); })
+                     [](nb::object self) {
+                         return f3_view(self, nb::cast<PyMesh&>(self).data().positions);
+                     })
         .def_prop_ro("normals",
-                     [](nb::object self) { return f3_view(self, nb::cast<PyMesh&>(self).m.normals); })
+                     [](nb::object self) {
+                         return f3_view(self, nb::cast<PyMesh&>(self).data().normals);
+                     })
         .def_prop_ro("colors",
-                     [](nb::object self) { return f3_view(self, nb::cast<PyMesh&>(self).m.colors); })
+                     [](nb::object self) {
+                         return f3_view(self, nb::cast<PyMesh&>(self).data().colors);
+                     })
+        .def_prop_ro("uvs",
+                     [](nb::object self) {
+                         return f2_view(self, nb::cast<PyMesh&>(self).data().uvs);
+                     })
         .def_prop_ro("indices",
                      [](nb::object self) -> nb::object {
-                         const PyMesh& pm = nb::cast<const PyMesh&>(self);
-                         if (pm.m.indices.empty()) {
+                         const mesh::Mesh& mm = nb::cast<const PyMesh&>(self).data();
+                         if (mm.indices.empty()) {
                              nb::module_ np = nb::module_::import_("numpy");
                              return np.attr("empty")(nb::make_tuple(0, 3), "dtype"_a = "uint32");
                          }
                          return nb::cast(nb::ndarray<nb::numpy, const std::uint32_t>(
-                             pm.m.indices.data(), {pm.m.indices.size() / 3, 3}, self));
+                             mm.indices.data(), {mm.indices.size() / 3, 3}, self));
                      })
-        .def_prop_ro("triangle_count", [](const PyMesh& pm) { return pm.m.triangle_count(); })
+        .def_prop_ro("triangle_count", [](const PyMesh& pm) { return pm.data().triangle_count(); })
         .def("is_watertight",
-             [](const PyMesh& pm) { return mesh::validate(pm.m).watertight; },
+             [](const PyMesh& pm) { return mesh::validate(pm.data()).watertight; },
              "True when every edge is shared by exactly two triangles")
         .def("is_manifold",
-             [](const PyMesh& pm) { return mesh::validate(pm.m).manifold; },
+             [](const PyMesh& pm) { return mesh::validate(pm.data()).manifold; },
              "True when no edge has more than two incident triangles")
+        .def_prop_ro("layer",
+                     [](const PyMesh& pm) -> nb::object {
+                         if (!pm.doc) return nb::none();
+                         return nb::cast(pm.layer);
+                     },
+                     "The layer id a BORROWED mesh belongs to — what the document-level\n"
+                     "layer edits take — or None for a mesh you own.")
+        .def_prop_ro("bounds",
+                     [](const PyMesh& pm) {
+                         const mesh::Mesh& mm = pm.data();
+                         if (mm.positions.empty())
+                             throw std::invalid_argument("an empty mesh has no bounds");
+                         math::Aabb box;
+                         for (const kernel::cfloat3& p : mm.positions) box.expand(p);
+                         return nb::make_tuple(nb::make_tuple(box.min.x, box.min.y, box.min.z),
+                                               nb::make_tuple(box.max.x, box.max.y, box.max.z));
+                     },
+                     "((lo), (hi)) enclosing the positions — how you frame an imported\n"
+                     "model. Document.layer_bounds is derived from SDF shapes and reports\n"
+                     "nothing for a mesh layer, which is why this lives here.")
         .def("save",
-             [](const PyMesh& pm, const std::string& path) { save_mesh_any(pm.m, path); },
+             [](const PyMesh& pm, const std::string& path) { save_mesh_any(pm.data(), path); },
              "path"_a, "Save by extension: .obj, .ply, .fbx or .glb");
 
     // -- layer -----------------------------------------------------------------------
@@ -2950,6 +3001,42 @@ NB_MODULE(pyclay, m) {
              },
              "name"_a, "voxel_size"_a = 0.1f,
              "Add a voxel layer and return its grid (edits are stored in the document)")
+        .def("add_mesh_layer",
+             [](PyDocument& d, const PyMesh& source, const std::string& name, float scale) {
+                 const mesh::Mesh& src = source.data();
+                 if (src.triangle_count() == 0)
+                     throw std::invalid_argument("cannot carry a mesh with no triangles");
+                 mesh::Mesh stored = src;
+                 if (scale > 0.0f && scale != 1.0f)
+                     for (kernel::cfloat3& p : stored.positions) p = p * scale;
+                 // Through AddLayerCmd so the attach is undoable; see
+                 // add_sdf_layer. A mesh layer carries no SDF content.
+                 scene::Layer l;
+                 l.id = d.doc->document.reserve_layer_id();
+                 l.name = name;
+                 l.kind = scene::LayerKind::Mesh;
+                 scene::LayerId id = l.id;
+                 apply_or_throw(d.doc->document,
+                                scene::Command{scene::AddLayerCmd{std::move(l), -1}},
+                                "add_mesh_layer", d.undo.get());
+                 d.doc->mesh_layers.insert_or_assign(id, std::move(stored));
+                 PyMesh borrowed;
+                 borrowed.doc = d.doc;
+                 borrowed.layer = id;
+                 return borrowed;
+             },
+             "mesh"_a, "name"_a, "scale"_a = 1.0f,
+             "Carry an imported mesh in the document: the triangles are kept as the\n"
+             "importer produced them, for display and re-export, and are returned\n"
+             "as a BORROWED Mesh whose buffers are the document's own memory.\n\n"
+             "This is the opposite of Volume.from_mesh, which resamples a mesh into\n"
+             "a field so it can be sculpted. A mesh layer is never evaluated: no\n"
+             "tape, no blend, no influence bound, not pickable. Its geometry lives\n"
+             "beside the document rather than in it, so that is structural.\n\n"
+             "`scale` is baked into the stored vertices, so unit conversion is\n"
+             "resolved once at import rather than approximated by a layer\n"
+             "transform. The layer's own transform is applied by whatever exports\n"
+             "it, and moving the layer does not move the stored vertices.")
         .def("add_mask",
              [](PyDocument& d, const std::string& name, float cell_size) {
                  if (cell_size <= 0.0f) throw std::invalid_argument("cell_size must be > 0");
@@ -3056,6 +3143,19 @@ NB_MODULE(pyclay, m) {
                  return nb::none();
              },
              "name"_a, "Look up a voxel layer's grid by name")
+        .def("mesh_layer",
+             [](const PyDocument& d, const std::string& name) -> nb::object {
+                 for (const scene::Layer& l : d.doc->document.layers) {
+                     if (l.name != name || l.kind != scene::LayerKind::Mesh) continue;
+                     if (!d.doc->mesh_layers.count(l.id)) continue;
+                     PyMesh borrowed;
+                     borrowed.doc = d.doc;
+                     borrowed.layer = l.id;
+                     return nb::cast(borrowed);
+                 }
+                 return nb::none();
+             },
+             "name"_a, "Look up a mesh layer's triangles by name; None when there is none")
         .def("raycast",
              [](const PyDocument& d, nb::handle origin, nb::handle direction) -> nb::object {
                  math::Ray ray{to_f3(origin, "origin"),

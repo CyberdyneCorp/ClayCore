@@ -62,6 +62,7 @@ add_library(claycore
   src/io/ply.cpp
   src/io/fbx.cpp
   src/io/gltf.cpp
+  src/io/mesh_stream.cpp
   ${ufbx_SOURCE_DIR}/ufbx.c
   backends/cpu/cpu_backend.cpp
   bindings/c/clay_c.cpp)
