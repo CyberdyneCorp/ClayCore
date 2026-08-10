@@ -10,6 +10,7 @@
 
 #include "clay.h"
 #include "clay/field/volume.h"
+#include "kernel_utils.h"
 #include "clay/io/clayspace.h"
 #include "clay/scene/commands.h"
 #include "clay/kernel/exactness.h"
@@ -523,4 +524,69 @@ TEST_CASE("volume: the tape agrees with the volume it was built from") {
             CAPTURE(y);
             CHECK(tape.eval(p).d == doctest::Approx(v.eval(p)).epsilon(1e-4));
         }
+}
+
+TEST_CASE("volume: a volume reads its own blob, not the tape's") {
+    // Issue #35. The symptom reported was "clay_item_volume_from_document
+    // silently drops CLAY_PRIM_STROKE items": sampling a document containing a
+    // stroke and swapping the region back produced the bare ball, and three
+    // different ops agreed to four decimals because the item carrying them had
+    // contributed nothing.
+    //
+    // Sampling was never the problem — a stroke round trips as well as a sphere
+    // does. What was wrong is on the READ side: FieldVolume::to_blob writes its
+    // index/far/data offsets relative to its OWN twelve-float header, and the
+    // interpreter used them as absolute indices into the tape blob. Those two
+    // agree exactly when the volume sits at blob offset 0, which is true when
+    // nothing else out-of-line was emitted before it. A sphere carries no blob
+    // payload, so a volume beside spheres worked and hid this for as long as it
+    // did; a stroke, loft, swept or armature writes its points there first, and
+    // the volume then read whatever they had left.
+    //
+    // So the test is not about strokes. It is that a volume means the same
+    // thing wherever it lands in the blob.
+    scene::Document src;
+    src.add_sdf_layer("s").sdf->insert([] {
+        scene::Node n;
+        n.prim = scene::Prim::sphere(0.30f);
+        return n;
+    }());
+    scene::Tape src_tape = scene::compile_document(src);
+    field::FieldVolume vol = field::FieldVolume::sample(
+        [&](kernel::cfloat3 p) { return src_tape.eval(p).d; },
+        math::Aabb(cf3(-0.5f, -0.5f, -0.5f), cf3(0.5f, 0.5f, 0.5f)), 0.02f, 0.12f);
+    REQUIRE(!vol.empty());
+    auto shared = std::make_shared<const field::FieldVolume>(vol);
+
+    auto volume_node = [&] {
+        scene::Node n;
+        n.prim = scene::Prim::volume();
+        n.volume = shared;
+        return n;
+    };
+    // A stroke well away from the probes: it must not change the answer, only
+    // the volume's position in the blob.
+    auto stroke_node = [] {
+        scene::Node n;
+        n.prim = scene::Prim::stroke();
+        n.stroke = {{cf3(4.0f, 4.0f, 4.0f), 0.05f}, {cf3(4.2f, 4.0f, 4.0f), 0.05f}};
+        return n;
+    };
+
+    scene::Document alone;
+    alone.add_sdf_layer("l").sdf->insert(volume_node());
+    scene::Document behind;
+    scene::Layer& bl = behind.add_sdf_layer("l");
+    bl.sdf->insert(stroke_node());   // claims the start of the blob
+    bl.sdf->insert(volume_node());
+
+    scene::Tape ta = scene::compile_document(alone);
+    scene::Tape tb = scene::compile_document(behind);
+    clay_test::Lcg rng(23);
+    float worst = 0.0f;
+    for (int i = 0; i < 3000; ++i) {
+        kernel::cfloat3 p = rng.vec3(-0.45f, 0.45f);
+        worst = kernel::cmax(worst, std::fabs(ta.eval(p).d - tb.eval(p).d));
+    }
+    CHECK(worst < 1e-6f);
 }
