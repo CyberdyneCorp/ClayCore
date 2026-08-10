@@ -111,7 +111,8 @@ final class VerbLatencyTests: XCTestCase {
     /// failure rather than a silent gap.
     private func measureAxis(
         name: String, verb: String, _ cls: BudgetClass, backend: String = "cpu",
-        prepare: (Int) -> (body: () -> Void, cleanup: () -> Void)?
+        prepare: (Int) -> (body: () -> Void, reset: (() -> Void)?,
+                           cleanup: () -> Void)?
     ) {
         var measurements: [Measurement] = []
         for stamps in LatencyTests.axis {
@@ -119,7 +120,7 @@ final class VerbLatencyTests: XCTestCase {
                 XCTFail("\(name): could not build a fixture at \(stamps) stamps")
                 continue
             }
-            let r = Timing.measure(fixture.body)
+            let r = Timing.measure(reset: fixture.reset, fixture.body)
             fixture.cleanup()
             measurements.append(Measurement(stamps: stamps, p50Ms: r.p50,
                                             p95Ms: r.p95, samples: r.n))
@@ -152,7 +153,7 @@ final class VerbLatencyTests: XCTestCase {
                     } else {
                         _ = clay_voxel_set_brush(f.grid, &c, &b, index)
                     }
-                }, { clay_document_destroy(f.doc) })
+                }, nil, { clay_document_destroy(f.doc) })
             }
         }
 
@@ -163,7 +164,7 @@ final class VerbLatencyTests: XCTestCase {
             return ({
                 var c = Fixture.cell(i); i += 1
                 _ = clay_voxel_erase_brush(f.grid, &c, &b)
-            }, { clay_document_destroy(f.doc) })
+            }, nil, { clay_document_destroy(f.doc) })
         }
 
         // -- voxel sculpt verbs ------------------------------------------------
@@ -175,7 +176,7 @@ final class VerbLatencyTests: XCTestCase {
             return ({
                 var c = Fixture.cell(i); i += 1
                 _ = clay_voxel_sculpt_smooth(f.grid, &c, &b)
-            }, { clay_document_destroy(f.doc) })
+            }, nil, { clay_document_destroy(f.doc) })
         }
 
         measureAxis(name: "voxel_inflate", verb: "voxel_sculpt_inflate", .interactive) { stamps in
@@ -185,7 +186,7 @@ final class VerbLatencyTests: XCTestCase {
             return ({
                 var c = Fixture.cell(i); i += 1
                 _ = clay_voxel_sculpt_inflate(f.grid, &c, &b, 1)
-            }, { clay_document_destroy(f.doc) })
+            }, nil, { clay_document_destroy(f.doc) })
         }
 
         measureAxis(name: "voxel_flatten", verb: "voxel_sculpt_flatten", .interactive) { stamps in
@@ -196,7 +197,7 @@ final class VerbLatencyTests: XCTestCase {
             return ({
                 var c = Fixture.cell(i); i += 1
                 _ = clay_voxel_sculpt_flatten(f.grid, &c, &b, &normal, 0)
-            }, { clay_document_destroy(f.doc) })
+            }, nil, { clay_document_destroy(f.doc) })
         }
 
         measureAxis(name: "voxel_pinch", verb: "voxel_sculpt_pinch", .interactive) { stamps in
@@ -206,7 +207,7 @@ final class VerbLatencyTests: XCTestCase {
             return ({
                 var c = Fixture.cell(i); i += 1
                 _ = clay_voxel_sculpt_pinch(f.grid, &c, &b)
-            }, { clay_document_destroy(f.doc) })
+            }, nil, { clay_document_destroy(f.doc) })
         }
 
         measureAxis(name: "voxel_magnify", verb: "voxel_sculpt_magnify", .interactive) { stamps in
@@ -216,7 +217,7 @@ final class VerbLatencyTests: XCTestCase {
             return ({
                 var c = Fixture.cell(i); i += 1
                 _ = clay_voxel_sculpt_magnify(f.grid, &c, &b)
-            }, { clay_document_destroy(f.doc) })
+            }, nil, { clay_document_destroy(f.doc) })
         }
 
         // Grab and smudge need a displacement past the nearest-cell dead zone:
@@ -231,7 +232,7 @@ final class VerbLatencyTests: XCTestCase {
             return ({
                 var c = Fixture.cell(i); i += 1
                 _ = clay_voxel_sculpt_grab(f.grid, &c, &b, &displacement, 0)
-            }, { clay_document_destroy(f.doc) })
+            }, nil, { clay_document_destroy(f.doc) })
         }
 
         measureAxis(name: "voxel_smudge", verb: "voxel_sculpt_smudge", .gesture) { stamps in
@@ -242,7 +243,7 @@ final class VerbLatencyTests: XCTestCase {
             return ({
                 var c = Fixture.cell(i); i += 1
                 _ = clay_voxel_sculpt_smudge(f.grid, &c, &b, &displacement)
-            }, { clay_document_destroy(f.doc) })
+            }, nil, { clay_document_destroy(f.doc) })
         }
 
         measureAxis(name: "voxel_scrape", verb: "voxel_sculpt_scrape", .interactive) { stamps in
@@ -253,7 +254,7 @@ final class VerbLatencyTests: XCTestCase {
             return ({
                 var c = Fixture.cell(i); i += 1
                 _ = clay_voxel_sculpt_scrape(f.grid, &c, &b, &normal, 0)
-            }, { clay_document_destroy(f.doc) })
+            }, nil, { clay_document_destroy(f.doc) })
         }
 
         measureAxis(name: "voxel_fill_cavities", verb: "voxel_sculpt_fill_cavities",
@@ -264,7 +265,7 @@ final class VerbLatencyTests: XCTestCase {
             return ({
                 var c = Fixture.cell(i); i += 1
                 _ = clay_voxel_sculpt_fill_cavities(f.grid, &c, &b, 1)
-            }, { clay_document_destroy(f.doc) })
+            }, nil, { clay_document_destroy(f.doc) })
         }
 
         measureAxis(name: "voxel_carve_alpha", verb: "voxel_sculpt_carve_alpha",
@@ -286,7 +287,7 @@ final class VerbLatencyTests: XCTestCase {
                 var c = Fixture.cell(i); i += 1
                 _ = clay_voxel_sculpt_carve_alpha(f.grid, &c, &b, &alpha,
                                                   Int32(side), Int32(side), &direction, 0)
-            }, { clay_document_destroy(f.doc) })
+            }, nil, { clay_document_destroy(f.doc) })
         }
 
         // -- the stroke engine -------------------------------------------------
@@ -299,7 +300,7 @@ final class VerbLatencyTests: XCTestCase {
             return ({
                 var capacity = stamps.count
                 _ = clay_stroke_resolve(&samples, sampleCount, &preset, &stamps, &capacity)
-            }, {})
+            }, nil, {})
         }
 
         measureAxis(name: "voxel_apply_stroke", verb: "voxel_apply_stroke",
@@ -314,7 +315,7 @@ final class VerbLatencyTests: XCTestCase {
                     f.grid, &samples, sampleCount, &preset, 1,
                     Int32(CLAY_BRUSH_SHAPE_SPHERE.rawValue),
                     Int32(CLAY_BRUSH_FALLOFF_SMOOTH.rawValue), nil, &applied)
-            }, { clay_document_destroy(f.doc) })
+            }, nil, { clay_document_destroy(f.doc) })
         }
 
         // -- masks --------------------------------------------------------------
@@ -327,7 +328,7 @@ final class VerbLatencyTests: XCTestCase {
                 let (x, y, z) = SceneBuilder.stampPosition(i); i += 1
                 var point: [Float] = [x, y, z]
                 _ = clay_mask_paint(mask, &point, &b, 1.0)
-            }, { _ = clay_mask_destroy(mask) })
+            }, nil, { _ = clay_mask_destroy(mask) })
         }
 
         measureAxis(name: "mask_extrude", verb: "document_mask_extrude",
@@ -400,7 +401,7 @@ final class VerbLatencyTests: XCTestCase {
                 var item: OpaquePointer?
                 if clay_document_mask_extrude(doc, layer, mask, &params, &item) == CLAY_OK,
                    let item { clay_item_destroy(item) }
-            }, {
+            }, nil, {
                 _ = clay_mask_destroy(mask)
                 clay_document_destroy(doc)
             })
@@ -408,8 +409,12 @@ final class VerbLatencyTests: XCTestCase {
 
         // -- the SDF region verbs ------------------------------------------------
 
+        // relax and flatten REWRITE the volume's stored samples in place, so
+        // iteration 2 smooths an already-smoothed field. Rebuilding the volume
+        // between iterations (untimed) is what keeps every sample measuring
+        // the same operation on the same input.
         measureAxis(name: "sdf_relax", verb: "item_volume_relax", .operation) { stamps in
-            guard let item = Fixture.volumeItem(stamps: stamps) else { return nil }
+            guard var item = Fixture.volumeItem(stamps: stamps) else { return nil }
             var params = clay_relax_params()
             params.struct_size = UInt32(MemoryLayout<clay_relax_params>.size)
             params.strength = 0.5
@@ -419,11 +424,21 @@ final class VerbLatencyTests: XCTestCase {
             params.region_radius = 0.4
             params.falloff = 0.1
             return ({ _ = clay_item_volume_relax(item, &params) },
+                    {
+                        // build the replacement BEFORE releasing the original:
+                        // a failed rebuild would otherwise leave a destroyed
+                        // pointer in `item`, which is a use-after-free on the
+                        // next iteration and a double free at cleanup
+                        if let fresh = Fixture.volumeItem(stamps: stamps) {
+                            clay_item_destroy(item)
+                            item = fresh
+                        }
+                    },
                     { clay_item_destroy(item) })
         }
 
         measureAxis(name: "sdf_flatten", verb: "item_volume_flatten", .operation) { stamps in
-            guard let item = Fixture.volumeItem(stamps: stamps) else { return nil }
+            guard var item = Fixture.volumeItem(stamps: stamps) else { return nil }
             var params = clay_flatten_params()
             params.struct_size = UInt32(MemoryLayout<clay_flatten_params>.size)
             params.plane_point = (0, 0, 0)
@@ -434,14 +449,28 @@ final class VerbLatencyTests: XCTestCase {
             params.falloff = 0.1
             params.mode = Int32(CLAY_FLATTEN_TWO_SIDED.rawValue)
             return ({ _ = clay_item_volume_flatten(item, &params) },
+                    {
+                        // build the replacement BEFORE releasing the original:
+                        // a failed rebuild would otherwise leave a destroyed
+                        // pointer in `item`, which is a use-after-free on the
+                        // next iteration and a double free at cleanup
+                        if let fresh = Fixture.volumeItem(stamps: stamps) {
+                            clay_item_destroy(item)
+                            item = fresh
+                        }
+                    },
                     { clay_item_destroy(item) })
         }
 
         // Move is a GESTURE, not a stamp: a drag is resolved as one unit, and
         // the drag coalescing that `add-move-drag-continuity` added exists
         // because treating each frame as its own move stacked a warp per frame.
+        // Move APPENDS a warp to every item its region reaches, so iteration N
+        // drags a chain N deep — which is the exact degradation
+        // add-move-drag-continuity exists to stop, and measuring it here would
+        // report that decay as the cost of one drag. Rebuild between samples.
         measureAxis(name: "sdf_move", verb: "layer_move_surface", .gesture) { stamps in
-            guard let (doc, layer) = SceneBuilder.sdfDocument(stamps: stamps) else { return nil }
+            guard var built = SceneBuilder.sdfDocument(stamps: stamps) else { return nil }
             var params = clay_move_params()
             params.struct_size = UInt32(MemoryLayout<clay_move_params>.size)
             params.radius = 0.4
@@ -451,14 +480,28 @@ final class VerbLatencyTests: XCTestCase {
             var displacement: [Float] = [0.05, 0, 0]
             return ({
                 var applied = 0
-                _ = clay_layer_move_surface(doc, layer, &centre, &displacement,
+                _ = clay_layer_move_surface(built.0, built.1, &centre, &displacement,
                                             &params, &applied)
-            }, { clay_document_destroy(doc) })
+            },
+            {
+                // as above: a failed rebuild must not leave a destroyed
+                // document behind
+                if let fresh = SceneBuilder.sdfDocument(stamps: stamps) {
+                    clay_document_destroy(built.0)
+                    built = fresh
+                }
+            },
+            { clay_document_destroy(built.0) })
         }
 
+        // consolidate COLLAPSES the layer into one volume, so every iteration
+        // after the first consolidates an already-consolidated layer — a
+        // different and much cheaper operation. The whole document is rebuilt
+        // between iterations, untimed, so each sample measures what the verb
+        // costs on a real chain.
         measureAxis(name: "sdf_consolidate", verb: "layer_consolidate",
                     .operation) { stamps in
-            guard let (doc, layer) = SceneBuilder.sdfDocument(stamps: stamps) else { return nil }
+            guard var built = SceneBuilder.sdfDocument(stamps: stamps) else { return nil }
             var params = clay_consolidation_params()
             params.struct_size = UInt32(MemoryLayout<clay_consolidation_params>.size)
             params.cell_size = 0.05
@@ -468,8 +511,17 @@ final class VerbLatencyTests: XCTestCase {
             // and skipping it would measure the cheap-and-unsound path.
             params.skip_redistance = 0
             return ({
-                _ = clay_layer_consolidate(doc, layer, &params, nil, nil, nil)
-            }, { clay_document_destroy(doc) })
+                _ = clay_layer_consolidate(built.0, built.1, &params, nil, nil, nil)
+            },
+            {
+                // as above: a failed rebuild must not leave a destroyed
+                // document behind
+                if let fresh = SceneBuilder.sdfDocument(stamps: stamps) {
+                    clay_document_destroy(built.0)
+                    built = fresh
+                }
+            },
+            { clay_document_destroy(built.0) })
         }
 
         // -- the cut tool ----------------------------------------------------------
@@ -490,7 +542,7 @@ final class VerbLatencyTests: XCTestCase {
             desc.region_max = (1, 1, 1)
             return ({
                 if let item = clay_cut_create(&desc, nil, 0) { clay_item_destroy(item) }
-            }, {})
+            }, nil, {})
         }
 
         // -- the coverage guard ------------------------------------------------------

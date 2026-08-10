@@ -59,6 +59,9 @@ enum Coverage {
         // evaluation a host needs before it can draw. The case the whole
         // harness was built for — it is the only one paying a tape recompile.
         .measured("sdf_stamp", by: "sdf_stamp_cpu"),
+        // The same stamp through the brick cache — the incremental path a
+        // host actually drives, as opposed to re-evaluating everything.
+        .measured("sdf_stamp_incremental", by: "sdf_stamp_bricks"),
 
         // -- masks ------------------------------------------------------------
         .measured("mask_paint", by: "mask_paint"),

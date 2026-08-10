@@ -89,11 +89,61 @@ enum Timing {
         return sorted[min(max(rank, 0), sorted.count - 1)]
     }
 
-    /// Run `body` `warmups` times untimed, then `samples` times timed.
-    /// Returns milliseconds.
-    static func measure(warmups: Int = 3, samples: Int = 30,
-                        _ body: () -> Void) -> (p50: Double, p95: Double, n: Int) {
-        for _ in 0..<warmups { body() }
+    /// Timed work to aim for per measurement. Sample count is derived from
+    /// this rather than fixed, for two reasons that pull the same way:
+    ///
+    /// A FIXED 30 SAMPLES MAKES p95 MEANINGLESS. The 95th percentile of 30
+    /// values is the second-worst one, so a single scheduling hiccup IS the
+    /// result — measured: the brick-cache case reported 5.7 ms and 16.0 ms on
+    /// consecutive runs with identical code. A gate on that would fail for
+    /// reasons unrelated to the change under test.
+    ///
+    /// And it wastes minutes on the slow cases: `sdf_consolidate` at ~5 s an
+    /// iteration spent 150 s per document size to produce a number that a
+    /// tenth of the samples pins just as well.
+    static let targetMeasureMs = 1500.0
+    static let minSamples = 10
+    static let maxSamples = 200
+
+    /// Run `body` untimed to warm up, then timed enough times for the
+    /// percentiles to mean something. Returns milliseconds.
+    ///
+    /// `reset` runs after every iteration and is NOT timed. Any verb that
+    /// mutates what it measures needs one, or iteration 2 measures something
+    /// iteration 1 already changed. Two ways that bit, both caught by raising
+    /// the sample count:
+    ///
+    ///  - a stamp case with no reset grows the document by one per iteration,
+    ///    so "10 stamps" silently measured the average over 10..210 of them;
+    ///  - `consolidate` collapses a layer, so every iteration after the first
+    ///    re-consolidated an already-consolidated layer — a different and much
+    ///    cheaper operation (measured: 4975 ms became 514 ms purely by
+    ///    changing the sample count, which is the tell).
+    static func measure(warmups: Int = 3, reset: (() -> Void)? = nil,
+                        _ body: () -> Void)
+        -> (p50: Double, p95: Double, n: Int) {
+        for _ in 0..<warmups { body(); reset?() }
+
+        // Probe once to size the run. The warm-ups already paid any one-time
+        // cost, so this is representative.
+        //
+        // Size by body PLUS reset, even though only the body is reported. A
+        // reset can cost far more than the verb it restores — `relax` runs in
+        // under a millisecond but its reset rebuilds a thousand-stamp document
+        // and re-bakes a volume — and sizing on the body alone asked for 200
+        // samples of that, which took the device out of memory and killed the
+        // test process mid-run.
+        let probeStart = DispatchTime.now().uptimeNanoseconds
+        body()
+        let bodyEnd = DispatchTime.now().uptimeNanoseconds
+        reset?()
+        let resetEnd = DispatchTime.now().uptimeNanoseconds
+
+        _ = bodyEnd  // only the full iteration decides how many we can afford
+        let iterationMs = Double(resetEnd - probeStart) / 1_000_000.0
+        let wanted = iterationMs > 0 ? Int(targetMeasureMs / iterationMs) : maxSamples
+        let samples = min(max(wanted, minSamples), maxSamples)
+
         var times: [Double] = []
         times.reserveCapacity(samples)
         for _ in 0..<samples {
@@ -101,6 +151,7 @@ enum Timing {
             body()
             let t1 = DispatchTime.now().uptimeNanoseconds
             times.append(Double(t1 - t0) / 1_000_000.0)
+            reset?()
         }
         times.sort()
         return (percentile(times, 50), percentile(times, 95), samples)
