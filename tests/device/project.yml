@@ -1,0 +1,83 @@
+# XcodeGen spec for the on-device harness.
+#
+# An Xcode project exists here for one reason: tool-hosted (hostless) XCTest
+# bundles cannot run on a device destination — xcodebuild refuses with "Select
+# a host application for the test target". SwiftPM cannot declare a test host,
+# so the package alone can reach the simulator and never the iPad.
+#
+# The project is GENERATED rather than committed: a pbxproj is unreviewable,
+# and everything that decides the build is visible in this file instead.
+#
+# The host app is deliberately empty. The test bundle links the xcframework
+# itself rather than inheriting it from the host, so there is exactly one copy
+# of the static library in the graph and no duplicate-symbol question.
+
+name: ClayCoreDevice
+
+options:
+  bundleIdPrefix: com.cyberdyne.claycore
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+settings:
+  base:
+    # Overridable from the command line; see tools/run_device_bench.sh.
+    DEVELOPMENT_TEAM: 2C69VJZSNR
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.9"
+    TARGETED_DEVICE_FAMILY: "1,2"
+
+targets:
+  ClayCoreDeviceHost:
+    type: application
+    platform: iOS
+    sources:
+      - path: Host
+    info:
+      path: Host/Info.plist
+      properties:
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cyberdyne.claycore.devicehost
+        GENERATE_INFOPLIST_FILE: NO
+
+  ClayCoreDeviceTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Tests
+    dependencies:
+      # Builds the host before the bundle that loads into it.
+      - target: ClayCoreDeviceHost
+      # The static-library xcframework. `embed: false` because a static
+      # library is linked, not embedded — embedding it would produce an
+      # invalid bundle.
+      - framework: ../../dist/claycore.xcframework
+        embed: false
+      # A static library records no dependency on the frameworks its objects
+      # reference, and every slice now bundles the Metal backend.
+      - sdk: Metal.framework
+      - sdk: Foundation.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cyberdyne.claycore.devicetests
+        # A signed bundle needs an Info.plist; the test bundle has nothing
+        # worth stating in one, so let Xcode generate it.
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ClayCoreDeviceHost.app/ClayCoreDeviceHost"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        OTHER_LDFLAGS: -lc++
+
+schemes:
+  ClayCoreDevice:
+    build:
+      targets:
+        ClayCoreDeviceHost: all
+        ClayCoreDeviceTests: [test]
+    test:
+      targets:
+        - ClayCoreDeviceTests
