@@ -179,9 +179,25 @@ def main() -> int:
         print(f"  note: {note}")
     for f in failures:
         print(f"device-bench: FAIL {f}", file=sys.stderr)
-    if not failures:
-        print("device-bench: OK")
-    return 1 if failures else 0
+    if failures:
+        return 1
+
+    # Record that the gate passed, and for WHICH code. The release checklist
+    # reads this: CI runners have no attached iPad, so the only way a release
+    # can require the device gate is to require evidence that someone ran it
+    # against the engine being released. See tools/release_check.py.
+    stamp = {
+        "passed": True,
+        "claycoreCommit": run.get("claycoreCommit"),
+        "deviceModel": run["deviceModel"],
+        "osVersion": run["osVersion"],
+        "abiVersion": run["abiVersion"],
+        "caseCount": len(run["cases"]),
+    }
+    stamp_path = baseline_path.parent / "last-gate.json"
+    stamp_path.write_text(json.dumps(stamp, indent=2, sort_keys=True) + "\n")
+    print(f"device-bench: OK (recorded in {stamp_path.name})")
+    return 0
 
 
 if __name__ == "__main__":

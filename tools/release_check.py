@@ -75,6 +75,64 @@ def check_versions(cl: Checklist) -> None:
            f"wheel={'.'.join(wheel_version or '?')}")
 
 
+# Paths whose contents decide what the engine DOES on a device. A device gate
+# recorded before any of these changed is stale evidence.
+DEVICE_RELEVANT = ("src/", "include/", "backends/", "bindings/", "CMakeLists.txt")
+
+
+def check_device_gate(cl: "Checklist") -> None:
+    """The device gate ran, and it ran against this engine.
+
+    No CI runner has an attached iPad, so the release cannot run the gate
+    itself. What it CAN do is refuse to release code the gate has never seen:
+    tools/check_device_bench.py records the commit it passed against, and this
+    fails when the engine has changed since.
+
+    Skipping instead of failing was rejected. A skipped hardware gate and a
+    passing one are indistinguishable in a log, which is exactly how "Metal is
+    the iPad app's production path" went unverified to v0.25.0.
+    """
+    stamp_path = REPO / "tests" / "device" / "last-gate.json"
+    if not stamp_path.exists():
+        cl.add("device", False,
+               "no tests/device/last-gate.json — run tools/run_device_bench.sh "
+               "with an iPad attached, then tools/check_device_bench.py")
+        return
+    try:
+        stamp = json.loads(stamp_path.read_text())
+    except json.JSONDecodeError as e:
+        cl.add("device", False, f"last-gate.json is unreadable: {e}")
+        return
+    if not stamp.get("passed"):
+        cl.add("device", False, "the recorded device gate did not pass")
+        return
+
+    commit = stamp.get("claycoreCommit")
+    if not commit:
+        cl.add("device", False, "the recorded device gate names no commit")
+        return
+
+    ok, out = run(["git", "diff", "--name-only", commit, "HEAD"])
+    if not ok:
+        # a shallow clone cannot see the recorded commit; say so rather than
+        # passing on an unverifiable claim
+        cl.add("device", False,
+               f"cannot diff against the gated commit {commit[:9]} "
+               f"(shallow clone?): {out.splitlines()[-1] if out else ''}")
+        return
+    changed = [p for p in out.splitlines()
+               if any(p.startswith(prefix) for prefix in DEVICE_RELEVANT)]
+    if changed:
+        cl.add("device", False,
+               f"engine changed since the gate ran at {commit[:9]}: "
+               + ", ".join(changed[:3])
+               + (f" (+{len(changed) - 3} more)" if len(changed) > 3 else ""))
+        return
+    cl.add("device", True,
+           f"{stamp.get('caseCount')} case(s) on {stamp.get('deviceModel')} "
+           f"at {commit[:9]}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--skip-slow", action="store_true",
@@ -135,6 +193,8 @@ def main() -> int:
 
     ok, out = run(["openspec", "validate", "--all", "--strict"])
     cl.add("openspec", ok, out.splitlines()[-1] if out else "")
+
+    check_device_gate(cl)
 
     if not args.skip_slow:
         bench_json = build_dir / "release_bench.json"
