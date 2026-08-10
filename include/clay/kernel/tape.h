@@ -565,15 +565,21 @@ CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
         int cz = (int)cclamp(cfloor(gz), 0.0f, (float)(bcz * CLAY_BRICK_DIM - 1));
         int bx = cx / CLAY_BRICK_DIM, by = cy / CLAY_BRICK_DIM, bz = cz / CLAY_BRICK_DIM;
         int slot = (bz * bcy + by) * bcx + bx;
-        int entry = (int)blob[index_off + slot];
+        // Relative to the VOLUME's own blob, not the tape's. to_blob writes
+        // index/far/data offsets past its own 12-float header, so they are only
+        // absolute when the volume happens to sit at blob offset 0 — which is
+        // true exactly when nothing else out-of-line was emitted before it. A
+        // stroke, loft, swept or armature earlier in the layer puts its payload
+        // there first, and the volume then read whatever those had written.
+        int entry = (int)h[index_off + slot];
         // An empty brick carries its own signed lower bound: the gap in bricks
         // to the nearest brick that HAS samples, floored at the band less half
         // a cell diagonal. A flat band width would be conservative but useless
         // — the marcher would creep across the empty majority of the region in
         // steps that never grew. See FieldVolume::far_value().
-        if (entry < 0) return ctape_volume_outside(blob[far_off + slot], outside);
+        if (entry < 0) return ctape_volume_outside(h[far_off + slot], outside);
 
-        CLAY_DEVICE const float* block = blob + data_off + entry;
+        CLAY_DEVICE const float* block = h + data_off + entry;
         int lx = cx - bx * CLAY_BRICK_DIM;
         int ly = cy - by * CLAY_BRICK_DIM;
         int lz = cz - bz * CLAY_BRICK_DIM;
