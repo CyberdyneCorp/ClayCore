@@ -422,6 +422,35 @@ because the adaptive skin lays out quads whose edge flow follows the node
 frames, and none of marching cubes, surface nets or dual contouring consults
 such a frame. Storing it would be a promise this engine does not keep.
 
+## The interactive path, proposed 2026-08-10
+
+Seven changes, from a review of what the library actually costs on the device it
+exists for. The theme is that the *feature* work is ahead of the *latency* work:
+the sculpting vocabulary landed, and the engine has never been measured on a
+tablet.
+
+The budget these are judged against is the one
+`speed-the-interactive-path` wrote down: 4–8 ms per Pencil event at 120–240 Hz,
+16.7 ms for a preview frame. Everything below either defends it, or is the only
+way to know whether it is met.
+
+| Change | Why |
+|---|---|
+| `add-item-spatial-index` | **The one that matters most.** A dab's brick count is flat with document size; its cost is not. `clay_brick_cache_eval_requests` compiles a culled tape per brick and the cull walks every item — ~64 ns per item per brick, ~24 bricks per dab, so ~3.6 ms at 2 400 items and past the whole budget at 10 000, before a sample is evaluated. The tape cache cannot help: consecutive bricks want different cull regions. Fanning out halves the constant and leaves the slope. |
+| `add-cpu-simd-path` | The spec has required a SIMD batch path since v1 — "Apple `simd` on Apple platforms, SSE/NEON via xsimd elsewhere", with a parity scenario gating it — and there is none. `xsimd` is fetched by CMake and included by nothing; the "batch path" is the scalar evaluator sliced across threads. This is the path brick fills actually run on, per the 0.24.0 measurement that keeps them off Metal. |
+| `speed-the-metal-path` | Every dispatch re-uploads the whole tape, allocates and frees six buffers, blocks on `waitUntilCompleted` and copies results back out of shared memory. That is the dispatch cost the 288 µs-per-brick measurement was measuring. Also: `device_meshing` is false while the spec says the backend meshes on device, and gradients fall back to the CPU for the whole batch. |
+| `add-mobile-thread-scheduling` | "The caller owns threading and queues" is not true of the CPU backend: a process-wide pool spawns `hardware_concurrency - 1` threads with no QoS class, counts efficiency cores as equal workers, and spins on `yield()` at the join — on the thread the user is waiting for. |
+| `add-brick-cache-eviction` | The memory budget can be hit and never backed away from: no evict, no trim, no clear. Past the budget a submit is refused, so the surface stops updating where the artist is working, and the only recourse is destroying the cache. iOS asks for memory back and then takes it. |
+| `add-tape-abi-export` | Carried since Phase 2 and moved here because it is a latency row: `add-host-kernel-package` shipped the evaluator, but a host cannot get the tape, so a host drawing its own frames round-trips pixels through the library every frame instead of uploading a few kilobytes per edit. |
+| `add-device-perf-budgets` | Every number in this repository was taken on a desktop or an M2 Max. Nothing measures the budget, nothing measures the path end to end, nothing measures sustained behaviour, and the decision to keep brick fills on the CPU rests on a crossover found on a machine with a fan. This is how the six rows above are judged. |
+
+`add-vulkan-backend` is proposed alongside these and is **not** one of them: on
+Apple hardware Vulkan means MoltenVK over Metal, which cannot beat the Metal
+backend it translates into. Its case is portability and the retirement path for
+OpenCL, whose CI job was removed because pocl's arithmetic is the CPU's. The
+likely route needs no fifth dialect — the OpenCL amalgamation already is the
+C-compatible subset, and clspv compiles that to SPIR-V.
+
 ## Phase 3 — the pipeline
 
 | Change | Notes |
