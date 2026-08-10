@@ -187,6 +187,31 @@ def main():
         raise SystemExit("undoing the drag did not restore the form")
     print("  ...and undoing it puts the form back exactly")
 
+    # --- preview is PURE: it says what a drag would touch, and touches nothing --
+    # docs/07 lists move_surface_preview beside move_surface as the reason a
+    # host can show what a drag is about to affect. Nothing measured it, so the
+    # two could have drifted apart — and a preview that disagrees with the edit
+    # is worse than none, because the host would highlight the wrong items.
+    pre_doc, pre_layer = blended_form()
+    probe = np.array([[x, 0.5, 0.0] for x in PROBES], dtype=np.float32)
+    untouched = pre_doc.eval(probe)
+
+    would = pre_layer.move_surface_preview((0, 0.45, 0), (0, 0.4, 0), radius=RADIUS)
+    if not np.allclose(pre_doc.eval(probe), untouched, atol=0):
+        raise SystemExit("move_surface_preview changed the document — it must be pure")
+    did = pre_layer.move_surface((0, 0.45, 0), (0, 0.4, 0), radius=RADIUS)
+    if sorted(would) != sorted(did):
+        raise SystemExit(f"preview said {sorted(would)} but the move warped {sorted(did)}")
+    print(f"  move_surface_preview named the same {len(would)} items the move warped, "
+          f"without touching the document")
+
+    # A drag that cannot reach the form names nothing, rather than naming every
+    # item with a zero-weight warp.
+    far_doc, far_layer = blended_form()
+    if far_layer.move_surface_preview((40.0, 0, 0), (0, 0.4, 0), radius=RADIUS):
+        raise SystemExit("a preview out of reach still named items")
+    print("  ...and names nothing when the drag cannot reach the form")
+
     R.export_model(doc, "26_move.ply", resolution=72)
 
 
