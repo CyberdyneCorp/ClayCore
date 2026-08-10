@@ -141,3 +141,10 @@ A loader SHALL NOT return a mesh whose normals, colors or uvs array is non-empty
 - **WHEN** an FBX carrying two meshes, only one with a color layer, is imported
 - **THEN** the resulting mesh's colors array is either empty or exactly as long as its positions array
 
+### Requirement: The node record carries a tree
+The node record SHALL carry an armature's parent indices alongside its points, gated on the minor so that a reader predating armatures is unaffected.
+
+#### Scenario: An older reader is not broken by an armature
+- **WHEN** a reader that predates armatures opens a document containing one
+- **THEN** it opens the document rather than refusing it, and the armature is absent rather than corrupt
+

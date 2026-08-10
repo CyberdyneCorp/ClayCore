@@ -404,7 +404,70 @@ yields exactly one stamp at the start.
 
 ---
 
-## 6. Voxel sculpting verbs
+## 6. Armatures
+
+ZBrush's ZSpheres. A **tree** of spheres: each node names a parent, a link is
+the sphere-swept cone between the two, and the whole tree is ONE edit item.
+
+This is the mechanism for **blocking a figure out**, and what it buys is
+structure rather than a new shape.
+[`examples/34_organic_character.py`](../examples/34_organic_character.py) is
+forty-odd primitives whose positions are numbers typed into a file: there is no
+way there to say "an arm hangs from this shoulder", only to work out where the
+arm's endpoints would be if it did, and to retype them all when the shoulder
+moves. The same figure as an armature is 18 nodes and a tree, and moving the
+shoulder is one edit that the arm follows —
+[`examples/40_armature.py`](../examples/40_armature.py) measures exactly that.
+
+**It is the stroke with its chain generalised**, which is worth knowing rather
+than taking on faith. A stroke walks `(i, i+1)`, so its topology is a line; an
+armature walks `(i, parent[i])`, so it can branch. The link, the smooth union
+between links and the blend parameter are literally shared code, so a
+line-shaped armature and the stroke built from the same points agree to 4.8e-07
+across four blends — and the example asserts it, so the two cannot drift apart.
+
+**`blend_k` is the skin.** At 0 the links are a hard union and you see the
+armature; above it the smooth union fills the crotches between links, which is
+what turns a stick figure into a body. There is no separate skinning pass.
+
+| Edit | What it does |
+|---|---|
+| `add_child` | Append a node under a parent |
+| `move` | Move a node BY a delta, **carrying every descendant**. The property the feature exists for |
+| `set_radius` | Resize one node; the links either side follow |
+| `delete_subtree` | Remove a node and everything under it, renumbering the survivors |
+| `add_child` mirrored | Add a node **and** its reflection through x = 0, under the mirror of the parent where one is known. Returns 1 for a node on the plane, whose reflection is itself |
+
+Every one is a pure function over `(nodes, parents)`; the command that installs
+one is a whole-tree replace, so its inverse is exactly the tree that was there
+before and one undo puts a whole arm back.
+
+Two constraints are load-bearing rather than incidental:
+
+- **The fold order is ascending node index.** `csmin_quadratic` is not
+  associative, so three links meeting at a hip give a different field depending
+  on the order they combine. Fixing the order is what makes an armature evaluate
+  the same on every backend, and the parity corpus carries a branching armature
+  so that is checked rather than assumed.
+- **A root contributes its sphere only when nothing else names it.** Giving
+  every root a sphere on top of its links is invisible at `blend_k = 0`, because
+  `min` is idempotent, and wrong above it — a smooth union of two overlapping
+  terms pulls the surface outward, and the chain armature stopped matching its
+  stroke by 8e-2. The isolated-node case still needs the sphere, which is why
+  the rule is "unreferenced" rather than "not a root".
+
+**Per-node rotation is deliberately absent.** A sphere is isotropic, so rotating
+one changes no distance and no surface. It earns its place in ZBrush because the
+adaptive skin lays out quads whose edge flow follows the node frames; marching
+cubes, surface nets and dual contouring do not consult one.
+
+A tree whose parents do not form a forest — a cycle, or an index out of range —
+is **refused** rather than stored, because a cycle would make the field depend
+on the order links are walked rather than on the tree.
+
+---
+
+## 7. Voxel sculpting verbs
 
 In-place edits of a palette-indexed grid. Each reads a **snapshot** of the
 region first, so a cell's outcome never depends on a neighbour the same call
@@ -432,6 +495,14 @@ Every verb takes `BrushParams`: `size`, shape (`Cube`/`Sphere`), falloff
 a fully masked cell is untouched by *every* verb rather than by a hand-picked
 few.
 
+**A grid can carry a stack of resolution levels.** Blocking a form out wants
+coarse cells and detailing wants fine ones, and paying for fine cells everywhere
+to get them in one place is what a single-resolution grid forces. `add_level`
+pushes a finer level, `set_active_level` chooses which one the verbs above edit,
+and `drop_level` discards one. The coarsest level is the one that was always
+there, so a grid with a single level behaves exactly as it did and serialises to
+the bytes it always did.
+
 **Any verb here can be a valid call that changes nothing** — a sub-cell grab or
 smudge, a flatten on an already-flat region, a dithered stamp that misses every
 cell it was offered, a footprint over empty space. None of that is an error and
@@ -446,7 +517,7 @@ and so give an upper bound rather than an exact tally.
 
 ---
 
-## 7. ZBrush equivalents
+## 8. ZBrush equivalents
 
 Where a ZBrush brush maps onto the list above. This is a map, not a claim of
 parity — the mechanism usually differs even where the result matches.
@@ -468,6 +539,7 @@ parity — the mechanism usually differs even where the result matches.
 | Trim (Rect/Circle/Lasso) | `cut::cut_item` | The practitioners' "90% tool" |
 | Trim Curve | `CutShape::from_open_curve` | An OPEN stroke closed against the frame bounds — not the lasso constructor, which closes the stroke and cuts a sliver |
 | Clip | `cut::cut_item` | **As a solid, Clip is exactly Trim.** Clip's distinctive look is a zero-thickness fin a field cannot represent and users delete anyway |
+| ZSpheres | `Prim::armature` | A tree of spheres; `blend_k` is the skin. No per-node rotation — a sphere is isotropic, and no mesher here consults a node frame |
 | SnakeHook | `brush::snakehook` | Adds material rather than pulling it |
 | Surface Noise | `noise` deformer | Integer hash, so all four backends agree |
 | Mask | mask fields, layer lock/ghost | Painted by the stroke engine like any brush; freezes every verb on both representations; survives resolution changes |
@@ -479,7 +551,7 @@ parity — the mechanism usually differs even where the result matches.
 
 ---
 
-## 8. Where each is reachable
+## 9. Where each is reachable
 
 Names differ between bindings, so this lists them rather than ticking boxes.
 
@@ -504,6 +576,12 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Bounded complement | `MaskField::fill`, `invert_within` | `MaskField.fill/.invert_within` | `clay_mask_fill`, `clay_mask_invert_within` |
 | Mask as a distance | `brush::mask_to_field` | `MaskField.to_field(...)` | `clay_mask_to_field` |
 | Mask extrude | `brush::mask_extrude` | `Document.mask_extrude(...)`, `VoxelGrid.mask_extrude(...)` | `clay_document_mask_extrude`, `clay_voxel_mask_extrude` |
+| Armatures | `Prim::armature`, `scene::armature_*` | `clay.Armature`, `Layer.armature_edit(...)` | `clay_layer_armature_edit`, `clay_item_set_armature_parents` |
+| Consolidate a layer | `scene::consolidate_layer` | `Layer.consolidate(...)`, `.consolidation_cost(...)` | `clay_layer_consolidate`, `clay_layer_consolidation_cost`, `clay_layer_consolidation_state` |
+| What a layer's field costs | `scene::field_report` | `Layer.field_report()` | `clay_layer_field_report` |
+| Voxel resolution levels | `VoxelGrid::add_level` etc. | `VoxelGrid.add_level(...)`, `.set_active_level(...)` | `clay_voxel_add_level`, `clay_voxel_set_active_level`, `clay_voxel_drop_level` |
+| Groups a host builds | `scene::Node::is_group` | `Layer.add_group(...)` | `clay_layer_add_group`, `clay_layer_add_item_in_group`, `clay_item_add_child`, `clay_layer_children` |
+| A mesh a document carries | `scene::LayerKind::Mesh` | `Document.add_mesh_layer(...)`, `.mesh_layer(...)` | `clay_document_add_mesh_layer`, `clay_document_mesh_layer`, `clay_mesh_layer` |
 
 Snakehook has no dedicated C entry point on purpose: it is a **resolver** that
 produces an ordinary stroke item, and the C ABI already builds those. A separate

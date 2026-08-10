@@ -31,6 +31,15 @@
 // reader is told the version — that is the whole point of decoding against the
 // minor instead of guessing from the bytes.
 //
+// Minor 5 lets a document CARRY a mesh rather than only produce one. It adds a
+// 'MESH' chunk per mesh layer and a third value to the layer record's kind
+// byte. A reader written against 4 opens a 5 document, skips the unknown chunk,
+// and ignores a layer whose kind it does not recognise exactly as it already
+// ignores a voxel layer — and loses those layers if it saves the document
+// again, the same one-directional loss the minors below carry. The scene
+// payload is untouched: a document with no mesh layer serialises to the bytes
+// it always did.
+//
 // Minor 6 lets a voxel layer carry a stack of resolution levels. The 'VOXL'
 // chunk still opens with the COARSEST level in the layout it always had, and
 // any finer level follows inside the same chunk as a tail of per-cell offsets.
@@ -45,6 +54,28 @@
 // one direction a chunked format cannot protect against — the levels are gone
 // from the reader's model, not merely unwritten — and it is the trade the
 // backward-open rule buys. A build that understands the tail round-trips it.
+//
+// Minor 7 adds an armature's topology: one parent index per stroke point, at
+// the end of the node record, written only from 7.
+//
+// This is a SCENE PAYLOAD change, and those are a different kind from minor 5
+// above. A new chunk is length-prefixed, so a build that does not know it skips
+// it; a field inside the node record is not, and node records are written back
+// to back. The count word is written for every node at minor 7, armature or
+// not, so a document with no armature is four bytes per node LONGER than the
+// same document at 6 rather than byte-identical to it, and a build that
+// predates 7 reading a 7 document is short by that word on the first node and
+// desynchronised for every node after it. It does not misread: the reader's
+// bounds and element-count checks reject the stream and the load fails.
+//
+// That is the same shape as minors 2, 3 and 4, and it is worth being plain
+// about what "backward-open" does and does not buy. It means a CURRENT build
+// opens every older document, which the payload's decode-against-the-minor rule
+// gives. It does not mean an older build opens a newer one — for a payload
+// change it cannot, and the protection is that it fails rather than silently
+// reading a different scene. Writing at an older minor is how a document is
+// made readable by an older build, which is what the `minor` parameter on
+// save_clayspace and serialize_document is for.
 
 #include <map>
 #include <optional>

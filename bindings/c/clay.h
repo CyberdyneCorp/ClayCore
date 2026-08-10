@@ -24,8 +24,8 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 24
-#define CLAY_ABI_PATCH 2
+#define CLAY_ABI_MINOR 25
+#define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
  * selected node ids, stroke points, polygon vertices. A count above it is

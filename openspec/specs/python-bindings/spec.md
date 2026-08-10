@@ -595,3 +595,12 @@ The module SHALL expose resolving a path into a tube, with the point type, the s
 - **WHEN** a script resolves a path with a wide start and a narrow end
 - **THEN** it receives an item that tapers along its length and can be added to a layer
 
+### Requirement: Armatures from Python
+`pyclay` SHALL expose armatures with the same semantics as the C ABI, taking nodes as an (N, 4) array of position and radius plus an (N,) array of parent indices, matching how strokes and sweeps already take their points.
+
+`check_binding_parity` SHALL report no capability without a C counterpart.
+
+#### Scenario: Both bindings agree
+- **WHEN** the same armature is built through the C ABI and through pyclay
+- **THEN** the two documents evaluate identically
+
