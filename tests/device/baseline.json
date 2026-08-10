@@ -1,0 +1,809 @@
+{
+  "abiVersion": "0.25.0",
+  "budgetNotes": "budgetMs is a CEILING on p95 at the worst point of the growth axis. It records what the engine must not exceed, which is not the same as what it should cost: where the two differ the note says so. Derived budgets are 1.5x the measurement; hand-set ones carry a note explaining the decision.",
+  "budgets": {
+    "cut_create": {
+      "budgetMs": 0.0002,
+      "class": "gesture",
+      "measuredMs": 0.0001
+    },
+    "mask_extrude": {
+      "budgetMs": 3400.0,
+      "class": "operation",
+      "measuredMs": 2718.4472,
+      "note": "2.7 s at 1000 stamps and LINEAR in document size (N^0.92), so it gets worse in proportion to the sculpt. The budget covers the axis measured; at 10000 stamps it would blow through this, which is a real limit on the verb rather than a measurement artifact."
+    },
+    "mask_paint": {
+      "budgetMs": 0.0161,
+      "class": "interactive",
+      "measuredMs": 0.0107
+    },
+    "sdf_consolidate": {
+      "budgetMs": 6000.0,
+      "class": "operation",
+      "measuredMs": 4975.6326,
+      "note": "5.0 s measured and FLAT in document size, so this is the volume bake resolution rather than the document. It is an explicit user action, not per-stamp work, but 5 s needs progress UI and is a candidate for the first optimisation pass. The ceiling is deliberately tighter than the derived 1.5x so a regression here is caught rather than absorbed."
+    },
+    "sdf_flatten": {
+      "budgetMs": 9.8317,
+      "class": "operation",
+      "measuredMs": 6.5545
+    },
+    "sdf_move": {
+      "budgetMs": 0.16,
+      "class": "gesture",
+      "measuredMs": 0.1072,
+      "note": "The only gesture verb that scales LINEARLY with the document (N^1.00). Cheap in absolute terms today, so this is about the shape: a linear gesture is the one to watch as documents grow."
+    },
+    "sdf_relax": {
+      "budgetMs": 1.2073,
+      "class": "operation",
+      "measuredMs": 0.8049
+    },
+    "sdf_stamp_cpu": {
+      "budgetMs": 6.45,
+      "class": "interactive",
+      "measuredMs": 4.3024,
+      "note": "4.30 ms p95 at 1000 stamps is ALREADY outside the engine's half of a 120 Hz frame (4.17 ms), and grows as N^0.65. This budget is a regression ceiling on today's behaviour, NOT a statement that it is fast enough. The checker reports the frame-share breach on every run so it stays visible instead of being retired by being written down."
+    },
+    "sdf_stamp_metal": {
+      "budgetMs": 4.93,
+      "class": "interactive",
+      "measuredMs": 3.2887,
+      "note": "Metal is SLOWER than the CPU below roughly a thousand stamps (1.85 vs 0.21 ms p95 at 10) and only overtakes it at 1000 (3.29 vs 4.30). A host that always selects Metal is slower for most of a sculpt's life."
+    },
+    "stroke_resolve": {
+      "budgetMs": 0.0007,
+      "class": "interactive",
+      "measuredMs": 0.0005
+    },
+    "voxel_apply_stroke": {
+      "budgetMs": 0.3217,
+      "class": "gesture",
+      "measuredMs": 0.2145
+    },
+    "voxel_carve_alpha": {
+      "budgetMs": 0.0015,
+      "class": "interactive",
+      "measuredMs": 0.001
+    },
+    "voxel_erase": {
+      "budgetMs": 0.0052,
+      "class": "interactive",
+      "measuredMs": 0.0035
+    },
+    "voxel_fill_cavities": {
+      "budgetMs": 0.8659,
+      "class": "operation",
+      "measuredMs": 0.5773
+    },
+    "voxel_flatten": {
+      "budgetMs": 0.014,
+      "class": "interactive",
+      "measuredMs": 0.0093
+    },
+    "voxel_grab": {
+      "budgetMs": 0.0401,
+      "class": "gesture",
+      "measuredMs": 0.0267
+    },
+    "voxel_inflate": {
+      "budgetMs": 0.0154,
+      "class": "interactive",
+      "measuredMs": 0.0103
+    },
+    "voxel_magnify": {
+      "budgetMs": 0.0141,
+      "class": "interactive",
+      "measuredMs": 0.0094
+    },
+    "voxel_paint": {
+      "budgetMs": 0.0055,
+      "class": "interactive",
+      "measuredMs": 0.0037
+    },
+    "voxel_pinch": {
+      "budgetMs": 0.0143,
+      "class": "interactive",
+      "measuredMs": 0.0095
+    },
+    "voxel_scrape": {
+      "budgetMs": 0.0183,
+      "class": "interactive",
+      "measuredMs": 0.0122
+    },
+    "voxel_smooth": {
+      "budgetMs": 0.0183,
+      "class": "interactive",
+      "measuredMs": 0.0122
+    },
+    "voxel_smudge": {
+      "budgetMs": 0.0381,
+      "class": "gesture",
+      "measuredMs": 0.0254
+    },
+    "voxel_stamp": {
+      "budgetMs": 0.0167,
+      "class": "interactive",
+      "measuredMs": 0.0111
+    }
+  },
+  "cases": [
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "growthExponent": 0.6545411056327479,
+      "measurements": [
+        {
+          "p50Ms": 0.144084,
+          "p95Ms": 0.211167,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.497,
+          "p95Ms": 0.555042,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 4.088333,
+          "p95Ms": 4.302375,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "sdf_stamp_cpu",
+      "servedBy": "cpu",
+      "verb": "sdf_stamp"
+    },
+    {
+      "backend": "metal",
+      "budgetClass": "interactive",
+      "growthExponent": 0.12556560992959537,
+      "measurements": [
+        {
+          "p50Ms": 0.580625,
+          "p95Ms": 1.844542,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.870208,
+          "p95Ms": 2.526416,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 2.09225,
+          "p95Ms": 3.288666,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "sdf_stamp_metal",
+      "servedBy": "metal",
+      "verb": "sdf_stamp"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "growthExponent": -0.3866493737946157,
+      "measurements": [
+        {
+          "p50Ms": 0.003125,
+          "p95Ms": 0.011125,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.002541,
+          "p95Ms": 0.002917,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.00175,
+          "p95Ms": 0.001875,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "voxel_stamp",
+      "servedBy": "cpu",
+      "verb": "voxel_set_brush"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "growthExponent": -0.026213774490864178,
+      "measurements": [
+        {
+          "p50Ms": 0.002958,
+          "p95Ms": 0.003667,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.002875,
+          "p95Ms": 0.003458,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.002667,
+          "p95Ms": 0.00325,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "voxel_paint",
+      "servedBy": "cpu",
+      "verb": "voxel_paint_brush"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "growthExponent": -0.04651757403161896,
+      "measurements": [
+        {
+          "p50Ms": 0.002958,
+          "p95Ms": 0.003459,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.002583,
+          "p95Ms": 0.002917,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.002459,
+          "p95Ms": 0.002792,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "voxel_erase",
+      "servedBy": "cpu",
+      "verb": "voxel_erase_brush"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "growthExponent": -0.004756830042720591,
+      "measurements": [
+        {
+          "p50Ms": 0.008083,
+          "p95Ms": 0.011584,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.010875,
+          "p95Ms": 0.012209,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.01,
+          "p95Ms": 0.011333,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "voxel_smooth",
+      "servedBy": "cpu",
+      "verb": "voxel_sculpt_smooth"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "growthExponent": -0.06391605747226958,
+      "measurements": [
+        {
+          "p50Ms": 0.008333,
+          "p95Ms": 0.010291,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.007291,
+          "p95Ms": 0.00825,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.006792,
+          "p95Ms": 0.007667,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "voxel_inflate",
+      "servedBy": "cpu",
+      "verb": "voxel_sculpt_inflate"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "growthExponent": -0.0030370738560966002,
+      "measurements": [
+        {
+          "p50Ms": 0.007542,
+          "p95Ms": 0.009,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.00775,
+          "p95Ms": 0.009334,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.0075,
+          "p95Ms": 0.008875,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "voxel_flatten",
+      "servedBy": "cpu",
+      "verb": "voxel_sculpt_flatten"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "growthExponent": -0.017857776133267236,
+      "measurements": [
+        {
+          "p50Ms": 0.007542,
+          "p95Ms": 0.0095,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.008375,
+          "p95Ms": 0.009542,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.007667,
+          "p95Ms": 0.00875,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "voxel_pinch",
+      "servedBy": "cpu",
+      "verb": "voxel_sculpt_pinch"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "growthExponent": -0.02115344137228654,
+      "measurements": [
+        {
+          "p50Ms": 0.0075,
+          "p95Ms": 0.009416,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.008209,
+          "p95Ms": 0.009417,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.0075,
+          "p95Ms": 0.008542,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "voxel_magnify",
+      "servedBy": "cpu",
+      "verb": "voxel_sculpt_magnify"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "gesture",
+      "growthExponent": -0.015806089514035854,
+      "measurements": [
+        {
+          "p50Ms": 0.021875,
+          "p95Ms": 0.026708,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.022792,
+          "p95Ms": 0.026375,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.021917,
+          "p95Ms": 0.024833,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "voxel_grab",
+      "servedBy": "cpu",
+      "verb": "voxel_sculpt_grab"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "gesture",
+      "growthExponent": -0.015517116869984391,
+      "measurements": [
+        {
+          "p50Ms": 0.020375,
+          "p95Ms": 0.025375,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.02125,
+          "p95Ms": 0.024084,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.021291,
+          "p95Ms": 0.023625,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "voxel_smudge",
+      "servedBy": "cpu",
+      "verb": "voxel_sculpt_smudge"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "growthExponent": -0.017763785643621542,
+      "measurements": [
+        {
+          "p50Ms": 0.007833,
+          "p95Ms": 0.012209,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.010875,
+          "p95Ms": 0.012125,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.009958,
+          "p95Ms": 0.01125,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "voxel_scrape",
+      "servedBy": "cpu",
+      "verb": "voxel_sculpt_scrape"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "operation",
+      "growthExponent": 0.11967432554549363,
+      "measurements": [
+        {
+          "p50Ms": 0.306917,
+          "p95Ms": 0.332167,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.572833,
+          "p95Ms": 0.57725,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.571084,
+          "p95Ms": 0.576375,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "voxel_fill_cavities",
+      "servedBy": "cpu",
+      "verb": "voxel_sculpt_fill_cavities"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "growthExponent": 0.018815332164989484,
+      "measurements": [
+        {
+          "p50Ms": 0.000875,
+          "p95Ms": 0.000917,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.000916,
+          "p95Ms": 0.000917,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.000958,
+          "p95Ms": 0.001,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "voxel_carve_alpha",
+      "servedBy": "cpu",
+      "verb": "voxel_sculpt_carve_alpha"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "growthExponent": 0,
+      "measurements": [
+        {
+          "p50Ms": 0.000458,
+          "p95Ms": 0.000459,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.000458,
+          "p95Ms": 0.000459,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.000458,
+          "p95Ms": 0.000459,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "stroke_resolve",
+      "servedBy": "cpu",
+      "verb": "stroke_resolve"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "gesture",
+      "growthExponent": -0.028971100237837756,
+      "measurements": [
+        {
+          "p50Ms": 0.192542,
+          "p95Ms": 0.2145,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.162917,
+          "p95Ms": 0.211083,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.1805,
+          "p95Ms": 0.187709,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "voxel_apply_stroke",
+      "servedBy": "cpu",
+      "verb": "voxel_apply_stroke"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "growthExponent": -0.19725977863391245,
+      "measurements": [
+        {
+          "p50Ms": 0.00425,
+          "p95Ms": 0.01075,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.003625,
+          "p95Ms": 0.004875,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.003416,
+          "p95Ms": 0.004334,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "mask_paint",
+      "servedBy": "cpu",
+      "verb": "mask_paint"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "operation",
+      "growthExponent": 0.9247774642273469,
+      "measurements": [
+        {
+          "p50Ms": 37.6815,
+          "p95Ms": 38.438459,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 255.493167,
+          "p95Ms": 260.76275,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 2505.676792,
+          "p95Ms": 2718.447167,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "mask_extrude",
+      "servedBy": "cpu",
+      "verb": "document_mask_extrude"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "operation",
+      "growthExponent": 0.026738620640288358,
+      "measurements": [
+        {
+          "p50Ms": 0.700458,
+          "p95Ms": 0.711625,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.778834,
+          "p95Ms": 0.7905,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.80275,
+          "p95Ms": 0.804875,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "sdf_relax",
+      "servedBy": "cpu",
+      "verb": "item_volume_relax"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "operation",
+      "growthExponent": 0.038526959522002864,
+      "measurements": [
+        {
+          "p50Ms": 5.477042,
+          "p95Ms": 5.487334,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 6.327417,
+          "p95Ms": 6.554458,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 6.5445,
+          "p95Ms": 6.552625,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "sdf_flatten",
+      "servedBy": "cpu",
+      "verb": "item_volume_flatten"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "gesture",
+      "growthExponent": 0.9976009814571846,
+      "measurements": [
+        {
+          "p50Ms": 0.001042,
+          "p95Ms": 0.001084,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.010209,
+          "p95Ms": 0.010583,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.105917,
+          "p95Ms": 0.107209,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "sdf_move",
+      "servedBy": "cpu",
+      "verb": "layer_move_surface"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "operation",
+      "growthExponent": 0.006979837699795755,
+      "measurements": [
+        {
+          "p50Ms": 1170.494791,
+          "p95Ms": 4818.242208,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 1223.882125,
+          "p95Ms": 4974.538792,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 1223.895834,
+          "p95Ms": 4975.632583,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "sdf_consolidate",
+      "servedBy": "cpu",
+      "verb": "layer_consolidate"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "gesture",
+      "growthExponent": 0,
+      "measurements": [
+        {
+          "p50Ms": 0.000125,
+          "p95Ms": 0.000125,
+          "samples": 30,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.000125,
+          "p95Ms": 0.000125,
+          "samples": 30,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 8.4e-05,
+          "p95Ms": 0.000125,
+          "samples": 30,
+          "stamps": 1000
+        }
+      ],
+      "name": "cut_create",
+      "servedBy": "cpu",
+      "verb": "cut_create"
+    }
+  ],
+  "claycoreCommit": "2837a984e1a90941d054c97ca003dc9bef3dd710",
+  "deviceModel": "iPad15,5",
+  "osVersion": "Version 26.5.2 (Build 23F84)",
+  "tolerance": 1.4
+}

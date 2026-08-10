@@ -48,9 +48,9 @@
 - [x] 6.2 Write `tools/check_device_bench.py`: fail on regression beyond tolerance, on a case over its declared budget (checked against p95), and on any case with no declared budget
 - [x] 6.3 Implement the super-linear growth check across the document-size axis, failing with the sizes and the measured ratio
 - [x] 6.4 Refuse a comparison whose baseline device model or OS differs from the run's, as invalid rather than as a result
-- [ ] 6.5 Run the full harness on the reference iPad and inspect the numbers before any gate is wired
-- [ ] 6.6 Commit the baseline and the per-class budget values as their own reviewable commit — this is where the performance requirements get decided
-- [ ] 6.7 Wire the gate into `.github/workflows/release.yml`, failing the release when no device is attached rather than skipping; leave `ci.yml` untouched
+- [x] 6.5 Run the full harness on the reference iPad and inspect the numbers before any gate is wired
+- [x] 6.6 Commit the baseline and the per-class budget values as their own reviewable commit — this is where the performance requirements get decided
+- [x] 6.7 Wire the gate into `.github/workflows/release.yml`, failing the release when no device is attached rather than skipping; leave `ci.yml` untouched
 
 ## 7. Documentation and closing the loop
 
