@@ -248,15 +248,26 @@ Measured across a flank carrying a hollow, with the plane at x = 0.5:
 | 0.00 | 0.375 (hollow) | 0.498 | **0.375** kept | 0.498 filled |
 | 0.30 | 0.513 | 0.498 | **0.498** cut | 0.513 kept |
 
-**hPolish is a single-pass verb today.** A flatten bakes, and sampling the
-*document* gives an exact source and a 1-Lipschitz result. Chaining a second pass
-samples the first pass's *volume*, where outside the band a volume reports a
-lower bound rather than a distance — so the blend works from the wrong value. The
-declared Lipschitz goes 1.00 → 14.0 on the second pass whatever the falloff, and
-by the third the form is visibly corrupt rather than merely expensive. Polishing
-several faces of a form wants the cut tool (an Intersect against a prism is exact
-and stays exact) or a consolidation step the engine does not have yet.
-[`examples/28_hpolish.py`](../examples/28_hpolish.py) measures it.
+**hPolish chains only if you consolidate between passes.** A flatten bakes, and
+sampling the *document* gives an exact source and a 1-Lipschitz result. Chaining
+a second pass samples the first pass's *volume*, where outside the band a volume
+reports a lower bound rather than a distance — so the blend works from the wrong
+value. The declared Lipschitz goes 1.00 → 14.0 on the second pass whatever the
+falloff, and by the third the form is visibly corrupt rather than merely
+expensive. [`examples/28_hpolish.py`](../examples/28_hpolish.py) measures that.
+
+`Layer.consolidate` closes the loop: it collapses the layer into one volume,
+**redistances** it — replaces the samples with the distance to their own zero
+set — and hands back a source that is a distance field again, so the next pass
+starts where the first one did. Six passes hold the declared Lipschitz at
+√3 instead of reaching 32, and the memory does not creep.
+[`examples/38_consolidation.py`](../examples/38_consolidation.py) measures both
+halves. Baking WITHOUT redistancing does not do it: steepness is a property of
+the field, and resampling reproduces it.
+
+The other route is the cut tool, where an Intersect against a prism is exact and
+stays exact — cheaper than a bake when the facet is a plane through the whole
+form rather than a region with a falloff.
 
 `flatten` has two overloads. Prefer the one taking a **document sampler**: a
 volume's band tracks the surface only while the surface stays inside it, and

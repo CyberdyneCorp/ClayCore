@@ -532,9 +532,16 @@ def test_relax_is_the_smooth_brush():
 
     # Averaging destroys exactness but cannot RAISE the Lipschitz bound, which is
     # what keeps the raymarcher correct over a relaxed field.
+    #
+    # Against the SOURCE, not against 1: a relief through a narrow rounding is a
+    # steep field, and `rough` samples it, so its samples vary several times the
+    # cell size before relax touches them. This used to read `<= 1.05` and passed
+    # only because Volume.sample declared 1 without measuring — the bound was
+    # being compared against a number nothing had checked.
     smoothed = rough.relaxed(radius_cells=6, iterations=4, centre=(0, 0.80, 0),
                              region_radius=0.55, falloff=0.2)
-    assert smoothed.sample_lipschitz <= 1.05
+    assert rough.sample_lipschitz > 1.05, rough.sample_lipschitz
+    assert smoothed.sample_lipschitz <= rough.sample_lipschitz + 1e-3
 
 
 _TRIM_STROKE = np.array([[x, 0.22 * np.sin(x * 2.6), 0.0, 0.0]
@@ -3462,6 +3469,179 @@ def test_move_surface_pull_is_monotonic_and_short():
         previous = lift
 
 
+
+# -- consolidating a degraded chain (add-consolidation-policy) -----------------
+
+
+def _ball(radius=0.62):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=radius))
+    return doc, layer
+
+
+def _polished(source, normal, distance=0.44, cell=0.03, band=0.12):
+    """One hPolish pass: plane the form back along a normal, cutting only."""
+    n = np.array(normal, np.float32)
+    n = n / np.linalg.norm(n)
+    point = tuple(map(float, n * distance))
+    return clay.Volume.flattened_from(
+        source, plane_point=point, plane_normal=tuple(map(float, n)), strength=1.0,
+        centre=point, region_radius=0.7, falloff=0.3, cell=cell, band=band, mode="cut")
+
+
+def _wrapped(volume):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("f")
+    layer.add(volume)
+    return doc, layer
+
+
+def _surface_along(doc, direction, hi=1.4):
+    u = np.array(direction, np.float32)
+    u = u / np.linalg.norm(u)
+    ts = np.arange(hi, 0.0, -0.002, dtype=np.float32)
+    inside = np.nonzero(doc.eval((ts[:, None] * u[None, :]).astype(np.float32)) <= 0)[0]
+    return float(ts[inside[0]]) if len(inside) else float("nan")
+
+
+def test_field_report_names_which_mechanism_degraded_a_chain():
+    """The aggregate says something is wrong; these two say WHICH thing.
+
+    A polish chain degrades through a steepening VOLUME and a Move stroke
+    through a lengthening DEFORMER chain. The two cost the same aggregate and
+    want different cures, so a policy keyed on one of them would miss the other.
+    """
+    doc, layer = _ball(1.0)
+    clean = layer.field_report(advise_below_step_scale=0.25)
+    assert clean["safe_step_scale"] == pytest.approx(1.0)
+    assert clean["advises_consolidation"] is False
+
+    for i in range(9):
+        layer.move_surface((1.0 + 0.25 * i, 0, 0), (0.25, 0, 0), radius=0.5)
+    moved = layer.field_report(advise_below_step_scale=0.25)
+    assert moved["longest_deformer_chain"] == 9
+    assert moved["steepest_volume"] == pytest.approx(1.0)   # no volume is involved
+    assert moved["safe_step_scale"] < 0.05
+    assert moved["advises_consolidation"] is True
+    # Advice only when it is asked for: the threshold is the caller's, because
+    # a tolerance for marching cost belongs to a viewport, not to the artwork.
+    assert layer.field_report()["advises_consolidation"] is False
+
+    chained, chained_layer = _ball()
+    for n in ((1, 0, 0), (0, 1, 0)):
+        chained, chained_layer = _wrapped(_polished(chained, n))
+    polished = chained_layer.field_report(advise_below_step_scale=0.25)
+    assert polished["steepest_volume"] > 5.0
+    assert polished["longest_deformer_chain"] == 0
+    assert polished["advises_consolidation"] is True
+
+
+def test_a_polish_chain_holds_its_bound_once_consolidated():
+    """The claim the change exists to make true."""
+    cell, band = 0.03, 0.12
+    dirs = [(1, 0, 0), (0, 1, 0), (0, 0, 1)]
+
+    loose, _ = _ball()
+    declared = []
+    for n in dirs:
+        loose, _ = _wrapped(_polished(loose, n, cell=cell, band=band))
+        declared.append(1.0 / loose.safe_step_scale())
+    assert declared[1] > declared[0] * 5.0          # the second pass is the jump
+    assert declared[2] > 10.0
+
+    held, held_layer = _ball()
+    for n in dirs + dirs:
+        held, held_layer = _wrapped(_polished(held, n, cell=cell, band=band))
+        cost = held_layer.consolidate(cell=cell, band=band)
+        assert cost["sample_lipschitz"] <= 1.10, cost
+        assert held.safe_step_scale() > 0.5
+        assert cost["megabytes"] < 6.0              # and the memory does not creep
+    # Six passes in, and the facet is still on its plane.
+    assert _surface_along(held, (1, 0, 0)) == pytest.approx(0.44, abs=0.04)
+
+
+def test_baking_without_redistancing_does_not_bound_the_lipschitz():
+    """The measurement that decided the design, kept honest.
+
+    `from_document` collapses an edit list into a volume, which the proposal
+    took to be the whole mechanism. It is not: steepness is a property of the
+    FIELD, and resampling it onto a lattice preserves it. Redistancing —
+    replacing the samples with the distance to their own zero set — is what
+    actually removes it.
+    """
+    doc, layer = _ball()
+    for n in ((1, 0, 0), (0, 1, 0)):
+        doc, layer = _wrapped(_polished(doc, n))
+
+    plain = layer.consolidation_cost(cell=0.03, band=0.12, redistance=False)
+    assert plain["sample_lipschitz"] > 5.0
+    # ...and it does not lie about it any more. Volume.sample used to declare 1
+    # whatever it had just stored, which made every bake of a steep chain an
+    # overclaim the marcher would have stepped straight through.
+    assert clay.Volume.from_document(doc, cell=0.03, band=0.12).sample_lipschitz > 5.0
+
+    assert layer.consolidation_cost(cell=0.03, band=0.12)["sample_lipschitz"] <= 1.10
+
+
+def test_the_consolidation_cost_is_knowable_before_it_is_paid():
+    doc, layer = _ball(0.6)
+    quoted = layer.consolidation_cost(cell=0.04, band=0.16)
+    assert quoted["brick_count"] > 0
+    assert quoted["sample_count"] > 0
+    assert quoted["megabytes"] > 0.0
+    assert layer.consolidation_state is None        # quoting changed nothing
+    assert doc.safe_step_scale() == pytest.approx(1.0)
+
+    paid = layer.consolidate(cell=0.04, band=0.16)
+    # The quote IS the bill: it is the real bake with the result thrown away.
+    assert paid["brick_count"] == quoted["brick_count"]
+    assert paid["megabytes"] == pytest.approx(quoted["megabytes"])
+
+
+def test_consolidation_is_one_undo_step_that_restores_the_parametric_form():
+    doc = clay.Document()
+    doc.enable_undo()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.7), color="#e01919")
+    layer.add(clay.Sphere(r=0.3).at((0.55, 0, 0)), op=clay.Op.SUBTRACT)
+    depth = doc.undo_depth
+    bite = _surface_along(doc, (1, 0, 0))
+
+    layer.consolidate(cell=0.03, band=0.12)
+    assert doc.undo_depth == depth + 1          # ONE step, two items absorbed
+    assert layer.consolidation_state is not None
+
+    assert doc.undo() is True
+    assert layer.consolidation_state is None
+    # Parametric again, and editable BY ITS PARAMETERS, which is the claim: the
+    # bite came back as a sphere whose radius can still be changed.
+    assert _surface_along(doc, (1, 0, 0)) == pytest.approx(bite, abs=1e-3)
+    layer.set_prim(2, clay.Sphere(r=0.45))
+    assert _surface_along(doc, (1, 0, 0)) < bite
+
+
+def test_consolidation_state_answers_from_the_content():
+    doc, layer = _ball(0.6)
+    assert layer.consolidation_state is None
+    layer.consolidate(cell=0.04, band=0.16)
+    state = layer.consolidation_state
+    assert state["cell_size"] == pytest.approx(0.04)
+    assert state["band"] == pytest.approx(0.16)
+    assert state["sample_lipschitz"] <= 1.10
+    # A layer holding a volume AMONG other items is not consolidated: the other
+    # items still have parameters a host can offer.
+    layer.add(clay.Sphere(r=0.2))
+    assert layer.consolidation_state is None
+
+
+def test_consolidation_is_refused_on_a_protected_layer():
+    for ghost, locked in ((True, False), (False, True)):
+        doc, layer = _ball(0.6)
+        doc.set_layer_protection(layer.id, ghost=ghost, locked=locked)
+        with pytest.raises(ValueError):
+            layer.consolidate(cell=0.05, band=0.18)
+        assert layer.consolidation_state is None
 # -- scene groups (expose-scene-groups) --------------------------------------
 #
 # A group's children compile as ONE sub-expression, so an op inside it applies

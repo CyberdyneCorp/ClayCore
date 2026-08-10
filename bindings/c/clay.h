@@ -658,6 +658,129 @@ clay_result clay_safe_step_scale(const clay_document* doc, float* out_scale);
 clay_result clay_layer_safe_step_scale(const clay_document* doc, clay_layer_id layer,
                                        float* out_scale);
 
+/* -- consolidating a degraded chain ----------------------------------------
+ *
+ * The region verbs — relax, flatten, snakehook, move, the mask brush — each
+ * work once and none of them chain. A polish samples a document and hands back
+ * a volume, so the second pass samples a VOLUME, and the declared Lipschitz
+ * goes 1.7 -> 24 -> 39 over three passes. A move stroke never touches a volume
+ * at all: each drag appends a grab to the deformer chain, and those multiply,
+ * so the safe step scale decays by a constant factor per drag — 79x the
+ * marching cost by nine.
+ *
+ * Two mechanisms, so the report names them separately. An aggregate step scale
+ * says something is wrong; steepest_volume and longest_deformer_chain say
+ * which thing, and therefore which of the two an app should show.
+ *
+ * The trigger is ADVISORY. Nothing here bakes on its own: consolidating
+ * discards the parameters of everything it absorbs, and an engine that decided
+ * on an artist's behalf that a sphere's radius is no longer editable would be
+ * making the wrong person pay. `advise_below_step_scale` is the CALLER's
+ * tolerance for marching cost, passed per call rather than stored in the
+ * document, because that tolerance belongs to a viewport, a device and a frame
+ * budget rather than to the artwork. */
+typedef struct clay_field_report {
+    uint32_t struct_size; /* = sizeof(clay_field_report); required */
+    float lipschitz;      /* the compiled layer's declared bound */
+    float safe_step_scale;
+    float steepest_volume;         /* largest sample Lipschitz among volume items */
+    int32_t longest_deformer_chain;
+    int32_t item_count;
+    int32_t advises_consolidation; /* safe_step_scale < advise_below_step_scale */
+} clay_field_report;
+
+/* What a layer's chain currently costs the marcher, and what is causing it.
+ * Pass 0 for advise_below_step_scale to measure without asking for advice. */
+clay_result clay_layer_field_report(const clay_document* doc, clay_layer_id layer,
+                                    float advise_below_step_scale,
+                                    clay_field_report* out_report);
+
+typedef struct clay_consolidation_params {
+    uint32_t struct_size; /* = sizeof(clay_consolidation_params); required */
+    /* Required, and > 0. A document has no intrinsic scale to derive a
+     * resolution from the way a mesh's own bounds give one, so guessing here
+     * would fix the shape's resolution at a number nobody chose. */
+    float cell_size;
+    float band;    /* half-width of the band kept; <= 0 means three cells */
+    float padding; /* past the layer's bounds; <= 0 means the band */
+    /* Redistancing — replacing the baked samples with the distance to their
+     * own zero set — is what actually bounds the Lipschitz. Baking alone does
+     * NOT: resampling a steep field reproduces the steepness, and a finer cell
+     * makes it worse rather than better. Spelled as a SKIP so that a zeroed
+     * struct gets the sound behaviour rather than the fast one. */
+    int32_t skip_redistance;
+} clay_consolidation_params;
+
+/* What consolidating spends, from what a volume already reports. */
+typedef struct clay_consolidation_cost {
+    uint32_t struct_size; /* = sizeof(clay_consolidation_cost); required */
+    float cell_size;
+    float band;
+    uint64_t brick_count;
+    uint64_t sample_count;
+    uint64_t bytes;
+    float sample_lipschitz; /* how fast the stored samples vary */
+    float lipschitz;        /* what the compiler will declare for them */
+    float safe_step_scale;
+    float bounds_min[3];
+    float bounds_max[3];
+} clay_consolidation_cost;
+
+/* What consolidating this layer WOULD cost, without the document changing.
+ *
+ * The numbers are the ones the real thing produces, because this is the real
+ * thing with the result thrown away: an estimate that skipped the sampling
+ * could not report a brick count, and the brick count is where the memory is.
+ * A caller that means to go ahead should call clay_layer_consolidate and read
+ * the same cost out of it rather than paying for two bakes.
+ *
+ * `region_min`/`region_max` are an optional world-space box, or NULL for the
+ * layer's own bounds padded. Pin it when consolidating the SAME region
+ * repeatedly: a volume's geometric bound is its whole sampled box, so each
+ * bake would otherwise pad the previous padding. */
+clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_id layer,
+                                          const clay_consolidation_params* params,
+                                          const float region_min[3], const float region_max[3],
+                                          clay_consolidation_cost* out_cost);
+
+/* Collapse a layer's edit list into one item carrying samples, as ONE undo
+ * step whose inverse restores what it absorbed — ids, parameters, colours and
+ * deformers intact, because the undo record carries the removed subtrees by
+ * value. No new command was needed for this; the vocabulary could already say
+ * it, which is why this is a policy rather than a verb.
+ *
+ * Refused on a protected layer, and refused BEFORE the bake, so a locked layer
+ * does not cost a full resampling to say no.
+ *
+ * What survives: the surface, at `cell_size`. What does not: every parameter
+ * of every item absorbed, and every colour but the first one's. Hidden items
+ * are left alone — they contribute nothing to the field, so absorbing them
+ * would spend their parameters on nothing.
+ *
+ * `out_cost` may be NULL. Undo grouping is the document's own, so this lands
+ * as a single step when undo is enabled and as a plain edit when it is not. */
+clay_result clay_layer_consolidate(clay_document* doc, clay_layer_id layer,
+                                   const clay_consolidation_params* params,
+                                   const float region_min[3], const float region_max[3],
+                                   clay_consolidation_cost* out_cost);
+
+/* Whether a layer is consolidated — its edit list is a single item carrying
+ * samples — and at what resolution, so a host can stop offering parameter
+ * edits there rather than failing them.
+ *
+ * Answered from the CONTENT, not from a stored provenance flag. The promise a
+ * host makes is about what the region IS: samples at a fixed resolution, with
+ * no parameters to offer. A mesh imported with clay_item_volume_from_mesh is
+ * exactly as unparametric as a bake, so a flag marking one of them would split
+ * two cases an app has to treat alike — and it would have to be serialised to
+ * survive a save.
+ *
+ * *out_consolidated is 0/1; out_cost may be NULL and is left untouched when
+ * the layer is not consolidated. */
+clay_result clay_layer_consolidation_state(const clay_document* doc, clay_layer_id layer,
+                                           int32_t* out_consolidated,
+                                           clay_consolidation_cost* out_cost);
+
 /* Single raycast (origin + normalized direction). *out_hit is 0/1. */
 clay_result clay_raycast(const clay_document* doc, const float origin[3], const float dir[3],
                          int32_t* out_hit, float* out_t, float out_position[3],

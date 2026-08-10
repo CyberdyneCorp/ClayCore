@@ -130,6 +130,14 @@ FieldVolume FieldVolume::sample(const std::function<float(cfloat3)>& f, const ma
         }
     }
     v.build_far_bounds();
+    // Measured, not assumed to be 1. This was the one volume producer that did
+    // not measure — flatten, the topological move and the mask extrude all do —
+    // and the omission was a real overclaim rather than a tidiness point: baking
+    // a chain of two polish passes stored samples varying at fourteen times the
+    // cell size and declared them 1-Lipschitz, licensing exactly the overstep
+    // the declared bound exists to prevent. A field that IS 1-Lipschitz still
+    // measures 1, so nothing that was honest before pays for this.
+    v.sample_lipschitz_ = v.measure_sample_lipschitz();
     return v;
 }
 
@@ -349,6 +357,36 @@ float FieldVolume::measure_sample_lipschitz() const {
     return std::max(1.0f, steepest / cell_size_);
 }
 
+std::size_t FieldVolume::compact() {
+    if (data_.empty()) return 0;
+    std::vector<float> kept;
+    kept.reserve(data_.size());
+    std::size_t dropped = 0;
+    for (std::size_t slot = 0; slot < index_.size(); ++slot) {
+        const std::int32_t entry = index_[slot];
+        if (entry < 0) continue;
+        const float* block = data_.data() + static_cast<std::size_t>(entry);
+        bool near_surface = false, any_inside = false;
+        for (int i = 0; i < kBrickSamples; ++i) {
+            if (std::abs(block[i]) <= band_) near_surface = true;
+            if (block[i] < 0.0f) any_inside = true;
+        }
+        if (near_surface) {
+            index_[slot] = static_cast<std::int32_t>(kept.size());
+            kept.insert(kept.end(), block, block + kBrickSamples);
+            continue;
+        }
+        // Sign only, exactly as sample() records it; build_far_bounds supplies
+        // the magnitude from the brick's distance to the nearest one kept.
+        index_[slot] = kBrickEmpty;
+        far_[slot] = any_inside ? -1.0f : 1.0f;
+        ++dropped;
+    }
+    data_ = std::move(kept);
+    build_far_bounds();
+    return dropped;
+}
+
 void FieldVolume::shrink_band(float by) {
     if (!(by > 0.0f)) return;
     // Never below the sample spacing: a band thinner than that says nothing the
@@ -370,6 +408,12 @@ void FieldVolume::shrink_band(float by) {
 // finds its three offsets exactly where it always did, and a reader that
 // postdates it can tell the two apart without a version number to keep in
 // step with anything else.
+
+// The header, then one index entry and one far bound per brick, then the
+// samples. Kept beside to_blob so the two cannot drift.
+std::size_t FieldVolume::blob_floats() const {
+    return 12 + index_.size() + far_.size() + data_.size();
+}
 
 std::vector<float> FieldVolume::to_blob() const {
     std::vector<float> out;

@@ -32,8 +32,9 @@
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/validate.h"
 #include "clay/pick/pick.h"
-#include "clay/scene/commands.h"
 #include "clay/scene/bounds.h"
+#include "clay/scene/commands.h"
+#include "clay/scene/consolidate.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
 #include "clay/brush/mask_extrude.h"
@@ -2589,6 +2590,160 @@ clay_result clay_layer_safe_step_scale(const clay_document* doc, clay_layer_id l
     clay_result r = compile_one_layer(doc, layer, &tape);
     if (r != CLAY_OK) return r;
     *out_scale = tape.safe_step_scale();
+    return CLAY_OK;
+}
+
+// -- consolidating a degraded chain ------------------------------------------
+
+namespace {
+
+constexpr std::size_t kFieldReportOriginal =
+    offsetof(clay_field_report, advises_consolidation) + sizeof(std::int32_t);
+constexpr std::size_t kConsolidationParamsOriginal =
+    offsetof(clay_consolidation_params, skip_redistance) + sizeof(std::int32_t);
+constexpr std::size_t kConsolidationCostOriginal =
+    offsetof(clay_consolidation_cost, bounds_max) + sizeof(float) * 3;
+
+// An OUTPUT descriptor: struct_size is the caller saying how much of it
+// exists, not what it filled in, so it is probed and then written back.
+clay_result begin_out_cost(clay_consolidation_cost* out) {
+    clay_consolidation_cost probe;
+    clay_result r = read_desc(out, kConsolidationCostOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out->struct_size;
+    *out = clay_consolidation_cost{};
+    out->struct_size = declared;
+    return CLAY_OK;
+}
+
+void write_cost(const scene::ConsolidationCost& src, clay_consolidation_cost* out) {
+    out->cell_size = src.cell_size;
+    out->band = src.band;
+    out->brick_count = static_cast<std::uint64_t>(src.brick_count);
+    out->sample_count = static_cast<std::uint64_t>(src.sample_count);
+    out->bytes = static_cast<std::uint64_t>(src.bytes);
+    out->sample_lipschitz = src.sample_lipschitz;
+    out->lipschitz = src.lipschitz;
+    out->safe_step_scale = src.safe_step_scale;
+    const math::Aabb b = src.bounds.empty() ? math::Aabb{kernel::cf3(0, 0, 0), kernel::cf3(0, 0, 0)}
+                                            : src.bounds;
+    for (int a = 0; a < 3; ++a) {
+        out->bounds_min[a] = (&b.min.x)[a];
+        out->bounds_max[a] = (&b.max.x)[a];
+    }
+}
+
+clay_result read_consolidation(const clay_consolidation_params* params, const float region_min[3],
+                               const float region_max[3], scene::ConsolidationParams* out) {
+    clay_consolidation_params p;
+    clay_result r = read_desc(params, kConsolidationParamsOriginal, &p);
+    if (r != CLAY_OK) return r;
+    if (!(p.cell_size > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "cell_size must be > 0: a layer has no intrinsic scale to derive one from "
+                    "the way a mesh's bounds give one");
+    out->cell_size = p.cell_size;
+    out->band = p.band;
+    out->padding = p.padding;
+    out->skip_redistance = p.skip_redistance != 0;
+    if (region_min && region_max) {
+        out->region = math::Aabb{kernel::cf3(region_min[0], region_min[1], region_min[2]),
+                                 kernel::cf3(region_max[0], region_max[1], region_max[2])};
+        if (out->region.empty()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty region");
+    }
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_layer_field_report(const clay_document* doc, clay_layer_id layer_id,
+                                    float advise_below_step_scale,
+                                    clay_field_report* out_report) {
+    if (!doc || !out_report) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or report");
+    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    clay_field_report probe;
+    clay_result r = read_desc(out_report, kFieldReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+
+    const scene::FieldReport report = scene::report_layer(*layer, advise_below_step_scale);
+    const std::uint32_t declared = out_report->struct_size;
+    *out_report = clay_field_report{};
+    out_report->struct_size = declared;
+    out_report->lipschitz = report.lipschitz;
+    out_report->safe_step_scale = report.safe_step_scale;
+    out_report->steepest_volume = report.steepest_volume;
+    out_report->longest_deformer_chain = report.longest_deformer_chain;
+    out_report->item_count = report.item_count;
+    out_report->advises_consolidation = report.advises_consolidation ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_id layer_id,
+                                          const clay_consolidation_params* params,
+                                          const float region_min[3], const float region_max[3],
+                                          clay_consolidation_cost* out_cost) {
+    if (!doc || !params || !out_cost)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document, params or cost");
+    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    scene::ConsolidationParams p;
+    clay_result r = read_consolidation(params, region_min, region_max, &p);
+    if (r != CLAY_OK) return r;
+    r = begin_out_cost(out_cost);
+    if (r != CLAY_OK) return r;
+
+    scene::ConsolidationCost cost;
+    if (!scene::bake_layer(*layer, p, &cost))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "nothing to consolidate: the layer is empty, unbounded, or the region "
+                    "contains no surface");
+    write_cost(cost, out_cost);
+    return CLAY_OK;
+}
+
+clay_result clay_layer_consolidate(clay_document* doc, clay_layer_id layer_id,
+                                   const clay_consolidation_params* params,
+                                   const float region_min[3], const float region_max[3],
+                                   clay_consolidation_cost* out_cost) {
+    if (!doc || !params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or params");
+    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    if (layer->protected_from_edits())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "layer is protected (ghosted or locked)");
+    scene::ConsolidationParams p;
+    clay_result r = read_consolidation(params, region_min, region_max, &p);
+    if (r != CLAY_OK) return r;
+    if (out_cost) {
+        r = begin_out_cost(out_cost);
+        if (r != CLAY_OK) return r;
+    }
+
+    scene::ConsolidationCost cost;
+    if (!scene::consolidate_layer(doc->doc.document, layer_id, p, doc->undo.get(), &cost))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "nothing to consolidate: the layer is empty, unbounded, or the region "
+                    "contains no surface");
+    doc->touch();
+    if (out_cost) write_cost(cost, out_cost);
+    return CLAY_OK;
+}
+
+clay_result clay_layer_consolidation_state(const clay_document* doc, clay_layer_id layer_id,
+                                           int32_t* out_consolidated,
+                                           clay_consolidation_cost* out_cost) {
+    if (!doc || !out_consolidated)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out pointer");
+    const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
+    if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    if (out_cost) {
+        clay_result r = begin_out_cost(out_cost);
+        if (r != CLAY_OK) return r;
+    }
+    scene::ConsolidationCost cost;
+    const bool baked = scene::consolidation_state(*layer, &cost);
+    *out_consolidated = baked ? 1 : 0;
+    if (baked && out_cost) write_cost(cost, out_cost);
     return CLAY_OK;
 }
 
