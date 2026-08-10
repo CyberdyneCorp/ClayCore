@@ -369,6 +369,7 @@ each change's tasks carry its own number:
 | `add-mesh-layers` | 5 |
 | `add-multi-resolution` | 6 |
 | `add-sculpt-layers` | 7 |
+| `add-armature` | 9 |
 
 `add-consolidation-policy` and `expose-scene-groups` need no bump — volumes and
 groups both already serialise. `add-representation-round-trip` needs one only if
@@ -387,6 +388,33 @@ multi-resolution has landed.
 That is the most parallelism the dependency structure actually allows. Running
 more means rebasing voxel work onto a moving foundation, which costs more than
 the concurrency buys.
+
+## Armatures, proposed 2026-08-10
+
+`add-armature` — a tree of spheres that skins to a form, which is ZBrush's
+ZSphere workflow. Raised by `examples/34_organic_character.py`: a humanoid
+there is forty-odd primitives whose positions are hand-written coordinates,
+because there is no way to say "an arm hangs from this shoulder", only to
+compute where the arm's capsule would be if it did.
+
+The proposal's finding is that most of it already exists. `ctape_stroke` is a
+CHAIN of sphere-swept segments with a radius per point and a smooth union
+between them — an armature is that same loop over `(i, parent[i])` instead of
+`(i, i + 1)`. So the primitive is a generalisation rather than a subsystem, and
+a chain-shaped armature must evaluate identically to the stroke it came from.
+The rest of the pipeline is also already here and the proposal says so rather
+than re-inventing it: a field needs no preview mesh, `Document.mesh` IS the
+adaptive skin, the brick cache already does the incremental work, and
+`.clayspace` is already the save format.
+
+Two scoping notes worth keeping. The brief it came from describes a mobile
+app — gestures, compute shaders, draw calls, frame rate, battery, a cloud file
+format — and none of that is this library's to own; the host builds it on top.
+And per-node ROTATION is deliberately absent: a sphere is isotropic, so a
+rotation changes no distance and no surface. It earns its place in ZBrush
+because the adaptive skin lays out quads whose edge flow follows the node
+frames, and none of marching cubes, surface nets or dual contouring consults
+such a frame. Storing it would be a promise this engine does not keep.
 
 ## Phase 3 — the pipeline
 
