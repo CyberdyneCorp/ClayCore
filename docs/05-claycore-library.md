@@ -237,6 +237,28 @@ doc.move_layer(layer.id, 0)
 doc.remove_layer(layer.id)
 ```
 
+A **group** is a node whose children compile as one sub-expression, so an op
+inside it reaches its own subtree and nothing else — which is what makes
+"intersect A with B, then union that into C" sayable at all. Without it a plate
+needs a layer of its own; see `examples/36_groups.py`.
+
+```python
+plate = layer.add_group(op=clay.Op.ADD)             # a node id, like any other
+layer.add(clay.CutHollowSphere(r=0.6, h=0.17, t=0.05), parent=plate)
+layer.add(clay.Box(size=(0.6, 2, 2)), op=clay.Op.INTERSECT, parent=plate)
+layer.children(plate)                               # -> [shell_id, cutter_id]
+
+inline = layer.add_group(op=clay.Op.INLINE)         # children join the OUTER
+layer.add(clay.Sphere(r=0.2), parent=inline)        # chain: naming, not a field
+```
+
+A group has no transform of its own — the compiler composes `layer * item` and
+nothing else — and it carries no transition op, so both are refused rather than
+silently ignored. Reparenting is `layer.move(node, parent=group)`, whose inverse
+is the parent and index it captured before moving; a move into a node's own
+subtree is refused, because it would detach the subtree from the roots and the
+next save would drop it.
+
 Undo is opt-in per document and rides the same commands, so no reachable edit
 escapes it and the app does not reimplement a history over a second vocabulary
 that could disagree with what a saved document records:
@@ -477,6 +499,39 @@ facet = clay.Volume.flattened_from(doc, plane_point=(0, 0.55, 0),
 facet.sample_lipschitz          # measured, not assumed: a tight taper is steeper
 imported.flattened(...)         # a volume source, for a mesh with no document
 
+# consolidation: what lets any of the above be used TWICE. Each region verb
+# samples a document and hands back a volume, so the second call samples a
+# volume — and outside its band a volume reports a bound, not a distance. Move
+# fails from the other side: each drag appends a grab and those multiply.
+layer.field_report(advise_below_step_scale=0.25)
+# -> {'lipschitz', 'safe_step_scale', 'steepest_volume',
+#     'longest_deformer_chain', 'item_count', 'advises_consolidation'}
+# The two mechanisms are named SEPARATELY because they have different cures and
+# the aggregate cannot tell them apart. ADVISORY: nothing here bakes, and the
+# threshold is yours, because a tolerance for marching cost belongs to a
+# viewport and a frame budget rather than to the artwork.
+
+layer.consolidation_cost(cell=0.03, band=0.12)   # what it WOULD cost, no change
+# -> {'megabytes', 'brick_count', 'sample_count', 'cell_size', 'band',
+#     'sample_lipschitz', 'lipschitz', 'safe_step_scale', 'bounds'}
+layer.consolidate(cell=0.03, band=0.12)          # ONE undo step, same report
+layer.consolidation_state                        # the same dict, or None
+
+# BAKING ALONE DOES NOT BOUND THE LIPSCHITZ. Steepness is a property of the
+# FIELD; resampling it onto a lattice reproduces it, and a finer cell makes it
+# worse. What removes it is redistancing — replacing the samples with the
+# distance to their own zero set — which `consolidate` does by default.
+layer.consolidate(cell=0.03, redistance=False)   # measure the difference
+layer.consolidate(cell=0.03, region=((-1, -1, -1), (1, 1, 1)))  # pin the box
+#     when consolidating the same area repeatedly: a volume's geometric bound
+#     is its whole sampled box, so each bake would pad the previous padding.
+
+# The scope is a LAYER, because an arbitrary run of siblings has no field of its
+# own — an edit list is ordered and its operators relative — where a layer does.
+# What survives is the surface at `cell`; what does not is every parameter of
+# every item absorbed. Hidden items are left alone. Protected layers refuse.
+# Undo hands the parametric form back with ids and parameters intact.
+
 # curves: a stroke point carries a type saying how it joins the next, so a
 # stroke is a curve whose points are all hard corners. Typed points tessellate
 # into the same segment chain at compile time, so a curve costs nothing to
@@ -622,6 +677,8 @@ Use cases the bindings are designed for: authoring the spec's golden-scene test 
 Flat, stable, versioned C API over documents, evaluation, meshing, and I/O — the boundary the Swift app links against (alongside or instead of direct Swift-C++ interop), and the FFI story for C#/Rust/anything. Opaque handles, error codes, caller-owned buffers; no C++ types cross it.
 
 Authoring reaches what `pyclay` reaches: an opaque **item builder** (`clay_item_create` → setters → `clay_layer_add_item`) carries the chained modifiers and variable-length payloads no fixed struct can express, and the flat `clay_item_desc` path is sugar over it. Every descriptor struct starts with a `uint32_t struct_size` the caller sets and the library reads only up to, so fields are appended without a major bump; setting it is mandatory, and a value that is not a declared layout is rejected rather than misread.
+
+**Groups are reachable too**: `clay_layer_add_group` creates one and returns a node id like any other node, `clay_add_item_in_group` / `clay_layer_add_item_in_group` are the two add paths with somewhere to put the edit (the originals append to the layer root and have no argument that could say otherwise), and `clay_layer_children` enumerates a group by the size-query pattern — which doubles as the "is this a group?" question a host that reloaded a document has no other way to ask. `CLAY_OP_INLINE` is declared because the value appears in saved documents, and is accepted on a group and refused on an item.
 
 **The incremental path is reachable too** (`clay_brick_cache_*`, ABI minor 24): the brick cache of §8 is an opaque handle created from a `clay_brick_config` and never bound to a document, with exactly one refill loop — `mark_dirty` → `take_dirty` → `eval_requests` → `submit` — plus brick readback in the stored fp16 bits at a fixed `dim³` stride, statistics, LOD mips, `mesh_bricks` and `raycast_bricks`. It mirrors `brick::BrickCache` member for member and adds no policy: no thread, no lock, no refill driver, no ordering or eviction knob, because the consumer owns queues and scheduling. A request is a plain value whose layout *is* `brick::BrickRequest` (asserted with `offsetof`), so a drain is a `memcpy` and a request may be queued, copied and evaluated on any thread. It carries its lattice *and its band*, because the tape must be culled against the brick dilated by the band — a sample keeps its true distance whenever that distance is within the band, so an item a band outside the brick still decides samples inside it, and a band passed separately is a band that will one day arrive as zero. Three supporting calls come with it, none of which existed before: `clay_eval_grid` (dense lattice evaluation with an optional cull region — the per-brick fill primitive), and `clay_layer_node_influence_bound` / `clay_layer_influence_bound`, which report the box an edit must *dirty* (wider than `clay_layer_bounds`, and flagged when unbounded). Marking is validated in 64-bit before the engine converts the region: a span above `CLAY_MAX_BATCH` or a brick coordinate outside `int32` is refused with the cache untouched, since three caller floats can otherwise name 10<sup>19</sup> bricks.
 

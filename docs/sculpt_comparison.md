@@ -159,9 +159,12 @@ step scale decays **geometrically** — about ×0.615 per drag:
 
 Coalescing covers frames of *one* drag, where the centre and radius are fixed; a
 stroke moves the centre, so those stack by design. A host pulling a long lobe has
-to **consolidate** — bake the chain into a volume with
-`clay_item_volume_from_document` — rather than keep appending. There is no policy
-for that today, which is the Tier 3 consolidation gap seen from the other side.
+to **consolidate** rather than keep appending: `clay_layer_consolidate` /
+`Layer.consolidate` collapses the layer into one volume and redistances it, which
+takes the nine-drag stroke from a step scale of 0.013 back to 0.577 in one
+undoable step. `clay_layer_field_report` is how a host knows to offer it — it
+reports the step scale alongside the two things that cost it, a steepening volume
+and a lengthening deformer chain, and never bakes on its own.
 
 The verb for *growing* form is `snakehook`, which sweeps a tapered item along the
 drag: it reaches as far as the drag goes and the field stays exact (step scale

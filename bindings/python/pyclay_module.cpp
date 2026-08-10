@@ -26,6 +26,7 @@
 #include "clay/pick/pick.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
+#include "clay/scene/consolidate.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
 #include "clay/brush/mask_extrude.h"
@@ -486,6 +487,36 @@ math::Aabb to_aabb(nb::handle obj) {
     return math::Aabb(to_f3(s[0], "region lo"), to_f3(s[1], "region hi"));
 }
 
+// -- consolidation helpers -----------------------------------------------------
+
+scene::ConsolidationParams to_consolidation(float cell, nb::handle band, nb::handle padding,
+                                            nb::handle region, bool redistance) {
+    if (!(cell > 0.0f)) throw std::invalid_argument("cell must be > 0");
+    scene::ConsolidationParams p;
+    p.cell_size = cell;
+    p.band = band.is_none() ? 0.0f : nb::cast<float>(band);
+    p.padding = padding.is_none() ? 0.0f : nb::cast<float>(padding);
+    p.skip_redistance = !redistance;
+    if (!region.is_none()) p.region = to_aabb(region);
+    return p;
+}
+
+nb::dict cost_dict(const scene::ConsolidationCost& c) {
+    nb::dict out;
+    out["cell_size"] = c.cell_size;
+    out["band"] = c.band;
+    out["brick_count"] = c.brick_count;
+    out["sample_count"] = c.sample_count;
+    out["megabytes"] = static_cast<double>(c.bytes) / (1024.0 * 1024.0);
+    out["sample_lipschitz"] = c.sample_lipschitz;
+    out["lipschitz"] = c.lipschitz;
+    out["safe_step_scale"] = c.safe_step_scale;
+    out["bounds"] = nb::make_tuple(
+        nb::make_tuple(c.bounds.min.x, c.bounds.min.y, c.bounds.min.z),
+        nb::make_tuple(c.bounds.max.x, c.bounds.max.y, c.bounds.max.z));
+    return out;
+}
+
 struct PyLayer {
     std::shared_ptr<io::ClaySpaceDoc> doc;
     std::shared_ptr<UndoRef> undo;
@@ -497,6 +528,43 @@ struct PyLayer {
         return *l;
     }
 };
+
+// The one insertion path for Layer.add and Layer.add_group alike: an
+// AddNodeCmd with a reserved id (replay preserves ids) so an enabled undo stack
+// records the add like every other edit. Regression: a direct insert let adds
+// escape undo. A parent that is not a group is refused here, where the id the
+// caller passed can still be named in the message.
+scene::NodeId insert_node(PyLayer& l, scene::Node n, nb::handle parent, int index) {
+    scene::NodeId parent_id = scene::kNoNode;
+    if (!parent.is_none()) {
+        parent_id = nb::cast<scene::NodeId>(parent);
+        const scene::Node* g = l.layer().sdf->find(parent_id);
+        if (!g) throw std::invalid_argument("no node with that id in this layer");
+        if (!g->is_group) throw std::invalid_argument("parent must be a group");
+    }
+    n.id = l.layer().sdf->reserve_id();
+    scene::NodeId id = n.id;
+    std::vector<scene::Node> subtree;
+    subtree.push_back(std::move(n));
+    apply_or_throw(l.doc->document,
+                   scene::Command{scene::AddNodeCmd{l.id, parent_id, index, std::move(subtree)}},
+                   "add", l.undo.get());
+    return id;
+}
+
+// The group rules the C ABI states (clay.h, "-- groups --"): the inline op is
+// groups only and reads no blend, rounding or colour off the group at all, and
+// the transitions are items only — compile_group emits no transition
+// parameters, so a group carrying one would morph on defaults nobody wrote.
+void check_group_op_blend(scene::Op op, const scene::Blend& blend, float rounding) {
+    if (scene::op_is_transition(op))
+        throw std::invalid_argument("a group cannot carry a transition op");
+    if (op == scene::Op::None &&
+        (blend.profile != scene::BlendProfile::Hard || blend.k != 0.0f || rounding != 0.0f))
+        throw std::invalid_argument(
+            "an inline group reads no blend or rounding: its children combine into the "
+            "outer chain with their own");
+}
 
 // -- numpy point evaluation -----------------------------------------------------
 
@@ -807,7 +875,11 @@ NB_MODULE(pyclay, m) {
         // spatial morphs: need a transition= argument, and are NON-LOCAL
         // (never culled) because their weight reaches arbitrarily far
         .value("TRANSITION_LINEAR", scene::Op::TransitionLinear)
-        .value("TRANSITION_RADIAL", scene::Op::TransitionRadial);
+        .value("TRANSITION_RADIAL", scene::Op::TransitionRadial)
+        // GROUPS ONLY (Layer.add_group): the group's children apply inline to
+        // the chain outside it, as if they had been added there. Every other
+        // op makes the group a sub-expression combining as a unit.
+        .value("INLINE", scene::Op::None);
 
     // -- blends ----------------------------------------------------------------
     nb::class_<PyTransition>(m, "Transition",
@@ -1608,7 +1680,7 @@ NB_MODULE(pyclay, m) {
         .def_prop_ro("megabytes",
                      [](const PyVolume& v) {
                          if (!v.volume) return 0.0;
-                         return static_cast<double>(v.volume->to_blob().size() * sizeof(float)) /
+                         return static_cast<double>(v.volume->blob_floats() * sizeof(float)) /
                                 (1024.0 * 1024.0);
                      },
                      "What this volume costs in the tape's blob.")
@@ -2449,10 +2521,12 @@ NB_MODULE(pyclay, m) {
         .def_prop_ro("resolution", [](const PyLayer& l) { return l.layer().resolution; })
         .def("add",
              [](PyLayer& l, const PyPrim& prim, scene::Op op, nb::handle blend, nb::handle color,
-                nb::handle rounding, bool mirror, nb::handle transition) {
+                nb::handle rounding, bool mirror, nb::handle transition, nb::handle parent,
+                int index) {
                  if (op == scene::Op::None)
                      throw std::invalid_argument(
-                         "op must be a combine operator, not Op.NONE");
+                         "op must be a combine operator, not Op.INLINE — that one is for "
+                         "add_group");
                  scene::Node n;
                  n.prim = prim.prim;
                  n.xform = prim.xform;
@@ -2498,23 +2572,48 @@ NB_MODULE(pyclay, m) {
                  } else if (!transition.is_none()) {
                      throw std::invalid_argument("transition= only applies to transition ops");
                  }
-                 // Through the command vocabulary (AddNodeCmd with a reserved
-                 // id, since replay preserves ids) so an enabled undo stack
-                 // records the add like every other edit. Regression: a
-                 // direct insert let adds escape undo.
-                 n.id = l.layer().sdf->reserve_id();
-                 scene::NodeId id = n.id;
-                 std::vector<scene::Node> subtree;
-                 subtree.push_back(std::move(n));
-                 apply_or_throw(l.doc->document,
-                                scene::Command{scene::AddNodeCmd{l.id, scene::kNoNode, -1,
-                                                                 std::move(subtree)}},
-                                "add", l.undo.get());
-                 return id;
+                 return insert_node(l, std::move(n), parent, index);
              },
              "prim"_a, "op"_a = scene::Op::Add, "blend"_a = nb::none(), "color"_a = nb::none(),
              "rounding"_a = nb::none(), "mirror"_a = false, "transition"_a = nb::none(),
-             "Append an edit to the layer; returns the node id")
+             "parent"_a = nb::none(), "index"_a = -1,
+             "Append an edit to the layer; returns the node id. parent=<group id> "
+             "puts it inside that group instead of at the layer root, and index<0 "
+             "appends.")
+        .def("add_group",
+             [](PyLayer& l, scene::Op op, nb::handle blend, nb::handle color, float rounding,
+                nb::handle parent, int index) {
+                 scene::Node g;
+                 g.is_group = true;
+                 g.op = op;
+                 if (!blend.is_none()) g.blend = nb::cast<const PyBlend&>(blend).b;
+                 if (rounding < 0.0f) throw std::invalid_argument("rounding must be >= 0");
+                 g.rounding = rounding;
+                 if (!color.is_none()) g.color = parse_color(color);
+                 check_group_op_blend(op, g.blend, g.rounding);
+                 return insert_node(l, std::move(g), parent, index);
+             },
+             "op"_a = scene::Op::Add, "blend"_a = nb::none(), "color"_a = nb::none(),
+             "rounding"_a = 0.0f, "parent"_a = nb::none(), "index"_a = -1,
+             "Create an empty group and return its node id. Its children compile as "
+             "ONE sub-expression, so an intersect inside it trims the group alone "
+             "rather than everything the layer already holds — which is what makes "
+             "(A & B) | C sayable. parent=<group id> nests it. Op.INLINE makes the "
+             "children apply to the outer chain instead, and then reads no blend, "
+             "rounding or colour off the group. color= is the seed a SHELL or "
+             "REPLACE group paints when it starts a chain against empty space; in C "
+             "it is a separate clay_layer_set_color.")
+        .def("children",
+             [](const PyLayer& l, scene::NodeId node) {
+                 const scene::Node* n = l.layer().sdf->find(node);
+                 if (!n) throw std::invalid_argument("no node with that id in this layer");
+                 // Not a group is a caller asking the wrong question — and the
+                 // answer a script that RELOADED a document reads to tell a
+                 // group from an item.
+                 if (!n->is_group) throw std::invalid_argument("node is not a group");
+                 return n->children;
+             },
+             "node"_a, "A group's child node ids, in order")
         .def("set_points",
              [](PyLayer& l, scene::NodeId node, nb::handle points, nb::handle types, bool closed,
                 float tolerance, nb::handle in_handles, nb::handle out_handles) {
@@ -2679,6 +2778,12 @@ NB_MODULE(pyclay, m) {
                 nb::handle rotation_axis_angle, nb::handle scale) {
                  const scene::Node* n = l.layer().sdf->find(node);
                  if (!n) throw std::invalid_argument("no node with that id in this layer");
+                 // A group's transform never reaches its children — the
+                 // compiler composes layer * item and nothing else — so this
+                 // would be an undoable, saved edit that changes nothing.
+                 if (n->is_group)
+                     throw std::invalid_argument(
+                         "a group has no transform of its own: transform its children");
                  scene::SetTransformCmd cmd{l.id, node, n->xform};
                  if (!position.is_none()) cmd.xform.position = to_f3(position, "position");
                  if (!rotation_axis_angle.is_none())
@@ -2716,9 +2821,13 @@ NB_MODULE(pyclay, m) {
                  scene::SetOpBlendCmd cmd{l.id, node, n->op, n->blend, n->rounding};
                  if (!op.is_none()) {
                      cmd.op = nb::cast<scene::Op>(op);
-                     if (cmd.op == scene::Op::None)
+                     // Which rules apply is a property of the node: a group
+                     // takes the inline op and refuses the transitions, an item
+                     // is the other way round.
+                     if (!n->is_group && cmd.op == scene::Op::None)
                          throw std::invalid_argument(
-                             "op must be a combine operator, not Op.NONE");
+                             "op must be a combine operator, not Op.INLINE — that one is for "
+                             "add_group");
                  }
                  if (!blend.is_none()) cmd.blend = nb::cast<const PyBlend&>(blend).b;
                  if (!rounding.is_none()) {
@@ -2726,6 +2835,7 @@ NB_MODULE(pyclay, m) {
                      if (cmd.rounding < 0.0f)
                          throw std::invalid_argument("rounding must be >= 0");
                  }
+                 if (n->is_group) check_group_op_blend(cmd.op, cmd.blend, cmd.rounding);
                  apply_or_throw(l.doc->document, scene::Command{cmd}, "set_op_blend", l.undo.get());
              },
              "node"_a, "op"_a = nb::none(), "blend"_a = nb::none(), "rounding"_a = nb::none(),
@@ -2734,6 +2844,11 @@ NB_MODULE(pyclay, m) {
              [](PyLayer& l, scene::NodeId node, nb::handle parent, int index) {
                  scene::NodeId new_parent =
                      parent.is_none() ? scene::kNoNode : nb::cast<scene::NodeId>(parent);
+                 // SdfContent::move refuses this too — it is the engine's
+                 // invariant, not the binding's — but apply() could only report
+                 // it as a missing id, which is not what went wrong.
+                 if (new_parent != scene::kNoNode && l.layer().sdf->contains(node, new_parent))
+                     throw std::invalid_argument("a node cannot move into its own subtree");
                  apply_or_throw(
                      l.doc->document,
                      scene::Command{scene::MoveNodeCmd{l.id, node, new_parent, index}}, "move",
@@ -2811,7 +2926,102 @@ NB_MODULE(pyclay, m) {
              "nodes"_a, "Tight bounds of the given node ids — for zoom-to-selection")
         .def("safe_step_scale", [](const PyLayer& l) {
             return scene::compile_layer(l.layer()).safe_step_scale();
-        });
+        })
+        .def("field_report",
+             [](const PyLayer& l, float advise_below_step_scale) {
+                 const scene::FieldReport r =
+                     scene::report_layer(l.layer(), advise_below_step_scale);
+                 nb::dict out;
+                 out["lipschitz"] = r.lipschitz;
+                 out["safe_step_scale"] = r.safe_step_scale;
+                 out["steepest_volume"] = r.steepest_volume;
+                 out["longest_deformer_chain"] = r.longest_deformer_chain;
+                 out["item_count"] = r.item_count;
+                 out["advises_consolidation"] = r.advises_consolidation;
+                 return out;
+             },
+             "advise_below_step_scale"_a = 0.0f,
+             "What this layer's chain costs the marcher, and what is causing it.\n\n"
+             "The region verbs each work once and none of them chain, for TWO\n"
+             "different reasons. A polish samples a document and hands back a\n"
+             "volume, so the second pass samples a VOLUME — `steepest_volume`\n"
+             "is that. A move stroke never touches a volume at all: each drag\n"
+             "appends a grab to the deformer chain and those multiply —\n"
+             "`longest_deformer_chain` is that. The aggregate step scale says\n"
+             "something is wrong; those two say which thing.\n\n"
+             "`advise_below_step_scale` is YOUR tolerance for marching cost, and\n"
+             "it is an argument rather than document state because that\n"
+             "tolerance belongs to a viewport and a frame budget rather than to\n"
+             "the artwork. Nothing here bakes: consolidating discards the\n"
+             "parameters of what it absorbs, so it is never done unasked.")
+        .def("consolidation_cost",
+             [](const PyLayer& l, float cell, nb::handle band, nb::handle padding,
+                nb::handle region, bool redistance) {
+                 scene::ConsolidationCost cost;
+                 scene::ConsolidationParams p =
+                     to_consolidation(cell, band, padding, region, redistance);
+                 if (!scene::bake_layer(l.layer(), p, &cost))
+                     throw std::invalid_argument(
+                         "nothing to consolidate: the layer is empty, unbounded, or the region "
+                         "contains no surface");
+                 return cost_dict(cost);
+             },
+             "cell"_a, "band"_a = nb::none(), "padding"_a = nb::none(), "region"_a = nb::none(),
+             "redistance"_a = true,
+             "What consolidating this layer WOULD cost, without changing it.\n\n"
+             "The numbers are the ones the real thing produces, because this IS\n"
+             "the real thing with the result thrown away — an estimate that\n"
+             "skipped the sampling could not report a brick count, and the brick\n"
+             "count is where the memory is. If you mean to go ahead, call\n"
+             "`consolidate` and read the same report out of it rather than\n"
+             "paying for two bakes.")
+        .def("consolidate",
+             [](PyLayer& l, float cell, nb::handle band, nb::handle padding, nb::handle region,
+                bool redistance) {
+                 scene::ConsolidationCost cost;
+                 scene::ConsolidationParams p =
+                     to_consolidation(cell, band, padding, region, redistance);
+                 if (l.layer().protected_from_edits())
+                     throw std::invalid_argument("layer is protected (ghosted or locked)");
+                 if (!scene::consolidate_layer(l.doc->document, l.id, p,
+                                                          l.undo ? l.undo->get() : nullptr, &cost))
+                     throw std::invalid_argument(
+                         "nothing to consolidate: the layer is empty, unbounded, or the region "
+                         "contains no surface");
+                 return cost_dict(cost);
+             },
+             "cell"_a, "band"_a = nb::none(), "padding"_a = nb::none(), "region"_a = nb::none(),
+             "redistance"_a = true,
+             "Collapse this layer's edit list into one item carrying samples,\n"
+             "and report what it cost.\n\n"
+             "ONE undo step, whose inverse restores what it absorbed with ids,\n"
+             "parameters, colours and deformers intact — the undo record carries\n"
+             "the removed subtrees by value, so no new command was needed for\n"
+             "this. What survives is the surface at `cell`; what does not is\n"
+             "every parameter of every item absorbed, and every colour but the\n"
+             "first one's. Hidden items are left alone: they contribute nothing\n"
+             "to the field, so absorbing them would spend their parameters on\n"
+             "nothing.\n\n"
+             "`redistance=True` is what actually bounds the Lipschitz. Baking\n"
+             "alone does NOT — resampling a steep field reproduces the\n"
+             "steepness, and a finer cell makes it worse rather than better.\n"
+             "Turn it off only to measure that.\n\n"
+             "Pin `region` when consolidating the same area repeatedly: a\n"
+             "volume's geometric bound is its whole sampled box, so each bake\n"
+             "would otherwise pad the previous padding.")
+        .def_prop_ro("consolidation_state",
+                     [](const PyLayer& l) -> nb::object {
+                         scene::ConsolidationCost cost;
+                         if (!scene::consolidation_state(l.layer(), &cost)) return nb::none();
+                         return cost_dict(cost);
+                     },
+                     "The resolution this layer is baked at, or None if it is still\n"
+                     "parametric — so a host can stop offering parameter edits there\n"
+                     "rather than failing them.\n\n"
+                     "Answered from the CONTENT rather than a stored provenance flag: a\n"
+                     "mesh imported as a volume is exactly as unparametric as a bake, so\n"
+                     "a flag marking one of them would split two cases an app has to\n"
+                     "treat alike — and it would have to be serialised to survive a save.");
 
     // -- document ----------------------------------------------------------------------
     nb::class_<PyDocument>(m, "Document", "A claycore document: a stack of layers")

@@ -52,6 +52,8 @@ EXAMPLES = [
     "34_organic_character",
     "35_hard_surface_helmet",
     "36_mesh_layers",
+    "37_groups",
+    "38_consolidation",
     "39_multi_resolution",
 ]
 

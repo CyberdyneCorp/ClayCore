@@ -152,13 +152,19 @@ def main():
     if not all(a >= b - 1e-3 for a, b in zip(lifts, lifts[1:])):
         raise SystemExit(f"a wider averaging radius stopped softening more: {lifts}")
 
-    # Averaging destroys EXACTNESS but cannot break the LIPSCHITZ bound, so the
+    # Averaging destroys EXACTNESS but cannot RAISE the LIPSCHITZ bound, so the
     # raymarcher stays correct — which is why the step scale does not collapse.
+    #
+    # The comparison is against the SOURCE, not against 1. A relief through a
+    # narrow rounding is a steep field by construction, so the samples `rough`
+    # took from it are steep before relax sees them; what relax owes is not to
+    # make them worse.
     smoothed = rough.relaxed(radius_cells=6, iterations=4, centre=(0, 0.80, 0),
                              region_radius=0.55, falloff=0.2)
-    print(f"  relax leaves the field 1-Lipschitz or better: {smoothed.sample_lipschitz:.3f}, "
-          f"so the step scale holds at {doc0.safe_step_scale():.3f}")
-    if smoothed.sample_lipschitz > 1.05:
+    print(f"  relax cannot raise the bound: {rough.sample_lipschitz:.3f} in, "
+          f"{smoothed.sample_lipschitz:.3f} out, so the step scale holds at "
+          f"{doc0.safe_step_scale():.3f}")
+    if smoothed.sample_lipschitz > rough.sample_lipschitz + 1e-3:
         raise SystemExit("relax raised the Lipschitz bound, which it must not")
 
     # --- the pair, side by side -----------------------------------------------

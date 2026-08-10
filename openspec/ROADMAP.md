@@ -121,7 +121,8 @@ than the table: two things are true that the one-line summaries hid.
 way to build a field from sampled data. `sample_step_field` returns
 -voxel_size/2 or +voxel_size/2 — a bound, not a distance — and nothing in the
 tree does a distance transform (checked: no eikonal, no fast march, no
-redistancing anywhere). The brick cache samples an existing tape; it does not
+redistancing anywhere — `add-consolidation-policy` added the last of those on
+2026-08-09, as `field::redistance`). The brick cache samples an existing tape; it does not
 build a field from samples. So `add-mesh-to-field-import` cannot produce a
 layer, `add-sdf-relax` has no route through voxels, and `add-voxel-repair`'s
 output cannot become an SDF. That prerequisite is `add-sampled-fields` below.
@@ -254,10 +255,10 @@ Not planned: Morph (needs a stored morph target, which is a document concept
 rather than a brush), Elastic and ZProject (both mesh-era ideas that do not
 survive the representation change intact).
 
-## Consolidation, which two brushes now need
+## Consolidation, which two brushes needed — landed 2026-08-09
 
-Two verbs have hit the same wall from opposite sides, so it is worth naming as a
-row rather than as two footnotes.
+Two verbs hit the same wall from opposite sides, so it is worth naming as a row
+rather than as two footnotes.
 
 **Move** stacks a grab per drag, and a stroke is many drags: the declared
 Lipschitz compounds and the safe step scale decays geometrically, about x0.615
@@ -270,15 +271,27 @@ distance, so the blend works from the wrong value: the Lipschitz goes 1.00 to
 14.0 on the second pass whatever the falloff, and by the third the form is
 visibly corrupt rather than merely expensive.
 
-`clay_item_volume_from_document` can collapse an edit list into one volume, so
-the mechanism exists. What does not exist is a POLICY — proposed as
-`add-consolidation-policy` — when a host should
-consolidate, what it costs, and how a baked region rejoins an edit list that is
-still parametric everywhere else. Both brushes are usable for single gestures
-today and neither is usable as a stroke, which is what a sculpting app needs.
+`add-consolidation-policy` closed both. `Layer.consolidate` /
+`clay_layer_consolidate` collapses a layer into one volume as a single undoable
+step, and `Layer.field_report` / `clay_layer_field_report` is the advisory
+trigger — it reports the step scale alongside the two things that cost it, and
+never bakes on its own, because a bake discards parameters and the artist is the
+one who pays for that.
 
-Measured in `examples/27_move_strokes.py` and `examples/28_hpolish.py`, both of
-which fail if the degradation stops being what they claim.
+**The row assumed a bake was enough, and it was not.** Collapsing an edit list
+into a volume was already possible with `clay_item_volume_from_document`, so the
+proposal said no new primitive was needed. Measuring it showed otherwise: the
+bake of a two-pass polish chain stores samples varying at 14× the cell size, and
+a finer cell makes that *worse*. Steepness is a property of the field, and
+resampling it onto a lattice reproduces it. What removes it is **redistancing** —
+replacing the samples with the distance to their own zero set, `field::redistance`
+— which is a genuinely new primitive and the one this row turned out to need. The
+same measurement also caught `FieldVolume::sample` declaring its result
+1-Lipschitz without ever measuring it, which made every `from_document` bake of a
+steep chain an overclaim.
+
+Measured in `examples/27_move_strokes.py` and `examples/28_hpolish.py`, which
+pin the degradation, and in `examples/38_consolidation.py`, which pins the cure.
 
 ## The sculpting ceiling, proposed 2026-08-09
 
@@ -289,7 +302,7 @@ They are ordered by how much each one costs a sculptor today.
 | Change | Why it ranks here |
 |---|---|
 | `add-multi-resolution` | **The ceiling, and the only one that is not additive.** `VoxelGrid` takes its cell size in the constructor and there is no resample, resize, subdivide or adaptive refinement anywhere in `voxel/`, `mesh/` or `brick/` — the brick cache is a sparse narrow band, not an LOD hierarchy. So the finest detail in a model must be chosen before the first stroke and paid for everywhere, and cannot be added locally afterwards. This removes the loop sculpting is made of: block out coarse, subdivide, refine. Recommends discrete levels over an octree, because the falloff dither hashes a CELL COORDINATE and the parity suite enforces that strokes reproduce across platforms — a uniform lattice per level keeps that property, an adaptive one puts it in question. Do it first: retrofitting levels under verbs, a file format and an ABI that all assume one cell size is harder than building on them. |
-| `add-consolidation-policy` | The SDF verbs exist and do not chain. Each samples the document and hands back a volume, so the second call samples a VOLUME, which outside its band reports a lower bound rather than a distance. Measured and pinned by examples: hPolish goes 1.00 -> 14.0 Lipschitz on the second pass and is corrupt by the third; Move decays x0.615 per drag, 79x by nine. A sculpting app is made of strokes and these are gestures. |
+| ~~`add-consolidation-policy`~~ **landed 2026-08-09** | The SDF verbs existed and did not chain, for two different reasons: hPolish sampled the previous pass's VOLUME (1.00 -> 14.0 Lipschitz on the second pass, corrupt by the third) and Move stacked a grab per drag (x0.615 per drag, 79x by nine). Advisory reporting plus a layer-scoped bake that redistances; see the section above for what the row got wrong about baking. |
 | `add-representation-round-trip` | The bridge runs one way. SDF to voxel is `rasterize_tape`; voxel back is only mesh -> `to_field` -> volume, which resamples onto a frozen lattice and drops the palette. So a sculptor picks a representation and lives inside its half of the toolkit, when the natural workflow is to keep moving between them. Honest framing is a conversion, not a view: quantisation and lost procedural history are the price and the spec should say so. |
 | `add-sculpt-layers` | No way to record a pass and dial it back. Undo is a stack — removing an old pass discards everything after it; a sculpt layer is addressable. Partial strength on binary occupancy is the interesting part, and the answer is the dither the falloff brushes already use. |
 

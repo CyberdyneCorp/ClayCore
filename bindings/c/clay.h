@@ -148,7 +148,12 @@ typedef enum clay_op {
      * A pair rather than one signed amplitude, because blend_k is required
      * non-negative — and because add/subtract and engrave/emboss are pairs. */
     CLAY_OP_RELIEF = 14, /* build up: ZBrush Standard, ClayBuildup */
-    CLAY_OP_INCISE = 15  /* cut in:   Crease, DamStandard */
+    CLAY_OP_INCISE = 15, /* cut in:   Crease, DamStandard */
+    /* GROUPS ONLY (clay_layer_add_group): the group's children apply inline to
+     * the chain outside it, exactly as if they had been added there. Every
+     * other op makes the group a sub-expression that combines as a unit. An
+     * item carrying it is refused. */
+    CLAY_OP_INLINE = 255
 } clay_op;
 
 typedef enum clay_blend {
@@ -313,7 +318,10 @@ clay_result clay_document_end_undo_group(clay_document* doc);
  * whole value: C has no idiomatic "leave this one alone" argument. Read the
  * current state, change what you want, pass all of it back. */
 
-/* Retransform a node. axis/angle give the rotation; scale must be > 0. */
+/* Retransform a node. axis/angle give the rotation; scale must be > 0.
+ * A GROUP is refused: the engine composes layer * item and nothing else, so a
+ * group's transform never reaches its children — recording one would be an
+ * undoable, saved edit that changes nothing. Transform the children. */
 clay_result clay_layer_set_transform(clay_document* doc, clay_layer_id layer, clay_node_id node,
                                      const float position[3], const float rotation_axis[3],
                                      float rotation_angle, float scale);
@@ -323,11 +331,15 @@ clay_result clay_layer_set_prim(clay_document* doc, clay_layer_id layer, clay_no
                                 int32_t prim, const float* params, size_t param_count);
 clay_result clay_layer_set_color(clay_document* doc, clay_layer_id layer, clay_node_id node,
                                  const float rgb[3]);
-/* op is clay_op, blend is clay_blend; rounding must be >= 0. */
+/* op is clay_op, blend is clay_blend; rounding must be >= 0. A GROUP takes the
+ * same values clay_layer_add_group takes, CLAY_OP_INLINE included; an item
+ * takes anything but that one. */
 clay_result clay_layer_set_op_blend(clay_document* doc, clay_layer_id layer, clay_node_id node,
                                     int32_t op, int32_t blend, float blend_k, float rounding);
 /* Reparent or reorder. new_parent 0 moves the node to the layer root, and
- * index < 0 appends. */
+ * index < 0 appends. Moving a node into its own subtree is refused: it would
+ * close a cycle, and the subtree would leave the root list and be dropped on
+ * the next save. */
 clay_result clay_layer_move(clay_document* doc, clay_layer_id layer, clay_node_id node,
                             clay_node_id new_parent, int32_t index);
 /* Append (x, y, z, radius) quadruples to a placed stroke: points_xyzr holds
@@ -337,6 +349,9 @@ clay_result clay_layer_append_stroke(clay_document* doc, clay_layer_id layer, cl
 /* Remove the last count points from a placed stroke. */
 clay_result clay_layer_trim_stroke(clay_document* doc, clay_layer_id layer, clay_node_id node,
                                    uint32_t count);
+/* A GROUP is a node too, and every call above applies to one. Creating and
+ * filling one is further down, with the item builder whose handle it takes:
+ * see clay_layer_add_group. */
 
 /* -- editing layers -------------------------------------------------------- */
 
@@ -541,6 +556,69 @@ clay_result clay_item_set_transition_radial(clay_item* item, float r0, float r1,
 clay_result clay_layer_add_item(clay_document* doc, clay_layer_id layer, const clay_item* item,
                                 clay_node_id* out_node);
 
+/* -- groups ----------------------------------------------------------------
+ * A group is a node like any other — same id space, same commands, same undo —
+ * whose children compile as ONE sub-expression. That is what makes "intersect
+ * A with B, then union that into C" sayable from a host: the intersect applies
+ * to A alone because it is inside the group, and the group's own op combines
+ * the result with whatever the layer already holds. Without one, an op applies
+ * to the whole accumulated field, so an intersect meant for a single panel
+ * would trim everything added before it.
+ *
+ * Three rules the compiler already enforces (src/scene/tape_build.cpp,
+ * compile_group), stated here because a host has to be able to predict them:
+ *   - a carving group (subtract, intersect, the extended modes) with nothing
+ *     beneath it in the chain emits nothing at all — as a carving ITEM does;
+ *   - so does a group whose children all turned out to be hidden or culled,
+ *     down to the last instruction: an empty subtree is rolled back rather
+ *     than left as a combine against empty space;
+ *   - CLAY_OP_INLINE reads no blend, no rounding and no colour off the group,
+ *     which is why those are refused rather than quietly ignored.
+ *
+ * A group has no transform of its own; see clay_layer_set_transform. */
+
+/* Creates an empty group and returns its id. parent 0 puts it at the layer
+ * root and index < 0 appends; a parent that is not a group is refused, which
+ * is also how a nested group is built — pass the outer group's id.
+ *
+ * op is clay_op, blend is clay_blend, and blend_k and rounding must both be
+ * >= 0. The transition ops are refused: compile_group emits no transition
+ * parameters, so a group carrying one would morph on defaults nobody wrote.
+ * CLAY_OP_INLINE requires CLAY_BLEND_HARD with blend_k and rounding 0.
+ *
+ * The seed colour a CLAY_OP_SHELL or CLAY_OP_REPLACE group paints when it
+ * starts a chain against empty space is clay_layer_set_color, as for any other
+ * node. */
+clay_result clay_layer_add_group(clay_document* doc, clay_layer_id layer, clay_node_id parent,
+                                 int32_t index, int32_t op, int32_t blend, float blend_k,
+                                 float rounding, clay_node_id* out_node);
+
+/* clay_add_item and clay_layer_add_item append to the layer root and have no
+ * argument that could say otherwise, so these are those two calls with a group
+ * to put the edit in. index < 0 appends. One command each, hence one undo step
+ * each: filling a group needs no clay_document_begin_undo_group. */
+clay_result clay_add_item_in_group(clay_document* doc, clay_layer_id layer, clay_node_id group,
+                                   int32_t index, const clay_item_desc* item,
+                                   clay_node_id* out_node);
+clay_result clay_layer_add_item_in_group(clay_document* doc, clay_layer_id layer,
+                                         clay_node_id group, int32_t index,
+                                         const clay_item* item, clay_node_id* out_node);
+
+/* A group's children, in order, by the size-query pattern
+ * clay_layer_stroke_points uses: call with out_children == NULL to receive the
+ * count in *count, then again with a buffer of that many ids. *count is the
+ * capacity going in and the count written coming out; a buffer that is too
+ * small gets CLAY_ERROR_BUFFER_TOO_SMALL with the needed count in *count and
+ * writes nothing.
+ *
+ * A node that is not a group is CLAY_ERROR_INVALID_ARGUMENT — which is also
+ * how a host that RELOADED a document tells a group from an item, since
+ * nothing else in this ABI answers that question. Reading is not editing, so a
+ * ghosted, locked or hidden layer answers normally. */
+clay_result clay_layer_children(const clay_document* doc, clay_layer_id layer,
+                                clay_node_id node, clay_node_id* out_children, size_t* count);
+
+
 /* -- evaluation ------------------------------------------------------------ */
 
 /* Comma-separated registered backend names via the size-query pattern:
@@ -579,6 +657,129 @@ clay_result clay_layer_eval_gradients(const clay_document* doc, clay_layer_id la
 clay_result clay_safe_step_scale(const clay_document* doc, float* out_scale);
 clay_result clay_layer_safe_step_scale(const clay_document* doc, clay_layer_id layer,
                                        float* out_scale);
+
+/* -- consolidating a degraded chain ----------------------------------------
+ *
+ * The region verbs — relax, flatten, snakehook, move, the mask brush — each
+ * work once and none of them chain. A polish samples a document and hands back
+ * a volume, so the second pass samples a VOLUME, and the declared Lipschitz
+ * goes 1.7 -> 24 -> 39 over three passes. A move stroke never touches a volume
+ * at all: each drag appends a grab to the deformer chain, and those multiply,
+ * so the safe step scale decays by a constant factor per drag — 79x the
+ * marching cost by nine.
+ *
+ * Two mechanisms, so the report names them separately. An aggregate step scale
+ * says something is wrong; steepest_volume and longest_deformer_chain say
+ * which thing, and therefore which of the two an app should show.
+ *
+ * The trigger is ADVISORY. Nothing here bakes on its own: consolidating
+ * discards the parameters of everything it absorbs, and an engine that decided
+ * on an artist's behalf that a sphere's radius is no longer editable would be
+ * making the wrong person pay. `advise_below_step_scale` is the CALLER's
+ * tolerance for marching cost, passed per call rather than stored in the
+ * document, because that tolerance belongs to a viewport, a device and a frame
+ * budget rather than to the artwork. */
+typedef struct clay_field_report {
+    uint32_t struct_size; /* = sizeof(clay_field_report); required */
+    float lipschitz;      /* the compiled layer's declared bound */
+    float safe_step_scale;
+    float steepest_volume;         /* largest sample Lipschitz among volume items */
+    int32_t longest_deformer_chain;
+    int32_t item_count;
+    int32_t advises_consolidation; /* safe_step_scale < advise_below_step_scale */
+} clay_field_report;
+
+/* What a layer's chain currently costs the marcher, and what is causing it.
+ * Pass 0 for advise_below_step_scale to measure without asking for advice. */
+clay_result clay_layer_field_report(const clay_document* doc, clay_layer_id layer,
+                                    float advise_below_step_scale,
+                                    clay_field_report* out_report);
+
+typedef struct clay_consolidation_params {
+    uint32_t struct_size; /* = sizeof(clay_consolidation_params); required */
+    /* Required, and > 0. A document has no intrinsic scale to derive a
+     * resolution from the way a mesh's own bounds give one, so guessing here
+     * would fix the shape's resolution at a number nobody chose. */
+    float cell_size;
+    float band;    /* half-width of the band kept; <= 0 means three cells */
+    float padding; /* past the layer's bounds; <= 0 means the band */
+    /* Redistancing — replacing the baked samples with the distance to their
+     * own zero set — is what actually bounds the Lipschitz. Baking alone does
+     * NOT: resampling a steep field reproduces the steepness, and a finer cell
+     * makes it worse rather than better. Spelled as a SKIP so that a zeroed
+     * struct gets the sound behaviour rather than the fast one. */
+    int32_t skip_redistance;
+} clay_consolidation_params;
+
+/* What consolidating spends, from what a volume already reports. */
+typedef struct clay_consolidation_cost {
+    uint32_t struct_size; /* = sizeof(clay_consolidation_cost); required */
+    float cell_size;
+    float band;
+    uint64_t brick_count;
+    uint64_t sample_count;
+    uint64_t bytes;
+    float sample_lipschitz; /* how fast the stored samples vary */
+    float lipschitz;        /* what the compiler will declare for them */
+    float safe_step_scale;
+    float bounds_min[3];
+    float bounds_max[3];
+} clay_consolidation_cost;
+
+/* What consolidating this layer WOULD cost, without the document changing.
+ *
+ * The numbers are the ones the real thing produces, because this is the real
+ * thing with the result thrown away: an estimate that skipped the sampling
+ * could not report a brick count, and the brick count is where the memory is.
+ * A caller that means to go ahead should call clay_layer_consolidate and read
+ * the same cost out of it rather than paying for two bakes.
+ *
+ * `region_min`/`region_max` are an optional world-space box, or NULL for the
+ * layer's own bounds padded. Pin it when consolidating the SAME region
+ * repeatedly: a volume's geometric bound is its whole sampled box, so each
+ * bake would otherwise pad the previous padding. */
+clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_id layer,
+                                          const clay_consolidation_params* params,
+                                          const float region_min[3], const float region_max[3],
+                                          clay_consolidation_cost* out_cost);
+
+/* Collapse a layer's edit list into one item carrying samples, as ONE undo
+ * step whose inverse restores what it absorbed — ids, parameters, colours and
+ * deformers intact, because the undo record carries the removed subtrees by
+ * value. No new command was needed for this; the vocabulary could already say
+ * it, which is why this is a policy rather than a verb.
+ *
+ * Refused on a protected layer, and refused BEFORE the bake, so a locked layer
+ * does not cost a full resampling to say no.
+ *
+ * What survives: the surface, at `cell_size`. What does not: every parameter
+ * of every item absorbed, and every colour but the first one's. Hidden items
+ * are left alone — they contribute nothing to the field, so absorbing them
+ * would spend their parameters on nothing.
+ *
+ * `out_cost` may be NULL. Undo grouping is the document's own, so this lands
+ * as a single step when undo is enabled and as a plain edit when it is not. */
+clay_result clay_layer_consolidate(clay_document* doc, clay_layer_id layer,
+                                   const clay_consolidation_params* params,
+                                   const float region_min[3], const float region_max[3],
+                                   clay_consolidation_cost* out_cost);
+
+/* Whether a layer is consolidated — its edit list is a single item carrying
+ * samples — and at what resolution, so a host can stop offering parameter
+ * edits there rather than failing them.
+ *
+ * Answered from the CONTENT, not from a stored provenance flag. The promise a
+ * host makes is about what the region IS: samples at a fixed resolution, with
+ * no parameters to offer. A mesh imported with clay_item_volume_from_mesh is
+ * exactly as unparametric as a bake, so a flag marking one of them would split
+ * two cases an app has to treat alike — and it would have to be serialised to
+ * survive a save.
+ *
+ * *out_consolidated is 0/1; out_cost may be NULL and is left untouched when
+ * the layer is not consolidated. */
+clay_result clay_layer_consolidation_state(const clay_document* doc, clay_layer_id layer,
+                                           int32_t* out_consolidated,
+                                           clay_consolidation_cost* out_cost);
 
 /* Single raycast (origin + normalized direction). *out_hit is 0/1. */
 clay_result clay_raycast(const clay_document* doc, const float origin[3], const float dir[3],

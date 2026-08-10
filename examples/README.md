@@ -438,6 +438,31 @@ the pinholes a dithered stamp leaves.
 
 ![hard-surface turnaround](output/35_turnaround.png)
 
+### 36 — groups
+
+35 gives every armour plate a **layer** of its own, because a plate is a shell
+INTERSECTED with a cutter and an op applies to everything accumulated before
+it: on one shared field that intersect would trim the helmet too. A **group**
+is the thing that was actually wanted. Its children compile as one
+sub-expression, so the intersect stays inside it and the group's own op joins
+the result to whatever the layer already holds — four groups on one layer here,
+where the layer-per-plate technique needs four layers.
+
+![group stages](output/37_groups_stages.png)
+
+The right-hand half is the same edits with no group at all, kept on the page
+because it is what "the op applies to everything" looks like: the cutter slices
+the core as well, and what is left is the cutter's own box.
+
+![grouped against flat](output/37_groups_vs_flat.png)
+
+`Op.INLINE` is the other direction — a group whose children apply to the outer
+chain exactly as if they had been added there, so it names and moves a run of
+edits without changing the field. The script asserts that, bit for bit.
+
+## Notes
+
+- **This page documents 00-17 and the three showcase examples.** The gallery
 ### 36 — a mesh a document carries
 
 `19` imports a model so it can be *sculpted*: the triangles become a distance

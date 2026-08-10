@@ -1,0 +1,445 @@
+// The consolidation policy (scene-model spec, add-consolidation-policy), and
+// the redistancing pass it rests on.
+//
+// The claims under test are the two the change exists to make true: that a
+// chain of region-verb edits holds its declared Lipschitz within a stated
+// bound instead of multiplying per edit, and that collapsing one is a single
+// undo step whose inverse gives back the parametric form.
+
+#include <doctest/doctest.h>
+
+#include <algorithm>
+#include <cmath>
+#include <memory>
+#include <vector>
+
+#include "clay/field/flatten.h"
+#include "clay/field/redistance.h"
+#include "clay/field/volume.h"
+#include "clay/kernel/exactness.h"
+#include "clay/scene/consolidate.h"
+#include "clay/scene/tape.h"
+
+using namespace clay;
+using field::FieldVolume;
+using kernel::cf3;
+
+namespace {
+
+// The bound this change states. sqrt(3) is cfi_volume's interpolation factor,
+// which a volume pays whatever its samples do; the slack above it is what a
+// redistanced bake is allowed to measure over a perfect 1.
+constexpr float kConsolidatedSampleBound = 1.10f;
+constexpr float kConsolidatedDeclaredBound = 1.7320508f * kConsolidatedSampleBound;
+
+scene::Document sphere_document(float radius) {
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("l");
+    scene::Node n;
+    n.prim = scene::Prim::sphere(radius);
+    layer.sdf->insert(n);
+    return doc;
+}
+
+// One hPolish pass: plane the form back to `distance` along `normal`, cutting
+// only, over a region with a taper — the shape of gesture that does not chain.
+FieldVolume polish(const scene::Document& source, kernel::cfloat3 normal, float distance,
+                   float cell, float band) {
+    const scene::Tape tape = scene::compile_document(source);
+    field::FlattenSettings s;
+    s.plane_point = normal * distance;
+    s.plane_normal = normal;
+    s.strength = 1.0f;
+    s.centre = normal * distance;
+    s.region_radius = 0.7f;
+    s.falloff = 0.3f;
+    s.mode = field::FlattenMode::CutOnly;
+    const kernel::cfloat3 pad = cf3(band, band, band);
+    return field::flatten([&tape](kernel::cfloat3 p) { return tape.eval(p).d; },
+                          math::Aabb{tape.bounds.min - pad, tape.bounds.max + pad}, cell, band, s);
+}
+
+scene::Document wrap(const FieldVolume& v) {
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("f");
+    scene::Node n;
+    n.prim = scene::Prim::volume();
+    n.volume = std::make_shared<const FieldVolume>(v);
+    layer.sdf->insert(n);
+    return doc;
+}
+
+// Where the surface sits along a direction, by marching a fine ruler outwards.
+float surface_along(const scene::Document& doc, kernel::cfloat3 u, float from) {
+    const scene::Tape tape = scene::compile_document(doc);
+    for (float t = from; t > 0.0f; t -= 0.002f)
+        if (tape.eval(u * t).d <= 0.0f) return t;
+    return -1.0f;
+}
+
+scene::ConsolidationParams params_at(float cell, float band) {
+    scene::ConsolidationParams p;
+    p.cell_size = cell;
+    p.band = band;
+    return p;
+}
+
+}  // namespace
+
+// -- redistancing --------------------------------------------------------------
+
+TEST_CASE("redistance replaces a steep field with the distance to its own surface") {
+    // A sphere, deliberately steepened by a factor of eight. Its zero set is
+    // exactly the sphere's; only the values around it are wrong.
+    auto steep = [](kernel::cfloat3 p) { return (kernel::clength(p) - 0.6f) * 8.0f; };
+    FieldVolume v = FieldVolume::sample(steep, math::Aabb{cf3(-1, -1, -1), cf3(1, 1, 1)}, 0.02f,
+                                        0.16f);
+    REQUIRE(v.measure_sample_lipschitz() > 5.0f);
+
+    REQUIRE(field::redistance(v));
+    CHECK(v.measure_sample_lipschitz() <= kConsolidatedSampleBound);
+    CHECK(v.sample_lipschitz() == doctest::Approx(v.measure_sample_lipschitz()));
+
+    // The surface did not move: the interface is found by interpolating
+    // between the samples that bracket it, which is where it already was.
+    for (kernel::cfloat3 u : {cf3(1, 0, 0), cf3(0, 1, 0), cf3(0, 0, 1),
+                              kernel::cnormalize(cf3(1, 1, 1))}) {
+        CHECK(v.eval(u * 0.6f) == doctest::Approx(0.0f).epsilon(0.0).scale(1.0f).epsilon(0.05));
+        CHECK(v.eval(u * 0.5f) < 0.0f);
+        CHECK(v.eval(u * 0.7f) > 0.0f);
+    }
+    // And the values are now distances rather than merely signed: half way in
+    // from the surface the field reads about that.
+    CHECK(v.eval(cf3(0.5f, 0, 0)) == doctest::Approx(-0.1f).epsilon(0.15));
+}
+
+TEST_CASE("redistance leaves a field with no zero set alone") {
+    // Wholly outside the sampled box: nothing changes sign, so there is no
+    // interface to measure from and inventing one would be worse than the
+    // bound the sampling already produced.
+    auto far_away = [](kernel::cfloat3 p) { return kernel::clength(p - cf3(9, 9, 9)) - 0.5f; };
+    FieldVolume v = FieldVolume::sample(far_away, math::Aabb{cf3(-1, -1, -1), cf3(1, 1, 1)},
+                                        0.05f, 0.15f);
+    CHECK_FALSE(field::redistance(v));
+}
+
+TEST_CASE("compact drops the bricks a redistanced field shows are past the band") {
+    auto ball = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.6f; };
+    FieldVolume v = FieldVolume::sample(ball, math::Aabb{cf3(-1, -1, -1), cf3(1, 1, 1)}, 0.02f,
+                                        0.1f);
+    const std::size_t before = v.brick_count();
+    REQUIRE(field::redistance(v));
+    CHECK(v.compact() > 0);
+    CHECK(v.brick_count() < before);
+    // Dropping them may not move the surface: the claim compact rests on is
+    // that a brick whose samples are all past the band holds no crossing.
+    CHECK(v.eval(cf3(0.6f, 0, 0)) == doctest::Approx(0.0f).epsilon(0.0).scale(1.0f).epsilon(0.05));
+    CHECK(v.eval(cf3(0.55f, 0, 0)) < 0.0f);
+    CHECK(v.eval(cf3(0.65f, 0, 0)) > 0.0f);
+}
+
+TEST_CASE("the reported byte cost is the blob's real length") {
+    // blob_floats() exists so that asking what a volume costs does not
+    // materialise a copy of every sample. The two can only drift silently, so
+    // they are checked against each other.
+    auto ball = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.6f; };
+    FieldVolume v = FieldVolume::sample(ball, math::Aabb{cf3(-1, -1, -1), cf3(1, 1, 1)}, 0.04f,
+                                        0.16f);
+    CHECK(v.blob_floats() == v.to_blob().size());
+    REQUIRE(field::redistance(v));
+    v.compact();
+    CHECK(v.blob_floats() == v.to_blob().size());
+}
+
+// -- the soundness bug the policy would otherwise inherit ------------------------
+
+TEST_CASE("a sampled volume never declares a bound smaller than its samples measure") {
+    // FieldVolume::sample used to leave sample_lipschitz at 1 whatever it had
+    // just stored, which meant baking a steep chain declared it 1-Lipschitz —
+    // licensing exactly the overstep the declared bound exists to prevent.
+    auto steep = [](kernel::cfloat3 p) { return (kernel::clength(p) - 0.6f) * 14.0f; };
+    const FieldVolume v = FieldVolume::sample(steep, math::Aabb{cf3(-1, -1, -1), cf3(1, 1, 1)},
+                                              0.02f, 0.2f);
+    CHECK(v.sample_lipschitz() >= v.measure_sample_lipschitz() - 1e-3f);
+    CHECK(v.sample_lipschitz() > 5.0f);
+
+    // A field that IS 1-Lipschitz still measures 1, so nothing honest pays.
+    const FieldVolume plain = FieldVolume::sample(
+        [](kernel::cfloat3 p) { return kernel::clength(p) - 0.6f; },
+        math::Aabb{cf3(-1, -1, -1), cf3(1, 1, 1)}, 0.02f, 0.2f);
+    CHECK(plain.sample_lipschitz() == doctest::Approx(1.0f).epsilon(0.02));
+}
+
+// -- the chain the change exists for ---------------------------------------------
+
+TEST_CASE("a chain of polish passes degrades, and consolidation bounds it") {
+    const float cell = 0.03f, band = 0.12f;
+    const kernel::cfloat3 dirs[3] = {cf3(1, 0, 0), cf3(0, 1, 0), cf3(0, 0, 1)};
+
+    SUBCASE("unconsolidated, the declared Lipschitz multiplies per pass") {
+        scene::Document cur = sphere_document(0.62f);
+        std::vector<float> declared;
+        for (int i = 0; i < 3; ++i) {
+            cur = wrap(polish(cur, dirs[i], 0.44f, cell, band));
+            declared.push_back(scene::compile_document(cur).info.lipschitz);
+        }
+        CHECK(declared[0] <= kConsolidatedDeclaredBound);  // one pass is clean
+        CHECK(declared[1] > declared[0] * 5.0f);           // the second is not
+        CHECK(declared[2] > kConsolidatedDeclaredBound * 4.0f);
+    }
+
+    SUBCASE("consolidated between passes, it holds the stated bound") {
+        scene::Document cur = sphere_document(0.62f);
+        for (int i = 0; i < 4; ++i) {
+            cur = wrap(polish(cur, dirs[i % 3], 0.44f, cell, band));
+            scene::ConsolidationCost cost;
+            REQUIRE(scene::consolidate_layer(cur, cur.layers.front().id, params_at(cell, band),
+                                             nullptr, &cost));
+            INFO("pass " << i + 1 << " sample lipschitz " << cost.sample_lipschitz);
+            CHECK(cost.sample_lipschitz <= kConsolidatedSampleBound);
+            CHECK(cost.lipschitz <= kConsolidatedDeclaredBound);
+            CHECK(scene::compile_document(cur).info.lipschitz <= kConsolidatedDeclaredBound);
+            // And the memory does not creep: compacting after redistancing is
+            // what stops each bake keeping the shell of bricks the last one's
+            // band bound put just outside it.
+            CHECK(cost.bytes < 6u * 1024u * 1024u);
+        }
+        // The facet is still on its plane after four passes.
+        CHECK(surface_along(cur, dirs[0], 1.2f) == doctest::Approx(0.44f).epsilon(0.06));
+    }
+}
+
+TEST_CASE("a move stroke stops decaying once it is consolidated") {
+    scene::Document doc = sphere_document(1.0f);
+    scene::Layer& layer = doc.layers.front();
+    const scene::NodeId id = layer.sdf->roots.front();
+
+    // Nine drags, each a grab on the chain: the decay is geometric because
+    // deformer_lipschitz multiplies them.
+    for (int i = 0; i < 9; ++i)
+        layer.sdf->find_mut(id)->deformers.insert(
+            layer.sdf->find_mut(id)->deformers.begin(),
+            scene::Deformer::grab(cf3(1.0f + 0.25f * static_cast<float>(i), 0, 0), 0.5f,
+                                  cf3(0.25f, 0, 0)));
+    const scene::FieldReport before = scene::report_layer(layer, 0.25f);
+    CHECK(before.longest_deformer_chain == 9);
+    CHECK(before.steepest_volume == doctest::Approx(1.0f));  // no volume is involved at all
+    CHECK(before.safe_step_scale < 0.05f);
+    CHECK(before.advises_consolidation);
+
+    scene::ConsolidationCost cost;
+    REQUIRE(scene::consolidate_layer(doc, layer.id, params_at(0.03f, 0.12f), nullptr, &cost));
+    const scene::FieldReport after = scene::report_layer(doc.layers.front(), 0.25f);
+    CHECK(after.longest_deformer_chain == 0);
+    CHECK(after.lipschitz <= kConsolidatedDeclaredBound);
+    CHECK(after.safe_step_scale > before.safe_step_scale * 10.0f);
+    CHECK_FALSE(after.advises_consolidation);
+}
+
+TEST_CASE("the report names which of the two mechanisms degraded a chain") {
+    // A steep VOLUME and a long deformer chain cost the same aggregate and
+    // want different cures, so an aggregate alone cannot tell an app which to
+    // offer.
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("l");
+    scene::Node n;
+    n.prim = scene::Prim::volume();
+    n.volume = std::make_shared<const FieldVolume>(FieldVolume::sample(
+        [](kernel::cfloat3 p) { return (kernel::clength(p) - 0.6f) * 9.0f; },
+        math::Aabb{cf3(-1, -1, -1), cf3(1, 1, 1)}, 0.03f, 0.15f));
+    layer.sdf->insert(n);
+
+    const scene::FieldReport report = scene::report_layer(layer, 0.25f);
+    CHECK(report.steepest_volume > 5.0f);
+    CHECK(report.longest_deformer_chain == 0);
+    CHECK(report.item_count == 1);
+    CHECK(report.advises_consolidation);
+    // Advice only when asked for: a threshold of zero measures without judging.
+    CHECK_FALSE(scene::report_layer(layer, 0.0f).advises_consolidation);
+}
+
+// -- one undoable command ---------------------------------------------------------
+
+TEST_CASE("consolidation undoes exactly to the parametric form") {
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("l");
+    scene::Node a;
+    a.prim = scene::Prim::sphere(0.7f);
+    a.color = cf3(0.9f, 0.1f, 0.1f);
+    scene::Node b;
+    b.prim = scene::Prim::box(cf3(0.3f, 0.3f, 0.3f));
+    b.op = scene::Op::Subtract;
+    b.xform.position = cf3(0.5f, 0, 0);
+    scene::Node c;
+    c.prim = scene::Prim::sphere(0.25f);
+    c.xform.position = cf3(0, 0.7f, 0);
+    c.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.15f};
+    const scene::NodeId ia = layer.sdf->insert(a);
+    const scene::NodeId ib = layer.sdf->insert(b);
+    const scene::NodeId ic = layer.sdf->insert(c);
+    const std::vector<scene::NodeId> before = layer.sdf->roots;
+
+    scene::UndoStack undo;
+    REQUIRE(scene::consolidate_layer(doc, layer.id, params_at(0.03f, 0.12f), &undo));
+    CHECK(doc.layers.front().sdf->roots.size() == 1);
+    CHECK(scene::consolidation_state(doc.layers.front()));
+    // ONE step, however many items it absorbed.
+    CHECK(undo.undo_depth() == 1);
+
+    REQUIRE(undo.undo(doc));
+    const scene::SdfContent& back = *doc.layers.front().sdf;
+    CHECK(back.roots == before);  // same ids, same order
+    CHECK_FALSE(scene::consolidation_state(doc.layers.front()));
+
+    // Editable by their parameters again, which is the whole claim.
+    REQUIRE(back.find(ia) != nullptr);
+    CHECK(back.find(ia)->prim.type == scene::PrimType::Sphere);
+    CHECK(back.find(ia)->prim.params[0] == doctest::Approx(0.7f));
+    CHECK(back.find(ia)->color.x == doctest::Approx(0.9f));
+    CHECK(back.find(ib)->op == scene::Op::Subtract);
+    CHECK(back.find(ib)->xform.position.x == doctest::Approx(0.5f));
+    CHECK(back.find(ic)->blend.k == doctest::Approx(0.15f));
+
+    // And redo puts the bake back, still as one step.
+    REQUIRE(undo.redo(doc));
+    CHECK(doc.layers.front().sdf->roots.size() == 1);
+    CHECK(scene::consolidation_state(doc.layers.front()));
+}
+
+TEST_CASE("consolidation is refused on a protected layer") {
+    for (bool lock : {true, false}) {
+        scene::Document doc = sphere_document(0.6f);
+        scene::Layer& layer = doc.layers.front();
+        layer.locked = lock;
+        layer.ghost = !lock;
+        const std::vector<scene::NodeId> before = layer.sdf->roots;
+        CHECK_FALSE(scene::consolidate_layer(doc, layer.id, params_at(0.05f, 0.15f)));
+        CHECK(doc.layers.front().sdf->roots == before);
+    }
+}
+
+TEST_CASE("consolidation leaves hidden items alone") {
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("l");
+    scene::Node visible;
+    visible.prim = scene::Prim::sphere(0.6f);
+    scene::Node hidden;
+    hidden.prim = scene::Prim::sphere(0.3f);
+    hidden.visible = false;
+    layer.sdf->insert(visible);
+    const scene::NodeId ih = layer.sdf->insert(hidden);
+
+    REQUIRE(scene::consolidate_layer(doc, layer.id, params_at(0.04f, 0.15f)));
+    const scene::SdfContent& after = *doc.layers.front().sdf;
+    CHECK(after.roots.size() == 2);
+    REQUIRE(after.find(ih) != nullptr);
+    CHECK(after.find(ih)->prim.params[0] == doctest::Approx(0.3f));
+    // Still parametric, because a parametric item is still there.
+    CHECK_FALSE(scene::consolidation_state(doc.layers.front()));
+}
+
+// -- what a host may still promise --------------------------------------------------
+
+TEST_CASE("consolidation state reports the resolution, and only for a baked layer") {
+    scene::Document doc = sphere_document(0.6f);
+    CHECK_FALSE(scene::consolidation_state(doc.layers.front()));
+
+    scene::ConsolidationCost paid;
+    REQUIRE(scene::consolidate_layer(doc, doc.layers.front().id, params_at(0.04f, 0.16f), nullptr,
+                                     &paid));
+    scene::ConsolidationCost seen;
+    REQUIRE(scene::consolidation_state(doc.layers.front(), &seen));
+    CHECK(seen.cell_size == doctest::Approx(0.04f));
+    CHECK(seen.band == doctest::Approx(0.16f));
+    CHECK(seen.brick_count == paid.brick_count);
+    CHECK(seen.bytes == paid.bytes);
+
+    // A layer holding a volume among other items is NOT consolidated: the
+    // other items still have parameters an app can offer.
+    scene::Node extra;
+    extra.prim = scene::Prim::sphere(0.2f);
+    doc.layers.front().sdf->insert(extra);
+    CHECK_FALSE(scene::consolidation_state(doc.layers.front()));
+}
+
+TEST_CASE("the cost is knowable before it is paid, and the document does not change") {
+    scene::Document doc = sphere_document(0.6f);
+    const std::vector<std::uint8_t> before = scene::serialize_document(doc);
+
+    scene::ConsolidationCost quoted;
+    REQUIRE(scene::bake_layer(doc.layers.front(), params_at(0.04f, 0.16f), &quoted));
+    CHECK(quoted.brick_count > 0);
+    CHECK(quoted.bytes > 0);
+    CHECK(quoted.sample_count > 0);
+    CHECK(scene::serialize_document(doc) == before);
+
+    scene::ConsolidationCost paid;
+    REQUIRE(scene::consolidate_layer(doc, doc.layers.front().id, params_at(0.04f, 0.16f), nullptr,
+                                     &paid));
+    // The quote IS the bill: the estimate is the real bake with the result
+    // thrown away, so it cannot drift from what the real one produces.
+    CHECK(paid.brick_count == quoted.brick_count);
+    CHECK(paid.bytes == quoted.bytes);
+    CHECK(paid.sample_lipschitz == doctest::Approx(quoted.sample_lipschitz));
+}
+
+TEST_CASE("a document that never consolidates is untouched by the policy") {
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("l");
+    scene::Node a;
+    a.prim = scene::Prim::sphere(0.7f);
+    scene::Node b;
+    b.prim = scene::Prim::torus(0.5f, 0.15f);
+    b.op = scene::Op::Subtract;
+    layer.sdf->insert(a);
+    layer.sdf->insert(b);
+
+    const std::vector<std::uint8_t> bytes = scene::serialize_document(doc);
+    const scene::Tape tape = scene::compile_document(doc);
+
+    // Asking costs nothing: reporting, quoting a cost and checking the state
+    // are all reads, and none of them is allowed to leave a trace.
+    scene::report_layer(doc.layers.front(), 0.5f);
+    scene::ConsolidationCost cost;
+    scene::bake_layer(doc.layers.front(), params_at(0.05f, 0.15f), &cost);
+    scene::consolidation_state(doc.layers.front());
+
+    CHECK(scene::serialize_document(doc) == bytes);
+    const scene::Tape again = scene::compile_document(doc);
+    CHECK(again.instrs.size() == tape.instrs.size());
+    CHECK(again.params == tape.params);
+    CHECK(again.info.lipschitz == doctest::Approx(tape.info.lipschitz));
+}
+
+TEST_CASE("a hidden layer still reports and still consolidates") {
+    // compile_layer treats a hidden layer as empty, which would report a
+    // degraded chain as clean and refuse to bake it — making "hide the layer"
+    // a way to get stuck in a state nothing will tell you about.
+    scene::Document doc = sphere_document(0.6f);
+    scene::Layer& layer = doc.layers.front();
+    layer.sdf->find_mut(layer.sdf->roots.front())
+        ->deformers.push_back(scene::Deformer::grab(cf3(0.6f, 0, 0), 0.4f, cf3(0.2f, 0, 0)));
+    const scene::FieldReport shown = scene::report_layer(layer, 0.9f);
+    layer.visible = false;
+    const scene::FieldReport hidden = scene::report_layer(doc.layers.front(), 0.9f);
+    CHECK(hidden.lipschitz == doctest::Approx(shown.lipschitz));
+    CHECK(hidden.advises_consolidation == shown.advises_consolidation);
+    CHECK(hidden.longest_deformer_chain == 1);
+
+    REQUIRE(scene::consolidate_layer(doc, layer.id, params_at(0.03f, 0.12f)));
+    CHECK_FALSE(doc.layers.front().visible);  // consolidating does not unhide it
+    CHECK(scene::consolidation_state(doc.layers.front()));
+}
+
+TEST_CASE("consolidating keeps the layer's own transform rather than baking it twice") {
+    scene::Document doc = sphere_document(0.5f);
+    scene::Layer& layer = doc.layers.front();
+    layer.xform.position = cf3(2.0f, 0, 0);
+    layer.xform.scale = 2.0f;
+    const float before = surface_along(doc, cf3(1, 0, 0), 4.0f);
+    REQUIRE(before > 0.0f);
+
+    REQUIRE(scene::consolidate_layer(doc, layer.id, params_at(0.03f, 0.12f)));
+    CHECK(doc.layers.front().xform.position.x == doctest::Approx(2.0f));
+    CHECK(surface_along(doc, cf3(1, 0, 0), 4.0f) == doctest::Approx(before).epsilon(0.05));
+}
