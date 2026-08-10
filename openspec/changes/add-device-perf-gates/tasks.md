@@ -54,9 +54,9 @@
 
 ## 7. Documentation and closing the loop
 
-- [ ] 7.1 Document the device prerequisite in `docs/RELEASE.md`: provisioning, signing identity, which iPad is the reference device
-- [ ] 7.2 Document how to run the harness locally and how to read a result, including that simulator and Mac numbers are not comparable to device numbers
-- [ ] 7.3 Update `docs/05-claycore-library.md` where it describes the latency-critical path, so the measured numbers are discoverable from the library overview
-- [ ] 7.4 Add a row to `openspec/ROADMAP.md` — the roadmap has no device performance entry today, which is why this gap survived to v0.25.0
-- [ ] 7.5 Record in the roadmap what the first measurement pass found, in the style of the existing "what actually bit" entries
+- [x] 7.1 Document the device prerequisite in `docs/RELEASE.md`: provisioning, signing identity, which iPad is the reference device
+- [x] 7.2 Document how to run the harness locally and how to read a result, including that simulator and Mac numbers are not comparable to device numbers
+- [x] 7.3 Update `docs/05-claycore-library.md` where it describes the latency-critical path, so the measured numbers are discoverable from the library overview
+- [x] 7.4 Add a row to `openspec/ROADMAP.md` — the roadmap has no device performance entry today, which is why this gap survived to v0.25.0
+- [x] 7.5 Record in the roadmap what the first measurement pass found, in the style of the existing "what actually bit" entries
 - [ ] 7.6 Run `openspec validate --strict` and the four presets plus `release_check`

@@ -52,9 +52,13 @@ about *sculpting affordances*, not about the field engine:
   format — including an item's deformer chain, which `SetDeformersCmd` made an
   ordinary edit; **268 capabilities** gated for binding parity; the Swift
   package verified in the iOS Simulator
-- Four backends registered. **CPU and Metal are verified on device as of
-  v0.22.1**; CUDA and OpenCL are manual hardware checks (docs/RELEASE.md) and
-  were not re-verified for it
+- Four backends registered. ~~**CPU and Metal are verified on device as of
+  v0.22.1**~~ — **"on device" there meant a Mac with the `metal` preset.** No
+  iPad ran claycore until 2026-08-10, and could not have: the metallib was
+  compiled against the macOS SDK whatever the target, and the xcframework
+  shipped CPU-only. Corrected by `add-device-perf-gates`, which is also where
+  the measured latency lives. CUDA and OpenCL remain manual hardware checks
+  (docs/RELEASE.md)
 
 ### Corrections to the study's baseline
 
@@ -421,6 +425,69 @@ rotation changes no distance and no surface. It earns its place in ZBrush
 because the adaptive skin lays out quads whose edge flow follows the node
 frames, and none of marching cubes, surface nets or dual contouring consults
 such a frame. Storing it would be a promise this engine does not keep.
+
+## The device gate, landed 2026-08-10
+
+`add-device-perf-gates`. **This file had no performance row at all until this
+one, which is why the gap below survived to v0.25.0.** Everything the roadmap
+tracked was about what the engine can express; nothing tracked what it costs
+on the hardware it ships to, so nobody noticed that the answer was unknown.
+
+The gap was worse than "untested". `evaluation-backends` has called Metal "the
+iPad app's production path" since the beginning, and **no iPad had ever run
+it** — not from neglect, but because it was *unbuildable* for the platform.
+`CMakeLists.txt` compiled the kernels with `xcrun -sdk macosx` regardless of
+target and embedded the result in the library, so an iOS slice with the
+backend enabled carried **macOS AIR that loads on no device**. The failure
+surfaces as a backend that never registers, which is indistinguishable at the
+ABI from one that was never enabled. `build_xcframework.sh` then shipped every
+slice CPU-only by design, so even a correct metallib would not have reached a
+host.
+
+### What the first measurement pass found
+
+Written in the style of the "what actually bit" entries above, because the
+plan's guesses and the measurements disagreed in four places.
+
+| Expected | Actually |
+|---|---|
+| Metal is the fast path | Metal is **slower than the CPU below roughly a thousand stamps** — 1.85 ms vs 0.21 ms p95 at ten — because dispatch overhead dominates until the work amortises it. A host that always selects Metal is slower for most of a sculpt's early life. The spec says "production path" unconditionally and the measurement does not support that. |
+| The parity corpus covers the vocabulary | It covered every PRIMITIVE, because a guard existed for those, and **12 of the 16 combine ops and 4 of the 14 deformers reached no scene at all** — including twist, bend, taper and displace, the four *original* deformers. The four covered ops were the ones whose own changes happened to add a scene. All sixteen new scenes pass, so the opcodes were right; only the evidence was missing. |
+| A hostless XCTest bundle can run on device | It cannot. `xcodebuild` refuses outright, and SwiftPM cannot declare a test host, so a package reaches the simulator and never the iPad. The harness needs a generated Xcode project and an empty host app. |
+| Baking a latency number is the easy part | Timing a verb without asserting it SUCCEEDED measures the error path. `mask_extrude` was being refused at 100 and 1000 stamps — stamps spread through the volume merge into a blob, putting the mask deep inside the surface — and the first reported figures were the cost of a refusal at two of their three points. |
+
+Two more worth keeping. Thermal state is not noise to be averaged out: several
+runs back to back take an iPad to `serious`, and the guard that invalidates
+such a run **fired for real** during this change rather than in theory. And
+the Metal shader cache is worth 1400x on a first call (14.172 s cold vs
+0.010 s warm), which is why warm-up is excluded from every sample.
+
+### The numbers, and what they mean for the ceiling
+
+From `tests/device/baseline.json` — iPad Air 13-inch (M3), iOS 26.5.2,
+worst-point p95 across a 10/100/1000-stamp axis:
+
+| | p95 | grows as |
+|---|---|---|
+| every voxel verb (11) | < 0.03 ms | flat |
+| one SDF stamp (edit + evaluate), CPU | 4.30 ms | `N^0.65` |
+| one SDF stamp, Metal | 3.29 ms | `N^0.13` |
+| Move drag | 0.11 ms | `N^1.00` |
+| mask extrude | 2.7 s | `N^0.92` |
+| consolidate | 5.0 s | flat |
+
+**The SDF stamp curve is a product ceiling, and it belongs beside
+`add-multi-resolution` in the section above rather than in a test report.** At
+1000 stamps one stamp already exceeds the engine's half of a 120 Hz frame, and
+a real sculpt is far more than 1000 stamps. The cause is the one this file
+already named in Finding 2 — the tape is recompiled on every edit — now with a
+measured exponent on it. The voxel path being flat across all eleven verbs is
+the control that makes that a property of the tape rather than of the
+measurement.
+
+Nothing here was optimised. The change measures, gates and records; acting on
+what it found is the next change, and keeping the two apart is what makes the
+first baseline trustworthy.
 
 ## Phase 3 — the pipeline
 
