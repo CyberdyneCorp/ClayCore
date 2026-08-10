@@ -2,17 +2,29 @@
 # Build dist/claycore.xcframework for SwiftPM consumption (c-abi spec):
 # macOS (arm64), iOS device (arm64), iOS simulator (arm64).
 #
-# Every slice bundles the CPU backend (portable everywhere) AND the Metal
-# backend, which is the production path on iPad. Each slice's embedded metallib
-# is compiled for that slice's own SDK — see the SDK derivation in
-# CMakeLists.txt, and note that AIR built for the wrong platform loads on no
+# Every slice carries the CPU backend AND the Metal backend. Metal is the
+# iPad app's production path, and CLAY_BACKEND_METAL decides which sources are
+# COMPILED INTO libclaycore-*.a — so a consumer of a prebuilt static library
+# cannot turn it on afterwards, whatever it links or sets in Xcode. Shipping it
+# off meant every Apple host silently ran on the CPU: clay_list_backends
+# returned "cpu" alone, and asking for "metal" failed because nothing had
+# registered it.
+#
+# Each slice's embedded metallib is compiled for that slice's own SDK — see the
+# derivation in CMakeLists.txt. AIR built for the wrong platform loads on no
 # device while looking, at the ABI, exactly like a backend that was never
 # enabled. The C ABI and results are identical either way; backends change
 # speed, not values.
 #
-# A consumer must link Metal.framework and Foundation.framework, because these
-# slices are STATIC libraries and an xcframework of static libraries carries no
-# link-time dependency information of its own.
+# Consumers must link Metal and Foundation. Package.swift declares both for the
+# SwiftPM path; a plain C or C++ harness passes -framework Metal
+# -framework Foundation itself.
+#
+# Backend options are passed EXPLICITLY on every configure, including the ones
+# left off. CMake caches option() values, and these build directories are not
+# deleted between runs, so an inherited cache would otherwise decide what
+# ships — which has already produced one silently wrong A/B measurement, where
+# a run intended as CPU-only was still Metal.
 #
 # Each slice's Headers also carries the kernel dialect under clay/kernel/, so
 # an app drawing its own GPU preview compiles ClayCore's distance functions
@@ -47,16 +59,31 @@ build_slice() {
         -DCLAY_BUILD_TESTS=OFF \
         -DCLAY_BUILD_BENCHMARKS=OFF \
         -DCLAY_BACKEND_METAL=ON \
+        -DCLAY_BACKEND_CUDA=OFF \
+        -DCLAY_BACKEND_OPENCL=OFF \
+        -DCLAY_BACKEND_VULKAN=OFF \
         -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
         "$@" > /dev/null
     cmake --build "$build_dir" --target claycore -j > /dev/null
 
-    # A metallib built for the wrong platform links fine, ships fine, and then
-    # fails to load on the device — where it is indistinguishable from a
-    # backend that was never enabled. The platform is recorded in the file, so
-    # check it here rather than discovering it on an iPad.
+    # Three checks, because there are three separate ways a slice ships
+    # without a usable Metal backend and each looks fine to the other two.
+    #
+    # 1. The metallib is embedded, so an empty or missing one is a CPU-only
+    #    slice that still links and still passes a build.
+    local metallib="$build_dir/clay_kernels.metallib"
+    if [[ ! -s "$metallib" ]]; then
+        echo "no Metal library was built for slice $name ($metallib)" >&2
+        exit 1
+    fi
+
+    # 2. And it must be for THIS slice's platform. AIR built for the wrong one
+    #    links fine, ships fine, and then fails to load on the device — where
+    #    it is indistinguishable from a backend that was never enabled. The
+    #    platform is recorded in the file, so check it here rather than
+    #    discovering it on an iPad.
     local got
-    got=$(xcrun metal-readobj --file-headers "$build_dir/clay_kernels.metallib" \
+    got=$(xcrun metal-readobj --file-headers "$metallib" \
           | awk '/Platform:/ {print $2}')
     if [ "$got" != "$expect_platform" ]; then
         echo "slice $name: metallib is $got, expected $expect_platform" >&2
@@ -67,7 +94,15 @@ build_slice() {
     libtool -static -o "$STAGE/libclaycore-$name.a" \
         "$build_dir/libclaycore.a" \
         "$build_dir/_deps/meshoptimizer-build/libmeshoptimizer.a"
-    echo "built slice: $name ($got)"
+    # 3. And the MERGED archive still carries it. This is the device-
+    #    independent one: the Swift smoke asserts the backend REGISTERS, which
+    #    needs a Metal device present, while this asserts the artifact SHIPS
+    #    it, which is what the build controls and what was actually wrong.
+    if ! nm "$STAGE/libclaycore-$name.a" 2>/dev/null | grep -q "clay_metallib"; then
+        echo "slice $name has no embedded Metal library — it would ship CPU-only" >&2
+        exit 1
+    fi
+    echo "built slice: $name ($got, $(wc -c < "$metallib" | tr -d ' ') bytes)"
 }
 
 # Without an explicit deployment target the macOS slice inherits the host's

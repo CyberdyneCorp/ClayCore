@@ -67,8 +67,9 @@ run_macos() {
   local dir="$work/macos"
   make_module_dir "$slice" "$dir"
   echo "== macOS =="
-  # Metal: every slice now bundles the Metal backend, and a static library
-  # carries no record of the frameworks its objects reference.
+  # Metal as well as Foundation: every slice carries the Metal backend, and a
+  # static library records none of the frameworks its objects reference, so the
+  # archive has undefined Metal symbols without it.
   swiftc -O -I "$dir" -o "$dir/smoke" tests/swift/smoke.swift "$lib" -lc++ \
     -framework Foundation -framework Metal
   "$dir/smoke"

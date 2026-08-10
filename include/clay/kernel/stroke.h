@@ -22,6 +22,13 @@ struct CStrokePoint {
 // blend_k > 0 smooth-unions consecutive results (quadratic profile).
 // *out_seg / *out_t identify the closest segment and the projection
 // parameter along it, for color/radius attribution.
+//
+// Not compiled for Vulkan: it takes an ARRAY OF STRUCTS, which a GLSL cursor
+// into a flat float buffer cannot express. Nothing reaches it from a tape —
+// a stroke item stores raw floats and evaluates through ctape_stroke_dist —
+// so excluding it costs the shader nothing. If a caller ever appears, it
+// gets the same treatment as ctape_stroke_dist rather than an exception.
+#if !defined(CLAY_KERNEL_VULKAN)
 CLAY_FN float sd_stroke(CLAY_DEVICE const CStrokePoint* pts, int count, cfloat3 p, float blend_k,
                         CLAY_THREAD int* out_seg, CLAY_THREAD float* out_t) {
     *out_seg = 0;
@@ -51,5 +58,6 @@ CLAY_FN float sd_stroke(CLAY_DEVICE const CStrokePoint* pts, int count, cfloat3 
     }
     return d;
 }
+#endif  // !CLAY_KERNEL_VULKAN
 
 CLAY_NS_END

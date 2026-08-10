@@ -116,7 +116,8 @@ halves a preview `raycast_many`. Batches below the caller's minimum chunk size
 are untouched, so a single pick or a small brush batch still runs inline.
 | **Metal** | `metal-cpp` (pure C++, no ObjC in core) | headers compiled as MSL; argument buffers for tapes | tier-1: the iPad app |
 | **CUDA** | CUDA runtime or NVRTC JIT | same headers under `__device__` | tier-2: desktop/pipeline/ML workloads |
-| **OpenCL** | OpenCL 3.0 | kernel headers constrained to the C-compatible subset (macro-mapped to OpenCL C) | tier-3, best-effort; Vulkan compute is the likely long-term replacement and slots into the same backend interface |
+| **OpenCL** | OpenCL 3.0 | kernel headers constrained to the C-compatible subset (macro-mapped to OpenCL C) | tier-3, best-effort; the Vulkan backend below is its long-term replacement, and slots into the same interface |
+| **Vulkan** | Vulkan 1.1, no optional features | same headers as GLSL: buffer cursors are indices into a storage buffer (`CLAY_AT`), casts are functional, enums become `const int` when the shader is generated | tier-3; `eval_points` + `eval_grid`, raycast `Unsupported`. **Not an Apple path** — there it is MoltenVK over Metal, which cannot beat the Metal backend it translates into |
 
 Backend interface (`clay::eval::Backend`), identical everywhere:
 

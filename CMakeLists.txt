@@ -18,6 +18,7 @@ option(CLAY_BUILD_PYTHON    "Build the pyclay nanobind module"            OFF)
 option(CLAY_BACKEND_METAL   "Build the Metal backend (Apple platforms)"   OFF)
 option(CLAY_BACKEND_CUDA    "Build the CUDA backend"                      OFF)
 option(CLAY_BACKEND_OPENCL  "Build the OpenCL backend"                    OFF)
+option(CLAY_BACKEND_VULKAN  "Build the Vulkan compute backend"            OFF)
 option(CLAY_FETCH_ALL_DEPS  "Fetch every third-party dependency (CI pin validation)" OFF)
 set(CLAY_SANITIZE "" CACHE STRING "Comma-separated sanitizers, e.g. address,undefined (Clang/GCC only)")
 
@@ -101,14 +102,17 @@ if(CLAY_BACKEND_METAL AND APPLE)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   find_program(XCRUN xcrun REQUIRED)
 
-  # The metallib compiled here is EMBEDDED into the library by embed_binary.py
-  # and handed to the Metal runtime at load (backends/metal/metal_backend.cpp).
-  # AIR carries the platform it was built for, so a metallib built against the
-  # HOST sdk loads on no other platform — and that failure surfaces as a
-  # backend which never registers, indistinguishable at the ABI from one that
-  # was never enabled. Derive the SDK from the TARGET so the wrong combination
-  # cannot be expressed, and refuse a target with no known SDK rather than
-  # guessing one.
+  # A metallib is PLATFORM-SPECIFIC: one built for macOS does not load on iOS.
+  # It is EMBEDDED into the library by embed_binary.py and handed to the Metal
+  # runtime at load (backends/metal/metal_backend.cpp), so hardcoding
+  # `-sdk macosx` was survivable only while the Metal backend was never in an
+  # iOS build. The moment the xcframework enables it, a macOS metallib lands
+  # inside the iOS slices, newLibrary rejects it at runtime,
+  # MetalBackend::create() returns nullptr, and the backend silently does not
+  # register — indistinguishable at the ABI from one that was never enabled.
+  #
+  # So derive the SDK from the TARGET, and refuse a target with no known SDK
+  # rather than guessing one.
   if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
       set(CLAY_METAL_SDK iphonesimulator)
@@ -143,6 +147,7 @@ if(CLAY_BACKEND_METAL AND APPLE)
   set(CLAY_METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/clay_kernels.air)
   set(CLAY_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/clay_kernels.metallib)
   set(CLAY_METALLIB_C ${CMAKE_CURRENT_BINARY_DIR}/clay_metallib_embedded.cpp)
+
   add_custom_command(OUTPUT ${CLAY_METAL_AIR}
     COMMAND ${XCRUN} -sdk ${CLAY_METAL_SDK} metal -c
             ${CMAKE_CURRENT_SOURCE_DIR}/backends/metal/clay_kernels.metal
@@ -152,7 +157,7 @@ if(CLAY_BACKEND_METAL AND APPLE)
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/backends/metal/clay_kernels.metal
             ${CMAKE_CURRENT_SOURCE_DIR}/backends/metal/metal_shared.h
             ${CLAY_KERNEL_HEADERS}
-    COMMENT "Compiling claycore kernels to MSL (${CLAY_METAL_SDK}, single-source)")
+    COMMENT "Compiling claycore kernels to MSL for ${CLAY_METAL_SDK} (single-source)")
   add_custom_command(OUTPUT ${CLAY_METALLIB}
     COMMAND ${XCRUN} -sdk ${CLAY_METAL_SDK} metallib ${CLAY_METAL_AIR}
             -o ${CLAY_METALLIB}
@@ -254,6 +259,64 @@ if(CLAY_BACKEND_OPENCL)
     set_source_files_properties(backends/opencl/opencl_backend.cpp PROPERTIES
       COMPILE_OPTIONS "-Wno-deprecated-declarations")
   endif()
+endif()
+
+# -- Vulkan compute backend (tier 3) -----------------------------------------
+#
+# The shader is GENERATED from the kernel headers and compiled at build time:
+# nothing SPIR-V is committed, so a kernel change cannot leave a stale binary
+# behind claiming to be it.
+if(CLAY_BACKEND_VULKAN)
+  find_package(Vulkan REQUIRED)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+  # A system glslang if there is one, the pinned source build otherwise, so a
+  # machine without a Vulkan SDK still builds this backend.
+  if(NOT CLAY_GLSLANG)
+    find_program(CLAY_GLSLANG NAMES glslang glslangValidator)
+  endif()
+  if(NOT CLAY_GLSLANG)
+    message(STATUS "claycore: no glslang found, building the pinned one")
+    set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
+    set(GLSLANG_TESTS OFF CACHE BOOL "" FORCE)
+    set(BUILD_EXTERNAL OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(glslang)
+    set(CLAY_GLSLANG $<TARGET_FILE:glslang-standalone>)
+  endif()
+
+  file(GLOB CLAY_KERNEL_HEADERS_GLSL ${CMAKE_CURRENT_SOURCE_DIR}/include/clay/kernel/*.h)
+  set(CLAY_COMP ${CMAKE_CURRENT_BINARY_DIR}/clay_kernels.comp)
+  add_custom_command(OUTPUT ${CLAY_COMP}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate_glsl.py
+            clay/kernel/tape.h ${CLAY_COMP}
+            ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/clay_kernels.comp.in
+    DEPENDS ${CLAY_KERNEL_HEADERS_GLSL}
+            ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/clay_kernels.comp.in
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate_glsl.py
+    COMMENT "Amalgamating claycore kernels for Vulkan (single-source)")
+
+  # One source, two modules: a SPIR-V module has one entry point, and a
+  # runtime branch on the mode would cost every invocation.
+  set(CLAY_SPV_EMBED "")
+  foreach(entry points grid)
+    string(TOUPPER ${entry} ENTRY_UPPER)
+    set(spv ${CMAKE_CURRENT_BINARY_DIR}/clay_kernels_${entry}.spv)
+    set(embed ${CMAKE_CURRENT_BINARY_DIR}/clay_spv_${entry}_embedded.cpp)
+    add_custom_command(OUTPUT ${spv}
+      COMMAND ${CLAY_GLSLANG} -V --target-env vulkan1.1 -S comp
+              -DCLAY_ENTRY_${ENTRY_UPPER} -o ${spv} ${CLAY_COMP}
+      DEPENDS ${CLAY_COMP}
+      COMMENT "Compiling claycore ${entry} shader to SPIR-V")
+    add_custom_command(OUTPUT ${embed}
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_binary.py
+              ${spv} ${embed} clay_spv_${entry}
+      DEPENDS ${spv} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_binary.py)
+    list(APPEND CLAY_SPV_EMBED ${embed})
+  endforeach()
+
+  target_sources(claycore PRIVATE backends/vulkan/vulkan_backend.cpp ${CLAY_SPV_EMBED})
+  target_compile_definitions(claycore PRIVATE CLAY_HAS_VULKAN=1)
+  target_link_libraries(claycore PRIVATE Vulkan::Vulkan)
 endif()
 
 # -- clay-cli ----------------------------------------------------------------

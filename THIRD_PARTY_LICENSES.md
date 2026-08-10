@@ -14,6 +14,11 @@ row here; `tools/check_licenses.py` enforces both directions in CI.
 | ufbx | v0.23.0 | MIT | https://github.com/ufbx/ufbx |
 | metalcpp | macOS15.2_iOS18.2 | Apache-2.0 | https://developer.apple.com/metal/cpp/ |
 | nanobind | v2.13.0 | BSD-3-Clause | https://github.com/wjakob/nanobind |
+| glslang | 16.5.0 | BSD-3-Clause | https://github.com/KhronosGroup/glslang |
+
+glslang is a BUILD-TIME tool (GLSL to SPIR-V for the Vulkan backend), never
+linked into the shipping library, and fetched only when that backend is
+enabled and no glslang is already installed.
 
 Planned (added when their consuming module lands, per the same policy):
 cgltf or tinyply (MIT, glTF/PLY). assimp is used in CI only as an

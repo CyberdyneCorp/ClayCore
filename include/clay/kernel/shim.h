@@ -11,14 +11,18 @@
 //   CLAY_KERNEL_METAL   compiled as MSL
 //   CLAY_KERNEL_CUDA    compiled as CUDA device code
 //   CLAY_KERNEL_OPENCL  compiled as OpenCL C-compatible subset
+//   CLAY_KERNEL_VULKAN  compiled as Vulkan GLSL (tools/amalgamate_glsl.py)
 //
 // An explicit definition always wins. Absent one, the compiler's own identity
 // picks the branch, so a host that drops these headers into a .metal file and
 // includes them gets MSL with no build settings at all — which is the whole
-// point of publishing them (see docs/06-host-gpu-previews.md).
+// point of publishing them (see docs/06-host-gpu-previews.md). GLSL has no
+// identity macro worth keying on, so the Vulkan branch is only ever selected
+// explicitly, by the generator that emits the shader.
 
-#if !defined(CLAY_KERNEL_CPU) && !defined(CLAY_KERNEL_METAL) && \
-    !defined(CLAY_KERNEL_CUDA) && !defined(CLAY_KERNEL_OPENCL)
+#if !defined(CLAY_KERNEL_CPU) && !defined(CLAY_KERNEL_METAL) &&    \
+    !defined(CLAY_KERNEL_CUDA) && !defined(CLAY_KERNEL_OPENCL) &&  \
+    !defined(CLAY_KERNEL_VULKAN)
 #if defined(__METAL_VERSION__)
 #define CLAY_KERNEL_METAL 1
 #elif defined(__OPENCL_VERSION__) || defined(__OPENCL_C_VERSION__)
@@ -222,13 +226,137 @@ typedef float4 cfloat4;
 #define cnormalize(v) normalize(v)
 #define ccross(a, b) cross(a, b)
 
+#elif defined(CLAY_KERNEL_VULKAN)
+
+// Vulkan GLSL. Closer to OpenCL C than to C++ — no namespaces, no
+// overloading, no references — but with three differences that matter and
+// are handled here rather than at every call site:
+//
+//   1. No pointers. Buffer cursors are indices into the shader's storage
+//      buffers, which is what CLAY_FPTR/CLAY_AT/CLAY_OFF exist for. The
+//      generator (tools/amalgamate_glsl.py) emits the buffer declarations
+//      these names refer to ahead of the headers.
+//   2. Casts are functional, not prefix: int(x), not (int)x.
+//   3. Three builtins that look like their C counterparts are NOT them, and
+//      silently disagree on negative inputs. They are written out below
+//      rather than mapped, because a parity failure that only appears for
+//      negative operands is the kind that ships.
+
+#define CLAY_FN
+#define CLAY_THREAD
+#define CLAY_DEVICE
+#define CLAY_NS_BEGIN
+#define CLAY_NS_END
+
+#define cuint uint  // see the CPU branch for why the dialect has one
+
+#define cfloat2 vec2
+#define cfloat3 vec3
+#define cfloat4 vec4
+
+#define cf2(x, y) vec2(float(x), float(y))
+#define cf3(x, y, z) vec3(float(x), float(y), float(z))
+#define cf4(x, y, z, w) vec4(float(x), float(y), float(z), float(w))
+
+#define cmin(a, b) min(a, b)
+#define cmax(a, b) max(a, b)
+#define cclamp(v, lo, hi) clamp(v, lo, hi)
+#define cabs(v) abs(v)
+#define csign(v) sign(v)
+#define cfloor(v) floor(v)
+#define csqrt(v) sqrt(v)
+#define csin(v) sin(v)
+#define ccos(v) cos(v)
+#define ctan(v) tan(v)
+#define cacos(v) acos(v)
+#define catan2(y, x) atan(y, x)
+#define cpow(b, e) pow(b, e)
+#define cexp2(v) exp2(v)
+#define cdot(a, b) dot(a, b)
+#define cdot2(v) dot(v, v)
+#define clength(v) length(v)
+#define cnormalize(v) normalize(v)
+#define ccross(a, b) cross(a, b)
+
+// GLSL's round() breaks ties in an implementation-defined direction; C's
+// roundf breaks them away from zero. An implementation-defined tie is a
+// cross-backend disagreement waiting for the first coordinate that lands on
+// a half, so the tie is fixed here.
+float clay_round(float v) { return sign(v) * floor(abs(v) + 0.5); }
+vec2 clay_round(vec2 v) { return vec2(clay_round(v.x), clay_round(v.y)); }
+vec3 clay_round(vec3 v) {
+    return vec3(clay_round(v.x), clay_round(v.y), clay_round(v.z));
+}
+#define cround(v) clay_round(v)
+
+// GLSL's mod() is x - y*floor(x/y), which takes the sign of the DIVISOR.
+// C's fmod truncates toward zero and takes the sign of the dividend. Every
+// other backend maps to a C-style fmod, so this one must too.
+float clay_fmod(float a, float b) { return a - b * trunc(a / b); }
+#define cfmod(a, b) clay_fmod(a, b)
+
+// Written out rather than mapped to mix(): the shared C++ layer computes
+// a + (b - a) * t, and GLSL's mix is specified as x*(1-a) + y*a. The two
+// round differently, and this one is on the transition path where a tape
+// carries the result forward.
+#define cmix(a, b, t) ((a) + ((b) - (a)) * (t))
+
 #else
 #error "claycore kernel shim: this backend mapping is not implemented yet"
 #endif
 
+// -- buffer cursors ---------------------------------------------------------
+//
+// Every backend but Vulkan has pointers, so a cursor into the tape's float
+// pool is a `const float*` and reading it is p[i]. GLSL has neither, so a
+// cursor is an INDEX into a storage buffer and reading it goes through the
+// buffer. These macros are what let one source say it both ways.
+//
+// The C-family definitions expand to exactly the text they replaced, so the
+// four backends that already worked cannot have moved: the preprocessed
+// token stream is unchanged (tools/check_kernel_tokens.py).
+
+#if defined(CLAY_KERNEL_VULKAN)
+
+#define CLAY_FPTR uint
+#define CLAY_AT(p, i) clay_floats_[(p) + uint(i)]
+#define CLAY_OFF(p, n) ((p) + uint(n))
+#define CLAY_IPTR uint
+#define CLAY_INSTR_OP(p, i) clay_instrs_[((p) + uint(i)) * 2u]
+#define CLAY_INSTR_PARAM(p, i) clay_instrs_[((p) + uint(i)) * 2u + 1u]
+#define CLAY_UINT_T uint
+#define CLAY_INT(x) int(x)
+#define CLAY_UINT(x) uint(x)
+#define CLAY_FLOATC(x) float(x)
+#define CLAY_OUT(T) out T
+#define CLAY_SET(p, v) p = v
+#define CLAY_OUTARG(x) x
+
+#else
+
+#define CLAY_FPTR CLAY_DEVICE const float*
+#define CLAY_AT(p, i) p[i]
+// Deliberately unparenthesised: the expansion has to be token-identical to
+// the pointer arithmetic it replaced. Every use is an argument or an
+// initialiser, never a subexpression that could rebind.
+#define CLAY_OFF(p, n) p + n
+#define CLAY_IPTR CLAY_DEVICE const CTapeInstr*
+#define CLAY_INSTR_OP(p, i) p[i].op
+#define CLAY_INSTR_PARAM(p, i) p[i].param_offset
+#define CLAY_UINT_T unsigned int
+#define CLAY_INT(x) (int)x
+#define CLAY_UINT(x) (cuint)x
+#define CLAY_FLOATC(x) (float)x
+#define CLAY_OUT(T) CLAY_THREAD T*
+#define CLAY_SET(p, v) *p = v
+#define CLAY_OUTARG(x) &x
+
+#endif
+
 // -- shared vector/matrix layer (built on the per-backend types above) -------
 
-#if !defined(CLAY_KERNEL_OPENCL)  // OpenCL gets these from its builtins
+#if !defined(CLAY_KERNEL_OPENCL) && \
+    !defined(CLAY_KERNEL_VULKAN)  // OpenCL and GLSL get these from their builtins
 
 CLAY_NS_BEGIN
 
@@ -267,7 +395,7 @@ CLAY_FN cfloat3 cmix(cfloat3 a, cfloat3 b, float t) { return a + (b - a) * t; }
 
 CLAY_NS_END
 
-#endif  // !CLAY_KERNEL_OPENCL
+#endif  // !CLAY_KERNEL_OPENCL && !CLAY_KERNEL_VULKAN
 
 // -- matrices: no overloads, so every backend shares these ------------------
 

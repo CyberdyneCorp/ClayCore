@@ -153,6 +153,9 @@ std::unique_ptr<Backend> create_cuda_backend();  // backends/cuda
 #if defined(CLAY_HAS_OPENCL)
 std::unique_ptr<Backend> create_opencl_backend();  // backends/opencl
 #endif
+#if defined(CLAY_HAS_VULKAN)
+std::unique_ptr<Backend> create_vulkan_backend();  // backends/vulkan
+#endif
 
 Registry::Registry() {
     backends_.push_back(std::make_unique<CpuBackend>());
@@ -164,6 +167,9 @@ Registry::Registry() {
 #endif
 #if defined(CLAY_HAS_OPENCL)
     if (auto opencl = create_opencl_backend()) backends_.push_back(std::move(opencl));
+#endif
+#if defined(CLAY_HAS_VULKAN)
+    if (auto vulkan = create_vulkan_backend()) backends_.push_back(std::move(vulkan));
 #endif
 }
 

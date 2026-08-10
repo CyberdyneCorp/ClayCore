@@ -1,16 +1,30 @@
 """Run every example and regenerate the committed gallery.
 
-    python examples/run_all.py
+    python examples/run_all.py            # one process per core
+    python examples/run_all.py --jobs 1   # serial, for debugging one example
 
-Each example is run in-process. A failure in any one is fatal, which is what
-makes the CI job meaningful: an API change that breaks an example breaks the
-build, the gate the hand-written docs snippets never had.
+A failure in any one is fatal, which is what makes the CI job meaningful: an
+API change that breaks an example breaks the build, the gate the hand-written
+docs snippets never had.
+
+Examples run in SEPARATE PROCESSES, and the reason is measurement rather than
+taste: this job took ~70 minutes of wall clock on a two-core CI runner while
+every other job in the workflow finished inside 16, because 43 examples that
+each CPU-raytrace their images were being run one after another in a single
+process. They are independent — each writes and reads only its own files —
+so the only thing the serial loop bought was ordered output, which is
+recovered here by buffering each example's stdout and printing it in list
+order once it finishes.
 """
 
+import argparse
+import contextlib
 import importlib
+import io
 import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -110,7 +124,71 @@ def check_capability_coverage():
     return problems
 
 
+def check_fast_scaling():
+    """Every render entry point must honour CLAY_EXAMPLES_FAST.
+
+    This is a gate rather than a convention because the omission has already
+    happened once: when fast mode was added, `render_array` and `render_tile`
+    scaled and `render_voxels_array` did not, so 00_hero composited a 150px
+    image beside a 300px one and failed. It was caught by that example's own
+    assertion, which is luck — an example that renders a lone unscaled image
+    would have gone on quietly costing CI the time fast mode exists to save.
+
+    Structural, not behavioural: an entry point passes if it scales its own
+    dimensions, or if it delegates to one that does. That is cheap enough to
+    run every time and cannot be defeated by a render being slow or absent.
+    """
+    import inspect
+
+    import _render
+
+    entries = {name: fn for name, fn in vars(_render).items()
+               if name.startswith("render") and inspect.isfunction(fn)}
+    sources = {name: inspect.getsource(fn) for name, fn in entries.items()}
+
+    def scales(name, seen):
+        if name in seen:            # a delegation cycle scales nothing
+            return False
+        seen.add(name)
+        src = sources[name]
+        if "_fast_pixels(" in src or "_fast_ao(" in src:
+            return True
+        return any(other != name and f"{other}(" in src and scales(other, seen)
+                   for other in entries)
+
+    missing = sorted(name for name in entries if not scales(name, set()))
+    if not missing:
+        return []
+    return [f"render entry points ignore CLAY_EXAMPLES_FAST: {missing} — scale their "
+            f"dimensions through _fast_pixels/_fast_ao, or delegate to one that does"]
+
+
+def run_one(name):
+    """Run one example in this process, returning (name, output, error).
+
+    Its stdout is captured rather than left to interleave with every other
+    worker's: the report below prints it in list order, so parallel output
+    reads exactly like the serial run it replaced.
+    """
+    sys.path.insert(0, HERE)
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            module = importlib.import_module(name)
+            module.main()
+    except SystemExit as exc:            # examples raise SystemExit on a gap
+        return name, buffer.getvalue(), str(exc)
+    except Exception as exc:             # noqa: BLE001 - report, keep going
+        return name, buffer.getvalue(), f"{type(exc).__name__}: {exc}"
+    return name, buffer.getvalue(), None
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--jobs", "-j", type=int, default=0,
+                        help="worker processes; 0 picks one per core, 1 runs serially")
+    args = parser.parse_args()
+
     sys.path.insert(0, HERE)
 
     try:
@@ -123,7 +201,7 @@ def main():
               file=sys.stderr)
         return 1
 
-    coverage = check_capability_coverage()
+    coverage = check_capability_coverage() + check_fast_scaling()
     if coverage:
         for problem in coverage:
             print(f"  {problem}", file=sys.stderr)
@@ -132,18 +210,26 @@ def main():
     print(f"capability coverage: {shown} shown by an example, "
           f"{len(CAPABILITY_EXAMPLES) - shown} recorded as unshowable")
 
+    jobs = args.jobs or (os.cpu_count() or 1)
     failures = []
     started = time.time()
-    for name in EXAMPLES:
-        try:
-            module = importlib.import_module(name)
-            module.main()
-        except SystemExit as exc:            # examples raise SystemExit on a gap
-            failures.append((name, str(exc)))
-            print(f"  FAILED: {exc}", file=sys.stderr)
-        except Exception as exc:             # noqa: BLE001 - report, keep going
-            failures.append((name, f"{type(exc).__name__}: {exc}"))
-            print(f"  FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+    if jobs == 1:
+        results = [run_one(name) for name in EXAMPLES]
+    else:
+        # Each example holds its own grids and images, so peak memory scales
+        # with the worker count. Capped rather than unbounded for that reason.
+        jobs = min(jobs, len(EXAMPLES), 8)
+        print(f"running {len(EXAMPLES)} examples across {jobs} processes")
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            results = list(pool.map(run_one, EXAMPLES))
+
+    for name, output, error in results:  # list order, not completion order
+        if output:
+            print(output, end="")
+        if error is not None:
+            failures.append((name, error))
+            print(f"  FAILED [{name}]: {error}", file=sys.stderr)
 
     elapsed = time.time() - started
     print(f"\n{len(EXAMPLES) - len(failures)}/{len(EXAMPLES)} examples "

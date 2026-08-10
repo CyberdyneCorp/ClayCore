@@ -21,13 +21,16 @@ let package = Package(
     ],
     targets: [
         .binaryTarget(name: "claycoreBinary", path: "dist/claycore.xcframework"),
-        // Every xcframework slice bundles the Metal backend, and a
-        // static-library xcframework records no dependency on the frameworks
-        // its objects reference. This target holds that knowledge so a
-        // consumer does not have to: depend on it and Metal comes linked.
-        // The C API is still `import claycore`, from the module map inside
-        // the xcframework — this target adds no module of its own worth
-        // importing.
+        // Metal and Foundation are what the Metal backend inside the archive
+        // needs, and a binaryTarget cannot carry linker settings. Declaring
+        // them on the smoke executable alone would fix `swift build` here and
+        // leave every consuming app to discover the undefined symbols for
+        // itself, so they live on a target the PRODUCT vends instead: depend
+        // on `claycore` and the frameworks come with it.
+        //
+        // ClayCoreLink carries no code, only that knowledge. The C API is
+        // still `import claycore`, from the module map inside the xcframework
+        // — this target adds no module of its own worth importing.
         .target(name: "ClayCoreLink", dependencies: ["claycoreBinary"],
                 path: "bindings/swift/ClayCoreLink",
                 linkerSettings: [

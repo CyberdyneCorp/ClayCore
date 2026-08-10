@@ -165,8 +165,8 @@ enum CBlendProfile {
 // typedef form: the OpenCL backend compiles these headers as C99, where a
 // bare struct tag is not a type name.
 typedef struct CTapeInstrT {
-    unsigned int op;
-    unsigned int param_offset;
+    CLAY_UINT_T op;
+    CLAY_UINT_T param_offset;
 } CTapeInstr;
 
 typedef struct CTapeValueT {
@@ -196,21 +196,21 @@ enum CRepeatType {
 // Map the local point into its repetition cell. Radial arrays need the O(2)
 // neighbour evaluation, so the caller evaluates twice: pass sector = 0 and
 // then sector = crep_radial_neighbor(...).
-CLAY_FN cfloat3 ctape_repeat_point(CLAY_DEVICE const float* rec, cfloat3 p, int sector) {
-    int type = (int)rec[0];
-    if (type == crepeat_grid_infinite) return crep_inf_point(p, cf3(rec[1], rec[2], rec[3]));
+CLAY_FN cfloat3 ctape_repeat_point(CLAY_FPTR rec, cfloat3 p, int sector) {
+    int type = CLAY_INT(CLAY_AT(rec, 0));
+    if (type == crepeat_grid_infinite) return crep_inf_point(p, cf3(CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3)));
     if (type == crepeat_grid_finite)
-        return crep_lim_point(p, rec[1], cf3(rec[4], rec[5], rec[6]));
-    if (type == crepeat_radial) return crep_radial_point(p, (int)rec[1], sector);
+        return crep_lim_point(p, CLAY_AT(rec, 1), cf3(CLAY_AT(rec, 4), CLAY_AT(rec, 5), CLAY_AT(rec, 6)));
+    if (type == crepeat_radial) return crep_radial_point(p, CLAY_INT(CLAY_AT(rec, 1)), sector);
     return p;
 }
 
-CLAY_FN bool ctape_repeat_is_radial(CLAY_DEVICE const float* rec) {
-    return (int)rec[0] == crepeat_radial;
+CLAY_FN bool ctape_repeat_is_radial(CLAY_FPTR rec) {
+    return CLAY_INT(CLAY_AT(rec, 0)) == crepeat_radial;
 }
 
-CLAY_FN bool ctape_repeat_active(CLAY_DEVICE const float* rec) {
-    return (int)rec[0] != crepeat_none;
+CLAY_FN bool ctape_repeat_active(CLAY_FPTR rec) {
+    return CLAY_INT(CLAY_AT(rec, 0)) != crepeat_none;
 }
 
 // Domain warps an item can carry (deform.h). Values are serialization-stable.
@@ -239,10 +239,10 @@ enum CDeformType {
 // Apply one deformer record to the local point. No deformer corrects the
 // distance: safety is carried by the tape's tracked Lipschitz factor, which
 // also keeps influence bounds tight (see the taper note below).
-CLAY_FN cfloat3 ctape_deform_point(CLAY_DEVICE const float* rec, cfloat3 p) {
-    int type = (int)rec[0];
-    if (type == cdeform_twist) return ctwist_point(p, rec[1]);
-    if (type == cdeform_bend) return cbend_point(p, rec[1]);
+CLAY_FN cfloat3 ctape_deform_point(CLAY_FPTR rec, cfloat3 p) {
+    int type = CLAY_INT(CLAY_AT(rec, 0));
+    if (type == cdeform_twist) return ctwist_point(p, CLAY_AT(rec, 1));
+    if (type == cdeform_bend) return cbend_point(p, CLAY_AT(rec, 1));
     if (type == cdeform_taper) {
         // NOTE: deliberately no ctaper_dist here. Multiplying the distance by
         // min(s,1) would keep the field conservative on its own, but it also
@@ -251,60 +251,60 @@ CLAY_FN cfloat3 ctape_deform_point(CLAY_DEVICE const float* rec, cfloat3 p) {
         // brick culling trusts. Instead the taper behaves like twist and bend:
         // the raw warped field, with safety carried by the tape's tracked
         // Lipschitz factor (cfi_taper includes the 1/s_min stretch).
-        return ctaper_point(p, rec[1], rec[2], rec[3], rec[4], (int)rec[5]);
+        return ctaper_point(p, CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3), CLAY_AT(rec, 4), CLAY_INT(CLAY_AT(rec, 5)));
     }
-    if (type == cdeform_wrap) return cwrap_around_point(p, rec[1], rec[2]);
+    if (type == cdeform_wrap) return cwrap_around_point(p, CLAY_AT(rec, 1), CLAY_AT(rec, 2));
     if (type == cdeform_bend_linear) {
-        return cbend_linear_point(p, cf3(rec[1], rec[2], rec[3]),
-                                  cf3(rec[4], rec[6], rec[7]),
-                                  cf3(rec[8], rec[9], rec[10]), (int)rec[5]);
+        return cbend_linear_point(p, cf3(CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3)),
+                                  cf3(CLAY_AT(rec, 4), CLAY_AT(rec, 6), CLAY_AT(rec, 7)),
+                                  cf3(CLAY_AT(rec, 8), CLAY_AT(rec, 9), CLAY_AT(rec, 10)), CLAY_INT(CLAY_AT(rec, 5)));
     }
     if (type == cdeform_bend_radial) {
-        return cbend_radial_point(p, rec[1], rec[2], rec[3], (int)rec[5]);
+        return cbend_radial_point(p, CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3), CLAY_INT(CLAY_AT(rec, 5)));
     }
     if (type == cdeform_grab) {
-        return cgrab_point(p, cf3(rec[1], rec[2], rec[3]), rec[4],
-                           cf3(rec[6], rec[7], rec[8]), rec[9], (int)rec[5]);
+        return cgrab_point(p, cf3(CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3)), CLAY_AT(rec, 4),
+                           cf3(CLAY_AT(rec, 6), CLAY_AT(rec, 7), CLAY_AT(rec, 8)), CLAY_AT(rec, 9), CLAY_INT(CLAY_AT(rec, 5)));
     }
     if (type == cdeform_pose_line) {
-        return cpose_line_point(p, cf3(rec[1], rec[2], rec[3]), cf3(rec[4], rec[6], rec[7]),
-                                cf3(rec[8], rec[9], rec[10]), rec[11], (int)rec[5]);
+        return cpose_line_point(p, cf3(CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3)), cf3(CLAY_AT(rec, 4), CLAY_AT(rec, 6), CLAY_AT(rec, 7)),
+                                cf3(CLAY_AT(rec, 8), CLAY_AT(rec, 9), CLAY_AT(rec, 10)), CLAY_AT(rec, 11), CLAY_INT(CLAY_AT(rec, 5)));
     }
     if (type == cdeform_pose) {
-        return cpose_point(p, cf3(rec[1], rec[2], rec[3]), rec[4],
-                           cf3(rec[6], rec[7], rec[8]), rec[9], (int)rec[5]);
+        return cpose_point(p, cf3(CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3)), CLAY_AT(rec, 4),
+                           cf3(CLAY_AT(rec, 6), CLAY_AT(rec, 7), CLAY_AT(rec, 8)), CLAY_AT(rec, 9), CLAY_INT(CLAY_AT(rec, 5)));
     }
     if (type == cdeform_magnify) {
-        return cmagnify_point(p, cf3(rec[1], rec[2], rec[3]), rec[4], rec[6], (int)rec[5]);
+        return cmagnify_point(p, cf3(CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3)), CLAY_AT(rec, 4), CLAY_AT(rec, 6), CLAY_INT(CLAY_AT(rec, 5)));
     }
     if (type == cdeform_elongate_axis)
-        return celongate_axis_point(p, cf3(rec[1], rec[2], rec[3]));
+        return celongate_axis_point(p, cf3(CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3)));
     if (type == cdeform_elongate) {
         // The correction rides ctape_deform_offset, which the chain evaluates
         // at this same pre-warp point — exactly what elongation needs.
         float unused = 0.0f;
-        return celongate_point(p, cf3(rec[1], rec[2], rec[3]), &unused);
+        return celongate_point(p, cf3(CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3)), CLAY_OUTARG(unused));
     }
     return p;  // displace acts on the distance, not the point
 }
 
 // Post-primitive distance contribution of one deformer (0 for point warps).
-CLAY_FN float ctape_deform_offset(CLAY_DEVICE const float* rec, cfloat3 p) {
-    int type = (int)rec[0];
+CLAY_FN float ctape_deform_offset(CLAY_FPTR rec, cfloat3 p) {
+    int type = CLAY_INT(CLAY_AT(rec, 0));
     if (type == cdeform_elongate) {
         float correction = 0.0f;
-        celongate_point(p, cf3(rec[1], rec[2], rec[3]), &correction);
+        celongate_point(p, cf3(CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3)), CLAY_OUTARG(correction));
         return correction;
     }
     if (type == cdeform_noise) {
-        int octaves = (int)rec[3];
+        int octaves = CLAY_INT(CLAY_AT(rec, 3));
         if (octaves < 1) octaves = 1;
         if (octaves > 8) octaves = 8;  // past this the octaves are below a cell
-        return rec[1] * cnoise_fbm(p * rec[2], octaves, rec[4], (cuint)rec[6]);
+        return CLAY_AT(rec, 1) * cnoise_fbm(p * CLAY_AT(rec, 2), octaves, CLAY_AT(rec, 4), CLAY_UINT(CLAY_AT(rec, 6)));
     }
     if (type != cdeform_displace) return 0.0f;
-    float amp = rec[1];
-    float freq = rec[2];
+    float amp = CLAY_AT(rec, 1);
+    float freq = CLAY_AT(rec, 2);
     return amp * csin(freq * p.x) * csin(freq * p.y) * csin(freq * p.z);
 }
 
@@ -363,16 +363,16 @@ CLAY_FN float csweep_link(cfloat3 p, cfloat3 a, cfloat3 b, float ra, float rb) {
     return sd_round_cone_ab(p, a, b, ra, rb);
 }
 
-CLAY_FN float ctape_stroke_dist(CLAY_DEVICE const float* pts, int count, cfloat3 p,
+CLAY_FN float ctape_stroke_dist(CLAY_FPTR pts, int count, cfloat3 p,
                                 float blend_k) {
     if (count <= 0) return CLAY_TAPE_FAR;
-    cfloat3 a0 = cf3(pts[0], pts[1], pts[2]);
-    if (count == 1) return sd_sphere(p - a0, pts[3]);
+    cfloat3 a0 = cf3(CLAY_AT(pts, 0), CLAY_AT(pts, 1), CLAY_AT(pts, 2));
+    if (count == 1) return sd_sphere(p - a0, CLAY_AT(pts, 3));
     float d = CLAY_TAPE_FAR;
     for (int i = 0; i + 1 < count; ++i) {
-        cfloat3 a = cf3(pts[i * 4 + 0], pts[i * 4 + 1], pts[i * 4 + 2]);
-        cfloat3 b = cf3(pts[i * 4 + 4], pts[i * 4 + 5], pts[i * 4 + 6]);
-        float seg = csweep_link(p, a, b, pts[i * 4 + 3], pts[i * 4 + 7]);
+        cfloat3 a = cf3(CLAY_AT(pts, i * 4 + 0), CLAY_AT(pts, i * 4 + 1), CLAY_AT(pts, i * 4 + 2));
+        cfloat3 b = cf3(CLAY_AT(pts, i * 4 + 4), CLAY_AT(pts, i * 4 + 5), CLAY_AT(pts, i * 4 + 6));
+        float seg = csweep_link(p, a, b, CLAY_AT(pts, i * 4 + 3), CLAY_AT(pts, i * 4 + 7));
         d = (blend_k > 0.0f) ? csmin_quadratic(d, seg, blend_k) : cmin(d, seg);
     }
     return d;
@@ -388,16 +388,16 @@ CLAY_FN float ctape_stroke_dist(CLAY_DEVICE const float* pts, int count, cfloat3
 // links meeting at a hip give a different field depending on the order they
 // combine. Fixing the order here is what makes an armature evaluate the same
 // on every backend.
-CLAY_FN float ctape_armature_dist(CLAY_DEVICE const float* nodes,
-                                  CLAY_DEVICE const float* parents, int count, cfloat3 p,
+CLAY_FN float ctape_armature_dist(CLAY_FPTR nodes,
+                                  CLAY_FPTR parents, int count, cfloat3 p,
                                   float blend_k) {
     if (count <= 0) return CLAY_TAPE_FAR;
     float d = CLAY_TAPE_FAR;
     for (int i = 0; i < count; ++i) {
-        int j = (int)parents[i];
+        int j = CLAY_INT(CLAY_AT(parents, i));
         if (j < 0 || j >= count) j = i;
-        cfloat3 a = cf3(nodes[i * 4 + 0], nodes[i * 4 + 1], nodes[i * 4 + 2]);
-        float ra = nodes[i * 4 + 3];
+        cfloat3 a = cf3(CLAY_AT(nodes, i * 4 + 0), CLAY_AT(nodes, i * 4 + 1), CLAY_AT(nodes, i * 4 + 2));
+        float ra = CLAY_AT(nodes, i * 4 + 3);
         float seg;
         if (j == i) {
             // A root. Its sphere is ALREADY inside every link that names it,
@@ -410,14 +410,14 @@ CLAY_FN float ctape_armature_dist(CLAY_DEVICE const float* nodes,
             bool referenced = false;
             for (int k = 0; k < count; ++k) {
                 if (k == i) continue;
-                int pk = (int)parents[k];
+                int pk = CLAY_INT(CLAY_AT(parents, k));
                 if (pk == i) { referenced = true; break; }
             }
             if (referenced) continue;
             seg = sd_sphere(p - a, ra);
         } else {
-            cfloat3 b = cf3(nodes[j * 4 + 0], nodes[j * 4 + 1], nodes[j * 4 + 2]);
-            seg = csweep_link(p, a, b, ra, nodes[j * 4 + 3]);
+            cfloat3 b = cf3(CLAY_AT(nodes, j * 4 + 0), CLAY_AT(nodes, j * 4 + 1), CLAY_AT(nodes, j * 4 + 2));
+            seg = csweep_link(p, a, b, ra, CLAY_AT(nodes, j * 4 + 3));
         }
         d = (blend_k > 0.0f) ? csmin_quadratic(d, seg, blend_k) : cmin(d, seg);
     }
@@ -460,67 +460,67 @@ CLAY_FN float ctape_volume_outside(float inner, float outside) {
 // neighbour, which is what makes the lookup a single array read.
 #define CLAY_BRICK_DIM 8
 
-CLAY_FN float ctape_profile_dist(CLAY_DEVICE const float* prof, CLAY_DEVICE const float* blob,
+CLAY_FN float ctape_profile_dist(CLAY_FPTR prof, CLAY_FPTR blob,
                                  cfloat2 p) {
-    int type = (int)prof[0];
-    if (type == cprofile_circle) return sd_circle2(p, prof[1]);
-    if (type == cprofile_box) return sd_box2(p, cf2(prof[1], prof[2]));
-    if (type == cprofile_hexagon) return sd_hexagon2(p, prof[1]);
-    if (type == cprofile_triangle) return sd_equilateral_triangle2(p, prof[1]);
-    if (type == cprofile_trapezoid) return sd_trapezoid2(p, prof[1], prof[2], prof[3]);
-    if (type == cprofile_vesica) return sd_vesica2(p, prof[1], prof[2]);
+    int type = CLAY_INT(CLAY_AT(prof, 0));
+    if (type == cprofile_circle) return sd_circle2(p, CLAY_AT(prof, 1));
+    if (type == cprofile_box) return sd_box2(p, cf2(CLAY_AT(prof, 1), CLAY_AT(prof, 2)));
+    if (type == cprofile_hexagon) return sd_hexagon2(p, CLAY_AT(prof, 1));
+    if (type == cprofile_triangle) return sd_equilateral_triangle2(p, CLAY_AT(prof, 1));
+    if (type == cprofile_trapezoid) return sd_trapezoid2(p, CLAY_AT(prof, 1), CLAY_AT(prof, 2), CLAY_AT(prof, 3));
+    if (type == cprofile_vesica) return sd_vesica2(p, CLAY_AT(prof, 1), CLAY_AT(prof, 2));
     if (type == cprofile_polygon) {
-        int off = (int)prof[1];
-        int count = (int)prof[2];
+        int off = CLAY_INT(CLAY_AT(prof, 1));
+        int count = CLAY_INT(CLAY_AT(prof, 2));
         if (count < 3) return CLAY_TAPE_FAR;
         // vertices live in the out-of-line pool as consecutive (x, y) pairs;
         // sd_polygon2 walks them without materializing an array
-        return sd_polygon2_raw(blob + off, count, p);
+        return sd_polygon2_raw(CLAY_OFF(blob, off), count, p);
     }
     return CLAY_TAPE_FAR;
 }
 
-CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
-                              CLAY_DEVICE const float* blob, cfloat3 lp) {
+CLAY_FN float ctape_prim_dist(CLAY_UINT_T op, CLAY_FPTR q,
+                              CLAY_FPTR blob, cfloat3 lp) {
     // q points at the prim-specific params (after xform/scale/round/color).
-    if (op == ctape_sphere) return sd_sphere(lp, q[0]);
-    if (op == ctape_box) return sd_box(lp, cf3(q[0], q[1], q[2]));
-    if (op == ctape_round_box) return sd_round_box(lp, cf3(q[0], q[1], q[2]), q[3]);
-    if (op == ctape_box_frame) return sd_box_frame(lp, cf3(q[0], q[1], q[2]), q[3]);
-    if (op == ctape_torus) return sd_torus(lp, q[0], q[1]);
+    if (op == ctape_sphere) return sd_sphere(lp, CLAY_AT(q, 0));
+    if (op == ctape_box) return sd_box(lp, cf3(CLAY_AT(q, 0), CLAY_AT(q, 1), CLAY_AT(q, 2)));
+    if (op == ctape_round_box) return sd_round_box(lp, cf3(CLAY_AT(q, 0), CLAY_AT(q, 1), CLAY_AT(q, 2)), CLAY_AT(q, 3));
+    if (op == ctape_box_frame) return sd_box_frame(lp, cf3(CLAY_AT(q, 0), CLAY_AT(q, 1), CLAY_AT(q, 2)), CLAY_AT(q, 3));
+    if (op == ctape_torus) return sd_torus(lp, CLAY_AT(q, 0), CLAY_AT(q, 1));
     if (op == ctape_capsule)
-        return sd_capsule(lp, cf3(q[0], q[1], q[2]), cf3(q[3], q[4], q[5]), q[6]);
-    if (op == ctape_capped_cylinder) return sd_capped_cylinder(lp, q[0], q[1]);
-    if (op == ctape_rounded_cylinder) return sd_rounded_cylinder(lp, q[0], q[1], q[2]);
-    if (op == ctape_capped_cone) return sd_capped_cone(lp, q[0], q[1], q[2]);
-    if (op == ctape_round_cone) return sd_round_cone(lp, q[0], q[1], q[2]);
-    if (op == ctape_ellipsoid) return sd_ellipsoid_bound(lp, cf3(q[0], q[1], q[2]));
-    if (op == ctape_octahedron) return sd_octahedron(lp, q[0]);
-    if (op == ctape_hex_prism) return sd_hex_prism(lp, cf2(q[0], q[1]));
-    if (op == ctape_pyramid) return sd_pyramid(lp, q[0]);
-    if (op == ctape_capped_torus) return sd_capped_torus(lp, cf2(q[0], q[1]), q[2], q[3]);
-    if (op == ctape_link) return sd_link(lp, q[0], q[1], q[2]);
-    if (op == ctape_cylinder_inf) return sd_cylinder_inf(lp, cf2(q[0], q[1]), q[2]);
-    if (op == ctape_cone) return sd_cone(lp, cf2(q[0], q[1]), q[2]);
-    if (op == ctape_plane) return sd_plane(lp, cf3(q[0], q[1], q[2]), q[3]);
-    if (op == ctape_cut_sphere) return sd_cut_sphere(lp, q[0], q[1]);
-    if (op == ctape_cut_hollow_sphere) return sd_cut_hollow_sphere(lp, q[0], q[1], q[2]);
-    if (op == ctape_solid_angle) return sd_solid_angle(lp, cf2(q[0], q[1]), q[2]);
-    if (op == ctape_tetrahedron) return sd_tetrahedron(lp, q[0]);
-    if (op == ctape_dodecahedron) return sd_dodecahedron(lp, q[0]);
-    if (op == ctape_icosahedron) return sd_icosahedron(lp, q[0]);
-    if (op == ctape_tri_prism) return sd_tri_prism_bound(lp, cf2(q[0], q[1]));
-    if (op == ctape_octahedron_cheap) return sd_octahedron_bound(lp, q[0]);
-    if (op == ctape_lnorm_sphere) return sd_lnorm_sphere_bound(lp, q[0], q[1]);
+        return sd_capsule(lp, cf3(CLAY_AT(q, 0), CLAY_AT(q, 1), CLAY_AT(q, 2)), cf3(CLAY_AT(q, 3), CLAY_AT(q, 4), CLAY_AT(q, 5)), CLAY_AT(q, 6));
+    if (op == ctape_capped_cylinder) return sd_capped_cylinder(lp, CLAY_AT(q, 0), CLAY_AT(q, 1));
+    if (op == ctape_rounded_cylinder) return sd_rounded_cylinder(lp, CLAY_AT(q, 0), CLAY_AT(q, 1), CLAY_AT(q, 2));
+    if (op == ctape_capped_cone) return sd_capped_cone(lp, CLAY_AT(q, 0), CLAY_AT(q, 1), CLAY_AT(q, 2));
+    if (op == ctape_round_cone) return sd_round_cone(lp, CLAY_AT(q, 0), CLAY_AT(q, 1), CLAY_AT(q, 2));
+    if (op == ctape_ellipsoid) return sd_ellipsoid_bound(lp, cf3(CLAY_AT(q, 0), CLAY_AT(q, 1), CLAY_AT(q, 2)));
+    if (op == ctape_octahedron) return sd_octahedron(lp, CLAY_AT(q, 0));
+    if (op == ctape_hex_prism) return sd_hex_prism(lp, cf2(CLAY_AT(q, 0), CLAY_AT(q, 1)));
+    if (op == ctape_pyramid) return sd_pyramid(lp, CLAY_AT(q, 0));
+    if (op == ctape_capped_torus) return sd_capped_torus(lp, cf2(CLAY_AT(q, 0), CLAY_AT(q, 1)), CLAY_AT(q, 2), CLAY_AT(q, 3));
+    if (op == ctape_link) return sd_link(lp, CLAY_AT(q, 0), CLAY_AT(q, 1), CLAY_AT(q, 2));
+    if (op == ctape_cylinder_inf) return sd_cylinder_inf(lp, cf2(CLAY_AT(q, 0), CLAY_AT(q, 1)), CLAY_AT(q, 2));
+    if (op == ctape_cone) return sd_cone(lp, cf2(CLAY_AT(q, 0), CLAY_AT(q, 1)), CLAY_AT(q, 2));
+    if (op == ctape_plane) return sd_plane(lp, cf3(CLAY_AT(q, 0), CLAY_AT(q, 1), CLAY_AT(q, 2)), CLAY_AT(q, 3));
+    if (op == ctape_cut_sphere) return sd_cut_sphere(lp, CLAY_AT(q, 0), CLAY_AT(q, 1));
+    if (op == ctape_cut_hollow_sphere) return sd_cut_hollow_sphere(lp, CLAY_AT(q, 0), CLAY_AT(q, 1), CLAY_AT(q, 2));
+    if (op == ctape_solid_angle) return sd_solid_angle(lp, cf2(CLAY_AT(q, 0), CLAY_AT(q, 1)), CLAY_AT(q, 2));
+    if (op == ctape_tetrahedron) return sd_tetrahedron(lp, CLAY_AT(q, 0));
+    if (op == ctape_dodecahedron) return sd_dodecahedron(lp, CLAY_AT(q, 0));
+    if (op == ctape_icosahedron) return sd_icosahedron(lp, CLAY_AT(q, 0));
+    if (op == ctape_tri_prism) return sd_tri_prism_bound(lp, cf2(CLAY_AT(q, 0), CLAY_AT(q, 1)));
+    if (op == ctape_octahedron_cheap) return sd_octahedron_bound(lp, CLAY_AT(q, 0));
+    if (op == ctape_lnorm_sphere) return sd_lnorm_sphere_bound(lp, CLAY_AT(q, 0), CLAY_AT(q, 1));
     if (op == ctape_extrude) {
         // exact lift: profile distance merged with the axial slab
         return cop_extrude(ctape_profile_dist(q, blob, cf2(lp.x, lp.y)), lp.z,
-                           q[CLAY_TAPE_PROFILE_FLOATS]);
+                           CLAY_AT(q, CLAY_TAPE_PROFILE_FLOATS));
     }
     if (op == ctape_loft) {
-        int off = (int)q[2];
-        int count = (int)q[3];
-        float h = q[0];
+        int off = CLAY_INT(CLAY_AT(q, 2));
+        int count = CLAY_INT(CLAY_AT(q, 3));
+        float h = CLAY_AT(q, 0);
         // Two records are always read below, so fewer than two profiles would
         // read a record that was never written — a null blob when the loft is
         // the only item. ctape_swept guards the same way; a document loaded
@@ -528,27 +528,27 @@ CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
         if (count < 2) return CLAY_TAPE_FAR;
         // Bracket among the profiles: they sit evenly along the depth, so the
         // span index falls straight out of the normalized height.
-        float t = cclamp((lp.z + h) / cmax(2.0f * h, 1e-9f), 0.0f, 1.0f) * (float)(count - 1);
-        int i = (int)t;
+        float t = cclamp((lp.z + h) / cmax(2.0f * h, 1e-9f), 0.0f, 1.0f) * CLAY_FLOATC((count - 1));
+        int i = CLAY_INT(t);
         if (i > count - 2) i = count - 2;
         if (i < 0) i = 0;
-        float u = cease((int)q[1], t - (float)i);
+        float u = cease(CLAY_INT(CLAY_AT(q, 1)), t - CLAY_FLOATC(i));
         cfloat2 xy = cf2(lp.x, lp.y);
-        float da = ctape_profile_dist(blob + off + i * CLAY_TAPE_PROFILE_FLOATS, blob, xy);
-        float db = ctape_profile_dist(blob + off + (i + 1) * CLAY_TAPE_PROFILE_FLOATS, blob, xy);
+        float da = ctape_profile_dist(CLAY_OFF(blob, off + i * CLAY_TAPE_PROFILE_FLOATS), blob, xy);
+        float db = ctape_profile_dist(CLAY_OFF(blob, off + (i + 1) * CLAY_TAPE_PROFILE_FLOATS), blob, xy);
         return cop_loft(da, db, u, lp.z, h);
     }
     if (op == ctape_volume) {
-        CLAY_DEVICE const float* h = blob + (int)q[0];
-        cfloat3 origin = cf3(h[0], h[1], h[2]);
-        float cell = h[3];
-        int bcx = (int)h[5], bcy = (int)h[6], bcz = (int)h[7];
-        int index_off = (int)h[8], far_off = (int)h[9], data_off = (int)h[10];
+        CLAY_FPTR h = blob + CLAY_INT(CLAY_AT(q, 0));
+        cfloat3 origin = cf3(CLAY_AT(h, 0), CLAY_AT(h, 1), CLAY_AT(h, 2));
+        float cell = CLAY_AT(h, 3);
+        int bcx = CLAY_INT(CLAY_AT(h, 5)), bcy = CLAY_INT(CLAY_AT(h, 6)), bcz = CLAY_INT(CLAY_AT(h, 7));
+        int index_off = CLAY_INT(CLAY_AT(h, 8)), far_off = CLAY_INT(CLAY_AT(h, 9)), data_off = CLAY_INT(CLAY_AT(h, 10));
         if (bcx <= 0 || bcy <= 0 || bcz <= 0 || cell <= 0.0f) return CLAY_TAPE_FAR;
 
-        float span_x = (float)(bcx * CLAY_BRICK_DIM) * cell;
-        float span_y = (float)(bcy * CLAY_BRICK_DIM) * cell;
-        float span_z = (float)(bcz * CLAY_BRICK_DIM) * cell;
+        float span_x = CLAY_FLOATC((bcx * CLAY_BRICK_DIM)) * cell;
+        float span_y = CLAY_FLOATC((bcy * CLAY_BRICK_DIM)) * cell;
+        float span_z = CLAY_FLOATC((bcz * CLAY_BRICK_DIM)) * cell;
         // The point projected onto the sampled box, and how far outside it is.
         // The lookup below runs on the PROJECTED point, so it always reads a
         // real brick; the outside distance is folded in afterwards.
@@ -560,9 +560,9 @@ CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
         float gx = (cp.x - origin.x) / cell;
         float gy = (cp.y - origin.y) / cell;
         float gz = (cp.z - origin.z) / cell;
-        int cx = (int)cclamp(cfloor(gx), 0.0f, (float)(bcx * CLAY_BRICK_DIM - 1));
-        int cy = (int)cclamp(cfloor(gy), 0.0f, (float)(bcy * CLAY_BRICK_DIM - 1));
-        int cz = (int)cclamp(cfloor(gz), 0.0f, (float)(bcz * CLAY_BRICK_DIM - 1));
+        int cx = CLAY_INT(cclamp(cfloor(gx), 0.0f, CLAY_FLOATC((bcx * CLAY_BRICK_DIM - 1))));
+        int cy = CLAY_INT(cclamp(cfloor(gy), 0.0f, CLAY_FLOATC((bcy * CLAY_BRICK_DIM - 1))));
+        int cz = CLAY_INT(cclamp(cfloor(gz), 0.0f, CLAY_FLOATC((bcz * CLAY_BRICK_DIM - 1))));
         int bx = cx / CLAY_BRICK_DIM, by = cy / CLAY_BRICK_DIM, bz = cz / CLAY_BRICK_DIM;
         int slot = (bz * bcy + by) * bcx + bx;
         // Relative to the VOLUME's own blob, not the tape's. to_blob writes
@@ -571,48 +571,48 @@ CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
         // true exactly when nothing else out-of-line was emitted before it. A
         // stroke, loft, swept or armature earlier in the layer puts its payload
         // there first, and the volume then read whatever those had written.
-        int entry = (int)h[index_off + slot];
+        int entry = CLAY_INT(CLAY_AT(h, index_off + slot));
         // An empty brick carries its own signed lower bound: the gap in bricks
         // to the nearest brick that HAS samples, floored at the band less half
         // a cell diagonal. A flat band width would be conservative but useless
         // — the marcher would creep across the empty majority of the region in
         // steps that never grew. See FieldVolume::far_value().
-        if (entry < 0) return ctape_volume_outside(h[far_off + slot], outside);
+        if (entry < 0) return ctape_volume_outside(CLAY_AT(h, far_off + slot), outside);
 
-        CLAY_DEVICE const float* block = h + data_off + entry;
+        CLAY_FPTR block = CLAY_OFF(h, data_off + entry);
         int lx = cx - bx * CLAY_BRICK_DIM;
         int ly = cy - by * CLAY_BRICK_DIM;
         int lz = cz - bz * CLAY_BRICK_DIM;
-        float fx = cclamp(gx - (float)cx, 0.0f, 1.0f);
-        float fy = cclamp(gy - (float)cy, 0.0f, 1.0f);
-        float fz = cclamp(gz - (float)cz, 0.0f, 1.0f);
+        float fx = cclamp(gx - CLAY_FLOATC(cx), 0.0f, 1.0f);
+        float fy = cclamp(gy - CLAY_FLOATC(cy), 0.0f, 1.0f);
+        float fz = cclamp(gz - CLAY_FLOATC(cz), 0.0f, 1.0f);
         const int n = CLAY_BRICK_DIM + 1;
         // The halo is why this needs no neighbouring brick: lx+1 is always in
         // range, so a trilinear tap is one array read.
-        float c00 = cmix(block[((lz)*n + ly) * n + lx], block[((lz)*n + ly) * n + lx + 1], fx);
+        float c00 = cmix(CLAY_AT(block, ((lz)*n + ly) * n + lx), CLAY_AT(block, ((lz)*n + ly) * n + lx + 1), fx);
         float c10 =
-            cmix(block[((lz)*n + ly + 1) * n + lx], block[((lz)*n + ly + 1) * n + lx + 1], fx);
+            cmix(CLAY_AT(block, ((lz)*n + ly + 1) * n + lx), CLAY_AT(block, ((lz)*n + ly + 1) * n + lx + 1), fx);
         float c01 =
-            cmix(block[((lz + 1) * n + ly) * n + lx], block[((lz + 1) * n + ly) * n + lx + 1], fx);
-        float c11 = cmix(block[((lz + 1) * n + ly + 1) * n + lx],
-                         block[((lz + 1) * n + ly + 1) * n + lx + 1], fx);
+            cmix(CLAY_AT(block, ((lz + 1) * n + ly) * n + lx), CLAY_AT(block, ((lz + 1) * n + ly) * n + lx + 1), fx);
+        float c11 = cmix(CLAY_AT(block, ((lz + 1) * n + ly + 1) * n + lx),
+                         CLAY_AT(block, ((lz + 1) * n + ly + 1) * n + lx + 1), fx);
         return ctape_volume_outside(cmix(cmix(c00, c10, fy), cmix(c01, c11, fy), fz), outside);
     }
     if (op == ctape_swept) {
-        int guide_off = (int)q[0];
-        int guide_count = (int)q[1];
-        int rec_off = (int)q[2];
-        int profile_count = (int)q[3];
+        int guide_off = CLAY_INT(CLAY_AT(q, 0));
+        int guide_count = CLAY_INT(CLAY_AT(q, 1));
+        int rec_off = CLAY_INT(CLAY_AT(q, 2));
+        int profile_count = CLAY_INT(CLAY_AT(q, 3));
         if (guide_count < 2 || profile_count < 2) return CLAY_TAPE_FAR;
 
-        CSweepHit hit = csweep_nearest(blob + guide_off, guide_count, lp);
+        CSweepHit hit = csweep_nearest(CLAY_OFF(blob, guide_off), guide_count, lp);
         int seg = hit.seg;
         float t = hit.t;
 
-        CLAY_DEVICE const float* va = blob + guide_off + seg * CLAY_SWEPT_VERTEX_FLOATS;
-        CLAY_DEVICE const float* vb = va + CLAY_SWEPT_VERTEX_FLOATS;
-        cfloat3 a = cf3(va[0], va[1], va[2]);
-        cfloat3 b = cf3(vb[0], vb[1], vb[2]);
+        CLAY_FPTR va = CLAY_OFF(blob, guide_off + seg * CLAY_SWEPT_VERTEX_FLOATS);
+        CLAY_FPTR vb = CLAY_OFF(va, CLAY_SWEPT_VERTEX_FLOATS);
+        cfloat3 a = cf3(CLAY_AT(va, 0), CLAY_AT(va, 1), CLAY_AT(va, 2));
+        cfloat3 b = cf3(CLAY_AT(vb, 0), CLAY_AT(vb, 1), CLAY_AT(vb, 2));
         cfloat3 tangent = b - a;
         float seg_len = clength(tangent);
         tangent = seg_len > 1e-9f ? tangent * (1.0f / seg_len) : cf3(0, 0, 1);
@@ -620,8 +620,8 @@ CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
         // The two end normals were transported when the item compiled; lerp
         // and re-orthogonalize, which is enough for a polyline guide and
         // avoids a slerp in the inner loop.
-        cfloat3 na = cf3(va[3], va[4], va[5]);
-        cfloat3 nb = cf3(vb[3], vb[4], vb[5]);
+        cfloat3 na = cf3(CLAY_AT(va, 3), CLAY_AT(va, 4), CLAY_AT(va, 5));
+        cfloat3 nb = cf3(CLAY_AT(vb, 3), CLAY_AT(vb, 4), CLAY_AT(vb, 5));
         cfloat3 normal = cnormalize(cmix(na, nb, t));
         normal = cnormalize(normal - tangent * cdot(normal, tangent));
         cfloat3 binormal = ccross(tangent, normal);
@@ -641,14 +641,14 @@ CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
 
         // Profiles are distributed by ARC LENGTH, so a guide whose vertices
         // bunch does not bunch the profiles.
-        float total = blob[guide_off + (guide_count - 1) * CLAY_SWEPT_VERTEX_FLOATS + 6];
-        float s = va[6] + t * seg_len;
+        float total = CLAY_AT(blob, guide_off + (guide_count - 1) * CLAY_SWEPT_VERTEX_FLOATS + 6);
+        float s = CLAY_AT(va, 6) + t * seg_len;
         float u = cclamp(total > 1e-9f ? s / total : 0.0f, 0.0f, 1.0f) *
-                  (float)(profile_count - 1);
-        int i = (int)u;
+                  CLAY_FLOATC((profile_count - 1));
+        int i = CLAY_INT(u);
         if (i > profile_count - 2) i = profile_count - 2;
         if (i < 0) i = 0;
-        float f = cease((int)q[4], u - (float)i);
+        float f = cease(CLAY_INT(CLAY_AT(q, 4)), u - CLAY_FLOATC(i));
         float da = ctape_profile_dist(blob + rec_off + i * CLAY_TAPE_PROFILE_FLOATS, blob, xy);
         float db =
             ctape_profile_dist(blob + rec_off + (i + 1) * CLAY_TAPE_PROFILE_FLOATS, blob, xy);
@@ -664,29 +664,29 @@ CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
     }
     if (op == ctape_revolve) {
         // exact lift: evaluate the profile in the (radius - offset, y) plane
-        return ctape_profile_dist(q, blob, crevolve_point(lp, q[CLAY_TAPE_PROFILE_FLOATS]));
+        return ctape_profile_dist(q, blob, crevolve_point(lp, CLAY_AT(q, CLAY_TAPE_PROFILE_FLOATS)));
     }
     if (op == ctape_stroke) {
-        int off = (int)q[1];
-        int cnt = (int)q[2];
-        return ctape_stroke_dist(blob + off, cnt, lp, q[0]);
+        int off = CLAY_INT(CLAY_AT(q, 1));
+        int cnt = CLAY_INT(CLAY_AT(q, 2));
+        return ctape_stroke_dist(CLAY_OFF(blob, off), cnt, lp, CLAY_AT(q, 0));
     }
     if (op == ctape_armature) {
-        int nodes = (int)q[1];
-        int parents = (int)q[2];
-        int cnt = (int)q[3];
-        return ctape_armature_dist(blob + nodes, blob + parents, cnt, lp, q[0]);
+        int nodes = CLAY_INT(CLAY_AT(q, 1));
+        int parents = CLAY_INT(CLAY_AT(q, 2));
+        int cnt = CLAY_INT(CLAY_AT(q, 3));
+        return ctape_armature_dist(blob + nodes, blob + parents, cnt, lp, CLAY_AT(q, 0));
     }
     return CLAY_TAPE_FAR;
 }
 
 // Transition weight for the morph modes (0 -> accumulated, 1 -> item).
-CLAY_FN float ctape_transition_weight(int mode, CLAY_DEVICE const float* extra, cfloat3 p) {
+CLAY_FN float ctape_transition_weight(int mode, CLAY_FPTR extra, cfloat3 p) {
     if (mode == ccombine_transition_linear) {
-        return ctransition_linear_weight(p, cf3(extra[0], extra[1], extra[2]),
-                                         cf3(extra[3], extra[4], extra[5]), (int)extra[6]);
+        return ctransition_linear_weight(p, cf3(CLAY_AT(extra, 0), CLAY_AT(extra, 1), CLAY_AT(extra, 2)),
+                                         cf3(CLAY_AT(extra, 3), CLAY_AT(extra, 4), CLAY_AT(extra, 5)), CLAY_INT(CLAY_AT(extra, 6)));
     }
-    return ctransition_radial_weight(p, extra[0], extra[1], (int)extra[2]);
+    return ctransition_radial_weight(p, CLAY_AT(extra, 0), CLAY_AT(extra, 1), CLAY_INT(CLAY_AT(extra, 2)));
 }
 
 CLAY_FN bool ctape_mode_is_transition(int mode) {
@@ -759,31 +759,31 @@ CLAY_FN CTapeValue ctape_combine_values(CTapeValue a, CTapeValue b, int mode, in
 // One primitive evaluation at a local point: the deformer chain, then the
 // primitive's distance function. Repetition calls this once per cell it
 // needs (twice for radial arrays).
-CLAY_FN float ctape_prim_local(unsigned int op, CLAY_DEVICE const float* pr,
-                               CLAY_DEVICE const float* blob, cfloat3 lp) {
-    CLAY_DEVICE const float* deform =
-        pr + CLAY_TAPE_PRIM_HEADER + CLAY_TAPE_PRIM_PARAMS + CLAY_TAPE_REPEAT_FLOATS;
-    int deform_count = (int)deform[0];
+CLAY_FN float ctape_prim_local(CLAY_UINT_T op, CLAY_FPTR pr,
+                               CLAY_FPTR blob, cfloat3 lp) {
+    CLAY_FPTR deform =
+        CLAY_OFF(pr, CLAY_TAPE_PRIM_HEADER + CLAY_TAPE_PRIM_PARAMS + CLAY_TAPE_REPEAT_FLOATS);
+    int deform_count = CLAY_INT(CLAY_AT(deform, 0));
     float offset = 0.0f;
     cfloat3 wp = lp;
     for (int di = 0; di < deform_count; ++di) {
-        CLAY_DEVICE const float* rec = deform + 1 + di * CLAY_TAPE_DEFORM_FLOATS;
+        CLAY_FPTR rec = CLAY_OFF(deform, 1 + di * CLAY_TAPE_DEFORM_FLOATS);
         offset += ctape_deform_offset(rec, wp);
         wp = ctape_deform_point(rec, wp);
     }
-    return ctape_prim_dist(op, pr + CLAY_TAPE_PRIM_HEADER, blob, wp) + offset;
+    return ctape_prim_dist(op, CLAY_OFF(pr, CLAY_TAPE_PRIM_HEADER), blob, wp) + offset;
 }
 
 // The fixed interpreter every backend ships. Postfix stack machine; empty
 // tapes evaluate to "far outside".
-CLAY_FN CTapeValue ctape_eval(CLAY_DEVICE const CTapeInstr* instrs, int instr_count,
-                              CLAY_DEVICE const float* params, CLAY_DEVICE const float* blob,
+CLAY_FN CTapeValue ctape_eval(CLAY_IPTR instrs, int instr_count,
+                              CLAY_FPTR params, CLAY_FPTR blob,
                               cfloat3 p) {
     CTapeValue stack[CLAY_TAPE_MAX_STACK];
     int top = 0;
     for (int i = 0; i < instr_count; ++i) {
-        unsigned int op = instrs[i].op;
-        CLAY_DEVICE const float* pr = params + instrs[i].param_offset;
+        CLAY_UINT_T op = CLAY_INSTR_OP(instrs, i);
+        CLAY_FPTR pr = CLAY_OFF(params, CLAY_INSTR_PARAM(instrs, i));
         if (op == ctape_combine) {
             if (top < 1) continue;
             CTapeValue b = stack[top - 1];
@@ -797,31 +797,31 @@ CLAY_FN CTapeValue ctape_eval(CLAY_DEVICE const CTapeInstr* instrs, int instr_co
                 a = stack[top - 2];
                 --top;
             }
-            int mode = (int)pr[0];
+            int mode = CLAY_INT(CLAY_AT(pr, 0));
             if (ctape_mode_is_transition(mode)) {
                 // spatial morph: lerp BOTH operands by the weight at p. Not a
                 // distance — the tape's tracked field info records that.
-                float w = ctape_transition_weight(mode, pr + 4, p);
+                float w = ctape_transition_weight(mode, CLAY_OFF(pr, 4), p);
                 CTapeValue r;
                 r.d = cmix(a.d, b.d, w);
                 r.color = cmix(a.color, b.color, w);
                 stack[top - 1] = r;
             } else {
-                stack[top - 1] = ctape_combine_values(a, b, mode, (int)pr[1], pr[2], pr[3]);
+                stack[top - 1] = ctape_combine_values(a, b, mode, CLAY_INT(CLAY_AT(pr, 1)), CLAY_AT(pr, 2), CLAY_AT(pr, 3));
             }
         } else {
             if (top >= CLAY_TAPE_MAX_STACK) continue;
             cfloat4x4 inv;
-            inv.c0 = cf4(pr[0], pr[1], pr[2], 0.0f);
-            inv.c1 = cf4(pr[3], pr[4], pr[5], 0.0f);
-            inv.c2 = cf4(pr[6], pr[7], pr[8], 0.0f);
-            inv.c3 = cf4(pr[9], pr[10], pr[11], 1.0f);
-            float scale = pr[12];
-            float round = pr[13];
+            inv.c0 = cf4(CLAY_AT(pr, 0), CLAY_AT(pr, 1), CLAY_AT(pr, 2), 0.0f);
+            inv.c1 = cf4(CLAY_AT(pr, 3), CLAY_AT(pr, 4), CLAY_AT(pr, 5), 0.0f);
+            inv.c2 = cf4(CLAY_AT(pr, 6), CLAY_AT(pr, 7), CLAY_AT(pr, 8), 0.0f);
+            inv.c3 = cf4(CLAY_AT(pr, 9), CLAY_AT(pr, 10), CLAY_AT(pr, 11), 1.0f);
+            float scale = CLAY_AT(pr, 12);
+            float round = CLAY_AT(pr, 13);
             CTapeValue v;
-            v.color = cf3(pr[14], pr[15], pr[16]);
+            v.color = cf3(CLAY_AT(pr, 14), CLAY_AT(pr, 15), CLAY_AT(pr, 16));
             cfloat3 lp = cmul_point(inv, p);
-            CLAY_DEVICE const float* repeat = pr + CLAY_TAPE_PRIM_HEADER + CLAY_TAPE_PRIM_PARAMS;
+            CLAY_FPTR repeat = CLAY_OFF(pr, CLAY_TAPE_PRIM_HEADER + CLAY_TAPE_PRIM_PARAMS);
             float prim_value;  // NB: not `local` — reserved in OpenCL C
             if (!ctape_repeat_active(repeat)) {
                 prim_value = ctape_prim_local(op, pr, blob, lp);
@@ -829,7 +829,7 @@ CLAY_FN CTapeValue ctape_eval(CLAY_DEVICE const CTapeInstr* instrs, int instr_co
                 // O(2): the nearest angular sector and its neighbour, per
                 // docs/01 2.4 — one evaluation would seam at sector borders
                 float d0 = ctape_prim_local(op, pr, blob, ctape_repeat_point(repeat, lp, 0));
-                int neighbour = crep_radial_neighbor(lp, (int)repeat[1]);
+                int neighbour = crep_radial_neighbor(lp, CLAY_INT(CLAY_AT(repeat, 1)));
                 float d1 = ctape_prim_local(op, pr, blob,
                                             ctape_repeat_point(repeat, lp, neighbour));
                 prim_value = cmin(d0, d1);

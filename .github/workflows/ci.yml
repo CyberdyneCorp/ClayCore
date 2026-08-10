@@ -10,8 +10,12 @@ jobs:
     name: build+test (${{ matrix.os }}, cpu-only)
     strategy:
       fail-fast: false
+      # Windows was dropped deliberately, not by accident: it was the only
+      # MSVC coverage in this workflow, so an MSVC-only break now lands
+      # silently until someone builds there. The library still claims to
+      # build on Windows (docs/05), and nothing in CI checks that claim.
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -218,7 +222,14 @@ jobs:
           cmake --preset cpu-only -DCLAY_BUILD_PYTHON=ON
           cmake --build --preset cpu-only
       - name: Run every example
-        run: PYTHONPATH=build/cpu-only/bindings/python python examples/run_all.py
+        # CLAY_EXAMPLES_FAST renders at half resolution per axis and caps
+        # occlusion rays. This job's gate is that every example RUNS and
+        # produces files -- the outputs are discarded on the next step because
+        # float renders differ across platforms -- so quality here buys
+        # nothing and costs about an hour. 41/41 in 97s instead of 543s.
+        run: |
+          CLAY_EXAMPLES_FAST=1 \
+          PYTHONPATH=build/cpu-only/bindings/python python examples/run_all.py
       - name: Committed gallery is up to date with the code
         # Renders are float output, so bytes can differ across platforms. The
         # gate is that everything runs and produces files, not pixel equality;

@@ -67,7 +67,19 @@ add_executable(clay_unit_tests
   unit/test_c_consolidate.cpp
   unit/test_groups.cpp
   unit/test_mesh_layers.cpp
-  unit/test_c_mesh_layer.cpp)
+  unit/test_c_mesh_layer.cpp
+  unit/test_vulkan_dispatch.cpp)
+
+# The dispatch-splitting header is backend-internal; the test that keeps it
+# honest is built everywhere, so the include path is unconditional.
+target_include_directories(clay_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../backends/vulkan)
+
+# Device-dependent Vulkan cases only exist where the backend was built. They
+# skip themselves when no runtime is present, so this is about linking the
+# backend-internal upload counter, not about having a GPU.
+if(CLAY_BACKEND_VULKAN)
+  target_sources(clay_unit_tests PRIVATE unit/test_vulkan.cpp)
+endif()
 
 target_link_libraries(clay_unit_tests PRIVATE clay::core doctest::doctest)
 # the C ABI tests consume the public header as a C consumer would

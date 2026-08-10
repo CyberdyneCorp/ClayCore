@@ -25,9 +25,9 @@ CLAY_FN float cscale_nu_dist(float d, cfloat3 s) { return d * cmin(s.x, cmin(s.y
 
 // Elongation (exact for origin-symmetric primitives): evaluate the primitive
 // at the returned point and ADD the returned correction (docs/01 §2.3).
-CLAY_FN cfloat3 celongate_point(cfloat3 p, cfloat3 h, CLAY_THREAD float* correction) {
+CLAY_FN cfloat3 celongate_point(cfloat3 p, cfloat3 h, CLAY_OUT(float) correction) {
     cfloat3 q = cabs(p) - h;
-    *correction = cmin(cmax(q.x, cmax(q.y, q.z)), 0.0f);
+    CLAY_SET(correction, cmin(cmax(q.x, cmax(q.y, q.z)), 0.0f));
     return cmax(q, 0.0f);
 }
 
