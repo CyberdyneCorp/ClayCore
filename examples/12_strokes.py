@@ -20,6 +20,8 @@ outlives the engine build that wrote it; a newer schema is refused rather than
 read as a prefix and silently reinterpreted.
 """
 
+import pathlib
+
 import numpy as np
 
 import pyclay as clay
@@ -151,6 +153,107 @@ def main():
         raise SystemExit("a newer preset schema was accepted")
     except ValueError:
         print("  a preset from a newer schema is refused, not reinterpreted")
+
+
+    # --- the four knobs no page exercised -------------------------------------
+    # docs/07 lists pressure.strength, pressure.curve, jitter_rotation and
+    # rotate_along_stroke as brush features. Nothing measured them, which means
+    # any of the four could have stopped reaching the resolver without a single
+    # picture changing. Each is checked against the knob turned OFF, so the test
+    # is "does this control anything" rather than "does it run".
+    ramp_up = np.array([[-1.2 + i * 0.04, 0.0, 0.0, 0.05 + 0.95 * i / 60]
+                        for i in range(61)], np.float32)
+    base = clay.StrokePreset(radius=0.18, spacing=0.35)
+
+    # pressure_strength scales each stamp's strength off the pressure channel.
+    # Note the asymmetry, which is easy to get backwards: pressure_SIZE defaults
+    # to 0 (off) and pressure_STRENGTH to 1 (on), so a default preset already
+    # varies strength with pressure and only the radius needs opting in.
+    off = clay.StrokePreset(radius=0.18, spacing=0.35,
+                            pressure_strength=0.0).resolve(ramp_up)["strengths"]
+    on = clay.StrokePreset(radius=0.18, spacing=0.35,
+                           pressure_strength=1.0).resolve(ramp_up)["strengths"]
+    if np.allclose(off, on):
+        raise SystemExit("pressure_strength changed no stamp strength")
+    if not (on[0] < on[-1]):
+        raise SystemExit("pressure rose along the stroke but strength did not follow")
+    print(f"  pressure_strength: first/last stamp strength {on[0]:.3f} -> {on[-1]:.3f}")
+
+    # pressure_curve is the exponent on the normalized channel, so it bends the
+    # ramp without changing its endpoints.
+    curved = clay.StrokePreset(radius=0.18, spacing=0.35, pressure_size=1.0,
+                               pressure_curve=2.5).resolve(ramp_up)["radii"]
+    linear = clay.StrokePreset(radius=0.18, spacing=0.35,
+                               pressure_size=1.0).resolve(ramp_up)["radii"]
+    if np.allclose(curved, linear):
+        raise SystemExit("pressure_curve did not bend the pressure ramp")
+    mid = len(linear) // 2
+    if not curved[mid] < linear[mid]:
+        raise SystemExit("an exponent above 1 should pull the middle of the ramp down")
+    print(f"  pressure_curve 2.5 vs 1.0 at mid-stroke: {curved[mid]:.3f} vs {linear[mid]:.3f}")
+
+    # jitter_rotation and rotate_along_stroke turn each stamp, and `resolve`
+    # reports no angle — rotation is only OBSERVABLE through a stamp that is
+    # not rotationally symmetric, which is what docs/07 says about both knobs.
+    # So these use a BOX stamp and compare the resulting fields; a sphere stamp
+    # would make a working knob look dead.
+    def stroked(preset, samples, prim):
+        d = clay.Document()
+        d.add_sdf_layer("l").apply_stroke(samples, preset, prim)
+        rng = np.random.default_rng(4)
+        pts = rng.uniform(-1.5, 1.5, size=(4000, 3)).astype(np.float32)
+        return d.eval(pts)
+
+    box = clay.Box(size=(0.20, 0.07, 0.07))
+    plain = stroked(base, ramp_up, box)
+
+    jr = clay.StrokePreset(radius=0.18, spacing=0.35, jitter_rotation=1.0, seed=5)
+    jittered = stroked(jr, ramp_up, box)
+    if np.allclose(jittered, plain, atol=1e-6):
+        raise SystemExit("jitter_rotation rotated nothing")
+    if not np.allclose(jittered, stroked(jr, ramp_up, box), atol=0):
+        raise SystemExit("jitter_rotation is not deterministic — two resolves disagreed")
+    other = clay.StrokePreset(radius=0.18, spacing=0.35, jitter_rotation=1.0, seed=6)
+    if np.allclose(jittered, stroked(other, ramp_up, box), atol=1e-6):
+        raise SystemExit("two seeds gave the same rotations")
+    print("  jitter_rotation: turns the stamps, deterministic per seed, two seeds differ")
+
+    # rotate_along_stroke needs a CURVED path: on a straight line every tangent
+    # is identical and the knob would look dead while working correctly.
+    curve = arc(turns=0.5, radius=0.9, count=90)
+    follow = clay.StrokePreset(radius=0.14, spacing=0.35, rotate_along_stroke=True)
+    fixed = clay.StrokePreset(radius=0.14, spacing=0.35)
+    if np.allclose(stroked(follow, curve, box), stroked(fixed, curve, box), atol=1e-6):
+        raise SystemExit("rotate_along_stroke did not turn the stamps along the path")
+    # ...and on a STRAIGHT path it must change nothing, which is the other half
+    # of the claim and the half a curved-only check would let rot.
+    if not np.allclose(stroked(follow, ramp_up, box),
+                       stroked(fixed, ramp_up, box), atol=1e-5):
+        raise SystemExit("rotate_along_stroke turned stamps on a straight path")
+    print("  rotate_along_stroke: turns stamps along an arc, leaves a straight path alone")
+
+    # accumulation: BUILDUP lets overlapping stamps deposit twice, CLAMPED
+    # reaches the stroke's strength once however many overlap. A dense stroke
+    # is the case that separates them — at wide spacing nothing overlaps and
+    # the two are identical, which is the trap in testing this at all.
+    dense = clay.StrokePreset(radius=0.18, spacing=0.12, accumulation=clay.Accumulation.BUILDUP)
+    clamped = clay.StrokePreset(radius=0.18, spacing=0.12, accumulation=clay.Accumulation.CLAMPED)
+    b = dense.resolve(ramp_up)["strengths"]
+    c = clamped.resolve(ramp_up)["strengths"]
+    if np.allclose(b, c):
+        raise SystemExit("buildup and clamped accumulation resolved identically")
+    if not b.max() >= c.max():
+        raise SystemExit("clamped deposited more than buildup")
+    print(f"  accumulation: buildup peaks at {b.max():.3f}, clamped at {c.max():.3f}")
+
+    # Coverage: a preset field nothing exercises is a brush knob nobody checks.
+    src = pathlib.Path(__file__).read_text()
+    fields = {a for a in dir(clay.StrokePreset)
+              if not a.startswith("_") and not callable(getattr(clay.StrokePreset, a, None))}
+    missing = {f for f in fields if f not in src}
+    if missing:
+        raise SystemExit(f"StrokePreset fields with no example: {sorted(missing)}")
+    print(f"  covered all {len(fields)} StrokePreset fields")
 
     R.export_model(doc, "12_stroke.ply", resolution=64)
 

@@ -32,6 +32,8 @@ outside the bounds; whatever it cannot reach is enclosed. The cutaway renders
 below are of the same grids, sliced open, so the interior is actually visible.
 """
 
+import pathlib
+
 import numpy as np
 
 import pyclay as clay
@@ -71,6 +73,79 @@ def cutaway(src, half=5):
 def tile(grid, **kwargs):
     eye, target = R.voxel_camera(grid, VOXEL_SIZE, **kwargs)
     return R.render_voxels_array(grid, eye=eye, target=target, width=210, height=195)
+
+
+def sculpt_verbs():
+    """Every verb the binding exposes, read from it rather than listed here, so
+    a new one shows up as a gap instead of being forgotten."""
+    return {m for m in dir(clay.VoxelGrid) if m.startswith(("sculpt_", "repair_"))}
+
+
+def check_coverage():
+    """Every sculpt and repair verb is exercised on this page.
+
+    The pictures prove the verbs RAN. They cannot prove one is still reachable
+    from the bindings at all — a verb that lost its example leaves no gap in a
+    contact sheet. Read from the binding rather than from a list here, so a
+    verb added later shows up as a gap instead of being forgotten.
+    """
+    src = pathlib.Path(__file__).read_text()
+    missing = {v for v in sculpt_verbs() if f".{v}(" not in src}
+    if missing:
+        raise SystemExit(f"voxel verbs with no example here: {sorted(missing)}")
+    print(f"  covered all {len(sculpt_verbs())} sculpt and repair verbs")
+
+
+def check_every_verb_bites():
+    """Each verb, given a target it should act on, changes cells.
+
+    `change_count` rather than `occupied_count`: grab and magnify move material
+    without adding any, so an occupancy tally is identical across an edit that
+    moved a whole lump. A verb that silently became a no-op is otherwise
+    invisible — every one of them is ALLOWED to do nothing, so nothing raises.
+    """
+    def block_grid():
+        """A block with an uneven top: smooth and flatten need something to
+        even OUT, and a perfectly flat face is already their fixed point."""
+        g = clay.VoxelGrid(voxel_size=0.1)
+        c = g.palette_add((0.8, 0.6, 0.4))
+        g.fill_box((0, 0, 0), (9, 8, 9), c)
+        for x in range(0, 10, 2):
+            for z in range(0, 10, 3):
+                g.fill_box((x, 9, z), (x, 10, z), c)   # spurs on the top face
+        return g
+
+    # ON the top face, not inside the block. Every verb here acts on SURFACE
+    # cells, so a footprint buried in solid material legitimately changes
+    # nothing — the first draft of this check put the brush at the centre and
+    # "caught" six verbs that were working exactly as documented.
+    at, size = (4, 9, 4), 7
+    cases = {
+        "sculpt_smooth":   lambda g: g.sculpt_smooth(at, size),
+        "sculpt_inflate":  lambda g: g.sculpt_inflate(at, size, amount=1),
+        "sculpt_flatten":  lambda g: g.sculpt_flatten(at, size, normal=(0, 1, 0)),
+        "sculpt_pinch":    lambda g: g.sculpt_pinch(at, size),
+        "sculpt_magnify":  lambda g: g.sculpt_magnify(at, size),
+        "sculpt_scrape":   lambda g: g.sculpt_scrape(at, size, normal=(0, 1, 0)),
+        "sculpt_smudge":   lambda g: g.sculpt_smudge(at, size, displacement=(0.5, 0, 0)),
+        "sculpt_grab":     lambda g: g.sculpt_grab(at, size, displacement=(0.5, 0, 0)),
+        "sculpt_carve_alpha": lambda g: g.sculpt_carve_alpha(
+            at, size, alpha=np.ones((8, 8), dtype=np.float32), direction=(0, 1, 0)),
+    }
+    dead = []
+    for name, run in cases.items():
+        g = block_grid()
+        before = g.change_count
+        run(g)
+        if g.change_count == before:
+            dead.append(name)
+    if dead:
+        raise SystemExit(f"these verbs changed no cell on a solid block: {dead}")
+    print(f"  all {len(cases)} sculpt verbs changed cells on a block they should bite")
+
+    # fill_cavities and the repair verbs need a defect to act on rather than a
+    # solid block, which the pages above already build and measure.
+
 
 
 def main():
@@ -249,6 +324,10 @@ def main():
         raise SystemExit("fill-voids filled a cavity the outside can reach")
 
     R.save_model(solid.mesh(), "15_repaired.ply")
+
+    # --- what the pictures cannot check ---------------------------------------
+    check_every_verb_bites()
+    check_coverage()
 
 
 if __name__ == "__main__":
