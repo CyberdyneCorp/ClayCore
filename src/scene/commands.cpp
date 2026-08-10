@@ -398,9 +398,16 @@ void write_node(Writer& w, const Node& n) {
         w.pod(n.curve_tolerance);
     }
     // An armature's topology: one parent index per stroke point. Written only
-    // from minor 7, so a document without armatures is byte-identical to what
-    // an older build wrote, and an older READER meets a shorter record rather
-    // than a corrupt one.
+    // from minor 7, so serializing AT an older minor still produces exactly the
+    // bytes that minor always did — which is how a document is made readable by
+    // a build that predates armatures.
+    //
+    // Note that the count word goes out for every node at minor 7, armature or
+    // not: a no-armature document at 7 is four bytes per node longer than the
+    // same document at 6, not identical to it. Node records are not individually
+    // framed, so a build that predates 7 reading a 7 document desynchronises —
+    // it fails the reader's bounds and count checks rather than misreading, but
+    // it does not open the file. The format notes in io/clayspace.h say so.
     if (w.minor >= 7) {
         w.u32(static_cast<std::uint32_t>(n.armature_parents.size()));
         for (std::uint32_t parent : n.armature_parents) w.u32(parent);

@@ -84,8 +84,69 @@ forward-refuse).
    gets undefined symbols, which a patch number would not normally warn anyone
    about. Read the symbol list rather than the number when pinning.
 
-   **Mesh layers (`add-mesh-layers`) are additive**, and land on whatever
-   version ships next rather than moving one here. They add five symbols —
+   **0.25.0 is additive.** It adds 23 symbols and four descriptor structs, and
+   removes nothing. No existing signature changed, no existing struct grew or
+   reordered a field, and no existing entry point returns a new `clay_result`
+   value — so code compiled against 0.24.2 keeps linking and behaving as it did.
+   Verified by comparing the header against the `v0.24.2` tag rather than by
+   reading the changelog: 192 → 215 declared symbols, 21 → 25 structs, with the
+   four new ones (`clay_field_report`, `clay_consolidation_params`,
+   `clay_consolidation_cost`, `clay_mesh_layer_desc`) all new rather than grown.
+   The five changes behind it:
+
+   - **Mesh layers** (`add-mesh-layers`) — `clay_document_add_mesh_layer`,
+     `clay_document_mesh_layer`, `clay_mesh_layer`, `clay_mesh_bounds`,
+     `clay_mesh_uvs`. A document can now CARRY a mesh rather than only produce
+     one.
+   - **Host-buildable groups** (`expose-scene-groups`) — `clay_layer_add_group`,
+     `clay_layer_add_item_in_group`, `clay_add_item_in_group`,
+     `clay_item_add_child`, `clay_layer_children`. A sub-expression is sayable
+     from C, with a new op value `CLAY_OP_INLINE = 255`.
+   - **Consolidation** (`add-consolidation-policy`) — `clay_layer_consolidate`,
+     `clay_layer_consolidation_cost`, `clay_layer_consolidation_state`,
+     `clay_layer_field_report`. Collapses a layer to one redistanced volume, so
+     a chain of bakes stops steepening.
+   - **Multi-resolution voxels** (`add-multi-resolution-voxels`) — the seven
+     `clay_voxel_*level*` calls, from `clay_voxel_add_level` to
+     `clay_voxel_level_occupied_count`.
+   - **Armatures** (`add-armature`) — `clay_layer_armature_edit`,
+     `clay_item_set_armature_parents`, and a new primitive value
+     `CLAY_PRIM_ARMATURE = 34`.
+
+   Two new enum VALUES is the one thing worth reading twice. Neither changes an
+   existing value, and no existing call can return them, so nothing compiled
+   against 0.24.2 can meet one — but a host with an exhaustive `switch` over
+   `clay_prim` or `clay_op` that it recompiles will get a new unhandled case,
+   which is a compile-time nudge rather than a silent behaviour change.
+
+   It also carries two bug fixes that change RESULTS rather than signatures, so
+   a host may see different numbers from the same input:
+
+   - A volume placed after any blob-carrying primitive (stroke, loft, swept,
+     armature) in the same layer evaluated against the wrong payload —
+     `ctape_volume` used offsets that are relative to the volume's own header as
+     absolute indices into the tape blob, which coincide only at blob offset 0
+     (#35). Every backend was affected; a document that hit this evaluates
+     differently, and correctly, on 0.25.0.
+   - FBX import welds rather than emitting a vertex per triangle corner (#38).
+     An imported mesh had `triangle_count * 3` vertices whatever the file
+     stored — six times the source on a typical model — and no two triangles
+     shared a vertex. The surface is unchanged; vertex counts and anything
+     derived from adjacency are not. `max_vertices` now bounds real vertices
+     rather than corners, so a budget that previously refused a mesh may accept
+     it.
+
+   **`.clayspace` moves 1.4 → 1.7** across those changes: 5 adds the mesh
+   chunk, 6 the voxel level stack, 7 an armature's parent indices. Minor 5 is a
+   new chunk and so is skippable by a build that predates it; 6 and 7 are
+   payload changes and are not — see the format notes at the top of
+   `include/clay/io/clayspace.h`, which now spell out that "backward-open" means
+   a current build opens older documents, not that an older build opens this
+   one. Writing at an older minor is how a document is made readable by an
+   older build.
+
+   **Mesh layers (`add-mesh-layers`) are additive**, and landed in 0.25.0. They
+   add five symbols —
    `clay_document_add_mesh_layer`, `clay_document_mesh_layer`,
    `clay_mesh_layer`, `clay_mesh_bounds`, `clay_mesh_uvs` — and one descriptor,
    `clay_mesh_layer_desc`. No existing signature changed, nothing was removed
@@ -133,7 +194,15 @@ the host side rather than assuming the previous one still passes.
 Tracked honestly rather than assumed done:
 
 - **CUDA and OpenCL device parity have both executed** (task 12.2, closed by
-  `fix-cuda-arch-selection`; re-run for v0.24.0 on 2026-08-09). Validated on an
+  `fix-cuda-arch-selection`; re-run for v0.24.0 on 2026-08-09, and again for
+  v0.25.0 on 2026-08-10 because that release adds a tape opcode — an armature —
+  and a new opcode is exactly what a CPU-only parity run cannot vouch for).
+  The v0.25.0 re-run isolates the case that actually loops the registry rather
+  than reading the whole gate's total, which is dominated by tests that do not:
+  `parity: every registered backend matches the scalar reference` reports **204**
+  assertions CPU-only and **612** with both devices registered — exactly 3x, one
+  pass each for cpu, cuda and opencl, all matching the scalar reference. Prefer
+  that measurement to the aggregate below; it cannot be diluted. Validated on an
   RTX 5060 / driver 580 / nvcc 12.0, configuring one build directory with
   `-DCLAY_BACKEND_CUDA=ON -DCLAY_BACKEND_OPENCL=ON` and pointing
   `tools/release_check.py --build-dir` at it. Both backends register and match
