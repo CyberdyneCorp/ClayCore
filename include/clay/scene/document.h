@@ -108,10 +108,25 @@ class SdfContent {
         return false;
     }
 
+    // Is `id` at or below `root`? The cycle test move() needs.
+    bool contains(NodeId root, NodeId id) const {
+        if (root == id) return true;
+        const Node* n = find(root);
+        if (!n) return false;
+        for (NodeId c : n->children)
+            if (contains(c, id)) return true;
+        return false;
+    }
+
     bool move(NodeId id, NodeId new_parent, int new_index) {
         NodeId parent = kNoNode;
         int index = -1;
         if (!locate(id, &parent, &index)) return false;
+        // A node cannot move into its own subtree. Detaching it and then
+        // reattaching it below itself closes a cycle: the subtree leaves the
+        // root list, so it stops evaluating, is dropped on save (write_content
+        // walks from roots) and can no longer be reached by remove().
+        if (new_parent != kNoNode && contains(id, new_parent)) return false;
         // detach without destroying
         std::vector<NodeId>* siblings = parent == kNoNode ? &roots : &find_mut(parent)->children;
         siblings->erase(siblings->begin() + index);

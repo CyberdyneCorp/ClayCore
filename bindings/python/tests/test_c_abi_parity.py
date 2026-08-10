@@ -103,6 +103,20 @@ def lib():
     lib.clay_item_set_profile_polygon.argtypes = [ctypes.c_void_p, f32, ctypes.c_size_t]
     lib.clay_layer_add_item.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p,
                                         ctypes.POINTER(ctypes.c_uint32)]
+    lib.clay_item_set_op.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    # the group surface: the two float arguments make argtypes mandatory here,
+    # since ctypes would otherwise promote them to double
+    lib.clay_layer_add_group.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                                         ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
+                                         ctypes.c_float, ctypes.c_float,
+                                         ctypes.POINTER(ctypes.c_uint32)]
+    lib.clay_layer_add_item_in_group.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                                 ctypes.c_uint32, ctypes.c_int32,
+                                                 ctypes.c_void_p,
+                                                 ctypes.POINTER(ctypes.c_uint32)]
+    lib.clay_layer_children.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                                        ctypes.POINTER(ctypes.c_uint32),
+                                        ctypes.POINTER(ctypes.c_size_t)]
     lib.clay_last_error.restype = ctypes.c_char_p
 
     i32 = ctypes.POINTER(ctypes.c_int32)
@@ -703,3 +717,127 @@ def test_marching_mesher_matches_pyclay(lib):
             lib.clay_mesh_destroy(mesh)
     finally:
         lib.clay_document_destroy(doc)
+
+
+# -- groups --------------------------------------------------------------------
+
+CLAY_OP_ADD = 0
+CLAY_OP_SUBTRACT = 1
+CLAY_OP_INTERSECT = 2
+CLAY_OP_INLINE = 255
+CLAY_BLEND_HARD = 0
+CLAY_BLEND_QUADRATIC = 1
+CLAY_PRIM_SPHERE = 0
+
+
+def group_document_through_c(lib, path):
+    """(shell INTERSECT cutter) UNION another sphere, plus an inline group —
+    the construction that needs a group, built the way a C host builds it."""
+    doc = lib.clay_document_create()
+    layer = ctypes.c_uint32(0)
+    assert lib.clay_add_sdf_layer(doc, b"body", ctypes.byref(layer)) == 0
+    plate = ctypes.c_uint32(0)
+    assert lib.clay_layer_add_group(doc, layer.value, 0, -1, CLAY_OP_ADD, CLAY_BLEND_QUADRATIC,
+                                    0.08, 0.0, ctypes.byref(plate)) == 0
+
+    def add(parent, prim_params, position, op):
+        item = lib.clay_item_create(CLAY_PRIM_SPHERE, floats(*prim_params), 1)
+        assert item
+        assert lib.clay_item_set_position(item, floats(*position)) == 0
+        assert lib.clay_item_set_op(item, op) == 0
+        assert lib.clay_layer_add_item_in_group(doc, layer.value, parent, -1, item, None) == 0
+        lib.clay_item_destroy(item)
+
+    add(plate.value, (0.9,), (0.0, 0.0, 0.0), CLAY_OP_ADD)
+    add(plate.value, (0.7,), (0.55, 0.0, 0.0), CLAY_OP_INTERSECT)
+    # an inline group nested inside it: its children apply to the plate's chain
+    inner = ctypes.c_uint32(0)
+    assert lib.clay_layer_add_group(doc, layer.value, plate.value, -1, CLAY_OP_INLINE,
+                                    CLAY_BLEND_HARD, 0.0, 0.0, ctypes.byref(inner)) == 0
+    add(inner.value, (0.25,), (0.55, 0.5, 0.0), CLAY_OP_SUBTRACT)
+
+    item = lib.clay_item_create(CLAY_PRIM_SPHERE, floats(0.4), 1)
+    assert lib.clay_item_set_position(item, floats(-1.5, 0.0, 0.0)) == 0
+    assert lib.clay_layer_add_item(doc, layer.value, item, None) == 0
+    lib.clay_item_destroy(item)
+
+    assert lib.clay_document_save(doc, str(path).encode()) == 0
+    lib.clay_document_destroy(doc)
+
+
+def group_document_through_pyclay():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("body")
+    plate = layer.add_group(op=clay.Op.ADD, blend=clay.Smooth(0.08))
+    layer.add(clay.Sphere(r=0.9), parent=plate)
+    layer.add(clay.Sphere(r=0.7, position=(0.55, 0, 0)), op=clay.Op.INTERSECT, parent=plate)
+    inner = layer.add_group(op=clay.Op.INLINE, parent=plate)
+    layer.add(clay.Sphere(r=0.25, position=(0.55, 0.5, 0)), op=clay.Op.SUBTRACT, parent=inner)
+    layer.add(clay.Sphere(r=0.4, position=(-1.5, 0, 0)))
+    return doc
+
+
+def test_grouped_construction_matches_pyclay(lib, tmp_path):
+    """The python-bindings scenario: the same grouped construction, both ways."""
+    path = tmp_path / "groups_from_c.clayspace"
+    group_document_through_c(lib, path)
+    from_c = clay.load(str(path))
+    from_python = group_document_through_pyclay()
+
+    pts = sample_points()
+    c_d, py_d = from_c.eval(pts), from_python.eval(pts)
+    assert np.allclose(c_d, py_d, atol=1e-6), report(c_d, py_d, "distance")
+
+    # and the intersect stayed inside the group, which is the whole point
+    outside = np.array([[-1.5, 0.0, 0.0]], dtype=np.float32)
+    assert from_c.eval(outside)[0] < 0.0
+
+
+def test_group_children_read_back_through_both(lib):
+    """The size-query enumeration, over ctypes and in pyclay, on the same tree.
+
+    Built twice rather than saved and reloaded: pyclay has no accessor that
+    hands back an SDF Layer of a document it did not just build, so a reloaded
+    document can be evaluated from Python but not walked. That gap is older
+    than groups and is not one this surface can close.
+    """
+    doc = lib.clay_document_create()
+    try:
+        layer = ctypes.c_uint32(0)
+        assert lib.clay_add_sdf_layer(doc, b"body", ctypes.byref(layer)) == 0
+        plate = ctypes.c_uint32(0)
+        assert lib.clay_layer_add_group(doc, layer.value, 0, -1, CLAY_OP_ADD, CLAY_BLEND_HARD,
+                                        0.0, 0.0, ctypes.byref(plate)) == 0
+        ids = []
+        for radius in (0.9, 0.7):
+            item = lib.clay_item_create(CLAY_PRIM_SPHERE, floats(radius), 1)
+            node = ctypes.c_uint32(0)
+            assert lib.clay_layer_add_item_in_group(doc, layer.value, plate.value, -1, item,
+                                                    ctypes.byref(node)) == 0
+            lib.clay_item_destroy(item)
+            ids.append(node.value)
+
+        count = ctypes.c_size_t(0)
+        assert lib.clay_layer_children(doc, layer.value, plate.value, None,
+                                       ctypes.byref(count)) == CLAY_OK
+        assert count.value == 2
+        buf = (ctypes.c_uint32 * 2)()
+        assert lib.clay_layer_children(doc, layer.value, plate.value, buf,
+                                       ctypes.byref(count)) == CLAY_OK
+        assert list(buf) == ids
+        count = ctypes.c_size_t(1)
+        assert lib.clay_layer_children(doc, layer.value, plate.value, buf,
+                                       ctypes.byref(count)) == CLAY_ERROR_BUFFER_TOO_SMALL
+        assert count.value == 2
+        assert lib.clay_layer_children(doc, layer.value, ids[0], None,
+                                       ctypes.byref(count)) == CLAY_ERROR_INVALID_ARGUMENT
+    finally:
+        lib.clay_document_destroy(doc)
+
+    py_doc = clay.Document()
+    py_layer = py_doc.add_sdf_layer("body")
+    py_plate = py_layer.add_group()
+    py_ids = [py_layer.add(clay.Sphere(r=r), parent=py_plate) for r in (0.9, 0.7)]
+    assert py_layer.children(py_plate) == py_ids
+    with pytest.raises(ValueError, match="not a group"):
+        py_layer.children(py_ids[0])

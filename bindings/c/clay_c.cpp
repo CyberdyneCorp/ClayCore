@@ -303,6 +303,44 @@ bool blend_is_known(std::int32_t v) {
     return false;
 }
 
+// The blend half of an op/blend edit, which an item and a group state alike;
+// only the set of ops they accept differs.
+clay_result validate_blend(std::int32_t blend, float blend_k, float rounding) {
+    if (!blend_is_known(blend)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown blend");
+    if (!(blend_k >= 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "blend k must be >= 0");
+    if (!(rounding >= 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "rounding must be >= 0");
+    return CLAY_OK;
+}
+
+clay_result validate_item_op_blend(std::int32_t op, std::int32_t blend, float blend_k,
+                                   float rounding) {
+    if (!op_is_known(op)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown combine op");
+    return validate_blend(blend, blend_k, rounding);
+}
+
+// What a GROUP may carry, which is not what an item may carry. Op::None is the
+// inline op and belongs to groups alone; the transitions belong to items alone,
+// because compile_group emits no transition parameters and a group carrying one
+// would morph on the compiler's defaults instead of the node's. Inline reads no
+// blend, rounding or colour off the group at all, so those are refused rather
+// than silently ignored — an accepted blend would still dilate the group's
+// influence bound and dirty more than the edit touches.
+clay_result validate_group_op_blend(std::int32_t op, std::int32_t blend, float blend_k,
+                                    float rounding) {
+    if (op != static_cast<std::int32_t>(scene::Op::None) && !op_is_known(op))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown combine op");
+    if (scene::op_is_transition(static_cast<scene::Op>(op)))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a group cannot carry a transition op");
+    clay_result r = validate_blend(blend, blend_k, rounding);
+    if (r != CLAY_OK) return r;
+    if (op == static_cast<std::int32_t>(scene::Op::None) &&
+        (blend != CLAY_BLEND_HARD || blend_k != 0.0f || rounding != 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "an inline group reads no blend or rounding: its children combine into "
+                    "the outer chain with their own");
+    return CLAY_OK;
+}
+
 bool brush_shape_is_known(std::int32_t v) {
     if (v < 0 || v > 0xff) return false;
     switch (static_cast<voxel::BrushShape>(v)) {
@@ -850,16 +888,24 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
 // an enabled undo stack records the add like every other edit. (Regression:
 // inserting directly into the layer let adds escape undo.)
 clay_result insert_node(clay_document* doc, clay_layer_id layer_id, scene::Node node,
-                        clay_node_id* out_node) {
+                        clay_node_id* out_node, scene::NodeId parent = scene::kNoNode,
+                        int index = -1) {
     scene::Layer* layer = doc->doc.document.find_layer(layer_id);
     if (!layer || !layer->sdf) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    // A parent that is not a group is the caller's mistake, not a missing
+    // node: reinsert would refuse it and apply_edit could only report
+    // NOT_FOUND, which says nothing about which of the two ids was wrong.
+    if (parent != scene::kNoNode) {
+        const scene::Node* g = layer->sdf->find(parent);
+        if (!g) return fail(CLAY_ERROR_NOT_FOUND, "group not found");
+        if (!g->is_group) return fail(CLAY_ERROR_INVALID_ARGUMENT, "node is not a group");
+    }
     node.id = layer->sdf->reserve_id();
     scene::NodeId id = node.id;
     std::vector<scene::Node> subtree;
     subtree.push_back(std::move(node));
     clay_result r = apply_edit(
-        doc,
-        scene::Command{scene::AddNodeCmd{layer_id, scene::kNoNode, -1, std::move(subtree)}},
+        doc, scene::Command{scene::AddNodeCmd{layer_id, parent, index, std::move(subtree)}},
         "layer not found");
     if (r != CLAY_OK) return r;
     if (out_node) *out_node = id;
@@ -1180,6 +1226,16 @@ clay_result find_curve_node(const clay_document* doc, clay_layer_id layer, clay_
                     "curve points need CLAY_PRIM_STROKE or CLAY_PRIM_SWEPT");
     *out = n;
     return CLAY_OK;
+}
+
+// The node an edit names, or null — for the entry points whose rules differ
+// between a group and an item. A miss is deliberately NOT reported here: the
+// edit still routes through apply_edit, which is the one place that tells a
+// missing layer apart from a protected one.
+const scene::Node* peek_node(const clay_document* doc, clay_layer_id layer, clay_node_id node) {
+    if (!doc) return nullptr;
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    return (l && l->sdf) ? l->sdf->find(node) : nullptr;
 }
 
 bool node_is_swept(const clay_document* doc, clay_layer_id layer, clay_node_id node) {
@@ -1584,8 +1640,12 @@ clay_result clay_add_sdf_layer(clay_document* doc, const char* name,
     return CLAY_OK;
 }
 
-clay_result clay_add_item(clay_document* doc, clay_layer_id layer_id,
-                          const clay_item_desc* item, clay_node_id* out_node) {
+namespace {
+
+// The flat-descriptor path, shared by the root-level add and the in-group one:
+// a descriptor means the same thing wherever the edit lands.
+clay_result add_item_desc(clay_document* doc, clay_layer_id layer_id, const clay_item_desc* item,
+                          clay_node_id* out_node, scene::NodeId parent, int index) {
     if (!doc || !item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or item");
     clay_item_desc d;
     clay_result r = read_desc(item, kItemDescOriginal, &d);
@@ -1594,7 +1654,14 @@ clay_result clay_add_item(clay_document* doc, clay_layer_id layer_id,
     if (r != CLAY_OK) return r;
     r = canonical_prim_params(d.prim, d.params);
     if (r != CLAY_OK) return r;
-    return insert_node(doc, layer_id, item_from_desc(d).node, out_node);
+    return insert_node(doc, layer_id, item_from_desc(d).node, out_node, parent, index);
+}
+
+}  // namespace
+
+clay_result clay_add_item(clay_document* doc, clay_layer_id layer_id,
+                          const clay_item_desc* item, clay_node_id* out_node) {
+    return add_item_desc(doc, layer_id, item, out_node, scene::kNoNode, -1);
 }
 
 clay_result clay_remove_node(clay_document* doc, clay_layer_id layer_id, clay_node_id node) {
@@ -1658,6 +1725,13 @@ clay_result clay_document_end_undo_group(clay_document* doc) {
 clay_result clay_layer_set_transform(clay_document* doc, clay_layer_id layer, clay_node_id node,
                                      const float position[3], const float rotation_axis[3],
                                      float rotation_angle, float scale) {
+    // A group's transform never reaches its children — the compiler composes
+    // layer * item and nothing else — so this would be an undoable, saved edit
+    // that changes nothing at all. Refused rather than recorded.
+    const scene::Node* target = peek_node(doc, layer, node);
+    if (target && target->is_group)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "a group has no transform of its own: transform its children");
     math::Transform xform;
     clay_result r = read_transform(position, rotation_axis, rotation_angle, scale, &xform);
     if (r != CLAY_OK) return r;
@@ -1701,10 +1775,14 @@ clay_result clay_layer_set_color(clay_document* doc, clay_layer_id layer, clay_n
 
 clay_result clay_layer_set_op_blend(clay_document* doc, clay_layer_id layer, clay_node_id node,
                                     int32_t op, int32_t blend, float blend_k, float rounding) {
-    if (!op_is_known(op)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown combine op");
-    if (!blend_is_known(blend)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown blend");
-    if (!(blend_k >= 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "blend k must be >= 0");
-    if (!(rounding >= 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "rounding must be >= 0");
+    // A group takes the inline op and refuses the transitions; an item is the
+    // other way round. Which rules apply is a property of the node, so the
+    // node decides — a miss falls through to apply_edit's NOT_FOUND as before.
+    const scene::Node* target = peek_node(doc, layer, node);
+    clay_result r = (target && target->is_group)
+                        ? validate_group_op_blend(op, blend, blend_k, rounding)
+                        : validate_item_op_blend(op, blend, blend_k, rounding);
+    if (r != CLAY_OK) return r;
 
     scene::Blend b;
     b.profile = static_cast<scene::BlendProfile>(blend);
@@ -1718,6 +1796,12 @@ clay_result clay_layer_set_op_blend(clay_document* doc, clay_layer_id layer, cla
 
 clay_result clay_layer_move(clay_document* doc, clay_layer_id layer, clay_node_id node,
                             clay_node_id new_parent, int32_t index) {
+    // SdfContent::move refuses this too — it is the engine's invariant, not the
+    // binding's — but apply_edit could only report it as a missing id, which is
+    // not what went wrong.
+    const scene::Layer* l = doc ? doc->doc.document.find_layer(layer) : nullptr;
+    if (l && l->sdf && new_parent != scene::kNoNode && l->sdf->contains(node, new_parent))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a node cannot move into its own subtree");
     return apply_edit(
         doc, scene::Command{scene::MoveNodeCmd{layer, node, new_parent, index}},
         "node or new parent not found");
@@ -1745,6 +1829,63 @@ clay_result clay_layer_trim_stroke(clay_document* doc, clay_layer_id layer, clay
                                    uint32_t count) {
     return apply_edit(doc, scene::Command{scene::TrimStrokeCmd{layer, node, count}},
                       "node not found");
+}
+
+clay_result clay_layer_add_group(clay_document* doc, clay_layer_id layer, clay_node_id parent,
+                                 int32_t index, int32_t op, int32_t blend, float blend_k,
+                                 float rounding, clay_node_id* out_node) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    clay_result r = validate_group_op_blend(op, blend, blend_k, rounding);
+    if (r != CLAY_OK) return r;
+    scene::Node group;
+    group.is_group = true;
+    group.op = static_cast<scene::Op>(op);
+    group.blend.profile = static_cast<scene::BlendProfile>(blend);
+    group.blend.k = blend_k;
+    group.rounding = rounding;
+    // The same AddNodeCmd an item goes through, so the group is one undo step
+    // and its inverse is the RemoveNodeCmd that carries the whole subtree back.
+    return insert_node(doc, layer, std::move(group), out_node, parent, index);
+}
+
+clay_result clay_add_item_in_group(clay_document* doc, clay_layer_id layer, clay_node_id group,
+                                   int32_t index, const clay_item_desc* item,
+                                   clay_node_id* out_node) {
+    if (group == scene::kNoNode) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null group");
+    return add_item_desc(doc, layer, item, out_node, group, index);
+}
+
+clay_result clay_layer_add_item_in_group(clay_document* doc, clay_layer_id layer,
+                                         clay_node_id group, int32_t index,
+                                         const clay_item* item, clay_node_id* out_node) {
+    if (!doc || !item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or item");
+    if (group == scene::kNoNode) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null group");
+    clay_result r = validate_item(*item);
+    if (r != CLAY_OK) return r;
+    return insert_node(doc, layer, item->node, out_node, group, index);
+}
+
+clay_result clay_layer_children(const clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                clay_node_id* out_children, size_t* count) {
+    if (!doc || !count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or count");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    const scene::Node* n = l->sdf ? l->sdf->find(node) : nullptr;
+    if (!n) return fail(CLAY_ERROR_NOT_FOUND, "no node with that id in that layer");
+    // Not a group is a caller asking the wrong question, not a missing node —
+    // and the answer a reloading host reads to tell the two apart.
+    if (!n->is_group) return fail(CLAY_ERROR_INVALID_ARGUMENT, "node is not a group");
+
+    const std::size_t needed = n->children.size();
+    if (out_children && *count < needed) {
+        *count = needed;
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "the group has " + std::to_string(needed) + " children");
+    }
+    if (out_children)
+        for (std::size_t i = 0; i < needed; ++i) out_children[i] = n->children[i];
+    *count = needed;
+    return CLAY_OK;
 }
 
 clay_result clay_document_remove_layer(clay_document* doc, clay_layer_id layer) {

@@ -169,8 +169,9 @@ was aimed — invisible until an item has two deformers.
 There is also nothing to accumulate. `compile_group` passes the layer through
 and `emit_item` uses `layer.xform * item.xform`, so **a group's own transform
 never reaches its children**: a sphere under a group translated to `x = 2`
-evaluates at the origin. Worth knowing in its own right — a group carrying a
-transform silently does nothing.
+evaluates at the origin. Worth knowing in its own right — which is why the
+bindings now refuse a transform on a group rather than record an undoable,
+saved edit that changes nothing (`clay_layer_set_transform`, `Layer.set_transform`).
 
 **A drag coalesces.** A Move is not one call — a host re-applies it every frame
 with a longer displacement. A drag holds its centre and radius fixed and grows
