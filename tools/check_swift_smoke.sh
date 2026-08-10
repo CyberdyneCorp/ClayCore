@@ -67,7 +67,10 @@ run_macos() {
   local dir="$work/macos"
   make_module_dir "$slice" "$dir"
   echo "== macOS =="
-  swiftc -O -I "$dir" -o "$dir/smoke" tests/swift/smoke.swift "$lib" -lc++ -framework Foundation
+  # Metal as well as Foundation: the slice carries the Metal backend, so the
+  # archive has undefined Metal symbols without it.
+  swiftc -O -I "$dir" -o "$dir/smoke" tests/swift/smoke.swift "$lib" -lc++ \
+    -framework Foundation -framework Metal
   "$dir/smoke"
 }
 
@@ -113,6 +116,7 @@ print(c[-1] if c else "")' || true)"
     -o "$dir/smoke" \
     tests/swift/smoke.swift \
     "$lib" -lc++ \
+    -framework Foundation -framework Metal \
     -Xlinker -syslibroot -Xlinker "$sdk"   # else the linker takes the macOS sysroot
 
   local status=0

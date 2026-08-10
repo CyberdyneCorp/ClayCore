@@ -45,6 +45,32 @@ print("claycore ABI \(major).\(minor).\(patch)")
 check(major == CLAY_ABI_MAJOR && minor == CLAY_ABI_MINOR,
       "the linked library matches the header it was compiled against")
 
+// -- backends ----------------------------------------------------------------
+//
+// Which backends the SHIPPED artifact carries, asserted rather than assumed.
+// The xcframework went out CPU-only for several releases: CLAY_BACKEND_METAL
+// defaults off and the build script never passed it, so every Apple host was
+// pinned to CPU field evaluation and nothing here said so. A consumer of a
+// prebuilt static library cannot add the backend afterwards, so if this check
+// fails the artifact is wrong, not the app.
+
+func registeredBackends() -> [String] {
+    var size = 0
+    guard clay_list_backends(nil, &size) == CLAY_OK, size > 0 else { return [] }
+    var buffer = [CChar](repeating: 0, count: size)
+    guard clay_list_backends(&buffer, &size) == CLAY_OK else { return [] }
+    // Comma-separated with no spaces, per clay_list_backends.
+    let names = buffer.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+    return names.split(separator: ",").map(String.init)
+}
+
+let backends = registeredBackends()
+print("backends: \(backends.joined(separator: ", "))")
+check(backends.contains("cpu"), "the CPU backend is registered")
+check(backends.contains("metal"),
+      "the Metal backend is registered — the xcframework must ship it, since a "
+      + "consumer of a prebuilt static library cannot enable it afterwards")
+
 guard let doc = clay_document_create() else {
     print("FAIL could not create a document")
     exit(1)

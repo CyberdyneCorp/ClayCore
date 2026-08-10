@@ -193,6 +193,37 @@ the host side rather than assuming the previous one still passes.
 
 Tracked honestly rather than assumed done:
 
+- **The xcframework shipped CPU-only until this was fixed** (issue #45).
+  `CLAY_BACKEND_METAL` defaults off and `build_xcframework.sh` never passed it,
+  so every Apple host linking the shipped artifact got `clay_list_backends ->
+  "cpu"` and no way to opt in: the option decides what is COMPILED INTO the
+  archive, and a consumer of a prebuilt static library cannot add a backend
+  afterwards. The consuming app measured 2.6x at 25 items on an iPad Air M3,
+  with CPU degrading 2.7x over eight strokes while Metal stayed flat.
+
+  Two things are worth carrying forward. The first is that a flag flip alone
+  would NOT have fixed it: the metallib was compiled `-sdk macosx` regardless
+  of the slice, so the iOS slices would have carried a macOS metallib, which
+  links cleanly and fails to register at runtime — the same CPU-only outcome,
+  one level harder to see. The second is that nothing asserted any of this, so
+  it survived several releases; there are now two gates, the build failing on a
+  slice with no embedded metallib and the Swift smoke test asserting the
+  backend registers.
+
+  **Still unverified on hardware.** The fix was written on a machine with no
+  Apple toolchain. The release workflow builds the xcframework on macOS and now
+  fails rather than shipping a CPU-only slice, but "`clay_list_backends`
+  reports metal on a real iPad" has not been observed by this repository.
+
+- **A Metal parity deviation was reported on the iOS Simulator, not on device**
+  (issue #45, recorded by the consumer as a note rather than a bug report). A
+  Move-Topological fixture measured the baked field departing 0.166 from the
+  document where CPU gives 0.033; it did not reproduce on device and the
+  rendered goldens were unchanged. Not dismissed: "the simulator emulates
+  Metal" is an explanation, not evidence. The thing to do is reproduce it under
+  the parity suite on the simulator rather than through an app fixture, which
+  only became possible now the framework carries Metal at all.
+
 - **Vulkan device parity has executed** (added with the backend). Measured with
   the undilutable metric rather than the aggregate: `parity: every registered
   backend matches the scalar reference` reports **204** assertions with the
