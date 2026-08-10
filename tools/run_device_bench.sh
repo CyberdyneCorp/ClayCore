@@ -87,5 +87,8 @@ if [ "$status" -ne 0 ]; then
     exit "$status"
 fi
 
+JSON="${CLAY_DEVICE_JSON:-$ROOT/build/device/device-bench.json}"
+python3 "$ROOT/tools/collect_device_bench.py" "$RESULTS" "$JSON"
+
 echo "device-bench: OK"
 echo "  result bundle: $RESULTS"

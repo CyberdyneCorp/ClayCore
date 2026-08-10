@@ -12,18 +12,18 @@
 - [x] 2.1 Add a minimal Xcode project under `tests/device/` with a single XCTest target linking `dist/claycore.xcframework`, no app logic
 - [x] 2.2 Resolve the hostless-vs-host-app question from the design's risk list: attempt a hostless bundle first, add a trivial host app target only if the device install requires one
 - [x] 2.3 Write `tools/run_device_bench.sh`: resolve the target iPad's udid, run `xcodebuild test -destination 'platform=iOS,id=<udid>'`, exit non-zero with a named diagnostic when no provisioned device is attached
-- [ ] 2.4 Extract results from the `.xcresult` via `xcrun xcresulttool` and write them to a JSON path given on the command line
+- [x] 2.4 Extract results from the `.xcresult` via `xcrun xcresulttool` and write them to a JSON path given on the command line
 - [x] 2.5 Smoke the whole path end to end: one trivial case that calls `clay_list_backends` through the ABI and reports which backends registered on the device
 - [x] 2.6 Confirm `metal` appears in that list on the iPad — this is the first direct evidence the production path runs on device at all
 
 ## 3. Measurement mechanics
 
-- [ ] 3.1 Implement the timing core: a warm-up pass excluded from the samples, then N timed repetitions collecting per-sample durations
-- [ ] 3.2 Compute and report p50 and p95; assert no mean is reported as the gated statistic
-- [ ] 3.3 Record per case: backend name, device model, OS version, sample count, and the backend that actually served the call
-- [ ] 3.4 Fail a case that requested `metal` but was served by another backend, rather than recording the substitute's number
-- [ ] 3.5 Sample `ProcessInfo.thermalState` at start and end; mark the run invalid when either is not `.nominal`
-- [ ] 3.6 Add the document-growth axis: run every case at three stamp counts spanning two orders of magnitude, recording each
+- [x] 3.1 Implement the timing core: a warm-up pass excluded from the samples, then N timed repetitions collecting per-sample durations
+- [x] 3.2 Compute and report p50 and p95; assert no mean is reported as the gated statistic
+- [x] 3.3 Record per case: backend name, device model, OS version, sample count, and the backend that actually served the call
+- [x] 3.4 Fail a case that requested `metal` but was served by another backend, rather than recording the substitute's number
+- [x] 3.5 Sample `ProcessInfo.thermalState` at start and end; mark the run invalid when either is not `.nominal`
+- [x] 3.6 Add the document-growth axis: run every case at three stamp counts spanning two orders of magnitude, recording each
 
 ## 4. Coverage — every brush and verb has a device case
 
