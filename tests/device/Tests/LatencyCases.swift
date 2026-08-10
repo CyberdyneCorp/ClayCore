@@ -150,7 +150,7 @@ final class LatencyTests: XCTestCase {
 
             collector.add(CaseResult(
                 name: "sdf_stamp_\(backend)",
-                verb: "brush_stroke_engine.stamp",
+                verb: "sdf_stamp",
                 budgetClass: .interactive,
                 backend: backend,
                 servedBy: backend,
@@ -165,59 +165,4 @@ final class LatencyTests: XCTestCase {
                       + "experiment, not a slower result")
     }
 
-    /// One voxel brush stamp. No tape is involved, so this is the control:
-    /// it should be flat in document size where the SDF case is not.
-    func testVoxelStampLatencyAcrossDocumentGrowth() throws {
-        let collector = RunCollector()
-
-        var measurements: [Measurement] = []
-        for stamps in Self.axis {
-            guard let doc = clay_document_create() else {
-                XCTFail("could not create a document"); continue
-            }
-            defer { clay_document_destroy(doc) }
-
-            var layer: clay_layer_id = 0
-            var grid: OpaquePointer?
-            XCTAssertEqual(
-                clay_document_add_voxel_layer(doc, "bench", 0.02, &layer, &grid), CLAY_OK)
-            guard let grid else { XCTFail("no grid"); continue }
-
-            var brush = clay_brush_params()
-            brush.struct_size = UInt32(MemoryLayout<clay_brush_params>.size)
-            brush.size = 8
-            brush.shape = Int32(CLAY_BRUSH_SHAPE_SPHERE.rawValue)
-            brush.falloff = Int32(CLAY_BRUSH_FALLOFF_SMOOTH.rawValue)
-            brush.strength = 1.0
-            brush.seed = 1
-
-            // pre-load the grid with the same number of stamps the axis names
-            for i in 0..<stamps {
-                let (x, y, z) = SceneBuilder.stampPosition(i)
-                var cell: [Int32] = [Int32(x * 40), Int32(y * 40), Int32(z * 40)]
-                _ = clay_voxel_set_brush(grid, &cell, &brush, 0)
-            }
-
-            var index = stamps
-            let r = Timing.measure {
-                let (x, y, z) = SceneBuilder.stampPosition(index)
-                var cell: [Int32] = [Int32(x * 40), Int32(y * 40), Int32(z * 40)]
-                _ = clay_voxel_set_brush(grid, &cell, &brush, 0)
-                index += 1
-            }
-            measurements.append(Measurement(stamps: stamps, p50Ms: r.p50,
-                                            p95Ms: r.p95, samples: r.n))
-        }
-
-        collector.add(CaseResult(
-            name: "voxel_stamp",
-            verb: "voxel.set_brush",
-            budgetClass: .interactive,
-            backend: "cpu",
-            servedBy: "cpu",
-            measurements: measurements,
-            growthExponent: Timing.growthExponent(measurements)))
-
-        _ = collector.finish(abiVersion: abiVersion(), attachTo: self)
-    }
 }

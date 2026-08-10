@@ -27,27 +27,27 @@
 
 ## 4. Coverage — every brush and verb has a device case
 
-- [ ] 4.1 Write the coverage table mapping each brush and sculpt verb to its device case, with an explicit exemption entry format carrying a reason
-- [ ] 4.2 Fail the harness when a verb known to the engine has no table entry
-- [ ] 4.3 Add latency cases for the voxel sculpt verbs
-- [ ] 4.4 Add latency cases for the SDF verbs: relax, flatten, move, snakehook, mask paint, mask extrude
-- [ ] 4.5 Add latency cases for the brush stroke engine and the cut tool
-- [ ] 4.6 Classify every case as `interactive`, `gesture` or `operation` per the design's budget classes
+- [x] 4.1 Write the coverage table mapping each brush and sculpt verb to its device case, with an explicit exemption entry format carrying a reason
+- [x] 4.2 Fail the harness when a verb known to the engine has no table entry
+- [x] 4.3 Add latency cases for the voxel sculpt verbs
+- [x] 4.4 Add latency cases for the SDF verbs: relax, flatten, move, snakehook, mask paint, mask extrude
+- [x] 4.5 Add latency cases for the brush stroke engine and the cut tool
+- [x] 4.6 Classify every case as `interactive`, `gesture` or `operation` per the design's budget classes
 
 ## 5. Correctness on device, not only timing
 
-- [ ] 5.1 Run the existing parity corpus on the iPad against the scalar reference, using the tolerances `evaluation-backends` already documents
-- [ ] 5.2 Extend the parity corpus with scenes authored *by the brushes* — the tape a stroke, a cut and a mask extrude actually emit
-- [ ] 5.3 Extend the coverage guard at `tests/unit/test_parity.cpp:298` beyond primitive types to the combine ops, the deformers and the blend profiles
-- [ ] 5.4 Fix or record whatever 5.3 uncovers — an op no scene reaches today is a real gap, not a test bug
-- [ ] 5.5 Report a skipped Metal parity run as skipped rather than passed in the existing macOS CI job
+- [x] 5.1 Run the existing parity corpus on the iPad against the scalar reference, using the tolerances `evaluation-backends` already documents
+- [x] 5.2 Extend the parity corpus with scenes authored *by the brushes* — the tape a stroke, a cut and a mask extrude actually emit
+- [x] 5.3 Extend the coverage guard at `tests/unit/test_parity.cpp:298` beyond primitive types to the combine ops, the deformers and the blend profiles
+- [x] 5.4 Fix or record whatever 5.3 uncovers — an op no scene reaches today is a real gap, not a test bug
+- [x] 5.5 Report a skipped Metal parity run as skipped rather than passed in the existing macOS CI job
 
 ## 6. Baselines and the gate
 
-- [ ] 6.1 Define and document the baseline JSON schema: per case, the class, the declared budget, p50/p95 per document size, plus device model, OS, xcframework version and claycore commit
-- [ ] 6.2 Write `tools/check_device_bench.py`: fail on regression beyond tolerance, on a case over its declared budget (checked against p95), and on any case with no declared budget
-- [ ] 6.3 Implement the super-linear growth check across the document-size axis, failing with the sizes and the measured ratio
-- [ ] 6.4 Refuse a comparison whose baseline device model or OS differs from the run's, as invalid rather than as a result
+- [x] 6.1 Define and document the baseline JSON schema: per case, the class, the declared budget, p50/p95 per document size, plus device model, OS, xcframework version and claycore commit
+- [x] 6.2 Write `tools/check_device_bench.py`: fail on regression beyond tolerance, on a case over its declared budget (checked against p95), and on any case with no declared budget
+- [x] 6.3 Implement the super-linear growth check across the document-size axis, failing with the sizes and the measured ratio
+- [x] 6.4 Refuse a comparison whose baseline device model or OS differs from the run's, as invalid rather than as a result
 - [ ] 6.5 Run the full harness on the reference iPad and inspect the numbers before any gate is wired
 - [ ] 6.6 Commit the baseline and the per-class budget values as their own reviewable commit — this is where the performance requirements get decided
 - [ ] 6.7 Wire the gate into `.github/workflows/release.yml`, failing the release when no device is attached rather than skipping; leave `ci.yml` untouched

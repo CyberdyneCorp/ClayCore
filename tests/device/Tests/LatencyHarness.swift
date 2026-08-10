@@ -74,6 +74,9 @@ struct RunRecord: Codable {
     /// throttled run is not a slower result, it is a different experiment.
     let valid: Bool
     let cases: [CaseResult]
+    /// The coverage table as the harness declared it, so the checker can hold
+    /// it against the entry points clay.h actually exposes.
+    let coverage: [CoverageEntry]
 }
 
 // MARK: - Timing
@@ -179,7 +182,8 @@ final class RunCollector {
             thermalStateStart: DeviceInfo.thermalName(thermalStart),
             thermalStateEnd: DeviceInfo.thermalName(thermalEnd),
             valid: thermalStart == .nominal && thermalEnd == .nominal,
-            cases: cases)
+            cases: cases,
+            coverage: Coverage.table)
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
