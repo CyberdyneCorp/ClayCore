@@ -59,4 +59,4 @@
 - [x] 7.3 Update `docs/05-claycore-library.md` where it describes the latency-critical path, so the measured numbers are discoverable from the library overview
 - [x] 7.4 Add a row to `openspec/ROADMAP.md` — the roadmap has no device performance entry today, which is why this gap survived to v0.25.0
 - [x] 7.5 Record in the roadmap what the first measurement pass found, in the style of the existing "what actually bit" entries
-- [ ] 7.6 Run `openspec validate --strict` and the four presets plus `release_check`
+- [x] 7.6 Run `openspec validate --strict` and the four presets plus `release_check`
