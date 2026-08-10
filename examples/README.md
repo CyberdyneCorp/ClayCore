@@ -486,6 +486,9 @@ moves what gets exported, not what is stored.
 
 ## Notes
 
+- **This page documents 00-17 and the two showcase examples.** The gallery
+  text has drifted behind the scripts; 18-33 and 36 run in CI and regenerate
+  their output, they just have no section here yet.
 - **This page documents 00-17, the two showcase examples and 36.** The gallery
   text has drifted behind the scripts; 18-33 run in CI and regenerate their
   output, they just have no section here yet.

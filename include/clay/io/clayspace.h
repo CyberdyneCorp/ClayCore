@@ -31,17 +31,20 @@
 // reader is told the version — that is the whole point of decoding against the
 // minor instead of guessing from the bytes.
 //
-// Minor 4 adds a node's sampled volume. A build that predates it reads a
-// document containing one as though the node carried no volume, so a sampled
-// item vanishes rather than being misread; re-saving there drops it for good.
+// Minor 6 lets a voxel layer carry a stack of resolution levels. The 'VOXL'
+// chunk still opens with the COARSEST level in the layout it always had, and
+// any finer level follows inside the same chunk as a tail of per-cell offsets.
+// A build that predates the tail therefore stops after the coarsest level and
+// opens the document there rather than failing, and a layer with one level
+// serialises to the bytes it always did. The scene payload is untouched; the
+// minor moves because the container's content did, and kSceneMinor moves with
+// it because a reader is told one number for both.
 //
-// Minor 5 gives the layer record's kind byte a third value, `mesh`, and adds
-// the 'MESH' chunk carrying that layer's triangles. A build that predates it
-// opens such a document — the chunk is unknown and skipped, and the unfamiliar
-// kind reads into the enum's fixed uint8_t underlying type and is ignored at
-// every `kind == Sdf` gate, exactly as a voxel layer already is. It loses the
-// mesh layers if it saves again, which is the same loss minors 1, 2 and 4
-// carry and the reason the minor moved rather than the major.
+// The cost of opening rather than failing: such a build holds only the coarsest
+// level, so SAVING the document back drops the finer ones. That is lossy in the
+// one direction a chunked format cannot protect against — the levels are gone
+// from the reader's model, not merely unwritten — and it is the trade the
+// backward-open rule buys. A build that understands the tail round-trips it.
 
 #include <map>
 #include <optional>
@@ -58,7 +61,7 @@ namespace clay {
 namespace io {
 
 inline constexpr std::uint16_t kClaySpaceMajor = 1;
-inline constexpr std::uint16_t kClaySpaceMinor = 5;
+inline constexpr std::uint16_t kClaySpaceMinor = 6;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).

@@ -54,6 +54,7 @@ EXAMPLES = [
     "36_mesh_layers",
     "37_groups",
     "38_consolidation",
+    "39_multi_resolution",
 ]
 
 
@@ -72,6 +73,9 @@ CAPABILITY_EXAMPLES = {
     "evaluation-backends": None,  # the same field on four devices — a parity test, not a render
     "meshing": "08_meshing_and_io",  # plus 19_mesh_import for the reverse direction
     "picking": "10_editing",
+    "file-io": "08_meshing_and_io",
+    # plus 11_masks, 33_mask_extrude, and 39_multi_resolution for the level stack
+    "voxel-engine": "15_voxel_verbs_and_repair",
     "file-io": "08_meshing_and_io",  # plus 36_mesh_layers for the mesh chunk
     "voxel-engine": "15_voxel_verbs_and_repair",  # plus 11_masks and 33_mask_extrude
     "brush-engine": "12_strokes",   # plus 26_move_brush and 11_masks for the mask brush

@@ -211,7 +211,7 @@ void VoxelGrid::repair_close_holes(int passes, const MaskField* mask) {
                 std::size_t i = w.index(x, y, z);
                 if (!filled[i] || w.occupied[i]) continue;  // additions only
                 VoxelCoord c{x, y, z};
-                if (fully_masked(mask, c, voxel_size_)) continue;
+                if (fully_masked(mask, c, voxel_size())) continue;
                 set(c, enclosing_colour(*this, c));
             }
 }
@@ -231,7 +231,7 @@ void VoxelGrid::repair_fill_voids(const MaskField* mask) {
                 std::size_t i = w.index(x, y, z);
                 if (w.occupied[i] || outside[i]) continue;
                 VoxelCoord c{x, y, z};
-                if (fully_masked(mask, c, voxel_size_)) continue;
+                if (fully_masked(mask, c, voxel_size())) continue;
                 fill.push_back(c);
             }
 

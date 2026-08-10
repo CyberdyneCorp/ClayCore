@@ -1250,7 +1250,41 @@ clay_result clay_document_add_voxel_layer(clay_document* doc, const char* name,
 clay_result clay_document_voxel_layer(clay_document* doc, const char* name,
                                       clay_layer_id* out_layer, clay_voxel_grid** out_grid);
 
+/* Cell size of the grid's ACTIVE resolution level (see below). */
 clay_result clay_voxel_size(const clay_voxel_grid* grid, float* out_voxel_size);
+
+/* -- resolution levels ----------------------------------------------------- */
+
+/* A grid holds a stack of levels: level 0 is the coarsest and level k has half
+ * the cell size of level k-1. One is ACTIVE, and every other entry point in
+ * this file acts on it — the level is grid state rather than an argument, so
+ * nothing here changed shape and a caller that never mentions a level gets a
+ * one-level grid behaving exactly as it did before these calls existed.
+ *
+ * Adding a level subdivides every occupied cell into its eight children, so the
+ * solid is unchanged. Editing at a level averages down into the coarser ones
+ * and replays into the finer ones from the offsets they hold, which is what
+ * makes a broad stroke at a coarse level leave fine detail standing. Dropping a
+ * level discards the detail only that level held. */
+clay_result clay_voxel_level_count(const clay_voxel_grid* grid, size_t* out_count);
+clay_result clay_voxel_active_level(const clay_voxel_grid* grid, size_t* out_level);
+/* CLAY_ERROR_INVALID_ARGUMENT for a level the grid does not have, grid
+ * untouched. */
+clay_result clay_voxel_set_active_level(clay_voxel_grid* grid, size_t level);
+/* Appends a level at half the finest cell size and reports its index. The stack
+ * is capped, and CLAY_ERROR_INVALID_ARGUMENT at the cap: every level costs
+ * eight times the cells of the one below, so a stream naming an arbitrary count
+ * would be a request to allocate one. */
+clay_result clay_voxel_add_level(clay_voxel_grid* grid, size_t* out_level);
+/* Drops the finest level. CLAY_ERROR_INVALID_ARGUMENT when only one is left,
+ * since a grid always has at least one. */
+clay_result clay_voxel_drop_level(clay_voxel_grid* grid);
+/* Cell size and occupied cells of ONE level, so a host can report what each
+ * level of a stack costs without making it active first. */
+clay_result clay_voxel_level_voxel_size(const clay_voxel_grid* grid, size_t level,
+                                        float* out_voxel_size);
+clay_result clay_voxel_level_occupied_count(const clay_voxel_grid* grid, size_t level,
+                                            size_t* out_count);
 
 /* -- palette --------------------------------------------------------------- */
 

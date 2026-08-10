@@ -857,6 +857,55 @@ def test_voxel_greedy_mesh_and_step_field():
     assert inside[0] < 0 < outside[0]
 
 
+def test_voxel_levels_block_out_then_refine():
+    g = clay.VoxelGrid(0.2)
+    body = g.palette_add("#808080")
+    g.fill_box((0, 0, 0), (3, 3, 3), body)
+    assert g.level_count == 1
+    assert g.active_level == 0
+
+    assert g.add_level() == 1
+    assert g.level_voxel_size(1) == pytest.approx(0.1)
+    # subdivided into eight children apiece: the same solid, twice the detail
+    assert g.level_occupied_count(1) == g.level_occupied_count(0) * 8
+
+    g.active_level = 1
+    g.set((2, 2, 2), 0)  # a notch only the fine level can hold
+    g.active_level = 0
+    g.fill_box((0, 4, 0), (3, 4, 3), body)  # a broad stroke on top
+
+    g.active_level = 1
+    assert g.get((2, 2, 2)) == 0  # the detail survived the coarse edit
+    assert g.get((0, 9, 0)) == body  # and the broad stroke arrived
+
+    assert g.drop_level() is True
+    assert (g.level_count, g.active_level) == (1, 0)
+    assert g.drop_level() is False  # a grid always has at least one level
+
+    with pytest.raises(ValueError):
+        g.active_level = 3
+
+
+def test_voxel_levels_survive_a_document_round_trip(tmp_path):
+    doc = clay.Document()
+    grid = doc.add_voxel_layer("blocks", voxel_size=0.2)
+    body = grid.palette_add("#ff8800")
+    grid.fill_box((0, 0, 0), (3, 3, 3), body)
+    grid.add_level()
+    grid.active_level = 1
+    grid.set((2, 2, 2), 0)
+
+    path = tmp_path / "levels.clayspace"
+    doc.save(str(path))
+    back = clay.load(str(path)).voxel_layer("blocks")
+    assert back is not None
+    assert back.level_count == 2
+    assert back.active_level == 1
+    assert back.voxel_size == pytest.approx(0.1)
+    assert back.get((2, 2, 2)) == 0
+    assert back.level_occupied_count(0) == grid.level_occupied_count(0)
+
+
 def test_voxel_layer_in_document_round_trip(tmp_path):
     doc = clay.Document()
     grid = doc.add_voxel_layer("blocks", voxel_size=0.2)

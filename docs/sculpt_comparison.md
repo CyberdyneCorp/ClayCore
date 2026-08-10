@@ -201,8 +201,13 @@ Recorded so they read as decisions rather than oversights. In full in
 - **Mesh surface-mode sculpting** (ZBrush's surface brushes, 3DCoat's LiveClay).
   An SDF sidesteps topology entirely; competing on dynamic tessellation is not
   this engine's fight.
-- **Subdivision multires.** Resolution is an evaluation parameter here, so the
-  Res+/Resample apparatus has nothing to attach to.
+- **Subdivision multires on the SDF side.** Resolution is an evaluation
+  parameter for an SDF layer, so the Res+/Resample apparatus has nothing to
+  attach to there. Voxel layers now DO carry a level stack — level 0 coarsest,
+  half the cell size per level, detail held as offsets so a coarse stroke does
+  not flatten fine work — because a voxel layer's resolution is real storage
+  rather than a sampling choice. Discrete levels rather than an octree, so the
+  cell-coordinate hash the falloff dither depends on keeps working.
 - **Texture painting, node-graph texturing UI, scripted brushes.** The edit list
   already *is* non-destructive procedural sculpting; the pipeline exit is
   bake-and-export.

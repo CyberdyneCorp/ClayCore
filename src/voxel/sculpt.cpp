@@ -184,6 +184,14 @@ inline float mask_at(const MaskField& mask, VoxelCoord c, float voxel_size) {
 
 // Iterate the footprint, handing the callback each in-shape cell together
 // with its world coordinate and dithered pass/fail. Keeps the verbs flat.
+//
+// `voxel_size` is the ACTIVE level's, and it is the only thing a level changes
+// here: cell coordinates stay integers on a uniform lattice, so cell_threshold
+// hashes the same kind of key it always did and a stroke stays reproducible at
+// every level. It is also what converts a cell to world space for the mask,
+// which is how a world-addressed mask selects the same region at every level.
+// The walk carrying the size is what stops a verb from forgetting to state a
+// level: there is no other way into the footprint.
 template <typename Fn>
 void for_each_brush_cell(VoxelCoord c, const BrushParams& p, float voxel_size, Fn&& fn) {
     BrushExtent e = brush_extent(p.size);
@@ -239,16 +247,16 @@ void fill_pockets(Region& r, int passes) {
 }  // namespace
 
 void VoxelGrid::set_brush(VoxelCoord c, const BrushParams& p, std::uint8_t index) {
-    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) { set(w, index); });
+    for_each_brush_cell(c, p, voxel_size(), [&](VoxelCoord w) { set(w, index); });
 }
 
 void VoxelGrid::paint_brush(VoxelCoord c, const BrushParams& p, std::uint8_t index) {
-    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) { paint(w, index); });
+    for_each_brush_cell(c, p, voxel_size(), [&](VoxelCoord w) { paint(w, index); });
 }
 
 void VoxelGrid::sculpt_smooth(VoxelCoord c, const BrushParams& p) {
     Region before = snapshot(*this, c, p.size, 1);
-    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) {
+    for_each_brush_cell(c, p, voxel_size(), [&](VoxelCoord w) {
         int n = occupied_neighbours_26(before, w.x, w.y, w.z);
         bool occupied = before.at(w.x, w.y, w.z) != 0;
         // Majority of the 26 neighbours decides: under-supported material
@@ -266,7 +274,7 @@ void VoxelGrid::sculpt_inflate(VoxelCoord c, const BrushParams& p, int amount) {
     bool grow = amount > 0;
     for (int step = 0; step < steps; ++step) {
         Region before = snapshot(*this, c, p.size, 1);
-        for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) {
+        for_each_brush_cell(c, p, voxel_size(), [&](VoxelCoord w) {
             bool occupied = before.at(w.x, w.y, w.z) != 0;
             if (grow && !occupied && has_occupied_face_neighbour(before, w.x, w.y, w.z)) {
                 set(w, majority_colour(before, w.x, w.y, w.z));
@@ -281,7 +289,7 @@ void VoxelGrid::sculpt_flatten(VoxelCoord c, const BrushParams& p, kernel::cfloa
                                float offset_cells) {
     kernel::cfloat3 n = kernel::cnormalize(normal);
     Region before = snapshot(*this, c, p.size, 1);
-    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) {
+    for_each_brush_cell(c, p, voxel_size(), [&](VoxelCoord w) {
         // Signed distance from the plane through the brush centre, in cells.
         float side = (static_cast<float>(w.x - c.x)) * n.x + (static_cast<float>(w.y - c.y)) * n.y +
                      (static_cast<float>(w.z - c.z)) * n.z - offset_cells;
@@ -308,7 +316,7 @@ void VoxelGrid::sculpt_fill_cavities(VoxelCoord c, const BrushParams& p, int wid
     // sees the material on the other side of it.
     Region closed = snapshot(*this, c, p.size, width + 1);
     fill_pockets(closed, width);
-    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) {
+    for_each_brush_cell(c, p, voxel_size(), [&](VoxelCoord w) {
         if (get(w) == 0 && closed.at(w.x, w.y, w.z) != 0) set(w, closed.at(w.x, w.y, w.z));
     });
 }
@@ -326,7 +334,7 @@ void VoxelGrid::sculpt_scrape(VoxelCoord c, const BrushParams& p, cfloat3 normal
                                    static_cast<float>(c.z) + 0.5f),
                                n) +
                   offset_cells;
-    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) {
+    for_each_brush_cell(c, p, voxel_size(), [&](VoxelCoord w) {
         float height = kernel::cdot(cf3(static_cast<float>(w.x) + 0.5f,
                                         static_cast<float>(w.y) + 0.5f,
                                         static_cast<float>(w.z) + 0.5f),
@@ -347,11 +355,11 @@ void VoxelGrid::sculpt_scrape(VoxelCoord c, const BrushParams& p, cfloat3 normal
 void VoxelGrid::sculpt_smudge(VoxelCoord c, const BrushParams& p, cfloat3 displacement) {
     // Padded by the displacement so material dragged in from outside the
     // footprint is seen.
-    int pad = 1 + static_cast<int>(std::ceil(kernel::clength(displacement) / voxel_size_));
+    int pad = 1 + static_cast<int>(std::ceil(kernel::clength(displacement) / voxel_size()));
     Region before = snapshot(*this, c, p.size, pad);
-    cfloat3 step = displacement * (1.0f / voxel_size_);
+    cfloat3 step = displacement * (1.0f / voxel_size());
 
-    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) {
+    for_each_brush_cell(c, p, voxel_size(), [&](VoxelCoord w) {
         bool occupied = before.at(w.x, w.y, w.z) != 0;
         // Only the skin moves. An interior cell has no empty face neighbour,
         // so it is left exactly where it was — that is the whole difference
@@ -408,7 +416,7 @@ bool VoxelGrid::sculpt_carve_alpha(VoxelCoord c, const BrushParams& p, const flo
 
                 float weight = falloff_weight(p.falloff, normalized_distance(x, y, z, p.size, e)) *
                                p.strength * a;
-                if (p.mask) weight *= 1.0f - mask_at(*p.mask, w, voxel_size_);
+                if (p.mask) weight *= 1.0f - mask_at(*p.mask, w, voxel_size());
                 if (passes(w, weight, p.seed)) set(w, index);
             }
     return true;
@@ -419,20 +427,20 @@ void VoxelGrid::sculpt_grab(VoxelCoord c, const BrushParams& p, kernel::cfloat3 
     // Pad by the displacement so material pulled in from outside the footprint
     // is still in the snapshot we read from.
     int pad = 1 + static_cast<int>(kernel::clength(displacement) /
-                                   kernel::cmax(voxel_size_, 1e-6f));
+                                   kernel::cmax(voxel_size(), 1e-6f));
     Region before = snapshot(*this, c, p.size, pad);
 
     BrushExtent e = brush_extent(p.size);
     float radius = static_cast<float>(p.size) * 0.5f;
     kernel::cfloat3 centre = kernel::cf3(0, 0, 0);  // offsets are relative to c
 
-    for_each_brush_cell(c, p, voxel_size_, [&](VoxelCoord w) {
+    for_each_brush_cell(c, p, voxel_size(), [&](VoxelCoord w) {
         // Where this cell's material came from, in cell units, through the same
         // map cgrab_point applies to a point.
         kernel::cfloat3 local = kernel::cf3(static_cast<float>(w.x - c.x),
                                             static_cast<float>(w.y - c.y),
                                             static_cast<float>(w.z - c.z));
-        kernel::cfloat3 cells = displacement * (1.0f / kernel::cmax(voxel_size_, 1e-6f));
+        kernel::cfloat3 cells = displacement * (1.0f / kernel::cmax(voxel_size(), 1e-6f));
         kernel::cfloat3 src = cgrab_point(local, centre, radius, cells,
                                           front_only ? 1.0f : 0.0f,
                                           static_cast<int>(p.falloff));
@@ -488,7 +496,7 @@ void radial_sculpt(VoxelGrid& grid, VoxelCoord c, const BrushParams& p, float vo
 }  // namespace
 
 void VoxelGrid::sculpt_pinch(VoxelCoord c, const BrushParams& p) {
-    radial_sculpt(*this, c, p, voxel_size_, true);
+    radial_sculpt(*this, c, p, voxel_size(), true);
 }
 
 // Magnify: the inverse of pinch, and deliberately the same walk with the step
@@ -496,7 +504,7 @@ void VoxelGrid::sculpt_pinch(VoxelCoord c, const BrushParams& p) {
 // from cursor; inverse of Pinch" — and the SDF side spells it as one signed
 // strength for the same reason.
 void VoxelGrid::sculpt_magnify(VoxelCoord c, const BrushParams& p) {
-    radial_sculpt(*this, c, p, voxel_size_, false);
+    radial_sculpt(*this, c, p, voxel_size(), false);
 }
 
 }  // namespace voxel
