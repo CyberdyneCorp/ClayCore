@@ -144,7 +144,7 @@ def test_backend_listing_and_unknown_backend():
 def test_every_registered_backend_matches_cpu():
     """Backend availability changes speed, never results (evaluation-backends
     spec). Runs against whatever is registered in this build: cuda on an
-    NVIDIA machine, opencl where a device exists, metal on Apple."""
+    NVIDIA machine, opencl or vulkan where a device exists, metal on Apple."""
     doc, _ = build_body()
     rng = np.random.default_rng(20260803)
     pts = rng.uniform(-2.5, 2.5, size=(4096, 3)).astype(np.float32)
@@ -156,6 +156,33 @@ def test_every_registered_backend_matches_cpu():
         scale = np.maximum(np.maximum(np.abs(reference), np.abs(got)), 1.0)
         worst = float(np.max(np.abs(reference - got) / scale))
         assert worst <= 1e-4, f"{name} deviates from the cpu reference by {worst}"
+
+
+def test_vulkan_backend_is_usable_from_python_when_present():
+    """The tier-3 contract from Python: a backend that declines a capability
+    must not cost the caller the capability. Skipped where no Vulkan runtime
+    is registered, which is most machines."""
+    if "vulkan" not in clay.backends():
+        pytest.skip("no Vulkan runtime registered in this build")
+    doc, body = build_body()
+    rng = np.random.default_rng(20260810)
+    pts = rng.uniform(-2.5, 2.5, size=(2048, 3)).astype(np.float32)
+
+    reference = doc.eval(pts, backend="cpu")
+    got = doc.eval(pts, backend="vulkan")
+    assert got.shape == reference.shape
+    scale = np.maximum(np.maximum(np.abs(reference), np.abs(got)), 1.0)
+    assert float(np.max(np.abs(reference - got) / scale)) <= 1e-4
+
+    # Meshing and gradients are not on this backend; asking for them by name
+    # still answers, because the fallback is the library's job, not the
+    # caller's.
+    mesh = doc.mesh(backend="vulkan")
+    assert mesh.positions.shape[0] > 0 and mesh.positions.shape[1] == 3
+    grads = body.gradients(pts[:64], backend="vulkan")
+    assert grads.shape == (64, 3)
+    lengths = np.linalg.norm(grads, axis=1)
+    assert np.allclose(lengths, 1.0, atol=1e-3)
 
 
 def test_conservative_steps_property():

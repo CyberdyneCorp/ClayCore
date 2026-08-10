@@ -18,6 +18,7 @@ option(CLAY_BUILD_PYTHON    "Build the pyclay nanobind module"            OFF)
 option(CLAY_BACKEND_METAL   "Build the Metal backend (Apple platforms)"   OFF)
 option(CLAY_BACKEND_CUDA    "Build the CUDA backend"                      OFF)
 option(CLAY_BACKEND_OPENCL  "Build the OpenCL backend"                    OFF)
+option(CLAY_BACKEND_VULKAN  "Build the Vulkan compute backend"            OFF)
 option(CLAY_FETCH_ALL_DEPS  "Fetch every third-party dependency (CI pin validation)" OFF)
 set(CLAY_SANITIZE "" CACHE STRING "Comma-separated sanitizers, e.g. address,undefined (Clang/GCC only)")
 
@@ -214,6 +215,64 @@ if(CLAY_BACKEND_OPENCL)
     set_source_files_properties(backends/opencl/opencl_backend.cpp PROPERTIES
       COMPILE_OPTIONS "-Wno-deprecated-declarations")
   endif()
+endif()
+
+# -- Vulkan compute backend (tier 3) -----------------------------------------
+#
+# The shader is GENERATED from the kernel headers and compiled at build time:
+# nothing SPIR-V is committed, so a kernel change cannot leave a stale binary
+# behind claiming to be it.
+if(CLAY_BACKEND_VULKAN)
+  find_package(Vulkan REQUIRED)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+  # A system glslang if there is one, the pinned source build otherwise, so a
+  # machine without a Vulkan SDK still builds this backend.
+  if(NOT CLAY_GLSLANG)
+    find_program(CLAY_GLSLANG NAMES glslang glslangValidator)
+  endif()
+  if(NOT CLAY_GLSLANG)
+    message(STATUS "claycore: no glslang found, building the pinned one")
+    set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
+    set(GLSLANG_TESTS OFF CACHE BOOL "" FORCE)
+    set(BUILD_EXTERNAL OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(glslang)
+    set(CLAY_GLSLANG $<TARGET_FILE:glslang-standalone>)
+  endif()
+
+  file(GLOB CLAY_KERNEL_HEADERS_GLSL ${CMAKE_CURRENT_SOURCE_DIR}/include/clay/kernel/*.h)
+  set(CLAY_COMP ${CMAKE_CURRENT_BINARY_DIR}/clay_kernels.comp)
+  add_custom_command(OUTPUT ${CLAY_COMP}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate_glsl.py
+            clay/kernel/tape.h ${CLAY_COMP}
+            ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/clay_kernels.comp.in
+    DEPENDS ${CLAY_KERNEL_HEADERS_GLSL}
+            ${CMAKE_CURRENT_SOURCE_DIR}/backends/vulkan/clay_kernels.comp.in
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate_glsl.py
+    COMMENT "Amalgamating claycore kernels for Vulkan (single-source)")
+
+  # One source, two modules: a SPIR-V module has one entry point, and a
+  # runtime branch on the mode would cost every invocation.
+  set(CLAY_SPV_EMBED "")
+  foreach(entry points grid)
+    string(TOUPPER ${entry} ENTRY_UPPER)
+    set(spv ${CMAKE_CURRENT_BINARY_DIR}/clay_kernels_${entry}.spv)
+    set(embed ${CMAKE_CURRENT_BINARY_DIR}/clay_spv_${entry}_embedded.cpp)
+    add_custom_command(OUTPUT ${spv}
+      COMMAND ${CLAY_GLSLANG} -V --target-env vulkan1.1 -S comp
+              -DCLAY_ENTRY_${ENTRY_UPPER} -o ${spv} ${CLAY_COMP}
+      DEPENDS ${CLAY_COMP}
+      COMMENT "Compiling claycore ${entry} shader to SPIR-V")
+    add_custom_command(OUTPUT ${embed}
+      COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_binary.py
+              ${spv} ${embed} clay_spv_${entry}
+      DEPENDS ${spv} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_binary.py)
+    list(APPEND CLAY_SPV_EMBED ${embed})
+  endforeach()
+
+  target_sources(claycore PRIVATE backends/vulkan/vulkan_backend.cpp ${CLAY_SPV_EMBED})
+  target_compile_definitions(claycore PRIVATE CLAY_HAS_VULKAN=1)
+  target_link_libraries(claycore PRIVATE Vulkan::Vulkan)
 endif()
 
 # -- clay-cli ----------------------------------------------------------------

@@ -60,33 +60,39 @@ CLAY_FN float sd_vesica2(cfloat2 p, float r, float d) {
 
 // Exact arbitrary polygon: per-edge closest point, even-odd crossing sign.
 // Handles concave and self-intersecting polygons (even-odd rule).
+//
+// Not compiled for Vulkan, for the reason sd_stroke is not: an array of
+// vectors is not a cursor into a flat float buffer. The tape reaches the
+// _raw form below instead, which is the one it has always used.
+#if !defined(CLAY_KERNEL_VULKAN)
 CLAY_FN float sd_polygon2(CLAY_DEVICE const cfloat2* v, int n, cfloat2 p) {
-    float d = cdot2(p - v[0]);
+    float d = cdot2(p - CLAY_AT(v, 0));
     float s = 1.0f;
     int j = n - 1;
     for (int i = 0; i < n; j = i, i++) {
-        cfloat2 e = v[j] - v[i];
-        cfloat2 w = p - v[i];
+        cfloat2 e = CLAY_AT(v, j) - CLAY_AT(v, i);
+        cfloat2 w = p - CLAY_AT(v, i);
         cfloat2 b = w - e * cclamp(cdot(w, e) / cdot(e, e), 0.0f, 1.0f);
         d = cmin(d, cdot2(b));
-        bool c0 = p.y >= v[i].y;
-        bool c1 = p.y < v[j].y;
+        bool c0 = p.y >= CLAY_AT(v, i).y;
+        bool c1 = p.y < CLAY_AT(v, j).y;
         bool c2 = e.x * w.y > e.y * w.x;
         if ((c0 && c1 && c2) || (!c0 && !c1 && !c2)) s = -s;
     }
     return s * csqrt(d);
 }
+#endif  // !CLAY_KERNEL_VULKAN
 
 // Same even-odd polygon, over a raw (x, y) float pool — the form the tape
 // uses, since its out-of-line payload is a flat float array.
-CLAY_FN float sd_polygon2_raw(CLAY_DEVICE const float* v, int n, cfloat2 p) {
-    cfloat2 v0 = cf2(v[0], v[1]);
+CLAY_FN float sd_polygon2_raw(CLAY_FPTR v, int n, cfloat2 p) {
+    cfloat2 v0 = cf2(CLAY_AT(v, 0), CLAY_AT(v, 1));
     float d = cdot2(p - v0);
     float s = 1.0f;
     int j = n - 1;
     for (int i = 0; i < n; j = i, i++) {
-        cfloat2 vi = cf2(v[i * 2], v[i * 2 + 1]);
-        cfloat2 vj = cf2(v[j * 2], v[j * 2 + 1]);
+        cfloat2 vi = cf2(CLAY_AT(v, i * 2), CLAY_AT(v, i * 2 + 1));
+        cfloat2 vj = cf2(CLAY_AT(v, j * 2), CLAY_AT(v, j * 2 + 1));
         cfloat2 e = vj - vi;
         cfloat2 w = p - vi;
         cfloat2 b = w - e * cclamp(cdot(w, e) / cdot(e, e), 0.0f, 1.0f);

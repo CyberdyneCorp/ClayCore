@@ -16,7 +16,10 @@ Gates:
   openspec      specs validate strictly
   tests         full ctest suite (unit + C ABI smoke + CLI selftest)
   parity        every backend registered in this build matches CPU scalar
-                (that is what the unit suite's parity cases assert)
+                (that is what the unit suite's parity cases assert). Read it
+                as a DIFFERENTIAL: the cases pass vacuously when a backend
+                failed to register, so configure with the backends on and
+                compare assertion counts against a CPU-only run.
   benchmarks    performance floors and the surface-nets/marching relation
   wheel         `pip install .` into a throwaway venv, then the quickstart
 """
