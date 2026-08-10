@@ -32,6 +32,7 @@
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/validate.h"
 #include "clay/pick/pick.h"
+#include "clay/scene/armature.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
 #include "clay/scene/consolidate.h"
@@ -2277,6 +2278,47 @@ clay_result clay_item_set_curve(clay_item* item, int32_t closed, float tolerance
     item->node.stroke_closed = closed != 0;
     item->node.curve_tolerance = tolerance;
     return CLAY_OK;
+}
+
+clay_result clay_layer_armature_edit(clay_document* doc, clay_layer_id layer,
+                                     clay_node_id node, std::int32_t op, std::uint32_t target,
+                                     const float value[3], float radius,
+                                     std::int32_t mirrored) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    const scene::Node* n = (l && l->sdf) ? l->sdf->find(node) : nullptr;
+    if (!n) return fail(CLAY_ERROR_NOT_FOUND, "no such node in that layer");
+    if (!scene::prim_is_armature(n->prim.type))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "that node is not an armature");
+
+    std::vector<scene::StrokePoint> nodes = n->stroke;
+    std::vector<std::uint32_t> parents = n->armature_parents;
+    kernel::cfloat3 v = kernel::cf3(0, 0, 0);
+    if (value) v = kernel::cf3(value[0], value[1], value[2]);
+    bool ok = false;
+    switch (op) {
+        case CLAY_ARMATURE_ADD_CHILD:
+            if (!value) return fail(CLAY_ERROR_INVALID_ARGUMENT, "add-child needs a position");
+            ok = mirrored ? scene::armature_add_child_mirrored(nodes, parents, target, v,
+                                                               radius) > 0
+                          : scene::armature_add_child(nodes, parents, target, v, radius);
+            break;
+        case CLAY_ARMATURE_MOVE:
+            if (!value) return fail(CLAY_ERROR_INVALID_ARGUMENT, "move needs a delta");
+            ok = scene::armature_move(nodes, parents, target, v);
+            break;
+        case CLAY_ARMATURE_SET_RADIUS:
+            ok = scene::armature_set_radius(nodes, target, radius);
+            break;
+        case CLAY_ARMATURE_DELETE: ok = scene::armature_delete_subtree(nodes, parents, target); break;
+        default: return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown armature edit");
+    }
+    if (!ok) return fail(CLAY_ERROR_INVALID_ARGUMENT, "that armature node does not exist");
+    return apply_edit(doc,
+                      scene::Command{scene::SetArmatureCmd{layer, node, std::move(nodes),
+                                                           std::move(parents),
+                                                           n->stroke_blend_k}},
+                      "no armature with that id in that layer");
 }
 
 clay_result clay_layer_set_stroke_points(clay_document* doc, clay_layer_id layer,

@@ -531,6 +531,28 @@ clay_result clay_item_set_curve(clay_item* item, int32_t closed, float tolerance
  * the two rules clay_layer_add_item enforces on one: closing it is refused for
  * the reason clay_item_set_curve refuses it, and so is cutting it below two
  * points, which would leave the sweep with nothing to follow. */
+/* Tree edits for a placed armature. ONE undo step whatever the edit, because
+ * the command underneath is a whole-tree replace — an armature is tens of
+ * nodes, so that costs less than granular bookkeeping and its inverse is
+ * exactly the tree that was there.
+ *
+ *   CLAY_ARMATURE_ADD_CHILD   `value` is the position, under `target`
+ *   CLAY_ARMATURE_MOVE        `value` is a DELTA, and `target`'s whole subtree
+ *                             moves with it — an arm hangs from a shoulder
+ *   CLAY_ARMATURE_SET_RADIUS  `radius` on `target`
+ *   CLAY_ARMATURE_DELETE      `target` and everything under it
+ *
+ * `mirrored` applies to add-child only: it adds the reflection through x = 0 in
+ * the same step, under the mirror of the parent where there is one. A node on
+ * the plane is its own reflection and is added once. */
+#define CLAY_ARMATURE_ADD_CHILD  0
+#define CLAY_ARMATURE_MOVE       1
+#define CLAY_ARMATURE_SET_RADIUS 2
+#define CLAY_ARMATURE_DELETE     3
+clay_result clay_layer_armature_edit(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                     int32_t op, uint32_t target, const float value[3],
+                                     float radius, int32_t mirrored);
+
 clay_result clay_layer_set_stroke_points(clay_document* doc, clay_layer_id layer,
                                          clay_node_id node, const float* xyzr, size_t count,
                                          const int32_t* types, const float* in_handles_xyz,

@@ -24,6 +24,7 @@
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/validate.h"
 #include "clay/pick/pick.h"
+#include "clay/scene/armature.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
 #include "clay/scene/consolidate.h"
@@ -2753,6 +2754,49 @@ NB_MODULE(pyclay, m) {
              "Replace a placed stroke or curve's whole point list. A curve is "
              "tens of points, so a whole-list replace costs less than granular "
              "commands would and its undo is exact by construction.")
+        .def("armature_edit",
+             [](PyLayer& l, scene::NodeId node, const std::string& op, nb::handle target,
+                nb::handle value, float radius, bool mirrored) {
+                 const scene::Node* n = l.layer().sdf->find(node);
+                 if (!n) throw std::invalid_argument("no node with that id in this layer");
+                 if (!scene::prim_is_armature(n->prim.type))
+                     throw std::invalid_argument("that node is not an armature");
+                 std::vector<scene::StrokePoint> nodes = n->stroke;
+                 std::vector<std::uint32_t> parents = n->armature_parents;
+                 const std::uint32_t which =
+                     target.is_none() ? 0u : nb::cast<std::uint32_t>(target);
+                 bool ok = false;
+                 if (op == "add_child") {
+                     kernel::cfloat3 pos = to_f3(value, "position");
+                     ok = mirrored ? scene::armature_add_child_mirrored(nodes, parents, which,
+                                                                       pos, radius) > 0
+                                   : scene::armature_add_child(nodes, parents, which, pos, radius);
+                 } else if (op == "move") {
+                     ok = scene::armature_move(nodes, parents, which, to_f3(value, "delta"));
+                 } else if (op == "set_radius") {
+                     ok = scene::armature_set_radius(nodes, which, radius);
+                 } else if (op == "delete") {
+                     ok = scene::armature_delete_subtree(nodes, parents, which);
+                 } else {
+                     throw std::invalid_argument(
+                         "op must be add_child, move, set_radius or delete");
+                 }
+                 if (!ok) throw std::invalid_argument("that armature node does not exist");
+                 apply_or_throw(l.doc->document,
+                                scene::Command{scene::SetArmatureCmd{
+                                    l.id, node, std::move(nodes), std::move(parents),
+                                    n->stroke_blend_k}},
+                                "armature_edit", l.undo.get());
+             },
+             "node"_a, "op"_a, "target"_a = nb::none(), "value"_a = nb::none(),
+             "radius"_a = 0.1f, "mirrored"_a = false,
+             "Edit a placed armature's tree: add_child, move (which carries the "
+             "target's whole subtree), set_radius, or delete (which takes the "
+             "subtree with it). ONE undo step whatever the edit, because the "
+             "command is a whole-tree replace — an armature is tens of nodes, so "
+             "that costs less than granular bookkeeping and its inverse is the "
+             "tree that was there. mirrored=True on add_child adds the "
+             "reflection too, in the same step.")
         .def("apply_stroke",
              [](PyLayer& l, nb::handle samples, const brush::StrokePreset& preset,
                 const PyPrim& prim, scene::Op op, nb::handle blend, nb::handle color,

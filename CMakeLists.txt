@@ -37,6 +37,7 @@ add_library(claycore
   src/field/redistance.cpp
   src/scene/consolidate.cpp
   src/scene/commands.cpp
+  src/scene/armature.cpp
   src/scene/tape_build.cpp
   src/brick/cache.cpp
   src/voxel/grid.cpp

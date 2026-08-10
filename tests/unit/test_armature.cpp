@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "clay/io/clayspace.h"
+#include "clay/scene/armature.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
 #include "clay/scene/tape.h"
@@ -175,4 +176,135 @@ TEST_CASE("armature: its bound covers every node") {
     math::Aabb b = scene::layer_influence_bound(l);
     CHECK(b.min.x <= -0.2f);
     CHECK(b.max.x >= 0.9f);
+}
+
+// ---------------------------------------------------------------------------
+// Tree edits (scene-model spec). The semantics live in pure functions over
+// (nodes, parents); SetArmatureCmd is what installs the result.
+
+namespace {
+
+// A spine with two arms: node 0 root, 1 chest, 2 and 3 hanging off the chest.
+void limbed(std::vector<scene::StrokePoint>& nodes, std::vector<std::uint32_t>& parents) {
+    nodes = {node(cf3(0, 0, 0), 0.20f), node(cf3(0, 0.5f, 0), 0.18f),
+             node(cf3(-0.4f, 0.4f, 0), 0.12f), node(cf3(0.4f, 0.4f, 0), 0.12f)};
+    parents = {0, 0, 1, 1};
+}
+
+}  // namespace
+
+TEST_CASE("armature: moving a node carries its subtree") {
+    std::vector<scene::StrokePoint> nodes;
+    std::vector<std::uint32_t> parents;
+    limbed(nodes, parents);
+    const kernel::cfloat3 arm_before = nodes[2].pos;
+
+    // Move the CHEST. Both arms hang off it, so both must come along, and the
+    // root must not — that asymmetry is the whole property.
+    REQUIRE(scene::armature_move(nodes, parents, 1, cf3(0, 0.25f, 0)));
+    CHECK(nodes[1].pos.y == doctest::Approx(0.75f));
+    CHECK(nodes[2].pos.y == doctest::Approx(arm_before.y + 0.25f));
+    CHECK(nodes[3].pos.y == doctest::Approx(arm_before.y + 0.25f));
+    CHECK(nodes[0].pos.y == doctest::Approx(0.0f));  // the root stayed put
+    // and their offsets relative to the node that moved are unchanged
+    CHECK((nodes[2].pos.x - nodes[1].pos.x) == doctest::Approx(arm_before.x));
+}
+
+TEST_CASE("armature: deleting a node takes its subtree and renumbers the rest") {
+    std::vector<scene::StrokePoint> nodes;
+    std::vector<std::uint32_t> parents;
+    limbed(nodes, parents);
+    // Delete the chest: both arms go with it, leaving only the root.
+    REQUIRE(scene::armature_delete_subtree(nodes, parents, 1));
+    CHECK(nodes.size() == 1);
+    CHECK(parents.size() == 1);
+    CHECK(parents[0] == 0);
+    CHECK(scene::armature_is_valid(nodes, parents));
+
+    // Deleting a LEAF leaves its siblings, with the survivors renumbered so no
+    // parent points past the end.
+    limbed(nodes, parents);
+    REQUIRE(scene::armature_delete_subtree(nodes, parents, 2));
+    CHECK(nodes.size() == 3);
+    CHECK(scene::armature_is_valid(nodes, parents));
+    CHECK(nodes[2].pos.x == doctest::Approx(0.4f));  // the other arm survived
+    CHECK(parents[2] == 1);                          // still hanging off the chest
+}
+
+TEST_CASE("armature: a cycle is not a tree") {
+    std::vector<scene::StrokePoint> nodes;
+    std::vector<std::uint32_t> parents;
+    limbed(nodes, parents);
+    CHECK(scene::armature_is_valid(nodes, parents));
+    parents = {1, 0, 1, 1};  // 0 -> 1 -> 0
+    CHECK_FALSE(scene::armature_is_valid(nodes, parents));
+}
+
+TEST_CASE("armature: a mirrored insert adds both sides") {
+    std::vector<scene::StrokePoint> nodes;
+    std::vector<std::uint32_t> parents;
+    nodes = {node(cf3(0, 0, 0), 0.2f)};
+    parents = {0};
+
+    // A shoulder off the root: two nodes, reflected in x.
+    CHECK(scene::armature_add_child_mirrored(nodes, parents, 0, cf3(0.3f, 0.4f, 0), 0.12f) == 2);
+    REQUIRE(nodes.size() == 3);
+    CHECK(nodes[1].pos.x == doctest::Approx(0.3f));
+    CHECK(nodes[2].pos.x == doctest::Approx(-0.3f));
+
+    // An elbow off the shoulder: its reflection hangs off the MIRRORED
+    // shoulder, not off the one that was named.
+    CHECK(scene::armature_add_child_mirrored(nodes, parents, 1, cf3(0.5f, 0.1f, 0), 0.09f) == 2);
+    REQUIRE(nodes.size() == 5);
+    CHECK(parents[3] == 1);
+    CHECK(parents[4] == 2);
+    CHECK(nodes[4].pos.x == doctest::Approx(-0.5f));
+
+    // A node ON the plane is its own reflection, so it is added once.
+    CHECK(scene::armature_add_child_mirrored(nodes, parents, 0, cf3(0, 0.9f, 0), 0.15f) == 1);
+    CHECK(nodes.size() == 6);
+    CHECK(scene::armature_is_valid(nodes, parents));
+}
+
+TEST_CASE("armature: a tree edit is one undoable command") {
+    scene::Document doc;
+    scene::Node n;
+    n.prim = scene::Prim::armature();
+    std::vector<std::uint32_t> parents;
+    limbed(n.stroke, parents);
+    n.armature_parents = parents;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::NodeId id = l.sdf->insert(n);
+
+    std::vector<scene::StrokePoint> before = n.stroke;
+    std::vector<scene::StrokePoint> edited = n.stroke;
+    REQUIRE(scene::armature_move(edited, parents, 1, cf3(0, 0.25f, 0)));
+
+    scene::SetArmatureCmd cmd{l.id, id, edited, parents, 0.0f};
+    std::optional<scene::Command> inverse = scene::apply(doc, scene::Command{cmd});
+    REQUIRE(inverse.has_value());
+    CHECK(l.sdf->find(id)->stroke[2].pos.y == doctest::Approx(0.65f));
+
+    REQUIRE(scene::apply(doc, *inverse).has_value());
+    const scene::Node* back = l.sdf->find(id);
+    for (std::size_t i = 0; i < before.size(); ++i) {
+        CAPTURE(i);
+        CHECK(back->stroke[i].pos.y == doctest::Approx(before[i].pos.y));
+    }
+    CHECK(back->armature_parents == parents);
+}
+
+TEST_CASE("armature: a cyclic tree is refused by the command, not stored") {
+    scene::Document doc;
+    scene::Node n;
+    n.prim = scene::Prim::armature();
+    std::vector<std::uint32_t> parents;
+    limbed(n.stroke, parents);
+    n.armature_parents = parents;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::NodeId id = l.sdf->insert(n);
+
+    scene::SetArmatureCmd bad{l.id, id, n.stroke, {1, 0, 1, 1}, 0.0f};
+    CHECK_FALSE(scene::apply(doc, scene::Command{bad}).has_value());
+    CHECK(l.sdf->find(id)->armature_parents == parents);  // unchanged
 }

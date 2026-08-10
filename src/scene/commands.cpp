@@ -1,3 +1,4 @@
+#include "clay/scene/armature.h"
 #include "clay/scene/commands.h"
 
 #include <cstring>
@@ -120,6 +121,21 @@ std::optional<Command> apply_one(Document& doc, const SetStrokePointsCmd& c) {
     n->stroke = c.points;
     n->stroke_closed = c.closed;
     n->curve_tolerance = c.tolerance;
+    return Command{inverse};
+}
+
+std::optional<Command> apply_one(Document& doc, const SetArmatureCmd& c) {
+    SdfContent* content = content_of(doc, c.layer);
+    Node* n = content ? content->find_mut(c.node) : nullptr;
+    if (!n || !prim_is_armature(n->prim.type)) return std::nullopt;
+    // A tree whose parents do not form a forest is refused rather than stored:
+    // a cycle makes the field depend on the order links are walked instead of
+    // on the tree, and the undo stack would then carry something unrenderable.
+    if (!armature_is_valid(c.nodes, c.parents)) return std::nullopt;
+    SetArmatureCmd inverse{c.layer, c.node, n->stroke, n->armature_parents, n->stroke_blend_k};
+    n->stroke = c.nodes;
+    n->armature_parents = c.parents;
+    n->stroke_blend_k = c.blend_k;
     return Command{inverse};
 }
 
@@ -649,6 +665,7 @@ enum class Tag : std::uint8_t {
     SetStrokePoints,
     SetDeformers,
     SetLayerMirror,
+    SetArmature,
 };
 
 struct SerializeVisitor {
@@ -714,6 +731,16 @@ struct SerializeVisitor {
         for (const StrokePoint& p : c.points) write_point(w, p);
         w.pod(c.closed);
         w.pod(c.tolerance);
+    }
+    void operator()(const SetArmatureCmd& c) {
+        w.pod(Tag::SetArmature);
+        w.pod(c.layer);
+        w.pod(c.node);
+        w.u32(static_cast<std::uint32_t>(c.nodes.size()));
+        for (const StrokePoint& p : c.nodes) write_point(w, p);
+        w.u32(static_cast<std::uint32_t>(c.parents.size()));
+        for (std::uint32_t parent : c.parents) w.u32(parent);
+        w.pod(c.blend_k);
     }
     void operator()(const SetDeformersCmd& c) {
         w.pod(Tag::SetDeformers);
@@ -836,6 +863,20 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
             std::uint32_t n = r.u32();
             if (n > r.remaining / kStrokePointBytes) return std::nullopt;
             for (std::uint32_t i = 0; i < n && r.ok; ++i) c.points.push_back(read_point(r));
+            cmd = std::move(c);
+            break;
+        }
+        case Tag::SetArmature: {
+            SetArmatureCmd c;
+            c.layer = r.pod<LayerId>();
+            c.node = r.pod<NodeId>();
+            std::uint32_t n = r.u32();
+            if (n > r.remaining / kStrokePointBytes) return std::nullopt;
+            for (std::uint32_t i = 0; i < n && r.ok; ++i) c.nodes.push_back(read_point(r));
+            std::uint32_t pn = r.u32();
+            if (pn > r.remaining / sizeof(std::uint32_t)) return std::nullopt;
+            for (std::uint32_t i = 0; i < pn && r.ok; ++i) c.parents.push_back(r.u32());
+            c.blend_k = r.pod<float>();
             cmd = std::move(c);
             break;
         }

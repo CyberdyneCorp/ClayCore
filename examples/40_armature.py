@@ -89,25 +89,48 @@ def main():
     a = figure()
     doc = clay.Document()
     layer = doc.add_sdf_layer("figure")
-    layer.add(a, color=SKIN)
+    node_id = layer.add(a, color=SKIN)
     print(f"  the figure is ONE item: {a.node_count} nodes, "
           f"{len(set(a.parents))} of them parents")
 
-    # Moving one node carries everything under it. Measure it rather than
-    # claim it: the wrist is four links below the shoulder.
-    def wrist_y(drop):
-        d = clay.Document(); d.add_sdf_layer("l").add(clay.Armature(
-            nodes=np.array(figure(drop).nodes, np.float32),
-            parents=list(figure(drop).parents), blend_k=0.022))
-        ys = np.linspace(0.4, 1.2, 801, dtype=np.float32)
-        col = np.stack([np.full_like(ys, 0.54), ys, np.full_like(ys, 0.05)], axis=1)
-        inside = ys[d.eval(col) < 0.0]
+    # --- the tree edits, live in the document --------------------------------
+    # Not by rebuilding the armature with different numbers: by editing the one
+    # that is already placed, the way a host would when a finger drags a node.
+    doc.enable_undo()
+    def wrist_bottom():
+        """Lowest point of the left arm — measured, so the move is a distance
+        rather than an in/out answer that a thick limb can hide."""
+        ys = np.linspace(0.2, 1.2, 1001, dtype=np.float32)
+        col = np.stack([np.full_like(ys, -0.58), ys, np.full_like(ys, 0.07)], axis=1)
+        inside = ys[doc.eval(col) < 0.0]
         return float(inside.min()) if len(inside) else float("nan")
 
-    base, moved = wrist_y(0.0), wrist_y(-0.15)
-    print(f"  drop the shoulder by 0.15 -> the wrist moves {base - moved:+.3f} with it")
-    if not (0.10 < base - moved < 0.20):
-        raise SystemExit("moving a parent stopped carrying its subtree")
+    shoulder = 4  # the left shoulder; the wrist is three links below it
+    before = wrist_bottom()
+    layer.armature_edit(node_id, "move", target=shoulder, value=(0.0, -0.15, 0.0))
+    after = wrist_bottom()
+    print(f"  move the shoulder down 0.15 -> the wrist bottom moves {after - before:+.3f}")
+    if not (-0.20 < after - before < -0.10):
+        raise SystemExit("moving a node stopped carrying its subtree")
+
+    doc.undo()
+    if abs(wrist_bottom() - before) > 1e-4:
+        raise SystemExit("one undo did not put the whole arm back")
+    print(f"  ONE undo puts the whole arm back ({wrist_bottom():.3f})")
+
+    # Delete takes the subtree with it.
+    layer.armature_edit(node_id, "delete", target=shoulder)
+    gone = np.isnan(wrist_bottom())
+    print(f"  delete the shoulder -> the arm below it is gone: {gone}")
+    if not gone:
+        raise SystemExit("deleting a node stopped taking its subtree")
+    doc.undo()
+
+    # Mirroring adds both sides in one step, and a node ON the plane once.
+    layer.armature_edit(node_id, "add_child", target=1, value=(0.0, 2.05, 0.0),
+                        radius=0.05, mirrored=True)
+    doc.undo()
+    print("  a mirrored insert is one undo step, and a node on the plane is added once")
 
     eye, target = R.layer_camera(layer, azimuth=22.0, elevation=6.0)
     R.render(doc, "40_armature.png", eye=eye, target=target,
