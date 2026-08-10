@@ -498,6 +498,43 @@ struct PyLayer {
     }
 };
 
+// The one insertion path for Layer.add and Layer.add_group alike: an
+// AddNodeCmd with a reserved id (replay preserves ids) so an enabled undo stack
+// records the add like every other edit. Regression: a direct insert let adds
+// escape undo. A parent that is not a group is refused here, where the id the
+// caller passed can still be named in the message.
+scene::NodeId insert_node(PyLayer& l, scene::Node n, nb::handle parent, int index) {
+    scene::NodeId parent_id = scene::kNoNode;
+    if (!parent.is_none()) {
+        parent_id = nb::cast<scene::NodeId>(parent);
+        const scene::Node* g = l.layer().sdf->find(parent_id);
+        if (!g) throw std::invalid_argument("no node with that id in this layer");
+        if (!g->is_group) throw std::invalid_argument("parent must be a group");
+    }
+    n.id = l.layer().sdf->reserve_id();
+    scene::NodeId id = n.id;
+    std::vector<scene::Node> subtree;
+    subtree.push_back(std::move(n));
+    apply_or_throw(l.doc->document,
+                   scene::Command{scene::AddNodeCmd{l.id, parent_id, index, std::move(subtree)}},
+                   "add", l.undo.get());
+    return id;
+}
+
+// The group rules the C ABI states (clay.h, "-- groups --"): the inline op is
+// groups only and reads no blend, rounding or colour off the group at all, and
+// the transitions are items only — compile_group emits no transition
+// parameters, so a group carrying one would morph on defaults nobody wrote.
+void check_group_op_blend(scene::Op op, const scene::Blend& blend, float rounding) {
+    if (scene::op_is_transition(op))
+        throw std::invalid_argument("a group cannot carry a transition op");
+    if (op == scene::Op::None &&
+        (blend.profile != scene::BlendProfile::Hard || blend.k != 0.0f || rounding != 0.0f))
+        throw std::invalid_argument(
+            "an inline group reads no blend or rounding: its children combine into the "
+            "outer chain with their own");
+}
+
 // -- numpy point evaluation -----------------------------------------------------
 
 struct PointsView {
@@ -807,7 +844,11 @@ NB_MODULE(pyclay, m) {
         // spatial morphs: need a transition= argument, and are NON-LOCAL
         // (never culled) because their weight reaches arbitrarily far
         .value("TRANSITION_LINEAR", scene::Op::TransitionLinear)
-        .value("TRANSITION_RADIAL", scene::Op::TransitionRadial);
+        .value("TRANSITION_RADIAL", scene::Op::TransitionRadial)
+        // GROUPS ONLY (Layer.add_group): the group's children apply inline to
+        // the chain outside it, as if they had been added there. Every other
+        // op makes the group a sub-expression combining as a unit.
+        .value("INLINE", scene::Op::None);
 
     // -- blends ----------------------------------------------------------------
     nb::class_<PyTransition>(m, "Transition",
@@ -2449,10 +2490,12 @@ NB_MODULE(pyclay, m) {
         .def_prop_ro("resolution", [](const PyLayer& l) { return l.layer().resolution; })
         .def("add",
              [](PyLayer& l, const PyPrim& prim, scene::Op op, nb::handle blend, nb::handle color,
-                nb::handle rounding, bool mirror, nb::handle transition) {
+                nb::handle rounding, bool mirror, nb::handle transition, nb::handle parent,
+                int index) {
                  if (op == scene::Op::None)
                      throw std::invalid_argument(
-                         "op must be a combine operator, not Op.NONE");
+                         "op must be a combine operator, not Op.INLINE — that one is for "
+                         "add_group");
                  scene::Node n;
                  n.prim = prim.prim;
                  n.xform = prim.xform;
@@ -2498,23 +2541,48 @@ NB_MODULE(pyclay, m) {
                  } else if (!transition.is_none()) {
                      throw std::invalid_argument("transition= only applies to transition ops");
                  }
-                 // Through the command vocabulary (AddNodeCmd with a reserved
-                 // id, since replay preserves ids) so an enabled undo stack
-                 // records the add like every other edit. Regression: a
-                 // direct insert let adds escape undo.
-                 n.id = l.layer().sdf->reserve_id();
-                 scene::NodeId id = n.id;
-                 std::vector<scene::Node> subtree;
-                 subtree.push_back(std::move(n));
-                 apply_or_throw(l.doc->document,
-                                scene::Command{scene::AddNodeCmd{l.id, scene::kNoNode, -1,
-                                                                 std::move(subtree)}},
-                                "add", l.undo.get());
-                 return id;
+                 return insert_node(l, std::move(n), parent, index);
              },
              "prim"_a, "op"_a = scene::Op::Add, "blend"_a = nb::none(), "color"_a = nb::none(),
              "rounding"_a = nb::none(), "mirror"_a = false, "transition"_a = nb::none(),
-             "Append an edit to the layer; returns the node id")
+             "parent"_a = nb::none(), "index"_a = -1,
+             "Append an edit to the layer; returns the node id. parent=<group id> "
+             "puts it inside that group instead of at the layer root, and index<0 "
+             "appends.")
+        .def("add_group",
+             [](PyLayer& l, scene::Op op, nb::handle blend, nb::handle color, float rounding,
+                nb::handle parent, int index) {
+                 scene::Node g;
+                 g.is_group = true;
+                 g.op = op;
+                 if (!blend.is_none()) g.blend = nb::cast<const PyBlend&>(blend).b;
+                 if (rounding < 0.0f) throw std::invalid_argument("rounding must be >= 0");
+                 g.rounding = rounding;
+                 if (!color.is_none()) g.color = parse_color(color);
+                 check_group_op_blend(op, g.blend, g.rounding);
+                 return insert_node(l, std::move(g), parent, index);
+             },
+             "op"_a = scene::Op::Add, "blend"_a = nb::none(), "color"_a = nb::none(),
+             "rounding"_a = 0.0f, "parent"_a = nb::none(), "index"_a = -1,
+             "Create an empty group and return its node id. Its children compile as "
+             "ONE sub-expression, so an intersect inside it trims the group alone "
+             "rather than everything the layer already holds — which is what makes "
+             "(A & B) | C sayable. parent=<group id> nests it. Op.INLINE makes the "
+             "children apply to the outer chain instead, and then reads no blend, "
+             "rounding or colour off the group. color= is the seed a SHELL or "
+             "REPLACE group paints when it starts a chain against empty space; in C "
+             "it is a separate clay_layer_set_color.")
+        .def("children",
+             [](const PyLayer& l, scene::NodeId node) {
+                 const scene::Node* n = l.layer().sdf->find(node);
+                 if (!n) throw std::invalid_argument("no node with that id in this layer");
+                 // Not a group is a caller asking the wrong question — and the
+                 // answer a script that RELOADED a document reads to tell a
+                 // group from an item.
+                 if (!n->is_group) throw std::invalid_argument("node is not a group");
+                 return n->children;
+             },
+             "node"_a, "A group's child node ids, in order")
         .def("set_points",
              [](PyLayer& l, scene::NodeId node, nb::handle points, nb::handle types, bool closed,
                 float tolerance, nb::handle in_handles, nb::handle out_handles) {
@@ -2679,6 +2747,12 @@ NB_MODULE(pyclay, m) {
                 nb::handle rotation_axis_angle, nb::handle scale) {
                  const scene::Node* n = l.layer().sdf->find(node);
                  if (!n) throw std::invalid_argument("no node with that id in this layer");
+                 // A group's transform never reaches its children — the
+                 // compiler composes layer * item and nothing else — so this
+                 // would be an undoable, saved edit that changes nothing.
+                 if (n->is_group)
+                     throw std::invalid_argument(
+                         "a group has no transform of its own: transform its children");
                  scene::SetTransformCmd cmd{l.id, node, n->xform};
                  if (!position.is_none()) cmd.xform.position = to_f3(position, "position");
                  if (!rotation_axis_angle.is_none())
@@ -2716,9 +2790,13 @@ NB_MODULE(pyclay, m) {
                  scene::SetOpBlendCmd cmd{l.id, node, n->op, n->blend, n->rounding};
                  if (!op.is_none()) {
                      cmd.op = nb::cast<scene::Op>(op);
-                     if (cmd.op == scene::Op::None)
+                     // Which rules apply is a property of the node: a group
+                     // takes the inline op and refuses the transitions, an item
+                     // is the other way round.
+                     if (!n->is_group && cmd.op == scene::Op::None)
                          throw std::invalid_argument(
-                             "op must be a combine operator, not Op.NONE");
+                             "op must be a combine operator, not Op.INLINE — that one is for "
+                             "add_group");
                  }
                  if (!blend.is_none()) cmd.blend = nb::cast<const PyBlend&>(blend).b;
                  if (!rounding.is_none()) {
@@ -2726,6 +2804,7 @@ NB_MODULE(pyclay, m) {
                      if (cmd.rounding < 0.0f)
                          throw std::invalid_argument("rounding must be >= 0");
                  }
+                 if (n->is_group) check_group_op_blend(cmd.op, cmd.blend, cmd.rounding);
                  apply_or_throw(l.doc->document, scene::Command{cmd}, "set_op_blend", l.undo.get());
              },
              "node"_a, "op"_a = nb::none(), "blend"_a = nb::none(), "rounding"_a = nb::none(),
@@ -2734,6 +2813,11 @@ NB_MODULE(pyclay, m) {
              [](PyLayer& l, scene::NodeId node, nb::handle parent, int index) {
                  scene::NodeId new_parent =
                      parent.is_none() ? scene::kNoNode : nb::cast<scene::NodeId>(parent);
+                 // SdfContent::move refuses this too — it is the engine's
+                 // invariant, not the binding's — but apply() could only report
+                 // it as a missing id, which is not what went wrong.
+                 if (new_parent != scene::kNoNode && l.layer().sdf->contains(node, new_parent))
+                     throw std::invalid_argument("a node cannot move into its own subtree");
                  apply_or_throw(
                      l.doc->document,
                      scene::Command{scene::MoveNodeCmd{l.id, node, new_parent, index}}, "move",

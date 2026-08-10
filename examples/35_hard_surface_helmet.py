@@ -13,6 +13,13 @@ everything already there, so a cut meant for one panel would saw through the
 whole helmet. Plates therefore get carved in isolation and assembled by the
 document, which is how the real object is made too.
 
+That is the LAYER technique, and it is not the only one: `36_groups.py` builds
+the same plate as a **group** on one shared layer. A group is the sharper tool
+of the two — it rejoins the assembly with any op and any blend, where layers
+only ever union hard — and it leaves a layer meaning what it means everywhere
+else. This file keeps the layer form deliberately, as the technique it came
+from; read 36 for the group form and the difference between them.
+
 Each plate is a `CutHollowSphere` — a spherical shell with real wall thickness,
 not a surface — riding a few millimetres proud of a dark under-shell. The gaps
 between plates are not modelled at all: they are where the under-shell shows

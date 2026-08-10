@@ -678,6 +678,83 @@ static int check_flat_path(clay_document* doc, clay_layer_id layer) {
     return 0;
 }
 
+/* -- groups ---------------------------------------------------------------- */
+
+/* A sphere descriptor, since a group's children are ordinary edits. */
+static clay_item_desc unit_sphere(float r, float x, int32_t op) {
+    clay_item_desc d;
+    memset(&d, 0, sizeof d);
+    d.struct_size = (uint32_t)sizeof d;
+    d.prim = CLAY_PRIM_SPHERE;
+    d.params[0] = r;
+    d.position[0] = x;
+    d.rotation[3] = 1.0f;
+    d.scale = 1.0f;
+    d.op = op;
+    return d;
+}
+
+/* The field on the x axis, where every shape below is centred. */
+static float sample(const clay_document* doc, float x) {
+    const float p[3] = {x, 0.0f, 0.0f};
+    float d = 0.0f;
+    if (clay_eval_points(doc, NULL, p, 1, &d, NULL) != CLAY_OK) return 0.0f;
+    return d;
+}
+
+/* The operation a group is FOR: intersect A with B, then union that into C.
+ * Without a group the intersect applies to the whole accumulated field and
+ * takes C with it, which is why a plate used to need a layer of its own. */
+static int check_groups(void) {
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(doc != NULL);
+    REQUIRE(clay_add_sdf_layer(doc, "plates", &layer) == CLAY_OK);
+
+    clay_node_id plate = 0;
+    REQUIRE(clay_layer_add_group(doc, layer, 0, -1, CLAY_OP_ADD, CLAY_BLEND_HARD, 0.0f, 0.0f,
+                                 &plate) == CLAY_OK);
+    clay_item_desc shell = unit_sphere(0.9f, 0.0f, CLAY_OP_ADD);
+    clay_item_desc cutter = unit_sphere(0.6f, 0.6f, CLAY_OP_INTERSECT);
+    clay_node_id shell_id = 0, cutter_id = 0;
+    REQUIRE(clay_add_item_in_group(doc, layer, plate, -1, &shell, &shell_id) == CLAY_OK);
+    REQUIRE(clay_add_item_in_group(doc, layer, plate, -1, &cutter, &cutter_id) == CLAY_OK);
+    clay_item_desc other = unit_sphere(0.4f, -1.6f, CLAY_OP_ADD);
+    REQUIRE(clay_add_item(doc, layer, &other, NULL) == CLAY_OK);
+
+    REQUIREF(sample(doc, 0.6f) < 0.0f, "the trimmed plate is empty at its own centre");
+    REQUIREF(sample(doc, -0.6f) > 0.0f, "the intersect did not trim the plate");
+    REQUIREF(sample(doc, -1.6f) < 0.0f, "the intersect reached outside the group");
+
+    /* the size-query pattern, both halves */
+    size_t count = 0;
+    clay_node_id kids[2] = {0, 0};
+    REQUIRE(clay_layer_children(doc, layer, plate, NULL, &count) == CLAY_OK);
+    REQUIREF(count == 2, "the group reports %zu children", count);
+    REQUIRE(clay_layer_children(doc, layer, plate, kids, &count) == CLAY_OK);
+    REQUIRE(kids[0] == shell_id && kids[1] == cutter_id);
+    count = 1;
+    REQUIRE(clay_layer_children(doc, layer, plate, kids, &count) == CLAY_ERROR_BUFFER_TOO_SMALL);
+    REQUIRE(count == 2);
+    /* an item is not a group, which is how a reloading host tells them apart */
+    REQUIRE(clay_layer_children(doc, layer, shell_id, NULL, &count) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    /* a nested group, and the rules a group is held to */
+    clay_node_id nested = 0;
+    REQUIRE(clay_layer_add_group(doc, layer, plate, -1, CLAY_OP_INLINE, CLAY_BLEND_HARD, 0.0f,
+                                 0.0f, &nested) == CLAY_OK);
+    REQUIRE(clay_layer_add_group(doc, layer, 0, -1, CLAY_OP_INLINE, CLAY_BLEND_QUADRATIC, 0.2f,
+                                 0.0f, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_layer_add_group(doc, layer, 0, -1, CLAY_OP_TRANSITION_LINEAR, CLAY_BLEND_HARD,
+                                 0.0f, 0.0f, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_layer_add_group(doc, layer, shell_id, -1, CLAY_OP_ADD, CLAY_BLEND_HARD, 0.0f,
+                                 0.0f, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_layer_move(doc, layer, plate, nested, -1) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    clay_document_destroy(doc);
+    return 0;
+}
+
 /* -- voxel grids ----------------------------------------------------------- */
 
 /* A brush declaring the layout it was compiled against, hard-edged. */
@@ -1465,6 +1542,7 @@ int main(void) {
     if (check_every_primitive() != 0) return 1;
     if (check_struct_versioning() != 0) return 1;
     if (check_error_paths() != 0) return 1;
+    if (check_groups() != 0) return 1;
     if (check_voxel_edits() != 0) return 1;
     if (check_voxel_sculpting() != 0) return 1;
     if (check_voxel_ownership() != 0) return 1;

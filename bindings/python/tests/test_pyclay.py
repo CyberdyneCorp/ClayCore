@@ -3460,3 +3460,196 @@ def test_move_surface_pull_is_monotonic_and_short():
         assert lift > previous      # further every time...
         assert lift < d             # ...but never the whole displacement
         previous = lift
+
+
+# -- scene groups (expose-scene-groups) --------------------------------------
+#
+# A group's children compile as ONE sub-expression, so an op inside it applies
+# to the group alone. Everything below is that one fact and its consequences,
+# checked from Python because until this change nothing outside the engine
+# could build a group at all.
+
+
+def _plate_document():
+    """(shell INTERSECT cutter) unioned into a layer that already holds C."""
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.4, position=(-1.6, 0, 0)), color="#888888")
+    plate = layer.add_group(op=clay.Op.ADD)
+    layer.add(clay.Sphere(r=0.9), parent=plate)
+    layer.add(clay.Sphere(r=0.7, position=(0.55, 0, 0)), op=clay.Op.INTERSECT, parent=plate)
+    return doc, layer, plate
+
+
+def test_group_keeps_an_intersect_inside_itself():
+    doc, _layer, _plate = _plate_document()
+    pts = np.array([[0.5, 0, 0], [-0.7, 0, 0], [-1.6, 0, 0]], dtype=np.float32)
+    inside_plate, trimmed_away, other = doc.eval(pts)
+    assert inside_plate < 0.0          # the lens the two spheres share
+    assert trimmed_away > 0.0          # the intersect took this end of the shell
+    assert other < 0.0                 # ...and left the rest of the layer alone
+
+
+def test_without_a_group_the_intersect_takes_everything():
+    """The workaround this change replaces: the same edits, flat."""
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.4, position=(-1.6, 0, 0)))
+    layer.add(clay.Sphere(r=0.9))
+    layer.add(clay.Sphere(r=0.7, position=(0.55, 0, 0)), op=clay.Op.INTERSECT)
+    assert doc.eval(np.array([[-1.6, 0, 0]], dtype=np.float32))[0] > 0.0
+
+
+def test_group_children_enumerate_in_order():
+    _doc, layer, plate = _plate_document()
+    kids = layer.children(plate)
+    assert len(kids) == 2
+    nested = layer.add_group(op=clay.Op.SUBTRACT, parent=plate)
+    assert layer.children(plate) == kids + [nested]
+    assert layer.children(nested) == []
+    with pytest.raises(ValueError, match="not a group"):
+        layer.children(kids[0])
+
+
+def test_nested_group_carves_its_subtree_as_a_unit():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.8))
+    carve = layer.add_group(op=clay.Op.SUBTRACT)
+    inner = layer.add_group(op=clay.Op.ADD, parent=carve)
+    layer.add(clay.Sphere(r=0.35, position=(0.6, 0, 0)), parent=inner)
+    layer.add(clay.Sphere(r=0.35, position=(-0.6, 0, 0)), parent=inner)
+    pts = np.array([[0.6, 0, 0], [-0.6, 0, 0], [0, 0, 0]], dtype=np.float32)
+    right, left, middle = doc.eval(pts)
+    assert right > 0.0 and left > 0.0   # both carved, by one subtract
+    assert middle < 0.0                 # between them, untouched
+
+
+def test_inline_group_children_apply_to_the_outer_chain():
+    def build(grouped):
+        doc = clay.Document()
+        layer = doc.add_sdf_layer("l")
+        layer.add(clay.Sphere(r=0.9))
+        parent = layer.add_group(op=clay.Op.INLINE) if grouped else None
+        layer.add(clay.Box(size=(0.8, 0.8, 4.0), position=(0.5, 0.2, 0)),
+                  op=clay.Op.SUBTRACT, parent=parent)
+        layer.add(clay.Sphere(r=0.3, position=(0, 0.9, 0)), parent=parent)
+        return doc
+
+    pts = np.random.default_rng(11).uniform(-2, 2, size=(300, 3)).astype(np.float32)
+    assert np.array_equal(build(True).eval(pts), build(False).eval(pts))
+
+
+def test_a_carving_group_with_nothing_beneath_it_produces_nothing():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    carve = layer.add_group(op=clay.Op.SUBTRACT)
+    layer.add(clay.Sphere(r=0.5), parent=carve)
+    # a subtract against empty space is nothing at all, as it is for an item
+    assert doc.eval(np.array([[0, 0, 0]], dtype=np.float32))[0] > 1e30
+
+
+def test_a_group_with_nothing_in_it_leaves_the_field_alone():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.8))
+    pts = np.random.default_rng(5).uniform(-2, 2, size=(200, 3)).astype(np.float32)
+    before = doc.eval(pts)
+    for op in (clay.Op.ADD, clay.Op.SUBTRACT, clay.Op.INTERSECT):
+        layer.add_group(op=op)
+    # an empty subtree is rolled back, not left as a combine against empty space
+    assert np.array_equal(doc.eval(pts), before)
+
+
+def test_group_edits_undo_exactly(tmp_path):
+    doc, layer, plate = _plate_document()
+    doc.enable_undo()
+    before = _snapshot(doc, tmp_path, "before.clayspace")
+
+    layer.set_op_blend(plate, op=clay.Op.SUBTRACT, blend=clay.Smooth(0.2))
+    assert doc.undo() is True
+    assert _snapshot(doc, tmp_path, "after_op.clayspace") == before
+
+    child = layer.add(clay.Sphere(r=0.2), parent=plate)
+    assert doc.undo() is True
+    assert _snapshot(doc, tmp_path, "after_add.clayspace") == before
+
+    layer.remove(plate)
+    assert doc.undo() is True
+    assert _snapshot(doc, tmp_path, "after_remove.clayspace") == before
+
+    # reparenting is a MoveNodeCmd whose inverse is the parent and index it
+    # captured before moving, so it comes back to the same slot
+    kids = layer.children(plate)
+    layer.move(kids[0], parent=None, index=0)
+    assert doc.undo() is True
+    assert _snapshot(doc, tmp_path, "after_move.clayspace") == before
+    assert child not in layer.children(plate)
+
+
+def test_nested_groups_round_trip_bit_identically(tmp_path):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    outer = layer.add_group(op=clay.Op.ADD, blend=clay.Cubic(0.12), rounding=0.03)
+    inline = layer.add_group(op=clay.Op.INLINE, parent=outer)
+    carve = layer.add_group(op=clay.Op.SUBTRACT, blend=clay.Smooth(0.05), parent=inline)
+    layer.add(clay.Sphere(r=0.7), parent=inline, color="#3388cc")
+    layer.add(clay.Box(size=(0.6, 0.6, 1.8), position=(0.4, 0.1, 0)), parent=carve)
+    layer.add(clay.Sphere(r=0.3, position=(-1.2, 0, 0)))
+
+    path = tmp_path / "groups.clayspace"
+    doc.save(str(path))
+    first = path.read_bytes()
+    reloaded = clay.load(str(path))
+    again = tmp_path / "groups_again.clayspace"
+    reloaded.save(str(again))
+    assert again.read_bytes() == first
+
+    pts = np.random.default_rng(3).uniform(-2, 2, size=(400, 3)).astype(np.float32)
+    assert np.array_equal(reloaded.eval(pts), doc.eval(pts))
+
+
+def test_a_group_refuses_what_it_cannot_honour():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    group = layer.add_group()
+
+    # compile_group emits no transition parameters, so a group carrying a
+    # morph op would run on defaults nobody wrote
+    with pytest.raises(ValueError, match="transition"):
+        layer.add_group(op=clay.Op.TRANSITION_LINEAR)
+    with pytest.raises(ValueError, match="transition"):
+        layer.set_op_blend(group, op=clay.Op.TRANSITION_RADIAL)
+    # an inline group reads no blend or rounding at all
+    with pytest.raises(ValueError, match="inline group"):
+        layer.add_group(op=clay.Op.INLINE, blend=clay.Smooth(0.2))
+    with pytest.raises(ValueError, match="inline group"):
+        layer.add_group(op=clay.Op.INLINE, rounding=0.1)
+    # a group's transform never reaches its children, so it takes none
+    with pytest.raises(ValueError, match="no transform"):
+        layer.set_transform(group, position=(1, 0, 0))
+    # and Op.INLINE is groups only
+    with pytest.raises(ValueError, match="Op.INLINE"):
+        layer.add(clay.Sphere(r=0.3), op=clay.Op.INLINE)
+    with pytest.raises(ValueError, match="Op.INLINE"):
+        layer.set_op_blend(layer.add(clay.Sphere(r=0.3)), op=clay.Op.INLINE)
+
+
+def test_a_node_cannot_move_into_its_own_subtree():
+    """Regression: the move detached first and only then checked the parent,
+    so a group could become its own descendant — the subtree left the root
+    list, stopped evaluating and was dropped by the next save."""
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    outer = layer.add_group()
+    inner = layer.add_group(parent=outer)
+    node = layer.add(clay.Sphere(r=0.5), parent=inner)
+
+    for target in (outer, inner):
+        with pytest.raises(ValueError, match="own subtree"):
+            layer.move(outer, parent=target)
+    assert layer.children(outer) == [inner]
+    assert layer.children(inner) == [node]
+    # and an item is not somewhere an edit can be put
+    with pytest.raises(ValueError, match="must be a group"):
+        layer.add(clay.Sphere(r=0.2), parent=node)
