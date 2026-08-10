@@ -21,7 +21,7 @@ void clay_write(uint gid, CTapeValue v) {
 
 #ifdef CLAY_ENTRY_POINTS
 void main() {
-    uint gid = gl_GlobalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x + pc.base;
     if (gid >= pc.count) return;
     vec3 p = vec3(clay_in_[gid * 3u + 0u], clay_in_[gid * 3u + 1u], clay_in_[gid * 3u + 2u]);
     clay_write(gid, ctape_eval(0u, int(pc.instr_count), pc.params_base, pc.blob_base, p));
@@ -30,7 +30,7 @@ void main() {
 
 #ifdef CLAY_ENTRY_GRID
 void main() {
-    uint gid = gl_GlobalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x + pc.base;
     uint total = pc.nx * pc.ny * pc.nz;
     if (gid >= total) return;
     uint x = gid % pc.nx;

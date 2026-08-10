@@ -34,6 +34,12 @@ FetchContent_Declare(nanobind
   GIT_REPOSITORY https://github.com/wjakob/nanobind
   GIT_TAG v2.13.0)
 
+# GLSL -> SPIR-V for the Vulkan backend. Only fetched when the backend is on
+# AND no glslang is installed, so the common build never sees it.
+FetchContent_Declare(glslang
+  GIT_REPOSITORY https://github.com/KhronosGroup/glslang
+  GIT_TAG 16.5.0)
+
 if(CLAY_BUILD_TESTS OR CLAY_FETCH_ALL_DEPS)
   FetchContent_MakeAvailable(doctest)
 endif()

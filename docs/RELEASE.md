@@ -193,6 +193,33 @@ the host side rather than assuming the previous one still passes.
 
 Tracked honestly rather than assumed done:
 
+- **Vulkan device parity has executed** (added with the backend). Measured with
+  the undilutable metric rather than the aggregate: `parity: every registered
+  backend matches the scalar reference` reports **204** assertions with the
+  Vulkan runtime hidden (`VK_DRIVER_FILES=/nonexistent`) and **408** with it
+  registered — exactly 2x, one pass each for cpu and vulkan, both matching the
+  scalar reference. Validated on an RTX 5060 (driver 580, Vulkan 1.3.275) and
+  again on **lavapipe**, the software runtime, which gives the identical count.
+
+  Those two runs do not prove the same thing and must not be quoted as if they
+  did. lavapipe executes on the CPU, so its agreement with the CPU reference is
+  close to guaranteed by construction: it gates the *plumbing* — SPIR-V
+  validity, descriptor and buffer layout, dispatch, readback — and says nothing
+  about arithmetic. Only the RTX 5060 run is evidence about arithmetic, and a
+  release that touches kernels needs a real device for it, exactly as CUDA and
+  OpenCL do.
+
+  What is NOT yet measured is where this backend's CPU/GPU crossover sits. The
+  16³ figure in the brick-cache note below is a Metal-on-M2-Max number; Vulkan's
+  dispatch cost is its own and has to be found rather than inherited.
+
+- **The Vulkan backend does gradients on the host.** `eval_points` runs on the
+  device; a request for gradients falls back to the scalar reference for the
+  whole batch, because the tetrahedron tap lives in `field.h`, which is
+  templated C++ that no compute dialect in this tree compiles. Same choice the
+  OpenCL backend makes, recorded here rather than left to be discovered from a
+  profile. A caller asking a tier-3 backend for gradients is paying CPU for them.
+
 - **CUDA and OpenCL device parity have both executed** (task 12.2, closed by
   `fix-cuda-arch-selection`; re-run for v0.24.0 on 2026-08-09, and again for
   v0.25.0 on 2026-08-10 because that release adds a tape opcode — an armature —
@@ -241,16 +268,23 @@ Tracked honestly rather than assumed done:
   CUDA and Metal profiles plus the OpenCL amalgamation, so a dialect break
   fails in seconds on any runner.
 
-  The consequence is that **three things are now manual and hardware-dependent**
-  rather than gated, and all three must be run before a release that touches
+  The consequence is that **four things are now manual and hardware-dependent**
+  rather than gated, and all four must be run before a release that touches
   kernels:
   1. CUDA device parity (as below).
   2. The nvcc build of the backend, including its architecture auto-detection.
   3. That the OpenCL backend registers and passes parity on a real device.
+  4. That the Vulkan backend registers and passes parity on a real device — a
+     lavapipe run is not a substitute, for the reason given in the Vulkan entry
+     under "Open items": it executes on the CPU, so it gates plumbing rather
+     than arithmetic.
 
   `python3 tools/release_check.py` run on a machine with those devices present
-  covers all three, because it runs parity against every backend registered in
-  that build.
+  covers all four, because it runs parity against every backend registered in
+  that build. What per-push CI still gates for Vulkan is
+  `check_kernel_dialect.py`, which compiles the generated GLSL with glslang and
+  needs no device — the strictest of the five profiles, so it usually fails
+  first when a kernel gains something new.
 - **CUDA-enabled wheels are not shipped** (task 12.3). Wheels currently carry
   the CPU backend, which per the parity contract changes speed, not results.
   Shipping CUDA wheels needs a CUDA build host in the wheel matrix.

@@ -56,6 +56,10 @@ layout(push_constant) uniform ClayPush {
     uint count;
     uint nx, ny, nz;
     uint has_colors;
+    // First element this dispatch covers. A batch larger than the device's
+    // maxComputeWorkGroupCount is split, and every split writes absolute
+    // indices, so a chunked run is indistinguishable from a single one.
+    uint base;
 } pc;
 """
 

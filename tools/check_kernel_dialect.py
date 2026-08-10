@@ -23,6 +23,8 @@ Profiles, in the order they run:
          runner rather than waiting for an Apple one.
   metal-native  the real thing, `xcrun metal`, where an Apple toolchain exists.
   opencl the amalgamated kernel text through clang's OpenCL frontend.
+  vulkan the amalgamated kernel text through glslang, as Vulkan GLSL. The
+         strictest profile of the five, so it usually fails first.
 
 The two Metal profiles compile WITHOUT defining CLAY_KERNEL_METAL: shim.h is
 expected to select the branch from the compiler's own identity, which is what
@@ -188,6 +190,41 @@ def opencl_check() -> list[str]:
     return []
 
 
+def vulkan_check() -> list[str]:
+    """Compile the amalgamated kernel text as Vulkan GLSL.
+
+    Same role as the OpenCL profile: catch a dialect break on any runner,
+    without a device. GLSL is the strictest of the five — no pointers, no
+    prefix casts, no int-to-bool — so this is the profile most likely to
+    fail first when a kernel gains something new, which is the point.
+    """
+    glslang = shutil.which("glslang") or shutil.which("glslangValidator")
+    if not glslang:
+        print("kernel-dialect: no glslang found, skipping the Vulkan profile")
+        return []
+    errors = []
+    with tempfile.TemporaryDirectory() as tmp:
+        comp = Path(tmp) / "kernels.comp"
+        gen = subprocess.run(
+            [sys.executable, str(REPO / "tools" / "amalgamate_glsl.py"),
+             "clay/kernel/tape.h", str(comp),
+             str(REPO / "backends" / "vulkan" / "clay_kernels.comp.in")],
+            capture_output=True, text=True)
+        if gen.returncode != 0:
+            return [f"Vulkan amalgamation failed:\n{gen.stderr.strip()}"]
+        # Both entry points: they share the interpreter but not their mains,
+        # and a break in either is a broken backend.
+        for entry in ("CLAY_ENTRY_POINTS", "CLAY_ENTRY_GRID"):
+            proc = subprocess.run(
+                [glslang, "-V", "--target-env", "vulkan1.1", "-S", "comp",
+                 f"-D{entry}", "-o", str(Path(tmp) / f"{entry}.spv"), str(comp)],
+                capture_output=True, text=True)
+            if proc.returncode != 0:
+                errors.append(f"Vulkan profile compile failed [{entry}]:\n"
+                              f"{proc.stdout.strip()[:2000]}{proc.stderr.strip()[:2000]}")
+    return errors
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--compiler", default="c++", help="host C++ compiler for the restrictive compile")
@@ -206,12 +243,13 @@ def main() -> int:
             errors += compile_check(header, args.compiler, profile)
     errors += metal_native_check(headers)
     errors += opencl_check()
+    errors += vulkan_check()
 
     for e in errors:
         print(f"kernel-dialect: {e}", file=sys.stderr)
     if not errors:
         print(f"kernel-dialect: OK ({len(headers)} headers x {'+'.join(profiles)} profiles, "
-              f"plus the OpenCL amalgamation)")
+              f"plus the OpenCL and Vulkan amalgamations)")
     return 1 if errors else 0
 
 
