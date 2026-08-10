@@ -124,6 +124,45 @@ def check_capability_coverage():
     return problems
 
 
+def check_fast_scaling():
+    """Every render entry point must honour CLAY_EXAMPLES_FAST.
+
+    This is a gate rather than a convention because the omission has already
+    happened once: when fast mode was added, `render_array` and `render_tile`
+    scaled and `render_voxels_array` did not, so 00_hero composited a 150px
+    image beside a 300px one and failed. It was caught by that example's own
+    assertion, which is luck — an example that renders a lone unscaled image
+    would have gone on quietly costing CI the time fast mode exists to save.
+
+    Structural, not behavioural: an entry point passes if it scales its own
+    dimensions, or if it delegates to one that does. That is cheap enough to
+    run every time and cannot be defeated by a render being slow or absent.
+    """
+    import inspect
+
+    import _render
+
+    entries = {name: fn for name, fn in vars(_render).items()
+               if name.startswith("render") and inspect.isfunction(fn)}
+    sources = {name: inspect.getsource(fn) for name, fn in entries.items()}
+
+    def scales(name, seen):
+        if name in seen:            # a delegation cycle scales nothing
+            return False
+        seen.add(name)
+        src = sources[name]
+        if "_fast_pixels(" in src or "_fast_ao(" in src:
+            return True
+        return any(other != name and f"{other}(" in src and scales(other, seen)
+                   for other in entries)
+
+    missing = sorted(name for name in entries if not scales(name, set()))
+    if not missing:
+        return []
+    return [f"render entry points ignore CLAY_EXAMPLES_FAST: {missing} — scale their "
+            f"dimensions through _fast_pixels/_fast_ao, or delegate to one that does"]
+
+
 def run_one(name):
     """Run one example in this process, returning (name, output, error).
 
@@ -162,7 +201,7 @@ def main():
               file=sys.stderr)
         return 1
 
-    coverage = check_capability_coverage()
+    coverage = check_capability_coverage() + check_fast_scaling()
     if coverage:
         for problem in coverage:
             print(f"  {problem}", file=sys.stderr)
