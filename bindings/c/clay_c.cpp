@@ -3794,6 +3794,80 @@ clay_result clay_voxel_size(const clay_voxel_grid* grid, float* out_voxel_size) 
     return CLAY_OK;
 }
 
+clay_result clay_voxel_level_count(const clay_voxel_grid* grid, size_t* out_count) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (out_count) *out_count = g->level_count();
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_active_level(const clay_voxel_grid* grid, size_t* out_level) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (out_level) *out_level = g->active_level();
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_set_active_level(clay_voxel_grid* grid, size_t level) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (!g->set_active_level(level))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "no such resolution level: " + std::to_string(level));
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_add_level(clay_voxel_grid* grid, size_t* out_level) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    std::size_t before = g->level_count();
+    std::size_t level = g->add_level();
+    if (g->level_count() == before)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the level stack is capped at " + std::to_string(voxel::VoxelGrid::kMaxLevels));
+    if (out_level) *out_level = level;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_drop_level(clay_voxel_grid* grid) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (!g->drop_level())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a grid always has at least one level");
+    return CLAY_OK;
+}
+
+// A level this grid does not have is an error rather than a zero, so a caller
+// cannot read a stack's cost off by one and see a plausible-looking answer.
+clay_result clay_voxel_level_voxel_size(const clay_voxel_grid* grid, size_t level,
+                                        float* out_voxel_size) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (level >= g->level_count())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "no such resolution level: " + std::to_string(level));
+    if (out_voxel_size) *out_voxel_size = g->level_voxel_size(level);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_level_occupied_count(const clay_voxel_grid* grid, size_t level,
+                                            size_t* out_count) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (level >= g->level_count())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "no such resolution level: " + std::to_string(level));
+    if (out_count) *out_count = g->level_occupied_count(level);
+    return CLAY_OK;
+}
+
 clay_result clay_voxel_palette_add(clay_voxel_grid* grid, const float rgb[3],
                                    int32_t* out_index) {
     voxel::VoxelGrid* g = nullptr;

@@ -3525,7 +3525,49 @@ NB_MODULE(pyclay, m) {
                  self->owned = std::make_shared<voxel::VoxelGrid>(voxel_size);
              },
              "voxel_size"_a = 0.1f)
-        .def_prop_ro("voxel_size", [](const PyVoxelGrid& g) { return g.grid().voxel_size(); })
+        .def_prop_ro("voxel_size", [](const PyVoxelGrid& g) { return g.grid().voxel_size(); },
+                     "Cell size of the active resolution level.")
+        .def_prop_ro("level_count", [](const PyVoxelGrid& g) { return g.grid().level_count(); },
+                     "Resolution levels: level 0 is the coarsest and level k has\n"
+                     "half the cell size of level k-1. A grid always has at least\n"
+                     "one, and a grid that never gains a second behaves exactly as\n"
+                     "a grid did before levels existed.")
+        .def_prop_rw("active_level", [](const PyVoxelGrid& g) { return g.grid().active_level(); },
+                     [](PyVoxelGrid& g, std::size_t level) {
+                         if (!g.grid().set_active_level(level))
+                             throw std::invalid_argument("no such resolution level");
+                     },
+                     "The level every verb acts on. Setting it is free: editing at\n"
+                     "a level already averages down into the coarser levels and\n"
+                     "replays into the finer ones from the offsets they hold.")
+        .def("add_level",
+             [](PyVoxelGrid& g) {
+                 std::size_t before = g.grid().level_count();
+                 std::size_t level = g.grid().add_level();
+                 if (g.grid().level_count() == before)
+                     throw std::invalid_argument("the level stack is at its cap");
+                 return level;
+             },
+             "Appends a level at half the finest cell size, subdividing every\n"
+             "occupied cell into its eight children so the solid is unchanged.\n"
+             "Returns the new level's index.")
+        .def("drop_level", [](PyVoxelGrid& g) { return g.grid().drop_level(); },
+             "Drops the finest level and the detail only it held. False when\n"
+             "there is only one left.")
+        .def("level_voxel_size",
+             [](const PyVoxelGrid& g, std::size_t level) {
+                 if (level >= g.grid().level_count())
+                     throw std::invalid_argument("no such resolution level");
+                 return g.grid().level_voxel_size(level);
+             },
+             "level"_a)
+        .def("level_occupied_count",
+             [](const PyVoxelGrid& g, std::size_t level) {
+                 if (level >= g.grid().level_count())
+                     throw std::invalid_argument("no such resolution level");
+                 return g.grid().level_occupied_count(level);
+             },
+             "level"_a, "Occupied cells at one level — what that level costs.")
         .def_prop_ro("occupied_count",
                      [](const PyVoxelGrid& g) { return g.grid().occupied_count(); })
         .def_prop_ro("change_count",

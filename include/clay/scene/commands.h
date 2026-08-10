@@ -144,7 +144,7 @@ LayerId edited_layer(const Command& cmd);
 // The scene payload layout this build writes. It tracks the .clayspace
 // container's minor version, which is what a reader is told; io asserts they
 // agree so the two cannot drift.
-inline constexpr std::uint16_t kSceneMinor = 5;
+inline constexpr std::uint16_t kSceneMinor = 6;
 
 // Apply a command; returns its inverse, or nullopt if the target does not
 // exist or is protected (ghosted or locked). The document is unchanged in

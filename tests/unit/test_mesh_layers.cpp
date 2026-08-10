@@ -194,7 +194,11 @@ TEST_CASE("mesh layers: the major does not move, so nothing is refused") {
     add_mesh_layer(&cs, "scan", bare_mesh());
     std::vector<std::uint8_t> bytes = io::save_clayspace(cs);
     CHECK(bytes[4] == io::kClaySpaceMajor);
-    CHECK(bytes[6] == 5);  // the minor moved instead
+    // The minor moved instead — against the constant, not a literal, because
+    // every change that adds a chunk bumps it and a literal here turns each
+    // one into a spurious failure in an unrelated test.
+    CHECK(bytes[6] == io::kClaySpaceMinor);
+    CHECK(bytes[6] >= 5);  // ...and mesh layers are why it is at least 5
     io::ClaySpaceDoc back;
     CHECK(io::load_clayspace(bytes.data(), bytes.size(), &back).ok());
 }

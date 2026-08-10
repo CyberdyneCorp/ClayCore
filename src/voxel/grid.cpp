@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <map>
 
 namespace clay {
@@ -18,6 +19,24 @@ inline std::int32_t fdiv(std::int32_t a, std::int32_t b) {
     return (a >= 0) ? a / b : -(((-a) + b - 1) / b);
 }
 inline std::int32_t fmod_pos(std::int32_t a, std::int32_t b) { return a - fdiv(a, b) * b; }
+
+// The cell one level coarser that contains this one, and the first of its
+// eight children. Floor division, so the mapping stays a partition across the
+// origin instead of folding negative cells onto positive ones.
+inline VoxelCoord parent_cell(VoxelCoord c) { return {fdiv(c.x, 2), fdiv(c.y, 2), fdiv(c.z, 2)}; }
+inline VoxelCoord child_cell(VoxelCoord parent, int i) {
+    return {parent.x * 2 + (i & 1), parent.y * 2 + ((i >> 1) & 1), parent.z * 2 + ((i >> 2) & 1)};
+}
+inline constexpr int kChildren = 8;
+
+// A cell whose children would leave the int32 lattice has none. Doubling is
+// what a level costs, and a subdivision that wrapped would put material at a
+// coordinate nobody asked for — silently, and for a cell nothing can reach.
+inline bool has_children(VoxelCoord c) {
+    constexpr std::int32_t kLimit = std::numeric_limits<std::int32_t>::max() / 2;
+    return c.x <= kLimit && c.x >= -kLimit && c.y <= kLimit && c.y >= -kLimit && c.z <= kLimit &&
+           c.z >= -kLimit;
+}
 }  // namespace
 
 VoxelCoord VoxelGrid::chunk_key(VoxelCoord c) {
@@ -52,31 +71,174 @@ void VoxelGrid::palette_set(std::uint8_t index, cfloat3 color) {
 
 // -- single voxel ------------------------------------------------------------
 
-std::uint8_t VoxelGrid::get(VoxelCoord c) const {
-    auto it = chunks_.find(chunk_key(c));
-    return it == chunks_.end() ? 0 : it->second.data[chunk_offset(c)];
+std::uint8_t VoxelGrid::cell_at(std::size_t level, VoxelCoord c) const {
+    const ChunkMap& chunks = levels_[level].chunks;
+    auto it = chunks.find(chunk_key(c));
+    return it == chunks.end() ? 0 : it->second.data[chunk_offset(c)];
 }
 
-void VoxelGrid::set(VoxelCoord c, std::uint8_t index) {
+// Returns whether the cell actually changed, which is what change_count counts.
+bool VoxelGrid::write_cell(std::size_t level, VoxelCoord c, std::uint8_t index) {
+    ChunkMap& chunks = levels_[level].chunks;
     VoxelCoord key = chunk_key(c);
-    auto it = chunks_.find(key);
-    if (it == chunks_.end()) {
-        if (index == 0) return;
-        it = chunks_.emplace(key, Chunk{}).first;
+    auto it = chunks.find(key);
+    if (it == chunks.end()) {
+        if (index == 0) return false;
+        it = chunks.emplace(key, Chunk{}).first;
         it->second.data.assign(static_cast<std::size_t>(kChunkDim) * kChunkDim * kChunkDim, 0);
     }
     std::uint8_t& cell = it->second.data[chunk_offset(c)];
-    // Every verb funnels its writes through here, so one compare instruments
-    // all of them. The early return above is already a no-change case.
-    if (cell != index) ++change_count_;
+    bool changed = cell != index;
     if (cell == 0 && index != 0) ++it->second.occupied;
     if (cell != 0 && index == 0) --it->second.occupied;
     cell = index;
-    if (it->second.occupied == 0) chunks_.erase(it);
+    if (it->second.occupied == 0) chunks.erase(it);
+    return changed;
+}
+
+std::uint8_t VoxelGrid::get(VoxelCoord c) const { return cell_at(active_, c); }
+
+void VoxelGrid::set(VoxelCoord c, std::uint8_t index) {
+    // Every verb funnels its writes through here, so one compare instruments
+    // all of them, and propagation below is charged to the edit rather than
+    // counted as further edits.
+    if (write_cell(active_, c, index)) ++change_count_;
+    if (levels_.size() == 1) return;  // the single-level grid: nothing to carry
+    // Down first: it restates this cell's own offset against the parent it just
+    // recomputed, which is what the walk back up then replays.
+    propagate_down(active_, c);
+    propagate_up(active_, c);
 }
 
 void VoxelGrid::paint(VoxelCoord c, std::uint8_t index) {
     if (index != 0 && get(c) != 0) set(c, index);
+}
+
+// -- resolution levels -------------------------------------------------------
+
+float VoxelGrid::level_voxel_size(std::size_t level) const {
+    return level < levels_.size() ? levels_[level].voxel_size : 0.0f;
+}
+
+std::size_t VoxelGrid::level_occupied_count(std::size_t level) const {
+    if (level >= levels_.size()) return 0;
+    std::size_t n = 0;
+    for (const auto& [key, chunk] : levels_[level].chunks)
+        n += static_cast<std::size_t>(chunk.occupied);
+    return n;
+}
+
+bool VoxelGrid::set_active_level(std::size_t level) {
+    if (level >= levels_.size()) return false;
+    active_ = level;
+    return true;
+}
+
+// Capped because the file format has to be: a stream naming an arbitrary level
+// count would otherwise be a request to allocate one. Memory refuses a stack
+// this deep long before the cap does — every level costs eight times the cells
+// of the one below.
+std::size_t VoxelGrid::add_level() {
+    if (levels_.size() >= kMaxLevels) return levels_.size() - 1;
+    levels_.push_back(Level{levels_.back().voxel_size * 0.5f, {}, {}});
+    std::size_t fine = levels_.size() - 1;
+    subdivide_into(fine);
+    return fine;
+}
+
+bool VoxelGrid::drop_level() {
+    if (levels_.size() < 2) return false;
+    levels_.pop_back();
+    if (active_ >= levels_.size()) active_ = levels_.size() - 1;
+    return true;
+}
+
+// Seed a freshly added level from the one below it: every occupied coarse cell
+// becomes its eight children with the same palette index. The solid is exactly
+// the same one, so adding a level cannot move the surface, and no cell differs
+// from its parent — the detail map starts empty.
+void VoxelGrid::subdivide_into(std::size_t fine) {
+    const ChunkMap& coarse = levels_[fine - 1].chunks;
+    for (const auto& [key, chunk] : coarse) {
+        for (int z = 0; z < kChunkDim; ++z)
+            for (int y = 0; y < kChunkDim; ++y)
+                for (int x = 0; x < kChunkDim; ++x) {
+                    std::uint8_t v =
+                        chunk.data[(static_cast<std::size_t>(z) * kChunkDim + y) * kChunkDim + x];
+                    if (v == 0) continue;
+                    VoxelCoord c{key.x * kChunkDim + x, key.y * kChunkDim + y,
+                                 key.z * kChunkDim + z};
+                    if (!has_children(c)) continue;
+                    for (int i = 0; i < kChildren; ++i) write_cell(fine, child_cell(c, i), v);
+                }
+    }
+}
+
+// A cell differs from its parent or it does not; the map holds exactly the ones
+// that do, so it stays the size of the detail rather than the size of the level.
+void VoxelGrid::record_detail(std::size_t level, VoxelCoord c) {
+    if (level == 0) return;
+    std::uint8_t v = cell_at(level, c);
+    if (v == cell_at(level - 1, parent_cell(c)))
+        levels_[level].detail.erase(c);
+    else
+        levels_[level].detail[c] = v;
+}
+
+void VoxelGrid::refresh_detail(std::size_t level, VoxelCoord parent) {
+    for (int i = 0; i < kChildren; ++i) record_detail(level, child_cell(parent, i));
+}
+
+// Average, not subsample: a coarse cell is occupied when at least half its
+// eight children are, coloured by the commonest child. Picking one child would
+// make dropping a level depend on which corner the sculptor happened to hit.
+std::uint8_t VoxelGrid::downsample_cell(std::size_t fine, VoxelCoord coarse) const {
+    int tally[256] = {0};
+    int occupied = 0;
+    for (int i = 0; i < kChildren; ++i) {
+        std::uint8_t v = cell_at(fine, child_cell(coarse, i));
+        if (v == 0) continue;
+        ++occupied;
+        ++tally[v];
+    }
+    if (occupied * 2 < kChildren) return 0;
+    std::uint8_t best = 0;
+    int best_count = 0;
+    for (int i = 1; i < 256; ++i)
+        if (tally[i] > best_count) {
+            best_count = tally[i];
+            best = static_cast<std::uint8_t>(i);
+        }
+    return best;
+}
+
+void VoxelGrid::propagate_down(std::size_t from, VoxelCoord c) {
+    for (std::size_t fine = from; fine > 0; --fine) {
+        VoxelCoord parent = parent_cell(c);
+        write_cell(fine - 1, parent, downsample_cell(fine, parent));
+        // The parent moved, so every child's offset against it is restated —
+        // including the siblings this edit never touched.
+        refresh_detail(fine, parent);
+        c = parent;
+    }
+}
+
+void VoxelGrid::propagate_up(std::size_t from, VoxelCoord c) {
+    if (from + 1 >= levels_.size() || !has_children(c)) return;
+    const std::size_t fine = from + 1;
+    const std::uint8_t predicted = cell_at(from, c);
+    for (int i = 0; i < kChildren; ++i) {
+        VoxelCoord child = child_cell(c, i);
+        auto& detail = levels_[fine].detail;
+        auto it = detail.find(child);
+        std::uint8_t v = it != detail.end() ? it->second : predicted;
+        write_cell(fine, child, v);
+        // An offset the coarse form has caught up with is no offset at all.
+        // Dropping it keeps the map exactly the cells that differ, which is
+        // what makes the serialised stream a canonical form of the grid.
+        if (it != detail.end() && v == predicted) detail.erase(it);
+        propagate_up(fine, child);
+    }
 }
 
 // -- brushes and fills -------------------------------------------------------
@@ -174,15 +336,11 @@ void VoxelGrid::paint_mirrored(VoxelCoord c, std::uint8_t index, std::uint8_t ax
 
 // -- queries -----------------------------------------------------------------
 
-std::size_t VoxelGrid::occupied_count() const {
-    std::size_t n = 0;
-    for (const auto& [key, chunk] : chunks_) n += static_cast<std::size_t>(chunk.occupied);
-    return n;
-}
+std::size_t VoxelGrid::occupied_count() const { return level_occupied_count(active_); }
 
 std::optional<VoxelCoord> VoxelGrid::bounds_min() const {
     std::optional<VoxelCoord> out;
-    for (const auto& [key, chunk] : chunks_) {
+    for (const auto& [key, chunk] : levels_[active_].chunks) {
         for (int z = 0; z < kChunkDim; ++z)
             for (int y = 0; y < kChunkDim; ++y)
                 for (int x = 0; x < kChunkDim; ++x) {
@@ -202,7 +360,7 @@ std::optional<VoxelCoord> VoxelGrid::bounds_min() const {
 
 std::optional<VoxelCoord> VoxelGrid::bounds_max() const {
     std::optional<VoxelCoord> out;
-    for (const auto& [key, chunk] : chunks_) {
+    for (const auto& [key, chunk] : levels_[active_].chunks) {
         for (int z = 0; z < kChunkDim; ++z)
             for (int y = 0; y < kChunkDim; ++y)
                 for (int x = 0; x < kChunkDim; ++x) {
@@ -222,13 +380,14 @@ std::optional<VoxelCoord> VoxelGrid::bounds_max() const {
 
 std::optional<VoxelCoord> VoxelGrid::build_plane_pick(const math::Ray& ray,
                                                       std::int32_t plane_cell) const {
-    float plane_y = static_cast<float>(plane_cell) * voxel_size_;
+    const float vs = voxel_size();
+    float plane_y = static_cast<float>(plane_cell) * vs;
     if (kernel::cabs(ray.dir.y) < 1e-9f) return std::nullopt;
     float t = (plane_y - ray.origin.y) / ray.dir.y;
     if (t < 0.0f) return std::nullopt;
     kernel::cfloat3 p = ray.at(t);
-    return VoxelCoord{static_cast<std::int32_t>(std::floor(p.x / voxel_size_)), plane_cell,
-                      static_cast<std::int32_t>(std::floor(p.z / voxel_size_))};
+    return VoxelCoord{static_cast<std::int32_t>(std::floor(p.x / vs)), plane_cell,
+                      static_cast<std::int32_t>(std::floor(p.z / vs))};
 }
 
 std::vector<VoxelCoord> VoxelGrid::flood_select(VoxelCoord seed, bool same_color,
@@ -258,6 +417,24 @@ std::vector<VoxelCoord> VoxelGrid::flood_select(VoxelCoord seed, bool same_color
 
 // -- serialization -----------------------------------------------------------
 
+namespace {
+// Guard for the level tail. A reader that predates it stops at the end of the
+// coarsest level's chunks and never looks, which is what makes an older build
+// open a multi-resolution document at the coarsest level rather than fail; a
+// reader that does look needs the tag to tell a tail from a truncated file.
+constexpr std::uint32_t kLevelTail = 0x564C4343u;  // "CCLV" little-endian
+
+// Ceiling on the cells a tail may ask the reader to MATERIALISE. kMaxLevels
+// bounds how many levels a stream can name but not what naming them costs:
+// every level is rebuilt by subdividing the one below, so a fixed-size tail
+// asks for eight times the cells per level it declares. Twelve bytes claiming
+// sixteen levels over a four-cube is a request for 8^15 cells from a 220-byte
+// file, which is why the depth alone is not a bound. The budget is far above
+// any sculpt that could have been written — the coarsest level is the small
+// one — and far below the point where opening a document stops returning.
+constexpr std::size_t kMaxLevelCells = 1u << 26;
+}  // namespace
+
 std::vector<std::uint8_t> VoxelGrid::serialize() const {
     std::vector<std::uint8_t> out;
     auto put32 = [&](std::uint32_t v) {
@@ -268,7 +445,8 @@ std::vector<std::uint8_t> VoxelGrid::serialize() const {
         std::memcpy(&v, &f, 4);
         put32(v);
     };
-    putf(voxel_size_);
+    // The COARSEST level, in the layout this stream has always had.
+    putf(levels_.front().voxel_size);
     put32(static_cast<std::uint32_t>(palette_.size()));
     for (const cfloat3& c : palette_) {
         putf(c.x);
@@ -277,7 +455,7 @@ std::vector<std::uint8_t> VoxelGrid::serialize() const {
     }
     // deterministic chunk order
     std::map<std::tuple<int, int, int>, const Chunk*> ordered;
-    for (const auto& [key, chunk] : chunks_) ordered[{key.x, key.y, key.z}] = &chunk;
+    for (const auto& [key, chunk] : levels_.front().chunks) ordered[{key.x, key.y, key.z}] = &chunk;
     put32(static_cast<std::uint32_t>(ordered.size()));
     for (const auto& [key, chunk] : ordered) {
         put32(static_cast<std::uint32_t>(std::get<0>(key)));
@@ -297,6 +475,26 @@ std::vector<std::uint8_t> VoxelGrid::serialize() const {
         }
         put32(static_cast<std::uint32_t>(rle.size()));
         out.insert(out.end(), rle.begin(), rle.end());
+    }
+    if (levels_.size() == 1) return out;  // byte-for-byte the stream it always was
+
+    // Finer levels ride along as their OFFSETS ONLY — the cells that differ
+    // from the level below — because everything else is reproducible by
+    // subdividing. A level carrying no detail therefore costs four bytes, which
+    // is the answer to whether a stack has to multiply the file size.
+    put32(kLevelTail);
+    put32(static_cast<std::uint32_t>(levels_.size()));
+    put32(static_cast<std::uint32_t>(active_));
+    for (std::size_t i = 1; i < levels_.size(); ++i) {
+        std::map<std::tuple<int, int, int>, std::uint8_t> ordered_detail;
+        for (const auto& [c, v] : levels_[i].detail) ordered_detail[{c.x, c.y, c.z}] = v;
+        put32(static_cast<std::uint32_t>(ordered_detail.size()));
+        for (const auto& [c, v] : ordered_detail) {
+            put32(static_cast<std::uint32_t>(std::get<0>(c)));
+            put32(static_cast<std::uint32_t>(std::get<1>(c)));
+            put32(static_cast<std::uint32_t>(std::get<2>(c)));
+            out.push_back(v);
+        }
     }
     return out;
 }
@@ -356,21 +554,76 @@ std::optional<VoxelGrid> VoxelGrid::deserialize(const std::uint8_t* data, std::s
         pos += rle_size;
         if (cell != chunk_cells) return std::nullopt;
         if (chunk.occupied > 0)
-            grid.chunks_.emplace(
+            grid.levels_.front().chunks.emplace(
                 VoxelCoord{static_cast<std::int32_t>(kx), static_cast<std::int32_t>(ky),
                            static_cast<std::int32_t>(kz)},
                 std::move(chunk));
     }
+    // No tail, or a stream written before there was one: a single-level grid,
+    // which is what an older document is.
+    std::uint32_t tag = 0;
+    if (pos + 4 > size || !get32(&tag) || tag != kLevelTail) return grid;
+    if (!grid.read_level_tail(data, size, &pos, palette_count)) return std::nullopt;
     return grid;
+}
+
+bool VoxelGrid::read_level_tail(const std::uint8_t* data, std::size_t size, std::size_t* pos,
+                                std::uint32_t palette_count) {
+    auto get32 = [&](std::uint32_t* v) {
+        if (*pos + 4 > size) return false;
+        *v = 0;
+        for (int i = 0; i < 4; ++i) *v |= static_cast<std::uint32_t>(data[(*pos)++]) << (i * 8);
+        return true;
+    };
+    std::uint32_t level_count = 0, active = 0;
+    if (!get32(&level_count) || !get32(&active)) return false;
+    if (level_count < 2 || level_count > kMaxLevels || active >= level_count) return false;
+    // What the declared depth will cost, charged against the content the file
+    // actually supplied, before a single level is built. Subdivision is exact,
+    // so this is the count rather than an estimate of it.
+    std::size_t per_level = level_occupied_count(0);
+    std::size_t projected = 0;
+    for (std::uint32_t i = 1; i < level_count; ++i) {
+        if (per_level > (kMaxLevelCells - projected) / kChildren) return false;
+        per_level *= kChildren;
+        projected += per_level;
+    }
+
+    for (std::uint32_t i = 1; i < level_count; ++i) {
+        std::uint32_t detail_count = 0;
+        if (!get32(&detail_count)) return false;
+        // 13 bytes per entry, so a count the rest of the payload cannot possibly
+        // describe is refused before anything is reserved for it.
+        if (detail_count > (size - *pos) / 13) return false;
+        // Subdividing rebuilds everything the offsets do not override, so only
+        // the offsets are on the wire. Levels arrive coarsest first, so no finer
+        // level exists yet to replay into and an offset is simply restored —
+        // going through set() would average it back DOWN and rewrite the
+        // coarser levels the file just supplied.
+        if (add_level() != i) return false;  // the cap refused; the indices would drift
+        for (std::uint32_t e = 0; e < detail_count; ++e) {
+            std::uint32_t x, y, z;
+            if (!get32(&x) || !get32(&y) || !get32(&z) || *pos >= size) return false;
+            std::uint8_t v = data[(*pos)++];
+            if (static_cast<std::uint32_t>(v) >= palette_count) return false;
+            VoxelCoord c{static_cast<std::int32_t>(x), static_cast<std::int32_t>(y),
+                         static_cast<std::int32_t>(z)};
+            write_cell(i, c, v);
+            record_detail(i, c);
+        }
+    }
+    set_active_level(active);
+    return true;
 }
 
 // -- greedy meshing ----------------------------------------------------------
 
-mesh::Mesh VoxelGrid::mesh_greedy() const {
+mesh::Mesh VoxelGrid::mesh_greedy(std::size_t level) const {
     mesh::Mesh out;
-    auto b0 = bounds_min();
-    auto b1 = bounds_max();
-    if (!b0 || !b1) return out;
+    if (level >= levels_.size()) return out;
+    const ChunkMap& chunks = levels_[level].chunks;
+    if (chunks.empty()) return out;
+    auto value_at = [&](VoxelCoord c) { return cell_at(level, c); };
 
     // For each of 6 face directions, sweep slices and greedy-merge rectangles
     // of equal palette index whose faces are exposed.
@@ -380,7 +633,7 @@ mesh::Mesh VoxelGrid::mesh_greedy() const {
     };
     const Dir dirs[6] = {{0, 1}, {0, -1}, {1, 1}, {1, -1}, {2, 1}, {2, -1}};
 
-    auto cell_at = [&](int a, int u, int v, int axis) {
+    auto slice_cell = [&](int a, int u, int v, int axis) {
         // map (slice a, u, v) back to xyz for a given axis
         VoxelCoord c;
         if (axis == 0) c = {a, u, v};
@@ -411,7 +664,7 @@ mesh::Mesh VoxelGrid::mesh_greedy() const {
     for (const Dir& dir : dirs) {
         // slab index along the sweep axis -> the (u, v) box its chunks span
         std::map<int, Slab> slabs;
-        for (const auto& [key, chunk] : chunks_) {
+        for (const auto& [key, chunk] : chunks) {
             if (chunk.occupied <= 0) continue;
             const int sa = axis_of(key, dir.axis);
             const int cu = u_of(key, dir.axis) * kChunkDim;
@@ -439,14 +692,14 @@ mesh::Mesh VoxelGrid::mesh_greedy() const {
             // build exposure mask for this slice
             for (int v = 0; v < nv; ++v)
                 for (int u = 0; u < nu; ++u) {
-                    VoxelCoord c = cell_at(a, u + u0, v + v0, dir.axis);
-                    std::uint8_t idx = get(c);
+                    VoxelCoord c = slice_cell(a, u + u0, v + v0, dir.axis);
+                    std::uint8_t idx = value_at(c);
                     if (idx != 0) {
                         VoxelCoord n = c;
                         if (dir.axis == 0) n.x += dir.sign;
                         if (dir.axis == 1) n.y += dir.sign;
                         if (dir.axis == 2) n.z += dir.sign;
-                        if (get(n) != 0) idx = 0;  // covered face
+                        if (value_at(n) != 0) idx = 0;  // covered face
                     }
                     mask[static_cast<std::size_t>(v) * nu + u] = idx;
                 }
@@ -471,7 +724,8 @@ mesh::Mesh VoxelGrid::mesh_greedy() const {
                             }
                         if (grow) ++h;
                     }
-                    emit_quad(out, dir.axis, dir.sign, a, u + u0, v + v0, w, h, idx);
+                    emit_quad(out, dir.axis, dir.sign, a, u + u0, v + v0, w, h, idx,
+                              levels_[level].voxel_size);
                     for (int dv = 0; dv < h; ++dv)
                         for (int du = 0; du < w; ++du)
                             mask[static_cast<std::size_t>(v + dv) * nu + u + du] = 0;
@@ -484,8 +738,8 @@ mesh::Mesh VoxelGrid::mesh_greedy() const {
 }
 
 void VoxelGrid::emit_quad(mesh::Mesh& out, int axis, int sign, int a, int u, int v, int w, int h,
-                          std::uint8_t idx) const {
-    float s = voxel_size_;
+                          std::uint8_t idx, float cell_size) const {
+    float s = cell_size;
     float face = static_cast<float>(a) + (sign > 0 ? 1.0f : 0.0f);
     auto corner = [&](float uu, float vv) {
         if (axis == 0) return cf3(face, uu, vv) * s;
@@ -528,26 +782,28 @@ void VoxelGrid::emit_quad(mesh::Mesh& out, int axis, int sign, int a, int u, int
 // -- voxel <-> SDF bridges ---------------------------------------------------
 
 float VoxelGrid::sample_step_field(cfloat3 world_p) const {
-    VoxelCoord c{static_cast<std::int32_t>(std::floor(world_p.x / voxel_size_)),
-                 static_cast<std::int32_t>(std::floor(world_p.y / voxel_size_)),
-                 static_cast<std::int32_t>(std::floor(world_p.z / voxel_size_))};
-    return get(c) != 0 ? -0.5f * voxel_size_ : 0.5f * voxel_size_;
+    const float vs = voxel_size();
+    VoxelCoord c{static_cast<std::int32_t>(std::floor(world_p.x / vs)),
+                 static_cast<std::int32_t>(std::floor(world_p.y / vs)),
+                 static_cast<std::int32_t>(std::floor(world_p.z / vs))};
+    return get(c) != 0 ? -0.5f * vs : 0.5f * vs;
 }
 
 void VoxelGrid::rasterize_tape(const scene::Tape& tape, const math::Aabb& world_region) {
     if (world_region.empty() || world_region.is_infinite()) return;
-    std::int32_t x0 = static_cast<std::int32_t>(std::floor(world_region.min.x / voxel_size_));
-    std::int32_t y0 = static_cast<std::int32_t>(std::floor(world_region.min.y / voxel_size_));
-    std::int32_t z0 = static_cast<std::int32_t>(std::floor(world_region.min.z / voxel_size_));
-    std::int32_t x1 = static_cast<std::int32_t>(std::floor(world_region.max.x / voxel_size_));
-    std::int32_t y1 = static_cast<std::int32_t>(std::floor(world_region.max.y / voxel_size_));
-    std::int32_t z1 = static_cast<std::int32_t>(std::floor(world_region.max.z / voxel_size_));
+    const float vs = voxel_size();
+    std::int32_t x0 = static_cast<std::int32_t>(std::floor(world_region.min.x / vs));
+    std::int32_t y0 = static_cast<std::int32_t>(std::floor(world_region.min.y / vs));
+    std::int32_t z0 = static_cast<std::int32_t>(std::floor(world_region.min.z / vs));
+    std::int32_t x1 = static_cast<std::int32_t>(std::floor(world_region.max.x / vs));
+    std::int32_t y1 = static_cast<std::int32_t>(std::floor(world_region.max.y / vs));
+    std::int32_t z1 = static_cast<std::int32_t>(std::floor(world_region.max.z / vs));
     for (std::int32_t z = z0; z <= z1; ++z)
         for (std::int32_t y = y0; y <= y1; ++y)
             for (std::int32_t x = x0; x <= x1; ++x) {
-                cfloat3 center = cf3((static_cast<float>(x) + 0.5f) * voxel_size_,
-                                     (static_cast<float>(y) + 0.5f) * voxel_size_,
-                                     (static_cast<float>(z) + 0.5f) * voxel_size_);
+                cfloat3 center = cf3((static_cast<float>(x) + 0.5f) * vs,
+                                     (static_cast<float>(y) + 0.5f) * vs,
+                                     (static_cast<float>(z) + 0.5f) * vs);
                 kernel::CTapeValue v = tape.eval(center);
                 if (v.d < 0.0f) set({x, y, z}, palette_add(v.color, 1.0f / 64.0f));
             }

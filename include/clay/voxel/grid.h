@@ -8,6 +8,19 @@
 // space [x,x+1)*voxel_size. Palette index 0 means empty; indices 1..255
 // reference the palette color table (editing the palette recolors every
 // referencing voxel with no voxel-data touch).
+//
+// A grid holds a STACK OF RESOLUTION LEVELS. Level 0 is the coarsest and level
+// k has half the cell size of level k-1, so every level is a uniform lattice
+// with its own integer cell coordinates. That is the load-bearing property: the
+// falloff dither hashes a cell coordinate, and an adaptive structure would
+// change what a cell coordinate means. Levels keep the hash — and with it the
+// cross-platform reproducibility the parity suite enforces — exactly as it is.
+//
+// One level is ACTIVE, and every method here that names cells acts on it: the
+// level is grid state rather than a parameter, so a verb added later cannot
+// forget to state one. A grid constructed and never given a second level has
+// exactly one, and then every method, the serialised bytes and the meshed
+// result are what they were before levels existed.
 
 #include <cstdint>
 #include <optional>
@@ -77,11 +90,37 @@ struct BrushParams {
 
 class VoxelGrid {
   public:
-    explicit VoxelGrid(float voxel_size = 0.1f) : voxel_size_(voxel_size) {
+    explicit VoxelGrid(float voxel_size = 0.1f) {
+        levels_.push_back(Level{voxel_size, {}, {}});
         palette_.resize(1, kernel::cf3(0, 0, 0));  // index 0 = empty, unused
     }
 
-    float voxel_size() const { return voxel_size_; }
+    // Cell size of the ACTIVE level.
+    float voxel_size() const { return levels_[active_].voxel_size; }
+
+    // -- resolution levels ---------------------------------------------------
+    // Level 0 is the coarsest; level k has half the cell size of level k-1.
+    std::size_t level_count() const { return levels_.size(); }
+    std::size_t active_level() const { return active_; }
+    float level_voxel_size(std::size_t level) const;
+    // Occupied cells at one level, so a caller can report what each costs.
+    std::size_t level_occupied_count(std::size_t level) const;
+
+    // Chooses which level the verbs act on. False (and no change) for a level
+    // this grid does not have.
+    bool set_active_level(std::size_t level);
+
+    // Appends a level at half the finest cell size, seeded by subdividing every
+    // occupied cell into its eight children. The solid the grid represents is
+    // therefore unchanged, and returns the new level's index.
+    //
+    // The stack is capped, and at the cap this returns the finest level it
+    // already had — so level_count() is what says whether the stack grew.
+    static constexpr std::size_t kMaxLevels = 16;
+    std::size_t add_level();
+    // Drops the finest level, along with the detail only it held. False when
+    // there is only one level, since a grid always has at least one.
+    bool drop_level();
 
     // -- palette -------------------------------------------------------------
     // Returns the palette index for a color, adding it when new (up to 255).
@@ -235,13 +274,21 @@ class VoxelGrid {
                                          std::size_t max_count = 1 << 20) const;
 
     // -- serialization (palette + RLE, deterministic) ------------------------
+    // The stream opens with the COARSEST level in exactly the layout it always
+    // had, and any further level follows as a tail of per-cell offsets. A grid
+    // with one level therefore serialises to the same bytes it always did, and
+    // a reader that predates the tail stops after the coarsest level and opens
+    // the grid there rather than failing.
     std::vector<std::uint8_t> serialize() const;
     static std::optional<VoxelGrid> deserialize(const std::uint8_t* data, std::size_t size);
 
     // -- greedy meshing ------------------------------------------------------
     // Merged quads per axis slice, palette color per face, no color bleed
     // across merged faces; emits two triangles per quad with face normals.
-    mesh::Mesh mesh_greedy() const;
+    // Meshes the ACTIVE level; the overload names one explicitly, and returns
+    // an empty mesh for a level this grid does not have.
+    mesh::Mesh mesh_greedy() const { return mesh_greedy(active_); }
+    mesh::Mesh mesh_greedy(std::size_t level) const;
 
     // -- voxel <-> SDF bridges -----------------------------------------------
     // Step-function field: -voxel_size/2 inside occupied cells, +voxel_size/2
@@ -258,15 +305,48 @@ class VoxelGrid {
         std::vector<std::uint8_t> data;  // kChunkDim^3
         int occupied = 0;
     };
+    using ChunkMap = std::unordered_map<VoxelCoord, Chunk, VoxelCoordHash>;
+
+    // One resolution level. `detail` indexes exactly the cells whose value
+    // differs from the cell above them in the coarser level — the offsets that
+    // make a level change non-destructive. A coarse edit rewrites this level's
+    // cells from its new parent EXCEPT where a detail entry overrides it, so a
+    // broad stroke and the fine detail already sculpted both survive. Empty for
+    // level 0, which has nothing coarser to differ from.
+    struct Level {
+        float voxel_size = 0.1f;
+        ChunkMap chunks;
+        std::unordered_map<VoxelCoord, std::uint8_t, VoxelCoordHash> detail;
+    };
+
     static VoxelCoord chunk_key(VoxelCoord c);
     static std::size_t chunk_offset(VoxelCoord c);
     void emit_quad(mesh::Mesh& out, int axis, int sign, int a, int u, int v, int w, int h,
-                   std::uint8_t idx) const;
+                   std::uint8_t idx, float cell_size) const;
 
-    float voxel_size_;
+    // Level-addressed storage. Everything public funnels through these, so the
+    // active level is read in one place rather than at every call site.
+    std::uint8_t cell_at(std::size_t level, VoxelCoord c) const;
+    bool write_cell(std::size_t level, VoxelCoord c, std::uint8_t index);
+
+    // Propagation around an edited cell. Down averages into the coarser levels,
+    // up replays the finer ones from their parent and their stored detail.
+    void record_detail(std::size_t level, VoxelCoord c);
+    void refresh_detail(std::size_t level, VoxelCoord parent);
+    std::uint8_t downsample_cell(std::size_t fine, VoxelCoord coarse) const;
+    void propagate_down(std::size_t from, VoxelCoord c);
+    void propagate_up(std::size_t from, VoxelCoord c);
+    void subdivide_into(std::size_t fine);
+    // The serialised level tail, read into a grid that already holds its
+    // coarsest level. Advances `pos`; false leaves the grid unusable and the
+    // caller refuses the stream.
+    bool read_level_tail(const std::uint8_t* data, std::size_t size, std::size_t* pos,
+                         std::uint32_t palette_count);
+
     std::uint64_t change_count_ = 0;
     std::vector<kernel::cfloat3> palette_;
-    std::unordered_map<VoxelCoord, Chunk, VoxelCoordHash> chunks_;
+    std::vector<Level> levels_;
+    std::size_t active_ = 0;
 };
 
 }  // namespace voxel
