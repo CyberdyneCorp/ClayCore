@@ -125,6 +125,24 @@ class FieldVolume {
     // that "leave this one alone" needs no lookup and cannot be spelt as zero.
     void rewrite(const std::function<float(int, int, int, float)>& fn);
 
+    // Drop the bricks whose samples all lie beyond the band, and re-derive
+    // what the resulting sample-free bricks report. Returns how many went.
+    //
+    // ONLY SOUND ON A FIELD WHOSE SAMPLES ARE A DISTANCE, and the caller owes
+    // that: the whole sparse index rests on "the surface only ever lies inside
+    // a brick that has samples", and a brick of a STEEP field can hold a zero
+    // crossing between two samples that are both past the band. After
+    // redistance() the field varies by about a cell per cell and a band of two
+    // cells or more cannot hide a crossing, so the claim holds again.
+    //
+    // What it is for: a re-bake keeps the brick just outside the stored ones,
+    // because a sample-free brick beside a stored one reports the band's floor
+    // and that is within the band. Baking a volume repeatedly — which is what
+    // consolidating a chain does — would otherwise grow the stored shell by one
+    // brick every time, and the samples in that shell say nothing the far
+    // bounds did not.
+    std::size_t compact();
+
     // Narrow the band, and with it what a sample-free brick may claim. An
     // operator that MOVES the surface must do this by however far it moved:
     // the empty bricks were classified against the old surface, and their
@@ -149,6 +167,11 @@ class FieldVolume {
 
     // Flat float layout for the tape's blob. The kernel reads exactly this.
     std::vector<float> to_blob() const;
+    // How long that blob is, without building it. What a volume COSTS is a
+    // question a host asks while deciding, and often repeatedly; materialising
+    // a copy of every sample to measure one integer is the wrong way to answer
+    // it.
+    std::size_t blob_floats() const;
     static std::optional<FieldVolume> from_blob(const std::vector<float>& blob);
 
     std::vector<std::uint8_t> serialize() const;

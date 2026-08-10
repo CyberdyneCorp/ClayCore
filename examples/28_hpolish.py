@@ -26,10 +26,11 @@ section measures a chain and shows it: the declared Lipschitz goes 1.00 → 14.0
 on the second pass whatever the falloff, and by the third the form is visibly
 corrupt rather than merely expensive.
 
-So today hPolish is a **single-pass** verb on an SDF layer. Polishing several
-faces of a form wants either the cut tool (an Intersect against a prism is exact
-and stays exact) or a consolidation step the engine does not yet have — the same
-gap the Move brush hits from the other side.
+That degradation is what this example exists to pin, so it stays measured here
+in its raw form. The cure is `Layer.consolidate`, which collapses the chain and
+**redistances** it so the next pass has a distance field to sample —
+`examples/36_consolidation.py` runs the same chain both ways. The other route is
+the cut tool, where an Intersect against a prism is exact and stays exact.
 """
 
 import numpy as np
@@ -152,8 +153,8 @@ def main():
                         width=205, height=195)],
         "28_hpolish_chained.png", columns=3,
         caption="one pass is a crisp facet; two pulls the form concave; three breaks it "
-                "— chaining bakes samples a volume rather than the document, so hPolish "
-                "is a single-pass verb today")
+                "— chaining bakes samples a volume rather than the document, which is "
+                "what consolidating between passes fixes (36_consolidation)")
 
     R.export_model(facet, "28_hpolish.ply", resolution=80, decimate=0.08)
 

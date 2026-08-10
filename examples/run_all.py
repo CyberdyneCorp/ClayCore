@@ -51,6 +51,7 @@ EXAMPLES = [
     "33_mask_extrude",
     "34_organic_character",
     "35_hard_surface_helmet",
+    "36_consolidation",
 ]
 
 

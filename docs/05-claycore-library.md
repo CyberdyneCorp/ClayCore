@@ -475,6 +475,39 @@ facet = clay.Volume.flattened_from(doc, plane_point=(0, 0.55, 0),
 facet.sample_lipschitz          # measured, not assumed: a tight taper is steeper
 imported.flattened(...)         # a volume source, for a mesh with no document
 
+# consolidation: what lets any of the above be used TWICE. Each region verb
+# samples a document and hands back a volume, so the second call samples a
+# volume — and outside its band a volume reports a bound, not a distance. Move
+# fails from the other side: each drag appends a grab and those multiply.
+layer.field_report(advise_below_step_scale=0.25)
+# -> {'lipschitz', 'safe_step_scale', 'steepest_volume',
+#     'longest_deformer_chain', 'item_count', 'advises_consolidation'}
+# The two mechanisms are named SEPARATELY because they have different cures and
+# the aggregate cannot tell them apart. ADVISORY: nothing here bakes, and the
+# threshold is yours, because a tolerance for marching cost belongs to a
+# viewport and a frame budget rather than to the artwork.
+
+layer.consolidation_cost(cell=0.03, band=0.12)   # what it WOULD cost, no change
+# -> {'megabytes', 'brick_count', 'sample_count', 'cell_size', 'band',
+#     'sample_lipschitz', 'lipschitz', 'safe_step_scale', 'bounds'}
+layer.consolidate(cell=0.03, band=0.12)          # ONE undo step, same report
+layer.consolidation_state                        # the same dict, or None
+
+# BAKING ALONE DOES NOT BOUND THE LIPSCHITZ. Steepness is a property of the
+# FIELD; resampling it onto a lattice reproduces it, and a finer cell makes it
+# worse. What removes it is redistancing — replacing the samples with the
+# distance to their own zero set — which `consolidate` does by default.
+layer.consolidate(cell=0.03, redistance=False)   # measure the difference
+layer.consolidate(cell=0.03, region=((-1, -1, -1), (1, 1, 1)))  # pin the box
+#     when consolidating the same area repeatedly: a volume's geometric bound
+#     is its whole sampled box, so each bake would pad the previous padding.
+
+# The scope is a LAYER, because an arbitrary run of siblings has no field of its
+# own — an edit list is ordered and its operators relative — where a layer does.
+# What survives is the surface at `cell`; what does not is every parameter of
+# every item absorbed. Hidden items are left alone. Protected layers refuse.
+# Undo hands the parametric form back with ids and parameters intact.
+
 # curves: a stroke point carries a type saying how it joins the next, so a
 # stroke is a curve whose points are all hard corners. Typed points tessellate
 # into the same segment chain at compile time, so a curve costs nothing to

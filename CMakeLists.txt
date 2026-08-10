@@ -34,6 +34,8 @@ add_library(claycore
   src/field/relax.cpp
   src/field/flatten.cpp
   src/field/move_topological.cpp
+  src/field/redistance.cpp
+  src/scene/consolidate.cpp
   src/scene/commands.cpp
   src/scene/tape_build.cpp
   src/brick/cache.cpp

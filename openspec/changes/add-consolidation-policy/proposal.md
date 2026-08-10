@@ -45,6 +45,27 @@ look is more expensive than the first and the third is wrong.
 so the *mechanism* for consolidating is present and tested. Nothing here needs
 a new baking primitive.
 
+> **Corrected during implementation, 2026-08-09.** That last sentence was
+> wrong, and measuring it is what found the real gap. **Baking does not bound
+> the Lipschitz.** Sampling the two-pass polish chain into a fresh volume gives
+> samples varying at 14x the cell size at 0.04, 31x at 0.02 and 38x at 0.01 —
+> a finer cell makes it *worse*, because there are then more cells across the
+> same steep shell. Steepness is a property of the field, and resampling it
+> onto a lattice reproduces it.
+>
+> What removes it is **redistancing**: replacing the baked samples with the
+> distance to their own zero set. The tree had none — the roadmap says so
+> explicitly, "no eikonal, no fast march, no redistancing anywhere" — so this
+> change grew one (`field::redistance`, fast sweeping) and it is the primitive
+> the row turned out to need. Without it the spec's "holds its declared
+> Lipschitz within a stated bound" is unachievable by consolidating.
+>
+> The same measurement caught a second thing: `FieldVolume::sample` never
+> measured what it stored, so `from_document` declared every bake 1-Lipschitz
+> whatever it had just written. That made it unsound as a consolidation
+> primitive — a 14x overclaim licenses exactly the overstep the declared bound
+> exists to prevent — and it is fixed here with a regression test.
+
 What is absent is a **policy**: when consolidation should happen, what it
 costs, and how a baked region rejoins an edit list that is still parametric
 everywhere else.
@@ -84,16 +105,26 @@ result and is watching for the shape rather than the parameters; between
 strokes, keep the history. The proposal should test that framing rather than
 assume it.
 
-## Open questions
+## Open questions — settled, with the reasoning in `tasks.md` and the headers
 
-- Whether the trigger is a Lipschitz threshold, a chain depth, a memory budget,
-  or a host call.
-- Whether consolidation is undoable as one command — it should be, and its
-  inverse has to restore the items it absorbed, which means the undo record
-  holds them.
-- Whether a consolidated region can be re-expanded, or is one-way.
-- How this interacts with `add-multi-resolution`, if that lands: a bake fixes a
-  resolution, and levels would give it one to fix.
+- **The trigger**: a safe-step-scale threshold, reported and never acted on, with
+  the threshold passed per call rather than stored. A bake discards parameters,
+  and the artist is the one who pays for that, so the engine advises and the host
+  asks. The report names the two mechanisms separately, because hPolish and Move
+  degrade for genuinely different reasons and a policy keyed on one would miss
+  the other.
+- **The scope**: a layer. An arbitrary run of siblings has no self-contained
+  field — an edit list is ordered and its operators relative — where a layer
+  does, since layers combine by hard union.
+- **One command**: yes, and no new command was needed. `RemoveNodeCmd`'s inverse
+  already carries the removed subtree by value, so a group of removals plus one
+  add has exactly the inverse this asks for.
+- **Re-expansion**: one-way. What was absorbed is in the undo record, which is
+  where going back belongs; a separate un-bake would have to invent parameters
+  for a shape that no longer has any.
+- **`add-multi-resolution`**: still open, and the shape of the interaction is
+  now concrete rather than hypothetical — `ConsolidationParams::cell_size` is
+  the resolution a bake fixes, so levels would supply it instead of the caller.
 
 ## Impact
 

@@ -26,6 +26,7 @@
 #include "clay/pick/pick.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
+#include "clay/scene/consolidate.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
 #include "clay/brush/mask_extrude.h"
@@ -463,6 +464,36 @@ math::Aabb to_aabb(nb::handle obj) {
     if (nb::len(s) != 2)
         throw std::invalid_argument("region must be a Document or a ((lo), (hi)) pair");
     return math::Aabb(to_f3(s[0], "region lo"), to_f3(s[1], "region hi"));
+}
+
+// -- consolidation helpers -----------------------------------------------------
+
+scene::ConsolidationParams to_consolidation(float cell, nb::handle band, nb::handle padding,
+                                            nb::handle region, bool redistance) {
+    if (!(cell > 0.0f)) throw std::invalid_argument("cell must be > 0");
+    scene::ConsolidationParams p;
+    p.cell_size = cell;
+    p.band = band.is_none() ? 0.0f : nb::cast<float>(band);
+    p.padding = padding.is_none() ? 0.0f : nb::cast<float>(padding);
+    p.skip_redistance = !redistance;
+    if (!region.is_none()) p.region = to_aabb(region);
+    return p;
+}
+
+nb::dict cost_dict(const scene::ConsolidationCost& c) {
+    nb::dict out;
+    out["cell_size"] = c.cell_size;
+    out["band"] = c.band;
+    out["brick_count"] = c.brick_count;
+    out["sample_count"] = c.sample_count;
+    out["megabytes"] = static_cast<double>(c.bytes) / (1024.0 * 1024.0);
+    out["sample_lipschitz"] = c.sample_lipschitz;
+    out["lipschitz"] = c.lipschitz;
+    out["safe_step_scale"] = c.safe_step_scale;
+    out["bounds"] = nb::make_tuple(
+        nb::make_tuple(c.bounds.min.x, c.bounds.min.y, c.bounds.min.z),
+        nb::make_tuple(c.bounds.max.x, c.bounds.max.y, c.bounds.max.z));
+    return out;
 }
 
 struct PyLayer {
@@ -1587,7 +1618,7 @@ NB_MODULE(pyclay, m) {
         .def_prop_ro("megabytes",
                      [](const PyVolume& v) {
                          if (!v.volume) return 0.0;
-                         return static_cast<double>(v.volume->to_blob().size() * sizeof(float)) /
+                         return static_cast<double>(v.volume->blob_floats() * sizeof(float)) /
                                 (1024.0 * 1024.0);
                      },
                      "What this volume costs in the tape's blob.")
@@ -2760,7 +2791,102 @@ NB_MODULE(pyclay, m) {
              "nodes"_a, "Tight bounds of the given node ids — for zoom-to-selection")
         .def("safe_step_scale", [](const PyLayer& l) {
             return scene::compile_layer(l.layer()).safe_step_scale();
-        });
+        })
+        .def("field_report",
+             [](const PyLayer& l, float advise_below_step_scale) {
+                 const scene::FieldReport r =
+                     scene::report_layer(l.layer(), advise_below_step_scale);
+                 nb::dict out;
+                 out["lipschitz"] = r.lipschitz;
+                 out["safe_step_scale"] = r.safe_step_scale;
+                 out["steepest_volume"] = r.steepest_volume;
+                 out["longest_deformer_chain"] = r.longest_deformer_chain;
+                 out["item_count"] = r.item_count;
+                 out["advises_consolidation"] = r.advises_consolidation;
+                 return out;
+             },
+             "advise_below_step_scale"_a = 0.0f,
+             "What this layer's chain costs the marcher, and what is causing it.\n\n"
+             "The region verbs each work once and none of them chain, for TWO\n"
+             "different reasons. A polish samples a document and hands back a\n"
+             "volume, so the second pass samples a VOLUME — `steepest_volume`\n"
+             "is that. A move stroke never touches a volume at all: each drag\n"
+             "appends a grab to the deformer chain and those multiply —\n"
+             "`longest_deformer_chain` is that. The aggregate step scale says\n"
+             "something is wrong; those two say which thing.\n\n"
+             "`advise_below_step_scale` is YOUR tolerance for marching cost, and\n"
+             "it is an argument rather than document state because that\n"
+             "tolerance belongs to a viewport and a frame budget rather than to\n"
+             "the artwork. Nothing here bakes: consolidating discards the\n"
+             "parameters of what it absorbs, so it is never done unasked.")
+        .def("consolidation_cost",
+             [](const PyLayer& l, float cell, nb::handle band, nb::handle padding,
+                nb::handle region, bool redistance) {
+                 scene::ConsolidationCost cost;
+                 scene::ConsolidationParams p =
+                     to_consolidation(cell, band, padding, region, redistance);
+                 if (!scene::bake_layer(l.layer(), p, &cost))
+                     throw std::invalid_argument(
+                         "nothing to consolidate: the layer is empty, unbounded, or the region "
+                         "contains no surface");
+                 return cost_dict(cost);
+             },
+             "cell"_a, "band"_a = nb::none(), "padding"_a = nb::none(), "region"_a = nb::none(),
+             "redistance"_a = true,
+             "What consolidating this layer WOULD cost, without changing it.\n\n"
+             "The numbers are the ones the real thing produces, because this IS\n"
+             "the real thing with the result thrown away — an estimate that\n"
+             "skipped the sampling could not report a brick count, and the brick\n"
+             "count is where the memory is. If you mean to go ahead, call\n"
+             "`consolidate` and read the same report out of it rather than\n"
+             "paying for two bakes.")
+        .def("consolidate",
+             [](PyLayer& l, float cell, nb::handle band, nb::handle padding, nb::handle region,
+                bool redistance) {
+                 scene::ConsolidationCost cost;
+                 scene::ConsolidationParams p =
+                     to_consolidation(cell, band, padding, region, redistance);
+                 if (l.layer().protected_from_edits())
+                     throw std::invalid_argument("layer is protected (ghosted or locked)");
+                 if (!scene::consolidate_layer(l.doc->document, l.id, p,
+                                                          l.undo ? l.undo->get() : nullptr, &cost))
+                     throw std::invalid_argument(
+                         "nothing to consolidate: the layer is empty, unbounded, or the region "
+                         "contains no surface");
+                 return cost_dict(cost);
+             },
+             "cell"_a, "band"_a = nb::none(), "padding"_a = nb::none(), "region"_a = nb::none(),
+             "redistance"_a = true,
+             "Collapse this layer's edit list into one item carrying samples,\n"
+             "and report what it cost.\n\n"
+             "ONE undo step, whose inverse restores what it absorbed with ids,\n"
+             "parameters, colours and deformers intact — the undo record carries\n"
+             "the removed subtrees by value, so no new command was needed for\n"
+             "this. What survives is the surface at `cell`; what does not is\n"
+             "every parameter of every item absorbed, and every colour but the\n"
+             "first one's. Hidden items are left alone: they contribute nothing\n"
+             "to the field, so absorbing them would spend their parameters on\n"
+             "nothing.\n\n"
+             "`redistance=True` is what actually bounds the Lipschitz. Baking\n"
+             "alone does NOT — resampling a steep field reproduces the\n"
+             "steepness, and a finer cell makes it worse rather than better.\n"
+             "Turn it off only to measure that.\n\n"
+             "Pin `region` when consolidating the same area repeatedly: a\n"
+             "volume's geometric bound is its whole sampled box, so each bake\n"
+             "would otherwise pad the previous padding.")
+        .def_prop_ro("consolidation_state",
+                     [](const PyLayer& l) -> nb::object {
+                         scene::ConsolidationCost cost;
+                         if (!scene::consolidation_state(l.layer(), &cost)) return nb::none();
+                         return cost_dict(cost);
+                     },
+                     "The resolution this layer is baked at, or None if it is still\n"
+                     "parametric — so a host can stop offering parameter edits there\n"
+                     "rather than failing them.\n\n"
+                     "Answered from the CONTENT rather than a stored provenance flag: a\n"
+                     "mesh imported as a volume is exactly as unparametric as a bake, so\n"
+                     "a flag marking one of them would split two cases an app has to\n"
+                     "treat alike — and it would have to be serialised to survive a save.");
 
     // -- document ----------------------------------------------------------------------
     nb::class_<PyDocument>(m, "Document", "A claycore document: a stack of layers")
