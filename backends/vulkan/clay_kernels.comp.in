@@ -1,0 +1,43 @@
+// Vulkan compute entry points (evaluation-backends spec, tier 3). The tape
+// interpreter above is the amalgamated kernel-header text -- single source
+// with every other backend.
+//
+// Scope is eval_points + eval_grid (the brick-fill primitive); raycast stays
+// CPU/Metal/CUDA because its sphere-tracing utilities are templated C++
+// (field.h), which no compute dialect in this tree can compile.
+//
+// One source, two modules: the build compiles this twice with different
+// -DCLAY_ENTRY_*, because a SPIR-V module has one entry point and a runtime
+// branch on the mode would cost every invocation.
+
+void clay_write(uint gid, CTapeValue v) {
+    clay_dist_[gid] = v.d;
+    if (pc.has_colors != 0u) {
+        clay_color_[gid * 3u + 0u] = v.color.x;
+        clay_color_[gid * 3u + 1u] = v.color.y;
+        clay_color_[gid * 3u + 2u] = v.color.z;
+    }
+}
+
+#ifdef CLAY_ENTRY_POINTS
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= pc.count) return;
+    vec3 p = vec3(clay_in_[gid * 3u + 0u], clay_in_[gid * 3u + 1u], clay_in_[gid * 3u + 2u]);
+    clay_write(gid, ctape_eval(0u, int(pc.instr_count), pc.params_base, pc.blob_base, p));
+}
+#endif
+
+#ifdef CLAY_ENTRY_GRID
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint total = pc.nx * pc.ny * pc.nz;
+    if (gid >= total) return;
+    uint x = gid % pc.nx;
+    uint y = (gid / pc.nx) % pc.ny;
+    uint z = gid / (pc.nx * pc.ny);
+    vec3 p = vec3(pc.origin_x, pc.origin_y, pc.origin_z)
+           + vec3(float(x), float(y), float(z)) * pc.spacing;
+    clay_write(gid, ctape_eval(0u, int(pc.instr_count), pc.params_base, pc.blob_base, p));
+}
+#endif

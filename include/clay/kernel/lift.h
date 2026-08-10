@@ -75,15 +75,15 @@ typedef struct CSweepHitT {
 // segment is ~7e-3 on a guide tessellated to a 0.03 curve tolerance.
 #define CLAY_SWEEP_TIE_REL 1e-5f
 
-CLAY_FN CSweepHit csweep_nearest(CLAY_DEVICE const float* guide, int count, cfloat3 p) {
+CLAY_FN CSweepHit csweep_nearest(CLAY_FPTR guide, int count, cfloat3 p) {
     int best = 0;
     float best_t = 0.0f;
     float best_d2 = 3.4e38f;
     for (int i = 0; i + 1 < count; ++i) {
-        CLAY_DEVICE const float* va = guide + i * CLAY_SWEPT_VERTEX_FLOATS;
-        CLAY_DEVICE const float* vb = guide + (i + 1) * CLAY_SWEPT_VERTEX_FLOATS;
-        cfloat3 a = cf3(va[0], va[1], va[2]);
-        cfloat3 b = cf3(vb[0], vb[1], vb[2]);
+        CLAY_FPTR va = CLAY_OFF(guide, i * CLAY_SWEPT_VERTEX_FLOATS);
+        CLAY_FPTR vb = CLAY_OFF(guide, (i + 1) * CLAY_SWEPT_VERTEX_FLOATS);
+        cfloat3 a = cf3(CLAY_AT(va, 0), CLAY_AT(va, 1), CLAY_AT(va, 2));
+        cfloat3 b = cf3(CLAY_AT(vb, 0), CLAY_AT(vb, 1), CLAY_AT(vb, 2));
         cfloat3 ab = b - a;
         float len2 = cdot(ab, ab);
         float t = len2 > 1e-12f ? cclamp(cdot(p - a, ab) / len2, 0.0f, 1.0f) : 0.0f;

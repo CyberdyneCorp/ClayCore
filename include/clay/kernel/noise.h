@@ -45,11 +45,15 @@ CLAY_FN cfloat3 cnoise_gradient(cuint h) {
     // (+-1,0,+-1) — expressed without a lookup table, which the dialect forbids.
     // The order differs from Perlin's listing and does not matter: only the SET
     // does, since the hash decides which corner gets which.
-    float x = (i < 4u) ? ((i & 1u) ? -1.0f : 1.0f) : ((i < 8u) ? 0.0f : ((i & 1u) ? -1.0f : 1.0f));
-    float y = (i < 4u) ? ((i & 2u) ? -1.0f : 1.0f)
-                       : ((i < 8u) ? ((i & 1u) ? -1.0f : 1.0f) : 0.0f);
-    float z = (i < 4u) ? 0.0f : ((i < 8u) ? ((i & 2u) ? -1.0f : 1.0f)
-                                          : ((i & 2u) ? -1.0f : 1.0f));
+    // The `!= 0u` is not decoration: GLSL has no int-to-bool conversion, so a
+    // bare `(i & 1u)` as a condition is a compile error there and silently
+    // fine everywhere else.
+    float x = (i < 4u) ? ((i & 1u) != 0u ? -1.0f : 1.0f)
+                       : ((i < 8u) ? 0.0f : ((i & 1u) != 0u ? -1.0f : 1.0f));
+    float y = (i < 4u) ? ((i & 2u) != 0u ? -1.0f : 1.0f)
+                       : ((i < 8u) ? ((i & 1u) != 0u ? -1.0f : 1.0f) : 0.0f);
+    float z = (i < 4u) ? 0.0f : ((i < 8u) ? ((i & 2u) != 0u ? -1.0f : 1.0f)
+                                          : ((i & 2u) != 0u ? -1.0f : 1.0f));
     return cf3(x, y, z);
 }
 
@@ -69,9 +73,9 @@ CLAY_FN float cnoise_gradient3(cfloat3 p, cuint seed) {
     // Biased into the unsigned range before converting: a negative coordinate
     // must land on a stable lattice cell, and casting a negative float to an
     // unsigned integer is undefined in C++ and merely unhelpful elsewhere.
-    cuint ix = (cuint)((int)fx + 0x40000000);
-    cuint iy = (cuint)((int)fy + 0x40000000);
-    cuint iz = (cuint)((int)fz + 0x40000000);
+    cuint ix = CLAY_UINT((CLAY_INT(fx) + 0x40000000));
+    cuint iy = CLAY_UINT((CLAY_INT(fy) + 0x40000000));
+    cuint iz = CLAY_UINT((CLAY_INT(fz) + 0x40000000));
 
     float tx = p.x - fx, ty = p.y - fy, tz = p.z - fz;
     float ux = cnoise_fade(tx), uy = cnoise_fade(ty), uz = cnoise_fade(tz);
@@ -105,7 +109,7 @@ CLAY_FN float cnoise_fbm(cfloat3 p, int octaves, float gain, cuint seed) {
     float amp = 1.0f;
     cfloat3 q = p;
     for (int i = 0; i < octaves; ++i) {
-        sum = sum + amp * cnoise_gradient3(q, seed + (cuint)i * 0x9E3779B1u);
+        sum = sum + amp * cnoise_gradient3(q, seed + CLAY_UINT(i) * 0x9E3779B1u);
         weight = weight + amp;
         amp = amp * gain;
         q = q * 2.0f;  // lacunarity 2: the usual octave doubling

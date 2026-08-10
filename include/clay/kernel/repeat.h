@@ -33,9 +33,9 @@ CLAY_FN cfloat3 crep_lim_point_offset(cfloat3 p, float s, cfloat3 l, cfloat3 off
 // picked by which side of the sector center p lies on), take the min of the
 // two field evaluations.
 CLAY_FN cfloat3 crep_radial_point(cfloat3 p, int count, int offset) {
-    float sector = 6.2831853f / (float)count;
+    float sector = 6.2831853f / CLAY_FLOATC(count);
     float angle = catan2(p.z, p.x);
-    float idx = cround(angle / sector) + (float)offset;
+    float idx = cround(angle / sector) + CLAY_FLOATC(offset);
     float a = -idx * sector;  // rotate back into the canonical sector
     float c = ccos(a), s = csin(a);
     return cf3(c * p.x - s * p.z, p.y, s * p.x + c * p.z);
@@ -43,7 +43,7 @@ CLAY_FN cfloat3 crep_radial_point(cfloat3 p, int count, int offset) {
 
 // Which neighbor to evaluate second (+1 or -1) for the O(2) scheme.
 CLAY_FN int crep_radial_neighbor(cfloat3 p, int count) {
-    float sector = 6.2831853f / (float)count;
+    float sector = 6.2831853f / CLAY_FLOATC(count);
     float angle = catan2(p.z, p.x);
     float frac = angle / sector - cround(angle / sector);
     return frac >= 0.0f ? 1 : -1;
