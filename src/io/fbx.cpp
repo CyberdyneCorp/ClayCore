@@ -8,6 +8,7 @@
 
 #include <cstring>
 #include <string>
+#include <unordered_map>
 
 #include "clay/io/mesh_io.h"
 
@@ -306,6 +307,36 @@ std::vector<std::uint8_t> save_fbx(const mesh::Mesh& m, const std::string& name)
 // import via ufbx
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// What makes two triangle corners the same vertex: the attribute values they
+// resolve to. An attribute the mesh does not carry contributes a constant, so
+// it never splits anything.
+struct AttrKey {
+    std::uint32_t position, normal, color;
+    bool operator==(const AttrKey& o) const {
+        return position == o.position && normal == o.normal && color == o.color;
+    }
+};
+
+struct AttrKeyHash {
+    std::size_t operator()(const AttrKey& k) const {
+        std::size_t h = k.position;
+        h = h * 0x9e3779b97f4a7c15ULL + k.normal;
+        h = h * 0x9e3779b97f4a7c15ULL + k.color;
+        return h;
+    }
+};
+
+// The value a corner points AT, which is what ufbx's own accessors index by.
+template <typename Attrib>
+std::uint32_t attrib_index(const Attrib& attrib, std::uint32_t corner) {
+    if (!attrib.exists || corner >= attrib.indices.count) return 0;
+    return attrib.indices.data[corner];
+}
+
+}  // namespace
+
 IoStatus load_fbx(const std::uint8_t* data, std::size_t size, mesh::Mesh* out,
                   const ImportBudget& budget) {
     ufbx_load_opts opts = {};
@@ -319,25 +350,52 @@ IoStatus load_fbx(const std::uint8_t* data, std::size_t size, mesh::Mesh* out,
     bool any_colors = false;
     IoStatus status = IoStatus::success();
     std::vector<std::uint32_t> tri_indices;
+    // Corners that name the same source vertex AND the same attributes are ONE
+    // vertex. ufbx addresses every attribute BY CORNER, so appending per corner
+    // is the straightforward reading of its API — and it costs six times the
+    // memory of the welded mesh, leaves no two triangles sharing a vertex for
+    // anything downstream that walks adjacency, and disagrees with what the OBJ
+    // and PLY readers produce from the same model.
+    //
+    // Keyed on ufbx's own attribute INDICES, not on the float values: corners
+    // that resolve to the same index are the same point by construction, so
+    // there is no epsilon to pick and no chance of welding two vertices the
+    // file deliberately kept apart. A normal or colour split still splits the
+    // vertex, which is what keeps hard edges hard.
+    std::unordered_map<AttrKey, std::uint32_t, AttrKeyHash> welded;
 
     for (std::size_t ni = 0; ni < scene->nodes.count && status.ok(); ++ni) {
         ufbx_node* node = scene->nodes.data[ni];
         ufbx_mesh* fm = node->mesh;
         if (!fm) continue;
         tri_indices.resize(fm->max_face_triangles * 3);
+        // Attribute indices are per MESH, so they are only comparable within
+        // one node. Two nodes that happen to coincide in world space stay
+        // separate, which is what the file says.
+        welded.clear();
         for (std::size_t fi = 0; fi < fm->faces.count && status.ok(); ++fi) {
             ufbx_face face = fm->faces.data[fi];
             std::size_t tris =
                 ufbx_triangulate_face(tri_indices.data(), tri_indices.size(), fm, face);
             for (std::size_t t = 0; t < tris * 3; ++t) {
                 std::uint32_t index = tri_indices[t];
+                const AttrKey key{attrib_index(fm->vertex_position, index),
+                                  attrib_index(fm->vertex_normal, index),
+                                  attrib_index(fm->vertex_color, index)};
+                const auto seen = welded.find(key);
+                if (seen != welded.end()) {
+                    m.indices.push_back(seen->second);
+                    continue;
+                }
                 if (m.positions.size() >= budget.max_vertices) {
                     status = IoStatus::fail(IoError::BudgetExceeded, "vertex budget");
                     break;
                 }
                 ufbx_vec3 vp = ufbx_get_vertex_vec3(&fm->vertex_position, index);
                 ufbx_vec3 wp = ufbx_transform_position(&node->geometry_to_world, vp);
-                m.indices.push_back(static_cast<std::uint32_t>(m.positions.size()));
+                const auto emitted = static_cast<std::uint32_t>(m.positions.size());
+                m.indices.push_back(emitted);
+                welded.emplace(key, emitted);
                 m.positions.push_back(cf3(static_cast<float>(wp.x), static_cast<float>(wp.y),
                                           static_cast<float>(wp.z)));
                 if (fm->vertex_normal.exists) {
