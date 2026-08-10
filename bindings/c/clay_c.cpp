@@ -89,8 +89,9 @@ static_assert(CLAY_PRIM_LNORM_SPHERE == static_cast<int>(scene::PrimType::LNormS
 static_assert(CLAY_PRIM_LOFT == static_cast<int>(scene::PrimType::Loft));
 static_assert(CLAY_PRIM_SWEPT == static_cast<int>(scene::PrimType::Swept));
 static_assert(CLAY_PRIM_VOLUME == static_cast<int>(scene::PrimType::Volume));
+static_assert(CLAY_PRIM_ARMATURE == static_cast<int>(scene::PrimType::Armature));
 // The tape's own count: a new opcode without a clay_prim entry fails here.
-static_assert(CLAY_PRIM_VOLUME + 1 == kernel::ctape_prim_count);
+static_assert(CLAY_PRIM_ARMATURE + 1 == kernel::ctape_prim_count);
 
 static_assert(CLAY_OP_ADD == static_cast<int>(scene::Op::Add));
 static_assert(CLAY_OP_SUBTRACT == static_cast<int>(scene::Op::Subtract));
@@ -261,6 +262,7 @@ bool prim_is_known(std::int32_t v) {
         case scene::PrimType::Loft:
         case scene::PrimType::Swept:
         case scene::PrimType::Volume:
+        case scene::PrimType::Armature:
         case scene::PrimType::LNormSphere: return true;
     }
     return false;
@@ -435,7 +437,7 @@ constexpr std::size_t kBrickMeshParamsOriginal =
 // Loft takes 2: the half-depth and the ease. Its profiles are added
 // separately, since a fixed block cannot carry a variable number of them.
 constexpr int kPrimParams[] = {1, 3, 4, 4, 2, 7, 2, 3, 3, 3, 3, 1, 2, 1, 0, 1,
-                               1, 4, 3, 3, 3, 4, 2, 3, 3, 1, 1, 1, 2, 1, 2, 2, 1, 0};
+                               1, 4, 3, 3, 3, 4, 2, 3, 3, 1, 1, 1, 2, 1, 2, 2, 1, 0, 0};
 static_assert(sizeof kPrimParams / sizeof kPrimParams[0] == kernel::ctape_prim_count);
 
 constexpr int kProfileParams[] = {1, 2, 1, 1, 3, 2, 0};  // polygon: vertices instead
@@ -2196,14 +2198,58 @@ clay_result clay_item_set_stroke_points(clay_item* item, const float* xyzr, size
     return clay_item_set_curve_points(item, xyzr, count, nullptr, nullptr, nullptr);
 }
 
+clay_result clay_item_add_child(clay_item* item, const float position[3], float radius,
+                                std::int32_t parent) {
+    if (!item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item");
+    if (!scene::prim_is_armature(item->node.prim.type))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "children need CLAY_PRIM_ARMATURE");
+    if (!position) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null position");
+    if (!(radius >= 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "radius must be >= 0");
+    const std::int32_t n = static_cast<std::int32_t>(item->node.stroke.size());
+    if (parent >= n) return fail(CLAY_ERROR_INVALID_ARGUMENT, "parent index out of range");
+    scene::StrokePoint node;
+    node.pos = kernel::cf3(position[0], position[1], position[2]);
+    node.radius = radius;
+    item->node.stroke.push_back(node);
+    // Negative means "the node before this one", so a caller walking a limb
+    // outward never has to track indices it just created.
+    const std::int32_t chosen = parent >= 0 ? parent : (n > 0 ? n - 1 : 0);
+    item->node.armature_parents.push_back(static_cast<std::uint32_t>(chosen));
+    return CLAY_OK;
+}
+
+clay_result clay_item_set_armature_parents(clay_item* item, const uint32_t* parents,
+                                           size_t count) {
+    if (!item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item");
+    if (!scene::prim_is_armature(item->node.prim.type))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "parents need CLAY_PRIM_ARMATURE");
+    if (count && !parents) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null parents");
+    std::vector<std::uint32_t> tree(parents, parents + count);
+    for (std::size_t i = 0; i < tree.size(); ++i)
+        if (tree[i] >= tree.size())
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "armature parent index out of range");
+    // A cycle would make the field depend on the order the links are walked
+    // rather than on the tree, so it is refused where the reason can be said.
+    for (std::size_t i = 0; i < tree.size(); ++i) {
+        std::size_t walk = i, steps = 0;
+        while (tree[walk] != walk && steps++ <= tree.size()) walk = tree[walk];
+        if (steps > tree.size())
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "armature parents form a cycle");
+    }
+    item->node.armature_parents = std::move(tree);
+    return CLAY_OK;
+}
+
 clay_result clay_item_set_curve_points(clay_item* item, const float* xyzr, size_t count,
                                        const int32_t* types, const float* in_handles_xyz,
                                        const float* out_handles_xyz) {
     if (!item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item");
     if (item->node.prim.type != scene::PrimType::Stroke &&
-        !scene::prim_is_swept(item->node.prim.type))
+        !scene::prim_is_swept(item->node.prim.type) &&
+        !scene::prim_is_armature(item->node.prim.type))
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
-                    "curve points need CLAY_PRIM_STROKE or CLAY_PRIM_SWEPT");
+                    "curve points need CLAY_PRIM_STROKE, CLAY_PRIM_SWEPT or "
+                    "CLAY_PRIM_ARMATURE");
     std::vector<scene::StrokePoint> points;
     clay_result r = read_curve_points(xyzr, count, types, in_handles_xyz, out_handles_xyz,
                                       &points);

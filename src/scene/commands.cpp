@@ -381,6 +381,14 @@ void write_node(Writer& w, const Node& n) {
         w.pod(n.stroke_closed);
         w.pod(n.curve_tolerance);
     }
+    // An armature's topology: one parent index per stroke point. Written only
+    // from minor 7, so a document without armatures is byte-identical to what
+    // an older build wrote, and an older READER meets a shorter record rather
+    // than a corrupt one.
+    if (w.minor >= 7) {
+        w.u32(static_cast<std::uint32_t>(n.armature_parents.size()));
+        for (std::uint32_t parent : n.armature_parents) w.u32(parent);
+    }
     // Deformer carries uint8 + floats: field-wise, so padding never reaches
     // the stream (the portability trap struct-wise writes hit on GCC).
     w.pod(n.repeat.type);
@@ -482,6 +490,15 @@ Node read_node(Reader& r) {
     if (r.minor >= 2) {
         n.stroke_closed = r.pod<bool>();
         n.curve_tolerance = r.pod<float>();
+    }
+    if (r.minor >= 7) {
+        std::uint32_t ac = r.u32();
+        if (ac > r.remaining / sizeof(std::uint32_t)) {
+            r.ok = false;
+            return n;
+        }
+        n.armature_parents.reserve(ac);
+        for (std::uint32_t i = 0; i < ac && r.ok; ++i) n.armature_parents.push_back(r.u32());
     }
     n.repeat.type = r.pod<std::uint8_t>();
     n.repeat.spacing = r.pod<kernel::cfloat3>();

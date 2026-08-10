@@ -366,15 +366,21 @@ each change's tasks carry its own number:
 
 | Change | `.clayspace` minor |
 |---|---|
-| `add-mesh-layers` | 5 |
-| `add-multi-resolution` | 6 |
-| `add-sculpt-layers` | 7 |
-| `add-armature` | 9 |
+| `add-mesh-layers` | 5 — taken |
+| `add-multi-resolution` | 6 — taken |
+| `add-armature` | 7 — **taken**, see below |
+| `add-sculpt-layers` | 8 |
 
 `add-consolidation-policy` and `expose-scene-groups` need no bump — volumes and
 groups both already serialise. `add-representation-round-trip` needs one only if
 it introduces a new layer kind, which is one of its open questions; if it does,
-it takes 8.
+it takes 9.
+
+Armature was assigned 9 when it was proposed and took **7** when it was built,
+because 7 and 8 were reserved for changes that are still only proposals and
+nothing was in flight to collide with. The point of assigning is to stop two
+concurrent changes claiming one number, not to leave holes for work that may
+never happen.
 
 ### The plan
 

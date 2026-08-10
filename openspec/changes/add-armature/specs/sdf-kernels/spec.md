@@ -9,6 +9,8 @@ The tape SHALL provide an opcode carrying a set of nodes, each a position and a 
 
 A segment SHALL use the same construction the stroke opcode already uses: a round cone between two radii, a capsule where the radii agree, and a sphere where the endpoints coincide. The segments SHALL be combined with the same smooth union, whose radius is a parameter of the armature.
 
+A root — a node whose parent is itself — SHALL contribute its own sphere ONLY when no other node names it as a parent. A root with children is already contained in every link that names it, and contributing it twice is harmless under a hard union but wrong under a soft one: the smooth union of two overlapping terms pulls the surface outward, so a chain armature would stop matching the stroke it must equal.
+
 This is the chain opcode generalised from consecutive pairs to parent pairs. An armature whose parents form a line SHALL therefore evaluate identically to the stroke with the same points, which is what keeps the two from drifting.
 
 #### Scenario: A chain armature is a stroke
@@ -22,6 +24,10 @@ This is the chain opcode generalised from consecutive pairs to parent pairs. An 
 #### Scenario: A single node is a sphere
 - **WHEN** an armature has one node, whose parent is itself
 - **THEN** the field is that sphere, and nothing is degenerate
+
+#### Scenario: A root that has children contributes no extra sphere
+- **WHEN** a chain armature is evaluated with a non-zero blend
+- **THEN** it still agrees with the stroke, because the root's sphere already lies inside the link that names it and adding it again would pull the smooth union outward
 
 ### Requirement: A branch folds in a stated order
 The smooth union is not associative, so three or more links meeting at one node give a field that depends on the order they are combined. The order SHALL be deterministic and stated, so that the same armature evaluates identically on every backend and in every process.

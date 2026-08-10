@@ -207,6 +207,7 @@ struct PyPrim {
     float stroke_blend_k = 0.0f;
     bool stroke_closed = false;
     float curve_tolerance = 0.01f;
+    std::vector<std::uint32_t> armature_parents;
     std::vector<scene::Deformer> deformers;
     scene::Profile profile;
     std::vector<kernel::cfloat2> profile_points;
@@ -254,6 +255,7 @@ struct PyOctahedron : PyPrim {};
 struct PyHexPrism : PyPrim {};
 struct PyPyramid : PyPrim {};
 struct PyStroke : PyPrim {};
+struct PyArmature : PyPrim {};
 struct PyExtrude : PyPrim {};
 struct PyCappedTorus : PyPrim {};
 struct PyLink : PyPrim {};
@@ -664,6 +666,36 @@ void apply_handles(std::vector<scene::StrokePoint>& points, nb::handle in_handle
     };
     load(in_handles, true);
     load(out_handles, false);
+}
+
+// Parent index per armature node. None means a plain chain — node i's parent
+// is i-1 — which is the degenerate armature that equals a stroke, and the
+// friendliest default for someone reaching for this the first time.
+std::vector<std::uint32_t> to_parents(nb::handle obj, std::size_t count) {
+    std::vector<std::uint32_t> parents;
+    parents.reserve(count);
+    if (obj.is_none()) {
+        for (std::size_t i = 0; i < count; ++i)
+            parents.push_back(static_cast<std::uint32_t>(i == 0 ? 0 : i - 1));
+        return parents;
+    }
+    for (nb::handle h : nb::cast<nb::iterable>(obj)) {
+        long long v = nb::cast<long long>(h);
+        if (v < 0 || static_cast<std::size_t>(v) >= count)
+            throw std::invalid_argument("armature parent index out of range");
+        parents.push_back(static_cast<std::uint32_t>(v));
+    }
+    if (parents.size() != count)
+        throw std::invalid_argument("armature needs one parent per node");
+    // A cycle would make the field depend on traversal order rather than on
+    // the tree, so it is refused here where the message can say so.
+    for (std::size_t i = 0; i < count; ++i) {
+        std::size_t walk = i, steps = 0;
+        while (parents[walk] != walk && steps++ <= count)
+            walk = parents[walk];
+        if (steps > count) throw std::invalid_argument("armature parents form a cycle");
+    }
+    return parents;
 }
 
 std::vector<scene::StrokePoint> to_stroke_points(nb::handle obj) {
@@ -1503,6 +1535,78 @@ NB_MODULE(pyclay, m) {
            "self-intersecting outlines follow the even-odd rule. Flatten curves "
            "host-side (open curves are unsigned distances, not regions).")
         .def_prop_ro("point_count", [](const PyProfile& p) { return p.points.size(); });
+
+    // ------------------------------------------------------------------
+    nb::class_<PyArmature, PyPrim>(
+        m, "Armature",
+        "A TREE of spheres, skinned by one sphere-swept cone per node-parent\n"
+        "pair — ZBrush's ZSpheres. ONE edit item, not one per link.\n\n"
+        "This is Stroke with the chain generalised. A stroke joins point i to\n"
+        "point i+1, so its topology is a line; an armature gives each node a\n"
+        "parent, so it can branch. The link, the smooth union between links and\n"
+        "the blend parameter are literally the same code, which is why an\n"
+        "armature whose parents form a line evaluates identically to the stroke\n"
+        "with the same points.\n\n"
+        "`nodes` is (N, 4) — x, y, z, radius, as a stroke takes them. `parents`\n"
+        "is (N,) indices; a node whose parent is itself is a root, and node 0\n"
+        "defaults to one. Moving a node is the caller's business here; the\n"
+        "document-side edits that carry a subtree are on Layer.\n\n"
+        "There is deliberately no per-node ROTATION. A sphere is isotropic, so\n"
+        "rotating one changes no distance and no surface — it earns its place in\n"
+        "ZBrush because the adaptive skin lays out quads whose edge flow follows\n"
+        "the node frames, and marching cubes, surface nets and dual contouring\n"
+        "do not consult one.")
+        .def("__init__",
+             [](PyArmature* self, nb::handle nodes, nb::handle parents, float blend_k,
+                nb::handle position, nb::handle rotation_axis_angle, float scale) {
+                 new (self) PyArmature();
+                 self->prim = scene::Prim::armature();
+                 if (!nodes.is_none()) self->stroke = to_stroke_points(nodes);
+                 if (blend_k < 0.0f) throw std::invalid_argument("blend_k must be >= 0");
+                 self->stroke_blend_k = blend_k;
+                 self->armature_parents = to_parents(parents, self->stroke.size());
+                 place(*self, position, rotation_axis_angle, scale);
+             },
+             "nodes"_a = nb::none(), "parents"_a = nb::none(), "blend_k"_a = 0.0f,
+             "position"_a = nb::none(), "rotation_axis_angle"_a = nb::none(),
+             "scale"_a = 1.0f)
+        .def("add_child",
+             [](PyArmature& self, nb::handle position, float radius, int parent) {
+                 if (radius < 0.0f) throw std::invalid_argument("radius must be >= 0");
+                 const int n = static_cast<int>(self.stroke.size());
+                 if (parent < -1 || parent >= n)
+                     throw std::invalid_argument("parent index out of range");
+                 scene::StrokePoint p;
+                 p.pos = to_f3(position, "armature node");
+                 p.radius = radius;
+                 self.stroke.push_back(p);
+                 // -1 means "the node before this one", which is what a drag
+                 // out from the last sphere does and the common case by far.
+                 int chosen = parent >= 0 ? parent : (n > 0 ? n - 1 : 0);
+                 self.armature_parents.push_back(static_cast<std::uint32_t>(chosen));
+                 return &self;
+             },
+             "position"_a, "radius"_a, "parent"_a = -1, nb::rv_policy::reference_internal,
+             "Append a node under `parent` (chainable). parent=-1 continues from "
+             "the last node, which is what dragging a new sphere out does")
+        .def_prop_ro("node_count",
+                     [](const PyArmature& self) { return self.stroke.size(); })
+        .def_prop_ro("parents",
+                     [](const PyArmature& self) {
+                         nb::list out;
+                         for (std::uint32_t v : self.armature_parents) out.append(v);
+                         return out;
+                     })
+        .def_prop_ro("nodes", [](const PyArmature& self) {
+            nb::list out;
+            for (const scene::StrokePoint& p : self.stroke) {
+                nb::list row;
+                row.append(p.pos.x); row.append(p.pos.y); row.append(p.pos.z);
+                row.append(p.radius);
+                out.append(row);
+            }
+            return out;
+        });
 
     nb::class_<PyExtrude, PyPrim>(m, "Extrude",
                                   "Exact extrusion of a profile along Z (half_depth)")
@@ -2532,6 +2636,7 @@ NB_MODULE(pyclay, m) {
                  n.xform = prim.xform;
                  n.stroke = prim.stroke;
                  n.stroke_blend_k = prim.stroke_blend_k;
+                 n.armature_parents = prim.armature_parents;
                  n.stroke_closed = prim.stroke_closed;
                  n.curve_tolerance = prim.curve_tolerance;
                  n.deformers = prim.deformers;
