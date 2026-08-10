@@ -148,7 +148,12 @@ typedef enum clay_op {
      * A pair rather than one signed amplitude, because blend_k is required
      * non-negative — and because add/subtract and engrave/emboss are pairs. */
     CLAY_OP_RELIEF = 14, /* build up: ZBrush Standard, ClayBuildup */
-    CLAY_OP_INCISE = 15  /* cut in:   Crease, DamStandard */
+    CLAY_OP_INCISE = 15, /* cut in:   Crease, DamStandard */
+    /* GROUPS ONLY (clay_layer_add_group): the group's children apply inline to
+     * the chain outside it, exactly as if they had been added there. Every
+     * other op makes the group a sub-expression that combines as a unit. An
+     * item carrying it is refused. */
+    CLAY_OP_INLINE = 255
 } clay_op;
 
 typedef enum clay_blend {
@@ -313,7 +318,10 @@ clay_result clay_document_end_undo_group(clay_document* doc);
  * whole value: C has no idiomatic "leave this one alone" argument. Read the
  * current state, change what you want, pass all of it back. */
 
-/* Retransform a node. axis/angle give the rotation; scale must be > 0. */
+/* Retransform a node. axis/angle give the rotation; scale must be > 0.
+ * A GROUP is refused: the engine composes layer * item and nothing else, so a
+ * group's transform never reaches its children — recording one would be an
+ * undoable, saved edit that changes nothing. Transform the children. */
 clay_result clay_layer_set_transform(clay_document* doc, clay_layer_id layer, clay_node_id node,
                                      const float position[3], const float rotation_axis[3],
                                      float rotation_angle, float scale);
@@ -323,11 +331,15 @@ clay_result clay_layer_set_prim(clay_document* doc, clay_layer_id layer, clay_no
                                 int32_t prim, const float* params, size_t param_count);
 clay_result clay_layer_set_color(clay_document* doc, clay_layer_id layer, clay_node_id node,
                                  const float rgb[3]);
-/* op is clay_op, blend is clay_blend; rounding must be >= 0. */
+/* op is clay_op, blend is clay_blend; rounding must be >= 0. A GROUP takes the
+ * same values clay_layer_add_group takes, CLAY_OP_INLINE included; an item
+ * takes anything but that one. */
 clay_result clay_layer_set_op_blend(clay_document* doc, clay_layer_id layer, clay_node_id node,
                                     int32_t op, int32_t blend, float blend_k, float rounding);
 /* Reparent or reorder. new_parent 0 moves the node to the layer root, and
- * index < 0 appends. */
+ * index < 0 appends. Moving a node into its own subtree is refused: it would
+ * close a cycle, and the subtree would leave the root list and be dropped on
+ * the next save. */
 clay_result clay_layer_move(clay_document* doc, clay_layer_id layer, clay_node_id node,
                             clay_node_id new_parent, int32_t index);
 /* Append (x, y, z, radius) quadruples to a placed stroke: points_xyzr holds
@@ -337,6 +349,9 @@ clay_result clay_layer_append_stroke(clay_document* doc, clay_layer_id layer, cl
 /* Remove the last count points from a placed stroke. */
 clay_result clay_layer_trim_stroke(clay_document* doc, clay_layer_id layer, clay_node_id node,
                                    uint32_t count);
+/* A GROUP is a node too, and every call above applies to one. Creating and
+ * filling one is further down, with the item builder whose handle it takes:
+ * see clay_layer_add_group. */
 
 /* -- editing layers -------------------------------------------------------- */
 
@@ -540,6 +555,69 @@ clay_result clay_item_set_transition_radial(clay_item* item, float r0, float r1,
 /* Appends the composed edit to a layer. The builder is left untouched. */
 clay_result clay_layer_add_item(clay_document* doc, clay_layer_id layer, const clay_item* item,
                                 clay_node_id* out_node);
+
+/* -- groups ----------------------------------------------------------------
+ * A group is a node like any other — same id space, same commands, same undo —
+ * whose children compile as ONE sub-expression. That is what makes "intersect
+ * A with B, then union that into C" sayable from a host: the intersect applies
+ * to A alone because it is inside the group, and the group's own op combines
+ * the result with whatever the layer already holds. Without one, an op applies
+ * to the whole accumulated field, so an intersect meant for a single panel
+ * would trim everything added before it.
+ *
+ * Three rules the compiler already enforces (src/scene/tape_build.cpp,
+ * compile_group), stated here because a host has to be able to predict them:
+ *   - a carving group (subtract, intersect, the extended modes) with nothing
+ *     beneath it in the chain emits nothing at all — as a carving ITEM does;
+ *   - so does a group whose children all turned out to be hidden or culled,
+ *     down to the last instruction: an empty subtree is rolled back rather
+ *     than left as a combine against empty space;
+ *   - CLAY_OP_INLINE reads no blend, no rounding and no colour off the group,
+ *     which is why those are refused rather than quietly ignored.
+ *
+ * A group has no transform of its own; see clay_layer_set_transform. */
+
+/* Creates an empty group and returns its id. parent 0 puts it at the layer
+ * root and index < 0 appends; a parent that is not a group is refused, which
+ * is also how a nested group is built — pass the outer group's id.
+ *
+ * op is clay_op, blend is clay_blend, and blend_k and rounding must both be
+ * >= 0. The transition ops are refused: compile_group emits no transition
+ * parameters, so a group carrying one would morph on defaults nobody wrote.
+ * CLAY_OP_INLINE requires CLAY_BLEND_HARD with blend_k and rounding 0.
+ *
+ * The seed colour a CLAY_OP_SHELL or CLAY_OP_REPLACE group paints when it
+ * starts a chain against empty space is clay_layer_set_color, as for any other
+ * node. */
+clay_result clay_layer_add_group(clay_document* doc, clay_layer_id layer, clay_node_id parent,
+                                 int32_t index, int32_t op, int32_t blend, float blend_k,
+                                 float rounding, clay_node_id* out_node);
+
+/* clay_add_item and clay_layer_add_item append to the layer root and have no
+ * argument that could say otherwise, so these are those two calls with a group
+ * to put the edit in. index < 0 appends. One command each, hence one undo step
+ * each: filling a group needs no clay_document_begin_undo_group. */
+clay_result clay_add_item_in_group(clay_document* doc, clay_layer_id layer, clay_node_id group,
+                                   int32_t index, const clay_item_desc* item,
+                                   clay_node_id* out_node);
+clay_result clay_layer_add_item_in_group(clay_document* doc, clay_layer_id layer,
+                                         clay_node_id group, int32_t index,
+                                         const clay_item* item, clay_node_id* out_node);
+
+/* A group's children, in order, by the size-query pattern
+ * clay_layer_stroke_points uses: call with out_children == NULL to receive the
+ * count in *count, then again with a buffer of that many ids. *count is the
+ * capacity going in and the count written coming out; a buffer that is too
+ * small gets CLAY_ERROR_BUFFER_TOO_SMALL with the needed count in *count and
+ * writes nothing.
+ *
+ * A node that is not a group is CLAY_ERROR_INVALID_ARGUMENT — which is also
+ * how a host that RELOADED a document tells a group from an item, since
+ * nothing else in this ABI answers that question. Reading is not editing, so a
+ * ghosted, locked or hidden layer answers normally. */
+clay_result clay_layer_children(const clay_document* doc, clay_layer_id layer,
+                                clay_node_id node, clay_node_id* out_children, size_t* count);
+
 
 /* -- evaluation ------------------------------------------------------------ */
 

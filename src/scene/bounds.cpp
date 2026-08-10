@@ -528,11 +528,15 @@ Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& lay
     }
     // Extended-op groups: the subtree field is not rounded, so rb comes
     // straight from the group's rounding scaled into world units.
+    // Otherwise cmax(support, k), exactly as the item path above: paint fades
+    // over max(profile support, k), and a HARD profile has zero support — so
+    // support alone dilated a Paint group by nothing while its colour reached
+    // out to k.
     float support = op_is_extended(n->op)
                         ? kernel::ccombine_extended_support(
                               static_cast<int>(n->op), n->blend.k,
                               n->rounding * layer.xform.scale)
-                        : n->blend.support();
+                        : kernel::cmax(n->blend.support(), n->blend.k);
     return b.empty() ? b : b.dilated(support);
 }
 

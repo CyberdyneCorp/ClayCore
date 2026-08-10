@@ -62,6 +62,7 @@ add_executable(clay_unit_tests
   unit/test_c_brick.cpp
   unit/test_consolidate.cpp
   unit/test_c_consolidate.cpp
+  unit/test_groups.cpp
   unit/test_mesh_layers.cpp
   unit/test_c_mesh_layer.cpp)
 
