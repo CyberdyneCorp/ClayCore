@@ -22,6 +22,30 @@ OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "output")
 WIDTH, HEIGHT = 480, 360
 SUPERSAMPLE = 2
 
+# CI runs the gallery to prove every example still RUNS, and throws the images
+# away afterwards (`git checkout -- examples/output`) precisely because float
+# renders differ across platforms and pixel equality was never the gate. At
+# full quality that costs about seventy minutes on a two-core runner, and one
+# example accounts for most of it: 34_organic_character renders 560x680 with
+# twelve occlusion rays per pixel, where the rest of the gallery renders about
+# 205x195. Occlusion multiplies raycasts per pixel, so it dominates.
+#
+# CLAY_EXAMPLES_FAST scales the pixels and the occlusion rays down. It changes
+# how the images LOOK and nothing about what runs, so the gate survives intact
+# and the committed gallery is still regenerated at full quality by a plain
+# `python examples/run_all.py`.
+FAST = os.environ.get("CLAY_EXAMPLES_FAST", "") not in ("", "0")
+FAST_SCALE = 0.5     # per axis, so a quarter of the pixels
+FAST_AO_MAX = 3      # occlusion rays per pixel
+
+
+def _fast_pixels(n):
+    return max(16, int(n * FAST_SCALE)) if FAST else n
+
+
+def _fast_ao(samples):
+    return min(samples, FAST_AO_MAX) if FAST else samples
+
 BACKGROUND_TOP = np.array([0.16, 0.18, 0.22], dtype=np.float32)
 BACKGROUND_BOTTOM = np.array([0.05, 0.05, 0.07], dtype=np.float32)
 
@@ -215,6 +239,7 @@ def render_array(doc, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
     default: it costs a raycast pass per sample, and only earns that on a model
     whose detail is cavities rather than curvature.
     """
+    width, height, ao = _fast_pixels(width), _fast_pixels(height), _fast_ao(ao)
     rays, (h, w) = camera_rays(eye, target, fov_degrees=fov_degrees,
                                width=width, height=height, supersample=supersample)
     result = doc.raycast_many(rays)
@@ -282,6 +307,7 @@ def render_voxels_array(grid, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
     carries `cell` and `face`: the palette lookup gives colour, the face id
     gives an exact cube normal (no finite differences needed).
     """
+    width, height = _fast_pixels(width), _fast_pixels(height)
     rays, (h, w) = camera_rays(
         eye, target, fov_degrees=fov_degrees, width=width, height=height, supersample=1
     )
@@ -367,6 +393,7 @@ def render_tile(doc, eye=(2.4, 1.9, 3.0), target=(0.0, 0.0, 0.0),
     """
     if layer is not None:
         eye, target = layer_camera(layer, fov_degrees=fov_degrees)
+    size, ao = _fast_pixels(size), _fast_ao(ao)
     rays, (h, w) = camera_rays(
         eye, target, fov_degrees=fov_degrees, width=size, height=size, supersample=2
     )

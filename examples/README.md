@@ -29,6 +29,19 @@ kernel change shows up as an image diff. Each script also runs standalone.
 CI runs all of them and fails on a non-zero exit, so a binding rename breaks
 the build rather than silently rotting the gallery.
 
+Examples run one per core; `--jobs 1` puts them back in one process, which is
+what to reach for when debugging a single failure. **Regenerate the committed
+gallery with a plain run** — no environment set — because CI runs it with
+`CLAY_EXAMPLES_FAST=1`, which halves each render axis and caps occlusion rays.
+That flag exists because the gallery job cost about seventy minutes against
+sixteen for everything else in the workflow, and one example accounted for most
+of it: `34_organic_character` renders 560x680 with twelve occlusion rays per
+pixel where the rest of the gallery renders around 205x195, and occlusion
+multiplies raycasts per pixel. Fast mode changes how the images look and
+nothing about what runs, which is all CI was ever checking — it throws the
+renders away afterwards, because float output differs across platforms. 41/41
+in 97s rather than 543s.
+
 ## The gallery
 
 ### 00 — the hero image

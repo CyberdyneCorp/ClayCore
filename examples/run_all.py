@@ -1,16 +1,30 @@
 """Run every example and regenerate the committed gallery.
 
-    python examples/run_all.py
+    python examples/run_all.py            # one process per core
+    python examples/run_all.py --jobs 1   # serial, for debugging one example
 
-Each example is run in-process. A failure in any one is fatal, which is what
-makes the CI job meaningful: an API change that breaks an example breaks the
-build, the gate the hand-written docs snippets never had.
+A failure in any one is fatal, which is what makes the CI job meaningful: an
+API change that breaks an example breaks the build, the gate the hand-written
+docs snippets never had.
+
+Examples run in SEPARATE PROCESSES, and the reason is measurement rather than
+taste: this job took ~70 minutes of wall clock on a two-core CI runner while
+every other job in the workflow finished inside 16, because 43 examples that
+each CPU-raytrace their images were being run one after another in a single
+process. They are independent — each writes and reads only its own files —
+so the only thing the serial loop bought was ordered output, which is
+recovered here by buffering each example's stdout and printing it in list
+order once it finishes.
 """
 
+import argparse
+import contextlib
 import importlib
+import io
 import os
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -110,7 +124,32 @@ def check_capability_coverage():
     return problems
 
 
+def run_one(name):
+    """Run one example in this process, returning (name, output, error).
+
+    Its stdout is captured rather than left to interleave with every other
+    worker's: the report below prints it in list order, so parallel output
+    reads exactly like the serial run it replaced.
+    """
+    sys.path.insert(0, HERE)
+    buffer = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buffer):
+            module = importlib.import_module(name)
+            module.main()
+    except SystemExit as exc:            # examples raise SystemExit on a gap
+        return name, buffer.getvalue(), str(exc)
+    except Exception as exc:             # noqa: BLE001 - report, keep going
+        return name, buffer.getvalue(), f"{type(exc).__name__}: {exc}"
+    return name, buffer.getvalue(), None
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--jobs", "-j", type=int, default=0,
+                        help="worker processes; 0 picks one per core, 1 runs serially")
+    args = parser.parse_args()
+
     sys.path.insert(0, HERE)
 
     try:
@@ -132,18 +171,26 @@ def main():
     print(f"capability coverage: {shown} shown by an example, "
           f"{len(CAPABILITY_EXAMPLES) - shown} recorded as unshowable")
 
+    jobs = args.jobs or (os.cpu_count() or 1)
     failures = []
     started = time.time()
-    for name in EXAMPLES:
-        try:
-            module = importlib.import_module(name)
-            module.main()
-        except SystemExit as exc:            # examples raise SystemExit on a gap
-            failures.append((name, str(exc)))
-            print(f"  FAILED: {exc}", file=sys.stderr)
-        except Exception as exc:             # noqa: BLE001 - report, keep going
-            failures.append((name, f"{type(exc).__name__}: {exc}"))
-            print(f"  FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+    if jobs == 1:
+        results = [run_one(name) for name in EXAMPLES]
+    else:
+        # Each example holds its own grids and images, so peak memory scales
+        # with the worker count. Capped rather than unbounded for that reason.
+        jobs = min(jobs, len(EXAMPLES), 8)
+        print(f"running {len(EXAMPLES)} examples across {jobs} processes")
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            results = list(pool.map(run_one, EXAMPLES))
+
+    for name, output, error in results:  # list order, not completion order
+        if output:
+            print(output, end="")
+        if error is not None:
+            failures.append((name, error))
+            print(f"  FAILED [{name}]: {error}", file=sys.stderr)
 
     elapsed = time.time() - started
     print(f"\n{len(EXAMPLES) - len(failures)}/{len(EXAMPLES)} examples "
