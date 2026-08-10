@@ -379,6 +379,7 @@ the concurrency buys.
 
 | Change | Notes |
 |---|---|
+| `add-mesh-layers` **first slice landed 2026-08-09** | A document can CARRY an imported mesh, as opposed to sampling one: a third `LayerKind`, the triangles stored beside the document keyed by layer id where voxel grids and masks already live, a `MESH` chunk in `.clayspace` (1.4 → 1.5, backward-open), and the attach/lookup/bounds surface in both bindings. The placement is the design: `tools/check_layering.py` withholds `mesh` from `clay::scene`, so "a mesh layer does not change what the document evaluates to" is structural rather than maintained. **Not in the slice:** the merged export (`clay_mesh_transform` / `_concat` plus the convenience call that appends every visible mesh layer to the meshed field), and `max_file_bytes` on `clay_import_budget` with a budget-taking document load beside the existing one. Both are separable and neither is about meshes reaching the field, which stays out permanently. |
 | `add-claycore-bridge` (ClayCore half) | A retopo-oriented mesh export profile, plus a field-evaluation callback so a baker can sample exact normals and AO from the field rather than raycasting a mesh. The other half lives in CyberRemesherAndUV. This is the product story, and neither engine has the seam yet. |
 
 ## Phase 4 — parametric and scatter
@@ -401,6 +402,14 @@ needs them, and listed so they are not mistaken for oversights:
 - **Voxel layers beyond 256³.** The spec guarantees ≥256³ per layer, with a
   memory budget and typed errors past it. There is no streaming story for
   scenes larger than that; per-layer grids have been sufficient so far.
+- **glTF/GLB import.** `save_glb` exists and no `load_glb` does, which makes it
+  the only real gap in the importer — OBJ, PLY and FBX all load. Recorded by
+  `add-mesh-layers`, which does not need it.
+- **The voxel and mask chunks' orphan behaviour.** A mesh chunk is written only
+  for a layer that still exists and dropped on load when it names none;
+  `VOXL` and `MASK` do neither, so a removed voxel layer's grid is still
+  written and read back. Harmless today because layer ids are never reused, and
+  now visibly inconsistent.
 ## Deliberately not doing
 
 Recorded so they are decisions rather than oversights:
