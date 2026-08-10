@@ -242,6 +242,21 @@ std::vector<ParityScene> parity_scenes() {
         l.sdf->insert(stroke);
         scenes.push_back({"stroke", std::move(doc), 3.0f});
     }
+    {   // an armature: a BRANCHING tree, so every backend walks parent links
+        // and folds three links at one node in the same order
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        scene::Node arm;
+        arm.prim = scene::Prim::armature();
+        arm.stroke = {{cf3(0, -0.35f, 0), 0.30f},
+                      {cf3(0, 0.35f, 0), 0.24f},
+                      {cf3(-0.6f, 0.15f, 0.1f), 0.16f},
+                      {cf3(0.6f, 0.15f, -0.1f), 0.16f}};
+        arm.armature_parents = {0, 0, 0, 0};
+        arm.stroke_blend_k = 0.06f;
+        l.sdf->insert(arm);
+        scenes.push_back({"armature_branch", std::move(doc), 3.0f});
+    }
     // blend-profile pairs (union + subtract per profile)
     auto pair = [&](const char* name, scene::BlendProfile profile) {
         scene::Document doc;

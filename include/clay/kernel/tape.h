@@ -96,6 +96,14 @@ enum CTapeOp {
     // by a formula. Only bricks that straddle the band store samples; the rest
     // carry a signed lower bound. blob_offset  (bound)
     ctape_volume,
+    // An armature: a TREE of spheres, each naming its parent, skinned by one
+    // sphere-swept segment per node-parent pair. This is ctape_stroke with the
+    // chain generalised — the stroke walks (i, i+1), this walks (i, parent[i])
+    // — so the segment maths, the smooth union and the blend are shared rather
+    // than re-derived, and an armature whose parents form a line evaluates
+    // identically to the stroke with the same points.
+    // blend_k, node_offset, parent_offset, node_count  (bound)
+    ctape_armature,
     ctape_prim_count,
 
     // Pushes the far field ("empty space"): standard primitive param block,
@@ -345,6 +353,16 @@ CLAY_FN float ctape_smin(int profile, float a, float b, float k) {
 }
 
 // Stroke: chain of sphere-swept segments over raw float data (4 per point).
+// One sphere-swept segment between two nodes. Factored out of the stroke so
+// the armature cannot drift from it: a link is the same round cone either way,
+// and the degenerate cases (coincident endpoints, equal radii) have to be
+// answered the same or the two opcodes disagree on the same geometry.
+CLAY_FN float csweep_link(cfloat3 p, cfloat3 a, cfloat3 b, float ra, float rb) {
+    if (cdot2(b - a) < 1e-12f) return sd_sphere(p - a, cmax(ra, rb));
+    if (cabs(ra - rb) < 1e-7f) return sd_capsule(p, a, b, ra);
+    return sd_round_cone_ab(p, a, b, ra, rb);
+}
+
 CLAY_FN float ctape_stroke_dist(CLAY_DEVICE const float* pts, int count, cfloat3 p,
                                 float blend_k) {
     if (count <= 0) return CLAY_TAPE_FAR;
@@ -354,15 +372,52 @@ CLAY_FN float ctape_stroke_dist(CLAY_DEVICE const float* pts, int count, cfloat3
     for (int i = 0; i + 1 < count; ++i) {
         cfloat3 a = cf3(pts[i * 4 + 0], pts[i * 4 + 1], pts[i * 4 + 2]);
         cfloat3 b = cf3(pts[i * 4 + 4], pts[i * 4 + 5], pts[i * 4 + 6]);
-        float ra = pts[i * 4 + 3];
-        float rb = pts[i * 4 + 7];
+        float seg = csweep_link(p, a, b, pts[i * 4 + 3], pts[i * 4 + 7]);
+        d = (blend_k > 0.0f) ? csmin_quadratic(d, seg, blend_k) : cmin(d, seg);
+    }
+    return d;
+}
+
+// A tree of spheres. `nodes` is count * 4 floats (x, y, z, radius); `parents`
+// is count floats, each the index of that node's parent. A node whose parent
+// is itself is a root and contributes a bare sphere, so a one-node armature is
+// a sphere rather than nothing.
+//
+// The fold order is ascending node index, and that is a REQUIREMENT rather
+// than an implementation detail: csmin_quadratic is not associative, so three
+// links meeting at a hip give a different field depending on the order they
+// combine. Fixing the order here is what makes an armature evaluate the same
+// on every backend.
+CLAY_FN float ctape_armature_dist(CLAY_DEVICE const float* nodes,
+                                  CLAY_DEVICE const float* parents, int count, cfloat3 p,
+                                  float blend_k) {
+    if (count <= 0) return CLAY_TAPE_FAR;
+    float d = CLAY_TAPE_FAR;
+    for (int i = 0; i < count; ++i) {
+        int j = (int)parents[i];
+        if (j < 0 || j >= count) j = i;
+        cfloat3 a = cf3(nodes[i * 4 + 0], nodes[i * 4 + 1], nodes[i * 4 + 2]);
+        float ra = nodes[i * 4 + 3];
         float seg;
-        if (cdot2(b - a) < 1e-12f) {
-            seg = sd_sphere(p - a, cmax(ra, rb));
-        } else if (cabs(ra - rb) < 1e-7f) {
-            seg = sd_capsule(p, a, b, ra);
+        if (j == i) {
+            // A root. Its sphere is ALREADY inside every link that names it,
+            // so adding it again is redundant with a hard union and wrong with
+            // a soft one: smooth-min of two overlapping terms pulls the surface
+            // outward, and a chain armature would then stop matching the stroke
+            // it is supposed to equal. Contribute it only when nothing else
+            // does — an isolated node, which is the case that would otherwise
+            // vanish. Roots are few, so the scan costs nothing in practice.
+            bool referenced = false;
+            for (int k = 0; k < count; ++k) {
+                if (k == i) continue;
+                int pk = (int)parents[k];
+                if (pk == i) { referenced = true; break; }
+            }
+            if (referenced) continue;
+            seg = sd_sphere(p - a, ra);
         } else {
-            seg = sd_round_cone_ab(p, a, b, ra, rb);
+            cfloat3 b = cf3(nodes[j * 4 + 0], nodes[j * 4 + 1], nodes[j * 4 + 2]);
+            seg = csweep_link(p, a, b, ra, nodes[j * 4 + 3]);
         }
         d = (blend_k > 0.0f) ? csmin_quadratic(d, seg, blend_k) : cmin(d, seg);
     }
@@ -609,6 +664,12 @@ CLAY_FN float ctape_prim_dist(unsigned int op, CLAY_DEVICE const float* q,
         int off = (int)q[1];
         int cnt = (int)q[2];
         return ctape_stroke_dist(blob + off, cnt, lp, q[0]);
+    }
+    if (op == ctape_armature) {
+        int nodes = (int)q[1];
+        int parents = (int)q[2];
+        int cnt = (int)q[3];
+        return ctape_armature_dist(blob + nodes, blob + parents, cnt, lp, q[0]);
     }
     return CLAY_TAPE_FAR;
 }

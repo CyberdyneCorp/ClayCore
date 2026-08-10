@@ -162,6 +162,18 @@ Aabb prim_local_bounds(const Node& item) {
             }
             break;
         }
+        case PrimType::Armature: {
+            // Nodes only, and no tessellation: an armature's links are straight
+            // sphere-swept segments between a node and its parent, so the union
+            // of the node spheres already contains every link. A stroke needs
+            // the tessellated curve because a spline bulges outside its control
+            // polygon; an armature has no curve to bulge.
+            for (const StrokePoint& n : item.stroke) {
+                b.expand(n.pos - cf3(n.radius, n.radius, n.radius));
+                b.expand(n.pos + cf3(n.radius, n.radius, n.radius));
+            }
+            break;
+        }
         case PrimType::Stroke: {
             // Tessellated, not the control points: a spline can pass outside
             // the polygon its control points form, and bounds that missed

@@ -87,6 +87,20 @@ struct SetStrokePointsCmd {
     float tolerance = 0.01f;
 };
 
+// An armature's whole tree, replaced. Whole-tree for SetStrokePointsCmd's
+// reason: an armature is tens of nodes, so replacing the list costs less than
+// the bookkeeping granular commands would need, and its inverse is exactly the
+// tree that was there. The tree EDITS — add a child, move a node carrying its
+// subtree, delete a subtree — are pure functions in scene/armature.h that
+// compute the new tree; this is what installs one.
+struct SetArmatureCmd {
+    LayerId layer = 0;
+    NodeId node = kNoNode;
+    std::vector<StrokePoint> nodes;
+    std::vector<std::uint32_t> parents;
+    float blend_k = 0.0f;
+};
+
 // A node's whole deformer chain, replaced. Whole-list for SetStrokePointsCmd's
 // reason: a chain is a handful of records, so replacing it costs less than the
 // bookkeeping granular commands would need, and its inverse is the previous list
@@ -132,7 +146,7 @@ using Command =
                  SetColorCmd, SetOpBlendCmd, AppendStrokeCmd, TrimStrokeCmd, AddLayerCmd,
                  RemoveLayerCmd, SetLayerVisibleCmd, SetLayerTransformCmd,
                  SetLayerProtectionCmd, SetStrokePointsCmd, SetDeformersCmd,
-                 SetLayerMirrorCmd>;
+                 SetLayerMirrorCmd, SetArmatureCmd>;
 
 // The layer a command would edit, or 0 for one that edits no existing layer
 // (adding a layer creates its target; changing protection is how a protected
@@ -144,7 +158,7 @@ LayerId edited_layer(const Command& cmd);
 // The scene payload layout this build writes. It tracks the .clayspace
 // container's minor version, which is what a reader is told; io asserts they
 // agree so the two cannot drift.
-inline constexpr std::uint16_t kSceneMinor = 6;
+inline constexpr std::uint16_t kSceneMinor = 7;
 
 // Apply a command; returns its inverse, or nullopt if the target does not
 // exist or is protected (ghosted or locked). The document is unchanged in

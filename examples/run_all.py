@@ -55,6 +55,7 @@ EXAMPLES = [
     "37_groups",
     "38_consolidation",
     "39_multi_resolution",
+    "40_armature",
 ]
 
 

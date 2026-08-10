@@ -382,6 +382,37 @@ struct Compiler {
             }
             emit_prim(kernel::ctape_stroke, inv_world, scale, round_world, item.color,
                       prim_params, 3, item.deformers, item.repeat);
+        } else if (prim_is_armature(item.prim.type)) {
+            // Nodes verbatim: an armature's links are straight, so unlike the
+            // stroke there is no curve to tessellate. The parents ride in the
+            // blob beside them as floats, which is how every other index in a
+            // prim block travels — the blob has one element type.
+            const std::vector<StrokePoint>& nodes = item.stroke;
+            if (nodes.empty()) return;
+            float prim_params[4];
+            prim_params[0] = item.stroke_blend_k;
+            prim_params[1] = static_cast<float>(tape.blob.size());
+            for (const StrokePoint& n : nodes) {
+                tape.blob.push_back(n.pos.x);
+                tape.blob.push_back(n.pos.y);
+                tape.blob.push_back(n.pos.z);
+                tape.blob.push_back(n.radius);
+            }
+            prim_params[2] = static_cast<float>(tape.blob.size());
+            for (std::size_t i = 0; i < nodes.size(); ++i) {
+                // A parent out of range, or absent because the tree was built
+                // shorter than its points, reads as a root. The kernel makes the
+                // same reading, so a malformed armature degrades to loose
+                // spheres rather than to undefined behaviour.
+                std::uint32_t parent = i < item.armature_parents.size()
+                                           ? item.armature_parents[i]
+                                           : static_cast<std::uint32_t>(i);
+                if (parent >= nodes.size()) parent = static_cast<std::uint32_t>(i);
+                tape.blob.push_back(static_cast<float>(parent));
+            }
+            prim_params[3] = static_cast<float>(nodes.size());
+            emit_prim(kernel::ctape_armature, inv_world, scale, round_world, item.color,
+                      prim_params, 4, item.deformers, item.repeat);
         } else if (prim_is_volume(item.prim.type)) {
             if (!item.volume || item.volume->empty()) return;  // nothing to read
             std::vector<float> flat = item.volume->to_blob();

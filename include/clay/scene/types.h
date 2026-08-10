@@ -58,6 +58,7 @@ enum class PrimType : std::uint8_t {
     Loft = kernel::ctape_loft,
     Swept = kernel::ctape_swept,
     Volume = kernel::ctape_volume,
+    Armature = kernel::ctape_armature,
 };
 
 // Primitives with no finite extent: an item using one influences the field
@@ -110,6 +111,10 @@ inline bool prim_carries_profiles(PrimType t) { return prim_is_loft(t) || prim_i
 // The stroke list means control points for both of them, so anything that
 // reads or replaces a point list asks this rather than naming Stroke alone.
 inline bool prim_carries_curve(PrimType t) { return t == PrimType::Stroke || prim_is_swept(t); }
+// An armature is a TREE of spheres. It reuses the stroke's point list — a
+// StrokePoint is already a position and a radius — and adds one parent index
+// per point, so the two share their storage as well as their kernel segment.
+inline bool prim_is_armature(PrimType t) { return t == PrimType::Armature; }
 
 enum class Op : std::uint8_t {
     None = 255,  // groups only: children apply inline to the outer chain
@@ -233,6 +238,8 @@ struct Prim {
     static Prim hex_prism(float hx, float hy) { return {PrimType::HexPrism, {hx, hy}}; }
     static Prim pyramid(float h) { return {PrimType::Pyramid, {h}}; }
     static Prim stroke() { return {PrimType::Stroke, {}}; }
+    // The nodes live in Node::stroke and the topology in Node::armature_parents.
+    static Prim armature() { return {PrimType::Armature, {}}; }
     // Lifts carry their profile in Node::profile / Node::profile_points; the
     // single prim param is the lift's own (half-depth or axis offset).
     static Prim extrude(float half_depth) { return {PrimType::Extrude, {half_depth}}; }
@@ -570,6 +577,11 @@ struct Node {
     // ordinary curve, so it uses the same list rather than one of its own.
     std::vector<StrokePoint> stroke;
     float stroke_blend_k = 0.0f;      // within-stroke segment smoothing
+    // Armature only: parent index per stroke point, same length as `stroke`.
+    // A node whose parent is itself is a root. Kept beside the points rather
+    // than inside StrokePoint so a stroke costs nothing for a field it has no
+    // use for, and so an armature IS a stroke plus a topology.
+    std::vector<std::uint32_t> armature_parents;
     bool stroke_closed = false;       // last point joins back to the first
     // Maximum distance a tessellated span's midpoint may sit from its chord.
     // A document property, not a viewer setting: two builds have to agree on

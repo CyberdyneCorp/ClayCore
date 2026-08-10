@@ -46,6 +46,7 @@ CLASS_PREFIX = {
     "MeshQuery": ("clay_mesh_",),
     "Prim": ("clay_item_", "clay_item_set_", "clay_item_add_"),
     "Stroke": ("clay_item_", "clay_item_set_", "clay_item_add_"),
+    "Armature": ("clay_item_", "clay_item_set_", "clay_item_add_"),
     # Volume is an item like any other, so it would take the clay_item_
     # prefixes — but nothing in C builds or inspects one yet. Every member is
     # exempt with a reason; see CLASS_CTOR['Volume'].
@@ -193,6 +194,7 @@ CLASS_CTOR = {
     "Loft": "CLAY_PRIM_LOFT",
     "Swept": "CLAY_PRIM_SWEPT",
     "Stroke": "CLAY_PRIM_STROKE",
+    "Armature": "CLAY_PRIM_ARMATURE",
 }
 
 # Capabilities pyclay exposes that the C ABI deliberately does not, each with
@@ -230,6 +232,9 @@ EXEMPT = {
         "reads a shape's own outline back; in C the caller owns the buffer it passed",
     "Stroke.points": "reads a builder's own state back, as above",
     "Stroke.point_count": "reads a builder's own state back, as above",
+    "Armature.nodes": "reads a builder's own state back, as above",
+    "Armature.parents": "reads a builder's own state back, as above",
+    "Armature.node_count": "reads a builder's own state back, as above",
     "Profile.point_count": "reads a builder's own state back, as above",
     "Layer.name": "reads back the name the caller passed to clay_add_sdf_layer",
     "Layer.resolution": "per-layer meshing hint the C ABI does not author; "

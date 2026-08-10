@@ -65,6 +65,10 @@ COVERED_ELSEWHERE = {
     "Volume": ("18_sampled_fields.py", "it has no shape of its own — it samples "
                                        "another field, so a tile here would be a "
                                        "coarser copy of whatever it was given"),
+    "Armature": ("40_armature.py", "its shape IS its tree: one node is a sphere "
+                                   "and a chain is a stroke, both of which are "
+                                   "already tiles above, so a tile here would "
+                                   "show nothing the branching does"),
 }
 
 

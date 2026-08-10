@@ -60,6 +60,7 @@ add_executable(clay_unit_tests
   unit/test_c_pick_eval.cpp
   unit/test_c_tape_cache.cpp
   unit/test_c_brick.cpp
+  unit/test_armature.cpp
   unit/test_voxel_levels.cpp
   unit/test_c_voxel_levels.cpp
   unit/test_consolidate.cpp

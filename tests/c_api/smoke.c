@@ -318,7 +318,12 @@ static const struct {
             /* half-depth and ease; the profiles are out of line, added below */
             {CLAY_PRIM_LOFT, 2, {0.5f, 0.0f}},
             /* ease only: both the guide and the profiles are out of line */
-            {CLAY_PRIM_SWEPT, 1, {0.0f}}};
+            {CLAY_PRIM_SWEPT, 1, {0.0f}},
+            /* a volume cannot be built from a param array at all, so it holds a
+             * slot here and is skipped below; the armature after it can */
+            {CLAY_PRIM_VOLUME, 0, {0.0f}},
+            /* nodes and parents are out of line, as the stroke's points are */
+            {CLAY_PRIM_ARMATURE, 0, {0.0f}}};
 
 #define ZOO_COUNT (sizeof kZoo / sizeof kZoo[0])
 
@@ -331,6 +336,11 @@ static clay_item* zoo_item(size_t i) {
     clay_result r = CLAY_OK;
     if (kZoo[i].prim == CLAY_PRIM_STROKE)
         r = clay_item_set_stroke_points(one, chain, 2);
+    if (kZoo[i].prim == CLAY_PRIM_ARMATURE) {
+        static const uint32_t parents[2] = {0, 0};
+        r = clay_item_set_stroke_points(one, chain, 2);
+        if (r == CLAY_OK) r = clay_item_set_armature_parents(one, parents, 2);
+    }
     if (kZoo[i].prim == CLAY_PRIM_EXTRUDE || kZoo[i].prim == CLAY_PRIM_REVOLVE)
         r = clay_item_set_profile(one, CLAY_PROFILE_HEXAGON, profile, 1);
     if (kZoo[i].prim == CLAY_PRIM_SWEPT) {
@@ -410,6 +420,10 @@ static int check_primitive_zoo_document(void) {
     REQUIRE(clay_add_sdf_layer(all, "zoo", &all_layer) == CLAY_OK);
     REQUIRE(clay_add_sdf_layer(bounded, "zoo", &bounded_layer) == CLAY_OK);
     for (size_t i = 0; i < ZOO_COUNT; ++i) {
+        /* A volume holds a slot so the table stays indexed by the enum, but it
+         * cannot be built from a param array: its producers are
+         * clay_item_volume_from_mesh and _from_document. */
+        if (kZoo[i].prim == CLAY_PRIM_VOLUME) continue;
         clay_item* one = zoo_item(i);
         REQUIREF(one != NULL, "clay_prim %d: the table entry does not build", (int)kZoo[i].prim);
         REQUIRE(clay_layer_add_item(all, all_layer, one, NULL) == CLAY_OK);
@@ -452,22 +466,32 @@ static int check_every_primitive(void) {
      * two probe values are a unit sine and cosine, which is what the angle
      * primitives take. */
     float probe[7] = {0.6f, 0.8f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f};
-    int highest = -1;
     for (int32_t p = 0; p < 64; ++p) {
+        int creatable = 0;
         for (size_t n = 0; n <= 7; ++n) {
             clay_item* one = clay_item_create(p, probe, n);
             if (!one) continue;
             clay_item_destroy(one);
-            highest = (int)p;
+            creatable = 1;
             break;
         }
+        /* Each value the library accepts must have an entry, checked one by one
+         * rather than by comparing the highest against the count. The two agreed
+         * while every creatable primitive was contiguous, and CLAY_PRIM_VOLUME
+         * broke that: it sits inside the range and cannot be built from a param
+         * array, so anything added after it made the arithmetic wrong without
+         * anything being missing. */
+        REQUIREF(!creatable || p < (int32_t)ZOO_COUNT,
+                 "the library accepts clay_prim %d, the table covers %d: give the new "
+                 "primitive an entry", (int)p, (int)ZOO_COUNT);
     }
-    REQUIREF(highest + 1 == (int)ZOO_COUNT,
-             "the library accepts clay_prim values up to %d, the table covers %d: give the new "
-             "primitive an entry", highest, (int)ZOO_COUNT);
 
-    for (size_t i = 0; i < ZOO_COUNT; ++i)
+    for (size_t i = 0; i < ZOO_COUNT; ++i) {
+        /* A volume's samples cannot come from a param array; its producers are
+         * clay_item_volume_from_mesh and _from_document, covered elsewhere. */
+        if (kZoo[i].prim == CLAY_PRIM_VOLUME) continue;
         if (check_one_primitive(i) != 0) return 1;
+    }
     return check_primitive_zoo_document();
 }
 

@@ -115,7 +115,12 @@ typedef enum clay_prim {
     /* A sampled narrow-band volume. Not built with clay_item_create, which
      * has no way to supply the samples: the producers are
      * clay_item_volume_from_mesh and clay_item_volume_from_document. (bound) */
-    CLAY_PRIM_VOLUME = 33
+    CLAY_PRIM_VOLUME = 33,
+    /* A TREE of spheres, skinned by one sphere-swept cone per node-parent pair
+     * — ZBrush's ZSpheres. The nodes are a stroke's points; the topology is the
+     * parent array beside them. An armature whose parents form a line IS a
+     * stroke, and evaluates identically to one. */
+    CLAY_PRIM_ARMATURE = 34
 } clay_prim;
 
 /* Combine ops. For the extended modes (groove..replace) blend_k is the
@@ -460,7 +465,23 @@ clay_result clay_item_add_loft_profile(clay_item* item, int32_t profile, const f
  * nothing, as in the Python bindings. blend_k (>= 0) smooths consecutive
  * segments of the chain itself. */
 clay_result clay_item_set_stroke_points(clay_item* item, const float* xyzr, size_t count);
+/* The topology half of an armature: one parent index per node, where the nodes
+ * are the points clay_item_set_stroke_points takes. A node whose parent is
+ * itself is a root. Split in two because an armature IS a stroke plus a tree,
+ * and the points already had a setter worth reusing.
+ *
+ * An index outside the node range, or a parent chain that closes a cycle, is
+ * refused: a cycle would make the field depend on traversal order rather than
+ * on the tree. */
+clay_result clay_item_set_armature_parents(clay_item* item, const uint32_t* parents,
+                                           size_t count);
 clay_result clay_item_add_stroke_point(clay_item* item, const float position[3], float radius);
+/* Append one armature node under `parent`, the incremental authoring path that
+ * clay_item_add_stroke_point is for a chain. `parent` < 0 continues from the
+ * last node, which is what dragging a new sphere out of the previous one does.
+ * Only armatures have children, so the name needs no qualifier. */
+clay_result clay_item_add_child(clay_item* item, const float position[3], float radius,
+                                int32_t parent);
 clay_result clay_item_set_stroke_blend_k(clay_item* item, float k);
 
 /* How a point joins the one after it. A stroke is a curve whose points are all
@@ -510,6 +531,28 @@ clay_result clay_item_set_curve(clay_item* item, int32_t closed, float tolerance
  * the two rules clay_layer_add_item enforces on one: closing it is refused for
  * the reason clay_item_set_curve refuses it, and so is cutting it below two
  * points, which would leave the sweep with nothing to follow. */
+/* Tree edits for a placed armature. ONE undo step whatever the edit, because
+ * the command underneath is a whole-tree replace — an armature is tens of
+ * nodes, so that costs less than granular bookkeeping and its inverse is
+ * exactly the tree that was there.
+ *
+ *   CLAY_ARMATURE_ADD_CHILD   `value` is the position, under `target`
+ *   CLAY_ARMATURE_MOVE        `value` is a DELTA, and `target`'s whole subtree
+ *                             moves with it — an arm hangs from a shoulder
+ *   CLAY_ARMATURE_SET_RADIUS  `radius` on `target`
+ *   CLAY_ARMATURE_DELETE      `target` and everything under it
+ *
+ * `mirrored` applies to add-child only: it adds the reflection through x = 0 in
+ * the same step, under the mirror of the parent where there is one. A node on
+ * the plane is its own reflection and is added once. */
+#define CLAY_ARMATURE_ADD_CHILD  0
+#define CLAY_ARMATURE_MOVE       1
+#define CLAY_ARMATURE_SET_RADIUS 2
+#define CLAY_ARMATURE_DELETE     3
+clay_result clay_layer_armature_edit(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                     int32_t op, uint32_t target, const float value[3],
+                                     float radius, int32_t mirrored);
+
 clay_result clay_layer_set_stroke_points(clay_document* doc, clay_layer_id layer,
                                          clay_node_id node, const float* xyzr, size_t count,
                                          const int32_t* types, const float* in_handles_xyz,
