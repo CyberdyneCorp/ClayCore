@@ -199,7 +199,7 @@ def main():
     # -- groups survive a save and reload unchanged -------------------------
     # save -> load -> save: the strict form, since a tree that came back with
     # the same field but a different order would still fail this.
-    path = R.output_path("36_groups.clayspace")
+    path = R.output_path("37_groups.clayspace")
     doc.save(path)
     with open(path, "rb") as f:
         first = f.read()
@@ -229,7 +229,7 @@ def main():
             vents(staged_layer)
         stages.append(R.render_tile(staged, eye=eye, target=target, size=220,
                                     colors_from_field=True, ao=8, ao_reach=0.08))
-    R.contact_sheet(stages, "36_groups_stages.png", columns=4,
+    R.contact_sheet(stages, "37_groups_stages.png", columns=4,
                     caption="core, one plate group, three, vents carved")
 
     # Seen from the side, where a slab reads as a slab: the ungrouped intersect
@@ -239,7 +239,7 @@ def main():
                                  colors_from_field=True, ao=10, ao_reach=0.08)
     flat_tile = R.render_tile(flat_doc, eye=side_eye, target=side_target, size=300,
                               colors_from_field=True, ao=10, ao_reach=0.08)
-    R.side_by_side(grouped_tile, flat_tile, "36_groups_vs_flat.png",
+    R.side_by_side(grouped_tile, flat_tile, "37_groups_vs_flat.png",
                    caption="the intersect inside a group, and the same intersect loose")
 
     # The hero shot carries ambient occlusion, which render() does not take —
@@ -248,10 +248,10 @@ def main():
     eye, target = frame(azimuth=24.0, elevation=10.0)
     image = R.render_array(doc, eye=eye, target=target, colors_from_field=True,
                            ao=12, ao_reach=0.08)
-    R.write_png(R.output_path("36_groups.png"), image)
-    print("  wrote output/36_groups.png  (four groups, one layer)")
+    R.write_png(R.output_path("37_groups.png"), image)
+    print("  wrote output/37_groups.png  (four groups, one layer)")
     print(f"  step scale {doc.safe_step_scale():.3f}")
-    R.export_model(doc, "36_groups.ply", resolution=88, decimate=0.08)
+    R.export_model(doc, "37_groups.ply", resolution=88, decimate=0.08)
 
 
 if __name__ == "__main__":

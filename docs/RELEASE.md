@@ -84,6 +84,31 @@ forward-refuse).
    gets undefined symbols, which a patch number would not normally warn anyone
    about. Read the symbol list rather than the number when pinning.
 
+   **Mesh layers (`add-mesh-layers`) are additive**, and land on whatever
+   version ships next rather than moving one here. They add five symbols —
+   `clay_document_add_mesh_layer`, `clay_document_mesh_layer`,
+   `clay_mesh_layer`, `clay_mesh_bounds`, `clay_mesh_uvs` — and one descriptor,
+   `clay_mesh_layer_desc`. No existing signature changed, nothing was removed
+   and no existing struct grew. `clay_document_mesh` still means "mesh the
+   field" and returns exactly what it returned for the same document.
+
+   The one behaviour change to an existing call is `clay_mesh_destroy` on a
+   mesh obtained from a document layer, which is now a no-op rather than a
+   free. That case could not previously arise — no entry point handed out a
+   borrowed mesh — so no compiled caller can observe the difference. It is a
+   silent no-op rather than the reported refusal `clay_voxel_grid_destroy`
+   gives because the call returns no status, and changing its signature would
+   break every consumer for a case nobody has.
+
+   **`.clayspace` moves 1.4 → 1.5.** The major is unchanged, so nothing is
+   refused on version grounds. The container gains a `MESH` chunk per mesh
+   layer and the layer record's kind byte gains a third value. A reader written
+   against 1.4 opens a 1.5 document, skips the unknown chunk, and ignores a
+   layer whose kind it does not recognise exactly as it already ignores a voxel
+   layer — and loses the mesh layers if it saves the document again, which is
+   the same loss minors 1, 2 and 4 carry. The format notes at the top of
+   `include/clay/io/clayspace.h` record it.
+
 ## Tagging
 
 ```sh

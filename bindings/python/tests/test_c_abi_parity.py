@@ -64,6 +64,16 @@ class MeshParams(ctypes.Structure):
     ]
 
 
+class MeshLayerDesc(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("name", ctypes.c_char_p),
+        ("max_vertices", ctypes.c_uint64),
+        ("max_triangles", ctypes.c_uint64),
+        ("import_scale", ctypes.c_float),
+    ]
+
+
 def find_shared_library():
     start = Path(clay.__file__).resolve().parent
     names = ("libclay_shared.so", "libclay_shared.dylib", "clay_shared.dll")
@@ -84,6 +94,8 @@ def lib():
     lib.clay_document_create.restype = ctypes.c_void_p
     lib.clay_document_destroy.argtypes = [ctypes.c_void_p]
     lib.clay_document_save.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    lib.clay_document_load.argtypes = [ctypes.c_char_p,
+                                       ctypes.POINTER(ctypes.c_void_p)]
     lib.clay_add_sdf_layer.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
                                        ctypes.POINTER(ctypes.c_uint32)]
     lib.clay_item_create.argtypes = [ctypes.c_int32, f32, ctypes.c_size_t]
@@ -159,6 +171,21 @@ def lib():
     lib.clay_voxel_flood_select.argtypes = [ctypes.c_void_p, i32, ctypes.c_int32, i32,
                                             ctypes.POINTER(ctypes.c_size_t)]
     lib.clay_voxel_mesh.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+
+    lib.clay_mesh_from_triangles.argtypes = [f32, ctypes.c_size_t,
+                                             ctypes.POINTER(ctypes.c_uint32), ctypes.c_size_t,
+                                             ctypes.POINTER(ctypes.c_void_p)]
+    lib.clay_mesh_uvs.argtypes = [ctypes.c_void_p]
+    lib.clay_mesh_uvs.restype = f32
+    lib.clay_mesh_bounds.argtypes = [ctypes.c_void_p, f32, f32]
+    lib.clay_mesh_layer.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+    lib.clay_document_add_mesh_layer.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                                 ctypes.POINTER(MeshLayerDesc),
+                                                 ctypes.POINTER(ctypes.c_uint32),
+                                                 ctypes.POINTER(ctypes.c_void_p)]
+    lib.clay_document_mesh_layer.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                             ctypes.POINTER(ctypes.c_uint32),
+                                             ctypes.POINTER(ctypes.c_void_p)]
     return lib
 
 
@@ -841,3 +868,92 @@ def test_group_children_read_back_through_both(lib):
     assert py_layer.children(py_plate) == py_ids
     with pytest.raises(ValueError, match="not a group"):
         py_layer.children(py_ids[0])
+# -- mesh layers -----------------------------------------------------------------
+
+# A tetrahedron: no two coordinates alike, so a transposed or truncated buffer
+# is visible rather than plausible.
+TETRA_POSITIONS = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 2.0, 0.0), (0.0, 0.0, 3.0)]
+TETRA_INDICES = [0, 1, 2, 0, 1, 3, 0, 2, 3, 1, 2, 3]
+IMPORT_SCALE = 0.25
+
+
+def c_mesh_layer_document(lib):
+    """Attach a mesh through the C ABI and hand back the document."""
+    flat = [c for p in TETRA_POSITIONS for c in p]
+    mesh = ctypes.c_void_p(0)
+    assert lib.clay_mesh_from_triangles(floats(*flat), len(TETRA_POSITIONS),
+                                        (ctypes.c_uint32 * len(TETRA_INDICES))(*TETRA_INDICES),
+                                        len(TETRA_INDICES), ctypes.byref(mesh)) == CLAY_OK
+    doc = lib.clay_document_create()
+    desc = MeshLayerDesc()
+    desc.struct_size = ctypes.sizeof(MeshLayerDesc)
+    desc.name = b"scan"
+    desc.import_scale = IMPORT_SCALE
+    layer, borrowed = ctypes.c_uint32(0), ctypes.c_void_p(0)
+    assert lib.clay_document_add_mesh_layer(doc, mesh, ctypes.byref(desc),
+                                            ctypes.byref(layer),
+                                            ctypes.byref(borrowed)) == CLAY_OK
+    lib.clay_mesh_destroy(mesh)
+    return doc, layer.value, borrowed
+
+
+def pyclay_mesh_layer_document():
+    source = clay.Mesh.from_triangles(np.array(TETRA_POSITIONS, np.float32),
+                                      np.array(TETRA_INDICES, np.uint32))
+    doc = clay.Document()
+    return doc, doc.add_mesh_layer(source, "scan", scale=IMPORT_SCALE)
+
+
+def test_mesh_layer_attach_matches_pyclay(lib, tmp_path):
+    """Spec: "attach, transform, export through pyclay and through the C ABI
+    produces identical meshes" — including the uvs neither binding could read
+    before, and the layer id each side reports for the borrowed handle."""
+    doc, layer, borrowed = c_mesh_layer_document(lib)
+    try:
+        py_doc, py_mesh = pyclay_mesh_layer_document()
+
+        got = c_mesh_arrays(lib, borrowed)
+        assert np.array_equal(got["positions"], py_mesh.positions), report(
+            got["positions"], py_mesh.positions, "vertex")
+        assert np.array_equal(got["indices"], py_mesh.indices)
+        assert py_mesh.layer == layer, "the two bindings numbered the layer differently"
+        assert not lib.clay_mesh_uvs(borrowed) and len(py_mesh.uvs) == 0
+
+        lo, hi = floats(0, 0, 0), floats(0, 0, 0)
+        assert lib.clay_mesh_bounds(borrowed, lo, hi) == CLAY_OK
+        assert (tuple(lo), tuple(hi)) == py_mesh.bounds
+
+        # and the C document reloads into pyclay with the same arrays
+        path = tmp_path / "mesh_layer.clayspace"
+        assert lib.clay_document_save(doc, str(path).encode()) == CLAY_OK
+        reloaded = clay.load(str(path)).mesh_layer("scan")
+        assert reloaded is not None, "the mesh layer did not survive the round trip"
+        assert np.array_equal(reloaded.positions, py_mesh.positions)
+        assert np.array_equal(reloaded.indices, py_mesh.indices)
+    finally:
+        lib.clay_document_destroy(doc)
+
+
+def test_mesh_layer_written_by_pyclay_reads_back_through_c(lib, tmp_path):
+    """The other direction, which is the one a one-way parity gate would miss."""
+    py_doc, py_mesh = pyclay_mesh_layer_document()
+    path = tmp_path / "from_pyclay.clayspace"
+    py_doc.save(str(path))
+
+    doc = ctypes.c_void_p(0)
+    assert lib.clay_document_load(str(path).encode(), ctypes.byref(doc)) == CLAY_OK
+    try:
+        borrowed = ctypes.c_void_p(0)
+        assert lib.clay_document_mesh_layer(doc, b"scan", None,
+                                            ctypes.byref(borrowed)) == CLAY_OK
+        got = c_mesh_arrays(lib, borrowed)
+        assert np.array_equal(got["positions"], py_mesh.positions)
+        assert np.array_equal(got["indices"], py_mesh.indices)
+        # Borrowed on this side too: destroying it is a no-op, not a free.
+        lib.clay_mesh_destroy(borrowed)
+        again = ctypes.c_void_p(0)
+        assert lib.clay_document_mesh_layer(doc, b"scan", None,
+                                            ctypes.byref(again)) == CLAY_OK
+        assert lib.clay_mesh_vertex_count(again) == len(TETRA_POSITIONS)
+    finally:
+        lib.clay_document_destroy(doc)

@@ -160,7 +160,11 @@ class SdfContent {
     NodeId next_id_ = 1;
 };
 
-enum class LayerKind : std::uint8_t { Sdf = 0, Voxel = 1 };
+// Appended, so the existing enumerators keep their values and the layer
+// record's kind byte keeps its layout. A build that predates a kind reads it
+// into the fixed uint8_t underlying type and skips the layer at every
+// `kind == Sdf` gate, which is how a non-SDF kind costs no field semantics.
+enum class LayerKind : std::uint8_t { Sdf = 0, Voxel = 1, Mesh = 2 };
 
 inline constexpr std::uint8_t kMirrorX = 1;
 inline constexpr std::uint8_t kMirrorY = 2;
@@ -185,7 +189,10 @@ struct Layer {
     std::uint8_t mirror_axes = 0;  // kMirrorX|Y|Z — item-level mirror flag folds here
     float mirror_k = 0.0f;         // Mirror Blend seam smoothing
     std::shared_ptr<SdfContent> sdf;  // shared between instances
-    // voxel content lands with the voxel-engine group
+    // Voxel and mesh content live beside the document, keyed by layer id (see
+    // io::ClaySpaceDoc): the layering table withholds both modules from
+    // clay::scene, which is what makes "this content does not change what the
+    // document evaluates to" structural rather than a rule to maintain.
 };
 
 class Document {

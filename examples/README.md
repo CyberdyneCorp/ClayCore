@@ -448,13 +448,13 @@ sub-expression, so the intersect stays inside it and the group's own op joins
 the result to whatever the layer already holds — four groups on one layer here,
 where the layer-per-plate technique needs four layers.
 
-![group stages](output/36_groups_stages.png)
+![group stages](output/37_groups_stages.png)
 
 The right-hand half is the same edits with no group at all, kept on the page
 because it is what "the op applies to everything" looks like: the cutter slices
 the core as well, and what is left is the cutter's own box.
 
-![grouped against flat](output/36_groups_vs_flat.png)
+![grouped against flat](output/37_groups_vs_flat.png)
 
 `Op.INLINE` is the other direction — a group whose children apply to the outer
 chain exactly as if they had been added there, so it names and moves a run of
@@ -463,6 +463,30 @@ edits without changing the field. The script asserts that, bit for bit.
 ## Notes
 
 - **This page documents 00-17 and the three showcase examples.** The gallery
+### 36 — a mesh a document carries
+
+`19` imports a model so it can be *sculpted*: the triangles become a distance
+field and stop being triangles. This is the other reason to import one — a
+scan, a scale reference, a kit part — where the requirement is the opposite,
+and the model has to leave the pipeline as what it entered as. A **mesh layer**
+stores the triangles verbatim, saves them inside the `.clayspace`, and is never
+evaluated.
+
+![mesh layer parts](output/36_mesh_layers_parts.png)
+
+Left is what the document's own field contains, which is the sculpt and nothing
+else: the geometry lives beside the document, where the module layering keeps
+`clay::scene` from ever seeing it, so "a mesh layer does not change what the
+document evaluates to" is structural rather than a promise. The middle and
+right panels resample the carried triangles purely to draw them — the very
+approximation a mesh layer exists to avoid — and show that moving the layer
+moves what gets exported, not what is stored.
+
+![mesh layer and sculpt](output/36_mesh_layers.png)
+
+## Notes
+
+- **This page documents 00-17, the two showcase examples and 36.** The gallery
   text has drifted behind the scripts; 18-33 run in CI and regenerate their
   output, they just have no section here yet.
 - **Committed models are budgeted.** `_render.save_model` fails above 400 KiB

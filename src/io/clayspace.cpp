@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "clay/io/mesh_io.h"
 #include "clay/scene/commands.h"
 
 #include "file_bytes.h"
@@ -26,6 +27,7 @@ constexpr std::uint32_t fourcc(const char (&s)[5]) {
 constexpr std::uint32_t kScene = fourcc("SCNE");
 constexpr std::uint32_t kVoxel = fourcc("VOXL");
 constexpr std::uint32_t kMask = fourcc("MASK");
+constexpr std::uint32_t kMesh = fourcc("MESH");
 constexpr std::uint32_t kThumb = fourcc("THMB");
 constexpr std::uint32_t kCamera = fourcc("CAMB");
 
@@ -84,6 +86,38 @@ struct Cursor {
     }
 };
 
+// A mesh chunk and its layer must match, both ways: a payload whose layer is
+// gone is never written, and a chunk naming no mesh layer is dropped on load.
+// That one rule is what makes an orphaned map entry harmless, and layer ids
+// are monotonic so an orphan can never be captured by a later, different
+// layer.
+bool is_mesh_layer(const scene::Document& document, scene::LayerId id) {
+    const scene::Layer* layer = document.find_layer(id);
+    return layer && layer->kind == scene::LayerKind::Mesh;
+}
+
+// Its own function, not a branch inline, so the mesh reader's refusals keep
+// the detail they were written with rather than collapsing into one message.
+IoStatus read_mesh_chunk(const std::uint8_t* payload, std::size_t len, ClaySpaceDoc* out) {
+    if (len < 4) return IoStatus::fail(IoError::Malformed, "mesh chunk too small");
+    std::uint32_t layer_id = 0;
+    std::memcpy(&layer_id, payload, 4);
+    mesh::Mesh m;
+    IoStatus s = load_mesh_stream(payload + 4, len - 4, &m);
+    if (!s.ok()) return s;
+    out->mesh_layers.emplace(layer_id, std::move(m));
+    return IoStatus::success();
+}
+
+void drop_unmatched_mesh_chunks(ClaySpaceDoc* out) {
+    for (auto it = out->mesh_layers.begin(); it != out->mesh_layers.end();) {
+        if (is_mesh_layer(out->document, it->first))
+            ++it;
+        else
+            it = out->mesh_layers.erase(it);
+    }
+}
+
 }  // namespace
 
 std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc) {
@@ -107,6 +141,14 @@ std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc) {
         std::vector<std::uint8_t> mask_bytes = mask.serialize();
         payload.insert(payload.end(), mask_bytes.begin(), mask_bytes.end());
         put_chunk(out, kMask, payload);
+    }
+    for (const auto& [layer_id, m] : doc.mesh_layers) {
+        if (!is_mesh_layer(doc.document, layer_id)) continue;
+        std::vector<std::uint8_t> payload;
+        put_u32(payload, layer_id);
+        std::vector<std::uint8_t> mesh_bytes = save_mesh_stream(m);
+        payload.insert(payload.end(), mesh_bytes.begin(), mesh_bytes.end());
+        put_chunk(out, kMesh, payload);
     }
     if (!doc.thumbnail_png.empty()) put_chunk(out, kThumb, doc.thumbnail_png);
     if (!doc.camera_bookmarks.empty()) put_chunk(out, kCamera, doc.camera_bookmarks);
@@ -164,6 +206,9 @@ IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc
                                                       static_cast<std::size_t>(len) - 4);
             if (!mask) return IoStatus::fail(IoError::Malformed, "mask chunk parse failed");
             result.masks.emplace(layer_id, std::move(*mask));
+        } else if (cc == kMesh) {
+            IoStatus s = read_mesh_chunk(payload, static_cast<std::size_t>(len), &result);
+            if (!s.ok()) return s;
         } else if (cc == kThumb) {
             result.thumbnail_png.assign(payload, payload + len);
         } else if (cc == kCamera) {
@@ -173,6 +218,10 @@ IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc
     }
     if (!c.ok) return IoStatus::fail(IoError::Malformed, "truncated stream");
     if (!have_scene) return IoStatus::fail(IoError::Malformed, "missing scene chunk");
+    // After the loop rather than in the branch: chunk order is the writer's
+    // business, and the scene chunk a mesh chunk is matched against may not
+    // have been read yet.
+    drop_unmatched_mesh_chunks(&result);
     *out = std::move(result);
     return IoStatus::success();
 }

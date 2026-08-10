@@ -740,6 +740,12 @@ typedef struct clay_mesh_params {
  * Python bindings make in the same place. */
 clay_result clay_document_mesh(const clay_document* doc, const clay_mesh_params* params,
                                clay_mesh** out_mesh);
+/* Frees a mesh the caller owns. A mesh BORROWED from a document layer (see
+ * clay_document_mesh_layer) is owned by the document, and destroying one is a
+ * no-op that leaves the document intact. It is a silent no-op rather than the
+ * reported refusal clay_voxel_grid_destroy gives because this call returns no
+ * status, and changing its signature would break every existing consumer for a
+ * case that could not previously arise. */
 void clay_mesh_destroy(clay_mesh* mesh);
 
 size_t clay_mesh_vertex_count(const clay_mesh* mesh);
@@ -749,7 +755,18 @@ size_t clay_mesh_index_count(const clay_mesh* mesh);
 const float* clay_mesh_positions(const clay_mesh* mesh);
 const float* clay_mesh_normals(const clay_mesh* mesh);
 const float* clay_mesh_colors(const clay_mesh* mesh);
+/* count * 2, or NULL when absent. Meshers and the OBJ importer produce uvs and
+ * the OBJ and GLB writers consume them; before this they were the one mesh
+ * attribute the boundary could not read. */
+const float* clay_mesh_uvs(const clay_mesh* mesh);
 const uint32_t* clay_mesh_indices(const clay_mesh* mesh);
+
+/* The box enclosing the mesh's positions — how a host frames an imported
+ * model. It is answered here rather than by clay_layer_bounds because that
+ * query is derived from SDF shapes and would report an empty box for a mesh
+ * layer. An empty mesh returns CLAY_ERROR_INVALID_ARGUMENT rather than an
+ * inverted box. */
+clay_result clay_mesh_bounds(const clay_mesh* mesh, float out_min[3], float out_max[3]);
 
 /* watertight/manifold checks (mesh validation module). */
 clay_result clay_mesh_validate(const clay_mesh* mesh, int32_t* out_watertight,
@@ -783,6 +800,63 @@ clay_result clay_mesh_load(const char* path, const clay_import_budget* budget,
 clay_result clay_mesh_from_triangles(const float* positions, size_t vertex_count,
                                      const uint32_t* indices, size_t index_count,
                                      clay_mesh** out_mesh);
+
+/* -- mesh layers: a document CARRIES a mesh -------------------------------- */
+
+/* The other reason to import a model. clay_item_volume_from_mesh samples one
+ * into a field so it can be sculpted; a mesh LAYER keeps the triangles the
+ * importer produced, verbatim, for display and re-export. A scan, a scale
+ * reference, a kit part — geometry that must leave the pipeline as what it
+ * entered as.
+ *
+ * A mesh layer is never evaluated. It is not compiled into a tape, takes no
+ * part in a blend, contributes to no influence bound and is not pickable; its
+ * geometry is held beside the document rather than in it, so that is
+ * structural rather than a rule this ABI has to keep. clay_document_mesh is
+ * unaffected: it means "mesh the field" and still does.
+ *
+ * Its transform, visibility, ghost, lock and ordering are the ordinary layer
+ * ones, edited through the ordinary layer calls. */
+
+typedef struct clay_mesh_layer_desc {
+    uint32_t struct_size; /* = sizeof(clay_mesh_layer_desc); required */
+    const char* name;     /* the layer's name; required */
+    /* This layer's own ceiling, tighter than the loader's by default: what a
+     * document may CARRY is a different question from what a file may decode
+     * into, and the loader's defaults are 50M vertices. Zero means the
+     * library's default for that field. */
+    uint64_t max_vertices;
+    uint64_t max_triangles;
+    /* Uniform scale baked into the stored vertices, so unit conversion is
+     * resolved once at import rather than approximated by a layer transform.
+     * <= 0 means 1. Non-uniform scale is not expressible and is not
+     * approximated. */
+    float import_scale;
+} clay_mesh_layer_desc;
+
+/* Attaches an ALREADY-LOADED mesh (clay_mesh_load, clay_mesh_from_triangles,
+ * or one this library meshed) as a new layer, copying its geometry. Taking a
+ * handle rather than a path keeps import policy in one place and lets a host
+ * attach geometry it generated itself.
+ *
+ * Goes through the same layer vocabulary every other layer creation uses, so
+ * an enabled undo stack records it and it serializes with the document. Over
+ * the descriptor's budget returns CLAY_ERROR_BUDGET_EXCEEDED and the document
+ * is unchanged. `out_mesh` is BORROWED — see the lifetime note above
+ * clay_document_add_voxel_layer. */
+clay_result clay_document_add_mesh_layer(clay_document* doc, const clay_mesh* mesh,
+                                         const clay_mesh_layer_desc* desc,
+                                         clay_layer_id* out_layer, clay_mesh** out_mesh);
+
+/* Borrows the mesh of an existing mesh layer by name; CLAY_ERROR_NOT_FOUND
+ * when the document has no mesh layer carrying that name. */
+clay_result clay_document_mesh_layer(clay_document* doc, const char* name,
+                                     clay_layer_id* out_layer, clay_mesh** out_mesh);
+
+/* The layer a borrowed mesh belongs to — what the ordinary layer calls
+ * (transform, visibility, ghost, lock, ordering, removal) take. A mesh the
+ * caller owns belongs to no layer and returns CLAY_ERROR_NOT_FOUND. */
+clay_result clay_mesh_layer(const clay_mesh* mesh, clay_layer_id* out_layer);
 
 /* -- importing a mesh as a field ------------------------------------------- */
 
