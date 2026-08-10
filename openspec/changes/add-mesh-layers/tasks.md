@@ -126,3 +126,9 @@ Recorded here so the boundary is visible rather than assumed.
       chunk compression
 - [ ] 7.7 The voxel and mask chunks keep their own orphan behaviour; the mesh
       rule makes the inconsistency visible and a follow-up can close it
+- [ ] 0.1 SEQUENCING (see ROADMAP, "What can run in parallel"): runs in parallel with expose-scene-groups, add-consolidation-policy and add-multi-resolution; touches no VoxelGrid code
+- [ ] 0.2 This change takes `.clayspace` minor **5**. The minors are assigned in the
+      roadmap rather than taken first-come, because three open changes each add a chunk and
+      two bumping independently yields a document claiming one minor while carrying one
+      feature. Bump `kClaySpaceMinor` and `kSceneMinor` together — a static_assert binds them
+

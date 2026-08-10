@@ -10,3 +10,9 @@
 - [ ] 1.8 Both bindings, C ABI additive; a grid built with one level behaves exactly as today
 - [ ] 1.9 Tests: a stroke at a coarse level survives a trip to fine and back; detail added at fine survives an edit at coarse; masks addressed in world units still select the same region at every level; the dither stays reproducible per level; single-level grids are bit-identical to today
 - [ ] 1.10 Example: block out coarse, subdivide, add detail only where it is needed, and report the memory each level costs
+- [ ] 0.1 SEQUENCING (see ROADMAP, "What can run in parallel"): runs FIRST and alone among the VoxelGrid changes; add-sculpt-layers and add-representation-round-trip both wait on it
+- [ ] 0.2 This change takes `.clayspace` minor **6**. The minors are assigned in the
+      roadmap rather than taken first-come, because three open changes each add a chunk and
+      two bumping independently yields a document claiming one minor while carrying one
+      feature. Bump `kClaySpaceMinor` and `kSceneMinor` together — a static_assert binds them
+

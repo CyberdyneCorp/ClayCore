@@ -8,3 +8,4 @@
 - [ ] 1.6 Both bindings, C ABI additive
 - [ ] 1.7 Tests: a shape survives a round trip within the stated tolerance; colour survives; a boolean's edge degrades to the cell size and the test asserts THAT rather than pretending it does not; step scale reported honestly after conversion
 - [ ] 1.8 Example: block out with booleans, convert, sculpt with the voxel verbs, convert back, boolean again
+- [ ] 0.1 SEQUENCING (see ROADMAP, "What can run in parallel"): waits for add-multi-resolution; needs a `.clayspace` minor (8) only if it introduces a new layer kind, which is an open question
