@@ -69,9 +69,16 @@ jobs:
       # and the release-time device gate is what establishes Metal parity.
       - name: Report whether Metal parity actually ran
         run: |
-          checked=$(./build/metal/tests/clay_unit_tests \
-                    -tc="*report which backends*" 2>/dev/null \
-                    | sed -n 's/^PARITY_BACKENDS_CHECKED: //p')
+          # stderr is where the Metal backend explains itself when it will
+          # not register, so it is kept rather than discarded — discarding it
+          # is why three release attempts reported "no Metal backend" without
+          # ever saying why.
+          ./build/metal/tests/clay_unit_tests -tc="*report which backends*" \
+            > /tmp/backends.out 2> /tmp/backends.err || true
+          echo "--- backend diagnostics (stderr) ---"
+          cat /tmp/backends.err || true
+          echo "------------------------------------"
+          checked=$(sed -n 's/^PARITY_BACKENDS_CHECKED: //p' /tmp/backends.out)
           echo "backends compared on this runner: ${checked:-<none>}"
           case "$checked" in
             *metal*) echo "Metal parity ran here." ;;
