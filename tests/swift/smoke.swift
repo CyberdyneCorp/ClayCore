@@ -9,6 +9,7 @@
 // and against the iOS simulator slice, where it runs inside a booted device.
 
 import Foundation
+import Metal
 import claycore
 
 var failures = 0
@@ -67,9 +68,29 @@ func registeredBackends() -> [String] {
 let backends = registeredBackends()
 print("backends: \(backends.joined(separator: ", "))")
 check(backends.contains("cpu"), "the CPU backend is registered")
-check(backends.contains("metal"),
-      "the Metal backend is registered — the xcframework must ship it, since a "
-      + "consumer of a prebuilt static library cannot enable it afterwards")
+// Metal registers only where there is a Metal DEVICE to register against:
+// MetalBackend::create() returns null without one. That is not a property of
+// the artifact, and asserting it unconditionally made this smoke unpassable on
+// a runner with no GPU — which is where the release workflow runs it, so
+// v0.27.0 could not be released at all.
+//
+// The device-independent half is already gated, and gated harder, in
+// tools/build_xcframework.sh: the build fails outright if a slice's merged
+// archive carries no `clay_metallib` symbol. That is what "the xcframework
+// must ship it" means, and it is checked where it is decidable.
+//
+// So here: assert it where a device exists, and SAY SO where one does not,
+// rather than passing silently or failing wrongly.
+if MTLCreateSystemDefaultDevice() != nil {
+    check(backends.contains("metal"),
+          "the Metal backend is registered — this machine has a Metal device, "
+          + "and the xcframework ships the backend")
+} else {
+    print("  SKIP the Metal backend registers on a machine with a Metal device; "
+          + "this one has none. What the artifact SHIPS is gated by "
+          + "tools/build_xcframework.sh, which fails the build if a slice "
+          + "carries no metallib.")
+}
 
 guard let doc = clay_document_create() else {
     print("FAIL could not create a document")

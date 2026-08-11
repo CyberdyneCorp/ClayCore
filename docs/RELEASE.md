@@ -202,6 +202,21 @@ forward-refuse).
    the same loss minors 1, 2 and 4 carry. The format notes at the top of
    `include/clay/io/clayspace.h` record it.
 
+   **0.27.2 is 0.27.1 plus one test fix, and changes no library code either.**
+   v0.27.1's release workflow got past the checklist and failed building the
+   xcframework: the Swift smoke asserts that Metal REGISTERS, and a GitHub
+   macOS runner has no Metal device, so `MetalBackend::create()` returns null
+   and the backend legitimately does not register. The assertion was true of a
+   developer's Mac and false of the runner the release runs on, which made the
+   release unshippable.
+
+   What the ARTIFACT ships is a different question from what a MACHINE gets,
+   and only the first is decidable without a GPU. The first is already gated,
+   harder, in `tools/build_xcframework.sh`: the build fails outright if a
+   slice's merged archive carries no `clay_metallib` symbol. So the smoke now
+   asserts registration where a Metal device exists and prints a SKIP naming
+   the reason where one does not. The v0.27.1 tag remains for the record.
+
    **0.27.1 is 0.27.0 plus one CI fix, and changes no code at all.** v0.27.0 was
    tagged and its release workflow failed its own device gate — not on the
    library, on the clone: `actions/checkout` defaults to depth 1, the gate
