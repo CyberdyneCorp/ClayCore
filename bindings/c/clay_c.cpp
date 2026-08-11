@@ -37,6 +37,8 @@
 #include "clay/scene/commands.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/tape.h"
+#include "clay/io/parity_fixture.h"
+#include "clay/version.h"
 #include "clay/voxel/grid.h"
 #include "clay/brush/mask_extrude.h"
 #include "clay/brush/move.h"
@@ -430,6 +432,12 @@ constexpr std::size_t kBrickStatsOriginal =
     offsetof(clay_brick_stats, memory_budget) + sizeof(std::uint64_t);
 constexpr std::size_t kBrickMeshParamsOriginal =
     offsetof(clay_brick_mesh_params, gradient_eps) + sizeof(float);
+constexpr std::size_t kVertexLayoutOriginal =
+    offsetof(clay_vertex_layout, uv_offset) + sizeof(std::int32_t);
+constexpr std::size_t kDeviceDescOriginal =
+    offsetof(clay_device_desc, queue_family) + sizeof(std::uint32_t);
+constexpr std::size_t kDeviceBufferOriginal =
+    offsetof(clay_device_buffer, size) + sizeof(std::uint64_t);
 
 // Parameters each primitive takes, indexed by clay_prim (= the tape opcode).
 // This is what the clay_prim comments document and what clay_item_create
@@ -1411,6 +1419,19 @@ clay_result exact_capacity(const char* what, std::size_t count, std::size_t per,
     return CLAY_OK;
 }
 
+// The same rule for a buffer that may be absent: exactly count * per when it is
+// there, and exactly nothing when it is not. A capacity declared for a buffer
+// that was not passed is a caller who forgot the pointer, not a caller being
+// generous, so it is refused rather than ignored.
+clay_result optional_capacity(const char* what, const void* buffer, std::size_t count,
+                              std::size_t per, std::size_t capacity) {
+    if (buffer) return exact_capacity(what, count, per, capacity);
+    if (capacity != 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    std::string("no ") + what + " buffer, but a non-zero capacity");
+    return CLAY_OK;
+}
+
 clay_result eval_grid_into(const scene::Tape& tape, const char* backend,
                            const eval::GridQuery& q, float* out_values,
                            float* out_colors_rgb) {
@@ -1499,6 +1520,7 @@ clay_result read_brick_config(const clay_brick_config* src, brick::BrickConfig* 
     out->voxel_size = c.voxel_size;
     out->band_voxels = c.band_voxels;
     out->memory_budget = static_cast<std::size_t>(c.memory_budget);
+    out->colors = c.colors != 0;
     // The band and the brick size are derived, and both are used as divisors
     // and dilations below; an overflow here would make every span check
     // meaningless.
@@ -1568,24 +1590,22 @@ clay_result check_dirty_span(const brick::BrickCache& cache, const math::Aabb& w
     return CLAY_OK;
 }
 
-// One brick's slice of a read_bricks output. Split out because the branch is
-// the interesting part and the argument checking around it is not: a brick the
-// cache has nothing for is MISSING and its slice is LEFT UNTOUCHED, while a
-// uniform brick is FILLED with the band value of its sign so an uploader can
-// memcpy blindly rather than branching on the state.
-std::int32_t write_one_brick(const brick::Brick* b, std::size_t per, std::uint16_t inside,
-                             std::uint16_t outside, std::uint16_t* dst) {
-    if (!b) return CLAY_BRICK_MISSING;
-    const bool surface = b->state == brick::BrickState::Surface;
-    if (surface && b->values.size() != per) return CLAY_BRICK_MISSING;  // never reached
-    if (dst) {
-        if (surface)
-            std::memcpy(dst, b->values.data(), per * sizeof(std::uint16_t));
-        else
-            std::fill(dst, dst + per, b->state == brick::BrickState::Inside ? inside : outside);
-    }
-    return to_c_brick_state(b->state);
+// The fixed stride ONE brick occupies in a read_bricks output: its own lattice
+// plus the halo on both sides of every axis. apron is validated against dim
+// before this runs, so (dim + 2*apron) is at most 3*dim and the cube cannot
+// wrap a size_t for any dim this cache accepts.
+std::size_t padded_samples(const brick::BrickConfig& c, std::int32_t apron) {
+    const std::size_t w = static_cast<std::size_t>(c.dim) + 2 * static_cast<std::size_t>(apron);
+    return w * w * w;
 }
+
+// The colour payload crosses as bytes and is written through a BrickColor*, so
+// the two layouts have to be the same four bytes in the same order.
+static_assert(sizeof(brick::BrickColor) == 4, "BrickColor must be four packed bytes");
+static_assert(offsetof(brick::BrickColor, r) == 0, "BrickColor.r must be first");
+static_assert(offsetof(brick::BrickColor, g) == 1, "BrickColor.g must follow r");
+static_assert(offsetof(brick::BrickColor, b) == 2, "BrickColor.b must follow g");
+static_assert(offsetof(brick::BrickColor, a) == 3, "BrickColor.a must follow b");
 
 // A batch shares one stride, so it shares one lattice size. Requests from one
 // cache always do; a batch that does not is a caller mixing two caches, and
@@ -3031,6 +3051,115 @@ const float* clay_mesh_uvs(const clay_mesh* mesh) {
 const uint32_t* clay_mesh_indices(const clay_mesh* mesh) {
     const mesh::Mesh* m = mesh_data(mesh);
     return m && !m->indices.empty() ? m->indices.data() : nullptr;
+}
+
+namespace {
+
+// One attribute's place in an interleaved vertex: where the caller wants it,
+// how wide it is, and where it comes from. An attribute the caller did not name
+// has no entry, so the checks below never special-case "absent".
+struct VertexAttr {
+    std::uint32_t offset;
+    std::uint32_t width;  // bytes
+    const float* src;
+    std::uint32_t src_stride;  // bytes between consecutive vertices in src
+};
+
+// Gathers the named attributes, refusing any the mesh does not carry. Refused
+// rather than zero-filled: a silently black model is harder to find than an
+// error at the call that asked for it.
+clay_result collect_attrs(const clay_mesh* mesh, const clay_vertex_layout& l,
+                          std::vector<VertexAttr>* out) {
+    const struct {
+        std::int32_t offset;
+        std::uint32_t width;
+        const float* src;
+        const char* name;
+    } wanted[] = {
+        {l.position_offset, 12, clay_mesh_positions(mesh), "positions"},
+        {l.normal_offset, 12, clay_mesh_normals(mesh), "normals"},
+        {l.color_offset, 12, clay_mesh_colors(mesh), "colours"},
+        {l.uv_offset, 8, clay_mesh_uvs(mesh), "uvs"},
+    };
+    for (const auto& w : wanted) {
+        if (w.offset < 0) continue;
+        if (!w.src)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        std::string("the layout names ") + w.name + ", which this mesh does not "
+                        "carry");
+        out->push_back({static_cast<std::uint32_t>(w.offset), w.width, w.src, w.width});
+    }
+    if (out->empty())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the layout names no attribute to copy");
+    return CLAY_OK;
+}
+
+// The two mistakes that produce a buffer which is wrong without looking wrong:
+// attributes that overlap, and a stride that does not clear them.
+clay_result check_layout_fits(const std::vector<VertexAttr>& attrs, std::uint32_t* stride) {
+    std::uint32_t packed_end = 0;
+    for (std::size_t i = 0; i < attrs.size(); ++i) {
+        const std::uint64_t end =
+            static_cast<std::uint64_t>(attrs[i].offset) + attrs[i].width;
+        if (end > 0xFFFFFFFFull)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "an attribute offset overflows a vertex");
+        packed_end = std::max<std::uint32_t>(packed_end, static_cast<std::uint32_t>(end));
+        for (std::size_t j = i + 1; j < attrs.size(); ++j) {
+            const bool disjoint = attrs[i].offset + attrs[i].width <= attrs[j].offset ||
+                                  attrs[j].offset + attrs[j].width <= attrs[i].offset;
+            if (!disjoint)
+                return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                            "two attributes overlap in the vertex layout");
+        }
+    }
+    if (*stride == 0) {
+        *stride = packed_end;  // tightly packed IS the layout the caller described
+    } else if (*stride < packed_end) {
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "stride " + std::to_string(*stride) + " does not clear the attributes, which "
+                    "need " + std::to_string(packed_end) + " bytes");
+    }
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_mesh_copy_vertices(const clay_mesh* mesh, const clay_vertex_layout* layout,
+                                    void* dst, size_t dst_bytes) {
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh, &m);
+    if (r != CLAY_OK) return r;
+    if (!layout || !dst) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null layout or destination");
+    clay_vertex_layout l;
+    r = read_desc(layout, kVertexLayoutOriginal, &l);
+    if (r != CLAY_OK) return r;
+    std::vector<VertexAttr> attrs;
+    r = collect_attrs(mesh, l, &attrs);
+    if (r != CLAY_OK) return r;
+    std::uint32_t stride = l.stride;
+    r = check_layout_fits(attrs, &stride);
+    if (r != CLAY_OK) return r;
+    const std::size_t vertices = m->positions.size();
+    r = exact_capacity("interleaved vertex", vertices, stride, dst_bytes);
+    if (r != CLAY_OK) return r;
+    auto* out = static_cast<std::uint8_t*>(dst);
+    for (std::size_t v = 0; v < vertices; ++v)
+        for (const VertexAttr& a : attrs)
+            std::memcpy(out + v * stride + a.offset,
+                        reinterpret_cast<const std::uint8_t*>(a.src) + v * a.src_stride, a.width);
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_copy_indices(const clay_mesh* mesh, uint32_t* dst, size_t dst_count) {
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh, &m);
+    if (r != CLAY_OK) return r;
+    if (!dst) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null destination");
+    r = exact_capacity("index", m->indices.size(), 1, dst_count);
+    if (r != CLAY_OK) return r;
+    if (!m->indices.empty())
+        std::memcpy(dst, m->indices.data(), m->indices.size() * sizeof(std::uint32_t));
+    return CLAY_OK;
 }
 
 clay_result clay_mesh_bounds(const clay_mesh* mesh, float out_min[3], float out_max[3]) {
@@ -4815,6 +4944,344 @@ clay_result clay_eval_grid(const clay_document* doc, const char* backend,
     return eval_grid_into(tape, backend, query, out_values, out_colors_rgb);
 }
 
+// -- the host parity fixture (build-packaging spec: host parity fixture) -----
+
+clay_result clay_parity_fixture_json(char* buffer, size_t* size) {
+    if (!size) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null size");
+    // Built on each call rather than cached: this is a test-time entry point,
+    // and a static cache would hold a few hundred kilobytes for the whole life
+    // of every process that never calls it.
+    const std::string json = io::kernel_parity_fixture_json(io::kernel_parity_cases());
+    const std::size_t needed = json.size() + 1;
+    if (!buffer) {
+        *size = needed;
+        return CLAY_OK;
+    }
+    if (*size < needed) {
+        *size = needed;
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "the parity fixture needs " + std::to_string(needed) + " bytes");
+    }
+    std::memcpy(buffer, json.c_str(), needed);
+    *size = needed;
+    return CLAY_OK;
+}
+
+// -- device interop (evaluation-backends spec: a caller-supplied device) -----
+
+struct clay_device {
+    std::unique_ptr<eval::Backend> backend;
+};
+
+namespace {
+
+clay_result read_device_buffer(const clay_device_buffer* src, const char* what,
+                               eval::DeviceBuffer* out) {
+    if (!src) {
+        *out = eval::DeviceBuffer{};
+        return CLAY_OK;  // an absent optional destination, not an error
+    }
+    clay_device_buffer d;
+    clay_result r = read_desc(src, kDeviceBufferOriginal, &d);
+    if (r != CLAY_OK) return r;
+    if (!d.handle)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, std::string("null ") + what + " handle");
+    if (d.size == 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    std::string("the ") + what + " buffer declares no available size; it is "
+                    "required rather than inferred, as every other length here is");
+    out->handle = d.handle;
+    out->offset = d.offset;
+    out->size = d.size;
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_device* clay_device_adopt(const clay_device_desc* desc) {
+    clay_device_desc d;
+    if (read_desc(desc, kDeviceDescOriginal, &d) != CLAY_OK) return nullptr;
+    eval::DeviceApi api;
+    const char* backend_name = nullptr;
+    switch (d.api) {
+        case CLAY_DEVICE_API_METAL:
+            api = eval::DeviceApi::Metal;
+            backend_name = "metal";
+            break;
+        case CLAY_DEVICE_API_VULKAN:
+            api = eval::DeviceApi::Vulkan;
+            backend_name = "vulkan";
+            break;
+        case CLAY_DEVICE_API_CUDA:
+            api = eval::DeviceApi::Cuda;
+            backend_name = "cuda";
+            break;
+        default:
+            fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown device API: " + std::to_string(d.api));
+            return nullptr;
+    }
+    eval::DeviceHandles handles;
+    handles.api = api;
+    for (int i = 0; i < 6; ++i) handles.handles[i] = d.handles[i];
+    handles.queue_family = d.queue_family;
+    std::unique_ptr<eval::Backend> backend = eval::make_backend(backend_name, handles);
+    if (!backend) {
+        // Refused at ADOPT rather than at first use, so a caller learns at the
+        // point it can still choose a fallback. It is a capability report: the
+        // registered backend stays usable and produces the same values.
+        fail(CLAY_ERROR_UNSUPPORTED,
+             std::string("the ") + backend_name +
+                 " backend cannot adopt this device: it is not compiled in, has no adoption "
+                 "path, or the handles are incomplete for that API");
+        return nullptr;
+    }
+    auto* handle = new clay_device();
+    handle->backend = std::move(backend);
+    return handle;
+}
+
+void clay_device_release(clay_device* device) { delete device; }
+
+const char* clay_device_backend_name(const clay_device* device) {
+    return device && device->backend ? device->backend->name() : nullptr;
+}
+
+clay_result clay_eval_grid_device(const clay_document* doc, clay_device* device,
+                                  const clay_grid_query* grid, const float region_min[3],
+                                  const float region_max[3],
+                                  const clay_device_buffer* out_values,
+                                  const clay_device_buffer* out_colors_rgb) {
+    if (!doc || !device || !device->backend || !grid || !out_values)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document, device, grid or values");
+    clay_grid_query q;
+    clay_result r = read_desc(grid, kGridQueryOriginal, &q);
+    if (r != CLAY_OK) return r;
+    eval::GridQuery query;
+    std::size_t samples = 0;
+    r = read_grid(q.origin, q.spacing, q.dims, &query, &samples);
+    if (r != CLAY_OK) return r;
+    eval::DeviceBuffer values, colors;
+    r = read_device_buffer(out_values, "values", &values);
+    if (r != CLAY_OK) return r;
+    r = read_device_buffer(out_colors_rgb, "colours", &colors);
+    if (r != CLAY_OK) return r;
+    bool has_region = false;
+    math::Aabb region;
+    r = read_region(region_min, region_max, "the cull region", &has_region, &region);
+    if (r != CLAY_OK) return r;
+
+    std::shared_ptr<const scene::Tape> whole;
+    scene::Tape culled;
+    const scene::Tape* tape = nullptr;
+    if (has_region) {
+        scene::CullRegion cull{region};
+        culled = scene::compile_document(doc->doc.document, &cull);
+        tape = &culled;
+    } else {
+        whole = doc->tape();
+        tape = whole.get();
+    }
+    switch (device->backend->eval_grid_device(*tape, query, values, colors)) {
+        case eval::Status::Ok: return CLAY_OK;
+        case eval::Status::Unsupported:
+            return fail(CLAY_ERROR_UNSUPPORTED,
+                        "this backend does not evaluate into a caller's device buffer");
+        case eval::Status::InvalidInput:
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "the device buffer is too small for the lattice, or the lattice is "
+                        "empty");
+        default: return fail(CLAY_ERROR_BACKEND, "device evaluation failed");
+    }
+}
+
+clay_result clay_brick_cache_eval_requests_device(const clay_document* doc, clay_device* device,
+                                                  const clay_brick_request* requests,
+                                                  size_t count,
+                                                  const clay_device_buffer* out_values,
+                                                  const clay_device_buffer* out_colors_rgb) {
+    if (!doc || !device || !device->backend)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or device");
+    if (count > 0 && (!requests || !out_values))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null requests or values");
+    clay_result r = check_batch("brick requests", count);
+    if (r != CLAY_OK) return r;
+    if (count == 0) return CLAY_OK;
+    eval::GridQuery first;
+    std::size_t per = 0;
+    r = read_grid(requests[0].origin, requests[0].spacing, requests[0].dims, &first, &per);
+    if (r != CLAY_OK) return r;
+    r = check_uniform_dims(requests, count);
+    if (r != CLAY_OK) return r;
+    eval::DeviceBuffer values, colors;
+    r = read_device_buffer(out_values, "values", &values);
+    if (r != CLAY_OK) return r;
+    r = read_device_buffer(out_colors_rgb, "colours", &colors);
+    if (r != CLAY_OK) return r;
+    // The whole batch's stride is checked up front, so a buffer that cannot
+    // hold every brick is refused before the first dispatch rather than after
+    // the ones that fit have already landed.
+    const std::uint64_t values_bytes = static_cast<std::uint64_t>(count) * per * sizeof(float);
+    if (values.size < values_bytes)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the device values buffer holds " + std::to_string(values.size) +
+                        " bytes; " + std::to_string(count) + " bricks need " +
+                        std::to_string(values_bytes));
+    if (!colors.empty() && colors.size < values_bytes * 3)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the device colour buffer is too small for " + std::to_string(count) +
+                        " bricks");
+
+    for (std::size_t i = 0; i < count; ++i) {
+        eval::GridQuery q;
+        std::size_t samples = 0;
+        r = read_grid(requests[i].origin, requests[i].spacing, requests[i].dims, &q, &samples);
+        if (r != CLAY_OK) return r;
+        const float band = requests[i].band;
+        if (!(band >= 0.0f) || !std::isfinite(band))
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "a request carries a band that is not finite and >= 0");
+        // Culled against its own brick dilated by its own band, exactly as the
+        // host-memory form does: the two produce the same values and differ
+        // only in where they land.
+        scene::CullRegion cull{request_brick_box(requests[i]).dilated(band)};
+        scene::Tape tape = scene::compile_document(doc->doc.document, &cull);
+        // Brick i at its own slot in the caller's single allocation.
+        eval::DeviceBuffer slot = values;
+        slot.offset = values.offset + static_cast<std::uint64_t>(i) * per * sizeof(float);
+        slot.size = static_cast<std::uint64_t>(per) * sizeof(float);
+        eval::DeviceBuffer color_slot;
+        if (!colors.empty()) {
+            color_slot = colors;
+            color_slot.offset =
+                colors.offset + static_cast<std::uint64_t>(i) * per * 3 * sizeof(float);
+            color_slot.size = static_cast<std::uint64_t>(per) * 3 * sizeof(float);
+        }
+        switch (device->backend->eval_grid_device(tape, q, slot, color_slot)) {
+            case eval::Status::Ok: break;
+            case eval::Status::Unsupported:
+                return fail(CLAY_ERROR_UNSUPPORTED,
+                            "this backend does not evaluate into a caller's device buffer");
+            case eval::Status::InvalidInput:
+                return fail(CLAY_ERROR_INVALID_ARGUMENT, "a brick's device slot is invalid");
+            default: return fail(CLAY_ERROR_BACKEND, "device evaluation failed");
+        }
+    }
+    return CLAY_OK;
+}
+
+// -- the compiled tape (c-abi spec: the compiled tape is exportable) ---------
+
+// An immutable snapshot. The document hands out its compiled tape as a
+// shared_ptr<const Tape> keyed on a revision and installs a NEW one on an edit
+// rather than mutating the old, so holding a copy of the pointer is the whole
+// implementation of "editing cannot invalidate an export": exporting costs a
+// refcount, and there is no window in which a borrowed buffer goes bad.
+//
+// A culled tape has no such cache and is compiled per call, so it is owned here
+// the same way — the handle is the only difference the caller sees.
+struct clay_tape {
+    std::shared_ptr<const scene::Tape> tape;
+    std::uint64_t revision = 0;
+};
+
+namespace {
+
+// clay_tape_instr IS kernel::CTapeInstr: the caller's evaluator is ctape_eval
+// compiled from the header that declares it, so the two layouts agreeing is
+// not a convenience, it is the contract.
+static_assert(sizeof(clay_tape_instr) == sizeof(kernel::CTapeInstr),
+              "clay_tape_instr must be kernel::CTapeInstr");
+static_assert(offsetof(clay_tape_instr, op) == offsetof(kernel::CTapeInstr, op),
+              "clay_tape_instr.op must match");
+static_assert(offsetof(clay_tape_instr, param_offset) ==
+                  offsetof(kernel::CTapeInstr, param_offset),
+              "clay_tape_instr.param_offset must match");
+
+clay_result resolve_tape(const clay_tape* tape, const scene::Tape** out) {
+    if (!tape || !tape->tape) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null tape");
+    *out = tape->tape.get();
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_tape_export(const clay_document* doc, const float region_min[3],
+                             const float region_max[3], clay_tape** out_tape) {
+    if (!doc || !out_tape)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out_tape");
+    bool has_region = false;
+    math::Aabb region;
+    clay_result r = read_region(region_min, region_max, "the cull region", &has_region, &region);
+    if (r != CLAY_OK) return r;
+    auto* handle = new clay_tape();
+    handle->revision = doc->revision.load(std::memory_order_relaxed);
+    if (has_region) {
+        // Compiled per call and deliberately not cached, exactly as
+        // clay_eval_grid does it: consecutive regions differ, so a slot keyed
+        // on the document alone would thrash.
+        scene::CullRegion cull{region};
+        handle->tape =
+            std::make_shared<const scene::Tape>(scene::compile_document(doc->doc.document, &cull));
+    } else {
+        handle->tape = doc->tape();  // a refcount, not a compile
+    }
+    *out_tape = handle;
+    return CLAY_OK;
+}
+
+void clay_tape_release(clay_tape* tape) { delete tape; }
+
+uint32_t clay_tape_encoding_version(void) {
+    // clay::version(), which is the CMake project version — the same number
+    // tools/package_kernels.py stamps into the package's VERSION file, read
+    // from the same line of CMakeLists.txt. One number for both because a host
+    // evaluates an exported tape with ctape_eval from that package's headers:
+    // an opcode present on one side and absent on the other is a wrong ANSWER,
+    // not a link error, so the two cannot be versioned independently. This is
+    // deliberately NOT clay_version()'s CLAY_ABI_*, which tracks the shape of
+    // this header rather than the shape of the tape.
+    const Version v = clay::version();
+    return static_cast<std::uint32_t>(v.major) * 1000000u +
+           static_cast<std::uint32_t>(v.minor) * 1000u + static_cast<std::uint32_t>(v.patch);
+}
+
+const clay_tape_instr* clay_tape_instrs(const clay_tape* tape, size_t* out_count) {
+    const scene::Tape* t = nullptr;
+    if (!out_count || resolve_tape(tape, &t) != CLAY_OK) return nullptr;
+    *out_count = t->instrs.size();
+    return t->instrs.empty() ? nullptr
+                             : reinterpret_cast<const clay_tape_instr*>(t->instrs.data());
+}
+
+const float* clay_tape_params(const clay_tape* tape, size_t* out_count) {
+    const scene::Tape* t = nullptr;
+    if (!out_count || resolve_tape(tape, &t) != CLAY_OK) return nullptr;
+    *out_count = t->params.size();
+    return t->params.empty() ? nullptr : t->params.data();
+}
+
+const float* clay_tape_blob(const clay_tape* tape, size_t* out_count) {
+    const scene::Tape* t = nullptr;
+    if (!out_count || resolve_tape(tape, &t) != CLAY_OK) return nullptr;
+    *out_count = t->blob.size();
+    return t->blob.empty() ? nullptr : t->blob.data();
+}
+
+clay_result clay_tape_info(const clay_tape* tape, int32_t* out_is_exact, float* out_lipschitz,
+                           float* out_safe_step_scale, float out_bounds_min[3],
+                           float out_bounds_max[3], uint64_t* out_revision) {
+    const scene::Tape* t = nullptr;
+    clay_result r = resolve_tape(tape, &t);
+    if (r != CLAY_OK) return r;
+    if (out_is_exact) *out_is_exact = t->info.is_exact ? 1 : 0;
+    if (out_lipschitz) *out_lipschitz = t->info.lipschitz;
+    if (out_safe_step_scale) *out_safe_step_scale = t->safe_step_scale();
+    if (out_bounds_min) write_f3(out_bounds_min, t->bounds.min);
+    if (out_bounds_max) write_f3(out_bounds_max, t->bounds.max);
+    if (out_revision) *out_revision = tape->revision;
+    return CLAY_OK;
+}
+
 // -- the brick cache (brick-cache spec, through the C boundary) --------------
 
 clay_result clay_brick_config_defaults(clay_brick_config* out_config) {
@@ -4826,6 +5293,7 @@ clay_result clay_brick_config_defaults(clay_brick_config* out_config) {
     out_config->voxel_size = d.voxel_size;
     out_config->band_voxels = d.band_voxels;
     out_config->memory_budget = d.memory_budget;
+    out_config->colors = d.colors ? 1 : 0;
     return CLAY_OK;
 }
 
@@ -4854,6 +5322,7 @@ clay_result clay_brick_cache_config(const clay_brick_cache* cache,
     out_config->voxel_size = c.voxel_size;
     out_config->band_voxels = c.band_voxels;
     out_config->memory_budget = c.memory_budget;
+    out_config->colors = c.colors ? 1 : 0;
     return CLAY_OK;
 }
 
@@ -4973,14 +5442,15 @@ clay_result clay_brick_cache_take_dirty(clay_brick_cache* cache,
 
 clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char* backend,
                                            const clay_brick_request* requests, size_t count,
-                                           float* out_values, size_t values_capacity) {
+                                           float* out_values, size_t values_capacity,
+                                           float* out_colors_rgb, size_t colors_capacity) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     if (count > 0 && (!requests || !out_values))
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null requests or values");
     clay_result r = check_batch("brick requests", count);
     if (r != CLAY_OK) return r;
     if (count == 0) {
-        if (values_capacity != 0)
+        if (values_capacity != 0 || colors_capacity != 0)
             return fail(CLAY_ERROR_INVALID_ARGUMENT, "no requests, but a non-empty buffer");
         return CLAY_OK;
     }
@@ -4992,6 +5462,8 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
     r = read_grid(requests[0].origin, requests[0].spacing, requests[0].dims, &first, &per);
     if (r != CLAY_OK) return r;
     r = exact_capacity("brick values", count, per, values_capacity);
+    if (r != CLAY_OK) return r;
+    r = optional_capacity("brick colours", out_colors_rgb, count, per * 3, colors_capacity);
     if (r != CLAY_OK) return r;
     r = check_uniform_dims(requests, count);
     if (r != CLAY_OK) return r;
@@ -5008,7 +5480,8 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
             return fail(CLAY_ERROR_INVALID_ARGUMENT, "a request carries a band that is not finite and >= 0");
         scene::CullRegion cull{request_brick_box(requests[i]).dilated(band)};
         scene::Tape tape = scene::compile_document(doc->doc.document, &cull);
-        r = eval_grid_into(tape, backend, q, out_values + i * per, nullptr);
+        r = eval_grid_into(tape, backend, q, out_values + i * per,
+                           out_colors_rgb ? out_colors_rgb + i * per * 3 : nullptr);
         if (r != CLAY_OK) return r;
     }
     return CLAY_OK;
@@ -5017,6 +5490,7 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
 clay_result clay_brick_cache_submit(clay_brick_cache* cache,
                                     const clay_brick_request* requests, size_t count,
                                     const float* values, size_t values_capacity,
+                                    const float* colors_rgb, size_t colors_capacity,
                                     int32_t* out_results, size_t* out_accepted) {
     if (!cache) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brick cache");
     if (count > 0 && (!requests || !values))
@@ -5031,6 +5505,17 @@ clay_result clay_brick_cache_submit(clay_brick_cache* cache,
     const std::size_t per = brick_samples(config);
     r = exact_capacity("brick values", count, per, values_capacity);
     if (r != CLAY_OK) return r;
+    // Required with colour and refused without it, both ways round: a brick
+    // with a colour lattice and a brick without one are not the same brick to
+    // read back, so there is no cache that takes colour optionally.
+    if (config.colors && count > 0 && !colors_rgb)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this cache was created with colours, so submit needs colors_rgb");
+    if (!config.colors && colors_rgb)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this cache was created without colours and has nowhere to store them");
+    r = optional_capacity("brick colours", colors_rgb, count, per * 3, colors_capacity);
+    if (r != CLAY_OK) return r;
     r = check_requests_match(requests, count, config);
     if (r != CLAY_OK) return r;
     std::size_t accepted = 0;
@@ -5041,7 +5526,8 @@ clay_result clay_brick_cache_submit(clay_brick_cache* cache,
         // -Wclass-memaccess to object to the typed form.
         std::memcpy(static_cast<void*>(&req), static_cast<const void*>(&requests[i]),
                     sizeof req);
-        brick::SubmitResult result = cache->cache.submit(req, values + i * per);
+        brick::SubmitResult result = cache->cache.submit(
+            req, values + i * per, colors_rgb ? colors_rgb + i * per * 3 : nullptr);
         if (result == brick::SubmitResult::Accepted) ++accepted;
         if (out_results) out_results[i] = to_c_submit(result);
     }
@@ -5080,35 +5566,53 @@ clay_result clay_brick_cache_sample(const clay_brick_cache* cache, const int32_t
 }
 
 clay_result clay_brick_cache_read_bricks(const clay_brick_cache* cache, int32_t lod,
-                                         const int32_t* keys_xyz, size_t count,
+                                         const int32_t* keys_xyz, size_t count, int32_t apron,
                                          int32_t* out_states, uint16_t* out_halves,
-                                         size_t values_capacity) {
+                                         size_t values_capacity, uint8_t* out_colors_rgba,
+                                         size_t colors_capacity) {
     if (!cache) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brick cache");
     if (lod != 0 && lod != 1)
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "lod must be 0 (full resolution) or 1 (mip), got " + std::to_string(lod));
     if (count > 0 && !keys_xyz) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null keys");
-    if (!out_states && !out_halves)
-        return fail(CLAY_ERROR_INVALID_ARGUMENT, "read_bricks needs out_states or out_halves");
+    if (!out_states && !out_halves && !out_colors_rgba)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "read_bricks needs out_states, out_halves or out_colors_rgba");
     clay_result r = check_batch("bricks", count);
     if (r != CLAY_OK) return r;
     const brick::BrickConfig& config = cache->cache.config();
-    const std::size_t per = brick_samples(config);
-    if (out_halves) {
-        r = exact_capacity("brick half", count, per, values_capacity);
-        if (r != CLAY_OK) return r;
-    } else if (values_capacity != 0) {
+    // Refused rather than clamped, for the reason lod > 1 is: past a brick's
+    // own width the tile is mostly neighbour, and what the caller wants there
+    // is a coarser lod, not a fatter apron.
+    if (apron < 0 || apron > config.dim)
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
-                    "no out_halves, but a non-zero values_capacity");
-    }
-    const std::uint16_t inside = brick::float_to_half(-config.band());
-    const std::uint16_t outside = brick::float_to_half(config.band());
+                    "apron must be in [0, dim] = [0, " + std::to_string(config.dim) +
+                        "], got " + std::to_string(apron));
+    if (out_colors_rgba && !config.colors)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this cache was created without colours and stores none to read");
+    // A mip subsamples DISTANCES; averaging colour over its 2x2x2 block would
+    // be a filtering policy chosen on the caller's behalf, so it is reported
+    // rather than invented.
+    if (out_colors_rgba && lod != 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a mip carries no colour lattice");
+    const std::size_t per = padded_samples(config, apron);
+    r = optional_capacity("brick half", out_halves, count, per, values_capacity);
+    if (r != CLAY_OK) return r;
+    r = optional_capacity("brick colour", out_colors_rgba, count, per * 4, colors_capacity);
+    if (r != CLAY_OK) return r;
     for (std::size_t i = 0; i < count; ++i) {
         const brick::BrickKey key = to_brick_key(keys_xyz + i * 3);
-        const brick::Brick* b = lod == 0 ? cache->cache.find(key) : cache->cache.find_mip(key);
-        std::int32_t state = write_one_brick(b, per, inside, outside,
-                                             out_halves ? out_halves + i * per : nullptr);
-        if (out_states) out_states[i] = state;
+        const brick::Brick* b = cache->cache.find_lod(lod, key);
+        // MISSING leaves the WHOLE padded slice untouched. The rule is about
+        // the key, not its neighbourhood: a caller wanting a tile of band
+        // values for a brick that does not exist can synthesize one.
+        if (out_states) out_states[i] = b ? to_c_brick_state(b->state) : CLAY_BRICK_MISSING;
+        if (!b) continue;
+        if (out_halves) cache->cache.read_padded(lod, key, apron, out_halves + i * per);
+        if (out_colors_rgba)
+            cache->cache.read_colors_padded(
+                key, apron, reinterpret_cast<brick::BrickColor*>(out_colors_rgba) + i * per);
     }
     return CLAY_OK;
 }
@@ -5150,11 +5654,22 @@ clay_result clay_brick_cache_current_lod(const clay_brick_cache* cache,
 }
 
 clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_document* doc,
-                                  const clay_brick_mesh_params* params, clay_mesh** out_mesh) {
+                                  const clay_brick_mesh_params* params, const int32_t* keys_xyz,
+                                  size_t key_count, clay_brick_mesh_range* out_ranges,
+                                  clay_mesh** out_mesh) {
     if (!cache || !params || !out_mesh)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brick cache, params or out_mesh");
+    if (key_count > 0 && !keys_xyz)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a key count without keys");
+    // Ranges need a key list: with none there is no count the caller could have
+    // sized out_ranges from, and this ABI infers no length anywhere else.
+    if (out_ranges && !keys_xyz)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "out_ranges needs keys_xyz: without one there is no count to size it by");
+    clay_result r = check_batch("brick keys", key_count);
+    if (r != CLAY_OK) return r;
     clay_brick_mesh_params p;
-    clay_result r = read_desc(params, kBrickMeshParamsOriginal, &p);
+    r = read_desc(params, kBrickMeshParamsOriginal, &p);
     if (r != CLAY_OK) return r;
     if (!normal_mode_is_known(p.normals))
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
@@ -5175,8 +5690,28 @@ clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_docu
         tape_ref = doc->tape();
         tape = tape_ref.get();
     }
+    // NULL keys means "every surface brick", which is what this call did before
+    // the key list existed and what an export wants.
+    std::vector<brick::BrickKey> subset;
+    if (keys_xyz) {
+        subset.reserve(key_count);
+        for (std::size_t i = 0; i < key_count; ++i)
+            subset.push_back(to_brick_key(keys_xyz + i * 3));
+    }
+    std::vector<mesh::BrickMeshRange> ranges;
     auto* handle = new clay_mesh();
-    handle->data = mesh::mesh_bricks(cache->cache, tape, options);
+    handle->data = mesh::mesh_bricks(cache->cache, tape, options, keys_xyz ? &subset : nullptr,
+                                     out_ranges ? &ranges : nullptr);
+    if (out_ranges)
+        for (std::size_t i = 0; i < ranges.size(); ++i) {
+            out_ranges[i].key[0] = ranges[i].key.x;
+            out_ranges[i].key[1] = ranges[i].key.y;
+            out_ranges[i].key[2] = ranges[i].key.z;
+            out_ranges[i].vertex_first = ranges[i].vertex_first;
+            out_ranges[i].vertex_count = ranges[i].vertex_count;
+            out_ranges[i].index_first = ranges[i].index_first;
+            out_ranges[i].index_count = ranges[i].index_count;
+        }
     *out_mesh = handle;
     return CLAY_OK;
 }
@@ -5194,6 +5729,33 @@ clay_result clay_brick_cache_raycast(const clay_brick_cache* cache, const float 
     if (out_t) *out_t = hit.t;
     if (out_position) write_f3(out_position, hit.position);
     if (out_normal) write_f3(out_normal, hit.normal);
+    return CLAY_OK;
+}
+
+clay_result clay_brick_cache_raycast_many(const clay_brick_cache* cache,
+                                          const float* rays_origin_dir, size_t count,
+                                          int32_t* out_hits, float* out_t,
+                                          float* out_positions_xyz, float* out_normals_xyz) {
+    if (!cache || (count > 0 && !rays_origin_dir))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brick cache or rays");
+    if (count == 0) return CLAY_OK;  // no rays is no work, not a rejected query
+    // Normalized and batch-checked by the same helper clay_raycast_many uses,
+    // so a zero-length direction is refused identically on both surfaces.
+    std::vector<float> rays;
+    clay_result r = normalize_rays(rays_origin_dir, count, &rays);
+    if (r != CLAY_OK) return r;
+    std::vector<eval::RayHit> hits(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        math::Ray ray;
+        ray.origin = kernel::cf3(rays[i * 6], rays[i * 6 + 1], rays[i * 6 + 2]);
+        ray.dir = kernel::cf3(rays[i * 6 + 3], rays[i * 6 + 4], rays[i * 6 + 5]);
+        const pick::SceneHit hit = pick::raycast_bricks(cache->cache, ray);
+        hits[i].hit = hit.hit ? 1 : 0;
+        hits[i].t = hit.t;
+        write_f3(hits[i].pos, hit.position);
+        write_f3(hits[i].normal, hit.normal);
+    }
+    write_ray_hits(hits, count, out_hits, out_t, out_positions_xyz, out_normals_xyz);
     return CLAY_OK;
 }
 

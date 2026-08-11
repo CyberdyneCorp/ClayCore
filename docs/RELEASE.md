@@ -84,6 +84,38 @@ forward-refuse).
    gets undefined symbols, which a patch number would not normally warn anyone
    about. Read the symbol list rather than the number when pinning.
 
+   **0.26.0 is such a release** — the third, after 0.2.0 and 0.22.0. Four
+   `clay_brick_cache_*` entry points gained parameters rather than acquiring
+   `_colored` / `_apron` / `_subset` siblings, following the precedent
+   `clay_mesh_load` set in `close-c-abi-issue-gaps`: two entry points differing
+   by one nullable argument would be two ways to say one thing.
+
+   - `clay_brick_cache_read_bricks` gained `int32_t apron` after `count`, and
+     `uint8_t* out_colors_rgba` + `size_t colors_capacity` at the end.
+   - `clay_brick_cache_eval_requests` and `clay_brick_cache_submit` each gained
+     a `float*` colour buffer and its capacity.
+   - `clay_brick_cache_mesh` gained `keys_xyz`, `key_count` and `out_ranges`
+     before its out-parameter.
+
+   Every one is an ARITY change, so a caller compiled against 0.25.0 gets a
+   **compile error rather than a misread** — there is no way for old code to
+   link and behave differently, which is the property the never-silent rule is
+   protecting. Passing `NULL`/`0` for each new argument reproduces the 0.25.0
+   behaviour exactly, so the migration is mechanical.
+
+   `clay_brick_config` GREW rather than changing: a trailing `int32_t colors`,
+   under the `struct_size` rule, so a caller compiled against the older layout
+   keeps the distance-only cache it had. `clay_brick_mesh_range` and
+   `clay_vertex_layout` are new, and `clay_mesh_copy_vertices`,
+   `clay_mesh_copy_indices` and `clay_brick_cache_raycast_many` are additive.
+
+   It also carries one fix that changes RESULTS: `clay_brick_cache_mesh` with a
+   NULL document produced no normals at all, though the header promised
+   "positions and face normals" and `CLAY_NORMAL_FACE` says it needs no
+   document. `mesh_bricks` applied attributes only through the tape. A host
+   that relied on the documented behaviour was shading flat black; one that
+   worked around it by computing its own normals now gets ours as well.
+
    **0.25.0 is additive.** It adds 23 symbols and four descriptor structs, and
    removes nothing. No existing signature changed, no existing struct grew or
    reordered a field, and no existing entry point returns a new `clay_result`
@@ -427,10 +459,25 @@ Tracked honestly rather than assumed done:
   4. That the Vulkan backend registers and passes parity on a real device — a
      lavapipe run is not a substitute, for the reason given in the Vulkan entry
      under "Open items": it executes on the CPU, so it gates plumbing rather
-     than arithmetic.
+     than arithmetic. The `vulkan-plumbing` CI job runs lavapipe on every push
+     and covers the other half — that the shaders compile, that the backend
+     registers, that dispatch and readback work — so what stays manual here is
+     specifically the arithmetic on real silicon. That job asserts registration
+     explicitly, because the loader left to itself picks a device the backend
+     cannot use and the suite then passes CPU-only at 204 assertions instead of
+     failing.
+
+  5. That **Metal device adoption** works — `clay_device_adopt` with a
+     `MTLDevice` and `MTLCommandQueue` the caller made, then
+     `clay_eval_grid_device` into a caller-owned `MTLBuffer`, compared against
+     the host-memory path. Added with `add-device-interop` and written on a
+     Linux machine with no metal-cpp toolchain: CI compiles it on every push
+     and the Metal parity job exercises the ordinary path, but the ADOPTION
+     path has never run on Apple hardware. The Vulkan equivalent is covered by
+     the `vulkan-plumbing` job and by the unit suite; this one is not.
 
   `python3 tools/release_check.py` run on a machine with those devices present
-  covers all four, because it runs parity against every backend registered in
+  covers the first four, because it runs parity against every backend registered in
   that build. What per-push CI still gates for Vulkan is
   `check_kernel_dialect.py`, which compiles the generated GLSL with glslang and
   needs no device — the strictest of the five profiles, so it usually fails

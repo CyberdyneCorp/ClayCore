@@ -78,6 +78,15 @@ class VulkanBackend final : public Backend {
         return b->init() ? std::move(b) : nullptr;
     }
 
+    // Bound to a device the CALLER owns. Everything above the device — the
+    // pipelines, the descriptor pool, the command buffer, the staging buffers —
+    // is still ours and is still built and destroyed here; only the device,
+    // queue and instance are borrowed.
+    static std::unique_ptr<VulkanBackend> adopt(const DeviceHandles& d) {
+        auto b = std::unique_ptr<VulkanBackend>(new VulkanBackend());
+        return b->adopt_init(d) ? std::move(b) : nullptr;
+    }
+
     ~VulkanBackend() override {
         if (device_) {
             vkDeviceWaitIdle(device_);
@@ -89,9 +98,12 @@ class VulkanBackend final : public Backend {
             if (pipe_grid_) vkDestroyPipeline(device_, pipe_grid_, nullptr);
             if (layout_) vkDestroyPipelineLayout(device_, layout_, nullptr);
             if (set_layout_) vkDestroyDescriptorSetLayout(device_, set_layout_, nullptr);
-            vkDestroyDevice(device_, nullptr);
+            // Destroy nothing we did not make. On an adopted device the caller
+            // keeps its device and instance, and destroying them here would
+            // take down the host's renderer along with our backend.
+            if (owns_device_) vkDestroyDevice(device_, nullptr);
         }
-        if (instance_) vkDestroyInstance(instance_, nullptr);
+        if (owns_device_ && instance_) vkDestroyInstance(instance_, nullptr);
     }
 
     const char* name() const override { return "vulkan"; }
@@ -163,6 +175,55 @@ class VulkanBackend final : public Backend {
         return Status::Ok;
     }
 
+    // The point of adoption: results land in the caller's own buffer, so a host
+    // that was going to draw them never copies them through host memory.
+    //
+    // The same shader, the same tape, the same push constants as eval_grid —
+    // only the destination differs. That is deliberate and is what the test
+    // rests on: the two paths must agree BIT for bit, not within a tolerance.
+    Status eval_grid_device(const scene::Tape& tape, const GridQuery& q,
+                            const DeviceBuffer& values,
+                            const DeviceBuffer& colors) override {
+        // Only an ADOPTED backend can serve this: a VkBuffer belongs to the
+        // device that made it, and one from the caller's device is meaningless
+        // on the device we created for ourselves.
+        if (owns_device_) return Status::Unsupported;
+        if (values.empty() || q.nx <= 0 || q.ny <= 0 || q.nz <= 0) return Status::InvalidInput;
+        const std::size_t total = static_cast<std::size_t>(q.nx) *
+                                  static_cast<std::size_t>(q.ny) *
+                                  static_cast<std::size_t>(q.nz);
+        // Checked against the lattice BEFORE any dispatch, so a destination too
+        // small is refused with nothing written rather than partially filled.
+        if (values.size < static_cast<std::uint64_t>(total) * sizeof(float))
+            return Status::InvalidInput;
+        const bool want_colors = !colors.empty();
+        if (want_colors && colors.size < static_cast<std::uint64_t>(total) * 3 * sizeof(float))
+            return Status::InvalidInput;
+
+        PushConstants pc{};
+        pc.origin_x = q.origin.x;
+        pc.origin_y = q.origin.y;
+        pc.origin_z = q.origin.z;
+        pc.spacing = q.spacing;
+        pc.nx = static_cast<std::uint32_t>(q.nx);
+        pc.ny = static_cast<std::uint32_t>(q.ny);
+        pc.nz = static_cast<std::uint32_t>(q.nz);
+        pc.count = static_cast<std::uint32_t>(total);
+        pc.has_colors = want_colors ? 1u : 0u;
+        if (!upload_tape(tape, &pc)) return Status::DeviceError;
+        if (!ensure(&in_, sizeof(float))) return Status::DeviceError;  // unused, must bind
+        // Binding 4 must be a real buffer even when no colours were asked for.
+        if (!want_colors && !ensure(&color_, sizeof(float))) return Status::DeviceError;
+
+        const Borrowed dist{static_cast<VkBuffer>(values.handle), values.offset, values.size};
+        const Borrowed color{static_cast<VkBuffer>(colors.handle), colors.offset, colors.size};
+        if (!dispatch(pipe_grid_, pc, total, &dist, want_colors ? &color : nullptr))
+            return Status::DeviceError;
+        // dispatch() waits on its own fence before returning, so the work has
+        // COMPLETED here — nothing is left in flight on the caller's queue.
+        return Status::Ok;
+    }
+
     Status raycast(const scene::Tape&, const RayQuery&, RayHit*) override {
         return Status::Unsupported;  // sphere tracing is templated C++ (field.h)
     }
@@ -223,6 +284,40 @@ class VulkanBackend final : public Backend {
         vkGetDeviceQueue(device_, queue_family_, 0, &queue_);
 
         return build_pipelines() && build_pool();
+    }
+
+    // Adoption: take the caller's handles, check they are usable, and build
+    // everything above them exactly as init() does. Validation is up front
+    // because the alternative is a driver error deep inside a dispatch, in a
+    // process the caller owns.
+    bool adopt_init(const DeviceHandles& d) {
+        instance_ = static_cast<VkInstance>(d.handles[0]);
+        physical_ = static_cast<VkPhysicalDevice>(d.handles[1]);
+        device_ = static_cast<VkDevice>(d.handles[2]);
+        queue_ = static_cast<VkQueue>(d.handles[3]);
+        queue_family_ = d.queue_family;
+        owns_device_ = false;
+        if (!instance_ || !physical_ || !device_ || !queue_) {
+            device_ = VK_NULL_HANDLE;  // so the destructor touches nothing
+            return false;
+        }
+        // The family the caller named must actually support compute: binding a
+        // compute pipeline to a graphics-only queue is undefined behaviour
+        // rather than an error the loader reports.
+        std::uint32_t n = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(physical_, &n, nullptr);
+        std::vector<VkQueueFamilyProperties> families(n);
+        vkGetPhysicalDeviceQueueFamilyProperties(physical_, &n, families.data());
+        if (queue_family_ >= n || !(families[queue_family_].queueFlags & VK_QUEUE_COMPUTE_BIT)) {
+            device_ = VK_NULL_HANDLE;
+            return false;
+        }
+        VkPhysicalDeviceProperties props{};
+        vkGetPhysicalDeviceProperties(physical_, &props);
+        max_groups_ = props.limits.maxComputeWorkGroupCount[0];
+        vkGetPhysicalDeviceMemoryProperties(physical_, &mem_props_);
+        if (build_pipelines() && build_pool()) return true;
+        return false;
     }
 
     int compute_family(VkPhysicalDevice dev) const {
@@ -413,13 +508,33 @@ class VulkanBackend final : public Backend {
 
     // -- dispatch ------------------------------------------------------------
 
-    void bind_descriptors() {
+    // A slice of a buffer we did not create, bound in place of one we did.
+    // Non-owning by construction: it holds no memory and destroys nothing.
+    struct Borrowed {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceSize offset = 0;
+        VkDeviceSize range = VK_WHOLE_SIZE;
+    };
+
+    // `dist` and `color` override bindings 3 and 4 when a caller asked for its
+    // results in its own memory. Everything else binds exactly as before, so
+    // the device path and the host path run the same shader over the same tape
+    // and differ only in where the writes land — which is what makes them
+    // comparable bit for bit.
+    void bind_descriptors(const Borrowed* dist, const Borrowed* color) {
         VkDescriptorBufferInfo infos[kBindings]{};
         const Buffer* buffers[kBindings] = {&instrs_, &floats_, &in_, &dist_, &color_};
+        const Borrowed* overrides[kBindings] = {nullptr, nullptr, nullptr, dist, color};
         VkWriteDescriptorSet writes[kBindings]{};
         for (std::uint32_t i = 0; i < kBindings; ++i) {
-            infos[i].buffer = buffers[i]->buffer;
-            infos[i].range = VK_WHOLE_SIZE;
+            if (overrides[i]) {
+                infos[i].buffer = overrides[i]->buffer;
+                infos[i].offset = overrides[i]->offset;
+                infos[i].range = overrides[i]->range;
+            } else {
+                infos[i].buffer = buffers[i]->buffer;
+                infos[i].range = VK_WHOLE_SIZE;
+            }
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = set_;
             writes[i].dstBinding = i;
@@ -430,8 +545,9 @@ class VulkanBackend final : public Backend {
         vkUpdateDescriptorSets(device_, kBindings, writes, 0, nullptr);
     }
 
-    bool dispatch(VkPipeline pipeline, PushConstants pc, std::size_t elements) {
-        bind_descriptors();
+    bool dispatch(VkPipeline pipeline, PushConstants pc, std::size_t elements,
+                  const Borrowed* dist = nullptr, const Borrowed* color = nullptr) {
+        bind_descriptors(dist, color);
         // Split against the device's own limit rather than assuming a large
         // one: a 256^3 preview grid is 262144 groups, past what some devices
         // accept in a single dispatch.
@@ -469,6 +585,10 @@ class VulkanBackend final : public Backend {
     VkDevice device_ = VK_NULL_HANDLE;
     VkQueue queue_ = VK_NULL_HANDLE;
     std::uint32_t queue_family_ = 0;
+    // False on an adopted device: the destructor must not destroy what the
+    // caller lent us, and eval_grid_device is only meaningful when the buffers
+    // and the device came from the same place.
+    bool owns_device_ = true;
     std::uint64_t max_groups_ = 65535;
     VkPhysicalDeviceMemoryProperties mem_props_{};
 
@@ -497,6 +617,10 @@ class VulkanBackend final : public Backend {
 }  // namespace
 
 std::unique_ptr<Backend> create_vulkan_backend() { return VulkanBackend::create(); }
+
+std::unique_ptr<Backend> adopt_vulkan_backend(const DeviceHandles& device) {
+    return VulkanBackend::adopt(device);
+}
 
 // How many times the resident tape was actually re-uploaded. Exposed for the
 // backend's own tests; a caller has no use for it and none is published in

@@ -60,6 +60,10 @@ add_executable(clay_unit_tests
   unit/test_c_pick_eval.cpp
   unit/test_c_tape_cache.cpp
   unit/test_c_brick.cpp
+  unit/test_c_brick_atlas.cpp
+  unit/test_c_mesh_copy.cpp
+  unit/test_c_tape_export.cpp
+  unit/test_c_host_volume_path.cpp
   unit/test_armature.cpp
   unit/test_voxel_levels.cpp
   unit/test_c_voxel_levels.cpp
@@ -78,7 +82,10 @@ target_include_directories(clay_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.
 # skip themselves when no runtime is present, so this is about linking the
 # backend-internal upload counter, not about having a GPU.
 if(CLAY_BACKEND_VULKAN)
-  target_sources(clay_unit_tests PRIVATE unit/test_vulkan.cpp)
+  target_sources(clay_unit_tests PRIVATE unit/test_vulkan.cpp unit/test_vulkan_interop.cpp)
+  # The interop cases create a Vulkan device the way a HOST would and lend it
+  # to claycore, so this file needs the Vulkan headers directly.
+  target_link_libraries(clay_unit_tests PRIVATE Vulkan::Vulkan)
 endif()
 
 target_link_libraries(clay_unit_tests PRIVATE clay::core doctest::doctest)

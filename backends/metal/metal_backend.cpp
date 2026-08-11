@@ -10,6 +10,7 @@
 #include <dispatch/dispatch.h>
 
 #include <cstring>
+#include <vector>
 
 #include "clay/eval/backend.h"
 #include "metal_shared.h"
@@ -33,12 +34,25 @@ class MetalBackend final : public Backend {
         return b->init() ? std::move(b) : nullptr;
     }
 
+    // Bound to a device the CALLER owns. The pipelines and the library are
+    // still ours and are still built and released here; only the device and
+    // the command queue are borrowed.
+    static std::unique_ptr<MetalBackend> adopt(const DeviceHandles& d) {
+        auto b = std::unique_ptr<MetalBackend>(new MetalBackend());
+        return b->adopt_init(d) ? std::move(b) : nullptr;
+    }
+
     ~MetalBackend() override {
         if (pso_points_) pso_points_->release();
         if (pso_grid_) pso_grid_->release();
         if (pso_rays_) pso_rays_->release();
-        if (queue_) queue_->release();
-        if (device_) device_->release();
+        // Release nothing we did not retain. On an adopted device the caller
+        // keeps its device and queue, and releasing them here would drop a
+        // reference the host still holds.
+        if (owns_device_) {
+            if (queue_) queue_->release();
+            if (device_) device_->release();
+        }
     }
 
     const char* name() const override { return "metal"; }
@@ -105,6 +119,56 @@ class MetalBackend final : public Backend {
         return ok ? Status::Ok : Status::DeviceError;
     }
 
+    // Results land in the caller's own MTLBuffer, so a host that was going to
+    // draw them never copies them through host memory. Same shader, same tape,
+    // same uniforms as eval_grid — only the destination differs.
+    Status eval_grid_device(const scene::Tape& tape, const GridQuery& q,
+                            const DeviceBuffer& values, const DeviceBuffer& colors) override {
+        // Only an ADOPTED backend can serve this: an MTLBuffer belongs to the
+        // device that made it.
+        if (owns_device_) return Status::Unsupported;
+        if (values.empty() || q.nx <= 0 || q.ny <= 0 || q.nz <= 0) return Status::InvalidInput;
+        const std::size_t total = static_cast<std::size_t>(q.nx) *
+                                  static_cast<std::size_t>(q.ny) *
+                                  static_cast<std::size_t>(q.nz);
+        // Checked before any dispatch, so an undersized destination is refused
+        // with nothing written rather than partially filled.
+        if (values.size < static_cast<std::uint64_t>(total) * sizeof(float))
+            return Status::InvalidInput;
+        const bool want_colors = !colors.empty();
+        if (want_colors && colors.size < static_cast<std::uint64_t>(total) * 3 * sizeof(float))
+            return Status::InvalidInput;
+
+        ClayGridUniforms u{};
+        u.origin[0] = q.origin.x;
+        u.origin[1] = q.origin.y;
+        u.origin[2] = q.origin.z;
+        u.spacing = q.spacing;
+        u.instr_count = static_cast<unsigned int>(tape.instrs.size());
+        u.nx = static_cast<unsigned int>(q.nx);
+        u.ny = static_cast<unsigned int>(q.ny);
+        u.nz = static_cast<unsigned int>(q.nz);
+        u.has_colors = want_colors ? 1u : 0u;
+
+        TapeBuffers tb = upload_tape(tape);
+        // Binding 4 must be a real buffer even when no colours were asked for.
+        MTL::Buffer* scratch =
+            want_colors ? nullptr : device_->newBuffer(4, MTL::ResourceStorageModeShared);
+        const std::vector<Bound> bound = {
+            Bound{tb.instrs, 0}, Bound{tb.params, 0}, Bound{tb.blob, 0},
+            Bound{static_cast<MTL::Buffer*>(values.handle),
+                  static_cast<NS::UInteger>(values.offset)},
+            want_colors ? Bound{static_cast<MTL::Buffer*>(colors.handle),
+                                static_cast<NS::UInteger>(colors.offset)}
+                        : Bound{scratch, 0},
+        };
+        const bool ok = dispatch_bound(pso_grid_, bound, &u, sizeof(u), 5, total);
+        // dispatch waits until completed, so the work has landed here and
+        // nothing is left in flight on the caller's queue.
+        release_all({tb.instrs, tb.params, tb.blob, scratch});
+        return ok ? Status::Ok : Status::DeviceError;
+    }
+
     Status mesh(const scene::Tape& tape, const GridQuery& q, std::vector<float>* out_verts,
                 std::vector<std::uint32_t>* out_indices) override {
         // hybrid: field values on the device, triangulation on the host
@@ -158,6 +222,24 @@ class MetalBackend final : public Backend {
     bool init() {
         device_ = MTL::CreateSystemDefaultDevice();
         if (!device_) return false;
+        if (!build_pipelines()) return false;
+        queue_ = device_->newCommandQueue();
+        return queue_ != nullptr;
+    }
+
+    bool adopt_init(const DeviceHandles& d) {
+        device_ = static_cast<MTL::Device*>(d.handles[0]);
+        queue_ = static_cast<MTL::CommandQueue*>(d.handles[1]);
+        owns_device_ = false;
+        if (!device_ || !queue_) {
+            device_ = nullptr;  // so the destructor touches nothing
+            queue_ = nullptr;
+            return false;
+        }
+        return build_pipelines();
+    }
+
+    bool build_pipelines() {
         dispatch_data_t data = dispatch_data_create(clay_metallib, clay_metallib_size, nullptr,
                                                     DISPATCH_DATA_DESTRUCTOR_DEFAULT);
         NS::Error* err = nullptr;
@@ -168,8 +250,7 @@ class MetalBackend final : public Backend {
         pso_grid_ = make_pso(lib, "clay_eval_grid");
         pso_rays_ = make_pso(lib, "clay_raycast");
         lib->release();
-        queue_ = device_->newCommandQueue();
-        return pso_points_ && pso_grid_ && pso_rays_ && queue_;
+        return pso_points_ && pso_grid_ && pso_rays_;
     }
 
     MTL::ComputePipelineState* make_pso(MTL::Library* lib, const char* fn_name) {
@@ -195,15 +276,31 @@ class MetalBackend final : public Backend {
         };
     }
 
+    // A buffer and where in it to start. Offsets matter only on the device
+    // path, where a host packs many results into one allocation.
+    struct Bound {
+        MTL::Buffer* buffer = nullptr;
+        NS::UInteger offset = 0;
+    };
+
     bool dispatch(MTL::ComputePipelineState* pso, std::initializer_list<MTL::Buffer*> buffers,
                   const void* uniforms, std::size_t uniform_bytes, unsigned uniform_index,
                   std::size_t thread_count) {
+        std::vector<Bound> bound;
+        bound.reserve(buffers.size());
+        for (MTL::Buffer* b : buffers) bound.push_back(Bound{b, 0});
+        return dispatch_bound(pso, bound, uniforms, uniform_bytes, uniform_index, thread_count);
+    }
+
+    bool dispatch_bound(MTL::ComputePipelineState* pso, const std::vector<Bound>& buffers,
+                        const void* uniforms, std::size_t uniform_bytes,
+                        unsigned uniform_index, std::size_t thread_count) {
         MTL::CommandBuffer* cmd = queue_->commandBuffer();
         if (!cmd) return false;
         MTL::ComputeCommandEncoder* enc = cmd->computeCommandEncoder();
         enc->setComputePipelineState(pso);
         unsigned idx = 0;
-        for (MTL::Buffer* b : buffers) enc->setBuffer(b, 0, idx++);
+        for (const Bound& b : buffers) enc->setBuffer(b.buffer, b.offset, idx++);
         enc->setBytes(uniforms, uniform_bytes, uniform_index);
         MTL::Size grid(thread_count, 1, 1);
         NS::UInteger tg = pso->maxTotalThreadsPerThreadgroup();
@@ -235,6 +332,10 @@ class MetalBackend final : public Backend {
 
     MTL::Device* device_ = nullptr;
     MTL::CommandQueue* queue_ = nullptr;
+    // False on an adopted device: the destructor must not release what the
+    // caller lent us, and eval_grid_device is only meaningful when the buffers
+    // and the device came from the same place.
+    bool owns_device_ = true;
     MTL::ComputePipelineState* pso_points_ = nullptr;
     MTL::ComputePipelineState* pso_grid_ = nullptr;
     MTL::ComputePipelineState* pso_rays_ = nullptr;
@@ -243,6 +344,10 @@ class MetalBackend final : public Backend {
 }  // namespace
 
 std::unique_ptr<Backend> create_metal_backend() { return MetalBackend::create(); }
+
+std::unique_ptr<Backend> adopt_metal_backend(const DeviceHandles& device) {
+    return MetalBackend::adopt(device);
+}
 
 }  // namespace eval
 }  // namespace clay

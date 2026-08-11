@@ -192,5 +192,32 @@ std::vector<Backend*> Registry::all() {
     return out;
 }
 
+#if defined(CLAY_HAS_VULKAN)
+std::unique_ptr<Backend> adopt_vulkan_backend(const DeviceHandles&);  // backends/vulkan
+#endif
+#if defined(CLAY_HAS_METAL)
+std::unique_ptr<Backend> adopt_metal_backend(const DeviceHandles&);  // backends/metal
+#endif
+
+std::unique_ptr<Backend> make_backend(std::string_view name, const DeviceHandles& device) {
+    // A device-bound backend is an INSTANCE the caller holds, never a registry
+    // entry: two hosts with two devices cannot share one process-wide slot
+    // under one name. Registration is untouched by anything here.
+#if defined(CLAY_HAS_VULKAN)
+    if (name == "vulkan" && device.api == DeviceApi::Vulkan)
+        return adopt_vulkan_backend(device);
+#endif
+#if defined(CLAY_HAS_METAL)
+    if (name == "metal" && device.api == DeviceApi::Metal) return adopt_metal_backend(device);
+#endif
+    // Every other backend, and every mismatch between a name and an API,
+    // reports "unsupported" by returning nothing. The caller falls back to the
+    // registered backend and gets identical values — adoption changes where
+    // work runs, never what it computes.
+    (void)name;
+    (void)device;
+    return nullptr;
+}
+
 }  // namespace eval
 }  // namespace clay
