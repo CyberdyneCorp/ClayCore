@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <vector>
 
 #include "clay.h"
@@ -548,6 +549,34 @@ std::vector<Tri> triangles_of(const clay_mesh* m) {
     return out;
 }
 
+// Subset meshes deliberately repeat a straddler that touches two requested
+// keys' shares, so unions are compared as SETS.
+std::vector<Tri> deduped(std::vector<Tri> tris) {
+    tris.erase(std::unique(tris.begin(), tris.end()), tris.end());
+    return tris;
+}
+
+// The triangles inside ONE key's index range of a subset mesh — what a
+// per-brick host stores as that key's share of the surface.
+std::vector<Tri> range_triangles(const clay_mesh* m, const clay_brick_mesh_range& r) {
+    const float* pos = clay_mesh_positions(m);
+    const std::uint32_t* idx = clay_mesh_indices(m);
+    std::vector<Tri> out;
+    out.reserve(r.index_count / 3);
+    auto q = [](float v) { return static_cast<std::int64_t>(std::llround(v * 1e6f)); };
+    for (std::uint32_t t = r.index_first; t < r.index_first + r.index_count; t += 3) {
+        Tri tri{};
+        for (int c = 0; c < 3; ++c) {
+            const std::uint32_t v = idx[t + c];
+            tri[c] = {q(pos[v * 3]), q(pos[v * 3 + 1]), q(pos[v * 3 + 2])};
+        }
+        std::sort(tri.begin(), tri.end());
+        out.push_back(tri);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
 }  // namespace
 
 TEST_CASE("subset meshing: a subset is the whole, brick for brick") {
@@ -561,12 +590,18 @@ TEST_CASE("subset meshing: a subset is the whole, brick for brick") {
     MeshHandle whole;
     REQUIRE(clay_brick_cache_mesh(cache, nullptr, &params, nullptr, 0, nullptr, &whole.m) ==
             CLAY_OK);
-    const std::vector<Tri> expected = triangles_of(whole.m);
+    // Deduped: quantizing to 1e-6 can collapse a handful of sliver triangles
+    // into one key, and this comparison is about SETS of triangles.
+    const std::vector<Tri> expected = deduped(triangles_of(whole.m));
     REQUIRE(!expected.empty());
 
-    // Mesh every surface brick ALONE and collect the union. Identical to the
-    // whole mesh's triangles: marching a subset samples across its boundary
-    // exactly as the whole does, so no cell is skipped and no crossing moves.
+    // Mesh every surface brick ALONE and collect the union. As a set it is
+    // exactly the whole mesh's triangles: marching a subset samples across its
+    // boundary exactly as the whole does, so no cell is skipped and no
+    // crossing moves — and each single-brick mesh also carries the straddlers
+    // that reach a corner into it from neighbouring cells, so a triangle near
+    // a seam appears in more than one single-brick mesh. That repetition is
+    // the documented attribution cost, which is why the union is deduped.
     std::vector<std::int32_t> keys = surface_keys(cache);
     const std::size_t count = keys.size() / 3;
     std::vector<Tri> got;
@@ -577,14 +612,14 @@ TEST_CASE("subset meshing: a subset is the whole, brick for brick") {
                                       &one.m) == CLAY_OK);
         const std::vector<Tri> part = triangles_of(one.m);
         got.insert(got.end(), part.begin(), part.end());
-        // one key alone owns the whole output
+        // one key alone owns the whole output, straddlers included
         CHECK(range.vertex_first == 0);
         CHECK(range.index_first == 0);
         CHECK(range.vertex_count == clay_mesh_vertex_count(one.m));
         CHECK(range.index_count == clay_mesh_index_count(one.m));
     }
     std::sort(got.begin(), got.end());
-    CHECK(got == expected);
+    CHECK(deduped(std::move(got)) == expected);
 }
 
 TEST_CASE("subset meshing: a seam vertex is duplicated, never moved") {
@@ -625,12 +660,14 @@ TEST_CASE("subset meshing: a seam vertex is duplicated, never moved") {
 
     // The two separately-meshed halves carry exactly the triangles the joint
     // mesh does — bit-identical positions, so drawing them together leaves no
-    // gap. Only the vertex SHARING differs, which is the documented cost.
+    // gap. Compared as sets: each half also carries the straddlers reaching
+    // into it, including from the OTHER half's cells, so triangles near their
+    // seam appear in both halves and once in the joint mesh.
     std::vector<Tri> apart = triangles_of(first.m);
     const std::vector<Tri> b = triangles_of(second.m);
     apart.insert(apart.end(), b.begin(), b.end());
     std::sort(apart.begin(), apart.end());
-    CHECK(apart == triangles_of(together.m));
+    CHECK(deduped(std::move(apart)) == deduped(triangles_of(together.m)));
     // welding across the seam means the joint mesh has FEWER vertices than the
     // two halves put together — the property the header warns about
     CHECK(clay_mesh_vertex_count(together.m) <=
@@ -648,6 +685,215 @@ TEST_CASE("subset meshing: a seam vertex is duplicated, never moved") {
         for (int i = 0; i < 2; ++i)
             for (int a = 0; a < 3; ++a) CHECK(ranges[i].key[a] == pair[i * 3 + a]);
     }
+}
+
+namespace {
+
+// A finer lattice than the suite default, so the sphere spans dozens of
+// bricks and a dab's dirty set has a real boundary with unrequested surface
+// bricks on the far side — the geometry issue #66 is about. At the suite's
+// 0.05 voxel a brick is as big as the sphere and every dab dirties everything.
+constexpr float kFineVoxel = 0.02f;
+
+clay_brick_cache* make_fine_cache() {
+    clay_brick_config c;
+    REQUIRE(clay_brick_config_defaults(&c) == CLAY_OK);
+    c.dim = kDim;
+    c.voxel_size = kFineVoxel;
+    c.band_voxels = kBandVoxels;
+    return clay_brick_cache_create(&c);
+}
+
+// One relief dab on the surface: the edit whose dirty set is the subset a
+// host re-meshes while the pointer is down.
+clay_node_id add_relief_dab(Doc& doc, float r, float x, float y, float z) {
+    clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+    REQUIRE(it != nullptr);
+    const float pos[3] = {x, y, z};
+    REQUIRE(clay_item_set_position(it, pos) == CLAY_OK);
+    REQUIRE(clay_item_set_op(it, CLAY_OP_RELIEF) == CLAY_OK);
+    REQUIRE(clay_item_set_blend(it, CLAY_BLEND_HARD, r) == CLAY_OK);
+    REQUIRE(clay_item_set_rounding(it, r) == CLAY_OK);
+    clay_node_id id = 0;
+    REQUIRE(clay_layer_add_item(doc.d, doc.layer, it, &id) == CLAY_OK);
+    clay_item_destroy(it);
+    return id;
+}
+
+// The refill loop again, this time keeping the keys the drain reported —
+// exactly the list a host hands back as the subset to re-mesh.
+std::vector<std::int32_t> refill_collect(clay_brick_cache* cache, const clay_document* doc) {
+    constexpr std::size_t kChunk = 64;
+    std::vector<clay_brick_request> reqs(kChunk);
+    std::vector<float> values(kChunk * kSamples);
+    std::vector<std::int32_t> results(kChunk);
+    std::vector<std::int32_t> keys;
+    for (;;) {
+        std::size_t count = kChunk, remaining = 0;
+        REQUIRE(clay_brick_cache_take_dirty(cache, reqs.data(), &count, &remaining) == CLAY_OK);
+        if (count == 0) break;
+        for (std::size_t i = 0; i < count; ++i)
+            for (int a = 0; a < 3; ++a) keys.push_back(reqs[i].key[a]);
+        REQUIRE(clay_brick_cache_eval_requests(doc, nullptr, reqs.data(), count, values.data(),
+                                               count * kSamples, nullptr, 0) == CLAY_OK);
+        std::size_t accepted = 0;
+        REQUIRE(clay_brick_cache_submit(cache, reqs.data(), count, values.data(),
+                                        count * kSamples, nullptr, 0, results.data(),
+                                        &accepted) == CLAY_OK);
+        if (remaining == 0) break;
+    }
+    return keys;
+}
+
+// Closed containment: a corner exactly on a brick's boundary plane belongs to
+// both neighbours, matching the attribution rule the header documents.
+bool corner_in_keys(const float c[3], const std::vector<std::int32_t>& keys) {
+    const std::size_t count = keys.size() / 3;
+    for (std::size_t i = 0; i < count; ++i) {
+        bool in = true;
+        for (int a = 0; a < 3; ++a) {
+            const float lo = static_cast<float>(keys[i * 3 + a] * kDim) * kFineVoxel;
+            const float hi = static_cast<float>((keys[i * 3 + a] + 1) * kDim) * kFineVoxel;
+            if (!(c[a] >= lo && c[a] <= hi)) {
+                in = false;
+                break;
+            }
+        }
+        if (in) return true;
+    }
+    return false;
+}
+
+struct TouchCount {
+    std::size_t all_three = 0;
+    std::size_t at_least_one = 0;
+    std::vector<Tri> touching;  // sorted; >= 1 corner inside the keys
+};
+
+TouchCount touching_triangles(const clay_mesh* m, const std::vector<std::int32_t>& keys) {
+    const float* pos = clay_mesh_positions(m);
+    const std::uint32_t* idx = clay_mesh_indices(m);
+    const std::size_t tris = clay_mesh_index_count(m) / 3;
+    auto q = [](float v) { return static_cast<std::int64_t>(std::llround(v * 1e6f)); };
+    TouchCount out;
+    for (std::size_t t = 0; t < tris; ++t) {
+        int inside = 0;
+        Tri tri{};
+        for (int c = 0; c < 3; ++c) {
+            const std::uint32_t v = idx[t * 3 + c];
+            if (corner_in_keys(pos + v * 3, keys)) ++inside;
+            tri[c] = {q(pos[v * 3]), q(pos[v * 3 + 1]), q(pos[v * 3 + 2])};
+        }
+        if (inside == 3) ++out.all_three;
+        if (inside >= 1) {
+            ++out.at_least_one;
+            std::sort(tri.begin(), tri.end());
+            out.touching.push_back(tri);
+        }
+    }
+    std::sort(out.touching.begin(), out.touching.end());
+    return out;
+}
+
+}  // namespace
+
+// Regression for issue #66: a subset mesh omitted every triangle straddling
+// the requested set's boundary — triangles from cells owned by unrequested
+// bricks with a corner inside a requested brick. Dilating the request only
+// moved the boundary, so NO sequence of subset calls could maintain a complete
+// surface, and a host fell back to whole-surface meshing on every dab. The
+// subset must return every whole-mesh triangle with at least one corner in a
+// requested brick: what was N-missing/0-spurious becomes 0-missing/0-spurious.
+TEST_CASE("subset meshing: straddlers at the request boundary are emitted") {
+    Doc doc;
+    const float grey[3] = {0.5f, 0.5f, 0.5f};
+    add_sphere(doc, 0.4f, 0, 0, 0, grey);
+    Cache cache(make_fine_cache());
+    mark_and_fill(cache, doc, false);
+
+    // One dab, then exactly the issue's two calls: same cache, same state,
+    // differing only in the key list.
+    const clay_node_id dab = add_relief_dab(doc, 0.06f, 0.0f, 0.4f, 0.0f);
+    std::size_t marked = 0;
+    REQUIRE(clay_brick_cache_mark_dirty_nodes(cache, doc.d, doc.layer, &dab, 1, &marked) ==
+            CLAY_OK);
+    const std::vector<std::int32_t> dirty = refill_collect(cache, doc.d);
+    REQUIRE(!dirty.empty());
+
+    const clay_brick_mesh_params params = plain_params();
+    MeshHandle whole, subset;
+    REQUIRE(clay_brick_cache_mesh(cache, nullptr, &params, nullptr, 0, nullptr, &whole.m) ==
+            CLAY_OK);
+    REQUIRE(clay_brick_cache_mesh(cache, nullptr, &params, dirty.data(), dirty.size() / 3,
+                                  nullptr, &subset.m) == CLAY_OK);
+
+    const TouchCount w = touching_triangles(whole.m, dirty);
+    const TouchCount s = touching_triangles(subset.m, dirty);
+
+    // The fixture is meaningful: the whole mesh HAS straddlers here, so the
+    // old strictly-inside subset would fail the checks below.
+    REQUIRE(w.at_least_one > w.all_three);
+
+    // Wholly-inside triangles were never in question...
+    CHECK(s.all_three == w.all_three);
+    // ...and the straddlers now arrive too: 0 missing, 0 spurious.
+    CHECK(s.at_least_one == w.at_least_one);
+    CHECK(s.touching == w.touching);
+
+    // The subset invents nothing: every triangle it returns is in the whole.
+    const std::vector<Tri> whole_tris = triangles_of(whole.m);
+    const std::vector<Tri> subset_tris = triangles_of(subset.m);
+    CHECK(std::includes(whole_tris.begin(), whole_tris.end(), subset_tris.begin(),
+                        subset_tris.end()));
+}
+
+// The claim the straddlers exist to honour: a host that stores geometry per
+// brick and replaces each dirty key's share from the subset's ranges holds a
+// COMPLETE surface after every dab — equal, as a set, to a full rebuild.
+TEST_CASE("subset meshing: a per-brick host loop equals a full rebuild") {
+    Doc doc;
+    const float grey[3] = {0.5f, 0.5f, 0.5f};
+    add_sphere(doc, 0.4f, 0, 0, 0, grey);
+    Cache cache(make_fine_cache());
+    const clay_brick_mesh_params params = plain_params();
+
+    std::map<std::array<std::int32_t, 3>, std::vector<Tri>> store;
+    auto apply = [&](const std::vector<std::int32_t>& keys) {
+        const std::size_t count = keys.size() / 3;
+        REQUIRE(count > 0);
+        std::vector<clay_brick_mesh_range> ranges(count);
+        MeshHandle m;
+        REQUIRE(clay_brick_cache_mesh(cache, nullptr, &params, keys.data(), count, ranges.data(),
+                                      &m.m) == CLAY_OK);
+        for (const clay_brick_mesh_range& r : ranges)
+            store[{r.key[0], r.key[1], r.key[2]}] = range_triangles(m.m, r);
+    };
+
+    // The host loop from the first fill: mesh what the drain reported.
+    REQUIRE(clay_brick_cache_mark_dirty_layer(cache, doc.d, doc.layer) == CLAY_OK);
+    apply(refill_collect(cache, doc.d));
+
+    // Several dabs, each re-meshing only its dirty keys.
+    const float dabs[3][3] = {{0.0f, 0.4f, 0.0f}, {0.28f, 0.28f, 0.0f}, {0.0f, -0.4f, 0.0f}};
+    for (const float* at : dabs) {
+        const clay_node_id id = add_relief_dab(doc, 0.06f, at[0], at[1], at[2]);
+        std::size_t marked = 0;
+        REQUIRE(clay_brick_cache_mark_dirty_nodes(cache, doc.d, doc.layer, &id, 1, &marked) ==
+                CLAY_OK);
+        apply(refill_collect(cache, doc.d));
+    }
+
+    // The union of the per-brick shares, deduped (a straddler may sit in two
+    // shares), is exactly a full rebuild of the final document.
+    std::vector<Tri> maintained;
+    for (const auto& [key, tris] : store)
+        maintained.insert(maintained.end(), tris.begin(), tris.end());
+    std::sort(maintained.begin(), maintained.end());
+
+    MeshHandle rebuilt;
+    REQUIRE(clay_brick_cache_mesh(cache, nullptr, &params, nullptr, 0, nullptr, &rebuilt.m) ==
+            CLAY_OK);
+    CHECK(deduped(std::move(maintained)) == deduped(triangles_of(rebuilt.m)));
 }
 
 // Regression: clay_brick_cache_mesh documents that with no document the mesh

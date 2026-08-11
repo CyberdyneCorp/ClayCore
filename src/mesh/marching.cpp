@@ -1,8 +1,13 @@
 #include "clay/mesh/marching.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <optional>
+#include <tuple>
 
 #include <unordered_map>
+#include <unordered_set>
 
 #include "clay/eval/backend.h"
 #include "clay/kernel/field.h"
@@ -97,7 +102,10 @@ constexpr int kEvenRest[4][3] = {{1, 2, 3}, {0, 3, 2}, {3, 0, 1}, {2, 1, 0}};
 constexpr int kPairPerm[6][4] = {{0, 1, 2, 3}, {0, 2, 3, 1}, {0, 3, 1, 2},
                                  {1, 2, 0, 3}, {1, 3, 2, 0}, {2, 3, 0, 1}};
 
-void march_tet(Builder& b, const LatticePoint corners[4], const float f[4]) {
+// Sink is Builder, or any type with the same edge_vertex/triangle shape —
+// ShellCollector below records triangles instead of building a mesh.
+template <class Sink>
+void march_tet(Sink& b, const LatticePoint corners[4], const float f[4]) {
     // inside = strictly negative; f == 0 counts as outside (deterministic)
     int inside_mask = 0;
     for (int i = 0; i < 4; ++i)
@@ -143,26 +151,189 @@ void march_tet(Builder& b, const LatticePoint corners[4], const float f[4]) {
     }
 }
 
-void march_cells(Builder& b, const std::function<float(int, int, int)>& sample,
+template <class Sink>
+void march_cell(Sink& b, const std::function<float(int, int, int)>& sample, int i, int j, int k) {
+    LatticePoint pts[8];
+    float f[8];
+    bool any_neg = false, any_pos = false;
+    for (int c = 0; c < 8; ++c) {
+        pts[c] = {i + (c & 1), j + ((c >> 1) & 1), k + ((c >> 2) & 1)};
+        f[c] = sample(pts[c].i, pts[c].j, pts[c].k);
+        (f[c] < 0.0f ? any_neg : any_pos) = true;
+    }
+    if (!any_neg || !any_pos) return;
+    for (const auto& tet : kTets) {
+        LatticePoint tc[4] = {pts[tet[0]], pts[tet[1]], pts[tet[2]], pts[tet[3]]};
+        float tf[4] = {f[tet[0]], f[tet[1]], f[tet[2]], f[tet[3]]};
+        march_tet(b, tc, tf);
+    }
+}
+
+template <class Sink>
+void march_cells(Sink& b, const std::function<float(int, int, int)>& sample,
                  const int cell_min[3], const int cell_max[3]) {
     for (int k = cell_min[2]; k < cell_max[2]; ++k)
         for (int j = cell_min[1]; j < cell_max[1]; ++j)
-            for (int i = cell_min[0]; i < cell_max[0]; ++i) {
-                LatticePoint pts[8];
-                float f[8];
-                bool any_neg = false, any_pos = false;
-                for (int c = 0; c < 8; ++c) {
-                    pts[c] = {i + (c & 1), j + ((c >> 1) & 1), k + ((c >> 2) & 1)};
-                    f[c] = sample(pts[c].i, pts[c].j, pts[c].k);
-                    (f[c] < 0.0f ? any_neg : any_pos) = true;
-                }
-                if (!any_neg || !any_pos) continue;
-                for (const auto& tet : kTets) {
-                    LatticePoint tc[4] = {pts[tet[0]], pts[tet[1]], pts[tet[2]], pts[tet[3]]};
-                    float tf[4] = {f[tet[0]], f[tet[1]], f[tet[2]], f[tet[3]]};
-                    march_tet(b, tc, tf);
-                }
+            for (int i = cell_min[0]; i < cell_max[0]; ++i) march_cell(b, sample, i, j, k);
+}
+
+// -- subset boundary straddlers ---------------------------------------------
+//
+// A subset request marches the cells its keys OWN, and cell ownership puts
+// every triangle in exactly one brick. But a triangle produced by a cell just
+// outside the subset can still have a corner inside a requested brick — the
+// straddlers of the meshing spec — and without them no sequence of subset
+// meshes can maintain a complete surface (issue #66). The shell pass below
+// marches the one-cell ring of cells owned by unrequested SURFACE bricks and
+// keeps the triangles that reach into the request, attributing each to the
+// lexicographically lowest (x, then y, then z) requested key whose closed
+// brick box contains one of its corners.
+
+// One lattice-edge crossing as march_tet found it: enough to re-emit the
+// vertex through the real Builder later, with identical welding and an
+// identical position.
+struct ShellEdge {
+    LatticePoint p0, p1;
+    float f0 = 0.0f, f1 = 0.0f;
+};
+using ShellTriangle = std::array<ShellEdge, 3>;
+
+// Records triangles instead of building a mesh; no welding, since every
+// recorded edge is re-emitted through the Builder that welds.
+struct ShellCollector {
+    std::vector<ShellEdge> edges;
+    std::vector<std::array<std::uint32_t, 3>> tris;
+
+    std::uint32_t edge_vertex(LatticePoint p0, float f0, LatticePoint p1, float f1) {
+        edges.push_back({p0, p1, f0, f1});
+        return static_cast<std::uint32_t>(edges.size() - 1);
+    }
+    void triangle(std::uint32_t v0, std::uint32_t v1, std::uint32_t v2) {
+        tris.push_back({v0, v1, v2});
+    }
+};
+
+struct BrickKeyLess {
+    bool operator()(const brick::BrickKey& a, const brick::BrickKey& b) const {
+        return std::tie(a.x, a.y, a.z) < std::tie(b.x, b.y, b.z);
+    }
+};
+
+using RequestedSet = std::unordered_set<brick::BrickKey, brick::BrickKeyHash>;
+
+// The corner's position on its lattice edge, in lattice units, computed with
+// exactly the arithmetic Builder::edge_vertex uses (canonical endpoint order,
+// then t = f0 / (f0 - f1)) so classification agrees with the emitted vertex.
+std::array<float, 3> shell_corner_lattice(ShellEdge e) {
+    if (pack_point(e.p0.i, e.p0.j, e.p0.k) > pack_point(e.p1.i, e.p1.j, e.p1.k)) {
+        std::swap(e.p0, e.p1);
+        std::swap(e.f0, e.f1);
+    }
+    const float t = e.f0 / (e.f0 - e.f1);
+    return {static_cast<float>(e.p0.i) + (static_cast<float>(e.p1.i - e.p0.i)) * t,
+            static_cast<float>(e.p0.j) + (static_cast<float>(e.p1.j - e.p0.j)) * t,
+            static_cast<float>(e.p0.k) + (static_cast<float>(e.p1.k - e.p0.k)) * t};
+}
+
+// The lowest requested key whose CLOSED brick box contains the corner, if any.
+// A coordinate exactly on a brick boundary plane belongs to both neighbours,
+// so each axis can name two candidate brick indices.
+std::optional<brick::BrickKey> lowest_requested_owner(const std::array<float, 3>& c, int dim,
+                                                      const RequestedSet& requested) {
+    int lo[3], n[3][2];
+    for (int a = 0; a < 3; ++a) {
+        const float b = c[a] / static_cast<float>(dim);
+        const int fb = static_cast<int>(std::floor(b));
+        n[a][0] = fb;
+        n[a][1] = fb;
+        lo[a] = 1;
+        if (b == static_cast<float>(fb)) {  // on the boundary plane: both bricks
+            n[a][1] = fb - 1;
+            lo[a] = 2;
+        }
+    }
+    std::optional<brick::BrickKey> best;
+    BrickKeyLess less;
+    for (int x = 0; x < lo[0]; ++x)
+        for (int y = 0; y < lo[1]; ++y)
+            for (int z = 0; z < lo[2]; ++z) {
+                brick::BrickKey k{n[0][x], n[1][y], n[2][z]};
+                if (!requested.count(k)) continue;
+                if (!best || less(k, *best)) best = k;
             }
+    return best;
+}
+
+std::optional<brick::BrickKey> straddler_attribution(const ShellCollector& shell,
+                                                    const std::array<std::uint32_t, 3>& tri,
+                                                    int dim, const RequestedSet& requested) {
+    std::optional<brick::BrickKey> best;
+    BrickKeyLess less;
+    for (std::uint32_t corner : tri) {
+        auto owner =
+            lowest_requested_owner(shell_corner_lattice(shell.edges[corner]), dim, requested);
+        if (owner && (!best || less(*owner, *best))) best = owner;
+    }
+    return best;
+}
+
+// The ring cells to test: every cell whose closed span can touch a requested
+// brick's closed box but is owned by an unrequested brick — one cell deep on
+// every side, corners included. Owners that are not surface bricks are
+// skipped: the whole-surface mesh marches no cell of theirs, and the subset
+// must stay a filter of the whole, never a superset.
+std::vector<std::uint64_t> shell_cells(const brick::BrickCache& cache,
+                                       const std::vector<brick::BrickKey>& keys, int dim,
+                                       const RequestedSet& requested) {
+    auto fdiv = [](int a, int b) { return a >= 0 ? a / b : -(((-a) + b - 1) / b); };
+    std::unordered_set<std::uint64_t> seen;
+    std::vector<std::uint64_t> cells;
+    for (const brick::BrickKey& key : keys) {
+        for (int k = key.z * dim - 1; k <= key.z * dim + dim; ++k)
+            for (int j = key.y * dim - 1; j <= key.y * dim + dim; ++j)
+                for (int i = key.x * dim - 1; i <= key.x * dim + dim; ++i) {
+                    const bool ring = i < key.x * dim || i >= key.x * dim + dim ||
+                                      j < key.y * dim || j >= key.y * dim + dim ||
+                                      k < key.z * dim || k >= key.z * dim + dim;
+                    if (!ring) continue;
+                    brick::BrickKey owner{fdiv(i, dim), fdiv(j, dim), fdiv(k, dim)};
+                    if (requested.count(owner)) continue;
+                    const brick::Brick* b = cache.find(owner);
+                    if (!b || b->state != brick::BrickState::Surface) continue;
+                    if (seen.insert(pack_point(i, j, k)).second)
+                        cells.push_back(pack_point(i, j, k));
+                }
+    }
+    // pack_point orders lexicographically by (i, j, k): a deterministic march
+    // order, so a bucket's triangles come out the same way every call.
+    std::sort(cells.begin(), cells.end());
+    return cells;
+}
+
+// Every straddler a subset request owes, bucketed by the requested key each
+// one is attributed to.
+std::unordered_map<brick::BrickKey, std::vector<ShellTriangle>, brick::BrickKeyHash>
+collect_straddlers(const brick::BrickCache& cache, const std::vector<brick::BrickKey>& keys,
+                   const std::function<float(int, int, int)>& sample) {
+    const int dim = cache.config().dim;
+    RequestedSet requested(keys.begin(), keys.end());
+    std::unordered_map<brick::BrickKey, std::vector<ShellTriangle>, brick::BrickKeyHash> buckets;
+    constexpr std::uint64_t mask21 = (1u << 21) - 1;
+    constexpr std::int64_t bias = 1u << 20;
+    for (std::uint64_t packed : shell_cells(cache, keys, dim, requested)) {
+        const int i = static_cast<int>(static_cast<std::int64_t>(packed >> 42) - bias);
+        const int j = static_cast<int>(static_cast<std::int64_t>((packed >> 21) & mask21) - bias);
+        const int k = static_cast<int>(static_cast<std::int64_t>(packed & mask21) - bias);
+        ShellCollector shell;
+        march_cell(shell, sample, i, j, k);
+        for (const auto& tri : shell.tris) {
+            auto owner = straddler_attribution(shell, tri, dim, requested);
+            if (!owner) continue;
+            buckets[*owner].push_back(
+                {shell.edges[tri[0]], shell.edges[tri[1]], shell.edges[tri[2]]});
+        }
+    }
+    return buckets;
 }
 
 }  // namespace
@@ -228,6 +399,7 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Tape* tape_for_att
 
     // The subset a consumer named, or every surface brick — which is the
     // export path and stays the default.
+    const bool is_subset = keys != nullptr;
     std::vector<brick::BrickKey> owned;
     if (!keys) {
         owned = cache.surface_bricks();
@@ -238,6 +410,13 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Tape* tape_for_att
         out_ranges->reserve(keys->size());
     }
 
+    // A subset also owes the straddlers: triangles from cells owned by
+    // unrequested surface bricks that reach a corner into a requested brick.
+    // The whole-surface path marches every cell already and owes nothing.
+    std::unordered_map<brick::BrickKey, std::vector<ShellTriangle>, brick::BrickKeyHash>
+        straddlers;
+    if (is_subset) straddlers = collect_straddlers(cache, *keys, global_sample);
+
     // ONE builder for every brick: lattice-edge welding spans brick seams,
     // keeping the result watertight across the sparse set.
     Builder b(cf3(0, 0, 0), vs);
@@ -247,6 +426,16 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Tape* tape_for_att
         int cmin[3] = {key.x * dim, key.y * dim, key.z * dim};
         int cmax[3] = {key.x * dim + dim, key.y * dim + dim, key.z * dim + dim};
         march_cells(b, global_sample, cmin, cmax);
+        // The key's straddlers land inside its range, after its own cells, so
+        // the ranges keep partitioning the mesh. Re-emitting through the same
+        // Builder welds them onto the seam vertices the interior already made.
+        if (auto it = straddlers.find(key); it != straddlers.end())
+            for (const ShellTriangle& tri : it->second) {
+                std::uint32_t v[3];
+                for (int c = 0; c < 3; ++c)
+                    v[c] = b.edge_vertex(tri[c].p0, tri[c].f0, tri[c].p1, tri[c].f1);
+                b.triangle(v[0], v[1], v[2]);
+            }
         if (out_ranges)
             out_ranges->push_back({key, v0,
                                    static_cast<std::uint32_t>(b.out.positions.size()) - v0, i0,

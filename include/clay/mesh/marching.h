@@ -86,6 +86,18 @@ struct BrickMeshRange {
 // mesh reaches it, at a bit-identical position. A duplicated seam vertex, never
 // a crack.
 //
+// A subset also returns the STRADDLERS: every whole-mesh triangle with at
+// least one corner inside a requested brick's closed box, including those
+// whose cell is owned by an unrequested surface brick. Each straddler is
+// attributed to the lexicographically lowest (x, then y, then z) requested
+// key whose closed box contains one of its corners, and lands in that key's
+// ranges after the key's own cells. Without them no sequence of subset meshes
+// could maintain a complete surface (issue #66): the omitted triangles lived
+// in cells the request never named, and dilating the request only moved the
+// boundary. A consumer holding per-brick geometry dedupes by triangle, since
+// a straddler touching two requested keys is attributed to one of them per
+// call and may move between shares as the requested set changes.
+//
 // `out_ranges` (may be nullptr) receives one entry per key, in the order given.
 Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Tape* tape_for_attributes,
                  const MeshingOptions& options = {},
