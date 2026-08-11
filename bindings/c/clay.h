@@ -2257,6 +2257,113 @@ clay_result clay_eval_grid(const clay_document* doc, const char* backend,
                            const float region_max[3], float* out_values,
                            float* out_colors_rgb, size_t value_count);
 
+/* -- device interop -------------------------------------------------------- */
+
+/* Backends create and own their devices, which is right for a headless library
+ * and wrong for a host that was going to draw on a GPU anyway: results computed
+ * on our device are copied to host memory and uploaded again to the device the
+ * host draws from. On macOS both claycore and a wgpu host are on Metal, and on
+ * Linux both are on Vulkan — the same buffer could serve both sides.
+ *
+ * These calls let you lend claycore the device you already have.
+ *
+ * WHAT THIS DOES AND DOES NOT DO. It makes evaluation OUTPUT device-resident.
+ * It does NOT make the brick CACHE device-resident: generations, staleness,
+ * band classification, fp16 quantization and the memory budget are host code
+ * over host memory, and that is where a submitted brick becomes a stored brick.
+ * So a host taking this path has its bricks computed straight into its own
+ * buffer and then owns quantizing and uploading them — at which point the cache
+ * is not in the loop and neither are its guarantees. If you want the cache's
+ * correctness, use clay_brick_cache_read_bricks; if you want no host copy, use
+ * this. Both are complete paths; neither is both.
+ *
+ * NO VENDOR HEADER REACHES THIS ONE. Native objects cross as void*, positioned
+ * per API. A header that included vulkan.h would break every bindings generator
+ * that reads this one, and would make the surface it declares depend on how the
+ * library was built. */
+
+typedef enum clay_device_api {
+    CLAY_DEVICE_API_METAL = 0,
+    CLAY_DEVICE_API_VULKAN = 1,
+    CLAY_DEVICE_API_CUDA = 2
+} clay_device_api;
+
+/* Which handle goes in which slot, by API. Unused slots are ignored and should
+ * be NULL:
+ *
+ *   METAL   0 id<MTLDevice>   1 id<MTLCommandQueue>
+ *   VULKAN  0 VkInstance      1 VkPhysicalDevice   2 VkDevice   3 VkQueue
+ *           plus queue_family, which MUST support compute
+ *   CUDA    0 CUcontext       1 CUstream  — DECLARED BUT NOT IMPLEMENTED: the
+ *           CUDA backend has no adoption path, so clay_device_adopt refuses
+ *           this API. Said plainly here rather than left to be discovered:
+ *           the enumerator exists so the layout does not shift when it lands.
+ *
+ * A fixed void*[6] rather than a union, because a union of vendor types is a
+ * vendor header and a union of void* is this with worse ergonomics. */
+typedef struct clay_device_desc {
+    uint32_t struct_size; /* = sizeof(clay_device_desc); required */
+    int32_t api;          /* clay_device_api */
+    void* handles[6];
+    uint32_t queue_family; /* Vulkan only; ignored elsewhere */
+} clay_device_desc;
+
+typedef struct clay_device clay_device; /* opaque */
+
+/* Adopts the caller's device. Returns NULL — with the detail in
+ * clay_last_error() — when the named API's backend is not compiled in, when the
+ * handles are incomplete for that API, or when the backend has no adoption
+ * path. That is a capability report, not a failure: a caller whose adoption is
+ * refused falls back to the ordinary backend-name calls and gets IDENTICAL
+ * values. Adoption changes where work runs, never what it computes.
+ *
+ * OWNERSHIP. The library retains nothing it did not create and destroys nothing
+ * it did not make: your device, queue and instance are yours, and releasing the
+ * clay_device leaves them alone. The library creates, destroys and waits on no
+ * synchronization primitive of yours, and submits to your queue only inside a
+ * call you made. Work issued during a call has COMPLETED when that call
+ * returns, so nothing is left in flight with no way to know when it lands.
+ *
+ * THREADING. Calls on one clay_device are yours to serialize, exactly as they
+ * are for clay_brick_cache. A GPU queue is not free-threaded and adding a lock
+ * here would be a threading policy you did not ask for.
+ *
+ * The device must outlive the clay_device. Releasing yours first and then
+ * calling through this handle is a use-after-free this ABI cannot detect. */
+clay_device* clay_device_adopt(const clay_device_desc* desc);
+void clay_device_release(clay_device* device);
+
+/* Which backend the handle resolved to ("vulkan", "metal", ...), borrowed and
+ * valid until release, so a host can log or display what it actually got. */
+const char* clay_device_backend_name(const clay_device* device);
+
+/* A slice of a buffer YOU own and keep owning. `handle` is a VkBuffer /
+ * MTLBuffer / CUdeviceptr per the device's API. `size` is what is available
+ * from `offset`, is REQUIRED, and is checked against the lattice: a destination
+ * too small is refused with nothing written, as everywhere else here. */
+typedef struct clay_device_buffer {
+    uint32_t struct_size; /* = sizeof(clay_device_buffer); required */
+    void* handle;
+    uint64_t offset; /* bytes */
+    uint64_t size;   /* bytes available from offset */
+} clay_device_buffer;
+
+/* clay_eval_grid with the destination on the device. Same lattice, same cull
+ * region rules, same x-fastest order, same float32 elements — only where the
+ * results land differs, deliberately, so you can A/B the two and get
+ * bit-identical values.
+ *
+ * out_colors_rgb may be NULL. Values stay float32 and are NOT quantized on the
+ * device even though the brick cache stores fp16: quantization and band
+ * classification belong to clay_brick_cache_submit, and a device path that did
+ * them would be a second implementation of the step most able to drift. */
+clay_result clay_eval_grid_device(const clay_document* doc, clay_device* device,
+                                  const clay_grid_query* grid, const float region_min[3],
+                                  const float region_max[3],
+                                  const clay_device_buffer* out_values,
+                                  const clay_device_buffer* out_colors_rgb);
+
+
 /* -- the compiled tape ----------------------------------------------------- */
 
 /* What `docs/06-host-gpu-previews.md` calls route 1: evaluate the document's
@@ -2635,6 +2742,25 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
                                            const clay_brick_request* requests, size_t count,
                                            float* out_values, size_t values_capacity,
                                            float* out_colors_rgb, size_t colors_capacity);
+
+/* clay_brick_cache_eval_requests with the destination on the device — the call
+ * a host refilling a brick atlas actually wants. Brick i occupies
+ * out_values[i * dim^3 ...] floats and out_colors_rgb[i * dim^3 * 3 ...] at the
+ * same fixed stride the host-memory form uses, in ONE of your buffers, so a
+ * whole drain lands in the allocation you will draw from.
+ *
+ * Each request is culled against its own brick dilated by its own band, exactly
+ * as the host-memory form does, and the same values come out. What differs is
+ * only where they land — and what you then owe: these are float32 distances,
+ * not the cache's classified, band-clamped fp16 bricks. Nothing was submitted
+ * to a cache and no brick state was decided. If you want that, submit them and
+ * read them back; this call is for hosts that would rather do the conversion
+ * themselves than pay the copy. */
+clay_result clay_brick_cache_eval_requests_device(const clay_document* doc, clay_device* device,
+                                                  const clay_brick_request* requests,
+                                                  size_t count,
+                                                  const clay_device_buffer* out_values,
+                                                  const clay_device_buffer* out_colors_rgb);
 
 /* Submits the evaluated distances for `count` requests: each brick's values
  * are classified (inside / outside / surface), clamped to the band and

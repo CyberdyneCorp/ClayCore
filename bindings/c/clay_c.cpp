@@ -433,6 +433,10 @@ constexpr std::size_t kBrickMeshParamsOriginal =
     offsetof(clay_brick_mesh_params, gradient_eps) + sizeof(float);
 constexpr std::size_t kVertexLayoutOriginal =
     offsetof(clay_vertex_layout, uv_offset) + sizeof(std::int32_t);
+constexpr std::size_t kDeviceDescOriginal =
+    offsetof(clay_device_desc, queue_family) + sizeof(std::uint32_t);
+constexpr std::size_t kDeviceBufferOriginal =
+    offsetof(clay_device_buffer, size) + sizeof(std::uint64_t);
 
 // Parameters each primitive takes, indexed by clay_prim (= the tape opcode).
 // This is what the clay_prim comments document and what clay_item_create
@@ -4937,6 +4941,208 @@ clay_result clay_eval_grid(const clay_document* doc, const char* backend,
     scene::CullRegion cull{region};
     scene::Tape tape = scene::compile_document(doc->doc.document, &cull);
     return eval_grid_into(tape, backend, query, out_values, out_colors_rgb);
+}
+
+// -- device interop (evaluation-backends spec: a caller-supplied device) -----
+
+struct clay_device {
+    std::unique_ptr<eval::Backend> backend;
+};
+
+namespace {
+
+clay_result read_device_buffer(const clay_device_buffer* src, const char* what,
+                               eval::DeviceBuffer* out) {
+    if (!src) {
+        *out = eval::DeviceBuffer{};
+        return CLAY_OK;  // an absent optional destination, not an error
+    }
+    clay_device_buffer d;
+    clay_result r = read_desc(src, kDeviceBufferOriginal, &d);
+    if (r != CLAY_OK) return r;
+    if (!d.handle)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, std::string("null ") + what + " handle");
+    if (d.size == 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    std::string("the ") + what + " buffer declares no available size; it is "
+                    "required rather than inferred, as every other length here is");
+    out->handle = d.handle;
+    out->offset = d.offset;
+    out->size = d.size;
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_device* clay_device_adopt(const clay_device_desc* desc) {
+    clay_device_desc d;
+    if (read_desc(desc, kDeviceDescOriginal, &d) != CLAY_OK) return nullptr;
+    eval::DeviceApi api;
+    const char* backend_name = nullptr;
+    switch (d.api) {
+        case CLAY_DEVICE_API_METAL:
+            api = eval::DeviceApi::Metal;
+            backend_name = "metal";
+            break;
+        case CLAY_DEVICE_API_VULKAN:
+            api = eval::DeviceApi::Vulkan;
+            backend_name = "vulkan";
+            break;
+        case CLAY_DEVICE_API_CUDA:
+            api = eval::DeviceApi::Cuda;
+            backend_name = "cuda";
+            break;
+        default:
+            fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown device API: " + std::to_string(d.api));
+            return nullptr;
+    }
+    eval::DeviceHandles handles;
+    handles.api = api;
+    for (int i = 0; i < 6; ++i) handles.handles[i] = d.handles[i];
+    handles.queue_family = d.queue_family;
+    std::unique_ptr<eval::Backend> backend = eval::make_backend(backend_name, handles);
+    if (!backend) {
+        // Refused at ADOPT rather than at first use, so a caller learns at the
+        // point it can still choose a fallback. It is a capability report: the
+        // registered backend stays usable and produces the same values.
+        fail(CLAY_ERROR_UNSUPPORTED,
+             std::string("the ") + backend_name +
+                 " backend cannot adopt this device: it is not compiled in, has no adoption "
+                 "path, or the handles are incomplete for that API");
+        return nullptr;
+    }
+    auto* handle = new clay_device();
+    handle->backend = std::move(backend);
+    return handle;
+}
+
+void clay_device_release(clay_device* device) { delete device; }
+
+const char* clay_device_backend_name(const clay_device* device) {
+    return device && device->backend ? device->backend->name() : nullptr;
+}
+
+clay_result clay_eval_grid_device(const clay_document* doc, clay_device* device,
+                                  const clay_grid_query* grid, const float region_min[3],
+                                  const float region_max[3],
+                                  const clay_device_buffer* out_values,
+                                  const clay_device_buffer* out_colors_rgb) {
+    if (!doc || !device || !device->backend || !grid || !out_values)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document, device, grid or values");
+    clay_grid_query q;
+    clay_result r = read_desc(grid, kGridQueryOriginal, &q);
+    if (r != CLAY_OK) return r;
+    eval::GridQuery query;
+    std::size_t samples = 0;
+    r = read_grid(q.origin, q.spacing, q.dims, &query, &samples);
+    if (r != CLAY_OK) return r;
+    eval::DeviceBuffer values, colors;
+    r = read_device_buffer(out_values, "values", &values);
+    if (r != CLAY_OK) return r;
+    r = read_device_buffer(out_colors_rgb, "colours", &colors);
+    if (r != CLAY_OK) return r;
+    bool has_region = false;
+    math::Aabb region;
+    r = read_region(region_min, region_max, "the cull region", &has_region, &region);
+    if (r != CLAY_OK) return r;
+
+    std::shared_ptr<const scene::Tape> whole;
+    scene::Tape culled;
+    const scene::Tape* tape = nullptr;
+    if (has_region) {
+        scene::CullRegion cull{region};
+        culled = scene::compile_document(doc->doc.document, &cull);
+        tape = &culled;
+    } else {
+        whole = doc->tape();
+        tape = whole.get();
+    }
+    switch (device->backend->eval_grid_device(*tape, query, values, colors)) {
+        case eval::Status::Ok: return CLAY_OK;
+        case eval::Status::Unsupported:
+            return fail(CLAY_ERROR_UNSUPPORTED,
+                        "this backend does not evaluate into a caller's device buffer");
+        case eval::Status::InvalidInput:
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "the device buffer is too small for the lattice, or the lattice is "
+                        "empty");
+        default: return fail(CLAY_ERROR_BACKEND, "device evaluation failed");
+    }
+}
+
+clay_result clay_brick_cache_eval_requests_device(const clay_document* doc, clay_device* device,
+                                                  const clay_brick_request* requests,
+                                                  size_t count,
+                                                  const clay_device_buffer* out_values,
+                                                  const clay_device_buffer* out_colors_rgb) {
+    if (!doc || !device || !device->backend)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or device");
+    if (count > 0 && (!requests || !out_values))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null requests or values");
+    clay_result r = check_batch("brick requests", count);
+    if (r != CLAY_OK) return r;
+    if (count == 0) return CLAY_OK;
+    eval::GridQuery first;
+    std::size_t per = 0;
+    r = read_grid(requests[0].origin, requests[0].spacing, requests[0].dims, &first, &per);
+    if (r != CLAY_OK) return r;
+    r = check_uniform_dims(requests, count);
+    if (r != CLAY_OK) return r;
+    eval::DeviceBuffer values, colors;
+    r = read_device_buffer(out_values, "values", &values);
+    if (r != CLAY_OK) return r;
+    r = read_device_buffer(out_colors_rgb, "colours", &colors);
+    if (r != CLAY_OK) return r;
+    // The whole batch's stride is checked up front, so a buffer that cannot
+    // hold every brick is refused before the first dispatch rather than after
+    // the ones that fit have already landed.
+    const std::uint64_t values_bytes = static_cast<std::uint64_t>(count) * per * sizeof(float);
+    if (values.size < values_bytes)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the device values buffer holds " + std::to_string(values.size) +
+                        " bytes; " + std::to_string(count) + " bricks need " +
+                        std::to_string(values_bytes));
+    if (!colors.empty() && colors.size < values_bytes * 3)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the device colour buffer is too small for " + std::to_string(count) +
+                        " bricks");
+
+    for (std::size_t i = 0; i < count; ++i) {
+        eval::GridQuery q;
+        std::size_t samples = 0;
+        r = read_grid(requests[i].origin, requests[i].spacing, requests[i].dims, &q, &samples);
+        if (r != CLAY_OK) return r;
+        const float band = requests[i].band;
+        if (!(band >= 0.0f) || !std::isfinite(band))
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "a request carries a band that is not finite and >= 0");
+        // Culled against its own brick dilated by its own band, exactly as the
+        // host-memory form does: the two produce the same values and differ
+        // only in where they land.
+        scene::CullRegion cull{request_brick_box(requests[i]).dilated(band)};
+        scene::Tape tape = scene::compile_document(doc->doc.document, &cull);
+        // Brick i at its own slot in the caller's single allocation.
+        eval::DeviceBuffer slot = values;
+        slot.offset = values.offset + static_cast<std::uint64_t>(i) * per * sizeof(float);
+        slot.size = static_cast<std::uint64_t>(per) * sizeof(float);
+        eval::DeviceBuffer color_slot;
+        if (!colors.empty()) {
+            color_slot = colors;
+            color_slot.offset =
+                colors.offset + static_cast<std::uint64_t>(i) * per * 3 * sizeof(float);
+            color_slot.size = static_cast<std::uint64_t>(per) * 3 * sizeof(float);
+        }
+        switch (device->backend->eval_grid_device(tape, q, slot, color_slot)) {
+            case eval::Status::Ok: break;
+            case eval::Status::Unsupported:
+                return fail(CLAY_ERROR_UNSUPPORTED,
+                            "this backend does not evaluate into a caller's device buffer");
+            case eval::Status::InvalidInput:
+                return fail(CLAY_ERROR_INVALID_ARGUMENT, "a brick's device slot is invalid");
+            default: return fail(CLAY_ERROR_BACKEND, "device evaluation failed");
+        }
+    }
+    return CLAY_OK;
 }
 
 // -- the compiled tape (c-abi spec: the compiled tape is exportable) ---------

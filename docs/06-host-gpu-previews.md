@@ -335,14 +335,68 @@ you may overwrite a key's ranges, but not free them in isolation.
 your own interleaved layout, in one pass rather than an interleave into a
 staging vector plus a copy.
 
-## What is not here yet
+## Lend us your device
 
-Zero-copy, on both routes: every brick and every mesh crosses host memory,
-because backends create and own their devices and there is no way to lend
-claycore yours. That is `add-device-interop`.
+Both routes above copy through host memory: results are computed on claycore's
+device, read back, and uploaded again to the device you draw from. Since ABI
+0.26.0 you can skip that by lending claycore the device you already have.
+
+```c
+clay_device_desc desc = {0};
+desc.struct_size = sizeof desc;
+desc.api = CLAY_DEVICE_API_VULKAN;   /* or CLAY_DEVICE_API_METAL */
+desc.handles[0] = instance;  desc.handles[1] = physical;
+desc.handles[2] = device;    desc.handles[3] = queue;
+desc.queue_family = compute_family;
+
+clay_device* dev = clay_device_adopt(&desc);
+if (!dev) { /* fall back to the ordinary calls; the values are identical */ }
+
+clay_device_buffer dst = {0};
+dst.struct_size = sizeof dst;
+dst.handle = my_buffer;   /* VkBuffer / MTLBuffer */
+dst.offset = slot * brick_bytes;
+dst.size   = brick_bytes;
+clay_eval_grid_device(doc, dev, &grid, NULL, NULL, &dst, NULL);
+```
+
+**No vendor header reaches `clay.h`.** Handles cross as `void*`, positioned per
+API, so the header still parses with no graphics SDK present and the symbols it
+declares do not vary with how the library was built.
+
+**What we promise about your queue.** We create, destroy and wait on no
+synchronization primitive of yours; we submit to your queue only inside a call
+you made; and the work has *completed* when the call returns, so nothing is left
+in flight. Calls on one `clay_device` are yours to serialize, exactly as they
+are for the brick cache.
+
+**Read this limit before you build on it.** This makes evaluation *output*
+device-resident. It does **not** make the brick *cache* device-resident:
+generations, staleness, band classification, fp16 quantization and the memory
+budget are host code over host memory, and that is where a submitted brick
+becomes a stored brick. So on this path you get bricks computed straight into
+your buffer and you own quantizing and uploading them — the cache is not in the
+loop and neither are its guarantees. Want the cache's correctness? Use
+`clay_brick_cache_read_bricks`. Want no host copy? Use this. Both are complete;
+neither is both.
+
+Values stay `float32` on the device and are deliberately not quantized to fp16
+there, even though an `r16float` atlas wants fp16: quantization and band
+classification belong to `clay_brick_cache_submit`, and a second implementation
+of that step is the thing most able to drift.
+
+Adoption is refused — returning NULL, with the reason in `clay_last_error()` —
+when the API's backend is not compiled in or the handles are incomplete. That is
+a capability report, not a failure: fall back and the values are identical.
+
+## What is not here yet
 
 Blob deltas, as noted above: a document carrying a sampled volume re-uploads it
 whole on any edit.
+
+Device adoption covers Vulkan and Metal. CUDA reports "cannot adopt" rather than
+pretending, and no backend meshes on the device, so a mesh still crosses host
+memory even on an adopted device.
 
 ## Keeping this honest
 

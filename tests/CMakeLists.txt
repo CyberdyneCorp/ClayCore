@@ -81,7 +81,10 @@ target_include_directories(clay_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/.
 # skip themselves when no runtime is present, so this is about linking the
 # backend-internal upload counter, not about having a GPU.
 if(CLAY_BACKEND_VULKAN)
-  target_sources(clay_unit_tests PRIVATE unit/test_vulkan.cpp)
+  target_sources(clay_unit_tests PRIVATE unit/test_vulkan.cpp unit/test_vulkan_interop.cpp)
+  # The interop cases create a Vulkan device the way a HOST would and lend it
+  # to claycore, so this file needs the Vulkan headers directly.
+  target_link_libraries(clay_unit_tests PRIVATE Vulkan::Vulkan)
 endif()
 
 target_link_libraries(clay_unit_tests PRIVATE clay::core doctest::doctest)
