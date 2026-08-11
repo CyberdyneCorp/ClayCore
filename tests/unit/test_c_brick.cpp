@@ -104,10 +104,10 @@ Refill refill(clay_brick_cache* cache, const clay_document* doc, std::size_t chu
         REQUIRE(clay_brick_cache_take_dirty(cache, reqs.data(), &count, &remaining) == CLAY_OK);
         if (count == 0) break;
         REQUIRE(clay_brick_cache_eval_requests(doc, nullptr, reqs.data(), count, values.data(),
-                                               count * kSamples) == CLAY_OK);
+                                               count * kSamples, nullptr, 0) == CLAY_OK);
         std::size_t accepted = 0;
-        REQUIRE(clay_brick_cache_submit(cache, reqs.data(), count, values.data(),
-                                        count * kSamples, results.data(), &accepted) == CLAY_OK);
+        REQUIRE(clay_brick_cache_submit(cache, reqs.data(), count, values.data(), count * kSamples,
+                                        nullptr, 0, results.data(), &accepted) == CLAY_OK);
         out.requested += count;
         out.accepted += accepted;
         for (std::size_t i = 0; i < count; ++i) {
@@ -148,8 +148,8 @@ std::map<std::tuple<int, int, int>, std::vector<std::uint16_t>> snapshot(
     if (count == 0) return out;
     std::vector<std::uint16_t> halves(count * kSamples);
     std::vector<std::int32_t> states(count);
-    REQUIRE(clay_brick_cache_read_bricks(cache, 0, keys.data(), count, states.data(),
-                                         halves.data(), count * kSamples) == CLAY_OK);
+    REQUIRE(clay_brick_cache_read_bricks(cache, 0, keys.data(), count, 0, states.data(),
+                                         halves.data(), count * kSamples, nullptr, 0) == CLAY_OK);
     for (std::size_t i = 0; i < count; ++i) {
         REQUIRE(states[i] == CLAY_BRICK_SURFACE);
         out[{keys[i * 3], keys[i * 3 + 1], keys[i * 3 + 2]}].assign(
@@ -616,8 +616,8 @@ TEST_CASE("read_bricks: a fixed stride, uniform bricks filled, missing ones unto
                                   500,        500,        500};
     std::vector<std::int32_t> states(3, -1);
     std::vector<std::uint16_t> halves(3 * kSamples, 0xBEEF);
-    REQUIRE(clay_brick_cache_read_bricks(cache, 0, keys, 3, states.data(), halves.data(),
-                                         3 * kSamples) == CLAY_OK);
+    REQUIRE(clay_brick_cache_read_bricks(cache, 0, keys, 3, 0, states.data(), halves.data(),
+                                         3 * kSamples, nullptr, 0) == CLAY_OK);
     CHECK(states[0] == CLAY_BRICK_SURFACE);
     CHECK(states[1] == CLAY_BRICK_INSIDE);
     CHECK(states[2] == CLAY_BRICK_MISSING);
@@ -638,8 +638,8 @@ TEST_CASE("read_bricks: a fixed stride, uniform bricks filled, missing ones unto
     const float band = 3 * kVoxel;
     std::vector<std::uint16_t> again(kSamples, 0);
     std::int32_t again_state = -1;
-    REQUIRE(clay_brick_cache_read_bricks(cache, 0, keys, 1, &again_state, again.data(),
-                                         kSamples) == CLAY_OK);
+    REQUIRE(clay_brick_cache_read_bricks(cache, 0, keys, 1, 0, &again_state, again.data(), kSamples,
+                                         nullptr, 0) == CLAY_OK);
     for (std::size_t i = 0; i < kSamples; ++i) CHECK(again[i] == halves[i]);
     std::map<std::uint16_t, float> decoded_by_bits;
     for (int k = 0; k < kDim; ++k)
@@ -659,24 +659,26 @@ TEST_CASE("read_bricks: a fixed stride, uniform bricks filled, missing ones unto
     SUBCASE("every refusal") {
         std::vector<std::uint16_t> buf(kSamples);
         std::int32_t one_state = 0;
-        CHECK(clay_brick_cache_read_bricks(nullptr, 0, keys, 1, &one_state, nullptr, 0) ==
-              CLAY_ERROR_INVALID_ARGUMENT);
-        CHECK(clay_brick_cache_read_bricks(cache, 0, nullptr, 1, &one_state, nullptr, 0) ==
-              CLAY_ERROR_INVALID_ARGUMENT);
-        CHECK(clay_brick_cache_read_bricks(cache, 0, keys, 1, nullptr, nullptr, 0) ==
+        CHECK(clay_brick_cache_read_bricks(nullptr, 0, keys, 1, 0, &one_state, nullptr, 0, nullptr,
+                                           0) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_brick_cache_read_bricks(cache, 0, nullptr, 1, 0, &one_state, nullptr, 0, nullptr,
+                                           0) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_brick_cache_read_bricks(cache, 0, keys, 1, 0, nullptr, nullptr, 0, nullptr, 0) ==
               CLAY_ERROR_INVALID_ARGUMENT);
         // an lod above the one level that exists is rejected, not clamped
         for (std::int32_t lod : {2, 3, -1}) {
-            CHECK(clay_brick_cache_read_bricks(cache, lod, keys, 1, &one_state, nullptr, 0) ==
-                  CLAY_ERROR_INVALID_ARGUMENT);
+            CHECK(clay_brick_cache_read_bricks(cache, lod, keys, 1, 0, &one_state, nullptr, 0,
+                                               nullptr, 0) == CLAY_ERROR_INVALID_ARGUMENT);
         }
         // the stride is fixed, so the capacity is exact
-        CHECK(clay_brick_cache_read_bricks(cache, 0, keys, 1, &one_state, buf.data(),
-                                           kSamples - 1) == CLAY_ERROR_INVALID_ARGUMENT);
-        CHECK(clay_brick_cache_read_bricks(cache, 0, keys, 1, &one_state, buf.data(),
-                                           kSamples + 1) == CLAY_ERROR_INVALID_ARGUMENT);
-        CHECK(clay_brick_cache_read_bricks(cache, 0, keys, 1, &one_state, nullptr, kSamples) ==
-              CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_brick_cache_read_bricks(cache, 0, keys, 1, 0, &one_state, buf.data(),
+                                           kSamples - 1, nullptr,
+                                           0) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_brick_cache_read_bricks(cache, 0, keys, 1, 0, &one_state, buf.data(),
+                                           kSamples + 1, nullptr,
+                                           0) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_brick_cache_read_bricks(cache, 0, keys, 1, 0, &one_state, nullptr, kSamples,
+                                           nullptr, 0) == CLAY_ERROR_INVALID_ARGUMENT);
     }
 
     SUBCASE("sample refuses a lattice index outside the brick") {
@@ -774,7 +776,7 @@ TEST_CASE("generations: a result computed against the older scene is rejected") 
 
     std::vector<float> values(count * kSamples);
     REQUIRE(clay_brick_cache_eval_requests(doc.d, nullptr, inflight.data(), count, values.data(),
-                                           count * kSamples) == CLAY_OK);
+                                           count * kSamples, nullptr, 0) == CLAY_OK);
 
     // the brick is re-dirtied while the request is in flight
     float lo[3], hi[3];
@@ -783,8 +785,8 @@ TEST_CASE("generations: a result computed against the older scene is rejected") 
 
     std::vector<std::int32_t> results(count, -1);
     std::size_t accepted = 0;
-    REQUIRE(clay_brick_cache_submit(cache, inflight.data(), count, values.data(),
-                                    count * kSamples, results.data(), &accepted) == CLAY_OK);
+    REQUIRE(clay_brick_cache_submit(cache, inflight.data(), count, values.data(), count * kSamples,
+                                    nullptr, 0, results.data(), &accepted) == CLAY_OK);
     CHECK(results[0] == CLAY_BRICK_SUBMIT_STALE);  // an ordinary outcome, and CLAY_OK
     // Re-dirtying reaches the brick's band-dilated neighbours too, so the
     // assertion is the accounting rather than a fixed number: every request is
@@ -804,59 +806,61 @@ TEST_CASE("generations: a result computed against the older scene is rejected") 
     SUBCASE("submit's own refusals") {
         std::size_t got = 0;
         std::vector<std::int32_t> res(1);
-        CHECK(clay_brick_cache_submit(nullptr, inflight.data(), 1, values.data(), kSamples,
+        CHECK(clay_brick_cache_submit(nullptr, inflight.data(), 1, values.data(), kSamples, nullptr,
+                                      0, res.data(), &got) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_brick_cache_submit(cache, nullptr, 1, values.data(), kSamples, nullptr, 0,
                                       res.data(), &got) == CLAY_ERROR_INVALID_ARGUMENT);
-        CHECK(clay_brick_cache_submit(cache, nullptr, 1, values.data(), kSamples, res.data(),
-                                      &got) == CLAY_ERROR_INVALID_ARGUMENT);
-        CHECK(clay_brick_cache_submit(cache, inflight.data(), 1, nullptr, kSamples, res.data(),
-                                      &got) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_brick_cache_submit(cache, inflight.data(), 1, nullptr, kSamples, nullptr, 0,
+                                      res.data(), &got) == CLAY_ERROR_INVALID_ARGUMENT);
         // a caller that skips both outputs cannot tell what happened
         CHECK(clay_brick_cache_submit(cache, inflight.data(), 1, values.data(), kSamples, nullptr,
-                                      nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+                                      0, nullptr, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
         // the capacity must be exactly count * dim^3
         CHECK(clay_brick_cache_submit(cache, inflight.data(), 1, values.data(), kSamples - 1,
-                                      res.data(), &got) == CLAY_ERROR_INVALID_ARGUMENT);
+                                      nullptr, 0, res.data(), &got) == CLAY_ERROR_INVALID_ARGUMENT);
         CHECK(clay_brick_cache_submit(cache, inflight.data(), 1, values.data(), kSamples * 2,
-                                      res.data(), &got) == CLAY_ERROR_INVALID_ARGUMENT);
+                                      nullptr, 0, res.data(), &got) == CLAY_ERROR_INVALID_ARGUMENT);
         // a request whose lattice is not this cache's was modified, or came
         // from another cache
         clay_brick_request tampered = inflight[0];
         tampered.spacing *= 2.0f;
-        CHECK(clay_brick_cache_submit(cache, &tampered, 1, values.data(), kSamples, res.data(),
-                                      &got) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_brick_cache_submit(cache, &tampered, 1, values.data(), kSamples, nullptr, 0,
+                                      res.data(), &got) == CLAY_ERROR_INVALID_ARGUMENT);
         tampered = inflight[0];
         tampered.dims[1] = 16;
-        CHECK(clay_brick_cache_submit(cache, &tampered, 1, values.data(), kSamples, res.data(),
-                                      &got) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_brick_cache_submit(cache, &tampered, 1, values.data(), kSamples, nullptr, 0,
+                                      res.data(), &got) == CLAY_ERROR_INVALID_ARGUMENT);
         // ...but a submission to a cache that never issued it is merely STALE
         Cache sibling(make_cache());
         std::int32_t sibling_result = -1;
         REQUIRE(clay_brick_cache_submit(sibling, inflight.data(), 1, values.data(), kSamples,
-                                        &sibling_result, nullptr) == CLAY_OK);
+                                        nullptr, 0, &sibling_result, nullptr) == CLAY_OK);
         CHECK(sibling_result == CLAY_BRICK_SUBMIT_STALE);
     }
 
     SUBCASE("eval_requests' own refusals") {
         std::vector<float> out(kSamples);
         CHECK(clay_brick_cache_eval_requests(nullptr, nullptr, inflight.data(), 1, out.data(),
-                                             kSamples) == CLAY_ERROR_INVALID_ARGUMENT);
-        CHECK(clay_brick_cache_eval_requests(doc.d, nullptr, nullptr, 1, out.data(), kSamples) ==
-              CLAY_ERROR_INVALID_ARGUMENT);
-        CHECK(clay_brick_cache_eval_requests(doc.d, nullptr, inflight.data(), 1, nullptr,
-                                             kSamples) == CLAY_ERROR_INVALID_ARGUMENT);
+                                             kSamples, nullptr, 0) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_brick_cache_eval_requests(doc.d, nullptr, nullptr, 1, out.data(), kSamples,
+                                             nullptr, 0) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_brick_cache_eval_requests(doc.d, nullptr, inflight.data(), 1, nullptr, kSamples,
+                                             nullptr, 0) == CLAY_ERROR_INVALID_ARGUMENT);
         CHECK(clay_brick_cache_eval_requests(doc.d, nullptr, inflight.data(), 1, out.data(),
-                                             kSamples - 1) == CLAY_ERROR_INVALID_ARGUMENT);
+                                             kSamples - 1, nullptr,
+                                             0) == CLAY_ERROR_INVALID_ARGUMENT);
         CHECK(clay_brick_cache_eval_requests(doc.d, "nope", inflight.data(), 1, out.data(),
-                                             kSamples) == CLAY_ERROR_NOT_FOUND);
-        CHECK(clay_brick_cache_eval_requests(doc.d, nullptr, inflight.data(), 0, out.data(), 4) ==
-              CLAY_ERROR_INVALID_ARGUMENT);
-        CHECK(clay_brick_cache_eval_requests(doc.d, nullptr, inflight.data(), 0, nullptr, 0) ==
-              CLAY_OK);
+                                             kSamples, nullptr, 0) == CLAY_ERROR_NOT_FOUND);
+        CHECK(clay_brick_cache_eval_requests(doc.d, nullptr, inflight.data(), 0, out.data(), 4,
+                                             nullptr, 0) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_brick_cache_eval_requests(doc.d, nullptr, inflight.data(), 0, nullptr, 0,
+                                             nullptr, 0) == CLAY_OK);
         if (inflight.size() > 1) {
             std::vector<clay_brick_request> mixed = {inflight[0], inflight[1]};
             mixed[1].dims[0] = 16;  // two lattices in one batch have no stride
             CHECK(clay_brick_cache_eval_requests(doc.d, nullptr, mixed.data(), 2, out.data(),
-                                                 2 * kSamples) == CLAY_ERROR_INVALID_ARGUMENT);
+                                                 2 * kSamples, nullptr,
+                                                 0) == CLAY_ERROR_INVALID_ARGUMENT);
         }
     }
 }
@@ -979,8 +983,9 @@ TEST_CASE("memory budget: a predictable refusal, a ceiling never breached") {
     REQUIRE(keys.size() / 3 == s.surface_bricks);
     std::vector<std::int32_t> states(keys.size() / 3, -1);
     std::vector<std::uint16_t> halves(states.size() * kSamples);
-    REQUIRE(clay_brick_cache_read_bricks(cache, 0, keys.data(), states.size(), states.data(),
-                                         halves.data(), states.size() * kSamples) == CLAY_OK);
+    REQUIRE(clay_brick_cache_read_bricks(cache, 0, keys.data(), states.size(), 0, states.data(),
+                                         halves.data(), states.size() * kSamples, nullptr,
+                                         0) == CLAY_OK);
     for (std::int32_t state : states) CHECK(state == CLAY_BRICK_SURFACE);
     // the tracked bookkeeping is NOT what the budget bounds, and says so
     CHECK(s.tracked_bricks > s.surface_bricks);
@@ -1005,8 +1010,8 @@ TEST_CASE("LOD mips: built from clean children, dropped when one is dirtied") {
     // the mip reads back through the same call the full-resolution bricks use
     std::int32_t state = -1;
     std::vector<std::uint16_t> halves(kSamples, 0xBEEF);
-    REQUIRE(clay_brick_cache_read_bricks(cache, 1, coarse, 1, &state, halves.data(), kSamples) ==
-            CLAY_OK);
+    REQUIRE(clay_brick_cache_read_bricks(cache, 1, coarse, 1, 0, &state, halves.data(), kSamples,
+                                         nullptr, 0) == CLAY_OK);
     CHECK(state == CLAY_BRICK_SURFACE);
     bool wrote = false;
     for (std::uint16_t h : halves) wrote = wrote || h != 0xBEEF;
@@ -1022,7 +1027,8 @@ TEST_CASE("LOD mips: built from clean children, dropped when one is dirtied") {
     REQUIRE(clay_brick_cache_build_mip(cache, coarse, &built) == CLAY_OK);
     CHECK(built == 0);  // "not yet", not a failure
     std::int32_t missing = -1;
-    REQUIRE(clay_brick_cache_read_bricks(cache, 1, coarse, 1, &missing, nullptr, 0) == CLAY_OK);
+    REQUIRE(clay_brick_cache_read_bricks(cache, 1, coarse, 1, 0, &missing, nullptr, 0, nullptr,
+                                         0) == CLAY_OK);
     CHECK(missing == CLAY_BRICK_MISSING);
 
     CHECK(clay_brick_cache_build_mip(nullptr, coarse, &built) == CLAY_ERROR_INVALID_ARGUMENT);
@@ -1088,7 +1094,7 @@ TEST_CASE("brick cache: an item a band away from a brick still decides its sampl
 
     std::vector<float> values(n * kSamples);
     REQUIRE(clay_brick_cache_eval_requests(doc.d, nullptr, reqs.data(), n, values.data(),
-                                           values.size()) == CLAY_OK);
+                                           values.size(), nullptr, 0) == CLAY_OK);
 
     // Find brick (0,0,0) — the one whose box the sphere is OUTSIDE — and read
     // the corner sample nearest the sphere.
@@ -1105,13 +1111,13 @@ TEST_CASE("brick cache: an item a band away from a brick still decides its sampl
 
     // ...and the brick is stored as a surface brick, not classified away.
     std::size_t accepted = 0;
-    REQUIRE(clay_brick_cache_submit(cache, reqs.data(), n, values.data(), values.size(), nullptr,
-                                    &accepted) == CLAY_OK);
+    REQUIRE(clay_brick_cache_submit(cache, reqs.data(), n, values.data(), values.size(), nullptr, 0,
+                                    nullptr, &accepted) == CLAY_OK);
     CHECK(accepted == n);
     const std::int32_t key[3] = {0, 0, 0};
     std::int32_t state = -1;
     std::vector<std::uint16_t> halves(kSamples);
-    REQUIRE(clay_brick_cache_read_bricks(cache, 0, key, 1, &state, halves.data(),
-                                         halves.size()) == CLAY_OK);
+    REQUIRE(clay_brick_cache_read_bricks(cache, 0, key, 1, 0, &state, halves.data(), halves.size(),
+                                         nullptr, 0) == CLAY_OK);
     CHECK(state == CLAY_BRICK_SURFACE);
 }

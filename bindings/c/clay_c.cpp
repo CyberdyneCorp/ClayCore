@@ -1411,6 +1411,19 @@ clay_result exact_capacity(const char* what, std::size_t count, std::size_t per,
     return CLAY_OK;
 }
 
+// The same rule for a buffer that may be absent: exactly count * per when it is
+// there, and exactly nothing when it is not. A capacity declared for a buffer
+// that was not passed is a caller who forgot the pointer, not a caller being
+// generous, so it is refused rather than ignored.
+clay_result optional_capacity(const char* what, const void* buffer, std::size_t count,
+                              std::size_t per, std::size_t capacity) {
+    if (buffer) return exact_capacity(what, count, per, capacity);
+    if (capacity != 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    std::string("no ") + what + " buffer, but a non-zero capacity");
+    return CLAY_OK;
+}
+
 clay_result eval_grid_into(const scene::Tape& tape, const char* backend,
                            const eval::GridQuery& q, float* out_values,
                            float* out_colors_rgb) {
@@ -1499,6 +1512,7 @@ clay_result read_brick_config(const clay_brick_config* src, brick::BrickConfig* 
     out->voxel_size = c.voxel_size;
     out->band_voxels = c.band_voxels;
     out->memory_budget = static_cast<std::size_t>(c.memory_budget);
+    out->colors = c.colors != 0;
     // The band and the brick size are derived, and both are used as divisors
     // and dilations below; an overflow here would make every span check
     // meaningless.
@@ -1568,24 +1582,22 @@ clay_result check_dirty_span(const brick::BrickCache& cache, const math::Aabb& w
     return CLAY_OK;
 }
 
-// One brick's slice of a read_bricks output. Split out because the branch is
-// the interesting part and the argument checking around it is not: a brick the
-// cache has nothing for is MISSING and its slice is LEFT UNTOUCHED, while a
-// uniform brick is FILLED with the band value of its sign so an uploader can
-// memcpy blindly rather than branching on the state.
-std::int32_t write_one_brick(const brick::Brick* b, std::size_t per, std::uint16_t inside,
-                             std::uint16_t outside, std::uint16_t* dst) {
-    if (!b) return CLAY_BRICK_MISSING;
-    const bool surface = b->state == brick::BrickState::Surface;
-    if (surface && b->values.size() != per) return CLAY_BRICK_MISSING;  // never reached
-    if (dst) {
-        if (surface)
-            std::memcpy(dst, b->values.data(), per * sizeof(std::uint16_t));
-        else
-            std::fill(dst, dst + per, b->state == brick::BrickState::Inside ? inside : outside);
-    }
-    return to_c_brick_state(b->state);
+// The fixed stride ONE brick occupies in a read_bricks output: its own lattice
+// plus the halo on both sides of every axis. apron is validated against dim
+// before this runs, so (dim + 2*apron) is at most 3*dim and the cube cannot
+// wrap a size_t for any dim this cache accepts.
+std::size_t padded_samples(const brick::BrickConfig& c, std::int32_t apron) {
+    const std::size_t w = static_cast<std::size_t>(c.dim) + 2 * static_cast<std::size_t>(apron);
+    return w * w * w;
 }
+
+// The colour payload crosses as bytes and is written through a BrickColor*, so
+// the two layouts have to be the same four bytes in the same order.
+static_assert(sizeof(brick::BrickColor) == 4, "BrickColor must be four packed bytes");
+static_assert(offsetof(brick::BrickColor, r) == 0, "BrickColor.r must be first");
+static_assert(offsetof(brick::BrickColor, g) == 1, "BrickColor.g must follow r");
+static_assert(offsetof(brick::BrickColor, b) == 2, "BrickColor.b must follow g");
+static_assert(offsetof(brick::BrickColor, a) == 3, "BrickColor.a must follow b");
 
 // A batch shares one stride, so it shares one lattice size. Requests from one
 // cache always do; a batch that does not is a caller mixing two caches, and
@@ -4826,6 +4838,7 @@ clay_result clay_brick_config_defaults(clay_brick_config* out_config) {
     out_config->voxel_size = d.voxel_size;
     out_config->band_voxels = d.band_voxels;
     out_config->memory_budget = d.memory_budget;
+    out_config->colors = d.colors ? 1 : 0;
     return CLAY_OK;
 }
 
@@ -4854,6 +4867,7 @@ clay_result clay_brick_cache_config(const clay_brick_cache* cache,
     out_config->voxel_size = c.voxel_size;
     out_config->band_voxels = c.band_voxels;
     out_config->memory_budget = c.memory_budget;
+    out_config->colors = c.colors ? 1 : 0;
     return CLAY_OK;
 }
 
@@ -4973,14 +4987,15 @@ clay_result clay_brick_cache_take_dirty(clay_brick_cache* cache,
 
 clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char* backend,
                                            const clay_brick_request* requests, size_t count,
-                                           float* out_values, size_t values_capacity) {
+                                           float* out_values, size_t values_capacity,
+                                           float* out_colors_rgb, size_t colors_capacity) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     if (count > 0 && (!requests || !out_values))
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null requests or values");
     clay_result r = check_batch("brick requests", count);
     if (r != CLAY_OK) return r;
     if (count == 0) {
-        if (values_capacity != 0)
+        if (values_capacity != 0 || colors_capacity != 0)
             return fail(CLAY_ERROR_INVALID_ARGUMENT, "no requests, but a non-empty buffer");
         return CLAY_OK;
     }
@@ -4992,6 +5007,8 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
     r = read_grid(requests[0].origin, requests[0].spacing, requests[0].dims, &first, &per);
     if (r != CLAY_OK) return r;
     r = exact_capacity("brick values", count, per, values_capacity);
+    if (r != CLAY_OK) return r;
+    r = optional_capacity("brick colours", out_colors_rgb, count, per * 3, colors_capacity);
     if (r != CLAY_OK) return r;
     r = check_uniform_dims(requests, count);
     if (r != CLAY_OK) return r;
@@ -5008,7 +5025,8 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
             return fail(CLAY_ERROR_INVALID_ARGUMENT, "a request carries a band that is not finite and >= 0");
         scene::CullRegion cull{request_brick_box(requests[i]).dilated(band)};
         scene::Tape tape = scene::compile_document(doc->doc.document, &cull);
-        r = eval_grid_into(tape, backend, q, out_values + i * per, nullptr);
+        r = eval_grid_into(tape, backend, q, out_values + i * per,
+                           out_colors_rgb ? out_colors_rgb + i * per * 3 : nullptr);
         if (r != CLAY_OK) return r;
     }
     return CLAY_OK;
@@ -5017,6 +5035,7 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
 clay_result clay_brick_cache_submit(clay_brick_cache* cache,
                                     const clay_brick_request* requests, size_t count,
                                     const float* values, size_t values_capacity,
+                                    const float* colors_rgb, size_t colors_capacity,
                                     int32_t* out_results, size_t* out_accepted) {
     if (!cache) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brick cache");
     if (count > 0 && (!requests || !values))
@@ -5031,6 +5050,17 @@ clay_result clay_brick_cache_submit(clay_brick_cache* cache,
     const std::size_t per = brick_samples(config);
     r = exact_capacity("brick values", count, per, values_capacity);
     if (r != CLAY_OK) return r;
+    // Required with colour and refused without it, both ways round: a brick
+    // with a colour lattice and a brick without one are not the same brick to
+    // read back, so there is no cache that takes colour optionally.
+    if (config.colors && count > 0 && !colors_rgb)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this cache was created with colours, so submit needs colors_rgb");
+    if (!config.colors && colors_rgb)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this cache was created without colours and has nowhere to store them");
+    r = optional_capacity("brick colours", colors_rgb, count, per * 3, colors_capacity);
+    if (r != CLAY_OK) return r;
     r = check_requests_match(requests, count, config);
     if (r != CLAY_OK) return r;
     std::size_t accepted = 0;
@@ -5041,7 +5071,8 @@ clay_result clay_brick_cache_submit(clay_brick_cache* cache,
         // -Wclass-memaccess to object to the typed form.
         std::memcpy(static_cast<void*>(&req), static_cast<const void*>(&requests[i]),
                     sizeof req);
-        brick::SubmitResult result = cache->cache.submit(req, values + i * per);
+        brick::SubmitResult result = cache->cache.submit(
+            req, values + i * per, colors_rgb ? colors_rgb + i * per * 3 : nullptr);
         if (result == brick::SubmitResult::Accepted) ++accepted;
         if (out_results) out_results[i] = to_c_submit(result);
     }
@@ -5080,35 +5111,53 @@ clay_result clay_brick_cache_sample(const clay_brick_cache* cache, const int32_t
 }
 
 clay_result clay_brick_cache_read_bricks(const clay_brick_cache* cache, int32_t lod,
-                                         const int32_t* keys_xyz, size_t count,
+                                         const int32_t* keys_xyz, size_t count, int32_t apron,
                                          int32_t* out_states, uint16_t* out_halves,
-                                         size_t values_capacity) {
+                                         size_t values_capacity, uint8_t* out_colors_rgba,
+                                         size_t colors_capacity) {
     if (!cache) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brick cache");
     if (lod != 0 && lod != 1)
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "lod must be 0 (full resolution) or 1 (mip), got " + std::to_string(lod));
     if (count > 0 && !keys_xyz) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null keys");
-    if (!out_states && !out_halves)
-        return fail(CLAY_ERROR_INVALID_ARGUMENT, "read_bricks needs out_states or out_halves");
+    if (!out_states && !out_halves && !out_colors_rgba)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "read_bricks needs out_states, out_halves or out_colors_rgba");
     clay_result r = check_batch("bricks", count);
     if (r != CLAY_OK) return r;
     const brick::BrickConfig& config = cache->cache.config();
-    const std::size_t per = brick_samples(config);
-    if (out_halves) {
-        r = exact_capacity("brick half", count, per, values_capacity);
-        if (r != CLAY_OK) return r;
-    } else if (values_capacity != 0) {
+    // Refused rather than clamped, for the reason lod > 1 is: past a brick's
+    // own width the tile is mostly neighbour, and what the caller wants there
+    // is a coarser lod, not a fatter apron.
+    if (apron < 0 || apron > config.dim)
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
-                    "no out_halves, but a non-zero values_capacity");
-    }
-    const std::uint16_t inside = brick::float_to_half(-config.band());
-    const std::uint16_t outside = brick::float_to_half(config.band());
+                    "apron must be in [0, dim] = [0, " + std::to_string(config.dim) +
+                        "], got " + std::to_string(apron));
+    if (out_colors_rgba && !config.colors)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this cache was created without colours and stores none to read");
+    // A mip subsamples DISTANCES; averaging colour over its 2x2x2 block would
+    // be a filtering policy chosen on the caller's behalf, so it is reported
+    // rather than invented.
+    if (out_colors_rgba && lod != 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a mip carries no colour lattice");
+    const std::size_t per = padded_samples(config, apron);
+    r = optional_capacity("brick half", out_halves, count, per, values_capacity);
+    if (r != CLAY_OK) return r;
+    r = optional_capacity("brick colour", out_colors_rgba, count, per * 4, colors_capacity);
+    if (r != CLAY_OK) return r;
     for (std::size_t i = 0; i < count; ++i) {
         const brick::BrickKey key = to_brick_key(keys_xyz + i * 3);
-        const brick::Brick* b = lod == 0 ? cache->cache.find(key) : cache->cache.find_mip(key);
-        std::int32_t state = write_one_brick(b, per, inside, outside,
-                                             out_halves ? out_halves + i * per : nullptr);
-        if (out_states) out_states[i] = state;
+        const brick::Brick* b = cache->cache.find_lod(lod, key);
+        // MISSING leaves the WHOLE padded slice untouched. The rule is about
+        // the key, not its neighbourhood: a caller wanting a tile of band
+        // values for a brick that does not exist can synthesize one.
+        if (out_states) out_states[i] = b ? to_c_brick_state(b->state) : CLAY_BRICK_MISSING;
+        if (!b) continue;
+        if (out_halves) cache->cache.read_padded(lod, key, apron, out_halves + i * per);
+        if (out_colors_rgba)
+            cache->cache.read_colors_padded(
+                key, apron, reinterpret_cast<brick::BrickColor*>(out_colors_rgba) + i * per);
     }
     return CLAY_OK;
 }

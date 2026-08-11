@@ -2298,10 +2298,27 @@ typedef struct clay_brick_config {
      * ever been marked dirty, which clay_brick_stats.tracked_bricks reports
      * and this does not cover. */
     uint64_t memory_budget;
+    /* 0/1: carry an RGBA8 colour lattice beside the distances, so a host can
+     * upload a colour atlas without meshing. Appended after the original
+     * layout, so a caller compiled against the older struct keeps the
+     * distance-only cache it already had.
+     *
+     * Chosen HERE and not per call, because a colour lattice has to be
+     * evaluated to exist: a per-call flag would let a host ask a distance-only
+     * cache for colours it never computed, and the only truthful answer would
+     * be an error for a mistake made three calls earlier. When this is set,
+     * clay_brick_cache_submit REQUIRES colours and clay_brick_cache_read_bricks
+     * can return them; when it is not, both refuse to deal in colour at all.
+     *
+     * It costs two more bytes per sample than the fp16 distance, inside the
+     * SAME memory_budget — so a colour cache holds about a third of the bricks
+     * a distance-only one holds at the same ceiling. That is why it is opt-in
+     * rather than the default. */
+    int32_t colors;
 } clay_brick_config;
 
 /* Fills a descriptor with the engine's defaults, struct_size included: 8^3
- * bricks, 0.05 world units per voxel, a 3-voxel band, no budget. */
+ * bricks, 0.05 world units per voxel, a 3-voxel band, no budget, no colour. */
 clay_result clay_brick_config_defaults(clay_brick_config* out_config);
 
 /* Everything a host needs to draw a progress bar or decide whether to raise
@@ -2455,6 +2472,12 @@ clay_result clay_brick_cache_take_dirty(clay_brick_cache* cache,
  * is measured, not reasoned: on an M2 Max it takes a 216-brick fill from
  * 24.7 ms to 8.2 ms on twelve workers.
  *
+ * out_colors_rgb (may be NULL) receives the field's colour at the same lattice
+ * points, count * dim^3 * 3 floats with brick i at i * dim^3 * 3, and
+ * colors_capacity must be exactly that or 0 when it is NULL. It is what a
+ * colour-carrying cache's clay_brick_cache_submit wants; a distance-only cache
+ * needs neither and passing NULL costs nothing to compute.
+ *
  * PASS "cpu" HERE. Naming a GPU backend is not a promise of a speedup, and for
  * a brick it is a promise of the opposite: the Metal backend allocates per
  * call, and 512 samples is too little work to cover the dispatch. Measured on
@@ -2465,7 +2488,8 @@ clay_result clay_brick_cache_take_dirty(clay_brick_cache* cache,
  * before changing the string on a device that is not an M-series Mac. */
 clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char* backend,
                                            const clay_brick_request* requests, size_t count,
-                                           float* out_values, size_t values_capacity);
+                                           float* out_values, size_t values_capacity,
+                                           float* out_colors_rgb, size_t colors_capacity);
 
 /* Submits the evaluated distances for `count` requests: each brick's values
  * are classified (inside / outside / surface), clamped to the band and
@@ -2482,6 +2506,15 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
  * count * dim^3, or a request whose spacing or dims do not match the cache's
  * configuration, which means it was modified or came from a different cache.
  *
+ * `colors_rgb` is count * dim^3 * 3 floats in the same order, and it is
+ * REQUIRED when the cache was created with clay_brick_config.colors and
+ * REFUSED when it was not — there is no cache that takes colour optionally,
+ * because a brick with a colour lattice and a brick without one are not the
+ * same brick to read back. colors_capacity is checked exactly, or must be 0
+ * when colors_rgb is NULL. Classification is decided by the DISTANCES alone:
+ * colour never makes a brick a surface, and a uniform brick keeps one colour
+ * rather than a lattice.
+ *
  * The values are not scanned for NaN, and a request's origin is not
  * re-derived from its key. A backend that produces a NaN classifies the brick
  * as surface and stores a NaN half; validating dim^3 floats per brick on the
@@ -2490,6 +2523,7 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
 clay_result clay_brick_cache_submit(clay_brick_cache* cache,
                                     const clay_brick_request* requests, size_t count,
                                     const float* values, size_t values_capacity,
+                                    const float* colors_rgb, size_t colors_capacity,
                                     int32_t* out_results, size_t* out_accepted);
 
 /* The world box a brick's lattice covers, and the box its evaluation should be
@@ -2509,32 +2543,57 @@ clay_result clay_brick_cache_cull_region(const clay_brick_cache* cache, const in
 clay_result clay_brick_cache_sample(const clay_brick_cache* cache, const int32_t key[3],
                                     int32_t i, int32_t j, int32_t k, float* out_value);
 
-/* Reads whole bricks in their STORED form — dim^3 IEEE binary16 values per
- * key, the engine's own bits unconverted, which is what a GPU texture upload
- * wants and half the bytes of the decoded form. `keys_xyz` is count packed
- * int32 triples, exactly as clay_voxel_flood_select returns cells.
+/* Reads whole bricks in their STORED form — IEEE binary16 values per key, the
+ * engine's own bits unconverted, which is what a GPU texture upload wants and
+ * half the bytes of the decoded form. `keys_xyz` is count packed int32 triples,
+ * exactly as clay_voxel_flood_select returns cells.
  *
- * The stride is FIXED at dim^3: brick i occupies out_halves[i * dim^3 ...]
- * whatever its state, so out_halves can be an MTLBuffer's contents and the
- * upload is one memcpy with no packing pass. values_capacity must be exactly
- * count * dim^3, or 0 when out_halves is NULL and only the states are wanted.
+ * The stride is FIXED at (dim + 2*apron)^3 — call it W below: brick i occupies
+ * out_halves[i * W ...] whatever its state, so out_halves can be an MTLBuffer's
+ * contents and the upload is one memcpy with no packing pass. values_capacity
+ * must be exactly count * W, or 0 when out_halves is NULL and only the states
+ * are wanted.
  *
- * out_states (count clay_brick_state values) says what each key held. It may
- * be NULL when only the payload is wanted, but not together with out_halves:
- * a call that writes neither has nothing to report. A uniform brick is FILLED
- * with the band value of its sign, so an uploader never branches;
- * CLAY_BRICK_MISSING means the cache holds nothing for that key and its dim^3
- * elements are LEFT UNTOUCHED — the one state where the buffer is not
- * written.
+ * `apron` is the halo, in voxels, taken from the NEIGHBOURING bricks and
+ * written around each brick's own lattice. 0 is the brick alone and what this
+ * call did before the apron existed. Hardware trilinear filtering across a
+ * brick boundary needs a one-voxel halo, and without one a host either fetches
+ * neighbours in the shader at every brick edge or repacks tiles on the CPU —
+ * which throws away the one-memcpy property this call is for. The halo is
+ * defined for EVERY neighbour: an implicit or never-evaluated brick answers the
+ * same band value a single sample of it reports, so no element is undefined and
+ * a tile at the edge of the sculpted region filters against the band rather
+ * than against whatever was in the buffer. apron is bounded by dim and a wider
+ * one is rejected rather than clamped — past that the tile is mostly neighbour
+ * and what the host wants is a coarser lod, not a fatter apron.
+ *
+ * out_states (count clay_brick_state values) says what each key held — the
+ * KEY's own state, never the halo's. It may be NULL when only the payload is
+ * wanted, but not together with out_halves and out_colors_rgba: a call that
+ * writes nothing has nothing to report. A uniform brick is FILLED with the band
+ * value of its sign, so an uploader never branches; CLAY_BRICK_MISSING means
+ * the cache holds nothing for that key and its whole W elements are LEFT
+ * UNTOUCHED — the one state where the buffer is not written, and the rule is
+ * about the key rather than its neighbourhood.
+ *
+ * out_colors_rgba (may be NULL) receives count * W * 4 bytes of RGBA8 in the
+ * same padded layout — directly uploadable as rgba8unorm, which WebGPU filters
+ * as it filters r16float. Alpha is 255 and RESERVED: it is not a mask and not
+ * coverage. It requires a cache created with clay_brick_config.colors and is
+ * refused otherwise, and colors_capacity must be exactly count * W * 4 or 0
+ * when it is NULL.
  *
  * `lod` is 0 for the full-resolution brick or 1 for its mip. A value above 1
  * is rejected rather than clamped: there is one mip level, and silently
  * answering level 0 for a request for level 4 would put a brick twice the
- * intended size on screen. */
+ * intended size on screen. A mip carries NO colour — it subsamples distances,
+ * and averaging colour across its 2x2x2 block would be a filtering policy
+ * chosen on your behalf — so colours at lod 1 are refused, not approximated. */
 clay_result clay_brick_cache_read_bricks(const clay_brick_cache* cache, int32_t lod,
-                                         const int32_t* keys_xyz, size_t count,
+                                         const int32_t* keys_xyz, size_t count, int32_t apron,
                                          int32_t* out_states, uint16_t* out_halves,
-                                         size_t values_capacity);
+                                         size_t values_capacity, uint8_t* out_colors_rgba,
+                                         size_t colors_capacity);
 
 /* Every brick that stores samples, through the size-query pattern, as packed
  * int32 triples exactly like clay_voxel_flood_select: call with out_keys_xyz
