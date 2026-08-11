@@ -1,6 +1,6 @@
 {
   "abiVersion": "0.25.0",
-  "budgetNotes": "budgetMs is a CEILING on p95 at the worst point of the growth axis. It records what the engine must not exceed, which is not the same as what it should cost: where the two differ the note says so. Derived budgets are 1.5x the measurement; hand-set ones carry a note explaining the decision.",
+  "budgetNotes": "budgetMs is a CEILING on p95 at the worst point of the growth axis. It records what the engine must not exceed, which is not what it should cost: where the two differ the note says so. Derived budgets are 1.5x the measurement; hand-set ones carry a note. Sample counts are probe-derived, so a case's `samples` reflects how expensive one iteration is.",
   "budgets": {
     "cut_create": {
       "budgetMs": 0.0002,
@@ -8,49 +8,55 @@
       "measuredMs": 0.0001
     },
     "mask_extrude": {
-      "budgetMs": 3400.0,
+      "budgetMs": 3200.0,
       "class": "operation",
-      "measuredMs": 2718.4472,
-      "note": "2.7 s at 1000 stamps and LINEAR in document size (N^0.92), so it gets worse in proportion to the sculpt. The budget covers the axis measured; at 10000 stamps it would blow through this, which is a real limit on the verb rather than a measurement artifact."
+      "measuredMs": 2525.8919,
+      "note": "2.5 s at 1000 stamps and N^0.91 \u2014 near linear, so it degrades in proportion to the sculpt and would blow this at 10000."
     },
     "mask_paint": {
-      "budgetMs": 0.0161,
+      "budgetMs": 0.0083,
       "class": "interactive",
-      "measuredMs": 0.0107
+      "measuredMs": 0.0055
     },
     "sdf_consolidate": {
-      "budgetMs": 6000.0,
+      "budgetMs": 2000.0,
       "class": "operation",
-      "measuredMs": 4975.6326,
-      "note": "5.0 s measured and FLAT in document size, so this is the volume bake resolution rather than the document. It is an explicit user action, not per-stamp work, but 5 s needs progress UI and is a candidate for the first optimisation pass. The ceiling is deliberately tighter than the derived 1.5x so a regression here is caught rather than absorbed."
+      "measuredMs": 1568.9875,
+      "note": "1.57 s at 1000 stamps and N^0.84 \u2014 it scales WITH the document. An earlier baseline recorded 4975 ms and flat; both halves were a fixture artifact, from re-consolidating an already-consolidated layer."
     },
     "sdf_flatten": {
-      "budgetMs": 9.8317,
+      "budgetMs": 8.1783,
       "class": "operation",
-      "measuredMs": 6.5545
+      "measuredMs": 5.4522
     },
     "sdf_move": {
-      "budgetMs": 0.16,
+      "budgetMs": 0.15,
       "class": "gesture",
-      "measuredMs": 0.1072,
-      "note": "The only gesture verb that scales LINEARLY with the document (N^1.00). Cheap in absolute terms today, so this is about the shape: a linear gesture is the one to watch as documents grow."
+      "measuredMs": 0.1011,
+      "note": "The only gesture verb scaling linearly with the document (N^1.02). Cheap today; the budget is about the shape."
     },
     "sdf_relax": {
-      "budgetMs": 1.2073,
+      "budgetMs": 1.1157,
       "class": "operation",
-      "measuredMs": 0.8049
+      "measuredMs": 0.7438
+    },
+    "sdf_stamp_bricks": {
+      "budgetMs": 8.0,
+      "class": "interactive",
+      "measuredMs": 5.6002,
+      "note": "The INCREMENTAL path, and it is not cheaper: 5.60 ms vs the global lattice's 4.41 ms at 1000 stamps. Bricks refreshed per stamp is constant (~13) across the axis, so this is the per-brick culled-tape compile that add-item-spatial-index exists to remove \u2014 measured on hardware rather than predicted."
     },
     "sdf_stamp_cpu": {
-      "budgetMs": 6.45,
+      "budgetMs": 6.2,
       "class": "interactive",
-      "measuredMs": 4.3024,
-      "note": "4.30 ms p95 at 1000 stamps is ALREADY outside the engine's half of a 120 Hz frame (4.17 ms), and grows as N^0.65. This budget is a regression ceiling on today's behaviour, NOT a statement that it is fast enough. The checker reports the frame-share breach on every run so it stays visible instead of being retired by being written down."
+      "measuredMs": 4.4114,
+      "note": "4.41 ms p95 at 1000 stamps is ALREADY outside the engine's half of a 120 Hz frame (4.17 ms), and grows as N^0.88 \u2014 steeper than the first baseline's N^0.65, which was flattened by the document growing during measurement. A regression ceiling on today's behaviour, NOT a claim that it is fast enough. Task 8.3 owns recording the size it passes at."
     },
     "sdf_stamp_metal": {
-      "budgetMs": 4.93,
+      "budgetMs": 2.6,
       "class": "interactive",
-      "measuredMs": 3.2887,
-      "note": "Metal is SLOWER than the CPU below roughly a thousand stamps (1.85 vs 0.21 ms p95 at 10) and only overtakes it at 1000 (3.29 vs 4.30). A host that always selects Metal is slower for most of a sculpt's life."
+      "measuredMs": 1.7731,
+      "note": "Metal loses to the CPU at 10 stamps (0.44 vs 0.08 ms p95) and wins by 2.5x at 1000 (1.77 vs 4.41). The crossover is the routing rule a host needs; picking Metal unconditionally is slower early."
     },
     "stroke_resolve": {
       "budgetMs": 0.0007,
@@ -58,9 +64,9 @@
       "measuredMs": 0.0005
     },
     "voxel_apply_stroke": {
-      "budgetMs": 0.3217,
+      "budgetMs": 0.2937,
       "class": "gesture",
-      "measuredMs": 0.2145
+      "measuredMs": 0.1958
     },
     "voxel_carve_alpha": {
       "budgetMs": 0.0015,
@@ -68,88 +74,88 @@
       "measuredMs": 0.001
     },
     "voxel_erase": {
-      "budgetMs": 0.0052,
+      "budgetMs": 0.0048,
       "class": "interactive",
-      "measuredMs": 0.0035
+      "measuredMs": 0.0032
     },
     "voxel_fill_cavities": {
-      "budgetMs": 0.8659,
+      "budgetMs": 0.9241,
       "class": "operation",
-      "measuredMs": 0.5773
+      "measuredMs": 0.616
     },
     "voxel_flatten": {
-      "budgetMs": 0.014,
-      "class": "interactive",
-      "measuredMs": 0.0093
-    },
-    "voxel_grab": {
-      "budgetMs": 0.0401,
-      "class": "gesture",
-      "measuredMs": 0.0267
-    },
-    "voxel_inflate": {
-      "budgetMs": 0.0154,
-      "class": "interactive",
-      "measuredMs": 0.0103
-    },
-    "voxel_magnify": {
-      "budgetMs": 0.0141,
-      "class": "interactive",
-      "measuredMs": 0.0094
-    },
-    "voxel_paint": {
-      "budgetMs": 0.0055,
-      "class": "interactive",
-      "measuredMs": 0.0037
-    },
-    "voxel_pinch": {
-      "budgetMs": 0.0143,
+      "budgetMs": 0.0142,
       "class": "interactive",
       "measuredMs": 0.0095
     },
-    "voxel_scrape": {
-      "budgetMs": 0.0183,
+    "voxel_grab": {
+      "budgetMs": 0.0403,
+      "class": "gesture",
+      "measuredMs": 0.0269
+    },
+    "voxel_inflate": {
+      "budgetMs": 0.0163,
       "class": "interactive",
-      "measuredMs": 0.0122
+      "measuredMs": 0.0109
+    },
+    "voxel_magnify": {
+      "budgetMs": 0.0132,
+      "class": "interactive",
+      "measuredMs": 0.0088
+    },
+    "voxel_paint": {
+      "budgetMs": 0.0054,
+      "class": "interactive",
+      "measuredMs": 0.0036
+    },
+    "voxel_pinch": {
+      "budgetMs": 0.0135,
+      "class": "interactive",
+      "measuredMs": 0.009
+    },
+    "voxel_scrape": {
+      "budgetMs": 0.0176,
+      "class": "interactive",
+      "measuredMs": 0.0118
     },
     "voxel_smooth": {
-      "budgetMs": 0.0183,
+      "budgetMs": 0.0178,
       "class": "interactive",
-      "measuredMs": 0.0122
+      "measuredMs": 0.0119
     },
     "voxel_smudge": {
-      "budgetMs": 0.0381,
+      "budgetMs": 0.0386,
       "class": "gesture",
-      "measuredMs": 0.0254
+      "measuredMs": 0.0257
     },
     "voxel_stamp": {
-      "budgetMs": 0.0167,
+      "budgetMs": 0.0056,
       "class": "interactive",
-      "measuredMs": 0.0111
+      "measuredMs": 0.0037
     }
   },
   "cases": [
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": 0.6545411056327479,
+      "growthExponent": 0.8803419410421462,
       "measurements": [
         {
-          "p50Ms": 0.144084,
-          "p95Ms": 0.211167,
-          "samples": 30,
+          "p50Ms": 0.066,
+          "p95Ms": 0.076541,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.497,
-          "p95Ms": 0.555042,
-          "samples": 30,
+          "p50Ms": 0.412542,
+          "p95Ms": 0.458834,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 4.088333,
-          "p95Ms": 4.302375,
-          "samples": 30,
+          "p50Ms": 4.026541,
+          "p95Ms": 4.411416,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -160,24 +166,24 @@
     {
       "backend": "metal",
       "budgetClass": "interactive",
-      "growthExponent": 0.12556560992959537,
+      "growthExponent": 0.30302891752983196,
       "measurements": [
         {
-          "p50Ms": 0.580625,
-          "p95Ms": 1.844542,
-          "samples": 30,
+          "p50Ms": 0.370125,
+          "p95Ms": 0.439209,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.870208,
-          "p95Ms": 2.526416,
-          "samples": 30,
+          "p50Ms": 0.375917,
+          "p95Ms": 0.459708,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 2.09225,
-          "p95Ms": 3.288666,
-          "samples": 30,
+          "p50Ms": 1.735708,
+          "p95Ms": 1.773083,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -188,24 +194,52 @@
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": -0.3866493737946157,
+      "growthExponent": 0.6362367106582925,
       "measurements": [
         {
-          "p50Ms": 0.003125,
-          "p95Ms": 0.011125,
-          "samples": 30,
+          "p50Ms": 0.177667,
+          "p95Ms": 0.299041,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.002541,
-          "p95Ms": 0.002917,
-          "samples": 30,
+          "p50Ms": 0.579459,
+          "p95Ms": 0.858041,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.00175,
-          "p95Ms": 0.001875,
-          "samples": 30,
+          "p50Ms": 3.724,
+          "p95Ms": 5.600208,
+          "samples": 137,
+          "stamps": 1000
+        }
+      ],
+      "name": "sdf_stamp_bricks",
+      "servedBy": "cpu",
+      "verb": "sdf_stamp_incremental"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "growthExponent": -0.10452111001662885,
+      "measurements": [
+        {
+          "p50Ms": 0.00275,
+          "p95Ms": 0.003709,
+          "samples": 200,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.00225,
+          "p95Ms": 0.002625,
+          "samples": 200,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.001875,
+          "p95Ms": 0.002292,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -216,24 +250,24 @@
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": -0.026213774490864178,
+      "growthExponent": -0.04109337809367503,
       "measurements": [
         {
-          "p50Ms": 0.002958,
-          "p95Ms": 0.003667,
-          "samples": 30,
+          "p50Ms": 0.002833,
+          "p95Ms": 0.003625,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.002875,
-          "p95Ms": 0.003458,
-          "samples": 30,
+          "p50Ms": 0.002834,
+          "p95Ms": 0.003416,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.002667,
-          "p95Ms": 0.00325,
-          "samples": 30,
+          "p50Ms": 0.002625,
+          "p95Ms": 0.003,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -244,24 +278,24 @@
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": -0.04651757403161896,
+      "growthExponent": -0.011608969733996857,
       "measurements": [
         {
-          "p50Ms": 0.002958,
-          "p95Ms": 0.003459,
-          "samples": 30,
+          "p50Ms": 0.002583,
+          "p95Ms": 0.003208,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.002583,
-          "p95Ms": 0.002917,
-          "samples": 30,
+          "p50Ms": 0.0025,
+          "p95Ms": 0.003167,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.002459,
-          "p95Ms": 0.002792,
-          "samples": 30,
+          "p50Ms": 0.002583,
+          "p95Ms": 0.003041,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -272,24 +306,24 @@
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": -0.004756830042720591,
+      "growthExponent": 0.03441081883462642,
       "measurements": [
         {
-          "p50Ms": 0.008083,
-          "p95Ms": 0.011584,
-          "samples": 30,
+          "p50Ms": 0.007625,
+          "p95Ms": 0.009708,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.010875,
-          "p95Ms": 0.012209,
-          "samples": 30,
+          "p50Ms": 0.00925,
+          "p95Ms": 0.011875,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.01,
-          "p95Ms": 0.011333,
-          "samples": 30,
+          "p50Ms": 0.009583,
+          "p95Ms": 0.011375,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -300,24 +334,24 @@
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": -0.06391605747226958,
+      "growthExponent": -0.08068400111748743,
       "measurements": [
         {
-          "p50Ms": 0.008333,
-          "p95Ms": 0.010291,
-          "samples": 30,
+          "p50Ms": 0.008625,
+          "p95Ms": 0.010875,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.007291,
+          "p50Ms": 0.007084,
           "p95Ms": 0.00825,
-          "samples": 30,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.006792,
-          "p95Ms": 0.007667,
-          "samples": 30,
+          "p50Ms": 0.006667,
+          "p95Ms": 0.0075,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -328,24 +362,24 @@
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": -0.0030370738560966002,
+      "growthExponent": -0.006779147333556192,
       "measurements": [
         {
-          "p50Ms": 0.007542,
-          "p95Ms": 0.009,
-          "samples": 30,
+          "p50Ms": 0.007833,
+          "p95Ms": 0.0095,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.00775,
-          "p95Ms": 0.009334,
-          "samples": 30,
+          "p50Ms": 0.008208,
+          "p95Ms": 0.009458,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.0075,
-          "p95Ms": 0.008875,
-          "samples": 30,
+          "p50Ms": 0.008,
+          "p95Ms": 0.009208,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -356,24 +390,24 @@
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": -0.017857776133267236,
+      "growthExponent": -0.008384327227889034,
       "measurements": [
         {
-          "p50Ms": 0.007542,
-          "p95Ms": 0.0095,
-          "samples": 30,
+          "p50Ms": 0.007292,
+          "p95Ms": 0.008792,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.008375,
-          "p95Ms": 0.009542,
-          "samples": 30,
+          "p50Ms": 0.0075,
+          "p95Ms": 0.009,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.007667,
-          "p95Ms": 0.00875,
-          "samples": 30,
+          "p50Ms": 0.00725,
+          "p95Ms": 0.008459,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -384,24 +418,24 @@
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": -0.02115344137228654,
+      "growthExponent": -0.002177972675122141,
       "measurements": [
         {
-          "p50Ms": 0.0075,
-          "p95Ms": 0.009416,
-          "samples": 30,
+          "p50Ms": 0.006875,
+          "p95Ms": 0.008417,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.008209,
-          "p95Ms": 0.009417,
-          "samples": 30,
+          "p50Ms": 0.007166,
+          "p95Ms": 0.008792,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.0075,
-          "p95Ms": 0.008542,
-          "samples": 30,
+          "p50Ms": 0.007041,
+          "p95Ms": 0.008333,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -412,24 +446,24 @@
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.015806089514035854,
+      "growthExponent": 0.0003357040271575406,
       "measurements": [
         {
-          "p50Ms": 0.021875,
-          "p95Ms": 0.026708,
-          "samples": 30,
+          "p50Ms": 0.021583,
+          "p95Ms": 0.0265,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.022792,
-          "p95Ms": 0.026375,
-          "samples": 30,
+          "p50Ms": 0.022541,
+          "p95Ms": 0.026875,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.021917,
-          "p95Ms": 0.024833,
-          "samples": 30,
+          "p50Ms": 0.022209,
+          "p95Ms": 0.026541,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -440,24 +474,24 @@
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.015517116869984391,
+      "growthExponent": -0.016062455491289235,
       "measurements": [
         {
-          "p50Ms": 0.020375,
-          "p95Ms": 0.025375,
-          "samples": 30,
+          "p50Ms": 0.019917,
+          "p95Ms": 0.025708,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.02125,
-          "p95Ms": 0.024084,
-          "samples": 30,
+          "p50Ms": 0.020958,
+          "p95Ms": 0.023958,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.021291,
-          "p95Ms": 0.023625,
-          "samples": 30,
+          "p50Ms": 0.021125,
+          "p95Ms": 0.023875,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -468,24 +502,24 @@
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": -0.017763785643621542,
+      "growthExponent": 0.0149816116887216,
       "measurements": [
         {
-          "p50Ms": 0.007833,
-          "p95Ms": 0.012209,
-          "samples": 30,
+          "p50Ms": 0.007625,
+          "p95Ms": 0.0105,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.010875,
-          "p95Ms": 0.012125,
-          "samples": 30,
+          "p50Ms": 0.007959,
+          "p95Ms": 0.01175,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.009958,
+          "p50Ms": 0.008584,
           "p95Ms": 0.01125,
-          "samples": 30,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -496,24 +530,24 @@
     {
       "backend": "cpu",
       "budgetClass": "operation",
-      "growthExponent": 0.11967432554549363,
+      "growthExponent": 0.13300149932279678,
       "measurements": [
         {
-          "p50Ms": 0.306917,
-          "p95Ms": 0.332167,
-          "samples": 30,
+          "p50Ms": 0.325125,
+          "p95Ms": 0.332583,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.572833,
-          "p95Ms": 0.57725,
-          "samples": 30,
+          "p50Ms": 0.60675,
+          "p95Ms": 0.616042,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.571084,
-          "p95Ms": 0.576375,
-          "samples": 30,
+          "p50Ms": 0.605167,
+          "p95Ms": 0.613625,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -524,24 +558,24 @@
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": 0.018815332164989484,
+      "growthExponent": 0,
       "measurements": [
         {
-          "p50Ms": 0.000875,
-          "p95Ms": 0.000917,
-          "samples": 30,
+          "p50Ms": 0.000959,
+          "p95Ms": 0.001,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.000916,
-          "p95Ms": 0.000917,
-          "samples": 30,
+          "p50Ms": 0.000959,
+          "p95Ms": 0.001,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.000958,
+          "p50Ms": 0.000959,
           "p95Ms": 0.001,
-          "samples": 30,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -557,19 +591,19 @@
         {
           "p50Ms": 0.000458,
           "p95Ms": 0.000459,
-          "samples": 30,
+          "samples": 200,
           "stamps": 10
         },
         {
           "p50Ms": 0.000458,
           "p95Ms": 0.000459,
-          "samples": 30,
+          "samples": 200,
           "stamps": 100
         },
         {
           "p50Ms": 0.000458,
           "p95Ms": 0.000459,
-          "samples": 30,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -580,24 +614,24 @@
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.028971100237837756,
+      "growthExponent": -0.01805984780935199,
       "measurements": [
         {
-          "p50Ms": 0.192542,
-          "p95Ms": 0.2145,
-          "samples": 30,
+          "p50Ms": 0.190083,
+          "p95Ms": 0.195792,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.162917,
-          "p95Ms": 0.211083,
-          "samples": 30,
+          "p50Ms": 0.159458,
+          "p95Ms": 0.167958,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.1805,
-          "p95Ms": 0.187709,
-          "samples": 30,
+          "p50Ms": 0.17525,
+          "p95Ms": 0.180167,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -608,24 +642,24 @@
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": -0.19725977863391245,
+      "growthExponent": -0.0685351061334639,
       "measurements": [
         {
-          "p50Ms": 0.00425,
-          "p95Ms": 0.01075,
-          "samples": 30,
+          "p50Ms": 0.003208,
+          "p95Ms": 0.005542,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.003625,
-          "p95Ms": 0.004875,
-          "samples": 30,
+          "p50Ms": 0.003167,
+          "p95Ms": 0.004417,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.003416,
-          "p95Ms": 0.004334,
-          "samples": 30,
+          "p50Ms": 0.003166,
+          "p95Ms": 0.004042,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -636,24 +670,24 @@
     {
       "backend": "cpu",
       "budgetClass": "operation",
-      "growthExponent": 0.9247774642273469,
+      "growthExponent": 0.9128294499518879,
       "measurements": [
         {
-          "p50Ms": 37.6815,
-          "p95Ms": 38.438459,
-          "samples": 30,
+          "p50Ms": 37.628375,
+          "p95Ms": 37.736,
+          "samples": 39,
           "stamps": 10
         },
         {
-          "p50Ms": 255.493167,
-          "p95Ms": 260.76275,
-          "samples": 30,
+          "p50Ms": 255.4115,
+          "p95Ms": 255.627291,
+          "samples": 10,
           "stamps": 100
         },
         {
-          "p50Ms": 2505.676792,
-          "p95Ms": 2718.447167,
-          "samples": 30,
+          "p50Ms": 2524.210583,
+          "p95Ms": 2525.891917,
+          "samples": 10,
           "stamps": 1000
         }
       ],
@@ -664,24 +698,24 @@
     {
       "backend": "cpu",
       "budgetClass": "operation",
-      "growthExponent": 0.026738620640288358,
+      "growthExponent": 0.021785664842938295,
       "measurements": [
         {
-          "p50Ms": 0.700458,
-          "p95Ms": 0.711625,
-          "samples": 30,
+          "p50Ms": 0.663333,
+          "p95Ms": 0.672791,
+          "samples": 111,
           "stamps": 10
         },
         {
-          "p50Ms": 0.778834,
-          "p95Ms": 0.7905,
-          "samples": 30,
+          "p50Ms": 0.73775,
+          "p95Ms": 0.743125,
+          "samples": 11,
           "stamps": 100
         },
         {
-          "p50Ms": 0.80275,
-          "p95Ms": 0.804875,
-          "samples": 30,
+          "p50Ms": 0.739083,
+          "p95Ms": 0.743792,
+          "samples": 10,
           "stamps": 1000
         }
       ],
@@ -692,24 +726,24 @@
     {
       "backend": "cpu",
       "budgetClass": "operation",
-      "growthExponent": 0.038526959522002864,
+      "growthExponent": 0.046210632768135605,
       "measurements": [
         {
-          "p50Ms": 5.477042,
-          "p95Ms": 5.487334,
-          "samples": 30,
+          "p50Ms": 4.395666,
+          "p95Ms": 4.407083,
+          "samples": 87,
           "stamps": 10
         },
         {
-          "p50Ms": 6.327417,
-          "p95Ms": 6.554458,
-          "samples": 30,
+          "p50Ms": 5.114875,
+          "p95Ms": 5.13875,
+          "samples": 10,
           "stamps": 100
         },
         {
-          "p50Ms": 6.5445,
-          "p95Ms": 6.552625,
-          "samples": 30,
+          "p50Ms": 5.124,
+          "p95Ms": 5.452209,
+          "samples": 10,
           "stamps": 1000
         }
       ],
@@ -720,24 +754,24 @@
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": 0.9976009814571846,
+      "growthExponent": 1.0212445994751538,
       "measurements": [
         {
-          "p50Ms": 0.001042,
-          "p95Ms": 0.001084,
-          "samples": 30,
+          "p50Ms": 0.000917,
+          "p95Ms": 0.000917,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.010209,
-          "p95Ms": 0.010583,
-          "samples": 30,
+          "p50Ms": 0.00925,
+          "p95Ms": 0.009417,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.105917,
-          "p95Ms": 0.107209,
-          "samples": 30,
+          "p50Ms": 0.100667,
+          "p95Ms": 0.101125,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -748,24 +782,24 @@
     {
       "backend": "cpu",
       "budgetClass": "operation",
-      "growthExponent": 0.006979837699795755,
+      "growthExponent": 0.8374711036034428,
       "measurements": [
         {
-          "p50Ms": 1170.494791,
-          "p95Ms": 4818.242208,
-          "samples": 30,
+          "p50Ms": 33.132916,
+          "p95Ms": 33.164791,
+          "samples": 45,
           "stamps": 10
         },
         {
-          "p50Ms": 1223.882125,
-          "p95Ms": 4974.538792,
-          "samples": 30,
+          "p50Ms": 159.480084,
+          "p95Ms": 160.269542,
+          "samples": 10,
           "stamps": 100
         },
         {
-          "p50Ms": 1223.895834,
-          "p95Ms": 4975.632583,
-          "samples": 30,
+          "p50Ms": 1432.366166,
+          "p95Ms": 1568.987458,
+          "samples": 10,
           "stamps": 1000
         }
       ],
@@ -781,19 +815,19 @@
         {
           "p50Ms": 0.000125,
           "p95Ms": 0.000125,
-          "samples": 30,
+          "samples": 200,
           "stamps": 10
         },
         {
           "p50Ms": 0.000125,
           "p95Ms": 0.000125,
-          "samples": 30,
+          "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 8.4e-05,
+          "p50Ms": 0.000125,
           "p95Ms": 0.000125,
-          "samples": 30,
+          "samples": 200,
           "stamps": 1000
         }
       ],
@@ -802,7 +836,7 @@
       "verb": "cut_create"
     }
   ],
-  "claycoreCommit": "2837a984e1a90941d054c97ca003dc9bef3dd710",
+  "claycoreCommit": "2a0c926fceeeedf094ee8a889c8c713cfdbc37e0",
   "deviceModel": "iPad15,5",
   "osVersion": "Version 26.5.2 (Build 23F84)",
   "tolerance": 1.4

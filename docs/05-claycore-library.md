@@ -189,28 +189,32 @@ p95 per operation:
 | | p95 | grows as |
 |---|---|---|
 | every voxel verb (11 of them) | **< 0.03 ms** | flat |
-| one SDF stamp, edit + evaluate, CPU | **4.30 ms** | `N^0.65` |
-| one SDF stamp, edit + evaluate, Metal | **3.29 ms** | `N^0.13` |
-| Move drag (`layer_move_surface`) | 0.11 ms | `N^1.00` |
-| mask extrude | 2.7 s | `N^0.92` |
-| consolidate | 5.0 s | flat |
+| one SDF stamp, edit + evaluate, CPU | **4.41 ms** | `N^0.88` |
+| one SDF stamp, edit + evaluate, Metal | **1.77 ms** | `N^0.30` |
+| one SDF stamp, through the brick cache | 5.60 ms | `N^0.64` |
+| Move drag (`layer_move_surface`) | 0.10 ms | `N^1.02` |
+| consolidate | 1.57 s | `N^0.84` |
+| mask extrude | 2.53 s | `N^0.91` |
 
-Three things a host should design around, none of them obvious from the API:
+Four things a host should design around, none of them obvious from the API:
 
 1. **The voxel path is effectively free and flat; the SDF path is neither.**
-   An SDF stamp pays a tape recompile, so its cost is a function of everything
-   already in the document. At 1000 stamps one stamp already exceeds the
-   engine's half of a 120 Hz frame, and a real sculpt is far more than 1000.
-2. **Metal is not always the fast choice.** It is *slower* than the CPU below
-   roughly a thousand stamps — 1.85 ms vs 0.21 ms p95 at ten — because
-   dispatch overhead dominates until the work is large enough to amortise it.
-   A host that selects Metal unconditionally is slower for most of a sculpt's
-   early life. Select by document size, and measure the crossover on the
-   hardware you ship to.
-3. **`consolidate` is a five-second operation** and flat in document size, so
-   the cost is the volume bake resolution rather than the document. It needs
-   progress UI; it is not something to trigger from an advisory threshold
-   without telling the artist.
+   At 1000 stamps one SDF stamp already exceeds the engine's half of a 120 Hz
+   frame (4.17 ms), and a real sculpt is far more than 1000 stamps.
+2. **Metal is not always the fast choice.** It *loses* to the CPU at ten stamps
+   (0.44 ms vs 0.08 ms p95) and wins by 2.5x at a thousand (1.77 vs 4.41),
+   because dispatch overhead dominates until the work amortises it. Select by
+   document size and measure the crossover on the hardware you ship to; a host
+   that picks Metal unconditionally is slower through the whole blockout phase.
+3. **The incremental path is not the cheap one.** Driving the brick cache the
+   way a host does — dirty the new node, drain, evaluate, submit — costs *more*
+   than re-evaluating the whole working volume at these sizes (5.60 ms against
+   4.41 ms at 1000 stamps). Bricks refreshed per stamp is constant at ~13
+   across the axis, so the cost is the culled tape compiled per brick, not the
+   number of bricks. That is what `add-item-spatial-index` addresses.
+4. **`consolidate` and `mask extrude` are seconds, and both scale with the
+   document** — `N^0.84` and `N^0.91`. They need progress UI, and neither is
+   something to trigger from an advisory threshold without telling the artist.
 
 ## 10. Python bindings (`pyclay`)
 

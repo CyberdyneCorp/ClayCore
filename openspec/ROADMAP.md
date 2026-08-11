@@ -480,10 +480,11 @@ plan's guesses and the measurements disagreed in four places.
 
 | Expected | Actually |
 |---|---|
-| Metal is the fast path | Metal is **slower than the CPU below roughly a thousand stamps** — 1.85 ms vs 0.21 ms p95 at ten — because dispatch overhead dominates until the work amortises it. A host that always selects Metal is slower for most of a sculpt's early life. The spec says "production path" unconditionally and the measurement does not support that. |
+| Metal is the fast path | Metal is **slower than the CPU at small documents** — 0.44 ms vs 0.08 ms p95 at ten stamps — because dispatch overhead dominates until the work amortises it, and wins by 2.5x by a thousand. A host that always selects Metal is slower through the whole blockout phase. The spec says "production path" unconditionally and the measurement does not support that; the crossover is the routing rule. |
 | The parity corpus covers the vocabulary | It covered every PRIMITIVE, because a guard existed for those, and **12 of the 16 combine ops and 4 of the 14 deformers reached no scene at all** — including twist, bend, taper and displace, the four *original* deformers. The four covered ops were the ones whose own changes happened to add a scene. All sixteen new scenes pass, so the opcodes were right; only the evidence was missing. |
 | A hostless XCTest bundle can run on device | It cannot. `xcodebuild` refuses outright, and SwiftPM cannot declare a test host, so a package reaches the simulator and never the iPad. The harness needs a generated Xcode project and an empty host app. |
-| Baking a latency number is the easy part | Timing a verb without asserting it SUCCEEDED measures the error path. `mask_extrude` was being refused at 100 and 1000 stamps — stamps spread through the volume merge into a blob, putting the mask deep inside the surface — and the first reported figures were the cost of a refusal at two of their three points. |
+| Baking a latency number is the easy part | It is the hardest part, and it went wrong twice. Timing a verb without asserting it SUCCEEDED measures the error path: `mask_extrude` was being refused at 100 and 1000 stamps, so its first figures were the cost of a refusal at two of three points. And a verb that MUTATES what it measures times its own side effects — the stamp cases grew the document per iteration, `consolidate` re-consolidated an already-consolidated layer. Both were invisible until the sample count changed and the numbers moved with it. |
+| The incremental path is the cheap one | It is not, at these sizes: driving the brick cache costs 5.60 ms against the global lattice's 4.41 ms at 1000 stamps. Bricks per stamp is constant at ~13 across the axis, so the cost is the culled tape compiled per brick — which is what `add-item-spatial-index` above already predicted, now measured on hardware. |
 
 Two more worth keeping. Thermal state is not noise to be averaged out: several
 runs back to back take an iPad to `serious`, and the guard that invalidates
@@ -496,24 +497,25 @@ the Metal shader cache is worth 1400x on a first call (14.172 s cold vs
 From `tests/device/baseline.json` — iPad Air 13-inch (M3), iOS 26.5.2,
 worst-point p95 across a 10/100/1000-stamp axis:
 
-| | p95 | grows as |
+| | p95 at 1000 stamps | grows as |
 |---|---|---|
 | every voxel verb (11) | < 0.03 ms | flat |
-| one SDF stamp (edit + evaluate), CPU | 4.30 ms | `N^0.65`–`N^0.86` |
-| one SDF stamp, Metal | 3.29 ms | `N^0.13` |
-| Move drag | 0.11 ms | `N^1.00` |
-| mask extrude | 2.7 s | `N^0.92` |
+| one SDF stamp (edit + evaluate), CPU | 4.41 ms | `N^0.88` |
+| one SDF stamp, Metal | 1.77 ms | `N^0.30` |
+| one SDF stamp, through the brick cache | 5.60 ms | `N^0.64` |
+| Move drag | 0.10 ms | `N^1.02` |
+| consolidate | 1.57 s | `N^0.84` |
+| mask extrude | 2.53 s | `N^0.91` |
 
-**Two figures are being re-measured and are deliberately not quoted here.** A
-later pass found that several fixtures mutated what they measured — the stamp
-cases grew the document by one per iteration, and `consolidate` collapses its
-layer, so every iteration after the first re-consolidated an already
-consolidated one. The tell was numbers that moved when only the SAMPLE COUNT
-changed. `consolidate` is **not** the flat five-second operation an earlier
-draft of this table recorded; corrected fixtures put it near two orders of
-magnitude lower at the small end and growing with the document. The stamp
-growth exponent moves up rather than down. Both land with the corrected
-baseline.
+An earlier draft of this table was wrong in two places and the corrections are
+worth keeping, because the same mistake is easy to repeat. It recorded
+`consolidate` as a **flat 5 s**; it is 1.57 s and scales as `N^0.84`. And it
+put the stamp growth at `N^0.65`; it is `N^0.88`. Both came from fixtures that
+mutated what they measured — the stamp cases grew the document by one per
+iteration, and `consolidate` collapses its layer, so every iteration after the
+first re-consolidated an already-consolidated one. **The tell was numbers that
+moved when only the SAMPLE COUNT changed**, which cannot happen to an honest
+measurement.
 
 **The SDF stamp curve is a product ceiling, and it belongs beside
 `add-multi-resolution` in the section above rather than in a test report.** At
