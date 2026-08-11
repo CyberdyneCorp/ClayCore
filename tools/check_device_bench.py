@@ -42,6 +42,21 @@ INTERACTIVE_FRAME_SHARE_MS = 8.33 / 2
 # the margin absorbs fit noise from a two-point log-log slope.
 MAX_GROWTH_EXPONENT = 1.25
 
+# Below this, a difference is measurement noise rather than a result, and a
+# ratio computed from it means nothing.
+#
+# This is not a convenience. The session cases record ONE sample per stroke —
+# they measure a session, not a distribution — and several verbs run in single
+# microseconds, so `voxel_erase` moved 0.004 ms to 0.009 ms between two runs of
+# identical code and tripped both BUDGET and REGRESSION at 2.03x. A gate that
+# fails on five microseconds teaches people to ignore it.
+#
+# A regression must therefore be BOTH relatively large and absolutely
+# meaningful. Nothing near the interactive budget is anywhere near this floor:
+# the cases that matter are milliseconds, and 0.05 ms is a hundredth of a
+# 120 Hz frame.
+NOISE_FLOOR_MS = 0.05
+
 
 def worst_p95(case: dict) -> float:
     return max((m["p95Ms"] for m in case.get("measurements", [])), default=float("nan"))
@@ -149,7 +164,8 @@ def main() -> int:
         if budget is None:
             failures.append(f"{name}: no declared budget in the baseline")
         else:
-            if measured > budget["budgetMs"]:
+            over = measured - budget["budgetMs"]
+            if measured > budget["budgetMs"] and over > NOISE_FLOOR_MS:
                 failures.append(
                     f"{name}: BUDGET {measured:.3f} ms p95 exceeds "
                     f"{budget['budgetMs']:.3f} ms ({budget['class']})")
@@ -165,11 +181,12 @@ def main() -> int:
             notes.append(f"{name}: new case, no baseline to compare against")
         else:
             base_p95 = worst_p95(base)
-            if base_p95 > 0 and measured > base_p95 * tolerance:
+            grew = measured - base_p95
+            if base_p95 > 0 and measured > base_p95 * tolerance and grew > NOISE_FLOOR_MS:
                 failures.append(
                     f"{name}: REGRESSION {measured:.3f} ms p95 vs baseline "
                     f"{base_p95:.3f} ms (x{measured / base_p95:.2f}, "
-                    f"tolerance x{tolerance})")
+                    f"tolerance x{tolerance}, +{grew:.3f} ms)")
 
         # GROWTH — the shape, not the level.
         growth = case.get("growthExponent")
