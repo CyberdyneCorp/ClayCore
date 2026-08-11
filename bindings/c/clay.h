@@ -2962,14 +2962,17 @@ clay_result clay_brick_cache_take_dirty(clay_brick_cache* cache,
  * colour-carrying cache's clay_brick_cache_submit wants; a distance-only cache
  * needs neither and passing NULL costs nothing to compute.
  *
- * PASS "cpu" HERE. Naming a GPU backend is not a promise of a speedup, and for
- * a brick it is a promise of the opposite: the Metal backend allocates per
- * call, and 512 samples is too little work to cover the dispatch. Measured on
- * an M2 Max, Metal costs 288 us per brick against the CPU's 114 us and does not
- * win at any thread count. The crossover is at 16^3 — clay_eval_grid on a
- * preview grid of 32^3 or more is where "metal" pays, by 10x and up. Both
+ * ROUTE BY BATCH SIZE. The whole batch reaches the backend as batched
+ * evaluations, so a GPU backend runs it as a single device submission rather
+ * than one round trip per brick — but a submission still has a fixed cost
+ * (~0.25 ms on an M-series Mac) that count * dim^3 samples must cover.
+ * Measured there at dim 8: below ~16 bricks "cpu" wins (a single brick is
+ * 0.01 ms on the CPU against the submission's 0.3 ms); at a dab's 27 bricks
+ * "metal" is ~2x ahead; at 4096+ bricks it is 30x and up. So route small
+ * residual batches to "cpu" and anything from a dab upward to "metal", or
+ * simply pass "metal" whenever a batch holds a dab's worth of bricks. Both
  * backends produce the same field; this is speed, not results. Re-measure
- * before changing the string on a device that is not an M-series Mac. */
+ * before hardcoding the threshold on a device that is not an M-series Mac. */
 clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char* backend,
                                            const clay_brick_request* requests, size_t count,
                                            float* out_values, size_t values_capacity,

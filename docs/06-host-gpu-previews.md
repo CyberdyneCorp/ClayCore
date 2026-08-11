@@ -317,7 +317,11 @@ cfg.colors = 1;                       /* an RGBA8 lattice beside the distances *
 clay_brick_cache* cache = clay_brick_cache_create(&cfg);
 
 /* per edit: mark -> drain -> evaluate -> submit, exactly as before, except
- * that eval_requests now also produces colours and submit takes them. */
+ * that eval_requests now also produces colours and submit takes them.
+ * Route the backend by batch size: the batch reaches the backend as one
+ * batched evaluation, so "metal" wins from a dab's worth of bricks (~27)
+ * upward and by 30x on large fills, while tiny residual batches (< ~16
+ * bricks) stay faster on "cpu" — see the crossover notes in clay.h. */
 clay_brick_cache_mark_dirty_nodes(cache, doc, layer, nodes, n, NULL);
 clay_brick_cache_take_dirty(cache, reqs, &count, &remaining);
 clay_brick_cache_eval_requests(doc, "cpu", reqs, count,

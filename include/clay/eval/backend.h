@@ -50,6 +50,18 @@ struct GridQuery {
     int nx = 0, ny = 0, nz = 0;
 };
 
+// A batch of same-shape lattices, each with its OWN tape — the brick refill
+// shape: per-brick culled tapes over per-brick origins, one dims/spacing for
+// the whole batch. Grid i fills out_values[i * nx*ny*nz ...] and, when colours
+// are wanted, out_colors_rgb[i * nx*ny*nz * 3 ...].
+struct GridBatchQuery {
+    const scene::Tape* const* tapes = nullptr;  // count tapes, none null
+    const kernel::cfloat3* origins = nullptr;   // count lattice origins
+    float spacing = 1.0f;
+    int nx = 0, ny = 0, nz = 0;
+    std::size_t count = 0;
+};
+
 // Rays as count*6 floats (origin xyz, dir xyz, dir normalized).
 struct RayQuery {
     const float* rays = nullptr;
@@ -120,6 +132,34 @@ class Backend {
     virtual Status eval_grid(const scene::Tape& tape, const GridQuery& q, float* out_values,
                              float* out_colors_rgb = nullptr) = 0;
     virtual Status raycast(const scene::Tape& tape, const RayQuery& q, RayHit* hits) = 0;
+
+    // Many small grids in ONE call — what a brick refill is. The default runs
+    // eval_grid per entry, so every backend answers and answers identically;
+    // a GPU backend overrides it to evaluate the whole batch in one device
+    // submission, because a per-brick round trip (command buffer + wait per
+    // 8^3 lattice) costs more than the evaluation it carries (issue #64).
+    virtual Status eval_grid_batch(const GridBatchQuery& q, float* out_values,
+                                   float* out_colors_rgb = nullptr) {
+        if (q.count == 0) return Status::Ok;
+        if (!q.tapes || !q.origins || !out_values || q.nx <= 0 || q.ny <= 0 || q.nz <= 0)
+            return Status::InvalidInput;
+        const std::size_t per = static_cast<std::size_t>(q.nx) *
+                                static_cast<std::size_t>(q.ny) *
+                                static_cast<std::size_t>(q.nz);
+        for (std::size_t i = 0; i < q.count; ++i) {
+            if (!q.tapes[i]) return Status::InvalidInput;
+            GridQuery g;
+            g.origin = q.origins[i];
+            g.spacing = q.spacing;
+            g.nx = q.nx;
+            g.ny = q.ny;
+            g.nz = q.nz;
+            const Status s = eval_grid(*q.tapes[i], g, out_values + i * per,
+                                       out_colors_rgb ? out_colors_rgb + i * per * 3 : nullptr);
+            if (s != Status::Ok) return s;
+        }
+        return Status::Ok;
+    }
 
     // Device meshing lands with the meshing group; Unsupported by default.
     virtual Status mesh(const scene::Tape&, const GridQuery&, std::vector<float>*,

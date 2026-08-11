@@ -5767,22 +5767,65 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
     if (r != CLAY_OK) return r;
     r = check_uniform_dims(requests, count);
     if (r != CLAY_OK) return r;
+    const char* name = backend ? backend : "cpu";
+    eval::Backend* b = eval::Registry::instance().find(name);
+    if (!b) return fail(CLAY_ERROR_NOT_FOUND, std::string("backend not registered: ") + name);
+    // Every request is validated BEFORE any is evaluated, so a malformed one
+    // refuses the call with nothing written rather than after its neighbours
+    // have already landed.
+    std::vector<kernel::cfloat3> origins(count);
     for (std::size_t i = 0; i < count; ++i) {
         eval::GridQuery q;
         std::size_t samples = 0;
         r = read_grid(requests[i].origin, requests[i].spacing, requests[i].dims, &q, &samples);
         if (r != CLAY_OK) return r;
-        // Dilated by the request's OWN band: an item a band outside the brick
-        // still decides samples inside it, because a sample keeps its true
-        // distance whenever that distance is within the band.
         const float band = requests[i].band;
         if (!(band >= 0.0f) || !std::isfinite(band))
-            return fail(CLAY_ERROR_INVALID_ARGUMENT, "a request carries a band that is not finite and >= 0");
-        scene::CullRegion cull{request_brick_box(requests[i]).dilated(band)};
-        scene::Tape tape = scene::compile_document(doc->doc.document, &cull);
-        r = eval_grid_into(tape, backend, q, out_values + i * per,
-                           out_colors_rgb ? out_colors_rgb + i * per * 3 : nullptr);
-        if (r != CLAY_OK) return r;
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "a request carries a band that is not finite and >= 0");
+        origins[i] = q.origin;
+    }
+    // The whole batch goes to the backend as BATCHES of per-brick culled
+    // tapes, not one call per brick: a GPU backend turns a batch into a single
+    // device submission, and a per-brick submission costs more than the 512
+    // samples it carries (issue #64). Chunked so the compiled tapes held at
+    // once stay bounded — a tape carrying a sampled volume is megabytes.
+    constexpr std::size_t kChunk = 4096;
+    std::vector<scene::Tape> tapes;
+    std::vector<const scene::Tape*> tape_ptrs;
+    for (std::size_t base = 0; base < count;) {
+        // A chunk shares one spacing as well as one lattice size: dims are
+        // checked uniform above, but spacing is not, and each request keeps
+        // its own — so a batch that mixes spacings splits where they change.
+        std::size_t n = 1;
+        while (n < kChunk && base + n < count &&
+               requests[base + n].spacing == requests[base].spacing)
+            ++n;
+        tapes.clear();
+        tape_ptrs.clear();
+        tapes.reserve(n);
+        tape_ptrs.reserve(n);
+        for (std::size_t i = base; i < base + n; ++i) {
+            // Dilated by the request's OWN band: an item a band outside the
+            // brick still decides samples inside it, because a sample keeps
+            // its true distance whenever that distance is within the band.
+            scene::CullRegion cull{request_brick_box(requests[i]).dilated(requests[i].band)};
+            tapes.push_back(scene::compile_document(doc->doc.document, &cull));
+            tape_ptrs.push_back(&tapes.back());
+        }
+        eval::GridBatchQuery bq;
+        bq.tapes = tape_ptrs.data();
+        bq.origins = origins.data() + base;
+        bq.spacing = requests[base].spacing;
+        bq.nx = requests[0].dims[0];
+        bq.ny = requests[0].dims[1];
+        bq.nz = requests[0].dims[2];
+        bq.count = n;
+        if (b->eval_grid_batch(bq, out_values + base * per,
+                               out_colors_rgb ? out_colors_rgb + base * per * 3 : nullptr) !=
+            eval::Status::Ok)
+            return fail(CLAY_ERROR_BACKEND, "eval_grid_batch failed");
+        base += n;
     }
     return CLAY_OK;
 }

@@ -39,6 +39,17 @@ Every registered GPU backend SHALL match the CPU scalar reference within documen
 - **WHEN** the parity suite runs a backend against CPU scalar for each kernel over the standard sample corpus
 - **THEN** any kernel exceeding its documented tolerance fails CI with the kernel name and worst-case error reported
 
+### Requirement: Batched grid evaluation amortizes device dispatch
+The backend interface SHALL accept a batch of same-shape lattices, each carrying its own (typically per-brick culled) tape, as one call (`eval_grid_batch`). Every backend SHALL answer the batch with the values its per-grid path produces; a GPU backend SHALL evaluate the batch in a bounded number of device submissions rather than one submission per lattice, so that per-submission overhead is amortized over the batch instead of multiplying with it. The brick-refill entry point (`clay_brick_cache_eval_requests`) SHALL hand its requests to the named backend through this batched form.
+
+#### Scenario: A brick refill is not a round trip per brick
+- **WHEN** a batch of brick requests is evaluated through a GPU backend
+- **THEN** the batch runs in a bounded number of device submissions, and the refill's cost per brick falls as the batch grows instead of holding at the per-submission overhead
+
+#### Scenario: Batched and per-grid evaluation agree
+- **WHEN** the same lattices and per-lattice culled tapes are evaluated one call per grid and as one batch, on any registered backend
+- **THEN** the batched values match the per-grid values within that backend's parity tolerance, including for a lattice whose culled tape is empty
+
 ### Requirement: Metal backend (tier 1)
 The Metal backend SHALL use `metal-cpp` (pure C++, no Objective-C in the core), compile the kernel headers as MSL, pass tapes via argument buffers, and implement the full backend interface including `eval_bricks` and on-device meshing. It is the iPad app's production path.
 
