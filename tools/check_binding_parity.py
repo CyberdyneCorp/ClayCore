@@ -87,7 +87,7 @@ ALIASES = {
     "Volume.from_document": "clay_item_volume_from_document",
     "Volume.relaxed": "clay_item_volume_relax",
     "Volume.flattened": "clay_item_volume_flatten",
-    "Volume.flattened_from": "clay_item_volume_flatten",
+    "Volume.flattened_from": "clay_item_volume_flatten_from",
     "Prim.magnify": "CLAY_DEFORM_MAGNIFY",
     "Prim.noise": "CLAY_DEFORM_NOISE",
     "Mesh.from_triangles": "clay_mesh_from_triangles",

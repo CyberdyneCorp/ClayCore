@@ -1247,8 +1247,42 @@ typedef struct clay_flatten_params {
  * A region blends under a weight that varies across it, so the result may be
  * steeper than a plain volume; it declares that, and the document's safe step
  * scale drops to match. The item must carry a volume; anything else is refused
- * rather than ignored. */
+ * rather than ignored.
+ *
+ * WHERE A DOCUMENT EXISTS, use clay_item_volume_flatten_from below instead:
+ * it samples the document, which has no band, so the accuracy limit above
+ * does not apply. This call is for a volume with no document behind it — an
+ * imported mesh. */
 clay_result clay_item_volume_flatten(clay_item* item, const clay_flatten_params* params);
+
+/* The same flatten, sampled from a DOCUMENT rather than from an existing
+ * volume — and the one to reach for when a document is what you have.
+ *
+ * The difference is accuracy, and it is not small. The call above re-samples
+ * the item's own volume, which reports a distance only inside the band it
+ * carries and a lower BOUND outside it; a facet that moves further than that
+ * band is placed against the bound rather than against the surface, and the
+ * result is a wrong shape returned with CLAY_OK. A document has no band. It
+ * is exact everywhere, so a facet may move as far as the caller likes.
+ *
+ * `flatten` is the flatten itself, validated exactly as the in-place form
+ * validates it. `volume` gives the sampling of the RESULT — cell_size is
+ * required and > 0, because a document has no intrinsic scale to derive one
+ * from; band and padding default as they do for
+ * clay_item_volume_from_document. `region_min`/`region_max` are the same
+ * optional pair that call takes, with the same rule: both NULL means the
+ * document's own bounds padded by the band, and one without the other is
+ * refused.
+ *
+ * Returns a NEW item carrying the flattened volume; the document is not
+ * modified. Free it with clay_item_destroy, or place it with
+ * clay_layer_add_item. */
+clay_result clay_item_volume_flatten_from(const clay_document* doc,
+                                          const clay_flatten_params* flatten,
+                                          const clay_volume_params* volume,
+                                          const float region_min[3],
+                                          const float region_max[3],
+                                          clay_item** out_item);
 
 typedef struct clay_topological_move_params {
     uint32_t struct_size;  /* = sizeof(clay_topological_move_params); required */

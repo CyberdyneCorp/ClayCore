@@ -544,3 +544,145 @@ TEST_CASE("c abi: an unknown flatten mode is refused") {
     CHECK(clay_item_volume_flatten(item, &flat) == CLAY_ERROR_INVALID_ARGUMENT);
     clay_item_destroy(item);
 }
+
+// -- flatten sampled from a document (add-document-sourced-flatten) ----------
+//
+// `field::flatten` has had two overloads all along and the C ABI exposed one:
+// the in-place form, which re-samples the item's own volume. That volume
+// reports a distance only inside the band it carries and a lower BOUND outside
+// it, so a facet moving further than the band is placed against the bound —
+// a wrong surface returned with CLAY_OK.
+//
+// These tests are written to fail on the OLD behaviour. Asserting that the
+// call succeeds would have passed before the change too.
+TEST_CASE("c abi: a flatten can be sampled from a document") {
+    // A ball whose surface sits at 0.6, and a plane well inside it. The facet
+    // travels 0.25, which is far outside a three-cell band at this cell size.
+    const float kCell = 0.02f;
+    const float kNarrowBand = kCell * 3.0f;  // 0.06 — the default
+    const float kTravel = 0.25f;
+
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "src", &layer) == CLAY_OK);
+    float radius = 0.6f;
+    clay_item* ball = clay_item_create(CLAY_PRIM_SPHERE, &radius, 1);
+    REQUIRE(ball != nullptr);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, ball, &node) == CLAY_OK);
+    clay_item_destroy(ball);
+
+    clay_flatten_params fp;
+    std::memset(&fp, 0, sizeof fp);
+    fp.struct_size = (std::uint32_t)sizeof fp;
+    fp.plane_point[1] = 0.6f - kTravel;  // plane 0.25 below the crown
+    fp.plane_normal[1] = 1.0f;
+    fp.strength = 1.0f;
+    fp.centre[1] = 0.6f - kTravel;
+    fp.region_radius = 0.45f;
+    fp.falloff = 0.10f;
+    fp.mode = CLAY_FLATTEN_TWO_SIDED;
+
+    clay_volume_params vp;
+    std::memset(&vp, 0, sizeof vp);
+    vp.struct_size = (std::uint32_t)sizeof vp;
+    vp.cell_size = kCell;
+    vp.band = kNarrowBand;
+    vp.padding = 0.1f;
+
+    const float lo[3] = {-0.9f, -0.9f, -0.9f};
+    const float hi[3] = {0.9f, 0.9f, 0.9f};
+
+    SUBCASE("the facet lands on the plane") {
+        clay_item* flat = nullptr;
+        REQUIRE(clay_item_volume_flatten_from(doc, &fp, &vp, lo, hi, &flat) == CLAY_OK);
+        REQUIRE(flat != nullptr);
+
+        clay_document* out = clay_document_create();
+        clay_layer_id ol = 0;
+        REQUIRE(clay_add_sdf_layer(out, "out", &ol) == CLAY_OK);
+        clay_node_id on = 0;
+        REQUIRE(clay_layer_add_item(out, ol, flat, &on) == CLAY_OK);
+
+        // On the plane the field is ~0; a little above it is outside.
+        const float plane_y = 0.6f - kTravel;
+        CHECK(std::fabs(eval_c(out, cf3(0, plane_y, 0))) < 3.0f * kCell);
+        CHECK(eval_c(out, cf3(0, plane_y + 0.12f, 0)) > 0.0f);
+        // ...and the untouched side of the ball is still there.
+        CHECK(eval_c(out, cf3(0, -0.4f, 0)) < 0.0f);
+
+        clay_item_destroy(flat);
+        clay_document_destroy(out);
+    }
+
+    SUBCASE("the document-sourced field is far cheaper to march") {
+        // The measured difference between the two sources is NOT the surface.
+        // Both place the facet in the same place, at every band tried — an
+        // earlier draft of this test asserted otherwise and was wrong.
+        //
+        // What differs is STEEPNESS. Flattening a volume blends the plane with
+        // a source that is itself sampled, and the result declares a much
+        // worse Lipschitz than flattening from the exact document does. The
+        // engine's own raycast marches by safe_step_scale, so an 8x worse
+        // scale is 8x the marching cost for the same shape — and past some
+        // point the marcher runs out of iterations and the surface stops
+        // being drawable at all, which is how this was first noticed.
+        clay_item* baked = nullptr;
+        REQUIRE(clay_item_volume_from_document(doc, &vp, lo, hi, &baked) == CLAY_OK);
+        REQUIRE(clay_item_volume_flatten(baked, &fp) == CLAY_OK);
+
+        clay_item* sampled = nullptr;
+        REQUIRE(clay_item_volume_flatten_from(doc, &fp, &vp, lo, hi, &sampled) == CLAY_OK);
+
+        auto place = [&](clay_item* it) {
+            clay_document* d = clay_document_create();
+            clay_layer_id l = 0;
+            REQUIRE(clay_add_sdf_layer(d, "o", &l) == CLAY_OK);
+            clay_node_id n = 0;
+            REQUIRE(clay_layer_add_item(d, l, it, &n) == CLAY_OK);
+            return d;
+        };
+        clay_document* from_volume = place(baked);
+        clay_document* from_doc = place(sampled);
+
+        float step_volume = 0.0f, step_doc = 0.0f;
+        REQUIRE(clay_safe_step_scale(from_volume, &step_volume) == CLAY_OK);
+        REQUIRE(clay_safe_step_scale(from_doc, &step_doc) == CLAY_OK);
+        CAPTURE(step_volume);
+        CAPTURE(step_doc);
+        CHECK(step_doc > step_volume * 2.0f);
+
+        // and the shape really is the same, which is what makes the step
+        // difference a cost rather than a trade
+        const float plane_y = 0.6f - kTravel;
+        CHECK(std::fabs(eval_c(from_doc, cf3(0, plane_y, 0))) < 3.0f * kCell);
+        CHECK(std::fabs(eval_c(from_volume, cf3(0, plane_y, 0))) < 3.0f * kCell);
+
+        clay_item_destroy(baked);
+        clay_item_destroy(sampled);
+        clay_document_destroy(from_volume);
+        clay_document_destroy(from_doc);
+    }
+
+    SUBCASE("refusals") {
+        clay_item* out = nullptr;
+        clay_volume_params bad = vp;
+        bad.cell_size = 0.0f;  // a document has no intrinsic scale
+        CHECK(clay_item_volume_flatten_from(doc, &fp, &bad, lo, hi, &out) != CLAY_OK);
+
+        clay_flatten_params no_region = fp;
+        no_region.region_radius = 0.0f;  // would replace the shape with a half-space
+        CHECK(clay_item_volume_flatten_from(doc, &no_region, &vp, lo, hi, &out) != CLAY_OK);
+
+        clay_flatten_params no_plane = fp;
+        no_plane.plane_normal[0] = no_plane.plane_normal[1] = no_plane.plane_normal[2] = 0.0f;
+        CHECK(clay_item_volume_flatten_from(doc, &no_plane, &vp, lo, hi, &out) != CLAY_OK);
+
+        // half a region is a caller that meant to pass one
+        CHECK(clay_item_volume_flatten_from(doc, &fp, &vp, lo, nullptr, &out) != CLAY_OK);
+        CHECK(clay_item_volume_flatten_from(doc, &fp, &vp, nullptr, hi, &out) != CLAY_OK);
+    }
+
+    clay_document_destroy(doc);
+}
