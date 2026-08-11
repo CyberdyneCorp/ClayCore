@@ -202,6 +202,36 @@ forward-refuse).
    the same loss minors 1, 2 and 4 carry. The format notes at the top of
    `include/clay/io/clayspace.h` record it.
 
+   **0.27.3 fixes the Metal backend on paravirtualised GPUs, and makes it
+   faster on real ones.** No signature changed and nothing was added; this is a
+   kernel change and a diagnostic.
+
+   `clay_raycast` would not build a compute pipeline on an Apple Paravirtual
+   device — a macOS VM, which is what GitHub's runners are — so the whole Metal
+   backend was discarded and the library fell back to the CPU without a word.
+   It is the only one of the three kernels that evaluates the tape more than
+   once (per march step, plus four times for the normal), so inlining
+   `ctape_eval` at each site made it large enough for the pipeline compiler to
+   give up, with an error whose entire content was "Compilation failed".
+   `TapeField::operator()` is `noinline` now, in the Metal backend's own file;
+   the shared kernel headers are untouched.
+
+   Measured on an M2 Max through `Backend::raycast()`, 200k rays against 40
+   blended spheres: **45.16-47.00 ms inlined, 37.56-37.80 ms after** — about
+   20% quicker with an identical hit count, because the inlined version cost
+   more in register pressure than the call costs.
+
+   **Metal parity now runs in CI for the first time.** It had been skipped on
+   every previous run, which is how the backend came to be shipped unverified
+   there. And when Metal init fails it now says why, on stderr, naming the
+   stage and the function — the ignored `NS::Error**` behind three failed
+   release attempts. Issue #63 stays open for the half that is not fixed: one
+   failing pipeline still disables the entire backend, and `clay_list_backends`
+   returning `cpu` is still indistinguishable from a build without Metal.
+
+   v0.27.2 was tagged and its release failed on this; the tag remains for the
+   record, as v0.27.0's and v0.27.1's do.
+
    **0.27.2 is 0.27.1 plus one test fix, and changes no library code either.**
    v0.27.1's release workflow got past the checklist and failed building the
    xcframework: the Swift smoke asserts that Metal REGISTERS, and a GitHub
