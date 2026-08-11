@@ -281,7 +281,10 @@ typedef struct clay_item_desc {
     float blend_k;
     float rounding;
     float color[3];
-    int32_t mirror;      /* 0/1: apply through the layer's mirror axes */
+    int32_t mirror;      /* layer-mirror participation: 0 and 1 follow the
+                          * layer's mirror (the default — a zeroed field
+                          * mirrors), -1 excludes this item from it. See
+                          * clay_set_layer_mirror. */
 } clay_item_desc;
 
 /* Adds one edit from the flat descriptor — sugar over the item builder for
@@ -387,6 +390,24 @@ clay_result clay_document_set_layer_transform(clay_document* doc, clay_layer_id 
                                               const float position[3],
                                               const float rotation_axis[3],
                                               float rotation_angle, float scale);
+/* Symmetry. Each enabled axis reflects the layer's items through the plane
+ * where that LOCAL coordinate is 0 (the layer transform moves the plane with
+ * the layer), and every item participates: place a lump on one side and both
+ * sides carry it, through evaluation, meshing and both raycast paths alike.
+ * The mirror is a property of the layer that evaluation reads, not an edit
+ * baked into the items — so it applies to items added before OR after this
+ * call, and axes 0/0/0 turns it back off, restoring the unmirrored field.
+ *
+ * `mirror_k` is the Mirror Blend seam: 0 is a hard crease on the plane, and a
+ * positive value smooth-blends an item with its own reflection over that
+ * distance, welding the seam where an item crosses its mirror plane.
+ *
+ * Individual items opt OUT with mirror = -1 (clay_item_desc.mirror or
+ * clay_item_set_mirror) — an asymmetric detail on an otherwise symmetric
+ * layer. Through 0.27.3 the flag was an opt-IN whose default excluded every
+ * item, which made this call a silent no-op unless each item also passed
+ * mirror = 1 (#60); 1 is still accepted and means what it meant. Layers with
+ * no mirror axes evaluate exactly as before, whatever the items' flags. */
 clay_result clay_set_layer_mirror(clay_document* doc, clay_layer_id layer, int32_t axis_x,
                                   int32_t axis_y, int32_t axis_z, float mirror_k);
 
@@ -420,7 +441,10 @@ clay_result clay_item_set_op(clay_item* item, int32_t op);               /* clay
 clay_result clay_item_set_blend(clay_item* item, int32_t blend, float k); /* clay_blend, k >= 0 */
 clay_result clay_item_set_rounding(clay_item* item, float rounding);     /* >= 0 */
 clay_result clay_item_set_color(clay_item* item, const float rgb[3]);
-clay_result clay_item_set_mirror(clay_item* item, int32_t mirror); /* 0/1: layer mirror axes */
+/* Layer-mirror participation, the builder's spelling of clay_item_desc.mirror:
+ * -1 excludes the item from the layer's mirror, 0 and 1 follow it (the
+ * default). See clay_set_layer_mirror. */
+clay_result clay_item_set_mirror(clay_item* item, int32_t mirror);
 
 /* Appends one domain warp (clay_deform) to the item's chain: the local point
  * is warped by the first one added first. params/param_count are the kind's

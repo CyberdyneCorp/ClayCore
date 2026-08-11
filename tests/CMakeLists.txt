@@ -28,6 +28,7 @@ add_executable(clay_unit_tests
   unit/test_repetition.cpp
   unit/test_primitives_backfill.cpp
   unit/test_c_item_builder.cpp
+  unit/test_c_layer_mirror.cpp
   unit/test_c_voxel.cpp
   unit/test_c_mask.cpp
   unit/test_c_stroke.cpp

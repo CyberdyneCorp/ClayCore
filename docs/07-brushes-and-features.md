@@ -90,6 +90,29 @@ ops above, which use `k` for their own quantity.
 | `Circular` | Constant-radius fillet |
 | `Chamfer` | 45° flat bevel rather than a fillet |
 
+### Symmetry: the layer mirror
+
+`Layer::mirror_axes` reflects the layer's items through the planes where the
+layer-local coordinate is 0, one plane per enabled axis, and `mirror_k` is the
+**Mirror Blend** seam — 0 is a hard crease on the plane, a positive value
+smooth-welds an item to its own reflection where it crosses it. It is applied
+at **evaluation**, not authoring: one node exists, both sides render, and the
+left arm cannot drift from the right. Setting it before or after the items
+were added is the same document, and clearing the axes restores the
+unmirrored field.
+
+**Every item participates by default** — a sculptor who turns symmetry on
+means the layer. `Node::mirror = false` (C: `mirror = -1` on the descriptor or
+`clay_item_set_mirror`; Python: `mirror=False`) keeps an item out — an
+asymmetric detail, a scar on one cheek. Strokes are items, so a stroke on a
+mirrored layer stamps both sides, and a subtract or relief mirrors the carve
+the same as an add mirrors the deposit. Until 0.27.3 this flag was an
+**opt-in that defaulted to excluded**, which read as the layer mirror doing
+nothing at all (#60). Layers with no mirror axes cost nothing either way.
+
+For symmetry at **authoring** time instead — build one arm, get the node list
+of two — see `add_child` mirrored under Armatures (§6).
+
 ---
 
 ## 2. Deformers

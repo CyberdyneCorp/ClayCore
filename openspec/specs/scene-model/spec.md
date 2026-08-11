@@ -117,6 +117,29 @@ A layer SHALL optionally carry a mask field, absent by default, stored beside it
 - **WHEN** a region is masked and a further edit is authored across it
 - **THEN** the masked region is spared, while items already in the list are unaffected by the mask
 
+### Requirement: The layer mirror applies to every item by default
+A layer SHALL carry mirror axes (any of x/y/z, off by default) and a Mirror Blend seam width. When an axis is enabled, evaluation SHALL reflect each participating item through the plane where that layer-local coordinate is 0, combined with the item under the layer's Mirror Blend — a hard crease at width 0, a smooth weld above it.
+
+Every item SHALL participate by default, placed items and stroke stamps alike: turning symmetry on means the layer, so an item opts OUT (`Node::mirror = false`; `-1` across the C ABI, `mirror=False` in Python) rather than in. The mirror is a property the evaluation reads, not an edit baked into items — enabling it before or after the items were added SHALL evaluate identically, and disabling it SHALL restore the unmirrored field. A layer with no mirror axes SHALL evaluate identically whatever its items' participation flags, at no added cost.
+
+Loading a document SHALL preserve each stored node's participation flag, so a document saved under the opt-in default (through 0.27.3) evaluates as it did when it was saved.
+
+#### Scenario: Setting the layer mirror mirrors a placed item
+- **WHEN** a mirror about x is set on a layer holding a unit sphere, and an off-centre lump is added with a zeroed descriptor
+- **THEN** raycasts along the lump's direction and its mirror image both report the lump, through the document raycast and the brick cache alike
+
+#### Scenario: The mirror applies regardless of edit order
+- **WHEN** the same mirror is set after the items were added instead of before
+- **THEN** the document evaluates identically
+
+#### Scenario: An item opts out
+- **WHEN** the lump is added with mirror participation −1
+- **THEN** the near side carries the lump and the mirrored side reads the untouched sphere
+
+#### Scenario: A stroke lands on both sides
+- **WHEN** a relief stroke is applied to a mirrored layer
+- **THEN** the mirrored side carries the same bulge as the stroked side, not spillover
+
 ### Requirement: A layer may be ghosted or locked
 A layer SHALL carry a ghost flag and a lock flag, both off by default. A ghosted layer is still evaluated but is excluded from picking and from edits. A locked layer is still evaluated and still picked, but is excluded from edits. Neither flag SHALL change what a document evaluates to.
 

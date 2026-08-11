@@ -550,6 +550,12 @@ The ceiling SHALL be the mesher's own limit rather than the batch limit: the bat
 ### Requirement: Mirroring a layer is an ordinary layer edit
 `clay_set_layer_mirror` SHALL apply through the command vocabulary, so that it refuses a protected layer as every other layer edit does and is recorded on the undo stack.
 
+Setting a mirror SHALL be sufficient for the layer to evaluate mirrored: items participate by default (scene-model spec), and the per-item flag — `clay_item_desc.mirror` and `clay_item_set_mirror` — SHALL read one rule at both entry points: negative excludes the item, 0 and 1 follow the layer's mirror. A zeroed descriptor therefore mirrors, which is what makes the layer call sufficient.
+
+#### Scenario: A zeroed descriptor follows the layer mirror
+- **WHEN** a mirror is set on a layer and an item is added from a zeroed descriptor
+- **THEN** the item and its reflection both evaluate, with no other call required
+
 #### Scenario: A locked layer refuses a mirror
 - **WHEN** `clay_set_layer_mirror` names a locked layer
 - **THEN** it returns `CLAY_ERROR_INVALID_ARGUMENT` and the layer is unchanged

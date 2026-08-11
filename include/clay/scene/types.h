@@ -572,7 +572,12 @@ struct Node {
     math::Transform xform;
     float rounding = 0.0f;
     kernel::cfloat3 color = kernel::cf3(0.7f, 0.7f, 0.7f);
-    bool mirror = false;  // apply through the layer's active mirror
+    // Participates in the layer's active mirror. TRUE by default: a sculptor
+    // who turns symmetry on means the layer, so an item has to opt OUT, not
+    // in (issue #60 — a layer mirror that mirrored nothing by default). A
+    // layer with no mirror axes evaluates identically either way, and a
+    // document loads with whatever each node had when it was saved.
+    bool mirror = true;
     // Control points, for a Stroke and for a Swept guide alike — a guide is an
     // ordinary curve, so it uses the same list rather than one of its own.
     std::vector<StrokePoint> stroke;

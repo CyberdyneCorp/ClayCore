@@ -1316,7 +1316,11 @@ clay_item item_from_desc(const clay_item_desc& d) {
     node.blend = scene::Blend{static_cast<scene::BlendProfile>(d.blend), d.blend_k};
     node.rounding = d.rounding;
     node.color = kernel::cf3(d.color[0], d.color[1], d.color[2]);
-    node.mirror = d.mirror != 0;
+    // Negative excludes the item from the layer's mirror; 0 (a zeroed
+    // descriptor) and 1 both follow it. 0 used to mean excluded, which made
+    // clay_set_layer_mirror a silent no-op for every host that did not also
+    // flag every item (#60).
+    node.mirror = d.mirror >= 0;
     return item;
 }
 
@@ -2099,7 +2103,9 @@ clay_result clay_item_set_color(clay_item* item, const float rgb[3]) {
 
 clay_result clay_item_set_mirror(clay_item* item, int32_t mirror) {
     if (!item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item");
-    item->node.mirror = mirror != 0;
+    // One rule with clay_item_desc.mirror: negative excludes, 0 and 1 both
+    // follow the layer's mirror — which is also what a builder starts as.
+    item->node.mirror = mirror >= 0;
     return CLAY_OK;
 }
 

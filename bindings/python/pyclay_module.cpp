@@ -2681,11 +2681,12 @@ NB_MODULE(pyclay, m) {
                  return insert_node(l, std::move(n), parent, index);
              },
              "prim"_a, "op"_a = scene::Op::Add, "blend"_a = nb::none(), "color"_a = nb::none(),
-             "rounding"_a = nb::none(), "mirror"_a = false, "transition"_a = nb::none(),
+             "rounding"_a = nb::none(), "mirror"_a = true, "transition"_a = nb::none(),
              "parent"_a = nb::none(), "index"_a = -1,
              "Append an edit to the layer; returns the node id. parent=<group id> "
              "puts it inside that group instead of at the layer root, and index<0 "
-             "appends.")
+             "appends. mirror=False keeps the item out of the layer's mirror "
+             "(items follow it by default).")
         .def("add_group",
              [](PyLayer& l, scene::Op op, nb::handle blend, nb::handle color, float rounding,
                 nb::handle parent, int index) {
@@ -3036,7 +3037,8 @@ NB_MODULE(pyclay, m) {
                  layer.mirror_k = blend;
              },
              "axis"_a = "x", "blend"_a = 0.0f,
-             "Enable the layer mirror across an axis; items added with mirror=True reflect")
+             "Enable the layer mirror across an axis: every item reflects, before or "
+             "after it was added, except those added with mirror=False")
         .def("eval",
              [](const PyLayer& l, nb::handle points, const std::string& backend) {
                  return eval_field(scene::compile_layer(l.layer()), points, backend,

@@ -7,8 +7,9 @@ and sweeps. The sheet reads as the process, not as a list of features.
 
 Three things carry the organic look, and only one of them is a brush.
 
-**Symmetry is authored.** `layer.mirror("x")` plus `mirror=True` on an item
-puts it through the mirror plane, so the left arm IS the right arm and cannot
+**Symmetry is one call.** `layer.mirror("x")` puts every item through the
+mirror plane (the `mirror=True` below spells the default out; `mirror=False`
+opts a one-sided detail out), so the left arm IS the right arm and cannot
 drift from it — the same reason a sculptor works with symmetry on and turns it
 off only for the last pass.
 
@@ -256,17 +257,22 @@ def face_features(layer):
 
 
 def hammer(layer):
-    """A prop, so the figure carries weight. Hard surface on an organic body."""
+    """A prop, so the figure carries weight. Hard surface on an organic body.
+
+    The one deliberately one-sided thing on the figure: a hammer is held in ONE
+    hand, so every piece opts out of the layer mirror with mirror=False.
+    """
     layer.add(clay.Capsule(a=(0.534, 0.60, 0.118), b=(0.560, -0.10, 0.150), r=0.025),
-              blend=clay.Smooth(0.015), color=LEATHER)
+              blend=clay.Smooth(0.015), color=LEATHER, mirror=False)
     layer.add(clay.RoundBox(size=(0.175, 0.155, 0.155), r=0.018,
                             position=(0.552, 0.06, 0.140)),
-              blend=clay.Smooth(0.012), color=METAL)
+              blend=clay.Smooth(0.012), color=METAL, mirror=False)
     # ENGRAVE cuts a shallow mark weighted by the region, the way a maker's
     # stamp sits in metal rather than being a boolean notch.
     layer.add(clay.Box(size=(0.17, 0.016, 0.016), position=(0.552, 0.06, 0.232))
               .repeat_grid(spacing=0.035, counts=(0, 1, 0)),
-              op=clay.Op.ENGRAVE, blend=clay.Smooth(0.010), rounding=0.014)
+              op=clay.Op.ENGRAVE, blend=clay.Smooth(0.010), rounding=0.014,
+              mirror=False)
 
 
 def build(stage):
