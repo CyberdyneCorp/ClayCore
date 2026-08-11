@@ -247,6 +247,77 @@ TEST_CASE("stroke: presets survive engine versions") {
     }
 }
 
+// Issue #61: an add stamp deposited the same at every strength, zero included.
+// Strength scales an add stamp's whole deposit — scale and blend together —
+// through the DEPOSIT channel, which skips the clamped-accumulation division:
+// overlapping unions do not add up.
+TEST_CASE("stroke: strength scales an add stamp's deposit") {
+    scene::Node templ;
+    templ.prim = scene::Prim::sphere(1.0f);
+    templ.op = scene::Op::Add;
+    templ.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.18f};
+    templ.rounding = 0.18f;
+
+    std::vector<StrokeSample> tap(1);
+    tap[0].position = cf3(0, 0, 1);
+
+    auto nodes_at = [&](float strength, Accumulation acc = Accumulation::Buildup) {
+        StrokePreset p = simple(0.18f);
+        p.strength = strength;
+        p.accumulation = acc;
+        scene::SdfContent content;
+        return stamps_to_nodes(content, resolve_stroke(tap, p), templ);
+    };
+
+    SUBCASE("zero deposits nothing at all") { CHECK(nodes_at(0.0f).empty()); }
+
+    SUBCASE("full strength is the item exactly as authored") {
+        std::vector<scene::Node> nodes = nodes_at(1.0f);
+        REQUIRE(nodes.size() == 1);
+        CHECK(nodes[0].xform.scale == 0.18f);          // the stamp radius, untouched
+        CHECK(nodes[0].blend.k == templ.blend.k);      // bit for bit
+        CHECK(nodes[0].rounding == templ.rounding);
+    }
+
+    SUBCASE("in between, the deposit scales with the strength") {
+        std::vector<scene::Node> nodes = nodes_at(0.5f);
+        REQUIRE(nodes.size() == 1);
+        CHECK(nodes[0].xform.scale == doctest::Approx(0.18f * 0.5f));
+        CHECK(nodes[0].blend.k == doctest::Approx(templ.blend.k * 0.5f));
+    }
+
+    SUBCASE("clamped accumulation does not shrink the deposit") {
+        std::vector<scene::Node> clamped = nodes_at(1.0f, Accumulation::Clamped);
+        std::vector<scene::Node> buildup = nodes_at(1.0f, Accumulation::Buildup);
+        REQUIRE(clamped.size() == buildup.size());
+        CHECK(clamped[0].xform.scale == buildup[0].xform.scale);
+        CHECK(clamped[0].blend.k == buildup[0].blend.k);
+
+        // ...while a relief amplitude, which does accumulate, still divides.
+        scene::Node relief = templ;
+        relief.op = scene::Op::Relief;
+        StrokePreset p = simple(0.18f, 0.25f);
+        p.accumulation = Accumulation::Clamped;
+        scene::SdfContent content;
+        std::vector<scene::Node> divided =
+            stamps_to_nodes(content, resolve_stroke(tap, p), relief);
+        REQUIRE(divided.size() == 1);
+        CHECK(divided[0].blend.k == doctest::Approx(templ.blend.k * 0.25f));
+    }
+
+    SUBCASE("every other op still ignores strength") {
+        scene::Node groove = templ;
+        groove.op = scene::Op::Groove;
+        StrokePreset p = simple(0.18f);
+        p.strength = 0.5f;
+        scene::SdfContent content;
+        std::vector<scene::Node> nodes = stamps_to_nodes(content, resolve_stroke(tap, p), groove);
+        REQUIRE(nodes.size() == 1);
+        CHECK(nodes[0].xform.scale == 0.18f);
+        CHECK(nodes[0].blend.k == templ.blend.k);
+    }
+}
+
 TEST_CASE("stroke: applied to a voxel grid") {
     voxel::VoxelGrid grid(0.05f);
     std::uint8_t index = grid.palette_add(cf3(1, 1, 1));

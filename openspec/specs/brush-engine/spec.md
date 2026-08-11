@@ -200,10 +200,12 @@ The library SHALL expose which items a drag would warp without modifying the doc
 - **WHEN** a drag is previewed and then applied
 - **THEN** the items reported by each are the same
 
-### Requirement: A stamp's strength scales an amplitude, where the op has one
+### Requirement: A stamp's strength scales the amount, where the op has one
 Turning stamps into edit-list items SHALL apply a stamp's strength to the item's amplitude for the ops whose `blend.k` IS an amplitude — relief and incise — so that the stroke engine's pressure-strength channel and its accumulation mode reach an SDF layer.
 
-For every other op `blend.k` is a radius, a depth or a half-thickness. Scaling those by a stroke's strength would change the SHAPE rather than the amount, differently per op and silently, so those ops SHALL continue to ignore strength. A boolean has no partial application: a union at half strength is not a smaller union.
+For add, the amount IS the stamp: strength SHALL scale the whole deposit — the item's scale and its blend radius together, with the rounding following the scale — so a stroke at strength zero authors no node at all, full strength authors the item exactly as it would have been without a strength, and the deposited displacement is monotonic in between. The clamped-accumulation division SHALL NOT apply to an add stamp's deposit: overlapping unions do not add up, so dividing by the overlap would shrink every stamp of a clamped stroke rather than keep the stroke at its strength.
+
+For every other op `blend.k` is a radius, a depth or a half-thickness, and no scale is purely an amount. Scaling either by a stroke's strength would change the SHAPE rather than the amount, differently per op and silently, so those ops SHALL continue to ignore strength.
 
 #### Scenario: Buildup accumulates past clamped
 - **WHEN** the same dense relief stroke is applied under buildup and under clamped accumulation
@@ -213,7 +215,11 @@ For every other op `blend.k` is a radius, a depth or a half-thickness. Scaling t
 - **WHEN** a relief stroke is applied with reduced pressure strength
 - **THEN** the surface moves less than at full strength
 
-#### Scenario: A boolean stroke is unaffected
+#### Scenario: An add stroke honours strength
+- **WHEN** the same add stamp is applied at strengths 0, 0.1, 0.5 and 1.0
+- **THEN** strength 0 leaves the layer unchanged, 1.0 deposits the item exactly as authored, and the surface displacement rises monotonically in between
+
+#### Scenario: A clamped add stroke keeps its deposit
 - **WHEN** an add stroke is applied under buildup and under clamped accumulation
 - **THEN** the two results are identical
 

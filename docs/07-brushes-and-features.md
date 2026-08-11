@@ -371,7 +371,7 @@ mask's resolution instead of the brush's radius.
 | Feature | Field | What it does |
 |---|---|---|
 | Spacing | `spacing` | Distance between stamps as a fraction of brush **diameter**. 0.25 is dense; 1.0 places them just touching |
-| Pressure | `pressure.size`, `.strength`, `.curve` | Exponents on normalized pressure. 0 disables a channel — that is what "size only" and "flow only" brushes are. On an SDF layer the **strength** channel reaches relief and incise only — see below |
+| Pressure | `pressure.size`, `.strength`, `.curve` | Exponents on normalized pressure. 0 disables a channel — that is what "size only" and "flow only" brushes are. On an SDF layer the **strength** channel reaches relief, incise and add only — see below |
 | Jitter | `jitter_position`, `jitter_size`, `jitter_rotation`, `seed` | Derived from the stamp index and seed, **never from a random source**, so a stroke resolves identically everywhere |
 | Rotate along stroke | `rotate_along_stroke` | Turns each stamp to follow the path; only matters for stamps that are not rotationally symmetric |
 | Taper | `taper_start`, `taper_end` | Fraction of stroke length over which the radius ramps in and out |
@@ -385,13 +385,20 @@ silently reinterpreted by a later build is the failure that number prevents.
 Deserialization accepts its own version and earlier ones, and **refuses a newer
 one** rather than reading a prefix and pretending.
 
-**A stamp's strength reaches an SDF item only where `blend.k` is an amount.**
-For relief and incise it is the amplitude, and half an amplitude is exactly half
-the displacement — so pressure and accumulation mean something, and ClayBuildup
-gets the buildup it is named for. Every other op reads `blend.k` as a radius, a
-depth or a half-thickness: scaling those would change the *shape* rather than
-the amount, silently and differently per op, because a union at half strength is
-not a smaller union. Those ops ignore strength.
+**A stamp's strength reaches an SDF item only where scaling preserves what the
+op means.** For relief and incise `blend.k` is the amplitude, and half an
+amplitude is exactly half the displacement — so pressure and accumulation mean
+something, and ClayBuildup gets the buildup it is named for. For add the amount
+*is* the stamp: strength scales the whole deposit — scale, rounding and blend
+together — so a half-strength stamp is a self-similar half-size deposit, zero
+authors no node at all, and full strength is the item exactly as authored. One
+asymmetry is deliberate: `Clamped` accumulation divides a relief amplitude by
+the expected overlap so the stroke reaches its strength once, but it does **not**
+divide an add stamp's deposit — overlapping unions do not add up, so a clamped
+add stroke is identical to a buildup one. Every other op reads `blend.k` as a
+radius, a depth or a half-thickness: scaling those would change the *shape*
+rather than the amount, silently and differently per op — a groove at half
+strength is not a shallower groove. Those ops ignore strength.
 
 **A stroke carries `rounding`**, which matters more than it sounds: groove and
 tongue read it as the channel half-width and relief and incise as the falloff

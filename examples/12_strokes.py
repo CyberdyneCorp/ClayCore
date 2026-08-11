@@ -101,7 +101,12 @@ def main():
     doc.enable_undo()
     body = doc.add_sdf_layer("body")
     sweep = arc()
+    # pressure_strength is off here on purpose: an add stamp's strength scales
+    # its whole deposit (issue #61), and this section is about undo grouping,
+    # so the sweep's 0.15-pressure start should still deposit a full stamp for
+    # the probe below to sit inside.
     p = clay.StrokePreset(radius=0.16, spacing=0.3, pressure_size=1.0,
+                          pressure_strength=0.0,
                           taper_start=0.15, taper_end=0.15)
     ids = body.apply_stroke(sweep, p, clay.Sphere(r=1.0),
                             blend=clay.Smooth(0.12), color="#d8b26a")

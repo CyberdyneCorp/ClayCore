@@ -114,7 +114,17 @@ struct StrokePreset {
 struct Stamp {
     kernel::cfloat3 position = kernel::cf3(0, 0, 0);
     float radius = 0.0f;
+    // The per-application strength an ACCUMULATING consumer reads — what a
+    // voxel brush stamps with, and what scales a relief amplitude. Under
+    // clamped accumulation it is divided by the expected overlap, so however
+    // many stamps cover a point the stroke reaches its strength once.
     float strength = 1.0f;
+    // The same strength WITHOUT the clamped-accumulation division: the
+    // fraction of the stamp a non-accumulating consumer deposits. Overlapping
+    // unions do not add up, so dividing an ADD stamp's deposit by the overlap
+    // would shrink every stamp of a clamped stroke rather than keep the stroke
+    // at its strength. Equal to `strength` under buildup accumulation.
+    float deposit = 1.0f;
     math::Quat rotation = math::Quat::identity();
     float along = 0.0f;  // [0,1] position along the stroke, for a caller's use
 };
@@ -161,6 +171,12 @@ std::size_t apply_to_mask(voxel::MaskField& mask, const std::vector<Stamp>& stam
 
 // Turn stamps into edit-list nodes: one node per stamp, `templ` copied and
 // re-placed at the stamp's transform, with its radius scaled.
+//
+// A stamp's strength reaches an item where scaling preserves what its op
+// means: relief and incise scale their amplitude (`blend.k`) by it, and an
+// Add stamp scales its whole deposit — scale, rounding and blend together —
+// so strength 0 deposits nothing and 1 is exactly the item as authored. Every
+// other op ignores it; see the comment in stamps_to_nodes for why.
 //
 // The nodes are returned rather than inserted, so the caller decides which
 // commands carry them — one AddNodeCmd per node inside an undo group is what
