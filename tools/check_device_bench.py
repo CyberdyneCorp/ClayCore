@@ -204,6 +204,9 @@ def main() -> int:
         "osVersion": run["osVersion"],
         "abiVersion": run["abiVersion"],
         "caseCount": len(run["cases"]),
+        # Recorded so the release check can refuse a stamp whose commit does
+        # not describe the code that ran.
+        "treeDirty": run.get("treeDirty", False),
     }
     stamp_path = baseline_path.parent / "last-gate.json"
     stamp_path.write_text(json.dumps(stamp, indent=2, sort_keys=True) + "\n")

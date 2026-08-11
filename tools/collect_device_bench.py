@@ -43,6 +43,25 @@ def git_commit() -> str | None:
         return None
 
 
+def tree_is_dirty() -> bool:
+    """Whether anything is uncommitted, ignoring the gate's own outputs.
+
+    A run recorded against a dirty tree names a commit that does not describe
+    the code that ran, which is worse than naming nothing: it looks precise.
+    """
+    try:
+        out = subprocess.run(["git", "status", "--porcelain"],
+                             capture_output=True, text=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+    ignored = {"tests/device/baseline.json", "tests/device/last-gate.json"}
+    for line in out.stdout.splitlines():
+        path = line[3:].strip()
+        if path and path not in ignored:
+            return True
+    return False
+
+
 def merge(records: list[dict]) -> dict:
     """One run record from many. Cases concatenate; the run-level fields must
     agree, because two tests in one run measured the same device."""
@@ -121,6 +140,7 @@ def main() -> int:
         shutil.rmtree(tmp, ignore_errors=True)
 
     merged["claycoreCommit"] = git_commit()
+    merged["treeDirty"] = tree_is_dirty()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n")
 
