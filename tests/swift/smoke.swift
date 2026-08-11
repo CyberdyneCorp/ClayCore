@@ -9,6 +9,7 @@
 // and against the iOS simulator slice, where it runs inside a booted device.
 
 import Foundation
+import Metal
 import claycore
 
 var failures = 0
@@ -67,9 +68,32 @@ func registeredBackends() -> [String] {
 let backends = registeredBackends()
 print("backends: \(backends.joined(separator: ", "))")
 check(backends.contains("cpu"), "the CPU backend is registered")
-check(backends.contains("metal"),
-      "the Metal backend is registered — the xcframework must ship it, since a "
-      + "consumer of a prebuilt static library cannot enable it afterwards")
+// Metal registers for one reason and fails to register for three, and
+// "backends: cpu" does not say which. MetalBackend::init() returns false when
+// CreateSystemDefaultDevice() is null (no GPU — environmental), when the
+// embedded metallib does not load (a real defect in the artifact we ship), or
+// when the command queue cannot be made. Collapsing those into one assertion
+// is what made this smoke fail the v0.27.0 and v0.27.1 releases on a runner
+// with no GPU, and it would equally have hidden a broken metallib behind the
+// same message.
+//
+// So: ask whether a DEVICE exists, and report which case this is. Where one
+// exists, the backend must register — if it does not, the metallib is broken
+// and that is a failure, not an environment. Where none exists there is
+// nothing to register against, and what the ARTIFACT ships is gated where it
+// is decidable: tools/build_xcframework.sh fails the build outright if a
+// slice's merged archive carries no clay_metallib symbol.
+if let device = MTLCreateSystemDefaultDevice() {
+    print("  Metal device: \(device.name)")
+    check(backends.contains("metal"),
+          "the Metal backend registered — this machine HAS a Metal device, so a "
+          + "missing backend would mean the embedded metallib failed to load")
+} else {
+    print("  SKIP no Metal device on this machine, so there is nothing for the "
+          + "backend to register against. This is the environment, not the "
+          + "artifact: whether the xcframework SHIPS the metallib is gated by "
+          + "tools/build_xcframework.sh, which fails the build if it does not.")
+}
 
 guard let doc = clay_document_create() else {
     print("FAIL could not create a document")
