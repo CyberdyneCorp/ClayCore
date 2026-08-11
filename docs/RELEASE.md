@@ -348,8 +348,17 @@ Tracked honestly rather than assumed done:
      cannot use and the suite then passes CPU-only at 204 assertions instead of
      failing.
 
+  5. That **Metal device adoption** works — `clay_device_adopt` with a
+     `MTLDevice` and `MTLCommandQueue` the caller made, then
+     `clay_eval_grid_device` into a caller-owned `MTLBuffer`, compared against
+     the host-memory path. Added with `add-device-interop` and written on a
+     Linux machine with no metal-cpp toolchain: CI compiles it on every push
+     and the Metal parity job exercises the ordinary path, but the ADOPTION
+     path has never run on Apple hardware. The Vulkan equivalent is covered by
+     the `vulkan-plumbing` job and by the unit suite; this one is not.
+
   `python3 tools/release_check.py` run on a machine with those devices present
-  covers all four, because it runs parity against every backend registered in
+  covers the first four, because it runs parity against every backend registered in
   that build. What per-push CI still gates for Vulkan is
   `check_kernel_dialect.py`, which compiles the generated GLSL with glslang and
   needs no device — the strictest of the five profiles, so it usually fails
