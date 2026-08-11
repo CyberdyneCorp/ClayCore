@@ -202,6 +202,22 @@ forward-refuse).
    the same loss minors 1, 2 and 4 carry. The format notes at the top of
    `include/clay/io/clayspace.h` record it.
 
+   **0.27.0 adds one symbol**: `clay_item_volume_flatten_from`, a flatten
+   sampled from a document rather than from an existing volume. Additive — no
+   signature changed, nothing removed, no struct grew, and no existing entry
+   point returns a new `clay_result` value, so code compiled against 0.26.0
+   keeps linking and behaving as it did.
+
+   It exists because the sound path was Python-only: `pyclay` has both
+   `Volume.flattened` (a volume) and `Volume.flattened_from` (a source plus its
+   own sampling parameters), and the C ABI had only the first. Measured, the
+   two produce the SAME surface — same facet position, same enclosed volume, at
+   every band tried — and differ by about 8x in `safe_step_scale`, so the
+   document-sourced field costs a fraction of the marching for the same shape.
+   `tools/check_binding_parity.py` used to map both Python names onto the one C
+   symbol, which is how the gap passed the gate; it maps one symbol per
+   operation now.
+
 ## The device gate
 
 Metal is the iPad app's production path, and no CI runner has an attached
