@@ -15,6 +15,7 @@ that cannot say what produced it is not comparable to anything.
 
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -92,7 +93,30 @@ def main() -> int:
                     continue
                 path = tmp / attachment["exportedFileName"]
                 records.append(json.loads(path.read_text()))
+        # Renders come out of the same bundle. They are the half of the result
+        # that can be looked AT: a brush that got fast by doing nothing passes
+        # its latency case and produces an obviously wrong picture.
+        gallery = out_path.parent / "gallery"
+        gallery.mkdir(parents=True, exist_ok=True)
+        for old in gallery.glob("*.png"):
+            old.unlink()
+        for entry in manifest:
+            for attachment in entry.get("attachments", []):
+                name = attachment.get("suggestedHumanReadableName", "")
+                if not name.startswith("gallery-"):
+                    continue
+                src = tmp / attachment["exportedFileName"]
+                # xcresulttool appends "_<index>_<uuid>" before the extension.
+                # Strip exactly that: splitting on "_" instead collapsed
+                # gallery-stroke_build and gallery-stroke_carve onto one name,
+                # and one silently overwrote the other.
+                stem = re.sub(r"_\d+_[0-9A-Fa-f-]{36}(?=\.png$)", "", name)
+                if not stem.endswith(".png"):
+                    stem += ".png"
+                shutil.copyfile(src, gallery / stem)
+        rendered = sorted(p.name for p in gallery.glob("*.png"))
         merged = merge(records)
+        merged["gallery"] = rendered
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -101,6 +125,9 @@ def main() -> int:
     out_path.write_text(json.dumps(merged, indent=2, sort_keys=True) + "\n")
 
     print(f"device-bench: {len(merged['cases'])} case(s) -> {out_path}")
+    if merged.get("gallery"):
+        print(f"  {len(merged['gallery'])} render(s) -> "
+              f"{out_path.parent / 'gallery'}: {', '.join(merged['gallery'])}")
     print(f"  device {merged['deviceModel']}, {merged['osVersion']}")
     if not merged["valid"]:
         print(f"  INVALID: thermal {merged['thermalStateStart']}"

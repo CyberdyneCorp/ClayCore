@@ -76,6 +76,16 @@ enum Coverage {
         // -- the cut tool -----------------------------------------------------
         .measured("cut_create", by: "cut_create"),
 
+        // -- sessions: the same brushes over EIGHT strokes, accumulating -----
+        // Everything above measures one application with the document held
+        // still. These hold nothing still: stroke 8 lands on what strokes 1-7
+        // left, which is the shape that degrades and the shape an artist
+        // works in. Each one also renders its result to a PNG.
+        .measured("session_stroke_build", by: "stroke_build"),
+        .measured("session_stroke_carve", by: "stroke_carve"),
+        .measured("session_move_drags", by: "move_drags"),
+        .measured("session_cut_passes", by: "cut_passes"),
+
         // -- exemptions, each a decision rather than an omission --------------
         .exempt("snakehook",
                 because: "no C entry point exists. The binding-parity table maps "
