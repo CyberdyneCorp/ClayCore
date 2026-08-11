@@ -18,7 +18,24 @@ struct TapeField {
     int count;
     device const float* params;
     device const float* blob;
-    float operator()(cfloat3 p) const { return ctape_eval(instrs, count, params, blob, p).d; }
+    // NOT inlined, and only here.
+    //
+    // This is the evaluator the RAY MARCH calls: once per step through
+    // craycast, and four more times through cnormal. ctape_eval is a switch
+    // over every primitive, combine op and deformer, so inlining it at each of
+    // those sites makes clay_raycast enormous — and on an Apple Paravirtual
+    // GPU the pipeline compiler gives up on it outright, with an error whose
+    // entire content is "Compilation failed" (issue #63). The backend then
+    // registers nothing and the library falls back to the CPU.
+    //
+    // clay_eval_points and clay_eval_grid call ctape_eval DIRECTLY and once,
+    // where inlining is free, so they are untouched by this and still compile
+    // to what they did. Nothing outside this file changes: the shared kernel
+    // headers are what CPU, CUDA, OpenCL and Vulkan compile, and they see the
+    // same source they always did.
+    __attribute__((noinline)) float operator()(cfloat3 p) const {
+        return ctape_eval(instrs, count, params, blob, p).d;
+    }
 };
 
 }  // namespace
