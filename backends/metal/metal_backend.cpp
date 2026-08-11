@@ -47,6 +47,7 @@ class MetalBackend final : public Backend {
     ~MetalBackend() override {
         if (pso_points_) pso_points_->release();
         if (pso_grid_) pso_grid_->release();
+        if (pso_grid_batch_) pso_grid_batch_->release();
         if (pso_rays_) pso_rays_->release();
         // Release nothing we did not retain. On an adopted device the caller
         // keeps its device and queue, and releasing them here would drop a
@@ -118,6 +119,94 @@ class MetalBackend final : public Backend {
                 std::memcpy(out_colors_rgb, cols->contents(), total * 3 * sizeof(float));
         }
         release_all({tb.instrs, tb.params, tb.blob, dist, cols});
+        return ok ? Status::Ok : Status::DeviceError;
+    }
+
+    // The whole batch in ONE command buffer: the per-grid culled tapes ride
+    // concatenated in three shared buffers, a table says where each grid's
+    // slices start, and there is one dispatch, one wait and one readback. The
+    // per-grid loop the default implementation runs pays a command buffer and
+    // a waitUntilCompleted per 8^3 lattice — roughly 250 us of round trip for
+    // 512 samples of work — which is what made refill 7-10x slower on Metal
+    // than on the CPU at every batch size (issue #64).
+    Status eval_grid_batch(const GridBatchQuery& q, float* out_values,
+                           float* out_colors_rgb) override {
+        if (q.count == 0) return Status::Ok;
+        if (!q.tapes || !q.origins || !out_values || q.nx <= 0 || q.ny <= 0 || q.nz <= 0)
+            return Status::InvalidInput;
+        const std::size_t per = static_cast<std::size_t>(q.nx) *
+                                static_cast<std::size_t>(q.ny) *
+                                static_cast<std::size_t>(q.nz);
+        const std::size_t total = per * q.count;
+
+        // First pass: sizes, so the concatenated buffers are allocated once.
+        // The table offsets are 32-bit on the device, so a batch whose tapes
+        // do not fit is refused rather than wrapped.
+        std::uint64_t n_instrs = 0, n_params = 0, n_blob = 0;
+        for (std::size_t i = 0; i < q.count; ++i) {
+            if (!q.tapes[i]) return Status::InvalidInput;
+            n_instrs += q.tapes[i]->instrs.size();
+            n_params += q.tapes[i]->params.size();
+            n_blob += q.tapes[i]->blob.size();
+        }
+        const std::uint64_t limit = 0xffffffffu;
+        if (n_instrs > limit || n_params > limit || n_blob > limit)
+            return Status::InvalidInput;
+
+        MTL::Buffer* instrs = scratch_buffer(n_instrs * sizeof(kernel::CTapeInstr));
+        MTL::Buffer* params = scratch_buffer(n_params * sizeof(float));
+        MTL::Buffer* blob = scratch_buffer(n_blob * sizeof(float));
+        MTL::Buffer* table = scratch_buffer(q.count * sizeof(ClayBatchGrid));
+        MTL::Buffer* dist = scratch_buffer(total * sizeof(float));
+        MTL::Buffer* cols = scratch_buffer(out_colors_rgb ? total * 3 * sizeof(float) : 0);
+
+        // Second pass: each tape's slices land at their offsets, and the table
+        // records where.
+        auto* out_instrs = static_cast<kernel::CTapeInstr*>(instrs->contents());
+        auto* out_params = static_cast<float*>(params->contents());
+        auto* out_blob = static_cast<float*>(blob->contents());
+        auto* out_table = static_cast<ClayBatchGrid*>(table->contents());
+        std::uint32_t at_instr = 0, at_param = 0, at_blob = 0;
+        for (std::size_t i = 0; i < q.count; ++i) {
+            const scene::Tape& t = *q.tapes[i];
+            if (!t.instrs.empty())
+                std::memcpy(out_instrs + at_instr, t.instrs.data(),
+                            t.instrs.size() * sizeof(kernel::CTapeInstr));
+            if (!t.params.empty())
+                std::memcpy(out_params + at_param, t.params.data(),
+                            t.params.size() * sizeof(float));
+            if (!t.blob.empty())
+                std::memcpy(out_blob + at_blob, t.blob.data(), t.blob.size() * sizeof(float));
+            ClayBatchGrid g{};
+            g.origin[0] = q.origins[i].x;
+            g.origin[1] = q.origins[i].y;
+            g.origin[2] = q.origins[i].z;
+            g.instr_offset = at_instr;
+            g.instr_count = static_cast<unsigned int>(t.instrs.size());
+            g.param_offset = at_param;
+            g.blob_offset = at_blob;
+            out_table[i] = g;
+            at_instr += static_cast<std::uint32_t>(t.instrs.size());
+            at_param += static_cast<std::uint32_t>(t.params.size());
+            at_blob += static_cast<std::uint32_t>(t.blob.size());
+        }
+
+        ClayGridBatchUniforms u{};
+        u.spacing = q.spacing;
+        u.nx = static_cast<unsigned int>(q.nx);
+        u.ny = static_cast<unsigned int>(q.ny);
+        u.nz = static_cast<unsigned int>(q.nz);
+        u.grid_count = static_cast<unsigned int>(q.count);
+        u.has_colors = out_colors_rgb ? 1u : 0u;
+
+        bool ok = dispatch(pso_grid_batch_, {instrs, params, blob, table, dist, cols}, &u,
+                           sizeof(u), 6, total);
+        if (ok) {
+            std::memcpy(out_values, dist->contents(), total * sizeof(float));
+            if (out_colors_rgb)
+                std::memcpy(out_colors_rgb, cols->contents(), total * 3 * sizeof(float));
+        }
+        release_all({instrs, params, blob, table, dist, cols});
         return ok ? Status::Ok : Status::DeviceError;
     }
 
@@ -276,9 +365,10 @@ class MetalBackend final : public Backend {
         }
         pso_points_ = make_pso(lib, "clay_eval_points");
         pso_grid_ = make_pso(lib, "clay_eval_grid");
+        pso_grid_batch_ = make_pso(lib, "clay_eval_grid_batch");
         pso_rays_ = make_pso(lib, "clay_raycast");
         lib->release();
-        return pso_points_ && pso_grid_ && pso_rays_;
+        return pso_points_ && pso_grid_ && pso_grid_batch_ && pso_rays_;
     }
 
     MTL::ComputePipelineState* make_pso(MTL::Library* lib, const char* fn_name) {
@@ -304,6 +394,12 @@ class MetalBackend final : public Backend {
     MTL::Buffer* copy_in(const void* data, std::size_t bytes) {
         if (bytes == 0) return device_->newBuffer(4, MTL::ResourceStorageModeShared);
         return device_->newBuffer(data, bytes, MTL::ResourceStorageModeShared);
+    }
+
+    // A shared-mode allocation that is never zero-sized: every kernel binding
+    // must be a real buffer, and an empty tape section still gets bound.
+    MTL::Buffer* scratch_buffer(std::size_t bytes) {
+        return device_->newBuffer(bytes ? bytes : 4, MTL::ResourceStorageModeShared);
     }
 
     TapeBuffers upload_tape(const scene::Tape& tape) {
@@ -376,6 +472,7 @@ class MetalBackend final : public Backend {
     bool owns_device_ = true;
     MTL::ComputePipelineState* pso_points_ = nullptr;
     MTL::ComputePipelineState* pso_grid_ = nullptr;
+    MTL::ComputePipelineState* pso_grid_batch_ = nullptr;
     MTL::ComputePipelineState* pso_rays_ = nullptr;
 };
 

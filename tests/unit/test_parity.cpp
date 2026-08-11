@@ -505,6 +505,70 @@ TEST_CASE("parity: grid evaluation equals point evaluation") {
     }
 }
 
+TEST_CASE("parity: a grid batch answers what per-grid evaluation does") {
+    // The brick-refill shape (issue #64): many small lattices, each with its
+    // own culled tape, handed to the backend as ONE batch. A backend that
+    // turns the batch into a single device submission — the Metal override —
+    // must produce the values the per-grid path produces, including for a
+    // block whose culled tape is EMPTY (nothing reaches it), whose tape slice
+    // in the concatenated upload has zero length.
+    scene::Document doc = gnarly_document();
+    const int dim = 8;
+    const float spacing = 0.15f;
+    const float block = spacing * static_cast<float>(dim);
+
+    std::vector<scene::Tape> tapes;
+    std::vector<const scene::Tape*> tape_ptrs;
+    std::vector<cfloat3> origins;
+    for (int bz = -2; bz < 2; ++bz)
+        for (int by = -2; by < 2; ++by)
+            for (int bx = -2; bx < 2; ++bx) {
+                cfloat3 origin = cf3((float)bx, (float)by, (float)bz) * block;
+                scene::CullRegion cull;
+                cull.region = math::Aabb{origin, origin + cf3(block, block, block)}.dilated(
+                    3.0f * spacing);
+                tapes.push_back(scene::compile_document(doc, &cull));
+                origins.push_back(origin);
+            }
+    {   // far from everything: the empty-tape block
+        cfloat3 origin = cf3(50.0f, 50.0f, 50.0f);
+        scene::CullRegion cull;
+        cull.region = math::Aabb{origin, origin + cf3(block, block, block)};
+        tapes.push_back(scene::compile_document(doc, &cull));
+        REQUIRE(tapes.back().instrs.empty());
+        origins.push_back(origin);
+    }
+    for (const scene::Tape& t : tapes) tape_ptrs.push_back(&t);
+
+    eval::GridBatchQuery batch;
+    batch.tapes = tape_ptrs.data();
+    batch.origins = origins.data();
+    batch.spacing = spacing;
+    batch.nx = batch.ny = batch.nz = dim;
+    batch.count = tapes.size();
+    const std::size_t per = static_cast<std::size_t>(dim) * dim * dim;
+
+    for (eval::Backend* backend : eval::Registry::instance().all()) {
+        CAPTURE(backend->name());
+        const float kPoison = -12345.678f;
+        std::vector<float> got(batch.count * per, kPoison);
+        REQUIRE(backend->eval_grid_batch(batch, got.data()) == eval::Status::Ok);
+        const bool is_cpu = std::string(backend->name()) == "cpu";
+        const float tol = is_cpu ? 1e-6f : 1e-4f;
+        float worst = 0.0f;
+        for (std::size_t g = 0; g < batch.count; ++g)
+            for (std::size_t s = 0; s < per; ++s) {
+                const std::size_t x = s % dim, y = (s / dim) % dim, z = s / (dim * dim);
+                cfloat3 p = origins[g] +
+                            cf3((float)x, (float)y, (float)z) * spacing;
+                REQUIRE(got[g * per + s] != kPoison);
+                worst = kernel::cmax(worst,
+                                     rel_err(got[g * per + s], tapes[g].eval(p).d));
+            }
+        CHECK(worst <= tol);
+    }
+}
+
 TEST_CASE("parity: raycast hits agree with reference sphere tracing") {
     scene::Document doc;
     scene::Layer& l = doc.add_sdf_layer("l");

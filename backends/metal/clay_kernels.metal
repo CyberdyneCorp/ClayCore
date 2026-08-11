@@ -82,6 +82,39 @@ kernel void clay_eval_grid(device const CTapeInstr* instrs [[buffer(0)]],
     }
 }
 
+// Many small grids, each with its own culled tape, in ONE dispatch — the
+// brick-refill shape. A per-brick dispatch pays a command buffer and a wait
+// per 8^3 lattice, which costs more than the evaluation it carries; here the
+// tapes ride concatenated in the shared buffers and each thread indexes its
+// grid's slice through the table.
+kernel void clay_eval_grid_batch(device const CTapeInstr* instrs [[buffer(0)]],
+                                 device const float* params [[buffer(1)]],
+                                 device const float* blob [[buffer(2)]],
+                                 device const ClayBatchGrid* grids [[buffer(3)]],
+                                 device float* out_d [[buffer(4)]],
+                                 device float* out_col [[buffer(5)]],
+                                 constant ClayGridBatchUniforms& u [[buffer(6)]],
+                                 uint gid [[thread_position_in_grid]]) {
+    uint per = u.nx * u.ny * u.nz;
+    if (gid >= per * u.grid_count) return;
+    uint g = gid / per;
+    uint local = gid % per;
+    uint x = local % u.nx;
+    uint y = (local / u.nx) % u.ny;
+    uint z = local / (u.nx * u.ny);
+    ClayBatchGrid grid = grids[g];
+    cfloat3 p = cf3(grid.origin[0], grid.origin[1], grid.origin[2]) +
+                cf3((float)x, (float)y, (float)z) * u.spacing;
+    CTapeValue v = ctape_eval(instrs + grid.instr_offset, (int)grid.instr_count,
+                              params + grid.param_offset, blob + grid.blob_offset, p);
+    out_d[gid] = v.d;
+    if (u.has_colors) {
+        out_col[gid * 3 + 0] = v.color.x;
+        out_col[gid * 3 + 1] = v.color.y;
+        out_col[gid * 3 + 2] = v.color.z;
+    }
+}
+
 kernel void clay_raycast(device const CTapeInstr* instrs [[buffer(0)]],
                          device const float* params [[buffer(1)]],
                          device const float* blob [[buffer(2)]],

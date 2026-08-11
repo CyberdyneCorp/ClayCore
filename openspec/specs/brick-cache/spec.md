@@ -45,6 +45,8 @@ Evaluation requests SHALL cross the boundary as a fixed-layout array element tha
 
 Because the C ABI must produce a per-brick culled tape, the boundary SHALL also expose dense-grid evaluation with an optional cull region, and the influence bound an edit dirties (per node and per layer, reporting the unbounded case rather than claiming a finite box for it).
 
+Evaluation across the boundary SHALL reach the named backend as batched work (the evaluation-backends batched grid form), not as one backend call per brick, so a GPU backend can amortize its per-submission overhead over the batch. The values SHALL be those of the per-brick culled tapes regardless of how the batch is submitted.
+
 #### Scenario: A packaged consumer refills incrementally
 - **WHEN** a host holding only the C header marks an edit's influence bound dirty, drains the requests, evaluates them and submits the results
 - **THEN** only the bricks the bound reached are re-evaluated, and every other brick's stored payload is bit-identical

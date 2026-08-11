@@ -1,10 +1,12 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <map>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -864,6 +866,88 @@ TEST_CASE("generations: a result computed against the older scene is rejected") 
                                                  2 * kSamples, nullptr,
                                                  0) == CLAY_ERROR_INVALID_ARGUMENT);
         }
+    }
+}
+
+TEST_CASE("eval_requests: every registered backend answers what the CPU answers, batched") {
+    // Regression for issue #64's fix: the request batch reaches the backend as
+    // batched evaluations rather than one backend call per brick, which is
+    // what lets a GPU backend amortize its dispatch. The values must not
+    // notice: whatever backend name crosses the boundary, a batched refill
+    // produces the CPU path's field within GPU parity tolerance (1e-4, the
+    // evaluation-backends gate). The marked region spans surface, inside,
+    // outside AND far-empty bricks, so the batch carries culled tapes of very
+    // different sizes — including empty ones.
+    Doc doc;
+    add_sphere(doc, 0.5f, 0.0f, 0.0f, 0.0f);
+    Cache cache(make_cache());
+    const float near_lo[3] = {-0.6f, -0.6f, -0.6f}, near_hi[3] = {0.6f, 0.6f, 0.6f};
+    REQUIRE(clay_brick_cache_mark_dirty(cache, near_lo, near_hi) == CLAY_OK);
+    const float far_lo[3] = {5.0f, 5.0f, 5.0f}, far_hi[3] = {5.3f, 5.3f, 5.3f};
+    REQUIRE(clay_brick_cache_mark_dirty(cache, far_lo, far_hi) == CLAY_OK);
+
+    std::vector<clay_brick_request> reqs(4096);
+    std::size_t count = reqs.size(), remaining = 0;
+    REQUIRE(clay_brick_cache_take_dirty(cache, reqs.data(), &count, &remaining) == CLAY_OK);
+    REQUIRE(remaining == 0);
+    REQUIRE(count > 64);  // enough bricks that per-brick overhead would show
+    reqs.resize(count);
+
+    std::vector<float> reference(count * kSamples);
+    REQUIRE(clay_brick_cache_eval_requests(doc.d, nullptr, reqs.data(), count, reference.data(),
+                                           reference.size(), nullptr, 0) == CLAY_OK);
+
+    char names[256];
+    std::size_t size = sizeof names;
+    REQUIRE(clay_list_backends(names, &size) == CLAY_OK);
+    std::string list(names);
+    for (std::size_t at = 0; at < list.size();) {
+        std::size_t comma = list.find(',', at);
+        std::string name = list.substr(at, comma == std::string::npos ? comma : comma - at);
+        at = comma == std::string::npos ? list.size() : comma + 1;
+        if (name.empty() || name == "cpu") continue;
+        CAPTURE(name);
+        const float kPoison = -12345.678f;
+        std::vector<float> got(count * kSamples, kPoison);
+        REQUIRE(clay_brick_cache_eval_requests(doc.d, name.c_str(), reqs.data(), count,
+                                               got.data(), got.size(), nullptr, 0) == CLAY_OK);
+        float worst = 0.0f;
+        for (std::size_t i = 0; i < got.size(); ++i) {
+            REQUIRE(got[i] != kPoison);  // a brick nobody evaluated
+            const float scale =
+                std::max(std::max(std::fabs(got[i]), std::fabs(reference[i])), 1.0f);
+            worst = std::max(worst, std::fabs(got[i] - reference[i]) / scale);
+        }
+        CHECK(worst <= 1e-4f);
+    }
+
+    SUBCASE("a batch that mixes spacings keeps each request's own lattice") {
+        // dims are checked uniform across a batch; spacing is not, and each
+        // request keeps its own — the batched submission must split where the
+        // spacing changes rather than stretch one spacing over the batch.
+        Cache coarse(make_cache(2.0f * kVoxel));
+        REQUIRE(clay_brick_cache_mark_dirty(coarse, near_lo, near_hi) == CLAY_OK);
+        std::vector<clay_brick_request> coarse_reqs(4096);
+        std::size_t coarse_count = coarse_reqs.size();
+        REQUIRE(clay_brick_cache_take_dirty(coarse, coarse_reqs.data(), &coarse_count,
+                                            nullptr) == CLAY_OK);
+        REQUIRE(coarse_count > 0);
+        coarse_reqs.resize(coarse_count);
+
+        std::vector<float> coarse_ref(coarse_count * kSamples);
+        REQUIRE(clay_brick_cache_eval_requests(doc.d, nullptr, coarse_reqs.data(), coarse_count,
+                                               coarse_ref.data(), coarse_ref.size(), nullptr,
+                                               0) == CLAY_OK);
+
+        std::vector<clay_brick_request> mixed(reqs);
+        mixed.insert(mixed.end(), coarse_reqs.begin(), coarse_reqs.end());
+        std::vector<float> got(mixed.size() * kSamples);
+        REQUIRE(clay_brick_cache_eval_requests(doc.d, nullptr, mixed.data(), mixed.size(),
+                                               got.data(), got.size(), nullptr, 0) == CLAY_OK);
+        // Bitwise: the same backend ran the same per-request lattices.
+        CHECK(std::memcmp(got.data(), reference.data(), reference.size() * sizeof(float)) == 0);
+        CHECK(std::memcmp(got.data() + reference.size(), coarse_ref.data(),
+                          coarse_ref.size() * sizeof(float)) == 0);
     }
 }
 
