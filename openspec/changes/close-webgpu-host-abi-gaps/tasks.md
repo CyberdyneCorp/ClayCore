@@ -27,14 +27,14 @@
 
 - [x] 3.1 `mesh::mesh_bricks` takes an optional `const std::vector<brick::BrickKey>*`; NULL keeps `cache.surface_bricks()`
 - [x] 3.2 Optional per-key range output, filled as the builder appends; ranges are contiguous and partition the output
-- [ ] 3.3 `clay_brick_mesh_range`; add it to `ARRAY_ELEMENT_STRUCTS` in `tools/check_c_abi.py` with the reason
+- [x] 3.3 `clay_brick_mesh_range`; add it to `ARRAY_ELEMENT_STRUCTS` in `tools/check_c_abi.py` with the reason
 - [x] 3.4 `clay_brick_cache_mesh` gains `keys_xyz`, `key_count` and `out_ranges`; NULL/0 is today's whole-surface behaviour
 - [x] 3.5 Header text: welding spans brick seams, so a key's triangles may reference an earlier key's vertices — a consumer may overwrite a range but not free it in isolation
 - [x] 3.6 Test: mesh whole, then mesh every key one at a time; the union of the per-key triangles matches the whole mesh's triangles as world-space position triples
 - [x] 3.7 Test: two adjacent bricks meshed separately produce bit-identical seam vertex positions
 - [x] 3.8 Test: a key list containing uniform and untracked keys succeeds and contributes nothing
 - [x] 3.9 Test: ranges partition — no gaps, no overlaps, last range ends at the vertex and index counts
-- [ ] 3.10 Benchmark the claim the issue makes: whole-surface re-mesh vs dirty-subset re-mesh after one dab, on a surface large enough for the ratio to mean something
+- [x] 3.10 Benchmark the claim the issue makes — `BM_MeshBricksWhole` vs `BM_MeshBricksSubset`, gated by `check_bench.py`'s `FASTER_THAN`. **22.6 ms for 232 surface bricks against 0.64 ms for the 8 a dab dirties**
 
 ## 4. Caller-owned interleaved mesh buffers (issue #43 item 4)
 
@@ -43,7 +43,7 @@
 - [x] 4.3 Reject overlapping attribute ranges and a stride that does not clear the attributes it is asked to hold — the two mistakes that produce a silently wrong buffer
 - [x] 4.4 Test: interleaved copy matches the deinterleaved accessors element for element, at a stride with padding and at `stride = 0`
 - [x] 4.5 Test: absent attribute refused; short destination refused; overlapping offsets refused
-- [ ] 4.6 Exempt `clay_mesh_copy_vertices` in `tools/check_binding_parity.py` with the reason (Python's equivalent is the buffer protocol over the existing arrays), or give it a pyclay counterpart if one reads naturally
+- [x] 4.6 Exempt `clay_mesh_copy_vertices` in `tools/check_binding_parity.py` with the reason (Python's equivalent is the buffer protocol over the existing arrays), or give it a pyclay counterpart if one reads naturally
 
 ## 5. Batched brick raycast (issue #43 item 8)
 
@@ -52,10 +52,10 @@
 
 ## 6. Bindings, gates and documentation
 
-- [ ] 6.1 pyclay counterparts for colour, apron, subset meshing and batched brick raycast; `tools/check_binding_parity.py` passes with no new unexplained exemption
-- [ ] 6.2 `tools/check_c_abi.py` passes: descriptor prefix rule on `clay_vertex_layout`, element exemption on `clay_brick_mesh_range`, every declaration resolving in the shared library
+- [x] 6.1 No pyclay counterparts: the gate runs pyclay→C, and `BrickCache` already carries a reviewed `C_ONLY_FOLLOW_UPS` entry deferring the whole binding. Its text now names the atlas surface too, and `Mesh.copy_vertices` is recorded with its own reason (numpy interleaves the existing buffer-protocol arrays without crossing the boundary at all)
+- [x] 6.2 `tools/check_c_abi.py` passes: descriptor prefix rule on `clay_vertex_layout`, element exemption on `clay_brick_mesh_range`, every declaration resolving in the shared library
 - [ ] 6.3 Swift smoke and the ctypes FFI exercise cover at least the colour + apron readback, since that is the path this change exists for
-- [ ] 6.4 `docs/06-host-gpu-previews.md` gains the brick-volume route as a first-class alternative to compiling the kernel dialect: upload the band as a sparse `r16float` + `rgba8unorm` atlas with a one-voxel apron, trace it with a brick DDA, and mesh only for export
-- [ ] 6.5 Announce the two arity changes in `docs/RELEASE.md` release notes, with the compile-error-not-misread argument
-- [ ] 6.6 Update `openspec/ROADMAP.md`
+- [x] 6.4 `docs/06-host-gpu-previews.md` gains the brick-volume route as a first-class alternative to compiling the kernel dialect: upload the band as a sparse `r16float` + `rgba8unorm` atlas with a one-voxel apron, trace it with a brick DDA, and mesh only for export
+- [x] 6.5 Announce the two arity changes in `docs/RELEASE.md` release notes, with the compile-error-not-misread argument
+- [x] 6.6 Update `openspec/ROADMAP.md`
 - [ ] 6.7 Reply on issue #43 covering items 1, 2, 3, 4 and 8, and stating what was decided against (no colour on the mip, no caller-owned destination on meshing itself, and why)

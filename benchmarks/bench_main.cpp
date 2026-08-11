@@ -105,6 +105,58 @@ void BM_BrickFill(benchmark::State& state) {
 }
 BENCHMARK(BM_BrickFill)->Unit(benchmark::kMillisecond);
 
+// Issue #43 item 1's claim, measured rather than asserted: without a key list
+// a host has to re-mesh the WHOLE surface to see one brush dab, and "on a 2.3M
+// triangle bust that is not a 50 ms operation". These two benchmarks are the
+// same cache and the same mesher, differing only in how many bricks are
+// marched — the whole surface against the handful a dab dirties. Their ratio is
+// what subset meshing buys, and check_bench.py gates the direction of it.
+namespace {
+
+brick::BrickCache filled_cache(const scene::Document& doc) {
+    brick::BrickCache cache(brick::BrickConfig{8, 0.05f, 3, 0});
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    cache.mark_dirty(scene::layer_influence_bound(doc.layers[0]));
+    for (const brick::BrickRequest& req : cache.take_dirty()) {
+        scene::CullRegion cull{cache.cull_region(req.key)};
+        scene::Tape tape = scene::compile_document(doc, &cull);
+        std::vector<float> values(static_cast<std::size_t>(req.grid.nx) * req.grid.ny *
+                                  req.grid.nz);
+        cpu->eval_grid(tape, req.grid, values.data());
+        cache.submit(req, values.data());
+    }
+    return cache;
+}
+
+}  // namespace
+
+void BM_MeshBricksWhole(benchmark::State& state) {
+    scene::Document doc = bench_document();
+    brick::BrickCache cache = filled_cache(doc);
+    for (auto _ : state) {
+        mesh::Mesh m = mesh::mesh_bricks(cache, nullptr, {});
+        benchmark::DoNotOptimize(m.triangle_count());
+    }
+    state.counters["bricks"] = static_cast<double>(cache.surface_bricks().size());
+}
+BENCHMARK(BM_MeshBricksWhole)->Unit(benchmark::kMillisecond);
+
+// What a dab's worth of dirty bricks costs — 8 of them, the scale
+// clay_brick_cache_take_dirty reports after a small edit.
+void BM_MeshBricksSubset(benchmark::State& state) {
+    scene::Document doc = bench_document();
+    brick::BrickCache cache = filled_cache(doc);
+    std::vector<brick::BrickKey> all = cache.surface_bricks();
+    std::vector<brick::BrickKey> dab(all.begin(),
+                                     all.begin() + std::min<std::size_t>(8, all.size()));
+    for (auto _ : state) {
+        mesh::Mesh m = mesh::mesh_bricks(cache, nullptr, {}, &dab);
+        benchmark::DoNotOptimize(m.triangle_count());
+    }
+    state.counters["bricks"] = static_cast<double>(dab.size());
+}
+BENCHMARK(BM_MeshBricksSubset)->Unit(benchmark::kMillisecond);
+
 void BM_MeshTape(benchmark::State& state) {
     scene::Document doc = bench_document();
     scene::Tape tape = scene::compile_document(doc);

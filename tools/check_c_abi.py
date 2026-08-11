@@ -37,6 +37,12 @@ ARRAY_ELEMENT_STRUCTS = {
     # struct_size per element would forbid that copy and negotiate a layout
     # whose whole point is that it is fixed.
     "clay_brick_request",
+    # One per brick key in a subset mesh, and a host re-meshing a dirty set
+    # receives thousands at a time. Like clay_brick_request it is a fixed
+    # binary layout the caller reads rather than fills in, so there is nothing
+    # for a struct_size to negotiate: appending a field would move every
+    # element after the first, which is a break either way.
+    "clay_brick_mesh_range",
 }
 
 
@@ -520,6 +526,9 @@ class BrickConfig(ctypes.Structure):
         ("voxel_size", ctypes.c_float),
         ("band_voxels", ctypes.c_int32),
         ("memory_budget", ctypes.c_uint64),
+        # appended after the original layout: an RGBA8 lattice beside the
+        # distances, so a host can upload a colour atlas without meshing
+        ("colors", ctypes.c_int32),
     ]
 
 
@@ -549,6 +558,29 @@ class BrickRequest(ctypes.Structure):
         ("spacing", ctypes.c_float),
         ("dims", ctypes.c_int32 * 3),
         ("band", ctypes.c_float),
+    ]
+
+
+class BrickMeshRange(ctypes.Structure):
+    """clay_brick_mesh_range: an array ELEMENT, one per key in a subset mesh."""
+
+    _fields_ = [
+        ("key", ctypes.c_int32 * 3),
+        ("vertex_first", ctypes.c_uint32),
+        ("vertex_count", ctypes.c_uint32),
+        ("index_first", ctypes.c_uint32),
+        ("index_count", ctypes.c_uint32),
+    ]
+
+
+class VertexLayout(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("stride", ctypes.c_uint32),
+        ("position_offset", ctypes.c_int32),
+        ("normal_offset", ctypes.c_int32),
+        ("color_offset", ctypes.c_int32),
+        ("uv_offset", ctypes.c_int32),
     ]
 
 
@@ -583,17 +615,27 @@ def brick_types(lib) -> None:
                                                 szp, szp]
     lib.clay_brick_cache_eval_requests.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
                                                    ctypes.POINTER(BrickRequest),
-                                                   ctypes.c_size_t, fp, ctypes.c_size_t]
+                                                   ctypes.c_size_t, fp, ctypes.c_size_t,
+                                                   fp, ctypes.c_size_t]
     lib.clay_brick_cache_submit.argtypes = [ctypes.c_void_p, ctypes.POINTER(BrickRequest),
-                                            ctypes.c_size_t, fp, ctypes.c_size_t, i32p, szp]
+                                            ctypes.c_size_t, fp, ctypes.c_size_t,
+                                            fp, ctypes.c_size_t, i32p, szp]
     lib.clay_brick_cache_surface_bricks.argtypes = [ctypes.c_void_p, i32p, szp]
     lib.clay_brick_cache_read_bricks.argtypes = [ctypes.c_void_p, ctypes.c_int32, i32p,
-                                                 ctypes.c_size_t, i32p,
+                                                 ctypes.c_size_t, ctypes.c_int32, i32p,
                                                  ctypes.POINTER(ctypes.c_uint16),
+                                                 ctypes.c_size_t,
+                                                 ctypes.POINTER(ctypes.c_uint8),
                                                  ctypes.c_size_t]
     lib.clay_brick_cache_mesh.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
-                                          ctypes.POINTER(BrickMeshParams),
+                                          ctypes.POINTER(BrickMeshParams), i32p, ctypes.c_size_t,
+                                          ctypes.POINTER(BrickMeshRange),
                                           ctypes.POINTER(ctypes.c_void_p)]
+    lib.clay_brick_cache_raycast_many.argtypes = [ctypes.c_void_p, fp, ctypes.c_size_t, i32p,
+                                                  fp, fp, fp]
+    lib.clay_mesh_copy_vertices.argtypes = [ctypes.c_void_p, ctypes.POINTER(VertexLayout),
+                                            ctypes.c_void_p, ctypes.c_size_t]
+    lib.clay_mesh_copy_indices.argtypes = [ctypes.c_void_p, u32p, ctypes.c_size_t]
     lib.clay_layer_node_influence_bound.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                                     ctypes.c_uint32, fp, fp, i32p, i32p]
 
@@ -634,6 +676,9 @@ def brick_cache_exercise(lib) -> list[str]:
     zeroed = BrickConfig()  # setting struct_size is mandatory here too
     if lib.clay_brick_cache_create(ctypes.byref(zeroed)):
         errors.append("clay_brick_cache_create accepted a zeroed descriptor")
+    # A COLOUR cache, so the GPU-atlas path is walked by a generated-binding
+    # equivalent and not only from C++.
+    config.colors = 1
     cache = lib.clay_brick_cache_create(ctypes.byref(config))
     if not cache:
         lib.clay_document_destroy(doc)
@@ -675,6 +720,7 @@ def brick_cache_exercise(lib) -> list[str]:
     chunk = 16
     reqs = (BrickRequest * chunk)()
     values = (ctypes.c_float * (chunk * per))()
+    colors = (ctypes.c_float * (chunk * per * 3))()
     results = (ctypes.c_int32 * chunk)()
     count, remaining = ctypes.c_size_t(chunk), ctypes.c_size_t(0)
     if lib.clay_brick_cache_take_dirty(cache, None, ctypes.byref(count),
@@ -698,12 +744,13 @@ def brick_cache_exercise(lib) -> list[str]:
         if reqs[0].band != want_band:
             errors.append(
                 f"a request carries band {reqs[0].band}, expected {want_band}")
-        if lib.clay_brick_cache_eval_requests(doc, None, reqs, n, values, n * per) != 0:
+        if lib.clay_brick_cache_eval_requests(doc, None, reqs, n, values, n * per,
+                                              colors, n * per * 3) != 0:
             errors.append("clay_brick_cache_eval_requests failed")
             break
         got = ctypes.c_size_t(0)
-        if lib.clay_brick_cache_submit(cache, reqs, n, values, n * per, results,
-                                       ctypes.byref(got)) != 0:
+        if lib.clay_brick_cache_submit(cache, reqs, n, values, n * per, colors, n * per * 3,
+                                       results, ctypes.byref(got)) != 0:
             errors.append("clay_brick_cache_submit failed")
             break
         taken += n
@@ -716,8 +763,12 @@ def brick_cache_exercise(lib) -> list[str]:
         errors.append(f"{taken - accepted_total} of {taken} submissions were not accepted")
 
     # a count that is not exactly count * dim^3 is refused rather than trusted
-    if lib.clay_brick_cache_submit(cache, reqs, 1, values, per - 1, results, None) != 1:
+    if lib.clay_brick_cache_submit(cache, reqs, 1, values, per - 1, colors, per * 3,
+                                   results, None) != 1:
         errors.append("clay_brick_cache_submit accepted a short value buffer")
+    # colours are required on a cache configured for them, not optional
+    if lib.clay_brick_cache_submit(cache, reqs, 1, values, per, None, 0, results, None) != 1:
+        errors.append("clay_brick_cache_submit accepted a colour cache without colours")
 
     lib.clay_brick_cache_stats(cache, ctypes.byref(stats))
     if stats.dirty_bricks != 0 or stats.surface_bricks == 0:
@@ -725,9 +776,11 @@ def brick_cache_exercise(lib) -> list[str]:
                       f"surface={stats.surface_bricks}")
     if stats.surface_bricks >= stats.tracked_bricks:
         errors.append("every tracked brick stores a lattice: empty space is not free")
-    if stats.memory_usage != stats.surface_bricks * per * 2:
+    # 2 bytes of fp16 distance plus 4 of RGBA8 per sample: the budget bounds a
+    # whole brick, not half of one
+    if stats.memory_usage != stats.surface_bricks * per * 6:
         errors.append(f"memory_usage {stats.memory_usage} is not {stats.surface_bricks} "
-                      f"bricks of {per} halves")
+                      f"bricks of {per} halves and colours")
 
     # the section's one size query, then a zero-copy read at a fixed stride
     keys_count = ctypes.c_size_t(0)
@@ -742,24 +795,89 @@ def brick_cache_exercise(lib) -> list[str]:
         errors.append("clay_brick_cache_surface_bricks rejected an adequate buffer")
     states = (ctypes.c_int32 * n)()
     halves = (ctypes.c_uint16 * (n * per))()
-    if lib.clay_brick_cache_read_bricks(cache, 0, keys, n, states, halves, n * per) != 0:
+    rgba = (ctypes.c_uint8 * (n * per * 4))()
+    if lib.clay_brick_cache_read_bricks(cache, 0, keys, n, 0, states, halves, n * per,
+                                        rgba, n * per * 4) != 0:
         errors.append("clay_brick_cache_read_bricks failed")
     elif any(s != 2 for s in states):  # CLAY_BRICK_SURFACE
         errors.append("a brick listed as a surface brick did not read back as one")
-    if lib.clay_brick_cache_read_bricks(cache, 2, keys, 1, states, None, 0) != 1:
+    elif all(a != 255 for a in rgba[3:n * per * 4:4]):
+        errors.append("the colour lattice's reserved alpha is not 255")
+    if lib.clay_brick_cache_read_bricks(cache, 2, keys, 1, 0, states, None, 0, None, 0) != 1:
         errors.append("clay_brick_cache_read_bricks accepted an lod above 1")
+
+    # the apron: a padded, directly filterable tile at a fixed stride, which is
+    # the property this call exists for
+    padded = (config.dim + 2) ** 3
+    tile = (ctypes.c_uint16 * (n * padded))()
+    tile_rgba = (ctypes.c_uint8 * (n * padded * 4))()
+    if lib.clay_brick_cache_read_bricks(cache, 0, keys, n, 1, states, tile, n * padded,
+                                        tile_rgba, n * padded * 4) != 0:
+        errors.append("clay_brick_cache_read_bricks failed with an apron")
+    if lib.clay_brick_cache_read_bricks(cache, 0, keys, n, 1, states, tile, n * per,
+                                        None, 0) != 1:
+        errors.append("an apron readback accepted the unpadded capacity")
+    if lib.clay_brick_cache_read_bricks(cache, 0, keys, 1, config.dim + 1, states, None, 0,
+                                        None, 0) != 1:
+        errors.append("clay_brick_cache_read_bricks accepted an apron wider than the brick")
 
     mesh_params = BrickMeshParams()
     mesh_params.struct_size = ctypes.sizeof(BrickMeshParams)
     mesh_params.normals = 2  # CLAY_NORMAL_GRADIENT
     mesh_params.colors = 1
     mesh = ctypes.c_void_p(0)
-    if lib.clay_brick_cache_mesh(cache, doc, ctypes.byref(mesh_params),
+    if lib.clay_brick_cache_mesh(cache, doc, ctypes.byref(mesh_params), None, 0, None,
                                  ctypes.byref(mesh)) != 0 or not mesh.value:
         errors.append("clay_brick_cache_mesh failed on a filled cache")
     elif lib.clay_mesh_vertex_count(mesh) == 0:
         errors.append("the brick mesh of a filled cache has no vertices")
+    else:
+        # one interleaved vertex buffer, in a layout the caller chose
+        vl = VertexLayout()
+        vl.struct_size = ctypes.sizeof(VertexLayout)
+        vl.stride = 0
+        vl.position_offset, vl.normal_offset, vl.color_offset, vl.uv_offset = 0, 12, 24, -1
+        verts = lib.clay_mesh_vertex_count(mesh)
+        buf = (ctypes.c_uint8 * (verts * 36))()
+        if lib.clay_mesh_copy_vertices(mesh, ctypes.byref(vl), buf, verts * 36) != 0:
+            errors.append("clay_mesh_copy_vertices failed on an interleaved layout")
+        if lib.clay_mesh_copy_vertices(mesh, ctypes.byref(vl), buf, verts * 36 - 1) != 1:
+            errors.append("clay_mesh_copy_vertices accepted a short destination")
+        idx_n = lib.clay_mesh_index_count(mesh)
+        idx = (ctypes.c_uint32 * idx_n)()
+        if lib.clay_mesh_copy_indices(mesh, idx, idx_n) != 0:
+            errors.append("clay_mesh_copy_indices failed")
     lib.clay_mesh_destroy(mesh)
+
+    # subset meshing: the dirty set's keys, and the ranges a host patches with
+    subset = ctypes.c_void_p(0)
+    ranges = (BrickMeshRange * n)()
+    if lib.clay_brick_cache_mesh(cache, doc, ctypes.byref(mesh_params), keys, n, ranges,
+                                 ctypes.byref(subset)) != 0 or not subset.value:
+        errors.append("clay_brick_cache_mesh failed on an explicit key list")
+    else:
+        if ranges[0].vertex_first != 0 or ranges[0].index_first != 0:
+            errors.append("the first key's ranges do not start at zero")
+        end_v = ranges[n - 1].vertex_first + ranges[n - 1].vertex_count
+        end_i = ranges[n - 1].index_first + ranges[n - 1].index_count
+        if end_v != lib.clay_mesh_vertex_count(subset) or \
+                end_i != lib.clay_mesh_index_count(subset):
+            errors.append("the per-key ranges do not partition the subset mesh")
+    lib.clay_mesh_destroy(subset)
+    # ranges without a key list: nothing would have sized them
+    if lib.clay_brick_cache_mesh(cache, doc, ctypes.byref(mesh_params), None, 0, ranges,
+                                 ctypes.byref(subset)) != 1:
+        errors.append("clay_brick_cache_mesh accepted out_ranges with no key list")
+
+    # the batched raycast agrees with the single-ray path
+    rays = (ctypes.c_float * 12)(-2.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                                 -2.0, 9.0, 0.0, 1.0, 0.0, 0.0)
+    many_hits = (ctypes.c_int32 * 2)()
+    if lib.clay_brick_cache_raycast_many(cache, rays, 2, many_hits, None, None, None) != 0:
+        errors.append("clay_brick_cache_raycast_many failed")
+    elif many_hits[0] != 1 or many_hits[1] != 0:
+        errors.append(f"the batched brick raycast reports {many_hits[0]}/{many_hits[1]}, "
+                      "expected a hit through the origin and a miss well outside")
 
     lib.clay_brick_cache_destroy(cache)
     lib.clay_brick_cache_destroy(None)  # releasing a null handle is a no-op

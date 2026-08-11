@@ -6,6 +6,29 @@ engine. Design principle 1 ([05](05-claycore-library.md#2-design-principles))
 says there is **one** implementation of every distance function and operator —
 this document is how that promise reaches code outside this repository.
 
+## Two routes, and most hosts should take the second
+
+There are two ways to draw claycore's field on your own GPU with no risk of
+drifting from it, and this document originally described only the first.
+
+1. **Compile our kernels** into your own shader and evaluate the document's
+   tape. Zero drift because it is literally the same math, and it is the only
+   route that gives you an *analytic* field — refraction, arbitrary
+   re-evaluation, exact normals anywhere. It needs a shading language our
+   dialect compiles to, and it needs the tape, which is
+   `add-tape-abi-export`. The rest of this document is that route.
+
+2. **Upload the brick cache as a volume atlas** and trace it. No kernel math in
+   your shader at all, therefore *also* no drift risk — and it works in any
+   shading language, including WGSL, which our dialect does not target. Since
+   ABI 0.25.0 this is a complete path and for most hosts it is the cheaper one.
+   It is described in [the section below](#route-2-upload-the-brick-atlas).
+
+Route 2 is sampled rather than analytic: you get the field at the cache's voxel
+size, trilinearly interpolated, in a narrow band around the surface. For a
+sculpting viewport that is what you were going to draw anyway. Take route 1 when
+you need the field *between* the samples or *away* from the surface.
+
 ## Why this exists
 
 ClaySpace's Metal preview re-implemented the kernel math by hand. It used a
@@ -166,13 +189,95 @@ profiles. A host calling the old name gets a compile error, which is the
 outcome to want — the alternative, a silently different meaning, is the failure
 this whole document is about.
 
+## Route 2: upload the brick atlas
+
+The brick cache already stores exactly what a GPU wants: a sparse set of `dim³`
+fp16 lattices in a narrow band around the surface, in the engine's own bits. So
+a host can upload the band as a sparse 3D texture atlas and sphere-trace it —
+trilinear sampling plus a brick DDA, which is what `clay_brick_cache_raycast`
+does on the CPU — **with no kernel math in the shader**. Nothing to drift.
+
+This route was proposed by ClaySpaceDesktop in issue #43, which found the path
+90% shipped and named the missing 10%. It is all there as of ABI 0.25.0.
+
+**The loop.**
+
+```c
+clay_brick_config cfg;
+clay_brick_config_defaults(&cfg);
+cfg.colors = 1;                       /* an RGBA8 lattice beside the distances */
+clay_brick_cache* cache = clay_brick_cache_create(&cfg);
+
+/* per edit: mark -> drain -> evaluate -> submit, exactly as before, except
+ * that eval_requests now also produces colours and submit takes them. */
+clay_brick_cache_mark_dirty_nodes(cache, doc, layer, nodes, n, NULL);
+clay_brick_cache_take_dirty(cache, reqs, &count, &remaining);
+clay_brick_cache_eval_requests(doc, "cpu", reqs, count,
+                               values, count * per,
+                               colors, count * per * 3);
+clay_brick_cache_submit(cache, reqs, count, values, count * per,
+                        colors, count * per * 3, results, &accepted);
+
+/* per upload: one memcpy per brick, into your mapped buffer, padded so the
+ * hardware can filter across brick boundaries. */
+clay_brick_cache_surface_bricks(cache, keys, &key_count);
+clay_brick_cache_read_bricks(cache, /*lod*/ 0, keys, key_count, /*apron*/ 1,
+                             states, halves, key_count * padded,
+                             rgba, key_count * padded * 4);
+```
+
+**What each piece buys you.**
+
+- **The fixed stride.** Brick `i` occupies `out_halves[i * W ...]` whatever its
+  state — a uniform brick is *filled* with the band value of its sign — so the
+  destination can be a mapped buffer and the upload is one memcpy with no
+  packing pass and no branch on state. `CLAY_BRICK_MISSING` is the one state
+  that leaves its slice untouched.
+- **The apron.** `apron = 1` writes each brick as `(dim + 2)³` with a one-voxel
+  halo taken from its neighbours, so `r16float` trilinear filtering is correct
+  across brick faces with no manual neighbour fetches. The halo is defined
+  everywhere: implicit and never-evaluated neighbours answer their band values,
+  so a tile at the edge of the sculpted region filters against the band rather
+  than against garbage.
+- **The colour lattice.** `rgba8unorm`, filterable in WebGPU exactly as
+  `r16float` is, in the same padded stride. Alpha is 255 and reserved. Colour
+  is opt-in because it triples a surface brick's cost inside the same
+  `memory_budget` — a colour cache holds about a third of the bricks a
+  distance-only one does at the same ceiling.
+- **Mips.** `clay_brick_cache_build_mip` and `lod = 1` give a coarse brick over
+  2×2×2 fine ones for far-view LOD. Mips carry no colour: averaging colour over
+  the block is a filtering policy, and the call refuses rather than picking one
+  for you.
+
+**Formats.** `r16float` for distance, `rgba8unorm` for colour. Both are
+hardware-filterable in WebGPU, so the trilinear step is free and the shader is a
+DDA over occupied bricks plus a `textureSampleLevel` per step.
+
+**And if you still want triangles.** `clay_brick_cache_mesh` takes the key list
+`clay_brick_cache_take_dirty` just handed you, so a re-mesh costs the dab rather
+than the model, and reports the vertex and index range each key contributed so
+you can patch sub-ranges of a GPU buffer instead of rebuilding it. Measured on
+the benchmark scene: **22.6 ms** to re-mesh 232 surface bricks against
+**0.64 ms** for the 8 a dab dirties. Note the documented caveat — vertex welding
+spans brick seams, so a key's triangles may reference an earlier key's vertices:
+you may overwrite a key's ranges, but not free them in isolation.
+
+`clay_mesh_copy_vertices` then writes the mesh into your own mapped buffer in
+your own interleaved layout, in one pass rather than an interleave into a
+staging vector plus a copy.
+
 ## What is not here yet
 
 Feeding a **live** document's tape to a host GPU still needs the tape buffers
 across the C ABI; today `scene::Tape` is C++-side only, so a host gets tapes
-from the fixture but not from `clay_document`. That is its own change, and a
-small one now: the evaluator it would feed is `ctape_eval` compiled from these
-headers, already proven against the fixture.
+from the fixture but not from `clay_document`. That is its own change
+(`add-tape-abi-export`), and a small one now: the evaluator it would feed is
+`ctape_eval` compiled from these headers, already proven against the fixture.
+It blocks **route 1** only; route 2 above deliberately does not need it.
+
+Zero-copy is also still missing on both routes: every brick and every mesh
+crosses host memory, because backends create and own their devices and there is
+no way to lend claycore yours. That is `add-device-interop`.
 
 ## Keeping this honest
 
