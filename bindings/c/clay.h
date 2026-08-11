@@ -927,6 +927,47 @@ const float* clay_mesh_colors(const clay_mesh* mesh);
 const float* clay_mesh_uvs(const clay_mesh* mesh);
 const uint32_t* clay_mesh_indices(const clay_mesh* mesh);
 
+/* Where each attribute goes in ONE interleaved vertex, so a mesh reaches a
+ * mapped GPU buffer in a single pass instead of an interleave into a staging
+ * vector followed by a copy — two passes over geometry that was just produced,
+ * on the frame path. This does for meshes what clay_brick_cache_read_bricks
+ * does for bricks: the destination is the caller's.
+ *
+ * Offsets are BYTES from the start of a vertex, and -1 omits the attribute.
+ * Every attribute is float32 here because it is float32 in the mesh: this
+ * descriptor says WHERE a value goes, not what it is converted to. Format
+ * conversion is a second axis and would mean choosing a format enumeration for
+ * four attributes before anyone has asked for one.
+ *
+ * Widths: position 12 bytes, normal 12, colour 12, uv 8. stride 0 means
+ * "tightly packed", computed as the end of the last attribute named — which is
+ * only well defined because the offsets are yours, so a packed layout is the
+ * one you described with no gaps rather than an order this header picks. */
+typedef struct clay_vertex_layout {
+    uint32_t struct_size; /* = sizeof(clay_vertex_layout); required */
+    uint32_t stride;      /* bytes per vertex; 0 = tightly packed */
+    int32_t position_offset;
+    int32_t normal_offset;
+    int32_t color_offset;
+    int32_t uv_offset;
+} clay_vertex_layout;
+
+/* Copies count vertices into dst in the layout described, and the indices into
+ * a caller's buffer. dst_bytes must be exactly stride * clay_mesh_vertex_count
+ * and dst_count exactly clay_mesh_index_count — required rather than inferred,
+ * as everywhere else here, and a short destination is refused rather than
+ * truncated. Both counts are already queryable, so the two-call shape costs
+ * nothing.
+ *
+ * Naming an attribute the mesh does not carry is REFUSED, not zero-filled: a
+ * silently black or silently flat model is harder to diagnose than a returned
+ * error. So is a layout whose attributes overlap, or a stride that does not
+ * clear the attributes it was asked to hold — the two mistakes that produce a
+ * buffer which is wrong without being obviously wrong. */
+clay_result clay_mesh_copy_vertices(const clay_mesh* mesh, const clay_vertex_layout* layout,
+                                    void* dst, size_t dst_bytes);
+clay_result clay_mesh_copy_indices(const clay_mesh* mesh, uint32_t* dst, size_t dst_count);
+
 /* The box enclosing the mesh's positions — how a host frames an imported
  * model. It is answered here rather than by clay_layer_bounds because that
  * query is derived from SDF shapes and would report an empty box for a mesh
@@ -2640,9 +2681,51 @@ typedef struct clay_brick_mesh_params {
     float gradient_eps;   /* tetrahedron-tap half-width; <= 0 means the default */
 } clay_brick_mesh_params;
 
+/* What one brick key contributed to a mesh. An array ELEMENT, not a versioned
+ * descriptor: a caller receives one per key and thousands at a time, its layout
+ * is fixed, and changing that layout is a break rather than something to
+ * negotiate — the same reasoning clay_brick_request carries.
+ *
+ * The ranges are contiguous and together PARTITION the mesh, so a host can
+ * write a key's slice into a sub-range of a GPU buffer instead of rebuilding
+ * it. But vertices are welded on canonical lattice-edge keys and that welding
+ * spans brick SEAMS, so a triangle in one key's index range may reference a
+ * vertex in an EARLIER key's vertex range — whichever key reached a shared seam
+ * vertex first owns it. You may OVERWRITE a key's ranges; you may not free one
+ * key's vertices without checking its neighbours'. Breaking the weld to make
+ * the ranges independent would produce a seam-duplicated mesh, and this is also
+ * the export path, where watertightness is the contract. */
+typedef struct clay_brick_mesh_range {
+    int32_t key[3];
+    uint32_t vertex_first, vertex_count;
+    uint32_t index_first, index_count;
+} clay_brick_mesh_range;
+
 /* Meshes the cache's surface bricks — marching only the cells those bricks
  * own, which is the point: a re-mesh costs what the SURFACE covers, not what
  * the scene's bounding box does.
+ *
+ * `keys_xyz` (count packed int32 triples, exactly as
+ * clay_brick_cache_surface_bricks returns them) names the bricks to march, and
+ * NULL with a key_count of 0 means every surface brick — what this call did
+ * before the key list existed, and what an export wants. Hand it what
+ * clay_brick_cache_take_dirty reported and a re-mesh costs the dab rather than
+ * the model. A key that stores no lattice contributes nothing and is NOT an
+ * error: a drained dirty set routinely contains bricks that turned out uniform.
+ *
+ * Marching a subset samples ACROSS the subset's boundary exactly as the whole
+ * does, so the triangles produced for a cell are identical either way. A subset
+ * differs only in that a vertex shared with a cell outside it is emitted again
+ * by whichever mesh reaches it, at a bit-identical position — a duplicated seam
+ * vertex, never a crack.
+ *
+ * out_ranges (may be NULL) receives key_count clay_brick_mesh_range values in
+ * the order the keys were given. It REQUIRES keys_xyz: with no key list there
+ * is no count for the caller to have sized this buffer from, and inferring one
+ * from the cache's current surface set is the kind of length this ABI refuses
+ * to infer anywhere else. Wanting ranges means wanting to patch a buffer, which
+ * means having a key list — so the combination that is refused is not one a
+ * host has a use for.
  *
  * `doc` may be NULL, and then no tape is compiled: the mesh has positions and
  * face normals and no colours. Gradient normals and colours are attributes of
@@ -2652,7 +2735,9 @@ typedef struct clay_brick_mesh_params {
  * EMPTY mesh rather than an error, as clay_voxel_mesh does for an empty grid:
  * a cache that has not been filled yet is an ordinary state of a session. */
 clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_document* doc,
-                                  const clay_brick_mesh_params* params, clay_mesh** out_mesh);
+                                  const clay_brick_mesh_params* params,
+                                  const int32_t* keys_xyz, size_t key_count,
+                                  clay_brick_mesh_range* out_ranges, clay_mesh** out_mesh);
 
 /* Raycast the cached bricks: trilinear samples inside surface bricks, a brick
  * DDA across the rest — so the cost is the ray's path through the band rather
@@ -2665,6 +2750,19 @@ clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_docu
 clay_result clay_brick_cache_raycast(const clay_brick_cache* cache, const float origin[3],
                                      const float dir[3], int32_t* out_hit, float* out_t,
                                      float out_position[3], float out_normal[3]);
+
+/* The same, for many rays: rays_origin_dir is count packed six-float rays and
+ * the outputs are the ones clay_raycast_many takes, in the same shapes and each
+ * one optional. It is the batched form of the call above and nothing more —
+ * one call shape for the cache and for the document is the whole value of it.
+ *
+ * It starts NO thread, consistent with the cache owning none. A host that wants
+ * this parallel splits the array itself, which it can: the call is const on the
+ * cache, and serializing mutations against it is already the host's job. */
+clay_result clay_brick_cache_raycast_many(const clay_brick_cache* cache,
+                                          const float* rays_origin_dir, size_t count,
+                                          int32_t* out_hits, float* out_t,
+                                          float* out_positions_xyz, float* out_normals_xyz);
 
 #ifdef __cplusplus
 } /* extern "C" */

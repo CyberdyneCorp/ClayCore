@@ -25,30 +25,30 @@
 
 ## 3. Subset meshing (issue #43 item 1)
 
-- [ ] 3.1 `mesh::mesh_bricks` takes an optional `const std::vector<brick::BrickKey>*`; NULL keeps `cache.surface_bricks()`
-- [ ] 3.2 Optional per-key range output, filled as the builder appends; ranges are contiguous and partition the output
+- [x] 3.1 `mesh::mesh_bricks` takes an optional `const std::vector<brick::BrickKey>*`; NULL keeps `cache.surface_bricks()`
+- [x] 3.2 Optional per-key range output, filled as the builder appends; ranges are contiguous and partition the output
 - [ ] 3.3 `clay_brick_mesh_range`; add it to `ARRAY_ELEMENT_STRUCTS` in `tools/check_c_abi.py` with the reason
-- [ ] 3.4 `clay_brick_cache_mesh` gains `keys_xyz`, `key_count` and `out_ranges`; NULL/0 is today's whole-surface behaviour
-- [ ] 3.5 Header text: welding spans brick seams, so a key's triangles may reference an earlier key's vertices — a consumer may overwrite a range but not free it in isolation
-- [ ] 3.6 Test: mesh whole, then mesh every key one at a time; the union of the per-key triangles matches the whole mesh's triangles as world-space position triples
-- [ ] 3.7 Test: two adjacent bricks meshed separately produce bit-identical seam vertex positions
-- [ ] 3.8 Test: a key list containing uniform and untracked keys succeeds and contributes nothing
-- [ ] 3.9 Test: ranges partition — no gaps, no overlaps, last range ends at the vertex and index counts
+- [x] 3.4 `clay_brick_cache_mesh` gains `keys_xyz`, `key_count` and `out_ranges`; NULL/0 is today's whole-surface behaviour
+- [x] 3.5 Header text: welding spans brick seams, so a key's triangles may reference an earlier key's vertices — a consumer may overwrite a range but not free it in isolation
+- [x] 3.6 Test: mesh whole, then mesh every key one at a time; the union of the per-key triangles matches the whole mesh's triangles as world-space position triples
+- [x] 3.7 Test: two adjacent bricks meshed separately produce bit-identical seam vertex positions
+- [x] 3.8 Test: a key list containing uniform and untracked keys succeeds and contributes nothing
+- [x] 3.9 Test: ranges partition — no gaps, no overlaps, last range ends at the vertex and index counts
 - [ ] 3.10 Benchmark the claim the issue makes: whole-surface re-mesh vs dirty-subset re-mesh after one dab, on a surface large enough for the ratio to mean something
 
 ## 4. Caller-owned interleaved mesh buffers (issue #43 item 4)
 
-- [ ] 4.1 `clay_vertex_layout` with the `struct_size` prefix; `stride = 0` means tightly packed from the named attributes
-- [ ] 4.2 `clay_mesh_copy_vertices` / `clay_mesh_copy_indices`, exact-fit destinations, refusing an attribute the mesh does not carry
-- [ ] 4.3 Reject overlapping attribute ranges and a stride that does not clear the attributes it is asked to hold — the two mistakes that produce a silently wrong buffer
-- [ ] 4.4 Test: interleaved copy matches the deinterleaved accessors element for element, at a stride with padding and at `stride = 0`
-- [ ] 4.5 Test: absent attribute refused; short destination refused; overlapping offsets refused
+- [x] 4.1 `clay_vertex_layout` with the `struct_size` prefix; `stride = 0` means tightly packed from the named attributes
+- [x] 4.2 `clay_mesh_copy_vertices` / `clay_mesh_copy_indices`, exact-fit destinations, refusing an attribute the mesh does not carry
+- [x] 4.3 Reject overlapping attribute ranges and a stride that does not clear the attributes it is asked to hold — the two mistakes that produce a silently wrong buffer
+- [x] 4.4 Test: interleaved copy matches the deinterleaved accessors element for element, at a stride with padding and at `stride = 0`
+- [x] 4.5 Test: absent attribute refused; short destination refused; overlapping offsets refused
 - [ ] 4.6 Exempt `clay_mesh_copy_vertices` in `tools/check_binding_parity.py` with the reason (Python's equivalent is the buffer protocol over the existing arrays), or give it a pyclay counterpart if one reads naturally
 
 ## 5. Batched brick raycast (issue #43 item 8)
 
-- [ ] 5.1 `clay_brick_cache_raycast_many`, mirroring `clay_raycast_many` in layout and optional outputs; bounded by `CLAY_MAX_BATCH` like every other batch
-- [ ] 5.2 Test: a batch agrees with the single-ray path ray for ray, misses included
+- [x] 5.1 `clay_brick_cache_raycast_many`, mirroring `clay_raycast_many` in layout and optional outputs; bounded by `CLAY_MAX_BATCH` like every other batch
+- [x] 5.2 Test: a batch agrees with the single-ray path ray for ray, misses included
 
 ## 6. Bindings, gates and documentation
 

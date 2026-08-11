@@ -216,7 +216,8 @@ Mesh mesh_tape(const scene::Tape& tape, const math::Aabb& region, float voxel_si
 }
 
 Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Tape* tape_for_attributes,
-                 const MeshingOptions& options) {
+                 const MeshingOptions& options, const std::vector<brick::BrickKey>* keys,
+                 std::vector<BrickMeshRange>* out_ranges) {
     const int dim = cache.config().dim;
     const float vs = cache.config().voxel_size;
     auto global_sample = [&](int i, int j, int k) -> float {
@@ -225,16 +226,44 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Tape* tape_for_att
         return cache.sample(key, i - key.x * dim, j - key.y * dim, k - key.z * dim);
     };
 
+    // The subset a consumer named, or every surface brick — which is the
+    // export path and stays the default.
+    std::vector<brick::BrickKey> owned;
+    if (!keys) {
+        owned = cache.surface_bricks();
+        keys = &owned;
+    }
+    if (out_ranges) {
+        out_ranges->clear();
+        out_ranges->reserve(keys->size());
+    }
+
     // ONE builder for every brick: lattice-edge welding spans brick seams,
     // keeping the result watertight across the sparse set.
     Builder b(cf3(0, 0, 0), vs);
-    for (const brick::BrickKey& key : cache.surface_bricks()) {
+    for (const brick::BrickKey& key : *keys) {
+        const std::uint32_t v0 = static_cast<std::uint32_t>(b.out.positions.size());
+        const std::uint32_t i0 = static_cast<std::uint32_t>(b.out.indices.size());
         int cmin[3] = {key.x * dim, key.y * dim, key.z * dim};
         int cmax[3] = {key.x * dim + dim, key.y * dim + dim, key.z * dim + dim};
         march_cells(b, global_sample, cmin, cmax);
+        if (out_ranges)
+            out_ranges->push_back({key, v0,
+                                   static_cast<std::uint32_t>(b.out.positions.size()) - v0, i0,
+                                   static_cast<std::uint32_t>(b.out.indices.size()) - i0});
     }
     Mesh m = std::move(b.out);
-    if (tape_for_attributes) apply_tape_attributes(m, *tape_for_attributes, options);
+    if (tape_for_attributes) {
+        apply_tape_attributes(m, *tape_for_attributes, options);
+    } else if (options.normals == NormalMode::Face) {
+        // Face normals are area-weighted from the triangles and need no field,
+        // which is what NormalMode::Face means and what the C header promises a
+        // caller who passes no document ("positions and face normals"). Without
+        // this the promise was silently broken: attributes were applied only
+        // through the tape, so a document-less brick mesh came back with no
+        // normals at all and a host shaded it flat black.
+        compute_face_normals(m);
+    }
     return m;
 }
 

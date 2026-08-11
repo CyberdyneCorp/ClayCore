@@ -1,5 +1,7 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -498,6 +500,284 @@ TEST_CASE("brick apron: the stride stays fixed, and MISSING stays untouched") {
     // the rule is about the key, not about its neighbourhood
     for (std::size_t i = 2 * padded; i < 3 * padded; ++i) CHECK(halves[i] == 0xBEEF);
     for (std::size_t i = 2 * padded * 4; i < 3 * padded * 4; ++i) CHECK(rgba[i] == 0xAB);
+}
+
+// -- subset meshing -----------------------------------------------------------
+
+namespace {
+
+struct MeshHandle {
+    clay_mesh* m = nullptr;
+    ~MeshHandle() { clay_mesh_destroy(m); }
+    MeshHandle() = default;
+    MeshHandle(const MeshHandle&) = delete;
+    MeshHandle& operator=(const MeshHandle&) = delete;
+};
+
+clay_brick_mesh_params plain_params() {
+    clay_brick_mesh_params p{};
+    p.struct_size = static_cast<std::uint32_t>(sizeof p);
+    p.normals = CLAY_NORMAL_FACE;  // needs no document
+    p.colors = 0;
+    p.gradient_eps = 0.0f;
+    return p;
+}
+
+// Every triangle as a sorted triple of quantized world positions, so two
+// meshes can be compared for the GEOMETRY they carry rather than for the
+// vertex numbering they happened to produce.
+using Tri = std::array<std::array<std::int64_t, 3>, 3>;
+
+std::vector<Tri> triangles_of(const clay_mesh* m) {
+    const float* pos = clay_mesh_positions(m);
+    const std::uint32_t* idx = clay_mesh_indices(m);
+    const std::size_t tris = clay_mesh_index_count(m) / 3;
+    std::vector<Tri> out;
+    out.reserve(tris);
+    auto q = [](float v) { return static_cast<std::int64_t>(std::llround(v * 1e6f)); };
+    for (std::size_t t = 0; t < tris; ++t) {
+        Tri tri{};
+        for (int c = 0; c < 3; ++c) {
+            const std::uint32_t v = idx[t * 3 + c];
+            tri[c] = {q(pos[v * 3]), q(pos[v * 3 + 1]), q(pos[v * 3 + 2])};
+        }
+        std::sort(tri.begin(), tri.end());
+        out.push_back(tri);
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("subset meshing: a subset is the whole, brick for brick") {
+    Doc doc;
+    const float grey[3] = {0.5f, 0.5f, 0.5f};
+    add_sphere(doc, 0.4f, 0, 0, 0, grey);
+    Cache cache(make_cache(false));
+    mark_and_fill(cache, doc, false);
+
+    const clay_brick_mesh_params params = plain_params();
+    MeshHandle whole;
+    REQUIRE(clay_brick_cache_mesh(cache, nullptr, &params, nullptr, 0, nullptr, &whole.m) ==
+            CLAY_OK);
+    const std::vector<Tri> expected = triangles_of(whole.m);
+    REQUIRE(!expected.empty());
+
+    // Mesh every surface brick ALONE and collect the union. Identical to the
+    // whole mesh's triangles: marching a subset samples across its boundary
+    // exactly as the whole does, so no cell is skipped and no crossing moves.
+    std::vector<std::int32_t> keys = surface_keys(cache);
+    const std::size_t count = keys.size() / 3;
+    std::vector<Tri> got;
+    for (std::size_t i = 0; i < count; ++i) {
+        clay_brick_mesh_range range{};
+        MeshHandle one;
+        REQUIRE(clay_brick_cache_mesh(cache, nullptr, &params, keys.data() + i * 3, 1, &range,
+                                      &one.m) == CLAY_OK);
+        const std::vector<Tri> part = triangles_of(one.m);
+        got.insert(got.end(), part.begin(), part.end());
+        // one key alone owns the whole output
+        CHECK(range.vertex_first == 0);
+        CHECK(range.index_first == 0);
+        CHECK(range.vertex_count == clay_mesh_vertex_count(one.m));
+        CHECK(range.index_count == clay_mesh_index_count(one.m));
+    }
+    std::sort(got.begin(), got.end());
+    CHECK(got == expected);
+}
+
+TEST_CASE("subset meshing: a seam vertex is duplicated, never moved") {
+    Doc doc;
+    const float grey[3] = {0.5f, 0.5f, 0.5f};
+    add_sphere(doc, 0.4f, 0, 0, 0, grey);
+    Cache cache(make_cache(false));
+    mark_and_fill(cache, doc, false);
+    const clay_brick_mesh_params params = plain_params();
+
+    // Two adjacent surface bricks, meshed as one subset and as two.
+    std::vector<std::int32_t> keys = surface_keys(cache);
+    const std::size_t count = keys.size() / 3;
+    REQUIRE(count >= 2);
+    bool found = false;
+    std::int32_t pair[6] = {0, 0, 0, 0, 0, 0};
+    for (std::size_t i = 0; i < count && !found; ++i) {
+        const std::int32_t cand[6] = {keys[i * 3],     keys[i * 3 + 1], keys[i * 3 + 2],
+                                      keys[i * 3] + 1, keys[i * 3 + 1], keys[i * 3 + 2]};
+        std::int32_t states[2] = {-1, -1};
+        REQUIRE(clay_brick_cache_read_bricks(cache, 0, cand, 2, 0, states, nullptr, 0, nullptr,
+                                             0) == CLAY_OK);
+        if (states[0] == CLAY_BRICK_SURFACE && states[1] == CLAY_BRICK_SURFACE) {
+            std::memcpy(pair, cand, sizeof pair);
+            found = true;
+        }
+    }
+    REQUIRE(found);
+
+    MeshHandle together;
+    clay_brick_mesh_range ranges[2]{};
+    REQUIRE(clay_brick_cache_mesh(cache, nullptr, &params, pair, 2, ranges, &together.m) ==
+            CLAY_OK);
+    MeshHandle first, second;
+    REQUIRE(clay_brick_cache_mesh(cache, nullptr, &params, pair, 1, nullptr, &first.m) == CLAY_OK);
+    REQUIRE(clay_brick_cache_mesh(cache, nullptr, &params, pair + 3, 1, nullptr, &second.m) ==
+            CLAY_OK);
+
+    // The two separately-meshed halves carry exactly the triangles the joint
+    // mesh does — bit-identical positions, so drawing them together leaves no
+    // gap. Only the vertex SHARING differs, which is the documented cost.
+    std::vector<Tri> apart = triangles_of(first.m);
+    const std::vector<Tri> b = triangles_of(second.m);
+    apart.insert(apart.end(), b.begin(), b.end());
+    std::sort(apart.begin(), apart.end());
+    CHECK(apart == triangles_of(together.m));
+    // welding across the seam means the joint mesh has FEWER vertices than the
+    // two halves put together — the property the header warns about
+    CHECK(clay_mesh_vertex_count(together.m) <=
+          clay_mesh_vertex_count(first.m) + clay_mesh_vertex_count(second.m));
+
+    SUBCASE("and the ranges partition the output") {
+        CHECK(ranges[0].vertex_first == 0);
+        CHECK(ranges[0].index_first == 0);
+        CHECK(ranges[1].vertex_first == ranges[0].vertex_first + ranges[0].vertex_count);
+        CHECK(ranges[1].index_first == ranges[0].index_first + ranges[0].index_count);
+        CHECK(ranges[1].vertex_first + ranges[1].vertex_count ==
+              clay_mesh_vertex_count(together.m));
+        CHECK(ranges[1].index_first + ranges[1].index_count ==
+              clay_mesh_index_count(together.m));
+        for (int i = 0; i < 2; ++i)
+            for (int a = 0; a < 3; ++a) CHECK(ranges[i].key[a] == pair[i * 3 + a]);
+    }
+}
+
+// Regression: clay_brick_cache_mesh documents that with no document the mesh
+// has "positions and face normals", and CLAY_NORMAL_FACE says it "needs no
+// document". Neither was true — mesh_bricks applied attributes only through the
+// tape, so a document-less brick mesh came back with NO normals and a host
+// shaded it flat black. Found while testing clay_mesh_copy_vertices, which
+// refuses a layout naming an attribute the mesh does not carry.
+TEST_CASE("brick meshing: face normals need no document, as the header says") {
+    Doc doc;
+    const float grey[3] = {0.5f, 0.5f, 0.5f};
+    add_sphere(doc, 0.4f, 0, 0, 0, grey);
+    Cache cache(make_cache(false));
+    mark_and_fill(cache, doc, false);
+
+    const clay_brick_mesh_params params = plain_params();  // FACE normals, no colours
+    MeshHandle m;
+    REQUIRE(clay_brick_cache_mesh(cache, nullptr, &params, nullptr, 0, nullptr, &m.m) == CLAY_OK);
+    REQUIRE(clay_mesh_vertex_count(m.m) > 0);
+    const float* n = clay_mesh_normals(m.m);
+    REQUIRE(n != nullptr);
+    // and they are unit normals, not a zero-filled placeholder
+    for (std::size_t v = 0; v < clay_mesh_vertex_count(m.m); ++v) {
+        const float len = std::sqrt(n[v * 3] * n[v * 3] + n[v * 3 + 1] * n[v * 3 + 1] +
+                                    n[v * 3 + 2] * n[v * 3 + 2]);
+        CHECK(len == doctest::Approx(1.0f).epsilon(1e-4));
+    }
+
+    SUBCASE("and NONE still means none") {
+        clay_brick_mesh_params none = params;
+        none.normals = CLAY_NORMAL_NONE;
+        MeshHandle bare;
+        REQUIRE(clay_brick_cache_mesh(cache, nullptr, &none, nullptr, 0, nullptr, &bare.m) ==
+                CLAY_OK);
+        CHECK(clay_mesh_normals(bare.m) == nullptr);
+    }
+}
+
+TEST_CASE("subset meshing: uniform and untracked keys are ordinary") {
+    Doc doc;
+    const float grey[3] = {0.5f, 0.5f, 0.5f};
+    add_sphere(doc, 0.9f, 0, 0, 0, grey);
+    Cache cache(make_cache(false));
+    const float lo[3] = {-1.2f, -1.2f, -1.2f}, hi[3] = {1.2f, 1.2f, 1.2f};
+    REQUIRE(clay_brick_cache_mark_dirty(cache, lo, hi) == CLAY_OK);
+    refill(cache, doc.d, false);
+    const clay_brick_mesh_params params = plain_params();
+
+    // A drained dirty set routinely contains bricks that turned out uniform, so
+    // this must succeed and contribute nothing rather than refuse.
+    const std::int32_t keys[6] = {0, 0, 0, 500, 500, 500};  // inside, never tracked
+    clay_brick_mesh_range ranges[2]{};
+    MeshHandle m;
+    REQUIRE(clay_brick_cache_mesh(cache, nullptr, &params, keys, 2, ranges, &m.m) == CLAY_OK);
+    CHECK(clay_mesh_vertex_count(m.m) == 0);
+    CHECK(clay_mesh_index_count(m.m) == 0);
+    for (int i = 0; i < 2; ++i) {
+        CHECK(ranges[i].vertex_count == 0);
+        CHECK(ranges[i].index_count == 0);
+    }
+
+    SUBCASE("every refusal") {
+        clay_mesh* out = nullptr;
+        CHECK(clay_brick_cache_mesh(cache, nullptr, &params, nullptr, 2, nullptr, &out) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+        // ranges with no key list: nothing would have told the caller how many
+        // to allocate, and this ABI infers no length
+        CHECK(clay_brick_cache_mesh(cache, nullptr, &params, nullptr, 0, ranges, &out) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(out == nullptr);
+    }
+}
+
+// -- batched raycast ----------------------------------------------------------
+
+TEST_CASE("batched brick raycast: agrees with the single-ray path, ray for ray") {
+    Doc doc;
+    const float grey[3] = {0.5f, 0.5f, 0.5f};
+    add_sphere(doc, 0.4f, 0, 0, 0, grey);
+    Cache cache(make_cache(false));
+    mark_and_fill(cache, doc, false);
+
+    // A fan that deliberately contains misses: a batched form that silently
+    // dropped them would still pass a hits-only comparison.
+    std::vector<float> rays;
+    for (int i = -4; i <= 4; ++i)
+        for (int j = -4; j <= 4; ++j) {
+            const float y = static_cast<float>(i) * 0.15f;
+            const float z = static_cast<float>(j) * 0.15f;
+            const float r[6] = {-2.0f, y, z, 1.0f, 0.0f, 0.0f};
+            rays.insert(rays.end(), r, r + 6);
+        }
+    const std::size_t count = rays.size() / 6;
+
+    std::vector<std::int32_t> hits(count, -1);
+    std::vector<float> ts(count, -1.0f), pos(count * 3, 0.0f), nrm(count * 3, 0.0f);
+    REQUIRE(clay_brick_cache_raycast_many(cache, rays.data(), count, hits.data(), ts.data(),
+                                          pos.data(), nrm.data()) == CLAY_OK);
+    std::size_t hit_count = 0, miss_count = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        std::int32_t one_hit = -1;
+        float one_t = -1.0f, one_pos[3] = {0, 0, 0}, one_nrm[3] = {0, 0, 0};
+        REQUIRE(clay_brick_cache_raycast(cache, rays.data() + i * 6, rays.data() + i * 6 + 3,
+                                         &one_hit, &one_t, one_pos, one_nrm) == CLAY_OK);
+        CHECK(hits[i] == one_hit);
+        CHECK(ts[i] == one_t);
+        for (int c = 0; c < 3; ++c) {
+            CHECK(pos[i * 3 + c] == one_pos[c]);
+            CHECK(nrm[i * 3 + c] == one_nrm[c]);
+        }
+        (one_hit ? hit_count : miss_count)++;
+    }
+    CHECK(hit_count > 0);
+    CHECK(miss_count > 0);
+
+    SUBCASE("every output is optional, and a zero direction is refused") {
+        REQUIRE(clay_brick_cache_raycast_many(cache, rays.data(), count, hits.data(), nullptr,
+                                              nullptr, nullptr) == CLAY_OK);
+        // no rays is no work, as it is for the document-level batch
+        CHECK(clay_brick_cache_raycast_many(cache, nullptr, 0, nullptr, nullptr, nullptr,
+                                            nullptr) == CLAY_OK);
+        CHECK(clay_brick_cache_raycast_many(nullptr, rays.data(), count, hits.data(), nullptr,
+                                            nullptr, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_brick_cache_raycast_many(cache, nullptr, count, hits.data(), nullptr, nullptr,
+                                            nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+        std::vector<float> zero = rays;
+        zero[3] = zero[4] = zero[5] = 0.0f;
+        CHECK(clay_brick_cache_raycast_many(cache, zero.data(), count, hits.data(), nullptr,
+                                            nullptr, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    }
 }
 
 TEST_CASE("brick apron: every refusal") {

@@ -430,6 +430,8 @@ constexpr std::size_t kBrickStatsOriginal =
     offsetof(clay_brick_stats, memory_budget) + sizeof(std::uint64_t);
 constexpr std::size_t kBrickMeshParamsOriginal =
     offsetof(clay_brick_mesh_params, gradient_eps) + sizeof(float);
+constexpr std::size_t kVertexLayoutOriginal =
+    offsetof(clay_vertex_layout, uv_offset) + sizeof(std::int32_t);
 
 // Parameters each primitive takes, indexed by clay_prim (= the tape opcode).
 // This is what the clay_prim comments document and what clay_item_create
@@ -3045,6 +3047,115 @@ const uint32_t* clay_mesh_indices(const clay_mesh* mesh) {
     return m && !m->indices.empty() ? m->indices.data() : nullptr;
 }
 
+namespace {
+
+// One attribute's place in an interleaved vertex: where the caller wants it,
+// how wide it is, and where it comes from. An attribute the caller did not name
+// has no entry, so the checks below never special-case "absent".
+struct VertexAttr {
+    std::uint32_t offset;
+    std::uint32_t width;  // bytes
+    const float* src;
+    std::uint32_t src_stride;  // bytes between consecutive vertices in src
+};
+
+// Gathers the named attributes, refusing any the mesh does not carry. Refused
+// rather than zero-filled: a silently black model is harder to find than an
+// error at the call that asked for it.
+clay_result collect_attrs(const clay_mesh* mesh, const clay_vertex_layout& l,
+                          std::vector<VertexAttr>* out) {
+    const struct {
+        std::int32_t offset;
+        std::uint32_t width;
+        const float* src;
+        const char* name;
+    } wanted[] = {
+        {l.position_offset, 12, clay_mesh_positions(mesh), "positions"},
+        {l.normal_offset, 12, clay_mesh_normals(mesh), "normals"},
+        {l.color_offset, 12, clay_mesh_colors(mesh), "colours"},
+        {l.uv_offset, 8, clay_mesh_uvs(mesh), "uvs"},
+    };
+    for (const auto& w : wanted) {
+        if (w.offset < 0) continue;
+        if (!w.src)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        std::string("the layout names ") + w.name + ", which this mesh does not "
+                        "carry");
+        out->push_back({static_cast<std::uint32_t>(w.offset), w.width, w.src, w.width});
+    }
+    if (out->empty())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the layout names no attribute to copy");
+    return CLAY_OK;
+}
+
+// The two mistakes that produce a buffer which is wrong without looking wrong:
+// attributes that overlap, and a stride that does not clear them.
+clay_result check_layout_fits(const std::vector<VertexAttr>& attrs, std::uint32_t* stride) {
+    std::uint32_t packed_end = 0;
+    for (std::size_t i = 0; i < attrs.size(); ++i) {
+        const std::uint64_t end =
+            static_cast<std::uint64_t>(attrs[i].offset) + attrs[i].width;
+        if (end > 0xFFFFFFFFull)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "an attribute offset overflows a vertex");
+        packed_end = std::max<std::uint32_t>(packed_end, static_cast<std::uint32_t>(end));
+        for (std::size_t j = i + 1; j < attrs.size(); ++j) {
+            const bool disjoint = attrs[i].offset + attrs[i].width <= attrs[j].offset ||
+                                  attrs[j].offset + attrs[j].width <= attrs[i].offset;
+            if (!disjoint)
+                return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                            "two attributes overlap in the vertex layout");
+        }
+    }
+    if (*stride == 0) {
+        *stride = packed_end;  // tightly packed IS the layout the caller described
+    } else if (*stride < packed_end) {
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "stride " + std::to_string(*stride) + " does not clear the attributes, which "
+                    "need " + std::to_string(packed_end) + " bytes");
+    }
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_mesh_copy_vertices(const clay_mesh* mesh, const clay_vertex_layout* layout,
+                                    void* dst, size_t dst_bytes) {
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh, &m);
+    if (r != CLAY_OK) return r;
+    if (!layout || !dst) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null layout or destination");
+    clay_vertex_layout l;
+    r = read_desc(layout, kVertexLayoutOriginal, &l);
+    if (r != CLAY_OK) return r;
+    std::vector<VertexAttr> attrs;
+    r = collect_attrs(mesh, l, &attrs);
+    if (r != CLAY_OK) return r;
+    std::uint32_t stride = l.stride;
+    r = check_layout_fits(attrs, &stride);
+    if (r != CLAY_OK) return r;
+    const std::size_t vertices = m->positions.size();
+    r = exact_capacity("interleaved vertex", vertices, stride, dst_bytes);
+    if (r != CLAY_OK) return r;
+    auto* out = static_cast<std::uint8_t*>(dst);
+    for (std::size_t v = 0; v < vertices; ++v)
+        for (const VertexAttr& a : attrs)
+            std::memcpy(out + v * stride + a.offset,
+                        reinterpret_cast<const std::uint8_t*>(a.src) + v * a.src_stride, a.width);
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_copy_indices(const clay_mesh* mesh, uint32_t* dst, size_t dst_count) {
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh, &m);
+    if (r != CLAY_OK) return r;
+    if (!dst) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null destination");
+    r = exact_capacity("index", m->indices.size(), 1, dst_count);
+    if (r != CLAY_OK) return r;
+    if (!m->indices.empty())
+        std::memcpy(dst, m->indices.data(), m->indices.size() * sizeof(std::uint32_t));
+    return CLAY_OK;
+}
+
 clay_result clay_mesh_bounds(const clay_mesh* mesh, float out_min[3], float out_max[3]) {
     const mesh::Mesh* m = nullptr;
     clay_result r = resolve_mesh(mesh, &m);
@@ -5199,11 +5310,22 @@ clay_result clay_brick_cache_current_lod(const clay_brick_cache* cache,
 }
 
 clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_document* doc,
-                                  const clay_brick_mesh_params* params, clay_mesh** out_mesh) {
+                                  const clay_brick_mesh_params* params, const int32_t* keys_xyz,
+                                  size_t key_count, clay_brick_mesh_range* out_ranges,
+                                  clay_mesh** out_mesh) {
     if (!cache || !params || !out_mesh)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brick cache, params or out_mesh");
+    if (key_count > 0 && !keys_xyz)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a key count without keys");
+    // Ranges need a key list: with none there is no count the caller could have
+    // sized out_ranges from, and this ABI infers no length anywhere else.
+    if (out_ranges && !keys_xyz)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "out_ranges needs keys_xyz: without one there is no count to size it by");
+    clay_result r = check_batch("brick keys", key_count);
+    if (r != CLAY_OK) return r;
     clay_brick_mesh_params p;
-    clay_result r = read_desc(params, kBrickMeshParamsOriginal, &p);
+    r = read_desc(params, kBrickMeshParamsOriginal, &p);
     if (r != CLAY_OK) return r;
     if (!normal_mode_is_known(p.normals))
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
@@ -5224,8 +5346,28 @@ clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_docu
         tape_ref = doc->tape();
         tape = tape_ref.get();
     }
+    // NULL keys means "every surface brick", which is what this call did before
+    // the key list existed and what an export wants.
+    std::vector<brick::BrickKey> subset;
+    if (keys_xyz) {
+        subset.reserve(key_count);
+        for (std::size_t i = 0; i < key_count; ++i)
+            subset.push_back(to_brick_key(keys_xyz + i * 3));
+    }
+    std::vector<mesh::BrickMeshRange> ranges;
     auto* handle = new clay_mesh();
-    handle->data = mesh::mesh_bricks(cache->cache, tape, options);
+    handle->data = mesh::mesh_bricks(cache->cache, tape, options, keys_xyz ? &subset : nullptr,
+                                     out_ranges ? &ranges : nullptr);
+    if (out_ranges)
+        for (std::size_t i = 0; i < ranges.size(); ++i) {
+            out_ranges[i].key[0] = ranges[i].key.x;
+            out_ranges[i].key[1] = ranges[i].key.y;
+            out_ranges[i].key[2] = ranges[i].key.z;
+            out_ranges[i].vertex_first = ranges[i].vertex_first;
+            out_ranges[i].vertex_count = ranges[i].vertex_count;
+            out_ranges[i].index_first = ranges[i].index_first;
+            out_ranges[i].index_count = ranges[i].index_count;
+        }
     *out_mesh = handle;
     return CLAY_OK;
 }
@@ -5243,6 +5385,33 @@ clay_result clay_brick_cache_raycast(const clay_brick_cache* cache, const float 
     if (out_t) *out_t = hit.t;
     if (out_position) write_f3(out_position, hit.position);
     if (out_normal) write_f3(out_normal, hit.normal);
+    return CLAY_OK;
+}
+
+clay_result clay_brick_cache_raycast_many(const clay_brick_cache* cache,
+                                          const float* rays_origin_dir, size_t count,
+                                          int32_t* out_hits, float* out_t,
+                                          float* out_positions_xyz, float* out_normals_xyz) {
+    if (!cache || (count > 0 && !rays_origin_dir))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brick cache or rays");
+    if (count == 0) return CLAY_OK;  // no rays is no work, not a rejected query
+    // Normalized and batch-checked by the same helper clay_raycast_many uses,
+    // so a zero-length direction is refused identically on both surfaces.
+    std::vector<float> rays;
+    clay_result r = normalize_rays(rays_origin_dir, count, &rays);
+    if (r != CLAY_OK) return r;
+    std::vector<eval::RayHit> hits(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        math::Ray ray;
+        ray.origin = kernel::cf3(rays[i * 6], rays[i * 6 + 1], rays[i * 6 + 2]);
+        ray.dir = kernel::cf3(rays[i * 6 + 3], rays[i * 6 + 4], rays[i * 6 + 5]);
+        const pick::SceneHit hit = pick::raycast_bricks(cache->cache, ray);
+        hits[i].hit = hit.hit ? 1 : 0;
+        hits[i].t = hit.t;
+        write_f3(hits[i].pos, hit.position);
+        write_f3(hits[i].normal, hit.normal);
+    }
+    write_ray_hits(hits, count, out_hits, out_t, out_positions_xyz, out_normals_xyz);
     return CLAY_OK;
 }
 

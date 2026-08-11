@@ -551,7 +551,7 @@ TEST_CASE("the documented host loop fills a cache and the bricks describe the fi
         p.normals = CLAY_NORMAL_GRADIENT;
         p.colors = 1;
         clay_mesh* m = nullptr;
-        REQUIRE(clay_brick_cache_mesh(cache, doc.d, &p, &m) == CLAY_OK);
+        REQUIRE(clay_brick_cache_mesh(cache, doc.d, &p, nullptr, 0, nullptr, &m) == CLAY_OK);
         REQUIRE(m != nullptr);
         CHECK(clay_mesh_vertex_count(m) > 0);
         CHECK(clay_mesh_index_count(m) > 0);
@@ -563,20 +563,22 @@ TEST_CASE("the documented host loop fills a cache and the bricks describe the fi
         bare.normals = CLAY_NORMAL_FACE;
         bare.colors = 0;
         clay_mesh* plain = nullptr;
-        REQUIRE(clay_brick_cache_mesh(cache, nullptr, &bare, &plain) == CLAY_OK);
+        REQUIRE(clay_brick_cache_mesh(cache, nullptr, &bare, nullptr, 0, nullptr, &plain) ==
+                CLAY_OK);
         CHECK(clay_mesh_vertex_count(plain) > 0);
         clay_mesh_destroy(plain);
 
         // gradient normals and colours are attributes of the FIELD: asking for
         // either with no document is refused, not quietly downgraded
-        CHECK(clay_brick_cache_mesh(cache, nullptr, &p, &plain) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(clay_brick_cache_mesh(cache, nullptr, &p, nullptr, 0, nullptr, &plain) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
         clay_brick_mesh_params unknown = p;
         unknown.normals = 77;
-        CHECK(clay_brick_cache_mesh(cache, doc.d, &unknown, &plain) ==
+        CHECK(clay_brick_cache_mesh(cache, doc.d, &unknown, nullptr, 0, nullptr, &plain) ==
               CLAY_ERROR_INVALID_ARGUMENT);
         unknown.normals = CLAY_NORMAL_FACE;
         unknown.struct_size = 4;
-        CHECK(clay_brick_cache_mesh(cache, doc.d, &unknown, &plain) ==
+        CHECK(clay_brick_cache_mesh(cache, doc.d, &unknown, nullptr, 0, nullptr, &plain) ==
               CLAY_ERROR_INVALID_ARGUMENT);
 
         const float origin[3] = {0.0f, 0.0f, 2.0f};
