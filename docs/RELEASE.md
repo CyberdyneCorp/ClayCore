@@ -217,6 +217,55 @@ forward-refuse).
    0.27 loads with feather 0 and one written by 0.28 loads in 0.27 with the
    feather ignored.
 
+   **0.28.0 also changes RESULTS in three places, none of them silently.**
+   No signature changed for any of these; what changed is what the same input
+   produces, which is exactly what the never-silent rule exists to record:
+
+   - **`CLAY_OP_ADD` honours `clay_stroke_preset.strength`** (#61). It never
+     had: a stroke at strength 0 deposited the same full stamp as one at 1,
+     because strength was consumed only where `blend.k` is an amplitude
+     (Relief, Incise). An add stamp's whole deposit now scales with strength —
+     1.0 is bit-identical to before, 0 authors no node, monotonic between, and
+     a clamped add stroke still equals a buildup one. A host that mapped an
+     intensity slider onto strength and shipped around the flat response will
+     see the slider start working.
+   - **The layer mirror mirrors the layer by default** (#60).
+     `clay_set_layer_mirror` stored the plane, but evaluation mirrored only
+     items whose per-item participation flag opted in — and that flag
+     defaulted to excluded, so the sequence every host writes (set the mirror,
+     add items) mirrored nothing. Participation now defaults to mirrored:
+     `clay_item_desc.mirror` and `clay_item_set_mirror` read 0 and 1 as
+     "follow the layer" and a negative as "excluded". The one input that is
+     re-read: 0, which previously meant excluded — and was also the zeroed
+     descriptor, which is precisely how the feature came to be dead. Saved
+     documents carry the flag per node and load unchanged; a layer with no
+     mirror set compiles a byte-identical tape, pinned by test, so stroke
+     latency is untouched.
+   - **A subset brick mesh emits the straddlers it owes** (#66).
+     `clay_brick_cache_mesh` with a key list omitted triangles reaching a
+     corner across the request boundary, so no sequence of subset calls could
+     reconstruct a complete surface — dilating the request only moved the
+     boundary. A subset now returns every triangle with at least one corner in
+     a requested brick, each attributed to the lexicographically lowest
+     requested key owning a corner so a per-brick host can dedupe. The
+     whole-mesh (NULL keys) path is byte-identical, and a subset naming every
+     surface brick equals the whole mesh.
+
+   **And one speed change**: `clay_brick_cache_eval_requests` reaches the
+   backend as one batch instead of one call per brick (#64). The Metal path
+   paid a full GPU round trip per brick — its own command buffer, five
+   allocations, a tape upload and a `waitUntilCompleted` for 512 samples —
+   which is why it sat 7–10× BEHIND the CPU at every batch size. Batched into
+   one dispatch, a 17576-brick whole-model refill on an M-series Mac goes from
+   3.5 s to ~10 ms (from 10× slower than the CPU to ~30× faster), a 27-brick
+   dab from 6.5 ms to 0.35 ms, and the CPU/Metal crossover sits near 16 bricks
+   per call — measured guidance now in `clay.h`, replacing the old "pass cpu
+   here" advice. Other backends inherit a loop-based default and are
+   byte-for-byte unchanged. The relief amplitude contract is also now
+   documented and pinned by test (#62): displacement tracks `blend_k` up to
+   the region's extent (radius + rounding) and saturates below
+   radius + 2·rounding, so rounding buys amplitude as well as softness.
+
    **0.27.3 fixes the Metal backend on paravirtualised GPUs, and makes it
    faster on real ones.** No signature changed and nothing was added; this is a
    kernel change and a diagnostic.
@@ -594,19 +643,25 @@ Tracked honestly rather than assumed done:
   dispatch and a per-call allocation, so Metal costs 288 µs per brick against
   the CPU's 114 µs and never wins at any thread count. Sweeping the grid size
   puts the crossover at 16³ — from there Metal wins, reaching 10× at 32³ and
-  20× at 128³. So the two workloads want opposite backends: keep
-  `clay_brick_cache_eval_requests` on `"cpu"`, and send preview grids of 32³ and
-  up to `"metal"`. The header's advice to fan out over requests one brick per
+  20× at 128³. The header's advice to fan out over requests one brick per
   worker *is* now measurement: it takes a 216-brick fill from 24.7 ms to 8.2 ms
   on twelve workers, a 3.0x speedup. Metal and the CPU agree exactly over a full
   fill (max abs difference 0.0), so this is a speed result, not a parity one.
 
+  **0.28.0 retires the "keep refill on cpu" half of that advice** (#64): the
+  per-brick round trip was the cost, not the brick. `eval_requests` now
+  reaches the backend as one batch, and the crossover for refill sits near 16
+  *bricks per call* on the same class of machine — route by batch size, per
+  the guidance in `clay.h`. The per-brick culled-tape compile still happens on
+  the CPU either way.
+
   What is still untested is a *tablet*. An M2 Max has twelve cores, active
   cooling and a 34 GB unified pool; an iPad has fewer cores, a hard thermal
   ceiling and a memory budget that kills apps rather than swapping. The fan-out
-  gain assumes cores that stay at clock, and the 16³ crossover is the number
-  most likely to move on a GPU with a different dispatch cost. Re-measure both
-  on the target iPad before wiring up the split.
+  gain assumes cores that stay at clock, and both crossovers — 16³ for grids,
+  ~16 bricks for a batched refill — are the numbers most likely to move on a
+  GPU with a different dispatch cost. Re-measure on the target iPad before
+  wiring up the split.
 - **A brush dab's brick COUNT is flat, but its cost is not** (added 0.24.0).
   The count claim holds as designed and as tested: holding density constant
   while the document grows from 100 to 2400 items, a dab keeps dirtying 22–24
