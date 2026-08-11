@@ -232,9 +232,13 @@ final class StrokeGalleryTests: XCTestCase {
 
     /// The sessions. One per brush that can be driven as a stroke on an SDF
     /// layer through the C ABI.
+    ///
+    /// Appended rather than written as one array literal: seven closures in a
+    /// single expression is more than the Swift type-checker will take, and it
+    /// fails with a timeout rather than a useful message.
     private func sessions() -> [StrokeSession] {
-        [
-            StrokeSession(name: "stroke_build") { doc, layer, i in
+        var out: [StrokeSession] = []
+        out.append(StrokeSession(name: "stroke_build") { doc, layer, i in
                 var preset = Fixture.strokePreset(radius: 0.16)
                 var samples = Self.dragSamples(i)
                 let sampleCount = samples.count / 5
@@ -259,9 +263,9 @@ final class StrokeGalleryTests: XCTestCase {
                     if !ok { return false }
                 }
                 return true
-            },
+            })
 
-            StrokeSession(name: "stroke_carve") { doc, layer, i in
+        out.append(StrokeSession(name: "stroke_carve") { doc, layer, i in
                 var preset = Fixture.strokePreset(radius: 0.10)
                 var samples = Self.dragSamples(i + 3)
                 let sampleCount = samples.count / 5
@@ -287,11 +291,11 @@ final class StrokeGalleryTests: XCTestCase {
                     if !ok { return false }
                 }
                 return true
-            },
+            })
 
             // Move is a GESTURE per stroke, and the one the roadmap says
             // degrades: each drag prepends a warp to every item it reaches.
-            StrokeSession(name: "move_drags") { doc, layer, i in
+        out.append(StrokeSession(name: "move_drags") { doc, layer, i in
                 var params = clay_move_params()
                 params.struct_size = UInt32(MemoryLayout<clay_move_params>.size)
                 params.radius = 0.40
@@ -311,13 +315,26 @@ final class StrokeGalleryTests: XCTestCase {
                 var centre: [Float] = [cos(a) * r, sin(a) * r * 0.6, 0.25]
                 var displacement: [Float] = [cos(a) * 0.16, sin(a) * 0.16, 0.06]
                 var applied = 0
-                return clay_layer_move_surface(doc, layer, &centre, &displacement,
-                                               &params, &applied) == CLAY_OK
-            },
+                let rc = clay_layer_move_surface(doc, layer, &centre, &displacement,
+                                                 &params, &applied)
+                // `applied` is how many items took a warp. A drag that reaches
+                // nothing SUCCEEDS and changes nothing, so the return code
+                // alone cannot tell "moved the form" from "moved nothing" —
+                // which is the distinction two failed fixtures turned on.
+                var lo: [Float] = [0, 0, 0], hi: [Float] = [0, 0, 0]
+                var hasBounds: Int32 = 0
+                _ = clay_layer_bounds(doc, layer, &lo, &hi, &hasBounds)
+                let box = hasBounds != 0
+                    ? String(format: "[%.2f %.2f %.2f]..[%.2f %.2f %.2f]",
+                             lo[0], lo[1], lo[2], hi[0], hi[1], hi[2])
+                    : "<no bounds: the layer shows nothing>"
+                print("  move drag \(i): applied=\(applied) rc=\(rc.rawValue) \(box)")
+                return rc == CLAY_OK
+            })
 
             // A snakehook is a tapered stroke chain: the resolver is
             // Python-only, so what reaches this ABI is the chain it produces.
-            StrokeSession(name: "snakehook_tendrils") { doc, layer, i in
+        out.append(StrokeSession(name: "snakehook_tendrils") { doc, layer, i in
                 guard let item = clay_item_create(
                     Int32(CLAY_PRIM_STROKE.rawValue), nil, 0) else { return false }
                 defer { clay_item_destroy(item) }
@@ -339,10 +356,10 @@ final class StrokeGalleryTests: XCTestCase {
                 _ = clay_item_set_blend(item, Int32(CLAY_BLEND_QUADRATIC.rawValue), 0.07)
                 var node: clay_node_id = 0
                 return clay_layer_add_item(doc, layer, item, &node) == CLAY_OK
-            },
+            })
 
             // Noise, applied as a deformer to a fresh item per stroke.
-            StrokeSession(name: "noise_detail") { doc, layer, i in
+        out.append(StrokeSession(name: "noise_detail") { doc, layer, i in
                 var r: [Float] = [0.30]
                 guard let item = clay_item_create(
                     Int32(CLAY_PRIM_SPHERE.rawValue), &r, 1) else { return false }
@@ -356,11 +373,11 @@ final class StrokeGalleryTests: XCTestCase {
                 _ = clay_item_set_blend(item, Int32(CLAY_BLEND_QUADRATIC.rawValue), 0.07)
                 var node: clay_node_id = 0
                 return clay_layer_add_item(doc, layer, item, &node) == CLAY_OK
-            },
+            })
 
             // Magnify and pinch are ONE deformation with a signed strength,
             // so alternating the sign per stroke exercises both.
-            StrokeSession(name: "magnify_pinch") { doc, layer, i in
+        out.append(StrokeSession(name: "magnify_pinch") { doc, layer, i in
                 var r: [Float] = [0.34]
                 guard let item = clay_item_create(
                     Int32(CLAY_PRIM_SPHERE.rawValue), &r, 1) else { return false }
@@ -375,9 +392,9 @@ final class StrokeGalleryTests: XCTestCase {
                 _ = clay_item_set_blend(item, Int32(CLAY_BLEND_QUADRATIC.rawValue), 0.06)
                 var node: clay_node_id = 0
                 return clay_layer_add_item(doc, layer, item, &node) == CLAY_OK
-            },
+            })
 
-            StrokeSession(name: "cut_passes") { doc, layer, i in
+        out.append(StrokeSession(name: "cut_passes") { doc, layer, i in
                 var desc = clay_cut_desc()
                 desc.struct_size = UInt32(MemoryLayout<clay_cut_desc>.size)
                 let a = Float(i) * 0.9
@@ -397,8 +414,8 @@ final class StrokeGalleryTests: XCTestCase {
                 _ = clay_item_set_op(cut, Int32(CLAY_OP_SUBTRACT.rawValue))
                 var node: clay_node_id = 0
                 return clay_layer_add_item(doc, layer, cut, &node) == CLAY_OK
-            },
-        ]
+            })
+        return out
     }
 
     /// A base form for the verbs that reshape rather than deposit.
@@ -946,6 +963,13 @@ final class StrokeGalleryTests: XCTestCase {
                 let ms = Double(t1 - t0) / 1_000_000.0
                 measurements.append(Measurement(stamps: i + 1, p50Ms: ms,
                                                 p95Ms: ms, samples: 1))
+
+                // The first stroke, rendered. For most sessions this is only
+                // a before-picture; for Move it is the whole finding, because
+                // by the eighth the layer cannot be drawn at all.
+                if i == 0, let early = Render.image(of: doc) {
+                    Render.attach(early, named: "\(session.name)_pass1", to: self)
+                }
             }
             if failed { continue }
 
@@ -983,6 +1007,41 @@ final class StrokeGalleryTests: XCTestCase {
                 Render.attach(image, named: session.name, to: self)
             } else {
                 XCTFail("\(session.name): could not render the result")
+            }
+
+            // Move earns a third picture, because the second one is BLACK and
+            // that is the finding rather than a failure.
+            //
+            // Every drag applies (applied=1, CLAY_OK) and the layer's bounds
+            // grow from ±0.62 to ±1.42, so the surface is genuinely moving.
+            // But eight stacked warps take the declared Lipschitz to 333 and
+            // safe_step_scale to 0.003, and at that step size the engine's own
+            // raycast runs out of iterations before it reaches the surface:
+            // the shape is there and cannot be drawn. That is exactly what
+            // add-consolidation-policy was written for, and consolidating is
+            // the documented cure — so render that too, and let the pair say
+            // whether the cure works.
+            if session.name == "move_drags" {
+                var params = clay_consolidation_params()
+                params.struct_size = UInt32(MemoryLayout<clay_consolidation_params>.size)
+                params.cell_size = 0.012
+                params.band = 0.06
+                params.padding = 0.08
+                params.skip_redistance = 0        // redistancing is the point
+                let rc = clay_layer_consolidate(doc, layer, &params, nil, nil, nil)
+                XCTAssertEqual(rc, CLAY_OK, "consolidate was refused")
+
+                var after = clay_field_report()
+                after.struct_size = UInt32(MemoryLayout<clay_field_report>.size)
+                if clay_layer_field_report(doc, layer, 0, &after) == CLAY_OK {
+                    print("move_drags: after consolidate — lipschitz \(after.lipschitz), "
+                          + "safe_step_scale \(after.safe_step_scale), "
+                          + "items \(after.item_count), "
+                          + "chain \(after.longest_deformer_chain)")
+                }
+                if let cured = Render.image(of: doc) {
+                    Render.attach(cured, named: "move_drags_consolidated", to: self)
+                }
             }
         }
 
