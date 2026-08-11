@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 25
+#define CLAY_ABI_MINOR 26
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -926,6 +926,47 @@ const float* clay_mesh_colors(const clay_mesh* mesh);
  * attribute the boundary could not read. */
 const float* clay_mesh_uvs(const clay_mesh* mesh);
 const uint32_t* clay_mesh_indices(const clay_mesh* mesh);
+
+/* Where each attribute goes in ONE interleaved vertex, so a mesh reaches a
+ * mapped GPU buffer in a single pass instead of an interleave into a staging
+ * vector followed by a copy — two passes over geometry that was just produced,
+ * on the frame path. This does for meshes what clay_brick_cache_read_bricks
+ * does for bricks: the destination is the caller's.
+ *
+ * Offsets are BYTES from the start of a vertex, and -1 omits the attribute.
+ * Every attribute is float32 here because it is float32 in the mesh: this
+ * descriptor says WHERE a value goes, not what it is converted to. Format
+ * conversion is a second axis and would mean choosing a format enumeration for
+ * four attributes before anyone has asked for one.
+ *
+ * Widths: position 12 bytes, normal 12, colour 12, uv 8. stride 0 means
+ * "tightly packed", computed as the end of the last attribute named — which is
+ * only well defined because the offsets are yours, so a packed layout is the
+ * one you described with no gaps rather than an order this header picks. */
+typedef struct clay_vertex_layout {
+    uint32_t struct_size; /* = sizeof(clay_vertex_layout); required */
+    uint32_t stride;      /* bytes per vertex; 0 = tightly packed */
+    int32_t position_offset;
+    int32_t normal_offset;
+    int32_t color_offset;
+    int32_t uv_offset;
+} clay_vertex_layout;
+
+/* Copies count vertices into dst in the layout described, and the indices into
+ * a caller's buffer. dst_bytes must be exactly stride * clay_mesh_vertex_count
+ * and dst_count exactly clay_mesh_index_count — required rather than inferred,
+ * as everywhere else here, and a short destination is refused rather than
+ * truncated. Both counts are already queryable, so the two-call shape costs
+ * nothing.
+ *
+ * Naming an attribute the mesh does not carry is REFUSED, not zero-filled: a
+ * silently black or silently flat model is harder to diagnose than a returned
+ * error. So is a layout whose attributes overlap, or a stride that does not
+ * clear the attributes it was asked to hold — the two mistakes that produce a
+ * buffer which is wrong without being obviously wrong. */
+clay_result clay_mesh_copy_vertices(const clay_mesh* mesh, const clay_vertex_layout* layout,
+                                    void* dst, size_t dst_bytes);
+clay_result clay_mesh_copy_indices(const clay_mesh* mesh, uint32_t* dst, size_t dst_count);
 
 /* The box enclosing the mesh's positions — how a host frames an imported
  * model. It is answered here rather than by clay_layer_bounds because that
@@ -2216,6 +2257,248 @@ clay_result clay_eval_grid(const clay_document* doc, const char* backend,
                            const float region_max[3], float* out_values,
                            float* out_colors_rgb, size_t value_count);
 
+/* -- the host parity fixture ----------------------------------------------- */
+
+/* The fixture a host preview runs to PROVE it evaluates the same field
+ * claycore bakes: a table of composed tapes, probe points, and this library's
+ * own reference distance and colour at each probe, as JSON.
+ *
+ * `clay parity-fixture` writes the same bytes, and until now that CLI was the
+ * only way to get them — which is no use to an app whose tests link the
+ * framework rather than shell out to a tool that is not in the bundle. This is
+ * that gate, reachable from a test target: generate it, evaluate the same tapes
+ * with your own shader, and assert agreement within the tolerances the JSON
+ * carries.
+ *
+ * The case table is chosen for what a hand-written preview gets WRONG rather
+ * than for coverage: every blend profile against every smooth boolean, every
+ * extended combine mode, the material-mix weights, a deformer chain,
+ * repetition, the out-of-line blob, and a composed document. The blend cases
+ * are probed across the seam, so a support-k quadratic smin where the engine
+ * uses 4k fails here rather than at bake time — which is the drift that started
+ * all of this.
+ *
+ * Size-query pattern, exactly as clay_list_backends: call with buffer == NULL
+ * for the required size including the NUL, then again with a buffer that large.
+ * It is deterministic — no clock, no RNG beyond a fixed seed — so two calls in
+ * one build produce identical bytes and a host can diff them.
+ *
+ * It is a few hundred kilobytes and builds the whole table on each call. That
+ * is a test-time cost and this is a test-time entry point; do not call it per
+ * frame. */
+clay_result clay_parity_fixture_json(char* buffer, size_t* size);
+
+/* -- device interop -------------------------------------------------------- */
+
+/* Backends create and own their devices, which is right for a headless library
+ * and wrong for a host that was going to draw on a GPU anyway: results computed
+ * on our device are copied to host memory and uploaded again to the device the
+ * host draws from. On macOS both claycore and a wgpu host are on Metal, and on
+ * Linux both are on Vulkan — the same buffer could serve both sides.
+ *
+ * These calls let you lend claycore the device you already have.
+ *
+ * WHAT THIS DOES AND DOES NOT DO. It makes evaluation OUTPUT device-resident.
+ * It does NOT make the brick CACHE device-resident: generations, staleness,
+ * band classification, fp16 quantization and the memory budget are host code
+ * over host memory, and that is where a submitted brick becomes a stored brick.
+ * So a host taking this path has its bricks computed straight into its own
+ * buffer and then owns quantizing and uploading them — at which point the cache
+ * is not in the loop and neither are its guarantees. If you want the cache's
+ * correctness, use clay_brick_cache_read_bricks; if you want no host copy, use
+ * this. Both are complete paths; neither is both.
+ *
+ * NO VENDOR HEADER REACHES THIS ONE. Native objects cross as void*, positioned
+ * per API. A header that included vulkan.h would break every bindings generator
+ * that reads this one, and would make the surface it declares depend on how the
+ * library was built. */
+
+typedef enum clay_device_api {
+    CLAY_DEVICE_API_METAL = 0,
+    CLAY_DEVICE_API_VULKAN = 1,
+    CLAY_DEVICE_API_CUDA = 2
+} clay_device_api;
+
+/* Which handle goes in which slot, by API. Unused slots are ignored and should
+ * be NULL:
+ *
+ *   METAL   0 id<MTLDevice>   1 id<MTLCommandQueue>
+ *   VULKAN  0 VkInstance      1 VkPhysicalDevice   2 VkDevice   3 VkQueue
+ *           plus queue_family, which MUST support compute
+ *   CUDA    0 CUcontext       1 CUstream  — DECLARED BUT NOT IMPLEMENTED: the
+ *           CUDA backend has no adoption path, so clay_device_adopt refuses
+ *           this API. Said plainly here rather than left to be discovered:
+ *           the enumerator exists so the layout does not shift when it lands.
+ *
+ * A fixed void*[6] rather than a union, because a union of vendor types is a
+ * vendor header and a union of void* is this with worse ergonomics. */
+typedef struct clay_device_desc {
+    uint32_t struct_size; /* = sizeof(clay_device_desc); required */
+    int32_t api;          /* clay_device_api */
+    void* handles[6];
+    uint32_t queue_family; /* Vulkan only; ignored elsewhere */
+} clay_device_desc;
+
+typedef struct clay_device clay_device; /* opaque */
+
+/* Adopts the caller's device. Returns NULL — with the detail in
+ * clay_last_error() — when the named API's backend is not compiled in, when the
+ * handles are incomplete for that API, or when the backend has no adoption
+ * path. That is a capability report, not a failure: a caller whose adoption is
+ * refused falls back to the ordinary backend-name calls and gets IDENTICAL
+ * values. Adoption changes where work runs, never what it computes.
+ *
+ * OWNERSHIP. The library retains nothing it did not create and destroys nothing
+ * it did not make: your device, queue and instance are yours, and releasing the
+ * clay_device leaves them alone. The library creates, destroys and waits on no
+ * synchronization primitive of yours, and submits to your queue only inside a
+ * call you made. Work issued during a call has COMPLETED when that call
+ * returns, so nothing is left in flight with no way to know when it lands.
+ *
+ * THREADING. Calls on one clay_device are yours to serialize, exactly as they
+ * are for clay_brick_cache. A GPU queue is not free-threaded and adding a lock
+ * here would be a threading policy you did not ask for.
+ *
+ * The device must outlive the clay_device. Releasing yours first and then
+ * calling through this handle is a use-after-free this ABI cannot detect. */
+clay_device* clay_device_adopt(const clay_device_desc* desc);
+void clay_device_release(clay_device* device);
+
+/* Which backend the handle resolved to ("vulkan", "metal", ...), borrowed and
+ * valid until release, so a host can log or display what it actually got. */
+const char* clay_device_backend_name(const clay_device* device);
+
+/* A slice of a buffer YOU own and keep owning. `handle` is a VkBuffer /
+ * MTLBuffer / CUdeviceptr per the device's API. `size` is what is available
+ * from `offset`, is REQUIRED, and is checked against the lattice: a destination
+ * too small is refused with nothing written, as everywhere else here. */
+typedef struct clay_device_buffer {
+    uint32_t struct_size; /* = sizeof(clay_device_buffer); required */
+    void* handle;
+    uint64_t offset; /* bytes */
+    uint64_t size;   /* bytes available from offset */
+} clay_device_buffer;
+
+/* clay_eval_grid with the destination on the device. Same lattice, same cull
+ * region rules, same x-fastest order, same float32 elements — only where the
+ * results land differs, deliberately, so you can A/B the two and get
+ * bit-identical values.
+ *
+ * out_colors_rgb may be NULL. Values stay float32 and are NOT quantized on the
+ * device even though the brick cache stores fp16: quantization and band
+ * classification belong to clay_brick_cache_submit, and a device path that did
+ * them would be a second implementation of the step most able to drift. */
+clay_result clay_eval_grid_device(const clay_document* doc, clay_device* device,
+                                  const clay_grid_query* grid, const float region_min[3],
+                                  const float region_max[3],
+                                  const clay_device_buffer* out_values,
+                                  const clay_device_buffer* out_colors_rgb);
+
+
+/* -- the compiled tape ----------------------------------------------------- */
+
+/* What `docs/06-host-gpu-previews.md` calls route 1: evaluate the document's
+ * own field in your own shader, with OUR kernels rather than a copy of them.
+ * The published kernel package (`dist/claycore-kernels/`, and in the
+ * xcframework under `Headers/clay/kernel/`) gives you `ctape_eval`; this gives
+ * you the three buffers to feed it.
+ *
+ *     ctape_eval(instrs, instr_count, params, blob, p)
+ *
+ * Without this a host drawing its own frames round-trips PIXELS through the
+ * library every frame — computed in the engine, copied to host memory, then
+ * uploaded to the GPU it was going to draw on. The tape is a few kilobytes and
+ * changes once per edit; the pixels change 60 times a second.
+ *
+ * If you only want to draw the SURFACE, prefer the brick atlas below: it needs
+ * no shader kernels at all, works in shading languages our dialect does not
+ * target, and cannot drift for the same reason. Use the tape when you need the
+ * field between the samples or away from the surface. */
+
+/* An immutable SNAPSHOT of a compiled tape, which the caller releases.
+ *
+ * Editing the document CANNOT invalidate an export. The document holds its
+ * compiled tape as a shared, const, revision-keyed object and installs a new
+ * one on an edit rather than mutating the old, so an export is a reference to
+ * the tape as it was — no invalidation callback, no revision to check before
+ * dereferencing, no window in which a pointer you hold goes bad. That is why
+ * the buffers below can be borrowed pointers rather than a copy into memory you
+ * supplied: the lifetime rule is "an export is a snapshot", and the cost of the
+ * export itself is a refcount. */
+typedef struct clay_tape clay_tape; /* opaque */
+
+/* Exactly kernel::CTapeInstr, asserted field by field with offsetof in
+ * bindings/c/clay_c.cpp, because your evaluator is compiled from the header
+ * that declares it. An array ELEMENT, not a versioned descriptor. */
+typedef struct clay_tape_instr {
+    uint32_t op;
+    uint32_t param_offset;
+} clay_tape_instr;
+
+/* Exports the document's compiled tape. region_min/region_max are the same
+ * optional CULL region clay_eval_grid takes, with the same rules: both NULL
+ * compiles the whole document, one without the other is rejected, and an empty
+ * or non-finite region is rejected. A host streaming a region wants the cull
+ * the brick cache uses, so it is here rather than in a second entry point.
+ *
+ * COST DIFFERS between the two. With no region this is the document's cached
+ * tape and the export is a refcount increment. WITH a region it COMPILES — a
+ * culled tape is deliberately not cached, because consecutive bricks want
+ * different regions and a cache keyed on the document alone would thrash. One
+ * cull per brick per frame is an expensive thing to write by accident.
+ *
+ * Free with clay_tape_release. */
+clay_result clay_tape_export(const clay_document* doc, const float region_min[3],
+                             const float region_max[3], clay_tape** out_tape);
+void clay_tape_release(clay_tape* tape);
+
+/* The version of the tape ENCODING, which is the claycore version the kernel
+ * package records in its VERSION file. The two are one number because they only
+ * work together: your evaluator is `ctape_eval` from that package's headers, so
+ * an opcode added on one side and absent on the other is a wrong answer rather
+ * than a link error.
+ *
+ * The library cannot make this check — it does not know which package you
+ * compiled — so publishing the number is its half and comparing it is yours.
+ * On a mismatch, REFUSE. Do not reinterpret. */
+uint32_t clay_tape_encoding_version(void);
+
+/* Borrowed, valid until clay_tape_release, and unaffected by any edit. Each
+ * writes its element count to *out_count, which may not be NULL. A tape with
+ * no out-of-line payload has a blob count of 0 and may return NULL for it. */
+const clay_tape_instr* clay_tape_instrs(const clay_tape* tape, size_t* out_count);
+const float* clay_tape_params(const clay_tape* tape, size_t* out_count);
+const float* clay_tape_blob(const clay_tape* tape, size_t* out_count);
+
+/* What the three buffers cannot tell an evaluator, and what a host that
+ * guesses gets wrong. Every out pointer is optional.
+ *
+ * out_safe_step_scale is what a sphere tracer multiplies its step by. It is
+ * 1 / max(lipschitz, 1) and `csafe_step_scale` in the published headers
+ * computes it — it is returned anyway because "a host that guesses its step
+ * scale draws a wrong frame" and a host recomputing a one-line formula is a
+ * host that can get it wrong. Four bytes to remove the question.
+ *
+ * out_bounds_* is the union of item influence bounds: what to clip against. A
+ * host that guesses these draws a slow frame instead of a wrong one.
+ *
+ * out_revision is the document revision the tape was compiled at, so telling
+ * whether the copy you uploaded is still current is an integer comparison
+ * rather than a comparison of buffers. It is opaque and only equality is
+ * meaningful.
+ *
+ * NOTE on the blob: sampled volumes ride in it, so a document carrying one has
+ * a blob that is megabytes rather than kilobytes, and this export publishes the
+ * whole tape with no delta encoding. Compare out_revision AND the blob count
+ * between edits: a stroke that touches no volume leaves the blob alone and you
+ * can skip the re-upload. A finer answer needs to know WHICH region of a
+ * sampled volume an edit changed, which is a property of the edit rather than
+ * of the tape, and belongs with add-multi-resolution and
+ * add-consolidation-policy rather than here. */
+clay_result clay_tape_info(const clay_tape* tape, int32_t* out_is_exact, float* out_lipschitz,
+                           float* out_safe_step_scale, float out_bounds_min[3],
+                           float out_bounds_max[3], uint64_t* out_revision);
+
 /* -- the brick cache ------------------------------------------------------- */
 
 /* What makes sculpting INCREMENTAL. The field is kept as a sparse grid of
@@ -2298,10 +2581,27 @@ typedef struct clay_brick_config {
      * ever been marked dirty, which clay_brick_stats.tracked_bricks reports
      * and this does not cover. */
     uint64_t memory_budget;
+    /* 0/1: carry an RGBA8 colour lattice beside the distances, so a host can
+     * upload a colour atlas without meshing. Appended after the original
+     * layout, so a caller compiled against the older struct keeps the
+     * distance-only cache it already had.
+     *
+     * Chosen HERE and not per call, because a colour lattice has to be
+     * evaluated to exist: a per-call flag would let a host ask a distance-only
+     * cache for colours it never computed, and the only truthful answer would
+     * be an error for a mistake made three calls earlier. When this is set,
+     * clay_brick_cache_submit REQUIRES colours and clay_brick_cache_read_bricks
+     * can return them; when it is not, both refuse to deal in colour at all.
+     *
+     * It costs two more bytes per sample than the fp16 distance, inside the
+     * SAME memory_budget — so a colour cache holds about a third of the bricks
+     * a distance-only one holds at the same ceiling. That is why it is opt-in
+     * rather than the default. */
+    int32_t colors;
 } clay_brick_config;
 
 /* Fills a descriptor with the engine's defaults, struct_size included: 8^3
- * bricks, 0.05 world units per voxel, a 3-voxel band, no budget. */
+ * bricks, 0.05 world units per voxel, a 3-voxel band, no budget, no colour. */
 clay_result clay_brick_config_defaults(clay_brick_config* out_config);
 
 /* Everything a host needs to draw a progress bar or decide whether to raise
@@ -2455,6 +2755,12 @@ clay_result clay_brick_cache_take_dirty(clay_brick_cache* cache,
  * is measured, not reasoned: on an M2 Max it takes a 216-brick fill from
  * 24.7 ms to 8.2 ms on twelve workers.
  *
+ * out_colors_rgb (may be NULL) receives the field's colour at the same lattice
+ * points, count * dim^3 * 3 floats with brick i at i * dim^3 * 3, and
+ * colors_capacity must be exactly that or 0 when it is NULL. It is what a
+ * colour-carrying cache's clay_brick_cache_submit wants; a distance-only cache
+ * needs neither and passing NULL costs nothing to compute.
+ *
  * PASS "cpu" HERE. Naming a GPU backend is not a promise of a speedup, and for
  * a brick it is a promise of the opposite: the Metal backend allocates per
  * call, and 512 samples is too little work to cover the dispatch. Measured on
@@ -2465,7 +2771,27 @@ clay_result clay_brick_cache_take_dirty(clay_brick_cache* cache,
  * before changing the string on a device that is not an M-series Mac. */
 clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char* backend,
                                            const clay_brick_request* requests, size_t count,
-                                           float* out_values, size_t values_capacity);
+                                           float* out_values, size_t values_capacity,
+                                           float* out_colors_rgb, size_t colors_capacity);
+
+/* clay_brick_cache_eval_requests with the destination on the device — the call
+ * a host refilling a brick atlas actually wants. Brick i occupies
+ * out_values[i * dim^3 ...] floats and out_colors_rgb[i * dim^3 * 3 ...] at the
+ * same fixed stride the host-memory form uses, in ONE of your buffers, so a
+ * whole drain lands in the allocation you will draw from.
+ *
+ * Each request is culled against its own brick dilated by its own band, exactly
+ * as the host-memory form does, and the same values come out. What differs is
+ * only where they land — and what you then owe: these are float32 distances,
+ * not the cache's classified, band-clamped fp16 bricks. Nothing was submitted
+ * to a cache and no brick state was decided. If you want that, submit them and
+ * read them back; this call is for hosts that would rather do the conversion
+ * themselves than pay the copy. */
+clay_result clay_brick_cache_eval_requests_device(const clay_document* doc, clay_device* device,
+                                                  const clay_brick_request* requests,
+                                                  size_t count,
+                                                  const clay_device_buffer* out_values,
+                                                  const clay_device_buffer* out_colors_rgb);
 
 /* Submits the evaluated distances for `count` requests: each brick's values
  * are classified (inside / outside / surface), clamped to the band and
@@ -2482,6 +2808,15 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
  * count * dim^3, or a request whose spacing or dims do not match the cache's
  * configuration, which means it was modified or came from a different cache.
  *
+ * `colors_rgb` is count * dim^3 * 3 floats in the same order, and it is
+ * REQUIRED when the cache was created with clay_brick_config.colors and
+ * REFUSED when it was not — there is no cache that takes colour optionally,
+ * because a brick with a colour lattice and a brick without one are not the
+ * same brick to read back. colors_capacity is checked exactly, or must be 0
+ * when colors_rgb is NULL. Classification is decided by the DISTANCES alone:
+ * colour never makes a brick a surface, and a uniform brick keeps one colour
+ * rather than a lattice.
+ *
  * The values are not scanned for NaN, and a request's origin is not
  * re-derived from its key. A backend that produces a NaN classifies the brick
  * as surface and stores a NaN half; validating dim^3 floats per brick on the
@@ -2490,6 +2825,7 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
 clay_result clay_brick_cache_submit(clay_brick_cache* cache,
                                     const clay_brick_request* requests, size_t count,
                                     const float* values, size_t values_capacity,
+                                    const float* colors_rgb, size_t colors_capacity,
                                     int32_t* out_results, size_t* out_accepted);
 
 /* The world box a brick's lattice covers, and the box its evaluation should be
@@ -2509,32 +2845,57 @@ clay_result clay_brick_cache_cull_region(const clay_brick_cache* cache, const in
 clay_result clay_brick_cache_sample(const clay_brick_cache* cache, const int32_t key[3],
                                     int32_t i, int32_t j, int32_t k, float* out_value);
 
-/* Reads whole bricks in their STORED form — dim^3 IEEE binary16 values per
- * key, the engine's own bits unconverted, which is what a GPU texture upload
- * wants and half the bytes of the decoded form. `keys_xyz` is count packed
- * int32 triples, exactly as clay_voxel_flood_select returns cells.
+/* Reads whole bricks in their STORED form — IEEE binary16 values per key, the
+ * engine's own bits unconverted, which is what a GPU texture upload wants and
+ * half the bytes of the decoded form. `keys_xyz` is count packed int32 triples,
+ * exactly as clay_voxel_flood_select returns cells.
  *
- * The stride is FIXED at dim^3: brick i occupies out_halves[i * dim^3 ...]
- * whatever its state, so out_halves can be an MTLBuffer's contents and the
- * upload is one memcpy with no packing pass. values_capacity must be exactly
- * count * dim^3, or 0 when out_halves is NULL and only the states are wanted.
+ * The stride is FIXED at (dim + 2*apron)^3 — call it W below: brick i occupies
+ * out_halves[i * W ...] whatever its state, so out_halves can be an MTLBuffer's
+ * contents and the upload is one memcpy with no packing pass. values_capacity
+ * must be exactly count * W, or 0 when out_halves is NULL and only the states
+ * are wanted.
  *
- * out_states (count clay_brick_state values) says what each key held. It may
- * be NULL when only the payload is wanted, but not together with out_halves:
- * a call that writes neither has nothing to report. A uniform brick is FILLED
- * with the band value of its sign, so an uploader never branches;
- * CLAY_BRICK_MISSING means the cache holds nothing for that key and its dim^3
- * elements are LEFT UNTOUCHED — the one state where the buffer is not
- * written.
+ * `apron` is the halo, in voxels, taken from the NEIGHBOURING bricks and
+ * written around each brick's own lattice. 0 is the brick alone and what this
+ * call did before the apron existed. Hardware trilinear filtering across a
+ * brick boundary needs a one-voxel halo, and without one a host either fetches
+ * neighbours in the shader at every brick edge or repacks tiles on the CPU —
+ * which throws away the one-memcpy property this call is for. The halo is
+ * defined for EVERY neighbour: an implicit or never-evaluated brick answers the
+ * same band value a single sample of it reports, so no element is undefined and
+ * a tile at the edge of the sculpted region filters against the band rather
+ * than against whatever was in the buffer. apron is bounded by dim and a wider
+ * one is rejected rather than clamped — past that the tile is mostly neighbour
+ * and what the host wants is a coarser lod, not a fatter apron.
+ *
+ * out_states (count clay_brick_state values) says what each key held — the
+ * KEY's own state, never the halo's. It may be NULL when only the payload is
+ * wanted, but not together with out_halves and out_colors_rgba: a call that
+ * writes nothing has nothing to report. A uniform brick is FILLED with the band
+ * value of its sign, so an uploader never branches; CLAY_BRICK_MISSING means
+ * the cache holds nothing for that key and its whole W elements are LEFT
+ * UNTOUCHED — the one state where the buffer is not written, and the rule is
+ * about the key rather than its neighbourhood.
+ *
+ * out_colors_rgba (may be NULL) receives count * W * 4 bytes of RGBA8 in the
+ * same padded layout — directly uploadable as rgba8unorm, which WebGPU filters
+ * as it filters r16float. Alpha is 255 and RESERVED: it is not a mask and not
+ * coverage. It requires a cache created with clay_brick_config.colors and is
+ * refused otherwise, and colors_capacity must be exactly count * W * 4 or 0
+ * when it is NULL.
  *
  * `lod` is 0 for the full-resolution brick or 1 for its mip. A value above 1
  * is rejected rather than clamped: there is one mip level, and silently
  * answering level 0 for a request for level 4 would put a brick twice the
- * intended size on screen. */
+ * intended size on screen. A mip carries NO colour — it subsamples distances,
+ * and averaging colour across its 2x2x2 block would be a filtering policy
+ * chosen on your behalf — so colours at lod 1 are refused, not approximated. */
 clay_result clay_brick_cache_read_bricks(const clay_brick_cache* cache, int32_t lod,
-                                         const int32_t* keys_xyz, size_t count,
+                                         const int32_t* keys_xyz, size_t count, int32_t apron,
                                          int32_t* out_states, uint16_t* out_halves,
-                                         size_t values_capacity);
+                                         size_t values_capacity, uint8_t* out_colors_rgba,
+                                         size_t colors_capacity);
 
 /* Every brick that stores samples, through the size-query pattern, as packed
  * int32 triples exactly like clay_voxel_flood_select: call with out_keys_xyz
@@ -2581,9 +2942,51 @@ typedef struct clay_brick_mesh_params {
     float gradient_eps;   /* tetrahedron-tap half-width; <= 0 means the default */
 } clay_brick_mesh_params;
 
+/* What one brick key contributed to a mesh. An array ELEMENT, not a versioned
+ * descriptor: a caller receives one per key and thousands at a time, its layout
+ * is fixed, and changing that layout is a break rather than something to
+ * negotiate — the same reasoning clay_brick_request carries.
+ *
+ * The ranges are contiguous and together PARTITION the mesh, so a host can
+ * write a key's slice into a sub-range of a GPU buffer instead of rebuilding
+ * it. But vertices are welded on canonical lattice-edge keys and that welding
+ * spans brick SEAMS, so a triangle in one key's index range may reference a
+ * vertex in an EARLIER key's vertex range — whichever key reached a shared seam
+ * vertex first owns it. You may OVERWRITE a key's ranges; you may not free one
+ * key's vertices without checking its neighbours'. Breaking the weld to make
+ * the ranges independent would produce a seam-duplicated mesh, and this is also
+ * the export path, where watertightness is the contract. */
+typedef struct clay_brick_mesh_range {
+    int32_t key[3];
+    uint32_t vertex_first, vertex_count;
+    uint32_t index_first, index_count;
+} clay_brick_mesh_range;
+
 /* Meshes the cache's surface bricks — marching only the cells those bricks
  * own, which is the point: a re-mesh costs what the SURFACE covers, not what
  * the scene's bounding box does.
+ *
+ * `keys_xyz` (count packed int32 triples, exactly as
+ * clay_brick_cache_surface_bricks returns them) names the bricks to march, and
+ * NULL with a key_count of 0 means every surface brick — what this call did
+ * before the key list existed, and what an export wants. Hand it what
+ * clay_brick_cache_take_dirty reported and a re-mesh costs the dab rather than
+ * the model. A key that stores no lattice contributes nothing and is NOT an
+ * error: a drained dirty set routinely contains bricks that turned out uniform.
+ *
+ * Marching a subset samples ACROSS the subset's boundary exactly as the whole
+ * does, so the triangles produced for a cell are identical either way. A subset
+ * differs only in that a vertex shared with a cell outside it is emitted again
+ * by whichever mesh reaches it, at a bit-identical position — a duplicated seam
+ * vertex, never a crack.
+ *
+ * out_ranges (may be NULL) receives key_count clay_brick_mesh_range values in
+ * the order the keys were given. It REQUIRES keys_xyz: with no key list there
+ * is no count for the caller to have sized this buffer from, and inferring one
+ * from the cache's current surface set is the kind of length this ABI refuses
+ * to infer anywhere else. Wanting ranges means wanting to patch a buffer, which
+ * means having a key list — so the combination that is refused is not one a
+ * host has a use for.
  *
  * `doc` may be NULL, and then no tape is compiled: the mesh has positions and
  * face normals and no colours. Gradient normals and colours are attributes of
@@ -2593,7 +2996,9 @@ typedef struct clay_brick_mesh_params {
  * EMPTY mesh rather than an error, as clay_voxel_mesh does for an empty grid:
  * a cache that has not been filled yet is an ordinary state of a session. */
 clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_document* doc,
-                                  const clay_brick_mesh_params* params, clay_mesh** out_mesh);
+                                  const clay_brick_mesh_params* params,
+                                  const int32_t* keys_xyz, size_t key_count,
+                                  clay_brick_mesh_range* out_ranges, clay_mesh** out_mesh);
 
 /* Raycast the cached bricks: trilinear samples inside surface bricks, a brick
  * DDA across the rest — so the cost is the ray's path through the band rather
@@ -2606,6 +3011,19 @@ clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_docu
 clay_result clay_brick_cache_raycast(const clay_brick_cache* cache, const float origin[3],
                                      const float dir[3], int32_t* out_hit, float* out_t,
                                      float out_position[3], float out_normal[3]);
+
+/* The same, for many rays: rays_origin_dir is count packed six-float rays and
+ * the outputs are the ones clay_raycast_many takes, in the same shapes and each
+ * one optional. It is the batched form of the call above and nothing more —
+ * one call shape for the cache and for the document is the whole value of it.
+ *
+ * It starts NO thread, consistent with the cache owning none. A host that wants
+ * this parallel splits the array itself, which it can: the call is const on the
+ * cache, and serializing mutations against it is already the host's job. */
+clay_result clay_brick_cache_raycast_many(const clay_brick_cache* cache,
+                                          const float* rays_origin_dir, size_t count,
+                                          int32_t* out_hits, float* out_t,
+                                          float* out_positions_xyz, float* out_normals_xyz);
 
 #ifdef __cplusplus
 } /* extern "C" */

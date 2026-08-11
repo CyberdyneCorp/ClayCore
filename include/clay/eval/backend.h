@@ -66,6 +66,49 @@ struct RayHit {
     float normal[3] = {};
 };
 
+// -- device interop -----------------------------------------------------------
+//
+// Backends create and own their devices, which is right for a headless library
+// and wrong for a host that was going to draw on a GPU anyway: every brick and
+// every mesh crosses host memory on its way from our device to theirs. These
+// types let a caller lend us the device it already has.
+//
+// The ownership rule, which is what keeps this from becoming a source of
+// crashes inside someone else's driver:
+//
+//   * The library retains nothing it did not create and destroys nothing it did
+//     not make. A Device holds BORROWED handles.
+//   * The library creates, destroys and waits on no synchronization primitive
+//     belonging to the caller, and submits to a supplied queue only inside a
+//     call the caller made.
+//   * Work issued during a call has COMPLETED when that call returns. Nothing
+//     is left in flight with no way for the caller to know when it lands.
+//   * Calls on one Device are the CALLER's to serialize, exactly as they are
+//     for BrickCache. A GPU queue is not free-threaded and pretending otherwise
+//     here would be a threading policy the consumer did not ask for.
+
+enum class DeviceApi { Metal, Vulkan, Cuda };
+
+// Borrowed native handles, positional per API so no vendor header reaches this
+// one. The C boundary documents the positions; they are:
+//   Metal:  0 id<MTLDevice>, 1 id<MTLCommandQueue>
+//   Vulkan: 0 VkInstance, 1 VkPhysicalDevice, 2 VkDevice, 3 VkQueue (+ family)
+//   Cuda:   0 CUcontext, 1 CUstream
+struct DeviceHandles {
+    DeviceApi api = DeviceApi::Vulkan;
+    void* handles[6] = {};
+    std::uint32_t queue_family = 0;  // Vulkan only
+};
+
+// A slice of a buffer the CALLER owns and keeps owning. `handle` is a VkBuffer
+// / MTLBuffer / CUdeviceptr per the device's API.
+struct DeviceBuffer {
+    void* handle = nullptr;
+    std::uint64_t offset = 0;  // bytes
+    std::uint64_t size = 0;    // bytes available from offset
+    bool empty() const { return handle == nullptr; }
+};
+
 class Backend {
   public:
     virtual ~Backend() = default;
@@ -83,6 +126,22 @@ class Backend {
                         std::vector<std::uint32_t>*) {
         return Status::Unsupported;
     }
+
+    // eval_grid whose destination is a buffer the CALLER owns, so results a
+    // consumer intends to draw from are produced in the memory it will draw
+    // from. Only a backend bound to a caller-supplied device can serve this —
+    // a buffer from one device is meaningless on another — so the default is
+    // Unsupported and no backend is forced to implement it.
+    //
+    // Values are 32-bit floats and are NOT quantized on the device, even though
+    // the brick cache stores fp16 and a host uploading an r16float atlas wants
+    // fp16: quantization and band classification are BrickCache::submit's, and
+    // a device path that did them would be a second implementation of the step
+    // most able to drift. A host taking this path owns the conversion.
+    virtual Status eval_grid_device(const scene::Tape&, const GridQuery&, const DeviceBuffer&,
+                                    const DeviceBuffer&) {
+        return Status::Unsupported;
+    }
 };
 
 // Registry — CPU is registered on first access, GPU backends when compiled
@@ -98,6 +157,18 @@ class Registry {
     Registry();
     std::vector<std::unique_ptr<Backend>> backends_;
 };
+
+// A backend bound to a device the CALLER owns, as an instance the caller holds
+// — NOT a registry entry, because two hosts with two devices cannot share one
+// process-wide slot under one name. Registration keeps meaning exactly what it
+// means today and is unaffected by any device a caller supplies.
+//
+// Returns nullptr when the named backend has no adoption path, when its runtime
+// is not compiled in, or when the handles are not usable (a Vulkan queue family
+// without compute, an incomplete handle set). A caller whose adoption fails
+// falls back to Registry::find(name) and gets IDENTICAL values: adoption
+// changes where work runs, never what it computes.
+std::unique_ptr<Backend> make_backend(std::string_view name, const DeviceHandles& device);
 
 // Single-threaded scalar reference evaluation — CPU scalar defines
 // correctness; the parity suite compares every backend (including the CPU

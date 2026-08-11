@@ -40,6 +40,18 @@ def project_version() -> str:
     return m.group(1) if m else "0.0.0"
 
 
+def tape_encoding_version(version: str) -> int:
+    """The integer clay_tape_encoding_version() returns for this version.
+
+    Mirrors bindings/c/clay_c.cpp: major*1e6 + minor*1e3 + patch. It has to be
+    computed the same way on both sides — the whole point is that a host can
+    compare the number the package records against the number the library it
+    linked reports.
+    """
+    major, minor, patch = (int(p) for p in version.split("."))
+    return major * 1000000 + minor * 1000 + patch
+
+
 def check_self_contained(headers: list[Path]) -> list[str]:
     """The artifact must compile with nothing but itself on the include path."""
     errors = []
@@ -115,6 +127,14 @@ CPU, Metal, CUDA and OpenCL backends — and by you, here, into your own.
 
 Version: {version}
 
+**Tape encoding: {tape_version}.** These headers evaluate that encoding and no
+other. A tape obtained from a running library through `clay_tape_export` carries
+the same number, from `clay_tape_encoding_version()` — compare them and REFUSE
+on a mismatch rather than reinterpreting the buffers. The two are one version
+because they only work together: an opcode added on one side and absent on the
+other is a wrong answer, not a link error, and nothing in either half can detect
+it for you.
+
 ## Use it from Metal
 
 ```metal
@@ -166,7 +186,12 @@ def build(out: Path, clay_bin: Path | None) -> int:
     shutil.copyfile(EXAMPLE, out / "examples" / EXAMPLE.name)
     version = project_version()
     (out / "VERSION").write_text(version + "\n")
-    (out / "README.md").write_text(README.format(version=version))
+    # The tape encoding these headers evaluate, in the integer form
+    # clay_tape_encoding_version() returns, so a host compares two numbers
+    # rather than parsing a version string.
+    (out / "TAPE_VERSION").write_text(str(tape_encoding_version(version)) + "\n")
+    (out / "README.md").write_text(
+        README.format(version=version, tape_version=tape_encoding_version(version)))
 
     errors = compile_standalone(out)
     if errors:

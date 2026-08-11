@@ -129,6 +129,48 @@ Backend interface (`clay::eval::Backend`), identical everywhere:
 
 Backends are runtime-registered; the CPU backend is compiled in unconditionally. Parity suite runs every registered backend against CPU scalar on every kernel and on composed scenes.
 
+### Devices a caller lends us
+
+A registered backend creates and owns its device, which is right for a headless
+library and wrong for a host that was going to draw on a GPU anyway: results are
+computed on our device, copied to host memory, and uploaded again to theirs.
+`eval::make_backend(name, DeviceHandles)` returns a backend bound to the
+caller's device — as an **instance the caller holds**, never a registry entry,
+because two hosts with two devices cannot share one process-wide slot under one
+name. Registration means exactly what it meant before and is unaffected.
+
+Vulkan and Metal adopt; CPU, OpenCL and CUDA report that they cannot, and a
+caller whose adoption is refused falls back to the registered backend and gets
+**identical values**. Adoption changes where work runs, never what it computes.
+
+The ownership contract, which is what keeps this from becoming a source of
+crashes inside someone else's driver:
+
+- The library **retains nothing it did not create and destroys nothing it did
+  not make**. A `DeviceHandles` holds borrowed handles; the backend's
+  destructor releases its own pipelines and buffers and leaves the caller's
+  device, queue and instance alone.
+- The library **creates, destroys and waits on no synchronization primitive
+  belonging to the caller**, and submits to a supplied queue only inside a call
+  the caller made.
+- Work issued during a call has **completed when that call returns**. Nothing is
+  left in flight with no way for the caller to know when it lands.
+- **Calls on one device are the caller's to serialize**, exactly as they are for
+  `brick::BrickCache`. A GPU queue is not free-threaded, and adding a lock here
+  would be a threading policy the consumer did not ask for.
+
+`Backend::eval_grid_device` writes results into a caller-owned buffer slice.
+Values stay `float32` and are **not** quantized on the device even though the
+brick cache stores fp16: quantization and band classification are
+`BrickCache::submit`'s, and a device path that did them would be a second
+implementation of the step most able to drift.
+
+The limit worth stating plainly: this makes evaluation **output**
+device-resident, **not** brick **storage**. Generations, staleness,
+classification, quantization and the memory budget are host code over host
+memory, and that is where a submitted brick becomes a stored brick. A host on
+the device path owns the conversion, and the cache's guarantees are not in play.
+
 ## 6. Scene model & evaluation semantics (`clay::scene`)
 
 The document tree the app and specs already define, owned here so every consumer agrees:

@@ -1,10 +1,12 @@
 #include <doctest/doctest.h>
 
 #include <cmath>
+#include <cstdint>
 #include <set>
 #include <string>
 #include <vector>
 
+#include "clay.h"
 #include "clay/eval/backend.h"
 #include "clay/io/parity_fixture.h"
 #include "clay/kernel/ops.h"
@@ -107,6 +109,90 @@ TEST_CASE("parity fixture: expectations are what the tape evaluates") {
             CHECK(std::fabs(v.color.z - c.colors[i].z) <= tol.color_abs);
         }
     }
+}
+
+// The fixture gates the tapes it BUNDLES. That is a CI gate, not a product:
+// a host whose evaluator agrees on the fixture and disagrees on the document
+// the user is actually sculpting has exactly the drift this fixture exists to
+// prevent. So the export path is held to the same tolerance, on a live
+// document built through the C ABI — the surface a packaged consumer has.
+TEST_CASE("parity fixture: a tape obtained through the export path agrees too") {
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "body", &layer) == CLAY_OK);
+    // Every case shape the bundled fixture is built from: a smooth union
+    // across the seam (the drift that cost ClaySpace a debugging cycle), a
+    // smooth subtract, and a differently coloured item so the material mix is
+    // exercised rather than only the distance.
+    const struct {
+        float r, x, y, z;
+        std::int32_t op;
+        float k;
+        float rgb[3];
+    } items[] = {
+        {0.40f, -0.15f, 0.0f, 0.0f, CLAY_OP_ADD, 0.0f, {0.8f, 0.2f, 0.1f}},
+        {0.35f, 0.20f, 0.1f, 0.0f, CLAY_OP_ADD, 0.12f, {0.1f, 0.7f, 0.3f}},
+        {0.20f, 0.00f, 0.3f, 0.1f, CLAY_OP_SUBTRACT, 0.08f, {0.2f, 0.2f, 0.9f}},
+    };
+    for (const auto& it : items) {
+        clay_item* item = clay_item_create(CLAY_PRIM_SPHERE, &it.r, 1);
+        REQUIRE(item != nullptr);
+        const float pos[3] = {it.x, it.y, it.z};
+        REQUIRE(clay_item_set_position(item, pos) == CLAY_OK);
+        REQUIRE(clay_item_set_op(item, it.op) == CLAY_OK);
+        REQUIRE(clay_item_set_color(item, it.rgb) == CLAY_OK);
+        if (it.k > 0.0f)
+            REQUIRE(clay_item_set_blend(item, CLAY_BLEND_QUADRATIC, it.k) == CLAY_OK);
+        clay_node_id id = 0;
+        REQUIRE(clay_layer_add_item(doc, layer, item, &id) == CLAY_OK);
+        clay_item_destroy(item);
+    }
+
+    clay_tape* tape = nullptr;
+    REQUIRE(clay_tape_export(doc, nullptr, nullptr, &tape) == CLAY_OK);
+    std::size_t ni = 0, np = 0, nb = 0;
+    const clay_tape_instr* instrs = clay_tape_instrs(tape, &ni);
+    const float* params = clay_tape_params(tape, &np);
+    const float* blob = clay_tape_blob(tape, &nb);
+    REQUIRE(instrs != nullptr);
+
+    const io::FixtureTolerance tol;
+    // Probed ACROSS the seam, like the bundled blend cases: a support-k
+    // quadratic smin where the engine uses 4k fails here rather than at bake.
+    for (int i = -6; i <= 6; ++i)
+        for (int j = -6; j <= 6; ++j) {
+            const float p[3] = {static_cast<float>(i) * 0.06f, static_cast<float>(j) * 0.06f,
+                                0.0f};
+            float expect_d = 0.0f, expect_rgb[3] = {0, 0, 0};
+            REQUIRE(clay_eval_points(doc, nullptr, p, 1, &expect_d, expect_rgb) == CLAY_OK);
+            const kernel::CTapeValue got = kernel::ctape_eval(
+                reinterpret_cast<const kernel::CTapeInstr*>(instrs), static_cast<int>(ni), params,
+                blob, kernel::cf3(p[0], p[1], p[2]));
+            CAPTURE(i);
+            CAPTURE(j);
+            CHECK(within(got.d, expect_d, tol));
+            CHECK(std::fabs(got.color.x - expect_rgb[0]) <= tol.color_abs);
+            CHECK(std::fabs(got.color.y - expect_rgb[1]) <= tol.color_abs);
+            CHECK(std::fabs(got.color.z - expect_rgb[2]) <= tol.color_abs);
+        }
+
+    // and the fixture is discriminating on this path too: the drifted smin
+    // must FAIL against the exported tape, or agreement here means nothing
+    int disagreements = 0;
+    for (int i = -6; i <= 6; ++i) {
+        const float p[3] = {static_cast<float>(i) * 0.06f, 0.05f, 0.0f};
+        const kernel::CTapeValue got = kernel::ctape_eval(
+            reinterpret_cast<const kernel::CTapeInstr*>(instrs), static_cast<int>(ni), params,
+            blob, kernel::cf3(p[0], p[1], p[2]));
+        const float a = kernel::sd_sphere(kernel::cf3(p[0] + 0.15f, p[1], p[2]), 0.40f);
+        const float b = kernel::sd_sphere(kernel::cf3(p[0] - 0.20f, p[1] - 0.1f, p[2]), 0.35f);
+        if (!within(smin_support_k(a, b, 0.12f), got.d, tol)) ++disagreements;
+    }
+    CHECK(disagreements > 0);
+
+    clay_tape_release(tape);
+    clay_document_destroy(doc);
 }
 
 TEST_CASE("parity fixture: expectations hold on every registered backend") {

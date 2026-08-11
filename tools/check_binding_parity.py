@@ -257,7 +257,23 @@ C_ONLY_FOLLOW_UPS = {
                   "wants a buffer protocol for the fp16 payloads and a numpy view of a "
                   "request array, which is its own change with its own tests; until then "
                   "the incremental path is covered in C++ and C only, and a pyclay script "
-                  "cannot reproduce an app's refill.",
+                  "cannot reproduce an app's refill. This now covers the GPU-atlas surface "
+                  "too — the RGBA8 colour lattice, the apron on the readback, subset "
+                  "meshing with per-key ranges and the batched brick raycast (ABI 0.25.0) — "
+                  "which lands in the same binding and wants the same buffer protocol.",
+    "Device": "clay_device_adopt lends claycore the GPU device the CALLER already "
+              "owns, so evaluation lands in the caller's own buffer instead of "
+              "crossing host memory. A pyclay script has no device to lend: it is "
+              "not a renderer, and numpy arrays are host memory by definition. If "
+              "pyclay ever grows a CUDA-array-interface or dlpack path, this "
+              "becomes a real gap and the exemption should go.",
+    "Mesh.copy_vertices": "clay_mesh_copy_vertices interleaves a mesh into memory the "
+                          "CALLER owns, which exists so a host writes one pass into a "
+                          "mapped GPU buffer. Python's equivalent is already there and is "
+                          "better: the existing attribute arrays support the buffer "
+                          "protocol, so numpy interleaves them without crossing the "
+                          "boundary at all. A pyclay wrapper would be a slower way to do "
+                          "what numpy does.",
 }
 
 # String-valued choices pyclay parses out of an argument. They are capabilities

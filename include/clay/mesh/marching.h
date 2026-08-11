@@ -54,11 +54,43 @@ inline constexpr std::size_t kMaxGridSamples = 1u << 28;
 Mesh mesh_tape(const scene::Tape& tape, const math::Aabb& region, float voxel_size,
                const MeshingOptions& options = {});
 
+// What one brick key contributed to a brick mesh: contiguous, and together
+// with the other keys' ranges a partition of the output.
+//
+// Welding spans brick SEAMS, so a triangle in one key's index range may
+// reference a vertex in an EARLIER key's vertex range — the first key to reach
+// a shared seam vertex owns it. A consumer may therefore overwrite a key's
+// ranges in a GPU buffer, which is what these are for, but may not free one
+// key's vertices without checking its neighbours'. Breaking the weld to make
+// the ranges independent would produce a seam-duplicated mesh, and this is
+// also the export path, where watertightness is the contract.
+struct BrickMeshRange {
+    brick::BrickKey key;
+    std::uint32_t vertex_first = 0, vertex_count = 0;
+    std::uint32_t index_first = 0, index_count = 0;
+};
+
 // Mesh a filled brick cache: marches only cells owned by surface bricks
 // (the band width >= 1 voxel guarantees no crossing escapes into
 // inside/outside bricks). Attributes come from the tape when given.
+//
+// `keys` names the bricks to march; nullptr means every surface brick, which
+// is the whole-surface export path. A key that stores no lattice contributes
+// nothing and is not an error — a drained dirty set routinely contains bricks
+// that turned out uniform.
+//
+// Marching a SUBSET samples across the subset's boundary exactly as the whole
+// does, because BrickCache::sample answers for any key. So the triangles
+// produced for a cell are identical either way; a subset differs only in that a
+// vertex shared with a cell outside the subset is emitted again by whichever
+// mesh reaches it, at a bit-identical position. A duplicated seam vertex, never
+// a crack.
+//
+// `out_ranges` (may be nullptr) receives one entry per key, in the order given.
 Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Tape* tape_for_attributes,
-                 const MeshingOptions& options = {});
+                 const MeshingOptions& options = {},
+                 const std::vector<brick::BrickKey>* keys = nullptr,
+                 std::vector<BrickMeshRange>* out_ranges = nullptr);
 
 // Attribute helpers (meshing spec: vertex attributes).
 void apply_tape_attributes(Mesh& m, const scene::Tape& tape, const MeshingOptions& options);

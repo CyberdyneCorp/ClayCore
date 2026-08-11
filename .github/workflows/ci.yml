@@ -110,6 +110,99 @@ jobs:
       - name: Binding parity (C ABI vs pyclay)
         run: python3 tools/check_binding_parity.py
 
+  # READ THE NAME. This job gates the Vulkan backend's PLUMBING — that the
+  # generated GLSL compiles, that the SPIR-V is valid, that descriptors bind,
+  # that dispatches run and that results read back — and it gates NOTHING about
+  # arithmetic.
+  #
+  # lavapipe is Mesa's software rasteriser: it executes our SPIR-V on the CPU
+  # with LLVM. So when the parity suite passes here it has compared the CPU
+  # reference against the CPU, and agreement is close to tautological. That is
+  # exactly the trap the OpenCL job fell into with pocl, which is why it was
+  # removed (see the comment above) and why this job's name says "plumbing"
+  # rather than "parity". Vulkan arithmetic on a real device is a manual,
+  # hardware-dependent release check in docs/RELEASE.md.
+  #
+  # What it genuinely catches, and what nothing else does: a kernel change that
+  # produces GLSL the shim's Vulkan profile no longer compiles, a descriptor or
+  # push-constant layout that stopped matching the shader, a dispatch split that
+  # loses elements, and a backend that silently stops registering.
+  vulkan-plumbing:
+    name: vulkan plumbing (lavapipe; NOT an arithmetic gate)
+    runs-on: ubuntu-latest
+    env:
+      # lavapipe is a software device; the loader otherwise warns per dispatch.
+      MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the Vulkan loader, headers, glslang and lavapipe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libvulkan-dev vulkan-validationlayers glslang-tools \
+            mesa-vulkan-drivers vulkan-tools spirv-tools
+      # Pin the loader to lavapipe rather than hoping it is the only ICD: a
+      # runner that grows a second one must not silently change what ran.
+      # Discovered rather than hardcoded — Mesa packages the manifest as
+      # lvp_icd.json on some distributions and lvp_icd.<arch>.json on others,
+      # and a path that is merely wrong would leave the loader to pick for
+      # itself, which is the silent outcome this pin exists to prevent.
+      - name: Pin the loader to lavapipe
+        run: |
+          icd=$(ls /usr/share/vulkan/icd.d/lvp_icd*.json 2>/dev/null | head -1)
+          if [ -z "$icd" ]; then
+            echo "::error::mesa-vulkan-drivers is installed but no lavapipe ICD manifest was found"
+            ls -la /usr/share/vulkan/icd.d/ || true
+            exit 1
+          fi
+          echo "using $icd"
+          echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
+          echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+      # `|| true`: the step is informational, and the runner's shell is
+      # `bash -eo pipefail`, so a SIGPIPE from truncating the output would fail
+      # the job for no reason.
+      - name: Show the device the loader picked
+        run: vulkaninfo --summary || true
+      # With glslang present this stops skipping the Vulkan profile, so a kernel
+      # edit that breaks the GLSL branch of shim.h fails per-push. On every
+      # other runner this profile is skipped for want of a compiler.
+      - name: Kernel dialect, including the Vulkan GLSL profile
+        run: |
+          python3 tools/check_kernel_dialect.py --compiler g++ 2>&1 | tee dialect.log
+          if grep -q "skipping the Vulkan profile" dialect.log; then
+            echo "::error::glslang is installed but the Vulkan profile was still skipped"
+            exit 1
+          fi
+      - name: Configure
+        run: cmake --preset vulkan
+      - name: Build
+        run: cmake --build --preset vulkan
+      # A job that passes because the backend was never built proves nothing,
+      # and that is the failure mode most likely to go unnoticed — so the
+      # registration is asserted rather than assumed.
+      - name: The backend actually registered
+        run: |
+          python3 - <<'PY'
+          import ctypes, sys
+          lib = ctypes.CDLL("build/vulkan/libclay_shared.so")
+          lib.clay_list_backends.argtypes = [ctypes.c_char_p,
+                                             ctypes.POINTER(ctypes.c_size_t)]
+          n = ctypes.c_size_t(0)
+          lib.clay_list_backends(None, ctypes.byref(n))
+          buf = ctypes.create_string_buffer(n.value)
+          lib.clay_list_backends(buf, ctypes.byref(n))
+          names = buf.value.decode().split(",")
+          print("registered backends:", names)
+          if "vulkan" not in names:
+              sys.exit("the vulkan backend did not register on lavapipe")
+          PY
+      # The suite runs whole. Its parity cases DO execute against lavapipe and
+      # they are not evidence about a real GPU's arithmetic — see the block
+      # above. What they are evidence about is that the whole path from tape to
+      # buffer to dispatch to readback works.
+      - name: Test
+        run: ctest --preset vulkan
+
   deps-pins:
     name: dependency pins resolve
     runs-on: ubuntu-latest

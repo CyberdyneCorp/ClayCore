@@ -37,6 +37,18 @@ ARRAY_ELEMENT_STRUCTS = {
     # struct_size per element would forbid that copy and negotiate a layout
     # whose whole point is that it is fixed.
     "clay_brick_request",
+    # One per brick key in a subset mesh, and a host re-meshing a dirty set
+    # receives thousands at a time. Like clay_brick_request it is a fixed
+    # binary layout the caller reads rather than fills in, so there is nothing
+    # for a struct_size to negotiate: appending a field would move every
+    # element after the first, which is a break either way.
+    "clay_brick_mesh_range",
+    # Two uint32 that ARE kernel::CTapeInstr, asserted with offsetof in
+    # bindings/c/clay_c.cpp. The caller's evaluator is ctape_eval compiled from
+    # the header that declares it, so the layout agreeing is the contract
+    # rather than a convenience, and a struct_size would negotiate a layout
+    # whose whole point is that it is fixed.
+    "clay_tape_instr",
 }
 
 
@@ -520,6 +532,9 @@ class BrickConfig(ctypes.Structure):
         ("voxel_size", ctypes.c_float),
         ("band_voxels", ctypes.c_int32),
         ("memory_budget", ctypes.c_uint64),
+        # appended after the original layout: an RGBA8 lattice beside the
+        # distances, so a host can upload a colour atlas without meshing
+        ("colors", ctypes.c_int32),
     ]
 
 
@@ -552,6 +567,35 @@ class BrickRequest(ctypes.Structure):
     ]
 
 
+class TapeInstr(ctypes.Structure):
+    """clay_tape_instr: an array ELEMENT that IS kernel::CTapeInstr."""
+
+    _fields_ = [("op", ctypes.c_uint32), ("param_offset", ctypes.c_uint32)]
+
+
+class BrickMeshRange(ctypes.Structure):
+    """clay_brick_mesh_range: an array ELEMENT, one per key in a subset mesh."""
+
+    _fields_ = [
+        ("key", ctypes.c_int32 * 3),
+        ("vertex_first", ctypes.c_uint32),
+        ("vertex_count", ctypes.c_uint32),
+        ("index_first", ctypes.c_uint32),
+        ("index_count", ctypes.c_uint32),
+    ]
+
+
+class VertexLayout(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("stride", ctypes.c_uint32),
+        ("position_offset", ctypes.c_int32),
+        ("normal_offset", ctypes.c_int32),
+        ("color_offset", ctypes.c_int32),
+        ("uv_offset", ctypes.c_int32),
+    ]
+
+
 class BrickMeshParams(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_uint32),
@@ -559,6 +603,136 @@ class BrickMeshParams(ctypes.Structure):
         ("colors", ctypes.c_int32),
         ("gradient_eps", ctypes.c_float),
     ]
+
+
+def parity_fixture_exercise(lib) -> list[str]:
+    """The host parity fixture through the size-query pattern.
+
+    Issue #51 item C: an iOS test target links the framework and cannot shell
+    out to `clay parity-fixture`, so the fixture had to become reachable from
+    the ABI for "the preview agrees with the field" to be a test a host runs
+    rather than a property it hopes for.
+    """
+    errors = []
+    szp = ctypes.POINTER(ctypes.c_size_t)
+    lib.clay_parity_fixture_json.argtypes = [ctypes.c_char_p, szp]
+    n = ctypes.c_size_t(0)
+    if lib.clay_parity_fixture_json(None, ctypes.byref(n)) != 0 or n.value < 1024:
+        return [f"clay_parity_fixture_json size query returned {n.value}"]
+    buf = ctypes.create_string_buffer(n.value)
+    cap = ctypes.c_size_t(n.value)
+    if lib.clay_parity_fixture_json(buf, ctypes.byref(cap)) != 0:
+        errors.append("clay_parity_fixture_json rejected an adequate buffer")
+    text = buf.value.decode()
+    for key in ('"cases"', '"instrs"', '"safe_step_scale"', '"tolerance"'):
+        if key not in text:
+            errors.append(f"the parity fixture is missing {key}")
+    # a short buffer is refused AND reports what was needed, so the retry is
+    # one call rather than a doubling loop
+    short = ctypes.c_size_t(n.value - 1)
+    if lib.clay_parity_fixture_json(buf, ctypes.byref(short)) != 3:  # BUFFER_TOO_SMALL
+        errors.append("clay_parity_fixture_json accepted a short buffer")
+    elif short.value != n.value:
+        errors.append("a refused parity fixture call did not report the size needed")
+    return errors
+
+
+def tape_export_exercise(lib) -> list[str]:
+    """The compiled tape across the boundary, as a generated binding sees it.
+
+    The values are checked in C++ (tests/unit/test_c_tape_export.cpp evaluates
+    the export through ctape_eval). What this adds is the FFI shape: an opaque
+    handle a generated binding releases, borrowed buffers with out-counts, and
+    the lifetime rule — an edit must not invalidate an export.
+    """
+    errors = []
+    instr_p = ctypes.POINTER(TapeInstr)
+    szp = ctypes.POINTER(ctypes.c_size_t)
+    fp = ctypes.POINTER(ctypes.c_float)
+    lib.clay_tape_export.argtypes = [ctypes.c_void_p, fp, fp, ctypes.POINTER(ctypes.c_void_p)]
+    lib.clay_tape_release.argtypes = [ctypes.c_void_p]
+    lib.clay_tape_encoding_version.restype = ctypes.c_uint32
+    lib.clay_tape_instrs.argtypes = [ctypes.c_void_p, szp]
+    lib.clay_tape_instrs.restype = instr_p
+    lib.clay_tape_params.argtypes = [ctypes.c_void_p, szp]
+    lib.clay_tape_params.restype = fp
+    lib.clay_tape_blob.argtypes = [ctypes.c_void_p, szp]
+    lib.clay_tape_blob.restype = fp
+    lib.clay_tape_info.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32), fp, fp,
+                                   fp, fp, ctypes.POINTER(ctypes.c_uint64)]
+
+    doc = lib.clay_document_create()
+    layer = ctypes.c_uint32(0)
+    if lib.clay_add_sdf_layer(doc, b"tape", ctypes.byref(layer)) != 0:
+        lib.clay_document_destroy(doc)
+        return ["clay_add_sdf_layer failed for the tape exercise"]
+    item = ItemDesc()
+    item.struct_size = ctypes.sizeof(ItemDesc)
+    item.prim = 0  # CLAY_PRIM_SPHERE
+    item.params[0] = 0.4
+    node = ctypes.c_uint32(0)
+    if lib.clay_add_item(doc, layer.value, ctypes.byref(item), ctypes.byref(node)) != 0:
+        lib.clay_document_destroy(doc)
+        return ["clay_add_item failed for the tape exercise"]
+
+    tape = ctypes.c_void_p(0)
+    if lib.clay_tape_export(doc, None, None, ctypes.byref(tape)) != 0 or not tape.value:
+        lib.clay_document_destroy(doc)
+        return ["clay_tape_export failed on a plain document"]
+    n = ctypes.c_size_t(0)
+    if not lib.clay_tape_instrs(tape, ctypes.byref(n)) or n.value == 0:
+        errors.append("clay_tape_instrs returned nothing for a non-empty document")
+    if lib.clay_tape_params(tape, ctypes.byref(n)) is None or n.value == 0:
+        errors.append("clay_tape_params returned nothing for a non-empty document")
+    lib.clay_tape_blob(tape, ctypes.byref(n))  # 0 is legitimate: no out-of-line payload
+
+    exact, lip, step = ctypes.c_int32(-1), ctypes.c_float(0), ctypes.c_float(0)
+    lo, hi = (ctypes.c_float * 3)(), (ctypes.c_float * 3)()
+    rev = ctypes.c_uint64(0)
+    if lib.clay_tape_info(tape, ctypes.byref(exact), ctypes.byref(lip), ctypes.byref(step),
+                          lo, hi, ctypes.byref(rev)) != 0:
+        errors.append("clay_tape_info failed")
+    elif step.value <= 0.0 or step.value > 1.0 or rev.value == 0:
+        errors.append(f"clay_tape_info reports step={step.value} revision={rev.value}")
+    if lib.clay_tape_encoding_version() == 0:
+        errors.append("clay_tape_encoding_version returned 0")
+
+    # the lifetime rule: an edit installs a new tape and leaves this one alone
+    before = ctypes.c_size_t(0)
+    lib.clay_tape_instrs(tape, ctypes.byref(before))
+    for _ in range(4):
+        lib.clay_add_item(doc, layer.value, ctypes.byref(item), ctypes.byref(node))
+    after_edit = ctypes.c_size_t(0)
+    if not lib.clay_tape_instrs(tape, ctypes.byref(after_edit)):
+        errors.append("an export stopped being readable after an edit")
+    elif after_edit.value != before.value:
+        errors.append("an export changed under an edit: it is not a snapshot")
+    fresh = ctypes.c_void_p(0)
+    if lib.clay_tape_export(doc, None, None, ctypes.byref(fresh)) == 0:
+        grown = ctypes.c_size_t(0)
+        lib.clay_tape_instrs(fresh, ctypes.byref(grown))
+        if grown.value <= before.value:
+            errors.append("a re-export after four added items did not grow the tape")
+        new_rev = ctypes.c_uint64(0)
+        lib.clay_tape_info(fresh, None, None, None, None, None, ctypes.byref(new_rev))
+        if new_rev.value == rev.value:
+            errors.append("the revision did not change across an edit")
+    lib.clay_tape_release(fresh)
+
+    # the cull region follows clay_eval_grid's rules
+    region_lo = (ctypes.c_float * 3)(-1, -1, -1)
+    region_hi = (ctypes.c_float * 3)(1, 1, 1)
+    culled = ctypes.c_void_p(0)
+    if lib.clay_tape_export(doc, region_lo, region_hi, ctypes.byref(culled)) != 0:
+        errors.append("clay_tape_export rejected a valid cull region")
+    lib.clay_tape_release(culled)
+    if lib.clay_tape_export(doc, region_lo, None, ctypes.byref(culled)) != 1:
+        errors.append("clay_tape_export accepted one bound without the other")
+
+    lib.clay_tape_release(tape)
+    lib.clay_tape_release(None)  # releasing a null handle is a no-op
+    lib.clay_document_destroy(doc)
+    return errors
 
 
 def brick_types(lib) -> None:
@@ -583,17 +757,27 @@ def brick_types(lib) -> None:
                                                 szp, szp]
     lib.clay_brick_cache_eval_requests.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
                                                    ctypes.POINTER(BrickRequest),
-                                                   ctypes.c_size_t, fp, ctypes.c_size_t]
+                                                   ctypes.c_size_t, fp, ctypes.c_size_t,
+                                                   fp, ctypes.c_size_t]
     lib.clay_brick_cache_submit.argtypes = [ctypes.c_void_p, ctypes.POINTER(BrickRequest),
-                                            ctypes.c_size_t, fp, ctypes.c_size_t, i32p, szp]
+                                            ctypes.c_size_t, fp, ctypes.c_size_t,
+                                            fp, ctypes.c_size_t, i32p, szp]
     lib.clay_brick_cache_surface_bricks.argtypes = [ctypes.c_void_p, i32p, szp]
     lib.clay_brick_cache_read_bricks.argtypes = [ctypes.c_void_p, ctypes.c_int32, i32p,
-                                                 ctypes.c_size_t, i32p,
+                                                 ctypes.c_size_t, ctypes.c_int32, i32p,
                                                  ctypes.POINTER(ctypes.c_uint16),
+                                                 ctypes.c_size_t,
+                                                 ctypes.POINTER(ctypes.c_uint8),
                                                  ctypes.c_size_t]
     lib.clay_brick_cache_mesh.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
-                                          ctypes.POINTER(BrickMeshParams),
+                                          ctypes.POINTER(BrickMeshParams), i32p, ctypes.c_size_t,
+                                          ctypes.POINTER(BrickMeshRange),
                                           ctypes.POINTER(ctypes.c_void_p)]
+    lib.clay_brick_cache_raycast_many.argtypes = [ctypes.c_void_p, fp, ctypes.c_size_t, i32p,
+                                                  fp, fp, fp]
+    lib.clay_mesh_copy_vertices.argtypes = [ctypes.c_void_p, ctypes.POINTER(VertexLayout),
+                                            ctypes.c_void_p, ctypes.c_size_t]
+    lib.clay_mesh_copy_indices.argtypes = [ctypes.c_void_p, u32p, ctypes.c_size_t]
     lib.clay_layer_node_influence_bound.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
                                                     ctypes.c_uint32, fp, fp, i32p, i32p]
 
@@ -634,6 +818,9 @@ def brick_cache_exercise(lib) -> list[str]:
     zeroed = BrickConfig()  # setting struct_size is mandatory here too
     if lib.clay_brick_cache_create(ctypes.byref(zeroed)):
         errors.append("clay_brick_cache_create accepted a zeroed descriptor")
+    # A COLOUR cache, so the GPU-atlas path is walked by a generated-binding
+    # equivalent and not only from C++.
+    config.colors = 1
     cache = lib.clay_brick_cache_create(ctypes.byref(config))
     if not cache:
         lib.clay_document_destroy(doc)
@@ -675,6 +862,7 @@ def brick_cache_exercise(lib) -> list[str]:
     chunk = 16
     reqs = (BrickRequest * chunk)()
     values = (ctypes.c_float * (chunk * per))()
+    colors = (ctypes.c_float * (chunk * per * 3))()
     results = (ctypes.c_int32 * chunk)()
     count, remaining = ctypes.c_size_t(chunk), ctypes.c_size_t(0)
     if lib.clay_brick_cache_take_dirty(cache, None, ctypes.byref(count),
@@ -698,12 +886,13 @@ def brick_cache_exercise(lib) -> list[str]:
         if reqs[0].band != want_band:
             errors.append(
                 f"a request carries band {reqs[0].band}, expected {want_band}")
-        if lib.clay_brick_cache_eval_requests(doc, None, reqs, n, values, n * per) != 0:
+        if lib.clay_brick_cache_eval_requests(doc, None, reqs, n, values, n * per,
+                                              colors, n * per * 3) != 0:
             errors.append("clay_brick_cache_eval_requests failed")
             break
         got = ctypes.c_size_t(0)
-        if lib.clay_brick_cache_submit(cache, reqs, n, values, n * per, results,
-                                       ctypes.byref(got)) != 0:
+        if lib.clay_brick_cache_submit(cache, reqs, n, values, n * per, colors, n * per * 3,
+                                       results, ctypes.byref(got)) != 0:
             errors.append("clay_brick_cache_submit failed")
             break
         taken += n
@@ -716,8 +905,12 @@ def brick_cache_exercise(lib) -> list[str]:
         errors.append(f"{taken - accepted_total} of {taken} submissions were not accepted")
 
     # a count that is not exactly count * dim^3 is refused rather than trusted
-    if lib.clay_brick_cache_submit(cache, reqs, 1, values, per - 1, results, None) != 1:
+    if lib.clay_brick_cache_submit(cache, reqs, 1, values, per - 1, colors, per * 3,
+                                   results, None) != 1:
         errors.append("clay_brick_cache_submit accepted a short value buffer")
+    # colours are required on a cache configured for them, not optional
+    if lib.clay_brick_cache_submit(cache, reqs, 1, values, per, None, 0, results, None) != 1:
+        errors.append("clay_brick_cache_submit accepted a colour cache without colours")
 
     lib.clay_brick_cache_stats(cache, ctypes.byref(stats))
     if stats.dirty_bricks != 0 or stats.surface_bricks == 0:
@@ -725,9 +918,11 @@ def brick_cache_exercise(lib) -> list[str]:
                       f"surface={stats.surface_bricks}")
     if stats.surface_bricks >= stats.tracked_bricks:
         errors.append("every tracked brick stores a lattice: empty space is not free")
-    if stats.memory_usage != stats.surface_bricks * per * 2:
+    # 2 bytes of fp16 distance plus 4 of RGBA8 per sample: the budget bounds a
+    # whole brick, not half of one
+    if stats.memory_usage != stats.surface_bricks * per * 6:
         errors.append(f"memory_usage {stats.memory_usage} is not {stats.surface_bricks} "
-                      f"bricks of {per} halves")
+                      f"bricks of {per} halves and colours")
 
     # the section's one size query, then a zero-copy read at a fixed stride
     keys_count = ctypes.c_size_t(0)
@@ -742,24 +937,89 @@ def brick_cache_exercise(lib) -> list[str]:
         errors.append("clay_brick_cache_surface_bricks rejected an adequate buffer")
     states = (ctypes.c_int32 * n)()
     halves = (ctypes.c_uint16 * (n * per))()
-    if lib.clay_brick_cache_read_bricks(cache, 0, keys, n, states, halves, n * per) != 0:
+    rgba = (ctypes.c_uint8 * (n * per * 4))()
+    if lib.clay_brick_cache_read_bricks(cache, 0, keys, n, 0, states, halves, n * per,
+                                        rgba, n * per * 4) != 0:
         errors.append("clay_brick_cache_read_bricks failed")
     elif any(s != 2 for s in states):  # CLAY_BRICK_SURFACE
         errors.append("a brick listed as a surface brick did not read back as one")
-    if lib.clay_brick_cache_read_bricks(cache, 2, keys, 1, states, None, 0) != 1:
+    elif all(a != 255 for a in rgba[3:n * per * 4:4]):
+        errors.append("the colour lattice's reserved alpha is not 255")
+    if lib.clay_brick_cache_read_bricks(cache, 2, keys, 1, 0, states, None, 0, None, 0) != 1:
         errors.append("clay_brick_cache_read_bricks accepted an lod above 1")
+
+    # the apron: a padded, directly filterable tile at a fixed stride, which is
+    # the property this call exists for
+    padded = (config.dim + 2) ** 3
+    tile = (ctypes.c_uint16 * (n * padded))()
+    tile_rgba = (ctypes.c_uint8 * (n * padded * 4))()
+    if lib.clay_brick_cache_read_bricks(cache, 0, keys, n, 1, states, tile, n * padded,
+                                        tile_rgba, n * padded * 4) != 0:
+        errors.append("clay_brick_cache_read_bricks failed with an apron")
+    if lib.clay_brick_cache_read_bricks(cache, 0, keys, n, 1, states, tile, n * per,
+                                        None, 0) != 1:
+        errors.append("an apron readback accepted the unpadded capacity")
+    if lib.clay_brick_cache_read_bricks(cache, 0, keys, 1, config.dim + 1, states, None, 0,
+                                        None, 0) != 1:
+        errors.append("clay_brick_cache_read_bricks accepted an apron wider than the brick")
 
     mesh_params = BrickMeshParams()
     mesh_params.struct_size = ctypes.sizeof(BrickMeshParams)
     mesh_params.normals = 2  # CLAY_NORMAL_GRADIENT
     mesh_params.colors = 1
     mesh = ctypes.c_void_p(0)
-    if lib.clay_brick_cache_mesh(cache, doc, ctypes.byref(mesh_params),
+    if lib.clay_brick_cache_mesh(cache, doc, ctypes.byref(mesh_params), None, 0, None,
                                  ctypes.byref(mesh)) != 0 or not mesh.value:
         errors.append("clay_brick_cache_mesh failed on a filled cache")
     elif lib.clay_mesh_vertex_count(mesh) == 0:
         errors.append("the brick mesh of a filled cache has no vertices")
+    else:
+        # one interleaved vertex buffer, in a layout the caller chose
+        vl = VertexLayout()
+        vl.struct_size = ctypes.sizeof(VertexLayout)
+        vl.stride = 0
+        vl.position_offset, vl.normal_offset, vl.color_offset, vl.uv_offset = 0, 12, 24, -1
+        verts = lib.clay_mesh_vertex_count(mesh)
+        buf = (ctypes.c_uint8 * (verts * 36))()
+        if lib.clay_mesh_copy_vertices(mesh, ctypes.byref(vl), buf, verts * 36) != 0:
+            errors.append("clay_mesh_copy_vertices failed on an interleaved layout")
+        if lib.clay_mesh_copy_vertices(mesh, ctypes.byref(vl), buf, verts * 36 - 1) != 1:
+            errors.append("clay_mesh_copy_vertices accepted a short destination")
+        idx_n = lib.clay_mesh_index_count(mesh)
+        idx = (ctypes.c_uint32 * idx_n)()
+        if lib.clay_mesh_copy_indices(mesh, idx, idx_n) != 0:
+            errors.append("clay_mesh_copy_indices failed")
     lib.clay_mesh_destroy(mesh)
+
+    # subset meshing: the dirty set's keys, and the ranges a host patches with
+    subset = ctypes.c_void_p(0)
+    ranges = (BrickMeshRange * n)()
+    if lib.clay_brick_cache_mesh(cache, doc, ctypes.byref(mesh_params), keys, n, ranges,
+                                 ctypes.byref(subset)) != 0 or not subset.value:
+        errors.append("clay_brick_cache_mesh failed on an explicit key list")
+    else:
+        if ranges[0].vertex_first != 0 or ranges[0].index_first != 0:
+            errors.append("the first key's ranges do not start at zero")
+        end_v = ranges[n - 1].vertex_first + ranges[n - 1].vertex_count
+        end_i = ranges[n - 1].index_first + ranges[n - 1].index_count
+        if end_v != lib.clay_mesh_vertex_count(subset) or \
+                end_i != lib.clay_mesh_index_count(subset):
+            errors.append("the per-key ranges do not partition the subset mesh")
+    lib.clay_mesh_destroy(subset)
+    # ranges without a key list: nothing would have sized them
+    if lib.clay_brick_cache_mesh(cache, doc, ctypes.byref(mesh_params), None, 0, ranges,
+                                 ctypes.byref(subset)) != 1:
+        errors.append("clay_brick_cache_mesh accepted out_ranges with no key list")
+
+    # the batched raycast agrees with the single-ray path
+    rays = (ctypes.c_float * 12)(-2.0, 0.0, 0.0, 1.0, 0.0, 0.0,
+                                 -2.0, 9.0, 0.0, 1.0, 0.0, 0.0)
+    many_hits = (ctypes.c_int32 * 2)()
+    if lib.clay_brick_cache_raycast_many(cache, rays, 2, many_hits, None, None, None) != 0:
+        errors.append("clay_brick_cache_raycast_many failed")
+    elif many_hits[0] != 1 or many_hits[1] != 0:
+        errors.append(f"the batched brick raycast reports {many_hits[0]}/{many_hits[1]}, "
+                      "expected a hit through the origin and a miss well outside")
 
     lib.clay_brick_cache_destroy(cache)
     lib.clay_brick_cache_destroy(None)  # releasing a null handle is a no-op
@@ -851,6 +1111,8 @@ def ffi_exercise(lib_path: str) -> list[str]:
             errors += voxel_exercise(lib)
             errors += voxel_ownership_exercise(lib, doc)
             errors += brick_cache_exercise(lib)
+            errors += tape_export_exercise(lib)
+            errors += parity_fixture_exercise(lib)
         lib.clay_document_destroy(doc)
         lib.clay_document_destroy(None)  # releasing a null handle is a no-op
     return errors

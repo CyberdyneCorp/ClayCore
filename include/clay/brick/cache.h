@@ -39,10 +39,24 @@ enum class BrickState : std::uint8_t {
     Surface,  // narrow band crosses this brick: dim^3 fp16 samples
 };
 
+// One RGBA8 texel. Alpha is written as 255 and RESERVED: it is not a mask and
+// not coverage, so a consumer must not read it as one. RGBA rather than RGB
+// because rgba8unorm is what a GPU filters; the fourth byte buys alignment the
+// three-byte form would spend on a repack.
+struct BrickColor {
+    std::uint8_t r = 128, g = 128, b = 128, a = 255;
+};
+
 struct Brick {
     BrickState state = BrickState::Outside;
     std::uint32_t generation = 0;
     std::vector<std::uint16_t> values;  // Surface only, dim^3, band-clamped fp16
+    // Surface only, dim^3, and only when the cache was configured for color.
+    std::vector<BrickColor> colors;
+    // What a uniform brick answers for every texel. Inside/Outside allocate no
+    // lattice, so this is the whole of their color payload — 4 bytes beside the
+    // state byte they already carry, which is why it is not budgeted.
+    BrickColor uniform_color{};
 };
 
 struct BrickConfig {
@@ -50,10 +64,23 @@ struct BrickConfig {
     float voxel_size = 0.05f;
     int band_voxels = 3;       // ±band half-width in voxels
     std::size_t memory_budget = 0;  // bytes of surface-brick payload; 0 = unlimited
+    // Carry an RGBA8 lattice beside the distances. Chosen at CREATION and not
+    // per call, because a color lattice has to be evaluated to exist: a per-call
+    // flag would let a consumer ask a distance-only cache for colors it never
+    // computed, and the only truthful answer would be an error for a mistake
+    // made three calls earlier. Costs 2x the distance payload per surface brick,
+    // inside the same memory_budget — which is why it is opt-in.
+    bool colors = false;
 
     float band() const { return static_cast<float>(band_voxels) * voxel_size; }
+    std::size_t sample_count() const {
+        return static_cast<std::size_t>(dim) * dim * dim;
+    }
+    // What ONE surface brick costs the budget: distances, plus colors when the
+    // cache carries them. A budget that bounded half of a brick would not be a
+    // ceiling.
     std::size_t brick_bytes() const {
-        return static_cast<std::size_t>(dim) * dim * dim * sizeof(std::uint16_t);
+        return sample_count() * (sizeof(std::uint16_t) + (colors ? sizeof(BrickColor) : 0));
     }
 };
 
@@ -96,10 +123,47 @@ class BrickCache {
 
     // Submit dim^3 evaluated distances for a request. Values are classified
     // (Inside/Outside/Surface), band-clamped, and quantized to fp16.
-    SubmitResult submit(const BrickRequest& request, const float* values);
+    //
+    // colors_rgb is dim^3 * 3 floats in the same lattice order, REQUIRED when
+    // the cache was configured for color and ignored when it was not. Like
+    // `values`, it is a precondition rather than a checked argument: the C
+    // boundary validates it, and an engine-side caller that gets it wrong has
+    // the same bug it would have passing the wrong `values`. Classification is
+    // decided by the distances alone — color never makes a brick a surface.
+    SubmitResult submit(const BrickRequest& request, const float* values,
+                        const float* colors_rgb = nullptr);
 
     const Brick* find(BrickKey key) const;
+    // The brick a level answers with: level 0 is the evaluated brick, level 1
+    // its mip. Any other level has no brick, which is a caller's error to
+    // detect rather than something to clamp.
+    const Brick* find_lod(int lod, BrickKey key) const {
+        if (lod == 0) return find(key);
+        return lod == 1 ? find_mip(key) : nullptr;
+    }
     float sample(BrickKey key, int i, int j, int k) const;  // decoded, band-clamped
+    // The color at a lattice point. A brick with no color lattice — uniform, or
+    // in a cache not configured for color — answers its uniform color, which is
+    // the neutral seed for a cache that stores none.
+    BrickColor sample_color(BrickKey key, int i, int j, int k) const;
+
+    // Whole-brick readback in STORED form: (dim + 2*apron)^3 values, the
+    // brick's own lattice in the middle and a halo of `apron` voxels on every
+    // face taken from the neighbouring bricks, so a consumer uploading the
+    // result as a texture tile can filter across the brick boundary without
+    // fetching neighbours itself.
+    //
+    // The halo is defined for EVERY neighbour: implicit and never-evaluated
+    // bricks answer the same band values a single sample of them reports, so no
+    // output element is undefined and a tile at the edge of the sculpted region
+    // filters against the band rather than against whatever was in the buffer.
+    //
+    // apron == 0 is the brick alone, and is the memcpy the fp16 storage exists
+    // for. `lod` selects the brick as find_lod does; colors exist at level 0
+    // only, since a mip subsamples distances and averaging color across its
+    // 2x2x2 block would be a filtering policy chosen on the consumer's behalf.
+    void read_padded(int lod, BrickKey key, int apron, std::uint16_t* dst) const;
+    void read_colors_padded(BrickKey key, int apron, BrickColor* dst) const;
 
     std::vector<BrickKey> surface_bricks() const;
     std::size_t memory_usage() const { return surface_bytes_; }
@@ -128,6 +192,12 @@ class BrickCache {
     };
 
     void invalidate_mip_of(BrickKey key);
+
+    // Global lattice coordinates -> the stored value there. The coordinate is
+    // split back into a brick key and a local index, so these answer for any
+    // point in space, which is what makes the halo total.
+    std::uint16_t stored_half_at(int lod, int gx, int gy, int gz) const;
+    BrickColor stored_color_at(int gx, int gy, int gz) const;
 
     BrickConfig config_;
     std::unordered_map<BrickKey, Tracked, BrickKeyHash> bricks_;

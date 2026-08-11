@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace clay {
 namespace brick {
@@ -80,15 +81,33 @@ std::vector<BrickRequest> BrickCache::take_dirty() {
     return out;
 }
 
-SubmitResult BrickCache::submit(const BrickRequest& request, const float* values) {
+namespace {
+
+std::uint8_t quantize_channel(float v) {
+    // The color field is an authored albedo, not radiance: ctape_eval seeds it
+    // at 0.5 and every combine mode mixes between item colors, so [0, 1] is the
+    // range. Clamped rather than scaled, because a value outside it is a
+    // caller's, not a signal to rescale everything else.
+    return static_cast<std::uint8_t>(kernel::cclamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+}
+
+BrickColor to_brick_color(const float* rgb) {
+    return BrickColor{quantize_channel(rgb[0]), quantize_channel(rgb[1]),
+                      quantize_channel(rgb[2]), 255};
+}
+
+}  // namespace
+
+SubmitResult BrickCache::submit(const BrickRequest& request, const float* values,
+                                const float* colors_rgb) {
     auto it = bricks_.find(request.key);
     if (it == bricks_.end()) return SubmitResult::Stale;
     Tracked& t = it->second;
     if (request.generation != t.target_generation) return SubmitResult::Stale;
 
     const float band = config_.band();
-    const std::size_t n =
-        static_cast<std::size_t>(config_.dim) * config_.dim * config_.dim;
+    const std::size_t n = config_.sample_count();
+    const bool want_colors = config_.colors && colors_rgb != nullptr;
     bool all_inside = true, all_outside = true;
     for (std::size_t i = 0; i < n; ++i) {
         if (values[i] > -band) all_inside = false;
@@ -97,10 +116,18 @@ SubmitResult BrickCache::submit(const BrickRequest& request, const float* values
     }
 
     std::size_t old_bytes = t.brick.state == BrickState::Surface ? config_.brick_bytes() : 0;
+    // A uniform brick's whole color payload, so a padded or unpadded readback
+    // still answers one value per texel without allocating a lattice for it.
+    // The brick's CENTRE sample rather than a fixed constant: near the surface
+    // the field carries the neighbouring item's color there, and inventing a
+    // neutral grey instead would put a grey shell around every sculpt.
+    if (want_colors) t.brick.uniform_color = to_brick_color(colors_rgb + (n / 2) * 3);
     if (all_inside || all_outside) {
         t.brick.state = all_inside ? BrickState::Inside : BrickState::Outside;
         t.brick.values.clear();
         t.brick.values.shrink_to_fit();
+        t.brick.colors.clear();
+        t.brick.colors.shrink_to_fit();
         surface_bytes_ -= old_bytes;
     } else {
         std::size_t new_usage = surface_bytes_ - old_bytes + config_.brick_bytes();
@@ -110,6 +137,11 @@ SubmitResult BrickCache::submit(const BrickRequest& request, const float* values
         t.brick.values.resize(n);
         for (std::size_t i = 0; i < n; ++i)
             t.brick.values[i] = float_to_half(kernel::cclamp(values[i], -band, band));
+        if (want_colors) {
+            t.brick.colors.resize(n);
+            for (std::size_t i = 0; i < n; ++i)
+                t.brick.colors[i] = to_brick_color(colors_rgb + i * 3);
+        }
         surface_bytes_ = new_usage;
     }
     t.brick.generation = request.generation;
@@ -129,6 +161,99 @@ float BrickCache::sample(BrickKey key, int i, int j, int k) const {
     if (b->state == BrickState::Outside) return config_.band();
     std::size_t idx = (static_cast<std::size_t>(k) * config_.dim + j) * config_.dim + i;
     return half_to_float(b->values[idx]);
+}
+
+BrickColor BrickCache::sample_color(BrickKey key, int i, int j, int k) const {
+    const Brick* b = find(key);
+    if (!b) return BrickColor{};  // never evaluated: the neutral seed
+    if (b->colors.empty()) return b->uniform_color;
+    std::size_t idx = (static_cast<std::size_t>(k) * config_.dim + j) * config_.dim + i;
+    return b->colors[idx];
+}
+
+namespace {
+
+// Floor division, so a negative global lattice coordinate lands in the brick
+// below rather than in the one above.
+int fdiv(int a, int b) { return a >= 0 ? a / b : -(((-a) + b - 1) / b); }
+
+}  // namespace
+
+std::uint16_t BrickCache::stored_half_at(int lod, int gx, int gy, int gz) const {
+    const int dim = config_.dim;
+    const BrickKey key{fdiv(gx, dim), fdiv(gy, dim), fdiv(gz, dim)};
+    const Brick* b = find_lod(lod, key);
+    // A brick the cache has nothing for reads as OUTSIDE here rather than as
+    // missing: this is a halo sample, and a halo has no state to report. It is
+    // the same answer sample() gives, in stored bits instead of decoded ones.
+    if (!b || b->state == BrickState::Outside) return float_to_half(config_.band());
+    if (b->state == BrickState::Inside) return float_to_half(-config_.band());
+    const int i = gx - key.x * dim, j = gy - key.y * dim, k = gz - key.z * dim;
+    return b->values[(static_cast<std::size_t>(k) * dim + j) * dim + i];
+}
+
+BrickColor BrickCache::stored_color_at(int gx, int gy, int gz) const {
+    const int dim = config_.dim;
+    const BrickKey key{fdiv(gx, dim), fdiv(gy, dim), fdiv(gz, dim)};
+    return sample_color(key, gx - key.x * dim, gy - key.y * dim, gz - key.z * dim);
+}
+
+void BrickCache::read_padded(int lod, BrickKey key, int apron, std::uint16_t* dst) const {
+    const int dim = config_.dim;
+    const int w = dim + 2 * apron;
+    const Brick* self = find_lod(lod, key);
+    const bool run_copyable = self && self->state == BrickState::Surface;
+    for (int dk = 0; dk < w; ++dk) {
+        const int gz = key.z * dim + dk - apron;
+        for (int dj = 0; dj < w; ++dj) {
+            const int gy = key.y * dim + dj - apron;
+            std::uint16_t* row = dst + (static_cast<std::size_t>(dk) * w + dj) * w;
+            const bool own_row = dk >= apron && dk < apron + dim && dj >= apron && dj < apron + dim;
+            if (run_copyable && own_row) {
+                // The brick's own span of this row is contiguous in storage, so
+                // the interior stays a copy and only the two halo ends are
+                // gathered. At apron 0 this is the whole row and the gather
+                // loops do not run.
+                const std::size_t src =
+                    (static_cast<std::size_t>(dk - apron) * dim + (dj - apron)) * dim;
+                std::memcpy(row + apron, self->values.data() + src, dim * sizeof(std::uint16_t));
+                for (int di = 0; di < apron; ++di)
+                    row[di] = stored_half_at(lod, key.x * dim + di - apron, gy, gz);
+                for (int di = apron + dim; di < w; ++di)
+                    row[di] = stored_half_at(lod, key.x * dim + di - apron, gy, gz);
+            } else {
+                for (int di = 0; di < w; ++di)
+                    row[di] = stored_half_at(lod, key.x * dim + di - apron, gy, gz);
+            }
+        }
+    }
+}
+
+void BrickCache::read_colors_padded(BrickKey key, int apron, BrickColor* dst) const {
+    const int dim = config_.dim;
+    const int w = dim + 2 * apron;
+    const Brick* self = find(key);
+    const bool run_copyable = self && !self->colors.empty();
+    for (int dk = 0; dk < w; ++dk) {
+        const int gz = key.z * dim + dk - apron;
+        for (int dj = 0; dj < w; ++dj) {
+            const int gy = key.y * dim + dj - apron;
+            BrickColor* row = dst + (static_cast<std::size_t>(dk) * w + dj) * w;
+            const bool own_row = dk >= apron && dk < apron + dim && dj >= apron && dj < apron + dim;
+            if (run_copyable && own_row) {
+                const std::size_t src =
+                    (static_cast<std::size_t>(dk - apron) * dim + (dj - apron)) * dim;
+                std::memcpy(row + apron, self->colors.data() + src, dim * sizeof(BrickColor));
+                for (int di = 0; di < apron; ++di)
+                    row[di] = stored_color_at(key.x * dim + di - apron, gy, gz);
+                for (int di = apron + dim; di < w; ++di)
+                    row[di] = stored_color_at(key.x * dim + di - apron, gy, gz);
+            } else {
+                for (int di = 0; di < w; ++di)
+                    row[di] = stored_color_at(key.x * dim + di - apron, gy, gz);
+            }
+        }
+    }
 }
 
 std::vector<BrickKey> BrickCache::surface_bricks() const {

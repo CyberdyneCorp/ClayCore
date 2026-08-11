@@ -19,8 +19,13 @@ FLOORS = {
 }
 
 # relative gates: (bench, must_be_faster_than) — meshing spec requires the
-# surface-nets preview to beat the marching mesher at equal resolution
-FASTER_THAN = [("BM_SurfaceNets", "BM_MeshTape")]
+# surface-nets preview to beat the marching mesher at equal resolution, and
+# brick-cache requires that meshing a dab's worth of bricks costs less than
+# meshing the surface, which is the whole point of taking a key list
+FASTER_THAN = [
+    ("BM_SurfaceNets", "BM_MeshTape"),
+    ("BM_MeshBricksSubset", "BM_MeshBricksWhole"),
+]
 
 
 def main() -> int:
