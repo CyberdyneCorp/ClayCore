@@ -340,7 +340,13 @@ Tracked honestly rather than assumed done:
   4. That the Vulkan backend registers and passes parity on a real device — a
      lavapipe run is not a substitute, for the reason given in the Vulkan entry
      under "Open items": it executes on the CPU, so it gates plumbing rather
-     than arithmetic.
+     than arithmetic. The `vulkan-plumbing` CI job runs lavapipe on every push
+     and covers the other half — that the shaders compile, that the backend
+     registers, that dispatch and readback work — so what stays manual here is
+     specifically the arithmetic on real silicon. That job asserts registration
+     explicitly, because the loader left to itself picks a device the backend
+     cannot use and the suite then passes CPU-only at 204 assertions instead of
+     failing.
 
   `python3 tools/release_check.py` run on a machine with those devices present
   covers all four, because it runs parity against every backend registered in
