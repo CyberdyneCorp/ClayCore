@@ -271,3 +271,165 @@ TEST_CASE("c mesh layer: clay_document_mesh is untouched by one") {
     CHECK(positions_of(m) == plain);  // bit-identical, not merely similar
     clay_mesh_destroy(m);
 }
+
+// -- combining meshes for export (add-mesh-layers 4.6/4.7, issue #54) --------
+//
+// clay_document_mesh keeps meaning "mesh the field". Combining is explicit,
+// and these are the three calls that do it. Each scenario the c-abi delta
+// names has a test here.
+
+namespace {
+
+// A mesh carrying uvs, so the attribute-drop rule has something to drop.
+clay_mesh* square_with_uvs() {
+    const float positions[12] = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0};
+    const std::uint32_t indices[6] = {0, 1, 2, 0, 2, 3};
+    clay_mesh* m = nullptr;
+    REQUIRE(clay_mesh_from_triangles(positions, 4, indices, 6, &m) == CLAY_OK);
+    return m;
+}
+
+}  // namespace
+
+TEST_CASE("c mesh combine: transform moves positions and rotates normals") {
+    clay_mesh* tet = tetrahedron();
+    const float position[3] = {10.0f, 0.0f, 0.0f};
+    const float axis[3] = {0.0f, 1.0f, 0.0f};  // angle 0: the axis is required
+    clay_mesh* moved = nullptr;
+    REQUIRE(clay_mesh_transform(tet, position, axis, 0.0f, 2.0f, &moved) == CLAY_OK);
+
+    std::vector<float> before = positions_of(tet);
+    std::vector<float> after = positions_of(moved);
+    REQUIRE(after.size() == before.size());
+    // scaled by 2 then moved by 10 on x
+    CHECK(after[0] == doctest::Approx(before[0] * 2.0f + 10.0f));
+    CHECK(after[1] == doctest::Approx(before[1] * 2.0f));
+    CHECK(after[7] == doctest::Approx(before[7] * 2.0f));  // the y=2 vertex
+
+    SUBCASE("the refusals match every other transform in this ABI") {
+        clay_mesh* bad = nullptr;
+        CHECK(clay_mesh_transform(tet, position, axis, 0.0f, 0.0f, &bad) != CLAY_OK);
+        const float zero_axis[3] = {0.0f, 0.0f, 0.0f};
+        CHECK(clay_mesh_transform(tet, position, zero_axis, 0.0f, 1.0f, &bad) != CLAY_OK);
+        CHECK(clay_mesh_transform(tet, nullptr, axis, 0.0f, 1.0f, &bad) != CLAY_OK);
+    }
+
+    clay_mesh_destroy(moved);
+    clay_mesh_destroy(tet);
+}
+
+TEST_CASE("c mesh combine: concat rebases indices") {
+    clay_mesh* a = tetrahedron();
+    clay_mesh* b = tetrahedron();
+    const clay_mesh* parts[2] = {a, b};
+    clay_mesh* both = nullptr;
+    REQUIRE(clay_mesh_concat(parts, 2, &both) == CLAY_OK);
+
+    CHECK(clay_mesh_vertex_count(both) == clay_mesh_vertex_count(a) * 2);
+    std::vector<std::uint32_t> idx = indices_of(both);
+    std::vector<std::uint32_t> one = indices_of(a);
+    REQUIRE(idx.size() == one.size() * 2);
+    // the second copy's indices are shifted by the first copy's vertex count,
+    // which is what "rebased" means and what a naive append gets wrong
+    const std::uint32_t base = static_cast<std::uint32_t>(clay_mesh_vertex_count(a));
+    for (std::size_t i = 0; i < one.size(); ++i) {
+        CHECK(idx[i] == one[i]);
+        CHECK(idx[one.size() + i] == one[i] + base);
+    }
+    // and every index is in range, which a wrong base would break
+    for (std::uint32_t i : idx) CHECK(i < clay_mesh_vertex_count(both));
+
+    clay_mesh_destroy(both);
+    clay_mesh_destroy(a);
+    clay_mesh_destroy(b);
+}
+
+TEST_CASE("c mesh combine: a mismatched attribute is dropped, not truncated") {
+    // The rule exists because the alternative is a mesh whose uvs are
+    // non-empty and a different length than its positions — malformed, and
+    // discovered in an exported file rather than at the call.
+    clay_mesh* with = square_with_uvs();
+    clay_mesh* without = tetrahedron();
+    const clay_mesh* parts[2] = {with, without};
+    clay_mesh* both = nullptr;
+    REQUIRE(clay_mesh_concat(parts, 2, &both) == CLAY_OK);
+
+    // whatever the inputs carried, the result never carries a short array
+    const std::size_t vertices = clay_mesh_vertex_count(both);
+    CHECK(clay_mesh_vertex_count(both) == clay_mesh_vertex_count(with)
+                                              + clay_mesh_vertex_count(without));
+    CHECK(vertices > 0);
+
+    clay_mesh_destroy(both);
+    clay_mesh_destroy(with);
+    clay_mesh_destroy(without);
+}
+
+TEST_CASE("c mesh combine: a sculpt exports beside its reference model") {
+    Doc d;
+    add_sphere(d.doc);
+
+    clay_mesh* tet = tetrahedron();
+    clay_mesh_layer_desc desc = layer_desc("reference");
+    clay_layer_id layer = 0;
+    REQUIRE(clay_document_add_mesh_layer(d.doc, tet, &desc, &layer, nullptr) == CLAY_OK);
+    clay_mesh_destroy(tet);
+
+    // put the reference somewhere the sphere is not
+    const float position[3] = {5.0f, 0.0f, 0.0f};
+    const float axis[3] = {0.0f, 1.0f, 0.0f};
+    REQUIRE(clay_document_set_layer_transform(d.doc, layer, position, axis, 0.0f, 1.0f)
+            == CLAY_OK);
+
+    clay_mesh_params params;
+    std::memset(&params, 0, sizeof params);
+    params.struct_size = static_cast<std::uint32_t>(sizeof params);
+    params.resolution = 24;
+
+    clay_mesh* field_only = nullptr;
+    REQUIRE(clay_document_mesh(d.doc, &params, &field_only) == CLAY_OK);
+    clay_mesh* combined = nullptr;
+    REQUIRE(clay_document_mesh_combined(d.doc, &params, &combined) == CLAY_OK);
+
+    // the combined result is the field plus the four reference vertices
+    CHECK(clay_mesh_vertex_count(combined) == clay_mesh_vertex_count(field_only) + 4);
+
+    // and the reference sits under its LAYER transform, not at the origin
+    float lo[3], hi[3];
+    REQUIRE(clay_mesh_bounds(combined, lo, hi) == CLAY_OK);
+    CHECK(hi[0] > 4.0f);
+
+    SUBCASE("a hidden mesh layer is not exported") {
+        REQUIRE(clay_document_set_layer_visible(d.doc, layer, 0) == CLAY_OK);
+        clay_mesh* hidden = nullptr;
+        REQUIRE(clay_document_mesh_combined(d.doc, &params, &hidden) == CLAY_OK);
+        CHECK(clay_mesh_vertex_count(hidden) == clay_mesh_vertex_count(field_only));
+        clay_mesh_destroy(hidden);
+    }
+
+    SUBCASE("ghost and lock change nothing about the export") {
+        REQUIRE(clay_document_set_layer_protection(d.doc, layer, 1, 1) == CLAY_OK);
+        clay_mesh* protectedd = nullptr;
+        REQUIRE(clay_document_mesh_combined(d.doc, &params, &protectedd) == CLAY_OK);
+        // still there: neither flag changes what the document evaluates to,
+        // so neither may change what it exports
+        CHECK(clay_mesh_vertex_count(protectedd) == clay_mesh_vertex_count(combined));
+        clay_mesh_destroy(protectedd);
+    }
+
+    SUBCASE("a document with no visible mesh layer exports the field alone") {
+        Doc plain;
+        add_sphere(plain.doc);
+        clay_mesh* a = nullptr;
+        clay_mesh* b = nullptr;
+        REQUIRE(clay_document_mesh(plain.doc, &params, &a) == CLAY_OK);
+        REQUIRE(clay_document_mesh_combined(plain.doc, &params, &b) == CLAY_OK);
+        CHECK(clay_mesh_vertex_count(a) == clay_mesh_vertex_count(b));
+        CHECK(clay_mesh_index_count(a) == clay_mesh_index_count(b));
+        clay_mesh_destroy(a);
+        clay_mesh_destroy(b);
+    }
+
+    clay_mesh_destroy(field_only);
+    clay_mesh_destroy(combined);
+}

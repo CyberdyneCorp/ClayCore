@@ -3584,6 +3584,152 @@ clay_result clay_mesh_layer(const clay_mesh* mesh, clay_layer_id* out_layer) {
     return CLAY_OK;
 }
 
+// -- combining meshes for export --------------------------------------------
+
+}  // extern "C" — the helpers below return C++ types and cannot have C linkage
+
+namespace {
+
+// The mesh a handle refers to: its own, or the layer's if it is a borrow.
+const mesh::Mesh* mesh_of(const clay_mesh* handle) {
+    if (!handle) return nullptr;
+    if (handle->doc) {
+        auto it = handle->doc->doc.mesh_layers.find(handle->layer);
+        return it == handle->doc->doc.mesh_layers.end() ? nullptr : &it->second;
+    }
+    return &handle->data;
+}
+
+// Concatenate, rebasing indices.
+//
+// An attribute present on some inputs and absent on others is DROPPED. Padding
+// it would invent data and truncating it would return a mesh whose normals are
+// non-empty and a different length than its positions — which is malformed,
+// and which no call here may hand back. So the rule is: an attribute survives
+// only if EVERY input carries it.
+mesh::Mesh concat_meshes(const std::vector<const mesh::Mesh*>& parts) {
+    mesh::Mesh out;
+    bool keep_normals = !parts.empty(), keep_colors = !parts.empty(), keep_uvs = !parts.empty();
+    std::size_t vertices = 0, indices = 0;
+    for (const mesh::Mesh* m : parts) {
+        keep_normals = keep_normals && m->normals.size() == m->positions.size();
+        keep_colors = keep_colors && m->colors.size() == m->positions.size();
+        keep_uvs = keep_uvs && m->uvs.size() == m->positions.size();
+        vertices += m->positions.size();
+        indices += m->indices.size();
+    }
+    out.positions.reserve(vertices);
+    out.indices.reserve(indices);
+    if (keep_normals) out.normals.reserve(vertices);
+    if (keep_colors) out.colors.reserve(vertices);
+    if (keep_uvs) out.uvs.reserve(vertices);
+
+    std::uint32_t base = 0;
+    for (const mesh::Mesh* m : parts) {
+        out.positions.insert(out.positions.end(), m->positions.begin(), m->positions.end());
+        if (keep_normals) out.normals.insert(out.normals.end(), m->normals.begin(), m->normals.end());
+        if (keep_colors) out.colors.insert(out.colors.end(), m->colors.begin(), m->colors.end());
+        if (keep_uvs) out.uvs.insert(out.uvs.end(), m->uvs.begin(), m->uvs.end());
+        for (std::uint32_t i : m->indices) out.indices.push_back(i + base);
+        base += static_cast<std::uint32_t>(m->positions.size());
+    }
+    return out;
+}
+
+}  // namespace
+
+extern "C" {
+
+clay_result clay_mesh_transform(const clay_mesh* mesh, const float position[3],
+                                const float rotation_axis[3], float rotation_angle,
+                                float scale, clay_mesh** out_mesh) {
+    if (!mesh || !out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_mesh = nullptr;
+    const mesh::Mesh* src = mesh_of(mesh);
+    if (!src) return fail(CLAY_ERROR_NOT_FOUND, "this handle refers to no mesh");
+
+    // The same reader every other transform in this ABI goes through, so a
+    // mesh transform accepts exactly what a layer or item transform accepts.
+    math::Transform xform;
+    clay_result r = read_transform(position, rotation_axis, rotation_angle, scale, &xform);
+    if (r != CLAY_OK) return r;
+
+    auto* handle = new clay_mesh();
+    handle->data = *src;
+    for (kernel::cfloat3& v : handle->data.positions) v = xform.apply(v);
+    // Normals rotate, but do not translate and do not scale: a uniform scale
+    // leaves a direction unchanged, and adding the position would turn a
+    // direction into a point.
+    for (kernel::cfloat3& n : handle->data.normals) n = xform.rotation.rotate(n);
+    *out_mesh = handle;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_concat(const clay_mesh* const* meshes, size_t count,
+                             clay_mesh** out_mesh) {
+    if (!meshes || !out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_mesh = nullptr;
+    if (count == 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "no meshes to concatenate");
+
+    std::vector<const mesh::Mesh*> parts;
+    parts.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        const mesh::Mesh* m = mesh_of(meshes[i]);
+        if (!m) return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                            "mesh " + std::to_string(i) + " is null or refers to no mesh");
+        parts.push_back(m);
+    }
+    auto* handle = new clay_mesh();
+    handle->data = concat_meshes(parts);
+    *out_mesh = handle;
+    return CLAY_OK;
+}
+
+clay_result clay_document_mesh_combined(const clay_document* doc,
+                                        const clay_mesh_params* params,
+                                        clay_mesh** out_mesh) {
+    if (!doc || !params || !out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_mesh = nullptr;
+
+    // The field first, through the untouched call, so a document with no
+    // visible mesh layer gets exactly what clay_document_mesh gives.
+    clay_mesh* field = nullptr;
+    clay_result r = clay_document_mesh(doc, params, &field);
+    if (r != CLAY_OK) return r;
+
+    std::vector<mesh::Mesh> placed;
+    for (const scene::Layer& layer : doc->doc.document.layers) {
+        if (layer.kind != scene::LayerKind::Mesh) continue;
+        // Hidden means contributes nothing. Ghost and lock deliberately do
+        // NOT filter here: neither changes what a document evaluates to, so
+        // neither may change what it exports.
+        if (!layer.visible) continue;
+        auto it = doc->doc.mesh_layers.find(layer.id);
+        if (it == doc->doc.mesh_layers.end()) continue;
+
+        mesh::Mesh m = it->second;
+        for (kernel::cfloat3& v : m.positions) v = layer.xform.apply(v);
+        for (kernel::cfloat3& n : m.normals) n = layer.xform.rotation.rotate(n);
+        placed.push_back(std::move(m));
+    }
+
+    if (placed.empty()) {
+        *out_mesh = field;
+        return CLAY_OK;
+    }
+
+    std::vector<const mesh::Mesh*> parts;
+    parts.reserve(placed.size() + 1);
+    parts.push_back(&field->data);
+    for (const mesh::Mesh& m : placed) parts.push_back(&m);
+
+    auto* handle = new clay_mesh();
+    handle->data = concat_meshes(parts);
+    clay_mesh_destroy(field);
+    *out_mesh = handle;
+    return CLAY_OK;
+}
+
 // -- the cut tool (c-abi spec: the cut tool) ---------------------------------
 
 clay_item* clay_cut_create(const clay_cut_desc* desc, const float* polygon_xy,

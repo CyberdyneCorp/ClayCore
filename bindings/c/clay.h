@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 26
+#define CLAY_ABI_MINOR 27
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -1064,6 +1064,56 @@ clay_result clay_document_mesh_layer(clay_document* doc, const char* name,
  * (transform, visibility, ghost, lock, ordering, removal) take. A mesh the
  * caller owns belongs to no layer and returns CLAY_ERROR_NOT_FOUND. */
 clay_result clay_mesh_layer(const clay_mesh* mesh, clay_layer_id* out_layer);
+
+/* -- combining meshes for export -------------------------------------------
+ *
+ * `clay_document_mesh` means MESHING THE FIELD and keeps meaning exactly that.
+ * It prices a dense grid from the tape's own bounds, and geometry that is not
+ * in the tape would either inflate that grid or fall outside it — and it would
+ * change what an existing call returns for an existing document. Voxel layers
+ * are outside it for the same reason. Combining is therefore explicit, and
+ * these are the three calls that do it. */
+
+/* A copy of `mesh` with every position moved by the transform, and normals
+ * rotated but not translated or scaled — a uniform scale leaves a direction
+ * unchanged, and adding the position would turn a direction into a point.
+ *
+ * Takes a transform on the same terms as every other transform in this ABI:
+ * `position` and `rotation_axis` are required and the axis must be non-zero,
+ * `scale` must be > 0. A second convention for "no rotation" would be one
+ * more thing to get wrong. Free the result with clay_mesh_destroy. */
+clay_result clay_mesh_transform(const clay_mesh* mesh, const float position[3],
+                                const float rotation_axis[3], float rotation_angle,
+                                float scale, clay_mesh** out_mesh);
+
+/* One mesh from many, with indices rebased onto the concatenated vertices.
+ *
+ * AN ATTRIBUTE PRESENT ON SOME INPUTS AND ABSENT ON OTHERS IS DROPPED from the
+ * result. It is not padded and not truncated: a mesh whose normals, colors or
+ * uvs are non-empty and a different length than its positions is malformed,
+ * and no call in this ABI may return one. So concatenating a mesh that carries
+ * uvs with one that does not yields a mesh with no uvs at all. Said here
+ * because the alternative is discovering it in an exported file.
+ *
+ * `meshes` is `count` mesh pointers, none NULL. Free the result with
+ * clay_mesh_destroy. */
+clay_result clay_mesh_concat(const clay_mesh* const* meshes, size_t count,
+                             clay_mesh** out_mesh);
+
+/* The convenience call: mesh the document's field with `params`, then append
+ * every VISIBLE mesh layer under its own layer transform, indices rebased.
+ *
+ * Hidden mesh layers are excluded, because hidden means "contributes nothing".
+ * Ghost and lock do NOT change what is exported, consistent with neither flag
+ * changing what a document evaluates to.
+ *
+ * The attribute-drop rule of clay_mesh_concat applies: the meshed field
+ * carries normals, so a mesh layer without them costs the result its normals.
+ * A document with no visible mesh layer returns exactly what
+ * clay_document_mesh would. Free the result with clay_mesh_destroy. */
+clay_result clay_document_mesh_combined(const clay_document* doc,
+                                        const clay_mesh_params* params,
+                                        clay_mesh** out_mesh);
 
 /* -- importing a mesh as a field ------------------------------------------- */
 

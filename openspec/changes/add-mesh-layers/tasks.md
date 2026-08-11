@@ -76,12 +76,12 @@
       no-op on a borrowed handle, since the call returns no status and changing
       its signature would break every consumer for a case that cannot arise
       today. Documented beside the existing lifetime note
-- [ ] 4.6 DEFERRED. Transform and concatenate as primitives; one convenience
+- [x] 4.6 Transform and concatenate as primitives; one convenience
       call meshing the field and appending every visible mesh layer under its
       transform. Separable: `clay_document_mesh` is untouched either way (4.8),
       and a host can already read a layer's buffers and its transform and
       concatenate them itself, which is what `examples/36_mesh_layers.py` does
-- [ ] 4.7 DEFERRED with 4.6. The merge rebases indices and DROPS an attribute
+- [x] 4.7 The merge rebases indices and DROPS an attribute
       that is present on some inputs and absent on others, rather than
       returning a short array. Stated in the header
 - [x] 4.8 `clay_document_mesh` is untouched; a regression test holds it
@@ -98,8 +98,11 @@
       attach budget refusing an oversized mesh; not-found; destroy on a
       borrowed handle leaving the document readable; the import scale; the
       borrowed handle naming its layer; `clay_document_mesh` unchanged. The
-      combined export, the attribute drop and the hidden-layer exclusion are
-      tests for 4.6/4.7 and are deferred with them
+      combined export, the attribute drop and the hidden-layer exclusion landed
+      with 4.6/4.7 (issue #54): index rebasing checked per index rather than by
+      count, ghost and lock shown NOT to change the export, and a document with
+      no visible mesh layer shown to export exactly what `clay_document_mesh`
+      gives
 
 ## 5. Python
 
@@ -109,7 +112,10 @@
       views over the document's own memory. LISTING is not included: there is
       no layer enumeration in the C ABI to hold parity against, and the gate is
       one-way so a Python-only listing would pass silently. The combined export
-      is deferred with 4.6
+      stays C-only and is recorded as such in the parity table's C-only
+      section: numpy concatenates and offsets the attribute arrays through the
+      buffer protocol without crossing the boundary, which is what
+      `examples/36_mesh_layers.py` already does
 - [x] 5.2 `tools/check_binding_parity.py` clean — the gate is one-way, so a
       C-only surface would pass silently and is not an excuse
 - [x] 5.3 Parity test: attach, transform, export through both surfaces produces

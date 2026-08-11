@@ -202,6 +202,20 @@ forward-refuse).
    the same loss minors 1, 2 and 4 carry. The format notes at the top of
    `include/clay/io/clayspace.h` record it.
 
+   **0.27.0 adds three symbols for a merged export**: `clay_mesh_transform`,
+   `clay_mesh_concat` and `clay_document_mesh_combined`. Additive — no signature
+   changed, nothing removed, no struct grew.
+
+   `clay_document_mesh` still means MESHING THE FIELD and is bit-identical on a
+   document that has mesh layers, so combining is a separate call rather than a
+   change of behaviour in that one. A hidden mesh layer is excluded from the
+   combined export; ghost and lock are not, consistent with neither flag
+   changing what a document evaluates to. Concatenation rebases indices and
+   DROPS an attribute present on some inputs and absent on others, because the
+   alternative is a mesh whose uvs are non-empty and a different length than its
+   positions — malformed, and discovered in an exported file rather than at the
+   call. Closes issue #54.
+
 ## The device gate
 
 Metal is the iPad app's production path, and no CI runner has an attached

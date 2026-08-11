@@ -267,6 +267,16 @@ C_ONLY_FOLLOW_UPS = {
               "not a renderer, and numpy arrays are host memory by definition. If "
               "pyclay ever grows a CUDA-array-interface or dlpack path, this "
               "becomes a real gap and the exemption should go.",
+    "Mesh.combine": "clay_mesh_transform, clay_mesh_concat and "
+                    "clay_document_mesh_combined build one export out of the meshed "
+                    "field and the visible mesh layers, in C, because a C host "
+                    "otherwise writes the index-rebasing loop itself and has to get "
+                    "the attribute-drop rule right on its own. pyclay does not need "
+                    "them: the attribute arrays support the buffer protocol, so "
+                    "numpy concatenates and offsets them without crossing the "
+                    "boundary — which is exactly what examples/36_mesh_layers.py "
+                    "does. If pyclay ever wants the drop rule enforced rather than "
+                    "hand-written, this becomes a real gap.",
     "Mesh.copy_vertices": "clay_mesh_copy_vertices interleaves a mesh into memory the "
                           "CALLER owns, which exists so a host writes one pass into a "
                           "mapped GPU buffer. Python's equivalent is already there and is "
