@@ -253,6 +253,15 @@ class MetalBackend final : public Backend {
             detail = err->localizedDescription()->utf8String();
         std::fprintf(stderr, "claycore: the Metal backend will not register — %s: %s\n", what,
                      detail);
+        // localizedDescription for a pipeline failure is the useless half:
+        // "Compilation failed" and nothing about WHAT failed. The compiler's
+        // own log is in the error's userInfo, and description() prints the
+        // whole object including it. Without this the message names a symptom
+        // and leaves the cause a guess — which is how the paravirtual failure
+        // survived three release attempts.
+        if (err && err->description())
+            std::fprintf(stderr, "claycore: full Metal error: %s\n",
+                         err->description()->utf8String());
     }
 
     bool build_pipelines() {
