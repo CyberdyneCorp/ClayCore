@@ -1,6 +1,17 @@
 # performance-budgets — what the interactive path is expected to cost
 
-Delta for `add-device-perf-budgets`. This capability is new.
+Delta for `add-device-perf-gates`. This capability is new.
+
+Adopted from `add-device-perf-budgets`, which proposed it independently and was
+folded into this change rather than run twice. Its reasoning is kept because it
+is better than restating: the budget is a property of the PRODUCT, not of the
+build, so `build-packaging` is the right place for *how* the measurement runs
+and the wrong place to say what a brush dab is expected to cost on a named
+device.
+
+Four of its requirements are already met by the harness this change builds; two
+— sustained behaviour, and the preview frame — are not, and are tasks rather
+than claims.
 
 ## ADDED Requirements
 

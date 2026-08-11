@@ -75,6 +75,14 @@ runs parity only "when the runner exposes a Metal device".
   built and invoked, what it measures (per-stamp p50/p95 latency across a
   document-growth axis), the coverage table that makes an untested brush an
   error, the baseline format, and the release-time regression gate.
+- `performance-budgets`: what the interactive path is expected to COST — the
+  budget, on a named device at a named document size, measured end to end and
+  sustained rather than cold. **Adopted from `add-device-perf-budgets`**, which
+  proposed the same measurement independently while this change was in flight;
+  it was folded in rather than run twice, and its change directory removed. The
+  split it argued for is kept because it is right: `device-harness` is the
+  instrument, `performance-budgets` is the requirement the instrument tests,
+  and `build-packaging` is only where it runs.
 
 ### Modified Capabilities
 

@@ -60,3 +60,18 @@
 - [x] 7.4 Add a row to `openspec/ROADMAP.md` — the roadmap has no device performance entry today, which is why this gap survived to v0.25.0
 - [x] 7.5 Record in the roadmap what the first measurement pass found, in the style of the existing "what actually bit" entries
 - [x] 7.6 Run `openspec validate --strict` and the four presets plus `release_check`
+
+## 8. Adopted from `add-device-perf-budgets`
+
+That change proposed the same measurement independently and was folded in
+rather than run twice. Most of it is already done — the reference device, the
+document-size axis, the one-command harness, the committed results format, the
+verdict against a budget, the release-time obligation, and the end-to-end dab
+(mark dirty → drain → evaluate → submit) which is `sdf_stamp_bricks`. These
+are the parts that are NOT, and they are real gaps rather than restatements.
+
+- [ ] 8.1 A preview-frame case measured end to end — whichever of raycast or mesh the app actually draws with — so the 16.7 ms frame budget has something to judge. The dab path is covered; the frame path is not measured at all
+- [ ] 8.2 A sustained run reporting first-dab and steady-state separately, with the interval over which they diverged. This is deliberately in tension with the thermal guard: that guard exists to stop a warm device silently contaminating a comparison, while this measures the warm device ON PURPOSE. Both are wanted, and the sustained case must be exempt from the invalidation rather than defeat it
+- [ ] 8.3 When a case misses its budget, record the document size at which it PASSES and the size it targets, rather than widening the budget until it passes. `sdf_stamp_cpu` is the live case: it is already outside a 120 Hz frame share at 1000 stamps
+- [ ] 8.4 Update `docs/RELEASE.md`'s "pass cpu here" guidance for brick fills against the device measurement. The current advice rests on an M2 Max crossover (288 µs vs 114 µs per brick), which is exactly the provisional-decision case the `performance-budgets` spec now requires to be marked or re-measured
+- [ ] 8.5 Reconcile the document-size axis: this harness measures 10/100/1000 stamps, the folded proposal argued for 100/2400/10000 items to stay comparable with the existing desktop numbers. Pick one and say why, because two axes make the numbers incomparable

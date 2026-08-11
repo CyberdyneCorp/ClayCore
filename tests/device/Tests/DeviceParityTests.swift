@@ -293,6 +293,26 @@ final class DeviceParityTests: XCTestCase {
             return clay_layer_add_item(doc, layer, cut, &node) == CLAY_OK
         }
 
+        // A BAKED field: a document collapsed to a sampled volume by
+        // clay_item_volume_from_document, then placed and evaluated.
+        //
+        // This is the scene `ship-metal-in-the-xcframework` task 1.10 asks
+        // for. That change carries a report of a Simulator parity deviation
+        // on a baked field (0.166 against the CPU's 0.033) which had only ever
+        // been seen through an app fixture, because until Metal shipped in the
+        // xcframework there was no Metal-enabled framework to reproduce it
+        // with. Every other scene here is procedural; a bake is a different
+        // path — the samples are interpolated out of a sparse narrow band
+        // rather than evaluated from a formula.
+        withDocument("authored_baked_volume") { doc, layer in
+            guard let volume = Fixture.volumeItem(stamps: 12, cellSize: 0.04) else {
+                return false
+            }
+            defer { clay_item_destroy(volume) }
+            var node: clay_node_id = 0
+            return clay_layer_add_item(doc, layer, volume, &node) == CLAY_OK
+        }
+
         // A mask extrude: a painted patch pulled off as a solid, which lands
         // as a sampled VOLUME — the sparse narrow-band structure every backend
         // has to walk identically.
