@@ -5,6 +5,8 @@
 #define NS_PRIVATE_IMPLEMENTATION
 #define MTL_PRIVATE_IMPLEMENTATION
 
+#include <cstdio>
+#include <string>
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
 #include <dispatch/dispatch.h>
@@ -239,13 +241,30 @@ class MetalBackend final : public Backend {
         return build_pipelines();
     }
 
+    // Every failure below used to discard the NS::Error it was handed, so a
+    // backend that could not initialise registered nothing and said nothing —
+    // indistinguishable from a machine with no GPU. That cost three release
+    // attempts to diagnose: the artifact was fine and the reason was sitting
+    // in an ignored out-parameter. Metal init happens once, so one line on
+    // stderr is cheap and is the difference between a mystery and a message.
+    static void report(const char* what, NS::Error* err) {
+        const char* detail = "no error reported";
+        if (err && err->localizedDescription())
+            detail = err->localizedDescription()->utf8String();
+        std::fprintf(stderr, "claycore: the Metal backend will not register — %s: %s\n", what,
+                     detail);
+    }
+
     bool build_pipelines() {
         dispatch_data_t data = dispatch_data_create(clay_metallib, clay_metallib_size, nullptr,
                                                     DISPATCH_DATA_DESTRUCTOR_DEFAULT);
         NS::Error* err = nullptr;
         MTL::Library* lib = device_->newLibrary(data, &err);
         dispatch_release(data);
-        if (!lib) return false;
+        if (!lib) {
+            report("the embedded metallib did not load", err);
+            return false;
+        }
         pso_points_ = make_pso(lib, "clay_eval_points");
         pso_grid_ = make_pso(lib, "clay_eval_grid");
         pso_rays_ = make_pso(lib, "clay_raycast");
@@ -256,10 +275,20 @@ class MetalBackend final : public Backend {
     MTL::ComputePipelineState* make_pso(MTL::Library* lib, const char* fn_name) {
         NS::String* name = NS::String::string(fn_name, NS::UTF8StringEncoding);
         MTL::Function* fn = lib->newFunction(name);
-        if (!fn) return nullptr;
+        if (!fn) {
+            std::fprintf(stderr,
+                         "claycore: the Metal backend will not register — the metallib "
+                         "carries no function named %s\n",
+                         fn_name);
+            return nullptr;
+        }
         NS::Error* err = nullptr;
         MTL::ComputePipelineState* pso = device_->newComputePipelineState(fn, &err);
         fn->release();
+        if (!pso) {
+            std::string what = std::string("no compute pipeline for ") + fn_name;
+            report(what.c_str(), err);
+        }
         return pso;
     }
 
