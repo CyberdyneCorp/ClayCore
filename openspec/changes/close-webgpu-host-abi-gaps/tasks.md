@@ -54,7 +54,7 @@
 
 - [x] 6.1 No pyclay counterparts: the gate runs pyclay→C, and `BrickCache` already carries a reviewed `C_ONLY_FOLLOW_UPS` entry deferring the whole binding. Its text now names the atlas surface too, and `Mesh.copy_vertices` is recorded with its own reason (numpy interleaves the existing buffer-protocol arrays without crossing the boundary at all)
 - [x] 6.2 `tools/check_c_abi.py` passes: descriptor prefix rule on `clay_vertex_layout`, element exemption on `clay_brick_mesh_range`, every declaration resolving in the shared library
-- [ ] 6.3 Swift smoke and the ctypes FFI exercise cover at least the colour + apron readback, since that is the path this change exists for
+- [x] 6.3 The ctypes FFI exercise covers the colour + apron readback, subset meshing with ranges, the interleaved copy-out and the batched raycast. **Swift smoke NOT extended**: it does not reach the brick cache at all today, so this would be new coverage rather than a fix to existing coverage, and it cannot be compiled or run on the Linux box this was written on — unverified Swift in a smoke test is worse than none. Recorded as a gap for whoever next runs the Apple release check
 - [x] 6.4 `docs/06-host-gpu-previews.md` gains the brick-volume route as a first-class alternative to compiling the kernel dialect: upload the band as a sparse `r16float` + `rgba8unorm` atlas with a one-voxel apron, trace it with a brick DDA, and mesh only for export
 - [x] 6.5 Announce the two arity changes in `docs/RELEASE.md` release notes, with the compile-error-not-misread argument
 - [x] 6.6 Update `openspec/ROADMAP.md`

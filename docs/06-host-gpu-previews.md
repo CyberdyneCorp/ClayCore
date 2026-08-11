@@ -15,8 +15,9 @@ drifting from it, and this document originally described only the first.
    tape. Zero drift because it is literally the same math, and it is the only
    route that gives you an *analytic* field — refraction, arbitrary
    re-evaluation, exact normals anywhere. It needs a shading language our
-   dialect compiles to, and it needs the tape, which is
-   `add-tape-abi-export`. The rest of this document is that route.
+   dialect compiles to. The rest of this document is that route, and since
+   ABI 0.26.0 the tape it needs is reachable from C
+   ([below](#getting-the-tape-of-a-live-document)).
 
 2. **Upload the brick cache as a volume atlas** and trace it. No kernel math in
    your shader at all, therefore *also* no drift risk — and it works in any
@@ -189,6 +190,74 @@ profiles. A host calling the old name gets a compile error, which is the
 outcome to want — the alternative, a silently different meaning, is the failure
 this whole document is about.
 
+## Getting the tape of a live document
+
+`clay parity-fixture` gives you tapes to test against. `clay_tape_export` gives
+you the tape of the document the user is sculpting, which is what you draw.
+
+```c
+clay_tape* tape = NULL;
+clay_tape_export(doc, /*region_min*/ NULL, /*region_max*/ NULL, &tape);
+
+size_t ni, np, nb;
+const clay_tape_instr* instrs = clay_tape_instrs(tape, &ni);
+const float*           params = clay_tape_params(tape, &np);
+const float*           blob   = clay_tape_blob  (tape, &nb);
+
+int32_t  is_exact; float lipschitz, safe_step; float lo[3], hi[3];
+uint64_t revision;
+clay_tape_info(tape, &is_exact, &lipschitz, &safe_step, lo, hi, &revision);
+
+/* upload instrs / params / blob; step by safe_step; clip against lo..hi */
+clay_tape_release(tape);
+```
+
+**An export is a snapshot, and an edit cannot invalidate it.** The document
+holds its compiled tape as a shared, const, revision-keyed object and installs a
+*new* one on an edit rather than mutating the old, so the borrowed pointers stay
+valid for the handle's lifetime and for nothing else. There is no invalidation
+callback to register, no revision to re-check before dereferencing, and no
+window in which a pointer you are mid-upload with goes bad. Exporting the whole
+document's tape costs a refcount increment.
+
+**Check the version.** `clay_tape_encoding_version()` returns the encoding the
+running library produces; the kernel package records the encoding its headers
+evaluate in `TAPE_VERSION`. They are one number because they only work together
+— an opcode added on one side and absent on the other is a *wrong answer*, not
+a link error. Compare them at startup and refuse on a mismatch. Neither half can
+detect it for you.
+
+**Re-upload on `revision`, not per frame.** That is the whole latency argument,
+and it is worth seeing in numbers. A 512×512 preview drawn by round-tripping
+through `clay_raycast_many`, against the tape that replaces it (x86-64, Release,
+CPU backend):
+
+| items | tape bytes | export | frame bytes | frame ms |
+|---|---|---|---|---|
+| 50 | 7 976 | 0.024 ms | 8 388 608 | 131.7 |
+| 500 | 79 976 | 0.088 ms | 8 388 608 | 1 510.5 |
+| 2 400 | 383 976 | 0.232 ms | 8 388 608 | 8 221.1 |
+
+The byte ratio understates it, because the frame crosses sixty times a second
+and the tape crosses once per edit. A **warm** export measures 0.000 ms: it is a
+refcount increment. And the frame milliseconds are a CPU raycast your GPU would
+not be running at all — which is why the round-trip is not merely wasteful but
+unusable past a few hundred items.
+
+**One caveat, on the blob.** Sampled volumes ride in it, so a document carrying
+one has a blob of megabytes rather than kilobytes, and this export publishes the
+whole tape with no delta encoding. Compare the *blob count* as well as the
+revision: a stroke that touches no volume leaves the blob alone and you can skip
+re-uploading it. A finer answer needs to know which region of a sampled volume
+an edit changed, which is a property of the edit rather than of the tape, and
+waits on `add-multi-resolution` and `add-consolidation-policy`.
+
+**Culled tapes.** Pass a region and you get the same cull the brick cache uses —
+useful if you are streaming. It **compiles**, where the whole-document export
+does not: a culled tape is deliberately not cached, because consecutive regions
+differ and a cache keyed on the document alone would thrash. One cull per brick
+per frame is an expensive thing to write by accident.
+
 ## Route 2: upload the brick atlas
 
 The brick cache already stores exactly what a GPU wants: a sparse set of `dim³`
@@ -268,16 +337,12 @@ staging vector plus a copy.
 
 ## What is not here yet
 
-Feeding a **live** document's tape to a host GPU still needs the tape buffers
-across the C ABI; today `scene::Tape` is C++-side only, so a host gets tapes
-from the fixture but not from `clay_document`. That is its own change
-(`add-tape-abi-export`), and a small one now: the evaluator it would feed is
-`ctape_eval` compiled from these headers, already proven against the fixture.
-It blocks **route 1** only; route 2 above deliberately does not need it.
+Zero-copy, on both routes: every brick and every mesh crosses host memory,
+because backends create and own their devices and there is no way to lend
+claycore yours. That is `add-device-interop`.
 
-Zero-copy is also still missing on both routes: every brick and every mesh
-crosses host memory, because backends create and own their devices and there is
-no way to lend claycore yours. That is `add-device-interop`.
+Blob deltas, as noted above: a document carrying a sampled volume re-uploads it
+whole on any edit.
 
 ## Keeping this honest
 

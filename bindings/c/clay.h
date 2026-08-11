@@ -2257,6 +2257,110 @@ clay_result clay_eval_grid(const clay_document* doc, const char* backend,
                            const float region_max[3], float* out_values,
                            float* out_colors_rgb, size_t value_count);
 
+/* -- the compiled tape ----------------------------------------------------- */
+
+/* What `docs/06-host-gpu-previews.md` calls route 1: evaluate the document's
+ * own field in your own shader, with OUR kernels rather than a copy of them.
+ * The published kernel package (`dist/claycore-kernels/`, and in the
+ * xcframework under `Headers/clay/kernel/`) gives you `ctape_eval`; this gives
+ * you the three buffers to feed it.
+ *
+ *     ctape_eval(instrs, instr_count, params, blob, p)
+ *
+ * Without this a host drawing its own frames round-trips PIXELS through the
+ * library every frame — computed in the engine, copied to host memory, then
+ * uploaded to the GPU it was going to draw on. The tape is a few kilobytes and
+ * changes once per edit; the pixels change 60 times a second.
+ *
+ * If you only want to draw the SURFACE, prefer the brick atlas below: it needs
+ * no shader kernels at all, works in shading languages our dialect does not
+ * target, and cannot drift for the same reason. Use the tape when you need the
+ * field between the samples or away from the surface. */
+
+/* An immutable SNAPSHOT of a compiled tape, which the caller releases.
+ *
+ * Editing the document CANNOT invalidate an export. The document holds its
+ * compiled tape as a shared, const, revision-keyed object and installs a new
+ * one on an edit rather than mutating the old, so an export is a reference to
+ * the tape as it was — no invalidation callback, no revision to check before
+ * dereferencing, no window in which a pointer you hold goes bad. That is why
+ * the buffers below can be borrowed pointers rather than a copy into memory you
+ * supplied: the lifetime rule is "an export is a snapshot", and the cost of the
+ * export itself is a refcount. */
+typedef struct clay_tape clay_tape; /* opaque */
+
+/* Exactly kernel::CTapeInstr, asserted field by field with offsetof in
+ * bindings/c/clay_c.cpp, because your evaluator is compiled from the header
+ * that declares it. An array ELEMENT, not a versioned descriptor. */
+typedef struct clay_tape_instr {
+    uint32_t op;
+    uint32_t param_offset;
+} clay_tape_instr;
+
+/* Exports the document's compiled tape. region_min/region_max are the same
+ * optional CULL region clay_eval_grid takes, with the same rules: both NULL
+ * compiles the whole document, one without the other is rejected, and an empty
+ * or non-finite region is rejected. A host streaming a region wants the cull
+ * the brick cache uses, so it is here rather than in a second entry point.
+ *
+ * COST DIFFERS between the two. With no region this is the document's cached
+ * tape and the export is a refcount increment. WITH a region it COMPILES — a
+ * culled tape is deliberately not cached, because consecutive bricks want
+ * different regions and a cache keyed on the document alone would thrash. One
+ * cull per brick per frame is an expensive thing to write by accident.
+ *
+ * Free with clay_tape_release. */
+clay_result clay_tape_export(const clay_document* doc, const float region_min[3],
+                             const float region_max[3], clay_tape** out_tape);
+void clay_tape_release(clay_tape* tape);
+
+/* The version of the tape ENCODING, which is the claycore version the kernel
+ * package records in its VERSION file. The two are one number because they only
+ * work together: your evaluator is `ctape_eval` from that package's headers, so
+ * an opcode added on one side and absent on the other is a wrong answer rather
+ * than a link error.
+ *
+ * The library cannot make this check — it does not know which package you
+ * compiled — so publishing the number is its half and comparing it is yours.
+ * On a mismatch, REFUSE. Do not reinterpret. */
+uint32_t clay_tape_encoding_version(void);
+
+/* Borrowed, valid until clay_tape_release, and unaffected by any edit. Each
+ * writes its element count to *out_count, which may not be NULL. A tape with
+ * no out-of-line payload has a blob count of 0 and may return NULL for it. */
+const clay_tape_instr* clay_tape_instrs(const clay_tape* tape, size_t* out_count);
+const float* clay_tape_params(const clay_tape* tape, size_t* out_count);
+const float* clay_tape_blob(const clay_tape* tape, size_t* out_count);
+
+/* What the three buffers cannot tell an evaluator, and what a host that
+ * guesses gets wrong. Every out pointer is optional.
+ *
+ * out_safe_step_scale is what a sphere tracer multiplies its step by. It is
+ * 1 / max(lipschitz, 1) and `csafe_step_scale` in the published headers
+ * computes it — it is returned anyway because "a host that guesses its step
+ * scale draws a wrong frame" and a host recomputing a one-line formula is a
+ * host that can get it wrong. Four bytes to remove the question.
+ *
+ * out_bounds_* is the union of item influence bounds: what to clip against. A
+ * host that guesses these draws a slow frame instead of a wrong one.
+ *
+ * out_revision is the document revision the tape was compiled at, so telling
+ * whether the copy you uploaded is still current is an integer comparison
+ * rather than a comparison of buffers. It is opaque and only equality is
+ * meaningful.
+ *
+ * NOTE on the blob: sampled volumes ride in it, so a document carrying one has
+ * a blob that is megabytes rather than kilobytes, and this export publishes the
+ * whole tape with no delta encoding. Compare out_revision AND the blob count
+ * between edits: a stroke that touches no volume leaves the blob alone and you
+ * can skip the re-upload. A finer answer needs to know WHICH region of a
+ * sampled volume an edit changed, which is a property of the edit rather than
+ * of the tape, and belongs with add-multi-resolution and
+ * add-consolidation-policy rather than here. */
+clay_result clay_tape_info(const clay_tape* tape, int32_t* out_is_exact, float* out_lipschitz,
+                           float* out_safe_step_scale, float out_bounds_min[3],
+                           float out_bounds_max[3], uint64_t* out_revision);
+
 /* -- the brick cache ------------------------------------------------------- */
 
 /* What makes sculpting INCREMENTAL. The field is kept as a sparse grid of

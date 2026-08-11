@@ -37,6 +37,7 @@
 #include "clay/scene/commands.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/tape.h"
+#include "clay/version.h"
 #include "clay/voxel/grid.h"
 #include "clay/brush/mask_extrude.h"
 #include "clay/brush/move.h"
@@ -4936,6 +4937,119 @@ clay_result clay_eval_grid(const clay_document* doc, const char* backend,
     scene::CullRegion cull{region};
     scene::Tape tape = scene::compile_document(doc->doc.document, &cull);
     return eval_grid_into(tape, backend, query, out_values, out_colors_rgb);
+}
+
+// -- the compiled tape (c-abi spec: the compiled tape is exportable) ---------
+
+// An immutable snapshot. The document hands out its compiled tape as a
+// shared_ptr<const Tape> keyed on a revision and installs a NEW one on an edit
+// rather than mutating the old, so holding a copy of the pointer is the whole
+// implementation of "editing cannot invalidate an export": exporting costs a
+// refcount, and there is no window in which a borrowed buffer goes bad.
+//
+// A culled tape has no such cache and is compiled per call, so it is owned here
+// the same way — the handle is the only difference the caller sees.
+struct clay_tape {
+    std::shared_ptr<const scene::Tape> tape;
+    std::uint64_t revision = 0;
+};
+
+namespace {
+
+// clay_tape_instr IS kernel::CTapeInstr: the caller's evaluator is ctape_eval
+// compiled from the header that declares it, so the two layouts agreeing is
+// not a convenience, it is the contract.
+static_assert(sizeof(clay_tape_instr) == sizeof(kernel::CTapeInstr),
+              "clay_tape_instr must be kernel::CTapeInstr");
+static_assert(offsetof(clay_tape_instr, op) == offsetof(kernel::CTapeInstr, op),
+              "clay_tape_instr.op must match");
+static_assert(offsetof(clay_tape_instr, param_offset) ==
+                  offsetof(kernel::CTapeInstr, param_offset),
+              "clay_tape_instr.param_offset must match");
+
+clay_result resolve_tape(const clay_tape* tape, const scene::Tape** out) {
+    if (!tape || !tape->tape) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null tape");
+    *out = tape->tape.get();
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_tape_export(const clay_document* doc, const float region_min[3],
+                             const float region_max[3], clay_tape** out_tape) {
+    if (!doc || !out_tape)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out_tape");
+    bool has_region = false;
+    math::Aabb region;
+    clay_result r = read_region(region_min, region_max, "the cull region", &has_region, &region);
+    if (r != CLAY_OK) return r;
+    auto* handle = new clay_tape();
+    handle->revision = doc->revision.load(std::memory_order_relaxed);
+    if (has_region) {
+        // Compiled per call and deliberately not cached, exactly as
+        // clay_eval_grid does it: consecutive regions differ, so a slot keyed
+        // on the document alone would thrash.
+        scene::CullRegion cull{region};
+        handle->tape =
+            std::make_shared<const scene::Tape>(scene::compile_document(doc->doc.document, &cull));
+    } else {
+        handle->tape = doc->tape();  // a refcount, not a compile
+    }
+    *out_tape = handle;
+    return CLAY_OK;
+}
+
+void clay_tape_release(clay_tape* tape) { delete tape; }
+
+uint32_t clay_tape_encoding_version(void) {
+    // clay::version(), which is the CMake project version — the same number
+    // tools/package_kernels.py stamps into the package's VERSION file, read
+    // from the same line of CMakeLists.txt. One number for both because a host
+    // evaluates an exported tape with ctape_eval from that package's headers:
+    // an opcode present on one side and absent on the other is a wrong ANSWER,
+    // not a link error, so the two cannot be versioned independently. This is
+    // deliberately NOT clay_version()'s CLAY_ABI_*, which tracks the shape of
+    // this header rather than the shape of the tape.
+    const Version v = clay::version();
+    return static_cast<std::uint32_t>(v.major) * 1000000u +
+           static_cast<std::uint32_t>(v.minor) * 1000u + static_cast<std::uint32_t>(v.patch);
+}
+
+const clay_tape_instr* clay_tape_instrs(const clay_tape* tape, size_t* out_count) {
+    const scene::Tape* t = nullptr;
+    if (!out_count || resolve_tape(tape, &t) != CLAY_OK) return nullptr;
+    *out_count = t->instrs.size();
+    return t->instrs.empty() ? nullptr
+                             : reinterpret_cast<const clay_tape_instr*>(t->instrs.data());
+}
+
+const float* clay_tape_params(const clay_tape* tape, size_t* out_count) {
+    const scene::Tape* t = nullptr;
+    if (!out_count || resolve_tape(tape, &t) != CLAY_OK) return nullptr;
+    *out_count = t->params.size();
+    return t->params.empty() ? nullptr : t->params.data();
+}
+
+const float* clay_tape_blob(const clay_tape* tape, size_t* out_count) {
+    const scene::Tape* t = nullptr;
+    if (!out_count || resolve_tape(tape, &t) != CLAY_OK) return nullptr;
+    *out_count = t->blob.size();
+    return t->blob.empty() ? nullptr : t->blob.data();
+}
+
+clay_result clay_tape_info(const clay_tape* tape, int32_t* out_is_exact, float* out_lipschitz,
+                           float* out_safe_step_scale, float out_bounds_min[3],
+                           float out_bounds_max[3], uint64_t* out_revision) {
+    const scene::Tape* t = nullptr;
+    clay_result r = resolve_tape(tape, &t);
+    if (r != CLAY_OK) return r;
+    if (out_is_exact) *out_is_exact = t->info.is_exact ? 1 : 0;
+    if (out_lipschitz) *out_lipschitz = t->info.lipschitz;
+    if (out_safe_step_scale) *out_safe_step_scale = t->safe_step_scale();
+    if (out_bounds_min) write_f3(out_bounds_min, t->bounds.min);
+    if (out_bounds_max) write_f3(out_bounds_max, t->bounds.max);
+    if (out_revision) *out_revision = tape->revision;
+    return CLAY_OK;
 }
 
 // -- the brick cache (brick-cache spec, through the C boundary) --------------

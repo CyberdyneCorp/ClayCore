@@ -43,6 +43,12 @@ ARRAY_ELEMENT_STRUCTS = {
     # for a struct_size to negotiate: appending a field would move every
     # element after the first, which is a break either way.
     "clay_brick_mesh_range",
+    # Two uint32 that ARE kernel::CTapeInstr, asserted with offsetof in
+    # bindings/c/clay_c.cpp. The caller's evaluator is ctape_eval compiled from
+    # the header that declares it, so the layout agreeing is the contract
+    # rather than a convenience, and a struct_size would negotiate a layout
+    # whose whole point is that it is fixed.
+    "clay_tape_instr",
 }
 
 
@@ -561,6 +567,12 @@ class BrickRequest(ctypes.Structure):
     ]
 
 
+class TapeInstr(ctypes.Structure):
+    """clay_tape_instr: an array ELEMENT that IS kernel::CTapeInstr."""
+
+    _fields_ = [("op", ctypes.c_uint32), ("param_offset", ctypes.c_uint32)]
+
+
 class BrickMeshRange(ctypes.Structure):
     """clay_brick_mesh_range: an array ELEMENT, one per key in a subset mesh."""
 
@@ -591,6 +603,104 @@ class BrickMeshParams(ctypes.Structure):
         ("colors", ctypes.c_int32),
         ("gradient_eps", ctypes.c_float),
     ]
+
+
+def tape_export_exercise(lib) -> list[str]:
+    """The compiled tape across the boundary, as a generated binding sees it.
+
+    The values are checked in C++ (tests/unit/test_c_tape_export.cpp evaluates
+    the export through ctape_eval). What this adds is the FFI shape: an opaque
+    handle a generated binding releases, borrowed buffers with out-counts, and
+    the lifetime rule — an edit must not invalidate an export.
+    """
+    errors = []
+    instr_p = ctypes.POINTER(TapeInstr)
+    szp = ctypes.POINTER(ctypes.c_size_t)
+    fp = ctypes.POINTER(ctypes.c_float)
+    lib.clay_tape_export.argtypes = [ctypes.c_void_p, fp, fp, ctypes.POINTER(ctypes.c_void_p)]
+    lib.clay_tape_release.argtypes = [ctypes.c_void_p]
+    lib.clay_tape_encoding_version.restype = ctypes.c_uint32
+    lib.clay_tape_instrs.argtypes = [ctypes.c_void_p, szp]
+    lib.clay_tape_instrs.restype = instr_p
+    lib.clay_tape_params.argtypes = [ctypes.c_void_p, szp]
+    lib.clay_tape_params.restype = fp
+    lib.clay_tape_blob.argtypes = [ctypes.c_void_p, szp]
+    lib.clay_tape_blob.restype = fp
+    lib.clay_tape_info.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32), fp, fp,
+                                   fp, fp, ctypes.POINTER(ctypes.c_uint64)]
+
+    doc = lib.clay_document_create()
+    layer = ctypes.c_uint32(0)
+    if lib.clay_add_sdf_layer(doc, b"tape", ctypes.byref(layer)) != 0:
+        lib.clay_document_destroy(doc)
+        return ["clay_add_sdf_layer failed for the tape exercise"]
+    item = ItemDesc()
+    item.struct_size = ctypes.sizeof(ItemDesc)
+    item.prim = 0  # CLAY_PRIM_SPHERE
+    item.params[0] = 0.4
+    node = ctypes.c_uint32(0)
+    if lib.clay_add_item(doc, layer.value, ctypes.byref(item), ctypes.byref(node)) != 0:
+        lib.clay_document_destroy(doc)
+        return ["clay_add_item failed for the tape exercise"]
+
+    tape = ctypes.c_void_p(0)
+    if lib.clay_tape_export(doc, None, None, ctypes.byref(tape)) != 0 or not tape.value:
+        lib.clay_document_destroy(doc)
+        return ["clay_tape_export failed on a plain document"]
+    n = ctypes.c_size_t(0)
+    if not lib.clay_tape_instrs(tape, ctypes.byref(n)) or n.value == 0:
+        errors.append("clay_tape_instrs returned nothing for a non-empty document")
+    if lib.clay_tape_params(tape, ctypes.byref(n)) is None or n.value == 0:
+        errors.append("clay_tape_params returned nothing for a non-empty document")
+    lib.clay_tape_blob(tape, ctypes.byref(n))  # 0 is legitimate: no out-of-line payload
+
+    exact, lip, step = ctypes.c_int32(-1), ctypes.c_float(0), ctypes.c_float(0)
+    lo, hi = (ctypes.c_float * 3)(), (ctypes.c_float * 3)()
+    rev = ctypes.c_uint64(0)
+    if lib.clay_tape_info(tape, ctypes.byref(exact), ctypes.byref(lip), ctypes.byref(step),
+                          lo, hi, ctypes.byref(rev)) != 0:
+        errors.append("clay_tape_info failed")
+    elif step.value <= 0.0 or step.value > 1.0 or rev.value == 0:
+        errors.append(f"clay_tape_info reports step={step.value} revision={rev.value}")
+    if lib.clay_tape_encoding_version() == 0:
+        errors.append("clay_tape_encoding_version returned 0")
+
+    # the lifetime rule: an edit installs a new tape and leaves this one alone
+    before = ctypes.c_size_t(0)
+    lib.clay_tape_instrs(tape, ctypes.byref(before))
+    for _ in range(4):
+        lib.clay_add_item(doc, layer.value, ctypes.byref(item), ctypes.byref(node))
+    after_edit = ctypes.c_size_t(0)
+    if not lib.clay_tape_instrs(tape, ctypes.byref(after_edit)):
+        errors.append("an export stopped being readable after an edit")
+    elif after_edit.value != before.value:
+        errors.append("an export changed under an edit: it is not a snapshot")
+    fresh = ctypes.c_void_p(0)
+    if lib.clay_tape_export(doc, None, None, ctypes.byref(fresh)) == 0:
+        grown = ctypes.c_size_t(0)
+        lib.clay_tape_instrs(fresh, ctypes.byref(grown))
+        if grown.value <= before.value:
+            errors.append("a re-export after four added items did not grow the tape")
+        new_rev = ctypes.c_uint64(0)
+        lib.clay_tape_info(fresh, None, None, None, None, None, ctypes.byref(new_rev))
+        if new_rev.value == rev.value:
+            errors.append("the revision did not change across an edit")
+    lib.clay_tape_release(fresh)
+
+    # the cull region follows clay_eval_grid's rules
+    region_lo = (ctypes.c_float * 3)(-1, -1, -1)
+    region_hi = (ctypes.c_float * 3)(1, 1, 1)
+    culled = ctypes.c_void_p(0)
+    if lib.clay_tape_export(doc, region_lo, region_hi, ctypes.byref(culled)) != 0:
+        errors.append("clay_tape_export rejected a valid cull region")
+    lib.clay_tape_release(culled)
+    if lib.clay_tape_export(doc, region_lo, None, ctypes.byref(culled)) != 1:
+        errors.append("clay_tape_export accepted one bound without the other")
+
+    lib.clay_tape_release(tape)
+    lib.clay_tape_release(None)  # releasing a null handle is a no-op
+    lib.clay_document_destroy(doc)
+    return errors
 
 
 def brick_types(lib) -> None:
@@ -969,6 +1079,7 @@ def ffi_exercise(lib_path: str) -> list[str]:
             errors += voxel_exercise(lib)
             errors += voxel_ownership_exercise(lib, doc)
             errors += brick_cache_exercise(lib)
+            errors += tape_export_exercise(lib)
         lib.clay_document_destroy(doc)
         lib.clay_document_destroy(None)  # releasing a null handle is a no-op
     return errors
