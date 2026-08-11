@@ -230,10 +230,16 @@ final class LatencyTests: XCTestCase {
                     // win at any thread count — 512 samples is too little work
                     // to cover a dispatch. This case measures the documented
                     // path, not a worse one.
+                    // ABI 0.26.0 gave the cache a colour channel ("the cache
+                    // becomes a GPU atlas"), so eval and submit each take a
+                    // colours buffer and its capacity. Passing nil/0 asks for
+                    // distances only, which is what this case measures.
                     _ = clay_brick_cache_eval_requests(doc, "cpu", requests, count,
-                                                       &values, count * brickFloats)
+                                                       &values, count * brickFloats,
+                                                       nil, 0)
                     _ = clay_brick_cache_submit(cache, requests, count, values,
-                                                count * brickFloats, nil, nil)
+                                                count * brickFloats, nil, 0,
+                                                nil, nil)
                     refreshed += count
                     if remaining == 0 { return refreshed }
                 }

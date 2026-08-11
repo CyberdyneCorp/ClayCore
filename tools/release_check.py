@@ -78,9 +78,16 @@ def check_versions(cl: Checklist) -> None:
            f"wheel={'.'.join(wheel_version or '?')}")
 
 
-# Paths whose contents decide what the engine DOES on a device. A device gate
-# recorded before any of these changed is stale evidence.
-DEVICE_RELEVANT = ("src/", "include/", "backends/", "bindings/", "CMakeLists.txt")
+# Paths whose contents decide what the engine DOES on a device, or what the
+# harness MEASURES. A gate recorded before any of these changed is stale
+# evidence.
+#
+# tests/device/ is in the list because leaving it out let the gate pass while
+# certifying a suite that no longer existed: the harness grew from 25 cases to
+# 50 and the recorded stamp still said PASS, because only engine paths were
+# checked. A stamp has to name the same experiment that is about to ship.
+DEVICE_RELEVANT = ("src/", "include/", "backends/", "bindings/", "CMakeLists.txt",
+                   "tests/device/")
 
 
 def check_device_gate(cl: "Checklist") -> None:
@@ -131,6 +138,24 @@ def check_device_gate(cl: "Checklist") -> None:
                + ", ".join(changed[:3])
                + (f" (+{len(changed) - 3} more)" if len(changed) > 3 else ""))
         return
+    # And the baseline must budget everything the recorded run measured. A
+    # baseline with fewer budgets than the run has cases means the gate would
+    # fail the moment it actually ran, which is not something to discover at
+    # release time.
+    baseline_path = REPO / "tests" / "device" / "baseline.json"
+    if baseline_path.exists():
+        try:
+            budgets = json.loads(baseline_path.read_text()).get("budgets", {})
+        except json.JSONDecodeError:
+            budgets = {}
+        recorded = stamp.get("caseCount") or 0
+        if recorded and len(budgets) < recorded:
+            cl.add("device", False,
+                   f"the recorded run measured {recorded} case(s) but the "
+                   f"baseline budgets only {len(budgets)}; re-run the device "
+                   f"bench and update the baseline")
+            return
+
     cl.add("device", True,
            f"{stamp.get('caseCount')} case(s) on {stamp.get('deviceModel')} "
            f"at {commit[:9]}")
