@@ -3096,7 +3096,10 @@ typedef struct clay_brick_mesh_params {
  * vertex first owns it. You may OVERWRITE a key's ranges; you may not free one
  * key's vertices without checking its neighbours'. Breaking the weld to make
  * the ranges independent would produce a seam-duplicated mesh, and this is also
- * the export path, where watertightness is the contract. */
+ * the export path, where watertightness is the contract.
+ *
+ * A key's ranges carry its own cells' triangles first, then the straddlers
+ * attributed to it — see clay_brick_cache_mesh for the attribution rule. */
 typedef struct clay_brick_mesh_range {
     int32_t key[3];
     uint32_t vertex_first, vertex_count;
@@ -3120,6 +3123,20 @@ typedef struct clay_brick_mesh_range {
  * differs only in that a vertex shared with a cell outside it is emitted again
  * by whichever mesh reaches it, at a bit-identical position — a duplicated seam
  * vertex, never a crack.
+ *
+ * A subset returns every whole-mesh triangle with at least one corner inside
+ * a requested brick's closed box — including the STRADDLERS, whose cell is
+ * owned by an unrequested brick. Each straddler is attributed to the
+ * lexicographically lowest (x, then y, then z) requested key whose closed box
+ * contains one of its corners, and lands in that key's ranges after the key's
+ * own triangles. This is what makes a subset able to MAINTAIN a surface:
+ * without the straddlers those triangles lived in cells no request named, so
+ * no sequence of subset calls could reconstruct the whole, and dilating the
+ * request only moved the boundary. The cost is that a host holding geometry
+ * per brick dedupes by triangle: a straddler touching two requested keys is
+ * attributed to one of them per call, and may move to another key's share
+ * when a later request names a different set — its content is identical
+ * wherever it lands, so keeping either copy is right.
  *
  * out_ranges (may be NULL) receives key_count clay_brick_mesh_range values in
  * the order the keys were given. It REQUIRES keys_xyz: with no key list there
