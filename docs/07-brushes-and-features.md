@@ -63,7 +63,7 @@ item in an empty layer produces nothing.
 from it — but paint moves colour and leaves the field untouched, where relief
 moves the field and leaves colour alone.
 
-Two consequences worth knowing before using them:
+Three consequences worth knowing before using them:
 
 - The **rounding does double duty**: it is the falloff width *and* it rounds the
   region's own field, exactly as it does for groove and tongue. So the reach is
@@ -72,6 +72,17 @@ Two consequences worth knowing before using them:
   rim into a ledge rather than a swell, and it is exactly the slope the op adds
   — so a picture that looks harsh and a step scale that dropped are the same
   fact. See [`examples/25_relief.py`](../examples/25_relief.py).
+- **`k` buys displacement only up to the region's extent.** A surface point
+  moves only while it stays inside the rounded region, so the displacement
+  equals `k` exactly until `k` reaches how far the region extends past the
+  surface along the normal — for a sphere stamp centered on the surface, its
+  radius plus the rounding — then saturates, never reaching radius +
+  2·rounding. With rounding 0 the ceiling is the bare radius: leaving rounding
+  unset costs amplitude as well as edge softness, and a depth slider mapped to
+  `k` goes dead past the extent. The standard clay mapping is
+  **`k` = rounding = stamp radius**: the stamp raises the surface by exactly
+  `k` with a soft rim, reaching no further than 2·rounding outside the item.
+  `tests/unit/test_relief.cpp` pins these numbers.
 
 `TransitionLinear`/`TransitionRadial` are **non-local**: their weight is
 non-zero arbitrarily far from both operands, so those items report infinite
