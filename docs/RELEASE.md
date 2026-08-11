@@ -202,6 +202,21 @@ forward-refuse).
    the same loss minors 1, 2 and 4 carry. The format notes at the top of
    `include/clay/io/clayspace.h` record it.
 
+   **0.28.0 is additive: one symbol and one grown descriptor**
+   (`add-feathered-volume-replace`, closing #67). `clay_item_volume_relax_from`
+   mirrors `clay_item_volume_flatten_from` — a document-sourced relax, so the
+   last SDF verb stops requiring a bake-first round trip. `clay_volume_params`
+   gains a trailing `feather`: a volume placed with `CLAY_OP_REPLACE`
+   crossfades into the field beneath it over that margin instead of meeting it
+   at a hard box edge, which is what removes the cell-wavelength normal
+   corrugation of the bake round trip. The versioned-descriptor pattern
+   applies: a zeroed feather, and any pre-0.28 struct_size, is the hard
+   replace byte for byte. Internally the tape gains one combine mode
+   (`ccombine_replace_feather`) and the volume blob header grows to 13 floats,
+   both by their existing self-describing rules; a `.clayspace` written by
+   0.27 loads with feather 0 and one written by 0.28 loads in 0.27 with the
+   feather ignored.
+
    **0.27.3 fixes the Metal backend on paravirtualised GPUs, and makes it
    faster on real ones.** No signature changed and nothing was added; this is a
    kernel change and a diagnostic.

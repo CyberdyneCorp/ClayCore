@@ -408,16 +408,19 @@ void FieldVolume::shrink_band(float by) {
 // finds its three offsets exactly where it always did, and a reader that
 // postdates it can tell the two apart without a version number to keep in
 // step with anything else.
+//
+// [12] feather (add-feathered-volume-replace), by the same self-describing
+// rule: absent reads as 0, which is the hard replace.
 
 // The header, then one index entry and one far bound per brick, then the
 // samples. Kept beside to_blob so the two cannot drift.
 std::size_t FieldVolume::blob_floats() const {
-    return 12 + index_.size() + far_.size() + data_.size();
+    return 13 + index_.size() + far_.size() + data_.size();
 }
 
 std::vector<float> FieldVolume::to_blob() const {
     std::vector<float> out;
-    const std::size_t header = 12;
+    const std::size_t header = 13;
     out.resize(header);
     out[0] = origin_.x;
     out[1] = origin_.y;
@@ -431,6 +434,7 @@ std::vector<float> FieldVolume::to_blob() const {
     out[9] = static_cast<float>(header + index_.size());
     out[10] = static_cast<float>(header + index_.size() + far_.size());
     out[11] = sample_lipschitz_;
+    out[12] = feather_;
     for (std::int32_t e : index_) out.push_back(static_cast<float>(e));
     out.insert(out.end(), far_.begin(), far_.end());
     out.insert(out.end(), data_.begin(), data_.end());
@@ -450,8 +454,10 @@ std::optional<FieldVolume> FieldVolume::from_blob(const std::vector<float>& blob
     std::size_t far_off = static_cast<std::size_t>(blob[9]);
     std::size_t data_off = static_cast<std::size_t>(blob[10]);
     // The header size IS the index offset, so a blob written before the
-    // Lipschitz field simply does not have one and reads as 1.
+    // Lipschitz field simply does not have one and reads as 1, and one
+    // written before the feather reads as 0 — the hard replace.
     v.sample_lipschitz_ = index_off > 11 ? std::max(blob[11], 1.0f) : 1.0f;
+    v.feather_ = index_off > 12 ? std::max(blob[12], 0.0f) : 0.0f;
     std::size_t index_size =
         static_cast<std::size_t>(v.bcount_[0]) * v.bcount_[1] * v.bcount_[2];
     if (index_off + index_size > blob.size() || far_off + index_size > blob.size() ||

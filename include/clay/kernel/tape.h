@@ -152,6 +152,26 @@ enum CCombineMode {
     // branch below so they cannot drift apart.
     ccombine_relief = 14,  // build the surface up  (ZBrush Standard, ClayBuildup)
     ccombine_incise = 15,  // cut into it           (Crease, DamStandard)
+    // FEATHERED replace of a sampled volume (add-feathered-volume-replace).
+    // Emitted by the tape COMPILER when a volume item placed with Replace
+    // carries a feather; it is not a public op — the node's op stays Replace,
+    // and a feather of zero emits ccombine_replace exactly as before.
+    //
+    // The hard replace holds BOTH fields live at the surface, and a volume
+    // baked from the document beneath it ties with that field at every sample
+    // plane. min/max of two fields that touch and cross at the cell wavelength
+    // is what corrugates the normals (issue #67): the field's zero set is
+    // exact, but any finite-difference gradient across a branch switch pays
+    // |b - a| over its own epsilon, at the cell wavelength. This mode holds
+    // ONE field almost everywhere instead: the volume outright deep inside its
+    // sampled box, the surrounding field outside, crossfaded over the feather
+    // margin just inside the box faces.
+    //
+    // Extra params after the shared four: [4] the volume's blob header offset
+    // (origin, cell, band, brick counts and feather are read from the same
+    // header the prim reads, so the two cannot disagree), [5..16] the
+    // world-to-local matrix of the instance, [17] its world scale.
+    ccombine_replace_feather = 16,
 };
 
 enum CBlendProfile {
@@ -333,6 +353,9 @@ CLAY_FN float ccombine_extended_support(int mode, float k, float r2) {
     if (mode == ccombine_relief || mode == ccombine_incise) return cmax(r2, 0.0f);
     if (mode == ccombine_groove || mode == ccombine_tongue) return cmax(r2, 0.0f);
     if (mode == ccombine_inset || mode == ccombine_replace) return 0.0f;
+    // The feathered replace deviates from `a` only inside the sampled box,
+    // which IS the item's geometry bound: support 0, exactly as the hard one.
+    if (mode == ccombine_replace_feather) return 0.0f;
     return cmax(k, 0.0f);
 }
 
@@ -693,6 +716,71 @@ CLAY_FN bool ctape_mode_is_transition(int mode) {
     return mode == ccombine_transition_linear || mode == ccombine_transition_radial;
 }
 
+// The feathered replace (ccombine_replace_feather). rec points past the four
+// shared combine params: [0] volume header offset in the blob, [1..12] the
+// instance's world-to-local matrix, [13] its world scale.
+//
+//     r = a + w(p) * clamp(b - a, -band, band)
+//
+// w is a smoothstep of the Chebyshev inset into the sampled box over the
+// feather width: 0 at and outside the box faces — the surrounding field
+// continues untouched, which is what removes the hard box edge — and 1 a
+// feather inside them, where the result IS the volume and only one gradient
+// survives, which is what removes the corrugation.
+//
+// The correction is clamped at the volume's band, and that clamp is what two
+// other contracts hang off. Lipschitz: the crossfade adds at most
+// band * 1.5 / feather to the declared slope (cfi_replace_feather), because
+// that is the largest value the weight's own gradient can multiply. Per-brick
+// culling: a dropped item can shift `a` only where `a` already exceeded the
+// cull dilation, and a correction no larger than the band cannot pull such a
+// value back inside the brick's clamp — provided the compiler widened the
+// cull test by this band, which it does (compile-time counterpart in
+// tape_build.cpp). A surface the volume moved FURTHER than its band is
+// therefore expressed only up to the band; bake with a band that covers the
+// verb, which is the same contract the volume's own accuracy already states.
+CLAY_FN CTapeValue ctape_replace_feather(CTapeValue a, CTapeValue b, CLAY_FPTR rec,
+                                         CLAY_FPTR blob, cfloat3 p) {
+    CLAY_FPTR h = blob + CLAY_INT(CLAY_AT(rec, 0));
+    cfloat3 origin = cf3(CLAY_AT(h, 0), CLAY_AT(h, 1), CLAY_AT(h, 2));
+    float cell = CLAY_AT(h, 3);
+    float band = CLAY_AT(h, 4);
+    int bcx = CLAY_INT(CLAY_AT(h, 5)), bcy = CLAY_INT(CLAY_AT(h, 6)), bcz = CLAY_INT(CLAY_AT(h, 7));
+    float feather = CLAY_AT(h, 12);
+    if (bcx <= 0 || bcy <= 0 || bcz <= 0 || cell <= 0.0f || feather <= 0.0f) {
+        CTapeValue r;
+        r.d = op_replace(a.d, b.d);
+        r.color = b.d < 0.0f ? b.color : a.color;
+        return r;
+    }
+
+    cfloat4x4 inv;
+    inv.c0 = cf4(CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3), 0.0f);
+    inv.c1 = cf4(CLAY_AT(rec, 4), CLAY_AT(rec, 5), CLAY_AT(rec, 6), 0.0f);
+    inv.c2 = cf4(CLAY_AT(rec, 7), CLAY_AT(rec, 8), CLAY_AT(rec, 9), 0.0f);
+    inv.c3 = cf4(CLAY_AT(rec, 10), CLAY_AT(rec, 11), CLAY_AT(rec, 12), 1.0f);
+    cfloat3 lp = cmul_point(inv, p);
+
+    // Chebyshev inset into the sampled box: positive inside, zero on a face.
+    float sx = CLAY_FLOATC((bcx * CLAY_BRICK_DIM)) * cell;
+    float sy = CLAY_FLOATC((bcy * CLAY_BRICK_DIM)) * cell;
+    float sz = CLAY_FLOATC((bcz * CLAY_BRICK_DIM)) * cell;
+    float inset = cmin(cmin(lp.x - origin.x, origin.x + sx - lp.x),
+                       cmin(cmin(lp.y - origin.y, origin.y + sy - lp.y),
+                            cmin(lp.z - origin.z, origin.z + sz - lp.z)));
+    float t = cclamp(inset / feather, 0.0f, 1.0f);
+    float w = t * t * (3.0f - 2.0f * t);
+
+    // band and the correction are compared in world units: the header carries
+    // both in the volume's own, so the instance scale converts them.
+    float scale = CLAY_AT(rec, 13);
+    float band_world = band * scale;
+    CTapeValue r;
+    r.d = a.d + w * cclamp(b.d - a.d, -band_world, band_world);
+    r.color = b.d < 0.0f ? cmix(a.color, b.color, w) : a.color;
+    return r;
+}
+
 CLAY_FN CTapeValue ctape_combine_values(CTapeValue a, CTapeValue b, int mode, int profile,
                                         float k, float r2) {
     CTapeValue r;
@@ -806,6 +894,8 @@ CLAY_FN CTapeValue ctape_eval(CLAY_IPTR instrs, int instr_count,
                 r.d = cmix(a.d, b.d, w);
                 r.color = cmix(a.color, b.color, w);
                 stack[top - 1] = r;
+            } else if (mode == ccombine_replace_feather) {
+                stack[top - 1] = ctape_replace_feather(a, b, CLAY_OFF(pr, 4), blob, p);
             } else {
                 stack[top - 1] = ctape_combine_values(a, b, mode, CLAY_INT(CLAY_AT(pr, 1)), CLAY_AT(pr, 2), CLAY_AT(pr, 3));
             }

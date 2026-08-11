@@ -24,8 +24,8 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 27
-#define CLAY_ABI_PATCH 3
+#define CLAY_ABI_MINOR 28
+#define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
  * selected node ids, stroke points, polygon vertices. A count above it is
@@ -1172,6 +1172,33 @@ typedef struct clay_volume_params {
      * the default. Sampling every triangle exactly is not reachable from here:
      * it is a testing control, not something an app should ask for. */
     float beta;
+    /* How far inside the sampled box a CLAY_OP_REPLACE placement crossfades
+     * from the surrounding field to this volume, in world units. <= 0 — and
+     * any struct_size from before this field existed — is the hard replace,
+     * byte-identical to what every prior release did.
+     *
+     * WHY: a hard replace holds BOTH fields live at the surface. A bake put
+     * straight back ties with the field beneath it at every sample plane, and
+     * min/max branch switching between two fields that touch is what
+     * corrugates the normals at the cell wavelength (issue #67) — the zero
+     * set is exact, the shading is not — while the box faces meet the outside
+     * field at a hard edge. With a feather, deep inside the box the result IS
+     * the volume (one gradient, no ties), outside the box the surrounding
+     * field continues untouched, and the two crossfade over this margin.
+     *
+     * The blend's correction is clamped at the volume's BAND, which keeps the
+     * declared field slope at max + band * 1.5 / feather (the document's safe
+     * step scale drops to match — feather about one band is the sweet spot)
+     * and keeps per-brick culling exact. It also means a verb that moved the
+     * surface further than the band from what sits beneath is expressed only
+     * up to the band across the feather margin: bake with a band that covers
+     * the verb, which is the accuracy contract a volume already has.
+     *
+     * A feathered volume placed with CLAY_OP_REPLACE does not participate in
+     * the layer mirror (the crossfade follows ONE sampled box); every other
+     * op ignores the feather. Applies to every producer that takes this
+     * struct: the mesh import, the document bake, and the _from verbs. */
+    float feather;
 } clay_volume_params;
 
 /* Samples `mesh` into an item carrying a volume, which is what turns an
@@ -1234,9 +1261,42 @@ typedef struct clay_relax_params {
  * to its own zero set. So the raymarcher stays correct.
  *
  * The item must carry a volume; anything else is refused rather than ignored.
- * From this ABI that means an imported mesh, which is the workflow an app
- * wants: bring in a scan, then smooth it. */
+ *
+ * WHERE A DOCUMENT EXISTS, use clay_item_volume_relax_from below instead: it
+ * samples the document, which is exact everywhere, in one call. This call is
+ * for a volume with no document behind it — an imported mesh: bring in a
+ * scan, then smooth it. */
 clay_result clay_item_volume_relax(clay_item* item, const clay_relax_params* params);
+
+/* The same relax, sampled from a DOCUMENT rather than applied to an existing
+ * volume — the counterpart clay_item_volume_flatten_from is to the flatten,
+ * and the one to reach for when a document is what you have.
+ *
+ * The relationship to bake-then-relax is exact: this call samples the
+ * document precisely as clay_item_volume_from_document would and relaxes
+ * those samples in place, so inside the band the result is identical to
+ * baking first — a test holds that. What it removes is the two-call round
+ * trip and the temptation to relax a volume that was itself derived from
+ * another volume, where the band inaccuracy the flatten note above describes
+ * compounds. Relax moves the surface by less than a cell per pass, so unlike
+ * a flatten it can never walk out of the band it was baked with.
+ *
+ * `relax` is the relax itself, validated exactly as the in-place form
+ * validates it. `volume` gives the sampling — cell_size required and > 0,
+ * band and padding defaulting as they do for clay_item_volume_from_document,
+ * feather honoured the same way. `region_min`/`region_max` are the same
+ * optional pair, with the same rule: both NULL means the document's own
+ * bounds padded by the band, and one without the other is refused.
+ *
+ * Returns a NEW item carrying the relaxed volume; the document is not
+ * modified. Free it with clay_item_destroy, or place it with
+ * clay_layer_add_item. */
+clay_result clay_item_volume_relax_from(const clay_document* doc,
+                                        const clay_relax_params* relax,
+                                        const clay_volume_params* volume,
+                                        const float region_min[3],
+                                        const float region_max[3],
+                                        clay_item** out_item);
 
 /* Which side of its plane a flatten acts on.
  *

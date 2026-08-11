@@ -181,3 +181,71 @@ TEST_CASE("tape tracks exactness: ellipsoid or blends downgrade") {
     CHECK_FALSE(blended.info.is_exact);
     CHECK(blended.safe_step_scale() == doctest::Approx(1.0f));  // still safe at full step
 }
+
+TEST_CASE("per-brick culled tape: band-clamped bit-identity under a feathered replace") {
+    // The feathered replace (add-feathered-volume-replace) moves the
+    // accumulated value by up to the volume's band, so the compiler widens
+    // its cull test by that band — otherwise an item dropped just beyond the
+    // caller's dilation could still steer a value back inside the brick's
+    // clamp. This holds the same bit-identity contract the plain cull test
+    // above holds, on a document where the feather is in play: a ball, a
+    // second ball far away (the cullable item), and a feathered bake of the
+    // first put back with Replace.
+    Document doc;
+    Layer& l = doc.add_sdf_layer("l");
+    l.sdf->insert(item(Prim::sphere(1.0f), cf3(0, 0, 0)));
+    l.sdf->insert(item(Prim::sphere(0.6f), cf3(3.0f, 0, 0)));
+
+    auto ball = [](cfloat3 p) { return clength(p) - 1.0f; };
+    field::FieldVolume v = field::FieldVolume::sample(
+        ball, math::Aabb(cf3(-0.7f, -0.4f, 0.4f), cf3(0.7f, 0.4f, 1.3f)), 0.02f, 0.06f);
+    v.set_feather(0.06f);
+    Node n = item(Prim::volume(), cf3(0, 0, 0), Op::Replace);
+    n.volume = std::make_shared<field::FieldVolume>(std::move(v));
+    l.sdf->insert(n);
+
+    Tape full = compile_document(doc);
+    REQUIRE(!full.empty());
+    const float band = 0.05f;
+    clay_test::Lcg rng(304);
+    for (int b = 0; b < 40; ++b) {
+        cfloat3 corner = rng.vec3(-1.5f, 3.5f);
+        math::Aabb brick{corner, corner + cf3(0.4f, 0.4f, 0.4f)};
+        CullRegion cull{brick.dilated(band)};
+        Tape culled = compile_document(doc, &cull);
+        for (int i = 0; i < 200; ++i) {
+            cfloat3 p = cf3(rng.range(brick.min.x, brick.max.x),
+                            rng.range(brick.min.y, brick.max.y),
+                            rng.range(brick.min.z, brick.max.z));
+            float df = cclamp(full.eval(p).d, -band, band);
+            float dc = cclamp(culled.eval(p).d, -band, band);
+            CHECK(df == dc);  // exact equality, not approx
+        }
+    }
+
+    // A lone feathered volume still shows: with nothing beneath it in the
+    // chain, the compiler degrades to the hard replace rather than blending
+    // the volume into a far-field seed and away to nothing.
+    Document lone;
+    Layer& ll = lone.add_sdf_layer("l");
+    field::FieldVolume lv = field::FieldVolume::sample(
+        ball, math::Aabb(cf3(-0.7f, -0.4f, 0.4f), cf3(0.7f, 0.4f, 1.3f)), 0.02f, 0.06f);
+    lv.set_feather(0.06f);
+    Node ln = item(Prim::volume(), cf3(0, 0, 0), Op::Replace);
+    ln.volume = std::make_shared<field::FieldVolume>(std::move(lv));
+    ll.sdf->insert(ln);
+    Tape lone_tape = compile_document(lone);
+    CHECK(lone_tape.eval(cf3(0, 0, 0.9f)).d < 0.0f);  // the cap's material
+    // ...and its per-brick tapes agree with its full tape the same way.
+    math::Aabb cap_brick{cf3(-0.2f, -0.2f, 0.8f), cf3(0.2f, 0.2f, 1.2f)};
+    CullRegion cap_cull{cap_brick.dilated(band)};
+    Tape lone_culled = compile_document(lone, &cap_cull);
+    for (int i = 0; i < 200; ++i) {
+        cfloat3 p = cf3(rng.range(cap_brick.min.x, cap_brick.max.x),
+                        rng.range(cap_brick.min.y, cap_brick.max.y),
+                        rng.range(cap_brick.min.z, cap_brick.max.z));
+        float df = cclamp(lone_tape.eval(p).d, -band, band);
+        float dc = cclamp(lone_culled.eval(p).d, -band, band);
+        CHECK(df == dc);
+    }
+}
