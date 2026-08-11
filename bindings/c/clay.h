@@ -2257,6 +2257,37 @@ clay_result clay_eval_grid(const clay_document* doc, const char* backend,
                            const float region_max[3], float* out_values,
                            float* out_colors_rgb, size_t value_count);
 
+/* -- the host parity fixture ----------------------------------------------- */
+
+/* The fixture a host preview runs to PROVE it evaluates the same field
+ * claycore bakes: a table of composed tapes, probe points, and this library's
+ * own reference distance and colour at each probe, as JSON.
+ *
+ * `clay parity-fixture` writes the same bytes, and until now that CLI was the
+ * only way to get them — which is no use to an app whose tests link the
+ * framework rather than shell out to a tool that is not in the bundle. This is
+ * that gate, reachable from a test target: generate it, evaluate the same tapes
+ * with your own shader, and assert agreement within the tolerances the JSON
+ * carries.
+ *
+ * The case table is chosen for what a hand-written preview gets WRONG rather
+ * than for coverage: every blend profile against every smooth boolean, every
+ * extended combine mode, the material-mix weights, a deformer chain,
+ * repetition, the out-of-line blob, and a composed document. The blend cases
+ * are probed across the seam, so a support-k quadratic smin where the engine
+ * uses 4k fails here rather than at bake time — which is the drift that started
+ * all of this.
+ *
+ * Size-query pattern, exactly as clay_list_backends: call with buffer == NULL
+ * for the required size including the NUL, then again with a buffer that large.
+ * It is deterministic — no clock, no RNG beyond a fixed seed — so two calls in
+ * one build produce identical bytes and a host can diff them.
+ *
+ * It is a few hundred kilobytes and builds the whole table on each call. That
+ * is a test-time cost and this is a test-time entry point; do not call it per
+ * frame. */
+clay_result clay_parity_fixture_json(char* buffer, size_t* size);
+
 /* -- device interop -------------------------------------------------------- */
 
 /* Backends create and own their devices, which is right for a headless library

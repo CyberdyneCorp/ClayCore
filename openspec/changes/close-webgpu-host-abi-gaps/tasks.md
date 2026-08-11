@@ -59,3 +59,26 @@
 - [x] 6.5 Announce the two arity changes in `docs/RELEASE.md` release notes, with the compile-error-not-misread argument
 - [x] 6.6 Update `openspec/ROADMAP.md`
 - [x] 6.7 Reply on issue #43 covering items 1, 2, 3, 4 and 8, and stating what was decided against (no colour on the mip, no caller-owned destination on meshing itself, and why)
+
+## 7. Issue #51 — the iPad host (ClaySpace, Metal)
+
+#51 is the iOS counterpart to #43 and asks to be counted as a **second consumer**
+of items 2, 3, 5 and 6 rather than as a second issue. Those are delivered by this
+change and by `add-tape-abi-export` / `add-device-interop`. What is specific to
+it, and what needed work:
+
+- [x] 7.1 **Item A — decide and say which path is supported.** #51 asked whether the analytic host preview was being retired in favour of the brick path, and said either answer was usable but the ambiguity was not. Answer: **both are supported, neither is deprecated**, and route 2 is the recommendation for a host with no need for the field between samples. Written into `docs/06`'s opening section rather than left to be inferred
+- [x] 7.2 **Item B — a volume item must be renderable on whichever path wins.** It is, on both, and by construction rather than by addition: route 1 evaluates the tape whose blob carries the samples, route 2 reads bricks filled from that same tape. Neither asks a host to enumerate primitives, which is the mistake that made regional verbs invisible in ClaySpace's own MSL (`default: return 1e9`)
+- [x] 7.3 Test it rather than assert it — `tests/unit/test_c_host_volume_path.cpp`. Both cases put a blob-carrying STROKE before the volume so it does not sit at blob offset 0, which is the arrangement #35 needed to become visible. Analytic: the exported blob is non-empty and `ctape_eval` agrees with the library inside the volume. Atlas: the volume produces surface bricks, a raycast hits its near side, and the same bricks mesh
+- [x] 7.4 **Item C — the parity fixture reachable from a host test bundle.** `clay_parity_fixture_json`, size-query pattern like `clay_list_backends`. An iOS test target links the framework and cannot shell out to a CLI that is not in it, so the gate `docs/06` describes was unreachable for exactly the consumer it was written for
+- [x] 7.5 Verify the ABI's bytes are identical to the CLI's — confirmed by diff (422 147 bytes), and the determinism a host needs to diff two runs is asserted in the test
+- [x] 7.6 `tools/check_c_abi.py` exercises the fixture through ctypes: size query, adequate buffer, the keys a host needs, and a short buffer refused WITH the needed size reported so the retry is one call
+- [x] 7.7 `docs/06`: the ABI route beside the CLI one under "Prove the preview agrees", and the "do not hand-mirror our kernels" paragraph #51's own table makes the case for
+- [x] 7.8 Reply on #51
+
+**Not addressed here**, and said plainly rather than left implied: #51's ask A
+also offered "a claycore-owned Metal preview entry point the host drives" as a
+third option. That is not built. It would mean this library owning a marcher, a
+step policy and a shading contract — a renderer, not a field engine — and the
+two routes that are built exist so it does not have to. If neither serves, that
+is worth reopening with the specific thing they cannot express.

@@ -67,3 +67,16 @@ The mesh SHALL remain the engine's, produced and freed as it is today; this requ
 #### Scenario: A short destination is refused
 - **WHEN** the destination is smaller than the stride times the vertex count
 - **THEN** the call is refused rather than writing what the caller did not allocate
+
+### Requirement: Every primitive is reachable on a host preview path
+A consumer drawing this library's field on its own GPU SHALL be able to reproduce EVERY primitive the document can contain, including sampled volumes, without enumerating primitive kinds in its own code.
+
+A host that implements a subset of the dialect draws a subset of the document, and the subset that goes missing is not arbitrary: sampled volumes are what every regional verb produces, so a preview lacking them shows nothing for a whole class of brush until a bake lands. Neither published path SHALL require a consumer to name primitives — one evaluates the compiled tape, whose out-of-line payload carries a volume's samples, and the other reads bricks filled by evaluating that same tape.
+
+#### Scenario: A regional verb is visible before the bake
+- **WHEN** a document containing a sampled volume is drawn through either the exported tape or the brick payloads
+- **THEN** the volume contributes its surface, and the field a consumer evaluates agrees with the library's own at the same points
+
+#### Scenario: A volume is found wherever it sits in the payload
+- **WHEN** a sampled volume follows another item that carries out-of-line data, so it does not begin at the start of the payload
+- **THEN** it is still evaluated correctly on both paths

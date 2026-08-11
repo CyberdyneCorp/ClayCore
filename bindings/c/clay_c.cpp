@@ -37,6 +37,7 @@
 #include "clay/scene/commands.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/tape.h"
+#include "clay/io/parity_fixture.h"
 #include "clay/version.h"
 #include "clay/voxel/grid.h"
 #include "clay/brush/mask_extrude.h"
@@ -4941,6 +4942,29 @@ clay_result clay_eval_grid(const clay_document* doc, const char* backend,
     scene::CullRegion cull{region};
     scene::Tape tape = scene::compile_document(doc->doc.document, &cull);
     return eval_grid_into(tape, backend, query, out_values, out_colors_rgb);
+}
+
+// -- the host parity fixture (build-packaging spec: host parity fixture) -----
+
+clay_result clay_parity_fixture_json(char* buffer, size_t* size) {
+    if (!size) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null size");
+    // Built on each call rather than cached: this is a test-time entry point,
+    // and a static cache would hold a few hundred kilobytes for the whole life
+    // of every process that never calls it.
+    const std::string json = io::kernel_parity_fixture_json(io::kernel_parity_cases());
+    const std::size_t needed = json.size() + 1;
+    if (!buffer) {
+        *size = needed;
+        return CLAY_OK;
+    }
+    if (*size < needed) {
+        *size = needed;
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "the parity fixture needs " + std::to_string(needed) + " bytes");
+    }
+    std::memcpy(buffer, json.c_str(), needed);
+    *size = needed;
+    return CLAY_OK;
 }
 
 // -- device interop (evaluation-backends spec: a caller-supplied device) -----

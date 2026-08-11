@@ -57,6 +57,30 @@ triangle viewport should not be forced onto the volume path to get incremental
 display, and because `take_dirty` producing a key list that `mesh` refuses is an
 inconsistency inside one section of one header.
 
+## The same gaps, from the iPad
+
+Issue #51 arrived from **ClaySpace**, the iOS/Metal host, while this was being
+written, and asks to be counted as "a second consumer, not a second issue" of
+items 2, 3, 5 and 6. It is, and this change serves both — but it brings two
+findings of its own that shaped the work:
+
+- **A preview that implements a SUBSET of the dialect draws a subset of the
+  document.** Their hand-written MSL ends `default: return 1e9`, and
+  `CLAY_PRIM_VOLUME` falls into that default — so every *regional* verb
+  (flatten, smooth, move-topological) is invisible in the live preview until the
+  bake lands. Users report it as "the brush does nothing, then a second later it
+  does". Neither route this change publishes has that failure available, because
+  neither asks a host to enumerate primitives. Worth proving rather than
+  asserting, which `tests/unit/test_c_host_volume_path.cpp` does.
+- **The parity fixture was unreachable from the consumer it was written for.**
+  `clay parity-fixture` is a CLI; an iOS test target links the framework and
+  cannot shell out to a tool that is not in the bundle. So `docs/06`'s "prove
+  the preview agrees" section described a gate that host could not run.
+
+They also asked for a decision they said they would take either way: is the
+analytic host preview deprecated in favour of the brick path? **No.** Both are
+supported. That is now the first thing `docs/06` says.
+
 ## What changes
 
 - **Brick colour.** An opt-in per-brick RGBA8 lattice carried alongside the fp16
@@ -73,6 +97,8 @@ inconsistency inside one section of one header.
   and a copy entry point, so a mesh reaches a mapped GPU buffer in one pass in
   the host's own layout.
 - **Batched brick raycast**, mirroring `clay_raycast_many`.
+- **The parity fixture through the ABI** (`clay_parity_fixture_json`), so a host
+  whose tests link the framework can run the gate that already exists.
 
 ## What this change does not do
 

@@ -30,6 +30,31 @@ size, trilinearly interpolated, in a narrow band around the surface. For a
 sculpting viewport that is what you were going to draw anyway. Take route 1 when
 you need the field *between* the samples or *away* from the surface.
 
+**Both are supported, and neither is deprecated.** ClaySpace asked (#51) whether
+the analytic host preview was being retired in favour of the brick path, and
+said either answer was usable but the ambiguity was not. It is not being
+retired: route 1 is the only way to get an analytic field, and `clay_tape_export`
+exists precisely so an ABI consumer can take it. If you have no strong reason to
+need the field between samples, **take route 2** — it is cheaper to adopt, works
+in shading languages our dialect does not target, and removes the drift class
+instead of managing it.
+
+**Whichever you take, do not hand-mirror our kernels.** `include/clay/kernel/`
+is published so you never have to, and a re-implementation is a promise to
+re-derive every op we add. The mix-form quadratic `smin` of support `k` where
+`csmin_quadratic` uses `4k` cost one host a debugging cycle and its users a
+release of "the bake destroys my strokes"; that is the failure mode both routes
+are shaped to make impossible.
+
+**Every primitive is on both routes, sampled volumes included.** A host that
+implements a *subset* of the dialect draws a subset of the document: ClaySpace's
+shader ended with `default: return 1e9`, `CLAY_PRIM_VOLUME` fell into it, and so
+every regional verb — flatten, smooth, move-topological — was invisible until
+the bake landed. Neither route has that failure available, because neither asks
+you to enumerate primitives: route 1 evaluates the tape, whose blob carries a
+volume's samples, and route 2 reads bricks that were filled by evaluating that
+same tape. Gated by `tests/unit/test_c_host_volume_path.cpp`.
+
 ## Why this exists
 
 ClaySpace's Metal preview re-implemented the kernel math by hand. It used a
@@ -89,6 +114,20 @@ out-of-line blob at the wrong offset. The parity fixture is the gate for that:
 ```sh
 clay parity-fixture -o kernel_parity.json
 ```
+
+**Or from your own test bundle**, which is what you want if your tests link the
+framework rather than shell out to a CLI that is not in it (#51 item C):
+
+```c
+size_t n = 0;
+clay_parity_fixture_json(NULL, &n);          /* size query, includes the NUL */
+char* json = malloc(n);
+clay_parity_fixture_json(json, &n);          /* same bytes the CLI writes */
+```
+
+Byte-identical to the CLI's output and deterministic, so two runs diff clean and
+a change in the fixture is a change you made. It builds the whole table per
+call — a test-time cost for a test-time entry point.
 
 It is JSON, schema 1:
 

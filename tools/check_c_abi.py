@@ -605,6 +605,38 @@ class BrickMeshParams(ctypes.Structure):
     ]
 
 
+def parity_fixture_exercise(lib) -> list[str]:
+    """The host parity fixture through the size-query pattern.
+
+    Issue #51 item C: an iOS test target links the framework and cannot shell
+    out to `clay parity-fixture`, so the fixture had to become reachable from
+    the ABI for "the preview agrees with the field" to be a test a host runs
+    rather than a property it hopes for.
+    """
+    errors = []
+    szp = ctypes.POINTER(ctypes.c_size_t)
+    lib.clay_parity_fixture_json.argtypes = [ctypes.c_char_p, szp]
+    n = ctypes.c_size_t(0)
+    if lib.clay_parity_fixture_json(None, ctypes.byref(n)) != 0 or n.value < 1024:
+        return [f"clay_parity_fixture_json size query returned {n.value}"]
+    buf = ctypes.create_string_buffer(n.value)
+    cap = ctypes.c_size_t(n.value)
+    if lib.clay_parity_fixture_json(buf, ctypes.byref(cap)) != 0:
+        errors.append("clay_parity_fixture_json rejected an adequate buffer")
+    text = buf.value.decode()
+    for key in ('"cases"', '"instrs"', '"safe_step_scale"', '"tolerance"'):
+        if key not in text:
+            errors.append(f"the parity fixture is missing {key}")
+    # a short buffer is refused AND reports what was needed, so the retry is
+    # one call rather than a doubling loop
+    short = ctypes.c_size_t(n.value - 1)
+    if lib.clay_parity_fixture_json(buf, ctypes.byref(short)) != 3:  # BUFFER_TOO_SMALL
+        errors.append("clay_parity_fixture_json accepted a short buffer")
+    elif short.value != n.value:
+        errors.append("a refused parity fixture call did not report the size needed")
+    return errors
+
+
 def tape_export_exercise(lib) -> list[str]:
     """The compiled tape across the boundary, as a generated binding sees it.
 
@@ -1080,6 +1112,7 @@ def ffi_exercise(lib_path: str) -> list[str]:
             errors += voxel_ownership_exercise(lib, doc)
             errors += brick_cache_exercise(lib)
             errors += tape_export_exercise(lib)
+            errors += parity_fixture_exercise(lib)
         lib.clay_document_destroy(doc)
         lib.clay_document_destroy(None)  # releasing a null handle is a no-op
     return errors
