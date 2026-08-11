@@ -58,4 +58,4 @@
 - [x] 6.4 `docs/06-host-gpu-previews.md` gains the brick-volume route as a first-class alternative to compiling the kernel dialect: upload the band as a sparse `r16float` + `rgba8unorm` atlas with a one-voxel apron, trace it with a brick DDA, and mesh only for export
 - [x] 6.5 Announce the two arity changes in `docs/RELEASE.md` release notes, with the compile-error-not-misread argument
 - [x] 6.6 Update `openspec/ROADMAP.md`
-- [ ] 6.7 Reply on issue #43 covering items 1, 2, 3, 4 and 8, and stating what was decided against (no colour on the mip, no caller-owned destination on meshing itself, and why)
+- [x] 6.7 Reply on issue #43 covering items 1, 2, 3, 4 and 8, and stating what was decided against (no colour on the mip, no caller-owned destination on meshing itself, and why)
