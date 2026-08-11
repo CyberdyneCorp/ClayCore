@@ -1913,6 +1913,12 @@ typedef struct clay_stroke_preset {
     uint32_t struct_size; /* = sizeof(clay_stroke_preset); required */
     float radius;         /* world units; must be > 0 */
     float spacing;        /* stamp spacing as a fraction of the DIAMETER; > 0 */
+    /* How much a stamp deposits, [0, 1]. Reaches a voxel stroke as the brush
+     * strength. On an SDF layer it reaches the ops that have an amount:
+     * CLAY_OP_RELIEF and CLAY_OP_INCISE scale their amplitude by it, and
+     * CLAY_OP_ADD scales its whole deposit — 0 deposits nothing, 1 is the item
+     * exactly as authored. Every other op ignores it; see
+     * clay_layer_apply_stroke. */
     float strength;
     float pressure_size;     /* 0 = pressure does not drive the radius */
     float pressure_strength; /* 0 = pressure does not drive the strength */
@@ -2046,6 +2052,16 @@ clay_result clay_mask_apply_stroke(clay_mask* mask, const float* samples_xyzpt,
 /* Resolve a stroke and append one edit per stamp to a layer, using `item` as
  * the stamp template scaled to each stamp's radius. The builder is left
  * untouched. With undo enabled the whole stroke is ONE step.
+ *
+ * The preset's strength reaches an item where scaling preserves what its op
+ * means. CLAY_OP_RELIEF and CLAY_OP_INCISE scale their amplitude (blend_k) by
+ * it. CLAY_OP_ADD scales its whole deposit — the stamp's scale, rounding and
+ * blend together — so strength 0 authors no node at all, 1 is the item
+ * exactly as authored, and the response is monotonic in between; the
+ * clamped-accumulation division does not apply, because overlapping unions do
+ * not add up the way relief amplitudes do. Every other op ignores strength:
+ * its blend_k is a radius, a depth or a half-thickness, and scaling one would
+ * change the shape rather than the amount.
  *
  * This is NOT a size-query call: it applies the stroke exactly once, however
  * it is called. `count` is the capacity of out_nodes going in and the number

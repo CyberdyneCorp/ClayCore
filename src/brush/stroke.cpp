@@ -65,12 +65,19 @@ float stamp_radius(const StrokePreset& p, float pressure, float along) {
     return std::max(r, 0.0f);
 }
 
-float stamp_strength(const StrokePreset& p, float pressure) {
+// The preset's strength shaped by pressure, before any accumulation
+// correction. What Stamp::deposit clamps, and what stamp_strength divides.
+float shaped_strength(const StrokePreset& p, float pressure) {
     float s = p.strength;
     if (p.pressure.strength > 0.0f) {
         float shaped = std::pow(std::clamp(pressure, 0.0f, 1.0f), std::max(p.pressure.curve, 1e-3f));
         s *= 1.0f - p.pressure.strength + p.pressure.strength * shaped;
     }
+    return s;
+}
+
+float stamp_strength(const StrokePreset& p, float pressure) {
+    float s = shaped_strength(p, pressure);
     if (p.accumulation == Accumulation::Clamped) {
         // A clamped stroke reaches its strength once however many stamps
         // overlap, so divide by how many cover a point: one diameter of
@@ -121,6 +128,7 @@ bool gate(const voxel::MaskField* mask, Stamp& s) {
     float m = mask->sample(s.position);
     if (m >= 1.0f) return false;
     s.strength *= 1.0f - m;
+    s.deposit *= 1.0f - m;
     return s.strength > 0.0f;
 }
 
@@ -267,6 +275,7 @@ std::vector<Stamp> resolve_stroke(const std::vector<StrokeSample>& samples,
         s.position = at.position;
         s.radius = stamp_radius(preset, at.pressure, along);
         s.strength = stamp_strength(preset, at.pressure);
+        s.deposit = std::clamp(shaped_strength(preset, at.pressure), 0.0f, 1.0f);
         if (preset.rotate_along_stroke) s.rotation = align_x_to(at.direction);
 
         auto index = static_cast<std::uint32_t>(i);
@@ -354,6 +363,10 @@ std::vector<scene::Node> stamps_to_nodes(scene::SdfContent& content,
         // This is the whole of "freeze" for a declarative edit: a stamp in a
         // frozen region produces no item, so the region receives nothing new.
         if (!gate(mask, s)) continue;
+        // An Add stamp at zero strength deposits nothing at all: its deposit
+        // scales with the strength (below), and the zero-scale node that would
+        // express "nothing" is degenerate, so none is authored.
+        if (templ.op == scene::Op::Add && !(s.deposit > 0.0f)) continue;
         scene::Node node = templ;
         // The command vocabulary preserves ids rather than assigning them, so
         // reserve one here. Leaving it at kNoNode would have every node in the
@@ -364,17 +377,34 @@ std::vector<scene::Node> stamps_to_nodes(scene::SdfContent& content,
         // The template's own scale is the unit the radius is expressed in, so
         // a template authored at radius 1 scales straight to the stamp's.
         node.xform.scale = s.radius;
-        // A stamp's STRENGTH reaches an item only where blend.k is an AMOUNT.
-        // For relief and incise it is the amplitude — how far the accumulated
-        // surface moves along its own normal — and half an amplitude is exactly
-        // half the displacement, so pressure and accumulation mean something.
+        // A stamp's STRENGTH reaches an item only where scaling preserves what
+        // the op means.
         //
-        // Every other op reads blend.k as a radius, a depth or a half-thickness.
-        // Scaling those would change the SHAPE rather than the amount, silently
-        // and differently per op: a union at half strength is not a smaller
-        // union. They ignore strength, which is why this is not applied above.
+        // For relief and incise, blend.k is the AMPLITUDE — how far the
+        // accumulated surface moves along its own normal — and half an
+        // amplitude is exactly half the displacement, so pressure and
+        // accumulation mean something.
         if (node.op == scene::Op::Relief || node.op == scene::Op::Incise)
             node.blend.k = templ.blend.k * s.strength;
+        // For add, the amount IS the stamp: strength scales the whole deposit.
+        // Scale, blend radius and rounding shrink together (rounding is local,
+        // so it follows the scale), so a half-strength stamp is a self-similar
+        // half-size deposit, zero deposits nothing, and full strength is the
+        // item exactly as authored — bit for bit, since x * 1.0f is x.
+        //
+        // The DEPOSIT channel rather than strength: overlapping unions do not
+        // add up, so the clamped-accumulation division that keeps a relief
+        // stroke at its strength would instead shrink every stamp of a clamped
+        // add stroke. Clamped and buildup add strokes stay identical.
+        if (node.op == scene::Op::Add) {
+            node.xform.scale = s.radius * s.deposit;
+            node.blend.k = templ.blend.k * s.deposit;
+        }
+        // Every other op reads blend.k as a radius, a depth or a half-thickness,
+        // and has no scale that is purely an amount. Scaling either would change
+        // the SHAPE rather than the amount, silently and differently per op: a
+        // groove at half strength is not a shallower groove. They ignore
+        // strength.
         nodes.push_back(std::move(node));
     }
     return nodes;

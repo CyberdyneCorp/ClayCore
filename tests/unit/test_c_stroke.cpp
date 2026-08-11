@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -319,4 +320,132 @@ TEST_CASE("c stroke: applied to a layer as one undo step") {
 
     clay_item_destroy(item);
     clay_document_destroy(doc);
+}
+
+namespace {
+
+// The issue-61 fixture: one stamp on a unit sphere at the pole, measured as
+// the surface's displacement along +Z. Returns the displacement and, through
+// out_nodes, how many nodes the stroke authored.
+float pole_displacement(std::int32_t op, float strength, std::int32_t accumulation,
+                        std::size_t* out_nodes = nullptr) {
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "body", &layer) == CLAY_OK);
+
+    clay_item_desc base{};
+    base.struct_size = sizeof base;
+    base.prim = CLAY_PRIM_SPHERE;
+    base.params[0] = 1.0f;
+    base.rotation[3] = 1.0f;
+    base.scale = 1.0f;
+    base.op = CLAY_OP_ADD;
+    REQUIRE(clay_add_item(doc, layer, &base, nullptr) == CLAY_OK);
+
+    const float r[1] = {0.18f};
+    clay_item* stamp = clay_item_create(CLAY_PRIM_SPHERE, r, 1);
+    REQUIRE(stamp != nullptr);
+    REQUIRE(clay_item_set_op(stamp, op) == CLAY_OK);
+    REQUIRE(clay_item_set_blend(stamp, CLAY_BLEND_QUADRATIC, 0.18f) == CLAY_OK);
+    REQUIRE(clay_item_set_rounding(stamp, 0.18f) == CLAY_OK);
+
+    clay_stroke_preset p = defaults();
+    p.radius = 0.18f;
+    p.strength = strength;
+    p.accumulation = accumulation;
+
+    const float sample[5] = {0.0f, 0.0f, 1.0f, 1.0f, 0.0f};  // the pole, full pressure
+    std::size_t count = 0;
+    REQUIRE(clay_layer_apply_stroke(doc, layer, sample, 1, &p, stamp, nullptr, nullptr, &count) ==
+            CLAY_OK);
+    if (out_nodes) *out_nodes = count;
+    clay_item_destroy(stamp);
+
+    const float origin[3] = {0.0f, 0.0f, 3.0f};
+    const float dir[3] = {0.0f, 0.0f, -1.0f};
+    std::int32_t hit = 0;
+    float t = 0.0f, pos[3] = {0, 0, 0}, normal[3] = {0, 0, 0};
+    REQUIRE(clay_raycast(doc, origin, dir, &hit, &t, pos, normal) == CLAY_OK);
+    REQUIRE(hit == 1);
+    clay_document_destroy(doc);
+    return pos[2] - 1.0f;
+}
+
+}  // namespace
+
+// Issue #61: CLAY_OP_ADD deposited a full stamp at every strength, zero
+// included, while CLAY_OP_RELIEF scaled correctly.
+TEST_CASE("c stroke: strength scales what a stamp deposits") {
+    const std::int32_t buildup = CLAY_ACCUMULATION_BUILDUP;
+
+    SUBCASE("add honours strength: nothing at zero, monotonic, exact at one") {
+        std::size_t authored = ~std::size_t(0);
+        const float d0 = pole_displacement(CLAY_OP_ADD, 0.0f, buildup, &authored);
+        CHECK(std::fabs(d0) < 1e-3f);
+        CHECK(authored == 0);  // a zero-strength stamp authors no node at all
+
+        const float d10 = pole_displacement(CLAY_OP_ADD, 0.1f, buildup);
+        const float d50 = pole_displacement(CLAY_OP_ADD, 0.5f, buildup);
+        const float d100 = pole_displacement(CLAY_OP_ADD, 1.0f, buildup);
+        INFO("add displaces " << d10 << " / " << d50 << " / " << d100);
+        CHECK(d10 > d0 + 1e-3f);
+        CHECK(d50 > d10 + 1e-3f);
+        CHECK(d100 > d50 + 1e-3f);
+
+        // Full strength is the item exactly as authored: the same edit placed
+        // by hand at the stamp's transform lands the surface in the same spot.
+        clay_document* doc = clay_document_create();
+        REQUIRE(doc != nullptr);
+        clay_layer_id layer = 0;
+        REQUIRE(clay_add_sdf_layer(doc, "body", &layer) == CLAY_OK);
+        clay_item_desc base{};
+        base.struct_size = sizeof base;
+        base.prim = CLAY_PRIM_SPHERE;
+        base.params[0] = 1.0f;
+        base.rotation[3] = 1.0f;
+        base.scale = 1.0f;
+        base.op = CLAY_OP_ADD;
+        REQUIRE(clay_add_item(doc, layer, &base, nullptr) == CLAY_OK);
+        clay_item_desc hand{};
+        hand.struct_size = sizeof hand;
+        hand.prim = CLAY_PRIM_SPHERE;
+        hand.params[0] = 0.18f;
+        hand.position[2] = 1.0f;
+        hand.rotation[3] = 1.0f;
+        hand.scale = 0.18f;  // the stamp's radius, exactly as stamps scale
+        hand.op = CLAY_OP_ADD;
+        hand.blend = CLAY_BLEND_QUADRATIC;
+        hand.blend_k = 0.18f;
+        hand.rounding = 0.18f;
+        REQUIRE(clay_add_item(doc, layer, &hand, nullptr) == CLAY_OK);
+        const float origin[3] = {0.0f, 0.0f, 3.0f};
+        const float dir[3] = {0.0f, 0.0f, -1.0f};
+        std::int32_t hit = 0;
+        float t = 0.0f, pos[3] = {0, 0, 0}, normal[3] = {0, 0, 0};
+        REQUIRE(clay_raycast(doc, origin, dir, &hit, &t, pos, normal) == CLAY_OK);
+        REQUIRE(hit == 1);
+        CHECK(d100 == doctest::Approx(pos[2] - 1.0f).epsilon(1e-5));
+        clay_document_destroy(doc);
+    }
+
+    SUBCASE("relief still scales as it did") {
+        const float d0 = pole_displacement(CLAY_OP_RELIEF, 0.0f, buildup);
+        const float d10 = pole_displacement(CLAY_OP_RELIEF, 0.1f, buildup);
+        const float d50 = pole_displacement(CLAY_OP_RELIEF, 0.5f, buildup);
+        const float d100 = pole_displacement(CLAY_OP_RELIEF, 1.0f, buildup);
+        INFO("relief displaces " << d0 << " / " << d10 << " / " << d50 << " / " << d100);
+        CHECK(std::fabs(d0) < 1e-3f);
+        CHECK(d10 > d0 + 1e-3f);
+        CHECK(d50 > d10 + 1e-3f);
+        CHECK(d100 > d50 + 1e-3f);
+    }
+
+    SUBCASE("a clamped add stroke keeps its deposit") {
+        // Overlapping unions do not add up, so the clamped division that keeps
+        // a relief stroke at its strength must not shrink an add stamp.
+        const float clamped = pole_displacement(CLAY_OP_ADD, 1.0f, CLAY_ACCUMULATION_CLAMPED);
+        const float built = pole_displacement(CLAY_OP_ADD, 1.0f, buildup);
+        CHECK(clamped == doctest::Approx(built).epsilon(1e-6));
+    }
 }
