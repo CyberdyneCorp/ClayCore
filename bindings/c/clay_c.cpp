@@ -3295,12 +3295,15 @@ clay_result clay_item_volume_from_mesh(const clay_mesh* mesh, const clay_volume_
     return CLAY_OK;
 }
 
-clay_result clay_item_volume_from_document(const clay_document* doc,
-                                           const clay_volume_params* params,
-                                           const float region_min[3], const float region_max[3],
-                                           clay_item** out_item) {
-    if (!doc || !params || !out_item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
-    *out_item = nullptr;
+// The sampling half of baking from a document: descriptor, cell, band, and
+// the region convention. Shared with clay_item_volume_flatten_from so this
+// ABI has ONE meaning for "both NULL means the document's bounds padded by
+// the band", rather than a second copy free to drift from it.
+static clay_result read_volume_sampling(const clay_document* doc,
+                                        const clay_volume_params* params,
+                                        const float region_min[3], const float region_max[3],
+                                        math::Aabb* out_region, float* out_cell,
+                                        float* out_band) {
     clay_volume_params p;
     clay_result r = read_desc(params, kVolumeParamsOriginal, &p);
     if (r != CLAY_OK) return r;
@@ -3317,6 +3320,12 @@ clay_result clay_item_volume_from_document(const clay_document* doc,
     const float band = p.band > 0.0f ? p.band : cell * 3.0f;
     const float padding = p.padding > 0.0f ? p.padding : band;
 
+    // One without the other is a caller that meant to pass a region and got it
+    // half right; refused rather than silently falling back to the bounds.
+    if ((region_min == nullptr) != (region_max == nullptr))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "pass both region_min and region_max, or neither");
+
     math::Aabb region;
     if (region_min && region_max) {
         region = math::Aabb(kernel::cf3(region_min[0], region_min[1], region_min[2]),
@@ -3331,6 +3340,28 @@ clay_result clay_item_volume_from_document(const clay_document* doc,
         region = math::Aabb(region.min - pad, region.max + pad);
     }
     if (region.empty()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty region");
+
+    *out_region = region;
+    *out_cell = cell;
+    *out_band = band;
+    return CLAY_OK;
+}
+
+clay_result clay_item_volume_from_document(const clay_document* doc,
+                                           const clay_volume_params* params,
+                                           const float region_min[3], const float region_max[3],
+                                           clay_item** out_item) {
+    if (!doc || !params || !out_item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_item = nullptr;
+
+    math::Aabb region;
+    float cell = 0.0f, band = 0.0f;
+    clay_result r = read_volume_sampling(doc, params, region_min, region_max, &region, &cell,
+                                         &band);
+    if (r != CLAY_OK) return r;
+
+    std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
+    const scene::Tape& tape = *tape_ref;
 
     field::FieldVolume volume = field::FieldVolume::sample(
         [&tape](kernel::cfloat3 q) { return tape.eval(q).d; }, region, cell, band);
@@ -3405,13 +3436,15 @@ clay_result clay_item_volume_move_topological(clay_item* item,
     return CLAY_OK;
 }
 
-clay_result clay_item_volume_flatten(clay_item* item, const clay_flatten_params* params) {
-    if (!item || !params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+// Reads and validates a flatten descriptor into settings. Shared by the
+// in-place flatten and the document-sourced one: two copies of "region_radius
+// must be > 0" would drift, and the refusals ARE the contract here — every one
+// of them exists because the alternative looks like it worked.
+static clay_result read_flatten_settings(const clay_flatten_params* params,
+                                         field::FlattenSettings* out) {
     clay_flatten_params p;
     clay_result r = read_desc(params, kFlattenParamsOriginal, &p);
     if (r != CLAY_OK) return r;
-    if (item->node.prim.type != scene::PrimType::Volume || !item->node.volume)
-        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this item carries no volume to flatten");
 
     field::FlattenSettings settings;
     settings.plane_point = kernel::cf3(p.plane_point[0], p.plane_point[1], p.plane_point[2]);
@@ -3442,8 +3475,60 @@ clay_result clay_item_volume_flatten(clay_item* item, const clay_flatten_params*
         settings.mask = [m](kernel::cfloat3 q) { return m->sample(q); };
     }
 
+    *out = std::move(settings);
+    return CLAY_OK;
+}
+
+clay_result clay_item_volume_flatten(clay_item* item, const clay_flatten_params* params) {
+    if (!item || !params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    if (item->node.prim.type != scene::PrimType::Volume || !item->node.volume)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this item carries no volume to flatten");
+
+    field::FlattenSettings settings;
+    clay_result r = read_flatten_settings(params, &settings);
+    if (r != CLAY_OK) return r;
+
     item->node.volume =
         std::make_shared<field::FieldVolume>(field::flatten(*item->node.volume, settings));
+    return CLAY_OK;
+}
+
+clay_result clay_item_volume_flatten_from(const clay_document* doc,
+                                          const clay_flatten_params* flatten,
+                                          const clay_volume_params* volume,
+                                          const float region_min[3],
+                                          const float region_max[3],
+                                          clay_item** out_item) {
+    if (!doc || !flatten || !volume || !out_item)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_item = nullptr;
+
+    field::FlattenSettings settings;
+    clay_result r = read_flatten_settings(flatten, &settings);
+    if (r != CLAY_OK) return r;
+
+    // The sampling half, on the same terms as clay_item_volume_from_document:
+    // one region convention in this ABI, not two.
+    math::Aabb region;
+    float cell = 0.0f, band = 0.0f;
+    r = read_volume_sampling(doc, volume, region_min, region_max, &region, &cell, &band);
+    if (r != CLAY_OK) return r;
+
+    std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
+    const scene::Tape& tape = *tape_ref;
+
+    // The point of this entry point: the source is the DOCUMENT, which is
+    // exact everywhere, rather than a volume that reports a bound outside its
+    // band and places the facet against it.
+    field::FieldVolume flattened = field::flatten(
+        [&tape](kernel::cfloat3 q) { return tape.eval(q).d; }, region, cell, band, settings);
+    if (flattened.brick_count() == 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the region contains no surface to sample");
+
+    auto* item = new clay_item();
+    item->node.prim = scene::Prim::volume();
+    item->node.volume = std::make_shared<field::FieldVolume>(std::move(flattened));
+    *out_item = item;
     return CLAY_OK;
 }
 
