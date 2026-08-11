@@ -158,6 +158,10 @@ bool consolidate_layer(Document& doc, LayerId layer_id, const ConsolidationParam
     Node baked;
     baked.id = layer->sdf->reserve_id();
     baked.prim = Prim::volume();
+    // The bake sampled the layer's field, mirror copies included, so the
+    // volume already holds both sides. Re-mirroring it is idempotent for the
+    // union but doubles what every later evaluation pays.
+    baked.mirror = false;
     baked.volume = std::make_shared<const field::FieldVolume>(std::move(*volume));
     // One colour for what may have been many. A volume carries a single
     // colour, so the first absorbed item's is the one that survives — stated

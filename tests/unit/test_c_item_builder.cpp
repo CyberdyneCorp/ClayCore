@@ -979,12 +979,12 @@ TEST_CASE("the mirror flag applies through the layer's mirror axes") {
     reference.add(n);
     check_same_field(built.doc, reference.doc);
 
-    // and an unmirrored item on the same layer is left alone
+    // and an item excluded with mirror = -1 is left alone
     CDoc plain;
     REQUIRE(clay_set_layer_mirror(plain.doc, plain.layer, 1, 0, 0, 0.08f) == CLAY_OK);
     clay_item* other = clay_item_create(CLAY_PRIM_BOX, size, 3);
     REQUIRE(clay_item_set_position(other, where) == CLAY_OK);
-    REQUIRE(clay_item_set_mirror(other, 0) == CLAY_OK);
+    REQUIRE(clay_item_set_mirror(other, -1) == CLAY_OK);
     REQUIRE(clay_layer_add_item(plain.doc, plain.layer, other, nullptr) == CLAY_OK);
     clay_item_destroy(other);
     std::vector<float> pts = sample_points();
