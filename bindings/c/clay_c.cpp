@@ -3293,6 +3293,7 @@ clay_result clay_item_volume_from_mesh(const clay_mesh* mesh, const clay_volume_
 
     std::optional<field::FieldVolume> volume = mesh::to_field(*src, settings);
     if (!volume) return fail(CLAY_ERROR_INVALID_ARGUMENT, "the mesh could not be sampled");
+    volume->set_feather(p.feather);
 
     auto* item = new clay_item();
     item->node.prim = scene::Prim::volume();
@@ -3309,7 +3310,7 @@ static clay_result read_volume_sampling(const clay_document* doc,
                                         const clay_volume_params* params,
                                         const float region_min[3], const float region_max[3],
                                         math::Aabb* out_region, float* out_cell,
-                                        float* out_band) {
+                                        float* out_band, float* out_feather) {
     clay_volume_params p;
     clay_result r = read_desc(params, kVolumeParamsOriginal, &p);
     if (r != CLAY_OK) return r;
@@ -3350,6 +3351,9 @@ static clay_result read_volume_sampling(const clay_document* doc,
     *out_region = region;
     *out_cell = cell;
     *out_band = band;
+    // Absent from a shorter struct_size, in which case read_desc has already
+    // zeroed it — the hard replace, which is what an older caller means.
+    *out_feather = p.feather > 0.0f ? p.feather : 0.0f;
     return CLAY_OK;
 }
 
@@ -3361,9 +3365,9 @@ clay_result clay_item_volume_from_document(const clay_document* doc,
     *out_item = nullptr;
 
     math::Aabb region;
-    float cell = 0.0f, band = 0.0f;
+    float cell = 0.0f, band = 0.0f, feather = 0.0f;
     clay_result r = read_volume_sampling(doc, params, region_min, region_max, &region, &cell,
-                                         &band);
+                                         &band, &feather);
     if (r != CLAY_OK) return r;
 
     std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
@@ -3378,6 +3382,7 @@ clay_result clay_item_volume_from_document(const clay_document* doc,
     // item that silently contributes nothing.
     if (volume.brick_count() == 0)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "the region contains no surface to sample");
+    volume.set_feather(feather);
 
     auto* item = new clay_item();
     item->node.prim = scene::Prim::volume();
@@ -3386,15 +3391,15 @@ clay_result clay_item_volume_from_document(const clay_document* doc,
     return CLAY_OK;
 }
 
-clay_result clay_item_volume_relax(clay_item* item, const clay_relax_params* params) {
-    if (!item || !params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+// Reads and validates a relax descriptor into settings. Shared by the
+// in-place relax and the document-sourced one, exactly as the two flattens
+// share read_flatten_settings and for the same reason: a second copy of the
+// defaulting rules would drift.
+static clay_result read_relax_settings(const clay_relax_params* params,
+                                       field::RelaxSettings* out) {
     clay_relax_params p;
     clay_result r = read_desc(params, kRelaxParamsOriginal, &p);
     if (r != CLAY_OK) return r;
-    // Refused rather than ignored: an item that is not a volume has no samples
-    // to smooth, and quietly returning OK would look like it worked.
-    if (item->node.prim.type != scene::PrimType::Volume || !item->node.volume)
-        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this item carries no volume to relax");
 
     field::RelaxSettings settings;
     settings.strength = std::clamp(p.strength, 0.0f, 1.0f);
@@ -3414,8 +3419,64 @@ clay_result clay_item_volume_relax(clay_item* item, const clay_relax_params* par
         settings.mask = [m](kernel::cfloat3 q) { return m->sample(q); };
     }
 
+    *out = std::move(settings);
+    return CLAY_OK;
+}
+
+clay_result clay_item_volume_relax(clay_item* item, const clay_relax_params* params) {
+    if (!item || !params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    // Refused rather than ignored: an item that is not a volume has no samples
+    // to smooth, and quietly returning OK would look like it worked.
+    if (item->node.prim.type != scene::PrimType::Volume || !item->node.volume)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this item carries no volume to relax");
+
+    field::RelaxSettings settings;
+    clay_result r = read_relax_settings(params, &settings);
+    if (r != CLAY_OK) return r;
+
     item->node.volume =
         std::make_shared<field::FieldVolume>(field::relax(*item->node.volume, settings));
+    return CLAY_OK;
+}
+
+clay_result clay_item_volume_relax_from(const clay_document* doc,
+                                        const clay_relax_params* relax,
+                                        const clay_volume_params* volume,
+                                        const float region_min[3],
+                                        const float region_max[3],
+                                        clay_item** out_item) {
+    if (!doc || !relax || !volume || !out_item)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_item = nullptr;
+
+    field::RelaxSettings settings;
+    clay_result r = read_relax_settings(relax, &settings);
+    if (r != CLAY_OK) return r;
+
+    // The sampling half, on the same terms as clay_item_volume_from_document:
+    // one region convention in this ABI, not two.
+    math::Aabb region;
+    float cell = 0.0f, band = 0.0f, feather = 0.0f;
+    r = read_volume_sampling(doc, volume, region_min, region_max, &region, &cell, &band,
+                             &feather);
+    if (r != CLAY_OK) return r;
+
+    std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
+    const scene::Tape& tape = *tape_ref;
+
+    // Samples the document exactly as clay_item_volume_from_document would,
+    // then relaxes those samples: identical to bake-then-relax inside the
+    // band, by construction — and held by a test rather than assumed.
+    field::FieldVolume relaxed = field::relax(
+        [&tape](kernel::cfloat3 q) { return tape.eval(q).d; }, region, cell, band, settings);
+    if (relaxed.brick_count() == 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the region contains no surface to sample");
+    relaxed.set_feather(feather);
+
+    auto* item = new clay_item();
+    item->node.prim = scene::Prim::volume();
+    item->node.volume = std::make_shared<field::FieldVolume>(std::move(relaxed));
+    *out_item = item;
     return CLAY_OK;
 }
 
@@ -3516,8 +3577,9 @@ clay_result clay_item_volume_flatten_from(const clay_document* doc,
     // The sampling half, on the same terms as clay_item_volume_from_document:
     // one region convention in this ABI, not two.
     math::Aabb region;
-    float cell = 0.0f, band = 0.0f;
-    r = read_volume_sampling(doc, volume, region_min, region_max, &region, &cell, &band);
+    float cell = 0.0f, band = 0.0f, feather = 0.0f;
+    r = read_volume_sampling(doc, volume, region_min, region_max, &region, &cell, &band,
+                             &feather);
     if (r != CLAY_OK) return r;
 
     std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
@@ -3530,6 +3592,7 @@ clay_result clay_item_volume_flatten_from(const clay_document* doc,
         [&tape](kernel::cfloat3 q) { return tape.eval(q).d; }, region, cell, band, settings);
     if (flattened.brick_count() == 0)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "the region contains no surface to sample");
+    flattened.set_feather(feather);
 
     auto* item = new clay_item();
     item->node.prim = scene::Prim::volume();

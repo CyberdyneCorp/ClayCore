@@ -87,17 +87,44 @@ kernel::CFieldInfo swept_field_info(const Node& item) {
                              ease_max_slope(static_cast<std::uint8_t>(item.prim.params[0])));
 }
 
+// The extra width the cull test needs when this content holds a feathered
+// volume replace. The feathered combine moves the accumulated value by up to
+// the volume's band (the kernel clamps the correction there), so an item
+// whose field the caller's dilation put just beyond the clamp can still steer
+// a value back inside it. Testing against the region dilated by that band
+// restores the contract the CullRegion states: band-clamped results identical
+// to the full tape. Zero — the common case — leaves the test exactly as it was.
+float feather_cull_pad(const SdfContent& content, const Layer& layer) {
+    float pad = 0.0f;
+    for (const auto& [id, n] : content.nodes()) {
+        (void)id;
+        if (n.is_group || !n.visible) continue;
+        if (n.op != Op::Replace || !prim_is_volume(n.prim.type)) continue;
+        if (n.volume && n.volume->feather() > 0.0f)
+            pad = kernel::cmax(pad, n.volume->band() * layer.xform.scale * n.xform.scale);
+    }
+    return pad;
+}
+
 struct Compiler {
     Tape tape;
     const CullRegion* cull;
+    // What cull tests actually intersect against: the caller's region, wider
+    // by feather_cull_pad when a feathered replace is present.
+    math::Aabb cull_test;
     // Reused across items so a document full of curves does not allocate a
     // fresh vector per item; only ever read between assignment and use.
     std::vector<StrokePoint> scratch_curve;
 
+    void begin_cull(const CullRegion* cull_region, float pad) {
+        cull = cull_region;
+        if (cull) cull_test = pad > 0.0f ? cull->region.dilated(pad) : cull->region;
+    }
+
     bool culled(const math::Aabb& bound) const {
         if (!cull) return false;
         if (bound.is_infinite()) return false;
-        return !bound.intersects(cull->region);
+        return !bound.intersects(cull_test);
     }
 
     // -- emission ------------------------------------------------------------
@@ -155,6 +182,39 @@ struct Compiler {
         ident.c3 = kernel::cf4(0, 0, 0, 1);
         float none = 0.0f;
         emit_prim(kernel::ctape_empty, ident, 1.0f, 0.0f, color, &none, 0, {});
+    }
+
+    // Blob offset of the most recently emitted volume header; consumed by
+    // emit_replace_feather immediately after the emit_item that set it.
+    std::size_t last_volume_blob = 0;
+
+    // Whether this item is a volume placed with Replace that asked for a
+    // feathered placement. The one predicate the mirror skip, the combine
+    // choice and the field-info fold all share, so they cannot disagree.
+    static bool is_feathered_replace(const Node& item) {
+        return item.op == Op::Replace && prim_is_volume(item.prim.type) && item.volume &&
+               item.volume->feather() > 0.0f;
+    }
+
+    // The feathered replace: mode ccombine_replace_feather with the volume's
+    // header offset and the instance's world-to-local transform appended, so
+    // the kernel can weigh the crossfade by the inset into the sampled box.
+    void emit_replace_feather(const Node& item, const Layer& layer) {
+        math::Transform world = layer.xform * item.xform;
+        cfloat4x4 inv = world.inverse_matrix();
+        CTapeInstr instr;
+        instr.op = kernel::ctape_combine;
+        instr.param_offset = static_cast<unsigned int>(tape.params.size());
+        tape.instrs.push_back(instr);
+        tape.params.push_back(static_cast<float>(static_cast<int>(kernel::ccombine_replace_feather)));
+        tape.params.push_back(0.0f);  // profile: unread by this mode
+        tape.params.push_back(0.0f);  // k: unread
+        tape.params.push_back(0.0f);  // rb: unread
+        tape.params.push_back(static_cast<float>(last_volume_blob));
+        const float xf[12] = {inv.c0.x, inv.c0.y, inv.c0.z, inv.c1.x, inv.c1.y, inv.c1.z,
+                              inv.c2.x, inv.c2.y, inv.c2.z, inv.c3.x, inv.c3.y, inv.c3.z};
+        tape.params.insert(tape.params.end(), xf, xf + 12);
+        tape.params.push_back(world.scale);
     }
 
     // rb: second radius of the two-parameter extended modes (groove/tongue
@@ -246,6 +306,13 @@ struct Compiler {
             // a blend's. The item's own field never reaches the result, which
             // is why prim_info plays no part here.
             tape.info = kernel::cfi_relief(tape.info, item.blend.k, round_world);
+        } else if (is_feathered_replace(item)) {
+            // The crossfade adds its clamped correction over the feather; see
+            // cfi_replace_feather. Declared whenever the item ASKS for a
+            // feather: the seeded-empty chain emits the hard mode instead, and
+            // for it this bound is merely conservative, never an understatement.
+            tape.info = kernel::cfi_replace_feather(tape.info, prim_info, item.volume->band(),
+                                                    item.volume->feather());
         } else if (op_is_extended(op))
             tape.info = kernel::cfi_extended_blend(tape.info, prim_info, op_is_diagonal(op));
         else
@@ -416,6 +483,9 @@ struct Compiler {
         } else if (prim_is_volume(item.prim.type)) {
             if (!item.volume || item.volume->empty()) return;  // nothing to read
             std::vector<float> flat = item.volume->to_blob();
+            // Remembered for the feathered replace combine, which reads the
+            // box, band and feather from the same header the prim reads.
+            last_volume_blob = tape.blob.size();
             float prim_params[1] = {static_cast<float>(tape.blob.size())};
             tape.blob.insert(tape.blob.end(), flat.begin(), flat.end());
             emit_prim(kernel::ctape_volume, inv_world, scale, round_world, item.color,
@@ -459,7 +529,14 @@ struct Compiler {
     void emit_item(const Node& item, const Layer& layer) {
         math::Transform world = layer.xform * item.xform;
         emit_item_instance(item, world.inverse_matrix(), world.scale);
-        if (item.mirror && layer.mirror_axes != 0) {
+        // A feathered replace does not participate in the layer mirror: its
+        // combine crossfades by the inset into ONE sampled box, and a mirror
+        // copy pre-combined into the same operand would sit outside that box
+        // and be blended away entirely — worse than either behaviour a caller
+        // could mean. A feathered bake is a world-space patch; mirror the
+        // strokes it was baked from, or bake each side. Documented on
+        // clay_volume_params.feather.
+        if (item.mirror && layer.mirror_axes != 0 && !is_feathered_replace(item)) {
             Blend mirror_blend{layer.mirror_k > 0.0f ? BlendProfile::Quadratic
                                                      : BlendProfile::Hard,
                                layer.mirror_k};
@@ -483,10 +560,21 @@ struct Compiler {
     // already on the stack below; returns whether one is there afterwards.
     bool compile_list(const std::vector<NodeId>& ids, const SdfContent& content,
                       const Layer& layer, bool have_acc) {
+        // Whether the cull dropped anything from THIS chain. A feathered
+        // replace over a chain the cull emptied must still blend against the
+        // far-field seed — the dropped items are real, just out of reach —
+        // while one over a chain that was truly empty has nothing to blend
+        // into and degrades to the hard replace, so the full tape and every
+        // per-brick tape agree on what a lone volume shows.
+        bool cull_dropped = false;
         for (NodeId id : ids) {
             const Node* n = content.find(id);
             if (!n || !n->visible) continue;
             if (n->is_group) {
+                if (culled(node_influence_bound(content, n->id, layer))) {
+                    cull_dropped = true;
+                    continue;
+                }
                 have_acc = compile_group(*n, content, layer, have_acc);
             } else {
                 // carving/painting with nothing beneath produces nothing;
@@ -502,7 +590,10 @@ struct Compiler {
                 // A non-local item has an infinite influence bound and so can
                 // never be culled; item_influence_is_local is the single
                 // definition of that test, shared with item_influence_bound.
-                if (cull && item_influence_is_local(*n) && culled(geometry)) continue;
+                if (cull && item_influence_is_local(*n) && culled(geometry)) {
+                    cull_dropped = true;
+                    continue;
+                }
                 // tape.bounds is the geometric extent meshing and raycast
                 // clipping use — never infinite, even for non-local ops
                 tape.bounds.expand(geometry);
@@ -510,10 +601,19 @@ struct Compiler {
                 if (seeded) emit_empty(n->color);
                 emit_item(*n, layer);
                 bool smooth = n->blend.profile != BlendProfile::Hard && n->blend.k > 0.0f;
-                if (have_acc || seeded)
-                    emit_combine(n->op, n->blend,
-                                 n->rounding * layer.xform.scale * n->xform.scale,
-                                 &n->transition);
+                if (have_acc || seeded) {
+                    // The feather blends the volume into what is beneath it.
+                    // With something there — or with something the cull put
+                    // out of reach — the feathered mode; over a chain that
+                    // was truly empty, the hard replace, because a crossfade
+                    // toward the far-field seed would blend the volume away.
+                    if (is_feathered_replace(*n) && (have_acc || cull_dropped))
+                        emit_replace_feather(*n, layer);
+                    else
+                        emit_combine(n->op, n->blend,
+                                     n->rounding * layer.xform.scale * n->xform.scale,
+                                     &n->transition);
+                }
                 fold_info(*n, (have_acc || seeded) ? n->op : Op::Add, smooth && have_acc,
                           n->rounding * layer.xform.scale * n->xform.scale);
                 have_acc = true;
@@ -522,9 +622,10 @@ struct Compiler {
         return have_acc;
     }
 
+    // The cull test for a whole group lives in compile_list, which needs to
+    // know a group was dropped (see cull_dropped there); this trusts it.
     bool compile_group(const Node& group, const SdfContent& content, const Layer& layer,
                        bool have_acc) {
-        if (culled(node_influence_bound(content, group.id, layer))) return have_acc;
         if (group.op == Op::None) {
             // inline: children continue the outer chain
             return compile_list(group.children, content, layer, have_acc);
@@ -557,7 +658,12 @@ struct Compiler {
     }
 
     void run(const Document& doc, const CullRegion* cull_region) {
-        cull = cull_region;
+        float pad = 0.0f;
+        if (cull_region)
+            for (const Layer& layer : doc.layers)
+                if (layer.visible && layer.kind == LayerKind::Sdf && layer.sdf)
+                    pad = kernel::cmax(pad, feather_cull_pad(*layer.sdf, layer));
+        begin_cull(cull_region, pad);
         bool have_acc = false;
         for (const Layer& layer : doc.layers) {
             if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
@@ -579,9 +685,9 @@ Tape compile_document(const Document& doc, const CullRegion* cull) {
 
 Tape compile_layer(const Layer& layer, const CullRegion* cull) {
     Compiler c;
-    c.cull = cull;
-    if (layer.visible && layer.kind == LayerKind::Sdf && layer.sdf)
-        c.compile_list(layer.sdf->roots, *layer.sdf, layer, false);
+    bool usable = layer.visible && layer.kind == LayerKind::Sdf && layer.sdf;
+    c.begin_cull(cull, cull && usable ? feather_cull_pad(*layer.sdf, layer) : 0.0f);
+    if (usable) c.compile_list(layer.sdf->roots, *layer.sdf, layer, false);
     return std::move(c.tape);
 }
 

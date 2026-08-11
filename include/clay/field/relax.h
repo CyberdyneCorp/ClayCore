@@ -73,5 +73,15 @@ struct RelaxSettings {
 // resolution. The input is not modified.
 FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings = {});
 
+// The same, sampled from an arbitrary SOURCE first — a document's tape is the
+// intended one — mirroring flatten's pair of overloads. Deliberately exactly
+// sample-then-relax: relax averages cell-aligned taps, and the taps of a
+// fresh bake ARE the source at those lattice points, so there is nothing a
+// fused form could do better. What the overload buys is one entry point for
+// hosts, and a source that is exact rather than a volume carrying a band.
+FieldVolume relax(const std::function<float(kernel::cfloat3)>& source,
+                  const math::Aabb& region, float cell_size, float band,
+                  const RelaxSettings& settings = {});
+
 }  // namespace field
 }  // namespace clay

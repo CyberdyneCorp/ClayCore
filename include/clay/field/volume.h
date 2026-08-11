@@ -55,6 +55,16 @@ class FieldVolume {
     // Lipschitz bound — see cfi_volume.
     float sample_lipschitz() const { return sample_lipschitz_; }
     void set_sample_lipschitz(float v) { sample_lipschitz_ = v > 1.0f ? v : 1.0f; }
+
+    // How far inside the sampled box a Replace placement crossfades from the
+    // surrounding field to this volume, in world units; 0 is the hard replace.
+    // A property of the VOLUME rather than of the op, because it is decided
+    // where the volume is baked — the bake knows what the box edge will meet —
+    // and because it must survive the document round trip with the samples.
+    // Read by the tape compiler; every other consumer ignores it.
+    float feather() const { return feather_; }
+    void set_feather(float v) { feather_ = v > 0.0f ? v : 0.0f; }
+
     float band() const { return band_; }
     kernel::cfloat3 origin() const { return origin_; }
     math::Aabb bounds() const;
@@ -185,6 +195,7 @@ class FieldVolume {
     float cell_size_ = 0.05f;
     float band_ = 0.2f;
     float sample_lipschitz_ = 1.0f;
+    float feather_ = 0.0f;
     std::int32_t bcount_[3] = {0, 0, 0}; // bricks per axis
     std::vector<std::int32_t> index_;    // bcount product; offset into data_, or kBrickEmpty
     std::vector<float> far_;             // per brick; signed lower bound where index_ is empty

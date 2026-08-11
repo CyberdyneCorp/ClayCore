@@ -210,6 +210,18 @@ CLAY_FN CFieldInfo cfi_volume(float sample_lipschitz) {
     return CFieldInfo{false, 1.7320508f * cmax(sample_lipschitz, 1.0f)};
 }
 
+// Feathered replace of a sampled volume: a crossfade adds the blended
+// difference times the weight's own gradient, the same shape cfi_relief and
+// cfi_transition pay for. The difference is CLAMPED at the volume's band in
+// the kernel (ctape_replace_feather), so unlike a transition the bound here
+// is structural rather than a region diagonal: band * 1.5 / feather, with
+// 1.5 the smoothstep's peak slope. Both lengths are in the same units, so
+// the instance scale cancels.
+CLAY_FN CFieldInfo cfi_replace_feather(CFieldInfo a, CFieldInfo b, float band, float feather) {
+    return CFieldInfo{false,
+                      cmax(a.lipschitz, b.lipschitz) + band * 1.5f / cmax(feather, 1e-6f)};
+}
+
 CLAY_FN CFieldInfo cfi_loft(float profile_spread, float depth, float ease_slope) {
     return CFieldInfo{false, 1.0f + profile_spread * ease_slope / cmax(depth, 1e-6f)};
 }

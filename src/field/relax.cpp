@@ -121,5 +121,10 @@ FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings) {
     return current;
 }
 
+FieldVolume relax(const std::function<float(kernel::cfloat3)>& source, const math::Aabb& region,
+                  float cell_size, float band, const RelaxSettings& settings) {
+    return relax(FieldVolume::sample(source, region, cell_size, band), settings);
+}
+
 }  // namespace field
 }  // namespace clay

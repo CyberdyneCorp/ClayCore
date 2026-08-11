@@ -309,6 +309,36 @@ flatten moves it many band widths, so flattening a volume in place is accurate
 only near the band it came from. The volume overload exists for imported meshes,
 where there is no document behind the surface.
 
+`relax` has the same pair, mirroring flatten symbol for symbol
+(`clay_item_volume_relax_from` beside `clay_item_volume_flatten_from`). For
+relax the document-sourced form is exactly bake-then-relax fused into one call
+— relax averages cell-aligned taps, and a fresh bake's taps *are* the document
+at those lattice points — so inside the band the two are identical, and a test
+holds that. What it buys is one entry point, and a source that can never be a
+volume derived from another volume.
+
+**Putting a bake back: feather the replace.** Every one of these verbs returns
+a volume that a host then places with `CLAY_OP_REPLACE`, and the hard replace
+corrugates the *shading* even when no verb was applied at all (issue #67). The
+surface is exact — measured by bisection the round trip's zero set deviates by
+nothing — but the hard replace holds *both* fields live at the surface, and a
+bake ties with the field beneath it at every sample plane, so any
+finite-difference normal across the min/max branch switch pays |b−a| over its
+own epsilon, rippling at the cell wavelength: ~32° of normal tilt at
+`cell 0.04`, and it does not shrink with the cell. Set
+`clay_volume_params.feather` (a band's width is the sweet spot) when baking,
+and the placement crossfades instead: deep inside the sampled box the result
+**is** the volume — one field, one gradient, tilt 1.2° at `cell 0.04` and
+falling with the cell — outside the box the surrounding field continues
+untouched, and the box edge stops being a hard rectangle. The blend's
+correction is clamped at the volume's **band**, which is what keeps the
+declared Lipschitz closed-form (max + band·1.5/feather) and per-brick culling
+exact — and means a verb that moved the surface further than the band should
+be baked with a band that covers it. Feather zero, and every descriptor from
+before the field existed, is the hard replace byte for byte. A feathered
+replace does not participate in the layer mirror: the crossfade follows one
+sampled box.
+
 Both also take an optional **mask**, and it freezes exactly: a fully masked
 sample keeps its source value verbatim rather than nearly so, because a frozen
 region that drifts by a rounding error per iteration is a frozen region that has
@@ -602,8 +632,8 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Blends | `scene::Blend`, `BlendProfile` | `clay.Smooth/Cubic/Circular/Chamfer(k)` | `clay_item_set_blend`, `CLAY_BLEND_*` |
 | Deformers | `scene::Deformer::twist(...)` etc. | methods on the prim: `p.twist(...)`, `p.noise(...)`, `p.magnify(...)` | `clay_item_add_deformer` |
 | Stroke engine | `brush::resolve_stroke`, `StrokePreset` | `clay.StrokePreset`, `layer.apply_stroke(...)` | `clay_stroke_resolve`, `clay_stroke_preset_*`, `clay_layer_apply_stroke`, `clay_voxel_apply_stroke` |
-| Smooth — `relax` on SDF layers | `field::relax`, `VoxelGrid::sculpt_smooth` | `Volume.relaxed(...)`, `VoxelGrid.sculpt_smooth(...)` | `clay_item_volume_relax`, `clay_voxel_sculpt_smooth` |
-| Flatten | `field::flatten` | `Volume.flattened_from(...)` | `clay_item_volume_flatten` |
+| Smooth — `relax` on SDF layers | `field::relax`, `VoxelGrid::sculpt_smooth` | `Volume.relaxed(...)`, `VoxelGrid.sculpt_smooth(...)` | `clay_item_volume_relax`, `clay_item_volume_relax_from`, `clay_voxel_sculpt_smooth` |
+| Flatten | `field::flatten` | `Volume.flattened(...)`, `Volume.flattened_from(...)` | `clay_item_volume_flatten`, `clay_item_volume_flatten_from` |
 | Cut tool | `cut::cut_item`, `cut::CutShape` | `clay.Cut(...)`, `clay.CutShape.rect/circle/from_polygon/from_curve` | `clay_cut_create`, `clay_cut_polygon_from_curve` |
 | Snakehook | `brush::snakehook` | `clay.snakehook(...)` | `clay_item_create` + `clay_item_set_curve_points` |
 | Tube | `brush::tube` | `clay.tube(...)` | `clay_tube_create` |

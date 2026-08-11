@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "clay.h"
+#include "clay/field/volume.h"
 #include "clay/scene/tape.h"
 
 // Building a volume through the C ABI (c-abi spec, add-mesh-to-field-import).
@@ -167,7 +168,9 @@ TEST_CASE("c volume: an older descriptor still works") {
         float padding;
         float beta;
     };
-    static_assert(sizeof(OldParams) == sizeof(clay_volume_params));
+    // The 0.27 layout, now a strict prefix: 0.28.0 appended `feather`, which
+    // zero-fills to the hard replace for a caller this old.
+    static_assert(sizeof(OldParams) < sizeof(clay_volume_params));
 
     clay_mesh* mesh = build_box_mesh(0.5f);
     OldParams old{};
@@ -685,4 +688,336 @@ TEST_CASE("c abi: a flatten can be sampled from a document") {
     }
 
     clay_document_destroy(doc);
+}
+
+// -- the replace round trip and its feather (issue #67, ------------------------
+// add-feathered-volume-replace)
+//
+// Baking a region and putting it straight back with CLAY_OP_REPLACE — no verb
+// applied — left the surface shaded like corrugated metal. The zero set was
+// EXACT (these tests hold that); what corrugated was the normals: the hard
+// replace holds both fields live at the surface, a fresh bake ties with the
+// field beneath it at every sample plane, and any finite-difference gradient
+// across a min/max branch switch pays |b - a| over its own epsilon, at the
+// cell wavelength. The feather crossfades to ONE field deep inside the box,
+// so only one gradient survives — and the error finally shrinks with the cell.
+
+namespace {
+
+// A unit ball as one SDF layer, the issue's own repro document.
+clay_document* unit_ball_doc(clay_layer_id* out_layer) {
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+    REQUIRE(clay_add_sdf_layer(doc, "ball", out_layer) == CLAY_OK);
+    clay_item_desc it;
+    std::memset(&it, 0, sizeof it);
+    it.struct_size = sizeof it;
+    it.prim = CLAY_PRIM_SPHERE;
+    it.params[0] = 1.0f;
+    it.rotation[3] = 1.0f;
+    it.scale = 1.0f;
+    it.op = CLAY_OP_ADD;
+    clay_node_id node = 0;
+    REQUIRE(clay_add_item(doc, *out_layer, &it, &node) == CLAY_OK);
+    return doc;
+}
+
+// The issue's region: a box clipping the cap of the ball around +z.
+constexpr float kCapMin[3] = {-0.7f, -0.4f, 0.4f};
+constexpr float kCapMax[3] = {0.7f, 0.4f, 1.3f};
+
+// Directions through the cap, kept well inside the region box.
+std::vector<kernel::cfloat3> cap_directions() {
+    std::vector<kernel::cfloat3> dirs;
+    for (int j = 0; j < 5; ++j)
+        for (int i = 0; i < 9; ++i) {
+            float x = -0.5f + 1.0f * (i + 0.5f) / 9.0f;
+            float y = -0.28f + 0.56f * (j + 0.5f) / 5.0f;
+            float z = std::sqrt(1.0f - x * x - y * y);
+            dirs.push_back(cf3(x, y, z));
+        }
+    return dirs;
+}
+
+// Bake the cap and put it straight back with CLAY_OP_REPLACE. No verb.
+void replace_cap(clay_document* doc, clay_layer_id layer, float cell, float feather) {
+    clay_volume_params vp = volume_params(cell);
+    vp.feather = feather;
+    clay_item* item = nullptr;
+    REQUIRE(clay_item_volume_from_document(doc, &vp, kCapMin, kCapMax, &item) == CLAY_OK);
+    REQUIRE(clay_item_set_op(item, CLAY_OP_REPLACE) == CLAY_OK);
+    REQUIRE(clay_layer_add_item(doc, layer, item, nullptr) == CLAY_OK);
+    clay_item_destroy(item);
+}
+
+// Worst angle, in degrees, between the field gradient and the radial
+// direction over the cap — the corrugation, measured where shading reads it.
+double worst_normal_tilt_deg(clay_document* doc) {
+    std::vector<kernel::cfloat3> dirs = cap_directions();
+    std::vector<float> pts, grads(dirs.size() * 3);
+    for (const kernel::cfloat3& d : dirs) {
+        pts.push_back(d.x);
+        pts.push_back(d.y);
+        pts.push_back(d.z);
+    }
+    REQUIRE(clay_eval_gradients(doc, "cpu", pts.data(), dirs.size(), grads.data()) == CLAY_OK);
+    double worst = 0.0;
+    for (std::size_t i = 0; i < dirs.size(); ++i) {
+        double dot = grads[3 * i] * dirs[i].x + grads[3 * i + 1] * dirs[i].y +
+                     grads[3 * i + 2] * dirs[i].z;
+        dot = std::min(1.0, std::fabs(dot));
+        worst = std::max(worst, std::acos(dot) * 180.0 / 3.14159265358979);
+    }
+    return worst;
+}
+
+// Worst |radius - 1| of the field's zero crossing along the cap directions,
+// by bisection — the surface itself, free of any marching tolerance.
+double worst_radial_deviation(clay_document* doc) {
+    double worst = 0.0;
+    for (const kernel::cfloat3& d : cap_directions()) {
+        float lo = 0.94f, hi = 1.06f;
+        REQUIRE(eval_c(doc, d * lo) < 0.0f);
+        REQUIRE(eval_c(doc, d * hi) > 0.0f);
+        for (int it = 0; it < 30; ++it) {
+            float m = 0.5f * (lo + hi);
+            (eval_c(doc, d * m) < 0.0f ? lo : hi) = m;
+        }
+        worst = std::max(worst, std::fabs(0.5 * (lo + hi) - 1.0));
+    }
+    return worst;
+}
+
+}  // namespace
+
+TEST_CASE("c abi: a feathered replace uncorrugates the bake round trip") {
+    // Written to fail on the OLD behaviour: the hard replace's normal tilt sat
+    // at tens of degrees and did NOT shrink with the cell — the issue's
+    // constant-worst-deviation table, seen where it actually lands (normals).
+    struct Row {
+        float cell;
+        double hard_tilt, feathered_tilt, feathered_dev;
+    };
+    Row rows[2] = {{0.04f, 0, 0, 0}, {0.02f, 0, 0, 0}};
+
+    for (Row& row : rows) {
+        clay_layer_id layer = 0;
+        clay_document* hard = unit_ball_doc(&layer);
+        replace_cap(hard, layer, row.cell, 0.0f);
+        row.hard_tilt = worst_normal_tilt_deg(hard);
+        // The surface itself was never wrong: exact to well below the cell
+        // even under the hard replace. The corrugation is all in the normals.
+        CHECK(worst_radial_deviation(hard) < 1e-4);
+        clay_document_destroy(hard);
+
+        clay_document* feathered = unit_ball_doc(&layer);
+        replace_cap(feathered, layer, row.cell, 3.0f * row.cell);  // one band
+        row.feathered_tilt = worst_normal_tilt_deg(feathered);
+        row.feathered_dev = worst_radial_deviation(feathered);
+        // The feathered field is steeper by band * 1.5 / feather and declares
+        // it; the declared cost must stay a cost, not a cliff.
+        float step = 0.0f;
+        REQUIRE(clay_safe_step_scale(feathered, &step) == CLAY_OK);
+        CHECK(step > 0.15f);
+        clay_document_destroy(feathered);
+    }
+
+    // The defect: hard-replace normals corrugate far past anything trilinear
+    // reconstruction explains (measured 32 degrees at cell 0.04).
+    CHECK(rows[0].hard_tilt > 4.0);
+    // The fix: single-field normals, converging as the cell shrinks.
+    CHECK(rows[0].feathered_tilt < 2.5);
+    CHECK(rows[1].feathered_tilt < 1.2);
+    CHECK(rows[1].feathered_tilt < rows[0].feathered_tilt);
+    // The surface deviation is now plain trilinear reconstruction —
+    // O(cell^2) — rather than resolution-independent.
+    CHECK(rows[0].feathered_dev < 0.7 * 0.04 * 0.04);
+    CHECK(rows[1].feathered_dev < 0.7 * 0.02 * 0.02);
+    CHECK(rows[1].feathered_dev < 0.5 * rows[0].feathered_dev);
+}
+
+TEST_CASE("c abi: feather zero is the hard replace it always was") {
+    // Byte-identity pinned algebraically: with feather 0 (or a descriptor
+    // from before the field existed) the composed field IS
+    // min(max(a, -b), b) of the two fields evaluated separately.
+    clay_layer_id layer = 0;
+    clay_document* composed = unit_ball_doc(&layer);
+    replace_cap(composed, layer, 0.02f, 0.0f);
+
+    clay_document* ball_only = unit_ball_doc(&layer);
+
+    clay_document* volume_only = clay_document_create();
+    clay_layer_id vl = 0;
+    REQUIRE(clay_add_sdf_layer(volume_only, "v", &vl) == CLAY_OK);
+    {
+        clay_volume_params vp = volume_params(0.02f);
+        clay_item* item = nullptr;
+        REQUIRE(clay_item_volume_from_document(ball_only, &vp, kCapMin, kCapMax, &item) ==
+                CLAY_OK);
+        REQUIRE(clay_item_set_op(item, CLAY_OP_REPLACE) == CLAY_OK);
+        REQUIRE(clay_layer_add_item(volume_only, vl, item, nullptr) == CLAY_OK);
+        clay_item_destroy(item);
+    }
+
+    for (const kernel::cfloat3& d : cap_directions()) {
+        for (float r : {0.9f, 0.999f, 1.001f, 1.1f}) {
+            float a = eval_c(ball_only, d * r);
+            float b = eval_c(volume_only, d * r);
+            float expect = std::min(std::max(a, -b), b);
+            CHECK(eval_c(composed, d * r) == expect);  // exact, not approx
+        }
+    }
+
+    clay_document_destroy(composed);
+    clay_document_destroy(ball_only);
+    clay_document_destroy(volume_only);
+}
+
+TEST_CASE("c abi: the feather blends inside the box and leaves the outside alone") {
+    clay_layer_id layer = 0;
+    clay_document* ball_only = unit_ball_doc(&layer);
+    clay_document* hard = unit_ball_doc(&layer);
+    replace_cap(hard, layer, 0.02f, 0.0f);
+    clay_document* feathered = unit_ball_doc(&layer);
+    replace_cap(feathered, layer, 0.02f, 0.06f);
+
+    // Just outside the box's top face, above the cap: the analytic field
+    // continues untouched through a feathered replace. The hard replace caps
+    // it with the volume's box distance — the visible hard rectangle. (The
+    // region's 0.9 z-extent rounds up to six whole bricks of eight 0.02
+    // cells, so the sampled box ends at z = 1.36, not 1.3.)
+    kernel::cfloat3 outside = cf3(0.0f, 0.0f, 1.40f);
+    float analytic = eval_c(ball_only, outside);
+    CHECK(eval_c(feathered, outside) == analytic);
+    CHECK(eval_c(hard, outside) != analytic);
+
+    // Deeper inside the box than the feather, the result IS the volume: the
+    // crossfade has fully handed over, which is what removes the ties.
+    clay_document* volume_only = clay_document_create();
+    clay_layer_id vl = 0;
+    REQUIRE(clay_add_sdf_layer(volume_only, "v", &vl) == CLAY_OK);
+    {
+        clay_volume_params vp = volume_params(0.02f);
+        vp.feather = 0.06f;
+        clay_item* item = nullptr;
+        REQUIRE(clay_item_volume_from_document(ball_only, &vp, kCapMin, kCapMax, &item) ==
+                CLAY_OK);
+        REQUIRE(clay_item_set_op(item, CLAY_OP_REPLACE) == CLAY_OK);
+        REQUIRE(clay_layer_add_item(volume_only, vl, item, nullptr) == CLAY_OK);
+        clay_item_destroy(item);
+    }
+    for (float r : {0.98f, 1.0f, 1.02f}) {
+        kernel::cfloat3 p = cf3(0.1f, 0.05f, 0.0f) + cf3(0, 0, r);
+        float composed = eval_c(feathered, p);
+        float b = eval_c(volume_only, p);
+        CHECK(composed == doctest::Approx(b).epsilon(1e-6));
+    }
+
+    clay_document_destroy(ball_only);
+    clay_document_destroy(hard);
+    clay_document_destroy(feathered);
+    clay_document_destroy(volume_only);
+}
+
+TEST_CASE("c abi: a relax can be sampled from a document") {
+    // The counterpart clay_item_volume_flatten_from is to the flatten. The
+    // relationship to bake-then-relax is EQUALITY inside the band — relax
+    // averages cell-aligned taps, and a fresh bake's taps are the document at
+    // those lattice points — so the test holds exactly that, and the refusals.
+    clay_layer_id layer = 0;
+    clay_document* doc = unit_ball_doc(&layer);
+
+    clay_relax_params rp;
+    std::memset(&rp, 0, sizeof rp);
+    rp.struct_size = sizeof rp;
+    rp.strength = 1.0f;
+    rp.radius_cells = 2;
+    rp.iterations = 2;
+    rp.centre[2] = 1.0f;
+    rp.region_radius = 0.5f;
+    rp.falloff = 0.1f;
+
+    clay_volume_params vp = volume_params(0.02f);
+
+    SUBCASE("parity with bake-then-relax") {
+        clay_item* baked = nullptr;
+        REQUIRE(clay_item_volume_from_document(doc, &vp, kCapMin, kCapMax, &baked) == CLAY_OK);
+        REQUIRE(clay_item_volume_relax(baked, &rp) == CLAY_OK);
+
+        clay_item* sampled = nullptr;
+        REQUIRE(clay_item_volume_relax_from(doc, &rp, &vp, kCapMin, kCapMax, &sampled) ==
+                CLAY_OK);
+        REQUIRE(sampled != nullptr);
+
+        auto place = [](clay_item* it) {
+            clay_document* d = clay_document_create();
+            clay_layer_id l = 0;
+            REQUIRE(clay_add_sdf_layer(d, "o", &l) == CLAY_OK);
+            REQUIRE(clay_layer_add_item(d, l, it, nullptr) == CLAY_OK);
+            return d;
+        };
+        clay_document* two_calls = place(baked);
+        clay_document* one_call = place(sampled);
+        for (const kernel::cfloat3& d : cap_directions())
+            for (float r : {0.97f, 1.0f, 1.03f})
+                CHECK(eval_c(one_call, d * r) == eval_c(two_calls, d * r));  // exact
+
+        clay_item_destroy(baked);
+        clay_item_destroy(sampled);
+        clay_document_destroy(two_calls);
+        clay_document_destroy(one_call);
+    }
+
+    SUBCASE("refusals") {
+        clay_item* out = nullptr;
+        clay_volume_params bad = vp;
+        bad.cell_size = 0.0f;  // a document has no intrinsic scale
+        CHECK(clay_item_volume_relax_from(doc, &rp, &bad, kCapMin, kCapMax, &out) != CLAY_OK);
+        // half a region is a caller that meant to pass one
+        CHECK(clay_item_volume_relax_from(doc, &rp, &vp, kCapMin, nullptr, &out) != CLAY_OK);
+        CHECK(clay_item_volume_relax_from(doc, &rp, &vp, nullptr, kCapMax, &out) != CLAY_OK);
+        CHECK(clay_item_volume_relax_from(nullptr, &rp, &vp, kCapMin, kCapMax, &out) !=
+              CLAY_OK);
+        CHECK(clay_item_volume_relax_from(doc, nullptr, &vp, kCapMin, kCapMax, &out) !=
+              CLAY_OK);
+        CHECK(clay_item_volume_relax_from(doc, &rp, nullptr, kCapMin, kCapMax, &out) !=
+              CLAY_OK);
+    }
+
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("c volume: the feather survives the blob, and an old blob reads hard") {
+    // The blob header is self-describing (its size IS the index offset), so
+    // the feather appends the same way the sample Lipschitz did: a new reader
+    // of an old blob sees 0 — the hard replace — and an old reader of a new
+    // blob finds its offsets exactly where they always were.
+    using field::FieldVolume;
+    auto ball = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.4f; };
+    FieldVolume v = FieldVolume::sample(ball, math::Aabb(cf3(-0.6f, -0.6f, -0.6f),
+                                                         cf3(0.6f, 0.6f, 0.6f)),
+                                        0.05f, 0.15f);
+    v.set_feather(0.07f);
+
+    std::vector<float> blob = v.to_blob();
+    auto back = FieldVolume::from_blob(blob);
+    REQUIRE(back.has_value());
+    CHECK(back->feather() == 0.07f);
+    // ...and through the byte serialization documents use.
+    std::vector<std::uint8_t> bytes = v.serialize();
+    auto loaded = FieldVolume::deserialize(bytes.data(), bytes.size());
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->feather() == 0.07f);
+
+    // A pre-feather blob: header of 12, sections shifted down by one float.
+    std::vector<float> old;
+    old.insert(old.end(), blob.begin(), blob.begin() + 12);
+    old.insert(old.end(), blob.begin() + 13, blob.end());
+    old[8] -= 1.0f;   // index offset
+    old[9] -= 1.0f;   // far-bound offset
+    old[10] -= 1.0f;  // data offset
+    auto pre = FieldVolume::from_blob(old);
+    REQUIRE(pre.has_value());
+    CHECK(pre->feather() == 0.0f);
+    CHECK(pre->eval(cf3(0.1f, 0.2f, 0.0f)) == v.eval(cf3(0.1f, 0.2f, 0.0f)));
 }
