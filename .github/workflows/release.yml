@@ -10,7 +10,15 @@ jobs:
     name: release checklist (all gates)
     runs-on: ubuntu-latest
     steps:
+      # Full history: the device gate compares HEAD against the commit its
+      # recorded run names, and a depth-1 clone cannot resolve that commit at
+      # all. The gate reports it honestly ("cannot diff... shallow clone?") and
+      # fails rather than passing on a claim it cannot check — which is right,
+      # and which made this workflow unable to pass until the checkout stopped
+      # being shallow. v0.27.0 is the tag that found it.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 20

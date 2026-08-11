@@ -202,6 +202,16 @@ forward-refuse).
    the same loss minors 1, 2 and 4 carry. The format notes at the top of
    `include/clay/io/clayspace.h` record it.
 
+   **0.27.1 is 0.27.0 plus one CI fix, and changes no code at all.** v0.27.0 was
+   tagged and its release workflow failed its own device gate — not on the
+   library, on the clone: `actions/checkout` defaults to depth 1, the gate
+   compares HEAD against the commit its recorded run names, and a shallow clone
+   cannot resolve that commit. The gate said so ("cannot diff against the gated
+   commit… shallow clone?") and failed rather than passing on a claim it could
+   not check, which is the behaviour that change asked for. The checklist job
+   fetches full history now. **The v0.27.0 tag remains for the record**, as
+   v0.24.0's does, and nothing was published from it.
+
    **0.27.0 adds four symbols**, from two changes, and is additive throughout:
    no signature changed, nothing was removed, no struct grew, and no existing
    entry point returns a new `clay_result` value, so code compiled against
