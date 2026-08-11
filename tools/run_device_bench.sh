@@ -22,6 +22,33 @@ RESULTS="${CLAY_DEVICE_RESULTS:-$ROOT/build/device/results.xcresult}"
 
 # -- the device ---------------------------------------------------------------
 
+# --simulator is an explicit opt-in, never a fallback. Its numbers are labelled
+# `platform: simulator` in the record and check_device_bench.py refuses them as
+# a source for device figures: a simulator runs the HOST's cores, with the
+# host's memory and no thermal ceiling, so it answers no question about a
+# tablet. It is useful for the RENDERS and for exercising every brush without
+# waiting for hardware to cool.
+simulator=0
+if [ "${1:-}" = "--simulator" ]; then simulator=1; shift; fi
+
+if [ "$simulator" = "1" ]; then
+    udid="${1:-${CLAY_SIM_UDID:-}}"
+    if [ -z "$udid" ]; then
+        udid="$(xcrun simctl list devices available -j 2>/dev/null \
+                | python3 -c 'import json,sys
+d = json.load(sys.stdin)["devices"]
+c = [v["udid"] for rt, rs in sorted(d.items()) for v in rs if "iPad" in v["name"]]
+print(c[-1] if c else "")')"
+    fi
+    if [ -z "$udid" ]; then
+        echo "device-bench: no iPad simulator available." >&2
+        exit 1
+    fi
+    echo "device-bench: SIMULATOR $udid — these are NOT device numbers"
+    xcrun simctl bootstatus "$udid" -b > /dev/null 2>&1 || xcrun simctl boot "$udid" || true
+    DESTINATION="platform=iOS Simulator,id=$udid"
+else
+
 udid="${1:-${CLAY_DEVICE_UDID:-}}"
 if [ -z "$udid" ]; then
     # xctrace lists ATTACHED devices before the "Devices Offline" heading and
@@ -42,6 +69,8 @@ if [ -z "$udid" ]; then
     exit 1
 fi
 echo "device-bench: target udid $udid"
+DESTINATION="platform=iOS,id=$udid"
+fi
 
 # -- the artifact under test --------------------------------------------------
 
@@ -74,7 +103,7 @@ set +e
 xcodebuild test \
     -project "$PROJECT/ClayCoreDevice.xcodeproj" \
     -scheme ClayCoreDevice \
-    -destination "platform=iOS,id=$udid" \
+    -destination "$DESTINATION" \
     -resultBundlePath "$RESULTS" \
     -allowProvisioningUpdates \
     ${team_arg[@]+"${team_arg[@]}"}

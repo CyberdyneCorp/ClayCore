@@ -85,6 +85,41 @@ enum Coverage {
         .measured("session_stroke_carve", by: "stroke_carve"),
         .measured("session_move_drags", by: "move_drags"),
         .measured("session_cut_passes", by: "cut_passes"),
+        .measured("session_snakehook", by: "snakehook_tendrils"),
+        .measured("session_noise", by: "noise_detail"),
+        .measured("session_magnify_pinch", by: "magnify_pinch"),
+
+        // Volume verbs and masking, rendered. These had latency cases and no
+        // picture, which for a brush whose job is a visible change of surface
+        // leaves the only question that matters unanswered.
+        .measured("session_volume_relax", by: "volume_relax"),
+        // *_pass1 renders are attachments, not cases; the chaining pair is
+        // two pictures of one case rather than two measurements.
+        .measured("session_volume_flatten", by: "volume_flatten"),
+        // hPolish is NOT its own entry point: it is clay_item_volume_flatten
+        // in CUT_ONLY mode, and every other flatten case here uses TWO_SIDED,
+        // so the mode that defines the Trim family was untested.
+        .measured("session_volume_hpolish", by: "volume_hpolish"),
+        // What a mask is FOR. Everything else measures how fast one paints.
+        .measured("session_mask_freeze", by: "mask_freeze"),
+        .measured("session_mask_extract", by: "mask_extract"),
+
+        // Voxel sessions. Several voxel verbs can legally return CLAY_OK
+        // having changed no cell — the ABI says so explicitly — and no timing
+        // distinguishes that from working. The render does.
+        .measured("session_voxel_build", by: "session_voxel_build"),
+        .measured("session_voxel_erase", by: "session_voxel_erase"),
+        .measured("session_voxel_paint", by: "session_voxel_paint"),
+        .measured("session_voxel_smooth", by: "session_voxel_smooth"),
+        .measured("session_voxel_inflate", by: "session_voxel_inflate"),
+        .measured("session_voxel_flatten", by: "session_voxel_flatten"),
+        .measured("session_voxel_pinch", by: "session_voxel_pinch"),
+        .measured("session_voxel_magnify", by: "session_voxel_magnify"),
+        .measured("session_voxel_scrape", by: "session_voxel_scrape"),
+        .measured("session_voxel_grab", by: "session_voxel_grab"),
+        .measured("session_voxel_smudge", by: "session_voxel_smudge"),
+        .measured("session_voxel_fill_cavities", by: "session_voxel_fill_cavities"),
+        .measured("session_voxel_carve_alpha", by: "session_voxel_carve_alpha"),
 
         // -- exemptions, each a decision rather than an omission --------------
         .exempt("snakehook",

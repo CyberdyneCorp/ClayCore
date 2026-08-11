@@ -67,6 +67,12 @@ struct RunRecord: Codable {
     /// Baselines are only comparable against the hardware that produced them.
     let deviceModel: String
     let osVersion: String
+    /// "device" or "simulator". A simulator runs the HOST's cores with the
+    /// host's memory and no thermal ceiling, so its timings answer no question
+    /// about a tablet. `performance-budgets` requires them to be labelled and
+    /// refused as a source for device figures — this field is what lets the
+    /// checker refuse them rather than trusting the operator to remember.
+    let platform: String
     let abiVersion: String
     let thermalStateStart: String
     let thermalStateEnd: String
@@ -189,6 +195,16 @@ enum DeviceInfo {
         return name.isEmpty ? "unknown" : name
     }
 
+    /// Where this ran. Compiled in rather than inferred, so it cannot be
+    /// wrong: the simulator target defines `targetEnvironment(simulator)`.
+    static var platform: String {
+        #if targetEnvironment(simulator)
+        return "simulator"
+        #else
+        return "device"
+        #endif
+    }
+
     static func thermalName(_ state: ProcessInfo.ThermalState) -> String {
         switch state {
         case .nominal:  return "nominal"
@@ -229,6 +245,7 @@ final class RunCollector {
         let record = RunRecord(
             deviceModel: DeviceInfo.model,
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            platform: DeviceInfo.platform,
             abiVersion: abiVersion,
             thermalStateStart: DeviceInfo.thermalName(thermalStart),
             thermalStateEnd: DeviceInfo.thermalName(thermalEnd),

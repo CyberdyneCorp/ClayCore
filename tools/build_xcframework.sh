@@ -98,10 +98,23 @@ build_slice() {
     #    independent one: the Swift smoke asserts the backend REGISTERS, which
     #    needs a Metal device present, while this asserts the artifact SHIPS
     #    it, which is what the build controls and what was actually wrong.
-    if ! nm "$STAGE/libclaycore-$name.a" 2>/dev/null | grep -q "clay_metallib"; then
-        echo "slice $name has no embedded Metal library — it would ship CPU-only" >&2
-        exit 1
-    fi
+    #
+    # Captured rather than piped into `grep -q`. Under `set -o pipefail` that
+    # pipeline FAILS AT RANDOM: grep exits on the first match, nm takes SIGPIPE
+    # writing the rest, and the pipeline reports the failure even though the
+    # symbol was found. Measured at 4 in 30 on this archive — about a 13%
+    # flake per slice, so better than a one-in-three chance of a spurious
+    # "would ship CPU-only" per xcframework build, on a check that blocks a
+    # release.
+    local symbols
+    symbols=$(nm "$STAGE/libclaycore-$name.a" 2>/dev/null || true)
+    case "$symbols" in
+        *clay_metallib*) ;;
+        *)
+            echo "slice $name has no embedded Metal library — it would ship CPU-only" >&2
+            exit 1
+            ;;
+    esac
     echo "built slice: $name ($got, $(wc -c < "$metallib" | tr -d ' ') bytes)"
 }
 

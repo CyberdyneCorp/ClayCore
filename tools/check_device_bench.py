@@ -109,6 +109,17 @@ def main() -> int:
               f"Let the device cool and run again.", file=sys.stderr)
         return 1
 
+    # `performance-budgets`: a simulator runs the host's cores with the host's
+    # memory and no thermal ceiling, so it cannot answer a question about a
+    # tablet. Refused in BOTH directions — seeding a baseline from one would
+    # bake a desktop number in as the device's requirement.
+    platform = run.get("platform", "device")
+    if platform != "device":
+        print(f"device-bench: REFUSED — this run is from a {platform}, not a "
+              f"device. Its renders are useful; its timings are not comparable "
+              f"to a device baseline and cannot seed one.", file=sys.stderr)
+        return 1
+
     if args.update:
         write_baseline(run, baseline_path, args.tolerance)
         return 0
