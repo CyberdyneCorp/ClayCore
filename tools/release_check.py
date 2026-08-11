@@ -89,6 +89,14 @@ def check_versions(cl: Checklist) -> None:
 DEVICE_RELEVANT = ("src/", "include/", "backends/", "bindings/", "CMakeLists.txt",
                    "tests/device/")
 
+# ...except the gate's OWN outputs, which live under tests/device/ and are
+# written by the run being recorded. Including them made the gate invalidate
+# itself: the commit that records a passing run necessarily changes
+# baseline.json and last-gate.json, so the stamp was stale the instant it was
+# committed and the gate was red on main from the moment it landed. A check
+# that cannot be satisfied is one people learn to ignore.
+DEVICE_GATE_OUTPUTS = ("tests/device/baseline.json", "tests/device/last-gate.json")
+
 
 def check_device_gate(cl: "Checklist") -> None:
     """The device gate ran, and it ran against this engine.
@@ -117,6 +125,17 @@ def check_device_gate(cl: "Checklist") -> None:
         cl.add("device", False, "the recorded device gate did not pass")
         return
 
+    # A commit id does not identify what ran if the tree was dirty when it
+    # ran. That is not hypothetical: the first stamp this repo recorded named
+    # a commit that did not contain the harness edit the run had actually
+    # used, because the edit was still uncommitted.
+    if stamp.get("treeDirty"):
+        cl.add("device", False,
+               "the recorded run was taken with uncommitted changes, so the "
+               "commit it names does not identify the code that ran; commit "
+               "and re-run the device bench")
+        return
+
     commit = stamp.get("claycoreCommit")
     if not commit:
         cl.add("device", False, "the recorded device gate names no commit")
@@ -131,7 +150,8 @@ def check_device_gate(cl: "Checklist") -> None:
                f"(shallow clone?): {out.splitlines()[-1] if out else ''}")
         return
     changed = [p for p in out.splitlines()
-               if any(p.startswith(prefix) for prefix in DEVICE_RELEVANT)]
+               if any(p.startswith(prefix) for prefix in DEVICE_RELEVANT)
+               and p not in DEVICE_GATE_OUTPUTS]
     if changed:
         cl.add("device", False,
                f"engine changed since the gate ran at {commit[:9]}: "
