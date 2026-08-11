@@ -150,6 +150,23 @@ typedef enum clay_op {
      * tongue use. Support is finite, so influence bounds and culling are
      * unaffected.
      *
+     * blend_k saturates at the item's extent. A surface point moves only
+     * while it stays inside the region (the item inflated by its rounding),
+     * so the displacement equals blend_k only until blend_k reaches how far
+     * that region extends past the surface along the normal — for a sphere
+     * stamp centered on the surface, its radius plus the rounding. Past that
+     * the falloff gives sharply diminishing returns, and radius + 2*rounding
+     * is never reached; a host's depth slider mapped to blend_k should top
+     * out near the extent rather than run past it.
+     *
+     * rounding = 0 therefore costs amplitude as well as edge softness: the
+     * ceiling drops to the item's bare radius, and the rim becomes a step
+     * whose declared steepness — amplitude over falloff width, the marcher's
+     * cost model — is effectively unbounded. For a standard clay brush set
+     * blend_k = rounding = the item's radius: the stamp then raises the
+     * surface by exactly blend_k with a soft rim, and reaches no further
+     * than 2*rounding outside the item.
+     *
      * A pair rather than one signed amplitude, because blend_k is required
      * non-negative — and because add/subtract and engrave/emboss are pairs. */
     CLAY_OP_RELIEF = 14, /* build up: ZBrush Standard, ClayBuildup */

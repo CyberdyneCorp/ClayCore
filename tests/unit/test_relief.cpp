@@ -39,7 +39,7 @@ scene::Document plain_ball() { return ball_with(scene::Op::Add, 0.0f, 0.0f, fals
 
 // Where the surface sits on the +Y axis.
 float top(const scene::Tape& t) {
-    for (float y = 0.2f; y < 1.4f; y += 0.001f)
+    for (float y = 0.2f; y < 1.8f; y += 0.001f)
         if (t.eval(cf3(0, y, 0)).d > 0.0f) return y;
     return -1.0f;
 }
@@ -71,6 +71,67 @@ TEST_CASE("relief: it displaces the surface accumulated before it") {
     // gradient — the surface normal — by exactly the offset. Not approximately.
     CHECK(up - base == doctest::Approx(amplitude).epsilon(0.05));
     CHECK(base - in == doctest::Approx(amplitude).epsilon(0.05));
+}
+
+TEST_CASE("relief: the amplitude blend.k buys is capped by the region's extent") {
+    // Documented in clay.h at CLAY_OP_RELIEF and in docs/07: a surface point
+    // moves only while it stays inside the rounded region, so displacement
+    // tracks blend.k exactly until blend.k reaches how far the region extends
+    // past the surface along the normal, then saturates. A host's depth
+    // slider relies on where that ceiling sits; this pins it.
+    const float base = top(scene::compile_document(plain_ball()));
+
+    SUBCASE("below the extent the displacement IS blend.k") {
+        for (float amp : {0.1f, 0.2f, 0.35f}) {
+            const float up = top(scene::compile_document(ball_with(scene::Op::Relief, amp, 0.0f)));
+            CAPTURE(amp);
+            CHECK(up - base == doctest::Approx(amp).epsilon(0.02));
+        }
+    }
+
+    SUBCASE("with rounding 0 the ceiling is the region's bare radius") {
+        // The region sphere has radius 0.35: blend.k past it moves nothing
+        // further, which is what makes the top half of a naive depth slider
+        // go dead.
+        for (float amp : {0.5f, 0.8f}) {
+            const float up = top(scene::compile_document(ball_with(scene::Op::Relief, amp, 0.0f)));
+            CAPTURE(amp);
+            CHECK(up - base == doctest::Approx(0.35f).epsilon(0.02));
+        }
+    }
+
+    SUBCASE("rounding raises the ceiling to radius + rounding, then the falloff tapers off") {
+        // Exact tracking up to radius + rounding = 0.6...
+        const float at = top(scene::compile_document(ball_with(scene::Op::Relief, 0.6f, 0.25f)));
+        CHECK(at - base == doctest::Approx(0.6f).epsilon(0.02));
+        // ...diminishing returns past it, and radius + 2*rounding = 0.85 is
+        // never reached however large blend.k grows.
+        const float far = top(scene::compile_document(ball_with(scene::Op::Relief, 2.0f, 0.25f)));
+        CHECK(far - base > 0.6f);
+        CHECK(far - base < 0.85f);
+    }
+}
+
+TEST_CASE("relief: rounding buys amplitude, not just a soft rim") {
+    // The reported trap: rounding read as edge softness alone, left at 0,
+    // silently costs most of the brush. The same amplitude that saturates at
+    // the bare radius is achieved in full once the rounding extends the
+    // region.
+    const float base = top(scene::compile_document(plain_ball()));
+    const float bare = top(scene::compile_document(ball_with(scene::Op::Relief, 0.5f, 0.0f)));
+    const float rounded = top(scene::compile_document(ball_with(scene::Op::Relief, 0.5f, 0.25f)));
+    INFO("amplitude 0.5 achieves " << bare - base << " at rounding 0, "  //
+         << rounded - base << " at rounding 0.25");
+    CHECK(bare - base == doctest::Approx(0.35f).epsilon(0.02));
+    CHECK(rounded - base == doctest::Approx(0.5f).epsilon(0.02));
+
+    SUBCASE("the standard clay mapping: blend.k = rounding = stamp radius") {
+        // What clay.h recommends for a clay brush, kept true by measurement:
+        // the stamp raises the surface by exactly blend.k, with headroom to
+        // spare (the ceiling sits at twice blend.k).
+        const float up = top(scene::compile_document(ball_with(scene::Op::Relief, 0.35f, 0.35f)));
+        CHECK(up - base == doctest::Approx(0.35f).epsilon(0.02));
+    }
 }
 
 TEST_CASE("relief: the item is a region, not a shape") {
