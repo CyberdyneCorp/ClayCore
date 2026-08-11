@@ -62,6 +62,21 @@ jobs:
         run: cmake --build --preset metal
       - name: Test (Metal parity runs when the runner exposes a Metal device)
         run: ctest --test-dir build/metal --output-on-failure -C Release
+      # A skipped gate and a passing gate look identical in a log, which is
+      # how "parity runs when the runner exposes a Metal device" stayed
+      # unchecked. Report what was actually compared. Absent Metal is a
+      # WARNING rather than a failure: this runner may genuinely have no GPU,
+      # and the release-time device gate is what establishes Metal parity.
+      - name: Report whether Metal parity actually ran
+        run: |
+          checked=$(./build/metal/tests/clay_unit_tests \
+                    -tc="*report which backends*" 2>/dev/null \
+                    | sed -n 's/^PARITY_BACKENDS_CHECKED: //p')
+          echo "backends compared on this runner: ${checked:-<none>}"
+          case "$checked" in
+            *metal*) echo "Metal parity ran here." ;;
+            *) echo "::warning::Metal parity was SKIPPED — no Metal backend registered on this runner (compared: ${checked:-none}). Metal parity is established by the release-time device gate, tools/run_device_bench.sh." ;;
+          esac
       # the only runner that can compile the headers as REAL MSL — including
       # the worked example the kernels artifact ships to host apps
       - name: Kernel dialect (native Metal profile)

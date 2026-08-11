@@ -101,41 +101,66 @@ endif()
 if(CLAY_BACKEND_METAL AND APPLE)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   find_program(XCRUN xcrun REQUIRED)
+
+  # A metallib is PLATFORM-SPECIFIC: one built for macOS does not load on iOS.
+  # It is EMBEDDED into the library by embed_binary.py and handed to the Metal
+  # runtime at load (backends/metal/metal_backend.cpp), so hardcoding
+  # `-sdk macosx` was survivable only while the Metal backend was never in an
+  # iOS build. The moment the xcframework enables it, a macOS metallib lands
+  # inside the iOS slices, newLibrary rejects it at runtime,
+  # MetalBackend::create() returns nullptr, and the backend silently does not
+  # register — indistinguishable at the ABI from one that was never enabled.
+  #
+  # So derive the SDK from the TARGET, and refuse a target with no known SDK
+  # rather than guessing one.
+  if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
+      set(CLAY_METAL_SDK iphonesimulator)
+      set(CLAY_METAL_MIN_FLAG "-mios-simulator-version-min")
+    else()
+      set(CLAY_METAL_SDK iphoneos)
+      set(CLAY_METAL_MIN_FLAG "-mios-version-min")
+    endif()
+  elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    set(CLAY_METAL_SDK macosx)
+    set(CLAY_METAL_MIN_FLAG "-mmacosx-version-min")
+  else()
+    message(FATAL_ERROR
+      "CLAY_BACKEND_METAL is ON but no Metal SDK is known for CMAKE_SYSTEM_NAME "
+      "'${CMAKE_SYSTEM_NAME}'. Guessing one would embed a metallib that loads "
+      "on no device, and the backend would silently fail to register at run "
+      "time instead of failing here.")
+  endif()
+
+  # The deployment target has to reach the metal compiler too: the metallib
+  # records it (metal-readobj reports PlatformMajor), and a library built for a
+  # newer OS than the slice claims will not load on a device running the older
+  # one. Only pass it when CMake has one — an empty list expands to nothing.
+  set(CLAY_METAL_MIN_ARG)
+  if(CMAKE_OSX_DEPLOYMENT_TARGET)
+    list(APPEND CLAY_METAL_MIN_ARG
+         "${CLAY_METAL_MIN_FLAG}=${CMAKE_OSX_DEPLOYMENT_TARGET}")
+  endif()
+  message(STATUS "Metal kernels: ${CLAY_METAL_SDK} SDK ${CLAY_METAL_MIN_ARG}")
+
   file(GLOB CLAY_KERNEL_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/include/clay/kernel/*.h)
   set(CLAY_METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/clay_kernels.air)
   set(CLAY_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/clay_kernels.metallib)
   set(CLAY_METALLIB_C ${CMAKE_CURRENT_BINARY_DIR}/clay_metallib_embedded.cpp)
-
-  # A metallib is PLATFORM-SPECIFIC: one built for macOS does not load on iOS.
-  # Hardcoding `-sdk macosx` here was survivable only while the Metal backend
-  # was never in an iOS build; the moment the xcframework enables it, a macOS
-  # metallib lands inside the iOS slices, newLibrary rejects it at runtime,
-  # MetalBackend::create() returns nullptr, and the backend silently does not
-  # register — a CPU-only framework again, one level harder to see. Derive the
-  # SDK from what is actually being built for.
-  if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-    if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
-      set(CLAY_METAL_SDK iphonesimulator)
-    else()
-      set(CLAY_METAL_SDK iphoneos)
-    endif()
-  else()
-    set(CLAY_METAL_SDK macosx)
-  endif()
-  message(STATUS "claycore: compiling Metal kernels for SDK ${CLAY_METAL_SDK}")
 
   add_custom_command(OUTPUT ${CLAY_METAL_AIR}
     COMMAND ${XCRUN} -sdk ${CLAY_METAL_SDK} metal -c
             ${CMAKE_CURRENT_SOURCE_DIR}/backends/metal/clay_kernels.metal
             -I ${CMAKE_CURRENT_SOURCE_DIR}/include
             -I ${CMAKE_CURRENT_SOURCE_DIR}/backends/metal
-            -fno-fast-math -o ${CLAY_METAL_AIR}
+            -fno-fast-math ${CLAY_METAL_MIN_ARG} -o ${CLAY_METAL_AIR}
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/backends/metal/clay_kernels.metal
             ${CMAKE_CURRENT_SOURCE_DIR}/backends/metal/metal_shared.h
             ${CLAY_KERNEL_HEADERS}
     COMMENT "Compiling claycore kernels to MSL for ${CLAY_METAL_SDK} (single-source)")
   add_custom_command(OUTPUT ${CLAY_METALLIB}
-    COMMAND ${XCRUN} -sdk ${CLAY_METAL_SDK} metallib ${CLAY_METAL_AIR} -o ${CLAY_METALLIB}
+    COMMAND ${XCRUN} -sdk ${CLAY_METAL_SDK} metallib ${CLAY_METAL_AIR}
+            -o ${CLAY_METALLIB}
     DEPENDS ${CLAY_METAL_AIR})
   add_custom_command(OUTPUT ${CLAY_METALLIB_C}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_binary.py

@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <cstdio>
 #include <set>
 #include <string>
 #include <vector>
@@ -273,6 +274,79 @@ std::vector<ParityScene> parity_scenes() {
     pair("blend_circular", scene::BlendProfile::Circular);
     pair("blend_chamfer", scene::BlendProfile::Chamfer);
 
+    // -- the rest of the combine vocabulary -----------------------------------
+    //
+    // Added when the op/deformer coverage guard below was written and found
+    // that 12 of the 16 combine ops and 4 of the 14 deformers reached NO
+    // parity scene. They were evaluated on Metal — the iPad app's production
+    // path — with nothing checking that Metal agreed with the CPU about them.
+    // The four that were covered (add, subtract, paint, relief) are the ones
+    // whose own changes happened to add a scene.
+    auto combine = [&](const char* name, scene::Op op, float k, float rounding = 0.0f) {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        l.sdf->insert(item(scene::Prim::sphere(0.9f), cf3(-0.15f, 0, 0)));
+        scene::Node n = item(scene::Prim::box(cf3(0.55f, 0.75f, 0.5f)), cf3(0.35f, 0.1f, 0.1f));
+        n.op = op;
+        n.blend = scene::Blend{scene::BlendProfile::Quadratic, k};
+        n.rounding = rounding;
+        l.sdf->insert(n);
+        scenes.push_back({name, std::move(doc), 3.0f});
+    };
+    combine("op_intersect", scene::Op::Intersect, 0.12f);
+    // groove and tongue additionally consume the node's rounding as the
+    // channel half-width, so a zero there would measure a degenerate channel
+    combine("op_groove", scene::Op::Groove, 0.18f, 0.09f);
+    combine("op_tongue", scene::Op::Tongue, 0.18f, 0.09f);
+    combine("op_pipe", scene::Op::Pipe, 0.14f);
+    combine("op_engrave", scene::Op::Engrave, 0.14f);
+    combine("op_emboss", scene::Op::Emboss, 0.14f);
+    combine("op_inset", scene::Op::Inset, 0.12f);
+    combine("op_shell", scene::Op::Shell, 0.10f);
+    combine("op_replace", scene::Op::Replace, 0.10f);
+    combine("op_incise", scene::Op::Incise, 0.13f, 0.20f);
+
+    {   // the transitions are NON-LOCAL: their weight reaches arbitrarily far,
+        // which is why they are never culled. A parity scene has to sample
+        // well outside both shapes for that to mean anything.
+        auto transition = [&](const char* name, scene::Op op) {
+            scene::Document doc;
+            scene::Layer& l = doc.add_sdf_layer("l");
+            l.sdf->insert(item(scene::Prim::sphere(0.8f), cf3(0, -0.5f, 0)));
+            scene::Node n = item(scene::Prim::box(cf3(0.6f, 0.6f, 0.6f)), cf3(0, 0.5f, 0));
+            n.op = op;
+            n.transition.a = cf3(0, -1.0f, 0);
+            n.transition.b = cf3(0, 1.0f, 0);
+            n.transition.r0 = 0.2f;
+            n.transition.r1 = 1.4f;
+            n.transition.ease = 3;
+            l.sdf->insert(n);
+            scenes.push_back({name, std::move(doc), 3.5f});
+        };
+        transition("op_transition_linear", scene::Op::TransitionLinear);
+        transition("op_transition_radial", scene::Op::TransitionRadial);
+    }
+
+    // -- the four original deformers ------------------------------------------
+    auto warped = [&](const char* name, scene::Prim prim, scene::Deformer d) {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        scene::Node n = item(prim, cf3(0, 0, 0));
+        n.deformers.push_back(d);
+        l.sdf->insert(n);
+        scenes.push_back({name, std::move(doc), 3.0f});
+    };
+    warped("twist", scene::Prim::box(cf3(0.5f, 1.0f, 0.5f)),
+           scene::Deformer::twist(1.1f));
+    warped("bend", scene::Prim::box(cf3(1.0f, 0.35f, 0.35f)),
+           scene::Deformer::bend(0.9f));
+    warped("taper", scene::Prim::capped_cylinder(0.5f, 1.0f),
+           scene::Deformer::taper(-1.0f, 1.0f, 1.3f, 0.4f, 3));
+    // displace is by-callable in the engine but tape-expressible here: the
+    // sine is the classic backend-disagreement case, which is the point
+    warped("displace", scene::Prim::sphere(0.9f),
+           scene::Deformer::displace(0.08f, 4.0f));
+
     scenes.push_back({"gnarly", gnarly_document(), 4.5f});
     return scenes;
 }
@@ -307,6 +381,61 @@ TEST_CASE("parity: the corpus exercises every primitive type") {
         CAPTURE(op);
         CHECK(covered.count(op) == 1);
     }
+}
+
+// Guard: the same argument as the primitive guard above, for the rest of the
+// vocabulary. An op, deformer or blend profile that no parity scene exercises
+// is never evaluated on Metal/CUDA/OpenCL by this suite, so single-source
+// agreement is unverified for it — and Metal is the iPad app's production
+// path, where an unverified opcode is one a sculptor can reach.
+TEST_CASE("parity: the corpus exercises every op, deformer and blend profile") {
+    // These pin what "every" currently means. Adding an opcode fails here
+    // rather than silently widening the set the corpus is measured against,
+    // which is the whole point: a new op with no parity scene is unverified.
+    static_assert(kernel::ccombine_incise == 15, "a combine op was added; widen this test");
+    static_assert(kernel::cdeform_noise == 13, "a deformer was added; widen this test");
+    static_assert(kernel::cblend_chamfer == 4, "a blend profile was added; widen this test");
+
+    std::set<int> ops, deformers, profiles;
+    for (ParityScene& ps : parity_scenes())
+        for (scene::Layer& l : ps.doc.layers) {
+            if (!l.sdf) continue;
+            for (const auto& kv : l.sdf->nodes()) {
+                const scene::Node& n = kv.second;
+                if (n.op != scene::Op::None) ops.insert(static_cast<int>(n.op));
+                profiles.insert(static_cast<int>(n.blend.profile));
+                for (const scene::Deformer& d : n.deformers)
+                    deformers.insert(static_cast<int>(d.type));
+            }
+        }
+
+    for (int op = 0; op <= kernel::ccombine_incise; ++op) {
+        CAPTURE(op);
+        CHECK(ops.count(op) == 1);
+    }
+    for (int d = 0; d <= kernel::cdeform_noise; ++d) {
+        CAPTURE(d);
+        CHECK(deformers.count(d) == 1);
+    }
+    for (int p = 0; p <= kernel::cblend_chamfer; ++p) {
+        CAPTURE(p);
+        CHECK(profiles.count(p) == 1);
+    }
+}
+
+// A skipped gate and a passing gate look identical in a log, which is how
+// "Metal parity runs when the runner exposes a Metal device" became a claim
+// nobody could check. This prints what was ACTUALLY compared, in a form CI
+// greps, so an absent Metal backend is visible rather than inferred from the
+// suite going green.
+TEST_CASE("parity: report which backends were actually compared") {
+    std::string names;
+    for (eval::Backend* backend : eval::Registry::instance().all()) {
+        if (!names.empty()) names += ",";
+        names += backend->name();
+    }
+    std::printf("PARITY_BACKENDS_CHECKED: %s\n", names.c_str());
+    CHECK_FALSE(names.empty());
 }
 
 TEST_CASE("parity: every registered backend matches the scalar reference") {

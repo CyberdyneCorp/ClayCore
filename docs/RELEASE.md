@@ -20,8 +20,8 @@ forward-refuse).
    backend parity for every backend registered in that build, module
    layering, kernel dialect (CPU + CUDA profiles), the license manifest, C
    ABI hygiene + declared-symbol resolution + ctypes FFI, `openspec validate
-   --all --strict`, benchmark floors, and a real `pip install .` quickstart in
-   a throwaway venv.
+   --all --strict`, benchmark floors, the **device gate** (see below), and a
+   real `pip install .` quickstart in a throwaway venv.
 3. On a minor/patch release, read the `clay.h` diff for symbol and
    struct-layout breaks (the ABI gate checks that every declared symbol
    resolves and that the header is bindgen-clean, not history). Below 1.0
@@ -201,6 +201,125 @@ forward-refuse).
    layer — and loses the mesh layers if it saves the document again, which is
    the same loss minors 1, 2 and 4 carry. The format notes at the top of
    `include/clay/io/clayspace.h` record it.
+
+## The device gate
+
+Metal is the iPad app's production path, and no CI runner has an attached
+iPad. So the one check that covers the path the app ships on cannot run in
+CI — it runs here, on hardware, before the tag.
+
+**It is not optional and it does not skip.** A skipped hardware gate and a
+passing one are indistinguishable in a log, which is exactly how "Metal is the
+iPad app's production path" reached v0.25.0 without a single iPad ever having
+run it.
+
+### Prerequisites
+
+- **An attached iPad with Developer Mode enabled.** `xcrun xctrace list
+  devices` must list it above the `== Devices Offline ==` heading; a
+  paired-but-absent device is listed by name and cannot be run on.
+- **A signing identity and a provisioning profile that covers the device.**
+  Today that is the Cyberdyne team, `2C69VJZSNR`, whose wildcard profile
+  (`iOS Team Provisioning Profile: *`) covers the lab devices. **The signing
+  certificate in use expires 2026-09-02.** An expired certificate blocks the
+  gate and therefore blocks the release, so renewal is on the release critical
+  path rather than being somebody's background chore.
+
+  Check the certificate **inside the profile**, not the first one in the
+  keychain — this machine also holds an unrelated, already-expired
+  `Apple Development` identity on a different team, and
+  `security find-certificate` returns that one first:
+
+  ```sh
+  for p in ~/Library/Developer/Xcode/UserData/Provisioning\ Profiles/*.mobileprovision; do
+    security cms -D -i "$p" 2>/dev/null | python3 -c '
+import sys, plistlib, subprocess
+d = plistlib.loads(sys.stdin.buffer.read())
+print(d["Name"], "| team", d["TeamIdentifier"][0], "| profile to", d["ExpirationDate"])
+for c in d.get("DeveloperCertificates", []):
+    r = subprocess.run(["openssl", "x509", "-inform", "DER", "-noout", "-enddate"],
+                       input=c, capture_output=True)
+    print("   cert", r.stdout.decode().strip())'
+  done
+  ```
+
+  The wildcard profile itself is valid until 2027-06-17; the certificate
+  inside it is the earlier deadline, and the one that matters.
+- **`xcodegen`** (`brew install xcodegen`). The Xcode project under
+  `tests/device/` is generated from `project.yml` and is not committed: a
+  pbxproj is not reviewable, and generating it on every run keeps the spec and
+  the project from drifting.
+
+An Xcode project exists at all only because XCTest has no hostless mode on a
+device destination — `xcodebuild` refuses with "Select a host application for
+the test target" — and SwiftPM cannot declare a test host. The host app under
+`tests/device/Host/` is empty and exists solely to satisfy that.
+
+### The reference device
+
+**`iPad15,5` (iPad Air 13-inch, M3) on iOS 26.5.2** produced the committed
+baseline. A run from any other model or OS is **refused rather than compared**:
+the numbers are not commensurable, and scoring them against this baseline
+would produce a figure that means nothing. Moving to a different reference
+device means re-taking the baseline on it, deliberately, as its own commit.
+
+### Running it
+
+```sh
+tools/run_device_bench.sh                        # first attached iPad
+tools/run_device_bench.sh <udid>                 # a specific one
+python3 tools/check_device_bench.py build/device/device-bench.json
+python3 tools/check_device_coverage.py build/device/device-bench.json
+```
+
+`run_device_bench.sh` rebuilds the xcframework first rather than trusting what
+is on disk. This repo has been bitten by that exact staleness before: the
+Swift smoke consumes the prebuilt xcframework rather than the working tree, so
+it had been passing against an old one while the tree moved underneath it
+(found by `add-mesh-to-field-import`).
+
+`check_device_bench.py` writes `tests/device/last-gate.json` on success,
+recording the commit it passed against. `tools/release_check.py` reads that
+file and **fails the release when anything under `src/`, `include/`,
+`backends/`, `bindings/` or `CMakeLists.txt` has changed since** — so the
+release can require the gate without an iPad being attached to CI. A docs or
+spec commit does not invalidate it.
+
+### Reading a result
+
+Each case reports **p50 and p95 in milliseconds** at three document sizes
+(10 / 100 / 1000 accumulated stamps), plus a `growthExponent` — the log-log
+slope of cost against document size. `0` is flat, `1` is linear, `2` is
+quadratic.
+
+Three failures mean three different things:
+
+| Failure | Means |
+|---|---|
+| `REGRESSION` | slower than the committed baseline by more than tolerance |
+| `BUDGET` | slower than the interaction class allows, regressed or not |
+| `GROWTH` | cost is scaling faster than the document (over `N^1.25`) |
+
+And two refusals, which are not scores at all: a run from **different
+hardware**, and a run that was **thermally throttled**. `ProcessInfo`'s
+thermal state is sampled at both ends and anything but `nominal` invalidates
+the run. This fires in practice — several harness runs back to back will take
+an iPad to `serious`. Let it cool and run again rather than reaching for the
+tolerance.
+
+**Simulator and Mac numbers are not device numbers and must never be compared
+to this baseline.** A Mac has more cores, active cooling and no
+memory-pressure kills. The `metal` CMake preset on a Mac is the right tool for
+"does the Metal backend agree"; it is the wrong tool for any question about
+latency.
+
+Budgets live in `tests/device/baseline.json`. `budgetMs` is a ceiling on p95
+at the worst point of the axis — what the engine must not exceed, which is
+**not** the same as what it should cost. Where those differ the entry carries
+a `note` saying so. `sdf_stamp_cpu` is the live example: it is already outside
+the engine's half of a 120 Hz frame, its budget is a regression ceiling rather
+than an endorsement, and the checker reprints the breach on every run so
+writing it down does not retire it.
 
 ## Tagging
 

@@ -10,6 +10,12 @@
 # returned "cpu" alone, and asking for "metal" failed because nothing had
 # registered it.
 #
+# Each slice's embedded metallib is compiled for that slice's own SDK — see the
+# derivation in CMakeLists.txt. AIR built for the wrong platform loads on no
+# device while looking, at the ABI, exactly like a backend that was never
+# enabled. The C ABI and results are identical either way; backends change
+# speed, not values.
+#
 # Consumers must link Metal and Foundation. Package.swift declares both for the
 # SwiftPM path; a plain C or C++ harness passes -framework Metal
 # -framework Foundation itself.
@@ -46,6 +52,7 @@ EOF
 
 build_slice() {
     local name="$1"; shift
+    local expect_platform="$1"; shift
     local build_dir="$ROOT/build/xc-$name"
     cmake -S "$ROOT" -B "$build_dir" \
         -DCMAKE_BUILD_TYPE=Release \
@@ -59,44 +66,72 @@ build_slice() {
         "$@" > /dev/null
     cmake --build "$build_dir" --target claycore -j > /dev/null
 
-    # The metallib is embedded, so an empty or missing one is a CPU-only slice
-    # that still links and still passes a build. Fail here rather than ship it.
+    # Three checks, because there are three separate ways a slice ships
+    # without a usable Metal backend and each looks fine to the other two.
+    #
+    # 1. The metallib is embedded, so an empty or missing one is a CPU-only
+    #    slice that still links and still passes a build.
     local metallib="$build_dir/clay_kernels.metallib"
     if [[ ! -s "$metallib" ]]; then
         echo "no Metal library was built for slice $name ($metallib)" >&2
         exit 1
     fi
+
+    # 2. And it must be for THIS slice's platform. AIR built for the wrong one
+    #    links fine, ships fine, and then fails to load on the device — where
+    #    it is indistinguishable from a backend that was never enabled. The
+    #    platform is recorded in the file, so check it here rather than
+    #    discovering it on an iPad.
+    local got
+    got=$(xcrun metal-readobj --file-headers "$metallib" \
+          | awk '/Platform:/ {print $2}')
+    if [ "$got" != "$expect_platform" ]; then
+        echo "slice $name: metallib is $got, expected $expect_platform" >&2
+        exit 1
+    fi
+
     # merge claycore with its static dependencies into one library
     libtool -static -o "$STAGE/libclaycore-$name.a" \
         "$build_dir/libclaycore.a" \
         "$build_dir/_deps/meshoptimizer-build/libmeshoptimizer.a"
-
-    # And that the merged archive still carries it. This is the check that is
-    # independent of any device: the Swift smoke test asserts the backend
-    # REGISTERS, which needs a Metal device to be present, while this asserts
-    # the artifact SHIPS it, which is what the build controls and what was
-    # actually wrong.
-    if ! nm "$STAGE/libclaycore-$name.a" 2>/dev/null | grep -q "clay_metallib"; then
-        echo "slice $name has no embedded Metal library — it would ship CPU-only" >&2
-        exit 1
-    fi
-    echo "built slice: $name (metal: $(wc -c < "$metallib") bytes)"
+    # 3. And the MERGED archive still carries it. This is the device-
+    #    independent one: the Swift smoke asserts the backend REGISTERS, which
+    #    needs a Metal device present, while this asserts the artifact SHIPS
+    #    it, which is what the build controls and what was actually wrong.
+    #
+    # Captured rather than piped into `grep -q`. Under `set -o pipefail` that
+    # pipeline FAILS AT RANDOM: grep exits on the first match, nm takes SIGPIPE
+    # writing the rest, and the pipeline reports the failure even though the
+    # symbol was found. Measured at 4 in 30 on this archive — about a 13%
+    # flake per slice, so better than a one-in-three chance of a spurious
+    # "would ship CPU-only" per xcframework build, on a check that blocks a
+    # release.
+    local symbols
+    symbols=$(nm "$STAGE/libclaycore-$name.a" 2>/dev/null || true)
+    case "$symbols" in
+        *clay_metallib*) ;;
+        *)
+            echo "slice $name has no embedded Metal library — it would ship CPU-only" >&2
+            exit 1
+            ;;
+    esac
+    echo "built slice: $name ($got, $(wc -c < "$metallib" | tr -d ' ') bytes)"
 }
 
 # Without an explicit deployment target the macOS slice inherits the host's
 # SDK version, so a library built on a new machine refuses to link into an app
 # targeting anything older. Keep this in step with Package.swift's platforms.
-build_slice macos \
+build_slice macos METALLIB_PLATFORM_MACOS \
     -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
 
-build_slice ios \
+build_slice ios METALLIB_PLATFORM_IOS \
     -DCMAKE_SYSTEM_NAME=iOS \
     -DCMAKE_OSX_SYSROOT=iphoneos \
     -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0
 
-build_slice ios-sim \
+build_slice ios-sim METALLIB_PLATFORM_IOS_SIMULATOR \
     -DCMAKE_SYSTEM_NAME=iOS \
     -DCMAKE_OSX_SYSROOT=iphonesimulator \
     -DCMAKE_OSX_ARCHITECTURES=arm64 \

@@ -16,20 +16,32 @@ let package = Package(
     name: "claycore",
     platforms: [.macOS(.v12), .iOS(.v16)],
     products: [
-        .library(name: "claycore", targets: ["claycore"]),
+        .library(name: "claycore", targets: ["ClayCoreLink"]),
         .executable(name: "claycore-smoke", targets: ["claycore-smoke"]),
     ],
     targets: [
-        .binaryTarget(name: "claycore", path: "dist/claycore.xcframework"),
+        .binaryTarget(name: "claycoreBinary", path: "dist/claycore.xcframework"),
         // Metal and Foundation are what the Metal backend inside the archive
-        // needs. A binaryTarget cannot carry linker settings, so they are
-        // declared by the target that links it — an app consuming this package
-        // needs the same two, and gets undefined symbols without them.
-        .executableTarget(name: "claycore-smoke", dependencies: ["claycore"],
-                          path: "tests/swift",
-                          linkerSettings: [
-                              .linkedFramework("Metal"),
-                              .linkedFramework("Foundation"),
-                          ]),
+        // needs, and a binaryTarget cannot carry linker settings. Declaring
+        // them on the smoke executable alone would fix `swift build` here and
+        // leave every consuming app to discover the undefined symbols for
+        // itself, so they live on a target the PRODUCT vends instead: depend
+        // on `claycore` and the frameworks come with it.
+        //
+        // ClayCoreLink carries no code, only that knowledge. The C API is
+        // still `import claycore`, from the module map inside the xcframework
+        // — this target adds no module of its own worth importing.
+        .target(name: "ClayCoreLink", dependencies: ["claycoreBinary"],
+                path: "bindings/swift/ClayCoreLink",
+                linkerSettings: [
+                    .linkedFramework("Metal"),
+                    .linkedFramework("Foundation"),
+                ]),
+        .executableTarget(name: "claycore-smoke", dependencies: ["ClayCoreLink"],
+                          path: "tests/swift"),
+        // The device harness is NOT a target here. XCTest has no hostless mode
+        // on a device destination and SwiftPM cannot declare a test host, so
+        // the on-device tests live in a generated Xcode project instead —
+        // tests/device/project.yml, driven by tools/run_device_bench.sh.
     ]
 )
