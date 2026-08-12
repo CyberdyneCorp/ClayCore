@@ -25,6 +25,14 @@ FLOORS = {
 FASTER_THAN = [
     ("BM_SurfaceNets", "BM_MeshTape"),
     ("BM_MeshBricksSubset", "BM_MeshBricksWhole"),
+    # Grid-path consolidation (accel/parallel-consolidate): baking a grown
+    # layer through the CPU backend's batch path must beat the serial
+    # one-point-at-a-time bake it replaced (kept in the benchmark as the
+    # reference; the two are byte-identical by contract). Catches the bake
+    # falling off the pool; holds on any machine with more than one core,
+    # since both sides pay the same serial redistance floor (4.7x on an
+    # M2 Max).
+    ("BM_ConsolidateGrownDoc", "BM_ConsolidateSerialGrownDoc"),
 ]
 
 # ratio gates: (bench, reference, max_ratio) — bench must cost at most

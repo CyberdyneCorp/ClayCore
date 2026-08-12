@@ -47,6 +47,37 @@ class FieldVolume {
     static FieldVolume sample(const std::function<float(kernel::cfloat3)>& f,
                               const math::Aabb& region, float cell_size, float band);
 
+    // The brick lattice a batched sample() walks. Exposed so an external
+    // evaluator can compute the exact positions sample() hands its callable —
+    // the same integers through the same float operations — which is what
+    // lets a batched bake produce the bit-identical volume.
+    struct BrickGrid {
+        kernel::cfloat3 origin;
+        float cell_size;
+        float band;
+        std::int32_t bcount[3];
+
+        // Sample `i` (x-fastest over (kBrickDim+1)^3, halo included) of the
+        // brick at linear `slot` (x-fastest over bcount).
+        kernel::cfloat3 sample_position(std::size_t slot, int i) const;
+        // The box the brick's samples span, halo face included.
+        math::Aabb brick_box(std::size_t slot) const;
+    };
+
+    // Batched sampling: the same volume sample() builds, from sample blocks an
+    // external evaluator fills. `fill` is called with consecutive slot windows
+    // [first, first + count) and writes count * kBrickSamples values — sample
+    // index x-fastest, exactly the values `f` would produce at
+    // grid.sample_position. sample() routes through this with a serial fill;
+    // a caller that can evaluate whole bricks at once (per-brick culled tapes
+    // across a thread pool) supplies its own and gets the identical volume:
+    // blocks land in slot order whatever order they were computed in, so the
+    // result does not depend on the evaluator's scheduling.
+    using BrickBlockFill = std::function<void(const BrickGrid& grid, std::size_t first,
+                                              std::size_t count, float* out)>;
+    static FieldVolume sample_blocks(const BrickBlockFill& fill, const math::Aabb& region,
+                                     float cell_size, float band);
+
     float cell_size() const { return cell_size_; }
 
     // How fast the stored samples may vary. 1 for a volume sampled from a

@@ -268,6 +268,10 @@ Four things a host should design around, none of them obvious from the API:
 4. **`consolidate` and `mask extrude` are seconds, and both scale with the
    document** — `N^0.84` and `N^0.91`. They need progress UI, and neither is
    something to trigger from an advisory threshold without telling the artist.
+   (Since this baseline, `consolidate`'s bake batches its lattice samples
+   through the CPU backend's thread pool — ~6x faster at these sizes on an
+   M2 Max, byte-identical output. It still scales with the document and still
+   deserves the progress UI; re-measure on device before relaxing either.)
 
 ## 10. Python bindings (`pyclay`)
 

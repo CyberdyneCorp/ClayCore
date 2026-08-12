@@ -6,8 +6,11 @@
 #include "clay/scene/consolidate.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <memory>
+#include <vector>
 
+#include "clay/eval/backend.h"
 #include "clay/field/redistance.h"
 #include "clay/kernel/exactness.h"
 #include "clay/scene/tape.h"
@@ -76,6 +79,57 @@ void walk(const SdfContent& content, const std::vector<NodeId>& ids, FieldReport
     }
 }
 
+// -- the bake's grid path -----------------------------------------------------
+//
+// The serial bake evaluated the layer tape at every lattice sample through a
+// std::function, one point at a time on one core. This is the same
+// evaluation as a flat batch through the CPU backend: same tape, same points,
+// and the backend's batch path is documented to match its scalar reference
+// bit for bit, so the volume comes out byte-identical while every core
+// participates. Blocks land in slot order whatever order the pool computed
+// them in (sample_blocks assembles serially), so the bytes do not depend on
+// thread scheduling either.
+//
+// WHY NOT PER-BRICK CULLED TAPES, when the refill path over the same bricks
+// lives on them: the cull contract (scene/tape.h) is BAND-CLAMPED identity,
+// and the bake is the one consumer that stores raw values past the band. It
+// is not just the far samples that go soft, either — a chain of smooth
+// blends can carry a culled item's quadratic tail from an accumulator value
+// beyond the cull horizon down INTO the band (measured up to ~7e-3 on a
+// 24-dab blend chain, dilating by the band exactly as the refill does). The
+// refill never sees this because it clamps every stored value to ±band and
+// its scenes pay it below its half-float precision; a bake that consolidated
+// a layer to slightly different bytes than the serial bake would fail the
+// determinism this feature is specified against. Culling here would need a
+// per-op tail-freeness analysis to be sound — the win it offered is already
+// covered by the pool, so the bake spends cores, not exactness.
+
+// One window of bricks, every sample against the full tape, distances only.
+// The loop below is the same evaluation again for a build with no registered
+// backends at all.
+void fill_window(const Tape& tape, const field::FieldVolume::BrickGrid& grid, std::size_t first,
+                 std::size_t count, float* out) {
+    const std::size_t n = count * field::kBrickSamples;
+    std::vector<float> points(n * 3);
+    for (std::size_t s = 0; s < count; ++s)
+        for (int i = 0; i < field::kBrickSamples; ++i) {
+            const kernel::cfloat3 p = grid.sample_position(first + s, i);
+            const std::size_t at = (s * field::kBrickSamples + static_cast<std::size_t>(i)) * 3;
+            points[at] = p.x;
+            points[at + 1] = p.y;
+            points[at + 2] = p.z;
+        }
+    eval::PointQuery q;
+    q.points_xyz = points.data();
+    q.count = n;
+    eval::PointResults res;
+    res.distances = out;
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    if (cpu && cpu->eval_points(tape, q, res) == eval::Status::Ok) return;
+    for (std::size_t i = 0; i < n; ++i)
+        out[i] = tape.eval(kernel::cf3(points[i * 3], points[i * 3 + 1], points[i * 3 + 2])).d;
+}
+
 }  // namespace
 
 FieldReport report_layer(const Layer& layer, float advise_below_step_scale) {
@@ -108,8 +162,10 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
         region = math::Aabb{tape.bounds.min - pad, tape.bounds.max + pad};
     }
 
-    field::FieldVolume volume = field::FieldVolume::sample(
-        [&tape](kernel::cfloat3 p) { return tape.eval(p).d; }, region, params.cell_size, band);
+    field::FieldVolume volume = field::FieldVolume::sample_blocks(
+        [&tape](const field::FieldVolume::BrickGrid& grid, std::size_t first, std::size_t count,
+                float* out) { fill_window(tape, grid, first, count, out); },
+        region, params.cell_size, band);
     // brick_count rather than empty(): a volume covering only empty space
     // still has a full brick index, it just stores no samples, and handing one
     // back from a bake would replace the layer with something that silently
