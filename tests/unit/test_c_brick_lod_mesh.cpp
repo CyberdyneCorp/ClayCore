@@ -491,7 +491,11 @@ TEST_CASE("brick lod meshing: lod 0 is the call clay_brick_cache_mesh always was
         CHECK(mesh_bytes(old_mesh.m) == mesh_bytes(new_mesh.m));
         CHECK(clay_mesh_vertex_count(old_mesh.m) == clay_mesh_vertex_count(new_mesh.m));
         CHECK(clay_mesh_index_count(old_mesh.m) == clay_mesh_index_count(new_mesh.m));
-        REQUIRE(std::memcmp(old_ranges.data(), new_ranges.data(),
-                            old_ranges.size() * sizeof(clay_brick_mesh_range)) == 0);
+        // Guarded: the no-ranges cases leave both vectors empty, and data() on
+        // an empty vector may be null, which memcmp forbids however zero the
+        // length is.
+        if (!old_ranges.empty())
+            REQUIRE(std::memcmp(old_ranges.data(), new_ranges.data(),
+                                old_ranges.size() * sizeof(clay_brick_mesh_range)) == 0);
     }
 }
