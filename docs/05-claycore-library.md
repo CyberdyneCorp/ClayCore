@@ -298,7 +298,13 @@ what it put there — so the ABI has no `clay_item_*` getter. Reading a PLACED
 node is a different question, asked by a host that reloaded a document and has
 only ids: `clay_layer_stroke_points` returns a curve's control points as
 authored, taking the arguments `clay_layer_set_stroke_points` takes, so what
-comes out goes straight back in.
+comes out goes straight back in. An armature answers the same call for its
+nodes — the same x, y, z, radius list — and `clay_layer_armature_parents` for
+its topology, mirroring the split on the setter side, so a reloaded rig can be
+re-posed through `clay_layer_armature_edit` with indices the host actually
+holds. `clay_layer_node_prim` reports which primitive a placed node carries, so
+a host finds the armature (or the curve) by asking rather than by probing
+readers until one stops refusing.
 
 Documents can be edited after they are built, not only appended to. Every
 editing entry point applies one command from `scene/commands.h` — the same

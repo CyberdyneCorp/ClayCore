@@ -1266,9 +1266,16 @@ clay_result find_curve_node(const clay_document* doc, clay_layer_id layer, clay_
     if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
     const scene::Node* n = l->sdf ? l->sdf->find(node) : nullptr;
     if (!n) return fail(CLAY_ERROR_NOT_FOUND, "no stroke or curve with that id in that layer");
-    if (n->is_group || !scene::prim_carries_curve(n->prim.type))
+    // An armature's nodes are the same x, y, z, radius list, so the READ side
+    // serves them too — the same set of prims the item-side setter accepts.
+    // The placed-node SETTER stays narrower on purpose: replacing an
+    // armature's points alone would desynchronise them from its parents, and
+    // clay_layer_armature_edit already owns that half.
+    if (n->is_group || !(scene::prim_carries_curve(n->prim.type) ||
+                         scene::prim_is_armature(n->prim.type)))
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
-                    "curve points need CLAY_PRIM_STROKE or CLAY_PRIM_SWEPT");
+                    "curve points need CLAY_PRIM_STROKE, CLAY_PRIM_SWEPT or "
+                    "CLAY_PRIM_ARMATURE");
     *out = n;
     return CLAY_OK;
 }
@@ -1949,6 +1956,23 @@ clay_result clay_layer_children(const clay_document* doc, clay_layer_id layer, c
     return CLAY_OK;
 }
 
+clay_result clay_layer_node_prim(const clay_document* doc, clay_layer_id layer,
+                                 clay_node_id node, int32_t* out_prim) {
+    if (!doc || !out_prim)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out_prim");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    const scene::Node* n = l->sdf ? l->sdf->find(node) : nullptr;
+    if (!n) return fail(CLAY_ERROR_NOT_FOUND, "no node with that id in that layer");
+    // A group carries no primitive: the dual of clay_layer_children refusing
+    // an item, so every node answers exactly one of the two questions.
+    if (n->is_group) return fail(CLAY_ERROR_INVALID_ARGUMENT, "node is a group");
+    // scene::PrimType's values ARE the clay_prim values; the static_asserts at
+    // the top of this file pin the correspondence.
+    *out_prim = static_cast<std::int32_t>(n->prim.type);
+    return CLAY_OK;
+}
+
 clay_result clay_document_remove_layer(clay_document* doc, clay_layer_id layer) {
     return apply_edit(doc, scene::Command{scene::RemoveLayerCmd{layer}}, "layer not found");
 }
@@ -2479,6 +2503,42 @@ clay_result clay_layer_stroke_points(const clay_document* doc, clay_layer_id lay
     if (out_xyzr)
         write_curve_points(n->stroke, out_xyzr, out_types, out_in_handles_xyz,
                            out_out_handles_xyz);
+    *count = needed;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_armature_parents(const clay_document* doc, clay_layer_id layer,
+                                        clay_node_id node, uint32_t* out_parents,
+                                        size_t* count) {
+    if (!doc || !count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or count");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    const scene::Node* n = l->sdf ? l->sdf->find(node) : nullptr;
+    if (!n) return fail(CLAY_ERROR_NOT_FOUND, "no such node in that layer");
+    // Parents are the other half of a different primitive, not an attribute a
+    // curve happens to lack — the same typed refusal the tree edits give.
+    if (n->is_group || !scene::prim_is_armature(n->prim.type))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "that node is not an armature");
+
+    // Counted in NODES, not in stored parents: the xyzr readback and this one
+    // are parallel arrays, so they must agree on the count. A tree authored
+    // shorter than its points reads back padded with roots — the reading
+    // tape_build makes when it compiles the same node, so what comes back is
+    // the tree the document evaluates.
+    const std::size_t needed = n->stroke.size();
+    if (out_parents && *count < needed) {
+        *count = needed;
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "the armature has " + std::to_string(needed) + " nodes");
+    }
+    if (out_parents)
+        for (std::size_t i = 0; i < needed; ++i) {
+            std::uint32_t parent = i < n->armature_parents.size()
+                                       ? n->armature_parents[i]
+                                       : static_cast<std::uint32_t>(i);
+            if (parent >= needed) parent = static_cast<std::uint32_t>(i);
+            out_parents[i] = parent;
+        }
     *count = needed;
     return CLAY_OK;
 }
