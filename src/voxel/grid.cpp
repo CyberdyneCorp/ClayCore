@@ -92,8 +92,72 @@ bool VoxelGrid::write_cell(std::size_t level, VoxelCoord c, std::uint8_t index) 
     if (cell == 0 && index != 0) ++it->second.occupied;
     if (cell != 0 && index == 0) --it->second.occupied;
     cell = index;
+    // A chunk that reaches zero occupancy goes, because a missing chunk is how
+    // this grid spells empty space. It is marked dirty BELOW rather than
+    // skipped: a host holding its quads has to be told to drop them.
     if (it->second.occupied == 0) chunks.erase(it);
+    if (changed) mark_chunk_dirty(level, c, key);
     return changed;
+}
+
+// A write dirties its own chunk, and the chunk across any face it touches.
+//
+// The mask build reads the neighbour cell to decide whether a face is exposed,
+// and on a chunk's boundary slice that read crosses into the next chunk. So a
+// write here changes what THAT chunk emits, and a host re-meshing only the
+// written chunk would leave the neighbour's stale quads on screen — a hole (or
+// a doubled wall) that shows up only at chunk boundaries.
+//
+// A neighbour that does not exist is left alone. An absent chunk holds no
+// material and emits no quads, and any later write into it marks it itself, so
+// the set stays proportional to the material rather than to the surface area of
+// everywhere ever touched.
+void VoxelGrid::mark_chunk_dirty(std::size_t level, VoxelCoord c, VoxelCoord key) {
+    Level& lv = levels_[level];
+    const std::int32_t lx = fmod_pos(c.x, kChunkDim);
+    const std::int32_t ly = fmod_pos(c.y, kChunkDim);
+    const std::int32_t lz = fmod_pos(c.z, kChunkDim);
+    const bool on_face = lx == 0 || lx == kChunkDim - 1 || ly == 0 || ly == kChunkDim - 1 ||
+                         lz == 0 || lz == kChunkDim - 1;
+    // The memo: this is the write path, charged per cell a rasterize touches,
+    // and an interior cell of a chunk already marked has nothing left to do.
+    if (!on_face && lv.dirty_memo_valid && key == lv.dirty_memo) return;
+    lv.dirty.insert(key);
+    lv.dirty_memo = key;
+    lv.dirty_memo_valid = true;
+    if (!on_face) return;
+    auto neighbour = [&](std::int32_t dx, std::int32_t dy, std::int32_t dz) {
+        VoxelCoord n{key.x + dx, key.y + dy, key.z + dz};
+        if (lv.chunks.find(n) != lv.chunks.end()) lv.dirty.insert(n);
+    };
+    if (lx == 0) neighbour(-1, 0, 0);
+    if (lx == kChunkDim - 1) neighbour(1, 0, 0);
+    if (ly == 0) neighbour(0, -1, 0);
+    if (ly == kChunkDim - 1) neighbour(0, 1, 0);
+    if (lz == 0) neighbour(0, 0, -1);
+    if (lz == kChunkDim - 1) neighbour(0, 0, 1);
+}
+
+std::vector<VoxelCoord> VoxelGrid::take_dirty_chunks(std::size_t level) {
+    std::vector<VoxelCoord> keys;
+    if (level >= levels_.size()) return keys;
+    Level& lv = levels_[level];
+    keys.assign(lv.dirty.begin(), lv.dirty.end());
+    lv.dirty.clear();
+    lv.dirty_memo_valid = false;  // the set is empty; the next write must insert
+    // Sorted rather than in the set's own order, so two runs of the same edit
+    // sequence hand a host the same keys in the same order and mesh them in
+    // the same order.
+    std::sort(keys.begin(), keys.end(), [](VoxelCoord a, VoxelCoord b) {
+        if (a.x != b.x) return a.x < b.x;
+        if (a.y != b.y) return a.y < b.y;
+        return a.z < b.z;
+    });
+    return keys;
+}
+
+std::size_t VoxelGrid::dirty_chunk_count(std::size_t level) const {
+    return level < levels_.size() ? levels_[level].dirty.size() : 0;
 }
 
 std::uint8_t VoxelGrid::get(VoxelCoord c) const { return cell_at(active_, c); }
@@ -140,7 +204,8 @@ bool VoxelGrid::set_active_level(std::size_t level) {
 // of the one below.
 std::size_t VoxelGrid::add_level() {
     if (levels_.size() >= kMaxLevels) return levels_.size() - 1;
-    levels_.push_back(Level{levels_.back().voxel_size * 0.5f, {}, {}});
+    const float half = levels_.back().voxel_size * 0.5f;
+    levels_.emplace_back().voxel_size = half;
     std::size_t fine = levels_.size() - 1;
     subdivide_into(fine);
     return fine;
@@ -562,9 +627,27 @@ std::optional<VoxelGrid> VoxelGrid::deserialize(const std::uint8_t* data, std::s
     // No tail, or a stream written before there was one: a single-level grid,
     // which is what an older document is.
     std::uint32_t tag = 0;
-    if (pos + 4 > size || !get32(&tag) || tag != kLevelTail) return grid;
+    if (pos + 4 > size || !get32(&tag) || tag != kLevelTail) {
+        grid.mark_every_chunk_dirty();
+        return grid;
+    }
     if (!grid.read_level_tail(data, size, &pos, palette_count)) return std::nullopt;
+    grid.mark_every_chunk_dirty();
     return grid;
+}
+
+// A grid read back from a file has never been displayed, so every chunk it
+// carries is something a host still has to draw. The coarsest level's chunks
+// are placed straight into the map here rather than written cell by cell, so
+// they are marked in one pass at the end instead — and the finer levels are
+// re-marked with them, which costs one insert per chunk and keeps the rule
+// "what a reader must draw" in one place.
+void VoxelGrid::mark_every_chunk_dirty() {
+    for (Level& lv : levels_) {
+        lv.dirty_memo_valid = false;
+        for (const auto& [key, chunk] : lv.chunks)
+            if (chunk.occupied > 0) lv.dirty.insert(key);
+    }
 }
 
 bool VoxelGrid::read_level_tail(const std::uint8_t* data, std::size_t size, std::size_t* pos,
@@ -618,29 +701,34 @@ bool VoxelGrid::read_level_tail(const std::uint8_t* data, std::size_t size, std:
 
 // -- greedy meshing ----------------------------------------------------------
 
-mesh::Mesh VoxelGrid::mesh_greedy(std::size_t level) const {
-    mesh::Mesh out;
-    if (level >= levels_.size()) return out;
+namespace {
+// For each of 6 face directions, sweep slices and greedy-merge rectangles of
+// equal palette index whose faces are exposed.
+struct Dir {
+    int axis;  // face normal axis 0/1/2
+    int sign;  // +1 or -1
+};
+constexpr Dir kDirs[6] = {{0, 1}, {0, -1}, {1, 1}, {1, -1}, {2, 1}, {2, -1}};
+
+// map (slice a, u, v) back to xyz for a given axis
+inline VoxelCoord slice_cell(int a, int u, int v, int axis) {
+    VoxelCoord c;
+    if (axis == 0) c = {a, u, v};
+    if (axis == 1) c = {u, a, v};
+    if (axis == 2) c = {u, v, a};
+    return c;
+}
+inline int axis_of(VoxelCoord c, int axis) { return axis == 0 ? c.x : (axis == 1 ? c.y : c.z); }
+inline int u_of(VoxelCoord c, int axis) { return axis == 0 ? c.y : c.x; }
+inline int v_of(VoxelCoord c, int axis) { return axis == 2 ? c.y : c.z; }
+}  // namespace
+
+void VoxelGrid::sweep_window(std::size_t level, int axis, int sign, int slab_index, int u0,
+                             int v0, int nu, int nv, std::vector<std::uint8_t>& mask,
+                             mesh::Mesh& out) const {
     const ChunkMap& chunks = levels_[level].chunks;
-    if (chunks.empty()) return out;
     auto value_at = [&](VoxelCoord c) { return cell_at(level, c); };
-
-    // For each of 6 face directions, sweep slices and greedy-merge rectangles
-    // of equal palette index whose faces are exposed.
-    struct Dir {
-        int axis;     // face normal axis 0/1/2
-        int sign;     // +1 or -1
-    };
-    const Dir dirs[6] = {{0, 1}, {0, -1}, {1, 1}, {1, -1}, {2, 1}, {2, -1}};
-
-    auto slice_cell = [&](int a, int u, int v, int axis) {
-        // map (slice a, u, v) back to xyz for a given axis
-        VoxelCoord c;
-        if (axis == 0) c = {a, u, v};
-        if (axis == 1) c = {u, a, v};
-        if (axis == 2) c = {u, v, a};
-        return c;
-    };
+    const Dir dir{axis, sign};
 
     // Build one slice's exposure mask, one CHUNK at a time.
     //
@@ -662,8 +750,7 @@ mesh::Mesh VoxelGrid::mesh_greedy(std::size_t level) const {
     // empty. The merge below zeroes every entry it consumes and leaves the
     // zeros it skipped, so the mask is all-zero again at the top of each slice
     // — which is what keeps a slab window spanning mostly empty space cheap.
-    auto build_slice_mask = [&](const Dir& dir, int a, int slab_index, int u0, int v0, int nu,
-                                int nv, std::vector<std::uint8_t>& mask) {
+    auto build_slice_mask = [&](int a) {
         constexpr std::size_t kCd = static_cast<std::size_t>(kChunkDim);
         const std::size_t du = dir.axis == 0 ? kCd : 1;
         const std::size_t dv = dir.axis == 2 ? kCd : kCd * kCd;
@@ -703,6 +790,50 @@ mesh::Mesh VoxelGrid::mesh_greedy(std::size_t level) const {
             }
     };
 
+    mask.assign(static_cast<std::size_t>(nu) * nv, 0);
+    const int a0 = slab_index * kChunkDim;
+    const int a1 = a0 + kChunkDim - 1;
+
+    for (int a = a0; a <= a1; ++a) {
+        build_slice_mask(a);
+        // Greedy merge. It also hands the mask back all-zero — every entry
+        // it reads nonzero it zeroes — which is the precondition the mask
+        // build relies on to skip empty chunks and empty cells entirely.
+        for (int v = 0; v < nv; ++v)
+            for (int u = 0; u < nu;) {
+                std::uint8_t idx = mask[static_cast<std::size_t>(v) * nu + u];
+                if (idx == 0) {
+                    ++u;
+                    continue;
+                }
+                int w = 1;
+                while (u + w < nu && mask[static_cast<std::size_t>(v) * nu + u + w] == idx) ++w;
+                int h = 1;
+                bool grow = true;
+                while (grow && v + h < nv) {
+                    for (int k = 0; k < w; ++k)
+                        if (mask[static_cast<std::size_t>(v + h) * nu + u + k] != idx) {
+                            grow = false;
+                            break;
+                        }
+                    if (grow) ++h;
+                }
+                emit_quad(out, dir.axis, dir.sign, a, u + u0, v + v0, w, h, idx,
+                          levels_[level].voxel_size);
+                for (int dv = 0; dv < h; ++dv)
+                    for (int du = 0; du < w; ++du)
+                        mask[static_cast<std::size_t>(v + dv) * nu + u + du] = 0;
+                u += w;
+            }
+    }
+}
+
+mesh::Mesh VoxelGrid::mesh_greedy(std::size_t level) const {
+    mesh::Mesh out;
+    if (level >= levels_.size()) return out;
+    const ChunkMap& chunks = levels_[level].chunks;
+    if (chunks.empty()) return out;
+
     // The sweep runs per occupied CHUNK SLAB rather than over the whole
     // occupied bounding box. A grid is sparse by construction, and a bounding
     // box is not: two voxels far apart on two axes made the box — and the
@@ -715,14 +846,15 @@ mesh::Mesh VoxelGrid::mesh_greedy(std::size_t level) const {
     // slice lies in that slab's (u, v) extent. Cells outside it are empty and
     // emit nothing, so the merge sees the same mask contents and produces the
     // same quads it always did.
+    //
+    // The window spans the slab's chunks, which is why the merge here CROSSES
+    // chunk boundaries — the tighter merge, and the reason this call stays the
+    // export path while mesh_greedy_chunks clamps to one chunk.
     struct Slab {
         int u0 = 0, u1 = 0, v0 = 0, v1 = 0;
     };
-    auto axis_of = [](VoxelCoord c, int axis) { return axis == 0 ? c.x : (axis == 1 ? c.y : c.z); };
-    auto u_of = [](VoxelCoord c, int axis) { return axis == 0 ? c.y : c.x; };
-    auto v_of = [](VoxelCoord c, int axis) { return axis == 2 ? c.y : c.z; };
-
-    for (const Dir& dir : dirs) {
+    std::vector<std::uint8_t> mask;
+    for (const Dir& dir : kDirs) {
         // slab index along the sweep axis -> the (u, v) box its chunks span
         std::map<int, Slab> slabs;
         for (const auto& [key, chunk] : chunks) {
@@ -740,49 +872,57 @@ mesh::Mesh VoxelGrid::mesh_greedy(std::size_t level) const {
             it->second.v0 = std::min(it->second.v0, cv);
             it->second.v1 = std::max(it->second.v1, cv + kChunkDim - 1);
         }
+        for (const auto& [slab_index, slab] : slabs)
+            sweep_window(level, dir.axis, dir.sign, slab_index, slab.u0, slab.v0,
+                         slab.u1 - slab.u0 + 1, slab.v1 - slab.v0 + 1, mask, out);
+    }
+    return out;
+}
 
-        std::vector<std::uint8_t> mask;
-        for (const auto& [slab_index, slab] : slabs) {
-        const int u0 = slab.u0, v0 = slab.v0;
-        const int nu = slab.u1 - slab.u0 + 1, nv = slab.v1 - slab.v0 + 1;
-        mask.assign(static_cast<std::size_t>(nu) * nv, 0);
-        const int a0 = slab_index * kChunkDim;
-        const int a1 = a0 + kChunkDim - 1;
+std::vector<VoxelCoord> VoxelGrid::occupied_chunk_keys(std::size_t level) const {
+    std::vector<VoxelCoord> keys;
+    if (level >= levels_.size()) return keys;
+    const ChunkMap& chunks = levels_[level].chunks;
+    keys.reserve(chunks.size());
+    for (const auto& [key, chunk] : chunks)
+        if (chunk.occupied > 0) keys.push_back(key);
+    return keys;
+}
 
-        for (int a = a0; a <= a1; ++a) {
-            build_slice_mask(dir, a, slab_index, u0, v0, nu, nv, mask);
-            // Greedy merge. It also hands the mask back all-zero — every entry
-            // it reads nonzero it zeroes — which is the precondition the mask
-            // build relies on to skip empty chunks and empty cells entirely.
-            for (int v = 0; v < nv; ++v)
-                for (int u = 0; u < nu;) {
-                    std::uint8_t idx = mask[static_cast<std::size_t>(v) * nu + u];
-                    if (idx == 0) {
-                        ++u;
-                        continue;
-                    }
-                    int w = 1;
-                    while (u + w < nu && mask[static_cast<std::size_t>(v) * nu + u + w] == idx)
-                        ++w;
-                    int h = 1;
-                    bool grow = true;
-                    while (grow && v + h < nv) {
-                        for (int k = 0; k < w; ++k)
-                            if (mask[static_cast<std::size_t>(v + h) * nu + u + k] != idx) {
-                                grow = false;
-                                break;
-                            }
-                        if (grow) ++h;
-                    }
-                    emit_quad(out, dir.axis, dir.sign, a, u + u0, v + v0, w, h, idx,
-                              levels_[level].voxel_size);
-                    for (int dv = 0; dv < h; ++dv)
-                        for (int du = 0; du < w; ++du)
-                            mask[static_cast<std::size_t>(v + dv) * nu + u + du] = 0;
-                    u += w;
-                }
-        }
-        }
+// Per chunk, the same sweep over a window of exactly one chunk. The exposure
+// test still reads the neighbour cell through `cell_at`, so an unrequested —
+// or absent — neighbour hides a face exactly as it does in the whole-grid
+// sweep, and the surface is the same one. Only the merge is clamped: the
+// window is 32x32 rather than the slab's, so a quad that spanned a chunk
+// boundary comes back as one quad per chunk. More triangles, same surface, no
+// crack, and every vertex belongs to exactly one key — which is what makes the
+// ranges a partition.
+mesh::Mesh VoxelGrid::mesh_greedy_chunks(std::size_t level, const std::vector<VoxelCoord>& keys,
+                                         std::vector<VoxelChunkMeshRange>* out_ranges) const {
+    mesh::Mesh out;
+    if (out_ranges) {
+        out_ranges->clear();
+        out_ranges->reserve(keys.size());
+    }
+    const bool have_level = level < levels_.size();
+    std::vector<std::uint8_t> mask;
+    for (VoxelCoord key : keys) {
+        VoxelChunkMeshRange range;
+        range.key = key;
+        range.vertex_first = static_cast<std::uint32_t>(out.positions.size());
+        range.index_first = static_cast<std::uint32_t>(out.indices.size());
+        // A key holding no chunk contributes nothing: a drained set names the
+        // chunks a stroke emptied as readily as the ones it filled.
+        const bool occupied =
+            have_level && levels_[level].chunks.find(key) != levels_[level].chunks.end();
+        if (occupied)
+            for (const Dir& dir : kDirs)
+                sweep_window(level, dir.axis, dir.sign, axis_of(key, dir.axis),
+                             u_of(key, dir.axis) * kChunkDim, v_of(key, dir.axis) * kChunkDim,
+                             kChunkDim, kChunkDim, mask, out);
+        range.vertex_count = static_cast<std::uint32_t>(out.positions.size()) - range.vertex_first;
+        range.index_count = static_cast<std::uint32_t>(out.indices.size()) - range.index_first;
+        if (out_ranges) out_ranges->push_back(range);
     }
     return out;
 }

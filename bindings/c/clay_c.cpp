@@ -781,6 +781,16 @@ struct clay_voxel_grid {
     voxel::VoxelGrid* owned = nullptr;  // non-null: the caller destroys it
     clay_document* doc = nullptr;       // non-null: borrowed from a layer
     clay_layer_id layer = 0;
+
+    // The dirty-chunk drain is capacity-in/count-out while the engine's drain
+    // is all-or-nothing, so the keys the caller could not take live here until
+    // it comes back for them. Held on the HANDLE rather than the grid because
+    // it is a property of this conversation, not of the sculpt: a borrowed
+    // handle is per layer and stable, so a host draining one layer in chunks
+    // does not disturb another.
+    std::vector<voxel::VoxelCoord> staged_dirty;
+    std::size_t staged_head = 0;
+    std::size_t staged_remaining() const { return staged_dirty.size() - staged_head; }
 };
 
 struct clay_mask {
@@ -5385,6 +5395,78 @@ clay_result clay_voxel_mesh(const clay_voxel_grid* grid, clay_mesh** out_mesh) {
     if (!out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out pointer");
     auto* handle = new clay_mesh();
     handle->data = g->mesh_greedy();
+    *out_mesh = handle;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_take_dirty_chunks(clay_voxel_grid* grid, int32_t* out_keys_xyz,
+                                         size_t* count, size_t* out_remaining) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (!count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null count");
+    if (!out_keys_xyz)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "clay_voxel_take_dirty_chunks is capacity-in/count-out, not a size query: "
+                    "pass a buffer and call again while *out_remaining is non-zero");
+    const std::size_t capacity = *count;
+    r = check_batch("chunk keys", capacity);
+    if (r != CLAY_OK) return r;
+    if (grid->staged_head == grid->staged_dirty.size()) {
+        grid->staged_dirty = g->take_dirty_chunks();  // all-or-nothing, once
+        grid->staged_head = 0;
+    }
+    const std::size_t available = grid->staged_remaining();
+    const std::size_t written = capacity < available ? capacity : available;
+    for (std::size_t i = 0; i < written; ++i) {
+        const voxel::VoxelCoord& key = grid->staged_dirty[grid->staged_head + i];
+        out_keys_xyz[i * 3] = key.x;
+        out_keys_xyz[i * 3 + 1] = key.y;
+        out_keys_xyz[i * 3 + 2] = key.z;
+    }
+    grid->staged_head += written;
+    if (grid->staged_head == grid->staged_dirty.size()) {
+        grid->staged_dirty.clear();
+        grid->staged_dirty.shrink_to_fit();
+        grid->staged_head = 0;
+    }
+    *count = written;
+    if (out_remaining) *out_remaining = grid->staged_remaining() + g->dirty_chunk_count();
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_mesh_chunks(const clay_voxel_grid* grid, const int32_t* keys_xyz,
+                                   size_t key_count, clay_voxel_chunk_mesh_range* out_ranges,
+                                   clay_mesh** out_mesh) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (!out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out pointer");
+    if (key_count > 0 && !keys_xyz) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null chunk keys");
+    r = check_batch("chunk keys", key_count);
+    if (r != CLAY_OK) return r;
+    // Ranges without a key list would be a length inferred from the grid's
+    // current chunk set — the one kind of length this ABI never infers.
+    if (out_ranges && key_count == 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "ranges were requested with no keys: there is no count to have sized them "
+                    "from");
+    std::vector<voxel::VoxelCoord> keys;
+    keys.reserve(key_count);
+    for (std::size_t i = 0; i < key_count; ++i)
+        keys.push_back({keys_xyz[i * 3], keys_xyz[i * 3 + 1], keys_xyz[i * 3 + 2]});
+    std::vector<voxel::VoxelChunkMeshRange> ranges;
+    auto* handle = new clay_mesh();
+    handle->data = g->mesh_greedy_chunks(keys, out_ranges ? &ranges : nullptr);
+    for (std::size_t i = 0; i < ranges.size(); ++i) {
+        out_ranges[i].key[0] = ranges[i].key.x;
+        out_ranges[i].key[1] = ranges[i].key.y;
+        out_ranges[i].key[2] = ranges[i].key.z;
+        out_ranges[i].vertex_first = ranges[i].vertex_first;
+        out_ranges[i].vertex_count = ranges[i].vertex_count;
+        out_ranges[i].index_first = ranges[i].index_first;
+        out_ranges[i].index_count = ranges[i].index_count;
+    }
     *out_mesh = handle;
     return CLAY_OK;
 }

@@ -2507,8 +2507,109 @@ clay_result clay_voxel_sample_step_field(const clay_voxel_grid* grid, const floa
 
 /* Greedy mesh (merged quads per axis slice, palette color per face) behind
  * the same owner handle as clay_document_mesh, freed with clay_mesh_destroy.
- * An empty grid yields an empty mesh rather than an error. */
+ * An empty grid yields an empty mesh rather than an error.
+ *
+ * This is the WHOLE grid's active level, always, and its output is unchanged
+ * by clay_voxel_mesh_chunks existing: the merge still spans chunk boundaries,
+ * which is the tighter one and what an export wants. Displaying a sculpt
+ * INTERACTIVELY is the other call — this one costs every occupied chunk on
+ * every frame (issue #86). */
 clay_result clay_voxel_mesh(const clay_voxel_grid* grid, clay_mesh** out_mesh);
+
+/* -- incremental display ---------------------------------------------------
+ *
+ * The voxel side of the refill shape the brick cache already uses: drain the
+ * keys, mesh the keys, patch the ranges. A dab dirties a handful of chunks,
+ * so re-meshing those costs the dab rather than the model.
+ *
+ * Both calls act on the grid's ACTIVE level, as every other cell-addressed
+ * call here does; the dirty set is per level, and a level's set describes that
+ * level whether or not it was active when the edit landed. */
+
+/* Drains the chunks whose meshed surface a mutation could have changed, as
+ * packed int32 triples — the spelling clay_voxel_flood_select and
+ * clay_brick_cache_surface_bricks use.
+ *
+ * Capacity in, count out — the clay_brick_cache_take_dirty shape, not a size
+ * query: *count is the caller's buffer capacity in KEYS going in and the
+ * number written coming out, and *out_remaining (may be NULL) is how many are
+ * still queued afterwards. out_keys_xyz == NULL is CLAY_ERROR_INVALID_ARGUMENT
+ * and never a size query, so there is no BUFFER_TOO_SMALL retry loop. Call it
+ * in a loop until *out_remaining is 0, or bound the work per frame by stopping
+ * early — the rest stay queued. Keys come back in a deterministic order
+ * (lexicographic by x, then y, then z), so a replay of the same edits drains
+ * the same list.
+ *
+ * As with the brick-cache drain, the engine's drain is all-or-nothing, so the
+ * first call after a large edit stages every queued key inside the library at
+ * 12 bytes each and holds the staging until the queue is fully drained. A
+ * write that lands while keys are still staged is queued behind them, so a key
+ * may be reported twice across two drains — re-meshing a chunk that did not
+ * change is wasted work, never a wrong surface.
+ *
+ * Every public mutation reports through this: a write that CHANGES a cell
+ * dirties its chunk, and one on a chunk face also dirties the chunk across
+ * that face, whose exposed faces it changed. A chunk emptied to nothing is
+ * dropped from the grid and STILL reported, because that is the key whose
+ * quads a host has to remove. A write that changes nothing dirties nothing.
+ *
+ * A grid that was just created from a file, rasterized, or given a level
+ * reports every chunk it wrote, so a first full display and an incremental one
+ * are the same code path. clay_voxel_mesh neither reads the set nor clears
+ * it. */
+clay_result clay_voxel_take_dirty_chunks(clay_voxel_grid* grid, int32_t* out_keys_xyz,
+                                         size_t* count, size_t* out_remaining);
+
+/* What one chunk key contributed to a mesh. An array ELEMENT, not a versioned
+ * descriptor: a caller receives one per key and thousands at a time, its
+ * layout is fixed, and changing that layout is a break rather than something
+ * to negotiate — the same reasoning clay_brick_mesh_range carries.
+ *
+ * Unlike clay_brick_mesh_range, these ranges PARTITION the mesh with no vertex
+ * shared between two keys, so a host may overwrite OR DROP one key's slice
+ * without consulting its neighbours'. A voxel face belongs to exactly one cell
+ * in exactly one chunk, so there is nothing to weld across a seam and no
+ * straddler to attribute. */
+typedef struct clay_voxel_chunk_mesh_range {
+    int32_t key[3];
+    uint32_t vertex_first, vertex_count;
+    uint32_t index_first, index_count;
+} clay_voxel_chunk_mesh_range;
+
+/* Meshes ONLY the named chunks — hand it what clay_voxel_take_dirty_chunks
+ * reported and a re-mesh costs the dab rather than the model.
+ *
+ * keys_xyz is key_count packed int32 triples. The exposure test still reads
+ * the neighbour cell wherever it lives, including in a chunk that was not
+ * named and in one that does not exist, so the SURFACE is exactly the one
+ * clay_voxel_mesh describes over the same chunks: the same exposed faces, the
+ * same colours, the same covered area.
+ *
+ * What differs is the merge. Greedy quads are axis-aligned and exact, so
+ * clamping the merge to a chunk boundary emits MORE, SMALLER quads over the
+ * identical surface — never a crack. That is why this needs no straddler
+ * attribution, unlike clay_brick_cache_mesh, whose marching cells straddle the
+ * brick boundary. The cost is triangle count at chunk seams and nothing else
+ * (measured at a few percent on a realistic sculpt), which is why
+ * clay_voxel_mesh stays whole-grid for export.
+ *
+ * out_ranges (may be NULL) receives key_count clay_voxel_chunk_mesh_range
+ * values in the order the keys were given, and REQUIRES keys_xyz: with no key
+ * list there is no count the caller could have sized the buffer from, which is
+ * the same combination clay_brick_cache_mesh refuses. A key naming a chunk the
+ * grid does not hold contributes nothing and is NOT an error — a drained set
+ * routinely names a chunk a stroke emptied, and that is precisely the key
+ * whose geometry the host must drop; its range is zero-length and sits where
+ * its geometry would have begun. A key repeated in the list is meshed once per
+ * occurrence.
+ *
+ * Behind the same owner handle as clay_document_mesh and freed with
+ * clay_mesh_destroy. No keys yields an EMPTY mesh rather than an error, as
+ * clay_voxel_mesh does for an empty grid: a frame in which nothing changed is
+ * an ordinary state of a session. */
+clay_result clay_voxel_mesh_chunks(const clay_voxel_grid* grid, const int32_t* keys_xyz,
+                                   size_t key_count, clay_voxel_chunk_mesh_range* out_ranges,
+                                   clay_mesh** out_mesh);
 
 /* Rasterize a document's SDF content into the grid: cells whose centre lands
  * inside are set, colored from the field through the nearest palette entry

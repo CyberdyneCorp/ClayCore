@@ -415,6 +415,27 @@ void BM_VoxelMeshSparse64Chunks(benchmark::State& state) {
 }
 BENCHMARK(BM_VoxelMeshSparse64Chunks)->Unit(benchmark::kMillisecond);
 
+// Issue #86 part 2: the same 64-chunk grid, meshing only the two chunks a dab
+// would have dirtied. What this gates is the SHAPE — that the regional call
+// costs the chunks named and not the grid — so it is the bench above divided
+// by 32, and a regression that reintroduced a whole-grid sweep would blow the
+// ceiling by an order of magnitude rather than a few percent.
+void BM_VoxelMeshDirtyChunks(benchmark::State& state) {
+    voxel::VoxelGrid g(0.1f);
+    std::uint8_t c = g.palette_add(cf3(0.8f, 0.4f, 0.2f));
+    for (int i = 0; i < 64; ++i) g.set({i * 32 + 16, 16, 16}, c);
+    (void)g.take_dirty_chunks();
+    g.set({16, 17, 16}, c);  // one dab's worth of writes, in two chunks
+    g.set({32 + 16, 17, 16}, c);
+    const std::vector<voxel::VoxelCoord> dirty = g.take_dirty_chunks();
+    for (auto _ : state) {
+        mesh::Mesh m = g.mesh_greedy_chunks(dirty);
+        benchmark::DoNotOptimize(m.triangle_count());
+    }
+    state.counters["chunks"] = static_cast<double>(dirty.size());
+}
+BENCHMARK(BM_VoxelMeshDirtyChunks)->Unit(benchmark::kMillisecond);
+
 // Consolidation (accel/parallel-consolidate): baking a 193-node layer, once
 // through bake_layer — which batches every lattice sample through the CPU
 // backend's pool — and once through the serial std::function path bake_layer

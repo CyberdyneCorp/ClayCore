@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "clay/math/geom.h"
@@ -48,6 +49,21 @@ struct VoxelCoordHash {
         h ^= static_cast<std::uint32_t>(c.z) * 0x165667B19E3779F9ull + (h >> 3);
         return static_cast<std::size_t>(h);
     }
+};
+
+// What one chunk key contributed to a regional mesh: contiguous, and together
+// with the other keys' ranges a PARTITION of the output — no vertex is shared
+// between two keys, so a host may overwrite or drop one key's slice of a GPU
+// buffer without consulting its neighbours'.
+//
+// That is the difference from mesh::BrickMeshRange, whose welding spans brick
+// seams. A voxel face belongs to exactly one cell, which belongs to exactly
+// one chunk, so there is nothing to weld and nothing to attribute across a
+// seam.
+struct VoxelChunkMeshRange {
+    VoxelCoord key;
+    std::uint32_t vertex_first = 0, vertex_count = 0;
+    std::uint32_t index_first = 0, index_count = 0;
 };
 
 inline constexpr std::uint8_t kVoxMirrorX = 1;
@@ -91,7 +107,7 @@ struct BrushParams {
 class VoxelGrid {
   public:
     explicit VoxelGrid(float voxel_size = 0.1f) {
-        levels_.push_back(Level{voxel_size, {}, {}});
+        levels_.emplace_back().voxel_size = voxel_size;
         palette_.resize(1, kernel::cf3(0, 0, 0));  // index 0 = empty, unused
     }
 
@@ -290,6 +306,81 @@ class VoxelGrid {
     mesh::Mesh mesh_greedy() const { return mesh_greedy(active_); }
     mesh::Mesh mesh_greedy(std::size_t level) const;
 
+    // -- incremental meshing -------------------------------------------------
+    // The chunks holding material, so a caller can mesh a grid a chunk at a
+    // time without draining the dirty set. Order is the map's own and is not
+    // stable across a mutation, as BrickCache::surface_bricks is not.
+    std::vector<VoxelCoord> occupied_chunk_keys() const {
+        return occupied_chunk_keys(active_);
+    }
+    std::vector<VoxelCoord> occupied_chunk_keys(std::size_t level) const;
+
+    // Mesh ONLY the named chunks, reporting per key what it contributed.
+    //
+    // The exposure test still reads the neighbour cell wherever it lives —
+    // including in a chunk that was not named and in one that does not exist —
+    // so the SURFACE is exactly the one mesh_greedy describes over the same
+    // chunks. What changes is the merge: greedy quads are axis-aligned and
+    // exact, and a face belongs to exactly one cell in exactly one chunk, so
+    // clamping the merge to a chunk boundary emits MORE, SMALLER quads over
+    // the identical surface. Never a crack, and no straddler to attribute the
+    // way mesh_bricks must (#66).
+    //
+    // A key holding no chunk contributes nothing and is not an error: a
+    // drained dirty set routinely names a chunk that has since been emptied,
+    // and that is precisely the key whose geometry a host has to drop. Its
+    // range is empty and sits where its geometry would have begun.
+    //
+    // `out_ranges` (may be null) receives one entry per key, in the order
+    // given. A key repeated in the list is meshed once per occurrence.
+    mesh::Mesh mesh_greedy_chunks(const std::vector<VoxelCoord>& keys,
+                                  std::vector<VoxelChunkMeshRange>* out_ranges = nullptr) const {
+        return mesh_greedy_chunks(active_, keys, out_ranges);
+    }
+    mesh::Mesh mesh_greedy_chunks(std::size_t level, const std::vector<VoxelCoord>& keys,
+                                  std::vector<VoxelChunkMeshRange>* out_ranges = nullptr) const;
+
+    // -- dirty chunks --------------------------------------------------------
+    // Which chunks a mutation could have changed the meshed surface of, so a
+    // host re-meshes the dab instead of the model. The same shape the brick
+    // cache uses on the SDF side: mark (implicitly, on every write) -> drain
+    // -> mesh the drained keys.
+    //
+    // Every public verb funnels its writes through one place, so the set is
+    // fed there and a verb added later reports without being told to. A write
+    // that does not change the cell dirties nothing — nothing about the
+    // surface moved — which is the distinction change_count() already draws.
+    //
+    // A write on a cell lying on a chunk FACE also dirties the chunk across
+    // that face, because that chunk's exposure test reads this cell. Missing
+    // that is a hole in the surface visible only at chunk boundaries. A
+    // neighbour that does not exist is left alone: an absent chunk holds no
+    // material and emits no quads.
+    //
+    // A chunk that reaches zero occupancy is ERASED from the grid, and is
+    // still reported dirty — otherwise the quads it contributed are never
+    // removed.
+    //
+    // The set is per LEVEL, and propagation across levels dirties the levels
+    // it writes, so a level's set describes that level whether or not it was
+    // active when the edit landed.
+    //
+    // The drain returns the set and empties it, in a deterministic order
+    // (lexicographic by x, then y, then z), so a host that skipped a frame
+    // coalesces rather than replaying. A write that lands after a drain
+    // appears in the NEXT drain, never in the one already returned. An
+    // un-drained set costs nothing but memory: mesh_greedy neither reads it
+    // nor clears it, so "mesh everything once, then track" and "track from the
+    // start" reach the same state.
+    //
+    // A grid that was just deserialized, rasterized or given a level reports
+    // every chunk it wrote, which is what a host that has drawn nothing needs.
+    std::vector<VoxelCoord> take_dirty_chunks() { return take_dirty_chunks(active_); }
+    std::vector<VoxelCoord> take_dirty_chunks(std::size_t level);
+    // How many are queued, without draining.
+    std::size_t dirty_chunk_count() const { return dirty_chunk_count(active_); }
+    std::size_t dirty_chunk_count(std::size_t level) const;
+
     // -- voxel <-> SDF bridges -----------------------------------------------
     // Step-function field: -voxel_size/2 inside occupied cells, +voxel_size/2
     // elsewhere (a bound, not a distance — classify accordingly).
@@ -317,12 +408,34 @@ class VoxelGrid {
         float voxel_size = 0.1f;
         ChunkMap chunks;
         std::unordered_map<VoxelCoord, std::uint8_t, VoxelCoordHash> detail;
+        // Chunks whose meshed surface a write could have changed, since the
+        // last drain. `dirty_memo` is the last key marked: writes walk a
+        // footprint, so consecutive cells nearly always share a chunk, and an
+        // interior cell of a chunk already marked needs no set probe at all.
+        // A rasterize writes a million cells into eighty chunks, and the memo
+        // is what keeps that a million compares rather than a million hashes.
+        std::unordered_set<VoxelCoord, VoxelCoordHash> dirty;
+        VoxelCoord dirty_memo{};
+        bool dirty_memo_valid = false;
     };
 
     static VoxelCoord chunk_key(VoxelCoord c);
     static std::size_t chunk_offset(VoxelCoord c);
     void emit_quad(mesh::Mesh& out, int axis, int sign, int a, int u, int v, int w, int h,
                    std::uint8_t idx, float cell_size) const;
+    // One face direction's sweep over one chunk-aligned (u, v) window of one
+    // chunk slab: build each slice's exposure mask, greedy-merge it, emit.
+    // The whole-grid mesh hands it a window spanning a slab's chunks, which is
+    // why its merge crosses chunk boundaries; the regional mesh hands it a
+    // window of exactly one chunk, which is what clamps the merge.
+    void sweep_window(std::size_t level, int axis, int sign, int slab_index, int u0, int v0,
+                      int nu, int nv, std::vector<std::uint8_t>& mask, mesh::Mesh& out) const;
+    // The chunk this write changed, plus the neighbour across any chunk face
+    // it sits on. Called only when the cell actually changed.
+    void mark_chunk_dirty(std::size_t level, VoxelCoord c, VoxelCoord key);
+    // Every occupied chunk at every level: what a grid built from a file owes a
+    // host that has drawn nothing yet.
+    void mark_every_chunk_dirty();
 
     // Level-addressed storage. Everything public funnels through these, so the
     // active level is read in one place rather than at every call site.

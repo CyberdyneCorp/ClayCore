@@ -24,6 +24,12 @@ FLOORS = {
     # solid chunk would be the wrong gate — see the note on the benchmarks.
     "BM_VoxelMeshSparseChunk": {"max_ms": 2},
     "BM_VoxelMeshSparse64Chunks": {"max_ms": 120},
+    # Part 2 of the same issue: two chunks of that 64-chunk grid, meshed
+    # through the regional call. It is the bench above divided by 32 — 0.40 ms
+    # against 12.9 ms here — so the ceiling gates the SHAPE. A regression that
+    # meshed the whole grid for a two-chunk request would land at 12.9 ms and
+    # blow this by 30x, which is the failure worth catching.
+    "BM_VoxelMeshDirtyChunks": {"max_ms": 4},
 }
 
 # relative gates: (bench, must_be_faster_than) — meshing spec requires the
