@@ -77,6 +77,13 @@ MAX_RATIO = [
     # serial path coming back on capable machines without flaking on small
     # runners, where both sides lose the pool together.
     ("BM_MeshBricksGradDenseDoc", "BM_DabRefillDenseDoc", 10.0),
+    # Undo of a stamp stroke (accel/undo-removal): undoing 100 stamps on a
+    # 10k-stamp document is gated against the same stroke on a 100-stamp one.
+    # Before the location index in SdfContent every removed stamp's locate()
+    # walked the whole node arena, so this ratio scaled with document size
+    # (33x between these sizes); after, both sides pay the same per-stamp
+    # hash work. 3x catches the O(document) walk coming back, not noise.
+    ("BM_UndoStampsGrownDoc", "BM_UndoStampsFreshDoc", 3.0),
 ]
 
 
