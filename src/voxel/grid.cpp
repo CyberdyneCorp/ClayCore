@@ -1,6 +1,7 @@
 #include "clay/voxel/grid.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <deque>
@@ -745,6 +746,14 @@ mesh::Mesh VoxelGrid::mesh_greedy(std::size_t level) const {
         for (const auto& [slab_index, slab] : slabs) {
         const int u0 = slab.u0, v0 = slab.v0;
         const int nu = slab.u1 - slab.u0 + 1, nv = slab.v1 - slab.v0 + 1;
+        // The slab bounds are chunk corners, so the window is a whole number of
+        // chunks on both axes. build_slice_mask writes a chunk-wide row at a
+        // time and steps ku while ku * kChunkDim < nu, so a window that is not
+        // chunk-aligned would run a row off the end of the mask — a heap write,
+        // not a wrong quad. Tightening the window to the occupied bounding box
+        // is the natural next optimisation and is exactly what would break it,
+        // so the invariant is asserted rather than left to the comment.
+        assert(nu % kChunkDim == 0 && nv % kChunkDim == 0);
         mask.assign(static_cast<std::size_t>(nu) * nv, 0);
         const int a0 = slab_index * kChunkDim;
         const int a1 = a0 + kChunkDim - 1;

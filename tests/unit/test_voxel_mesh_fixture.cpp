@@ -62,39 +62,51 @@ Digest digest(const mesh::Mesh& m) {
 
 // Eight palette entries, so merged quads are broken up by color the way a real
 // sculpt breaks them up and the mask carries more than one nonzero value.
+//
+// Every component is a multiple of 1/16, which is exact in binary32, because a
+// golden hash covers the color bytes and the fixture has to produce the same
+// bytes on every target. The obvious spelling, 1.0f - 0.1f * i, does not: the
+// compiler is free to contract it to one fused multiply-add, arm64 has the
+// instruction and x86-64's baseline does not, and the two round differently —
+// 1.0f - 0.1f * 7 is 0x3e99999a contracted and 0x3e999999 not. That is a
+// one-ulp disagreement in a value nothing here is measuring, and it turned
+// every fixture carrying a high palette index red on macOS while the mesher
+// under test was byte-identical. Exact operands take the question away rather
+// than answering it per platform.
 std::vector<std::uint8_t> seed_palette(VoxelGrid& g) {
     std::vector<std::uint8_t> pal;
-    for (int i = 0; i < 8; ++i)
-        pal.push_back(g.palette_add(cf3(0.1f * static_cast<float>(i + 1), 0.35f,
-                                        1.0f - 0.1f * static_cast<float>(i))));
+    for (int i = 0; i < 8; ++i) {
+        const float t = static_cast<float>(i) / 16.0f;
+        pal.push_back(g.palette_add(cf3(t + 1.0f / 16.0f, 0.375f, 1.0f - t)));
+    }
     return pal;
 }
 
-// A blobby form: three spheres smooth-unioned, rasterized by cell centre.
-float smin(float a, float b, float k) {
-    float h = std::max(k - std::abs(a - b), 0.0f) / k;
-    return std::min(a, b) - h * h * k * 0.25f;
-}
-float blob(float x, float y, float z) {
-    auto sph = [&](float cx, float cy, float cz, float r) {
-        float dx = x - cx, dy = y - cy, dz = z - cz;
-        return std::sqrt(dx * dx + dy * dy + dz * dz) - r;
+// A blobby form: three overlapping balls, unioned, tested in integer lattice
+// space. The shape only has to be a large multi-chunk body whose merged quads
+// meet at seams; deciding it with an integer predicate rather than a float SDF
+// keeps the occupancy — and so the golden hash — identical everywhere. A float
+// distance would put cells whose centre falls within an ulp of the surface on
+// whichever side the target's libm and fused arithmetic land, which is a
+// coin-flip in the fixture rather than a property of the mesher.
+bool in_blob(int x, int y, int z, int scale) {
+    auto ball = [&](int cx, int cy, int cz, int r) {
+        const long long dx = x - cx, dy = y - cy, dz = z - cz;
+        return dx * dx + dy * dy + dz * dz <= static_cast<long long>(r) * r;
     };
-    float d = sph(0.0f, 0.0f, 0.0f, 1.0f);
-    d = smin(d, sph(0.9f, 0.4f, 0.0f, 0.6f), 0.4f);
-    d = smin(d, sph(-0.3f, 0.8f, 0.5f, 0.5f), 0.4f);
-    return d;
+    return ball(0, 0, 0, scale) || ball(9 * scale / 10, 2 * scale / 5, 0, 3 * scale / 5) ||
+           ball(-3 * scale / 10, 4 * scale / 5, scale / 2, scale / 2);
 }
 
 void fill_blob(VoxelGrid& g, float vs, const std::vector<std::uint8_t>& pal, int shift) {
-    int r = static_cast<int>(std::ceil(1.9f / vs)) + 1;
+    // The lattice radius one world unit buys at this cell size: the fixture is
+    // the same shape at every cell size, sampled more finely.
+    const int scale = static_cast<int>(1.0f / vs);
+    const int r = 2 * scale;
     for (int z = -r; z <= r; ++z)
         for (int y = -r; y <= r; ++y)
             for (int x = -r; x <= r; ++x) {
-                float wx = (static_cast<float>(x) + 0.5f) * vs;
-                float wy = (static_cast<float>(y) + 0.5f) * vs;
-                float wz = (static_cast<float>(z) + 0.5f) * vs;
-                if (blob(wx, wy, wz) >= 0.0f) continue;
+                if (!in_blob(x, y, z, scale)) continue;
                 int oct = (x >= 0 ? 1 : 0) | (y >= 0 ? 2 : 0) | (z >= 0 ? 4 : 0);
                 g.set({x + shift, y + shift, z + shift}, pal[static_cast<std::size_t>(oct)]);
             }
@@ -114,7 +126,7 @@ TEST_CASE("mesh_greedy fixture: single cell at the origin") {
     VoxelGrid g(0.1f);
     auto pal = seed_palette(g);
     g.set({0, 0, 0}, pal[0]);
-    check_digest(g.mesh_greedy(), 24, 36, 0x1d743d89f9321907ull);
+    check_digest(g.mesh_greedy(), 24, 36, 0xf2cd840d57c66007ull);
 }
 
 TEST_CASE("mesh_greedy fixture: single cell in negative space") {
@@ -122,7 +134,7 @@ TEST_CASE("mesh_greedy fixture: single cell in negative space") {
     VoxelGrid g(0.1f);
     auto pal = seed_palette(g);
     g.set({-1, -1, -1}, pal[1]);
-    check_digest(g.mesh_greedy(), 24, 36, 0x52f6c574c397be37ull);
+    check_digest(g.mesh_greedy(), 24, 36, 0xa7c9443e44c0fb47ull);
 }
 
 TEST_CASE("mesh_greedy fixture: two cells far apart") {
@@ -130,7 +142,7 @@ TEST_CASE("mesh_greedy fixture: two cells far apart") {
     auto pal = seed_palette(g);
     g.set({0, 0, 0}, pal[0]);
     g.set({2048, 2048, 2048}, pal[2]);
-    check_digest(g.mesh_greedy(), 48, 72, 0xfaf5bbb7a26f7623ull);
+    check_digest(g.mesh_greedy(), 48, 72, 0x3ee4f3a1cf5452d3ull);
 }
 
 TEST_CASE("mesh_greedy fixture: two cells far apart across the origin") {
@@ -138,7 +150,7 @@ TEST_CASE("mesh_greedy fixture: two cells far apart across the origin") {
     auto pal = seed_palette(g);
     g.set({-2048, -33, 5}, pal[3]);
     g.set({2048, 2048, -2048}, pal[4]);
-    check_digest(g.mesh_greedy(), 48, 72, 0xa6a4becdccfc0ac3ull);
+    check_digest(g.mesh_greedy(), 48, 72, 0x7a2bada08b602943ull);
 }
 
 TEST_CASE("mesh_greedy fixture: cells on every chunk seam") {
@@ -150,7 +162,7 @@ TEST_CASE("mesh_greedy fixture: cells on every chunk seam") {
     for (int x : b) g.set({x, 0, 0}, pal[0]);
     for (int y : b) g.set({0, y, 0}, pal[1]);
     for (int z : b) g.set({0, 0, z}, pal[2]);
-    check_digest(g.mesh_greedy(), 336, 504, 0x278d9f5a83d5a52bull);
+    check_digest(g.mesh_greedy(), 336, 504, 0x0f52545de81dc4abull);
 }
 
 TEST_CASE("mesh_greedy fixture: solid blocks straddling a seam") {
@@ -167,21 +179,21 @@ TEST_CASE("mesh_greedy fixture: solid blocks straddling a seam") {
         for (int y = -4; y <= 4; ++y)
             for (int x = -4; x <= 4; ++x)
                 g.set({x - 32, y, z}, pal[static_cast<std::size_t>((x * 3 + y) & 7)]);
-    check_digest(g.mesh_greedy(), 2736, 4104, 0xea07eb4f037e2901ull);
+    check_digest(g.mesh_greedy(), 2736, 4104, 0x229055f5f32db2c1ull);
 }
 
 TEST_CASE("mesh_greedy fixture: rasterized blob in the positive octant") {
     VoxelGrid g(0.05f);
     auto pal = seed_palette(g);
     fill_blob(g, 0.05f, pal, 40);
-    check_digest(g.mesh_greedy(), 17212, 25818, 0xa86a0b4d978d601aull);
+    check_digest(g.mesh_greedy(), 17652, 26478, 0xdc2f919a9c08d1e6ull);
 }
 
 TEST_CASE("mesh_greedy fixture: rasterized blob straddling the origin") {
     VoxelGrid g(0.05f);
     auto pal = seed_palette(g);
     fill_blob(g, 0.05f, pal, 0);
-    check_digest(g.mesh_greedy(), 17212, 25818, 0x3fbfb23e31b32b2aull);
+    check_digest(g.mesh_greedy(), 17652, 26478, 0xc8861b257edd50b6ull);
 }
 
 TEST_CASE("mesh_greedy fixture: every level of a multi-level grid") {
@@ -198,9 +210,9 @@ TEST_CASE("mesh_greedy fixture: every level of a multi-level grid") {
                 if (x * x + y * y + z * z <= 36)
                     g.set({x + 30, y - 30, z}, pal[static_cast<std::size_t>((x + 4) & 7)]);
 
-    check_digest(g.mesh_greedy(0), 164, 246, 0x147ffa3b04a8f4c3ull);
-    check_digest(g.mesh_greedy(1), 500, 750, 0x1c17324b076514deull);
-    check_digest(g.mesh_greedy(2), 1496, 2244, 0x41c5ad117c745ce8ull);
+    check_digest(g.mesh_greedy(0), 164, 246, 0x7e89417cdf6dbd03ull);
+    check_digest(g.mesh_greedy(1), 500, 750, 0x24a084d43602bd2eull);
+    check_digest(g.mesh_greedy(2), 1496, 2244, 0x554c9cddf7f88d10ull);
     // The level overload and the active-level form must agree.
     CHECK(digest(g.mesh_greedy()).hash == digest(g.mesh_greedy(2)).hash);
     // A level this grid does not have meshes to nothing rather than reading out
@@ -216,7 +228,7 @@ TEST_CASE("mesh_greedy fixture: one cell in each of 64 chunks") {
     for (int i = 0; i < 64; ++i)
         g.set({(i - 32) * 32, ((i * 7) % 9 - 4) * 32, ((i * 5) % 7 - 3) * 32},
               pal[static_cast<std::size_t>(i & 7)]);
-    check_digest(g.mesh_greedy(), 1536, 2304, 0xfd958a27650da412ull);
+    check_digest(g.mesh_greedy(), 1536, 2304, 0x32dddc5a8b52c392ull);
 }
 
 TEST_CASE("mesh_greedy reads empty space without creating it") {
