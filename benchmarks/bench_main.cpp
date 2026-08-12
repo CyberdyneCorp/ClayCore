@@ -385,8 +385,10 @@ BENCHMARK(BM_SurfaceNets)->Unit(benchmark::kMillisecond);
 // merge's scan of the mask window, which is the same work whether the window
 // held one voxel or 32768. The ratio was 0.50x before the fix and 0.66x after,
 // so it moves the WRONG WAY while the wall clock drops 20x. The ceilings are
-// generous in the style of the floors above: 20x headroom on this machine, and
-// still comfortably below the 3.8 ms / 256 ms the per-cell lookup cost here.
+// generous in the style of the floors above: ~12x headroom on this machine
+// (0.16 ms against the 2 ms ceiling, 9.6 ms against the 120 ms one), and still
+// far below the 3.8 ms / 256 ms the per-cell lookup cost here, which is what
+// they are there to catch coming back.
 void BM_VoxelMeshSparseChunk(benchmark::State& state) {
     voxel::VoxelGrid g(0.1f);
     std::uint8_t c = g.palette_add(cf3(0.8f, 0.4f, 0.2f));

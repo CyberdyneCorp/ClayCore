@@ -1,6 +1,7 @@
 #include "clay/voxel/grid.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <deque>
@@ -790,6 +791,14 @@ void VoxelGrid::sweep_window(std::size_t level, int axis, int sign, int slab_ind
             }
     };
 
+    // Every caller's window is a whole number of chunks — slab bounds are chunk
+    // corners, and a single key's window is the chunk itself. build_slice_mask
+    // writes a chunk-wide row at a time and steps ku while ku * kChunkDim < nu,
+    // so a window that is not chunk-aligned would run a row off the end of the
+    // mask — a heap write, not a wrong quad. Tightening a window to the
+    // occupied bounding box is the natural next optimisation and is exactly
+    // what would break it, so the invariant is asserted rather than described.
+    assert(nu % kChunkDim == 0 && nv % kChunkDim == 0);
     mask.assign(static_cast<std::size_t>(nu) * nv, 0);
     const int a0 = slab_index * kChunkDim;
     const int a1 = a0 + kChunkDim - 1;
