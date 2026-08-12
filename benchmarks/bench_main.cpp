@@ -22,6 +22,7 @@
 #include "clay/scene/consolidate.h"
 #include "clay/scene/cull_index.h"
 #include "clay/scene/tape.h"
+#include "clay/voxel/grid.h"
 
 using namespace clay;
 using kernel::cf3;
@@ -371,6 +372,48 @@ void BM_SurfaceNets(benchmark::State& state) {
     }
 }
 BENCHMARK(BM_SurfaceNets)->Unit(benchmark::kMillisecond);
+
+// Issue #86: greedy meshing cost a flat ~4 ms per occupied chunk however empty
+// the chunk was, because the exposure mask probed the chunk map — a hash and a
+// find — once per cell, six directions x 32 slices x a 32x32 window deep. Both
+// benches below hold one voxel per chunk, which is the shape that made the bug
+// visible; the second is the per-chunk cost Part 2 gets sized from.
+//
+// Gated by absolute ceilings rather than against a full chunk. The obvious
+// ratio — an almost-empty chunk against a solid one — is not the instrument it
+// looks like: with the lookup hoisted, what is left per chunk is the greedy
+// merge's scan of the mask window, which is the same work whether the window
+// held one voxel or 32768. The ratio was 0.50x before the fix and 0.66x after,
+// so it moves the WRONG WAY while the wall clock drops 20x. The ceilings are
+// generous in the style of the floors above: 20x headroom on this machine, and
+// still comfortably below the 3.8 ms / 256 ms the per-cell lookup cost here.
+void BM_VoxelMeshSparseChunk(benchmark::State& state) {
+    voxel::VoxelGrid g(0.1f);
+    std::uint8_t c = g.palette_add(cf3(0.8f, 0.4f, 0.2f));
+    g.set({16, 16, 16}, c);
+    for (auto _ : state) {
+        mesh::Mesh m = g.mesh_greedy();
+        benchmark::DoNotOptimize(m.triangle_count());
+    }
+    state.counters["cells"] = static_cast<double>(g.occupied_count());
+}
+BENCHMARK(BM_VoxelMeshSparseChunk)->Unit(benchmark::kMillisecond);
+
+// The scaling shape: one voxel in each of 64 chunks. Cost is linear in occupied
+// chunks and independent of how much material each holds, so this is the
+// per-chunk number times 64 and catches the same regression with more signal
+// above the noise.
+void BM_VoxelMeshSparse64Chunks(benchmark::State& state) {
+    voxel::VoxelGrid g(0.1f);
+    std::uint8_t c = g.palette_add(cf3(0.8f, 0.4f, 0.2f));
+    for (int i = 0; i < 64; ++i) g.set({i * 32 + 16, 16, 16}, c);
+    for (auto _ : state) {
+        mesh::Mesh m = g.mesh_greedy();
+        benchmark::DoNotOptimize(m.triangle_count());
+    }
+    state.counters["cells"] = static_cast<double>(g.occupied_count());
+}
+BENCHMARK(BM_VoxelMeshSparse64Chunks)->Unit(benchmark::kMillisecond);
 
 // Consolidation (accel/parallel-consolidate): baking a 193-node layer, once
 // through bake_layer — which batches every lattice sample through the CPU

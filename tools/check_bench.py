@@ -16,6 +16,14 @@ FLOORS = {
     "BM_BrickFill": {"min_items_per_second": 100},
     "BM_MeshTape": {"max_ms": 20_000},
     "BM_SurfaceNets": {"max_ms": 20_000},
+    # Issue #86: voxel greedy meshing must cost the material, not a chunk-map
+    # lookup per cell probed. Both grids hold one voxel per chunk. Measured at
+    # 3.8 ms and 256 ms with the per-cell lookup, 0.21 ms and 12.9 ms without,
+    # on a Linux desktop; the ceilings sit between, closer to the fast side,
+    # which is the same generosity as the ceilings above. A ratio against a
+    # solid chunk would be the wrong gate — see the note on the benchmarks.
+    "BM_VoxelMeshSparseChunk": {"max_ms": 2},
+    "BM_VoxelMeshSparse64Chunks": {"max_ms": 120},
 }
 
 # relative gates: (bench, must_be_faster_than) — meshing spec requires the
