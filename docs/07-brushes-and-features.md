@@ -544,7 +544,10 @@ the ones `clay_layer_armature_edit` takes, which is what lets a host that
 reloaded a document re-pose a rig it did not author; branching topology is not
 recoverable from the skinned surface, so without the reader the tree was simply
 gone. `clay_layer_node_prim` answers which primitive a placed node carries, so
-the armature is findable without probing readers until one stops refusing.
+the armature is findable without probing readers until one stops refusing, and
+`clay_layer_node_count` / `clay_layer_node_at` say which nodes exist to ask
+about — without them the host still had to guess ids, and a rig placed after a
+run of removed nodes was invisible to the guess.
 
 ---
 
@@ -661,7 +664,7 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Consolidate a layer | `scene::consolidate_layer` | `Layer.consolidate(...)`, `.consolidation_cost(...)` | `clay_layer_consolidate`, `clay_layer_consolidation_cost`, `clay_layer_consolidation_state` |
 | What a layer's field costs | `scene::field_report` | `Layer.field_report()` | `clay_layer_field_report` |
 | Voxel resolution levels | `VoxelGrid::add_level` etc. | `VoxelGrid.add_level(...)`, `.set_active_level(...)` | `clay_voxel_add_level`, `clay_voxel_set_active_level`, `clay_voxel_drop_level` |
-| Groups a host builds | `scene::Node::is_group` | `Layer.add_group(...)` | `clay_layer_add_group`, `clay_layer_add_item_in_group`, `clay_item_add_child`, `clay_layer_children` |
+| Groups a host builds | `scene::Node::is_group` | `Layer.add_group(...)` | `clay_layer_add_group`, `clay_layer_add_item_in_group`, `clay_item_add_child`, `clay_layer_children`, `clay_layer_node_count`, `clay_layer_node_at` |
 | A mesh a document carries | `scene::LayerKind::Mesh` | `Document.add_mesh_layer(...)`, `.mesh_layer(...)` | `clay_document_add_mesh_layer`, `clay_document_mesh_layer`, `clay_mesh_layer` |
 
 Snakehook has no dedicated C entry point on purpose: it is a **resolver** that

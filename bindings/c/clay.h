@@ -836,6 +836,35 @@ clay_result clay_layer_children(const clay_document* doc, clay_layer_id layer,
 clay_result clay_layer_node_prim(const clay_document* doc, clay_layer_id layer,
                                  clay_node_id node, int32_t* out_prim);
 
+/* The layer's TOP-LEVEL nodes, count-then-index, in the layer's EVALUATION
+ * order — index 0 is the node evaluated first, and the index is the one
+ * clay_layer_add_group and clay_add_item_in_group place against. An index of
+ * count or beyond is CLAY_ERROR_NOT_FOUND, so a host walks to the end without
+ * a sentinel; a layer id that is not a layer's is CLAY_ERROR_NOT_FOUND too.
+ *
+ * Top level ONLY, and it stops there on purpose: this is the sibling of
+ * clay_layer_children, which continues to descend, so the whole tree is walked
+ * by pairing the two — enumerate the layer's roots here, ask
+ * clay_layer_node_prim what each one is, and recurse with clay_layer_children
+ * through the ones it refuses as groups. A layer's root is not itself a group
+ * and carries no node id, which is why clay_layer_children answers
+ * CLAY_ERROR_NOT_FOUND for node 0 and this pair has to exist.
+ *
+ * Node ids are not dense — a removal leaves a gap, and nothing bounds how long
+ * a gap can be — which is why enumeration goes through an index rather than
+ * the id space. Probing ids upward against clay_layer_node_prim and tolerating
+ * a run of misses is the guess this replaces: it loses every node past the
+ * longest gap it happened to tolerate, and no value of "long enough" is
+ * defensible.
+ *
+ * A layer with no SDF content — a voxel or a mesh layer — counts 0 rather than
+ * failing, the same reading clay_layer_eval_points makes of it. Reading is not
+ * editing: a ghosted, locked or hidden layer answers normally. */
+clay_result clay_layer_node_count(const clay_document* doc, clay_layer_id layer,
+                                  size_t* out_count);
+clay_result clay_layer_node_at(const clay_document* doc, clay_layer_id layer, size_t index,
+                               clay_node_id* out_node);
+
 
 /* -- evaluation ------------------------------------------------------------ */
 
