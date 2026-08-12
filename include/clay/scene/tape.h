@@ -39,8 +39,17 @@ struct CullRegion {
     math::Aabb region;
 };
 
+class CullIndex;
+class CullPlan;
+
 // Whole document: visible SDF layers chained by hard union.
-Tape compile_document(const Document& doc, const CullRegion* cull = nullptr);
+//
+// `index` (cull_index.h) supplies per-revision cached bounds; `plan` a
+// per-batch coarse cull, valid only with a `cull` region contained in the
+// plan's own. Both accelerate the compile without changing its output: the
+// tape is byte-identical with and without them.
+Tape compile_document(const Document& doc, const CullRegion* cull = nullptr,
+                      const CullIndex* index = nullptr, const CullPlan* plan = nullptr);
 
 // Single layer.
 Tape compile_layer(const Layer& layer, const CullRegion* cull = nullptr);

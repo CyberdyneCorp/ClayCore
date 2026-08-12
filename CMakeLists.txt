@@ -29,6 +29,7 @@ include(Dependencies)
 add_library(claycore
   src/version.cpp
   src/scene/bounds.cpp
+  src/scene/cull_index.cpp
   src/scene/curve.cpp
   src/cut/cut.cpp
   src/field/volume.cpp

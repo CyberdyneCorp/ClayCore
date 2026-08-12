@@ -1,4 +1,5 @@
 #include "clay/scene/bounds.h"
+#include "clay/scene/cull_index.h"
 #include "clay/scene/curve.h"
 #include "clay/scene/tape.h"
 
@@ -87,28 +88,14 @@ kernel::CFieldInfo swept_field_info(const Node& item) {
                              ease_max_slope(static_cast<std::uint8_t>(item.prim.params[0])));
 }
 
-// The extra width the cull test needs when this content holds a feathered
-// volume replace. The feathered combine moves the accumulated value by up to
-// the volume's band (the kernel clamps the correction there), so an item
-// whose field the caller's dilation put just beyond the clamp can still steer
-// a value back inside it. Testing against the region dilated by that band
-// restores the contract the CullRegion states: band-clamped results identical
-// to the full tape. Zero — the common case — leaves the test exactly as it was.
-float feather_cull_pad(const SdfContent& content, const Layer& layer) {
-    float pad = 0.0f;
-    for (const auto& [id, n] : content.nodes()) {
-        (void)id;
-        if (n.is_group || !n.visible) continue;
-        if (n.op != Op::Replace || !prim_is_volume(n.prim.type)) continue;
-        if (n.volume && n.volume->feather() > 0.0f)
-            pad = kernel::cmax(pad, n.volume->band() * layer.xform.scale * n.xform.scale);
-    }
-    return pad;
-}
-
 struct Compiler {
     Tape tape;
     const CullRegion* cull;
+    // Per-revision cached bounds and per-batch coarse survivors (see
+    // cull_index.h). Both optional, both pure accelerations: with either
+    // present the cull decisions — and so the emitted tape — are identical.
+    const CullIndex* index = nullptr;
+    const CullPlan* plan = nullptr;
     // What cull tests actually intersect against: the caller's region, wider
     // by feather_cull_pad when a feathered replace is present.
     math::Aabb cull_test;
@@ -189,11 +176,10 @@ struct Compiler {
     std::size_t last_volume_blob = 0;
 
     // Whether this item is a volume placed with Replace that asked for a
-    // feathered placement. The one predicate the mirror skip, the combine
-    // choice and the field-info fold all share, so they cannot disagree.
+    // feathered placement — bounds.h owns the single definition, shared with
+    // the cull index's refusal to prune chains that hold one.
     static bool is_feathered_replace(const Node& item) {
-        return item.op == Op::Replace && prim_is_volume(item.prim.type) && item.volume &&
-               item.volume->feather() > 0.0f;
+        return item_is_feathered_replace(item);
     }
 
     // The feathered replace: mode ccombine_replace_feather with the volume's
@@ -567,11 +553,21 @@ struct Compiler {
         // into and degrades to the hard replace, so the full tape and every
         // per-brick tape agree on what a lone volume shows.
         bool cull_dropped = false;
-        for (NodeId id : ids) {
-            const Node* n = content.find(id);
+        // The plan's coarse survivors, when a batch compile supplies one: a
+        // chain member whose bound misses the batch's union region cannot
+        // survive any member brick's test either, so iterating the survivor
+        // entries — which carry the cached bounds — makes the same decisions
+        // with none of the per-item work. Chains a plan must not prune (a
+        // feathered replace reads cull_dropped) come back null and take the
+        // walk below unchanged.
+        const std::vector<CullIndex::Entry>* pruned = plan ? plan->chain(layer, ids) : nullptr;
+        const std::size_t member_count = pruned ? pruned->size() : ids.size();
+        for (std::size_t at = 0; at < member_count; ++at) {
+            const CullIndex::Entry* e = pruned ? &(*pruned)[at] : nullptr;
+            const Node* n = e ? e->node : content.find(ids[at]);
             if (!n || !n->visible) continue;
             if (n->is_group) {
-                if (culled(node_influence_bound(content, n->id, layer))) {
+                if (culled(e ? e->bound : node_influence_bound(content, n->id, layer))) {
                     cull_dropped = true;
                     continue;
                 }
@@ -586,7 +582,7 @@ struct Compiler {
                 // Both calls do the real work — for a stroke or a sweep they
                 // re-tessellate the curve — so the second was pure waste on
                 // every compile, culled or not.
-                const math::Aabb geometry = item_geometry_bound(*n, layer);
+                const math::Aabb geometry = e ? e->bound : item_geometry_bound(*n, layer);
                 // A non-local item has an infinite influence bound and so can
                 // never be culled; item_influence_is_local is the single
                 // definition of that test, shared with item_influence_bound.
@@ -659,7 +655,9 @@ struct Compiler {
 
     void run(const Document& doc, const CullRegion* cull_region) {
         float pad = 0.0f;
-        if (cull_region)
+        if (cull_region && index)
+            pad = index->feather_pad();
+        else if (cull_region)
             for (const Layer& layer : doc.layers)
                 if (layer.visible && layer.kind == LayerKind::Sdf && layer.sdf)
                     pad = kernel::cmax(pad, feather_cull_pad(*layer.sdf, layer));
@@ -677,8 +675,17 @@ struct Compiler {
 
 }  // namespace
 
-Tape compile_document(const Document& doc, const CullRegion* cull) {
+Tape compile_document(const Document& doc, const CullRegion* cull, const CullIndex* index,
+                      const CullPlan* plan) {
     Compiler c;
+    // An index for another document caches bounds under other layers'
+    // addresses: every lookup would miss and the compile would silently run
+    // at the uncached speed, so it is dropped rather than trusted. A plan
+    // without a cull could only mean a pruned whole-document tape, which no
+    // caller can want.
+    if (index && index->document() != &doc) index = nullptr;
+    c.index = index;
+    c.plan = cull && index ? plan : nullptr;
     c.run(doc, cull);
     return std::move(c.tape);
 }

@@ -15,6 +15,7 @@
 #include "clay/mesh/marching.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/scene/bounds.h"
+#include "clay/scene/cull_index.h"
 #include "clay/scene/tape.h"
 
 using namespace clay;
@@ -227,6 +228,51 @@ BENCHMARK(BM_MeshBricksGradFreshDoc)->Unit(benchmark::kMillisecond);
 
 void BM_MeshBricksGradGrownDoc(benchmark::State& state) { mesh_pole_with_gradients(state, 193); }
 BENCHMARK(BM_MeshBricksGradGrownDoc)->Unit(benchmark::kMillisecond);
+
+// Cull index: refilling a FIXED dab's worth of bricks must cost what the
+// bricks cost, not what the document does. Every per-brick culled compile
+// used to walk the whole document (bounds recomputed per item per brick), so
+// a dab's refill grew with everything already sculpted. With the
+// per-revision CullIndex and a per-batch coarse CullPlan the per-brick
+// compiles walk only the batch's neighbourhood; the index rebuild — one
+// bounds pass, which is what a SINGLE per-brick compile used to pay — is
+// timed inside the loop because a real dab bumps the revision and rebuilds
+// it. Same +x-pole bricks, against 1 node and against 193 far dabs;
+// check_bench.py gates the ratio the same way it gates MeshBricksGrad.
+namespace {
+
+void refill_pole_dab(benchmark::State& state, int nodes) {
+    scene::Document doc = sculpted_sphere(nodes);
+    brick::BrickCache cache = filled_cache(doc);
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    // A dab-sized dirty region at the +x pole, far from every grown dab.
+    cache.mark_dirty(math::Aabb{cf3(0.92f, -0.12f, -0.12f), cf3(1.08f, 0.12f, 0.12f)});
+    const std::vector<brick::BrickRequest> reqs = cache.take_dirty();
+    std::vector<float> values;
+    for (auto _ : state) {
+        scene::CullIndex index(doc);
+        math::Aabb batch;
+        for (const brick::BrickRequest& req : reqs) batch.expand(cache.cull_region(req.key));
+        const scene::CullPlan plan = index.plan(batch);
+        for (const brick::BrickRequest& req : reqs) {
+            scene::CullRegion cull{cache.cull_region(req.key)};
+            scene::Tape tape = scene::compile_document(doc, &cull, &index, &plan);
+            values.resize(static_cast<std::size_t>(req.grid.nx) * req.grid.ny * req.grid.nz);
+            cpu->eval_grid(tape, req.grid, values.data());
+        }
+        benchmark::DoNotOptimize(values.data());
+    }
+    state.counters["bricks"] = static_cast<double>(reqs.size());
+    state.counters["nodes"] = static_cast<double>(nodes);
+}
+
+}  // namespace
+
+void BM_DabRefillFreshDoc(benchmark::State& state) { refill_pole_dab(state, 1); }
+BENCHMARK(BM_DabRefillFreshDoc)->Unit(benchmark::kMillisecond);
+
+void BM_DabRefillGrownDoc(benchmark::State& state) { refill_pole_dab(state, 193); }
+BENCHMARK(BM_DabRefillGrownDoc)->Unit(benchmark::kMillisecond);
 
 void BM_MeshTape(benchmark::State& state) {
     scene::Document doc = bench_document();

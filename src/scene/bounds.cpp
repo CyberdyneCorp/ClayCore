@@ -510,6 +510,28 @@ Aabb item_geometry_bound(const Node& item, const Layer& layer) {
     return bound.dilated(kernel::cmax(round_world, 0.0f) + combine);
 }
 
+bool item_is_feathered_replace(const Node& item) {
+    return item.op == Op::Replace && prim_is_volume(item.prim.type) && item.volume &&
+           item.volume->feather() > 0.0f;
+}
+
+// The feathered combine moves the accumulated value by up to the volume's
+// band (the kernel clamps the correction there), so an item whose field the
+// caller's dilation put just beyond the clamp can still steer a value back
+// inside it. Testing against the region dilated by that band restores the
+// contract the CullRegion states: band-clamped results identical to the full
+// tape.
+float feather_cull_pad(const SdfContent& content, const Layer& layer) {
+    float pad = 0.0f;
+    for (const auto& [id, n] : content.nodes()) {
+        (void)id;
+        if (n.is_group || !n.visible) continue;
+        if (!item_is_feathered_replace(n)) continue;
+        pad = kernel::cmax(pad, n.volume->band() * layer.xform.scale * n.xform.scale);
+    }
+    return pad;
+}
+
 bool item_influence_is_local(const Node& item) {
     // Non-local ops (intersect, the spatial morphs) change the field
     // arbitrarily far from the item: claiming a finite bound would let

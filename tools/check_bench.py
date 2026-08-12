@@ -36,6 +36,14 @@ FASTER_THAN = [
 # style as the floors: it catches the O(document) path coming back, not noise.
 MAX_RATIO = [
     ("BM_MeshBricksGradGrownDoc", "BM_MeshBricksGradFreshDoc", 3.0),
+    # Cull index (accel/cull-index): refilling a fixed dab's bricks against a
+    # grown document is gated against the fresh one. Before the per-revision
+    # CullIndex + per-batch CullPlan every per-brick compile walked the whole
+    # document, so this ratio scaled with total nodes; after, the grown
+    # document pays one cached-bounds pass plus the coarse cull. Same 3x
+    # generosity as above: it catches the O(document x bricks) walk coming
+    # back, not runner noise.
+    ("BM_DabRefillGrownDoc", "BM_DabRefillFreshDoc", 3.0),
 ]
 
 

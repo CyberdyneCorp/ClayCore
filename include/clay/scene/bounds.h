@@ -67,6 +67,18 @@ bool item_influence_is_local(const Node& item);
 // morphs). This is what per-brick culling must consult.
 math::Aabb item_influence_bound(const Node& item, const Layer& layer);
 
+// Whether this item is a volume placed with Replace that asked for a
+// feathered placement. The ONE definition of the test the compiler's mirror
+// skip, combine choice and field-info fold share with the cull index's
+// chain-pruning refusal, so they cannot disagree.
+bool item_is_feathered_replace(const Node& item);
+
+// The extra width the cull test needs when this content holds a feathered
+// volume replace (see tape_build.cpp for why the feather reaches past the
+// caller's dilation). Zero — the common case — leaves the cull test as the
+// caller built it.
+float feather_cull_pad(const SdfContent& content, const Layer& layer);
+
 // Influence bound of any node (recursive union for groups, dilated by the
 // group's blend support; infinite for intersect anywhere in the subtree).
 math::Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& layer);
