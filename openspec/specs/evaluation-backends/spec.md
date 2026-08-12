@@ -42,9 +42,15 @@ Every registered GPU backend SHALL match the CPU scalar reference within documen
 ### Requirement: Batched grid evaluation amortizes device dispatch
 The backend interface SHALL accept a batch of same-shape lattices, each carrying its own (typically per-brick culled) tape, as one call (`eval_grid_batch`). Every backend SHALL answer the batch with the values its per-grid path produces; a GPU backend SHALL evaluate the batch in a bounded number of device submissions rather than one submission per lattice, so that per-submission overhead is amortized over the batch instead of multiplying with it. The brick-refill entry point (`clay_brick_cache_eval_requests`) SHALL hand its requests to the named backend through this batched form.
 
+The same batched form SHALL exist for a device-buffer destination (`eval_grid_batch_device`): a batch of same-shape lattices whose results land at fixed per-grid slots in a caller-owned device buffer, honouring each grid's buffer offset exactly as the per-grid device path does. Every backend that serves the per-grid device path SHALL answer the batched device form with identical values (the default runs the per-grid path per lattice); a backend bound to a caller-supplied device SHALL evaluate the batch in a bounded number of device submissions. The device-destination refill entry point (`clay_brick_cache_eval_requests_device`) SHALL hand its requests to the adopted backend through this batched device form, under the same chunking rules as the host-memory form.
+
 #### Scenario: A brick refill is not a round trip per brick
 - **WHEN** a batch of brick requests is evaluated through a GPU backend
 - **THEN** the batch runs in a bounded number of device submissions, and the refill's cost per brick falls as the batch grows instead of holding at the per-submission overhead
+
+#### Scenario: The device-buffer refill is batched too
+- **WHEN** a batch of brick requests is evaluated into a caller-owned device buffer through an adopted GPU backend
+- **THEN** the batch runs in a bounded number of device submissions, brick i lands at the same fixed slot the host-memory form uses, and the values are identical to the host-memory batched form on the same backend
 
 #### Scenario: Batched and per-grid evaluation agree
 - **WHEN** the same lattices and per-lattice culled tapes are evaluated one call per grid and as one batch, on any registered backend

@@ -77,6 +77,7 @@ add_executable(clay_unit_tests
   unit/test_groups.cpp
   unit/test_mesh_layers.cpp
   unit/test_c_mesh_layer.cpp
+  unit/test_grid_batch_device.cpp
   unit/test_vulkan_dispatch.cpp)
 
 # The dispatch-splitting header is backend-internal; the test that keeps it
@@ -91,6 +92,16 @@ if(CLAY_BACKEND_VULKAN)
   # The interop cases create a Vulkan device the way a HOST would and lend it
   # to claycore, so this file needs the Vulkan headers directly.
   target_link_libraries(clay_unit_tests PRIVATE Vulkan::Vulkan)
+endif()
+
+# The Metal interop cases create a Metal device the way a HOST would and lend
+# it to claycore, so this file needs metal-cpp directly. The NS/MTL private
+# implementations live in the backend's own translation unit inside claycore;
+# this file only declares them, so there is no duplicate-symbol hazard. Skips
+# itself when no Metal device is present.
+if(CLAY_BACKEND_METAL AND APPLE)
+  target_sources(clay_unit_tests PRIVATE unit/test_metal_interop.cpp)
+  target_include_directories(clay_unit_tests SYSTEM PRIVATE ${metalcpp_SOURCE_DIR})
 endif()
 
 target_link_libraries(clay_unit_tests PRIVATE clay::core doctest::doctest)

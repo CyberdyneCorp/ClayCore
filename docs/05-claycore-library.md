@@ -166,6 +166,15 @@ brick cache stores fp16: quantization and band classification are
 `BrickCache::submit`'s, and a device path that did them would be a second
 implementation of the step most able to drift.
 
+`Backend::eval_grid_batch_device` is `eval_grid_batch` for that caller-owned
+destination — the brick-refill shape, with grid *i* landing at the same fixed
+slot the host-memory batch uses. The default loops `eval_grid_device`, so any
+adopting backend answers it with identical values; the Metal override runs the
+whole batch as **one dispatch** through the same concatenated-tape kernel as
+the host-memory batch, which is what `clay_brick_cache_eval_requests_device`
+rides: without it the zero-copy path paid a command buffer and a wait per
+brick and sat 25-165x behind the host-memory route it exists to beat.
+
 The limit worth stating plainly: this makes evaluation **output**
 device-resident, **not** brick **storage**. Generations, staleness,
 classification, quantization and the memory budget are host code over host

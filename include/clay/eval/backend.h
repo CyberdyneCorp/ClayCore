@@ -224,6 +224,56 @@ class Backend {
                                     const DeviceBuffer&) {
         return Status::Unsupported;
     }
+
+    // eval_grid_batch whose destination is a buffer the CALLER owns — the
+    // brick-refill shape with a device destination. Grid i lands at
+    // values.offset + i * nx*ny*nz * sizeof(float) and, when colours are
+    // wanted, at colors.offset + i * nx*ny*nz * 3 * sizeof(float): the same
+    // fixed slots the host-memory batch uses, so a whole refill lands in the
+    // allocation the caller will draw from. The default runs eval_grid_device
+    // per grid, so any backend that serves the per-grid device path answers
+    // the batch — and answers it identically, because per-grid results are
+    // independent of how the batch is split; a GPU backend overrides it to
+    // evaluate the whole batch in one device submission, because a command
+    // buffer + wait per 8^3 lattice costs more than the samples it carries
+    // (issue #64, which the host-memory batch fixed first).
+    virtual Status eval_grid_batch_device(const GridBatchQuery& q, const DeviceBuffer& values,
+                                          const DeviceBuffer& colors) {
+        if (q.count == 0) return Status::Ok;
+        if (!q.tapes || !q.origins || values.empty() || q.nx <= 0 || q.ny <= 0 || q.nz <= 0)
+            return Status::InvalidInput;
+        const std::uint64_t per = static_cast<std::uint64_t>(q.nx) *
+                                  static_cast<std::uint64_t>(q.ny) *
+                                  static_cast<std::uint64_t>(q.nz);
+        // Checked for the whole batch before any grid runs, so an undersized
+        // destination is refused with nothing written rather than partially
+        // filled.
+        if (values.size < per * sizeof(float) * q.count) return Status::InvalidInput;
+        const bool want_colors = !colors.empty();
+        if (want_colors && colors.size < per * 3 * sizeof(float) * q.count)
+            return Status::InvalidInput;
+        for (std::size_t i = 0; i < q.count; ++i) {
+            if (!q.tapes[i]) return Status::InvalidInput;
+            GridQuery g;
+            g.origin = q.origins[i];
+            g.spacing = q.spacing;
+            g.nx = q.nx;
+            g.ny = q.ny;
+            g.nz = q.nz;
+            DeviceBuffer slot = values;
+            slot.offset = values.offset + i * per * sizeof(float);
+            slot.size = per * sizeof(float);
+            DeviceBuffer color_slot;
+            if (want_colors) {
+                color_slot = colors;
+                color_slot.offset = colors.offset + i * per * 3 * sizeof(float);
+                color_slot.size = per * 3 * sizeof(float);
+            }
+            const Status s = eval_grid_device(*q.tapes[i], g, slot, color_slot);
+            if (s != Status::Ok) return s;
+        }
+        return Status::Ok;
+    }
 };
 
 // Registry — CPU is registered on first access, GPU backends when compiled
