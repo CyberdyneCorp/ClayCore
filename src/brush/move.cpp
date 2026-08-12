@@ -22,8 +22,8 @@ namespace {
 bool reaches(const math::Aabb& influence, cfloat3 centre, float radius) {
     if (influence.empty()) return false;
     if (influence.is_infinite()) return true;  // a non-local op: never cull it
-    const math::Aabb drag(centre - cf3(radius, radius, radius),
-                          centre + cf3(radius, radius, radius));
+    const math::Aabb drag{centre - cf3(radius, radius, radius),
+                          centre + cf3(radius, radius, radius)};
     return !(influence.max.x < drag.min.x || influence.min.x > drag.max.x ||
              influence.max.y < drag.min.y || influence.min.y > drag.max.y ||
              influence.max.z < drag.min.z || influence.min.z > drag.max.z);

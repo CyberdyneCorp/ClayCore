@@ -35,7 +35,7 @@ std::optional<field::FieldVolume> to_field(const Bvh& bvh, const ImportSettings&
     const float beta = settings.beta;
 
     kernel::cfloat3 pad = cf3(padding, padding, padding);
-    math::Aabb region(box.min - pad, box.max + pad);
+    math::Aabb region{box.min - pad, box.max + pad};
 
     return field::FieldVolume::sample(
         [&bvh, beta](kernel::cfloat3 p) { return bvh.signed_distance(p, beta); }, region, cell,

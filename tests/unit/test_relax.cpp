@@ -33,7 +33,7 @@ auto bumpy_field(float r, float amplitude, float frequency) {
 FieldVolume bumpy_volume(float r = 0.7f, float amplitude = 0.05f, float frequency = 14.0f,
                          float cell = 0.03f) {
     return FieldVolume::sample(bumpy_field(r, amplitude, frequency),
-                               math::Aabb(cf3(-1.1f, -1.1f, -1.1f), cf3(1.1f, 1.1f, 1.1f)), cell,
+                               math::Aabb{cf3(-1.1f, -1.1f, -1.1f), cf3(1.1f, 1.1f, 1.1f)}, cell,
                                0.12f);
 }
 
@@ -116,7 +116,7 @@ TEST_CASE("relax: a smooth surface stays where it was") {
     const float r = 0.7f;
     FieldVolume sphere = FieldVolume::sample(
         [r](kernel::cfloat3 p) { return kernel::clength(p) - r; },
-        math::Aabb(cf3(-1.1f, -1.1f, -1.1f), cf3(1.1f, 1.1f, 1.1f)), 0.03f, 0.12f);
+        math::Aabb{cf3(-1.1f, -1.1f, -1.1f), cf3(1.1f, 1.1f, 1.1f)}, 0.03f, 0.12f);
 
     RelaxSettings settings;
     settings.radius_cells = 2;

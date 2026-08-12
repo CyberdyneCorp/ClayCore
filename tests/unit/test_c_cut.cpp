@@ -76,7 +76,7 @@ TEST_CASE("c cut: a rectangle cuts through, and matches the engine") {
     frame.up = cf3(0, 1, 0);
     frame.forward = cf3(0, 0, 1);
     auto expected = cut::cut_item(frame, cut::CutShape::rect(0.4f, 0.4f),
-                                  math::Aabb(cf3(-1, -1, -1), cf3(1, 1, 1)));
+                                  math::Aabb{cf3(-1, -1, -1), cf3(1, 1, 1)});
     REQUIRE(expected.has_value());
     scene::Document ref;
     scene::Layer& l = ref.add_sdf_layer("l");

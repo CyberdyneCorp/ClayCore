@@ -225,7 +225,7 @@ std::vector<ParityScene> parity_scenes() {
         Node n = item(Prim::volume(), cf3(0, 0, 0));
         auto sphere = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.7f; };
         n.volume = std::make_shared<field::FieldVolume>(field::FieldVolume::sample(
-            sphere, math::Aabb(cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)), 0.12f, 0.3f));
+            sphere, math::Aabb{cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)}, 0.12f, 0.3f));
         l.sdf->insert(n);
         scenes.push_back({"sampled_volume_sphere", std::move(doc), 3.0f});
     }

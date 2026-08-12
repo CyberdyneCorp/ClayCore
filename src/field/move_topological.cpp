@@ -101,7 +101,7 @@ Geodesic solve(const std::function<float(cfloat3)>& source,
     const float reach = settings.radius + kernel::clength(settings.displacement) +
                         4.0f * cell_size;
     const cfloat3 half = cf3(reach, reach, reach);
-    g.box = math::Aabb(settings.anchor - half, settings.anchor + half);
+    g.box = math::Aabb{settings.anchor - half, settings.anchor + half};
     g.nx = std::max(1, static_cast<int>(std::ceil(g.box.extent().x / cell_size)));
     g.ny = std::max(1, static_cast<int>(std::ceil(g.box.extent().y / cell_size)));
     g.nz = std::max(1, static_cast<int>(std::ceil(g.box.extent().z / cell_size)));

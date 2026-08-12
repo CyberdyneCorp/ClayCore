@@ -34,7 +34,7 @@ float two_prongs(kernel::cfloat3 p) {
     return std::min(bar(p), std::min(prong(p, -0.26f), prong(p, 0.26f)));
 }
 
-math::Aabb region() { return math::Aabb(cf3(-1.1f, -1.0f, -0.6f), cf3(1.1f, 1.1f, 0.6f)); }
+math::Aabb region() { return math::Aabb{cf3(-1.1f, -1.0f, -0.6f), cf3(1.1f, 1.1f, 0.6f)}; }
 
 // Where the surface sits along X at a height, scanning from one side.
 float edge_at(const FieldVolume& v, float y, float from, float to) {

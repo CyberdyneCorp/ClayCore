@@ -29,7 +29,7 @@ FieldVolume bumpy_ball(float cell = 0.03f) {
         float dent = kernel::clength(p - cf3(0.55f, 0.1f, 0)) - 0.2f;
         return std::max(std::min(ball, bump), -dent);  // union the bump, subtract the dent
     };
-    return FieldVolume::sample(f, math::Aabb(cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)),
+    return FieldVolume::sample(f, math::Aabb{cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)},
                                cell, 0.12f);
 }
 
@@ -45,7 +45,7 @@ std::function<float(kernel::cfloat3)> bumpy_source() {
     };
 }
 
-const math::Aabb kRegion(cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f));
+const math::Aabb kRegion{cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)};
 constexpr float kCell = 0.03f;
 constexpr float kBand = 0.12f;
 

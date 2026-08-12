@@ -994,8 +994,8 @@ TEST_CASE("c volume: the feather survives the blob, and an old blob reads hard")
     // blob finds its offsets exactly where they always were.
     using field::FieldVolume;
     auto ball = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.4f; };
-    FieldVolume v = FieldVolume::sample(ball, math::Aabb(cf3(-0.6f, -0.6f, -0.6f),
-                                                         cf3(0.6f, 0.6f, 0.6f)),
+    FieldVolume v = FieldVolume::sample(ball, math::Aabb{cf3(-0.6f, -0.6f, -0.6f),
+                                                         cf3(0.6f, 0.6f, 0.6f)},
                                         0.05f, 0.15f);
     v.set_feather(0.07f);
 

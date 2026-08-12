@@ -198,7 +198,7 @@ TEST_CASE("per-brick culled tape: band-clamped bit-identity under a feathered re
 
     auto ball = [](cfloat3 p) { return clength(p) - 1.0f; };
     field::FieldVolume v = field::FieldVolume::sample(
-        ball, math::Aabb(cf3(-0.7f, -0.4f, 0.4f), cf3(0.7f, 0.4f, 1.3f)), 0.02f, 0.06f);
+        ball, math::Aabb{cf3(-0.7f, -0.4f, 0.4f), cf3(0.7f, 0.4f, 1.3f)}, 0.02f, 0.06f);
     v.set_feather(0.06f);
     Node n = item(Prim::volume(), cf3(0, 0, 0), Op::Replace);
     n.volume = std::make_shared<field::FieldVolume>(std::move(v));
@@ -229,7 +229,7 @@ TEST_CASE("per-brick culled tape: band-clamped bit-identity under a feathered re
     Document lone;
     Layer& ll = lone.add_sdf_layer("l");
     field::FieldVolume lv = field::FieldVolume::sample(
-        ball, math::Aabb(cf3(-0.7f, -0.4f, 0.4f), cf3(0.7f, 0.4f, 1.3f)), 0.02f, 0.06f);
+        ball, math::Aabb{cf3(-0.7f, -0.4f, 0.4f), cf3(0.7f, 0.4f, 1.3f)}, 0.02f, 0.06f);
     lv.set_feather(0.06f);
     Node ln = item(Prim::volume(), cf3(0, 0, 0), Op::Replace);
     ln.volume = std::make_shared<field::FieldVolume>(std::move(lv));
