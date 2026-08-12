@@ -285,7 +285,7 @@ std::optional<brick::BrickKey> straddler_attribution(const ShellCollector& shell
 // must stay a filter of the whole, never a superset.
 std::vector<std::uint64_t> shell_cells(const brick::BrickCache& cache,
                                        const std::vector<brick::BrickKey>& keys, int dim,
-                                       const RequestedSet& requested) {
+                                       const RequestedSet& requested, int lod) {
     auto fdiv = [](int a, int b) { return a >= 0 ? a / b : -(((-a) + b - 1) / b); };
     std::unordered_set<std::uint64_t> seen;
     std::vector<std::uint64_t> cells;
@@ -299,7 +299,10 @@ std::vector<std::uint64_t> shell_cells(const brick::BrickCache& cache,
                     if (!ring) continue;
                     brick::BrickKey owner{fdiv(i, dim), fdiv(j, dim), fdiv(k, dim)};
                     if (requested.count(owner)) continue;
-                    const brick::Brick* b = cache.find(owner);
+                    // The level's own bricks, so the subset stays a filter of
+                    // the whole mesh AT THAT LEVEL rather than borrowing cells
+                    // from another one.
+                    const brick::Brick* b = cache.find_lod(lod, owner);
                     if (!b || b->state != brick::BrickState::Surface) continue;
                     if (seen.insert(pack_point(i, j, k)).second)
                         cells.push_back(pack_point(i, j, k));
@@ -315,13 +318,13 @@ std::vector<std::uint64_t> shell_cells(const brick::BrickCache& cache,
 // one is attributed to.
 std::unordered_map<brick::BrickKey, std::vector<ShellTriangle>, brick::BrickKeyHash>
 collect_straddlers(const brick::BrickCache& cache, const std::vector<brick::BrickKey>& keys,
-                   const std::function<float(int, int, int)>& sample) {
+                   const std::function<float(int, int, int)>& sample, int lod) {
     const int dim = cache.config().dim;
     RequestedSet requested(keys.begin(), keys.end());
     std::unordered_map<brick::BrickKey, std::vector<ShellTriangle>, brick::BrickKeyHash> buckets;
     constexpr std::uint64_t mask21 = (1u << 21) - 1;
     constexpr std::int64_t bias = 1u << 20;
-    for (std::uint64_t packed : shell_cells(cache, keys, dim, requested)) {
+    for (std::uint64_t packed : shell_cells(cache, keys, dim, requested, lod)) {
         const int i = static_cast<int>(static_cast<std::int64_t>(packed >> 42) - bias);
         const int j = static_cast<int>(static_cast<std::int64_t>((packed >> 21) & mask21) - bias);
         const int k = static_cast<int>(static_cast<std::int64_t>(packed & mask21) - bias);
@@ -508,21 +511,35 @@ void apply_brick_attributes(Mesh& m, const brick::BrickCache& cache, const scene
 
 Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_attributes,
                  const MeshingOptions& options, const std::vector<brick::BrickKey>* keys,
-                 std::vector<BrickMeshRange>* out_ranges, const scene::CullIndex* cull_index) {
+                 std::vector<BrickMeshRange>* out_ranges, const scene::CullIndex* cull_index,
+                 int lod) {
+    // There is one mip level. A level the cache cannot hold has no bricks and
+    // no lattice, so it meshes to nothing rather than to whichever level is
+    // nearest — answering level 0 for a request for level 4 would put geometry
+    // at the wrong size on screen, which is the reason read_bricks rejects the
+    // same request.
+    if (lod < 0 || lod > 1) {
+        if (out_ranges) out_ranges->clear();
+        return {};
+    }
     const int dim = cache.config().dim;
-    const float vs = cache.config().voxel_size;
+    // A mip keeps every second lattice point of the block it covers, so its
+    // lattice is the cache's own at twice the spacing and still anchored at the
+    // world origin: doubling the spacing per level is the whole of the
+    // transform, and the marcher needs nothing else.
+    const float vs = cache.config().voxel_size * static_cast<float>(1 << lod);
     auto global_sample = [&](int i, int j, int k) -> float {
         auto fdiv = [](int a, int b) { return a >= 0 ? a / b : -(((-a) + b - 1) / b); };
         brick::BrickKey key{fdiv(i, dim), fdiv(j, dim), fdiv(k, dim)};
-        return cache.sample(key, i - key.x * dim, j - key.y * dim, k - key.z * dim);
+        return cache.sample_lod(lod, key, i - key.x * dim, j - key.y * dim, k - key.z * dim);
     };
 
-    // The subset a consumer named, or every surface brick — which is the
-    // export path and stays the default.
+    // The subset a consumer named, or every brick the LEVEL stores — which is
+    // the export path and stays the default.
     const bool is_subset = keys != nullptr;
     std::vector<brick::BrickKey> owned;
     if (!keys) {
-        owned = cache.surface_bricks();
+        owned = cache.surface_bricks_lod(lod);
         keys = &owned;
     }
     if (out_ranges) {
@@ -535,7 +552,7 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
     // The whole-surface path marches every cell already and owes nothing.
     std::unordered_map<brick::BrickKey, std::vector<ShellTriangle>, brick::BrickKeyHash>
         straddlers;
-    if (is_subset) straddlers = collect_straddlers(cache, *keys, global_sample);
+    if (is_subset) straddlers = collect_straddlers(cache, *keys, global_sample, lod);
 
     // ONE builder for every brick: lattice-edge welding spans brick seams,
     // keeping the result watertight across the sparse set.
@@ -562,7 +579,14 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
                                    static_cast<std::uint32_t>(b.out.indices.size()) - i0});
     }
     Mesh m = std::move(b.out);
-    if (doc_for_attributes && (options.colors || options.normals == NormalMode::Gradient))
+    // Level 0 only: the per-brick culled tapes are bit-identical to the full
+    // document's for a vertex on the FIELD's surface, and a coarse vertex sits
+    // on the mip's instead — up to most of a coarse cell away, where the two
+    // tapes are only both-outside-the-band rather than equal. The C boundary
+    // refuses the request; in-engine it is skipped, and face normals below
+    // still answer because they need no field.
+    if (lod == 0 && doc_for_attributes &&
+        (options.colors || options.normals == NormalMode::Gradient))
         apply_brick_attributes(m, cache, *doc_for_attributes, options, cull_index);
     // Face normals are area-weighted from the triangles and need no field,
     // which is what NormalMode::Face means and what the C header promises a

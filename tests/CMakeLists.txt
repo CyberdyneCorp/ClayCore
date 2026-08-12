@@ -66,6 +66,7 @@ add_executable(clay_unit_tests
   unit/test_c_tape_cache.cpp
   unit/test_c_brick.cpp
   unit/test_c_brick_atlas.cpp
+  unit/test_c_brick_lod_mesh.cpp
   unit/test_c_mesh_copy.cpp
   unit/test_c_tape_export.cpp
   unit/test_c_host_volume_path.cpp

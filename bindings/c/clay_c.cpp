@@ -6184,12 +6184,45 @@ clay_result clay_brick_cache_current_lod(const clay_brick_cache* cache,
     return CLAY_OK;
 }
 
-clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_document* doc,
-                                  const clay_brick_mesh_params* params, const int32_t* keys_xyz,
-                                  size_t key_count, clay_brick_mesh_range* out_ranges,
-                                  clay_mesh** out_mesh) {
+namespace {
+
+// "Not built" and "no surface" must stay distinguishable: an empty mesh already
+// means the latter — an ordinary state of a session — so a level that was never
+// built is reported instead. At lod 0 a key that stores no lattice is an
+// ordinary uniform brick and is not an error; at lod 1 there is no uniform mip,
+// so an absent one is a "not yet" the caller acts on with build_mip.
+clay_result brick_cache_level_available(const clay_brick_cache* cache, std::int32_t lod,
+                                        const std::vector<brick::BrickKey>& subset,
+                                        bool whole_level) {
+    if (lod != 1) return CLAY_OK;
+    for (const brick::BrickKey& key : subset)
+        if (!cache->cache.find_mip(key))
+            return fail(CLAY_ERROR_NOT_FOUND,
+                        "no level-1 mip for coarse key (" + std::to_string(key.x) + ", " +
+                            std::to_string(key.y) + ", " + std::to_string(key.z) +
+                            "): build it with clay_brick_cache_build_mip");
+    // memory_usage() is the surface payload and is 0 exactly when the cache
+    // stores no surface brick — an O(1) way to tell an unbuilt level from an
+    // empty cache, which still meshes empty at every level.
+    if (whole_level && cache->cache.mip_count() == 0 && cache->cache.memory_usage() > 0)
+        return fail(CLAY_ERROR_NOT_FOUND,
+                    "no level-1 mip has been built: clay_brick_cache_build_mip takes the "
+                    "coarse keys");
+    return CLAY_OK;
+}
+
+// The one body behind clay_brick_cache_mesh and clay_brick_cache_mesh_lod, so
+// the older call is the newer one at lod 0 by construction rather than by
+// two implementations agreeing.
+clay_result brick_cache_mesh_at(const clay_brick_cache* cache, const clay_document* doc,
+                                const clay_brick_mesh_params* params, std::int32_t lod,
+                                const int32_t* keys_xyz, size_t key_count,
+                                clay_brick_mesh_range* out_ranges, clay_mesh** out_mesh) {
     if (!cache || !params || !out_mesh)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brick cache, params or out_mesh");
+    if (lod != 0 && lod != 1)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "lod must be 0 (full resolution) or 1 (mip), got " + std::to_string(lod));
     if (key_count > 0 && !keys_xyz)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "a key count without keys");
     // Ranges need a key list: with none there is no count the caller could have
@@ -6215,14 +6248,24 @@ clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_docu
     if (!doc && (options.normals == mesh::NormalMode::Gradient || options.colors))
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "gradient normals and colours need a document to sample");
-    // NULL keys means "every surface brick", which is what this call did before
-    // the key list existed and what an export wants.
+    // A coarse vertex sits on the MIP's surface rather than the field's, so the
+    // per-brick culled tape that makes these attributes exact at lod 0 is only
+    // both-out-of-band there, not equal. Refused rather than approximated, the
+    // same answer read_bricks gives for a colour at lod 1.
+    if (lod != 0 && (options.normals == mesh::NormalMode::Gradient || options.colors))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "gradient normals and colours are level 0 only: a mip's vertices are not on "
+                    "the field's surface and it carries no colour lattice");
+    // NULL keys means "every brick this level stores", which is what this call
+    // did before the key list existed and what an export wants.
     std::vector<brick::BrickKey> subset;
     if (keys_xyz) {
         subset.reserve(key_count);
         for (std::size_t i = 0; i < key_count; ++i)
             subset.push_back(to_brick_key(keys_xyz + i * 3));
     }
+    r = brick_cache_level_available(cache, lod, subset, keys_xyz == nullptr);
+    if (r != CLAY_OK) return r;
     std::vector<mesh::BrickMeshRange> ranges;
     auto* handle = new clay_mesh();
     // The document rather than its compiled tape: gradient normals and colours
@@ -6233,7 +6276,7 @@ clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_docu
     std::shared_ptr<const scene::CullIndex> index = doc ? doc->cull_index() : nullptr;
     handle->data = mesh::mesh_bricks(cache->cache, doc ? &doc->doc.document : nullptr, options,
                                      keys_xyz ? &subset : nullptr, out_ranges ? &ranges : nullptr,
-                                     index.get());
+                                     index.get(), lod);
     if (out_ranges)
         for (std::size_t i = 0; i < ranges.size(); ++i) {
             out_ranges[i].key[0] = ranges[i].key.x;
@@ -6246,6 +6289,22 @@ clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_docu
         }
     *out_mesh = handle;
     return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_document* doc,
+                                  const clay_brick_mesh_params* params, const int32_t* keys_xyz,
+                                  size_t key_count, clay_brick_mesh_range* out_ranges,
+                                  clay_mesh** out_mesh) {
+    return brick_cache_mesh_at(cache, doc, params, 0, keys_xyz, key_count, out_ranges, out_mesh);
+}
+
+clay_result clay_brick_cache_mesh_lod(const clay_brick_cache* cache, const clay_document* doc,
+                                      const clay_brick_mesh_params* params, int32_t lod,
+                                      const int32_t* keys_xyz, size_t key_count,
+                                      clay_brick_mesh_range* out_ranges, clay_mesh** out_mesh) {
+    return brick_cache_mesh_at(cache, doc, params, lod, keys_xyz, key_count, out_ranges, out_mesh);
 }
 
 clay_result clay_brick_cache_raycast(const clay_brick_cache* cache, const float origin[3],

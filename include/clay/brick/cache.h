@@ -142,6 +142,12 @@ class BrickCache {
         return lod == 1 ? find_mip(key) : nullptr;
     }
     float sample(BrickKey key, int i, int j, int k) const;  // decoded, band-clamped
+    // The same decoded sample at a LEVEL, `lod` selecting the brick as find_lod
+    // does. A level that holds no brick for the key answers +band — the same
+    // "outside" a never-evaluated brick answers — so a lattice walk over any
+    // level is total and a mesher needs no special case at the edge of the
+    // built region. Level 0 is sample() exactly.
+    float sample_lod(int lod, BrickKey key, int i, int j, int k) const;
     // The color at a lattice point. A brick with no color lattice — uniform, or
     // in a cache not configured for color — answers its uniform color, which is
     // the neutral seed for a cache that stores none.
@@ -166,6 +172,11 @@ class BrickCache {
     void read_colors_padded(BrickKey key, int apron, BrickColor* dst) const;
 
     std::vector<BrickKey> surface_bricks() const;
+    // The keys that store a lattice AT A LEVEL: surface_bricks() at level 0,
+    // the coarse keys whose mip is built at level 1, and nothing at any other
+    // level. What a whole-level mesh marches, so that "level 1 holds no bricks"
+    // and "level 1 was never built" are the same enumeration rather than two.
+    std::vector<BrickKey> surface_bricks_lod(int lod) const;
     std::size_t memory_usage() const { return surface_bytes_; }
     std::size_t dirty_count() const { return dirty_.size(); }
     // Bricks tracked at all — evaluated, implicit and never-evaluated alike.
@@ -182,6 +193,9 @@ class BrickCache {
     const Brick* find_mip(BrickKey coarse_key) const;
     // 1 when the mip for this coarse key is valid, else 0 (full res).
     int current_lod(BrickKey coarse_key) const;
+    // How many coarse keys currently hold a valid mip. O(1), so a caller can
+    // ask "has level 1 been built at all" without enumerating it.
+    std::size_t mip_count() const { return mips_.size(); }
 
   private:
     struct Tracked {

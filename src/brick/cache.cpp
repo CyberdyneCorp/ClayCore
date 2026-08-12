@@ -155,7 +155,11 @@ const Brick* BrickCache::find(BrickKey key) const {
 }
 
 float BrickCache::sample(BrickKey key, int i, int j, int k) const {
-    const Brick* b = find(key);
+    return sample_lod(0, key, i, j, k);
+}
+
+float BrickCache::sample_lod(int lod, BrickKey key, int i, int j, int k) const {
+    const Brick* b = find_lod(lod, key);
     if (!b) return config_.band();
     if (b->state == BrickState::Inside) return -config_.band();
     if (b->state == BrickState::Outside) return config_.band();
@@ -260,6 +264,17 @@ std::vector<BrickKey> BrickCache::surface_bricks() const {
     std::vector<BrickKey> out;
     for (const auto& [key, t] : bricks_)
         if (t.evaluated && t.brick.state == BrickState::Surface) out.push_back(key);
+    return out;
+}
+
+std::vector<BrickKey> BrickCache::surface_bricks_lod(int lod) const {
+    if (lod == 0) return surface_bricks();
+    std::vector<BrickKey> out;
+    if (lod != 1) return out;  // there is one mip level; any other holds nothing
+    out.reserve(mips_.size());
+    // Every stored mip is a Surface brick by construction — build_mip writes a
+    // lattice or writes nothing — so there is no state to filter here.
+    for (const auto& [key, mip] : mips_) out.push_back(key);
     return out;
 }
 
