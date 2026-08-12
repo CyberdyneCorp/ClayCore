@@ -202,6 +202,46 @@ forward-refuse).
    the same loss minors 1, 2 and 4 carry. The format notes at the top of
    `include/clay/io/clayspace.h` record it.
 
+   **0.29.0 adds six symbols, one enum and one descriptor, and removes
+   nothing.** No existing signature changed, no existing struct grew or
+   reordered a field, and no existing entry point returns a new `clay_result`
+   value, so code compiled against 0.28.0 keeps linking and behaving as it
+   did. Two changes:
+
+   - **Layer enumeration** (`expose-layer-enumeration`, #69) —
+     `clay_document_layer_count`, `clay_document_layer_at` (index is STACK
+     position, which is evaluation order), `clay_document_layer_info` (a
+     `struct_size`-leading output descriptor, `clay_layer_info`: id,
+     representation, stack index, visible, ghost, locked) and
+     `clay_layer_name` (the ABI's size-query string pattern), plus the
+     `clay_layer_representation` enum. Pure exposure: the document model and
+     `.clayspace` already round-tripped every field, so the format is
+     untouched. This closes the reload gap where a host probed ids against
+     `clay_layer_bounds`, regenerated names, mistook voxel layers for SDF and
+     — the correctness half — lost stack order, so a reopened document could
+     evaluate differently from the one saved.
+   - **Armature readback** (`read-armature-tree`, #77) —
+     `clay_layer_armature_parents` (the `clay_layer_children` size-query
+     shape, counted in nodes; a tree authored with fewer parents than points
+     reads back padded with roots, exactly as evaluation reads it) and
+     `clay_layer_node_prim` (which primitive a placed node carries; refuses
+     groups, the dual of `clay_layer_children`). One existing call accepts an
+     input it refused: `clay_layer_stroke_points` now serves the xyzr half of
+     `CLAY_PRIM_ARMATURE` instead of returning `CLAY_ERROR_INVALID_ARGUMENT`
+     — the 0.24.2 kind of additive, an error turning into a success, with no
+     signature change. The placed-node point SETTER still refuses armatures:
+     points replaced alone would desync from parents.
+
+   It also carries a speed fix that changes no results: brick-mesh gradient
+   normals and colours are evaluated against a tape culled per brick (#73),
+   the same culling refill uses, inside which band-clamped evaluation is
+   bit-identical — so a fixed 80-brick re-mesh stops scaling with the
+   document (130 ms → 7.7 ms at 193 nodes, ~flat in document size, gated in
+   CI by a bench ratio). And a build fix (#71): all 40 parenthesized
+   aggregate initialisations of `math::Aabb` — a C++20 P0960 form AppleClang
+   15 rejects — became braces, and a pinned Xcode 15.4 CI row now gates the
+   AppleClang 15 toolchain floor recorded in `docs/05-claycore-library.md`.
+
    **0.28.0 is additive: one symbol and one grown descriptor**
    (`add-feathered-volume-replace`, closing #67). `clay_item_volume_relax_from`
    mirrors `clay_item_volume_flatten_from` — a document-sourced relax, so the
