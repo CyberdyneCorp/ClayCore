@@ -54,6 +54,7 @@ Four properties the rest of this document leans on:
 | a mesh layer's triangles | `doc.mesh_layer(name)` | `clay_document_mesh_layer` | `io::ClaySpaceDoc::mesh_layers` |
 | a voxel grid | `grid.mesh()` | `clay_voxel_mesh` | `VoxelGrid::mesh_greedy()` |
 | a brick subset (incremental) | — | `clay_brick_cache_mesh` | `mesh::mesh_bricks` |
+| a coarse level of the bricks | — | `clay_brick_cache_mesh_lod` | `mesh::mesh_bricks(…, lod)` |
 | triangles you own | `clay.Mesh.from_triangles` | `clay_mesh_from_triangles` | build a `mesh::Mesh` |
 
 Whichever produced it, the readback below is identical — a mesh does not
@@ -335,7 +336,7 @@ Three cases, and the middle one is the trap.
 
 | you got the mesh from | you own it | free it with |
 |---|---|---|
-| `clay_document_mesh`, `clay_mesh_load`, `clay_mesh_from_triangles`, `clay_mesh_transform`, `clay_mesh_concat`, `clay_document_mesh_combined`, `clay_voxel_mesh`, `clay_brick_cache_mesh` | yes | `clay_mesh_destroy` |
+| `clay_document_mesh`, `clay_mesh_load`, `clay_mesh_from_triangles`, `clay_mesh_transform`, `clay_mesh_concat`, `clay_document_mesh_combined`, `clay_voxel_mesh`, `clay_brick_cache_mesh`, `clay_brick_cache_mesh_lod` | yes | `clay_mesh_destroy` |
 | `clay_document_mesh_layer`, and the `out_mesh` of `clay_document_add_mesh_layer` | **no — the document owns it** | nothing; `clay_mesh_destroy` on it is a silent no-op |
 | Python: any `Mesh` | the interpreter | — |
 
@@ -358,12 +359,21 @@ mesh holds the document alive, so `del doc` while you still hold arrays is fine.
 | `clay_document_mesh` / `doc.mesh()` / `mesh_tape` | yes (gradient, or face) | yes, from the colour field | **no** |
 | `clay_brick_cache_mesh` with a document | yes | yes | no |
 | `clay_brick_cache_mesh` with `doc = NULL` | face normals only | no | no |
+| `clay_brick_cache_mesh_lod` at `lod = 1` | face normals only | **refused** | no |
 | `clay_voxel_mesh` / `grid.mesh()` | yes | per-face palette colour | no |
 | OBJ / PLY / FBX import | as the file carries | as the file carries | as the file carries |
 | `clay_mesh_from_triangles` | no | no | no |
 
-Two consequences worth planning for:
+Three consequences worth planning for:
 
+- **A coarse brick mesh carries no field attributes.** Colours and gradient
+  normals ride per-brick culled tapes, and those are exact because a vertex sits
+  on the field's surface; a vertex found on the *mip's* lattice sits on the
+  mip's surface, up to most of a coarse cell off it, where the culled tape and
+  the whole document's are only both-out-of-band rather than equal. So
+  `clay_brick_cache_mesh_lod` refuses them at `lod = 1` rather than returning
+  approximate ones. Shade a coarse mesh with face normals, or re-evaluate the
+  attributes yourself if you want the field's answer at those positions.
 - **A meshed field has no UVs.** If your pipeline needs them, box-project in
   C++, or unwrap downstream. A `clay_vertex_layout` naming uvs will be refused,
   which is the loud version of this same fact.

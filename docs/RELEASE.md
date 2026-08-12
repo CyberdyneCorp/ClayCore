@@ -202,6 +202,28 @@ forward-refuse).
    the same loss minors 1, 2 and 4 carry. The format notes at the top of
    `include/clay/io/clayspace.h` record it.
 
+   **Unreleased is additive: one new symbol, no signature changed.**
+   `mesh-brick-cache-lod` (#93) adds `clay_brick_cache_mesh_lod`, which is
+   `clay_brick_cache_mesh` plus an `int32_t lod` before the key list — the
+   position `lod` holds in `clay_brick_cache_read_bricks`. The existing
+   entry point keeps its signature and forwards at lod 0 through the SAME
+   body, so code compiled against 0.29.1 keeps linking and producing the same
+   bytes. Verified rather than asserted: a fingerprint program linked against
+   0.29.1's `libclay_shared.so` and against this tree's produces identical
+   surface-brick counts, key order and buffer hashes for the whole-cache and
+   key-subset lod-0 meshes, with and without a document.
+
+   This is deliberately NOT the arity change `close-webgpu-host-abi-gaps` made
+   to the same call. That precedent rests on "two entry points differing by one
+   nullable argument would be two ways to say one thing", and a level is not a
+   nullable argument: it changes what `keys_xyz` MEANS (fine keys at lod 0,
+   coarse block keys at lod 1) and brings refusals that apply to one of its
+   values only — an unbuilt level is `CLAY_ERROR_NOT_FOUND`, and colours and
+   gradient normals are refused. `clay_brick_cache_mesh_lod` also returns
+   `CLAY_ERROR_NOT_FOUND`, which `clay_brick_cache_mesh` never did and still
+   does not: the new code is on the new symbol, so no already-compiled caller
+   can see a success turn into a failure.
+
    **0.29.1 changes no signature, adds no symbol, and changes no result — it
    is speed only**, which is why it is a patch under the same rule that made
    0.27.3 one. Seven changes, each merged with a measured A/B and a

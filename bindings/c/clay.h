@@ -3289,7 +3289,8 @@ clay_result clay_brick_cache_surface_bricks(const clay_brick_cache* cache,
 
 /* A coarse brick covering 2x2x2 full-resolution bricks, subsampled from them
  * rather than evaluated: same lattice size, twice the spacing. Read it with
- * clay_brick_cache_read_bricks at lod 1.
+ * clay_brick_cache_read_bricks at lod 1, mesh it with
+ * clay_brick_cache_mesh_lod at lod 1.
  *
  * Buildable only when all eight children are evaluated AND clean. *out_built
  * is 0 when they are not — an ordinary "not yet", reported like every other
@@ -3307,7 +3308,10 @@ clay_result clay_brick_cache_current_lod(const clay_brick_cache* cache,
 /* How a brick mesh is built. Only the fields mesh::MeshingOptions actually
  * has: this is NOT clay_mesh_params, whose voxel_size, resolution and mesher
  * mean nothing here — the lattice is the cache's and the mesher is the
- * marching one, both already decided. */
+ * marching one, both already decided. The one thing about the lattice a caller
+ * DOES decide is which level of it to march, and that is the `lod` argument of
+ * clay_brick_cache_mesh_lod rather than a field here: it changes what the key
+ * list means, so it belongs beside the keys. */
 typedef enum clay_normal_mode {
     CLAY_NORMAL_NONE = 0,     /* no normals */
     CLAY_NORMAL_FACE = 1,     /* area-weighted face normals; needs no document */
@@ -3406,6 +3410,56 @@ clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_docu
                                   const clay_brick_mesh_params* params,
                                   const int32_t* keys_xyz, size_t key_count,
                                   clay_brick_mesh_range* out_ranges, clay_mesh** out_mesh);
+
+/* The same, at a LEVEL. clay_brick_cache_mesh is this call at lod 0 and is
+ * unchanged, byte for byte, by its existence.
+ *
+ * Until this call existed the LOD half a host could reach was the half it
+ * could not use: clay_brick_cache_build_mip built a level, clay_brick_cache_
+ * read_bricks read one and clay_brick_cache_current_lod reported one, and the
+ * only way to get triangles out of it was to reimplement the marcher over the
+ * fp16 samples — the same lattice, the same band clamping and the same
+ * straddler attribution the cache exists to own (issue #93). So a host that
+ * meshes had no coarse path at all, rather than a slower one.
+ *
+ * `lod` is 0 for the full-resolution bricks or 1 for their mips, as
+ * clay_brick_cache_read_bricks takes it, and a value above 1 is rejected
+ * rather than clamped for the same reason: there is one mip level, and
+ * silently meshing level 0 for a request for level 4 puts geometry at twice
+ * the intended size on screen.
+ *
+ * A mip is the cache's own dim^3 lattice with every second point kept, so a
+ * level changes exactly two things: the spacing doubles and `keys_xyz` names
+ * COARSE keys — the 2x2x2 block keys clay_brick_cache_build_mip and
+ * clay_brick_cache_current_lod already take. The march, the seam welding, the
+ * ranges and the straddler rule are the ones lod 0 uses, unchanged, and NULL
+ * keys still means "every brick this level stores".
+ *
+ * A LEVEL THAT WAS NEVER BUILT IS CLAY_ERROR_NOT_FOUND, not an empty mesh. An
+ * empty mesh already means "no surface bricks" — an ordinary state of a
+ * session — and a half-built level answering the same thing would report a
+ * missing mip as a missing surface. So a named coarse key with no valid mip is
+ * refused (unlike lod 0, where a key that stores no lattice is an ordinary
+ * uniform brick and contributes nothing: at lod 1 there is no uniform mip, and
+ * an absent one means "not yet"), and a whole-level request is refused when the
+ * cache holds surface bricks but not one mip. A cache with nothing in it at all
+ * still meshes EMPTY at every valid level. clay_brick_cache_current_lod is the
+ * cheap way to ask first, and clay_brick_cache_build_mip's *out_built is the
+ * same "not yet" reported where it is expected rather than exceptional.
+ *
+ * COLOURS AND GRADIENT NORMALS ARE REFUSED AT LOD 1, not downgraded. They are
+ * evaluated through per-brick culled tapes whose agreement with the whole
+ * document's holds because a vertex sits on the field's surface, well inside
+ * the band; a coarse vertex sits on the MIP's surface, which can be most of a
+ * coarse cell off it, where the culled tape and the full one are only both
+ * out-of-band rather than equal. The mip also carries no colour lattice of its
+ * own, which is what clay_brick_cache_read_bricks already reports rather than
+ * averaging. CLAY_NORMAL_FACE comes from the triangles, needs no field, and
+ * works at every level. */
+clay_result clay_brick_cache_mesh_lod(const clay_brick_cache* cache, const clay_document* doc,
+                                      const clay_brick_mesh_params* params, int32_t lod,
+                                      const int32_t* keys_xyz, size_t key_count,
+                                      clay_brick_mesh_range* out_ranges, clay_mesh** out_mesh);
 
 /* Raycast the cached bricks: trilinear samples inside surface bricks, a brick
  * DDA across the rest — so the cost is the ray's path through the band rather

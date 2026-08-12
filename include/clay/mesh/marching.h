@@ -111,11 +111,32 @@ struct BrickMeshRange {
 // index so the attribute pass reuses its cached bounds; nullptr builds one
 // for the call when attributes need the document. Either way the attributes
 // are unchanged — the index only accelerates the per-brick culled compiles.
+//
+// `lod` selects the LEVEL to march, as BrickCache::sample_lod does: 0 is the
+// evaluated bricks, 1 their mips. A mip is the same dim³ lattice with every
+// second point kept, so a level changes exactly two things — the spacing
+// doubles and the keys are coarse ones naming 2x2x2 blocks — and the march,
+// the welding and the straddler attribution are the ones level 0 uses,
+// unchanged. `keys` at level 1 is therefore a list of COARSE keys, and nullptr
+// means every built mip. A level with no mip built holds no bricks and meshes
+// empty; distinguishing "not built" from "no surface" is the C boundary's job,
+// which has an error to report it with. Anything above 1 has no bricks at all
+// and returns an empty mesh rather than clamping to a level the caller did not
+// ask for.
+//
+// FIELD ATTRIBUTES ARE LEVEL 0 ONLY. Colours and gradient normals ride the
+// per-brick culled tapes above, whose bit-identity argument is that a vertex
+// sits on the field's surface (|d| ~ 0, well inside the band where a culled
+// tape and the full one agree). A coarse vertex sits on the MIP's surface,
+// which can be most of a coarse cell away from the field's, so the argument
+// does not hold and the numbers would be silently approximate. They are
+// skipped here and refused outright at the C boundary. Face normals come from
+// the triangles and are unaffected.
 Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_attributes,
                  const MeshingOptions& options = {},
                  const std::vector<brick::BrickKey>* keys = nullptr,
                  std::vector<BrickMeshRange>* out_ranges = nullptr,
-                 const scene::CullIndex* cull_index = nullptr);
+                 const scene::CullIndex* cull_index = nullptr, int lod = 0);
 
 // Attribute helpers (meshing spec: vertex attributes).
 void apply_tape_attributes(Mesh& m, const scene::Tape& tape, const MeshingOptions& options);
