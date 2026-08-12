@@ -33,6 +33,14 @@ FASTER_THAN = [
     # since both sides pay the same serial redistance floor (4.7x on an
     # M2 Max).
     ("BM_ConsolidateGrownDoc", "BM_ConsolidateSerialGrownDoc"),
+    # Resident uploaded tapes (accel/metal-persistent): re-evaluating one
+    # compiled tape must beat alternating more tapes than the Metal backend's
+    # residency holds — the two run the identical dispatch and differ only in
+    # whether the tape (a consolidated volume, megabytes of blob) is
+    # re-uploaded per call. Catches the residency falling out. The pair is
+    # registered only on machines with a Metal device; FASTER_THAN skips
+    # missing names, so CPU-only CI is unaffected (3.8x on an M2 Max).
+    ("BM_MetalTapeResident", "BM_MetalTapeReupload"),
 ]
 
 # ratio gates: (bench, reference, max_ratio) — bench must cost at most

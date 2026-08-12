@@ -14,6 +14,7 @@ add_executable(clay_unit_tests
   unit/test_extended_blends.cpp
   unit/test_commands.cpp
   unit/test_parity.cpp
+  unit/test_backend_residency.cpp
   unit/test_points_batch.cpp
   unit/test_parity_fixture.cpp
   unit/test_brick.cpp

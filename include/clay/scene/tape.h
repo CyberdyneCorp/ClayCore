@@ -5,6 +5,7 @@
 // param blocks, and per-brick culling drops items whose influence bound
 // misses the (band-dilated) region — the Dreams design (scene-model spec).
 
+#include <cstdint>
 #include <vector>
 
 #include "clay/kernel/exactness.h"
@@ -21,6 +22,17 @@ struct Tape {
     std::vector<float> blob;  // out-of-line payload: stroke points, polygon verts
     kernel::CFieldInfo info{true, 1.0f};
     math::Aabb bounds;  // union of item influence bounds (raycast clipping)
+
+    // Content identity for backend upload caching. compile_document and
+    // compile_layer stamp each tape they return with a process-unique nonzero
+    // id, so two tapes with the same nonzero id carry byte-identical
+    // instrs/params/blob (copies of a tape share the id WITH the bytes). A
+    // backend may therefore keep the uploaded form resident and key it on
+    // this id alone — no hashing, no false hits. 0 means "no identity":
+    // hand-assembled tapes are never cached. Anything that mutates a compiled
+    // tape's instrs/params/blob must reset this to 0; nothing in the library
+    // mutates a compiled tape today.
+    std::uint64_t compile_id = 0;
 
     float safe_step_scale() const { return kernel::csafe_step_scale(info); }
     bool empty() const { return instrs.empty(); }
