@@ -11,7 +11,7 @@ There SHALL be exactly one refill path — mark dirty, drain requests, evaluate,
 
 The refill path SHALL carry colour when the cache was configured for it: the batched evaluation call SHALL be able to produce a colour lattice beside the distances, and submission SHALL accept it, so that colour reaches the cache by the same route distance does and there is no second path to keep consistent.
 
-The handle SHALL take no lock and start no thread; the header SHALL state that calls on one handle are the host's to serialize and that the batched evaluation call, which takes no handle, is free-threaded against one const document.
+The handle SHALL take no lock and own no thread; the header SHALL state that calls on one handle are the host's to serialize and that the batched evaluation call, which takes no handle, is free-threaded against one const document. A batched const query — the many-ray raycast — MAY fan its rays out across the engine's shared worker pool, provided the call returns only after every worker is done with the cache and each output slot is byte-identical to what the single-ray call reports for the same ray.
 
 A dirty region SHALL be validated in 64-bit before the engine converts it: a non-finite or empty region, a brick coordinate outside `int32`, and a span above the batch ceiling SHALL each be refused with the cache left unchanged. Dirtying everything the cache tracks SHALL be spelled as the absence of a region, never as a region carrying an infinity.
 
@@ -36,6 +36,10 @@ Brick raycasting SHALL have a batched form matching the document-level batched r
 #### Scenario: The bound to dirty is not the bound to frame on
 - **WHEN** a consumer asks for a node's influence bound
 - **THEN** it receives a box no tighter than the layer bounds query reports, and an explicit flag for the items whose influence is unbounded
+
+#### Scenario: A batched raycast parallelizes without changing its answers
+- **WHEN** a host casts the same rays through the batched brick-cache raycast and one at a time through the single-ray call
+- **THEN** every batch slot holds exactly the hit flag, distance, position and normal the single-ray call reports for that ray, and no engine thread touches the cache after the batched call returns
 
 #### Scenario: A host uploads a colour atlas without meshing
 - **WHEN** a consumer configures a cache for colour, refills it, and reads the surface bricks back with colour and a one-voxel apron
