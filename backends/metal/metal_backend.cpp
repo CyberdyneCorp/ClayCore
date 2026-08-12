@@ -10,6 +10,7 @@
 #include <Foundation/Foundation.hpp>
 #include <Metal/Metal.hpp>
 #include <dispatch/dispatch.h>
+#include <TargetConditionals.h>
 
 #include <chrono>
 #include <cstdint>
@@ -601,11 +602,19 @@ class MetalBackend final : public Backend {
         // this thread on waitUntilCompleted's semaphore notices that hundreds
         // of microseconds later — the wakeup is most of what an interactive
         // 1-brick call pays (measured ~150 us polled vs ~520 us parked on an
-        // M2 Max). So for small dispatches, poll the status for up to ~2 ms
-        // of wall time before parking. Large dispatches run for milliseconds
-        // and park immediately: spinning there burns a core for no latency
-        // anyone can see. The call is synchronous either way; only how
-        // completion is noticed changes.
+        // M2 Max). So on macOS, for small dispatches, poll the status for up
+        // to ~2 ms of wall time before parking. Large dispatches run for
+        // milliseconds and park immediately: spinning there burns a core for
+        // no latency anyone can see.
+        //
+        // macOS ONLY. An iPad's CPU and GPU share one power budget, so the
+        // spinning core starves the kernel it is waiting on: the same small
+        // dispatch that polls in 150 us on an M2 Max ran 3.1x SLOWER on an
+        // iPad Air M3 (sdf_stamp_metal 1.77 -> 5.54 ms p95), caught by the
+        // device gate. On iOS the thread parks immediately, as it always
+        // did. The call is synchronous either way; only how completion is
+        // noticed changes.
+#if TARGET_OS_OSX
         constexpr std::size_t kSpinThreads = 64 * 512;  // ~a refill chunk's worth
         if (thread_count <= kSpinThreads) {
             const auto deadline =
@@ -618,6 +627,7 @@ class MetalBackend final : public Backend {
                 }
             } while (std::chrono::steady_clock::now() < deadline);
         }
+#endif
         cmd->waitUntilCompleted();
         return cmd->status() == MTL::CommandBufferStatusCompleted;
     }
