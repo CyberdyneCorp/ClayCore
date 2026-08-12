@@ -25,6 +25,11 @@ alone for tools, pipelines, CI, and research.
   with the parity fixture.
 - Brushes and features: `docs/07-brushes-and-features.md` — every sculpting
   verb, what it does, how it is parameterised, and its ZBrush equivalent.
+- Reading a mesh back: `docs/08-mesh-readback.md` — getting faces, vertices,
+  normals, colours and UVs out of the library, in Python, C and C++.
+- Brush latency and coverage: `docs/09-brush-latency-and-coverage.md` — every
+  brush against ZBrush and Nomad, what it costs on the reference iPad, what has
+  to get faster, and which have a test and a committed render.
 - Where we stand: `docs/sculpt_comparison.md` — claycore against Blender,
   ZBrush and 3DCoat, what it wins outright, and what is missing before an app
   built on it could compete.
