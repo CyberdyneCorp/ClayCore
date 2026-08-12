@@ -229,7 +229,15 @@ forward-refuse).
      (#88): steady-state eval of a document carrying a consolidated volume
      stops re-paying the blob upload (flat in blob size, ~5× at 22 MB), a
      1-brick call costs ~0.17 ms against the 0.52 ms it did, and the
-     CPU/Metal crossover moves to ~8 bricks/call.
+     CPU/Metal crossover moves to ~8 bricks/call. Its third piece — a 2 ms
+     status-poll before parking on small dispatches — shipped macOS-only
+     after the DEVICE GATE caught it regressing the iPad 3.1×
+     (`sdf_stamp_metal` 1.77 → 5.54 ms p95): an iPad's CPU and GPU share one
+     power budget, so the spinning core starves the kernel it waits on. The
+     Mac keeps the measured win; iOS parks immediately, as it always did.
+     That failure is the device gate doing precisely what it was built for —
+     a desktop-verified micro-optimisation that inverts on the hardware that
+     ships.
    - **Batched brick raycasts fan out across the worker pool** (#94):
      ~40 → ~320 rays/ms on twelve cores, results byte-identical in order.
    - **Undo stops scaling with the document** (#95): node removal indexed —
