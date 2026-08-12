@@ -109,7 +109,6 @@ TEST_CASE("brick-cache meshing is watertight across brick seams") {
     eval::Backend* cpu = eval::Registry::instance().find("cpu");
     brick::BrickCache cache(brick::BrickConfig{8, 0.08f, 3, 0});
     cache.mark_dirty(scene::layer_influence_bound(doc.layers[0]));
-    scene::Tape full = scene::compile_document(doc);
     for (const brick::BrickRequest& req : cache.take_dirty()) {
         scene::CullRegion cull{cache.cull_region(req.key)};
         scene::Tape tape = scene::compile_document(doc, &cull);
@@ -118,7 +117,7 @@ TEST_CASE("brick-cache meshing is watertight across brick seams") {
         REQUIRE(cpu->eval_grid(tape, req.grid, values.data()) == eval::Status::Ok);
         cache.submit(req, values.data());
     }
-    Mesh m = mesh::mesh_bricks(cache, &full);
+    Mesh m = mesh::mesh_bricks(cache, &doc);
     REQUIRE(!m.empty());
     ValidationReport r = mesh::validate(m);
     CHECK(r.watertight);  // no holes at brick boundaries

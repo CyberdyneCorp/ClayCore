@@ -370,7 +370,11 @@ DDA over occupied bricks plus a `textureSampleLevel` per step.
 than the model, and reports the vertex and index range each key contributed so
 you can patch sub-ranges of a GPU buffer instead of rebuilding it. Measured on
 the benchmark scene: **22.6 ms** to re-mesh 232 surface bricks against
-**0.64 ms** for the 8 a dab dirties. Note the documented caveat — vertex welding
+**0.64 ms** for the 8 a dab dirties. Gradient normals and colours keep that
+property: they are evaluated through per-brick culled tapes, so asking for them
+costs the bricks you name, not the size of the document — re-meshing a fixed
+brick set is the same price on a fresh document and on one carrying two hundred
+earlier strokes. Note the documented caveat — vertex welding
 spans brick seams, so a key's triangles may reference an earlier key's vertices:
 you may overwrite a key's ranges, but not free them in isolation.
 
