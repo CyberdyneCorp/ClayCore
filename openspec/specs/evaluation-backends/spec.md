@@ -56,6 +56,19 @@ The same batched form SHALL exist for a device-buffer destination (`eval_grid_ba
 - **WHEN** the same lattices and per-lattice culled tapes are evaluated one call per grid and as one batch, on any registered backend
 - **THEN** the batched values match the per-grid values within that backend's parity tolerance, including for a lattice whose culled tape is empty
 
+### Requirement: Repeated evaluation reuses device-resident state
+Compiled tapes SHALL carry a content identity (`Tape::compile_id`): a process-unique nonzero id stamped by `compile_document`/`compile_layer`, equal only when the bytes are the same compile's; a tape assembled by hand carries 0 and has no identity. Code that mutates a compiled tape's sections MUST reset the id to 0.
+
+A GPU backend MAY rely on that identity to keep the uploaded form of recently evaluated tapes resident across calls, and SHALL reuse its transfer scratch buffers (grown to the high-water mark) instead of allocating per call — so re-evaluating an unchanged document costs the dispatch, not a re-upload of the tape (notably a consolidated volume's blob) plus buffer allocation. Residency and pooling SHALL change only speed: values are identical to an upload-per-call evaluation, a tape with no identity is re-uploaded per call, and a recompiled document is never served a stale upload — the id is identity, never a size or address heuristic.
+
+#### Scenario: An unchanged document is not re-uploaded per call
+- **WHEN** the same compiled tape, carrying a multi-megabyte volume blob, is evaluated repeatedly on a GPU backend
+- **THEN** the steady-state cost per call is flat in the blob size, and the values are byte-identical call after call
+
+#### Scenario: A recompiled document is never served stale bytes
+- **WHEN** a document is recompiled into a tape whose sections have the same sizes but different bytes, and both tapes are evaluated in turn
+- **THEN** each evaluation returns that tape's own field, within the backend's parity tolerance of the scalar reference
+
 ### Requirement: Metal backend (tier 1)
 The Metal backend SHALL use `metal-cpp` (pure C++, no Objective-C in the core), compile the kernel headers as MSL, pass tapes via argument buffers, and implement the full backend interface including `eval_bricks` and on-device meshing. It is the iPad app's production path.
 

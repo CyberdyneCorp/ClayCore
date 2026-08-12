@@ -11,7 +11,10 @@
 #include <Metal/Metal.hpp>
 #include <dispatch/dispatch.h>
 
+#include <chrono>
+#include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <vector>
 
 #include "clay/eval/backend.h"
@@ -45,6 +48,9 @@ class MetalBackend final : public Backend {
     }
 
     ~MetalBackend() override {
+        for (MTL::Buffer* b : scratch_)
+            if (b) b->release();
+        for (ResidentTape& t : resident_) release_resident(t);
         if (pso_points_) pso_points_->release();
         if (pso_grid_) pso_grid_->release();
         if (pso_grid_batch_) pso_grid_batch_->release();
@@ -65,17 +71,17 @@ class MetalBackend final : public Backend {
                        const PointResults& out) override {
         if (!q.points_xyz || !out.distances) return Status::InvalidInput;
         if (q.count == 0) return Status::Ok;
+        std::lock_guard<std::mutex> lock(mutex_);
 
         ClayEvalUniforms u{};
         u.instr_count = static_cast<unsigned int>(tape.instrs.size());
         u.point_count = static_cast<unsigned int>(q.count);
         u.has_colors = out.colors_rgb ? 1u : 0u;
 
-        MTL::Buffer* pts = copy_in(q.points_xyz, q.count * 3 * sizeof(float));
-        MTL::Buffer* dist = device_->newBuffer(q.count * sizeof(float),
-                                               MTL::ResourceStorageModeShared);
-        MTL::Buffer* cols = device_->newBuffer(
-            (out.colors_rgb ? q.count * 3 : 1) * sizeof(float), MTL::ResourceStorageModeShared);
+        MTL::Buffer* pts = copy_in(kSlotIn, q.points_xyz, q.count * 3 * sizeof(float));
+        MTL::Buffer* dist = scratch(kSlotValues, q.count * sizeof(float));
+        MTL::Buffer* cols =
+            scratch(kSlotColors, out.colors_rgb ? q.count * 3 * sizeof(float) : 0);
 
         TapeBuffers tb = upload_tape(tape);
         bool ok = dispatch(pso_points_, {tb.instrs, tb.params, tb.blob, pts, dist, cols},
@@ -86,7 +92,6 @@ class MetalBackend final : public Backend {
                 std::memcpy(out.colors_rgb, cols->contents(), q.count * 3 * sizeof(float));
             if (out.gradients_xyz) gradients_from_taps(tape, q, out);
         }
-        release_all({tb.instrs, tb.params, tb.blob, pts, dist, cols});
         return ok ? Status::Ok : Status::DeviceError;
     }
 
@@ -94,6 +99,7 @@ class MetalBackend final : public Backend {
                      float* out_colors_rgb) override {
         if (!out_values || q.nx <= 0 || q.ny <= 0 || q.nz <= 0) return Status::InvalidInput;
         std::size_t total = static_cast<std::size_t>(q.nx) * q.ny * q.nz;
+        std::lock_guard<std::mutex> lock(mutex_);
 
         ClayGridUniforms u{};
         u.origin[0] = q.origin.x;
@@ -106,10 +112,9 @@ class MetalBackend final : public Backend {
         u.nz = static_cast<unsigned int>(q.nz);
         u.has_colors = out_colors_rgb ? 1u : 0u;
 
-        MTL::Buffer* dist = device_->newBuffer(total * sizeof(float),
-                                               MTL::ResourceStorageModeShared);
-        MTL::Buffer* cols = device_->newBuffer(
-            (out_colors_rgb ? total * 3 : 1) * sizeof(float), MTL::ResourceStorageModeShared);
+        MTL::Buffer* dist = scratch(kSlotValues, total * sizeof(float));
+        MTL::Buffer* cols =
+            scratch(kSlotColors, out_colors_rgb ? total * 3 * sizeof(float) : 0);
         TapeBuffers tb = upload_tape(tape);
         bool ok = dispatch(pso_grid_, {tb.instrs, tb.params, tb.blob, dist, cols}, &u,
                            sizeof(u), 5, total);
@@ -118,7 +123,6 @@ class MetalBackend final : public Backend {
             if (out_colors_rgb)
                 std::memcpy(out_colors_rgb, cols->contents(), total * 3 * sizeof(float));
         }
-        release_all({tb.instrs, tb.params, tb.blob, dist, cols});
         return ok ? Status::Ok : Status::DeviceError;
     }
 
@@ -138,11 +142,12 @@ class MetalBackend final : public Backend {
                                 static_cast<std::size_t>(q.ny) *
                                 static_cast<std::size_t>(q.nz);
         const std::size_t total = per * q.count;
+        std::lock_guard<std::mutex> lock(mutex_);
 
         BatchUpload up = upload_batch(q);
         if (!up.ok) return Status::InvalidInput;
-        MTL::Buffer* dist = scratch_buffer(total * sizeof(float));
-        MTL::Buffer* cols = scratch_buffer(out_colors_rgb ? total * 3 * sizeof(float) : 0);
+        MTL::Buffer* dist = scratch(kSlotValues, total * sizeof(float));
+        MTL::Buffer* cols = scratch(kSlotColors, out_colors_rgb ? total * 3 * sizeof(float) : 0);
 
         const ClayGridBatchUniforms u = batch_uniforms(q, out_colors_rgb != nullptr);
         bool ok = dispatch(pso_grid_batch_, {up.instrs, up.params, up.blob, up.table, dist, cols},
@@ -152,7 +157,6 @@ class MetalBackend final : public Backend {
             if (out_colors_rgb)
                 std::memcpy(out_colors_rgb, cols->contents(), total * 3 * sizeof(float));
         }
-        release_all({up.instrs, up.params, up.blob, up.table, dist, cols});
         return ok ? Status::Ok : Status::DeviceError;
     }
 
@@ -182,12 +186,10 @@ class MetalBackend final : public Backend {
         const bool want_colors = !colors.empty();
         if (want_colors && colors.size < static_cast<std::uint64_t>(total) * 3 * sizeof(float))
             return Status::InvalidInput;
+        std::lock_guard<std::mutex> lock(mutex_);
 
         BatchUpload up = upload_batch(q);
         if (!up.ok) return Status::InvalidInput;
-        // Binding 5 must be a real buffer even when no colours were asked for.
-        MTL::Buffer* scratch =
-            want_colors ? nullptr : device_->newBuffer(4, MTL::ResourceStorageModeShared);
         const ClayGridBatchUniforms u = batch_uniforms(q, want_colors);
         const std::vector<Bound> bound = {
             Bound{up.instrs, 0}, Bound{up.params, 0}, Bound{up.blob, 0}, Bound{up.table, 0},
@@ -195,12 +197,13 @@ class MetalBackend final : public Backend {
                   static_cast<NS::UInteger>(values.offset)},
             want_colors ? Bound{static_cast<MTL::Buffer*>(colors.handle),
                                 static_cast<NS::UInteger>(colors.offset)}
-                        : Bound{scratch, 0},
+                        // Binding 5 must be a real buffer even when no
+                        // colours were asked for.
+                        : Bound{scratch(kSlotColors, 0), 0},
         };
         const bool ok = dispatch_bound(pso_grid_batch_, bound, &u, sizeof(u), 6, total);
         // dispatch waits until completed, so the work has landed here and
         // nothing is left in flight on the caller's queue.
-        release_all({up.instrs, up.params, up.blob, up.table, scratch});
         return ok ? Status::Ok : Status::DeviceError;
     }
 
@@ -223,6 +226,7 @@ class MetalBackend final : public Backend {
         const bool want_colors = !colors.empty();
         if (want_colors && colors.size < static_cast<std::uint64_t>(total) * 3 * sizeof(float))
             return Status::InvalidInput;
+        std::lock_guard<std::mutex> lock(mutex_);
 
         ClayGridUniforms u{};
         u.origin[0] = q.origin.x;
@@ -236,21 +240,19 @@ class MetalBackend final : public Backend {
         u.has_colors = want_colors ? 1u : 0u;
 
         TapeBuffers tb = upload_tape(tape);
-        // Binding 4 must be a real buffer even when no colours were asked for.
-        MTL::Buffer* scratch =
-            want_colors ? nullptr : device_->newBuffer(4, MTL::ResourceStorageModeShared);
         const std::vector<Bound> bound = {
             Bound{tb.instrs, 0}, Bound{tb.params, 0}, Bound{tb.blob, 0},
             Bound{static_cast<MTL::Buffer*>(values.handle),
                   static_cast<NS::UInteger>(values.offset)},
             want_colors ? Bound{static_cast<MTL::Buffer*>(colors.handle),
                                 static_cast<NS::UInteger>(colors.offset)}
-                        : Bound{scratch, 0},
+                        // Binding 4 must be a real buffer even when no
+                        // colours were asked for.
+                        : Bound{scratch(kSlotColors, 0), 0},
         };
         const bool ok = dispatch_bound(pso_grid_, bound, &u, sizeof(u), 5, total);
         // dispatch waits until completed, so the work has landed here and
         // nothing is left in flight on the caller's queue.
-        release_all({tb.instrs, tb.params, tb.blob, scratch});
         return ok ? Status::Ok : Status::DeviceError;
     }
 
@@ -264,6 +266,7 @@ class MetalBackend final : public Backend {
         if (!q.rays || !hits) return Status::InvalidInput;
         if (q.count == 0) return Status::Ok;
         static_assert(sizeof(RayHit) == sizeof(ClayRayHitGpu));
+        std::lock_guard<std::mutex> lock(mutex_);
 
         ClayRayUniforms u{};
         u.instr_count = static_cast<unsigned int>(tape.instrs.size());
@@ -284,14 +287,12 @@ class MetalBackend final : public Backend {
             u.bounds_max[2] = b.max.z;
         }
 
-        MTL::Buffer* rays = copy_in(q.rays, q.count * 6 * sizeof(float));
-        MTL::Buffer* out = device_->newBuffer(q.count * sizeof(ClayRayHitGpu),
-                                              MTL::ResourceStorageModeShared);
+        MTL::Buffer* rays = copy_in(kSlotIn, q.rays, q.count * 6 * sizeof(float));
+        MTL::Buffer* out = scratch(kSlotValues, q.count * sizeof(ClayRayHitGpu));
         TapeBuffers tb = upload_tape(tape);
         bool ok = dispatch(pso_rays_, {tb.instrs, tb.params, tb.blob, rays, out}, &u,
                            sizeof(u), 5, q.count);
         if (ok) std::memcpy(hits, out->contents(), q.count * sizeof(ClayRayHitGpu));
-        release_all({tb.instrs, tb.params, tb.blob, rays, out});
         return ok ? Status::Ok : Status::DeviceError;
     }
 
@@ -385,32 +386,112 @@ class MetalBackend final : public Backend {
         return pso;
     }
 
-    MTL::Buffer* copy_in(const void* data, std::size_t bytes) {
+    // -- persistent scratch pool ---------------------------------------------
+    //
+    // One reusable buffer per binding role, grown in place and never shrunk:
+    // a steady stream of dispatches allocates on the first call (or on a new
+    // high-water mark) and never again. Allocating five buffers per call was
+    // most of what a small dispatch cost. Reuse is safe because every submit
+    // waits until completed before returning and mutex_ serializes calls, so
+    // no buffer is read by the device after this call returns. Slots are
+    // never zero-sized: every kernel binding must be a real buffer, and an
+    // empty tape section still gets bound.
+    enum Slot : int {
+        kSlotIn = 0,       // points / rays in
+        kSlotValues,       // distances / ray hits out
+        kSlotColors,       // colours out, or the 4-byte placeholder binding
+        kSlotBatchInstrs,  // concatenated batch tape sections + table
+        kSlotBatchParams,
+        kSlotBatchBlob,
+        kSlotBatchTable,
+        kSlotTapeInstrs,  // single tape without an identity (compile_id 0)
+        kSlotTapeParams,
+        kSlotTapeBlob,
+        kSlotCount,
+    };
+
+    MTL::Buffer* scratch(Slot slot, std::size_t bytes) {
+        MTL::Buffer*& b = scratch_[slot];
+        if (bytes < 4) bytes = 4;
+        if (!b || b->length() < bytes) {
+            if (b) b->release();
+            b = device_->newBuffer(bytes, MTL::ResourceStorageModeShared);
+        }
+        return b;
+    }
+
+    MTL::Buffer* copy_in(Slot slot, const void* data, std::size_t bytes) {
+        MTL::Buffer* b = scratch(slot, bytes);
+        if (bytes) std::memcpy(b->contents(), data, bytes);
+        return b;
+    }
+
+    // -- resident uploaded tapes ---------------------------------------------
+    //
+    // The uploaded form of the last few identified tapes, keyed on
+    // Tape::compile_id — process-unique per compile, so an id hit IS a
+    // content hit and no bytes need comparing or hashing (which would cost
+    // what the upload costs, linear in a consolidated volume's blob). A
+    // document being sculpted re-evaluates one cached whole-document tape
+    // between edits; a handful of entries covers that plus a pick tape and a
+    // layer tape without building a cache framework. Tapes without an
+    // identity (compile_id 0, hand-assembled) go through the scratch slots
+    // and are re-uploaded per call, exactly as before.
+    struct ResidentTape {
+        std::uint64_t id = 0;
+        std::uint64_t last_use = 0;
+        MTL::Buffer* instrs = nullptr;
+        MTL::Buffer* params = nullptr;
+        MTL::Buffer* blob = nullptr;
+    };
+
+    void release_resident(ResidentTape& t) {
+        if (t.instrs) t.instrs->release();
+        if (t.params) t.params->release();
+        if (t.blob) t.blob->release();
+        t = ResidentTape{};
+    }
+
+    // An exact-size shared buffer holding a copy of one tape section; never
+    // zero-sized, because it gets bound.
+    MTL::Buffer* upload_section(const void* data, std::size_t bytes) {
         if (bytes == 0) return device_->newBuffer(4, MTL::ResourceStorageModeShared);
         return device_->newBuffer(data, bytes, MTL::ResourceStorageModeShared);
     }
 
-    // A shared-mode allocation that is never zero-sized: every kernel binding
-    // must be a real buffer, and an empty tape section still gets bound.
-    MTL::Buffer* scratch_buffer(std::size_t bytes) {
-        return device_->newBuffer(bytes ? bytes : 4, MTL::ResourceStorageModeShared);
-    }
-
     TapeBuffers upload_tape(const scene::Tape& tape) {
-        return TapeBuffers{
-            copy_in(tape.instrs.data(), tape.instrs.size() * sizeof(kernel::CTapeInstr)),
-            copy_in(tape.params.data(), tape.params.size() * sizeof(float)),
-            copy_in(tape.blob.data(), tape.blob.size() * sizeof(float)),
-        };
+        const std::size_t instr_bytes = tape.instrs.size() * sizeof(kernel::CTapeInstr);
+        const std::size_t param_bytes = tape.params.size() * sizeof(float);
+        const std::size_t blob_bytes = tape.blob.size() * sizeof(float);
+        if (tape.compile_id == 0)
+            return TapeBuffers{copy_in(kSlotTapeInstrs, tape.instrs.data(), instr_bytes),
+                               copy_in(kSlotTapeParams, tape.params.data(), param_bytes),
+                               copy_in(kSlotTapeBlob, tape.blob.data(), blob_bytes)};
+        ResidentTape* entry = &resident_[0];
+        for (ResidentTape& t : resident_) {
+            if (t.id == tape.compile_id) {
+                t.last_use = ++use_counter_;
+                return TapeBuffers{t.instrs, t.params, t.blob};
+            }
+            if (t.last_use < entry->last_use) entry = &t;  // oldest = eviction victim
+        }
+        release_resident(*entry);
+        entry->id = tape.compile_id;
+        entry->last_use = ++use_counter_;
+        entry->instrs = upload_section(tape.instrs.data(), instr_bytes);
+        entry->params = upload_section(tape.params.data(), param_bytes);
+        entry->blob = upload_section(tape.blob.data(), blob_bytes);
+        return TapeBuffers{entry->instrs, entry->params, entry->blob};
     }
 
     // A batch's per-grid tapes concatenated into three shared buffers, plus
     // the table that says where each grid's slices start — the upload half of
     // the clay_eval_grid_batch kernel, shared by the host-memory and
-    // device-destination batch paths so the two cannot drift. ok is false when
-    // the batch is refused (a null tape, or tapes whose concatenation
-    // overflows the table's 32-bit device offsets) and then nothing was
-    // allocated.
+    // device-destination batch paths so the two cannot drift. The buffers are
+    // the pooled scratch slots — borrowed for the call, not owned. ok is
+    // false when the batch is refused (a null tape, or tapes whose
+    // concatenation overflows the table's 32-bit device offsets) and then no
+    // slot was touched.
     struct BatchUpload {
         MTL::Buffer* instrs = nullptr;
         MTL::Buffer* params = nullptr;
@@ -434,10 +515,10 @@ class MetalBackend final : public Backend {
         const std::uint64_t limit = 0xffffffffu;
         if (n_instrs > limit || n_params > limit || n_blob > limit) return up;
 
-        up.instrs = scratch_buffer(n_instrs * sizeof(kernel::CTapeInstr));
-        up.params = scratch_buffer(n_params * sizeof(float));
-        up.blob = scratch_buffer(n_blob * sizeof(float));
-        up.table = scratch_buffer(q.count * sizeof(ClayBatchGrid));
+        up.instrs = scratch(kSlotBatchInstrs, n_instrs * sizeof(kernel::CTapeInstr));
+        up.params = scratch(kSlotBatchParams, n_params * sizeof(float));
+        up.blob = scratch(kSlotBatchBlob, n_blob * sizeof(float));
+        up.table = scratch(kSlotBatchTable, q.count * sizeof(ClayBatchGrid));
 
         // Second pass: each tape's slices land at their offsets, and the table
         // records where.
@@ -516,13 +597,29 @@ class MetalBackend final : public Backend {
         enc->dispatchThreads(grid, MTL::Size(tg, 1, 1));
         enc->endEncoding();
         cmd->commit();
+        // A dab-sized dispatch finishes in tens of microseconds, but parking
+        // this thread on waitUntilCompleted's semaphore notices that hundreds
+        // of microseconds later — the wakeup is most of what an interactive
+        // 1-brick call pays (measured ~150 us polled vs ~520 us parked on an
+        // M2 Max). So for small dispatches, poll the status for up to ~2 ms
+        // of wall time before parking. Large dispatches run for milliseconds
+        // and park immediately: spinning there burns a core for no latency
+        // anyone can see. The call is synchronous either way; only how
+        // completion is noticed changes.
+        constexpr std::size_t kSpinThreads = 64 * 512;  // ~a refill chunk's worth
+        if (thread_count <= kSpinThreads) {
+            const auto deadline =
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
+            do {
+                for (int poll = 0; poll < 64; ++poll) {
+                    const MTL::CommandBufferStatus s = cmd->status();
+                    if (s == MTL::CommandBufferStatusCompleted) return true;
+                    if (s == MTL::CommandBufferStatusError) return false;
+                }
+            } while (std::chrono::steady_clock::now() < deadline);
+        }
         cmd->waitUntilCompleted();
         return cmd->status() == MTL::CommandBufferStatusCompleted;
-    }
-
-    void release_all(std::initializer_list<MTL::Buffer*> buffers) {
-        for (MTL::Buffer* b : buffers)
-            if (b) b->release();
     }
 
     // Gradients on the host from 4 extra device evaluations would need a
@@ -537,6 +634,16 @@ class MetalBackend final : public Backend {
         grad_only.distances = tmp.data();
         eval_points_reference(tape, sub, grad_only);
     }
+
+    // Serializes the public entry points: the scratch pool and the resident
+    // tapes are shared mutable state, and the device work is synchronous and
+    // one queue deep anyway, so serializing costs concurrent callers nothing
+    // they were not already paying at the queue.
+    std::mutex mutex_;
+    MTL::Buffer* scratch_[kSlotCount] = {};
+    static constexpr int kResidentTapes = 4;
+    ResidentTape resident_[kResidentTapes];
+    std::uint64_t use_counter_ = 0;
 
     MTL::Device* device_ = nullptr;
     MTL::CommandQueue* queue_ = nullptr;

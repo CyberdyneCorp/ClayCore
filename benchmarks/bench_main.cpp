@@ -408,6 +408,67 @@ void BM_ConsolidateSerialGrownDoc(benchmark::State& state) {
 }
 BENCHMARK(BM_ConsolidateSerialGrownDoc)->Unit(benchmark::kMillisecond);
 
+// Resident uploaded tapes (accel/metal-persistent): the Metal backend keeps
+// the uploaded form of recent tapes resident, keyed on the process-unique
+// Tape::compile_id the compiler stamps, so re-evaluating an unchanged
+// document does not re-upload its tape — notably a consolidated volume's
+// multi-megabyte blob — every dispatch. The pair below drives a small lattice
+// against a consolidated layer once with ONE compiled tape (every call after
+// the first is resident) and once alternating MORE tapes of the same document
+// than the residency holds (every call re-uploads the blob). The values are
+// identical by construction; check_bench.py requires resident < reupload,
+// which is exactly the residency existing. Registered only when a Metal
+// device is present — FASTER_THAN skips the pair when the names are absent,
+// so CPU-only CI is unaffected.
+namespace {
+
+void metal_consolidated_eval(benchmark::State& state, int tape_count) {
+    scene::Document doc = sculpted_sphere(193);
+    scene::ConsolidationParams params;
+    params.cell_size = 0.015f;
+    scene::consolidate_layer(doc, doc.layers.front().id, params, nullptr, nullptr,
+                             eval::pooled_bake_eval());
+    std::vector<scene::Tape> tapes;
+    for (int i = 0; i < tape_count; ++i) tapes.push_back(scene::compile_document(doc));
+    eval::Backend* metal = eval::Registry::instance().find("metal");
+    eval::GridQuery q;
+    q.origin = cf3(0.9f, -0.08f, -0.08f);
+    q.spacing = 0.02f;
+    q.nx = q.ny = q.nz = 8;
+    std::vector<float> values(static_cast<std::size_t>(q.nx) * q.ny * q.nz);
+    std::size_t at = 0;
+    for (auto _ : state) {
+        metal->eval_grid(tapes[at % tapes.size()], q, values.data());
+        ++at;
+        benchmark::DoNotOptimize(values.data());
+    }
+    state.counters["tapes"] = static_cast<double>(tape_count);
+    state.counters["blob_floats"] = static_cast<double>(tapes.front().blob.size());
+}
+
+// Called from main, not from a static initializer: probing the registry
+// spins up backend runtimes (a Metal device), which has no business running
+// before main.
+void register_metal_benches() {
+    if (!eval::Registry::instance().find("metal")) return;
+    benchmark::RegisterBenchmark("BM_MetalTapeResident",
+                                 [](benchmark::State& s) { metal_consolidated_eval(s, 1); })
+        ->Unit(benchmark::kMillisecond);
+    benchmark::RegisterBenchmark("BM_MetalTapeReupload",
+                                 [](benchmark::State& s) { metal_consolidated_eval(s, 6); })
+        ->Unit(benchmark::kMillisecond);
+}
+
 }  // namespace
 
-BENCHMARK_MAIN();
+}  // namespace
+
+// BENCHMARK_MAIN(), plus the conditionally registered Metal pair.
+int main(int argc, char** argv) {
+    register_metal_benches();
+    benchmark::Initialize(&argc, argv);
+    if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
+    benchmark::RunSpecifiedBenchmarks();
+    benchmark::Shutdown();
+    return 0;
+}

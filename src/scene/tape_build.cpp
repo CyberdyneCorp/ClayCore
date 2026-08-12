@@ -1,3 +1,5 @@
+#include <atomic>
+
 #include "clay/scene/bounds.h"
 #include "clay/scene/cull_index.h"
 #include "clay/scene/curve.h"
@@ -673,6 +675,14 @@ struct Compiler {
     }
 };
 
+// Process-unique nonzero ids for compiled tapes (Tape::compile_id): equal ids
+// mean the same compile produced the bytes, which is what lets a backend keep
+// an uploaded tape resident without comparing or hashing its contents.
+std::uint64_t next_compile_id() {
+    static std::atomic<std::uint64_t> counter{0};
+    return counter.fetch_add(1, std::memory_order_relaxed) + 1;
+}
+
 }  // namespace
 
 Tape compile_document(const Document& doc, const CullRegion* cull, const CullIndex* index,
@@ -687,6 +697,7 @@ Tape compile_document(const Document& doc, const CullRegion* cull, const CullInd
     c.index = index;
     c.plan = cull && index ? plan : nullptr;
     c.run(doc, cull);
+    c.tape.compile_id = next_compile_id();
     return std::move(c.tape);
 }
 
@@ -695,6 +706,7 @@ Tape compile_layer(const Layer& layer, const CullRegion* cull) {
     bool usable = layer.visible && layer.kind == LayerKind::Sdf && layer.sdf;
     c.begin_cull(cull, cull && usable ? feather_cull_pad(*layer.sdf, layer) : 0.0f);
     if (usable) c.compile_list(layer.sdf->roots, *layer.sdf, layer, false);
+    c.tape.compile_id = next_compile_id();
     return std::move(c.tape);
 }
 
