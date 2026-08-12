@@ -615,7 +615,7 @@ The ABI SHALL expose the brick cache as an opaque handle the caller creates from
 
 There SHALL be exactly one refill path — mark dirty, drain requests, evaluate, submit — with the drain taking a capacity and reporting a count and a remainder rather than accepting a NULL buffer as a size query, and with the outcome of a submission (accepted, stale, over budget) crossing as an out-parameter with a success return, on the same footing as "nothing to undo".
 
-The handle SHALL take no lock and start no thread; the header SHALL state that calls on one handle are the host's to serialize and that the batched evaluation call, which takes no handle, is free-threaded against one const document.
+The handle SHALL take no lock and own no thread; the header SHALL state that calls on one handle are the host's to serialize and that the batched evaluation call, which takes no handle, is free-threaded against one const document. A batched const query — the many-ray raycast — MAY fan its rays out across the engine's shared worker pool, provided the call returns only after every worker is done with the cache and each output slot is byte-identical to what the single-ray call reports for the same ray.
 
 A dirty region SHALL be validated in 64-bit before the engine converts it: a non-finite or empty region, a brick coordinate outside `int32`, and a span above the batch ceiling SHALL each be refused with the cache left unchanged. Dirtying everything the cache tracks SHALL be spelled as the absence of a region, never as a region carrying an infinity.
 
@@ -634,6 +634,10 @@ A dirty region SHALL be validated in 64-bit before the engine converts it: a non
 #### Scenario: The bound to dirty is not the bound to frame on
 - **WHEN** a consumer asks for a node's influence bound
 - **THEN** it receives a box no tighter than the layer bounds query reports, and an explicit flag for the items whose influence is unbounded
+
+#### Scenario: A batched raycast parallelizes without changing its answers
+- **WHEN** a host casts the same rays through the batched brick-cache raycast and one at a time through the single-ray call
+- **THEN** every batch slot holds exactly the hit flag, distance, position and normal the single-ray call reports for that ray, and no engine thread touches the cache after the batched call returns
 
 ### Requirement: A voxel edit's effect is readable across the ABI
 The ABI SHALL expose the grid's change count as a query alongside the occupied count, taking a `uint64_t` out-parameter rather than a `size_t` because the counter is never reset and a 32-bit host would wrap it in a long session. A NULL out-parameter SHALL be tolerated, matching the other grid queries; a NULL grid SHALL be refused with an invalid-argument error.

@@ -17,6 +17,8 @@
 
 #include "desc_version.h"
 
+#include "../../backends/cpu/thread_pool.h"
+
 #include "clay/eval/backend.h"
 #include "clay/eval/bake_points.h"
 #include "clay/io/clayspace.h"
@@ -6275,16 +6277,24 @@ clay_result clay_brick_cache_raycast_many(const clay_brick_cache* cache,
     clay_result r = normalize_rays(rays_origin_dir, count, &rays);
     if (r != CLAY_OK) return r;
     std::vector<eval::RayHit> hits(count);
-    for (std::size_t i = 0; i < count; ++i) {
-        math::Ray ray;
-        ray.origin = kernel::cf3(rays[i * 6], rays[i * 6 + 1], rays[i * 6 + 2]);
-        ray.dir = kernel::cf3(rays[i * 6 + 3], rays[i * 6 + 4], rays[i * 6 + 5]);
-        const pick::SceneHit hit = pick::raycast_bricks(cache->cache, ray);
-        hits[i].hit = hit.hit ? 1 : 0;
-        hits[i].t = hit.t;
-        write_f3(hits[i].pos, hit.position);
-        write_f3(hits[i].normal, hit.normal);
-    }
+    // Rays are independent reads of a const cache, so the batch fans out over
+    // the same pool the CPU backend evaluates points with. Each ray is marched
+    // by exactly one chunk with the same arithmetic the serial loop used and
+    // writes only its own slot, so the outputs match the serial loop bit for
+    // bit, in order.
+    backends_cpu::ThreadPool::instance().parallel_for(
+        count, 1, [&](std::size_t b, std::size_t e) {
+            for (std::size_t i = b; i < e; ++i) {
+                math::Ray ray;
+                ray.origin = kernel::cf3(rays[i * 6], rays[i * 6 + 1], rays[i * 6 + 2]);
+                ray.dir = kernel::cf3(rays[i * 6 + 3], rays[i * 6 + 4], rays[i * 6 + 5]);
+                const pick::SceneHit hit = pick::raycast_bricks(cache->cache, ray);
+                hits[i].hit = hit.hit ? 1 : 0;
+                hits[i].t = hit.t;
+                write_f3(hits[i].pos, hit.position);
+                write_f3(hits[i].normal, hit.normal);
+            }
+        });
     write_ray_hits(hits, count, out_hits, out_t, out_positions_xyz, out_normals_xyz);
     return CLAY_OK;
 }

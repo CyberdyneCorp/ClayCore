@@ -33,6 +33,13 @@ FASTER_THAN = [
     # since both sides pay the same serial redistance floor (4.7x on an
     # M2 Max).
     ("BM_ConsolidateGrownDoc", "BM_ConsolidateSerialGrownDoc"),
+    # Batched brick raycast (accel/parallel-raycast): the batched C-ABI call
+    # fans its rays across the CPU backend's pool and must beat the same rays
+    # issued one single-ray call at a time (kept in the benchmark as the
+    # reference; slot-for-slot bit-identical by contract). Catches the batch
+    # falling off the pool; holds on any machine with more than one core,
+    # since both sides pay the identical per-ray march (8x on an M2 Max).
+    ("BM_RaycastBricksBatch", "BM_RaycastBricksSerial"),
     # Resident uploaded tapes (accel/metal-persistent): re-evaluating one
     # compiled tape must beat alternating more tapes than the Metal backend's
     # residency holds — the two run the identical dispatch and differ only in

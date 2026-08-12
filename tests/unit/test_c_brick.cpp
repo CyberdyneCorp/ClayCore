@@ -1207,3 +1207,61 @@ TEST_CASE("brick cache: an item a band away from a brick still decides its sampl
                                          nullptr, 0) == CLAY_OK);
     CHECK(state == CLAY_BRICK_SURFACE);
 }
+
+TEST_CASE("raycast_many: the parallel batch matches the single-ray call slot for slot") {
+    // The batched raycast fans its rays out across the engine's worker pool
+    // (c-abi spec: "A batched raycast parallelizes without changing its
+    // answers"). The contract is bit-identity in caller order: every slot
+    // holds EXACTLY the hit flag, distance, position and normal the
+    // single-ray call reports for the same ray, no matter which worker
+    // marched it. Exact float equality, not Approx — a reordered reduction
+    // or a per-thread fast-math difference must fail here.
+    Doc doc;
+    add_sphere(doc, 0.4f, 0.0f, 0.0f, 0.0f);
+    add_sphere(doc, 0.25f, 0.5f, 0.2f, -0.1f);
+    add_sphere(doc, 0.2f, -0.3f, -0.2f, 0.15f, CLAY_OP_SUBTRACT);
+    Cache cache(make_cache());
+    REQUIRE(clay_brick_cache_mark_dirty_layer(cache, doc.d, doc.layer) == CLAY_OK);
+    refill(cache, doc.d);
+
+    // A deterministic mix of hitting and missing rays, deliberately NOT
+    // normalized: the batch's normalization must agree with the single-ray
+    // call's bit for bit too. 257 is not a multiple of any chunk size, so a
+    // ragged final chunk is exercised.
+    const std::size_t n = 257;
+    std::vector<float> rays(n * 6);
+    std::uint64_t s = 12345;
+    auto rnd = [&] {
+        s = s * 6364136223846793005ull + 1442695040888963407ull;
+        return static_cast<float>((s >> 40) & 0xFFFFFF) / 16777216.0f - 0.5f;
+    };
+    for (std::size_t i = 0; i < n; ++i) {
+        float* r = rays.data() + i * 6;
+        for (int a = 0; a < 3; ++a) r[a] = rnd() * 4.0f;
+        // Most rays aim near the shapes; every fifth flies off into space.
+        const float spread = (i % 5 == 0) ? 8.0f : 0.8f;
+        for (int a = 0; a < 3; ++a) r[3 + a] = rnd() * spread - r[a];
+    }
+
+    std::vector<std::int32_t> hits(n, -1);
+    std::vector<float> t(n, -1.0f), pos(n * 3, -1.0f), nrm(n * 3, -1.0f);
+    REQUIRE(clay_brick_cache_raycast_many(cache, rays.data(), n, hits.data(), t.data(),
+                                          pos.data(), nrm.data()) == CLAY_OK);
+
+    std::size_t hit_count = 0, mismatches = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        std::int32_t hit1 = -1;
+        float t1 = -1.0f, pos1[3] = {-1, -1, -1}, nrm1[3] = {-1, -1, -1};
+        REQUIRE(clay_brick_cache_raycast(cache, rays.data() + i * 6, rays.data() + i * 6 + 3,
+                                         &hit1, &t1, pos1, nrm1) == CLAY_OK);
+        hit_count += hit1 ? 1 : 0;
+        bool same = hits[i] == hit1 && t[i] == t1;
+        for (int a = 0; a < 3; ++a)
+            same = same && pos[i * 3 + a] == pos1[a] && nrm[i * 3 + a] == nrm1[a];
+        if (!same) ++mismatches;
+    }
+    CHECK(mismatches == 0);
+    // The comparison only means something if both outcomes are represented.
+    CHECK(hit_count > 0);
+    CHECK(hit_count < n);
+}

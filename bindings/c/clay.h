@@ -3360,9 +3360,12 @@ clay_result clay_brick_cache_raycast(const clay_brick_cache* cache, const float 
  * one optional. It is the batched form of the call above and nothing more —
  * one call shape for the cache and for the document is the whole value of it.
  *
- * It starts NO thread, consistent with the cache owning none. A host that wants
- * this parallel splits the array itself, which it can: the call is const on the
- * cache, and serializing mutations against it is already the host's job. */
+ * The batch fans out across the engine's shared worker pool — the same one the
+ * CPU backend evaluates points with — and returns only when every ray is done,
+ * so no engine thread touches the cache after the call returns. The cache still
+ * owns no thread, and serializing mutations against this call is still the
+ * host's job. Each slot holds byte-for-byte what the single-ray call above
+ * reports for the same ray, in order. */
 clay_result clay_brick_cache_raycast_many(const clay_brick_cache* cache,
                                           const float* rays_origin_dir, size_t count,
                                           int32_t* out_hits, float* out_t,
