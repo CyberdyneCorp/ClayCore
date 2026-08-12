@@ -57,6 +57,8 @@
 // is in the undo record, which is where a "go back" belongs; a separate
 // un-bake would have to invent parameters for a shape that no longer has any.
 
+#include <cstddef>
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -66,6 +68,20 @@
 
 namespace clay {
 namespace scene {
+
+struct Tape;
+
+// How bake_layer evaluates the layer's tape at its lattice samples. Empty —
+// the default — walks tape.eval serially; eval/bake_points.h supplies
+// pooled_bake_eval(), the same points through the CPU backend's reference
+// arithmetic on its thread pool, which the bindings and the benchmark inject.
+// An INJECTED evaluator is how the pool reaches a bake at all: eval depends
+// on scene, never the reverse, so this module cannot name a backend. An
+// evaluator may change only speed, never bytes — the volume is byte-identical
+// either way (test_consolidate.cpp holds it to that), and one that cannot
+// serve the request returns false to hand the window back to the serial walk.
+using BakePointEval = std::function<bool(const Tape& tape, const float* points_xyz,
+                                         std::size_t count, float* out_distances)>;
 
 // What a layer's chain currently costs the marcher, and what is causing it.
 struct FieldReport {
@@ -128,7 +144,8 @@ FieldReport report_layer(const Layer& layer, float advise_below_step_scale = 0.0
 // to the result and consolidating does not move anything.
 std::optional<field::FieldVolume> bake_layer(const Layer& layer,
                                              const ConsolidationParams& params,
-                                             ConsolidationCost* out_cost = nullptr);
+                                             ConsolidationCost* out_cost = nullptr,
+                                             const BakePointEval& point_eval = {});
 
 // Collapse a layer's edit list into one volume item, as ONE undo step.
 //
@@ -145,7 +162,8 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
 // `undo` may be null, in which case the commands are applied and no undo entry
 // is recorded — the same choice every other editing entry point offers.
 bool consolidate_layer(Document& doc, LayerId layer, const ConsolidationParams& params,
-                       UndoStack* undo = nullptr, ConsolidationCost* out_cost = nullptr);
+                       UndoStack* undo = nullptr, ConsolidationCost* out_cost = nullptr,
+                       const BakePointEval& point_eval = {});
 
 // What a host may still promise about a layer: whether its edit list is a
 // single item carrying samples, and at what resolution. False for anything

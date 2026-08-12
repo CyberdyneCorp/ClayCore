@@ -17,6 +17,7 @@
 #include "clay/field/redistance.h"
 #include "clay/field/volume.h"
 #include "clay/kernel/exactness.h"
+#include "clay/eval/bake_points.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/tape.h"
 
@@ -517,13 +518,15 @@ TEST_CASE("the grid bake is byte-identical to the serial full-tape bake") {
     // With redistance skipped first: the raw baked samples compared directly,
     // where a repair pass that missed a sample cannot hide behind the solve.
     params.skip_redistance = true;
-    std::optional<FieldVolume> raw = scene::bake_layer(doc.layers.front(), params);
+    std::optional<FieldVolume> raw =
+        scene::bake_layer(doc.layers.front(), params, nullptr, eval::pooled_bake_eval());
     REQUIRE(raw);
     CHECK(raw->serialize() == serial_bake(doc.layers.front(), params).serialize());
 
     // And the full pipeline, redistance and compact included.
     params.skip_redistance = false;
-    std::optional<FieldVolume> baked = scene::bake_layer(doc.layers.front(), params);
+    std::optional<FieldVolume> baked =
+        scene::bake_layer(doc.layers.front(), params, nullptr, eval::pooled_bake_eval());
     REQUIRE(baked);
     CHECK(baked->serialize() == serial_bake(doc.layers.front(), params).serialize());
 }
@@ -534,7 +537,8 @@ TEST_CASE("the grid bake matches the serial bake on a steep volume chain") {
     // that make the bake stricter than any band-clamped consumer.
     scene::Document doc = wrap(polish(sphere_document(0.8f), cf3(0, 0, 1), 0.55f, 0.02f, 0.08f));
     scene::ConsolidationParams params = params_at(0.04f, 0.12f);
-    std::optional<FieldVolume> baked = scene::bake_layer(doc.layers.front(), params);
+    std::optional<FieldVolume> baked =
+        scene::bake_layer(doc.layers.front(), params, nullptr, eval::pooled_bake_eval());
     REQUIRE(baked);
     CHECK(baked->serialize() == serial_bake(doc.layers.front(), params).serialize());
 }

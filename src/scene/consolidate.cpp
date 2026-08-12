@@ -10,7 +10,6 @@
 #include <memory>
 #include <vector>
 
-#include "clay/eval/backend.h"
 #include "clay/field/redistance.h"
 #include "clay/kernel/exactness.h"
 #include "clay/scene/tape.h"
@@ -90,6 +89,13 @@ void walk(const SdfContent& content, const std::vector<NodeId>& ids, FieldReport
 // them in (sample_blocks assembles serially), so the bytes do not depend on
 // thread scheduling either.
 //
+// The pool arrives as an INJECTED BakePointEval (eval/bake_points.h, passed
+// down by the bindings and the benchmark) rather than by naming the backend
+// here: the layering runs eval -> scene, never scene -> eval, and the
+// injection is what lets this module stay below the registry it benefits
+// from. With no evaluator — or one that declines — every window falls back
+// to the serial walk below, same positions, same arithmetic, same bytes.
+//
 // WHY NOT PER-BRICK CULLED TAPES, when the refill path over the same bricks
 // lives on them: the cull contract (scene/tape.h) is BAND-CLAMPED identity,
 // and the bake is the one consumer that stores raw values past the band. It
@@ -105,9 +111,9 @@ void walk(const SdfContent& content, const std::vector<NodeId>& ids, FieldReport
 // covered by the pool, so the bake spends cores, not exactness.
 
 // One window of bricks, every sample against the full tape, distances only.
-// The loop below is the same evaluation again for a build with no registered
-// backends at all.
-void fill_window(const Tape& tape, const field::FieldVolume::BrickGrid& grid, std::size_t first,
+// The loop below is the same evaluation again when no evaluator was injected.
+void fill_window(const Tape& tape, const BakePointEval& point_eval,
+                 const field::FieldVolume::BrickGrid& grid, std::size_t first,
                  std::size_t count, float* out) {
     const std::size_t n = count * field::kBrickSamples;
     std::vector<float> points(n * 3);
@@ -119,13 +125,7 @@ void fill_window(const Tape& tape, const field::FieldVolume::BrickGrid& grid, st
             points[at + 1] = p.y;
             points[at + 2] = p.z;
         }
-    eval::PointQuery q;
-    q.points_xyz = points.data();
-    q.count = n;
-    eval::PointResults res;
-    res.distances = out;
-    eval::Backend* cpu = eval::Registry::instance().find("cpu");
-    if (cpu && cpu->eval_points(tape, q, res) == eval::Status::Ok) return;
+    if (point_eval && point_eval(tape, points.data(), n, out)) return;
     for (std::size_t i = 0; i < n; ++i)
         out[i] = tape.eval(kernel::cf3(points[i * 3], points[i * 3 + 1], points[i * 3 + 2])).d;
 }
@@ -145,7 +145,8 @@ FieldReport report_layer(const Layer& layer, float advise_below_step_scale) {
 
 std::optional<field::FieldVolume> bake_layer(const Layer& layer,
                                              const ConsolidationParams& params,
-                                             ConsolidationCost* out_cost) {
+                                             ConsolidationCost* out_cost,
+                                             const BakePointEval& point_eval) {
     if (!(params.cell_size > 0.0f)) return std::nullopt;
     const float band = params.band > 0.0f ? params.band : params.cell_size * 3.0f;
     const float padding = params.padding > 0.0f ? params.padding : band;
@@ -163,8 +164,9 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
     }
 
     field::FieldVolume volume = field::FieldVolume::sample_blocks(
-        [&tape](const field::FieldVolume::BrickGrid& grid, std::size_t first, std::size_t count,
-                float* out) { fill_window(tape, grid, first, count, out); },
+        [&tape, &point_eval](const field::FieldVolume::BrickGrid& grid, std::size_t first,
+                             std::size_t count,
+                             float* out) { fill_window(tape, point_eval, grid, first, count, out); },
         region, params.cell_size, band);
     // brick_count rather than empty(): a volume covering only empty space
     // still has a full brick index, it just stores no samples, and handing one
@@ -189,7 +191,8 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
 }
 
 bool consolidate_layer(Document& doc, LayerId layer_id, const ConsolidationParams& params,
-                       UndoStack* undo, ConsolidationCost* out_cost) {
+                       UndoStack* undo, ConsolidationCost* out_cost,
+                       const BakePointEval& point_eval) {
     const Layer* layer = doc.find_layer(layer_id);
     if (!layer || layer->kind != LayerKind::Sdf || !layer->sdf) return false;
     // Checked before the bake, not after: a locked layer should not cost a
@@ -208,7 +211,7 @@ bool consolidate_layer(Document& doc, LayerId layer_id, const ConsolidationParam
     }
     if (absorb.empty()) return false;
 
-    std::optional<field::FieldVolume> volume = bake_layer(*layer, params, out_cost);
+    std::optional<field::FieldVolume> volume = bake_layer(*layer, params, out_cost, point_eval);
     if (!volume) return false;
 
     Node baked;

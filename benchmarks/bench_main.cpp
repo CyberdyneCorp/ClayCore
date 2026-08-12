@@ -16,6 +16,7 @@
 #include "clay/mesh/surface_nets.h"
 #include "clay/field/redistance.h"
 #include "clay/scene/bounds.h"
+#include "clay/eval/bake_points.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/cull_index.h"
 #include "clay/scene/tape.h"
@@ -384,7 +385,8 @@ void BM_ConsolidateGrownDoc(benchmark::State& state) {
     scene::ConsolidationParams params;
     params.cell_size = 0.05f;
     for (auto _ : state) {
-        std::optional<field::FieldVolume> v = scene::bake_layer(doc.layers.front(), params);
+        std::optional<field::FieldVolume> v =
+            scene::bake_layer(doc.layers.front(), params, nullptr, eval::pooled_bake_eval());
         benchmark::DoNotOptimize(v->sample_count());
     }
 }
