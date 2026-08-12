@@ -202,6 +202,45 @@ forward-refuse).
    the same loss minors 1, 2 and 4 carry. The format notes at the top of
    `include/clay/io/clayspace.h` record it.
 
+   **0.29.1 changes no signature, adds no symbol, and changes no result — it
+   is speed only**, which is why it is a patch under the same rule that made
+   0.27.3 one. Seven changes, each merged with a measured A/B and a
+   bit-identity gate (same inputs, byte-identical outputs against 0.29.0),
+   figures from an M2 Max, medians, driven through the C ABI:
+
+   - **A per-revision cull index + per-batch coarse cull** (#82): per-brick
+     culled tape compiles stop walking the whole document — 59.6 → 6.0
+     ns/item, and a dab's refill slope on Metal drops 2.22 → 0.21 µs/item.
+     Emitted tapes are byte-identical by the cull contract's superset rule.
+   - **Batched brick-mesh attribute taps** (#83): gradient normals + colors
+     evaluate through the CPU pool in one batch — the mesh share of a dab
+     goes from 6.7× the refill slope to 1.14×; a dense re-mesh at 10 000
+     stamps drops 98.8 → 15.0 ms.
+   - **The zero-copy device refill is batched** (#84): it had missed #64's
+     treatment and ran 28–166× SLOWER than the host-memory route; it now
+     runs the same chunked pipeline into the caller's buffers at 0.7–1.0×
+     the host route, values identical to the bit.
+   - **Consolidation bakes on the thread pool** (#85): 351/958/3094 ms at
+     100/300/1000 items became 87/160/426 ms (4–7.3×), volume byte-identical;
+     the estimate stays the bake itself. A per-brick-culled variant was
+     tried, measured, and rejected for a real reason — band-clamped identity
+     is not raw-sample identity — recorded in consolidate.cpp.
+   - **The Metal backend keeps scratch buffers and uploaded tapes resident**
+     (#88): steady-state eval of a document carrying a consolidated volume
+     stops re-paying the blob upload (flat in blob size, ~5× at 22 MB), a
+     1-brick call costs ~0.17 ms against the 0.52 ms it did, and the
+     CPU/Metal crossover moves to ~8 bricks/call.
+   - **Batched brick raycasts fan out across the worker pool** (#94):
+     ~40 → ~320 rays/ms on twelve cores, results byte-identical in order.
+   - **Undo stops scaling with the document** (#95): node removal indexed —
+     undoing a 100-stamp stroke at 10 000 stamps drops 0.62 → 0.008 ms, flat
+     in document size, serialized state byte-identical through undo/redo.
+
+   The engine's C++ evaluation interface grew two internal batch entry
+   points (`eval_points_batch`, `eval_grid_batch_device`) with
+   identical-results loop defaults — internal headers, free to evolve within
+   the major, invisible at the C ABI.
+
    **0.29.0 adds six symbols, one enum and one descriptor, and removes
    nothing.** No existing signature changed, no existing struct grew or
    reordered a field, and no existing entry point returns a new `clay_result`
