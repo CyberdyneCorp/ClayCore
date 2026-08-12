@@ -3094,7 +3094,14 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
  * not the cache's classified, band-clamped fp16 bricks. Nothing was submitted
  * to a cache and no brick state was decided. If you want that, submit them and
  * read them back; this call is for hosts that would rather do the conversion
- * themselves than pay the copy. */
+ * themselves than pay the copy.
+ *
+ * BATCHED like the host-memory form: the whole batch reaches the adopted
+ * backend as batched device evaluations — one device submission per chunk of
+ * requests, not one per brick — so a drain costs about what the host-memory
+ * "metal" route costs, without the copy back. The per-submission floor
+ * (~0.25 ms on an M-series Mac) still applies per CALL, so route by batch
+ * size exactly as clay_brick_cache_eval_requests documents. */
 clay_result clay_brick_cache_eval_requests_device(const clay_document* doc, clay_device* device,
                                                   const clay_brick_request* requests,
                                                   size_t count,

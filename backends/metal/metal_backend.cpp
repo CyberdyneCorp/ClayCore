@@ -139,74 +139,68 @@ class MetalBackend final : public Backend {
                                 static_cast<std::size_t>(q.nz);
         const std::size_t total = per * q.count;
 
-        // First pass: sizes, so the concatenated buffers are allocated once.
-        // The table offsets are 32-bit on the device, so a batch whose tapes
-        // do not fit is refused rather than wrapped.
-        std::uint64_t n_instrs = 0, n_params = 0, n_blob = 0;
-        for (std::size_t i = 0; i < q.count; ++i) {
-            if (!q.tapes[i]) return Status::InvalidInput;
-            n_instrs += q.tapes[i]->instrs.size();
-            n_params += q.tapes[i]->params.size();
-            n_blob += q.tapes[i]->blob.size();
-        }
-        const std::uint64_t limit = 0xffffffffu;
-        if (n_instrs > limit || n_params > limit || n_blob > limit)
-            return Status::InvalidInput;
-
-        MTL::Buffer* instrs = scratch_buffer(n_instrs * sizeof(kernel::CTapeInstr));
-        MTL::Buffer* params = scratch_buffer(n_params * sizeof(float));
-        MTL::Buffer* blob = scratch_buffer(n_blob * sizeof(float));
-        MTL::Buffer* table = scratch_buffer(q.count * sizeof(ClayBatchGrid));
+        BatchUpload up = upload_batch(q);
+        if (!up.ok) return Status::InvalidInput;
         MTL::Buffer* dist = scratch_buffer(total * sizeof(float));
         MTL::Buffer* cols = scratch_buffer(out_colors_rgb ? total * 3 * sizeof(float) : 0);
 
-        // Second pass: each tape's slices land at their offsets, and the table
-        // records where.
-        auto* out_instrs = static_cast<kernel::CTapeInstr*>(instrs->contents());
-        auto* out_params = static_cast<float*>(params->contents());
-        auto* out_blob = static_cast<float*>(blob->contents());
-        auto* out_table = static_cast<ClayBatchGrid*>(table->contents());
-        std::uint32_t at_instr = 0, at_param = 0, at_blob = 0;
-        for (std::size_t i = 0; i < q.count; ++i) {
-            const scene::Tape& t = *q.tapes[i];
-            if (!t.instrs.empty())
-                std::memcpy(out_instrs + at_instr, t.instrs.data(),
-                            t.instrs.size() * sizeof(kernel::CTapeInstr));
-            if (!t.params.empty())
-                std::memcpy(out_params + at_param, t.params.data(),
-                            t.params.size() * sizeof(float));
-            if (!t.blob.empty())
-                std::memcpy(out_blob + at_blob, t.blob.data(), t.blob.size() * sizeof(float));
-            ClayBatchGrid g{};
-            g.origin[0] = q.origins[i].x;
-            g.origin[1] = q.origins[i].y;
-            g.origin[2] = q.origins[i].z;
-            g.instr_offset = at_instr;
-            g.instr_count = static_cast<unsigned int>(t.instrs.size());
-            g.param_offset = at_param;
-            g.blob_offset = at_blob;
-            out_table[i] = g;
-            at_instr += static_cast<std::uint32_t>(t.instrs.size());
-            at_param += static_cast<std::uint32_t>(t.params.size());
-            at_blob += static_cast<std::uint32_t>(t.blob.size());
-        }
-
-        ClayGridBatchUniforms u{};
-        u.spacing = q.spacing;
-        u.nx = static_cast<unsigned int>(q.nx);
-        u.ny = static_cast<unsigned int>(q.ny);
-        u.nz = static_cast<unsigned int>(q.nz);
-        u.grid_count = static_cast<unsigned int>(q.count);
-        u.has_colors = out_colors_rgb ? 1u : 0u;
-
-        bool ok = dispatch(pso_grid_batch_, {instrs, params, blob, table, dist, cols}, &u,
-                           sizeof(u), 6, total);
+        const ClayGridBatchUniforms u = batch_uniforms(q, out_colors_rgb != nullptr);
+        bool ok = dispatch(pso_grid_batch_, {up.instrs, up.params, up.blob, up.table, dist, cols},
+                           &u, sizeof(u), 6, total);
         if (ok) {
             std::memcpy(out_values, dist->contents(), total * sizeof(float));
             if (out_colors_rgb)
                 std::memcpy(out_colors_rgb, cols->contents(), total * 3 * sizeof(float));
         }
-        release_all({instrs, params, blob, table, dist, cols});
+        release_all({up.instrs, up.params, up.blob, up.table, dist, cols});
+        return ok ? Status::Ok : Status::DeviceError;
+    }
+
+    // eval_grid_batch's treatment for the caller's own MTLBuffer: the same
+    // concatenated tapes, the same table, the same kernel and ONE dispatch —
+    // only the destination binding differs, so the values are bit-identical
+    // to the host-memory batch and nothing crosses host memory on the way
+    // out. The per-grid loop the default runs pays a command buffer and a
+    // waitUntilCompleted per 8^3 lattice, which is what left the zero-copy
+    // path 25-165x behind the host-memory one it exists to beat.
+    Status eval_grid_batch_device(const GridBatchQuery& q, const DeviceBuffer& values,
+                                  const DeviceBuffer& colors) override {
+        // Only an ADOPTED backend can serve this: an MTLBuffer belongs to the
+        // device that made it.
+        if (owns_device_) return Status::Unsupported;
+        if (q.count == 0) return Status::Ok;
+        if (!q.tapes || !q.origins || values.empty() || q.nx <= 0 || q.ny <= 0 || q.nz <= 0)
+            return Status::InvalidInput;
+        const std::size_t per = static_cast<std::size_t>(q.nx) *
+                                static_cast<std::size_t>(q.ny) *
+                                static_cast<std::size_t>(q.nz);
+        const std::size_t total = per * q.count;
+        // Checked before any dispatch, so an undersized destination is refused
+        // with nothing written rather than partially filled.
+        if (values.size < static_cast<std::uint64_t>(total) * sizeof(float))
+            return Status::InvalidInput;
+        const bool want_colors = !colors.empty();
+        if (want_colors && colors.size < static_cast<std::uint64_t>(total) * 3 * sizeof(float))
+            return Status::InvalidInput;
+
+        BatchUpload up = upload_batch(q);
+        if (!up.ok) return Status::InvalidInput;
+        // Binding 5 must be a real buffer even when no colours were asked for.
+        MTL::Buffer* scratch =
+            want_colors ? nullptr : device_->newBuffer(4, MTL::ResourceStorageModeShared);
+        const ClayGridBatchUniforms u = batch_uniforms(q, want_colors);
+        const std::vector<Bound> bound = {
+            Bound{up.instrs, 0}, Bound{up.params, 0}, Bound{up.blob, 0}, Bound{up.table, 0},
+            Bound{static_cast<MTL::Buffer*>(values.handle),
+                  static_cast<NS::UInteger>(values.offset)},
+            want_colors ? Bound{static_cast<MTL::Buffer*>(colors.handle),
+                                static_cast<NS::UInteger>(colors.offset)}
+                        : Bound{scratch, 0},
+        };
+        const bool ok = dispatch_bound(pso_grid_batch_, bound, &u, sizeof(u), 6, total);
+        // dispatch waits until completed, so the work has landed here and
+        // nothing is left in flight on the caller's queue.
+        release_all({up.instrs, up.params, up.blob, up.table, scratch});
         return ok ? Status::Ok : Status::DeviceError;
     }
 
@@ -408,6 +402,86 @@ class MetalBackend final : public Backend {
             copy_in(tape.params.data(), tape.params.size() * sizeof(float)),
             copy_in(tape.blob.data(), tape.blob.size() * sizeof(float)),
         };
+    }
+
+    // A batch's per-grid tapes concatenated into three shared buffers, plus
+    // the table that says where each grid's slices start — the upload half of
+    // the clay_eval_grid_batch kernel, shared by the host-memory and
+    // device-destination batch paths so the two cannot drift. ok is false when
+    // the batch is refused (a null tape, or tapes whose concatenation
+    // overflows the table's 32-bit device offsets) and then nothing was
+    // allocated.
+    struct BatchUpload {
+        MTL::Buffer* instrs = nullptr;
+        MTL::Buffer* params = nullptr;
+        MTL::Buffer* blob = nullptr;
+        MTL::Buffer* table = nullptr;
+        bool ok = false;
+    };
+
+    BatchUpload upload_batch(const GridBatchQuery& q) {
+        BatchUpload up;
+        // First pass: sizes, so the concatenated buffers are allocated once.
+        // The table offsets are 32-bit on the device, so a batch whose tapes
+        // do not fit is refused rather than wrapped.
+        std::uint64_t n_instrs = 0, n_params = 0, n_blob = 0;
+        for (std::size_t i = 0; i < q.count; ++i) {
+            if (!q.tapes[i]) return up;
+            n_instrs += q.tapes[i]->instrs.size();
+            n_params += q.tapes[i]->params.size();
+            n_blob += q.tapes[i]->blob.size();
+        }
+        const std::uint64_t limit = 0xffffffffu;
+        if (n_instrs > limit || n_params > limit || n_blob > limit) return up;
+
+        up.instrs = scratch_buffer(n_instrs * sizeof(kernel::CTapeInstr));
+        up.params = scratch_buffer(n_params * sizeof(float));
+        up.blob = scratch_buffer(n_blob * sizeof(float));
+        up.table = scratch_buffer(q.count * sizeof(ClayBatchGrid));
+
+        // Second pass: each tape's slices land at their offsets, and the table
+        // records where.
+        auto* out_instrs = static_cast<kernel::CTapeInstr*>(up.instrs->contents());
+        auto* out_params = static_cast<float*>(up.params->contents());
+        auto* out_blob = static_cast<float*>(up.blob->contents());
+        auto* out_table = static_cast<ClayBatchGrid*>(up.table->contents());
+        std::uint32_t at_instr = 0, at_param = 0, at_blob = 0;
+        for (std::size_t i = 0; i < q.count; ++i) {
+            const scene::Tape& t = *q.tapes[i];
+            if (!t.instrs.empty())
+                std::memcpy(out_instrs + at_instr, t.instrs.data(),
+                            t.instrs.size() * sizeof(kernel::CTapeInstr));
+            if (!t.params.empty())
+                std::memcpy(out_params + at_param, t.params.data(),
+                            t.params.size() * sizeof(float));
+            if (!t.blob.empty())
+                std::memcpy(out_blob + at_blob, t.blob.data(), t.blob.size() * sizeof(float));
+            ClayBatchGrid g{};
+            g.origin[0] = q.origins[i].x;
+            g.origin[1] = q.origins[i].y;
+            g.origin[2] = q.origins[i].z;
+            g.instr_offset = at_instr;
+            g.instr_count = static_cast<unsigned int>(t.instrs.size());
+            g.param_offset = at_param;
+            g.blob_offset = at_blob;
+            out_table[i] = g;
+            at_instr += static_cast<std::uint32_t>(t.instrs.size());
+            at_param += static_cast<std::uint32_t>(t.params.size());
+            at_blob += static_cast<std::uint32_t>(t.blob.size());
+        }
+        up.ok = true;
+        return up;
+    }
+
+    static ClayGridBatchUniforms batch_uniforms(const GridBatchQuery& q, bool has_colors) {
+        ClayGridBatchUniforms u{};
+        u.spacing = q.spacing;
+        u.nx = static_cast<unsigned int>(q.nx);
+        u.ny = static_cast<unsigned int>(q.ny);
+        u.nz = static_cast<unsigned int>(q.nz);
+        u.grid_count = static_cast<unsigned int>(q.count);
+        u.has_colors = has_colors ? 1u : 0u;
+        return u;
     }
 
     // A buffer and where in it to start. Offsets matter only on the device

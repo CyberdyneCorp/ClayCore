@@ -1668,6 +1668,83 @@ math::Aabb request_brick_box(const clay_brick_request& req) {
     return math::Aabb{lo, lo + size};
 }
 
+// The batch pipeline shared by the host- and device-destination request
+// evaluators, so the two cannot drift (issue #64 applied to both): validate
+// every request BEFORE any is evaluated — a malformed one refuses the call
+// with nothing written rather than after its neighbours have already landed —
+// then build one per-revision cull index and one coarse plan over the union
+// of every request's cull region, so each per-brick compile walks only the
+// items near the batch instead of the whole document. The plan's region
+// contains every brick's, which is what makes the per-brick tapes
+// byte-identical to compiling without it.
+//
+// The per-brick culled tapes then reach `run` as GridBatchQuery CHUNKS of up
+// to 4096, so the compiled tapes held at once stay bounded — a tape carrying
+// a sampled volume is megabytes. Dims are checked uniform by both callers,
+// but each request keeps its own spacing, so a chunk splits where the
+// spacing changes and a batch that mixes caches keeps each request's own
+// lattice. Each tape is culled against its own brick DILATED by its own
+// band: an item a band outside the brick still decides samples inside it,
+// because a sample keeps its true distance whenever that distance is within
+// the band.
+//
+// run(bq, base) evaluates one chunk, whose requests start at `base`, into
+// the caller's destination — host memory or the caller's device buffer, the
+// only thing the two entry points do differently.
+template <typename Run>
+clay_result eval_requests_in_chunks(const clay_document* doc,
+                                    const clay_brick_request* requests, std::size_t count,
+                                    Run&& run) {
+    std::vector<kernel::cfloat3> origins(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        eval::GridQuery q;
+        std::size_t samples = 0;
+        clay_result r =
+            read_grid(requests[i].origin, requests[i].spacing, requests[i].dims, &q, &samples);
+        if (r != CLAY_OK) return r;
+        const float band = requests[i].band;
+        if (!(band >= 0.0f) || !std::isfinite(band))
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "a request carries a band that is not finite and >= 0");
+        origins[i] = q.origin;
+    }
+    std::shared_ptr<const scene::CullIndex> index = doc->cull_index();
+    math::Aabb batch_region;
+    for (std::size_t i = 0; i < count; ++i)
+        batch_region.expand(request_brick_box(requests[i]).dilated(requests[i].band));
+    const scene::CullPlan plan = index->plan(batch_region);
+    constexpr std::size_t kChunk = 4096;
+    std::vector<scene::Tape> tapes;
+    std::vector<const scene::Tape*> tape_ptrs;
+    for (std::size_t base = 0; base < count;) {
+        std::size_t n = 1;
+        while (n < kChunk && base + n < count &&
+               requests[base + n].spacing == requests[base].spacing)
+            ++n;
+        tapes.clear();
+        tape_ptrs.clear();
+        tapes.reserve(n);
+        tape_ptrs.reserve(n);
+        for (std::size_t i = base; i < base + n; ++i) {
+            scene::CullRegion cull{request_brick_box(requests[i]).dilated(requests[i].band)};
+            tapes.push_back(scene::compile_document(doc->doc.document, &cull, index.get(), &plan));
+            tape_ptrs.push_back(&tapes.back());
+        }
+        eval::GridBatchQuery bq;
+        bq.tapes = tape_ptrs.data();
+        bq.origins = origins.data() + base;
+        bq.spacing = requests[base].spacing;
+        bq.nx = requests[0].dims[0];
+        bq.ny = requests[0].dims[1];
+        bq.nz = requests[0].dims[2];
+        bq.count = n;
+        clay_result r = run(bq, base);
+        if (r != CLAY_OK) return r;
+        base += n;
+    }
+    return CLAY_OK;
+}
+
 }  // namespace
 
 extern "C" {
@@ -5581,60 +5658,39 @@ clay_result clay_brick_cache_eval_requests_device(const clay_document* doc, clay
                     "the device colour buffer is too small for " + std::to_string(count) +
                         " bricks");
 
-    // Every request is validated BEFORE any is evaluated (as the host-memory
-    // form does), which is also where the batch's union region for the
-    // coarse cull plan comes from.
-    for (std::size_t i = 0; i < count; ++i) {
-        eval::GridQuery q;
-        std::size_t samples = 0;
-        r = read_grid(requests[i].origin, requests[i].spacing, requests[i].dims, &q, &samples);
-        if (r != CLAY_OK) return r;
-        const float band = requests[i].band;
-        if (!(band >= 0.0f) || !std::isfinite(band))
-            return fail(CLAY_ERROR_INVALID_ARGUMENT,
-                        "a request carries a band that is not finite and >= 0");
-    }
-    // The same index + coarse plan the host-memory form uses, for the same
-    // reason: per-brick compiles that walk the batch's neighbourhood, not
-    // the document.
-    std::shared_ptr<const scene::CullIndex> index = doc->cull_index();
-    math::Aabb batch_region;
-    for (std::size_t i = 0; i < count; ++i)
-        batch_region.expand(request_brick_box(requests[i]).dilated(requests[i].band));
-    const scene::CullPlan plan = index->plan(batch_region);
-    for (std::size_t i = 0; i < count; ++i) {
-        eval::GridQuery q;
-        std::size_t samples = 0;
-        r = read_grid(requests[i].origin, requests[i].spacing, requests[i].dims, &q, &samples);
-        if (r != CLAY_OK) return r;
-        // Culled against its own brick dilated by its own band, exactly as the
-        // host-memory form does: the two produce the same values and differ
-        // only in where they land.
-        scene::CullRegion cull{request_brick_box(requests[i]).dilated(requests[i].band)};
-        scene::Tape tape =
-            scene::compile_document(doc->doc.document, &cull, index.get(), &plan);
-        // Brick i at its own slot in the caller's single allocation.
-        eval::DeviceBuffer slot = values;
-        slot.offset = values.offset + static_cast<std::uint64_t>(i) * per * sizeof(float);
-        slot.size = static_cast<std::uint64_t>(per) * sizeof(float);
-        eval::DeviceBuffer color_slot;
-        if (!colors.empty()) {
-            color_slot = colors;
-            color_slot.offset =
-                colors.offset + static_cast<std::uint64_t>(i) * per * 3 * sizeof(float);
-            color_slot.size = static_cast<std::uint64_t>(per) * 3 * sizeof(float);
-        }
-        switch (device->backend->eval_grid_device(tape, q, slot, color_slot)) {
-            case eval::Status::Ok: break;
-            case eval::Status::Unsupported:
-                return fail(CLAY_ERROR_UNSUPPORTED,
-                            "this backend does not evaluate into a caller's device buffer");
-            case eval::Status::InvalidInput:
-                return fail(CLAY_ERROR_INVALID_ARGUMENT, "a brick's device slot is invalid");
-            default: return fail(CLAY_ERROR_BACKEND, "device evaluation failed");
-        }
-    }
-    return CLAY_OK;
+    // The same batch pipeline the host-memory form runs — validation up
+    // front, one cull index and coarse plan, per-brick culled tapes in
+    // chunks — with the whole chunk reaching the adopted backend as ONE
+    // batched device evaluation (issue #64 applied to the zero-copy path:
+    // the per-brick loop paid a command buffer and a wait per 8^3 lattice,
+    // which left this path 25-165x behind the host-memory one). Each chunk
+    // lands at its requests' fixed slots in the caller's single allocation,
+    // so brick i still occupies out_values[i * dim^3 ...] exactly as
+    // documented, and the values are identical to the host-memory form's.
+    return eval_requests_in_chunks(
+        doc, requests, count,
+        [&](const eval::GridBatchQuery& bq, std::size_t base) -> clay_result {
+            eval::DeviceBuffer slot = values;
+            slot.offset = values.offset + static_cast<std::uint64_t>(base) * per * sizeof(float);
+            slot.size = static_cast<std::uint64_t>(bq.count) * per * sizeof(float);
+            eval::DeviceBuffer color_slot;
+            if (!colors.empty()) {
+                color_slot = colors;
+                color_slot.offset =
+                    colors.offset + static_cast<std::uint64_t>(base) * per * 3 * sizeof(float);
+                color_slot.size = static_cast<std::uint64_t>(bq.count) * per * 3 * sizeof(float);
+            }
+            switch (device->backend->eval_grid_batch_device(bq, slot, color_slot)) {
+                case eval::Status::Ok: return CLAY_OK;
+                case eval::Status::Unsupported:
+                    return fail(CLAY_ERROR_UNSUPPORTED,
+                                "this backend does not evaluate into a caller's device buffer");
+                case eval::Status::InvalidInput:
+                    return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                                "a brick's device slot is invalid");
+                default: return fail(CLAY_ERROR_BACKEND, "device evaluation failed");
+            }
+        });
 }
 
 // -- the compiled tape (c-abi spec: the compiled tape is exportable) ---------
@@ -5941,75 +5997,21 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
     const char* name = backend ? backend : "cpu";
     eval::Backend* b = eval::Registry::instance().find(name);
     if (!b) return fail(CLAY_ERROR_NOT_FOUND, std::string("backend not registered: ") + name);
-    // Every request is validated BEFORE any is evaluated, so a malformed one
-    // refuses the call with nothing written rather than after its neighbours
-    // have already landed.
-    std::vector<kernel::cfloat3> origins(count);
-    for (std::size_t i = 0; i < count; ++i) {
-        eval::GridQuery q;
-        std::size_t samples = 0;
-        r = read_grid(requests[i].origin, requests[i].spacing, requests[i].dims, &q, &samples);
-        if (r != CLAY_OK) return r;
-        const float band = requests[i].band;
-        if (!(band >= 0.0f) || !std::isfinite(band))
-            return fail(CLAY_ERROR_INVALID_ARGUMENT,
-                        "a request carries a band that is not finite and >= 0");
-        origins[i] = q.origin;
-    }
-    // One per-revision cull index and one coarse plan over the union of
-    // every request's cull region: each per-brick compile then walks only
-    // the items near the batch, so a dab's refill no longer pays a
-    // whole-document walk per brick. The plan's region contains every
-    // brick's, which is what makes the per-brick tapes byte-identical to
-    // compiling without it.
-    std::shared_ptr<const scene::CullIndex> index = doc->cull_index();
-    math::Aabb batch_region;
-    for (std::size_t i = 0; i < count; ++i)
-        batch_region.expand(request_brick_box(requests[i]).dilated(requests[i].band));
-    const scene::CullPlan plan = index->plan(batch_region);
     // The whole batch goes to the backend as BATCHES of per-brick culled
     // tapes, not one call per brick: a GPU backend turns a batch into a single
     // device submission, and a per-brick submission costs more than the 512
-    // samples it carries (issue #64). Chunked so the compiled tapes held at
-    // once stay bounded — a tape carrying a sampled volume is megabytes.
-    constexpr std::size_t kChunk = 4096;
-    std::vector<scene::Tape> tapes;
-    std::vector<const scene::Tape*> tape_ptrs;
-    for (std::size_t base = 0; base < count;) {
-        // A chunk shares one spacing as well as one lattice size: dims are
-        // checked uniform above, but spacing is not, and each request keeps
-        // its own — so a batch that mixes spacings splits where they change.
-        std::size_t n = 1;
-        while (n < kChunk && base + n < count &&
-               requests[base + n].spacing == requests[base].spacing)
-            ++n;
-        tapes.clear();
-        tape_ptrs.clear();
-        tapes.reserve(n);
-        tape_ptrs.reserve(n);
-        for (std::size_t i = base; i < base + n; ++i) {
-            // Dilated by the request's OWN band: an item a band outside the
-            // brick still decides samples inside it, because a sample keeps
-            // its true distance whenever that distance is within the band.
-            scene::CullRegion cull{request_brick_box(requests[i]).dilated(requests[i].band)};
-            tapes.push_back(scene::compile_document(doc->doc.document, &cull, index.get(), &plan));
-            tape_ptrs.push_back(&tapes.back());
-        }
-        eval::GridBatchQuery bq;
-        bq.tapes = tape_ptrs.data();
-        bq.origins = origins.data() + base;
-        bq.spacing = requests[base].spacing;
-        bq.nx = requests[0].dims[0];
-        bq.ny = requests[0].dims[1];
-        bq.nz = requests[0].dims[2];
-        bq.count = n;
-        if (b->eval_grid_batch(bq, out_values + base * per,
-                               out_colors_rgb ? out_colors_rgb + base * per * 3 : nullptr) !=
-            eval::Status::Ok)
-            return fail(CLAY_ERROR_BACKEND, "eval_grid_batch failed");
-        base += n;
-    }
-    return CLAY_OK;
+    // samples it carries (issue #64). Validation, the cull index and the
+    // chunking rules live in eval_requests_in_chunks, shared with the
+    // device-destination form.
+    return eval_requests_in_chunks(
+        doc, requests, count,
+        [&](const eval::GridBatchQuery& bq, std::size_t base) -> clay_result {
+            if (b->eval_grid_batch(bq, out_values + base * per,
+                                   out_colors_rgb ? out_colors_rgb + base * per * 3
+                                                  : nullptr) != eval::Status::Ok)
+                return fail(CLAY_ERROR_BACKEND, "eval_grid_batch failed");
+            return CLAY_OK;
+        });
 }
 
 clay_result clay_brick_cache_submit(clay_brick_cache* cache,
