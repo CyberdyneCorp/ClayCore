@@ -10,6 +10,7 @@ add_executable(clay_unit_tests
   unit/test_field.cpp
   unit/test_math.cpp
   unit/test_scene.cpp
+  unit/test_cull_index.cpp
   unit/test_extended_blends.cpp
   unit/test_commands.cpp
   unit/test_parity.cpp

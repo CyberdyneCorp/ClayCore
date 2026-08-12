@@ -11,6 +11,7 @@
 
 #include "clay/eval/backend.h"
 #include "clay/kernel/field.h"
+#include "clay/scene/cull_index.h"
 
 namespace clay {
 namespace mesh {
@@ -401,7 +402,8 @@ namespace {
 // every sample lands where the tapes agree exactly and the attributes match a
 // full-tape evaluation bit for bit.
 void apply_brick_attributes(Mesh& m, const brick::BrickCache& cache, const scene::Document& doc,
-                            const MeshingOptions& options) {
+                            const MeshingOptions& options,
+                            const scene::CullIndex* cull_index) {
     const bool colors = options.colors;
     const bool gradients = options.normals == NormalMode::Gradient;
     const float brick_width =
@@ -419,11 +421,24 @@ void apply_brick_attributes(Mesh& m, const brick::BrickCache& cache, const scene
     }
     if (colors) m.colors.resize(m.positions.size());
     if (gradients) m.normals.resize(m.positions.size());
+    // One cull index and one coarse plan for the whole vertex set (an
+    // uncached index costs one bounds pass — what a single per-brick compile
+    // used to pay — amortized over every group): each group's compile then
+    // walks only the items near the meshed bricks, not the whole document.
+    std::optional<scene::CullIndex> local_index;
+    if (!cull_index) {
+        local_index.emplace(doc);
+        cull_index = &*local_index;
+    }
+    math::Aabb all_regions;
+    for (const auto& [key, verts] : groups)
+        all_regions.expand(cache.cull_region(key).dilated(options.gradient_eps));
+    const scene::CullPlan plan = cull_index->plan(all_regions);
     for (const auto& [key, verts] : groups) {
         // Dilated by gradient_eps on top of the band, so the tetrahedron taps
         // of a vertex at the region's edge stay inside the culled zone.
         const scene::CullRegion cull{cache.cull_region(key).dilated(options.gradient_eps)};
-        const scene::Tape tape = scene::compile_document(doc, &cull);
+        const scene::Tape tape = scene::compile_document(doc, &cull, cull_index, &plan);
         auto field = [&](cfloat3 p) { return tape.eval(p).d; };
         for (std::uint32_t i : verts) {
             if (colors) m.colors[i] = tape.eval(m.positions[i]).color;
@@ -437,7 +452,7 @@ void apply_brick_attributes(Mesh& m, const brick::BrickCache& cache, const scene
 
 Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_attributes,
                  const MeshingOptions& options, const std::vector<brick::BrickKey>* keys,
-                 std::vector<BrickMeshRange>* out_ranges) {
+                 std::vector<BrickMeshRange>* out_ranges, const scene::CullIndex* cull_index) {
     const int dim = cache.config().dim;
     const float vs = cache.config().voxel_size;
     auto global_sample = [&](int i, int j, int k) -> float {
@@ -492,7 +507,7 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
     }
     Mesh m = std::move(b.out);
     if (doc_for_attributes && (options.colors || options.normals == NormalMode::Gradient))
-        apply_brick_attributes(m, cache, *doc_for_attributes, options);
+        apply_brick_attributes(m, cache, *doc_for_attributes, options, cull_index);
     // Face normals are area-weighted from the triangles and need no field,
     // which is what NormalMode::Face means and what the C header promises a
     // caller who passes no document ("positions and face normals"). Without

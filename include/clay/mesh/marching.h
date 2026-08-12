@@ -106,10 +106,16 @@ struct BrickMeshRange {
 // call and may move between shares as the requested set changes.
 //
 // `out_ranges` (may be nullptr) receives one entry per key, in the order given.
+//
+// `cull_index` (scene/cull_index.h) may share the caller's per-revision cull
+// index so the attribute pass reuses its cached bounds; nullptr builds one
+// for the call when attributes need the document. Either way the attributes
+// are unchanged — the index only accelerates the per-brick culled compiles.
 Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_attributes,
                  const MeshingOptions& options = {},
                  const std::vector<brick::BrickKey>* keys = nullptr,
-                 std::vector<BrickMeshRange>* out_ranges = nullptr);
+                 std::vector<BrickMeshRange>* out_ranges = nullptr,
+                 const scene::CullIndex* cull_index = nullptr);
 
 // Attribute helpers (meshing spec: vertex attributes).
 void apply_tape_attributes(Mesh& m, const scene::Tape& tape, const MeshingOptions& options);

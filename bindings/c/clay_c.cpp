@@ -36,6 +36,7 @@
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
 #include "clay/scene/consolidate.h"
+#include "clay/scene/cull_index.h"
 #include "clay/scene/tape.h"
 #include "clay/io/parity_fixture.h"
 #include "clay/version.h"
@@ -841,14 +842,22 @@ struct clay_document {
                       [this] { return pick::pickable_tape(doc.document); });
     }
 
+    // The per-revision cull index (scene/cull_index.h): cached bounds and
+    // coarse pruning for per-brick culled compiles, keyed on the same
+    // revision as the tape — an edit invalidates both the same way.
+    std::shared_ptr<const scene::CullIndex> cull_index() const {
+        return cached(index_cache_, index_revision_,
+                      [this] { return scene::CullIndex(doc.document); });
+    }
+
   private:
-    template <typename Build>
-    std::shared_ptr<const scene::Tape> cached(std::shared_ptr<const scene::Tape>& slot,
-                                              std::uint64_t& slot_revision, Build build) const {
+    template <typename T, typename Build>
+    std::shared_ptr<const T> cached(std::shared_ptr<const T>& slot,
+                                    std::uint64_t& slot_revision, Build build) const {
         const std::uint64_t now = revision.load(std::memory_order_relaxed);
         std::lock_guard<std::mutex> lock(cache_mutex_);
         if (!slot || slot_revision != now) {
-            slot = std::make_shared<const scene::Tape>(build());
+            slot = std::make_shared<const T>(build());
             slot_revision = now;
         }
         return slot;
@@ -859,6 +868,8 @@ struct clay_document {
     mutable std::uint64_t tape_revision_ = 0;
     mutable std::shared_ptr<const scene::Tape> pick_cache_;
     mutable std::uint64_t pick_revision_ = 0;
+    mutable std::shared_ptr<const scene::CullIndex> index_cache_;
+    mutable std::uint64_t index_revision_ = 0;
 };
 
 // The item builder is a scene::Node under construction. Whether a transition
@@ -5371,9 +5382,13 @@ clay_result clay_eval_grid(const clay_document* doc, const char* backend,
         return eval_grid_into(*doc->tape(), backend, query, out_values, out_colors_rgb);
     // A culled tape is compiled per call and deliberately not cached:
     // consecutive bricks want different regions, so a slot keyed on the
-    // document alone would thrash.
+    // document alone would thrash. The compile itself runs through the
+    // revision-cached cull index, so it walks the region's neighbourhood
+    // rather than the whole document.
+    std::shared_ptr<const scene::CullIndex> index = doc->cull_index();
+    const scene::CullPlan plan = index->plan(region);
     scene::CullRegion cull{region};
-    scene::Tape tape = scene::compile_document(doc->doc.document, &cull);
+    scene::Tape tape = scene::compile_document(doc->doc.document, &cull, index.get(), &plan);
     return eval_grid_into(tape, backend, query, out_values, out_colors_rgb);
 }
 
@@ -5507,8 +5522,10 @@ clay_result clay_eval_grid_device(const clay_document* doc, clay_device* device,
     scene::Tape culled;
     const scene::Tape* tape = nullptr;
     if (has_region) {
+        std::shared_ptr<const scene::CullIndex> index = doc->cull_index();
+        const scene::CullPlan plan = index->plan(region);
         scene::CullRegion cull{region};
-        culled = scene::compile_document(doc->doc.document, &cull);
+        culled = scene::compile_document(doc->doc.document, &cull, index.get(), &plan);
         tape = &culled;
     } else {
         whole = doc->tape();
@@ -5564,6 +5581,9 @@ clay_result clay_brick_cache_eval_requests_device(const clay_document* doc, clay
                     "the device colour buffer is too small for " + std::to_string(count) +
                         " bricks");
 
+    // Every request is validated BEFORE any is evaluated (as the host-memory
+    // form does), which is also where the batch's union region for the
+    // coarse cull plan comes from.
     for (std::size_t i = 0; i < count; ++i) {
         eval::GridQuery q;
         std::size_t samples = 0;
@@ -5573,11 +5593,26 @@ clay_result clay_brick_cache_eval_requests_device(const clay_document* doc, clay
         if (!(band >= 0.0f) || !std::isfinite(band))
             return fail(CLAY_ERROR_INVALID_ARGUMENT,
                         "a request carries a band that is not finite and >= 0");
+    }
+    // The same index + coarse plan the host-memory form uses, for the same
+    // reason: per-brick compiles that walk the batch's neighbourhood, not
+    // the document.
+    std::shared_ptr<const scene::CullIndex> index = doc->cull_index();
+    math::Aabb batch_region;
+    for (std::size_t i = 0; i < count; ++i)
+        batch_region.expand(request_brick_box(requests[i]).dilated(requests[i].band));
+    const scene::CullPlan plan = index->plan(batch_region);
+    for (std::size_t i = 0; i < count; ++i) {
+        eval::GridQuery q;
+        std::size_t samples = 0;
+        r = read_grid(requests[i].origin, requests[i].spacing, requests[i].dims, &q, &samples);
+        if (r != CLAY_OK) return r;
         // Culled against its own brick dilated by its own band, exactly as the
         // host-memory form does: the two produce the same values and differ
         // only in where they land.
-        scene::CullRegion cull{request_brick_box(requests[i]).dilated(band)};
-        scene::Tape tape = scene::compile_document(doc->doc.document, &cull);
+        scene::CullRegion cull{request_brick_box(requests[i]).dilated(requests[i].band)};
+        scene::Tape tape =
+            scene::compile_document(doc->doc.document, &cull, index.get(), &plan);
         // Brick i at its own slot in the caller's single allocation.
         eval::DeviceBuffer slot = values;
         slot.offset = values.offset + static_cast<std::uint64_t>(i) * per * sizeof(float);
@@ -5651,10 +5686,13 @@ clay_result clay_tape_export(const clay_document* doc, const float region_min[3]
     if (has_region) {
         // Compiled per call and deliberately not cached, exactly as
         // clay_eval_grid does it: consecutive regions differ, so a slot keyed
-        // on the document alone would thrash.
+        // on the document alone would thrash. The cull index is the cached
+        // part, keyed on the revision this handle already records.
+        std::shared_ptr<const scene::CullIndex> index = doc->cull_index();
+        const scene::CullPlan plan = index->plan(region);
         scene::CullRegion cull{region};
-        handle->tape =
-            std::make_shared<const scene::Tape>(scene::compile_document(doc->doc.document, &cull));
+        handle->tape = std::make_shared<const scene::Tape>(
+            scene::compile_document(doc->doc.document, &cull, index.get(), &plan));
     } else {
         handle->tape = doc->tape();  // a refcount, not a compile
     }
@@ -5918,6 +5956,17 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
                         "a request carries a band that is not finite and >= 0");
         origins[i] = q.origin;
     }
+    // One per-revision cull index and one coarse plan over the union of
+    // every request's cull region: each per-brick compile then walks only
+    // the items near the batch, so a dab's refill no longer pays a
+    // whole-document walk per brick. The plan's region contains every
+    // brick's, which is what makes the per-brick tapes byte-identical to
+    // compiling without it.
+    std::shared_ptr<const scene::CullIndex> index = doc->cull_index();
+    math::Aabb batch_region;
+    for (std::size_t i = 0; i < count; ++i)
+        batch_region.expand(request_brick_box(requests[i]).dilated(requests[i].band));
+    const scene::CullPlan plan = index->plan(batch_region);
     // The whole batch goes to the backend as BATCHES of per-brick culled
     // tapes, not one call per brick: a GPU backend turns a batch into a single
     // device submission, and a per-brick submission costs more than the 512
@@ -5943,7 +5992,7 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
             // brick still decides samples inside it, because a sample keeps
             // its true distance whenever that distance is within the band.
             scene::CullRegion cull{request_brick_box(requests[i]).dilated(requests[i].band)};
-            tapes.push_back(scene::compile_document(doc->doc.document, &cull));
+            tapes.push_back(scene::compile_document(doc->doc.document, &cull, index.get(), &plan));
             tape_ptrs.push_back(&tapes.back());
         }
         eval::GridBatchQuery bq;
@@ -6172,9 +6221,13 @@ clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_docu
     auto* handle = new clay_mesh();
     // The document rather than its compiled tape: gradient normals and colours
     // are evaluated through per-brick CULLED tapes, so their cost follows the
-    // bricks named rather than the total document (issue #73).
+    // bricks named rather than the total document (issue #73). The document's
+    // revision-cached cull index rides along so the attribute pass reuses the
+    // bounds the refill path just computed.
+    std::shared_ptr<const scene::CullIndex> index = doc ? doc->cull_index() : nullptr;
     handle->data = mesh::mesh_bricks(cache->cache, doc ? &doc->doc.document : nullptr, options,
-                                     keys_xyz ? &subset : nullptr, out_ranges ? &ranges : nullptr);
+                                     keys_xyz ? &subset : nullptr, out_ranges ? &ranges : nullptr,
+                                     index.get());
     if (out_ranges)
         for (std::size_t i = 0; i < ranges.size(); ++i) {
             out_ranges[i].key[0] = ranges[i].key.x;
