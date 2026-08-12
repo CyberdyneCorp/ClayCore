@@ -663,6 +663,13 @@ clay_result clay_layer_set_stroke_points(clay_document* doc, clay_layer_id layer
  * put there. A host that RELOADS a document knows nothing, and without this it
  * cannot edit a curve — or a swept tube's guide — it did not author.
  *
+ * A CLAY_PRIM_ARMATURE node answers here too: its nodes are the same x, y, z,
+ * radius list the setter shares with the stroke, so this call serves the
+ * geometry half of a rig and clay_layer_armature_parents below the topology
+ * half, mirroring the split on the setter side. An armature has no curve
+ * settings, so out_closed reads 0 and out_tolerance the default it never
+ * consults.
+ *
  * Size-query pattern, as clay_cut_polygon_from_curve uses: call with
  * out_xyzr == NULL to receive the point count in *count, then again with a
  * buffer of count*4 floats. *count is the capacity in POINTS going in and the
@@ -685,6 +692,32 @@ clay_result clay_layer_stroke_points(const clay_document* doc, clay_layer_id lay
                                      int32_t* out_types, float* out_in_handles_xyz,
                                      float* out_out_handles_xyz, int32_t* out_closed,
                                      float* out_tolerance);
+
+/* The topology half of a placed armature, as clay_item_set_armature_parents
+ * took it: one parent index per node, a root naming itself. A separate call
+ * rather than another parameter on the reader above because the setters are
+ * already split, and for the setters' own reason: an armature IS a stroke plus
+ * a tree, and parents are the other half of a different primitive, not an
+ * optional attribute a curve happens to lack. A node that is not an armature
+ * is therefore CLAY_ERROR_INVALID_ARGUMENT.
+ *
+ * Same size-query pattern as the call above, counted in NODES: out_parents ==
+ * NULL receives the node count in *count, and a buffer that is too small gets
+ * CLAY_ERROR_BUFFER_TOO_SMALL with the needed count in *count and writes
+ * nothing. The count is the one the xyzr readback reports — the two halves are
+ * parallel arrays — and it holds even for a tree authored with fewer parents
+ * than points: the missing tail reads back as roots, which is exactly the
+ * reading compilation makes of it, so what comes back is always the tree the
+ * document EVALUATES. For any tree the setter accepted whole, the round trip
+ * is exact.
+ *
+ * The indices are the ones clay_layer_armature_edit takes, which is what makes
+ * a reloaded rig posable at all: read the tree, pick the subtree, edit by
+ * index. Reading is not editing: a ghosted, locked or hidden layer answers
+ * normally. */
+clay_result clay_layer_armature_parents(const clay_document* doc, clay_layer_id layer,
+                                        clay_node_id node, uint32_t* out_parents,
+                                        size_t* count);
 
 /* Parameters of a spatial morph, in world space. Required by the matching
  * transition op and rejected with any other op: linear morphs along the
@@ -753,11 +786,25 @@ clay_result clay_layer_add_item_in_group(clay_document* doc, clay_layer_id layer
  * writes nothing.
  *
  * A node that is not a group is CLAY_ERROR_INVALID_ARGUMENT — which is also
- * how a host that RELOADED a document tells a group from an item, since
- * nothing else in this ABI answers that question. Reading is not editing, so a
- * ghosted, locked or hidden layer answers normally. */
+ * how a host that RELOADED a document tells a group from an item, since before
+ * clay_layer_node_prim below nothing else in this ABI answered that question.
+ * Reading is not editing, so a ghosted, locked or hidden layer answers
+ * normally. */
 clay_result clay_layer_children(const clay_document* doc, clay_layer_id layer,
                                 clay_node_id node, clay_node_id* out_children, size_t* count);
+
+/* Which primitive a placed item carries — clay_prim, the value
+ * clay_item_create took. This is what lets a host that RELOADED a document
+ * FIND its armature (or any other item worth a typed reader) instead of
+ * probing every node against readers that refuse until one does not: ask what
+ * the node is, then call the reader that applies.
+ *
+ * A group carries no primitive and is CLAY_ERROR_INVALID_ARGUMENT — the dual
+ * of clay_layer_children refusing an item, so between the two calls every node
+ * answers exactly one question. Reading is not editing: a ghosted, locked or
+ * hidden layer answers normally. */
+clay_result clay_layer_node_prim(const clay_document* doc, clay_layer_id layer,
+                                 clay_node_id node, int32_t* out_prim);
 
 
 /* -- evaluation ------------------------------------------------------------ */

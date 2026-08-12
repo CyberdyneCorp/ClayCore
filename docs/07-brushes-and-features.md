@@ -536,6 +536,16 @@ A tree whose parents do not form a forest — a cycle, or an index out of range 
 is **refused** rather than stored, because a cycle would make the field depend
 on the order links are walked rather than on the tree.
 
+**A placed armature reads back** (#77). The two halves come back the way they
+went in: `clay_layer_stroke_points` serves the nodes — the same x, y, z, radius
+list a stroke's reader already returned — and `clay_layer_armature_parents` the
+topology, one parent index per node with a root naming itself. The indices are
+the ones `clay_layer_armature_edit` takes, which is what lets a host that
+reloaded a document re-pose a rig it did not author; branching topology is not
+recoverable from the skinned surface, so without the reader the tree was simply
+gone. `clay_layer_node_prim` answers which primitive a placed node carries, so
+the armature is findable without probing readers until one stops refusing.
+
 ---
 
 ## 7. Voxel sculpting verbs
