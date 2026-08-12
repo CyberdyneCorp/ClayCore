@@ -1994,6 +1994,79 @@ clay_result clay_document_layer_protection(const clay_document* doc, clay_layer_
     return CLAY_OK;
 }
 
+// -- discovering layers ------------------------------------------------------
+
+clay_result clay_document_layer_count(const clay_document* doc, size_t* out_count) {
+    if (!doc || !out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or count");
+    *out_count = doc->doc.document.layers.size();
+    return CLAY_OK;
+}
+
+clay_result clay_document_layer_at(const clay_document* doc, size_t index,
+                                   clay_layer_id* out_layer) {
+    if (!doc || !out_layer)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out pointer");
+    const std::vector<scene::Layer>& layers = doc->doc.document.layers;
+    if (index >= layers.size())
+        return fail(CLAY_ERROR_NOT_FOUND, "no layer at index " + std::to_string(index) +
+                                              ": the document has " +
+                                              std::to_string(layers.size()) + " layers");
+    *out_layer = layers[index].id;
+    return CLAY_OK;
+}
+
+namespace {
+constexpr std::size_t kLayerInfoOriginal =
+    offsetof(clay_layer_info, locked) + sizeof(std::int32_t);
+}  // namespace
+
+clay_result clay_document_layer_info(const clay_document* doc, clay_layer_id layer,
+                                     clay_layer_info* out_info) {
+    if (!doc || !out_info) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or info");
+    const std::vector<scene::Layer>& layers = doc->doc.document.layers;
+    for (std::size_t i = 0; i < layers.size(); ++i) {
+        const scene::Layer& l = layers[i];
+        if (l.id != layer) continue;
+        // An OUTPUT descriptor: struct_size is the caller saying how much of
+        // it exists, so it is probed and then written back (see
+        // clay_layer_field_report).
+        clay_layer_info probe;
+        clay_result r = read_desc(out_info, kLayerInfoOriginal, &probe);
+        if (r != CLAY_OK) return r;
+        const std::uint32_t declared = out_info->struct_size;
+        *out_info = clay_layer_info{};
+        out_info->struct_size = declared;
+        out_info->id = l.id;
+        out_info->representation = static_cast<std::int32_t>(l.kind);
+        out_info->stack_index = static_cast<std::int32_t>(i);
+        out_info->visible = l.visible ? 1 : 0;
+        out_info->ghost = l.ghost ? 1 : 0;
+        out_info->locked = l.locked ? 1 : 0;
+        return CLAY_OK;
+    }
+    return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+}
+
+clay_result clay_layer_name(const clay_document* doc, clay_layer_id layer, char* buffer,
+                            size_t* size) {
+    if (!doc || !size) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or size");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    const std::size_t needed = l->name.size() + 1;
+    if (!buffer) {
+        *size = needed;
+        return CLAY_OK;
+    }
+    if (*size < needed) {
+        *size = needed;
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "the name needs " + std::to_string(needed) + " bytes");
+    }
+    std::memcpy(buffer, l->name.c_str(), needed);
+    *size = needed;
+    return CLAY_OK;
+}
+
 clay_result clay_document_set_layer_transform(clay_document* doc, clay_layer_id layer,
                                               const float position[3],
                                               const float rotation_axis[3],

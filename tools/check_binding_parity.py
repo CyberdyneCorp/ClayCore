@@ -236,7 +236,6 @@ EXEMPT = {
     "Armature.parents": "reads a builder's own state back, as above",
     "Armature.node_count": "reads a builder's own state back, as above",
     "Profile.point_count": "reads a builder's own state back, as above",
-    "Layer.name": "reads back the name the caller passed to clay_add_sdf_layer",
     "Layer.resolution": "per-layer meshing hint the C ABI does not author; "
                         "clay_mesh_params carries the resolution a mesh is built at",
     "Layer.id": "in C the id IS the handle — clay_layer_id is the type every "

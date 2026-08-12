@@ -428,6 +428,63 @@ clay_result clay_document_set_layer_transform(clay_document* doc, clay_layer_id 
 clay_result clay_set_layer_mirror(clay_document* doc, clay_layer_id layer, int32_t axis_x,
                                   int32_t axis_y, int32_t axis_z, float mirror_k);
 
+/* -- discovering layers ----------------------------------------------------
+ *
+ * The read half of the layer surface (#69). Everything a host can set about a
+ * layer — name, visibility, protection, representation, stack position — is
+ * readable back, so a document that comes back from clay_document_load comes
+ * back whole rather than anonymous. Before this existed the only recourse was
+ * probing ids against clay_layer_bounds, which recovers ids alone, in id
+ * order — and id order is creation order, so a document reordered with
+ * clay_document_move_layer EVALUATED differently after a reload.
+ *
+ * Reading is not editing: a ghosted, locked or hidden layer answers every
+ * query below normally. */
+
+/* How a layer carries its content. The values match the layer record's kind
+ * byte in a saved document, and new kinds are appended, never renumbered. */
+typedef enum clay_layer_representation {
+    CLAY_LAYER_SDF = 0,   /* an edit tree (clay_add_sdf_layer) */
+    CLAY_LAYER_VOXEL = 1, /* a sampled grid (clay_document_add_voxel_layer) */
+    CLAY_LAYER_MESH = 2   /* imported triangles (clay_document_add_mesh_layer) */
+} clay_layer_representation;
+
+/* Count-then-index enumeration, in STACK ORDER — index 0 is the layer
+ * evaluated first, exactly the index clay_document_move_layer takes. An index
+ * of count or beyond is CLAY_ERROR_NOT_FOUND. Ids are stable across
+ * save/load, so enumerate once and hold the ids; they are not dense — a
+ * removal leaves a gap — which is why enumeration goes through an index
+ * rather than the id space. */
+clay_result clay_document_layer_count(const clay_document* doc, size_t* out_count);
+clay_result clay_document_layer_at(const clay_document* doc, size_t index,
+                                   clay_layer_id* out_layer);
+
+/* Everything about one layer in one call. An OUTPUT descriptor: set
+ * struct_size to the sizeof of the struct you compiled against and the
+ * library fills what you declared (see descriptor struct versioning). */
+typedef struct clay_layer_info {
+    uint32_t struct_size;   /* = sizeof(clay_layer_info); required */
+    clay_layer_id id;       /* the id queried, so the struct is self-contained */
+    int32_t representation; /* clay_layer_representation */
+    int32_t stack_index;    /* position in evaluation order; what
+                             * clay_document_move_layer sets */
+    int32_t visible;        /* what clay_document_set_layer_visible set */
+    int32_t ghost;          /* both what clay_document_set_layer_protection */
+    int32_t locked;         /* set; also clay_document_layer_protection */
+} clay_layer_info;
+
+clay_result clay_document_layer_info(const clay_document* doc, clay_layer_id layer,
+                                     clay_layer_info* out_info);
+
+/* The layer's UTF-8 name by the size-query pattern clay_list_backends uses:
+ * call with buffer == NULL to receive the required size (incl. NUL) in
+ * *size; call again with an adequate buffer to fill it. A buffer that is too
+ * small gets CLAY_ERROR_BUFFER_TOO_SMALL with the needed size in *size and
+ * writes nothing. The name is a string rather than a clay_layer_info field
+ * because it is the one layer property without a fixed size. */
+clay_result clay_layer_name(const clay_document* doc, clay_layer_id layer, char* buffer,
+                            size_t* size);
+
 /* -- item builder ---------------------------------------------------------- */
 
 /* An edit composed one call at a time, then appended to a layer. This is the
