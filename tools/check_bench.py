@@ -44,6 +44,16 @@ MAX_RATIO = [
     # generosity as above: it catches the O(document x bricks) walk coming
     # back, not runner noise.
     ("BM_DabRefillGrownDoc", "BM_DabRefillFreshDoc", 3.0),
+    # Batched brick-mesh attributes (accel/shared-attribute-tape): on a
+    # densely sculpted region the attribute pass is held to a bounded
+    # multiple of refilling the same bricks against the same document. Both
+    # evaluate similar point counts against the same long culled tapes
+    # through the CPU backend's pool, so the healthy ratio is a few x (5.3x
+    # on an M2 Max) and stays put; the attribute taps falling back to one
+    # vertex at a time on one core measured 14x there. 10x catches the
+    # serial path coming back on capable machines without flaking on small
+    # runners, where both sides lose the pool together.
+    ("BM_MeshBricksGradDenseDoc", "BM_DabRefillDenseDoc", 10.0),
 ]
 
 

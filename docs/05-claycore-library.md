@@ -122,6 +122,7 @@ are untouched, so a single pick or a small brush batch still runs inline.
 Backend interface (`clay::eval::Backend`), identical everywhere:
 
 - `eval_points(tape, points[]) -> distances[] / gradients[] / colors[]` — batch field queries
+- `eval_points_batch(tapes[], runs[]) -> distances[] / gradients[] / colors[]` — many point runs, each against its own (typically per-brick culled) tape, in one call; the CPU backend dispatches the flattened batch across its thread pool, and the brick-mesh attribute pass (gradient normals + colors) evaluates through it
 - `eval_bricks(tape, brick_ids[]) -> narrow-band brick data` — incremental cache fill
 - `raycast(tape, rays[]) -> hits[]` — picking/rendering support
 - `mesh(tape | bricks, params) -> triangles` — GPU meshing where supported
@@ -190,7 +191,7 @@ The document tree the app and specs already define, owned here so every consumer
 - **Dual contouring** (QEF + Hermite data): sharp-edge export for the chamfer aesthetic; manifold DC variant. Ships behind a flag; roadmap-hardened after v1.
 - **Decimation**: quadric edge collapse via `meshoptimizer`, color-attribute aware, target ratio or error.
 - **Validation**: watertight/manifold/degenerate checks, self-intersection sampling — the primitive behind CI's export gates and the app's "guaranteed clean booleans" claim.
-- **Attributes**: vertex colors sampled from the color field (blend-gradient faithful), normals (field gradient or face), optional UV box-projection utility.
+- **Attributes**: vertex colors sampled from the color field (blend-gradient faithful), normals (field gradient or face), optional UV box-projection utility. For a brick mesh the gradient/color taps go through per-brick culled tapes — one tape per involved brick, shared by normals and colors — and are evaluated as ONE flattened batch on the CPU backend's thread pool (`eval_points_batch`), so a dense re-mesh costs about what refilling the same bricks does instead of one core's worth of serial taps; the results are byte-identical to the serial evaluation.
 
 ## 8. File I/O (`clay::io`)
 

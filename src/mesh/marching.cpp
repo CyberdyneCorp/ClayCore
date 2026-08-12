@@ -434,13 +434,69 @@ void apply_brick_attributes(Mesh& m, const brick::BrickCache& cache, const scene
     for (const auto& [key, verts] : groups)
         all_regions.expand(cache.cull_region(key).dilated(options.gradient_eps));
     const scene::CullPlan plan = cull_index->plan(all_regions);
+    // ONE culled tape per group, shared by the colour and the normal of every
+    // vertex the group holds. The evaluation goes to the CPU backend as a
+    // single flattened batch (eval_points_batch) rather than a serial loop
+    // here: with the index and plan the compiles above are cheap, and what
+    // kept a dense re-mesh slow was five scalar field taps per vertex on one
+    // core while the refill over the same bricks ran on all of them. The
+    // backend's reference path computes exactly the taps this loop computed —
+    // same tape, same points, same gradient_eps — so the attributes are
+    // unchanged bit for bit.
+    std::vector<scene::Tape> tapes;
+    std::vector<const scene::Tape*> tape_ptrs;
+    std::vector<std::size_t> offsets;
+    std::vector<std::uint32_t> order;  // vertex index per flattened point
+    tapes.reserve(groups.size());
+    tape_ptrs.reserve(groups.size());
+    offsets.reserve(groups.size() + 1);
+    order.reserve(m.positions.size());
+    offsets.push_back(0);
     for (const auto& [key, verts] : groups) {
         // Dilated by gradient_eps on top of the band, so the tetrahedron taps
         // of a vertex at the region's edge stay inside the culled zone.
         const scene::CullRegion cull{cache.cull_region(key).dilated(options.gradient_eps)};
-        const scene::Tape tape = scene::compile_document(doc, &cull, cull_index, &plan);
+        tapes.push_back(scene::compile_document(doc, &cull, cull_index, &plan));
+        order.insert(order.end(), verts.begin(), verts.end());
+        offsets.push_back(order.size());
+    }
+    for (const scene::Tape& tape : tapes) tape_ptrs.push_back(&tape);
+    std::vector<float> points(order.size() * 3);
+    for (std::size_t at = 0; at < order.size(); ++at) {
+        const cfloat3 p = m.positions[order[at]];
+        points[at * 3] = p.x;
+        points[at * 3 + 1] = p.y;
+        points[at * 3 + 2] = p.z;
+    }
+    std::vector<float> distances(order.size());
+    std::vector<float> grads(gradients ? order.size() * 3 : 0);
+    std::vector<float> cols(colors ? order.size() * 3 : 0);
+    eval::PointBatchQuery q;
+    q.tapes = tape_ptrs.data();
+    q.offsets = offsets.data();
+    q.points_xyz = points.data();
+    q.count = tapes.size();
+    q.gradient_eps = options.gradient_eps;
+    eval::PointResults out;
+    out.distances = distances.data();
+    out.gradients_xyz = gradients ? grads.data() : nullptr;
+    out.colors_rgb = colors ? cols.data() : nullptr;
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    if (cpu && cpu->eval_points_batch(q, out) == eval::Status::Ok) {
+        for (std::size_t at = 0; at < order.size(); ++at) {
+            const std::uint32_t i = order[at];
+            if (colors) m.colors[i] = cf3(cols[at * 3], cols[at * 3 + 1], cols[at * 3 + 2]);
+            if (gradients)
+                m.normals[i] = cf3(grads[at * 3], grads[at * 3 + 1], grads[at * 3 + 2]);
+        }
+        return;
+    }
+    // No CPU backend registered: the same evaluation, serially.
+    for (std::size_t g = 0; g < tapes.size(); ++g) {
+        const scene::Tape& tape = tapes[g];
         auto field = [&](cfloat3 p) { return tape.eval(p).d; };
-        for (std::uint32_t i : verts) {
+        for (std::size_t at = offsets[g]; at < offsets[g + 1]; ++at) {
+            const std::uint32_t i = order[at];
             if (colors) m.colors[i] = tape.eval(m.positions[i]).color;
             if (gradients)
                 m.normals[i] = kernel::cnormal(field, m.positions[i], options.gradient_eps);
