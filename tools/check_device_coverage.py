@@ -40,6 +40,15 @@ VERB_PATTERNS = [
     r"clay_item_volume_(relax|flatten|move_topological)",
     r"clay_layer_(move_surface|consolidate)",
     r"clay_cut_create",
+    # The resolvers that turn a gesture into an item. They were missing here
+    # rather than exempt, which is a different thing: `tube` and Trim Curve are
+    # brushes in docs/07's table and had no case, and nothing said so, because
+    # this list is what decides what "missing" means.
+    r"clay_tube_create",
+    r"clay_cut_polygon_from_(open_)?curve",
+    # A rig edit is a drag like any other — ZBrush's ZSpheres, and the one
+    # brush-shaped verb that edits topology rather than a field.
+    r"clay_layer_armature_edit",
 ]
 
 # Verbs the engine has no C entry point for, so pattern-matching clay.h cannot
@@ -53,6 +62,13 @@ EXTRA_VERBS = {
     # The SDF stamp is a composition (create item, add to layer, evaluate)
     # rather than one entry point, but it is the verb a stroke is made of.
     "sdf_stamp",
+    # Every deformer arrives through clay_item_add_deformer, so a pattern
+    # matching that entry point would collapse fourteen warps into one verb and
+    # call the family covered as soon as any single one had a case. The
+    # brush-shaped ones are named individually instead. Magnify and noise are
+    # already measured, under the session verbs `session_magnify_pinch` and
+    # `session_noise`; pose is ZBrush's Rotate and had no case at all.
+    "pose",
 }
 
 

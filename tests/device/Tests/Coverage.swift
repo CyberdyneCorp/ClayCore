@@ -75,6 +75,17 @@ enum Coverage {
 
         // -- the cut tool -----------------------------------------------------
         .measured("cut_create", by: "cut_create"),
+        // Trim Curve: an OPEN stroke closed against the frame bounds. A
+        // separate brush from the lasso in docs/07's table, and a separate
+        // tessellation.
+        .measured("cut_polygon_from_open_curve", by: "trim_curve"),
+
+        // -- the resolvers that turn a gesture into an item -------------------
+        .measured("tube_create", by: "tube_create"),
+        .measured("pose", by: "pose_region"),
+
+        // -- rigs ---------------------------------------------------------------
+        .measured("layer_armature_edit", by: "armature_edit"),
 
         // -- sessions: the same brushes over EIGHT strokes, accumulating -----
         // Everything above measures one application with the document held
@@ -137,6 +148,13 @@ enum Coverage {
         .exempt("item_volume_move_topological",
                 because: "reachable only on a volume item, and layer_move_surface "
                        + "is the verb a host drives for Move. Measured there."),
+        .exempt("cut_polygon_from_curve",
+                because: "the CLOSED tessellation of the same control points the "
+                       + "open variant measured by trim_curve tessellates. The "
+                       + "shapes differ — one divides the frame, the other does "
+                       + "not — but the work is the same curve flattening, so "
+                       + "measuring the second adds a number, not a signal. "
+                       + "Revisit if the two paths diverge."),
     ]
 
     /// Entries that must have produced a case in the run.

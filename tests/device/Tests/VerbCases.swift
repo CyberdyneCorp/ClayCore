@@ -79,6 +79,58 @@ enum Fixture {
         return preset
     }
 
+    /// A short open path, as x y z r control points — what a Trim Curve drag
+    /// leaves and what a tube is swept along. Deterministic, so two runs
+    /// tessellate the same curve.
+    static func curvePoints(count: Int = 12) -> [Float] {
+        var points: [Float] = []
+        points.reserveCapacity(count * 4)
+        for i in 0..<count {
+            let t = Float(i) / Float(max(count - 1, 1))
+            points.append(contentsOf: [t * 1.6 - 0.8, sin(t * 4) * 0.3, 0, 0.1])
+        }
+        return points
+    }
+
+    /// The same path as x y z triples, which is what clay_tube_create takes.
+    static func tubePath(count: Int = 12) -> [Float] {
+        let xyzr = curvePoints(count: count)
+        var path: [Float] = []
+        path.reserveCapacity(count * 3)
+        for i in 0..<count {
+            path.append(contentsOf: [xyzr[i * 4], xyzr[i * 4 + 1], xyzr[i * 4 + 2]])
+        }
+        return path
+    }
+
+    /// A document of `stamps` stamps carrying a placed armature, plus the node
+    /// it became and a target inside it to drag. The rig is the four-node tree
+    /// tests/unit/test_c_armature.cpp uses: node 3 hangs off node 1, not off
+    /// node 2, so a subtree move actually moves a subtree.
+    static func armatureLayer(stamps: Int)
+        -> (doc: OpaquePointer, layer: clay_layer_id, node: clay_node_id, target: UInt32)? {
+        guard let (doc, layer) = SceneBuilder.sdfDocument(stamps: stamps) else { return nil }
+        var rig: [Float] = [
+            0.0, 0.0, 0.0, 0.30,   // 0, the root
+            0.5, 0.0, 0.0, 0.20,   // 1, off the root
+            1.0, 0.0, 0.0, 0.15,   // 2, off 1
+            0.5, 0.6, 0.0, 0.15,   // 3, off 1 as well
+        ]
+        var parents: [UInt32] = [0, 0, 1, 1]
+        guard let item = clay_item_create(Int32(CLAY_PRIM_ARMATURE.rawValue), nil, 0) else {
+            clay_document_destroy(doc); return nil
+        }
+        defer { clay_item_destroy(item) }
+        var node: clay_node_id = 0
+        guard clay_item_set_stroke_points(item, &rig, 4) == CLAY_OK,
+              clay_item_set_armature_parents(item, &parents, 4) == CLAY_OK,
+              clay_layer_add_item(doc, layer, item, &node) == CLAY_OK else {
+            clay_document_destroy(doc); return nil
+        }
+        // Node 1 — the one carrying a subtree, so the move is not a leaf move.
+        return (doc, layer, node, 1)
+    }
+
     /// Pointer-pressure-time samples along a short drag.
     static func strokeSamples(count: Int = 32) -> [Float] {
         var samples: [Float] = []
@@ -543,6 +595,88 @@ final class VerbLatencyTests: XCTestCase {
             return ({
                 if let item = clay_cut_create(&desc, nil, 0) { clay_item_destroy(item) }
             }, nil, {})
+        }
+
+        // Trim Curve: an OPEN stroke closed against the frame bounds. Two
+        // calls, as a host makes them — size query, then tessellate — because
+        // the size query is not free and a host cannot skip it.
+        measureAxis(name: "trim_curve", verb: "cut_polygon_from_open_curve", .gesture) { _ in
+            var points = Fixture.curvePoints()
+            var types = [Int32](repeating: Int32(CLAY_POINT_SPLINE.rawValue),
+                                count: points.count / 4)
+            var extent: [Float] = [3.0, 3.0]
+            let side = Int32(CLAY_TRIM_BELOW.rawValue)
+            return ({
+                var count = 0
+                guard clay_cut_polygon_from_open_curve(&points, types.count, &types,
+                                                       side, &extent, 0,
+                                                       nil, &count) == CLAY_OK,
+                      count > 0 else { return }
+                var xy = [Float](repeating: 0, count: count * 2)
+                _ = clay_cut_polygon_from_open_curve(&points, types.count, &types,
+                                                     side, &extent, 0, &xy, &count)
+            }, nil, {})
+        }
+
+        // -- the resolvers that turn a gesture into an item ------------------------
+
+        // Nomad's Tube, and the swept-sphere half of SnakeHook. Round rather
+        // than profiled: with no profile the tube is an exact distance field,
+        // which is the configuration a host reaches for first.
+        measureAxis(name: "tube_create", verb: "tube_create", .gesture) { _ in
+            var path = Fixture.tubePath()
+            var params = clay_tube_params()
+            params.struct_size = UInt32(MemoryLayout<clay_tube_params>.size)
+            params.point_type = Int32(CLAY_POINT_SPLINE.rawValue)
+            params.radius_start = 0.05
+            params.radius_mid = 0.12
+            params.radius_end = 0.03
+            params.closed = 0
+            params.tolerance = 0
+            params.blend_k = 0.02
+            let count = path.count / 3
+            return ({
+                if let item = clay_tube_create(&path, count, &params, -1, nil, 0) {
+                    clay_item_destroy(item)
+                }
+            }, nil, {})
+        }
+
+        // ZBrush's Rotate. A deformer rather than an entry point of its own, so
+        // the timed body is what a host does per drag: build the item, put the
+        // warp at the FRONT of its chain, place it.
+        measureAxis(name: "pose_region", verb: "pose", .gesture) { stamps in
+            guard let (doc, layer) = SceneBuilder.sdfDocument(stamps: stamps) else { return nil }
+            // centre(3), radius, axis(3), angle
+            var pose: [Float] = [0, 0, 0, 0.6, 0, 1, 0, 0.4]
+            var radius: Float = 0.35
+            return ({
+                guard let item = clay_item_create(Int32(CLAY_PRIM_SPHERE.rawValue),
+                                                  &radius, 1) else { return }
+                defer { clay_item_destroy(item) }
+                _ = clay_item_add_deformer(item, Int32(CLAY_DEFORM_POSE.rawValue),
+                                           &pose, pose.count, CLAY_EASE_LINEAR)
+                var node: clay_node_id = 0
+                _ = clay_layer_add_item(doc, layer, item, &node)
+            }, nil, { clay_document_destroy(doc) })
+        }
+
+        // -- rigs -------------------------------------------------------------------
+
+        // ZSpheres. One MOVE on a placed armature, which is the drag an artist
+        // repeats: `value` is a delta and the target's whole subtree travels
+        // with it, so the cost follows the subtree rather than the document.
+        measureAxis(name: "armature_edit", verb: "layer_armature_edit", .gesture) { stamps in
+            guard let f = Fixture.armatureLayer(stamps: stamps) else { return nil }
+            var delta: [Float] = [0.01, 0, 0]
+            return ({
+                _ = clay_layer_armature_edit(f.doc, f.layer, f.node,
+                                             CLAY_ARMATURE_MOVE, f.target,
+                                             &delta, 0, 0)
+                // Alternate the direction so a long run does not walk the rig
+                // out of its own bounds and change what is being measured.
+                delta[0] = -delta[0]
+            }, nil, { clay_document_destroy(f.doc) })
         }
 
         // -- the coverage guard ------------------------------------------------------
