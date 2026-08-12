@@ -208,6 +208,11 @@
       "class": "operation",
       "measuredMs": 322.5502
     },
+    "voxel_add_level": {
+      "budgetMs": 500.0,
+      "class": "operation",
+      "note": "PROVISIONAL \u2014 hand-set without a device measurement, so this is a ceiling that admits anything reasonable rather than a result. Re-seed with tools/check_device_bench.py <run.json> --update on the reference device and delete this note. A subdivide rewrites the lattice, so it is charged as an operation. What the edit AFTER it costs is voxel_smooth_l2."
+    },
     "voxel_apply_stroke": {
       "budgetMs": 0.2866,
       "class": "gesture",
@@ -248,6 +253,16 @@
       "class": "interactive",
       "measuredMs": 0.0088
     },
+    "voxel_mesh_dirty": {
+      "budgetMs": 8.0,
+      "class": "interactive",
+      "note": "PROVISIONAL \u2014 hand-set without a device measurement, so this is a ceiling that admits anything reasonable rather than a result. Re-seed with tools/check_device_bench.py <run.json> --update on the reference device and delete this note. This is the DISPLAY path and the case #86 exists for. The ceiling is deliberately above the 4.17 ms frame share so the first device run reports where it lands instead of failing the gate on a number nobody has measured yet; the frame-share note fires either way."
+    },
+    "voxel_mesh_whole": {
+      "budgetMs": 250.0,
+      "class": "operation",
+      "note": "PROVISIONAL \u2014 hand-set without a device measurement, so this is a ceiling that admits anything reasonable rather than a result. Re-seed with tools/check_device_bench.py <run.json> --update on the reference device and delete this note. Whole-grid meshing is the EXPORT path \u2014 clay_voxel_mesh keeps the tighter merge for it \u2014 so it is budgeted as an operation rather than held to a frame."
+    },
     "voxel_paint": {
       "budgetMs": 0.0054,
       "class": "interactive",
@@ -267,6 +282,16 @@
       "budgetMs": 0.0175,
       "class": "interactive",
       "measuredMs": 0.0117
+    },
+    "voxel_smooth_l2": {
+      "budgetMs": 2.0,
+      "class": "interactive",
+      "note": "PROVISIONAL \u2014 hand-set without a device measurement, so this is a ceiling that admits anything reasonable rather than a result. Re-seed with tools/check_device_bench.py <run.json> --update on the reference device and delete this note. A write costs 8^d cell writes for d levels finer than the active one, so this should land near 8x voxel_smooth. Compare the pair rather than this number alone."
+    },
+    "voxel_smooth_r32": {
+      "budgetMs": 8.0,
+      "class": "interactive",
+      "note": "PROVISIONAL \u2014 hand-set without a device measurement, so this is a ceiling that admits anything reasonable rather than a result. Re-seed with tools/check_device_bench.py <run.json> --update on the reference device and delete this note. Cost is roughly cubic in radius, so this should land far above voxel_smooth at the same document size. Ceiling above the frame share for the same reason as voxel_mesh_dirty."
     },
     "voxel_smudge": {
       "budgetMs": 0.0387,

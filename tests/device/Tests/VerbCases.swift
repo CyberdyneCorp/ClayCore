@@ -342,6 +342,148 @@ final class VerbLatencyTests: XCTestCase {
             }, nil, { clay_document_destroy(f.doc) })
         }
 
+        // -- the display path ---------------------------------------------------
+        //
+        // The gate measured the voxel EDIT verbs and nothing that shows their
+        // result, which is how a ~130x display gap (#86) stayed invisible here
+        // while every verb above reported two orders of magnitude of headroom.
+        // A sculpt nobody can see inside a frame is not interactive, however
+        // cheap the edit was.
+        //
+        // Two cases because there are two paths, and they carry different
+        // budgets on purpose. Whole-grid meshing is the EXPORT path — its
+        // header says so, and it keeps the tighter merge for that reason — so
+        // it is an `operation`. Meshing what a dab dirtied is the DISPLAY path
+        // and has to fit a frame, so it is `interactive`.
+
+        measureAxis(name: "voxel_mesh_whole", verb: "voxel_mesh", .operation) { stamps in
+            guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
+            return ({
+                var mesh: OpaquePointer?
+                if clay_voxel_mesh(f.grid, &mesh) == CLAY_OK, let mesh {
+                    clay_mesh_destroy(mesh)
+                }
+            }, nil, { clay_document_destroy(f.doc) })
+        }
+
+        // One dab and the display it costs, timed together, because that pair
+        // is the interactive unit — the same reason the SDF stamp case times
+        // edit-then-evaluate rather than the edit alone.
+        //
+        // The drain is INSIDE the timed body. It has to be: a host that
+        // skipped a frame coalesces, so what a frame pays is whatever the set
+        // holds when it asks, and hoisting the drain out would measure a
+        // hand-picked key list instead of the one a session produces.
+        //
+        // No reset, for the reason the other voxel cases have none: the verbs
+        // are flat in document size, so an accumulating grid does not drift the
+        // number. It is load-bearing HERE for a second reason — draining every
+        // iteration is what keeps the unit one dab. Without it the set would
+        // accumulate and iteration N would mesh what N-1 also dirtied, which
+        // reads as a display path that grows with the session.
+        measureAxis(name: "voxel_mesh_dirty", verb: "voxel_mesh_chunks", .interactive) { stamps in
+            guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
+            var b = Fixture.brush()
+            var i = 0
+            var keys = [Int32](repeating: 0, count: 4096 * 3)
+            // Drain what building the fixture dirtied, so the first timed
+            // iteration pays for its own dab rather than for the whole grid.
+            var drained = keys.count / 3
+            var remaining = 0
+            _ = clay_voxel_take_dirty_chunks(f.grid, &keys, &drained, &remaining)
+            var meshedChunks = 0
+            var calls = 0
+            var starved = 0
+            return ({
+                var c = Fixture.cell(i); i += 1
+                _ = clay_voxel_sculpt_smooth(f.grid, &c, &b)
+
+                var count = keys.count / 3
+                var left = 0
+                guard clay_voxel_take_dirty_chunks(f.grid, &keys, &count, &left) == CLAY_OK
+                else { return }
+                calls += 1
+                meshedChunks += count
+                if count == 0 { starved += 1 }
+                var mesh: OpaquePointer?
+                if clay_voxel_mesh_chunks(f.grid, &keys, count, nil, &mesh) == CLAY_OK,
+                   let mesh {
+                    clay_mesh_destroy(mesh)
+                }
+            }, nil, {
+                // The same guard the brick-cache case carries. A dab that
+                // dirties nothing meshes nothing, and a case that measured an
+                // empty loop would report the display path as free.
+                XCTAssertLessThan(starved, max(calls, 1),
+                                  "every timed iteration at \(stamps) stamps dirtied zero "
+                                  + "chunks — this is measuring an empty loop")
+                let perDab = calls > 0 ? Double(meshedChunks) / Double(calls) : 0
+                print("chunks/dab at \(stamps) stamps: \(String(format: "%.1f", perDab))")
+                clay_document_destroy(f.doc)
+            })
+        }
+
+        // -- what a level costs ------------------------------------------------
+        //
+        // add-multi-resolution landed the level stack and nothing here measured
+        // it (#89). Three costs were unmeasured on device; these are the two
+        // that land on the frame path.
+
+        // Subdivision itself. Reset drops the level again, so every iteration
+        // measures an add against the same one-level grid rather than adding a
+        // fourth level to a stack the previous iteration deepened — and the
+        // stack is capped, so without the reset later iterations would measure
+        // a refusal.
+        measureAxis(name: "voxel_add_level", verb: "voxel_add_level", .operation) { stamps in
+            guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
+            return ({
+                var level = 0
+                _ = clay_voxel_add_level(f.grid, &level)
+            }, {
+                _ = clay_voxel_drop_level(f.grid)
+            }, { clay_document_destroy(f.doc) })
+        }
+
+        // A verb with a level under it. The design charges a write `8^d` cell
+        // writes for `d` levels finer than the active one, so editing COARSE
+        // with a stack is the expensive direction — and it is also the one the
+        // #86 workaround recommends, since a host displaying a coarse level
+        // wants to keep editing there. Same verb and same brush as
+        // `voxel_smooth`, so the pair is the measurement.
+        measureAxis(name: "voxel_smooth_l2", verb: "voxel_sculpt_smooth_levels",
+                    .interactive) { stamps in
+            guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
+            var level = 0
+            guard clay_voxel_add_level(f.grid, &level) == CLAY_OK,
+                  clay_voxel_set_active_level(f.grid, 0) == CLAY_OK else {
+                clay_document_destroy(f.doc); return nil
+            }
+            var b = Fixture.brush()
+            var i = 0
+            return ({
+                var c = Fixture.cell(i); i += 1
+                _ = clay_voxel_sculpt_smooth(f.grid, &c, &b)
+            }, nil, { clay_document_destroy(f.doc) })
+        }
+
+        // -- what a big brush costs ---------------------------------------------
+        //
+        // Every voxel case above uses Fixture.brush(), which is size 8 — about
+        // 2,100 cells. Cost is roughly cubic in radius, so the gate has been
+        // reporting the cheap end of the range a sculptor actually uses: a
+        // radius-32 smooth is ~200x the footprint of a radius-8 one, and
+        // nothing here would have said so.
+        measureAxis(name: "voxel_smooth_r32", verb: "voxel_sculpt_smooth_large",
+                    .interactive) { stamps in
+            guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
+            var b = Fixture.brush(size: 32)
+            var i = 0
+            return ({
+                var c = Fixture.cell(i); i += 1
+                _ = clay_voxel_sculpt_smooth(f.grid, &c, &b)
+            }, nil, { clay_document_destroy(f.doc) })
+        }
+
         // -- the stroke engine -------------------------------------------------
 
         measureAxis(name: "stroke_resolve", verb: "stroke_resolve", .interactive) { _ in

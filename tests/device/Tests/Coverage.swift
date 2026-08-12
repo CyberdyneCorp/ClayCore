@@ -52,6 +52,35 @@ enum Coverage {
         .measured("voxel_sculpt_fill_cavities", by: "voxel_fill_cavities"),
         .measured("voxel_sculpt_carve_alpha", by: "voxel_carve_alpha"),
 
+        // -- voxel: the display path ------------------------------------------
+        // The half of a sculpt the gate never measured. Whole-grid meshing is
+        // the export path and budgeted as an operation; meshing what a dab
+        // dirtied is what has to fit a frame.
+        .measured("voxel_mesh", by: "voxel_mesh_whole"),
+        .measured("voxel_mesh_chunks", by: "voxel_mesh_dirty"),
+        // Drained inside voxel_mesh_dirty's timed body rather than hoisted out
+        // of it, because what a frame pays is whatever the set holds when it
+        // asks — a host that skipped a frame coalesces.
+        .measured("voxel_take_dirty_chunks", by: "voxel_mesh_dirty"),
+
+        // -- voxel: multi-resolution -------------------------------------------
+        .measured("voxel_add_level", by: "voxel_add_level"),
+        // A verb with a level under it: a write costs 8^d cell writes for d
+        // levels finer than the active one, so editing coarse with a stack is
+        // the direction that pays — and it is the one #86's workaround asks a
+        // host to take.
+        .measured("voxel_sculpt_smooth_levels", by: "voxel_smooth_l2"),
+        // The same verb at a radius a sculptor actually blocks out with. Every
+        // other voxel case is size 8; cost is roughly cubic in radius.
+        .measured("voxel_sculpt_smooth_large", by: "voxel_smooth_r32"),
+        // Reading a level's own size and occupancy is an accessor, not a verb
+        // a sculptor drives, and dropping a level is the undo of add_level
+        // rather than an edit of its own.
+        .exempt("voxel_drop_level", because:
+            "the inverse of voxel_add_level, which is measured; it frees the "
+            + "detail map of one level and writes no cells, so it cannot be the "
+            + "expensive half of a subdivide/undo pair"),
+
         // -- the stroke engine ----------------------------------------------
         .measured("stroke_resolve", by: "stroke_resolve"),
         .measured("voxel_apply_stroke", by: "voxel_apply_stroke"),
