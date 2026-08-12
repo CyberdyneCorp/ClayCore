@@ -2064,6 +2064,34 @@ clay_result clay_layer_node_prim(const clay_document* doc, clay_layer_id layer,
     return CLAY_OK;
 }
 
+clay_result clay_layer_node_count(const clay_document* doc, clay_layer_id layer,
+                                  size_t* out_count) {
+    if (!doc || !out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or count");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    // A voxel or mesh layer carries no SDF content, so it holds no nodes:
+    // empty, not an error, the same reading clay_layer_eval_points makes.
+    *out_count = l->sdf ? l->sdf->roots.size() : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_node_at(const clay_document* doc, clay_layer_id layer, size_t index,
+                               clay_node_id* out_node) {
+    if (!doc || !out_node)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out pointer");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    // The root list IS evaluation order, and it is the list a group's children
+    // are the recursion of — top level only, as clay_layer_children descends.
+    const std::size_t count = l->sdf ? l->sdf->roots.size() : 0;
+    if (index >= count)
+        return fail(CLAY_ERROR_NOT_FOUND, "no node at index " + std::to_string(index) +
+                                              ": the layer holds " + std::to_string(count) +
+                                              " top-level nodes");
+    *out_node = l->sdf->roots[index];
+    return CLAY_OK;
+}
+
 clay_result clay_document_remove_layer(clay_document* doc, clay_layer_id layer) {
     return apply_edit(doc, scene::Command{scene::RemoveLayerCmd{layer}}, "layer not found");
 }
