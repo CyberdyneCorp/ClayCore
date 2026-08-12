@@ -43,6 +43,10 @@ ARRAY_ELEMENT_STRUCTS = {
     # for a struct_size to negotiate: appending a field would move every
     # element after the first, which is a break either way.
     "clay_brick_mesh_range",
+    # The voxel side of the same thing: one per chunk key in a regional mesh,
+    # read rather than filled in, and a host patching a dab's worth of chunks
+    # receives one per key every frame. Same fixed layout, same reasoning.
+    "clay_voxel_chunk_mesh_range",
     # Two uint32 that ARE kernel::CTapeInstr, asserted with offsetof in
     # bindings/c/clay_c.cpp. The caller's evaluator is ctape_eval compiled from
     # the header that declares it, so the layout agreeing is the contract
