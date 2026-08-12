@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "clay/brush/stroke.h"
 #include "clay/scene/document.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
@@ -83,15 +84,35 @@ std::map<UnitFace, cfloat3> unit_faces(const mesh::Mesh& m) {
     return faces;
 }
 
+// Reports WHICH faces disagree, not just that some do. A seam regression here
+// is a handful of faces out of tens of thousands, and a bare false leaves the
+// next reader bisecting for it when both maps were already in hand.
 bool same_surface(const mesh::Mesh& a, const mesh::Mesh& b) {
     std::map<UnitFace, cfloat3> fa = unit_faces(a), fb = unit_faces(b);
-    if (fa.size() != fb.size()) return false;
-    auto ib = fb.begin();
-    for (auto ia = fa.begin(); ia != fa.end(); ++ia, ++ib) {
-        if (ia->first < ib->first || ib->first < ia->first) return false;
-        if (clength(ia->second - ib->second) > 1e-6f) return false;
+    auto describe = [](const char* what, const UnitFace& f) {
+        MESSAGE(what << ": axis=" << f.axis << " sign=" << f.sign << " slice=" << f.a
+                     << " u=" << f.u << " v=" << f.v);
+    };
+    int reported = 0;
+    bool same = true;
+    for (const auto& [f, color] : fa) {
+        auto it = fb.find(f);
+        if (it == fb.end()) {
+            same = false;
+            if (reported++ < 8) describe("missing from the second mesh", f);
+        } else if (clength(it->second - color) > 1e-6f) {
+            same = false;
+            if (reported++ < 8) describe("colour differs", f);
+        }
     }
-    return true;
+    for (const auto& [f, color] : fb) {
+        (void)color;
+        if (fa.find(f) == fa.end()) {
+            same = false;
+            if (reported++ < 8) describe("extra in the second mesh", f);
+        }
+    }
+    return same;
 }
 
 std::size_t tris(const mesh::Mesh& m) { return m.indices.size() / 3; }
@@ -426,6 +447,19 @@ TEST_CASE("every mutation verb reports the chunks it changed") {
     });
     check_verb("fill_line", [](VoxelGrid& g, std::uint8_t c) {
         g.fill_line({-30, 0, 0}, {30, 0, 0}, c);
+    });
+    // The spec scenario names stroke application among the verbs that report
+    // what they touched, so it is gated here rather than left to the reader to
+    // infer from apply_to_grid funnelling through set_brush.
+    check_verb("brush::apply_to_grid", [](VoxelGrid& g, std::uint8_t c) {
+        std::vector<brush::Stamp> stamps;
+        for (int i = 0; i < 4; ++i) {
+            brush::Stamp s;
+            s.position = cf3(static_cast<float>(kChunkDim - 2 + i) * g.voxel_size(), 0.0f, 0.0f);
+            s.radius = 3.0f * g.voxel_size();
+            stamps.push_back(s);
+        }
+        brush::apply_to_grid(g, stamps, c);
     });
     check_verb("set_mirrored", [](VoxelGrid& g, std::uint8_t c) {
         g.set_mirrored({20, 20, 20}, c, voxel::kVoxMirrorX | voxel::kVoxMirrorY);

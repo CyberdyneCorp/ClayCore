@@ -2524,7 +2524,14 @@ clay_result clay_voxel_mesh(const clay_voxel_grid* grid, clay_mesh** out_mesh);
  *
  * Both calls act on the grid's ACTIVE level, as every other cell-addressed
  * call here does; the dirty set is per level, and a level's set describes that
- * level whether or not it was active when the edit landed. */
+ * level whether or not it was active when the edit landed.
+ *
+ * A drain that takes more than one call is bound to the level that was active
+ * when it BEGAN: the remaining keys are staged, and changing the active level
+ * partway through hands back the rest of the old level's keys, while
+ * *out_remaining counts those staged keys plus the new level's dirty ones.
+ * Finish a drain before changing level — a multi-resolution host that
+ * interleaves the two gets a coherent answer for neither. */
 
 /* Drains the chunks whose meshed surface a mutation could have changed, as
  * packed int32 triples — the spelling clay_voxel_flood_select and
