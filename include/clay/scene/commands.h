@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -140,13 +141,21 @@ struct SetLayerMirrorCmd {
     std::uint8_t axes = 0;  // kMirrorX|Y|Z
     float k = 0.0f;
 };
+// A layer's name, replaced. A command rather than a field write for the reason
+// the mirror became one: the name was set once at creation and never after, so
+// a host kept its own display name beside the document and the rename was lost
+// on the next save. Its inverse is the previous name, exact by construction.
+struct SetLayerNameCmd {
+    LayerId id = 0;
+    std::string name;
+};
 
 using Command =
     std::variant<AddNodeCmd, RemoveNodeCmd, MoveNodeCmd, SetTransformCmd, SetPrimCmd,
                  SetColorCmd, SetOpBlendCmd, AppendStrokeCmd, TrimStrokeCmd, AddLayerCmd,
                  RemoveLayerCmd, SetLayerVisibleCmd, SetLayerTransformCmd,
                  SetLayerProtectionCmd, SetStrokePointsCmd, SetDeformersCmd,
-                 SetLayerMirrorCmd, SetArmatureCmd>;
+                 SetLayerMirrorCmd, SetArmatureCmd, SetLayerNameCmd>;
 
 // The layer a command would edit, or 0 for one that edits no existing layer
 // (adding a layer creates its target; changing protection is how a protected

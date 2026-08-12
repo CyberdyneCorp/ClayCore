@@ -388,6 +388,35 @@ clay_result clay_document_move_layer(clay_document* doc, clay_layer_id layer, in
  * the original field exactly. */
 clay_result clay_document_set_layer_visible(clay_document* doc, clay_layer_id layer,
                                             int32_t visible);
+/* Rename a layer — the setter for the name clay_layer_name reads back. Through
+ * 0.29.1 a layer was named by whichever call created it and nothing could
+ * change it, so a host that let the artist rename a layer kept that name
+ * beside the document and lost it on the next save (#92). clay_layer_name made
+ * that visible rather than caused it: a reopened document now confidently
+ * reports the stale creation name, which looks correct.
+ *
+ * A command like every other layer edit, so one rename is one undo step and a
+ * ghosted or locked layer refuses it. A rename invisible to undo would be a
+ * new inconsistency, not a fix.
+ *
+ * NULL and the empty string are refused: an empty name is what a cleared text
+ * field submits, and the document's name is the only one left to lose. There
+ * is no length limit — the saved layer record length-prefixes the name and
+ * clay_layer_name sizes before it writes, so a long name costs the reader a
+ * bigger buffer rather than a truncation.
+ *
+ * Names are NOT unique, here or at creation: clay_add_sdf_layer,
+ * clay_document_add_voxel_layer and clay_document_add_mesh_layer each accept a
+ * name another layer already carries, so refusing a duplicate here would buy a
+ * guarantee the create calls do not keep. What a duplicate means is stated
+ * instead: clay_document_voxel_layer and clay_document_mesh_layer answer with
+ * the FIRST layer in stack order carrying the name, so renaming a voxel layer
+ * onto a name already in use shadows the other layer's grid, and renaming it
+ * away leaves the old name looking up nothing. Hold the id from creation or
+ * from clay_document_layer_at when the lookup has to survive a rename — ids
+ * are stable across save and load; names are not a key anything enforces. */
+clay_result clay_document_set_layer_name(clay_document* doc, clay_layer_id layer,
+                                         const char* name);
 /* Protection, both off by default. A GHOSTED layer is still evaluated but is
  * never picked and never edited: "show me this for reference, but stay out of
  * my way". A LOCKED layer is still picked but never edited: "this is
@@ -481,7 +510,8 @@ clay_result clay_document_layer_info(const clay_document* doc, clay_layer_id lay
  * *size; call again with an adequate buffer to fill it. A buffer that is too
  * small gets CLAY_ERROR_BUFFER_TOO_SMALL with the needed size in *size and
  * writes nothing. The name is a string rather than a clay_layer_info field
- * because it is the one layer property without a fixed size. */
+ * because it is the one layer property without a fixed size. What a layer is
+ * called after creation is clay_document_set_layer_name's to say. */
 clay_result clay_layer_name(const clay_document* doc, clay_layer_id layer, char* buffer,
                             size_t* size);
 
@@ -1230,7 +1260,9 @@ clay_result clay_document_add_mesh_layer(clay_document* doc, const clay_mesh* me
                                          clay_layer_id* out_layer, clay_mesh** out_mesh);
 
 /* Borrows the mesh of an existing mesh layer by name; CLAY_ERROR_NOT_FOUND
- * when the document has no mesh layer carrying that name. */
+ * when the document has no mesh layer carrying that name. Names are not
+ * unique, so this answers with the FIRST mesh layer in stack order carrying
+ * the name, and it follows clay_document_set_layer_name — see there. */
 clay_result clay_document_mesh_layer(clay_document* doc, const char* name,
                                      clay_layer_id* out_layer, clay_mesh** out_mesh);
 
@@ -1648,7 +1680,10 @@ clay_result clay_document_add_voxel_layer(clay_document* doc, const char* name,
                                           float voxel_size, clay_layer_id* out_layer,
                                           clay_voxel_grid** out_grid);
 /* Borrows the grid of an existing voxel layer by name; CLAY_ERROR_NOT_FOUND
- * when the document has no such layer. */
+ * when the document has no such layer. The name is not a unique key — nothing
+ * has ever required one — so this answers with the FIRST voxel layer in stack
+ * order carrying the name, and it follows clay_document_set_layer_name: hold
+ * the id when a lookup has to survive a rename. */
 clay_result clay_document_voxel_layer(clay_document* doc, const char* name,
                                       clay_layer_id* out_layer, clay_voxel_grid** out_grid);
 

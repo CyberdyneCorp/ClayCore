@@ -2120,6 +2120,18 @@ clay_result clay_document_set_layer_visible(clay_document* doc, clay_layer_id la
                       "layer not found");
 }
 
+clay_result clay_document_set_layer_name(clay_document* doc, clay_layer_id layer,
+                                         const char* name) {
+    if (!doc || !name) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or name");
+    // An empty name is what a cleared text field submits, and the name in the
+    // document is the only one left to lose — refused rather than saved.
+    if (!*name) return fail(CLAY_ERROR_INVALID_ARGUMENT, "a layer name may not be empty");
+    // Through the command vocabulary like every other layer edit, so the
+    // rename is one undo step and a protected layer refuses it.
+    return apply_edit(doc, scene::Command{scene::SetLayerNameCmd{layer, name}},
+                      "layer not found");
+}
+
 clay_result clay_document_set_layer_protection(clay_document* doc, clay_layer_id layer,
                                                int32_t ghost, int32_t locked) {
     return apply_edit(

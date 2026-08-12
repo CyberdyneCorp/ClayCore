@@ -65,6 +65,7 @@ TEST_CASE("every command's inverse restores the document bit-identically") {
         RemoveLayerCmd{lid},
         SetLayerVisibleCmd{lid, false},
         SetLayerTransformCmd{lid, math::Transform{cf3(0, 5, 0), math::Quat::identity(), 1.0f}},
+        SetLayerNameCmd{lid, "renomeada"},
     };
 
     for (std::size_t i = 0; i < cmds.size(); ++i) {
@@ -118,6 +119,7 @@ TEST_CASE("every command serializes and deserializes losslessly") {
         RemoveLayerCmd{lid},
         SetLayerVisibleCmd{lid, false},
         SetLayerTransformCmd{lid, math::Transform{}},
+        SetLayerNameCmd{lid, "renomeada"},
     };
 
     for (std::size_t i = 0; i < cmds.size(); ++i) {

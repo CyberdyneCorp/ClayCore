@@ -182,6 +182,14 @@ std::optional<Command> apply_one(Document& doc, const SetLayerTransformCmd& c) {
     return Command{inverse};
 }
 
+std::optional<Command> apply_one(Document& doc, const SetLayerNameCmd& c) {
+    Layer* l = doc.find_layer(c.id);
+    if (!l) return std::nullopt;
+    SetLayerNameCmd inverse{c.id, l->name};
+    l->name = c.name;
+    return Command{inverse};
+}
+
 std::optional<Command> apply_one(Document& doc, const SetLayerMirrorCmd& c) {
     Layer* l = doc.find_layer(c.id);
     if (!l) return std::nullopt;
@@ -209,7 +217,8 @@ LayerId edited_layer(const Command& cmd) {
             else if constexpr (std::is_same_v<C, RemoveLayerCmd> ||
                                std::is_same_v<C, SetLayerVisibleCmd> ||
                                std::is_same_v<C, SetLayerTransformCmd> ||
-                               std::is_same_v<C, SetLayerMirrorCmd>)
+                               std::is_same_v<C, SetLayerMirrorCmd> ||
+                               std::is_same_v<C, SetLayerNameCmd>)
                 return c.id;
             else
                 return c.layer;
@@ -677,6 +686,7 @@ enum class Tag : std::uint8_t {
     SetDeformers,
     SetLayerMirror,
     SetArmature,
+    SetLayerName,
 };
 
 struct SerializeVisitor {
@@ -795,6 +805,12 @@ struct SerializeVisitor {
         w.pod(c.id);
         w.pod(c.axes);
         w.pod(c.k);
+    }
+    void operator()(const SetLayerNameCmd& c) {
+        w.pod(Tag::SetLayerName);
+        w.pod(c.id);
+        w.u32(static_cast<std::uint32_t>(c.name.size()));
+        w.bytes(c.name.data(), c.name.size());
     }
 };
 
@@ -957,6 +973,18 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
             c.axes = r.pod<std::uint8_t>();
             c.k = r.pod<float>();
             cmd = c;
+            break;
+        }
+        case Tag::SetLayerName: {
+            SetLayerNameCmd c;
+            c.id = r.pod<LayerId>();
+            std::uint32_t n = r.u32();
+            // The length guard read_layer makes, for the same reason: a
+            // truncated stream must not ask for a gigabyte-long name.
+            if (!r.ok || n > r.remaining) return std::nullopt;
+            c.name.resize(n);
+            r.bytes(c.name.data(), n);
+            cmd = std::move(c);
             break;
         }
         default:
