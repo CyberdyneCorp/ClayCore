@@ -361,5 +361,7 @@ endif()
 if(CLAY_BUILD_BENCHMARKS)
   add_executable(clay_bench benchmarks/bench_main.cpp)
   target_link_libraries(clay_bench PRIVATE claycore benchmark::benchmark)
+  # The batched-raycast pair drives the C ABI, where its fan-out lives.
+  target_include_directories(clay_bench PRIVATE bindings/c)
   clay_apply_warnings(clay_bench)
 endif()

@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "clay.h"
 #include "clay/brick/cache.h"
 #include "clay/eval/backend.h"
 #include "clay/mesh/marching.h"
@@ -407,6 +408,117 @@ void BM_ConsolidateSerialGrownDoc(benchmark::State& state) {
     }
 }
 BENCHMARK(BM_ConsolidateSerialGrownDoc)->Unit(benchmark::kMillisecond);
+
+// Batched brick raycast (accel/parallel-raycast): clay_brick_cache_raycast_many
+// fans its rays out across the CPU backend's pool; the serial reference is the
+// single-ray C-ABI call issued once per ray, which marches identically and by
+// contract answers bit-identically (regression-tested in test_c_brick.cpp).
+// The pair goes through the C ABI because that is where the fan-out lives.
+// check_bench.py requires the batch to be FASTER than the serial loop, which
+// is what catches the batch falling off the pool; it holds on any machine
+// with more than one core, since both sides pay the same per-ray march and
+// only the fan-out differs (8x on an M2 Max).
+namespace {
+
+struct CRaycastScene {
+    clay_document* doc = nullptr;
+    clay_brick_cache* cache = nullptr;
+    std::vector<float> rays;  // count * 6 packed origin+direction
+
+    explicit CRaycastScene(std::size_t ray_count) {
+        doc = clay_document_create();
+        clay_layer_id layer = 0;
+        clay_add_sdf_layer(doc, "bench", &layer);
+        auto add_sphere = [&](float r, float x, float y, float z) {
+            clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+            const float pos[3] = {x, y, z};
+            clay_item_set_position(it, pos);
+            clay_node_id id = 0;
+            clay_layer_add_item(doc, layer, it, &id);
+            clay_item_destroy(it);
+        };
+        add_sphere(0.4f, 0.0f, 0.0f, 0.0f);
+        add_sphere(0.25f, 0.5f, 0.2f, -0.1f);
+        add_sphere(0.3f, -0.4f, -0.3f, 0.2f);
+        clay_brick_config cfg;
+        clay_brick_config_defaults(&cfg);
+        cfg.dim = 8;
+        cfg.voxel_size = 0.05f;
+        cfg.band_voxels = 3;
+        cfg.memory_budget = 0;
+        cache = clay_brick_cache_create(&cfg);
+        clay_brick_cache_mark_dirty_layer(cache, doc, layer);
+        constexpr std::size_t kChunk = 64, kSamples = 8 * 8 * 8;
+        std::vector<clay_brick_request> reqs(kChunk);
+        std::vector<float> values(kChunk * kSamples);
+        for (;;) {
+            std::size_t count = kChunk, remaining = 0;
+            clay_brick_cache_take_dirty(cache, reqs.data(), &count, &remaining);
+            if (count == 0) break;
+            clay_brick_cache_eval_requests(doc, nullptr, reqs.data(), count, values.data(),
+                                           count * kSamples, nullptr, 0);
+            std::size_t accepted = 0;
+            clay_brick_cache_submit(cache, reqs.data(), count, values.data(), count * kSamples,
+                                    nullptr, 0, nullptr, &accepted);
+            if (remaining == 0) break;
+        }
+        // Rays from a shell of radius 3 toward jittered targets among the
+        // spheres, so most hit and every march crosses real bricks.
+        rays.resize(ray_count * 6);
+        std::uint64_t s = 24680;
+        auto rnd = [&] {
+            s = s * 6364136223846793005ull + 1442695040888963407ull;
+            return static_cast<float>((s >> 40) & 0xFFFFFF) / 16777216.0f - 0.5f;
+        };
+        for (std::size_t i = 0; i < ray_count; ++i) {
+            float* r = rays.data() + i * 6;
+            float o[3] = {rnd(), rnd(), rnd()};
+            const float len = std::sqrt(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]) + 1e-6f;
+            for (int a = 0; a < 3; ++a) {
+                r[a] = o[a] / len * 3.0f;
+                r[3 + a] = rnd() * 0.8f - r[a];
+            }
+        }
+    }
+    ~CRaycastScene() {
+        clay_brick_cache_destroy(cache);
+        clay_document_destroy(doc);
+    }
+    CRaycastScene(const CRaycastScene&) = delete;
+    CRaycastScene& operator=(const CRaycastScene&) = delete;
+};
+
+constexpr std::size_t kRaycastBenchRays = 2048;
+
+}  // namespace
+
+void BM_RaycastBricksBatch(benchmark::State& state) {
+    CRaycastScene scene(kRaycastBenchRays);
+    std::vector<std::int32_t> hits(kRaycastBenchRays);
+    std::vector<float> t(kRaycastBenchRays);
+    for (auto _ : state) {
+        clay_brick_cache_raycast_many(scene.cache, scene.rays.data(), kRaycastBenchRays,
+                                      hits.data(), t.data(), nullptr, nullptr);
+        benchmark::DoNotOptimize(hits.data());
+    }
+    state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations()) * kRaycastBenchRays);
+}
+BENCHMARK(BM_RaycastBricksBatch)->Unit(benchmark::kMillisecond);
+
+void BM_RaycastBricksSerial(benchmark::State& state) {
+    CRaycastScene scene(kRaycastBenchRays);
+    std::vector<std::int32_t> hits(kRaycastBenchRays);
+    std::vector<float> t(kRaycastBenchRays);
+    for (auto _ : state) {
+        for (std::size_t i = 0; i < kRaycastBenchRays; ++i)
+            clay_brick_cache_raycast(scene.cache, scene.rays.data() + i * 6,
+                                     scene.rays.data() + i * 6 + 3, &hits[i], &t[i], nullptr,
+                                     nullptr);
+        benchmark::DoNotOptimize(hits.data());
+    }
+    state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations()) * kRaycastBenchRays);
+}
+BENCHMARK(BM_RaycastBricksSerial)->Unit(benchmark::kMillisecond);
 
 // Resident uploaded tapes (accel/metal-persistent): the Metal backend keeps
 // the uploaded form of recent tapes resident, keyed on the process-unique
