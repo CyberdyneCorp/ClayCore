@@ -603,6 +603,20 @@ clay_result clay_item_set_stroke_points(clay_item* item, const float* xyzr, size
  * on the tree. */
 clay_result clay_item_set_armature_parents(clay_item* item, const uint32_t* parents,
                                            size_t count);
+/* The sign half of an armature: +1 or -1 per node, positive by default —
+ * ZBrush's negative ZSphere. The field is the armature of the positive nodes
+ * MINUS the armature of the negative nodes, each half built exactly as the
+ * unsigned armature is, the carve applied after the whole positive fold. A
+ * link exists only between two nodes of the SAME sign, so skin along a
+ * negative node's links is never drawn (the membrane cut) and a carve never
+ * sweeps a positive parent's radius (an eye-socket child does not swallow
+ * the head). A negative node may carry children; they keep their own signs.
+ *
+ * An array shorter than the nodes reads as positive-padded, exactly as a
+ * short parent array reads as roots. Any value other than +1 or -1 is
+ * refused: a magnitude here would be the negative-radius convention this
+ * feature deliberately did not take. */
+clay_result clay_item_set_armature_signs(clay_item* item, const int8_t* signs, size_t count);
 clay_result clay_item_add_stroke_point(clay_item* item, const float position[3], float radius);
 /* Append one armature node under `parent`, the incremental authoring path that
  * clay_item_add_stroke_point is for a chain. `parent` < 0 continues from the
@@ -669,6 +683,9 @@ clay_result clay_item_set_curve(clay_item* item, int32_t closed, float tolerance
  *                             moves with it — an arm hangs from a shoulder
  *   CLAY_ARMATURE_SET_RADIUS  `radius` on `target`
  *   CLAY_ARMATURE_DELETE      `target` and everything under it
+ *   CLAY_ARMATURE_SET_SIGN    `radius` carries the sign, +1 or -1, on `target`
+ *                             — anything else is refused. A new child is
+ *                             always positive; this is what flips it.
  *
  * `mirrored` applies to add-child only: it adds the reflection through x = 0 in
  * the same step, under the mirror of the parent where there is one. A node on
@@ -677,6 +694,7 @@ clay_result clay_item_set_curve(clay_item* item, int32_t closed, float tolerance
 #define CLAY_ARMATURE_MOVE       1
 #define CLAY_ARMATURE_SET_RADIUS 2
 #define CLAY_ARMATURE_DELETE     3
+#define CLAY_ARMATURE_SET_SIGN   4
 clay_result clay_layer_armature_edit(clay_document* doc, clay_layer_id layer, clay_node_id node,
                                      int32_t op, uint32_t target, const float value[3],
                                      float radius, int32_t mirrored);
@@ -748,6 +766,16 @@ clay_result clay_layer_stroke_points(const clay_document* doc, clay_layer_id lay
 clay_result clay_layer_armature_parents(const clay_document* doc, clay_layer_id layer,
                                         clay_node_id node, uint32_t* out_parents,
                                         size_t* count);
+
+/* The sign half of the same rig, by the same size-query pattern and the same
+ * count: one +1 or -1 per node, parallel to the xyzr and parents readbacks.
+ * Signs stored shorter than the nodes read back padded positive — the reading
+ * compilation makes, so what comes back is the rig the document evaluates,
+ * and a rig saved before signs existed reads back all-positive. A node that
+ * is not an armature is CLAY_ERROR_INVALID_ARGUMENT; reading is not editing,
+ * so a ghosted, locked or hidden layer answers normally. */
+clay_result clay_layer_armature_signs(const clay_document* doc, clay_layer_id layer,
+                                      clay_node_id node, int8_t* out_signs, size_t* count);
 
 /* Parameters of a spatial morph, in world space. Required by the matching
  * transition op and rejected with any other op: linear morphs along the

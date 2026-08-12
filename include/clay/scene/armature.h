@@ -46,11 +46,23 @@ bool armature_move(std::vector<StrokePoint>& nodes, const std::vector<std::uint3
 
 bool armature_set_radius(std::vector<StrokePoint>& nodes, std::uint32_t node, float radius);
 
-// Delete a node and everything under it, renumbering the parents that survive.
-// A root's subtree is the whole tree, which empties the armature — that is the
-// caller's decision to make, not this function's to refuse.
+// Delete a node and everything under it, renumbering the parents that survive
+// and carrying each survivor's sign with it. A root's subtree is the whole
+// tree, which empties the armature — that is the caller's decision to make,
+// not this function's to refuse.
 bool armature_delete_subtree(std::vector<StrokePoint>& nodes,
-                             std::vector<std::uint32_t>& parents, std::uint32_t node);
+                             std::vector<std::uint32_t>& parents,
+                             std::vector<std::int8_t>& signs, std::uint32_t node);
+
+// Resize `signs` to `node_count`, padding with +1 — the reading evaluation
+// makes of a signs array shorter than its nodes, made explicit so an edit can
+// renumber a normalized list.
+void armature_normalize_signs(std::vector<std::int8_t>& signs, std::size_t node_count);
+
+// Set one node's sign, +1 or -1. Anything else, or a node out of range, is
+// refused with both left alone.
+bool armature_set_sign(std::vector<std::int8_t>& signs, std::size_t node_count,
+                       std::uint32_t node, std::int8_t sign);
 
 // Append a node under `parent` AND its reflection through the plane x = 0,
 // under the mirror of that parent where one is known. Returns the number of

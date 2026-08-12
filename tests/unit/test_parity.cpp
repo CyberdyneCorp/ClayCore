@@ -258,6 +258,23 @@ std::vector<ParityScene> parity_scenes() {
         l.sdf->insert(arm);
         scenes.push_back({"armature_branch", std::move(doc), 3.0f});
     }
+    {   // a signed armature: a negative interior node and a referenced
+        // negative root, so every backend runs the two-pass fold — positive
+        // links, then subtracted ones — in the same order
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        scene::Node arm;
+        arm.prim = scene::Prim::armature();
+        arm.stroke = {{cf3(0, -0.35f, 0), 0.30f},
+                      {cf3(0, 0.35f, 0), 0.24f},
+                      {cf3(-0.6f, 0.15f, 0.1f), 0.16f},
+                      {cf3(0.6f, 0.15f, -0.1f), 0.16f}};
+        arm.armature_parents = {0, 0, 1, 1};
+        arm.armature_signs = {-1, 1, -1, 1};
+        arm.stroke_blend_k = 0.06f;
+        l.sdf->insert(arm);
+        scenes.push_back({"armature_negative", std::move(doc), 3.0f});
+    }
     // blend-profile pairs (union + subtract per profile)
     auto pair = [&](const char* name, scene::BlendProfile profile) {
         scene::Document doc;

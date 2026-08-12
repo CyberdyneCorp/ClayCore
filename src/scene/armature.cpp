@@ -88,8 +88,10 @@ bool armature_set_radius(std::vector<StrokePoint>& nodes, std::uint32_t node, fl
 }
 
 bool armature_delete_subtree(std::vector<StrokePoint>& nodes,
-                             std::vector<std::uint32_t>& parents, std::uint32_t node) {
+                             std::vector<std::uint32_t>& parents,
+                             std::vector<std::int8_t>& signs, std::uint32_t node) {
     if (node >= nodes.size() || nodes.size() != parents.size()) return false;
+    armature_normalize_signs(signs, nodes.size());
     const std::vector<std::uint32_t> doomed = armature_subtree(parents, node);
     std::vector<bool> drop(nodes.size(), false);
     for (std::uint32_t i : doomed) drop[i] = true;
@@ -100,15 +102,30 @@ bool armature_delete_subtree(std::vector<StrokePoint>& nodes,
     std::vector<std::uint32_t> remap(nodes.size(), 0);
     std::vector<StrokePoint> kept_nodes;
     std::vector<std::uint32_t> kept_parents;
+    std::vector<std::int8_t> kept_signs;
     for (std::uint32_t i = 0; i < nodes.size(); ++i) {
         if (drop[i]) continue;
         remap[i] = static_cast<std::uint32_t>(kept_nodes.size());
         kept_nodes.push_back(nodes[i]);
         kept_parents.push_back(parents[i]);
+        kept_signs.push_back(signs[i]);
     }
     for (std::uint32_t& p : kept_parents) p = remap[p];
     nodes = std::move(kept_nodes);
     parents = std::move(kept_parents);
+    signs = std::move(kept_signs);
+    return true;
+}
+
+void armature_normalize_signs(std::vector<std::int8_t>& signs, std::size_t node_count) {
+    signs.resize(node_count, std::int8_t{1});
+}
+
+bool armature_set_sign(std::vector<std::int8_t>& signs, std::size_t node_count,
+                       std::uint32_t node, std::int8_t sign) {
+    if (node >= node_count || (sign != 1 && sign != -1)) return false;
+    armature_normalize_signs(signs, node_count);
+    signs[node] = sign;
     return true;
 }
 

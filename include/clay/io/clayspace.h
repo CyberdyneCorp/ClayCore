@@ -76,6 +76,13 @@
 // reading a different scene. Writing at an older minor is how a document is
 // made readable by an older build, which is what the `minor` parameter on
 // save_clayspace and serialize_document is for.
+//
+// Minor 8 adds an armature's signs: one byte per node, +1 or -1, after the
+// parents at the end of the node record, written only from 8. The same scene
+// payload trade as minor 7: the count word goes out for every node, a build
+// that predates 8 desynchronises and fails rather than misreads, and writing
+// AT minor 7 drops only the signs — an all-positive document loses nothing
+// to it.
 
 #include <map>
 #include <optional>
@@ -92,7 +99,7 @@ namespace clay {
 namespace io {
 
 inline constexpr std::uint16_t kClaySpaceMajor = 1;
-inline constexpr std::uint16_t kClaySpaceMinor = 7;
+inline constexpr std::uint16_t kClaySpaceMinor = 8;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).

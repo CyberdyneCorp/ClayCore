@@ -132,9 +132,17 @@ std::optional<Command> apply_one(Document& doc, const SetArmatureCmd& c) {
     // a cycle makes the field depend on the order links are walked instead of
     // on the tree, and the undo stack would then carry something unrenderable.
     if (!armature_is_valid(c.nodes, c.parents)) return std::nullopt;
-    SetArmatureCmd inverse{c.layer, c.node, n->stroke, n->armature_parents, n->stroke_blend_k};
+    // Signs are not topology, but a stored sign is a promise to the kernel:
+    // only +1 and -1 mean anything, and a longer-than-nodes array names nodes
+    // that do not exist.
+    if (c.signs.size() > c.nodes.size()) return std::nullopt;
+    for (std::int8_t s : c.signs)
+        if (s != 1 && s != -1) return std::nullopt;
+    SetArmatureCmd inverse{c.layer,          c.node,           n->stroke,
+                           n->armature_parents, n->armature_signs, n->stroke_blend_k};
     n->stroke = c.nodes;
     n->armature_parents = c.parents;
+    n->armature_signs = c.signs;
     n->stroke_blend_k = c.blend_k;
     return Command{inverse};
 }
@@ -421,6 +429,14 @@ void write_node(Writer& w, const Node& n) {
         w.u32(static_cast<std::uint32_t>(n.armature_parents.size()));
         for (std::uint32_t parent : n.armature_parents) w.u32(parent);
     }
+    // The signs, one byte per entry, from minor 8 — the same trade minor 7
+    // made for the parents: the count word goes out for every node, so a
+    // pre-8 build desynchronises and fails rather than misreads, and writing
+    // AT minor 7 drops only the signs.
+    if (w.minor >= 8) {
+        w.u32(static_cast<std::uint32_t>(n.armature_signs.size()));
+        for (std::int8_t sign : n.armature_signs) w.pod(sign);
+    }
     // Deformer carries uint8 + floats: field-wise, so padding never reaches
     // the stream (the portability trap struct-wise writes hit on GCC).
     w.pod(n.repeat.type);
@@ -531,6 +547,16 @@ Node read_node(Reader& r) {
         }
         n.armature_parents.reserve(ac);
         for (std::uint32_t i = 0; i < ac && r.ok; ++i) n.armature_parents.push_back(r.u32());
+    }
+    if (r.minor >= 8) {
+        std::uint32_t sgc = r.u32();
+        if (sgc > r.remaining) {
+            r.ok = false;
+            return n;
+        }
+        n.armature_signs.reserve(sgc);
+        for (std::uint32_t i = 0; i < sgc && r.ok; ++i)
+            n.armature_signs.push_back(r.pod<std::int8_t>());
     }
     n.repeat.type = r.pod<std::uint8_t>();
     n.repeat.spacing = r.pod<kernel::cfloat3>();
@@ -761,6 +787,10 @@ struct SerializeVisitor {
         for (const StrokePoint& p : c.nodes) write_point(w, p);
         w.u32(static_cast<std::uint32_t>(c.parents.size()));
         for (std::uint32_t parent : c.parents) w.u32(parent);
+        if (w.minor >= 8) {
+            w.u32(static_cast<std::uint32_t>(c.signs.size()));
+            for (std::int8_t sign : c.signs) w.pod(sign);
+        }
         w.pod(c.blend_k);
     }
     void operator()(const SetDeformersCmd& c) {
@@ -903,6 +933,12 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
             std::uint32_t pn = r.u32();
             if (pn > r.remaining / sizeof(std::uint32_t)) return std::nullopt;
             for (std::uint32_t i = 0; i < pn && r.ok; ++i) c.parents.push_back(r.u32());
+            if (r.minor >= 8) {
+                std::uint32_t sn = r.u32();
+                if (sn > r.remaining) return std::nullopt;
+                for (std::uint32_t i = 0; i < sn && r.ok; ++i)
+                    c.signs.push_back(r.pod<std::int8_t>());
+            }
             c.blend_k = r.pod<float>();
             cmd = std::move(c);
             break;

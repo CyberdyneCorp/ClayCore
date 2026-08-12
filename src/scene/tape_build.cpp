@@ -444,7 +444,7 @@ struct Compiler {
             // prim block travels — the blob has one element type.
             const std::vector<StrokePoint>& nodes = item.stroke;
             if (nodes.empty()) return;
-            float prim_params[4];
+            float prim_params[5];
             prim_params[0] = item.stroke_blend_k;
             prim_params[1] = static_cast<float>(tape.blob.size());
             for (const StrokePoint& n : nodes) {
@@ -466,8 +466,16 @@ struct Compiler {
                 tape.blob.push_back(static_cast<float>(parent));
             }
             prim_params[3] = static_cast<float>(nodes.size());
+            prim_params[4] = static_cast<float>(tape.blob.size());
+            for (std::size_t i = 0; i < nodes.size(); ++i) {
+                // A sign absent because the array was stored shorter than the
+                // points reads as positive, the same padding short parents get.
+                std::int8_t sign =
+                    i < item.armature_signs.size() ? item.armature_signs[i] : std::int8_t{1};
+                tape.blob.push_back(sign < 0 ? -1.0f : 1.0f);
+            }
             emit_prim(kernel::ctape_armature, inv_world, scale, round_world, item.color,
-                      prim_params, 4, item.deformers, item.repeat);
+                      prim_params, 5, item.deformers, item.repeat);
         } else if (prim_is_volume(item.prim.type)) {
             if (!item.volume || item.volume->empty()) return;  // nothing to read
             std::vector<float> flat = item.volume->to_blob();

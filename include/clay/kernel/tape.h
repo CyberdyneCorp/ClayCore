@@ -402,47 +402,86 @@ CLAY_FN float ctape_stroke_dist(CLAY_FPTR pts, int count, cfloat3 p,
 }
 
 // A tree of spheres. `nodes` is count * 4 floats (x, y, z, radius); `parents`
-// is count floats, each the index of that node's parent. A node whose parent
-// is itself is a root and contributes a bare sphere, so a one-node armature is
-// a sphere rather than nothing.
+// is count floats, each the index of that node's parent; `signs` is count
+// floats, +1 or -1 per node. A node whose parent is itself is a root and
+// contributes a bare sphere, so a one-node armature is a sphere rather than
+// nothing.
 //
-// The fold order is ascending node index, and that is a REQUIREMENT rather
-// than an implementation detail: csmin_quadratic is not associative, so three
-// links meeting at a hip give a different field depending on the order they
-// combine. Fixing the order here is what makes an armature evaluate the same
-// on every backend.
+// The signed rule is one sentence: the armature of the positive nodes, MINUS
+// the armature of the negative nodes (ZBrush's negative ZSphere), each half
+// built exactly as the unsigned armature is. A link therefore exists only
+// between two nodes of the SAME sign — skin between builders, carve between
+// carvers — and a link whose ends disagree belongs to neither half: skin
+// along a negative's links is suppressed rather than drawn, which is the
+// membrane cut, and a carve never sweeps a positive parent's radius, which is
+// what keeps an eye-socket child from swallowing the head it is cut into. A
+// node whose parent has the other sign reads as a root of its own half, and
+// the referenced-root suppression is applied per half for the same reason it
+// exists at all: two overlapping terms are wrong under a soft fold, subtracted
+// exactly as unioned.
+//
+// The carve is subtracted AFTER the whole positive fold, so a sleeve from any
+// other branch that runs through a hollow is cut by it and no later union can
+// re-fill it — what the host-side workaround of a trailing subtract sphere
+// cannot express.
+//
+// The fold order is ascending node index within each half, positives first,
+// and that is a REQUIREMENT rather than an implementation detail:
+// csmin_quadratic is not associative, and neither is the subtraction that
+// follows it, so three links meeting at a hip give a different field
+// depending on the order they combine. Fixing the order here is what makes an
+// armature evaluate the same on every backend. When every sign is positive
+// the first pass is instruction-for-instruction the pre-signs fold, which is
+// what keeps a chain armature equal to its stroke.
 CLAY_FN float ctape_armature_dist(CLAY_FPTR nodes,
-                                  CLAY_FPTR parents, int count, cfloat3 p,
-                                  float blend_k) {
+                                  CLAY_FPTR parents, CLAY_FPTR signs, int count,
+                                  cfloat3 p, float blend_k) {
     if (count <= 0) return CLAY_TAPE_FAR;
     float d = CLAY_TAPE_FAR;
-    for (int i = 0; i < count; ++i) {
-        int j = CLAY_INT(CLAY_AT(parents, i));
-        if (j < 0 || j >= count) j = i;
-        cfloat3 a = cf3(CLAY_AT(nodes, i * 4 + 0), CLAY_AT(nodes, i * 4 + 1), CLAY_AT(nodes, i * 4 + 2));
-        float ra = CLAY_AT(nodes, i * 4 + 3);
-        float seg;
-        if (j == i) {
-            // A root. Its sphere is ALREADY inside every link that names it,
-            // so adding it again is redundant with a hard union and wrong with
-            // a soft one: smooth-min of two overlapping terms pulls the surface
-            // outward, and a chain armature would then stop matching the stroke
-            // it is supposed to equal. Contribute it only when nothing else
-            // does — an isolated node, which is the case that would otherwise
-            // vanish. Roots are few, so the scan costs nothing in practice.
-            bool referenced = false;
-            for (int k = 0; k < count; ++k) {
-                if (k == i) continue;
-                int pk = CLAY_INT(CLAY_AT(parents, k));
-                if (pk == i) { referenced = true; break; }
+    for (int pass = 0; pass < 2; ++pass) {
+        bool negative = pass == 1;
+        for (int i = 0; i < count; ++i) {
+            if ((CLAY_AT(signs, i) < 0.0f) != negative) continue;
+            int j = CLAY_INT(CLAY_AT(parents, i));
+            if (j < 0 || j >= count) j = i;
+            // A parent of the other sign is no parent in this half: the node
+            // reads as a root of its own half.
+            if (j != i && (CLAY_AT(signs, j) < 0.0f) != negative) j = i;
+            cfloat3 a = cf3(CLAY_AT(nodes, i * 4 + 0), CLAY_AT(nodes, i * 4 + 1), CLAY_AT(nodes, i * 4 + 2));
+            float ra = CLAY_AT(nodes, i * 4 + 3);
+            float seg;
+            if (j == i) {
+                // A root. Its sphere is ALREADY inside every same-sign link
+                // that names it, so contributing it again is redundant with a
+                // hard fold and wrong with a soft one: smooth-min of two
+                // overlapping terms pulls the surface outward — and the
+                // subtracted half over-carves the same way — so a chain
+                // armature would stop matching the stroke it is supposed to
+                // equal. Contribute it only when nothing else in ITS HALF
+                // does — an isolated node, which is the case that would
+                // otherwise vanish. Roots are few, so the scan costs nothing
+                // in practice.
+                bool referenced = false;
+                for (int k = 0; k < count; ++k) {
+                    if (k == i) continue;
+                    if ((CLAY_AT(signs, k) < 0.0f) != negative) continue;
+                    int pk = CLAY_INT(CLAY_AT(parents, k));
+                    if (pk == i) { referenced = true; break; }
+                }
+                if (referenced) continue;
+                seg = sd_sphere(p - a, ra);
+            } else {
+                cfloat3 b = cf3(CLAY_AT(nodes, j * 4 + 0), CLAY_AT(nodes, j * 4 + 1), CLAY_AT(nodes, j * 4 + 2));
+                seg = csweep_link(p, a, b, ra, CLAY_AT(nodes, j * 4 + 3));
             }
-            if (referenced) continue;
-            seg = sd_sphere(p - a, ra);
-        } else {
-            cfloat3 b = cf3(CLAY_AT(nodes, j * 4 + 0), CLAY_AT(nodes, j * 4 + 1), CLAY_AT(nodes, j * 4 + 2));
-            seg = csweep_link(p, a, b, ra, CLAY_AT(nodes, j * 4 + 3));
+            if (negative) {
+                // The carve half comes out of the skin half: the subtract
+                // idiom ctape_combine_values uses, hard where the blend is.
+                d = (blend_k > 0.0f) ? -csmin_quadratic(-d, seg, blend_k) : cmax(d, -seg);
+            } else {
+                d = (blend_k > 0.0f) ? csmin_quadratic(d, seg, blend_k) : cmin(d, seg);
+            }
         }
-        d = (blend_k > 0.0f) ? csmin_quadratic(d, seg, blend_k) : cmin(d, seg);
     }
     return d;
 }
@@ -698,7 +737,9 @@ CLAY_FN float ctape_prim_dist(CLAY_UINT_T op, CLAY_FPTR q,
         int nodes = CLAY_INT(CLAY_AT(q, 1));
         int parents = CLAY_INT(CLAY_AT(q, 2));
         int cnt = CLAY_INT(CLAY_AT(q, 3));
-        return ctape_armature_dist(blob + nodes, blob + parents, cnt, lp, CLAY_AT(q, 0));
+        int signs = CLAY_INT(CLAY_AT(q, 4));
+        return ctape_armature_dist(blob + nodes, blob + parents, blob + signs, cnt, lp,
+                                   CLAY_AT(q, 0));
     }
     return CLAY_TAPE_FAR;
 }
