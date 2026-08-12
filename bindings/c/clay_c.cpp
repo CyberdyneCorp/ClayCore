@@ -6027,12 +6027,6 @@ clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_docu
     if (!doc && (options.normals == mesh::NormalMode::Gradient || options.colors))
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "gradient normals and colours need a document to sample");
-    std::shared_ptr<const scene::Tape> tape_ref;
-    const scene::Tape* tape = nullptr;
-    if (doc) {
-        tape_ref = doc->tape();
-        tape = tape_ref.get();
-    }
     // NULL keys means "every surface brick", which is what this call did before
     // the key list existed and what an export wants.
     std::vector<brick::BrickKey> subset;
@@ -6043,8 +6037,11 @@ clay_result clay_brick_cache_mesh(const clay_brick_cache* cache, const clay_docu
     }
     std::vector<mesh::BrickMeshRange> ranges;
     auto* handle = new clay_mesh();
-    handle->data = mesh::mesh_bricks(cache->cache, tape, options, keys_xyz ? &subset : nullptr,
-                                     out_ranges ? &ranges : nullptr);
+    // The document rather than its compiled tape: gradient normals and colours
+    // are evaluated through per-brick CULLED tapes, so their cost follows the
+    // bricks named rather than the total document (issue #73).
+    handle->data = mesh::mesh_bricks(cache->cache, doc ? &doc->doc.document : nullptr, options,
+                                     keys_xyz ? &subset : nullptr, out_ranges ? &ranges : nullptr);
     if (out_ranges)
         for (std::size_t i = 0; i < ranges.size(); ++i) {
             out_ranges[i].key[0] = ranges[i].key.x;

@@ -3136,7 +3136,16 @@ clay_result clay_brick_cache_current_lod(const clay_brick_cache* cache,
 typedef enum clay_normal_mode {
     CLAY_NORMAL_NONE = 0,     /* no normals */
     CLAY_NORMAL_FACE = 1,     /* area-weighted face normals; needs no document */
-    CLAY_NORMAL_GRADIENT = 2  /* the field gradient, so blends read smooth */
+    /* The field gradient, so blends read smooth. Evaluated through PER-BRICK
+     * culled tapes — the same culling the refill path uses — so its cost
+     * follows the bricks being meshed, not the size of the document: re-meshing
+     * a fixed dab's worth of bricks costs the same on a fresh document and on
+     * one carrying two hundred earlier strokes (issue #73). Inside a brick's
+     * band-dilated cull region the culled tape is band-clamp identical to the
+     * whole document's, and mesh vertices sit on the surface with gradient
+     * taps of gradient_eps << band, so the normals equal a full-tape
+     * evaluation exactly. */
+    CLAY_NORMAL_GRADIENT = 2
 } clay_normal_mode;
 
 typedef struct clay_brick_mesh_params {
@@ -3212,7 +3221,9 @@ typedef struct clay_brick_mesh_range {
  * `doc` may be NULL, and then no tape is compiled: the mesh has positions and
  * face normals and no colours. Gradient normals and colours are attributes of
  * the FIELD, so asking for either without a document is rejected rather than
- * quietly downgraded. Behind the same owner handle as clay_document_mesh and
+ * quietly downgraded. When a document IS passed, those attributes are
+ * evaluated through per-brick CULLED tapes rather than the whole document's,
+ * so their cost follows the bricks named — see CLAY_NORMAL_GRADIENT. Behind the same owner handle as clay_document_mesh and
  * freed with clay_mesh_destroy. A cache holding no surface bricks yields an
  * EMPTY mesh rather than an error, as clay_voxel_mesh does for an empty grid:
  * a cache that has not been filled yet is an ordinary state of a session. */

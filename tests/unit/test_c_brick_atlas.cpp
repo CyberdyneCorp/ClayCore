@@ -1056,3 +1056,111 @@ TEST_CASE("brick apron: every refusal") {
     CHECK(clay_brick_cache_read_bricks(cache, 0, keys.data(), 1, 1, &state, one.data(), one.size(),
                                        nullptr, 0) == CLAY_OK);
 }
+
+// -- gradient normals and the size of the document (issue #73) ----------------
+
+namespace {
+
+// A small blended scene near the origin, so gradient normals and colours
+// depend on MORE than one item — a wrongly culled tape that dropped a nearby
+// item would visibly change them, where a lone sphere would hide it.
+void add_near_scene(Doc& doc) {
+    const float red[3] = {0.9f, 0.2f, 0.1f};
+    add_sphere(doc, 0.4f, 0, 0, 0, red);
+    const float blue[3] = {0.1f, 0.2f, 0.9f};
+    const float r = 0.25f;
+    clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+    REQUIRE(it != nullptr);
+    const float pos[3] = {0.3f, 0.2f, 0.0f};
+    REQUIRE(clay_item_set_position(it, pos) == CLAY_OK);
+    REQUIRE(clay_item_set_color(it, blue) == CLAY_OK);
+    REQUIRE(clay_item_set_blend(it, CLAY_BLEND_QUADRATIC, 0.1f) == CLAY_OK);
+    clay_node_id id = 0;
+    REQUIRE(clay_layer_add_item(doc.d, doc.layer, it, &id) == CLAY_OK);
+    clay_item_destroy(it);
+}
+
+}  // namespace
+
+// Regression for issue #73: clay_brick_cache_mesh with gradient normals used
+// to evaluate the WHOLE document tape at every vertex, so re-meshing a fixed
+// brick set grew linearly with everything already sculpted — 4.8 ms at 1 node
+// to 120 ms at 193 — while refill over the same bricks stayed flat, because it
+// culls. Gradient normals and colours now go through per-brick culled tapes,
+// the same culling refill uses. This test pins the CORRECTNESS half of that:
+// the culled attributes must equal both a full-tape evaluation and the
+// attributes of a document that never held the far nodes at all. The scaling
+// half is gated by BM_MeshBricksGradGrownDoc in the benchmark suite.
+TEST_CASE("brick meshing: gradient normals read the bricks' region, not the document") {
+    Doc near_doc;   // the blended scene alone
+    Doc crowded;    // the same scene plus 200 nodes ~3 world units away
+    add_near_scene(near_doc);
+    add_near_scene(crowded);
+    const float green[3] = {0.2f, 0.8f, 0.2f};
+    for (int i = 0; i < 200; ++i)
+        add_sphere(crowded, 0.05f, 3.0f + 0.02f * static_cast<float>(i % 10),
+                   0.4f * std::sin(static_cast<float>(i) * 0.7f),
+                   0.4f * std::cos(static_cast<float>(i) * 1.3f), green);
+
+    Cache a(make_cache(false));
+    Cache b(make_cache(false));
+    mark_and_fill(a, near_doc, false);
+    mark_and_fill(b, crowded, false);
+
+    // The FIXED brick set: the near scene's whole surface. The far nodes are
+    // an order of magnitude beyond any influence bound that reaches it.
+    std::vector<std::int32_t> keys = surface_keys(a);
+    const std::size_t count = keys.size() / 3;
+    REQUIRE(count > 0);
+
+    clay_brick_mesh_params params{};
+    params.struct_size = static_cast<std::uint32_t>(sizeof params);
+    params.normals = CLAY_NORMAL_GRADIENT;
+    params.colors = 1;
+    params.gradient_eps = 0.0f;
+
+    MeshHandle ma, mb;
+    REQUIRE(clay_brick_cache_mesh(a, near_doc.d, &params, keys.data(), count, nullptr, &ma.m) ==
+            CLAY_OK);
+    REQUIRE(clay_brick_cache_mesh(b, crowded.d, &params, keys.data(), count, nullptr, &mb.m) ==
+            CLAY_OK);
+
+    const std::size_t verts = clay_mesh_vertex_count(ma.m);
+    REQUIRE(verts > 0);
+    REQUIRE(clay_mesh_vertex_count(mb.m) == verts);
+    const float* pa = clay_mesh_positions(ma.m);
+    const float* pb = clay_mesh_positions(mb.m);
+    const float* na = clay_mesh_normals(ma.m);
+    const float* nb = clay_mesh_normals(mb.m);
+    const float* ca = clay_mesh_colors(ma.m);
+    const float* cb = clay_mesh_colors(mb.m);
+    REQUIRE(na != nullptr);
+    REQUIRE(nb != nullptr);
+    REQUIRE(ca != nullptr);
+    REQUIRE(cb != nullptr);
+
+    // Same culled refill, same marched cells: the geometry is bit-identical,
+    // and the attributes must be too — the far nodes cannot reach these bricks.
+    std::size_t worst = 0;
+    float worst_diff = 0.0f;
+    for (std::size_t i = 0; i < verts * 3; ++i) {
+        REQUIRE(pa[i] == pb[i]);
+        const float dn = std::fabs(na[i] - nb[i]);
+        const float dc = std::fabs(ca[i] - cb[i]);
+        if (dn > worst_diff) {
+            worst_diff = dn;
+            worst = i / 3;
+        }
+        REQUIRE(dn <= 1e-5f);
+        REQUIRE(dc <= 1e-5f);
+    }
+    INFO("worst normal difference " << worst_diff << " at vertex " << worst);
+
+    // And against the full document tape, which is what the gradient path
+    // consulted before it culled: inside a brick's band-dilated cull region the
+    // culled tape is band-clamp identical to the whole, so the normals must
+    // agree with clay_eval_gradients over the crowded document itself.
+    std::vector<float> full(verts * 3);
+    REQUIRE(clay_eval_gradients(crowded.d, nullptr, pb, verts, full.data()) == CLAY_OK);
+    for (std::size_t i = 0; i < verts * 3; ++i) REQUIRE(std::fabs(nb[i] - full[i]) <= 1e-4f);
+}

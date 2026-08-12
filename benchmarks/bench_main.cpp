@@ -5,6 +5,8 @@
 
 #include <benchmark/benchmark.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -156,6 +158,75 @@ void BM_MeshBricksSubset(benchmark::State& state) {
     state.counters["bricks"] = static_cast<double>(dab.size());
 }
 BENCHMARK(BM_MeshBricksSubset)->Unit(benchmark::kMillisecond);
+
+// Issue #73: gradient normals over a FIXED brick set must cost what the bricks
+// cost, not what the document does. Same sphere, same 80-brick subset at the +x
+// pole, gradient normals on — against a document holding 1 node and against one
+// holding 193, the extra 192 dabs at the -x pole, two world units from every
+// measured brick. Before the per-brick culled attribute pass the grown document
+// was ~18x the fresh one (4.8 ms -> 120 ms in the report); check_bench.py gates
+// the ratio.
+namespace {
+
+scene::Document sculpted_sphere(int nodes) {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("sculpt");
+    scene::Node base;
+    base.prim = scene::Prim::sphere(1.0f);
+    l.sdf->insert(base);
+    for (int i = 1; i < nodes; ++i) {
+        scene::Node dab;
+        dab.prim = scene::Prim::sphere(0.04f);
+        const float a = 0.3f * std::sin(static_cast<float>(i) * 0.7f);
+        const float b = 0.3f * std::cos(static_cast<float>(i) * 1.3f);
+        const float x = -std::sqrt(std::max(0.0f, 1.0f - a * a - b * b));
+        dab.xform.position = cf3(x, a, b);
+        l.sdf->insert(dab);
+    }
+    return doc;
+}
+
+// The 80 surface bricks nearest the +x pole: a fixed re-mesh region on the far
+// side of the sphere from every dab.
+std::vector<brick::BrickKey> pole_subset(const brick::BrickCache& cache) {
+    std::vector<brick::BrickKey> keys = cache.surface_bricks();
+    const float w = static_cast<float>(cache.config().dim) * cache.config().voxel_size;
+    auto dist = [&](const brick::BrickKey& k) {
+        const float cx = (static_cast<float>(k.x) + 0.5f) * w - 1.0f;
+        const float cy = (static_cast<float>(k.y) + 0.5f) * w;
+        const float cz = (static_cast<float>(k.z) + 0.5f) * w;
+        return cx * cx + cy * cy + cz * cz;
+    };
+    std::sort(keys.begin(), keys.end(),
+              [&](const brick::BrickKey& a, const brick::BrickKey& b) {
+                  return dist(a) < dist(b);
+              });
+    keys.resize(std::min<std::size_t>(80, keys.size()));
+    return keys;
+}
+
+void mesh_pole_with_gradients(benchmark::State& state, int nodes) {
+    scene::Document doc = sculpted_sphere(nodes);
+    brick::BrickCache cache = filled_cache(doc);
+    std::vector<brick::BrickKey> subset = pole_subset(cache);
+    mesh::MeshingOptions options;
+    options.normals = mesh::NormalMode::Gradient;
+    options.colors = false;
+    for (auto _ : state) {
+        mesh::Mesh m = mesh::mesh_bricks(cache, &doc, options, &subset);
+        benchmark::DoNotOptimize(m.triangle_count());
+    }
+    state.counters["bricks"] = static_cast<double>(subset.size());
+    state.counters["nodes"] = static_cast<double>(nodes);
+}
+
+}  // namespace
+
+void BM_MeshBricksGradFreshDoc(benchmark::State& state) { mesh_pole_with_gradients(state, 1); }
+BENCHMARK(BM_MeshBricksGradFreshDoc)->Unit(benchmark::kMillisecond);
+
+void BM_MeshBricksGradGrownDoc(benchmark::State& state) { mesh_pole_with_gradients(state, 193); }
+BENCHMARK(BM_MeshBricksGradGrownDoc)->Unit(benchmark::kMillisecond);
 
 void BM_MeshTape(benchmark::State& state) {
     scene::Document doc = bench_document();

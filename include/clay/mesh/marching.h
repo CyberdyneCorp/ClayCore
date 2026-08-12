@@ -72,7 +72,14 @@ struct BrickMeshRange {
 
 // Mesh a filled brick cache: marches only cells owned by surface bricks
 // (the band width >= 1 voxel guarantees no crossing escapes into
-// inside/outside bricks). Attributes come from the tape when given.
+// inside/outside bricks). Attributes come from the document when given —
+// gradient normals and colours are evaluated through PER-BRICK culled tapes,
+// the same culling the refill path uses, so their cost follows the bricks
+// being meshed rather than the size of the document (issue #73). Inside a
+// brick's band-dilated cull region the culled tape's band-clamped results are
+// bit-identical to the full tape's, and the vertices sit on the surface with
+// gradient taps of gradient_eps << band, so the attributes match a full-tape
+// evaluation exactly.
 //
 // `keys` names the bricks to march; nullptr means every surface brick, which
 // is the whole-surface export path. A key that stores no lattice contributes
@@ -99,7 +106,7 @@ struct BrickMeshRange {
 // call and may move between shares as the requested set changes.
 //
 // `out_ranges` (may be nullptr) receives one entry per key, in the order given.
-Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Tape* tape_for_attributes,
+Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_attributes,
                  const MeshingOptions& options = {},
                  const std::vector<brick::BrickKey>* keys = nullptr,
                  std::vector<BrickMeshRange>* out_ranges = nullptr);

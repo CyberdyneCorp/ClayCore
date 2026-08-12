@@ -386,7 +386,56 @@ Mesh mesh_tape(const scene::Tape& tape, const math::Aabb& region, float voxel_si
     return m;
 }
 
-Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Tape* tape_for_attributes,
+namespace {
+
+// Field attributes for a brick mesh, through PER-BRICK culled tapes rather
+// than the whole document's (issue #73): with the full tape every vertex paid
+// O(document), so re-meshing a FIXED brick set grew with everything already
+// sculpted — 4.8 ms at 1 node to 120 ms at 193 in the report — while the
+// refill path over the same bricks stayed flat, because it culls. Vertices
+// are grouped by the brick that owns their position and each group is
+// evaluated against a tape culled to that brick's band-dilated region, the
+// region BrickCache::cull_region defines and refill culls against. Inside it
+// band-clamped results are bit-identical to the full tape's; the vertices sit
+// on the surface (|d| ~ 0) and gradient taps move gradient_eps << band, so
+// every sample lands where the tapes agree exactly and the attributes match a
+// full-tape evaluation bit for bit.
+void apply_brick_attributes(Mesh& m, const brick::BrickCache& cache, const scene::Document& doc,
+                            const MeshingOptions& options) {
+    const bool colors = options.colors;
+    const bool gradients = options.normals == NormalMode::Gradient;
+    const float brick_width =
+        static_cast<float>(cache.config().dim) * cache.config().voxel_size;
+    std::unordered_map<brick::BrickKey, std::vector<std::uint32_t>, brick::BrickKeyHash> groups;
+    for (std::size_t i = 0; i < m.positions.size(); ++i) {
+        const cfloat3 p = m.positions[i];
+        // A vertex exactly on a boundary plane floors into its upper
+        // neighbour, whose cull region still contains it: the region is the
+        // brick dilated by the band, and the band is >= 1 voxel.
+        const brick::BrickKey key{static_cast<int>(std::floor(p.x / brick_width)),
+                                  static_cast<int>(std::floor(p.y / brick_width)),
+                                  static_cast<int>(std::floor(p.z / brick_width))};
+        groups[key].push_back(static_cast<std::uint32_t>(i));
+    }
+    if (colors) m.colors.resize(m.positions.size());
+    if (gradients) m.normals.resize(m.positions.size());
+    for (const auto& [key, verts] : groups) {
+        // Dilated by gradient_eps on top of the band, so the tetrahedron taps
+        // of a vertex at the region's edge stay inside the culled zone.
+        const scene::CullRegion cull{cache.cull_region(key).dilated(options.gradient_eps)};
+        const scene::Tape tape = scene::compile_document(doc, &cull);
+        auto field = [&](cfloat3 p) { return tape.eval(p).d; };
+        for (std::uint32_t i : verts) {
+            if (colors) m.colors[i] = tape.eval(m.positions[i]).color;
+            if (gradients)
+                m.normals[i] = kernel::cnormal(field, m.positions[i], options.gradient_eps);
+        }
+    }
+}
+
+}  // namespace
+
+Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_attributes,
                  const MeshingOptions& options, const std::vector<brick::BrickKey>* keys,
                  std::vector<BrickMeshRange>* out_ranges) {
     const int dim = cache.config().dim;
@@ -442,17 +491,15 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Tape* tape_for_att
                                    static_cast<std::uint32_t>(b.out.indices.size()) - i0});
     }
     Mesh m = std::move(b.out);
-    if (tape_for_attributes) {
-        apply_tape_attributes(m, *tape_for_attributes, options);
-    } else if (options.normals == NormalMode::Face) {
-        // Face normals are area-weighted from the triangles and need no field,
-        // which is what NormalMode::Face means and what the C header promises a
-        // caller who passes no document ("positions and face normals"). Without
-        // this the promise was silently broken: attributes were applied only
-        // through the tape, so a document-less brick mesh came back with no
-        // normals at all and a host shaded it flat black.
-        compute_face_normals(m);
-    }
+    if (doc_for_attributes && (options.colors || options.normals == NormalMode::Gradient))
+        apply_brick_attributes(m, cache, *doc_for_attributes, options);
+    // Face normals are area-weighted from the triangles and need no field,
+    // which is what NormalMode::Face means and what the C header promises a
+    // caller who passes no document ("positions and face normals"). Without
+    // this the promise was silently broken: attributes were applied only
+    // through the tape, so a document-less brick mesh came back with no
+    // normals at all and a host shaded it flat black.
+    if (options.normals == NormalMode::Face) compute_face_normals(m);
     return m;
 }
 
