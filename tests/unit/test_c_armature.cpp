@@ -257,3 +257,179 @@ TEST_CASE("c armature: a node answers what primitive it carries") {
     CHECK(clay_layer_node_prim(d.doc, layer, 999999, &prim) == CLAY_ERROR_NOT_FOUND);
     CHECK(clay_layer_node_prim(d.doc, layer, rig, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
 }
+
+// ---------------------------------------------------------------------------
+// Signs (#99, add-armature-node-signs): a negative node carves instead of
+// skinning, and the sign travels with the tree — setter, placed edit, readback
+// and file — so a reopened rig can be un-negatived.
+
+namespace {
+
+clay_node_id place_signed_rig(clay_document* doc, clay_layer_id layer) {
+    clay_item* item = clay_item_create(CLAY_PRIM_ARMATURE, nullptr, 0);
+    REQUIRE(item != nullptr);
+    REQUIRE(clay_item_set_stroke_points(item, kRig, 4) == CLAY_OK);
+    REQUIRE(clay_item_set_armature_parents(item, kParents, 4) == CLAY_OK);
+    const int8_t signs[4] = {1, -1, 1, 1};
+    REQUIRE(clay_item_set_armature_signs(item, signs, 4) == CLAY_OK);
+    REQUIRE(clay_item_set_op(item, CLAY_OP_ADD) == CLAY_OK);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, item, &node) == CLAY_OK);
+    clay_item_destroy(item);
+    return node;
+}
+
+}  // namespace
+
+TEST_CASE("c armature: a negative node survives the round trip and flips back") {
+    const std::string path = temp_path("c_armature_signs.clayspace");
+    clay_layer_id layer = 0;
+    clay_node_id node = 0;
+    {
+        Doc d;
+        REQUIRE(clay_add_sdf_layer(d.doc, "rig", &layer) == CLAY_OK);
+        node = place_signed_rig(d.doc, layer);
+        REQUIRE(clay_document_save(d.doc, path.c_str()) == CLAY_OK);
+    }
+
+    clay_document* back = nullptr;
+    REQUIRE(clay_document_load(path.c_str(), &back) == CLAY_OK);
+    Doc d(back);
+    std::filesystem::remove(path);
+
+    // The issue's second defect, closed: the reopened rig knows which node is
+    // negative. Size query first, by the pattern the parents readback set.
+    size_t count = 0;
+    REQUIRE(clay_layer_armature_signs(d.doc, layer, node, nullptr, &count) == CLAY_OK);
+    REQUIRE(count == 4);
+    int8_t signs[4] = {0, 0, 0, 0};
+    REQUIRE(clay_layer_armature_signs(d.doc, layer, node, signs, &count) == CLAY_OK);
+    CHECK(signs[0] == 1);
+    CHECK(signs[1] == -1);
+    CHECK(signs[2] == 1);
+    CHECK(signs[3] == 1);
+
+    // And it can be UN-negatived — what the workaround could not do at all.
+    REQUIRE(clay_document_enable_undo(d.doc) == CLAY_OK);
+    REQUIRE(clay_layer_armature_edit(d.doc, layer, node, CLAY_ARMATURE_SET_SIGN, 1, nullptr,
+                                     1.0f, 0) == CLAY_OK);
+    REQUIRE(clay_layer_armature_signs(d.doc, layer, node, signs, &count) == CLAY_OK);
+    for (int i = 0; i < 4; ++i) CHECK(signs[i] == 1);
+
+    // One undo step, and the sign is back.
+    int32_t undone = 0;
+    REQUIRE(clay_document_undo(d.doc, &undone) == CLAY_OK);
+    REQUIRE(undone == 1);
+    REQUIRE(clay_layer_armature_signs(d.doc, layer, node, signs, &count) == CLAY_OK);
+    CHECK(signs[1] == -1);
+}
+
+TEST_CASE("c armature: a negative node is not required to be a leaf") {
+    Doc d;
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(d.doc, "l", &layer) == CLAY_OK);
+    clay_node_id rig = place_rig(d.doc, layer);
+
+    // Node 1 carries 2 and 3 — the issue's third defect was having to refuse
+    // exactly this. The edit succeeds, and moving the negative node still
+    // carries its subtree, signs undisturbed.
+    REQUIRE(clay_layer_armature_edit(d.doc, layer, rig, CLAY_ARMATURE_SET_SIGN, 1, nullptr,
+                                     -1.0f, 0) == CLAY_OK);
+    const float delta[3] = {0.0f, 0.0f, 0.5f};
+    REQUIRE(clay_layer_armature_edit(d.doc, layer, rig, CLAY_ARMATURE_MOVE, 1, delta, 0.0f,
+                                     0) == CLAY_OK);
+    float xyzr[16] = {0};
+    uint32_t parents[4] = {0};
+    read_rig(d.doc, layer, rig, xyzr, parents);
+    CHECK(xyzr[1 * 4 + 2] == doctest::Approx(0.5f));
+    CHECK(xyzr[3 * 4 + 2] == doctest::Approx(0.5f));  // the subtree came along
+    size_t count = 4;
+    int8_t signs[4] = {0};
+    REQUIRE(clay_layer_armature_signs(d.doc, layer, rig, signs, &count) == CLAY_OK);
+    CHECK(signs[1] == -1);
+
+    // Deleting the negative subtree renumbers the survivors' signs with them.
+    REQUIRE(clay_layer_armature_edit(d.doc, layer, rig, CLAY_ARMATURE_DELETE, 1, nullptr, 0.0f,
+                                     0) == CLAY_OK);
+    count = 4;
+    REQUIRE(clay_layer_armature_signs(d.doc, layer, rig, signs, &count) == CLAY_OK);
+    CHECK(count == 1);
+    CHECK(signs[0] == 1);
+}
+
+TEST_CASE("c armature: the signs surface keeps the refusals typed") {
+    Doc d;
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(d.doc, "l", &layer) == CLAY_OK);
+    clay_node_id rig = place_rig(d.doc, layer);
+
+    // The setter: only +1 and -1 are signs. A zero or a magnitude is refused,
+    // not coerced — the negative-radius convention deliberately not taken.
+    clay_item* item = clay_item_create(CLAY_PRIM_ARMATURE, nullptr, 0);
+    REQUIRE(item != nullptr);
+    REQUIRE(clay_item_set_stroke_points(item, kRig, 4) == CLAY_OK);
+    const int8_t zero[4] = {1, 0, 1, 1};
+    CHECK(clay_item_set_armature_signs(item, zero, 4) == CLAY_ERROR_INVALID_ARGUMENT);
+    const int8_t two[4] = {1, 2, 1, 1};
+    CHECK(clay_item_set_armature_signs(item, two, 4) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_item_set_armature_signs(item, nullptr, 4) == CLAY_ERROR_INVALID_ARGUMENT);
+    clay_item_destroy(item);
+
+    // A stroke has no signs, and the sign is not a prim property of anything
+    // else either — the same typed refusal the parents reader gives.
+    clay_item* stroke = clay_item_create(CLAY_PRIM_STROKE, nullptr, 0);
+    REQUIRE(stroke != nullptr);
+    const int8_t ok_signs[4] = {1, -1, 1, 1};
+    CHECK(clay_item_set_armature_signs(stroke, ok_signs, 4) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_item_set_stroke_points(stroke, kRig, 4) == CLAY_OK);
+    clay_node_id stroke_node = 0;
+    REQUIRE(clay_layer_add_item(d.doc, layer, stroke, &stroke_node) == CLAY_OK);
+    clay_item_destroy(stroke);
+    size_t count = 0;
+    CHECK(clay_layer_armature_signs(d.doc, layer, stroke_node, nullptr, &count) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_layer_armature_signs(d.doc, layer, 999999, nullptr, &count) ==
+          CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_layer_armature_signs(d.doc, layer, rig, nullptr, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+
+    // A short buffer reports the needed count and writes nothing.
+    int8_t small[2] = {77, 77};
+    count = 2;
+    CHECK(clay_layer_armature_signs(d.doc, layer, rig, small, &count) ==
+          CLAY_ERROR_BUFFER_TOO_SMALL);
+    CHECK(count == 4);
+    CHECK(small[0] == 77);
+    CHECK(small[1] == 77);
+
+    // The placed edit: a sign that is not exactly +/-1 is refused, and so is a
+    // node that is not there.
+    CHECK(clay_layer_armature_edit(d.doc, layer, rig, CLAY_ARMATURE_SET_SIGN, 1, nullptr, 0.5f,
+                                   0) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_layer_armature_edit(d.doc, layer, rig, CLAY_ARMATURE_SET_SIGN, 99, nullptr,
+                                   -1.0f, 0) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    // Protection refuses the EDIT but not the read.
+    REQUIRE(clay_document_set_layer_protection(d.doc, layer, 0, 1) == CLAY_OK);
+    CHECK(clay_layer_armature_edit(d.doc, layer, rig, CLAY_ARMATURE_SET_SIGN, 1, nullptr, -1.0f,
+                                   0) == CLAY_ERROR_INVALID_ARGUMENT);
+    count = 4;
+    int8_t signs[4] = {0};
+    CHECK(clay_layer_armature_signs(d.doc, layer, rig, signs, &count) == CLAY_OK);
+    CHECK(signs[1] == 1);  // the refused edit changed nothing
+}
+
+TEST_CASE("c armature: signs authored shorter than the nodes read as evaluated") {
+    Doc d;
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(d.doc, "l", &layer) == CLAY_OK);
+
+    // No signs set at all — every armature authored before signs existed.
+    clay_node_id rig = place_rig(d.doc, layer);
+    size_t count = 0;
+    REQUIRE(clay_layer_armature_signs(d.doc, layer, rig, nullptr, &count) == CLAY_OK);
+    REQUIRE(count == 4);
+    int8_t signs[4] = {0, 0, 0, 0};
+    REQUIRE(clay_layer_armature_signs(d.doc, layer, rig, signs, &count) == CLAY_OK);
+    for (int i = 0; i < 4; ++i) CHECK(signs[i] == 1);  // positive-padded
+}

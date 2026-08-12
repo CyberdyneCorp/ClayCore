@@ -210,6 +210,7 @@ struct PyPrim {
     bool stroke_closed = false;
     float curve_tolerance = 0.01f;
     std::vector<std::uint32_t> armature_parents;
+    std::vector<std::int8_t> armature_signs;
     std::vector<scene::Deformer> deformers;
     scene::Profile profile;
     std::vector<kernel::cfloat2> profile_points;
@@ -698,6 +699,24 @@ std::vector<std::uint32_t> to_parents(nb::handle obj, std::size_t count) {
         if (steps > count) throw std::invalid_argument("armature parents form a cycle");
     }
     return parents;
+}
+
+// Sign per armature node, +1 or -1. None means all positive — the rig every
+// armature was before signs existed. Anything other than ±1 is refused rather
+// than coerced, the same reading the C setter makes.
+std::vector<std::int8_t> to_signs(nb::handle obj, std::size_t count) {
+    std::vector<std::int8_t> signs;
+    if (obj.is_none()) return signs;
+    signs.reserve(count);
+    for (nb::handle h : nb::cast<nb::iterable>(obj)) {
+        long long v = nb::cast<long long>(h);
+        if (v != 1 && v != -1)
+            throw std::invalid_argument("an armature sign must be +1 or -1");
+        signs.push_back(static_cast<std::int8_t>(v));
+    }
+    if (signs.size() != count)
+        throw std::invalid_argument("armature needs one sign per node");
+    return signs;
 }
 
 std::vector<scene::StrokePoint> to_stroke_points(nb::handle obj) {
@@ -1551,27 +1570,33 @@ NB_MODULE(pyclay, m) {
         "with the same points.\n\n"
         "`nodes` is (N, 4) — x, y, z, radius, as a stroke takes them. `parents`\n"
         "is (N,) indices; a node whose parent is itself is a root, and node 0\n"
-        "defaults to one. Moving a node is the caller's business here; the\n"
-        "document-side edits that carry a subtree are on Layer.\n\n"
+        "defaults to one. `signs` is (N,) of +1/-1, all positive by default —\n"
+        "ZBrush's negative ZSphere: the field is the armature of the positive\n"
+        "nodes minus the armature of the negative nodes, so a negative node\n"
+        "carves and its links carry no skin. Moving a node is the caller's\n"
+        "business here; the document-side edits that carry a subtree are on\n"
+        "Layer.\n\n"
         "There is deliberately no per-node ROTATION. A sphere is isotropic, so\n"
         "rotating one changes no distance and no surface — it earns its place in\n"
         "ZBrush because the adaptive skin lays out quads whose edge flow follows\n"
         "the node frames, and marching cubes, surface nets and dual contouring\n"
         "do not consult one.")
         .def("__init__",
-             [](PyArmature* self, nb::handle nodes, nb::handle parents, float blend_k,
-                nb::handle position, nb::handle rotation_axis_angle, float scale) {
+             [](PyArmature* self, nb::handle nodes, nb::handle parents, nb::handle signs,
+                float blend_k, nb::handle position, nb::handle rotation_axis_angle,
+                float scale) {
                  new (self) PyArmature();
                  self->prim = scene::Prim::armature();
                  if (!nodes.is_none()) self->stroke = to_stroke_points(nodes);
                  if (blend_k < 0.0f) throw std::invalid_argument("blend_k must be >= 0");
                  self->stroke_blend_k = blend_k;
                  self->armature_parents = to_parents(parents, self->stroke.size());
+                 self->armature_signs = to_signs(signs, self->stroke.size());
                  place(*self, position, rotation_axis_angle, scale);
              },
-             "nodes"_a = nb::none(), "parents"_a = nb::none(), "blend_k"_a = 0.0f,
-             "position"_a = nb::none(), "rotation_axis_angle"_a = nb::none(),
-             "scale"_a = 1.0f)
+             "nodes"_a = nb::none(), "parents"_a = nb::none(), "signs"_a = nb::none(),
+             "blend_k"_a = 0.0f, "position"_a = nb::none(),
+             "rotation_axis_angle"_a = nb::none(), "scale"_a = 1.0f)
         .def("add_child",
              [](PyArmature& self, nb::handle position, float radius, int parent) {
                  if (radius < 0.0f) throw std::invalid_argument("radius must be >= 0");
@@ -1599,6 +1624,25 @@ NB_MODULE(pyclay, m) {
                          for (std::uint32_t v : self.armature_parents) out.append(v);
                          return out;
                      })
+        .def_prop_rw("signs",
+                     [](const PyArmature& self) {
+                         nb::list out;
+                         for (std::size_t i = 0; i < self.stroke.size(); ++i)
+                             out.append(int(i < self.armature_signs.size()
+                                                ? self.armature_signs[i]
+                                                : std::int8_t{1}));
+                         return out;
+                     },
+                     [](PyArmature& self, nb::handle value) {
+                         self.armature_signs = to_signs(value, self.stroke.size());
+                     },
+                     "+1 or -1 per node, positive by default — ZBrush's negative "
+                     "ZSphere. The field is the armature of the positive nodes "
+                     "minus the armature of the negative nodes, so skin along a "
+                     "negative node's links is never drawn and a hollow is a "
+                     "continuous scoop rather than a carved ball with a bridge "
+                     "across its opening. Reads padded positive when set shorter "
+                     "than the nodes, exactly as the document evaluates it.")
         .def_prop_ro("nodes", [](const PyArmature& self) {
             nb::list out;
             for (const scene::StrokePoint& p : self.stroke) {
@@ -2639,6 +2683,7 @@ NB_MODULE(pyclay, m) {
                  n.stroke = prim.stroke;
                  n.stroke_blend_k = prim.stroke_blend_k;
                  n.armature_parents = prim.armature_parents;
+                 n.armature_signs = prim.armature_signs;
                  n.stroke_closed = prim.stroke_closed;
                  n.curve_tolerance = prim.curve_tolerance;
                  n.deformers = prim.deformers;
@@ -2758,13 +2803,14 @@ NB_MODULE(pyclay, m) {
              "commands would and its undo is exact by construction.")
         .def("armature_edit",
              [](PyLayer& l, scene::NodeId node, const std::string& op, nb::handle target,
-                nb::handle value, float radius, bool mirrored) {
+                nb::handle value, float radius, bool mirrored, nb::handle sign) {
                  const scene::Node* n = l.layer().sdf->find(node);
                  if (!n) throw std::invalid_argument("no node with that id in this layer");
                  if (!scene::prim_is_armature(n->prim.type))
                      throw std::invalid_argument("that node is not an armature");
                  std::vector<scene::StrokePoint> nodes = n->stroke;
                  std::vector<std::uint32_t> parents = n->armature_parents;
+                 std::vector<std::int8_t> signs = n->armature_signs;
                  const std::uint32_t which =
                      target.is_none() ? 0u : nb::cast<std::uint32_t>(target);
                  bool ok = false;
@@ -2778,23 +2824,30 @@ NB_MODULE(pyclay, m) {
                  } else if (op == "set_radius") {
                      ok = scene::armature_set_radius(nodes, which, radius);
                  } else if (op == "delete") {
-                     ok = scene::armature_delete_subtree(nodes, parents, which);
+                     ok = scene::armature_delete_subtree(nodes, parents, signs, which);
+                 } else if (op == "set_sign") {
+                     const int s = sign.is_none() ? 1 : nb::cast<int>(sign);
+                     if (s != 1 && s != -1)
+                         throw std::invalid_argument("an armature sign must be +1 or -1");
+                     ok = scene::armature_set_sign(signs, nodes.size(), which,
+                                                   static_cast<std::int8_t>(s));
                  } else {
                      throw std::invalid_argument(
-                         "op must be add_child, move, set_radius or delete");
+                         "op must be add_child, move, set_radius, set_sign or delete");
                  }
                  if (!ok) throw std::invalid_argument("that armature node does not exist");
                  apply_or_throw(l.doc->document,
                                 scene::Command{scene::SetArmatureCmd{
                                     l.id, node, std::move(nodes), std::move(parents),
-                                    n->stroke_blend_k}},
+                                    std::move(signs), n->stroke_blend_k}},
                                 "armature_edit", l.undo.get());
              },
              "node"_a, "op"_a, "target"_a = nb::none(), "value"_a = nb::none(),
-             "radius"_a = 0.1f, "mirrored"_a = false,
+             "radius"_a = 0.1f, "mirrored"_a = false, "sign"_a = nb::none(),
              "Edit a placed armature's tree: add_child, move (which carries the "
-             "target's whole subtree), set_radius, or delete (which takes the "
-             "subtree with it). ONE undo step whatever the edit, because the "
+             "target's whole subtree), set_radius, set_sign (+1 or -1 — a "
+             "negative node carves instead of skinning), or delete (which takes "
+             "the subtree with it). ONE undo step whatever the edit, because the "
              "command is a whole-tree replace — an armature is tens of nodes, so "
              "that costs less than granular bookkeeping and its inverse is the "
              "tree that was there. mirrored=True on add_child adds the "

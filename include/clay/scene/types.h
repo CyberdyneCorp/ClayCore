@@ -587,6 +587,10 @@ struct Node {
     // than inside StrokePoint so a stroke costs nothing for a field it has no
     // use for, and so an armature IS a stroke plus a topology.
     std::vector<std::uint32_t> armature_parents;
+    // Armature only: +1 or -1 per node, a negative node's link carving instead
+    // of skinning (ZBrush's negative ZSphere). Shorter than `stroke` reads as
+    // positive-padded, exactly as short parents read as roots.
+    std::vector<std::int8_t> armature_signs;
     bool stroke_closed = false;       // last point joins back to the first
     // Maximum distance a tessellated span's midpoint may sit from its chord.
     // A document property, not a viewer setting: two builds have to agree on

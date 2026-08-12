@@ -2495,6 +2495,21 @@ clay_result clay_item_set_armature_parents(clay_item* item, const uint32_t* pare
     return CLAY_OK;
 }
 
+clay_result clay_item_set_armature_signs(clay_item* item, const int8_t* signs, size_t count) {
+    if (!item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item");
+    if (!scene::prim_is_armature(item->node.prim.type))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "signs need CLAY_PRIM_ARMATURE");
+    if (count && !signs) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null signs");
+    // Only +1 and -1 mean anything. A zero, or a magnitude, is refused rather
+    // than coerced — the negative-radius convention this feature deliberately
+    // did not take would have re-read invalid input, and so would this.
+    for (std::size_t i = 0; i < count; ++i)
+        if (signs[i] != 1 && signs[i] != -1)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "an armature sign must be +1 or -1");
+    item->node.armature_signs.assign(signs, signs + count);
+    return CLAY_OK;
+}
+
 clay_result clay_item_set_curve_points(clay_item* item, const float* xyzr, size_t count,
                                        const int32_t* types, const float* in_handles_xyz,
                                        const float* out_handles_xyz) {
@@ -2547,6 +2562,7 @@ clay_result clay_layer_armature_edit(clay_document* doc, clay_layer_id layer,
 
     std::vector<scene::StrokePoint> nodes = n->stroke;
     std::vector<std::uint32_t> parents = n->armature_parents;
+    std::vector<std::int8_t> signs = n->armature_signs;
     kernel::cfloat3 v = kernel::cf3(0, 0, 0);
     if (value) v = kernel::cf3(value[0], value[1], value[2]);
     bool ok = false;
@@ -2564,13 +2580,24 @@ clay_result clay_layer_armature_edit(clay_document* doc, clay_layer_id layer,
         case CLAY_ARMATURE_SET_RADIUS:
             ok = scene::armature_set_radius(nodes, target, radius);
             break;
-        case CLAY_ARMATURE_DELETE: ok = scene::armature_delete_subtree(nodes, parents, target); break;
+        case CLAY_ARMATURE_DELETE:
+            ok = scene::armature_delete_subtree(nodes, parents, signs, target);
+            break;
+        case CLAY_ARMATURE_SET_SIGN: {
+            // The sign rides the radius argument so no signature changes
+            // shape; only exactly +1 and -1 are readable as intent.
+            if (radius != 1.0f && radius != -1.0f)
+                return fail(CLAY_ERROR_INVALID_ARGUMENT, "an armature sign must be +1 or -1");
+            ok = scene::armature_set_sign(signs, nodes.size(), target,
+                                          radius < 0.0f ? std::int8_t{-1} : std::int8_t{1});
+            break;
+        }
         default: return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown armature edit");
     }
     if (!ok) return fail(CLAY_ERROR_INVALID_ARGUMENT, "that armature node does not exist");
     return apply_edit(doc,
                       scene::Command{scene::SetArmatureCmd{layer, node, std::move(nodes),
-                                                           std::move(parents),
+                                                           std::move(parents), std::move(signs),
                                                            n->stroke_blend_k}},
                       "no armature with that id in that layer");
 }
@@ -2670,6 +2697,33 @@ clay_result clay_layer_armature_parents(const clay_document* doc, clay_layer_id 
             if (parent >= needed) parent = static_cast<std::uint32_t>(i);
             out_parents[i] = parent;
         }
+    *count = needed;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_armature_signs(const clay_document* doc, clay_layer_id layer,
+                                      clay_node_id node, int8_t* out_signs, size_t* count) {
+    if (!doc || !count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or count");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    const scene::Node* n = l->sdf ? l->sdf->find(node) : nullptr;
+    if (!n) return fail(CLAY_ERROR_NOT_FOUND, "no such node in that layer");
+    if (n->is_group || !scene::prim_is_armature(n->prim.type))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "that node is not an armature");
+
+    // Counted in NODES like the parents readback, so the three armature
+    // readbacks are parallel arrays. Signs stored shorter than the nodes read
+    // back padded positive — the reading tape_build makes when it compiles the
+    // same node, so what comes back is the rig the document evaluates.
+    const std::size_t needed = n->stroke.size();
+    if (out_signs && *count < needed) {
+        *count = needed;
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "the armature has " + std::to_string(needed) + " nodes");
+    }
+    if (out_signs)
+        for (std::size_t i = 0; i < needed; ++i)
+            out_signs[i] = i < n->armature_signs.size() ? n->armature_signs[i] : std::int8_t{1};
     *count = needed;
     return CLAY_OK;
 }

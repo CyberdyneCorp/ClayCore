@@ -132,9 +132,71 @@ def main():
     doc.undo()
     print("  a mirrored insert is one undo step, and a node on the plane is added once")
 
+    # --- negative nodes: ZBrush's negative ZSphere ---------------------------
+    # A sign per node, positive by default. The field is the armature of the
+    # positive nodes MINUS the armature of the negative nodes, so a negative
+    # node carves, its links carry no skin, and — because the carve happens
+    # after the whole positive fold — a hollow is a continuous scoop rather
+    # than a carved ball with a sleeve bridging its opening. Eye sockets,
+    # mouth cavities, the hollow of an ear are all blocked out this way.
+    head = 3
+    head_x, head_y, head_z, head_r = (float(v) for v in a.nodes[head])
+    sockets = []
+    for side in (-1.0, 1.0):
+        layer.armature_edit(node_id, "add_child", target=head,
+                            value=(side * 0.06, head_y + 0.02, head_z + head_r - 0.045),
+                            radius=0.04)
+        sockets.append(a.node_count + len(sockets))  # appended at the end
+
+    def socket_depth(side):
+        """Signed distance at the left/right socket center: negative while the
+        face is solid there, positive once the socket is carved."""
+        p = np.array([[side * 0.06, head_y + 0.02, head_z + head_r - 0.045]], np.float32)
+        return float(doc.eval(p)[0])
+
+    solid = socket_depth(-1.0)
+    for s in sockets:
+        layer.armature_edit(node_id, "set_sign", target=s, sign=-1)
+    carved = socket_depth(-1.0)
+    print(f"  two eye sockets: face went from d={solid:+.3f} (solid) to d={carved:+.3f} (carved)")
+    if not (solid < 0.0 < carved):
+        raise SystemExit("a negative node stopped carving")
+    if socket_depth(1.0) <= 0.0:
+        raise SystemExit("the second socket did not carve")
+
+    # The head around the sockets is still a head: a negative CHILD carves its
+    # own ball, not a sweep at the parent's radius that would swallow it.
+    brow = np.array([[0.0, head_y + 0.1, head_z + head_r - 0.06]], np.float32)
+    if float(doc.eval(brow)[0]) >= 0.0:
+        raise SystemExit("carving the sockets ate the head")
+    print("  ...and the head around them is still a head")
+
+    # The sign is one undo step, like every other tree edit — and it goes back
+    # on the same way, which is what the issue's workaround lost on reload.
+    doc.undo()
+    if socket_depth(1.0) >= 0.0:
+        raise SystemExit("undoing a sign edit did not restore the skin")
+    layer.armature_edit(node_id, "set_sign", target=sockets[1], sign=-1)
+    print("  a sign is one undo step, and the sockets stay for the render below")
+
+    # The same thing at build time: `signs=` beside `parents=`, here carving a
+    # mouth into a fresh head so the builder path is exercised too.
+    mouth_doc = clay.Document()
+    mouth_layer = mouth_doc.add_sdf_layer("head")
+    mouth_layer.add(clay.Armature(
+        nodes=np.array([(0.0, 0.0, 0.0, 0.30),      # the head
+                        (0.0, -0.10, 0.26, 0.09)],  # the mouth, poked into its face
+                       np.float32),
+        parents=[0, 0], signs=[1, -1], blend_k=0.01), color=SKIN)
+    m = mouth_doc.eval(np.array([[0.0, -0.10, 0.26], [0.0, 0.12, 0.0]], np.float32))
+    print(f"  built with signs=[1,-1]: mouth d={float(m[0]):+.3f}, skull d={float(m[1]):+.3f}")
+    if not (m[0] > 0.0 > m[1]):
+        raise SystemExit("signs= at build time disagrees with set_sign after placing")
+
     eye, target = R.layer_camera(layer, azimuth=22.0, elevation=6.0)
     R.render(doc, "40_armature.png", eye=eye, target=target,
-             colors_from_field=True, caption="a figure as one armature")
+             colors_from_field=True,
+             caption="a figure as one armature — the eye sockets are negative nodes")
 
     # --- the armature and its skin, side by side -----------------------------
     tiles = []

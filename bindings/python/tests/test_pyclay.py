@@ -3909,3 +3909,93 @@ def test_a_node_cannot_move_into_its_own_subtree():
     # and an item is not somewhere an edit can be put
     with pytest.raises(ValueError, match="must be a group"):
         layer.add(clay.Sphere(r=0.2), parent=node)
+
+
+# --- armature signs (add-armature-node-signs, #99) --------------------------
+# A sign per node, +1/-1: the field is the armature of the positive nodes
+# minus the armature of the negative nodes — ZBrush's negative ZSphere.
+
+
+def test_a_negative_armature_node_carves_without_eating_its_parent():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Armature(
+        nodes=np.array([(0, 0, 0, 0.3), (0, 0, 0.28, 0.1)], np.float32),
+        parents=[0, 0], signs=[1, -1]))
+    d = doc.eval(np.array([[0, 0, 0.28], [0, 0, -0.1], [0.25, 0, 0]], np.float32))
+    assert d[0] > 0.0        # the socket is hollow
+    assert d[1] < 0.0        # the head is still a head
+    assert d[2] < 0.0
+
+
+def test_a_negative_nodes_links_carry_no_skin():
+    # A <- B(-) <- C: no sleeve is drawn through the hollow in either
+    # direction, which is what the separate-subtract-ball workaround could
+    # not express.
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Armature(
+        nodes=np.array([(-0.5, 0, 0, 0.2), (0, 0, 0, 0.2), (0.5, 0, 0, 0.2)], np.float32),
+        parents=[0, 0, 1], signs=[1, -1, 1]))
+    d = doc.eval(np.array([[-0.5, 0, 0], [0.5, 0, 0], [0, 0, 0],
+                           [-0.25, 0, 0], [0.25, 0, 0]], np.float32))
+    assert d[0] < 0.0 and d[1] < 0.0          # A and C are material
+    assert d[2] > 0.0 and d[3] > 0.0 and d[4] > 0.0  # the hollow is hollow
+
+
+def test_an_all_positive_signs_array_changes_nothing():
+    pts = np.array([(-0.6, 0, 0, 0.2), (0, 0.3, 0, 0.15), (0.6, 0, 0, 0.1)], np.float32)
+    bare = clay.Document()
+    bare.add_sdf_layer("l").add(clay.Armature(nodes=pts, blend_k=0.06))
+    signed = clay.Document()
+    signed.add_sdf_layer("l").add(clay.Armature(nodes=pts, signs=[1, 1, 1], blend_k=0.06))
+    probe = np.random.default_rng(7).uniform(-1, 1, size=(2000, 3)).astype(np.float32)
+    assert np.array_equal(bare.eval(probe), signed.eval(probe))
+
+
+def test_a_sign_edit_is_undoable_and_survives_the_round_trip(tmp_path):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    node = layer.add(clay.Armature(
+        nodes=np.array([(0, 0, 0, 0.3), (0, 0, 0.28, 0.1)], np.float32),
+        parents=[0, 0]))
+    socket = np.array([[0, 0, 0.28]], np.float32)
+    assert doc.eval(socket)[0] < 0.0  # solid before the flip
+
+    doc.enable_undo()
+    layer.armature_edit(node, "set_sign", target=1, sign=-1)
+    assert doc.eval(socket)[0] > 0.0  # carved
+    doc.undo()
+    assert doc.eval(socket)[0] < 0.0  # one undo puts the skin back
+    layer.armature_edit(node, "set_sign", target=1, sign=-1)
+
+    # The issue's second defect: the sign survives a save, byte-identically.
+    # (Un-negativing the RELOADED rig is the C ABI's job — pyclay is a
+    # builder, and the placed readback is C-only by the parity exemptions.)
+    path = tmp_path / "signed.clayspace"
+    doc.save(str(path))
+    reloaded = clay.load(str(path))
+    assert reloaded.eval(socket)[0] > 0.0
+    again = tmp_path / "signed_again.clayspace"
+    reloaded.save(str(again))
+    assert again.read_bytes() == path.read_bytes()
+
+
+def test_a_sign_is_plus_or_minus_one():
+    nodes = np.array([(0, 0, 0, 0.3), (0, 0, 0.28, 0.1)], np.float32)
+    with pytest.raises(ValueError, match="[+]1 or -1"):
+        clay.Armature(nodes=nodes, signs=[1, 2])
+    with pytest.raises(ValueError, match="[+]1 or -1"):
+        clay.Armature(nodes=nodes, signs=[0, 1])
+    with pytest.raises(ValueError, match="one sign per node"):
+        clay.Armature(nodes=nodes, signs=[1])
+
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    node = layer.add(clay.Armature(nodes=nodes, parents=[0, 0]))
+    with pytest.raises(ValueError, match="[+]1 or -1"):
+        layer.armature_edit(node, "set_sign", target=1, sign=0)
+
+    a = clay.Armature(nodes=nodes)
+    assert a.signs == [1, 1]  # positive by default
+    a.signs = [1, -1]
+    assert a.signs == [1, -1]

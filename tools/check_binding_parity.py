@@ -234,6 +234,8 @@ EXEMPT = {
     "Stroke.point_count": "reads a builder's own state back, as above",
     "Armature.nodes": "reads a builder's own state back, as above",
     "Armature.parents": "reads a builder's own state back, as above",
+    "Armature.signs": "reads a builder's own state back, as above; the write "
+                      "half is clay_item_set_armature_signs",
     "Armature.node_count": "reads a builder's own state back, as above",
     "Profile.point_count": "reads a builder's own state back, as above",
     "Layer.resolution": "per-layer meshing hint the C ABI does not author; "

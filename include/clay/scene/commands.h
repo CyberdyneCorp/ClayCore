@@ -99,6 +99,9 @@ struct SetArmatureCmd {
     NodeId node = kNoNode;
     std::vector<StrokePoint> nodes;
     std::vector<std::uint32_t> parents;
+    // +1 or -1 per node; shorter than `nodes` reads as positive-padded, the
+    // reading the kernel and the node record both make.
+    std::vector<std::int8_t> signs;
     float blend_k = 0.0f;
 };
 
@@ -167,7 +170,7 @@ LayerId edited_layer(const Command& cmd);
 // The scene payload layout this build writes. It tracks the .clayspace
 // container's minor version, which is what a reader is told; io asserts they
 // agree so the two cannot drift.
-inline constexpr std::uint16_t kSceneMinor = 7;
+inline constexpr std::uint16_t kSceneMinor = 8;
 
 // Apply a command; returns its inverse, or nullopt if the target does not
 // exist or is protected (ghosted or locked). The document is unchanged in

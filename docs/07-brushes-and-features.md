@@ -506,12 +506,31 @@ what turns a stick figure into a body. There is no separate skinning pass.
 | `add_child` | Append a node under a parent |
 | `move` | Move a node BY a delta, **carrying every descendant**. The property the feature exists for |
 | `set_radius` | Resize one node; the links either side follow |
-| `delete_subtree` | Remove a node and everything under it, renumbering the survivors |
+| `set_sign` | Flip one node between building (+1) and carving (-1) — see negative nodes below |
+| `delete_subtree` | Remove a node and everything under it, renumbering the survivors and their signs |
 | `add_child` mirrored | Add a node **and** its reflection through x = 0, under the mirror of the parent where one is known. Returns 1 for a node on the plane, whose reflection is itself |
 
 Every one is a pure function over `(nodes, parents)`; the command that installs
 one is a whole-tree replace, so its inverse is exactly the tree that was there
 before and one undo puts a whole arm back.
+
+**Negative nodes** (#99) are ZBrush's negative ZSphere: a sign per node, +1 by
+default, and the field is **the armature of the positive nodes MINUS the
+armature of the negative nodes**, each half built exactly as the unsigned
+armature is, the carve applied after the whole positive fold. A link exists
+only between two nodes of the *same* sign — skin between builders, carve
+between carvers — so skin along a negative node's links is never drawn (the
+membrane cut a trailing subtract sphere cannot express: no sleeve bridges the
+hollow's opening) and a carve never sweeps a positive parent's radius (an
+eye-socket child does not swallow the head it is cut into). A negative
+parent-child pair carves its link as one swept segment, so a deep hollow is a
+scoop; a negative node may carry children. Eye sockets, mouth cavities and the
+hollow of an ear are blocked out this way —
+[`examples/40_armature.py`](../examples/40_armature.py) carves the figure's eye
+sockets with two of them. The sign travels with the tree: set at build time
+(`clay_item_set_armature_signs`, pyclay's `signs=`), flipped on a placed rig
+(`set_sign`), read back (`clay_layer_armature_signs`, positive-padded exactly
+as short parents read as roots) and saved with the document at format minor 8.
 
 Two constraints are load-bearing rather than incidental:
 
