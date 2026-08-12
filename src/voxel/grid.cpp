@@ -1,6 +1,7 @@
 #include "clay/voxel/grid.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <deque>
@@ -642,6 +643,67 @@ mesh::Mesh VoxelGrid::mesh_greedy(std::size_t level) const {
         return c;
     };
 
+    // Build one slice's exposure mask, one CHUNK at a time.
+    //
+    // The mask window is chunk-aligned by construction (the slab bounds below
+    // are chunk corners), and within a slice every cell of a chunk column
+    // shares one chunk key. So the map is probed once per chunk instead of once
+    // per cell: `cell_at` is a hash plus an unordered_map::find, and the sweep
+    // touches 6 directions x 32 slices x the whole 32x32 window per chunk —
+    // ~200K finds per chunk, which is why a chunk holding one voxel used to
+    // cost the same as a full one.
+    //
+    // Inside the chunk the flat kChunkDim^3 payload is addressed as
+    // base + u*du + v*dv, the strides being whichever of x/y/z the sweep axis
+    // maps u and v onto. The only probe that can leave the chunk is the
+    // neighbour across the face, and only on the slice sitting on the chunk's
+    // own boundary; that one still goes through `cell_at`.
+    //
+    // Nothing is written for a chunk that does not exist or a cell that is
+    // empty. The merge below zeroes every entry it consumes and leaves the
+    // zeros it skipped, so the mask is all-zero again at the top of each slice
+    // — which is what keeps a slab window spanning mostly empty space cheap.
+    auto build_slice_mask = [&](const Dir& dir, int a, int slab_index, int u0, int v0, int nu,
+                                int nv, std::vector<std::uint8_t>& mask) {
+        constexpr std::size_t kCd = static_cast<std::size_t>(kChunkDim);
+        const std::size_t du = dir.axis == 0 ? kCd : 1;
+        const std::size_t dv = dir.axis == 2 ? kCd : kCd * kCd;
+        const std::size_t da = dir.axis == 0 ? 1 : (dir.axis == 1 ? kCd : kCd * kCd);
+        const int la = fmod_pos(a, kChunkDim);
+        const int la_n = la + dir.sign;
+        const bool neighbour_inside = la_n >= 0 && la_n < kChunkDim;
+        const std::size_t base = static_cast<std::size_t>(la) * da;
+        const std::size_t nbase =
+            neighbour_inside ? static_cast<std::size_t>(la_n) * da : std::size_t{0};
+
+        const int ku0 = fdiv(u0, kChunkDim), kv0 = fdiv(v0, kChunkDim);
+        for (int kv = 0; kv * kChunkDim < nv; ++kv)
+            for (int ku = 0; ku * kChunkDim < nu; ++ku) {
+                auto it = chunks.find(slice_cell(slab_index, ku0 + ku, kv0 + kv, dir.axis));
+                if (it == chunks.end()) continue;  // no chunk here: the mask is already 0
+                const std::uint8_t* data = it->second.data.data();
+                for (int lv = 0; lv < kChunkDim; ++lv) {
+                    std::uint8_t* row =
+                        &mask[static_cast<std::size_t>(kv * kChunkDim + lv) * nu + ku * kChunkDim];
+                    const std::size_t off = base + static_cast<std::size_t>(lv) * dv;
+                    const std::size_t noff = nbase + static_cast<std::size_t>(lv) * dv;
+                    for (int lu = 0; lu < kChunkDim; ++lu) {
+                        const std::size_t step = static_cast<std::size_t>(lu) * du;
+                        std::uint8_t idx = data[off + step];
+                        if (idx == 0) continue;  // empty cell: the mask is already 0
+                        if (neighbour_inside) {
+                            if (data[noff + step] != 0) continue;  // covered face
+                        } else {
+                            VoxelCoord n = slice_cell(a + dir.sign, u0 + ku * kChunkDim + lu,
+                                                      v0 + kv * kChunkDim + lv, dir.axis);
+                            if (value_at(n) != 0) continue;  // covered face, across the seam
+                        }
+                        row[lu] = idx;
+                    }
+                }
+            }
+    };
+
     // The sweep runs per occupied CHUNK SLAB rather than over the whole
     // occupied bounding box. A grid is sparse by construction, and a bounding
     // box is not: two voxels far apart on two axes made the box — and the
@@ -684,26 +746,23 @@ mesh::Mesh VoxelGrid::mesh_greedy(std::size_t level) const {
         for (const auto& [slab_index, slab] : slabs) {
         const int u0 = slab.u0, v0 = slab.v0;
         const int nu = slab.u1 - slab.u0 + 1, nv = slab.v1 - slab.v0 + 1;
+        // The slab bounds are chunk corners, so the window is a whole number of
+        // chunks on both axes. build_slice_mask writes a chunk-wide row at a
+        // time and steps ku while ku * kChunkDim < nu, so a window that is not
+        // chunk-aligned would run a row off the end of the mask — a heap write,
+        // not a wrong quad. Tightening the window to the occupied bounding box
+        // is the natural next optimisation and is exactly what would break it,
+        // so the invariant is asserted rather than left to the comment.
+        assert(nu % kChunkDim == 0 && nv % kChunkDim == 0);
         mask.assign(static_cast<std::size_t>(nu) * nv, 0);
         const int a0 = slab_index * kChunkDim;
         const int a1 = a0 + kChunkDim - 1;
 
         for (int a = a0; a <= a1; ++a) {
-            // build exposure mask for this slice
-            for (int v = 0; v < nv; ++v)
-                for (int u = 0; u < nu; ++u) {
-                    VoxelCoord c = slice_cell(a, u + u0, v + v0, dir.axis);
-                    std::uint8_t idx = value_at(c);
-                    if (idx != 0) {
-                        VoxelCoord n = c;
-                        if (dir.axis == 0) n.x += dir.sign;
-                        if (dir.axis == 1) n.y += dir.sign;
-                        if (dir.axis == 2) n.z += dir.sign;
-                        if (value_at(n) != 0) idx = 0;  // covered face
-                    }
-                    mask[static_cast<std::size_t>(v) * nu + u] = idx;
-                }
-            // greedy merge
+            build_slice_mask(dir, a, slab_index, u0, v0, nu, nv, mask);
+            // Greedy merge. It also hands the mask back all-zero — every entry
+            // it reads nonzero it zeroes — which is the precondition the mask
+            // build relies on to skip empty chunks and empty cells entirely.
             for (int v = 0; v < nv; ++v)
                 for (int u = 0; u < nu;) {
                     std::uint8_t idx = mask[static_cast<std::size_t>(v) * nu + u];

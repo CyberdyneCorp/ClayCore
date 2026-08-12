@@ -122,10 +122,13 @@ Only three things miss, and one of them is not in the gate at all.
 |---|---|---|---|
 | `sdf_stamp_cpu` | 4.81 ms | 4.17 ms | **1.2×** |
 | `sdf_stamp_bricks` | 5.70 ms | 4.17 ms | **1.4×** |
-| voxel display (`clay_voxel_mesh`) | ~551 ms † | 4.17 ms | **~130×** |
+| voxel display (`clay_voxel_mesh`) | ~25 ms † | 4.17 ms | **~6×** |
 
 † Desktop measurement at cell 0.02 on a ~1.07M-cell sculpt — see the caveat
-below. There is no device case for it; that is the point.
+below. There is no device case for it; that is the point. This row was ~551 ms
+and ~130× until the mask build stopped probing the chunk map once per cell
+(#86 part 1, a 22× ratio measured back to back on one machine and applied to
+the 551 ms figure, which was taken on the same one).
 
 Three things worth saying about that table:
 
@@ -143,8 +146,10 @@ whole working volume at these sizes (5.70 ms against 4.81 ms at 1000 stamps).
 Bricks refreshed per stamp is constant at ~13 across the axis, so the cost is the
 culled tape compiled per brick, not the number of bricks.
 
-**The display path is the real gap**, and it is ~130×, not 1.4×. It is tracked in
-[#86](https://github.com/CyberdyneCorp/ClayCore/issues/86).
+**The display path is still the largest gap**, though it is now ~6× rather than
+~130×. It is tracked in
+[#86](https://github.com/CyberdyneCorp/ClayCore/issues/86); part 1 has landed
+and part 2, incremental re-meshing, has not.
 
 ## The unmeasured costs
 
@@ -171,24 +176,49 @@ over half the engine share, from one stamp, and the gate would never report it.
 
 ### Displaying the result
 
-`clay_voxel_mesh` → `VoxelGrid::mesh_greedy()` is a whole-grid sweep costing a
-flat **~4 ms per occupied chunk however empty that chunk is** — one cell in one
-chunk costs 3.99 ms, 64 cells across 64 chunks cost 260 ms. Cost tracks chunk
-count, not occupancy and not surface area.
+`clay_voxel_mesh` → `VoxelGrid::mesh_greedy()` is a whole-grid sweep. Its cost
+tracks **occupied chunks** — not occupancy within them, not surface area, not
+triangle count. At 0.29.0 that was a flat **~4 ms per occupied chunk however
+empty the chunk was**: one cell in one chunk cost 3.99 ms and 64 cells across 64
+chunks cost 260 ms, because the exposure mask probed the chunk map — a hash and
+an `unordered_map::find` — once per cell, six directions × 32 slices × a 32×32
+window deep.
 
-| voxel size | occupied cells | triangles | full re-mesh | one `sculpt_smooth` | ratio |
-|---|---|---|---|---|---|
-| 0.05 | 68K | 12K | 69 ms | 0.033 ms | 2,090× |
-| 0.03 | 317K | 34K | 206 ms | 0.032 ms | 6,494× |
-| **0.02** *(the gate's fixture size)* | 1.07M | 77K | **548 ms** | 0.026 ms | **21,246×** |
-| 0.015 | 2.5M | 137K | 1,184 ms | 0.025 ms | 46,892× |
-| 0.01 | 8.6M | 308K | 3,526 ms | 0.029 ms | 122,756× |
+Part 1 of [#86](https://github.com/CyberdyneCorp/ClayCore/issues/86) hoisted
+that lookup to once per chunk per slice. The per-chunk cost is now the greedy
+merge's own scan of the mask window rather than ~200K hash lookups. Measured
+before and after on one Linux desktop, back to back:
 
-Until [#86](https://github.com/CyberdyneCorp/ClayCore/issues/86) lands, the two
-workarounds are **meshing a coarser level** (measured ~90× between level 0 at
-cell 0.08 and level 3 at cell 0.01; edits propagate across levels, so the coarse
-level stays in sync for free) and **not meshing at all** — `clay_voxel_raycast`
-does a grid DDA, so a host can trace the voxels directly.
+| occupied chunks | before | after | speedup | ms/chunk before → after |
+|---|---|---|---|---|
+| 1 | 3.90 ms | 0.37 ms | 10× | 3.90 → 0.37 |
+| 8 | 34.3 ms | 1.42 ms | 24× | 4.29 → 0.18 |
+| 64 | 263.8 ms | 10.0 ms | 26× | 4.12 → 0.16 |
+
+Still exactly linear in chunk count, at ~0.16 ms a chunk instead of ~4 ms. On a
+rasterized blob (three smooth-unioned primitives), same machine, back to back:
+
+| voxel size | occupied cells | occupied chunks | triangles | before | after | speedup |
+|---|---|---|---|---|---|---|
+| 0.05 | 42K | 8 | 8.6K | 41.1 ms | 2.2 ms | 19× |
+| 0.03 | 195K | 34 | 22K | 195.4 ms | 7.9 ms | 25× |
+| **0.02** *(the gate's fixture size)* | 658K | 64 | 50K | **395.8 ms** | **17.6 ms** | **22×** |
+| 0.015 | 1.56M | 111 | 88K | 800.9 ms | 33.5 ms | 24× |
+
+That fixture is smaller than the 1.07M-cell one the 548 ms figure above came
+from; the ratio is what transfers between them, not the absolute.
+
+`benchmarks/bench_main.cpp` now carries `BM_VoxelMeshSparseChunk` and
+`BM_VoxelMeshSparse64Chunks` so `tools/check_bench.py` gates the per-cell lookup
+coming back.
+
+**A ~138-chunk sculpt still costs ~22 ms**, which is five frames' worth of the
+4.17 ms engine share, so part 2 — dirty-chunk tracking and a regional mesh — is
+still needed for interactive display rather than being an optimisation. Until it
+lands, the two workarounds are **meshing a coarser level** (measured ~90×
+between level 0 at cell 0.08 and level 3 at cell 0.01; edits propagate across
+levels, so the coarse level stays in sync for free) and **not meshing at all** —
+`clay_voxel_raycast` does a grid DDA, so a host can trace the voxels directly.
 
 ## Coverage: every brush has a test and a picture
 
