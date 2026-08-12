@@ -33,4 +33,4 @@
 ## 6. Docs and PR
 
 - [x] 6.1 `docs/05-claycore-library.md` armature paragraphs and `docs/07-brushes-and-features.md` §6: the sign, the membrane-cut semantics, the minor-8 note
-- [ ] 6.2 PR referencing #99; note the archive-order dependency on `read-armature-tree` (both deltas modify the c-abi armature requirement)
+- [x] 6.2 PR referencing #99; note the archive-order dependency on `read-armature-tree` (both deltas modify the c-abi armature requirement)
