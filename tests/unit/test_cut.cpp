@@ -29,7 +29,7 @@ CutFrame front_frame(float z = -4.0f) {
 }
 
 // A 2x2x2 block centred on the origin, and the region a caller would pass.
-const math::Aabb kRegion(cf3(-1, -1, -1), cf3(1, 1, 1));
+const math::Aabb kRegion{cf3(-1, -1, -1), cf3(1, 1, 1)};
 
 scene::Document block_with(std::optional<scene::Node> cut, scene::Op op) {
     scene::Document doc;

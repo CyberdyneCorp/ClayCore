@@ -96,6 +96,40 @@ jobs:
       - name: Swift smoke type-check (clay.h is consumable from Swift)
         run: ./tools/check_swift_smoke.sh typecheck
 
+  # The OLDEST AppleClang still on a hosted runner, and the row that catches
+  # what the rest of this matrix cannot: issue #71 was C++20 parenthesized
+  # aggregate initialisation (P0960) of math::Aabb, which every newer clang in
+  # this workflow accepts and AppleClang 15 rejects — so it built green here
+  # and failed in a consumer's submodule on their macos-14 rows. This job
+  # compiles the whole tree (library AND tests, where most of the #71 sweep's
+  # sites lived) with Xcode 15.4's AppleClang 1500, so that class of
+  # regression fails on the PR instead of downstream.
+  #
+  # The Xcode is pinned rather than taken as the image default so the gate
+  # does not silently move when the image's default does.
+  #
+  # macos-14 is deprecated and retires on November 2nd, 2026, with brownout
+  # windows through October (actions/runner-images#13518). When the label
+  # dies, note before deleting the job: macos-15's oldest image Xcode is 16.0,
+  # whose clang (LLVM 17 based) ACCEPTS P0960 — selecting an old Xcode there
+  # is not a replacement gate. The replacement is whatever oldest toolchain
+  # consumers still build with at that time.
+  appleclang15:
+    name: build+test (macos-14, AppleClang 15 — oldest gated toolchain)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin Xcode 15.4 (AppleClang 1500)
+        run: |
+          sudo xcode-select -s /Applications/Xcode_15.4.app
+          clang++ --version
+      - name: Configure
+        run: cmake --preset cpu-only
+      - name: Build (the gate — every TU must compile on AppleClang 15)
+        run: cmake --build --preset cpu-only
+      - name: Test
+        run: ctest --preset cpu-only
+
   sanitizers:
     name: ASan + UBSan (ubuntu)
     runs-on: ubuntu-latest

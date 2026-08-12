@@ -30,7 +30,7 @@ auto sphere_field(float r) {
 FieldVolume sphere_volume(float r = 0.7f, float cell = 0.06f, float band = 0.25f,
                           float half = 1.2f) {
     return FieldVolume::sample(sphere_field(r),
-                               math::Aabb(cf3(-half, -half, -half), cf3(half, half, half)), cell,
+                               math::Aabb{cf3(-half, -half, -half), cf3(half, half, half)}, cell,
                                band);
 }
 
@@ -554,7 +554,7 @@ TEST_CASE("volume: a volume reads its own blob, not the tape's") {
     scene::Tape src_tape = scene::compile_document(src);
     field::FieldVolume vol = field::FieldVolume::sample(
         [&](kernel::cfloat3 p) { return src_tape.eval(p).d; },
-        math::Aabb(cf3(-0.5f, -0.5f, -0.5f), cf3(0.5f, 0.5f, 0.5f)), 0.02f, 0.12f);
+        math::Aabb{cf3(-0.5f, -0.5f, -0.5f), cf3(0.5f, 0.5f, 0.5f)}, 0.02f, 0.12f);
     REQUIRE(!vol.empty());
     auto shared = std::make_shared<const field::FieldVolume>(vol);
 

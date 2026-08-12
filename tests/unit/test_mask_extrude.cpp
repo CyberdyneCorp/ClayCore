@@ -122,7 +122,7 @@ TEST_CASE("mask_to_field: an empty mask converts to nothing") {
     CHECK_FALSE(brush::mask_to_field(empty).has_value());
     // ...and so does one painted only below the threshold.
     MaskField faint(0.05f);
-    faint.fill(math::Aabb(cf3(-0.2f, -0.2f, -0.2f), cf3(0.2f, 0.2f, 0.2f)), 0.2f);
+    faint.fill(math::Aabb{cf3(-0.2f, -0.2f, -0.2f), cf3(0.2f, 0.2f, 0.2f)}, 0.2f);
     CHECK_FALSE(brush::mask_to_field(faint, 0.5f).has_value());
 }
 
@@ -203,7 +203,7 @@ TEST_CASE("mask extrude: refusals produce nothing") {
 
     // Painted, but nowhere near the surface.
     MaskField away(0.03f);
-    away.fill(math::Aabb(cf3(4.0f, 4.0f, 4.0f), cf3(4.4f, 4.4f, 4.4f)), 1.0f);
+    away.fill(math::Aabb{cf3(4.0f, 4.0f, 4.0f), cf3(4.4f, 4.4f, 4.4f)}, 1.0f);
     CHECK_FALSE(brush::mask_extrude(source, away, s).has_value());
 
     // A thickness that is not one.
@@ -342,7 +342,7 @@ TEST_CASE("mask extrude: voxel refusals produce nothing") {
     CHECK_FALSE(brush::mask_extrude(VoxelGrid(0.03f), cap_mask(), plate_settings()).has_value());
 
     MaskField away(0.03f);
-    away.fill(math::Aabb(cf3(4.0f, 4.0f, 4.0f), cf3(4.4f, 4.4f, 4.4f)), 1.0f);
+    away.fill(math::Aabb{cf3(4.0f, 4.0f, 4.0f), cf3(4.4f, 4.4f, 4.4f)}, 1.0f);
     CHECK_FALSE(brush::mask_extrude(g, away, plate_settings()).has_value());
 
     MaskExtrudeSettings bad = plate_settings();

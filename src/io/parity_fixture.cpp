@@ -215,7 +215,7 @@ Document sampled_volume() {
             float q = std::sqrt(p.x * p.x + p.z * p.z) - 0.55f;
             return std::sqrt(q * q + p.y * p.y) - 0.22f;
         },
-        math::Aabb(cf3(-1.0f, -0.45f, -1.0f), cf3(1.0f, 0.45f, 1.0f)), 0.06f, 0.2f));
+        math::Aabb{cf3(-1.0f, -0.45f, -1.0f), cf3(1.0f, 0.45f, 1.0f)}, 0.06f, 0.2f));
     l.sdf->insert(n);
     return doc;
 }

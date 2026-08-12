@@ -487,7 +487,7 @@ math::Aabb to_aabb(nb::handle obj) {
     }
     if (nb::len(s) != 2)
         throw std::invalid_argument("region must be a Document or a ((lo), (hi)) pair");
-    return math::Aabb(to_f3(s[0], "region lo"), to_f3(s[1], "region hi"));
+    return math::Aabb{to_f3(s[0], "region lo"), to_f3(s[1], "region hi")};
 }
 
 // -- consolidation helpers -----------------------------------------------------
@@ -1759,7 +1759,7 @@ NB_MODULE(pyclay, m) {
                         throw std::invalid_argument(
                             "the document has no bounds to sample; pass bounds=");
                     kernel::cfloat3 pad = kernel::cf3(width, width, width);
-                    region = math::Aabb(region.min - pad, region.max + pad);
+                    region = math::Aabb{region.min - pad, region.max + pad};
                 } else {
                     region = to_aabb(bounds);
                 }
@@ -1930,7 +1930,7 @@ NB_MODULE(pyclay, m) {
                         throw std::invalid_argument("the document has no bounds; pass bounds=");
                     const float pad = width + radius + kernel::clength(settings.displacement);
                     kernel::cfloat3 p3 = kernel::cf3(pad, pad, pad);
-                    where = math::Aabb(where.min - p3, where.max + p3);
+                    where = math::Aabb{where.min - p3, where.max + p3};
                 } else {
                     where = to_aabb(bounds);
                 }
@@ -2004,7 +2004,7 @@ NB_MODULE(pyclay, m) {
                     if (where.empty())
                         throw std::invalid_argument("the document has no bounds; pass bounds=");
                     kernel::cfloat3 pad = kernel::cf3(width, width, width);
-                    where = math::Aabb(where.min - pad, where.max + pad);
+                    where = math::Aabb{where.min - pad, where.max + pad};
                 } else {
                     where = to_aabb(bounds);
                 }

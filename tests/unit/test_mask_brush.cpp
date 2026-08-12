@@ -60,7 +60,7 @@ field::MaskGate gate(const MaskField& m) {
 
 FieldVolume sphere_volume(float r = 0.6f, float cell = 0.04f) {
     return FieldVolume::sample([r](kernel::cfloat3 p) { return kernel::clength(p) - r; },
-                               math::Aabb(cf3(-1, -1, -1), cf3(1, 1, 1)), cell, 0.16f);
+                               math::Aabb{cf3(-1, -1, -1), cf3(1, 1, 1)}, cell, 0.16f);
 }
 
 }  // namespace
@@ -158,7 +158,7 @@ TEST_CASE("mask: invert_within masks everything else") {
     p.shape = voxel::BrushShape::Sphere;
     m.paint(cf3(0.05f, 0.05f, 0.05f), p, 1.0f);
 
-    const math::Aabb box(cf3(-1, -1, -1), cf3(1, 1, 1));
+    const math::Aabb box{cf3(-1, -1, -1), cf3(1, 1, 1)};
     m.invert_within(box);
 
     CHECK(m.sample(cf3(0.05f, 0.05f, 0.05f)) < 0.1f);  // what was painted is released
@@ -170,7 +170,7 @@ TEST_CASE("mask: the region's edge is the region's edge, not a chunk's") {
     // invert() flips whole chunks, so a box whose faces fall mid-chunk is
     // exactly where the two forms differ.
     MaskField m(0.1f);
-    const math::Aabb box(cf3(-0.35f, -0.35f, -0.35f), cf3(0.35f, 0.35f, 0.35f));
+    const math::Aabb box{cf3(-0.35f, -0.35f, -0.35f), cf3(0.35f, 0.35f, 0.35f)};
     m.invert_within(box);
 
     CHECK(m.sample(cf3(0.05f, 0.05f, 0.05f)) > 0.9f);  // inside
@@ -181,7 +181,7 @@ TEST_CASE("mask: the region's edge is the region's edge, not a chunk's") {
 
 TEST_CASE("mask: fill, and filling with zero empties") {
     MaskField m(0.1f);
-    const math::Aabb box(cf3(-0.3f, -0.3f, -0.3f), cf3(0.3f, 0.3f, 0.3f));
+    const math::Aabb box{cf3(-0.3f, -0.3f, -0.3f), cf3(0.3f, 0.3f, 0.3f)};
 
     m.fill(box, 0.5f);
     CHECK(m.sample(cf3(0.05f, 0.05f, 0.05f)) == doctest::Approx(0.5f).epsilon(0.01));
@@ -206,20 +206,20 @@ TEST_CASE("mask: a region that cannot be walked is refused rather than obeyed") 
     // for that alone let it through — and its cell indices overflow the
     // lattice's int32 long before its volume overflows a float.
     const float huge = 3.4e38f;
-    const math::Aabb enormous(cf3(-huge, -huge, -huge), cf3(huge, huge, huge));
+    const math::Aabb enormous{cf3(-huge, -huge, -huge), cf3(huge, huge, huge)};
     CHECK_FALSE(enormous.is_infinite());
     CHECK_FALSE(m.region_is_walkable(enormous));
     m.fill(enormous, 1.0f);
     CHECK(m.empty());
 
     // And one merely far too large on a single axis.
-    const math::Aabb slab(cf3(-1e9f, -0.1f, -0.1f), cf3(1e9f, 0.1f, 0.1f));
+    const math::Aabb slab{cf3(-1e9f, -0.1f, -0.1f), cf3(1e9f, 0.1f, 0.1f)};
     CHECK_FALSE(m.region_is_walkable(slab));
     m.invert_within(slab);
     CHECK(m.empty());
 
     // A region a caller actually means is walkable.
-    CHECK(m.region_is_walkable(math::Aabb(cf3(-1, -1, -1), cf3(1, 1, 1))));
+    CHECK(m.region_is_walkable(math::Aabb{cf3(-1, -1, -1), cf3(1, 1, 1)}));
 }
 
 // -- the freeze reaching the field verbs --------------------------------------
@@ -238,7 +238,7 @@ TEST_CASE("mask: relax leaves a frozen region alone") {
 
     // Freeze the whole region the relax acts over.
     MaskField m(0.05f);
-    m.fill(math::Aabb(cf3(-0.2f, -1.2f, -1.2f), cf3(1.4f, 1.2f, 1.2f)), 1.0f);
+    m.fill(math::Aabb{cf3(-0.2f, -1.2f, -1.2f), cf3(1.4f, 1.2f, 1.2f)}, 1.0f);
     settings.mask = gate(m);
     const FieldVolume masked = field::relax(source, settings);
 
@@ -253,7 +253,7 @@ TEST_CASE("mask: relax leaves a frozen region alone") {
 TEST_CASE("mask: flatten leaves a frozen region alone, and half masking attenuates") {
     const float r = 0.6f;
     const auto sphere = [r](kernel::cfloat3 p) { return kernel::clength(p) - r; };
-    const math::Aabb region(cf3(-1, -1, -1), cf3(1, 1, 1));
+    const math::Aabb region{cf3(-1, -1, -1), cf3(1, 1, 1)};
 
     field::FlattenSettings settings;
     settings.plane_point = cf3(0, 0.4f, 0);
@@ -265,12 +265,12 @@ TEST_CASE("mask: flatten leaves a frozen region alone, and half masking attenuat
     const FieldVolume open = field::flatten(sphere, region, 0.04f, 0.16f, settings);
 
     MaskField frozen(0.05f);
-    frozen.fill(math::Aabb(cf3(-1, 0.0f, -1), cf3(1, 1, 1)), 1.0f);
+    frozen.fill(math::Aabb{cf3(-1, 0.0f, -1), cf3(1, 1, 1)}, 1.0f);
     settings.mask = gate(frozen);
     const FieldVolume held = field::flatten(sphere, region, 0.04f, 0.16f, settings);
 
     MaskField half(0.05f);
-    half.fill(math::Aabb(cf3(-1, 0.0f, -1), cf3(1, 1, 1)), 0.5f);
+    half.fill(math::Aabb{cf3(-1, 0.0f, -1), cf3(1, 1, 1)}, 0.5f);
     settings.mask = gate(half);
     const FieldVolume partial = field::flatten(sphere, region, 0.04f, 0.16f, settings);
 

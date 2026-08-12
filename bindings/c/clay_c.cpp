@@ -3335,8 +3335,8 @@ static clay_result read_volume_sampling(const clay_document* doc,
 
     math::Aabb region;
     if (region_min && region_max) {
-        region = math::Aabb(kernel::cf3(region_min[0], region_min[1], region_min[2]),
-                            kernel::cf3(region_max[0], region_max[1], region_max[2]));
+        region = math::Aabb{kernel::cf3(region_min[0], region_min[1], region_min[2]),
+                            kernel::cf3(region_max[0], region_max[1], region_max[2])};
     } else {
         region = tape.bounds;
         if (region.empty() || region.is_infinite())
@@ -3344,7 +3344,7 @@ static clay_result read_volume_sampling(const clay_document* doc,
         // Padded by the band: sampling exactly to the bounds would clip the
         // band at the surface, which is where it is needed most.
         kernel::cfloat3 pad = kernel::cf3(padding, padding, padding);
-        region = math::Aabb(region.min - pad, region.max + pad);
+        region = math::Aabb{region.min - pad, region.max + pad};
     }
     if (region.empty()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty region");
 
@@ -3946,8 +3946,8 @@ clay_item* clay_cut_create(const clay_cut_desc* desc, const float* polygon_xy,
         options.far_extent = d.far_extent;
     }
 
-    math::Aabb region(kernel::cf3(d.region_min[0], d.region_min[1], d.region_min[2]),
-                      kernel::cf3(d.region_max[0], d.region_max[1], d.region_max[2]));
+    math::Aabb region{kernel::cf3(d.region_min[0], d.region_min[1], d.region_min[2]),
+                      kernel::cf3(d.region_max[0], d.region_max[1], d.region_max[2])};
     std::optional<scene::Node> node = cut::cut_item(frame, shape, region, options);
     if (!node) {
         fail(CLAY_ERROR_INVALID_ARGUMENT, "the cut is degenerate: a shape with no area");
@@ -4425,8 +4425,8 @@ namespace {
 clay_result read_box(const voxel::MaskField& mask, const float box_min[3],
                      const float box_max[3], math::Aabb* out) {
     if (!box_min || !box_max) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null box");
-    *out = math::Aabb(kernel::cf3(box_min[0], box_min[1], box_min[2]),
-                      kernel::cf3(box_max[0], box_max[1], box_max[2]));
+    *out = math::Aabb{kernel::cf3(box_min[0], box_min[1], box_min[2]),
+                      kernel::cf3(box_max[0], box_max[1], box_max[2])};
     if (out->empty())
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "box_min must not exceed box_max on any axis");
     // Typed here rather than silently doing nothing, which is what the engine

@@ -205,7 +205,7 @@ TEST_CASE("curve: bounds cover the bulge, so picking does not miss it") {
     scene::Layer& layer = doc.add_sdf_layer("l");
     layer.sdf->insert(curve_node(pts));
 
-    math::Aabb control_only(cf3(-1.1f, -0.1f, -0.1f), cf3(1.1f, 0.1f, 0.1f));
+    math::Aabb control_only{cf3(-1.1f, -0.1f, -0.1f), cf3(1.1f, 0.1f, 0.1f)};
     math::Aabb b = scene::item_local_bounds(*layer.sdf->find(layer.sdf->roots[0]));
     CHECK(b.max.y > control_only.max.y);
     CHECK(b.max.y > 1.0f);
