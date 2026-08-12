@@ -3,6 +3,7 @@
 // chunks per thread (block-friendly inner loops the compiler can vectorize;
 // hand-tuned SIMD lanes are a benchmark-driven follow-up in task 10.6).
 
+#include <algorithm>
 #include <cstring>
 
 #include "clay/eval/backend.h"
@@ -60,6 +61,47 @@ class CpuBackend final : public Backend {
                 sub_out.gradients_xyz = out.gradients_xyz ? out.gradients_xyz + b * 3 : nullptr;
                 sub_out.colors_rgb = out.colors_rgb ? out.colors_rgb + b * 3 : nullptr;
                 eval_points_reference(tape, sub, sub_out);
+            });
+        return Status::Ok;
+    }
+
+    // The flattened batch goes to the pool as ONE parallel_for over every
+    // point of every run: a chunk that spans a run boundary walks the runs it
+    // covers. The default's per-run dispatch barriers between runs, and an
+    // attribute pass hands over dozens of runs of a few hundred points each —
+    // too few per run to occupy the pool, plenty across the batch. Each point
+    // is evaluated by exactly one chunk with the same reference arithmetic,
+    // so the results match the default bit for bit.
+    Status eval_points_batch(const PointBatchQuery& q, const PointResults& out) override {
+        if (q.count == 0) return Status::Ok;
+        if (!q.tapes || !q.offsets || !q.points_xyz || !out.distances)
+            return Status::InvalidInput;
+        for (std::size_t i = 0; i < q.count; ++i)
+            if (!q.tapes[i] || q.offsets[i] > q.offsets[i + 1]) return Status::InvalidInput;
+        const std::size_t first = q.offsets[0];
+        backends_cpu::ThreadPool::instance().parallel_for(
+            q.offsets[q.count] - first, 64, [&](std::size_t b, std::size_t e) {
+                std::size_t at = first + b;
+                const std::size_t last = first + e;
+                // the first run whose end is past this chunk's start
+                std::size_t run = static_cast<std::size_t>(
+                    std::upper_bound(q.offsets + 1, q.offsets + q.count + 1, at) -
+                    (q.offsets + 1));
+                while (at < last) {
+                    while (q.offsets[run + 1] <= at) ++run;  // skip empty runs
+                    const std::size_t stop = std::min(q.offsets[run + 1], last);
+                    PointQuery sub;
+                    sub.points_xyz = q.points_xyz + at * 3;
+                    sub.count = stop - at;
+                    sub.gradient_eps = q.gradient_eps;
+                    PointResults slice;
+                    slice.distances = out.distances + at;
+                    slice.gradients_xyz =
+                        out.gradients_xyz ? out.gradients_xyz + at * 3 : nullptr;
+                    slice.colors_rgb = out.colors_rgb ? out.colors_rgb + at * 3 : nullptr;
+                    eval_points_reference(*q.tapes[run], sub, slice);
+                    at = stop;
+                }
             });
         return Status::Ok;
     }

@@ -62,6 +62,19 @@ struct GridBatchQuery {
     std::size_t count = 0;
 };
 
+// A batch of point runs, each with its OWN tape — the brick-mesh attribute
+// shape: per-brick culled tapes over the vertices each brick owns. Run i
+// covers the points at indices [offsets[i], offsets[i+1]) of points_xyz and
+// writes the same slice of the outputs, so offsets has count+1 entries and
+// the outputs are indexed exactly like the points. Runs may be empty.
+struct PointBatchQuery {
+    const scene::Tape* const* tapes = nullptr;  // count tapes, none null
+    const std::size_t* offsets = nullptr;       // count+1, non-decreasing
+    const float* points_xyz = nullptr;          // packed xyz, offsets[count]*3 floats
+    std::size_t count = 0;                      // number of runs
+    float gradient_eps = 1e-4f;                 // tetrahedron-tap half-width
+};
+
 // Rays as count*6 floats (origin xyz, dir xyz, dir normalized).
 struct RayQuery {
     const float* rays = nullptr;
@@ -156,6 +169,35 @@ class Backend {
             g.nz = q.nz;
             const Status s = eval_grid(*q.tapes[i], g, out_values + i * per,
                                        out_colors_rgb ? out_colors_rgb + i * per * 3 : nullptr);
+            if (s != Status::Ok) return s;
+        }
+        return Status::Ok;
+    }
+
+    // Many point runs, each against its own tape, in ONE call — what the
+    // brick-mesh attribute pass is. The default runs eval_points per run, so
+    // every backend answers and answers identically; the CPU backend
+    // overrides it to dispatch the flattened batch across its thread pool,
+    // because a per-run barrier leaves most cores idle on runs of a few
+    // hundred vertices. Per-point results are independent of how the batch
+    // is split, so the override is value-identical to this default.
+    virtual Status eval_points_batch(const PointBatchQuery& q, const PointResults& out) {
+        if (q.count == 0) return Status::Ok;
+        if (!q.tapes || !q.offsets || !q.points_xyz || !out.distances)
+            return Status::InvalidInput;
+        for (std::size_t i = 0; i < q.count; ++i) {
+            if (!q.tapes[i] || q.offsets[i] > q.offsets[i + 1]) return Status::InvalidInput;
+            PointQuery sub;
+            sub.points_xyz = q.points_xyz + q.offsets[i] * 3;
+            sub.count = q.offsets[i + 1] - q.offsets[i];
+            sub.gradient_eps = q.gradient_eps;
+            if (sub.count == 0) continue;
+            PointResults slice;
+            slice.distances = out.distances + q.offsets[i];
+            slice.gradients_xyz =
+                out.gradients_xyz ? out.gradients_xyz + q.offsets[i] * 3 : nullptr;
+            slice.colors_rgb = out.colors_rgb ? out.colors_rgb + q.offsets[i] * 3 : nullptr;
+            const Status s = eval_points(*q.tapes[i], sub, slice);
             if (s != Status::Ok) return s;
         }
         return Status::Ok;

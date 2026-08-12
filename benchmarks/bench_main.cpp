@@ -274,6 +274,77 @@ BENCHMARK(BM_DabRefillFreshDoc)->Unit(benchmark::kMillisecond);
 void BM_DabRefillGrownDoc(benchmark::State& state) { refill_pole_dab(state, 193); }
 BENCHMARK(BM_DabRefillGrownDoc)->Unit(benchmark::kMillisecond);
 
+// Batched brick-mesh attributes: on a DENSELY sculpted region — every dab on
+// top of the measured bricks, so the per-brick culled tapes are long — the
+// attribute pass costs a bounded multiple of refilling the same bricks. Both
+// evaluate similar point counts against the same culled tapes; refill has
+// always gone through the CPU backend's pool, and the attribute pass now
+// goes through eval_points_batch, so their ratio is small and stays small.
+// Before the batch the attribute taps ran one vertex at a time on one core
+// and the ratio scaled with core count; check_bench.py gates it.
+namespace {
+
+// The sculpted sphere with every dab AT the +x pole: the pole subset's
+// culled tapes then hold ~all 193 nodes, the dense-stroke worst case.
+scene::Document pole_dense_sphere(int nodes) {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("sculpt");
+    scene::Node base;
+    base.prim = scene::Prim::sphere(1.0f);
+    l.sdf->insert(base);
+    for (int i = 1; i < nodes; ++i) {
+        scene::Node dab;
+        dab.prim = scene::Prim::sphere(0.04f);
+        const float a = 0.3f * std::sin(static_cast<float>(i) * 0.7f);
+        const float b = 0.3f * std::cos(static_cast<float>(i) * 1.3f);
+        const float x = std::sqrt(std::max(0.0f, 1.0f - a * a - b * b));
+        dab.xform.position = cf3(x, a, b);
+        l.sdf->insert(dab);
+    }
+    return doc;
+}
+
+}  // namespace
+
+void BM_MeshBricksGradDenseDoc(benchmark::State& state) {
+    scene::Document doc = pole_dense_sphere(193);
+    brick::BrickCache cache = filled_cache(doc);
+    std::vector<brick::BrickKey> subset = pole_subset(cache);
+    mesh::MeshingOptions options;
+    options.normals = mesh::NormalMode::Gradient;
+    options.colors = true;
+    for (auto _ : state) {
+        mesh::Mesh m = mesh::mesh_bricks(cache, &doc, options, &subset);
+        benchmark::DoNotOptimize(m.triangle_count());
+    }
+    state.counters["bricks"] = static_cast<double>(subset.size());
+}
+BENCHMARK(BM_MeshBricksGradDenseDoc)->Unit(benchmark::kMillisecond);
+
+void BM_DabRefillDenseDoc(benchmark::State& state) {
+    scene::Document doc = pole_dense_sphere(193);
+    brick::BrickCache cache = filled_cache(doc);
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    cache.mark_dirty(math::Aabb{cf3(0.92f, -0.12f, -0.12f), cf3(1.08f, 0.12f, 0.12f)});
+    const std::vector<brick::BrickRequest> reqs = cache.take_dirty();
+    std::vector<float> values;
+    for (auto _ : state) {
+        scene::CullIndex index(doc);
+        math::Aabb batch;
+        for (const brick::BrickRequest& req : reqs) batch.expand(cache.cull_region(req.key));
+        const scene::CullPlan plan = index.plan(batch);
+        for (const brick::BrickRequest& req : reqs) {
+            scene::CullRegion cull{cache.cull_region(req.key)};
+            scene::Tape tape = scene::compile_document(doc, &cull, &index, &plan);
+            values.resize(static_cast<std::size_t>(req.grid.nx) * req.grid.ny * req.grid.nz);
+            cpu->eval_grid(tape, req.grid, values.data());
+        }
+        benchmark::DoNotOptimize(values.data());
+    }
+    state.counters["bricks"] = static_cast<double>(reqs.size());
+}
+BENCHMARK(BM_DabRefillDenseDoc)->Unit(benchmark::kMillisecond);
+
 void BM_MeshTape(benchmark::State& state) {
     scene::Document doc = bench_document();
     scene::Tape tape = scene::compile_document(doc);
