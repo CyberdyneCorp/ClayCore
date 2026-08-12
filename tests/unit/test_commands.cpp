@@ -1,5 +1,7 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
+
 #include "clay/scene/commands.h"
 #include "kernel_utils.h"
 
@@ -207,4 +209,123 @@ TEST_CASE("new command clears the redo stack") {
     CHECK(stack.redo_depth() == 1);
     REQUIRE(stack.perform(doc, SetColorCmd{lid, sphere, cf3(0, 1, 0)}));
     CHECK(stack.redo_depth() == 0);
+}
+
+// accel/undo-removal: SdfContent keeps an id -> (parent, index) location
+// index so locate() — paid once per node an undo removes — no longer walks
+// the whole arena. The two cases below pin what the index must never change:
+// undo/redo semantics and serialized bytes at sculpt-sized documents, and
+// locate() answers under every structural edit including the paths that
+// bypass the index (the document reader's wholesale roots rewrite, and a
+// host mutating the public `roots` member directly).
+
+namespace {
+
+Node stamp_node(SdfContent& c, int i) {
+    Node n;
+    n.id = c.reserve_id();
+    n.prim = Prim::sphere(0.05f);
+    n.xform.position = cf3(0.001f * static_cast<float>(i), 0.002f * static_cast<float>(i), 0);
+    return n;
+}
+
+// The pre-index locate, kept here as the reference the indexed one must match.
+bool reference_locate(const SdfContent& c, NodeId id, NodeId* parent, int* index) {
+    for (std::size_t i = 0; i < c.roots.size(); ++i)
+        if (c.roots[i] == id) {
+            *parent = kNoNode;
+            *index = static_cast<int>(i);
+            return true;
+        }
+    for (const auto& [nid, n] : c.nodes())
+        for (std::size_t i = 0; i < n.children.size(); ++i)
+            if (n.children[i] == id) {
+                *parent = nid;
+                *index = static_cast<int>(i);
+                return true;
+            }
+    return false;
+}
+
+void check_locate_matches_reference(const SdfContent& c) {
+    for (const auto& [id, n] : c.nodes()) {
+        CAPTURE(id);
+        NodeId want_parent = kNoNode, got_parent = kNoNode;
+        int want_index = -1, got_index = -1;
+        bool want = reference_locate(c, id, &want_parent, &want_index);
+        bool got = c.locate(id, &got_parent, &got_index);
+        CHECK(got == want);
+        CHECK(got_parent == want_parent);
+        CHECK(got_index == want_index);
+    }
+}
+
+}  // namespace
+
+TEST_CASE("undoing a stroke on a 10k-stamp document is byte-exact") {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("sculpt");
+    LayerId lid = l.id;
+    UndoStack stack;
+    for (int i = 0; i < 10000; ++i)
+        REQUIRE(stack.perform(doc, AddNodeCmd{lid, kNoNode, -1, {stamp_node(*l.sdf, i)}}));
+    std::vector<std::uint8_t> base = serialize_document(doc);
+
+    stack.begin_group();
+    for (int i = 0; i < 100; ++i)
+        REQUIRE(stack.perform(doc, AddNodeCmd{lid, kNoNode, -1, {stamp_node(*l.sdf, 20000 + i)}}));
+    stack.end_group();
+    std::vector<std::uint8_t> stroked = serialize_document(doc);
+    CHECK(stroked != base);
+
+    REQUIRE(stack.undo(doc));
+    CHECK(serialize_document(doc) == base);
+    REQUIRE(stack.redo(doc));
+    CHECK(serialize_document(doc) == stroked);
+    REQUIRE(stack.undo(doc));
+    CHECK(serialize_document(doc) == base);
+}
+
+TEST_CASE("locate stays exact through structural churn and index bypasses") {
+    Document doc = base_document();
+    SdfContent& c = *doc.layers[0].sdf;
+    NodeId group = nth_root(doc, 1);
+
+    // Grow, then churn: inserts at indices, same-list and cross-list moves,
+    // refused moves (into a non-group, into the node's own subtree), a
+    // middle removal and its reinsert.
+    for (int i = 0; i < 20; ++i) c.insert(stamp_node(c, i), i % 3 == 0 ? group : kNoNode, i % 5);
+    check_locate_matches_reference(c);
+    NodeId item_a = c.insert(stamp_node(c, 100));
+    NodeId item_b = c.insert(stamp_node(c, 101));
+    REQUIRE(c.move(c.roots[7], kNoNode, 2));
+    REQUIRE(c.move(c.roots[0], group, -1));
+    CHECK_FALSE(c.move(item_a, item_b, 0));                     // dest is not a group
+    CHECK_FALSE(c.move(group, c.find(group)->children[0], 0));  // own subtree
+    check_locate_matches_reference(c);
+    NodeId doomed = c.roots[3];
+    NodeId parent = kNoNode;
+    int index = -1;
+    REQUIRE(c.locate(doomed, &parent, &index));
+    std::vector<Node> cut = c.remove(doomed);
+    REQUIRE_FALSE(cut.empty());
+    NodeId gone_parent = kNoNode;
+    int gone_index = -1;
+    CHECK_FALSE(c.locate(doomed, &gone_parent, &gone_index));
+    REQUIRE(c.reinsert(cut, parent, index));
+    check_locate_matches_reference(c);
+
+    // The document reader rewrites `roots` wholesale rather than editing
+    // through insert/remove/move; locate must be exact on the loaded copy.
+    std::vector<std::uint8_t> bytes = serialize_document(doc);
+    std::optional<Document> back = deserialize_document(bytes.data(), bytes.size());
+    REQUIRE(back.has_value());
+    check_locate_matches_reference(*back->layers[0].sdf);
+    CHECK(serialize_document(*back) == bytes);
+
+    // A host can mutate the public member directly; a stale index entry must
+    // fall back to the walk and self-repair, never answer wrongly.
+    std::reverse(c.roots.begin(), c.roots.end());
+    check_locate_matches_reference(c);
+    check_locate_matches_reference(c);  // again, through the repaired entries
 }

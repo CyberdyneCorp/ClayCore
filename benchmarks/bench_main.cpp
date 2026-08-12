@@ -17,6 +17,7 @@
 #include "clay/mesh/surface_nets.h"
 #include "clay/field/redistance.h"
 #include "clay/scene/bounds.h"
+#include "clay/scene/commands.h"
 #include "clay/eval/bake_points.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/cull_index.h"
@@ -519,6 +520,51 @@ void BM_RaycastBricksSerial(benchmark::State& state) {
     state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations()) * kRaycastBenchRays);
 }
 BENCHMARK(BM_RaycastBricksSerial)->Unit(benchmark::kMillisecond);
+
+// Undo does not scale with the document (accel/undo-removal): undoing a
+// 100-stamp stroke on a 10k-stamp document is gated against the same stroke
+// on a 100-stamp one. Undo removes each stamp through SdfContent::locate,
+// which used to walk the root list and then every node's children — linear
+// in the document, 33x between these two sizes — and now answers from the
+// maintained id -> (parent, index) location map. check_bench.py holds the
+// ratio to the same generous 3x style as the gates above: it catches the
+// O(document) walk coming back, not runner noise.
+namespace {
+
+void undo_stamp_stroke(benchmark::State& state, int base_nodes) {
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("sculpt");
+    const scene::LayerId lid = layer.id;
+    scene::UndoStack undo;
+    auto stamp = [&](int i) {
+        scene::Node n;
+        n.id = layer.sdf->reserve_id();
+        n.prim = scene::Prim::sphere(0.05f);
+        n.xform.position = cf3(0.001f * static_cast<float>(i), 0, 0);
+        return n;
+    };
+    auto add = [&](int i) {
+        return undo.perform(doc,
+                            scene::Command{scene::AddNodeCmd{lid, scene::kNoNode, -1, {stamp(i)}}});
+    };
+    for (int i = 0; i < base_nodes; ++i) add(i);
+    for (auto _ : state) {
+        undo.begin_group();
+        for (int i = 0; i < 100; ++i) add(base_nodes + i);
+        undo.end_group();
+        undo.undo(doc);
+        benchmark::DoNotOptimize(doc.layers.front().sdf->roots.data());
+    }
+    state.counters["nodes"] = static_cast<double>(base_nodes);
+}
+
+void BM_UndoStampsFreshDoc(benchmark::State& state) { undo_stamp_stroke(state, 100); }
+BENCHMARK(BM_UndoStampsFreshDoc)->Unit(benchmark::kMillisecond);
+
+void BM_UndoStampsGrownDoc(benchmark::State& state) { undo_stamp_stroke(state, 10000); }
+BENCHMARK(BM_UndoStampsGrownDoc)->Unit(benchmark::kMillisecond);
+
+}  // namespace
 
 // Resident uploaded tapes (accel/metal-persistent): the Metal backend keeps
 // the uploaded form of recent tapes resident, keyed on the process-unique

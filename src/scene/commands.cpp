@@ -606,6 +606,10 @@ std::shared_ptr<SdfContent> read_content(Reader& r) {
     if (!r.ok) return content;
     if (!flat.empty()) content->reinsert(flat, kNoNode, -1);
     content->roots = roots;
+    // The wholesale assignment above bypasses the location index that
+    // insert/remove/move maintain; rebuild it so the first undo after a load
+    // does not pay a full-arena walk per root.
+    content->reindex_roots();
     return content;
 }
 
