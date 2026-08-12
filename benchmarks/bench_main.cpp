@@ -14,7 +14,10 @@
 #include "clay/eval/backend.h"
 #include "clay/mesh/marching.h"
 #include "clay/mesh/surface_nets.h"
+#include "clay/field/redistance.h"
 #include "clay/scene/bounds.h"
+#include "clay/eval/bake_points.h"
+#include "clay/scene/consolidate.h"
 #include "clay/scene/cull_index.h"
 #include "clay/scene/tape.h"
 
@@ -366,6 +369,44 @@ void BM_SurfaceNets(benchmark::State& state) {
     }
 }
 BENCHMARK(BM_SurfaceNets)->Unit(benchmark::kMillisecond);
+
+// Consolidation (accel/parallel-consolidate): baking a 193-node layer, once
+// through bake_layer — which batches every lattice sample through the CPU
+// backend's pool — and once through the serial std::function path bake_layer
+// replaced, reconstructed here as the reference. The two are byte-identical
+// by contract (regression-tested in test_consolidate.cpp); check_bench.py
+// requires the batched bake to be FASTER than the serial one, which is what
+// catches the one-point-at-a-time bake coming back. A ratio against a
+// fixed-cost reference would drift with core count; this pair holds on any
+// machine with more than one, because both sides pay the identical serial
+// redistance floor and only the evaluation differs.
+void BM_ConsolidateGrownDoc(benchmark::State& state) {
+    scene::Document doc = sculpted_sphere(193);
+    scene::ConsolidationParams params;
+    params.cell_size = 0.05f;
+    for (auto _ : state) {
+        std::optional<field::FieldVolume> v =
+            scene::bake_layer(doc.layers.front(), params, nullptr, eval::pooled_bake_eval());
+        benchmark::DoNotOptimize(v->sample_count());
+    }
+}
+BENCHMARK(BM_ConsolidateGrownDoc)->Unit(benchmark::kMillisecond);
+
+void BM_ConsolidateSerialGrownDoc(benchmark::State& state) {
+    scene::Document doc = sculpted_sphere(193);
+    const float cell = 0.05f, band = cell * 3.0f;
+    const scene::Tape tape = scene::compile_layer(doc.layers.front());
+    const kernel::cfloat3 pad = cf3(band, band, band);
+    const math::Aabb region{tape.bounds.min - pad, tape.bounds.max + pad};
+    for (auto _ : state) {
+        field::FieldVolume v = field::FieldVolume::sample(
+            [&tape](kernel::cfloat3 p) { return tape.eval(p).d; }, region, cell, band);
+        if (field::redistance(v)) v.compact();
+        v.set_sample_lipschitz(v.measure_sample_lipschitz());
+        benchmark::DoNotOptimize(v.sample_count());
+    }
+}
+BENCHMARK(BM_ConsolidateSerialGrownDoc)->Unit(benchmark::kMillisecond);
 
 }  // namespace
 

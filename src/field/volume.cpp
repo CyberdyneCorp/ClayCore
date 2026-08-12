@@ -26,31 +26,17 @@ std::size_t sample_index(int x, int y, int z) {
     return static_cast<std::size_t>((z * n + y) * n + x);
 }
 
-// What sampling one brick found out about it.
+// What the samples of one brick say about it.
 struct BrickScan {
     bool near_surface;  // something landed within the band: the brick is kept
     bool any_inside;    // ...and if not, which side the whole of it is on
 };
 
-// Sample one brick, halo included, into `block`.
-//
-// The three axes are walked as ONE index rather than three nested loops. That
-// is not a micro-optimisation: sample_index(x, y, z) is exactly that linear
-// index, so the nesting bought nothing except depth.
-BrickScan scan_brick(const std::function<float(cfloat3)>& f, cfloat3 origin, float cell,
-                     float band, int bx, int by, int bz, std::vector<float>& block) {
+BrickScan scan_block(const float* block, float band) {
     BrickScan scan{false, false};
-    const int n = kBrickDim + 1;
     for (int i = 0; i < kBrickSamples; ++i) {
-        int x = i % n, y = (i / n) % n, z = i / (n * n);
-        cfloat3 p = origin + cf3(static_cast<float>(bx * kBrickDim + x),
-                                 static_cast<float>(by * kBrickDim + y),
-                                 static_cast<float>(bz * kBrickDim + z)) *
-                                cell;
-        float d = f(p);
-        block[static_cast<std::size_t>(i)] = d;
-        if (std::abs(d) <= band) scan.near_surface = true;
-        if (d < 0.0f) scan.any_inside = true;
+        if (std::abs(block[i]) <= band) scan.near_surface = true;
+        if (block[i] < 0.0f) scan.any_inside = true;
     }
     return scan;
 }
@@ -85,8 +71,42 @@ void chamfer_pass(std::vector<std::int32_t>& steps, const std::int32_t count[3],
 
 }  // namespace
 
+cfloat3 FieldVolume::BrickGrid::sample_position(std::size_t slot, int i) const {
+    const int n = kBrickDim + 1;
+    const int bx = static_cast<int>(slot) % bcount[0];
+    const int by = (static_cast<int>(slot) / bcount[0]) % bcount[1];
+    const int bz = static_cast<int>(slot) / (bcount[0] * bcount[1]);
+    const int x = i % n, y = (i / n) % n, z = i / (n * n);
+    return origin + cf3(static_cast<float>(bx * kBrickDim + x),
+                        static_cast<float>(by * kBrickDim + y),
+                        static_cast<float>(bz * kBrickDim + z)) *
+                        cell_size;
+}
+
+math::Aabb FieldVolume::BrickGrid::brick_box(std::size_t slot) const {
+    math::Aabb box;
+    box.expand(sample_position(slot, 0));
+    box.expand(sample_position(slot, kBrickSamples - 1));
+    return box;
+}
+
 FieldVolume FieldVolume::sample(const std::function<float(cfloat3)>& f, const math::Aabb& region,
                                 float cell_size, float band) {
+    // The serial fill: every sample through `f`, at exactly the positions the
+    // grid describes. The three axes are walked as ONE index rather than three
+    // nested loops — sample_index(x, y, z) is exactly that linear index, so
+    // nesting bought nothing except depth.
+    return sample_blocks(
+        [&f](const BrickGrid& grid, std::size_t first, std::size_t count, float* out) {
+            for (std::size_t s = 0; s < count; ++s)
+                for (int i = 0; i < kBrickSamples; ++i)
+                    out[s * kBrickSamples + i] = f(grid.sample_position(first + s, i));
+        },
+        region, cell_size, band);
+}
+
+FieldVolume FieldVolume::sample_blocks(const BrickBlockFill& fill, const math::Aabb& region,
+                                       float cell_size, float band) {
     FieldVolume v;
     v.cell_size_ = cell_size > 0.0f ? cell_size : 0.05f;
     v.band_ = band > 0.0f ? band : v.cell_size_ * 3.0f;
@@ -112,21 +132,28 @@ FieldVolume FieldVolume::sample(const std::function<float(cfloat3)>& f, const ma
 
     // Brick by brick rather than through one dense grid: the halo means 42%
     // of samples are taken twice, which is a better trade than holding a dense
-    // volume in memory for a region that is mostly empty by construction.
-    std::vector<float> block(kBrickSamples);
-    for (std::size_t slot = 0; slot < total; ++slot) {
-        const int bx = static_cast<int>(slot) % v.bcount_[0];
-        const int by = (static_cast<int>(slot) / v.bcount_[0]) % v.bcount_[1];
-        const int bz = static_cast<int>(slot) / (v.bcount_[0] * v.bcount_[1]);
-        BrickScan scan = scan_brick(f, v.origin_, v.cell_size_, v.band_, bx, by, bz, block);
-        if (scan.near_surface) {
-            v.index_[slot] = static_cast<std::int32_t>(v.data_.size());
-            v.data_.insert(v.data_.end(), block.begin(), block.end());
-        } else {
-            // No samples: the whole brick is on one side, and which side is
-            // the thing a band alone could not tell us. The magnitude comes
-            // from build_far_bounds; this only records the sign.
-            v.far_[slot] = scan.any_inside ? -1.0f : 1.0f;
+    // volume in memory for a region that is mostly empty by construction. The
+    // window keeps that property for a batched fill — enough bricks per call
+    // to occupy a thread pool, never the whole region's samples at once.
+    constexpr std::size_t kWindowBricks = 512;
+    const BrickGrid grid{v.origin_, v.cell_size_, v.band_,
+                         {v.bcount_[0], v.bcount_[1], v.bcount_[2]}};
+    std::vector<float> blocks(std::min(total, kWindowBricks) * kBrickSamples);
+    for (std::size_t first = 0; first < total; first += kWindowBricks) {
+        const std::size_t count = std::min(kWindowBricks, total - first);
+        fill(grid, first, count, blocks.data());
+        for (std::size_t s = 0; s < count; ++s) {
+            const float* block = blocks.data() + s * kBrickSamples;
+            const BrickScan scan = scan_block(block, v.band_);
+            if (scan.near_surface) {
+                v.index_[first + s] = static_cast<std::int32_t>(v.data_.size());
+                v.data_.insert(v.data_.end(), block, block + kBrickSamples);
+            } else {
+                // No samples: the whole brick is on one side, and which side
+                // is the thing a band alone could not tell us. The magnitude
+                // comes from build_far_bounds; this only records the sign.
+                v.far_[first + s] = scan.any_inside ? -1.0f : 1.0f;
+            }
         }
     }
     v.build_far_bounds();

@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "clay/eval/backend.h"
+#include "clay/eval/bake_points.h"
 #include "clay/io/clayspace.h"
 #include "clay/io/mesh_io.h"
 #include "clay/mesh/decimate.h"
@@ -3111,7 +3112,7 @@ NB_MODULE(pyclay, m) {
                  scene::ConsolidationCost cost;
                  scene::ConsolidationParams p =
                      to_consolidation(cell, band, padding, region, redistance);
-                 if (!scene::bake_layer(l.layer(), p, &cost))
+                 if (!scene::bake_layer(l.layer(), p, &cost, eval::pooled_bake_eval()))
                      throw std::invalid_argument(
                          "nothing to consolidate: the layer is empty, unbounded, or the region "
                          "contains no surface");
@@ -3135,7 +3136,8 @@ NB_MODULE(pyclay, m) {
                  if (l.layer().protected_from_edits())
                      throw std::invalid_argument("layer is protected (ghosted or locked)");
                  if (!scene::consolidate_layer(l.doc->document, l.id, p,
-                                                          l.undo ? l.undo->get() : nullptr, &cost))
+                                               l.undo ? l.undo->get() : nullptr, &cost,
+                                               eval::pooled_bake_eval()))
                      throw std::invalid_argument(
                          "nothing to consolidate: the layer is empty, unbounded, or the region "
                          "contains no surface");

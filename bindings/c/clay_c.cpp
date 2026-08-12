@@ -18,6 +18,7 @@
 #include "desc_version.h"
 
 #include "clay/eval/backend.h"
+#include "clay/eval/bake_points.h"
 #include "clay/io/clayspace.h"
 #include <memory>
 
@@ -3029,7 +3030,7 @@ clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_i
     if (r != CLAY_OK) return r;
 
     scene::ConsolidationCost cost;
-    if (!scene::bake_layer(*layer, p, &cost))
+    if (!scene::bake_layer(*layer, p, &cost, eval::pooled_bake_eval()))
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "nothing to consolidate: the layer is empty, unbounded, or the region "
                     "contains no surface");
@@ -3055,7 +3056,8 @@ clay_result clay_layer_consolidate(clay_document* doc, clay_layer_id layer_id,
     }
 
     scene::ConsolidationCost cost;
-    if (!scene::consolidate_layer(doc->doc.document, layer_id, p, doc->undo.get(), &cost))
+    if (!scene::consolidate_layer(doc->doc.document, layer_id, p, doc->undo.get(), &cost,
+                                  eval::pooled_bake_eval()))
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "nothing to consolidate: the layer is empty, unbounded, or the region "
                     "contains no surface");

@@ -17,6 +17,7 @@
 #include "clay/field/redistance.h"
 #include "clay/field/volume.h"
 #include "clay/kernel/exactness.h"
+#include "clay/eval/bake_points.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/tape.h"
 
@@ -442,4 +443,122 @@ TEST_CASE("consolidating keeps the layer's own transform rather than baking it t
     REQUIRE(scene::consolidate_layer(doc, layer.id, params_at(0.03f, 0.12f)));
     CHECK(doc.layers.front().xform.position.x == doctest::Approx(2.0f));
     CHECK(surface_along(doc, cf3(1, 0, 0), 4.0f) == doctest::Approx(before).epsilon(0.05));
+}
+
+// -- the bake's grid path -----------------------------------------------------
+//
+// The bake batches every lattice sample through the CPU backend's pool
+// (src/scene/consolidate.cpp). The contract is byte-identity with the serial
+// full-tape bake it replaced: these tests hold the whole pipeline — sampling,
+// classification, redistance, compact, the re-measured bound — to it.
+//
+// The dabbed scene below is the one that keeps the bake honest about
+// per-brick CULLED tapes: its chain of quadratic blends carries a culled
+// item's tail into band-interior values (up to ~7e-3 measured), so a bake
+// that reached for the refill path's culling would fail these byte
+// comparisons. See the grid-path comment in consolidate.cpp.
+
+namespace {
+
+// A layer whose field exercises brick classification everywhere it can go:
+// smooth-blended dabs, a subtract, and empty bricks on both sides of the
+// surface.
+scene::Document dabbed_document() {
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("sculpt");
+    scene::Node base;
+    base.prim = scene::Prim::sphere(0.8f);
+    layer.sdf->insert(base);
+    for (int i = 0; i < 24; ++i) {
+        scene::Node dab;
+        dab.prim = scene::Prim::sphere(0.12f);
+        dab.blend.profile = scene::BlendProfile::Quadratic;
+        dab.blend.k = 0.06f;
+        const float a = static_cast<float>(i) * 0.7f;
+        dab.xform.position =
+            cf3(0.8f * std::cos(a), 0.8f * std::sin(a), 0.25f * std::sin(a * 1.9f));
+        layer.sdf->insert(dab);
+    }
+    scene::Node bite;
+    bite.prim = scene::Prim::sphere(0.35f);
+    bite.op = scene::Op::Subtract;
+    bite.xform.position = cf3(0.0f, 0.75f, 0.2f);
+    layer.sdf->insert(bite);
+    return doc;
+}
+
+// The serial reference: bake_layer's exact steps with the FULL layer tape at
+// every sample — the path the grid bake replaced, kept here as the yardstick.
+FieldVolume serial_bake(const scene::Layer& layer, const scene::ConsolidationParams& params) {
+    scene::Layer view = layer;
+    view.visible = true;
+    view.xform = math::Transform{};
+    const scene::Tape tape = scene::compile_layer(view);
+    REQUIRE(!tape.empty());
+    const float band = params.band > 0.0f ? params.band : params.cell_size * 3.0f;
+    const float padding = params.padding > 0.0f ? params.padding : band;
+    math::Aabb region = params.region;
+    if (region.empty()) {
+        const kernel::cfloat3 pad = cf3(padding, padding, padding);
+        region = math::Aabb{tape.bounds.min - pad, tape.bounds.max + pad};
+    }
+    FieldVolume v = FieldVolume::sample([&tape](kernel::cfloat3 p) { return tape.eval(p).d; },
+                                        region, params.cell_size, band);
+    if (!params.skip_redistance && field::redistance(v)) v.compact();
+    v.set_sample_lipschitz(v.measure_sample_lipschitz());
+    return v;
+}
+
+}  // namespace
+
+TEST_CASE("the grid bake is byte-identical to the serial full-tape bake") {
+    scene::Document doc = dabbed_document();
+    scene::ConsolidationParams params = params_at(0.05f, 0.15f);
+
+    // With redistance skipped first: the raw baked samples compared directly,
+    // where a repair pass that missed a sample cannot hide behind the solve.
+    params.skip_redistance = true;
+    std::optional<FieldVolume> raw =
+        scene::bake_layer(doc.layers.front(), params, nullptr, eval::pooled_bake_eval());
+    REQUIRE(raw);
+    CHECK(raw->serialize() == serial_bake(doc.layers.front(), params).serialize());
+
+    // And the full pipeline, redistance and compact included.
+    params.skip_redistance = false;
+    std::optional<FieldVolume> baked =
+        scene::bake_layer(doc.layers.front(), params, nullptr, eval::pooled_bake_eval());
+    REQUIRE(baked);
+    CHECK(baked->serialize() == serial_bake(doc.layers.front(), params).serialize());
+}
+
+TEST_CASE("the grid bake matches the serial bake on a steep volume chain") {
+    // A polish pass hands back a STEEP volume (that is why chains consolidate
+    // at all), so kept bricks hold values far past the band — the raw stores
+    // that make the bake stricter than any band-clamped consumer.
+    scene::Document doc = wrap(polish(sphere_document(0.8f), cf3(0, 0, 1), 0.55f, 0.02f, 0.08f));
+    scene::ConsolidationParams params = params_at(0.04f, 0.12f);
+    std::optional<FieldVolume> baked =
+        scene::bake_layer(doc.layers.front(), params, nullptr, eval::pooled_bake_eval());
+    REQUIRE(baked);
+    CHECK(baked->serialize() == serial_bake(doc.layers.front(), params).serialize());
+}
+
+TEST_CASE("a batched fill's order does not change the volume") {
+    // More bricks than one fill window, filled back to front within each
+    // window: sample_blocks assembles in slot order regardless, so the volume
+    // is the one the serial fill builds, byte for byte.
+    auto f = [](kernel::cfloat3 p) { return kernel::clength(p) - 2.0f; };
+    const math::Aabb region{cf3(-3, -3, -3), cf3(3, 3, 3)};
+    const float cell = 0.06f, band = 0.2f;
+    FieldVolume serial = FieldVolume::sample(f, region, cell, band);
+    FieldVolume batched = FieldVolume::sample_blocks(
+        [&f](const FieldVolume::BrickGrid& grid, std::size_t first, std::size_t count,
+             float* out) {
+            for (std::size_t s = count; s-- > 0;)
+                for (int i = 0; i < field::kBrickSamples; ++i)
+                    out[s * field::kBrickSamples + i] = f(grid.sample_position(first + s, i));
+        },
+        region, cell, band);
+    CHECK(serial.brick_count() > 0);
+    CHECK(serial.serialize() == batched.serialize());
 }
