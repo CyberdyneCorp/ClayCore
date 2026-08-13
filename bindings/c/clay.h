@@ -2627,6 +2627,50 @@ clay_result clay_voxel_mesh(const clay_voxel_grid* grid, clay_mesh** out_mesh);
 clay_result clay_voxel_mesh_smooth(const clay_voxel_grid* grid, int32_t blur,
                                    clay_mesh** out_mesh);
 
+/* The sculpt back into the document as an OPERAND, in a new layer (#90).
+ *
+ * The bridge ran one way. SDF to voxel is clay_voxel_rasterize_document; voxel
+ * back was a detour — mesh the grid, sample the triangles into a volume, place
+ * that — which resamples twice, builds a BVH to do it, drops the palette, and
+ * hands back something no longer being sculpted. This is direct: occupancy is
+ * read by trilinear interpolation between cell CENTRES, and the result is
+ * redistanced so it carries a Lipschitz bound a marcher and a blend can trust.
+ *
+ * COLOUR SURVIVES by conversion per palette entry. A field has nowhere to put
+ * a palette, so this places one volume item per entry the grid carries, each
+ * with that entry's colour, unioned without a blend. The union of the parts is
+ * the solid; the interface between two colours is interior to it.
+ *
+ * NON-DESTRUCTIVE. A new layer, and the grid is untouched — so a host offers
+ * "go back" by keeping the original, and one misclick cannot cost a
+ * parametric model. Nothing about the document format changes: these are
+ * ordinary volume items in an ordinary SDF layer.
+ *
+ * LOSSY, in both directions, and the spec says so rather than implying
+ * otherwise. Going to voxels quantised to the lattice and nothing here
+ * recovers it — a boolean's sharp edge went to a staircase and comes back as a
+ * rounded one. Coming back turns occupancy into a distance. PRESERVED: the
+ * surface within about a cell, and the colour. NOT preserved: exactness, and
+ * the procedural history — once converted the items are gone and their
+ * parameters are no longer editable.
+ *
+ * `blur` is the smoothing the conversion reads occupancy through, as in
+ * clay_voxel_mesh_smooth: 0 keeps thin features, 1 is smoother and loses them.
+ *
+ * CLAY_ERROR_INVALID_ARGUMENT when the grid holds nothing convertible. */
+/* One palette entry of a sculpt as a placeable ITEM, the counterpart to
+ * clay_item_volume_from_mesh. `index` 0 converts every occupied cell into one
+ * item; a non-zero index converts only that entry's cells and gives the item
+ * that entry's colour, which is how a caller assembles a coloured sculpt by
+ * hand. clay_voxel_to_layer is this in a loop, into a new layer.
+ *
+ * Free with clay_item_destroy; placing it copies it, as every item does. */
+clay_result clay_item_volume_from_voxels(const clay_voxel_grid* grid, int32_t blur, int32_t index,
+                                         clay_item** out_item);
+
+clay_result clay_voxel_to_layer(clay_document* doc, const clay_voxel_grid* grid, const char* name,
+                                int32_t blur, clay_layer_id* out_layer);
+
 /* -- incremental display ---------------------------------------------------
  *
  * The voxel side of the refill shape the brick cache already uses: drain the

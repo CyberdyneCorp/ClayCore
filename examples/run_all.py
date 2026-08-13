@@ -71,6 +71,7 @@ EXAMPLES = [
     "39_multi_resolution",
     "40_armature",
     "41_voxel_smooth_display",
+    "42_representation_round_trip",
 ]
 
 

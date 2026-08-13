@@ -163,6 +163,10 @@ std::size_t VoxelGrid::dirty_chunk_count(std::size_t level) const {
 
 std::uint8_t VoxelGrid::get(VoxelCoord c) const { return cell_at(active_, c); }
 
+std::uint8_t VoxelGrid::cell_index(std::size_t level, VoxelCoord c) const {
+    return level < levels_.size() ? cell_at(level, c) : 0;
+}
+
 void VoxelGrid::set(VoxelCoord c, std::uint8_t index) {
     // Every verb funnels its writes through here, so one compare instruments
     // all of them, and propagation below is charged to the edit rather than

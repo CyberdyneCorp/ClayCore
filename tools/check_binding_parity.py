@@ -84,6 +84,7 @@ ALIASES = {
     "Document.gradients": "clay_eval_gradients",
     "Document.raycast": "clay_raycast_attributed",  # pyclay's reports layer+item too
     "Volume.from_mesh": "clay_item_volume_from_mesh",
+    "Volume.from_voxels": "clay_item_volume_from_voxels",
     "Volume.from_document": "clay_item_volume_from_document",
     "Volume.relaxed": "clay_item_volume_relax",
     "Volume.flattened": "clay_item_volume_flatten",

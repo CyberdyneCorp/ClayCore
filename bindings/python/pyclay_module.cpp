@@ -1897,6 +1897,50 @@ NB_MODULE(pyclay, m) {
             "too coarse for a bolt. `beta` is how far a BVH node must be before\n"
             "it is summarized by one term rather than descended: larger is more\n"
             "accurate and slower, and 0 sums every triangle exactly.")
+        .def_static(
+            "from_voxels",
+            [](const PyVoxelGrid& grid, int blur, int index, nb::handle band,
+               nb::handle position, nb::handle rotation_axis_angle, float scale) {
+                if (blur < 0 || blur > 8) throw std::invalid_argument("blur must be 0..8");
+                if (index < 0 || index > 255) throw std::invalid_argument("index must be 0..255");
+                voxel::VoxelGrid::FieldOptions options{
+                    blur, band.is_none() ? 0.0f : nb::cast<float>(band),
+                    static_cast<std::uint8_t>(index)};
+                std::optional<field::FieldVolume> volume;
+                {
+                    nb::gil_scoped_release release;
+                    volume = grid.grid().to_field(options);
+                }
+                if (!volume)
+                    throw std::invalid_argument(
+                        "the grid holds nothing to convert at that index or level");
+
+                PyVolume out;
+                out.prim = scene::Prim::volume();
+                out.volume = std::make_shared<const field::FieldVolume>(std::move(*volume));
+                place(out, position, rotation_axis_angle, scale);
+                return out;
+            },
+            "grid"_a, "blur"_a = 0, "index"_a = 0, "band"_a = nb::none(), CLAY_PLACE_ARGS,
+            "A voxel sculpt back as a FIELD, so it is an operand again rather\n"
+            "than something you can only display or export.\n\n"
+            "Direct, without a mesh in between. The grid knows where its surface\n"
+            "is; it does not know the DISTANCE to it. Occupancy is read by\n"
+            "trilinear interpolation between cell CENTRES — which is what puts\n"
+            "the isosurface on a surface rather than on a cell boundary — and\n"
+            "the result is redistanced, so it carries a Lipschitz bound a\n"
+            "marcher and a blend can trust.\n\n"
+            "`index` converts ONE palette entry, which is how colour survives a\n"
+            "trip a single field has nowhere to store it on: convert once per\n"
+            "entry and place each with that entry's colour. The union of the\n"
+            "parts is the whole solid. 0 converts every occupied cell.\n\n"
+            "`blur` smooths the occupancy first: 0 keeps thin features, 1 is\n"
+            "smoother and can erase an isolated voxel.\n\n"
+            "LOSSY IN BOTH DIRECTIONS. Going to voxels quantised to the lattice\n"
+            "and nothing here recovers a boolean's sharp edge; coming back turns\n"
+            "occupancy into a distance. Preserved: the surface within about a\n"
+            "cell, and the colour. Not preserved: exactness, and the procedural\n"
+            "history — the items are gone and their parameters with them.")
         .def(
             "relaxed",
             [](const PyVolume& self, float strength, int radius_cells, int iterations,

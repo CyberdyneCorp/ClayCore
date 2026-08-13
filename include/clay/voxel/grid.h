@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "clay/math/geom.h"
+#include "clay/field/volume.h"
 #include "clay/mesh/mesh_data.h"
 #include "clay/scene/tape.h"
 
@@ -121,6 +122,11 @@ class VoxelGrid {
     float level_voxel_size(std::size_t level) const;
     // Occupied cells at one level, so a caller can report what each costs.
     std::size_t level_occupied_count(std::size_t level) const;
+    // One cell of ONE level, without making it active. get() answers for the
+    // active level; this is what a reader spanning levels needs — the smooth
+    // mesher and the field conversion both take a level rather than assuming
+    // the active one. 0 for a level this grid does not have.
+    std::uint8_t cell_index(std::size_t level, VoxelCoord c) const;
 
     // Chooses which level the verbs act on. False (and no change) for a level
     // this grid does not have.
@@ -336,6 +342,43 @@ class VoxelGrid {
     }
     mesh::Mesh mesh_smooth(std::size_t level, SmoothOptions options = kSmoothDefault) const;
 
+    // -- back into the document ----------------------------------------------
+    // The sculpt as a FIELD, so it can be an operand again (#90).
+    //
+    // The bridge ran one way: SDF to voxel is rasterize_tape, and voxel back
+    // was a detour through the mesher and mesh::to_field — two resamplings, a
+    // BVH to do them, and the palette dropped. This is direct. Occupancy is
+    // read by trilinear interpolation between cell CENTRES, which is what puts
+    // the isosurface somewhere real rather than on a cell boundary, and then
+    // field::redistance measures the distance to that surface so the result
+    // carries a Lipschitz bound a marcher and a blend can trust.
+    //
+    // `index` restricts the conversion to ONE palette entry, which is how
+    // colour survives a trip that a single field has nowhere to put it: a
+    // caller converts once per index in use and places each result with that
+    // entry's colour. The union of the parts is the whole solid, and the
+    // interface between two colours is interior to that union.
+    //
+    // Lossy, and in both directions. Going to voxels quantised to the lattice
+    // and no care here recovers it; coming back turns occupancy into a
+    // distance, and the band decides how much of the field means anything.
+    // What is preserved is the surface within about a cell, and the colour.
+    // What is not is exactness and the procedural history.
+    //
+    // nullopt when the level does not exist, holds nothing, holds nothing of
+    // `index`, or spans a box too large to sample.
+    struct FieldOptions {
+        int blur;            // extra occupancy smoothing; 0 keeps thin features
+        float band;          // 0 = three cells
+        std::uint8_t index;  // 0 = every occupied cell, whatever its colour
+    };
+    static constexpr FieldOptions kFieldDefault{0, 0.0f, 0};
+    std::optional<field::FieldVolume> to_field(FieldOptions options = kFieldDefault) const {
+        return to_field(active_, options);
+    }
+    std::optional<field::FieldVolume> to_field(std::size_t level,
+                                               FieldOptions options = kFieldDefault) const;
+
     // -- incremental meshing -------------------------------------------------
     // The chunks holding material, so a caller can mesh a grid a chunk at a
     // time without draining the dirty set. Order is the map's own and is not
@@ -419,6 +462,26 @@ class VoxelGrid {
     // Rasterize an SDF tape into the grid over a world region: cells whose
     // center evaluates inside are set, colored from the tape's color field
     // via nearest palette entry (added as needed).
+    //
+    // What this preserves, stated because the return trip (to_field) is only
+    // as trustworthy as the half nobody wrote down. These are properties of
+    // sampling a continuous field onto a lattice, not defects:
+    //
+    //  - THE SURFACE MOVES by up to half a cell. Membership is decided at the
+    //    cell centre, so a surface crossing a cell takes or leaves the whole
+    //    cell. This is the quantisation the return trip cannot undo, and the
+    //    reason its tolerance is a cell rather than zero.
+    //  - A FEATURE THINNER THAN A CELL MAY VANISH. Nothing samples between
+    //    centres, so a rib or a gap narrower than the lattice can fall between
+    //    them and leave no cells at all. Rasterize finer; nothing downstream
+    //    can invent what was never stored.
+    //  - A SHARP EDGE BECOMES A STAIRCASE at the cell size, in the lattice's
+    //    axes, and comes back from a conversion rounded. The information is
+    //    lost HERE rather than on the way back.
+    //  - COLOUR IS QUANTISED to the palette by nearest entry. Two colours
+    //    closer than the palette tolerance become one.
+    //  - THE REGION BOUNDS THE WORK. Content outside it is not rasterized and
+    //    is not reported as missing.
     void rasterize_tape(const scene::Tape& tape, const math::Aabb& world_region);
 
   private:

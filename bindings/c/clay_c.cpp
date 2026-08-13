@@ -5496,6 +5496,78 @@ clay_result clay_voxel_mesh(const clay_voxel_grid* grid, clay_mesh** out_mesh) {
     return CLAY_OK;
 }
 
+clay_result clay_item_volume_from_voxels(const clay_voxel_grid* grid, int32_t blur, int32_t index,
+                                         clay_item** out_item) {
+    if (!out_item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out pointer");
+    *out_item = nullptr;
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (blur < 0 || blur > 8) return fail(CLAY_ERROR_INVALID_ARGUMENT, "blur must be 0..8 passes");
+    if (index < 0 || index > 255) return fail(CLAY_ERROR_INVALID_ARGUMENT, "index must be 0..255");
+
+    std::optional<field::FieldVolume> volume = g->to_field(
+        voxel::VoxelGrid::FieldOptions{blur, 0.0f, static_cast<std::uint8_t>(index)});
+    if (!volume)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the grid holds nothing to convert at that palette index");
+
+    auto* item = new clay_item();
+    item->node.prim = scene::Prim::volume();
+    item->node.volume = std::make_shared<const field::FieldVolume>(std::move(*volume));
+    if (index > 0) item->node.color = g->palette_color(static_cast<std::uint8_t>(index));
+    *out_item = item;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_to_layer(clay_document* doc, const clay_voxel_grid* grid, const char* name,
+                                int32_t blur, clay_layer_id* out_layer) {
+    if (!doc || !name) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or name");
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (blur < 0 || blur > 8)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "blur must be 0..8 passes");
+
+    // One conversion per palette entry, because a field has nowhere to put a
+    // palette: the parts placed together are the whole solid, and each carries
+    // its own entry's colour. An entry nothing carries converts to nothing and
+    // is skipped, so the palette is walked rather than pre-filtered.
+    //
+    // Converted BEFORE the layer exists, so a conversion that fails leaves the
+    // document exactly as it was rather than an empty layer to clean up.
+    std::vector<std::pair<std::uint8_t, field::FieldVolume>> parts;
+    for (std::size_t i = 1; i < g->palette_size() && i < 256; ++i) {
+        const std::uint8_t index = static_cast<std::uint8_t>(i);
+        std::optional<field::FieldVolume> v =
+            g->to_field(voxel::VoxelGrid::FieldOptions{blur, 0.0f, index});
+        if (!v) continue;
+        parts.emplace_back(index, std::move(*v));
+    }
+    if (parts.empty())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the grid could not be converted to a field");
+
+    clay_layer_id layer = 0;
+    r = clay_add_sdf_layer(doc, name, &layer);
+    if (r != CLAY_OK) return r;
+    for (auto& [index, volume] : parts) {
+        scene::Node node;
+        node.prim = scene::Prim::volume();
+        node.volume = std::make_shared<const field::FieldVolume>(std::move(volume));
+        node.color = g->palette_color(index);
+        // Plain union. A blend between the parts would round the interface
+        // between two colours, which is interior to the solid they make
+        // together and should not be a feature of it.
+        node.op = scene::Op::Add;
+        node.blend = scene::Blend{};
+        clay_node_id placed = 0;
+        r = insert_node(doc, layer, std::move(node), &placed);
+        if (r != CLAY_OK) return r;
+    }
+    if (out_layer) *out_layer = layer;
+    return CLAY_OK;
+}
+
 clay_result clay_voxel_mesh_smooth(const clay_voxel_grid* grid, int32_t blur,
                                    clay_mesh** out_mesh) {
     voxel::VoxelGrid* g = nullptr;

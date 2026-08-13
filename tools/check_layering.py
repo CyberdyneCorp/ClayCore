@@ -22,7 +22,15 @@ ALLOWED = {
     "scene": {"kernel", "math", "field"},
     "eval": {"kernel", "math", "scene"},
     "brick": {"kernel", "math", "scene", "eval"},
-    "voxel": {"kernel", "math", "scene", "mesh"},  # mesh_data.h is a leaf data type
+    # voxel -> field is the return trip (#90): a sculpt converting into a
+    # sampled field so it can be an operand again. It adds no edge to the
+    # transitive graph — voxel already depends on scene, and scene depends on
+    # field — and it creates no cycle, because field depends on nothing above
+    # kernel and math. The alternative homes were worse: brush and mesh can
+    # both see field, but a representation conversion is neither a brush nor a
+    # mesher, and putting it there would hide it from the type that owns the
+    # cells.
+    "voxel": {"kernel", "math", "scene", "mesh", "field"},  # mesh_data.h is a leaf data type
     "mesh": {"kernel", "math", "scene", "eval", "brick", "field"},
     # brush -> field is mask extrude: the join of a mask (above scene) and a
     # sampled field (below it). It cannot live in field without making
