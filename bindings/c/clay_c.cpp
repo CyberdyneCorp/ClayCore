@@ -2976,6 +2976,49 @@ clay_result clay_list_backends(char* buffer, size_t* size) {
     return CLAY_OK;
 }
 
+clay_result clay_backend_supports(const char* backend, clay_backend_op op,
+                                  int32_t* out_supported) {
+    if (!backend || !out_supported) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    eval::Backend* b = eval::Registry::instance().find(backend);
+    // Not registered is NOT_FOUND rather than "supports nothing": a host falls
+    // back from an operation this backend cannot do, and asks a different
+    // question entirely about a backend that is not there.
+    if (!b)
+        return fail(CLAY_ERROR_NOT_FOUND, std::string("backend not registered: ") + backend);
+    const eval::BackendCaps caps = b->caps();
+    switch (op) {
+        case CLAY_BACKEND_OP_EVAL_POINTS: *out_supported = caps.eval_points ? 1 : 0; return CLAY_OK;
+        case CLAY_BACKEND_OP_EVAL_GRID: *out_supported = caps.eval_grid ? 1 : 0; return CLAY_OK;
+        case CLAY_BACKEND_OP_RAYCAST: *out_supported = caps.raycast ? 1 : 0; return CLAY_OK;
+    }
+    return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown backend operation");
+}
+
+clay_result clay_backend_diagnostic(const char* backend, char* buffer, size_t* size) {
+    if (!backend || !size) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    std::string text = eval::backend_diagnostic(backend);
+    // "Never compiled in" reads differently from "compiled in and failed",
+    // because a host acts on them differently: one is a build to change, the
+    // other is a machine or a bug to report. Neither is an error — the call
+    // answered.
+    if (text.empty() && !eval::backend_compiled_in(backend))
+        text = std::string("backend '") + backend +
+               "' is not compiled into this build of claycore";
+    size_t needed = text.size() + 1;
+    if (!buffer) {
+        *size = needed;
+        return CLAY_OK;
+    }
+    if (*size < needed) {
+        *size = needed;
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "backend diagnostic needs " + std::to_string(needed));
+    }
+    std::memcpy(buffer, text.c_str(), needed);
+    *size = needed;
+    return CLAY_OK;
+}
+
 clay_result clay_eval_points(const clay_document* doc, const char* backend,
                              const float* points_xyz, size_t count, float* out_distances,
                              float* out_colors_rgb) {

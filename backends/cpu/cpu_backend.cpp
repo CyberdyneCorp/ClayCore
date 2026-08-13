@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <map>
+#include <string>
 
 #include "clay/eval/backend.h"
 #include "clay/kernel/field.h"
@@ -198,6 +200,62 @@ std::unique_ptr<Backend> create_opencl_backend();  // backends/opencl
 #if defined(CLAY_HAS_VULKAN)
 std::unique_ptr<Backend> create_vulkan_backend();  // backends/vulkan
 #endif
+
+// The reasons compiled-in backends gave for not registering. Written during
+// Registry construction and read afterwards, so a plain map behind the same
+// one-time initialization the registry itself has needs no lock of its own:
+// every write happens inside the `static Registry reg` construction that
+// instance() serializes, and every read is after it.
+namespace {
+std::map<std::string, std::string, std::less<>>& diagnostics() {
+    static std::map<std::string, std::string, std::less<>> map;
+    return map;
+}
+
+// Compiled in, whatever happened at runtime. The list is the set of backends
+// this build could POSSIBLY register, which is what makes "not compiled in"
+// answerable rather than inferred from an absence.
+constexpr std::string_view kCompiledIn[] = {
+    "cpu",
+#if defined(CLAY_HAS_METAL)
+    "metal",
+#endif
+#if defined(CLAY_HAS_CUDA)
+    "cuda",
+#endif
+#if defined(CLAY_HAS_OPENCL)
+    "opencl",
+#endif
+#if defined(CLAY_HAS_VULKAN)
+    "vulkan",
+#endif
+};
+}  // namespace
+
+void report_backend_unavailable(std::string_view name, std::string why) {
+    // Appends rather than replaces. A backend reports twice on the way down —
+    // the pipeline that failed, carrying the compiler's log, and then what its
+    // absence cost — and the second would otherwise erase the first, which is
+    // the half that identifies the cause. Registration happens once per
+    // process, so this accumulates a record rather than growing without bound.
+    std::string& slot = diagnostics()[std::string(name)];
+    if (!slot.empty()) slot += "\n";
+    slot += why;
+}
+
+std::string backend_diagnostic(std::string_view name) {
+    // Before the registry exists nobody has tried, and an empty reason would
+    // read as "nothing went wrong" rather than "nothing has happened yet".
+    (void)Registry::instance();
+    auto it = diagnostics().find(name);
+    return it == diagnostics().end() ? std::string() : it->second;
+}
+
+bool backend_compiled_in(std::string_view name) {
+    for (std::string_view n : kCompiledIn)
+        if (n == name) return true;
+    return false;
+}
 
 Registry::Registry() {
     backends_.push_back(std::make_unique<CpuBackend>());
