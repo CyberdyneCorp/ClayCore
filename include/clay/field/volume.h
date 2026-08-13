@@ -151,6 +151,13 @@ class FieldVolume {
     // is what the tape does.
     kernel::cfloat3 eval_color(kernel::cfloat3 p) const;
 
+    // Fill (or replace) the colour of every STORED sample, from a callable
+    // asked at each sample's world position. For a producer that built its
+    // volume through sample_blocks — the batched path a thread pool fills —
+    // this is how colour is added afterwards without a second sampling
+    // contract. Does nothing to a volume with no stored samples.
+    void fill_colors(const std::function<kernel::cfloat3(kernel::cfloat3)>& c);
+
     // Whether `p` lands in a brick that stores samples. The two halves of
     // eval()'s contract are not the same thing as "within the band": a brick
     // spans kBrickDim cells and is kept whole, so a stored brick holds samples
@@ -243,7 +250,11 @@ class FieldVolume {
     std::size_t blob_floats() const;
     static std::optional<FieldVolume> from_blob(const std::vector<float>& blob);
 
-    std::vector<std::uint8_t> serialize() const;
+    // `with_color` false writes the volume WITHOUT its colour section, which
+    // is how a document written at an older format minor drops only the
+    // colours: the samples, the sparsity and the bounds are untouched, and a
+    // volume that has no colour is unaffected either way.
+    std::vector<std::uint8_t> serialize(bool with_color = true) const;
     static std::optional<FieldVolume> deserialize(const std::uint8_t* data, std::size_t size);
 
   private:

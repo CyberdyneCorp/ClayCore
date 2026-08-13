@@ -19,40 +19,40 @@
 - [x] 2.3 The call site applies it, and every other prim is untouched.
 - [x] 2.4 `check_kernel_dialect.py` passes for CPU, CUDA and Metal profiles
       plus the OpenCL and Vulkan amalgamations.
-- [ ] 2.5 The parity suite compares COLOUR for a coloured volume on every
+- [x] 2.5 The parity suite compares COLOUR for a coloured volume on every
       registered backend, not only distance.
 - [x] 2.6 Re-package the kernels artifact and note the host-visible change in
       `docs/06-host-gpu-previews.md`.
 
 ## 3. The format
 
-- [ ] 3.1 `FieldVolume::serialize` / `deserialize` carry the section.
-- [ ] 3.2 `kSceneMinor` and `kClaySpaceMinor` move to 9 together.
-- [ ] 3.3 A minor-8 document opens and its volumes read as uncoloured.
-- [ ] 3.4 A minor-9 document is refused by an older reader.
-- [ ] 3.5 The format notes at the top of `io/clayspace.h` record what minor 9
+- [x] 3.1 `FieldVolume::serialize` / `deserialize` carry the section.
+- [x] 3.2 `kSceneMinor` and `kClaySpaceMinor` move to 9 together.
+- [x] 3.3 A minor-8 document opens and its volumes read as uncoloured.
+- [x] 3.4 A minor-9 document is refused by an older reader.
+- [x] 3.5 The format notes at the top of `io/clayspace.h` record what minor 9
       carries.
 
 ## 4. The producers
 
-- [ ] 4.1 `consolidate` writes per-item colour into the baked volume.
-- [ ] 4.2 The consolidation bit-identity gate re-baselined deliberately, in
+- [x] 4.1 `consolidate` writes per-item colour into the baked volume.
+- [x] 4.2 The consolidation bit-identity gate re-baselined deliberately, in
       this change, with the reason.
-- [ ] 4.3 `VoxelGrid::to_field` writes the palette per sample.
-- [ ] 4.4 `clay_voxel_to_layer` produces one item; the header states the change
+- [x] 4.3 `VoxelGrid::to_field` writes the palette per sample.
+- [x] 4.4 `clay_voxel_to_layer` produces one item; the header states the change
       in what a host counts.
-- [ ] 4.5 Converting a single palette index still works.
+- [x] 4.5 Converting a single palette index still works.
 
 ## 5. Tests
 
 - [x] 5.1 A coloured volume evaluates its own colour, interpolated.
 - [x] 5.2 An uncoloured volume is bit-identical to before, distance and colour.
-- [~] 5.3 Colour survives a BLOB and a serialize round trip, and a blob
-      written before colour existed reads as uncoloured. The DOCUMENT-level
-      half waits on the format minor (3.x).
-- [ ] 5.4 A two-colour layer consolidates to a two-colour volume.
-- [ ] 5.5 Paint still overrides a coloured volume.
-- [ ] 5.6 Outside the sampled box, the item's colour applies.
+- [x] 5.3 Colour survives a blob, a serialize round trip AND a document save
+      and load; a pre-colour blob reads as uncoloured, and writing at minor 8
+      drops only the colour.
+- [x] 5.4 A two-colour layer consolidates to a two-colour volume.
+- [x] 5.5 Paint still overrides a coloured volume.
+- [x] 5.6 Outside the sampled box, the item's colour applies.
 - [ ] 5.7 Memory: a coloured volume is about twice an uncoloured one and an
       uncoloured one has not grown.
 

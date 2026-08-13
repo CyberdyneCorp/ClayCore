@@ -5529,41 +5529,33 @@ clay_result clay_voxel_to_layer(clay_document* doc, const clay_voxel_grid* grid,
     if (blur < 0 || blur > 8)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "blur must be 0..8 passes");
 
-    // One conversion per palette entry, because a field has nowhere to put a
-    // palette: the parts placed together are the whole solid, and each carries
-    // its own entry's colour. An entry nothing carries converts to nothing and
-    // is skipped, so the palette is walked rather than pre-filtered.
+    // ONE volume, carrying the palette per sample. This used to be one volume
+    // per palette entry — the only way to keep colour when a field had nowhere
+    // to store one — so a forty-entry sculpt became forty items and forty
+    // volumes. A host that counted one node per entry now counts one.
     //
     // Converted BEFORE the layer exists, so a conversion that fails leaves the
     // document exactly as it was rather than an empty layer to clean up.
-    std::vector<std::pair<std::uint8_t, field::FieldVolume>> parts;
-    for (std::size_t i = 1; i < g->palette_size() && i < 256; ++i) {
-        const std::uint8_t index = static_cast<std::uint8_t>(i);
-        std::optional<field::FieldVolume> v =
-            g->to_field(voxel::VoxelGrid::FieldOptions{blur, 0.0f, index});
-        if (!v) continue;
-        parts.emplace_back(index, std::move(*v));
-    }
-    if (parts.empty())
+    std::optional<field::FieldVolume> volume =
+        g->to_field(voxel::VoxelGrid::FieldOptions{blur, 0.0f, 0});
+    if (!volume)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "the grid could not be converted to a field");
 
     clay_layer_id layer = 0;
     r = clay_add_sdf_layer(doc, name, &layer);
     if (r != CLAY_OK) return r;
-    for (auto& [index, volume] : parts) {
-        scene::Node node;
-        node.prim = scene::Prim::volume();
-        node.volume = std::make_shared<const field::FieldVolume>(std::move(volume));
-        node.color = g->palette_color(index);
-        // Plain union. A blend between the parts would round the interface
-        // between two colours, which is interior to the solid they make
-        // together and should not be a feature of it.
-        node.op = scene::Op::Add;
-        node.blend = scene::Blend{};
-        clay_node_id placed = 0;
-        r = insert_node(doc, layer, std::move(node), &placed);
-        if (r != CLAY_OK) return r;
-    }
+
+    scene::Node node;
+    node.prim = scene::Prim::volume();
+    node.volume = std::make_shared<const field::FieldVolume>(std::move(*volume));
+    // The node colour is left at its default deliberately. It is what a sample
+    // OUTSIDE the stored bricks reports — empty space, where the sculpt has no
+    // colour to give — and picking a palette entry for it would mean running a
+    // conversion per entry just to find one, which is the cost this change
+    // exists to remove.
+    clay_node_id placed = 0;
+    r = insert_node(doc, layer, std::move(node), &placed);
+    if (r != CLAY_OK) return r;
     if (out_layer) *out_layer = layer;
     return CLAY_OK;
 }

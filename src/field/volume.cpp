@@ -137,20 +137,24 @@ FieldVolume FieldVolume::sample_colored(const std::function<float(cfloat3)>& f,
     FieldVolume v = sample(f, region, cell_size, band);
     if (!c || v.data_.empty()) return v;
 
-    // Then colour, for the samples that were KEPT. The bricks the sparsity
-    // dropped are empty space; a colour there would be a colour for nothing,
-    // and evaluating one would cost as much as the distance did.
-    const BrickGrid grid{v.origin_, v.cell_size_, v.band_,
-                         {v.bcount_[0], v.bcount_[1], v.bcount_[2]}};
-    v.colors_.assign(v.data_.size(), 0u);
-    for (std::size_t slot = 0; slot < v.index_.size(); ++slot) {
-        const std::int32_t entry = v.index_[slot];
+    v.fill_colors(c);
+    return v;
+}
+
+void FieldVolume::fill_colors(const std::function<cfloat3(cfloat3)>& c) {
+    // Only the samples that were KEPT. The bricks sparsity dropped are empty
+    // space; a colour there would be a colour for nothing, and asking for one
+    // would cost as much as the distance did.
+    if (!c || data_.empty()) return;
+    const BrickGrid grid{origin_, cell_size_, band_, {bcount_[0], bcount_[1], bcount_[2]}};
+    colors_.assign(data_.size(), 0u);
+    for (std::size_t slot = 0; slot < index_.size(); ++slot) {
+        const std::int32_t entry = index_[slot];
         if (entry == kBrickEmpty) continue;
         for (int i = 0; i < kBrickSamples; ++i)
-            v.colors_[static_cast<std::size_t>(entry) + static_cast<std::size_t>(i)] =
+            colors_[static_cast<std::size_t>(entry) + static_cast<std::size_t>(i)] =
                 pack_color(c(grid.sample_position(slot, i)));
     }
-    return v;
 }
 
 cfloat3 FieldVolume::eval_color(cfloat3 p) const {
@@ -644,8 +648,17 @@ std::optional<FieldVolume> FieldVolume::from_blob(const std::vector<float>& blob
     return v;
 }
 
-std::vector<std::uint8_t> FieldVolume::serialize() const {
-    std::vector<float> flat = to_blob();
+std::vector<std::uint8_t> FieldVolume::serialize(bool with_color) const {
+    std::vector<float> flat;
+    if (with_color || colors_.empty()) {
+        flat = to_blob();
+    } else {
+        // The same volume without its colour, by asking a copy that has none.
+        // Cheaper than a second blob writer, and it cannot drift from one.
+        FieldVolume plain = *this;
+        plain.colors_.clear();
+        flat = plain.to_blob();
+    }
     std::vector<std::uint8_t> out(flat.size() * sizeof(float));
     if (!flat.empty()) std::memcpy(out.data(), flat.data(), out.size());
     return out;

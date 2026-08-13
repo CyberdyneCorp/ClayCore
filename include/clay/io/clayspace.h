@@ -83,6 +83,19 @@
 // that predates 8 desynchronises and fails rather than misreads, and writing
 // AT minor 7 drops only the signs — an all-positive document loses nothing
 // to it.
+//
+// Minor 9 adds a sampled VOLUME's colour: one packed 0x00RRGGBB word per
+// stored sample, appended after the samples, present or absent as a whole
+// section. It differs in kind from 7 and 8 — the payload change is inside the
+// volume's own blob rather than in the node record — and it is why the volume
+// header grew a slot for the section's offset, 0 when there is none.
+//
+// So the older-reader story is the volume's rather than the record's: every
+// section of a volume is addressed by offsets the header carries, so a build
+// that predates 9 reads the same index, far and data arrays it always did and
+// simply never looks for colour. Writing AT minor 8 drops only the colours —
+// an uncoloured volume, which is every volume any build before this produced,
+// loses nothing to it.
 
 #include <map>
 #include <optional>
@@ -99,7 +112,7 @@ namespace clay {
 namespace io {
 
 inline constexpr std::uint16_t kClaySpaceMajor = 1;
-inline constexpr std::uint16_t kClaySpaceMinor = 8;
+inline constexpr std::uint16_t kClaySpaceMinor = 9;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).

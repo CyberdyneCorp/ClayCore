@@ -226,10 +226,23 @@ TEST_CASE("a host converts a sculpt into a layer it can boolean against") {
     REQUIRE(clay_voxel_to_layer(doc, grid, "converted", 0, &converted) == CLAY_OK);
     CHECK(converted != vox);
 
-    // One item per palette entry the grid carried, each keeping its colour.
+    // ONE item carrying the palette, not one per entry. This changed with the
+    // colour channel: a host that counted a node per palette entry counts one.
     size_t nodes = 0;
     REQUIRE(clay_layer_node_count(doc, converted, &nodes) == CLAY_OK);
-    CHECK(nodes == 2);
+    CHECK(nodes == 1);
+
+    // And it kept both colours, which is what makes one item enough. Sampled
+    // inside each half, through the ordinary evaluation path.
+    float probes[6] = {-0.2f, 0, 0, 0.2f, 0, 0};
+    float distances[2] = {0, 0};
+    float colors[6] = {0, 0, 0, 0, 0, 0};
+    REQUIRE(clay_layer_eval_points(doc, converted, nullptr, probes, 2, distances, colors) ==
+            CLAY_OK);
+    CHECK(colors[0] > 0.7f);  // red half
+    CHECK(colors[2] < 0.3f);
+    CHECK(colors[5] > 0.7f);  // blue half
+    CHECK(colors[3] < 0.3f);
 
     // And it evaluates as a solid: the point deep inside the red half is
     // inside the converted layer too.

@@ -67,6 +67,34 @@ std::optional<field::FieldVolume> VoxelGrid::to_field(std::size_t level,
     field::FieldVolume volume = field::FieldVolume::sample(signed_at, region, vs, band);
     if (volume.sample_count() == 0) return std::nullopt;
 
+    // The palette, per sample, so the whole sculpt converts to ONE volume
+    // instead of one per entry. Colour is read from the NEAREST cell rather
+    // than interpolated: the palette is a set of authored entries and a blend
+    // between two of them is a colour nobody chose. The interpolation that
+    // makes a boundary gradate happens later, in the field's own eval_color,
+    // between samples that each carry an entry.
+    //
+    // A converted-index run (options.index != 0) is one colour by definition
+    // and carries it on the item instead, so there is nothing to store.
+    if (options.index == 0) {
+        volume.fill_colors([&](cfloat3 p) {
+            const VoxelCoord c{static_cast<std::int32_t>(std::floor(p.x / vs)),
+                               static_cast<std::int32_t>(std::floor(p.y / vs)),
+                               static_cast<std::int32_t>(std::floor(p.z / vs))};
+            std::uint8_t idx = cell_at(level, c);
+            if (idx == 0) {
+                // Just outside the surface: take the nearest occupied
+                // neighbour's colour rather than a default, or every silhouette
+                // would carry a colour the sculpt does not contain.
+                for (int dz = -1; dz <= 1 && idx == 0; ++dz)
+                    for (int dy = -1; dy <= 1 && idx == 0; ++dy)
+                        for (int dx = -1; dx <= 1 && idx == 0; ++dx)
+                            idx = cell_at(level, {c.x + dx, c.y + dy, c.z + dz});
+            }
+            return idx != 0 ? palette_color(idx) : cf3(0.7f, 0.7f, 0.7f);
+        });
+    }
+
     // The half that makes the result an OPERAND rather than a picture. Without
     // it the stored values are an occupancy ramp, which crosses zero in the
     // right place and says nothing truthful about distance — so every marcher

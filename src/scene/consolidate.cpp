@@ -180,6 +180,19 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
     // what earns it, and it is what stops a repeatedly consolidated chain from
     // growing a brick of stored shell per bake.
     if (!params.skip_redistance && field::redistance(volume)) volume.compact();
+
+    // The colours the bake used to discard. Consolidation is advertised as
+    // changing what a layer COSTS rather than what it looks like, and
+    // collapsing every colour in it to the one on the resulting node
+    // contradicted that: a consolidated character lost the distinction between
+    // skin and armour.
+    //
+    // AFTER redistance and compact, so colour is filled for the samples that
+    // actually survive rather than for bricks compact is about to drop. It is
+    // a second pass over those samples — the batched fill above returns
+    // distances only — and it is charged to consolidation, which is an
+    // operation with progress UI rather than a frame.
+    volume.fill_colors([&tape](kernel::cfloat3 p) { return tape.eval(p).color; });
     // Re-measured because redistance and compact both changed the samples
     // since sample() measured them. Declaring anything smaller than this would
     // be the overstep the bound exists to prevent, so it is measured rather
