@@ -226,6 +226,41 @@ forward-refuse).
    by name, which is why the old rule was discarding a working backend over a
    kernel nothing could call.
 
+   **Unreleased carries a KERNEL DIALECT change and a format minor**, which
+   makes it the first release since 0.24.x that asks anything of a host
+   outside this repository. `volume-color-channel` gives a sampled volume an
+   optional per-sample colour, because two shipped features were losing colour
+   for the same structural reason: a `FieldVolume` had nowhere to put one, so
+   consolidation baked a whole layer to a single node colour — a consolidated
+   character came back without the distinction between skin and armour — and
+   the voxel round trip converted once per palette entry to work around it.
+
+   **What a host must do.** `docs/06-host-gpu-previews.md` ships the kernel
+   headers so a host can sphere-trace our fields in its own shading language,
+   with no second implementation to drift. The volume's blob grew a colour
+   section and `ctape_prim_dist` gained a colour out-parameter, so **a host
+   compiling those headers recompiles**. Nothing breaks silently: every
+   section of a volume is addressed by offsets its header carries, so a host
+   on the old headers reads the same distances it always did and simply never
+   sees colour.
+
+   **`.clayspace` moves 1.8 → 1.9.** The change is inside the volume's own
+   blob rather than in the node record, so the older-reader story is the
+   volume's: writing at minor 8 drops the colours and keeps the samples, the
+   sparsity and the bounds, and an uncoloured volume — which is every volume
+   any earlier build produced — loses nothing to it.
+
+   **Consolidated output is no longer byte-identical to 0.30.0's**, and that
+   is the point rather than a side effect. The bit-identity gate that guards
+   the bake was not silently re-baselined: it compares the pooled grid bake
+   against a serial full-tape bake, and the serial reference learned the same
+   colour step, so the two still agree byte for byte.
+
+   Additive at the C ABI: `clay_voxel_to_layer` keeps its signature but now
+   produces ONE volume item carrying the palette where it produced one per
+   entry, so a host counting nodes after converting counts differently. Said
+   in the header rather than left to be discovered.
+
    **0.30.0 is additive: nine new symbols and one new struct, no signature
    changed, nothing removed, and no existing struct grown.** Code compiled
    against 0.29.1 keeps linking and behaving as it did; the minor bump is

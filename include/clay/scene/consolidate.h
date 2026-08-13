@@ -80,8 +80,12 @@ struct Tape;
 // evaluator may change only speed, never bytes — the volume is byte-identical
 // either way (test_consolidate.cpp holds it to that), and one that cannot
 // serve the request returns false to hand the window back to the serial walk.
+// `out_colors_rgb` is null when the caller wants distances only, and count*3
+// floats when it wants the colours too — the bake needs both, at the same
+// points, and asking twice would evaluate the tape twice.
 using BakePointEval = std::function<bool(const Tape& tape, const float* points_xyz,
-                                         std::size_t count, float* out_distances)>;
+                                         std::size_t count, float* out_distances,
+                                         float* out_colors_rgb)>;
 
 // What a layer's chain currently costs the marcher, and what is causing it.
 struct FieldReport {

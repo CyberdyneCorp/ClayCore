@@ -229,6 +229,25 @@ std::vector<ParityScene> parity_scenes() {
         l.sdf->insert(n);
         scenes.push_back({"sampled_volume_sphere", std::move(doc), 3.0f});
     }
+    {   // The same structure carrying COLOUR per sample. The comparison this
+        // scene exists for is the colour one: the distance path is already
+        // covered above, and a backend that read the colour section at the
+        // wrong offset — or not at all — would still agree about distance and
+        // report the item's colour everywhere.
+        Document doc;
+        Layer& l = doc.add_sdf_layer("l");
+        Node n = item(Prim::volume(), cf3(0, 0, 0));
+        n.color = cf3(0, 1, 0);  // must NOT be what the samples report
+        auto sphere = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.7f; };
+        auto colour = [](kernel::cfloat3 p) {
+            return p.x < 0 ? cf3(0.9f, 0.1f, 0.1f) : cf3(0.1f, 0.1f, 0.9f);
+        };
+        n.volume = std::make_shared<field::FieldVolume>(field::FieldVolume::sample_colored(
+            sphere, colour, math::Aabb{cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)}, 0.12f,
+            0.3f));
+        l.sdf->insert(n);
+        scenes.push_back({"sampled_volume_colored", std::move(doc), 3.0f});
+    }
     lift("revolve_polygon", Prim::revolve(1.2f), Profile::polygon(),
          {cf2(-0.3f, -0.3f), cf2(0.3f, -0.3f), cf2(0.3f, 0.3f), cf2(-0.3f, 0.3f)});
     {

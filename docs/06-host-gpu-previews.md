@@ -229,6 +229,20 @@ profiles. A host calling the old name gets a compile error, which is the
 outcome to want — the alternative, a silently different meaning, is the failure
 this whole document is about.
 
+`volume-color-channel` is the second, and it is gentler. `ctape_prim_dist`
+gained a trailing colour out-parameter, and a sampled volume's blob grew a
+colour section addressed by a new header slot. A host that recompiles gets
+per-sample colour from a consolidated layer or a converted voxel sculpt; a host
+that does not gets **the same distances it always did**, because every section
+of a volume is addressed by the offsets its header carries and a reader that
+stops before the new slot never looks for colour. So this one is a compile
+error rather than a wrong picture, and a stale host is wrong only by omission.
+
+The colour rides in the float blob as a VALUE rather than as reinterpreted
+bits — packed `0x00RRGGBB` is at most 2^24 - 1 and float32 holds every integer
+to 2^24 exactly — specifically so that no host needs a bit-cast, which is
+spelled differently in every language this dialect compiles as.
+
 ## Getting the tape of a live document
 
 `clay parity-fixture` gives you tapes to test against. `clay_tape_export` gives

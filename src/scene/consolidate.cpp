@@ -125,7 +125,7 @@ void fill_window(const Tape& tape, const BakePointEval& point_eval,
             points[at + 1] = p.y;
             points[at + 2] = p.z;
         }
-    if (point_eval && point_eval(tape, points.data(), n, out)) return;
+    if (point_eval && point_eval(tape, points.data(), n, out, nullptr)) return;
     for (std::size_t i = 0; i < n; ++i)
         out[i] = tape.eval(kernel::cf3(points[i * 3], points[i * 3 + 1], points[i * 3 + 2])).d;
 }
@@ -180,6 +180,34 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
     // what earns it, and it is what stops a repeatedly consolidated chain from
     // growing a brick of stored shell per bake.
     if (!params.skip_redistance && field::redistance(volume)) volume.compact();
+
+    // The colours the bake used to discard. Consolidation is advertised as
+    // changing what a layer COSTS rather than what it looks like, and
+    // collapsing every colour in it to the one on the resulting node
+    // contradicted that: a consolidated character lost the distinction between
+    // skin and armour.
+    //
+    // AFTER redistance and compact, so colour is filled for the samples that
+    // actually survive rather than for bricks compact is about to drop. It is
+    // a second pass over those samples — the batched fill above returns
+    // distances only — and it is charged to consolidation, which is an
+    // operation with progress UI rather than a frame.
+    // Through the SAME injected evaluator the distances went through. A serial
+    // colour pass beside a pooled distance pass makes the pooled bake no
+    // faster than the serial one it replaced — measured, by the benchmark gate
+    // that compares exactly those two.
+    volume.fill_colors_blocks([&tape, &point_eval](const float* points_xyz, std::size_t count,
+                                                  float* out_rgb) {
+        std::vector<float> scratch(count);
+        if (point_eval && point_eval(tape, points_xyz, count, scratch.data(), out_rgb)) return;
+        for (std::size_t i = 0; i < count; ++i) {
+            const kernel::CTapeValue v = tape.eval(
+                kernel::cf3(points_xyz[i * 3], points_xyz[i * 3 + 1], points_xyz[i * 3 + 2]));
+            out_rgb[i * 3] = v.color.x;
+            out_rgb[i * 3 + 1] = v.color.y;
+            out_rgb[i * 3 + 2] = v.color.z;
+        }
+    });
     // Re-measured because redistance and compact both changed the samples
     // since sample() measured them. Declaring anything smaller than this would
     // be the overstep the bound exists to prevent, so it is measured rather

@@ -466,7 +466,11 @@ void write_node(Writer& w, const Node& n) {
     // right rather than two. A node without one writes a zero length.
     if (w.minor >= 4) {
         std::vector<std::uint8_t> volume_bytes;
-        if (n.volume && !n.volume->empty()) volume_bytes = n.volume->serialize();
+        // Colour is a minor-9 section. Writing at 8 or below drops it and
+        // keeps everything else, which is what makes an older minor a
+        // downgrade rather than a different document.
+        if (n.volume && !n.volume->empty())
+            volume_bytes = n.volume->serialize(w.minor >= 9);
         w.u32(static_cast<std::uint32_t>(volume_bytes.size()));
         w.bytes(volume_bytes.data(), volume_bytes.size());
     }

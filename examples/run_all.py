@@ -72,6 +72,7 @@ EXAMPLES = [
     "40_armature",
     "41_voxel_smooth_display",
     "42_representation_round_trip",
+    "43_consolidation_keeps_colour",
 ]
 
 
