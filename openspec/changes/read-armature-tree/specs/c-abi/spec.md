@@ -27,6 +27,18 @@ Replacing a placed armature's points through the curve replace SHALL remain refu
 - **WHEN** the parents of a stroke, a group or a missing node are asked for, or a buffer smaller than the node count is passed
 - **THEN** the stroke and the group are refused as invalid arguments, the missing node as not found, and the short buffer with the too-small error carrying the needed count and nothing written
 
+#### Scenario: A negative node survives the round trip
+- **WHEN** a host sets a sign array with one negative node, saves, reloads, and reads the signs back
+- **THEN** the signs match what was authored, and flipping the node positive through the sign edit restores the all-positive field
+
+#### Scenario: The signs surface keeps the refusals typed
+- **WHEN** a sign of 0 or ±2 is passed to the setter or the sign edit, the signs of a stroke are asked for, or a short buffer is passed to the signs readback
+- **THEN** each is refused with its typed error — invalid argument for the values and the stroke, too-small carrying the needed count for the buffer — and nothing is written
+
+#### Scenario: A negative node carries children
+- **WHEN** a node with descendants is set negative
+- **THEN** the edit succeeds, the descendants keep their own signs, and moving the negative node still carries its subtree
+
 ## ADDED Requirements
 
 ### Requirement: A placed node answers what primitive it carries
