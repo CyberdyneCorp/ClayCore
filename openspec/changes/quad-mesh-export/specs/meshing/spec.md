@@ -36,7 +36,9 @@ Any operation that rewrites `indices` SHALL clear the quad array rather than lea
 ### Requirement: The lattice dual is the quad mesher
 The module SHALL provide a quad mesher for tapes built on the LATTICE DUAL — the surface-nets construction already in `dual_grid_mesh`, one vertex per sign-changing cell and one quad per sign-changing lattice edge — retaining the four corners it already computes.
 
-The dual is chosen over greedy merging because merged rectangles create T-JUNCTIONS where one long quad abuts several short ones, and a T-junction cracks under subdivision and splits normals. The dual's interior vertices have valence four and no vertex lands mid-edge.
+The dual is chosen over greedy merging because merged rectangles create T-JUNCTIONS where one long quad abuts several short ones, and a T-junction cracks under subdivision and splits normals. No vertex of the dual lands in the interior of another face's edge, and every quad edge is shared by at most two quads.
+
+Vertex valence AVERAGES exactly four — every quad contributes four corners and the mesh has as many vertices as quads — but SHALL NOT be claimed to be four everywhere. A cell the surface enters through a corner has six of its twelve lattice edges change sign and belongs to six quads; one clipped by a corner belongs to three. Measured on a sphere the distribution is roughly 55% valence four with the rest at three, five and six, and it does not tighten with resolution: it is the lattice's discrete curvature, and a mesher that placed valence four everywhere would be doing retopology.
 
 The mesher SHALL NOT change the diagonal on which it triangulates. It triangulates on the 0–2 diagonal today; a non-planar quad would triangulate better on its shorter one, and switching would change the triangles every existing caller of the dual meshers receives.
 
@@ -47,7 +49,7 @@ Two properties of the output SHALL be stated in the header rather than discovere
 
 #### Scenario: A quad-meshed sphere is quads all the way
 - **WHEN** a sphere tape is quad-meshed
-- **THEN** every face in the output is a quad, every interior vertex is shared by four of them, and no vertex lies in the interior of another face's edge
+- **THEN** every face in the output is a quad, no vertex lies in the interior of another face's edge, no quad edge is shared by more than two quads, and vertex valence stays between three and six with an average of four
 
 #### Scenario: The quad mesh is the dual mesh
 - **WHEN** a tape is meshed with the dual mesher and quad-meshed at the same cell size

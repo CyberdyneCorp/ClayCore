@@ -4,6 +4,25 @@
 // documented vertex-color extension ("v x y z r g b"), PLY (binary little
 // endian + ascii) with vertex colors, FBX (import via ufbx, minimal binary
 // writer), and the platform-consumable buffer view for app-side USDZ.
+//
+// QUADS (mesh/quad_mesh.h). A mesh carrying quads is written AS QUADS by OBJ
+// (`f a b c d`), PLY (`element face` counting quads, each row `4 a b c d`) and
+// FBX (four indices per polygon). A mesh carrying none is written exactly as
+// it always was, in every format.
+//
+// glTF/GLB IS THE EXCEPTION AND IT IS NOT A DEFECT: glTF 2.0 defines no quad
+// primitive mode, so a conforming file cannot carry one and the writer keeps
+// writing the triangulation (mode 4). "I exported GLB and got triangles" is
+// the likeliest report this feature can produce, and the answer is the format,
+// not the writer. MeshBufferView is triangles too, for the same kind of
+// reason: it is the GPU readback path and a GPU draws triangles.
+//
+// The READERS are unchanged and still fan-triangulate every face they read, so
+// a quad file this library wrote re-imports as TRIANGLES with no quads. That
+// asymmetry is stated rather than left to be discovered: preserving faces on
+// import is a second direction with its own validation questions, and the
+// readers already hold the face list, so it stays a cheap follow-up rather
+// than a hidden gap.
 
 #include <string>
 #include <vector>
@@ -57,6 +76,23 @@ IoStatus save_glb_file(const mesh::Mesh& m, const std::string& path);
 // little-endian, then u32 indices. Uncompressed — triangle data does not
 // run-length encode usefully, and a general compressor would be a dependency
 // in readers that are deliberately dependency-free.
+//
+// A mesh carrying quads appends ONE MORE SECTION after the indices: u32 quad
+// count, then four u32 per quad. No mask bit and no format version move, both
+// deliberately. An unknown mask bit is REFUSED outright by the reader below
+// and this repository's format minors are forward-refused, so either would
+// make an older build reject a whole document rather than miss an optional
+// section whose information is already present as triangles. The appended tail
+// instead falls under the reader's "declared > body" bound, so an older build
+// opens the document and reads the mesh as the triangles it already is. A mesh
+// with no quads writes exactly the bytes it always wrote, and a mesh whose quad
+// list is NOT the triangulation beside it writes none either — the reader
+// refuses such a section, so emitting one would write a document this library
+// cannot open.
+//
+// The reader claims the FIRST tail after the indices, so a section added later
+// belongs AFTER the quads; bytes past the quad list are skipped the way bytes
+// past the indices were.
 //
 // A free function rather than a member of mesh::Mesh (which VoxelGrid and
 // MaskField would suggest): mesh::Mesh is a plain interchange struct with no

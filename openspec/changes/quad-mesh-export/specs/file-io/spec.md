@@ -41,6 +41,14 @@ A quad section that is PRESENT but malformed — a count that does not fit the b
 
 A mesh with no quads SHALL serialise to exactly the bytes it serialises to today.
 
+The WRITER SHALL NOT emit a quad section the reader would refuse: a mesh whose quad list is not the triangulation beside it serialises as the triangles it carries, without the section. Writing it would produce a document this library refuses to open, which is a worse failure than losing an optional array that was already describing triangles that do not exist.
+
+Because the reader claims the FIRST tail after the indices, a later section appended to this stream SHALL be written after the quad section rather than before it; bytes past the quad list are skipped, as bytes past the indices were.
+
+#### Scenario: An inconsistent quad list is written as triangles, not as a refusable document
+- **WHEN** a mesh whose quad list does not match its triangles is written to the stream
+- **THEN** the bytes carry no quad section, and they load as the mesh's triangles
+
 #### Scenario: A quad mesh layer survives a document round trip
 - **WHEN** a document holding a quad mesh layer is saved and loaded
 - **THEN** the mesh reads back with its quads, its triangles and its attributes unchanged

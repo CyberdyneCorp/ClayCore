@@ -11,8 +11,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <vector>
 
+#include "clay/mesh/quad_mesh.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/voxel/grid.h"
 
@@ -26,6 +28,16 @@ using kernel::cfloat3;
 
 
 mesh::Mesh VoxelGrid::mesh_smooth(std::size_t level, SmoothOptions options) const {
+    return dual_mesh(level, options.blur, /*cell_size=*/0.0f, /*keep_quads=*/false);
+}
+
+// The body of both. mesh_smooth is this with the grid's own cell size and no
+// quads; mesh_quads' dual mode is this with the quads kept and, optionally, a
+// coarser lattice. Keeping them ONE function is what makes "dual mode at the
+// voxel size IS the smooth mesh" a property of the code rather than a
+// coincidence two copies would eventually lose.
+mesh::Mesh VoxelGrid::dual_mesh(std::size_t level, int blur_in, float cell_size,
+                                bool keep_quads) const {
     mesh::Mesh out;
     if (level >= levels_.size()) return out;
     const ChunkMap& chunks = levels_[level].chunks;
@@ -34,7 +46,7 @@ mesh::Mesh VoxelGrid::mesh_smooth(std::size_t level, SmoothOptions options) cons
     // One cell of apron for the mesher to close the surface against, plus one
     // per blur pass so a sample near the edge reads the same zeros a sample
     // well outside would.
-    const int blur = std::max(options.blur, 0);
+    const int blur = std::max(blur_in, 0);
     detail::OccupancyBox box;
     if (!detail::build_occupancy(*this, level, 2 + blur, 0, &box)) return out;
 
@@ -43,18 +55,54 @@ mesh::Mesh VoxelGrid::mesh_smooth(std::size_t level, SmoothOptions options) cons
     // Negative inside, so the mesher's "wound toward positive field" puts the
     // normals outward, as it does for every SDF this library meshes.
     const float kIsolevel = 0.5f;
-    auto sample = [&](int x, int y, int z) { return kIsolevel - box.at(x, y, z); };
-
-    const int cell_min[3] = {box.min[0], box.min[1], box.min[2]};
-    const int cell_max[3] = {box.min[0] + box.dim[0] - 1, box.min[1] + box.dim[1] - 1,
-                             box.min[2] + box.dim[2] - 1};
     const float vs = levels_[level].voxel_size;
+    // A lattice FINER than the grid is clamped away: the occupancy is a step
+    // field, so a finer lattice resamples the same steps and buys quads
+    // without buying detail. Coarser is allowed and low-passes — it can drop a
+    // one-voxel feature entirely, the same trade `blur` makes.
+    const float cell = (std::isfinite(cell_size) && cell_size > vs) ? cell_size : vs;
+    const bool native = cell == vs;
+
     // Lattice points ARE voxel centres, so the lattice sits half a cell off the
     // grid's own corners. Without this the smooth mesh would be offset from the
     // greedy one by half a voxel on every axis, which reads as the sculpt
     // shifting when a host toggles the display.
-    const cfloat3 origin = cf3(0.5f * vs, 0.5f * vs, 0.5f * vs);
-    out = mesh::mesh_lattice_nets(sample, cell_min, cell_max, origin, vs);
+    const cfloat3 origin = cf3(0.5f * cell, 0.5f * cell, 0.5f * cell);
+
+    int cell_min[3], cell_max[3];
+    std::function<float(int, int, int)> sample;
+    if (native) {
+        // The lattice IS the cell grid, so occupancy is read directly. Byte
+        // for byte what mesh_smooth has always done, and deliberately not
+        // routed through the trilinear sampler below: at integer coordinates
+        // that sampler is the same value only up to floating-point rounding,
+        // and this path is asserted to be identical, not close.
+        sample = [&box, kIsolevel](int x, int y, int z) { return kIsolevel - box.at(x, y, z); };
+        for (int d = 0; d < 3; ++d) {
+            cell_min[d] = box.min[d];
+            cell_max[d] = box.min[d] + box.dim[d] - 1;
+        }
+    } else {
+        // A lattice of its own: world point origin + i*cell, read from the
+        // occupancy at the fractional CELL coordinate that point falls at
+        // (integer coordinate = cell centre, hence the half).
+        sample = [&box, kIsolevel, cell, vs](int x, int y, int z) {
+            const float fx = (static_cast<float>(x) * cell + 0.5f * cell) / vs - 0.5f;
+            const float fy = (static_cast<float>(y) * cell + 0.5f * cell) / vs - 0.5f;
+            const float fz = (static_cast<float>(z) * cell + 0.5f * cell) / vs - 0.5f;
+            return kIsolevel - box.trilinear(fx, fy, fz);
+        };
+        // Enough lattice points to span the occupancy box, apron included, so
+        // the surface still closes against the zeros outside the material.
+        for (int d = 0; d < 3; ++d) {
+            const float lo = (static_cast<float>(box.min[d]) + 0.5f) * vs;
+            const float hi = (static_cast<float>(box.min[d] + box.dim[d]) - 0.5f) * vs;
+            cell_min[d] = static_cast<int>(std::floor(lo / cell - 0.5f));
+            cell_max[d] = static_cast<int>(std::ceil(hi / cell - 0.5f));
+        }
+    }
+    out = keep_quads ? mesh::mesh_lattice_quads(sample, cell_min, cell_max, origin, cell)
+                     : mesh::mesh_lattice_nets(sample, cell_min, cell_max, origin, cell);
 
     // Colour per vertex, from the palette entries actually around it.
     //

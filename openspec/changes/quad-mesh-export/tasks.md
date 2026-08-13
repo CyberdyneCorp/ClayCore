@@ -2,26 +2,26 @@
 
 ## 1. The mesh carries quads
 
-- [ ] 1.1 `mesh::Mesh` gains `quads` (four indices per face) plus `quad_count()`
+- [x] 1.1 `mesh::Mesh` gains `quads` (four indices per face) plus `quad_count()`
       and `has_quads()`; the header states the invariant — `indices` is the
       quads' triangulation, quad `q` at `indices[6q..6q+5]`, same positions.
-- [ ] 1.2 `mesh::quads_consistent(const Mesh&)` checks that invariant, so the
+- [x] 1.2 `mesh::quads_consistent(const Mesh&)` checks that invariant, so the
       stream reader and the tests assert it instead of restating it.
-- [ ] 1.3 `mesh::drop_quads(Mesh&)` — what an index-rewriting operation calls.
-- [ ] 1.4 `decimate` clears the quads; a decimated quad mesh is a triangle mesh
+- [x] 1.3 `mesh::drop_quads(Mesh&)` — what an index-rewriting operation calls.
+- [x] 1.4 `decimate` clears the quads; a decimated quad mesh is a triangle mesh
       and says so in the header.
-- [ ] 1.5 Audit every writer of `Mesh::indices` in the tree and make each one
+- [x] 1.5 Audit every writer of `Mesh::indices` in the tree and make each one
       either preserve the invariant or clear the quads. List them in the commit.
 
 ## 2. The SDF quad mesher
 
-- [ ] 2.1 `detail::dual_grid_mesh` takes a "keep quads" option, filling `quads`
+- [x] 2.1 `detail::dual_grid_mesh` takes a "keep quads" option, filling `quads`
       from the `quad[4]` it already builds. Off by default, and the triangles
       and the 0-2 diagonal are unchanged in both modes.
-- [ ] 2.2 `mesh::mesh_tape_quads(tape, region, cell_size, options)` in a new
+- [x] 2.2 `mesh::mesh_tape_quads(tape, region, cell_size, options)` in a new
       `mesh/quad_mesh.h`, sharing `mesh_tape_nets`' sampler, apron ring and
       attribute application.
-- [ ] 2.3 The header states, first thing: lattice-derived quad grid, NOT
+- [x] 2.3 The header states, first thing: lattice-derived quad grid, NOT
       field-aligned retopology; quads are non-planar; output is not manifold
       and not watertight, and marching cubes remains the export path for that.
 
@@ -42,44 +42,48 @@
 
 ## 4. The voxel quad mesher
 
-- [ ] 4.1 Dual mode: the occupancy field `mesh_smooth` builds, sampled
+- [x] 4.1 Dual mode: the occupancy field `mesh_smooth` builds, sampled
       trilinearly so a cell size other than the voxel size works.
-- [ ] 4.2 GATE: at the grid's voxel size with `blur = 0`, dual mode's positions
+- [x] 4.2 GATE: at the grid's voxel size with `blur = 0`, dual mode's positions
       and indices are identical to `mesh_smooth`'s. Keep them one code path.
 - [ ] 4.3 The cell-size clamp below the voxel size, reported through `QuadFit`.
-- [ ] 4.4 Faces mode: `sweep_window` gains an unmerged path (`w = h = 1`);
+- [x] 4.4 Faces mode: `sweep_window` gains an unmerged path (`w = h = 1`);
       `mesh_greedy` and `mesh_greedy_chunks` reach it never and are byte-identical.
-- [ ] 4.5 Faces mode welds by (lattice corner, palette index) and emits no
+- [x] 4.5 Faces mode welds by (lattice corner, palette index) and emits no
       vertex normals; both choices are commented with the failure they prevent
       (unwelded shells in a DCC; a rounded cube from averaged normals).
-- [ ] 4.6 Faces mode winding follows `emit_quad`'s flip, so the quad corner
+- [x] 4.6 Faces mode winding follows `emit_quad`'s flip, so the quad corner
       order and the triangles agree on which way the face points.
 - [ ] 4.7 Faces mode's count lever is the multi-resolution level; a target picks
       the nearest, and the header states the ~4x granularity.
 
 ## 5. The exporters
 
-- [ ] 5.1 OBJ writes `f a b c d` with the same `v/vt/vn` spelling; a mesh with
+- [x] 5.1 OBJ writes `f a b c d` with the same `v/vt/vn` spelling; a mesh with
       no quads produces identical bytes.
-- [ ] 5.2 PLY counts quads in `element face` and writes `4 a b c d`, binary and
+- [x] 5.2 PLY counts quads in `element face` and writes `4 a b c d`, binary and
       ascii both.
-- [ ] 5.3 FBX writes four indices per polygon with the complement end marker.
-- [ ] 5.4 GLB unchanged; `mesh_io.h` and the C header both say why (glTF 2.0 has
+- [x] 5.3 FBX writes four indices per polygon with the complement end marker.
+- [x] 5.4 GLB unchanged; `mesh_io.h` and the C header both say why (glTF 2.0 has
       no quad primitive mode).
-- [ ] 5.5 `mesh_io.h` states that the READERS still fan-triangulate, so a quad
+- [x] 5.5 `mesh_io.h` states that the READERS still fan-triangulate, so a quad
       file re-imports as triangles.
 
 ## 6. The mesh stream
 
-- [ ] 6.1 `save_mesh_stream` appends a quad section — `u32 count` then four
+- [x] 6.1 `save_mesh_stream` appends a quad section — `u32 count` then four
       indices per quad — after the triangle indices, only when quads exist.
-- [ ] 6.2 `load_mesh_stream` reads the tail when bytes remain, bounding the
+- [x] 6.2 `load_mesh_stream` reads the tail when bytes remain, bounding the
       count against them before allocating, as it already does for the rest.
-- [ ] 6.3 A malformed tail — bad count, index past the vertices, or not the
+- [x] 6.3 A malformed tail — bad count, index past the vertices, or not the
       triangulation present — refuses the stream as malformed.
-- [ ] 6.4 No mask bit, no `kClaySpaceMinor` / `kSceneMinor` move; the format
+- [x] 6.4 No mask bit, no `kClaySpaceMinor` / `kSceneMinor` move; the format
       notes record why (an older reader skips the tail instead of refusing the
       document).
+- [x] 6.5 `save_mesh_stream` never writes a section its own loader refuses: a
+      mesh whose quads are not the triangulation beside them serialises as the
+      triangles it carries. The header records that the reader claims the FIRST
+      tail, so a later section is appended after the quads.
 
 ## 7. The C ABI
 
@@ -114,24 +118,25 @@
 
 ## 9. Tests
 
-- [ ] 9.1 Invariant: every quad mesher's output passes `quads_consistent`.
-- [ ] 9.2 REGRESSION: every existing mesher returns byte-identical vertices and
+- [x] 9.1 Invariant: every quad mesher's output passes `quads_consistent`.
+- [x] 9.2 REGRESSION: every existing mesher returns byte-identical vertices and
       indices and an empty quad array — `mesh_tape`, `mesh_tape_nets`,
       `mesh_greedy`, `mesh_greedy_chunks`, `mesh_smooth`, the brick mesher.
-- [ ] 9.3 Dual quads: valence four on the interior of a sphere, no vertex in
-      the interior of another face's edge (the T-junction check that is the
-      reason greedy merging was rejected).
-- [ ] 9.4 The dual quad mesh's positions and triangles equal `mesh_tape_nets`'
+- [x] 9.3 Dual quads: valence 3-6 averaging four on a sphere, no vertex in
+      the interior of another face's edge and no edge shared by more than two
+      quads (the T-junction check that is the reason greedy merging was
+      rejected).
+- [x] 9.4 The dual quad mesh's positions and triangles equal `mesh_tape_nets`'
       at the same cell size.
-- [ ] 9.5 Voxel dual at the voxel size equals `mesh_smooth` exactly.
-- [ ] 9.6 Faces mode: one quad per exposed face, welded within a colour, split
+- [x] 9.5 Voxel dual at the voxel size equals `mesh_smooth` exactly.
+- [x] 9.6 Faces mode: one quad per exposed face, welded within a colour, split
       across one, no normals, same covered surface as `mesh_greedy`.
 - [ ] 9.7 The search lands within tolerance on a sphere and on a shape with
       thin features; the ceiling case reports `clamped`; an explicit cell size
       spends zero iterations.
-- [ ] 9.8 Export: OBJ/PLY/FBX carry four-corner faces; GLB carries triangles;
+- [x] 9.8 Export: OBJ/PLY/FBX carry four-corner faces; GLB carries triangles;
       a triangle mesh's bytes are unchanged in all four.
-- [ ] 9.9 Stream: quads survive a document round trip; a pre-quad reader's
+- [x] 9.9 Stream: quads survive a document round trip; a pre-quad reader's
       bytes still load; a corrupt tail is refused; a triangle mesh's bytes are
       unchanged.
 - [ ] 9.10 Decimation drops quads; transform keeps them; mixed concat drops

@@ -13,7 +13,7 @@ Three candidates exist in the tree already.
 |---|---|---|---|---|
 | greedy MERGED rectangles (`mesh_greedy` today) | planar, axis-aligned, wildly varying size | **T-junctions**: one long quad abuts several short ones along a merged run | lowest | **rejected as the quad path** |
 | greedy UNMERGED (one quad per exposed voxel face) | planar, axis-aligned, uniform | no T-junctions; non-manifold where voxels touch only along an edge | very high, ~area/voxel² | **taken as a second mode**, voxels only |
-| **lattice dual** (surface nets, `dual_grid_mesh`) | **non-planar**, roughly uniform | four quads to a vertex, no T-junctions; **not manifold** at a twice-crossed cell | tunable by cell size | **taken as the default** |
+| **lattice dual** (surface nets, `dual_grid_mesh`) | **non-planar**, roughly uniform | valence 3-6, averaging four; no T-junctions; **not manifold** at a twice-crossed cell | tunable by cell size | **taken as the default** |
 
 **Why the merged rectangles lose.** A T-junction is a vertex sitting in the
 middle of another face's edge. Subdivision cracks there, normals split there,
@@ -24,10 +24,17 @@ quad mesh anybody can subdivide, and "clean" in the ask means "survives the
 next operation".
 
 **Why the dual wins.** Every quad comes from one sign-changing lattice edge and
-its four corners are the four cells around that edge, so interior vertices have
-valence four everywhere and no vertex ever lands mid-edge. Quad count scales
-directly and predictably with cell size, which is what makes decision 3
-possible at all. The mesh is already computed this way — `dual_grid_mesh`
+its four corners are the four cells around that edge, so no vertex ever lands
+mid-edge and no edge is shared by more than two quads. Valence averages four —
+one vertex per surface cell, one quad per crossing edge, and the two counts are
+equal — but it is NOT four everywhere: a cell the surface enters through a
+corner has six crossing edges and six quads, one clipped by a corner has three.
+Measured on a sphere it is about 55% four with the rest at three, five and six,
+and that does not improve with resolution. It is the lattice's discrete
+curvature; placing valence four everywhere is what a retopologiser does.
+
+Quad count scales directly and predictably with cell size, which is what makes
+decision 3 possible at all. The mesh is already computed this way — `dual_grid_mesh`
 literally builds `std::uint32_t quad[4]` and then writes six indices from it.
 
 **Its two real defects, stated rather than papered over.**

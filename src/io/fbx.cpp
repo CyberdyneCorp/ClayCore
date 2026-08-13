@@ -206,12 +206,20 @@ std::vector<std::uint8_t> save_fbx(const mesh::Mesh& m, const std::string& name)
             verts.push_back(p.z);
         }
         geom.child("Vertices").props = {FbxProp::DArr(std::move(verts))};
+        // A quad mesh writes four-index polygons; the format's end marker is
+        // the last corner's complement whatever the polygon's size, so this is
+        // the same structure with one more corner. A mesh with no quads writes
+        // the triangles it always did.
+        const bool quads = m.has_quads();
+        const std::vector<std::uint32_t>& face_indices = quads ? m.quads : m.indices;
+        const std::size_t corners = quads ? 4 : 3;
         std::vector<std::int32_t> poly;
-        poly.reserve(m.indices.size());
-        for (std::size_t t = 0; t < m.triangle_count(); ++t) {
-            poly.push_back(static_cast<std::int32_t>(m.indices[t * 3]));
-            poly.push_back(static_cast<std::int32_t>(m.indices[t * 3 + 1]));
-            poly.push_back(~static_cast<std::int32_t>(m.indices[t * 3 + 2]));  // end marker
+        poly.reserve(face_indices.size());
+        for (std::size_t f = 0; f + corners <= face_indices.size(); f += corners) {
+            for (std::size_t c = 0; c + 1 < corners; ++c)
+                poly.push_back(static_cast<std::int32_t>(face_indices[f + c]));
+            // end marker
+            poly.push_back(~static_cast<std::int32_t>(face_indices[f + corners - 1]));
         }
         geom.child("PolygonVertexIndex").props = {FbxProp::IArr(std::move(poly))};
         geom.child("GeometryVersion").props = {FbxProp::I32(124)};

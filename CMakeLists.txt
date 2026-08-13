@@ -55,6 +55,7 @@ add_library(claycore
   src/brush/move.cpp
   src/mesh/marching.cpp
   src/mesh/surface_nets.cpp
+  src/mesh/quad_mesh.cpp
   src/mesh/dual_contouring.cpp
   src/mesh/validate.cpp
   src/mesh/decimate.cpp

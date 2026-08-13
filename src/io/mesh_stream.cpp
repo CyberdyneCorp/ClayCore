@@ -2,6 +2,8 @@
 
 #include <cstring>
 
+#include "clay/mesh/quad_mesh.h"  // quads_consistent
+
 namespace clay {
 namespace io {
 
@@ -103,6 +105,19 @@ std::vector<std::uint8_t> save_mesh_stream(const mesh::Mesh& m) {
             put_f32(out, uv.y);
         }
     for (std::uint32_t index : m.indices) put_u32(out, index);
+    // The quad section, appended only when there is one. Written after every
+    // byte an older reader knows how to count, which is what makes it a tail
+    // that reader skips rather than a stream it refuses.
+    //
+    // A quad list that is NOT the triangulation beside it is not written at
+    // all: the loader below refuses one, so writing it would produce a
+    // document this very library cannot open. Dropping it costs the quads and
+    // keeps the mesh — the same trade every operation that rewrites indices
+    // makes through mesh::drop_quads.
+    if (m.has_quads() && mesh::quads_consistent(m)) {
+        put_u32(out, static_cast<std::uint32_t>(m.quad_count()));
+        for (std::uint32_t index : m.quads) put_u32(out, index);
+    }
     return out;
 }
 
@@ -126,6 +141,11 @@ IoStatus load_mesh_stream(const std::uint8_t* data, std::size_t size, mesh::Mesh
     // a single element is reserved: a chunk may claim four billion vertices.
     // Bounded rather than equal, so a later minor may append to the stream and
     // this reader skips the tail instead of refusing the file.
+    //
+    // THE QUAD SECTION DEPENDS ON THAT BEING AN INEQUALITY. Tighten this to
+    // equality and every build older than the quad section starts refusing
+    // whole documents that contain one, instead of reading their meshes as the
+    // triangles they already are.
     const std::uint64_t declared = vertex_count * bytes_per_vertex(mask) + index_count * 4;
     if (declared > body)
         return IoStatus::fail(IoError::Malformed,
@@ -150,6 +170,39 @@ IoStatus load_mesh_stream(const std::uint8_t* data, std::size_t size, mesh::Mesh
         if (index >= vertex_count)
             return IoStatus::fail(IoError::Malformed, "a mesh index points past the vertices");
         m.indices.push_back(index);
+    }
+
+    // The quad tail, when bytes remain for one. Absent is the normal case and
+    // is not an error — every mesh written before this section existed, and
+    // every triangle mesh written since, ends here.
+    //
+    // Present but malformed is refused, exactly as an out-of-range triangle
+    // index is: a chunk this library did not write is not trusted to be half
+    // right, and a quad list that contradicts the triangles beside it would
+    // travel on as a mesh whose two index arrays describe different surfaces.
+    //
+    // This claims the FIRST tail: a later minor that appends another section
+    // must write it after the quads (bytes past the quad list are ignored
+    // here, which is where it goes), because a section written before them
+    // would be read as a quad count and refused.
+    const std::uint64_t tail = body - declared;
+    if (tail != 0) {
+        if (tail < 4) return IoStatus::fail(IoError::Malformed, "truncated mesh quad section");
+        const std::uint64_t quad_count = take_u32(p);
+        if (quad_count * 4 * 4 > tail - 4)
+            return IoStatus::fail(IoError::Malformed,
+                                  "mesh stream declares " + std::to_string(quad_count) +
+                                      " quads but does not carry them");
+        m.quads.reserve(static_cast<std::size_t>(quad_count) * 4);
+        for (std::uint64_t i = 0; i < quad_count * 4; ++i) {
+            std::uint32_t index = take_u32(p);
+            if (index >= vertex_count)
+                return IoStatus::fail(IoError::Malformed, "a mesh quad points past the vertices");
+            m.quads.push_back(index);
+        }
+        if (!mesh::quads_consistent(m))
+            return IoStatus::fail(IoError::Malformed,
+                                  "a mesh quad section is not the triangulation beside it");
     }
     *out = std::move(m);
     return IoStatus::success();

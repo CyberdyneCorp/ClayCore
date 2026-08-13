@@ -45,20 +45,31 @@ std::string save_obj(const mesh::Mesh& m, const std::string& object_name,
         std::snprintf(line, sizeof line, "vt %.9g %.9g\n", m.uvs[i].x, m.uvs[i].y);
         out += line;
     }
-    for (std::size_t t = 0; t < m.triangle_count(); ++t) {
-        std::uint32_t a = m.indices[t * 3] + 1, b = m.indices[t * 3 + 1] + 1,
-                      c = m.indices[t * 3 + 2] + 1;
-        if (normals && uvs)
-            std::snprintf(line, sizeof line, "f %u/%u/%u %u/%u/%u %u/%u/%u\n", a, a, a, b, b, b,
-                          c, c, c);
-        else if (normals)
-            std::snprintf(line, sizeof line, "f %u//%u %u//%u %u//%u\n", a, a, b, b, c, c);
-        else if (uvs)
-            std::snprintf(line, sizeof line, "f %u/%u %u/%u %u/%u\n", a, a, b, b, c, c);
-        else
-            std::snprintf(line, sizeof line, "f %u %u %u\n", a, b, c);
-        out += line;
-    }
+    // A quad mesh writes its QUADS — that is the point of carrying them — and
+    // a mesh without them writes exactly the triangles it always did, byte for
+    // byte. The corner spelling is the same in both: the vertex index doubles
+    // as the vt and vn index, because claycore meshes are vertex-aligned.
+    auto face_line = [&](const std::uint32_t* face, int n) {
+        out += "f";
+        char corner[64];
+        for (int i = 0; i < n; ++i) {
+            const std::uint32_t a = face[i] + 1;
+            if (normals && uvs)
+                std::snprintf(corner, sizeof corner, " %u/%u/%u", a, a, a);
+            else if (normals)
+                std::snprintf(corner, sizeof corner, " %u//%u", a, a);
+            else if (uvs)
+                std::snprintf(corner, sizeof corner, " %u/%u", a, a);
+            else
+                std::snprintf(corner, sizeof corner, " %u", a);
+            out += corner;
+        }
+        out += "\n";
+    };
+    if (m.has_quads())
+        for (std::size_t q = 0; q < m.quad_count(); ++q) face_line(&m.quads[q * 4], 4);
+    else
+        for (std::size_t t = 0; t < m.triangle_count(); ++t) face_line(&m.indices[t * 3], 3);
     return out;
 }
 

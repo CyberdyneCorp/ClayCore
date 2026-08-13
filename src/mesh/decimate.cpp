@@ -6,6 +6,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "clay/mesh/quad_mesh.h"  // drop_quads
+
 namespace clay {
 namespace mesh {
 
@@ -66,7 +68,16 @@ Mesh weld_positions(const Mesh& m) {
 }  // namespace
 
 Mesh decimate(const Mesh& input, const DecimateOptions& options) {
-    if (input.empty()) return input;
+    // A decimated mesh is a TRIANGLE mesh: an edge collapse breaks the quad
+    // pairing the first time it fires, so `out` below is built without quads
+    // and there is nothing to carry over. The empty passthrough is the one
+    // path that returns the input itself, and it drops them too rather than
+    // leaving "empty" as the exception to a rule the rest of the tree obeys.
+    if (input.empty()) {
+        Mesh passthrough = input;
+        drop_quads(passthrough);
+        return passthrough;
+    }
     Mesh m = weld_positions(input);
     const std::size_t vcount = m.positions.size();
     const bool with_colors = options.color_weight > 0.0f && m.colors.size() == vcount;

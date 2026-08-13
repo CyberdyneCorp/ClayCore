@@ -342,6 +342,57 @@ class VoxelGrid {
     }
     mesh::Mesh mesh_smooth(std::size_t level, SmoothOptions options = kSmoothDefault) const;
 
+    // -- quad meshing --------------------------------------------------------
+    // The sculpt as QUADS, for a DCC that prefers them (mesh/quad_mesh.h).
+    //
+    // A LATTICE-DERIVED QUAD GRID, NOT field-aligned retopology: no edge loops
+    // follow the form, no poles are placed at features, density does not
+    // follow curvature, and the result is not animation-ready. Read
+    // mesh/quad_mesh.h before reaching for this.
+    //
+    // Two modes, because a voxel sculpt is two different subjects depending on
+    // what the user made:
+    //
+    //  - Dual is the same lattice dual mesh_smooth builds — the rounded form,
+    //    quads meeting four to a vertex on average. `cell_size` generalises
+    //    the lattice beyond the voxel size by sampling occupancy trilinearly; a
+    //    cell COARSER than a voxel low-passes it and can drop a one-voxel
+    //    feature entirely, exactly as `blur` can and for the same reason. A
+    //    cell FINER than a voxel is CLAMPED to the voxel size: it would resample
+    //    the same step field, buying quads and no detail. 0 means the voxel
+    //    size. At the voxel size with blur 0 this is mesh_smooth's mesh for the
+    //    SAME LEVEL, vertex for vertex and index for index, plus the quads —
+    //    note that `level` below defaults to 0 while mesh_smooth() with no
+    //    level follows the ACTIVE one, so on a multi-level grid the two default
+    //    calls can be meshing different levels.
+    //  - Faces is one planar, axis-aligned quad per exposed voxel face: the
+    //    greedy sweep with merging switched off, so it is the boxes the model
+    //    actually is. It is dense (~surface area / voxel²), it WELDS corners
+    //    and it carries NO vertex normals — see mesh_quads' definition for why
+    //    both are forced. mesh_greedy is unchanged and remains the merged,
+    //    per-face-normal, triangle path.
+    //
+    // Faces mode has no cell size: its lattice IS the grid. Its count lever is
+    // the resolution LEVEL, so its granularity is about a factor of four per
+    // step — a caller who asks for 50,000 quads and gets 12,000 chose a level,
+    // not hit a bug.
+    //
+    // `level` names the level explicitly rather than following the active one,
+    // because in faces mode it is the count lever. A grid with a single level
+    // has only level 0 and the distinction does not arise.
+    struct QuadOptions {
+        enum class Mode { Dual = 0, Faces = 1 };
+        Mode mode = Mode::Dual;
+        float cell_size = 0.0f;  // <= 0: the level's voxel size. Dual only.
+        int blur = 0;            // Dual only, as mesh_smooth's
+        std::size_t level = 0;
+    };
+    // Two spellings rather than a default argument: a default argument of `{}`
+    // is parsed before QuadOptions' member initializers are, so it would mean
+    // "every field zeroed" only by accident of declaration order.
+    mesh::Mesh mesh_quads() const { return mesh_quads(QuadOptions{}); }
+    mesh::Mesh mesh_quads(const QuadOptions& options) const;
+
     // -- back into the document ----------------------------------------------
     // The sculpt as a FIELD, so it can be an operand again (#90).
     //
@@ -516,13 +567,28 @@ class VoxelGrid {
     static std::size_t chunk_offset(VoxelCoord c);
     void emit_quad(mesh::Mesh& out, int axis, int sign, int a, int u, int v, int w, int h,
                    std::uint8_t idx, float cell_size) const;
+    // Faces mode's vertex table: the corners already emitted, keyed by lattice
+    // corner AND palette index. Defined in grid.cpp — nothing outside the
+    // sweep may hold one, and its contents are meaningless between sweeps.
+    struct FaceWeld;
+    void emit_face_quad(mesh::Mesh& out, FaceWeld& weld, int axis, int sign, int a, int u, int v,
+                        std::uint8_t idx, float cell_size) const;
+    // The lattice dual over this grid's occupancy, which mesh_smooth and
+    // mesh_quads' dual mode are both spellings of. One body, so the two cannot
+    // drift into two surfaces: `keep_quads` and the generalised cell size are
+    // the only things that vary.
+    mesh::Mesh dual_mesh(std::size_t level, int blur, float cell_size, bool keep_quads) const;
     // One face direction's sweep over one chunk-aligned (u, v) window of one
     // chunk slab: build each slice's exposure mask, greedy-merge it, emit.
     // The whole-grid mesh hands it a window spanning a slab's chunks, which is
     // why its merge crosses chunk boundaries; the regional mesh hands it a
     // window of exactly one chunk, which is what clamps the merge.
+    // `weld` non-null switches the merge OFF — one quad per exposed face,
+    // welded through that table (mesh_quads' faces mode). mesh_greedy and
+    // mesh_greedy_chunks pass null and reach byte-identical output.
     void sweep_window(std::size_t level, int axis, int sign, int slab_index, int u0, int v0,
-                      int nu, int nv, std::vector<std::uint8_t>& mask, mesh::Mesh& out) const;
+                      int nu, int nv, std::vector<std::uint8_t>& mask, mesh::Mesh& out,
+                      FaceWeld* weld = nullptr) const;
     // The chunk this write changed, plus the neighbour across any chunk face
     // it sits on. Called only when the cell actually changed.
     void mark_chunk_dirty(std::size_t level, VoxelCoord c, VoxelCoord key);

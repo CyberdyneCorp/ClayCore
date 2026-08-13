@@ -726,11 +726,39 @@ inline VoxelCoord slice_cell(int a, int u, int v, int axis) {
 inline int axis_of(VoxelCoord c, int axis) { return axis == 0 ? c.x : (axis == 1 ? c.y : c.z); }
 inline int u_of(VoxelCoord c, int axis) { return axis == 0 ? c.y : c.x; }
 inline int v_of(VoxelCoord c, int axis) { return axis == 2 ? c.y : c.z; }
+
+// One slab's (u, v) window, in cells.
+struct Slab {
+    int u0 = 0, u1 = 0, v0 = 0, v1 = 0;
+};
+
+// Slab index along the sweep axis -> the (u, v) box its occupied chunks span.
+// Templated only so an anonymous-namespace function can take VoxelGrid's
+// private chunk map without naming it; both quad meshing and greedy meshing
+// sweep the same slabs, and two copies of this would be two surfaces.
+template <typename ChunkMapT>
+void collect_slabs(const ChunkMapT& chunks, int axis, std::map<int, Slab>& out) {
+    for (const auto& [key, chunk] : chunks) {
+        if (chunk.occupied <= 0) continue;
+        const int sa = axis_of(key, axis);
+        const int cu = u_of(key, axis) * kChunkDim;
+        const int cv = v_of(key, axis) * kChunkDim;
+        auto it = out.find(sa);
+        if (it == out.end()) {
+            out.emplace(sa, Slab{cu, cu + kChunkDim - 1, cv, cv + kChunkDim - 1});
+            continue;
+        }
+        it->second.u0 = std::min(it->second.u0, cu);
+        it->second.u1 = std::max(it->second.u1, cu + kChunkDim - 1);
+        it->second.v0 = std::min(it->second.v0, cv);
+        it->second.v1 = std::max(it->second.v1, cv + kChunkDim - 1);
+    }
+}
 }  // namespace
 
 void VoxelGrid::sweep_window(std::size_t level, int axis, int sign, int slab_index, int u0,
                              int v0, int nu, int nv, std::vector<std::uint8_t>& mask,
-                             mesh::Mesh& out) const {
+                             mesh::Mesh& out, FaceWeld* weld) const {
     const ChunkMap& chunks = levels_[level].chunks;
     auto value_at = [&](VoxelCoord c) { return cell_at(level, c); };
     const Dir dir{axis, sign};
@@ -819,20 +847,30 @@ void VoxelGrid::sweep_window(std::size_t level, int axis, int sign, int slab_ind
                     ++u;
                     continue;
                 }
-                int w = 1;
-                while (u + w < nu && mask[static_cast<std::size_t>(v) * nu + u + w] == idx) ++w;
-                int h = 1;
-                bool grow = true;
-                while (grow && v + h < nv) {
-                    for (int k = 0; k < w; ++k)
-                        if (mask[static_cast<std::size_t>(v + h) * nu + u + k] != idx) {
-                            grow = false;
-                            break;
-                        }
-                    if (grow) ++h;
+                // Faces mode takes the run as it is — one quad per exposed
+                // face — so the merge is skipped rather than undone. A merged
+                // rectangle abutting several shorter ones is a T-junction by
+                // construction, which cracks under subdivision, and that is
+                // why the quad path does not merge.
+                int w = 1, h = 1;
+                if (weld != nullptr) {
+                    emit_face_quad(out, *weld, dir.axis, dir.sign, a, u + u0, v + v0, idx,
+                                   levels_[level].voxel_size);
+                } else {
+                    while (u + w < nu && mask[static_cast<std::size_t>(v) * nu + u + w] == idx)
+                        ++w;
+                    bool grow = true;
+                    while (grow && v + h < nv) {
+                        for (int k = 0; k < w; ++k)
+                            if (mask[static_cast<std::size_t>(v + h) * nu + u + k] != idx) {
+                                grow = false;
+                                break;
+                            }
+                        if (grow) ++h;
+                    }
+                    emit_quad(out, dir.axis, dir.sign, a, u + u0, v + v0, w, h, idx,
+                              levels_[level].voxel_size);
                 }
-                emit_quad(out, dir.axis, dir.sign, a, u + u0, v + v0, w, h, idx,
-                          levels_[level].voxel_size);
                 for (int dv = 0; dv < h; ++dv)
                     for (int du = 0; du < w; ++du)
                         mask[static_cast<std::size_t>(v + dv) * nu + u + du] = 0;
@@ -863,28 +901,10 @@ mesh::Mesh VoxelGrid::mesh_greedy(std::size_t level) const {
     // The window spans the slab's chunks, which is why the merge here CROSSES
     // chunk boundaries — the tighter merge, and the reason this call stays the
     // export path while mesh_greedy_chunks clamps to one chunk.
-    struct Slab {
-        int u0 = 0, u1 = 0, v0 = 0, v1 = 0;
-    };
     std::vector<std::uint8_t> mask;
     for (const Dir& dir : kDirs) {
-        // slab index along the sweep axis -> the (u, v) box its chunks span
         std::map<int, Slab> slabs;
-        for (const auto& [key, chunk] : chunks) {
-            if (chunk.occupied <= 0) continue;
-            const int sa = axis_of(key, dir.axis);
-            const int cu = u_of(key, dir.axis) * kChunkDim;
-            const int cv = v_of(key, dir.axis) * kChunkDim;
-            auto it = slabs.find(sa);
-            if (it == slabs.end()) {
-                slabs.emplace(sa, Slab{cu, cu + kChunkDim - 1, cv, cv + kChunkDim - 1});
-                continue;
-            }
-            it->second.u0 = std::min(it->second.u0, cu);
-            it->second.u1 = std::max(it->second.u1, cu + kChunkDim - 1);
-            it->second.v0 = std::min(it->second.v0, cv);
-            it->second.v1 = std::max(it->second.v1, cv + kChunkDim - 1);
-        }
+        collect_slabs(chunks, dir.axis, slabs);
         for (const auto& [slab_index, slab] : slabs)
             sweep_window(level, dir.axis, dir.sign, slab_index, slab.u0, slab.v0,
                          slab.u1 - slab.u0 + 1, slab.v1 - slab.v0 + 1, mask, out);
@@ -936,6 +956,101 @@ mesh::Mesh VoxelGrid::mesh_greedy_chunks(std::size_t level, const std::vector<Vo
         range.vertex_count = static_cast<std::uint32_t>(out.positions.size()) - range.vertex_first;
         range.index_count = static_cast<std::uint32_t>(out.indices.size()) - range.index_first;
         if (out_ranges) out_ranges->push_back(range);
+    }
+    return out;
+}
+
+// -- quad meshing ------------------------------------------------------------
+
+// Faces mode's vertex table. Keyed by lattice corner AND palette index: a
+// corner shared by faces of one colour becomes ONE vertex, and the corner on a
+// colour boundary appears once per colour. That split is what keeps per-face
+// palette colour — the reason emit_quad duplicates its four vertices in the
+// first place — while everything within a colour region comes out as a
+// connected quad grid instead of the soup of disconnected rectangles a greedy
+// mesh arrives in a DCC as.
+struct VoxelGrid::FaceWeld {
+    struct Key {
+        std::int32_t x, y, z;
+        std::uint8_t idx;
+        bool operator==(const Key&) const = default;
+    };
+    struct Hash {
+        std::size_t operator()(const Key& k) const {
+            std::uint64_t h = static_cast<std::uint32_t>(k.x) * 0x9E3779B185EBCA87ull;
+            h ^= static_cast<std::uint32_t>(k.y) * 0xC2B2AE3D27D4EB4Full + (h << 6);
+            h ^= static_cast<std::uint32_t>(k.z) * 0x165667B19E3779F9ull + (h >> 3);
+            h ^= static_cast<std::uint64_t>(k.idx) * 0x27D4EB2F165667C5ull + (h << 2);
+            return static_cast<std::size_t>(h);
+        }
+    };
+    std::unordered_map<Key, std::uint32_t, Hash> vertex;
+};
+
+// One planar, axis-aligned quad for one exposed face, through the weld table.
+//
+// No vertex normal is written, and that is forced rather than forgotten: a
+// welded corner is shared by faces pointing three different ways, so it has no
+// single normal — averaging would round the cube the model IS, and duplicating
+// the vertex to carry one would undo the weld. The quads are planar, so a
+// consumer derives the face normal from the face. A caller who needs per-face
+// normals uses mesh_greedy and gets triangles, exactly as before.
+void VoxelGrid::emit_face_quad(mesh::Mesh& out, FaceWeld& weld, int axis, int sign, int a, int u,
+                               int v, std::uint8_t idx, float cell_size) const {
+    const int face = a + (sign > 0 ? 1 : 0);
+    const cfloat3 color = palette_color(idx);
+    auto corner_index = [&](int du, int dv) {
+        FaceWeld::Key key{0, 0, 0, idx};
+        const int uu = u + du, vv = v + dv;
+        if (axis == 0) key = {face, uu, vv, idx};
+        if (axis == 1) key = {uu, face, vv, idx};
+        if (axis == 2) key = {uu, vv, face, idx};
+        auto it = weld.vertex.find(key);
+        if (it != weld.vertex.end()) return it->second;
+        const std::uint32_t index = static_cast<std::uint32_t>(out.positions.size());
+        weld.vertex.emplace(key, index);
+        out.positions.push_back(cf3(static_cast<float>(key.x), static_cast<float>(key.y),
+                                    static_cast<float>(key.z)) *
+                                cell_size);
+        out.colors.push_back(color);
+        return index;
+    };
+
+    // The corner ORDER carries the winding, so it follows emit_quad's per-axis
+    // flip exactly. Get it wrong and the quads and their triangulation
+    // disagree about which way the face points — invisible until someone
+    // imports with backface culling on.
+    const bool flip = axis == 1 ? sign > 0 : sign < 0;
+    std::uint32_t q[4] = {corner_index(0, 0), corner_index(1, 0), corner_index(1, 1),
+                          corner_index(0, 1)};
+    if (flip) std::swap(q[1], q[3]);
+    out.quads.insert(out.quads.end(), q, q + 4);
+    const std::uint32_t tri[6] = {q[0], q[1], q[2], q[0], q[2], q[3]};
+    out.indices.insert(out.indices.end(), tri, tri + 6);
+}
+
+mesh::Mesh VoxelGrid::mesh_quads(const QuadOptions& options) const {
+    if (options.mode == QuadOptions::Mode::Dual)
+        return dual_mesh(options.level, options.blur, options.cell_size, /*keep_quads=*/true);
+
+    mesh::Mesh out;
+    const std::size_t level = options.level;
+    if (level >= levels_.size()) return out;
+    const ChunkMap& chunks = levels_[level].chunks;
+    if (chunks.empty()) return out;
+
+    // The same sweep mesh_greedy runs, over the same slabs, with the merge
+    // switched off. Sharing it is the point: the exposure test — and therefore
+    // the SURFACE — is mesh_greedy's, so the two cannot disagree about which
+    // faces exist.
+    FaceWeld weld;
+    std::vector<std::uint8_t> mask;
+    for (const Dir& dir : kDirs) {
+        std::map<int, Slab> slabs;
+        collect_slabs(chunks, dir.axis, slabs);
+        for (const auto& [slab_index, slab] : slabs)
+            sweep_window(level, dir.axis, dir.sign, slab_index, slab.u0, slab.v0,
+                         slab.u1 - slab.u0 + 1, slab.v1 - slab.v0 + 1, mask, out, &weld);
     }
     return out;
 }

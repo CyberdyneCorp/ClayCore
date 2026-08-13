@@ -7,7 +7,7 @@ Delta for `quad-mesh-export`.
 ### Requirement: A voxel grid meshes to quads in two modes
 `VoxelGrid` SHALL provide a quad mesher offering two modes, because a voxel sculpt is two different subjects depending on what the user made.
 
-**Dual mode** SHALL be the lattice dual over the same occupancy field `mesh_smooth` builds — the rounded form, quads meeting four to a vertex — generalised to a lattice cell size other than the grid's voxel size by sampling that occupancy TRILINEARLY.
+**Dual mode** SHALL be the lattice dual over the same occupancy field `mesh_smooth` builds — the rounded form, quads meeting four to a vertex on average — generalised to a lattice cell size other than the grid's voxel size by sampling that occupancy TRILINEARLY.
 
 At the grid's own voxel size with no blur the sampler reads exactly the values `mesh_smooth` reads, so dual mode SHALL return `mesh_smooth`'s mesh vertex for vertex and index for index, differing only by the quad array. This identity is what keeps the two on one code path rather than two that drift.
 
