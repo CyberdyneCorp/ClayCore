@@ -22,10 +22,12 @@ Last reconciled against `3dcoat_study/MISSING_FEATURES.md` and
 caught five items this file had dropped. Every ClayCore-owned row in their
 catalogue is now represented here or in the deferred list below.
 
-## Where the engine is (2026-08-07, v0.22.1)
+## Where the engine is (2026-08-13, v0.30.0)
 
-14 capabilities, 44 archived changes. Complete enough that the gaps below are
-about *sculpting affordances*, not about the field engine:
+14 capabilities, 65 archived changes. Complete enough that the gaps below are
+about *sculpting affordances*, not about the field engine. The bullets below
+are the 2026-08-07 (v0.22.1) snapshot with corrections kept in place; what
+landed between v0.22.1 and v0.30.0 is summarised at the end of this section:
 
 - 30 primitives + stroke/curve chains, **16 combine ops**, 5 blend profiles,
   grid/radial repetition, mirror with blended seam. Every kernel capability is
@@ -50,8 +52,8 @@ about *sculpting affordances*, not about the field engine:
   polygon / spline lasso, swept as a prism)
 - Editing and opt-in undo over one command vocabulary shared with the file
   format — including an item's deformer chain, which `SetDeformersCmd` made an
-  ordinary edit; **268 capabilities** gated for binding parity; the Swift
-  package verified in the iOS Simulator
+  ordinary edit; **303 capabilities** gated for binding parity (268 at the
+  v0.22.1 snapshot); the Swift package verified in the iOS Simulator
 - Four backends registered. ~~**CPU and Metal are verified on device as of
   v0.22.1**~~ — **"on device" there meant a Mac with the `metal` preset.** No
   iPad ran claycore until 2026-08-10, and could not have: the metallib was
@@ -59,6 +61,17 @@ about *sculpting affordances*, not about the field engine:
   shipped CPU-only. Corrected by `add-device-perf-gates`, which is also where
   the measured latency lives. CUDA and OpenCL remain manual hardware checks
   (docs/RELEASE.md)
+
+Since that snapshot, v0.23–v0.30 landed (in archive order): the tube and Trim
+Curve tools, `move_topological`, stroke strength on relief; the compiled-tape
+cache and the interactive-path speedups; the brick cache exposed across the
+ABI — the WebGPU host path, LOD meshing, device interop; hardened boundary
+validation; curve-point and voxel-effect readback; the device gate (the first
+iPad ever to run claycore, 2026-08-10); armatures with per-node signs
+(negative ZSpheres); layer node enumeration and rename; the incremental voxel
+display path; and partial backend registration with per-operation
+introspection. The per-release detail is `docs/RELEASE.md`; each change's
+decisions are in `openspec/changes/archive/`.
 
 ### Corrections to the study's baseline
 
@@ -399,7 +412,13 @@ That is the most parallelism the dependency structure actually allows. Running
 more means rebasing voxel work onto a moving foundation, which costs more than
 the concurrency buys.
 
-## Armatures, proposed 2026-08-10
+## Armatures, proposed 2026-08-10 — landed, extended with per-node signs in v0.30.0
+
+`add-armature` landed 2026-08-10 as proposed below. `add-armature-node-signs`
+followed in v0.30.0 (archived 2026-08-13): a sign per node so a rig carries
+negative ZSpheres — a hollow is sculpted by the same tree that builds the limb.
+`clay_item_set_armature_signs` / `clay_layer_armature_signs`, carried by
+`.clayspace` 1.7 → 1.8 (backward-open).
 
 `add-armature` — a tree of spheres that skins to a form, which is ZBrush's
 ZSphere workflow. Raised by `examples/34_organic_character.py`: a humanoid
@@ -552,6 +571,39 @@ the CPU case grows by. The per-brick cull is the larger term.
 Nothing here was optimised. The change measures, gates and records; acting on
 what it found is the next change, and keeping the two apart is what makes the
 first baseline trustworthy.
+
+## The display path and the host seam, landed 2026-08-13 (v0.30.0)
+
+Seven changes, archived 2026-08-13, released as
+[v0.30.0](https://github.com/CyberdyneCorp/ClayCore/releases/tag/v0.30.0).
+The device gate ran on the reference iPad from a clean tree — 59 cases, the
+provisional display-path and level-stack budgets re-seeded from the measured
+run — and `release_check.py` passed every gate, `device` and `wheel`
+included, for the first time.
+
+The section above found that showing a voxel sculpt cost ~130× what editing
+it did; this is the release that acted on it:
+
+- `speed-the-voxel-mesh-sweep` — the mesh sweep stops probing the chunk map
+  per cell: 4.12 → 0.157 ms per occupied chunk (~26×), byte-identical output
+  over 157 fixtures.
+- `add-voxel-incremental-mesh` — a dab re-meshes only the chunks it dirtied:
+  0.65 ms against 23.3 ms whole-grid (~36×), the voxel side of the
+  `mark_dirty → take_dirty → mesh` shape the brick cache already had.
+  `clay_voxel_mesh` keeps meaning "mesh the whole grid".
+- `mesh-brick-cache-lod` — detail in its row in the interactive-path table.
+
+The rest is the host seam — gaps hosts actually hit, each from an issue:
+
+- `enumerate-layer-nodes` (#91) and `rename-a-layer` (#92) — an outliner can
+  be drawn and a layer renamed without probing sparse ids or losing the name
+  on save.
+- `add-armature-node-signs` (#99) — detail in the armatures section above.
+- `register-a-partial-backend` (#63) — a backend that lost one pipeline
+  registers on its core operations and says what it lost:
+  `clay_backend_supports` / `clay_backend_diagnostic`. On Apple Paravirtual
+  GPUs `clay_list_backends` now answers `cpu,metal` where it answered `cpu`.
+
 ## Phase 3 — the pipeline
 
 | Change | Notes |

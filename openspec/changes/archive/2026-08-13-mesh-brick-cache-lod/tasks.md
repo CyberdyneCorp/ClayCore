@@ -40,7 +40,7 @@
 - [x] 5.8 **DID NOT BREAK ANYTHING** (`brick lod meshing: lod 0 is the call clay_brick_cache_mesh always was`): whole-cache and key-subset meshing, with and without a document, compared BYTE for byte — positions, normals, colours, uvs, indices and the range array — between `clay_brick_cache_mesh` and `clay_brick_cache_mesh_lod(..., 0, ...)`, with mips built so the level path is live
 - [x] 5.9 The same claim against MAIN rather than against a sibling: one fingerprint program linked in turn against main's `libclay_shared.so` and this branch's, same Release configuration. Surface-brick count, surface-key order, and the vertex count, index count and FNV-1a hash of every buffer of four lod-0 meshes (whole/face, whole/gradient+colour, subset/face, subset/gradient+colour) plus the range array — **identical, diff clean**
 - [x] 5.10 Full suite green: `ctest --preset cpu-only` 4/4, `clay_unit_tests` 792 cases / 2 119 993 assertions, 0 failed
-- [ ] 5.11 No save/load round-trip: the brick cache is not serialized and this change touches no format. Recorded rather than skipped silently
+- [x] 5.11 No save/load round-trip: the brick cache is not serialized and this change touches no format. Recorded rather than skipped silently
 
 ## 6. Documentation
 

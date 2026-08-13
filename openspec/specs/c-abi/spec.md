@@ -674,7 +674,11 @@ The sculpting-verbs section of the header SHALL state this once for all of them,
 ### Requirement: Armatures across the ABI
 The C API SHALL expose building an armature item from nodes and their parents, and the tree edits, and SHALL be purely additive: no existing signature changes and no struct grows.
 
-Reading a placed armature's tree back SHALL follow the size-query pattern the other variable-length readbacks use, so a host that reloads a document can edit an armature it did not author — the gap that `clay_layer_stroke_points` closed for curves.
+Each node SHALL carry a sign, +1 or -1, positive by default, set beside the parents by a signs setter that mirrors the parents setter — one entry per node — and any value other than +1 or -1 SHALL be refused as a typed invalid argument, because the negative-radius convention would legalise input the point setter refuses today. A fifth tree edit SHALL set a placed node's sign, carrying it in the existing radius argument, so no signature changes shape; it SHALL be one undoable command and SHALL be refused on a protected layer, exactly as the other four edits are. A negative node SHALL NOT be required to be a leaf.
+
+Reading a placed armature's tree back SHALL be split the way the setters are split, because an armature IS a stroke plus a tree: the point readback SHALL accept the armature primitive and serve its nodes as the same x, y, z, radius list it serves for strokes and guides, and a parents readback of its own SHALL serve one parent index per node, a root naming itself, by the same size-query pattern — a null buffer answers with the count, an undersized buffer yields a too-small error carrying the needed count and writes nothing. A signs readback SHALL serve one sign per node by the same pattern, and every readback SHALL agree on the count: both are counted in nodes, a tree stored with fewer parents than nodes reads back padded with roots, and signs stored shorter than nodes read back padded positive — exactly the reading compilation makes, so what comes back is the tree the document evaluates. The parent indices SHALL be the indices the tree edits take, and a node that is not an armature SHALL be refused the parents and signs readbacks with a typed invalid-argument error. Reading SHALL NOT be refused on a protected or hidden layer, because protection refuses edits.
+
+Replacing a placed armature's points through the curve replace SHALL remain refused: points replaced alone would desynchronise from the parents, and the tree edits own that half.
 
 #### Scenario: An armature round trips through a host
 - **WHEN** a host reads a placed armature's nodes and parents, moves one node, and writes the tree back
@@ -683,4 +687,201 @@ Reading a placed armature's tree back SHALL follow the size-query pattern the ot
 #### Scenario: A malformed tree is refused
 - **WHEN** an armature is built with a parent index outside the node range, or with a cycle
 - **THEN** it is refused with the reason, and the document is unchanged
+
+#### Scenario: A reloaded branching rig is re-posable
+- **WHEN** a host saves a document holding an armature whose tree branches, reloads it, reads both halves back, and moves a node through the tree edits using the read-back indices
+- **THEN** the nodes and parents match what was authored, including the branch, and the move carries exactly the subtree the read-back tree names
+
+#### Scenario: The parents readback keeps the refusals typed
+- **WHEN** the parents of a stroke, a group or a missing node are asked for, or a buffer smaller than the node count is passed
+- **THEN** the stroke and the group are refused as invalid arguments, the missing node as not found, and the short buffer with the too-small error carrying the needed count and nothing written
+
+#### Scenario: A negative node survives the round trip
+- **WHEN** a host sets a sign array with one negative node, saves, reloads, and reads the signs back
+- **THEN** the signs match what was authored, and flipping the node positive through the sign edit restores the all-positive field
+
+#### Scenario: The signs surface keeps the refusals typed
+- **WHEN** a sign of 0 or ±2 is passed to the setter or the sign edit, the signs of a stroke are asked for, or a short buffer is passed to the signs readback
+- **THEN** each is refused with its typed error — invalid argument for the values and the stroke, too-small carrying the needed count for the buffer — and nothing is written
+
+#### Scenario: A negative node carries children
+- **WHEN** a node with descendants is set negative
+- **THEN** the edit succeeds, the descendants keep their own signs, and moving the negative node still carries its subtree
+
+### Requirement: A host can display a voxel sculpt incrementally
+The ABI SHALL expose the grid's dirty-chunk drain and its regional mesh, so that a host can display a sculpt by re-meshing what changed rather than the whole grid. The two calls SHALL follow the brick cache's refill vocabulary rather than inventing a parallel one: drain the keys, mesh the keys, patch the ranges.
+
+The drain SHALL take a capacity and report a count and a remainder, exactly as the brick-cache drain does, and SHALL NOT accept a NULL buffer as a size query — the two shapes are already distinguished in this header and mixing them is what makes a retry loop ambiguous. A host SHALL be able to call it in a loop until the remainder is zero, or to stop early and leave the rest queued for the next frame. Keys SHALL cross as packed `int32` triples, the same spelling `clay_voxel_flood_select` and `clay_brick_cache_surface_bricks` use.
+
+The regional mesh SHALL take that key list and SHALL fill, when asked, one range record per key in the order given, carrying the key and its vertex and index ranges — an array ELEMENT with a fixed layout, not a versioned descriptor, for the same reason `clay_brick_mesh_range` is one. The header SHALL state that these ranges PARTITION the mesh with no vertex shared between keys, which is the difference from the brick ranges and the property that lets a host free one key's slice without consulting its neighbours. It SHALL state why: a voxel face belongs to one cell in one chunk, so clamping the merge to a chunk boundary splits quads instead of cracking the surface, and there are no straddlers to attribute.
+
+Asking for ranges without a key list SHALL be refused, as the brick mesh refuses it and for the same reason: with no key list there is no count the caller could have sized the buffer from.
+
+A key naming a chunk the grid does not hold SHALL contribute an empty range and SHALL NOT be an error, because a drained set routinely names a chunk that has since been emptied and that is precisely the key whose geometry the host must drop.
+
+`clay_voxel_mesh` SHALL keep meaning "mesh the whole grid" and SHALL be unchanged by this addition — same signature, same output byte for byte — so export and a first full display keep the merge that spans chunk boundaries. The addition SHALL be purely additive: no existing signature changes, no struct grows, no enumerator's value changes.
+
+Both calls SHALL act on the grid's ACTIVE level, as every other cell-addressed call in this header does, and the header SHALL say so, because the dirty set is per level.
+
+#### Scenario: A host displays a stroke without re-meshing the model
+- **WHEN** a host rasterizes a sculpt, meshes it whole once, then applies a dab, drains the dirty chunks and meshes exactly those keys
+- **THEN** it receives one range per key, and patching those ranges over the previous per-chunk geometry yields the same surface a whole-grid re-mesh describes
+
+#### Scenario: The drain is capacity-in, count-out
+- **WHEN** the drain is called with a buffer smaller than the number of dirty chunks
+- **THEN** it writes what fits, reports how many it wrote and how many remain, and a loop that keeps calling until the remainder is zero receives every key exactly once
+
+#### Scenario: A NULL buffer is not a size query
+- **WHEN** the drain is called with a NULL key buffer
+- **THEN** it is refused as an invalid argument rather than reporting a required size
+
+#### Scenario: Ranges require a key list
+- **WHEN** the regional mesh is asked for ranges with no keys
+- **THEN** it is refused rather than inferring a count from the grid's current chunk set
+
+#### Scenario: A stale key is an ordinary key
+- **WHEN** a key drained before the chunk was emptied is passed to the regional mesh
+- **THEN** the call succeeds and reports a zero-length range for it
+
+#### Scenario: The whole-grid call did not move
+- **WHEN** the same grids are meshed by `clay_voxel_mesh` before and after this change
+- **THEN** the vertex count, the index count and a hash of every attribute and index buffer are identical
+
+### Requirement: A host can mesh a level of the brick cache
+The C API SHALL let a host mesh a LEVEL of the brick cache, not only its full-resolution bricks. The level SHALL be named the way the readback names it — 0 for the evaluated bricks, 1 for their mips — so that a host that can build a mip and read one can also mesh one without reimplementing the mesher over the stored samples.
+
+The addition SHALL be purely additive: the existing meshing entry point SHALL keep its signature and its behaviour, and SHALL be the new one at level 0. Both SHALL share one implementation so the two cannot drift.
+
+At level 1 the key list SHALL name COARSE keys — the 2x2x2 block keys the mip build and the current-level query already take — and a null key list SHALL still mean every brick the level stores. Everything else about the call SHALL be unchanged by the level: the marching, the seam welding, the per-key ranges and the straddler attribution.
+
+A level above 1 SHALL be rejected rather than clamped, for the reason the readback rejects it: there is one mip level, and silently meshing a finer one would put geometry at the wrong size on screen.
+
+#### Scenario: A built mip meshes, and meshes coarser
+- **WHEN** a host fills the cache, builds the mips covering its surface bricks, and meshes at level 1
+- **THEN** it receives real geometry whose triangle count is a small multiple lower than the same surface at level 0, and whose bounds agree with the level-0 mesh's to within one coarse cell
+
+#### Scenario: The older entry point is unchanged
+- **WHEN** the same whole-cache and key-subset requests are made through the existing entry point and through the new one at level 0, with and without a document
+- **THEN** the meshes are identical byte for byte — positions, normals, colours, uvs and indices — and so are the per-key ranges
+
+#### Scenario: A level above the one that exists is refused
+- **WHEN** a host asks for a level above 1, or a negative one
+- **THEN** the call is refused as an invalid argument and no mesh is produced
+
+### Requirement: An unbuilt level is reported, never answered with an empty mesh
+An empty mesh already means "this cache holds no surface bricks", which is an ordinary state of a session. A level that has not been built SHALL therefore be a typed not-found rather than an empty mesh, so that a host can tell a missing mip — whose remedy is to build it — from a missing surface, whose remedy is to sculpt.
+
+A named coarse key with no valid mip SHALL be refused, unlike level 0 where a key that stores no lattice is an ordinary uniform brick and contributes nothing: at level 1 there is no uniform mip, so an absent one means "not yet". A whole-level request SHALL be refused when the cache holds surface bricks and not one mip.
+
+A cache holding nothing at all SHALL still mesh EMPTY at every valid level, because there is nothing there to be mistaken about.
+
+#### Scenario: Meshing a level nobody built
+- **WHEN** a host fills the cache, builds no mip, and meshes at level 1
+- **THEN** the call is refused as not found, and the same request answers once the mip is built
+
+#### Scenario: The refusal is per key
+- **WHEN** one coarse key's mip is built and a different coarse key is named
+- **THEN** the request naming the built key succeeds and the request naming the unbuilt one is refused as not found
+
+#### Scenario: An empty cache is empty, not unbuilt
+- **WHEN** a cache that was never marked or filled is meshed at level 0 and at level 1
+- **THEN** both succeed and return a mesh with no vertices and no indices
+
+### Requirement: Field attributes stay at level 0
+Colours and gradient normals SHALL be refused at level 1 rather than approximated. They are evaluated through per-brick culled tapes whose agreement with the whole document's rests on a vertex sitting on the FIELD's surface, well inside the band; a coarse vertex sits on the mip's surface, which can be most of a coarse cell away, where the two tapes are only both out of band rather than equal. The mip also carries no colour lattice of its own, which the brick readback already reports rather than averaging.
+
+Face normals are computed from the triangles, need no field, and SHALL work at every level — otherwise "refused" would silently mean "no normals at level 1".
+
+#### Scenario: The refusal is about the level, not the parameters
+- **WHEN** the same gradient-normal and colour requests are made with a document at level 0 and at level 1
+- **THEN** level 0 succeeds and carries the attributes, and level 1 is refused as an invalid argument
+
+#### Scenario: Face normals answer at every level
+- **WHEN** a host meshes level 1 asking for face normals and passing no document
+- **THEN** the mesh carries normals
+
+### Requirement: A host can discover a layer's nodes
+The C API SHALL let a host enumerate the nodes a layer holds by a count and an index, where the index is the layer's EVALUATION order, mirroring the layer-level pair the discovery requirement above defines. An index at or beyond the count SHALL be a typed not-found, so a host walks to the end without a sentinel, and a layer id that names no layer SHALL be a typed not-found as well.
+
+The enumeration SHALL cover the layer's TOP-LEVEL nodes only, and the header SHALL say so plainly: it is the sibling of the group-children query, which continues to descend, so the whole tree is walked by pairing the two — enumerate the layer's roots, ask the node-primitive query what each one is, and recurse through the ones it refuses as groups. A layer's root SHALL NOT be addressable as a node id, because id 0 is the no-node sentinel and a call that answered for it could no longer refuse an id that does not exist.
+
+Enumeration SHALL go through the index rather than the id space, because node ids are not dense and nothing bounds the length of a gap left by a removal: probing ids upward against the node-primitive query loses every node past the longest run of misses the caller happened to tolerate. A layer that carries no SDF content — a voxel or a mesh layer — SHALL count zero rather than fail, the same reading the per-layer field evaluation makes of it. Reading is not editing: a ghosted, locked or hidden layer SHALL answer normally. The addition SHALL be purely additive — no existing signature changes and no existing call's meaning moves.
+
+#### Scenario: A reloaded document finds its armature without probing
+- **WHEN** a document whose layer holds an item, a group and an armature placed after a run of removed nodes is saved, reloaded, and walked by enumerating layers, then enumerating that layer's nodes, then asking each node which primitive it carries
+- **THEN** the armature is found without probing any node id and without a tolerance for missing ids, and its points and its parents read back exactly as authored
+
+#### Scenario: Enumeration is top level, children descends
+- **WHEN** a layer holds a loose item and a group containing two items, and the layer's nodes are enumerated
+- **THEN** exactly the loose item and the group are reported, the group's items are not, and the group's items are reached by the group-children query on the enumerated group id
+
+#### Scenario: Removed nodes leave gaps the index steps over
+- **WHEN** several consecutive nodes are removed and a node is added after them
+- **THEN** enumeration reports the surviving nodes and only those, in evaluation order, while each removed id is refused by the node-primitive query
+
+#### Scenario: The enumerators keep their refusals typed
+- **WHEN** the count or index query is given an id that is not a layer's, an index at or past the count, or a null out-parameter
+- **THEN** the first two are refused as not found and the last as an invalid argument, with nothing written
+
+### Requirement: A host can rename a layer
+The C API SHALL let a host change a layer's name after creation, so that the name a document persists is the name the artist chose. Until this existed a layer was named only by the call that created it, the rename lived in the host alone and was lost on the next save, and the layer-discovery surface reported the stale creation name back with no way to tell it from a current one.
+
+The rename SHALL go through the same command vocabulary as every other layer mutation: one rename is ONE undo step whose inverse restores the previous name exactly, and a ghosted or locked layer SHALL refuse it with the typed invalid-argument refusal that every other edit of a protected layer gives, rather than applying it silently.
+
+A NULL name and an empty name SHALL be refused, and a refused rename SHALL leave the name unchanged. The name SHALL have no length limit imposed by this call: the saved layer record length-prefixes it and the name query sizes before it writes, so a long name costs a reader a larger buffer rather than a truncation.
+
+Names SHALL NOT be required to be unique, because the calls that create layers have never required it and a uniqueness enforced on renames alone would be a guarantee the document does not keep. Instead the meaning of a duplicate SHALL be documented at the call: the by-name layer lookups answer with the FIRST layer in stack order carrying the name, so a rename onto a name already in use shadows the other layer rather than rebinding it, and a host whose lookup must survive a rename holds the layer id, which is stable across a save and reload.
+
+The addition SHALL be purely additive — no existing signature changes, no enumerator's value changes, and no document format version moves, since the layer record has always carried the name.
+
+#### Scenario: A rename survives a save and reload
+- **WHEN** a layer is created, renamed, and the document is saved and loaded into a fresh document
+- **THEN** the layer's name reads back as the NEW name, for an SDF, a voxel and a mesh layer alike
+
+#### Scenario: A rename is one undo step
+- **WHEN** a layer is renamed twice with undo enabled and undone twice
+- **THEN** each undo restores exactly the previous name, ending at the creation name, and redo re-applies each rename in order
+
+#### Scenario: The by-name lookup follows the rename
+- **WHEN** a voxel layer is renamed and its grid is looked up by the new name
+- **THEN** the lookup answers with that layer's grid, and the old name is refused as not found
+
+#### Scenario: A duplicate name shadows rather than rebinds
+- **WHEN** a layer is renamed to a name another layer already carries
+- **THEN** the rename is accepted, both layers keep the name, and the by-name lookup answers with whichever of them is first in stack order
+
+#### Scenario: A protected layer refuses the rename
+- **WHEN** a ghosted or locked layer is renamed
+- **THEN** the call is refused as an invalid argument, the name is unchanged, and releasing the protection makes the rename possible again
+
+#### Scenario: An unusable name is refused before it replaces a good one
+- **WHEN** a rename is called with a null document, a null name, an empty name, or an id no layer has
+- **THEN** it is refused — invalid argument for the first three, not found for the last — and no layer's name changes
+
+### Requirement: A host can tell a degraded backend from an absent one
+The C ABI SHALL let a caller ask which operations a named backend can run, and SHALL let a caller read why a backend is absent or degraded. `clay_list_backends` answering `cpu` currently means either "no GPU backend is compiled into this build" or "one is, and it was discarded" — two states a host must act on differently and cannot distinguish.
+
+`clay_backend_supports` SHALL report, for a named backend and a named operation, whether that operation is available. A backend that is not registered SHALL be `CLAY_ERROR_NOT_FOUND` rather than "supports nothing", because those are different answers: one is a backend that cannot do the thing, the other is a backend that is not there.
+
+`clay_backend_diagnostic` SHALL return, by the size-query pattern `clay_list_backends` uses, a human-readable account of why a backend is unavailable or partial. It SHALL answer for a backend that is NOT registered — that is its main use — and SHALL yield an empty string for a backend that registered with every operation available, so "nothing to say" is expressible and is not an error.
+
+The diagnostic SHALL carry the runtime's own words where it has any. A pipeline that failed to compile SHALL contribute the compiler's log rather than a summary of it: the log is what identifies the cause, and a host reporting a bug to us cannot recover what was already discarded.
+
+Both calls SHALL be readable at any time and SHALL NOT require a document, a device or any prior call — a host decides which backend to ask for BEFORE it has built anything.
+
+#### Scenario: A partial backend reports the operation it cannot run
+- **WHEN** a backend is registered whose raycast pipeline is unavailable
+- **THEN** `clay_backend_supports` reports the point and grid operations as available and raycast as unavailable, and `clay_backend_diagnostic` is non-empty and names the pipeline that failed
+
+#### Scenario: An absent backend is not a silent one
+- **WHEN** a backend is compiled in, fails to initialize, and is therefore not in `clay_list_backends`
+- **THEN** `clay_backend_supports` for it is `CLAY_ERROR_NOT_FOUND` and `clay_backend_diagnostic` returns the reason it failed
+
+#### Scenario: A backend that was never compiled in says so differently
+- **WHEN** a backend name that this build does not contain is asked about
+- **THEN** the diagnostic distinguishes "not compiled into this build" from "compiled in and failed", rather than answering the same way for both
+
+#### Scenario: A fully working backend has nothing to say
+- **WHEN** a registered backend has every operation available
+- **THEN** `clay_backend_diagnostic` succeeds with an empty string, and `clay_backend_supports` reports every operation as available
 

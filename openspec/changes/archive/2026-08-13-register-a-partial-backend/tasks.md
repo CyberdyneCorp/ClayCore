@@ -52,4 +52,4 @@
 - [x] 5.1 `docs/RELEASE.md` release entry: additive, two symbols and one enum.
 - [x] 5.2 The backend section of `docs/05-claycore-library.md` describes partial
       registration and what a host should do with an `Unsupported`.
-- [ ] 5.3 Issue #63 closed with what was decided, not only what was changed.
+- [x] 5.3 Issue #63 closed with what was decided, not only what was changed.
