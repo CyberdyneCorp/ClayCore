@@ -28,7 +28,7 @@ Only `interactive` cases are held to the frame. A `gesture` at 0.85 ms is not
 likes.
 
 **The reference device** is an iPad Air 13-inch (M3), iOS 26.5.2 (`iPad15,5`);
-the gate last passed at ABI 0.29.0. Simulator and Mac numbers are not device
+the gate last passed at ABI 0.30.0. Simulator and Mac numbers are not device
 numbers and must never be compared against this baseline.
 
 Every p95 below is **the worst point of the 10/100/1000-stamp document axis**,
@@ -77,32 +77,46 @@ representation, `s` the SDF one.
 | Pinch | Pinch | `magnify` (negative), `sculpt_pinch` | s v | `voxel_pinch` | 0.0091 | interactive |
 | Magnify | Inflate (local) | `magnify` (positive), `sculpt_magnify` | s v | `voxel_magnify` | 0.0088 | interactive |
 | Magnify / Pinch (SDF) | — | `magnify` deformer | s | `magnify_pinch` | 0.101 | gesture |
-| Rotate | Twist | `pose` / `pose_line` | s | `pose_region` | ‖ | gesture |
+| Rotate | Twist | `pose` / `pose_line` | s | `pose_region` | 0.0005 | gesture |
 | SnakeHook | Tube / SnakeHook | `brush::snakehook` | s | `snakehook_tendrils` | 0.212 | gesture |
-| — | Tube | `brush::tube` | s | `tube_create` | ‖ | gesture |
+| — | Tube | `brush::tube` | s | `tube_create` | 0.0013 | gesture |
 | Trim (Rect/Circle/Lasso) | Trim | `cut::cut_item` | s | `cut_create` / `cut_passes` | 0.0001 / 0.077 | gesture |
-| Trim Curve | Trim (curve) | `CutShape::from_open_curve` | s | `trim_curve` | ‖ | gesture |
+| Trim Curve | Trim (curve) | `CutShape::from_open_curve` | s | `trim_curve` | 0.0002 | gesture |
 | Clip | Trim | `cut::cut_item` | s | `cut_passes` | 0.077 | gesture |
 | Surface Noise | Noise | `noise` deformer | s | `noise_detail` | 0.269 | gesture |
 | Mask | Mask | mask fields + stroke engine | s v | `mask_paint` | 0.0058 | interactive |
 | Mask (freeze effect) | Mask | mask-gated verbs | s v | `mask_freeze` | 0.0140 | interactive |
 | Extract | Split / Extract | `brush::mask_extrude` | s v | `mask_extrude` | 3094.7 | operation |
-| ZSpheres | — | `Prim::armature` | s | `armature_edit` | ‖ | gesture |
+| ZSpheres | — | `Prim::armature` | s | `armature_edit` | 0.0008 | gesture |
 | Alphas | Alphas | `sculpt_carve_alpha` | v | `voxel_carve_alpha` | 0.0011 | interactive |
 | — | Paint | `voxel_paint_brush` | v | `voxel_paint` | 0.0036 | interactive |
 | — | Smudge | `sculpt_smudge` | v | `voxel_smudge` | 0.026 | gesture |
 | — | (fill holes) | `sculpt_fill_cavities` | v | `voxel_fill_cavities` | 0.62 | operation |
 | Dynamesh | Voxel Remesh | `Layer.consolidate` | s | `sdf_consolidate` | 1537.5 ‡ | operation |
-| — | Multires | `VoxelGrid::add_level` | v | `voxel_add_level` | ‖ | operation |
-| — | Multires (editing under one) | `sculpt_smooth`, one level finer | v | `voxel_smooth_l2` | ‖ | interactive |
-| — | (large brush) | `sculpt_smooth` at radius 32 | v | `voxel_smooth_r32` | ‖ | interactive |
-| — | (display) | `VoxelGrid::mesh_greedy` | v | `voxel_mesh_whole` | ‖ | operation |
-| — | (display, incremental) | `mesh_greedy_chunks` | v | `voxel_mesh_dirty` | ‖ | interactive |
+| — | Multires | `VoxelGrid::add_level` | v | `voxel_add_level` | 0.511 | operation |
+| — | Multires (editing under one) | `sculpt_smooth`, one level finer | v | `voxel_smooth_l2` | 0.0149 | interactive |
+| — | (large brush) | `sculpt_smooth` at radius 32 | v | `voxel_smooth_r32` | 0.479 | interactive |
+| — | (display) | `VoxelGrid::mesh_greedy` | v | `voxel_mesh_whole` | 4.72 | operation |
+| — | (display, incremental) | `mesh_greedy_chunks` | v | `voxel_mesh_dirty` | **0.528** | interactive |
 | Blob | — | *not implemented* | | | | |
 | Slice / Knife | Split | *not implemented* | | | | |
 | surface-mode mesh brushes | — | *out of scope* | | | | |
 
-‖ **Case added, not yet measured on device.** Four of these arrived with the tube/Trim Curve/pose/armature cases and the rest close the gaps #86 part 3 and #89 named — the display path and the level stack, neither of which the gate could see, while every edit verb above reported two orders of magnitude of headroom. Their budgets in `tests/device/baseline.json` are hand-set ceilings carrying the PROVISIONAL note; the numbers land here when the gate next runs on the reference device.
+All nine of those cases were measured for the first time at **v0.30.0** — four
+arrived with the tube/Trim Curve/pose/armature work, the rest close the gaps
+#86 part 3 and #89 named. Their budgets are now derived from the measurement
+rather than hand-set, and three of them corrected an estimate this document
+had been carrying:
+
+| case | the estimate here | **measured on device** | |
+|---|---|---|---|
+| `voxel_smooth_r32` | ~2.4 ms, "over half the share" | **0.479 ms** | **5× pessimistic** |
+| `voxel_smooth_l2` | ~8× `voxel_smooth` (the `8^d` model) | **0.0149 ms**, 1.27× | the model overstates it |
+| `voxel_mesh_whole` | ~25 ms (desktop) | **4.72 ms** | different fixture, same shape |
+
+The `8^d` write-amplification model and the cubic-radius model are both real
+descriptions of the work; they are poor predictors of the *time*, because the
+footprint that grows is not what dominates. Prefer the measurement.
 
 ‡ **Known stale, in the safe direction.** Since this baseline was taken,
 `consolidate`'s bake batches its lattice samples through the CPU backend's
@@ -147,11 +161,22 @@ to stroke 8. It gets marginally faster as the form settles.
 still moving. That needs edit + display inside 4.17 ms **repeatedly, without
 degrading as the sculpt grows** — the last clause is what separates the tiers.
 
-### Tier 1 — online, and flat in document size
+### Tier 1 — online, both halves, measured
 
-Every voxel edit verb. At the worst point of the axis they sit between 0.05%
-and 0.65% of the engine's share, and the growth column is the reason to trust
-that over a long session:
+Every voxel edit verb, **and now the display of what it did**. At v0.30.0 a
+dab and the frame that shows it cost ~0.54 ms together on the reference iPad —
+0.0117 ms of `voxel_smooth` plus 0.5285 ms of `voxel_mesh_dirty` — which is
+**~13% of the engine's share, from device numbers on both halves**. That is
+the claim this document could not make at 0.29.0 and it is the one that
+matters: a voxel sculpt is interactive end to end.
+
+The caveat is not latency. `mesh_greedy` emits axis-aligned quads, so what a
+sculptor sees is cubes; the brush is doing the right thing to the data and the
+display is not showing it. Fast and blocky.
+
+The edit halves, at the worst point of the axis, sit between 0.05% and 0.65%
+of the share — and the growth column is the reason to trust that over a long
+session:
 
 | verb | 10 stamps | 1000 stamps | growth |
 |---|---|---|---|
@@ -211,11 +236,30 @@ Only three things miss, and one of them is not in the gate at all.
 |---|---|---|---|
 | `sdf_stamp_cpu` @ 1000 stamps | 4.81 ms | 4.17 ms | **1.15×** |
 | `sdf_stamp_bricks` @ 1000 stamps | 5.70 ms | 4.17 ms | **1.37×** |
-| radius-32 voxel verb | ~2.4 ms † | 4.17 ms | fits — but 58% of the share |
-| voxel display on device | **unmeasured** | 4.17 ms | unknown |
 
-† Extrapolated from the radius table below, not measured. A case now exists
-(`voxel_smooth_r32`); this row is what it is expected to report.
+**That is the whole list.** At v0.30.0 the two SDF stamp rows are the only
+`interactive` cases outside the frame share, and both are tuning rather than
+architecture.
+
+**A voxel dab and its display now fit the frame, measured on device rather
+than argued from a desktop ratio:**
+
+| half | case | device p95 | % of the 4.17 ms share |
+|---|---|---|---|
+| edit | `voxel_smooth` | 0.0117 ms | 0.3% |
+| display | `voxel_mesh_dirty` | **0.5285 ms** | **12.7%** |
+| | **the pair** | **~0.54 ms** | **~13%** |
+
+Both halves are iPad numbers from the same run, so adding them is legitimate
+here in a way it was not while display was a desktop figure. A voxel sculpt
+is interactive end to end with roughly 7× headroom.
+
+Two things worth keeping an eye on. `voxel_mesh_dirty` grows `N^+0.29` — mild,
+but it is the first thing on the voxel path that grows with document size at
+all, and it is the half a long session accumulates. And the whole-grid
+`voxel_mesh_whole` at 4.72 ms is `operation` class deliberately: it is the
+export path, and a host that calls it per frame is outside the budget by
+design, not by accident.
 
 **Nothing is an order of magnitude out any more.** The row that was is gone:
 voxel display was ~551 ms and ~130× at 0.29.0, ~22 ms and ~6× after #86 part 1
@@ -225,14 +269,21 @@ ms** for the whole grid on the same desktop. The whole-grid sweep did not get
 faster; it stopped being on the frame path and became the export path, where
 it keeps the tighter merge.
 
-That leaves display **unmeasured rather than slow**, which is a different
-problem and the reason `voxel_mesh_whole` and `voxel_mesh_dirty` now exist as
-device cases. Every display figure in this document is a Linux desktop number,
-and [RELEASE.md](RELEASE.md#reading-a-result) forbids comparing those against
-the device baseline. Do not add 0.012 ms of device edit to 0.65 ms of desktop
-display and call the result a frame budget — the honest statement today is
-*edit is measured on device and tiny; display is measured on desktop and fits
-with room; nobody has measured the pair on the iPad.*
+**And at v0.30.0 the device confirmed it**: `voxel_mesh_dirty` measures
+0.5285 ms on the reference iPad, 12.7% of the engine's share. The desktop
+ratio pointed the right way and the device number is what the budget is now
+derived from. The figures in [the unmeasured costs](#the-unmeasured-costs)
+below remain desktop measurements, kept for their scaling shape;
+[RELEASE.md](RELEASE.md#reading-a-result) still forbids comparing those
+against the baseline.
+
+**What no measurement fixes is what the result looks like.** `mesh_greedy`
+emits axis-aligned quads, so a voxel sculpt displays as cubes however fast the
+meshing gets — the gallery shows it plainly (`09_sculpt_verbs`, `15_smudge`,
+`36_levels`). The path that fits the frame is the blocky one and the path that
+looks like clay is the SDF one, which is the 1.15× miss above. That is a
+display gap rather than a latency gap and it is tracked separately; nothing in
+this document's numbers should be read as saying a voxel sculpt looks right.
 
 Three things worth saying about that table:
 
@@ -270,21 +321,33 @@ Two axes the gate does not probe. Both were measured on a Linux desktop at
 be compared against the device baseline — these are here for **scaling shape and
 ratios**, which do transfer, and every one needs re-measuring on device.
 
-### Brush radius
+### Brush radius — measured since v0.30.0, and the model was wrong
 
-Every voxel case uses `Fixture.brush(size: 8)` — a fixed 8-cell sphere, ~2,100
-cells. Cost is roughly cubic in radius:
+Most voxel cases use `Fixture.brush(size: 8)` — a fixed 8-cell sphere, ~2,100
+cells. The footprint is cubic in radius:
 
-| brush size (cells) | footprint | relative cost |
+| brush size (cells) | footprint | relative *footprint* |
 |---|---|---|
 | 4 | ~270 | 1.0× |
-| 8 *(what the gate measures)* | ~2,100 | 4.8× |
+| 8 *(what most cases measure)* | ~2,100 | 4.8× |
 | 16 | ~17,000 | 28× |
 | 24 | ~58,000 | 89× |
 | 32 | ~137,000 | **204×** |
 
-Scaling the device's 0.0117 ms by that puts a radius-32 smooth around 2.4 ms —
-over half the engine share, from one stamp, and the gate would never report it.
+This document previously scaled the device's 0.0117 ms by that last row and
+predicted **~2.4 ms** for a radius-32 smooth — "over half the engine share,
+from one stamp". `voxel_smooth_r32` now measures it: **0.479 ms**, 11.5% of
+the share, `N^-0.02` in document size.
+
+**The prediction was 5× pessimistic**, and the reason is worth keeping. A
+cubic footprint is a true statement about how many cells the brush *covers*
+and a bad predictor of how long it *takes*: the per-cell work is a coherent
+walk over contiguous chunk payloads, so a larger brush amortises the fixed
+cost of getting there and touches memory the smaller one already paid to
+fetch. Footprint models overstate; measure the verb.
+
+The same correction applies one section down to the `8^d` level model —
+`voxel_smooth_l2` predicted ~8× and measures 1.27×.
 
 ### Displaying the result
 
@@ -436,10 +499,10 @@ Everything below is a **missing latency case**, not a missing test or render.
 | `snakehook` (the resolver) | **exempt on the record** — no C entry point; what reaches the ABI is the tapered stroke chain it resolves into, measured by `sdf_stamp` |
 | `voxel_mask_extrude` | **exempt on the record** — shares the pocket-fill walk with the measured SDF path |
 | `voxel_drop_level` | **exempt on the record** — the inverse of the measured `voxel_add_level`; it frees one level's detail map and writes no cells |
-| Tube, Trim Curve, Rotate/pose, ZSpheres | **case added, awaiting a device run** |
-| voxel meshing (display) | **case added, awaiting a device run** — `voxel_mesh_whole`, `voxel_mesh_dirty` |
-| large-radius verbs | **case added, awaiting a device run** — `voxel_smooth_r32` |
-| the level stack | **case added, awaiting a device run** — `voxel_add_level`, `voxel_smooth_l2` |
+| Tube, Trim Curve, Rotate/pose, ZSpheres | **measured at v0.30.0** |
+| voxel meshing (display) | **measured at v0.30.0** — `voxel_mesh_whole`, `voxel_mesh_dirty` |
+| large-radius verbs | **measured at v0.30.0** — `voxel_smooth_r32` |
+| the level stack | **measured at v0.30.0** — `voxel_add_level`, `voxel_smooth_l2` |
 
 **Every brush in the inventory now has a case or a recorded exemption.** That
 was not true at 0.29.0: `VERB_PATTERNS` in `tools/check_device_coverage.py` is
@@ -452,31 +515,36 @@ without anything reporting them missing. The list now names
 `clay_voxel_(add|drop)_level`. Extending it failed the gate until the cases
 existed, which was the intended order.
 
-What remains is not coverage but **measurement**: nine cases carry hand-set
-PROVISIONAL budgets and have never run on the reference device. Until that run
-they are ceilings, not results.
+Nothing remains unmeasured. v0.30.0 ran all 59 cases on the reference device,
+and every budget in `tests/device/baseline.json` is now derived from a
+measurement rather than hand-set. What this document cannot tell you is
+whether a brush's *result* looks right — see the note on the voxel display
+above, and the gallery.
 
 ## What to do, in order
 
-The first three items of the previous list — land #86, add cases for meshing
-and large-radius verbs, extend `VERB_PATTERNS` — are done. What is left:
+Landing #86, adding the cases, extending `VERB_PATTERNS` and running the gate
+are all done — v0.30.0 measured all nine new cases on the reference iPad and
+every one of them fits. **Latency is no longer the voxel path's problem.**
+What is left:
 
-1. **Run the device gate.** Nine cases have never been measured on the
-   reference iPad, and two of them decide whether a voxel sculpt is genuinely
-   interactive: `voxel_mesh_dirty` (does a dab's display fit the 4.17 ms
-   share?) and `voxel_smooth_r32` (does one large-radius stamp really cost half
-   the share?). Every display figure in this document is a desktop ratio until
-   that run happens, and the release is blocked on it regardless.
-2. **Then re-seed the provisional budgets** with
-   `check_device_bench.py <run.json> --update`, and replace the ‖ rows above
-   with what it reports.
-3. **The SDF stamp's 1.15× is a tuning problem, not an architecture one** — and
+1. **Give a voxel sculpt a display that is not cubes.** `mesh_greedy` emits
+   axis-aligned quads, so every voxel render in the gallery is blocky while the
+   SDF renders look like clay. This is now the largest visible gap between what
+   claycore produces and what a sculptor expects, and it is the one thing on
+   the voxel path that speed cannot fix — a dab's display already fits the
+   frame with 7× to spare. The machinery is mostly present: `field::redistance`
+   builds a narrow band from occupancy and `mesh/surface_nets.h` meshes a field
+   smoothly; what is missing is the bridge, which is what
+   [#90](https://github.com/CyberdyneCorp/ClayCore/issues/90) asks for on
+   workflow grounds and which turns out to answer this too.
+2. **The SDF stamp's 1.15× is a tuning problem, not an architecture one** — and
    `add-item-spatial-index` is the change that addresses the per-brick tape
    compile behind both `sdf_stamp_cpu` and `sdf_stamp_bricks`. Worth sizing
    against the crossovers rather than the worst point: the CPU path is fine
    below ~850 stamps and Metal is fine above ~180, so the genuinely
    unserved window is narrow.
-4. **Decide whether a stroke brush needs a per-dab case.** Tier 3 above is
+3. **Decide whether a stroke brush needs a per-dab case.** Tier 3 above is
    measured per gesture, so nothing says whether ClayBuildup or Crease can show
    a dab live — only what a whole stroke costs. That is a real gap in this
    document's ability to answer "which brushes are online", and it is a
