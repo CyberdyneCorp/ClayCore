@@ -282,8 +282,9 @@ emits axis-aligned quads, so a voxel sculpt displays as cubes however fast the
 meshing gets — the gallery shows it plainly (`09_sculpt_verbs`, `15_smudge`,
 `36_levels`). The path that fits the frame is the blocky one and the path that
 looks like clay is the SDF one, which is the 1.15× miss above. That is a
-display gap rather than a latency gap and it is tracked separately; nothing in
-this document's numbers should be read as saying a voxel sculpt looks right.
+display gap rather than a latency gap, tracked in
+[#108](https://github.com/CyberdyneCorp/ClayCore/issues/108); nothing in this
+document's numbers should be read as saying a voxel sculpt looks right.
 
 Three things worth saying about that table:
 
@@ -533,9 +534,11 @@ What is left:
    SDF renders look like clay. This is now the largest visible gap between what
    claycore produces and what a sculptor expects, and it is the one thing on
    the voxel path that speed cannot fix — a dab's display already fits the
-   frame with 7× to spare. The machinery is mostly present: `field::redistance`
-   builds a narrow band from occupancy and `mesh/surface_nets.h` meshes a field
-   smoothly; what is missing is the bridge, which is what
+   frame with 7× to spare. Tracked in
+   [#108](https://github.com/CyberdyneCorp/ClayCore/issues/108). The machinery
+   is mostly present: `mesh_lattice_nets` already takes a sampler rather than a
+   tape, and `field::redistance` builds a narrow band from a sign field; what
+   is missing is the bridge between them, which is what
    [#90](https://github.com/CyberdyneCorp/ClayCore/issues/90) asks for on
    workflow grounds and which turns out to answer this too.
 2. **The SDF stamp's 1.15× is a tuning problem, not an architecture one** — and
