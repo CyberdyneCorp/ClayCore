@@ -216,3 +216,74 @@ TEST_CASE("writing at minor 8 drops only the colour") {
     CHECK(restored->volume->eval(kernel::cf3(0, 0, 0)) ==
           doctest::Approx(n.volume->eval(kernel::cf3(0, 0, 0))));
 }
+
+TEST_CASE("colour costs one word a sample, and costs nothing when absent") {
+    // The storage claim, asserted rather than asserted-in-prose: RGB8 doubles
+    // a volume where three floats would quadruple it, and an uncoloured volume
+    // has not grown at all.
+    auto dist = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.5f; };
+    auto col = [](kernel::cfloat3) { return kernel::cf3(1, 0.5f, 0.25f); };
+    math::Aabb region{kernel::cf3(-1, -1, -1), kernel::cf3(1, 1, 1)};
+
+    const field::FieldVolume plain = field::FieldVolume::sample(dist, region, 0.04f, 0.12f);
+    const field::FieldVolume tinted =
+        field::FieldVolume::sample_colored(dist, col, region, 0.04f, 0.12f);
+
+    // Same shape: the colour pass does not change what is stored.
+    REQUIRE(plain.sample_count() == tinted.sample_count());
+    REQUIRE(plain.brick_count() == tinted.brick_count());
+
+    // One extra word per stored sample, and not one for an uncoloured volume.
+    CHECK(tinted.blob_floats() == plain.blob_floats() + tinted.sample_count());
+    CHECK(plain.blob_floats() == 14 + plain.blob_floats() - 14);  // unchanged shape
+    CHECK_FALSE(plain.has_color());
+    CHECK(tinted.has_color());
+
+    // And the distances are identical — colour rides alongside, it does not
+    // perturb the field.
+    CHECK(plain.eval(kernel::cf3(0.3f, 0.1f, 0)) ==
+          doctest::Approx(tinted.eval(kernel::cf3(0.3f, 0.1f, 0))));
+}
+
+TEST_CASE("colour is unpacked before it is mixed") {
+    // The regression the gallery caught. Interpolating the PACKED words and
+    // unpacking the result mixes the channels through their own carries: two
+    // colours that share a channel come out with a third that neither has.
+    //
+    // It only shows where neighbouring samples DIFFER, which is why the
+    // deep-inside test above passed with the bug — all eight corners agreed
+    // there, so mixing packed values returned the same packed value.
+    auto dist = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.5f; };
+    // Red and blue meet at x = 0, so a sample straddling it interpolates two
+    // words whose green is zero in both. A packed mix invents green.
+    auto col = [](kernel::cfloat3 p) {
+        return p.x < 0 ? kernel::cf3(1, 0, 0) : kernel::cf3(0, 0, 1);
+    };
+    math::Aabb region{kernel::cf3(-1, -1, -1), kernel::cf3(1, 1, 1)};
+
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("v");
+    scene::Node n;
+    n.prim = scene::Prim::volume();
+    n.volume = std::make_shared<const field::FieldVolume>(
+        field::FieldVolume::sample_colored(dist, col, region, 0.05f, 0.15f));
+    l.sdf->insert(n);
+    const scene::Tape tape = scene::compile_document(doc);
+
+    // Walk across the boundary on the surface, sampling between cells.
+    for (int i = -3; i <= 3; ++i) {
+        const float x = static_cast<float>(i) * 0.017f;  // not a multiple of the cell
+        kernel::cfloat3 p = kernel::cf3(x, 0.0f, 0.48f);
+        float d = 0;
+        kernel::cfloat3 c = kernel::cf3(0, 0, 0);
+        eval::PointQuery q{reinterpret_cast<const float*>(&p), 1, 1e-4f};
+        eval::eval_points_reference(
+            tape, q, eval::PointResults{&d, nullptr, reinterpret_cast<float*>(&c)});
+        CAPTURE(x);
+        // Neither source colour has green, so no mix of them may produce it.
+        CHECK(c.y < 0.15f);
+        // And every channel stays inside what the two sources span.
+        CHECK(c.x <= doctest::Approx(1.0f).epsilon(0.02));
+        CHECK(c.z <= doctest::Approx(1.0f).epsilon(0.02));
+    }
+}

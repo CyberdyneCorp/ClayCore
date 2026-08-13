@@ -515,6 +515,10 @@ enum CProfileType {
 // packed colour is at most 2^24 - 1 and float32 holds every integer to 2^24
 // exactly, so this needs no bit-cast — which matters here, because a bit-cast
 // is spelled differently in every dialect this header compiles as.
+CLAY_FN cfloat3 cmix3(cfloat3 a, cfloat3 b, float t) {
+    return cf3(cmix(a.x, b.x, t), cmix(a.y, b.y, t), cmix(a.z, b.z, t));
+}
+
 CLAY_FN cfloat3 cunpack_color(float packed) {
     float p = cmax(packed, 0.0f);
     float r = cfloor(p * (1.0f / 65536.0f));
@@ -688,15 +692,25 @@ CLAY_FN float ctape_prim_dist(CLAY_UINT_T op, CLAY_FPTR q,
             int color_off = CLAY_INT(CLAY_AT(h, 13));
             if (color_off > 0) {
                 CLAY_FPTR cblock = CLAY_OFF(h, color_off + entry);
-                float k00 = cmix(CLAY_AT(cblock, ((lz)*n + ly) * n + lx),
-                                 CLAY_AT(cblock, ((lz)*n + ly) * n + lx + 1), fx);
-                float k10 = cmix(CLAY_AT(cblock, ((lz)*n + ly + 1) * n + lx),
-                                 CLAY_AT(cblock, ((lz)*n + ly + 1) * n + lx + 1), fx);
-                float k01 = cmix(CLAY_AT(cblock, ((lz + 1) * n + ly) * n + lx),
-                                 CLAY_AT(cblock, ((lz + 1) * n + ly) * n + lx + 1), fx);
-                float k11 = cmix(CLAY_AT(cblock, ((lz + 1) * n + ly + 1) * n + lx),
-                                 CLAY_AT(cblock, ((lz + 1) * n + ly + 1) * n + lx + 1), fx);
-                CLAY_SET(out_color, cunpack_color(cmix(cmix(k00, k10, fy), cmix(k01, k11, fy), fz)));
+                // UNPACK BEFORE MIXING. Interpolating the packed words and
+                // unpacking the result mixes the channels through their own
+                // carries — a green halfway between two blues, and a blue that
+                // is whatever the arithmetic left over. Each corner becomes a
+                // colour first, and the mix is then an ordinary colour mix.
+                cfloat3 q000 = cunpack_color(CLAY_AT(cblock, ((lz)*n + ly) * n + lx));
+                cfloat3 q100 = cunpack_color(CLAY_AT(cblock, ((lz)*n + ly) * n + lx + 1));
+                cfloat3 q010 = cunpack_color(CLAY_AT(cblock, ((lz)*n + ly + 1) * n + lx));
+                cfloat3 q110 = cunpack_color(CLAY_AT(cblock, ((lz)*n + ly + 1) * n + lx + 1));
+                cfloat3 q001 = cunpack_color(CLAY_AT(cblock, ((lz + 1) * n + ly) * n + lx));
+                cfloat3 q101 = cunpack_color(CLAY_AT(cblock, ((lz + 1) * n + ly) * n + lx + 1));
+                cfloat3 q011 = cunpack_color(CLAY_AT(cblock, ((lz + 1) * n + ly + 1) * n + lx));
+                cfloat3 q111 =
+                    cunpack_color(CLAY_AT(cblock, ((lz + 1) * n + ly + 1) * n + lx + 1));
+                cfloat3 k00 = cmix3(q000, q100, fx);
+                cfloat3 k10 = cmix3(q010, q110, fx);
+                cfloat3 k01 = cmix3(q001, q101, fx);
+                cfloat3 k11 = cmix3(q011, q111, fx);
+                CLAY_SET(out_color, cmix3(cmix3(k00, k10, fy), cmix3(k01, k11, fy), fz));
             }
         }
         return ctape_volume_outside(cmix(cmix(c00, c10, fy), cmix(c01, c11, fy), fz), outside);

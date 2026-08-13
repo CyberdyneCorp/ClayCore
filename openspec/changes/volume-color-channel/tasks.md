@@ -53,12 +53,12 @@
 - [x] 5.4 A two-colour layer consolidates to a two-colour volume.
 - [x] 5.5 Paint still overrides a coloured volume.
 - [x] 5.6 Outside the sampled box, the item's colour applies.
-- [ ] 5.7 Memory: a coloured volume is about twice an uncoloured one and an
+- [x] 5.7 Memory: a coloured volume is about twice an uncoloured one and an
       uncoloured one has not grown.
 
 ## 6. Docs
 
-- [ ] 6.1 `docs/RELEASE.md`: the format minor, the tape change, and the
+- [x] 6.1 `docs/RELEASE.md`: the format minor, the tape change, and the
       host-visible recompile, called out rather than buried.
-- [ ] 6.2 The gallery shows a consolidated layer keeping its colours, which is
+- [x] 6.2 The gallery shows a consolidated layer keeping its colours, which is
       the change a user sees first.
