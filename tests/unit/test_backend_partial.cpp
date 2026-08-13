@@ -55,17 +55,24 @@ class PartialBackend : public eval::Backend {
     static eval::Backend* cpu() { return eval::Registry::instance().find("cpu"); }
 };
 
-// Registered once for the whole binary. The registry has no remove(), which is
-// deliberate — nothing in the library removes a backend — so this leans on it
-// being harmless to leave in place: every other suite either names the backend
-// it wants or skips one whose raycast is Unsupported.
-struct Registration {
-    Registration() {
-        if (!eval::Registry::instance().find(kName))
-            eval::Registry::instance().add(std::make_unique<PartialBackend>());
-    }
-};
-const Registration registered;
+// Registered on first use, NOT at static-initialization time.
+//
+// A namespace-scope object doing this ran Registry's constructor before main,
+// which on a Metal build creates an MTLDevice before the process is ready for
+// one: the whole binary segfaulted in 0.02 s, before a single test executed,
+// on macOS only. Registry itself is lazy for this reason and a test has no
+// business making it eager.
+//
+// The registry has no remove(), which is deliberate — nothing in the library
+// removes a backend — so this leans on the double being harmless to leave in
+// place: every other suite either names the backend it wants or skips one
+// whose raycast is Unsupported.
+eval::Backend* partial_backend() {
+    eval::Registry& registry = eval::Registry::instance();
+    if (eval::Backend* existing = registry.find(kName)) return existing;
+    registry.add(std::make_unique<PartialBackend>());
+    return registry.find(kName);
+}
 
 scene::Document sphere_document() {
     scene::Document doc;
@@ -77,6 +84,8 @@ scene::Document sphere_document() {
 }  // namespace
 
 TEST_CASE("a backend missing one pipeline still registers") {
+    REQUIRE(partial_backend() != nullptr);
+
     // The assertion the issue is about: before this change a backend whose
     // raycast pipeline failed was DISCARDED, and clay_list_backends answered
     // exactly what a build with no such backend answers.
@@ -88,6 +97,8 @@ TEST_CASE("a backend missing one pipeline still registers") {
 }
 
 TEST_CASE("a partial backend reports the operation it cannot run") {
+    REQUIRE(partial_backend() != nullptr);
+
     int32_t supported = -1;
     REQUIRE(clay_backend_supports(kName, CLAY_BACKEND_OP_EVAL_POINTS, &supported) == CLAY_OK);
     CHECK(supported == 1);
@@ -107,7 +118,7 @@ TEST_CASE("the operations a partial backend kept still agree with the reference"
 
     float mine[count] = {0, 0, 0}, reference[count] = {0, 0, 0};
     eval::PointQuery q{points, count, 1e-4f};
-    eval::Backend* partial = eval::Registry::instance().find(kName);
+    eval::Backend* partial = partial_backend();
     REQUIRE(partial != nullptr);
     REQUIRE(partial->eval_points(tape, q, eval::PointResults{mine, nullptr, nullptr}) ==
             eval::Status::Ok);
@@ -123,7 +134,7 @@ TEST_CASE("the operation it cannot run refuses rather than failing") {
     float ray[6] = {0, 0, -5, 0, 0, 1};
     eval::RayQuery q{ray, 1, 0.0f, 1e6f, 1e-4f, 256};
     eval::RayHit hit{};
-    eval::Backend* partial = eval::Registry::instance().find(kName);
+    eval::Backend* partial = partial_backend();
     REQUIRE(partial != nullptr);
     CHECK(partial->raycast(tape, q, &hit) == eval::Status::Unsupported);
 }
@@ -152,6 +163,8 @@ TEST_CASE("clay_raycast is unaffected by a partial backend") {
 }
 
 TEST_CASE("backend queries refuse what they cannot answer") {
+    REQUIRE(partial_backend() != nullptr);
+
     int32_t supported = -1;
     CHECK(clay_backend_supports("no-such-backend", CLAY_BACKEND_OP_RAYCAST, &supported) ==
           CLAY_ERROR_NOT_FOUND);
