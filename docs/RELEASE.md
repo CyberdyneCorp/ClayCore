@@ -202,8 +202,75 @@ forward-refuse).
    the same loss minors 1, 2 and 4 carry. The format notes at the top of
    `include/clay/io/clayspace.h` record it.
 
-   **Unreleased is additive: one new symbol, no signature changed.**
-   `mesh-brick-cache-lod` (#93) adds `clay_brick_cache_mesh_lod`, which is
+   **0.30.0 is additive: nine new symbols and one new struct, no signature
+   changed, nothing removed, and no existing struct grown.** Code compiled
+   against 0.29.1 keeps linking and behaving as it did; the minor bump is
+   SemVer for new surface, not a warning.
+
+   - **A layer's nodes enumerate** (#91): `clay_layer_node_count` /
+     `clay_layer_node_at`, the node-level sibling of the layer pair 0.29.0
+     added. `clay_layer_children` answers for a *group*, and a layer's root is
+     not a group, so before this the only way to find a placed armature was to
+     probe node ids upward and tolerate a run of misses — ids are not dense and
+     nothing bounds a gap. Top level only, deliberately: the whole tree is
+     walked by pairing these with `clay_layer_node_prim` and
+     `clay_layer_children`, which keeps the nesting a host needs to draw an
+     outliner.
+   - **A layer can be renamed** (#92): `clay_document_set_layer_name`, the
+     setter for the getter 0.29.0 added. It is a command, so it is one undo
+     step. Duplicate names are permitted, because all three create calls
+     already permit them and refusing on rename alone would buy a uniqueness
+     the document never had; `clay_document_voxel_layer` answers with the first
+     layer in stack order, and the header now says so. An empty name is
+     refused — a cleared text field should not destroy the name it replaces.
+   - **Per-node armature signs** (#99): `clay_item_set_armature_signs` and
+     `clay_layer_armature_signs`, so a ZSphere rig can carry negative nodes.
+   - **The voxel display path is incremental** (#86 part 2):
+     `clay_voxel_take_dirty_chunks`, `clay_voxel_mesh_chunks` and the
+     `clay_voxel_chunk_mesh_range` array element — the voxel side of the
+     `mark_dirty → take_dirty → mesh` shape the brick cache already had.
+     `clay_voxel_mesh` keeps meaning "mesh the whole grid", keeps its
+     signature, and keeps its output byte-identical, so it remains the export
+     path with the tighter merge.
+
+   **`.clayspace` moves 1.7 → 1.8**, carrying the per-node armature signs. The
+   major is unchanged, so nothing is refused on version grounds: a reader
+   written against 1.7 opens a 1.8 document and loses the signs if it saves it
+   again, the same loss the earlier minors carry.
+
+   **0.30.0 also gets much faster at showing a voxel sculpt, without changing
+   what it shows.** Two changes, both gated on byte-identity rather than on
+   inspection, figures from one Linux desktop measured back to back and
+   therefore ratios rather than device numbers (`docs/RELEASE.md` forbids
+   comparing them against the device baseline):
+
+   - **The mesh sweep stops probing the chunk map per cell** (#86 part 1):
+     4.12 → 0.157 ms per occupied chunk, ~26×, and a realistic sculpt at the
+     device fixture's cell size 396 → 17.6 ms. Pure refactoring behind an
+     unchanged result: an independent check of 157 fixtures — negative
+     coordinates, every chunk seam, non-active levels, chunks erased to zero
+     occupancy, a saturated palette, random soaks — moved not one byte.
+   - **A dab re-meshes only what it dirtied** (#86 part 2): 0.65 ms against
+     23.3 ms whole, ~36×, which puts the voxel path in the same order as the
+     brick cache's 0.64 ms against 22.6 ms. It costs +3.7% triangles at chunk
+     seams, and dirty tracking costs the write path ~16% on a fill-heavy run
+     (+0.0012 ms on a size-8 stamp). Per-chunk meshing cannot crack the
+     surface — greedy quads are axis-aligned and exact, so clamping the merge
+     to a chunk boundary splits a quad — and a test proves it by decomposing
+     both meshes into unit faces rather than comparing triangle counts.
+
+   **The device gate now measures the display path and the level stack** (#86
+   part 3, #89): five cases — whole-grid meshing, incremental meshing, a
+   subdivide, a verb with a level under it, and a verb at radius 32 where every
+   other voxel case is radius 8. Their budgets are hand-set ceilings carrying
+   the PROVISIONAL note and **must be re-seeded with `--update` on the
+   reference device**; until that run they are ceilings, not results. This
+   closes the gap that let a ~130× display cost sit beside edit verbs
+   reporting two orders of magnitude of headroom.
+
+   The `clay_brick_cache_mesh_lod` note below is part of this release too.
+
+   **`mesh-brick-cache-lod` (#93) adds `clay_brick_cache_mesh_lod`**, which is
    `clay_brick_cache_mesh` plus an `int32_t lod` before the key list — the
    position `lod` holds in `clay_brick_cache_read_bricks`. The existing
    entry point keeps its signature and forwards at lod 0 through the SAME
