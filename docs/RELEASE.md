@@ -202,6 +202,30 @@ forward-refuse).
    the same loss minors 1, 2 and 4 carry. The format notes at the top of
    `include/clay/io/clayspace.h` record it.
 
+   **Unreleased is additive: two new symbols and one new enum.**
+   `register-a-partial-backend` (#63, second half) adds
+   `clay_backend_supports` and `clay_backend_diagnostic`, and the
+   `clay_backend_op` enum they take. Nothing existing changes signature or
+   behaviour.
+
+   What DOES change is which backends register. A GPU backend now registers
+   when its point and grid pipelines build, rather than requiring every
+   pipeline it could provide; an operation whose pipeline is missing reports
+   `false` from `caps()` and returns `Status::Unsupported`. On Apple
+   Paravirtual GPUs — macOS VMs, which is what GitHub's macOS runners are —
+   that is the difference between a Metal backend and no Metal backend at all.
+
+   This is a behaviour change on exactly one axis and it is worth stating
+   plainly: on such a machine `clay_list_backends` now answers `cpu,metal`
+   where it answered `cpu`. A host that treated the presence of `metal` as
+   "everything is available" and called `Backend::raycast` directly would now
+   get `Unsupported` where it previously got a backend it could not find at
+   all — a refusal it must already handle for `mesh()`, and one the parity
+   suite has skipped on since before this change. No C ABI entry point is
+   affected: `clay_raycast` and `clay_raycast_many` ask the registry for `cpu`
+   by name, which is why the old rule was discarding a working backend over a
+   kernel nothing could call.
+
    **0.30.0 is additive: nine new symbols and one new struct, no signature
    changed, nothing removed, and no existing struct grown.** Code compiled
    against 0.29.1 keeps linking and behaving as it did; the minor bump is

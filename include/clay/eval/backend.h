@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -27,7 +28,50 @@ struct BackendCaps {
     bool device_meshing = false;
     bool fp16_storage = false;
     std::size_t max_tape_instrs = 0;  // 0 = unlimited
+
+    // What this backend can actually run. Default true, so a backend that
+    // provides everything says nothing: these exist for the backend that
+    // provides MOST of it.
+    //
+    // A GPU runtime builds one pipeline per kernel and they can fail
+    // independently — on Apple Paravirtual GPUs `clay_raycast` would not
+    // compile while the evaluation kernels did (#63). Requiring all of them to
+    // register threw away a backend that could accelerate everything the C ABI
+    // actually routes to it, and left `clay_list_backends` answering `cpu`,
+    // which is what a build with no Metal at all answers.
+    //
+    // An operation reported false here returns Status::Unsupported when
+    // called, which is the refusal a caller already handles for mesh().
+    // Batched operations are deliberately absent: the base class loops over
+    // the single-item form with identical results, so an unavailable batch
+    // kernel costs submission overhead rather than capability.
+    bool eval_points = true;
+    bool eval_grid = true;
+    bool raycast = true;
 };
+
+// Why a compiled-in backend is not in the registry, or is in it without all of
+// its operations. Empty for a backend that registered with everything working.
+//
+// This is the half of the registry a host cannot otherwise see. `find("metal")`
+// returning nullptr means "no Metal here" and says nothing about whether this
+// build HAS Metal, so a host on a machine whose GPU was rejected cannot tell
+// that from a CPU-only build, and cannot report it to anyone who could fix it.
+//
+// Recorded by the backend itself while it initializes, so the runtime's own
+// words survive — a pipeline that failed to compile contributes the compiler's
+// log, which is the only text that identifies the cause.
+void report_backend_unavailable(std::string_view name, std::string why);
+
+// The recorded reason, or an empty string when there is none. Forces registry
+// construction first: before anything has tried to register, every backend has
+// an empty reason for the uninteresting reason that nobody has looked.
+std::string backend_diagnostic(std::string_view name);
+
+// Whether this build contains the named backend at all, however it fared at
+// runtime. "Not compiled in" and "compiled in and rejected" are different
+// answers to a host deciding whether to file a bug or buy a machine.
+bool backend_compiled_in(std::string_view name);
 
 // Batch field query. points_xyz is count*3 floats (packed xyz). Outputs are
 // caller-allocated; gradients/colors may be null when not wanted.

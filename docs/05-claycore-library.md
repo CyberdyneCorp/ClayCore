@@ -181,6 +181,39 @@ classification, quantization and the memory budget are host code over host
 memory, and that is where a submitted brick becomes a stored brick. A host on
 the device path owns the conversion, and the cache's guarantees are not in play.
 
+**A backend registers when its core operations work, not when all of them do**
+(#63). A GPU runtime builds one pipeline per kernel and they fail
+independently: on Apple Paravirtual GPUs — which is what macOS VMs and
+GitHub's macOS runners are — `clay_raycast` would not compile while the
+evaluation kernels did. Requiring all of them threw the whole backend away and
+left `clay_list_backends` answering `cpu`, which is exactly what a build with
+no Metal compiled in answers. Three release attempts were spent on that.
+
+So point and grid evaluation are the bar. An operation whose pipeline is
+missing reports `false` from `caps()` and returns `Status::Unsupported` when
+called — the refusal a caller already handles for `mesh()` — and the backend
+keeps accelerating everything else. Batched operations are deliberately not
+part of the bar: the base class loops over the single-item form with identical
+values, so an unavailable batch kernel costs submission overhead rather than
+capability.
+
+Two calls make this visible to a host, because a registry that answers `cpu`
+for both "no GPU in this build" and "this machine's GPU was rejected" gives a
+host no way to tell a missing feature from a broken one:
+
+- `clay_backend_supports(name, op, &supported)` — per operation. Branch on
+  this.
+- `clay_backend_diagnostic(name, buffer, &size)` — why a backend is missing or
+  partial, carrying the runtime's own words: a pipeline that failed to compile
+  contributes the compiler's log verbatim, since that is the text that
+  identifies the cause and a host filing a bug cannot recover what we already
+  discarded. Diagnostic prose for a human, not a parseable status.
+
+A partial backend keeps its ordinary name. A host asks for `metal` to get
+acceleration, and per-operation refusal is how this interface already says "not
+from me"; a second name would force every host to match a string it has never
+seen, which fails harder than the `Unsupported` it must already handle.
+
 ## 6. Scene model & evaluation semantics (`clay::scene`)
 
 The document tree the app and specs already define, owned here so every consumer agrees:

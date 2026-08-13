@@ -66,7 +66,17 @@ class MetalBackend final : public Backend {
     }
 
     const char* name() const override { return "metal"; }
-    BackendCaps caps() const override { return BackendCaps{false, true, 0}; }
+    // Pipelines fail independently, so what this backend can do is a fact about
+    // this device rather than about the code — on Apple Paravirtual GPUs the
+    // raycast kernel would not compile while the evaluation kernels did (#63).
+    // Registration needs the two core pipelines; the rest is reported here.
+    BackendCaps caps() const override {
+        BackendCaps c{false, true, 0};
+        c.eval_points = pso_points_ != nullptr;
+        c.eval_grid = pso_grid_ != nullptr;
+        c.raycast = pso_rays_ != nullptr;
+        return c;
+    }
 
     Status eval_points(const scene::Tape& tape, const PointQuery& q,
                        const PointResults& out) override {
@@ -136,6 +146,12 @@ class MetalBackend final : public Backend {
     // than on the CPU at every batch size (issue #64).
     Status eval_grid_batch(const GridBatchQuery& q, float* out_values,
                            float* out_colors_rgb) override {
+        // A batch kernel that would not build costs submission overhead, not
+        // capability: the base class loops over eval_grid for identical
+        // values. So this falls back rather than refusing, and caps() does not
+        // report a batch operation at all.
+        if (!pso_grid_batch_)
+            return Backend::eval_grid_batch(q, out_values, out_colors_rgb);
         if (q.count == 0) return Status::Ok;
         if (!q.tapes || !q.origins || !out_values || q.nx <= 0 || q.ny <= 0 || q.nz <= 0)
             return Status::InvalidInput;
@@ -264,6 +280,11 @@ class MetalBackend final : public Backend {
     }
 
     Status raycast(const scene::Tape& tape, const RayQuery& q, RayHit* hits) override {
+        // The refusal a caller already handles for mesh(), rather than a
+        // backend that is absent entirely. Checked before the argument
+        // validation so a device that cannot raycast says so for every call,
+        // not only for well-formed ones.
+        if (!pso_rays_) return Status::Unsupported;
         if (!q.rays || !hits) return Status::InvalidInput;
         if (q.count == 0) return Status::Ok;
         static_assert(sizeof(RayHit) == sizeof(ClayRayHitGpu));
@@ -338,6 +359,17 @@ class MetalBackend final : public Backend {
             detail = err->localizedDescription()->utf8String();
         std::fprintf(stderr, "claycore: the Metal backend will not register — %s: %s\n", what,
                      detail);
+        // And into the registry, so it reaches a HOST rather than only whoever
+        // is watching stderr. A host on a paravirtualised machine sees
+        // clay_list_backends answer "cpu" — the same answer a build without
+        // Metal gives — and had no way to tell those apart or to report this
+        // to anyone who could fix it. The compiler's own log goes in whole:
+        // it is the text that identifies the cause, and summarising it here
+        // would discard the thing worth forwarding.
+        std::string full = std::string(what) + ": " + detail;
+        if (err && err->description())
+            full += std::string("\nfull Metal error: ") + err->description()->utf8String();
+        report_backend_unavailable("metal", std::move(full));
         // localizedDescription for a pipeline failure is the useless half:
         // "Compilation failed" and nothing about WHAT failed. The compiler's
         // own log is in the error's userInfo, and description() prints the
@@ -364,7 +396,35 @@ class MetalBackend final : public Backend {
         pso_grid_batch_ = make_pso(lib, "clay_eval_grid_batch");
         pso_rays_ = make_pso(lib, "clay_raycast");
         lib->release();
-        return pso_points_ && pso_grid_ && pso_grid_batch_ && pso_rays_;
+
+        // The CORE pipelines, and only those. A device that evaluates points
+        // and grids accelerates everything the C ABI routes here — both
+        // clay_raycast and clay_raycast_many ask the registry for "cpu"
+        // explicitly — so requiring every pipeline threw a working backend
+        // away over a kernel no ABI entry point can call (#63).
+        //
+        // Requiring all four was also getting wider rather than narrower:
+        // 0.29.1's batched refill added pso_grid_batch_ to the conjunction,
+        // which is the "next kernel that fails on any device" the issue
+        // predicted.
+        if (!pso_points_ || !pso_grid_) return false;
+
+        // Registered, but say what is missing. A partial backend that reported
+        // nothing would be the same silence one level down.
+        if (!pso_rays_)
+            report_backend_unavailable(
+                "metal",
+                "registered WITHOUT raycast: no compute pipeline for clay_raycast. "
+                "Point and grid evaluation run on the GPU; Backend::raycast returns "
+                "Unsupported and clay_raycast is unaffected, since it evaluates on the "
+                "CPU regardless. See the full Metal error above for the compiler's log.");
+        else if (!pso_grid_batch_)
+            report_backend_unavailable(
+                "metal",
+                "registered WITHOUT the batched grid kernel: no compute pipeline for "
+                "clay_eval_grid_batch. Values are identical — the batch falls back to a "
+                "loop over eval_grid — but a brick refill pays one dispatch per lattice.");
+        return true;
     }
 
     MTL::ComputePipelineState* make_pso(MTL::Library* lib, const char* fn_name) {

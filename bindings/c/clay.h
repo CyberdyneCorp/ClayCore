@@ -901,6 +901,53 @@ clay_result clay_layer_node_at(const clay_document* doc, clay_layer_id layer, si
  * *size; call again with an adequate buffer to fill it. */
 clay_result clay_list_backends(char* buffer, size_t* size);
 
+/* One operation a backend either runs or does not. A GPU runtime builds one
+ * pipeline per kernel and they fail independently, so what a backend can do is
+ * a fact about the DEVICE rather than about this library — on Apple
+ * Paravirtual GPUs the raycast kernel would not compile while the evaluation
+ * kernels did.
+ *
+ * Batched forms are deliberately not here. A backend whose batch kernel is
+ * unavailable loops over the single-item one and returns identical values, so
+ * the batch is a speed question, not a capability. */
+typedef enum clay_backend_op {
+    CLAY_BACKEND_OP_EVAL_POINTS = 0,
+    CLAY_BACKEND_OP_EVAL_GRID = 1,
+    CLAY_BACKEND_OP_RAYCAST = 2,
+} clay_backend_op;
+
+/* Whether a REGISTERED backend can run one operation. *out_supported is 1 or 0.
+ *
+ * A backend that is not registered is CLAY_ERROR_NOT_FOUND rather than
+ * "supports nothing": a backend that cannot do the thing and a backend that is
+ * not there are different answers, and only the first is worth falling back
+ * from. An unknown op is CLAY_ERROR_INVALID_ARGUMENT.
+ *
+ * Answerable at any time — no document, no device, no prior call. A host picks
+ * a backend BEFORE it has built anything. */
+clay_result clay_backend_supports(const char* backend, clay_backend_op op,
+                                  int32_t* out_supported);
+
+/* Why a backend is missing or partial, by the size-query pattern above.
+ *
+ * This is the call that makes clay_list_backends readable. Answering "cpu"
+ * means either "no GPU backend is compiled into this build" or "one is, and
+ * this machine's was discarded" — two states a host must act on differently
+ * and, until this call, could not tell apart. It answers for a backend that is
+ * NOT registered, which is its main use.
+ *
+ * The text is the runtime's own where there is any: a pipeline that failed to
+ * compile contributes the compiler's log verbatim, because that is what
+ * identifies the cause and a host filing a bug cannot recover what we already
+ * discarded. It is diagnostic prose for a human, not a parseable status —
+ * do not branch on it; branch on clay_backend_supports.
+ *
+ * An empty string is a successful answer meaning "nothing to report": either
+ * the backend registered with every operation available, or this build does
+ * not contain it. Those two are distinguished by the text itself — a backend
+ * this build never compiled in says so. */
+clay_result clay_backend_diagnostic(const char* backend, char* buffer, size_t* size);
+
 /* Batch field evaluation. points_xyz is count*3 floats; out_distances is
  * count floats; out_colors_rgb (count*3) may be NULL. backend NULL = "cpu". */
 clay_result clay_eval_points(const clay_document* doc, const char* backend,
