@@ -34,6 +34,25 @@ numbers and must never be compared against this baseline.
 Every p95 below is **the worst point of the 10/100/1000-stamp document axis**,
 so it is the number at the biggest document measured, not the average.
 
+**Two axes, not one.** Most cases run 10/100/1000 stamps — a document-size
+axis. The session cases (`stroke_build`, `stroke_carve`, `session_*`) run 1..8
+*accumulating strokes* instead, so their worst point is stroke 8, not a
+thousand-stamp document. Reading one as the other overstates a stroke brush and
+understates a stamp: `stroke_build`'s 0.85 ms is what the eighth stroke of a
+gesture costs, not what a dab costs.
+
+**A brush is "online" only if BOTH halves fit.** A dab a sculptor can see while
+the stroke is still moving has to pay for the edit *and* for showing it:
+
+```
+finger moves → dab lands (EDIT) → sculptor sees it (DISPLAY) → next frame
+```
+
+Until #86 part 2 this document measured the first half only, which is how the
+voxel verbs could report two orders of magnitude of headroom while a sculpt
+took half a second to appear. The table below is still per-verb edit cost;
+[which brushes are online](#which-brushes-are-online) puts the two together.
+
 ## The inventory
 
 A map onto ZBrush and Nomad Sculpt, not a claim of parity — the mechanism
@@ -96,7 +115,9 @@ progress UI; re-measure on device before relaxing either. See
 ## What already fits
 
 Every `interactive` case except the SDF stamp is **two to three orders of
-magnitude inside the 4.17 ms share**:
+magnitude inside the 4.17 ms share**. These are **edit** costs — what the dab
+does to the document, not what showing it costs; see
+[which brushes are online](#which-brushes-are-online) for the pair:
 
 | case | p95 (ms) | % of the share | growth |
 |---|---|---|---|
@@ -120,38 +141,113 @@ voxel is **flat or negative** in document size. `session_voxel_smooth` — the
 same brush over 8 accumulating strokes — runs 0.0123 → 0.0100 ms from stroke 1
 to stroke 8. It gets marginally faster as the form settles.
 
+## Which brushes are online
+
+"Online" in the ZBrush sense: the stroke shows its result while the finger is
+still moving. That needs edit + display inside 4.17 ms **repeatedly, without
+degrading as the sculpt grows** — the last clause is what separates the tiers.
+
+### Tier 1 — online, and flat in document size
+
+Every voxel edit verb. At the worst point of the axis they sit between 0.05%
+and 0.65% of the engine's share, and the growth column is the reason to trust
+that over a long session:
+
+| verb | 10 stamps | 1000 stamps | growth |
+|---|---|---|---|
+| `voxel_stamp` | 0.0037 | 0.0021 | `N^-0.12` |
+| `mask_paint` | 0.0058 | 0.0041 | `N^-0.07` |
+| `voxel_smooth` | 0.0094 | 0.0114 | `N^+0.04` |
+| `voxel_grab` | 0.0273 | 0.0259 | `N^-0.01` |
+
+Several get **faster** as the document grows. Nothing on this path is a latency
+question; the display half was the whole problem, and #86 part 2 answered it.
+
+### Tier 2 — online early, and it depends on the backend
+
+The SDF stamp is the case where the worst-point column hides the story, because
+every dab appends an item and recompiles the tape:
+
+| backend | 10 | 100 | 1000 | growth |
+|---|---|---|---|---|
+| `sdf_stamp_cpu` | 0.082 | 0.480 | **4.81** | `N^+0.88` |
+| `sdf_stamp_metal` | 0.429 | 0.450 | 1.774 | `N^+0.31` |
+| `sdf_stamp_bricks` | 0.290 | 0.885 | 5.695 | `N^+0.65` |
+
+Two crossovers fall out of those fits, and both are decisions a host has to
+make rather than limits the engine imposes:
+
+- **CPU stops fitting the frame at ~850 stamps.** Below that the SDF stamp is
+  online on the CPU; above it, it is not.
+- **Metal overtakes the CPU at ~180 stamps.** Below that Metal is *slower*
+  (0.43 ms against 0.08 ms at ten stamps) because dispatch overhead dominates
+  before the work amortises it.
+
+So SDF stamping is online for a whole session **if the host selects the backend
+by document size**, and stops being online around 850 stamps if it picks the
+CPU and never revisits that. A host that picks Metal unconditionally is slower
+through the entire blockout phase instead.
+
+### Tier 3 — gesture-scale, not per-dab
+
+`stroke_build` (0.187 ms at stroke 1 → 0.852 ms at stroke 8, `N^+0.73`),
+`stroke_carve`, `snakehook_tendrils`, `noise_detail`, `sdf_move`,
+`magnify_pinch`, `cut_passes`. These are complete gestures a host schedules,
+and their axis is strokes. Nothing here says a dab cannot be shown live — it
+says nobody has measured one, because the gesture is what was instrumented.
+
+### Tier 4 — the artist waits, correctly
+
+`sdf_relax` (0.74), `voxel_fill_cavities` (0.62), `sdf_flatten` (6.05),
+`volume_hpolish` (111), `sdf_consolidate` (1538), `mask_extrude` (3095). The
+first two would numerically fit a frame; they are `operation` because that is
+what they are, and a host should give them progress UI rather than a frame.
+
 ## What does not fit, and by how much
 
 Only three things miss, and one of them is not in the gate at all.
 
 | what | measured | target | **acceleration needed** |
 |---|---|---|---|
-| `sdf_stamp_cpu` | 4.81 ms | 4.17 ms | **1.2×** |
-| `sdf_stamp_bricks` | 5.70 ms | 4.17 ms | **1.4×** |
-| voxel display (`clay_voxel_mesh`) | ~25 ms † | 4.17 ms | **~6×** |
+| `sdf_stamp_cpu` @ 1000 stamps | 4.81 ms | 4.17 ms | **1.15×** |
+| `sdf_stamp_bricks` @ 1000 stamps | 5.70 ms | 4.17 ms | **1.37×** |
+| radius-32 voxel verb | ~2.4 ms † | 4.17 ms | fits — but 58% of the share |
+| voxel display on device | **unmeasured** | 4.17 ms | unknown |
 
-† Desktop measurement at cell 0.02 on a ~1.07M-cell sculpt — see the caveat
-below. This row was ~551 ms and ~130× until the mask build stopped probing the
-chunk map once per cell (#86 part 1, a 22× ratio measured back to back on one
-machine and applied to the 551 ms figure, which was taken on the same one).
+† Extrapolated from the radius table below, not measured. A case now exists
+(`voxel_smooth_r32`); this row is what it is expected to report.
 
-There are now device cases for both halves of this row — `voxel_mesh_whole` and
-`voxel_mesh_dirty` — so the next gate run replaces this desktop number with a
-device one. Until it does, the ~6× stands on a measurement `docs/RELEASE.md`
-forbids comparing against the device baseline, which is the reason the cases
-exist rather than a reason to trust the figure. What #86 part 2 changed is
-which number matters: a dab now re-meshes only the chunks it dirtied, so the
-frame pays `voxel_mesh_dirty` and the whole-grid sweep is the export path.
+**Nothing is an order of magnitude out any more.** The row that was is gone:
+voxel display was ~551 ms and ~130× at 0.29.0, ~22 ms and ~6× after #86 part 1
+hoisted the chunk lookup, and is no longer a whole-grid cost at all after part
+2 — a dab re-meshes the chunks it dirtied, measured at **0.65 ms against 23.3
+ms** for the whole grid on the same desktop. The whole-grid sweep did not get
+faster; it stopped being on the frame path and became the export path, where
+it keeps the tighter merge.
+
+That leaves display **unmeasured rather than slow**, which is a different
+problem and the reason `voxel_mesh_whole` and `voxel_mesh_dirty` now exist as
+device cases. Every display figure in this document is a Linux desktop number,
+and [RELEASE.md](RELEASE.md#reading-a-result) forbids comparing those against
+the device baseline. Do not add 0.012 ms of device edit to 0.65 ms of desktop
+display and call the result a frame budget — the honest statement today is
+*edit is measured on device and tiny; display is measured on desktop and fits
+with room; nobody has measured the pair on the iPad.*
 
 Three things worth saying about that table:
 
-**The SDF stamp is a 1.2× problem, not an order-of-magnitude one.** Its budget
-in the baseline is explicitly a regression ceiling rather than an endorsement,
-and `check_device_bench.py` reprints the breach on every run so writing it down
-does not retire it. `sdf_stamp_metal` already fits at 1.77 ms — but Metal *loses*
-to the CPU at ten stamps (0.44 ms vs 0.08 ms p95) because dispatch overhead
-dominates until the work amortises it. Select by document size; a host that
-picks Metal unconditionally is slower through the whole blockout phase.
+**The SDF stamp is a 1.15× problem, not an order-of-magnitude one — and only at
+the far end of the axis.** It is 0.082 ms at ten stamps and 4.81 ms at a
+thousand, growing `N^0.88`, so it fits comfortably for most of a session and
+crosses the frame share at **~850 stamps**. Its budget in the baseline is
+explicitly a regression ceiling rather than an endorsement, and
+`check_device_bench.py` reprints the breach on every run so writing it down
+does not retire it. `sdf_stamp_metal` fits everywhere at 1.77 ms — but Metal
+*loses* to the CPU below **~180 stamps** (0.43 ms against 0.08 ms at ten)
+because dispatch overhead dominates until the work amortises it. Select by
+document size; a host that picks Metal unconditionally is slower through the
+whole blockout phase, and one that picks the CPU and never revisits it stops
+being interactive at ~850.
 
 **The incremental path is not the cheap one.** Driving the brick cache the way a
 host does — dirty, drain, evaluate, submit — costs *more* than re-evaluating the
@@ -159,10 +255,13 @@ whole working volume at these sizes (5.70 ms against 4.81 ms at 1000 stamps).
 Bricks refreshed per stamp is constant at ~13 across the axis, so the cost is the
 culled tape compiled per brick, not the number of bricks.
 
-**The display path is still the largest gap**, though it is now ~6× rather than
-~130×. It is tracked in
-[#86](https://github.com/CyberdyneCorp/ClayCore/issues/86); part 1 has landed
-and part 2, incremental re-meshing, has not.
+**The display path is no longer a gap in cost — it is a gap in evidence.**
+[#86](https://github.com/CyberdyneCorp/ClayCore/issues/86) parts 1, 2 and 3
+have all landed: the mask build stopped probing the chunk map per cell, a dab
+re-meshes only what it dirtied, and device cases exist for both. What is left
+is the run that turns the desktop ratios below into device numbers. Until then
+the frame's display cost on the reference iPad is unknown, and an unknown is
+what the gate is for.
 
 ## The unmeasured costs
 
@@ -225,12 +324,49 @@ from; the ratio is what transfers between them, not the absolute.
 `BM_VoxelMeshSparse64Chunks` so `tools/check_bench.py` gates the per-cell lookup
 coming back.
 
-**A ~138-chunk sculpt still costs ~22 ms**, which is five frames' worth of the
-4.17 ms engine share, so part 2 — dirty-chunk tracking and a regional mesh — is
-still needed for interactive display rather than being an optimisation. Until it
-lands, the two workarounds are **meshing a coarser level** (measured ~90×
-between level 0 at cell 0.08 and level 3 at cell 0.01; edits propagate across
-levels, so the coarse level stays in sync for free) and **not meshing at all** —
+**A ~138-chunk sculpt still costs ~22 ms whole**, five frames' worth of the
+engine share — which is why part 1 alone was not enough and part 2 went ahead.
+
+### Meshing only what changed
+
+Part 2 gave the grid the vocabulary the brick cache already had: a dirty set
+fed by `write_cell`, `clay_voxel_take_dirty_chunks` to drain it, and
+`clay_voxel_mesh_chunks` to mesh a named set with a per-key range so a host
+patches GPU sub-ranges instead of rebuilding the buffer. On the same desktop
+blob at cell 0.02 (81 occupied chunks):
+
+| what a dab costs | ms | against a whole re-mesh |
+|---|---|---|
+| `set_brush` + display of what it dirtied | 0.65 | 23.3 ms → **36×** |
+| `sculpt_smooth` + display | 0.67 | **35×** |
+| `erase_brush` + display | 0.68 | **34×** |
+
+A size-8 dab dirties **2.2 of 81 chunks**. That puts the voxel path in the same
+order as the SDF side's brick cache, which re-meshes a dab's 8 bricks in 0.64 ms
+against 22.6 ms for all 232 — the two representations finally cost the same
+kind of money to display.
+
+The costs, measured rather than assumed:
+
+- **+3.7% triangles** at chunk seams (62,554 → 64,852 on that blob), because
+  clamping the greedy merge to a chunk boundary splits quads. It cannot crack
+  the surface — the quads are axis-aligned and exact, so a split is more,
+  smaller quads over the identical surface — and a test proves it by
+  decomposing both meshes into unit faces rather than comparing counts.
+- **Dirty tracking is charged to the write path**: +0.8% on `rasterize_tape`
+  (302 → 305 ms for 974K cells, where tape evaluation dominates) but **+16% on
+  a pure cell-write path** (`fill_box` over 1M cells, 21.5 → 25.0 ms) and the
+  same +16% on a size-8 stamp (0.0074 → 0.0086 ms, i.e. +0.0012 ms, 0.03% of
+  the frame share). Quote the fill figure, not the rasterize one — the latter
+  hides the cost behind work that dominates it.
+
+`clay_voxel_mesh` keeps meaning "mesh the whole grid" and keeps its output
+byte-identical, so export keeps the tighter merge.
+
+Two workarounds predate this and are no longer the answer for display, though
+both remain useful: **meshing a coarser level** (~90× between level 0 at cell
+0.08 and level 3 at cell 0.01; edits propagate across levels, so the coarse
+level stays in sync for free) and **not meshing at all** —
 `clay_voxel_raycast` does a grid DDA, so a host can trace the voxels directly.
 
 ## Coverage: every brush has a test and a picture
@@ -299,32 +435,52 @@ Everything below is a **missing latency case**, not a missing test or render.
 | Move Topological | **exempt on the record** — reachable only on a volume item, and `layer_move_surface` is the verb a host drives for Move |
 | `snakehook` (the resolver) | **exempt on the record** — no C entry point; what reaches the ABI is the tapered stroke chain it resolves into, measured by `sdf_stamp` |
 | `voxel_mask_extrude` | **exempt on the record** — shares the pocket-fill walk with the measured SDF path |
-| Tube | **unrecorded gap** |
-| Trim Curve | **unrecorded gap** |
-| Rotate / pose | **unrecorded gap** |
-| ZSpheres / armature | **unrecorded gap** |
-| voxel meshing (display) | **unrecorded gap** — [#86](https://github.com/CyberdyneCorp/ClayCore/issues/86) |
-| large-radius verbs | **unrecorded gap** — the axis is document size, never brush size |
+| `voxel_drop_level` | **exempt on the record** — the inverse of the measured `voxel_add_level`; it frees one level's detail map and writes no cells |
+| Tube, Trim Curve, Rotate/pose, ZSpheres | **case added, awaiting a device run** |
+| voxel meshing (display) | **case added, awaiting a device run** — `voxel_mesh_whole`, `voxel_mesh_dirty` |
+| large-radius verbs | **case added, awaiting a device run** — `voxel_smooth_r32` |
+| the level stack | **case added, awaiting a device run** — `voxel_add_level`, `voxel_smooth_l2` |
 
-The four unrecorded brush gaps share one cause: `VERB_PATTERNS` in
-`tools/check_device_coverage.py` is a named set of patterns, and it does not
-include `clay_tube_create`, `clay_item_add_deformer`, `clay_layer_armature_edit`
-or the cut-shape constructors. The checker is working exactly as written — the
-pattern list is what needs extending. Doing so will fail the coverage gate until
-cases exist, which is the intended order.
+**Every brush in the inventory now has a case or a recorded exemption.** That
+was not true at 0.29.0: `VERB_PATTERNS` in `tools/check_device_coverage.py` is
+a named set of patterns rather than "every `clay_` function", so a verb it did
+not name was invisible to the coverage gate — which is how tube, Trim Curve,
+pose, armature, the meshing entry points and the level stack were all missing
+without anything reporting them missing. The list now names
+`clay_tube_create`, the cut-shape constructors, `clay_layer_armature_edit`,
+`clay_voxel_mesh(_chunks)?`, `clay_voxel_take_dirty_chunks` and
+`clay_voxel_(add|drop)_level`. Extending it failed the gate until the cases
+existed, which was the intended order.
+
+What remains is not coverage but **measurement**: nine cases carry hand-set
+PROVISIONAL budgets and have never run on the reference device. Until that run
+they are ceilings, not results.
 
 ## What to do, in order
 
-1. **Land [#86](https://github.com/CyberdyneCorp/ClayCore/issues/86)** — the
-   ~130× display gap is the only order-of-magnitude problem on the voxel path,
-   and everything else there fits with two orders of magnitude to spare.
-2. **Add device cases for voxel meshing and large-radius verbs.** The gate's
-   green light currently covers the cheap half of the frame.
-3. **Extend `VERB_PATTERNS`** to cover tube, deformers, armature and cut shapes,
-   then add the four cases or record exemptions.
-4. **The SDF stamp's 1.2× is a tuning problem, not an architecture one** — and
+The first three items of the previous list — land #86, add cases for meshing
+and large-radius verbs, extend `VERB_PATTERNS` — are done. What is left:
+
+1. **Run the device gate.** Nine cases have never been measured on the
+   reference iPad, and two of them decide whether a voxel sculpt is genuinely
+   interactive: `voxel_mesh_dirty` (does a dab's display fit the 4.17 ms
+   share?) and `voxel_smooth_r32` (does one large-radius stamp really cost half
+   the share?). Every display figure in this document is a desktop ratio until
+   that run happens, and the release is blocked on it regardless.
+2. **Then re-seed the provisional budgets** with
+   `check_device_bench.py <run.json> --update`, and replace the ‖ rows above
+   with what it reports.
+3. **The SDF stamp's 1.15× is a tuning problem, not an architecture one** — and
    `add-item-spatial-index` is the change that addresses the per-brick tape
-   compile behind both `sdf_stamp_cpu` and `sdf_stamp_bricks`.
+   compile behind both `sdf_stamp_cpu` and `sdf_stamp_bricks`. Worth sizing
+   against the crossovers rather than the worst point: the CPU path is fine
+   below ~850 stamps and Metal is fine above ~180, so the genuinely
+   unserved window is narrow.
+4. **Decide whether a stroke brush needs a per-dab case.** Tier 3 above is
+   measured per gesture, so nothing says whether ClayBuildup or Crease can show
+   a dab live — only what a whole stroke costs. That is a real gap in this
+   document's ability to answer "which brushes are online", and it is a
+   measurement question rather than an engine one.
 
 ## See also
 
