@@ -44,6 +44,8 @@ add_library(claycore
   src/brick/cache.cpp
   src/voxel/grid.cpp
   src/voxel/mesh_smooth.cpp
+  src/voxel/occupancy_box.cpp
+  src/voxel/to_field.cpp
   src/voxel/sculpt.cpp
   src/voxel/mask.cpp
   src/voxel/repair.cpp
