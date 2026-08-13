@@ -105,6 +105,90 @@ FieldVolume FieldVolume::sample(const std::function<float(cfloat3)>& f, const ma
         region, cell_size, band);
 }
 
+namespace {
+
+// 0x00RRGGBB. Colour reaches a volume from a palette or from a float colour
+// field, and 8 bits a channel is finer than either resolves; three floats would
+// cost three words per sample where this costs one.
+std::uint32_t pack_color(cfloat3 c) {
+    auto q = [](float v) {
+        const float clamped = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+        return static_cast<std::uint32_t>(clamped * 255.0f + 0.5f);
+    };
+    return (q(c.x) << 16) | (q(c.y) << 8) | q(c.z);
+}
+
+cfloat3 unpack_color(std::uint32_t p) {
+    constexpr float k = 1.0f / 255.0f;
+    return kernel::cf3(static_cast<float>((p >> 16) & 0xFFu) * k,
+                       static_cast<float>((p >> 8) & 0xFFu) * k,
+                       static_cast<float>(p & 0xFFu) * k);
+}
+
+}  // namespace
+
+FieldVolume FieldVolume::sample_colored(const std::function<float(cfloat3)>& f,
+                                        const std::function<cfloat3(cfloat3)>& c,
+                                        const math::Aabb& region, float cell_size, float band) {
+    // The distance first, through the ordinary path — so the sparsity, the far
+    // bounds and the measured Lipschitz are decided exactly as they are for an
+    // uncoloured volume, and the batched-fill contract an external evaluator
+    // relies on is untouched.
+    FieldVolume v = sample(f, region, cell_size, band);
+    if (!c || v.data_.empty()) return v;
+
+    // Then colour, for the samples that were KEPT. The bricks the sparsity
+    // dropped are empty space; a colour there would be a colour for nothing,
+    // and evaluating one would cost as much as the distance did.
+    const BrickGrid grid{v.origin_, v.cell_size_, v.band_,
+                         {v.bcount_[0], v.bcount_[1], v.bcount_[2]}};
+    v.colors_.assign(v.data_.size(), 0u);
+    for (std::size_t slot = 0; slot < v.index_.size(); ++slot) {
+        const std::int32_t entry = v.index_[slot];
+        if (entry == kBrickEmpty) continue;
+        for (int i = 0; i < kBrickSamples; ++i)
+            v.colors_[static_cast<std::size_t>(entry) + static_cast<std::size_t>(i)] =
+                pack_color(c(grid.sample_position(slot, i)));
+    }
+    return v;
+}
+
+cfloat3 FieldVolume::eval_color(cfloat3 p) const {
+    // The same eight samples the distance interpolates, by the same rule. A
+    // nearest-sample read would facet a surface that has none.
+    if (colors_.empty()) return kernel::cf3(0.7f, 0.7f, 0.7f);
+    cfloat3 g = (p - origin_) * (1.0f / cell_size_);
+    int cx = static_cast<int>(std::floor(g.x));
+    int cy = static_cast<int>(std::floor(g.y));
+    int cz = static_cast<int>(std::floor(g.z));
+    cx = std::clamp(cx, 0, bcount_[0] * kBrickDim - 1);
+    cy = std::clamp(cy, 0, bcount_[1] * kBrickDim - 1);
+    cz = std::clamp(cz, 0, bcount_[2] * kBrickDim - 1);
+
+    const int bx = cx / kBrickDim, by = cy / kBrickDim, bz = cz / kBrickDim;
+    const std::size_t slot = static_cast<std::size_t>((bz * bcount_[1] + by) * bcount_[0] + bx);
+    const std::int32_t entry = index_[slot];
+    // No samples here: empty space carries no colour of its own, and the
+    // caller falls back to the item's, which is what the tape does.
+    if (entry == kBrickEmpty) return kernel::cf3(0.7f, 0.7f, 0.7f);
+
+    const std::uint32_t* block = colors_.data() + entry;
+    const int lx = cx - bx * kBrickDim, ly = cy - by * kBrickDim, lz = cz - bz * kBrickDim;
+    const float fx = std::clamp(g.x - static_cast<float>(cx), 0.0f, 1.0f);
+    const float fy = std::clamp(g.y - static_cast<float>(cy), 0.0f, 1.0f);
+    const float fz = std::clamp(g.z - static_cast<float>(cz), 0.0f, 1.0f);
+
+    auto at = [&](int x, int y, int z) {
+        return unpack_color(block[sample_index(lx + x, ly + y, lz + z)]);
+    };
+    auto mix = [](cfloat3 a, cfloat3 b, float t) { return a * (1.0f - t) + b * t; };
+    const cfloat3 c00 = mix(at(0, 0, 0), at(1, 0, 0), fx);
+    const cfloat3 c10 = mix(at(0, 1, 0), at(1, 1, 0), fx);
+    const cfloat3 c01 = mix(at(0, 0, 1), at(1, 0, 1), fx);
+    const cfloat3 c11 = mix(at(0, 1, 1), at(1, 1, 1), fx);
+    return mix(mix(c00, c10, fy), mix(c01, c11, fy), fz);
+}
+
 FieldVolume FieldVolume::sample_blocks(const BrickBlockFill& fill, const math::Aabb& region,
                                        float cell_size, float band) {
     FieldVolume v;
@@ -442,12 +526,19 @@ void FieldVolume::shrink_band(float by) {
 // The header, then one index entry and one far bound per brick, then the
 // samples. Kept beside to_blob so the two cannot drift.
 std::size_t FieldVolume::blob_floats() const {
-    return 13 + index_.size() + far_.size() + data_.size();
+    // Must track to_blob exactly: a host sizes an upload from this and a
+    // disagreement is a truncated buffer rather than a wrong number.
+    return 14 + index_.size() + far_.size() + data_.size() + colors_.size();
 }
 
 std::vector<float> FieldVolume::to_blob() const {
     std::vector<float> out;
-    const std::size_t header = 13;
+    // Slot 13 is the colour offset, 0 when this volume has none. Adding it to
+    // the END of the header is what keeps an old reader working: every section
+    // is addressed by the offsets in slots 8..10, which are computed from this
+    // header size, so a reader that stops at slot 12 finds the same index, far
+    // and data arrays it always did and simply never looks for colour.
+    const std::size_t header = 14;
     out.resize(header);
     out[0] = origin_.x;
     out[1] = origin_.y;
@@ -462,9 +553,18 @@ std::vector<float> FieldVolume::to_blob() const {
     out[10] = static_cast<float>(header + index_.size() + far_.size());
     out[11] = sample_lipschitz_;
     out[12] = feather_;
+    out[13] = colors_.empty()
+                  ? 0.0f
+                  : static_cast<float>(header + index_.size() + far_.size() + data_.size());
     for (std::int32_t e : index_) out.push_back(static_cast<float>(e));
     out.insert(out.end(), far_.begin(), far_.end());
     out.insert(out.end(), data_.begin(), data_.end());
+    // Packed 0x00RRGGBB as a float VALUE rather than as reinterpreted bits.
+    // The packed colour is at most 2^24 - 1, and float32 represents every
+    // integer up to 2^24 exactly, so this round-trips without a bit-cast —
+    // which matters because the kernel dialect would need a different one per
+    // backend and this needs none.
+    for (std::uint32_t c : colors_) out.push_back(static_cast<float>(c));
     return out;
 }
 
@@ -517,7 +617,30 @@ std::optional<FieldVolume> FieldVolume::from_blob(const std::vector<float>& blob
     }
     v.far_.assign(blob.begin() + static_cast<std::ptrdiff_t>(far_off),
                   blob.begin() + static_cast<std::ptrdiff_t>(far_off + index_size));
-    v.data_.assign(blob.begin() + static_cast<std::ptrdiff_t>(data_off), blob.end());
+
+    // Where the samples END. Slot 8 IS the header size, so it says whether
+    // this blob was written with a colour slot at all: a blob from before the
+    // colour channel has a 13-float header and no slot 13, and reading one
+    // there would read its first index entry as an offset.
+    const std::size_t header_size = index_off;
+    std::size_t colors_off = 0;
+    if (header_size >= 14) colors_off = static_cast<std::size_t>(blob[13]);
+    if (colors_off != 0 && (colors_off < data_off || colors_off > blob.size())) return std::nullopt;
+
+    const std::size_t data_end = colors_off != 0 ? colors_off : blob.size();
+    v.data_.assign(blob.begin() + static_cast<std::ptrdiff_t>(data_off),
+                   blob.begin() + static_cast<std::ptrdiff_t>(data_end));
+    if (colors_off != 0) {
+        // One colour per stored sample or none; a mismatch means a truncated
+        // or forged blob, and reading it would index past the samples.
+        if (blob.size() - colors_off != v.data_.size()) return std::nullopt;
+        v.colors_.reserve(v.data_.size());
+        for (std::size_t i = colors_off; i < blob.size(); ++i) {
+            const float raw = blob[i];
+            if (!(raw >= 0.0f) || raw > 16777215.0f) return std::nullopt;
+            v.colors_.push_back(static_cast<std::uint32_t>(raw));
+        }
+    }
     return v;
 }
 

@@ -47,6 +47,20 @@ class FieldVolume {
     static FieldVolume sample(const std::function<float(kernel::cfloat3)>& f,
                               const math::Aabb& region, float cell_size, float band);
 
+    // The same, with a colour per sample. A volume built without one carries
+    // NO colour array and costs exactly what it costs today — which is what
+    // makes this free everywhere it is not used, and there are more of those
+    // than not: every mesh import and every field bake has one colour or none.
+    //
+    // `c` is called at the same positions as `f`, and only for the samples
+    // that are kept. Colour is stored packed to 8 bits a channel, which is
+    // more than either producer resolves — a 256-entry palette, or a float
+    // colour field a display quantises anyway — and costs one word per sample
+    // where three floats would cost three.
+    static FieldVolume sample_colored(const std::function<float(kernel::cfloat3)>& f,
+                                      const std::function<kernel::cfloat3(kernel::cfloat3)>& c,
+                                      const math::Aabb& region, float cell_size, float band);
+
     // The brick lattice a batched sample() walks. Exposed so an external
     // evaluator can compute the exact positions sample() hands its callable —
     // the same integers through the same float operations — which is what
@@ -122,6 +136,20 @@ class FieldVolume {
     // are taken at it. Removing the jump would mean storing the bricks the
     // sparsity exists to avoid.
     float eval(kernel::cfloat3 p) const;
+
+    // Whether this volume carries colour of its own. False for every volume
+    // built before this existed and for every one built without it, and then
+    // the item's own colour is what evaluation reports, exactly as before.
+    bool has_color() const { return !colors_.empty(); }
+
+    // The colour at a world position, interpolated between the same eight
+    // samples the distance is. Reading the nearest sample instead would put a
+    // facet on a surface that has none.
+    //
+    // Meaningless where has_color() is false, and where `p` is outside the
+    // sampled box: both are the caller's cue to use the item's colour, which
+    // is what the tape does.
+    kernel::cfloat3 eval_color(kernel::cfloat3 p) const;
 
     // Whether `p` lands in a brick that stores samples. The two halves of
     // eval()'s contract are not the same thing as "within the band": a brick
@@ -231,6 +259,12 @@ class FieldVolume {
     std::vector<std::int32_t> index_;    // bcount product; offset into data_, or kBrickEmpty
     std::vector<float> far_;             // per brick; signed lower bound where index_ is empty
     std::vector<float> data_;            // kBrickSamples per stored brick
+    // Packed 0x00RRGGBB per stored sample, parallel to data_, or empty when
+    // this volume carries no colour. Present or absent as a WHOLE rather than
+    // per brick: a per-brick flag would make every reader branch — including
+    // the tape, per sample — to save memory in volumes that are mostly
+    // uncoloured, which is not a case that exists.
+    std::vector<std::uint32_t> colors_;
 };
 
 }  // namespace field
