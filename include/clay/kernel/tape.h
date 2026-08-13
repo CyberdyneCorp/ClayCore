@@ -511,6 +511,18 @@ enum CProfileType {
 // satisfies (p - c) . (s - c) <= 0 for every s in the box, so
 // |p - s|^2 >= |p - c|^2 + |c - s|^2. The positive part covers a box that
 // CLIPS the solid: the zero set then really does include the box face.
+// Packed 0x00RRGGBB carried as a float VALUE, not as reinterpreted bits: the
+// packed colour is at most 2^24 - 1 and float32 holds every integer to 2^24
+// exactly, so this needs no bit-cast — which matters here, because a bit-cast
+// is spelled differently in every dialect this header compiles as.
+CLAY_FN cfloat3 cunpack_color(float packed) {
+    float p = cmax(packed, 0.0f);
+    float r = cfloor(p * (1.0f / 65536.0f));
+    float g = cfloor((p - r * 65536.0f) * (1.0f / 256.0f));
+    float b = p - r * 65536.0f - g * 256.0f;
+    return cf3(r * (1.0f / 255.0f), g * (1.0f / 255.0f), b * (1.0f / 255.0f));
+}
+
 CLAY_FN float ctape_volume_outside(float inner, float outside) {
     if (outside <= 0.0f) return inner;
     float reach = cmax(inner, 0.0f);
@@ -542,8 +554,14 @@ CLAY_FN float ctape_profile_dist(CLAY_FPTR prof, CLAY_FPTR blob,
     return CLAY_TAPE_FAR;
 }
 
+// `out_color` is written ONLY by a sampled volume that carries colour of its
+// own, and only where it has samples. Every other prim leaves it untouched, so
+// the caller seeds it with the item's own colour and reads back whichever
+// applies — which is how one opcode gains a per-sample colour without every
+// other prim paying for a colour it does not have. Widening the return type to
+// CTapeValue was the alternative and would have charged all of them.
 CLAY_FN float ctape_prim_dist(CLAY_UINT_T op, CLAY_FPTR q,
-                              CLAY_FPTR blob, cfloat3 lp) {
+                              CLAY_FPTR blob, cfloat3 lp, CLAY_OUT(cfloat3) out_color) {
     // q points at the prim-specific params (after xform/scale/round/color).
     if (op == ctape_sphere) return sd_sphere(lp, CLAY_AT(q, 0));
     if (op == ctape_box) return sd_box(lp, cf3(CLAY_AT(q, 0), CLAY_AT(q, 1), CLAY_AT(q, 2)));
@@ -658,6 +676,29 @@ CLAY_FN float ctape_prim_dist(CLAY_UINT_T op, CLAY_FPTR q,
             cmix(CLAY_AT(block, ((lz + 1) * n + ly) * n + lx), CLAY_AT(block, ((lz + 1) * n + ly) * n + lx + 1), fx);
         float c11 = cmix(CLAY_AT(block, ((lz + 1) * n + ly + 1) * n + lx),
                          CLAY_AT(block, ((lz + 1) * n + ly + 1) * n + lx + 1), fx);
+
+        // Slot 13 is the colour offset, 0 when this volume carries none — and
+        // a volume written before colour existed has a 13-float header and no
+        // slot 13 at all, which is why the header size decides whether to look
+        // rather than the blob's length. Colour is interpolated at the SAME
+        // eight samples as the distance: a nearest-sample read would facet a
+        // surface that has none.
+        int header_size = index_off;
+        if (header_size >= 14) {
+            int color_off = CLAY_INT(CLAY_AT(h, 13));
+            if (color_off > 0) {
+                CLAY_FPTR cblock = CLAY_OFF(h, color_off + entry);
+                float k00 = cmix(CLAY_AT(cblock, ((lz)*n + ly) * n + lx),
+                                 CLAY_AT(cblock, ((lz)*n + ly) * n + lx + 1), fx);
+                float k10 = cmix(CLAY_AT(cblock, ((lz)*n + ly + 1) * n + lx),
+                                 CLAY_AT(cblock, ((lz)*n + ly + 1) * n + lx + 1), fx);
+                float k01 = cmix(CLAY_AT(cblock, ((lz + 1) * n + ly) * n + lx),
+                                 CLAY_AT(cblock, ((lz + 1) * n + ly) * n + lx + 1), fx);
+                float k11 = cmix(CLAY_AT(cblock, ((lz + 1) * n + ly + 1) * n + lx),
+                                 CLAY_AT(cblock, ((lz + 1) * n + ly + 1) * n + lx + 1), fx);
+                CLAY_SET(out_color, cunpack_color(cmix(cmix(k00, k10, fy), cmix(k01, k11, fy), fz)));
+            }
+        }
         return ctape_volume_outside(cmix(cmix(c00, c10, fy), cmix(c01, c11, fy), fz), outside);
     }
     if (op == ctape_swept) {
@@ -889,7 +930,7 @@ CLAY_FN CTapeValue ctape_combine_values(CTapeValue a, CTapeValue b, int mode, in
 // primitive's distance function. Repetition calls this once per cell it
 // needs (twice for radial arrays).
 CLAY_FN float ctape_prim_local(CLAY_UINT_T op, CLAY_FPTR pr,
-                               CLAY_FPTR blob, cfloat3 lp) {
+                               CLAY_FPTR blob, cfloat3 lp, CLAY_OUT(cfloat3) out_color) {
     CLAY_FPTR deform =
         CLAY_OFF(pr, CLAY_TAPE_PRIM_HEADER + CLAY_TAPE_PRIM_PARAMS + CLAY_TAPE_REPEAT_FLOATS);
     int deform_count = CLAY_INT(CLAY_AT(deform, 0));
@@ -900,7 +941,7 @@ CLAY_FN float ctape_prim_local(CLAY_UINT_T op, CLAY_FPTR pr,
         offset += ctape_deform_offset(rec, wp);
         wp = ctape_deform_point(rec, wp);
     }
-    return ctape_prim_dist(op, CLAY_OFF(pr, CLAY_TAPE_PRIM_HEADER), blob, wp) + offset;
+    return ctape_prim_dist(op, CLAY_OFF(pr, CLAY_TAPE_PRIM_HEADER), blob, wp, out_color) + offset;
 }
 
 // The fixed interpreter every backend ships. Postfix stack machine; empty
@@ -954,19 +995,29 @@ CLAY_FN CTapeValue ctape_eval(CLAY_IPTR instrs, int instr_count,
             cfloat3 lp = cmul_point(inv, p);
             CLAY_FPTR repeat = CLAY_OFF(pr, CLAY_TAPE_PRIM_HEADER + CLAY_TAPE_PRIM_PARAMS);
             float prim_value;  // NB: not `local` — reserved in OpenCL C
+            // A REPEATED volume reports the item's colour rather than its
+            // samples'. The repeat paths evaluate the primitive more than once
+            // and take a min, so a colour written by whichever call ran last
+            // would not be the colour of the instance that won. Discarding it
+            // is the honest answer until something repeats a coloured volume —
+            // neither producer does: consolidate and the voxel conversion each
+            // emit one placed volume.
+            cfloat3 repeat_color = v.color;
             if (!ctape_repeat_active(repeat)) {
-                prim_value = ctape_prim_local(op, pr, blob, lp);
+                prim_value = ctape_prim_local(op, pr, blob, lp, CLAY_OUTARG(v.color));
             } else if (ctape_repeat_is_radial(repeat)) {
                 // O(2): the nearest angular sector and its neighbour, per
                 // docs/01 2.4 — one evaluation would seam at sector borders
-                float d0 = ctape_prim_local(op, pr, blob, ctape_repeat_point(repeat, lp, 0));
+                float d0 = ctape_prim_local(op, pr, blob, ctape_repeat_point(repeat, lp, 0),
+                                            CLAY_OUTARG(repeat_color));
                 int neighbour = crep_radial_neighbor(lp, CLAY_INT(CLAY_AT(repeat, 1)));
                 float d1 = ctape_prim_local(op, pr, blob,
-                                            ctape_repeat_point(repeat, lp, neighbour));
+                                            ctape_repeat_point(repeat, lp, neighbour),
+                                            CLAY_OUTARG(repeat_color));
                 prim_value = cmin(d0, d1);
             } else {
-                prim_value =
-                    ctape_prim_local(op, pr, blob, ctape_repeat_point(repeat, lp, 0));
+                prim_value = ctape_prim_local(op, pr, blob, ctape_repeat_point(repeat, lp, 0),
+                                              CLAY_OUTARG(repeat_color));
             }
             v.d = prim_value * scale - round;
             stack[top] = v;
