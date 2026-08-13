@@ -2,26 +2,26 @@
 
 ## 1. Storage
 
-- [ ] 1.1 `FieldVolume` gains an optional packed-RGB8 array parallel to
+- [x] 1.1 `FieldVolume` gains an optional packed-RGB8 array parallel to
       `data_`, present or absent as a whole.
-- [ ] 1.2 `sample()` accepts an optional colour callable; a volume built
+- [x] 1.2 `sample()` accepts an optional colour callable; a volume built
       without one carries no colour and costs nothing extra.
-- [ ] 1.3 Accessors: does this volume carry colour, and what is the colour at a
+- [x] 1.3 Accessors: does this volume carry colour, and what is the colour at a
       point (trilinear, matching the distance's rule).
-- [ ] 1.4 `to_blob` / `from_blob` carry the section, since that is what the
+- [x] 1.4 `to_blob` / `from_blob` carry the section, since that is what the
       tape uploads.
 
 ## 2. The tape and the backends
 
-- [ ] 2.1 The volume blob header gains a colour offset; zero means none.
-- [ ] 2.2 `ctape_volume` writes an optional colour out-parameter, trilinear
+- [x] 2.1 The volume blob header gains a colour offset; zero means none.
+- [x] 2.2 `ctape_volume` writes an optional colour out-parameter, trilinear
       over the same eight samples as the distance.
-- [ ] 2.3 The call site applies it, and every other prim is untouched.
-- [ ] 2.4 `check_kernel_dialect.py` passes for CPU, CUDA and Metal profiles
+- [x] 2.3 The call site applies it, and every other prim is untouched.
+- [x] 2.4 `check_kernel_dialect.py` passes for CPU, CUDA and Metal profiles
       plus the OpenCL and Vulkan amalgamations.
 - [ ] 2.5 The parity suite compares COLOUR for a coloured volume on every
       registered backend, not only distance.
-- [ ] 2.6 Re-package the kernels artifact and note the host-visible change in
+- [x] 2.6 Re-package the kernels artifact and note the host-visible change in
       `docs/06-host-gpu-previews.md`.
 
 ## 3. The format
@@ -45,9 +45,11 @@
 
 ## 5. Tests
 
-- [ ] 5.1 A coloured volume evaluates its own colour, interpolated.
-- [ ] 5.2 An uncoloured volume is bit-identical to before, distance and colour.
-- [ ] 5.3 Colour survives save and load; a minor-8 document still opens.
+- [x] 5.1 A coloured volume evaluates its own colour, interpolated.
+- [x] 5.2 An uncoloured volume is bit-identical to before, distance and colour.
+- [~] 5.3 Colour survives a BLOB and a serialize round trip, and a blob
+      written before colour existed reads as uncoloured. The DOCUMENT-level
+      half waits on the format minor (3.x).
 - [ ] 5.4 A two-colour layer consolidates to a two-colour volume.
 - [ ] 5.5 Paint still overrides a coloured volume.
 - [ ] 5.6 Outside the sampled box, the item's colour applies.
