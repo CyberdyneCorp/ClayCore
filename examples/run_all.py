@@ -70,6 +70,7 @@ EXAMPLES = [
     "38_consolidation",
     "39_multi_resolution",
     "40_armature",
+    "41_voxel_smooth_display",
 ]
 
 

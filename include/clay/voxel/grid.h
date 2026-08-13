@@ -306,6 +306,36 @@ class VoxelGrid {
     mesh::Mesh mesh_greedy() const { return mesh_greedy(active_); }
     mesh::Mesh mesh_greedy(std::size_t level) const;
 
+    // -- smooth meshing ------------------------------------------------------
+    // The same occupancy as a rounded form rather than as boxes (#108).
+    //
+    // Surface nets over occupancy sampled at voxel CENTRES: one vertex per
+    // surface cell, at the centroid of that cell's edge crossings. The
+    // centroid is what smooths — a corner cell's vertex is pulled toward the
+    // average of its crossings, so the corner rounds — and it is why nothing
+    // has to be filtered first and why nothing can VANISH: a lone occupied
+    // voxel has a sign change on each of its six edges and still gets a
+    // surface.
+    //
+    // `blur` is optional extra smoothing, in passes of a 3x3x3 box over
+    // occupancy, and is 0 by default deliberately. A blur is what erases thin
+    // features: one pass puts an isolated voxel near 0.3 occupancy, below the
+    // isolevel, and it is gone. A caller passing more than 0 is asking for
+    // that trade.
+    //
+    // A PREVIEW mesh, not an export one. Per mesh/surface_nets.h a cell the
+    // surface crosses twice gets one vertex and the sheets pinch, so this is
+    // neither manifold nor watertight. mesh_greedy remains the export path and
+    // is unchanged by this existing.
+    struct SmoothOptions {
+        int blur;
+    };
+    static constexpr SmoothOptions kSmoothDefault{0};
+    mesh::Mesh mesh_smooth(SmoothOptions options = kSmoothDefault) const {
+        return mesh_smooth(active_, options);
+    }
+    mesh::Mesh mesh_smooth(std::size_t level, SmoothOptions options = kSmoothDefault) const;
+
     // -- incremental meshing -------------------------------------------------
     // The chunks holding material, so a caller can mesh a grid a chunk at a
     // time without draining the dirty set. Order is the map's own and is not

@@ -2591,6 +2591,42 @@ clay_result clay_voxel_sample_step_field(const clay_voxel_grid* grid, const floa
  * every frame (issue #86). */
 clay_result clay_voxel_mesh(const clay_voxel_grid* grid, clay_mesh** out_mesh);
 
+/* The same occupancy as a rounded FORM rather than as boxes (#108).
+ *
+ * Greedy meshing emits axis-aligned quads, which is what greedy meshing is —
+ * correct for hard-surface voxel work and for export, and the wrong picture of
+ * an organic sculpt. This is surface nets over occupancy sampled at voxel
+ * centres: one vertex per surface cell, at the centroid of that cell's edge
+ * crossings. The centroid is what smooths, so a corner rounds without anything
+ * being filtered first, and nothing VANISHES — a lone voxel has a sign change
+ * on each of its six edges and still gets a surface.
+ *
+ * `blur` is extra smoothing, in passes of a 3x3x3 box over occupancy, and the
+ * trade is real in both directions. At 0 nothing is filtered and nothing can
+ * be lost, but the surface still TERRACES — every crossing over binary
+ * occupancy interpolates to the same midpoint, so corners round and steps
+ * remain. At 1 it reads as clay, and an isolated voxel sits near 0.3
+ * occupancy, under the isolevel, and is gone; thin features go the same way.
+ *
+ * So: pass 1 for an organic sculpt, 0 when thin detail matters. The default is
+ * 0 because a default that silently deletes a sculptor's detail is the wrong
+ * default however good it looks.
+ *
+ * The setting is an ARGUMENT rather than grid state, so two hosts sharing a
+ * document cannot disagree about what it looks like and one host can show both
+ * pictures of one sculpt without mutating it. Neither call changes the grid.
+ *
+ * A PREVIEW mesh: per the surface-nets contract a cell the surface crosses
+ * twice gets one vertex and the sheets pinch, so this is neither manifold nor
+ * watertight. clay_voxel_mesh remains the export path and is byte-for-byte
+ * unaffected by this existing. Colour is per VERTEX and blends — a vertex sits
+ * between up to eight voxels and carries the average of the occupied ones,
+ * because a smooth surface has no facet to hold one palette entry.
+ *
+ * An empty grid yields an empty mesh rather than an error, as above. */
+clay_result clay_voxel_mesh_smooth(const clay_voxel_grid* grid, int32_t blur,
+                                   clay_mesh** out_mesh);
+
 /* -- incremental display ---------------------------------------------------
  *
  * The voxel side of the refill shape the brick cache already uses: drain the

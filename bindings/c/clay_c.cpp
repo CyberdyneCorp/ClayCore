@@ -5496,6 +5496,24 @@ clay_result clay_voxel_mesh(const clay_voxel_grid* grid, clay_mesh** out_mesh) {
     return CLAY_OK;
 }
 
+clay_result clay_voxel_mesh_smooth(const clay_voxel_grid* grid, int32_t blur,
+                                   clay_mesh** out_mesh) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (!out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out pointer");
+    // Negative is refused rather than clamped: a caller passing -1 has a bug,
+    // and silently meshing at 0 would hide it behind a picture that looks
+    // plausible. The upper end is bounded because each pass is a full sweep
+    // over the occupied box and nothing sensible asks for more.
+    if (blur < 0 || blur > 8)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "blur must be 0..8 passes");
+    auto* handle = new clay_mesh();
+    handle->data = g->mesh_smooth(voxel::VoxelGrid::SmoothOptions{blur});
+    *out_mesh = handle;
+    return CLAY_OK;
+}
+
 clay_result clay_voxel_take_dirty_chunks(clay_voxel_grid* grid, int32_t* out_keys_xyz,
                                          size_t* count, size_t* out_remaining) {
     voxel::VoxelGrid* g = nullptr;
