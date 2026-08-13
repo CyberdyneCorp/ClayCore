@@ -32,3 +32,20 @@ The conversion SHALL be documented as LOSSY IN BOTH DIRECTIONS. Going to voxels 
 #### Scenario: One palette entry converts alone
 - **WHEN** a grid carrying two palette entries is converted once per entry
 - **THEN** each result is solid only where its own entry's cells are, and an entry the grid does not carry converts to nothing
+
+### Requirement: The SDF-to-voxel direction states what it guarantees
+The direction that already worked SHALL say what it preserves, because a round trip is only as trustworthy as the half nobody wrote down. `rasterize_tape` sets the cells whose CENTRE evaluates inside the tape, over the world region it is given, and colours each from the tape's colour field through the nearest palette entry, adding entries as needed.
+
+What that guarantees, and what it does not, SHALL be stated rather than inferred:
+
+- **The surface moves by up to half a cell.** Membership is decided at the cell centre, so a surface passing through a cell includes or excludes the whole cell. This is the quantisation the return trip cannot undo and it is the reason the round-trip tolerance is a cell rather than zero.
+- **A feature thinner than a cell may vanish entirely.** Nothing samples between centres, so a wall, a rib or a gap narrower than the lattice can fall between them and leave no cells at all. Rasterizing finer is the only answer; the return trip cannot invent what was never stored.
+- **A sharp edge becomes a staircase**, at the cell size, in the lattice's axes. It comes back from a conversion rounded rather than sharp, and no care on the return recovers it — the information is gone at this step, not the next one.
+- **Colour is quantised to the palette**, by nearest entry, and entries are added as needed up to the palette's limit. Two colours closer than the palette's tolerance become one.
+- **The region bounds the work.** Content outside the region given is not rasterized and is not reported as missing; a caller that passes a region smaller than the document silently voxelises part of it.
+
+These are properties of sampling a continuous field onto a lattice rather than defects, and a caller SHALL be able to read them without measuring them.
+
+#### Scenario: The quantisation is stated where a caller reads it
+- **WHEN** a caller looks up what rasterizing a document into a grid preserves
+- **THEN** the half-cell surface movement, the loss of sub-cell features, the staircased edge, the palette quantisation and the region bound are all documented, rather than being discoverable only by experiment

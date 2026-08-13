@@ -5496,6 +5496,30 @@ clay_result clay_voxel_mesh(const clay_voxel_grid* grid, clay_mesh** out_mesh) {
     return CLAY_OK;
 }
 
+clay_result clay_item_volume_from_voxels(const clay_voxel_grid* grid, int32_t blur, int32_t index,
+                                         clay_item** out_item) {
+    if (!out_item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out pointer");
+    *out_item = nullptr;
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (blur < 0 || blur > 8) return fail(CLAY_ERROR_INVALID_ARGUMENT, "blur must be 0..8 passes");
+    if (index < 0 || index > 255) return fail(CLAY_ERROR_INVALID_ARGUMENT, "index must be 0..255");
+
+    std::optional<field::FieldVolume> volume = g->to_field(
+        voxel::VoxelGrid::FieldOptions{blur, 0.0f, static_cast<std::uint8_t>(index)});
+    if (!volume)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the grid holds nothing to convert at that palette index");
+
+    auto* item = new clay_item();
+    item->node.prim = scene::Prim::volume();
+    item->node.volume = std::make_shared<const field::FieldVolume>(std::move(*volume));
+    if (index > 0) item->node.color = g->palette_color(static_cast<std::uint8_t>(index));
+    *out_item = item;
+    return CLAY_OK;
+}
+
 clay_result clay_voxel_to_layer(clay_document* doc, const clay_voxel_grid* grid, const char* name,
                                 int32_t blur, clay_layer_id* out_layer) {
     if (!doc || !name) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or name");

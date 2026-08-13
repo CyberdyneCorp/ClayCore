@@ -34,6 +34,7 @@
 - [ ] 4.1 A colour channel on `FieldVolume`, which would make this one item
       rather than one per entry. A storage change touching consolidation,
       serialisation and the brick cache; worth it only if palettes get large.
-- [ ] 4.2 pyclay surface and a gallery example showing the round trip.
-- [ ] 4.3 The SDF-to-voxel direction's guarantees written down, which the issue
+- [x] 4.2 pyclay surface (`Volume.from_voxels`) and a gallery example
+      (`42_representation_round_trip`) showing the round trip.
+- [x] 4.3 The SDF-to-voxel direction's guarantees written down, which the issue
       asks for and which is prose rather than code.

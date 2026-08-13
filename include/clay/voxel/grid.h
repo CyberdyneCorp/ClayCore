@@ -462,6 +462,26 @@ class VoxelGrid {
     // Rasterize an SDF tape into the grid over a world region: cells whose
     // center evaluates inside are set, colored from the tape's color field
     // via nearest palette entry (added as needed).
+    //
+    // What this preserves, stated because the return trip (to_field) is only
+    // as trustworthy as the half nobody wrote down. These are properties of
+    // sampling a continuous field onto a lattice, not defects:
+    //
+    //  - THE SURFACE MOVES by up to half a cell. Membership is decided at the
+    //    cell centre, so a surface crossing a cell takes or leaves the whole
+    //    cell. This is the quantisation the return trip cannot undo, and the
+    //    reason its tolerance is a cell rather than zero.
+    //  - A FEATURE THINNER THAN A CELL MAY VANISH. Nothing samples between
+    //    centres, so a rib or a gap narrower than the lattice can fall between
+    //    them and leave no cells at all. Rasterize finer; nothing downstream
+    //    can invent what was never stored.
+    //  - A SHARP EDGE BECOMES A STAIRCASE at the cell size, in the lattice's
+    //    axes, and comes back from a conversion rounded. The information is
+    //    lost HERE rather than on the way back.
+    //  - COLOUR IS QUANTISED to the palette by nearest entry. Two colours
+    //    closer than the palette tolerance become one.
+    //  - THE REGION BOUNDS THE WORK. Content outside it is not rasterized and
+    //    is not reported as missing.
     void rasterize_tape(const scene::Tape& tape, const math::Aabb& world_region);
 
   private:

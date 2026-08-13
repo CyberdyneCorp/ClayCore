@@ -2658,6 +2658,16 @@ clay_result clay_voxel_mesh_smooth(const clay_voxel_grid* grid, int32_t blur,
  * clay_voxel_mesh_smooth: 0 keeps thin features, 1 is smoother and loses them.
  *
  * CLAY_ERROR_INVALID_ARGUMENT when the grid holds nothing convertible. */
+/* One palette entry of a sculpt as a placeable ITEM, the counterpart to
+ * clay_item_volume_from_mesh. `index` 0 converts every occupied cell into one
+ * item; a non-zero index converts only that entry's cells and gives the item
+ * that entry's colour, which is how a caller assembles a coloured sculpt by
+ * hand. clay_voxel_to_layer is this in a loop, into a new layer.
+ *
+ * Free with clay_item_destroy; placing it copies it, as every item does. */
+clay_result clay_item_volume_from_voxels(const clay_voxel_grid* grid, int32_t blur, int32_t index,
+                                         clay_item** out_item);
+
 clay_result clay_voxel_to_layer(clay_document* doc, const clay_voxel_grid* grid, const char* name,
                                 int32_t blur, clay_layer_id* out_layer);
 
