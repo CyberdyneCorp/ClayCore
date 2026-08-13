@@ -4346,6 +4346,23 @@ NB_MODULE(pyclay, m) {
                  return out;
              },
              "Greedy-mesh the grid (merged quads, per-face palette color)")
+        .def("mesh_smooth",
+             [](const PyVoxelGrid& g, int blur) {
+                 if (blur < 0 || blur > 8) throw nb::value_error("blur must be 0..8 passes");
+                 PyMesh out;
+                 const voxel::VoxelGrid& grid = g.grid();
+                 {
+                     nb::gil_scoped_release release;
+                     out.m = grid.mesh_smooth(voxel::VoxelGrid::SmoothOptions{blur});
+                 }
+                 return out;
+             },
+             "blur"_a = 0,
+             "Mesh the grid as a rounded form (surface nets over occupancy, "
+             "per-vertex blended palette color). blur adds 3x3x3 occupancy "
+             "passes and can erase a thin feature, so it is 0 by default. A "
+             "preview mesh: not manifold, not watertight — mesh() is the "
+             "export path and is unaffected.")
         .def("sample_step_field",
              [](const PyVoxelGrid& g, nb::handle points) {
                  PointsView pts = to_points(points);

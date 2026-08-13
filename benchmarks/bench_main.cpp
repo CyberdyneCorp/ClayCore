@@ -438,6 +438,44 @@ void BM_VoxelMeshDirtyChunks(benchmark::State& state) {
 }
 BENCHMARK(BM_VoxelMeshDirtyChunks)->Unit(benchmark::kMillisecond);
 
+// Issue #108: the same sculpt as a rounded form rather than as boxes. Paired
+// with the greedy bench on an IDENTICAL grid, because the number worth having
+// is the ratio — a host choosing between the two pictures is choosing what it
+// pays, and "surface nets is slower" is not actionable without how much.
+//
+// A solid-ish blob rather than the sparse grids above: the smooth mesher costs
+// its SURFACE (one vertex per surface cell) where greedy costs its occupied
+// chunks, so a one-voxel-per-chunk grid would flatter it for the wrong reason.
+namespace {
+voxel::VoxelGrid smooth_bench_grid() {
+    voxel::VoxelGrid g(0.05f);
+    std::uint8_t c = g.palette_add(cf3(0.8f, 0.4f, 0.2f));
+    g.set_brush({0, 0, 0}, 24, c, voxel::BrushShape::Sphere);
+    g.set_brush({14, 8, 0}, 12, c, voxel::BrushShape::Sphere);
+    return g;
+}
+}  // namespace
+
+void BM_VoxelMeshGreedyBlob(benchmark::State& state) {
+    voxel::VoxelGrid g = smooth_bench_grid();
+    for (auto _ : state) {
+        mesh::Mesh m = g.mesh_greedy();
+        benchmark::DoNotOptimize(m.triangle_count());
+    }
+    state.counters["cells"] = static_cast<double>(g.occupied_count());
+}
+BENCHMARK(BM_VoxelMeshGreedyBlob)->Unit(benchmark::kMillisecond);
+
+void BM_VoxelMeshSmoothBlob(benchmark::State& state) {
+    voxel::VoxelGrid g = smooth_bench_grid();
+    for (auto _ : state) {
+        mesh::Mesh m = g.mesh_smooth();
+        benchmark::DoNotOptimize(m.triangle_count());
+    }
+    state.counters["cells"] = static_cast<double>(g.occupied_count());
+}
+BENCHMARK(BM_VoxelMeshSmoothBlob)->Unit(benchmark::kMillisecond);
+
 // Consolidation (accel/parallel-consolidate): baking a 193-node layer, once
 // through bake_layer — which batches every lattice sample through the CPU
 // backend's pool — and once through the serial std::function path bake_layer
