@@ -49,6 +49,17 @@ VERB_PATTERNS = [
     # A rig edit is a drag like any other — ZBrush's ZSpheres, and the one
     # brush-shaped verb that edits topology rather than a field.
     r"clay_layer_armature_edit",
+    # Displaying a voxel sculpt. Not a verb a sculptor names, but it is on the
+    # frame path with the verbs and it was the whole of #86: every edit verb
+    # here fit the frame with two orders of magnitude to spare while showing
+    # the result cost ~130x the budget, and this list is what decides whether
+    # an absence is a gap or an omission nobody noticed.
+    r"clay_voxel_mesh(_chunks)?",
+    r"clay_voxel_take_dirty_chunks",
+    # Subdividing. A level is charged to the EDIT that crosses it (a write
+    # costs 8^d cell writes for d finer levels), so it belongs with the verbs
+    # rather than with the accessors that report a stack.
+    r"clay_voxel_(add|drop)_level",
 ]
 
 # Verbs the engine has no C entry point for, so pattern-matching clay.h cannot

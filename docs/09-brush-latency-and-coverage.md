@@ -58,26 +58,32 @@ representation, `s` the SDF one.
 | Pinch | Pinch | `magnify` (negative), `sculpt_pinch` | s v | `voxel_pinch` | 0.0091 | interactive |
 | Magnify | Inflate (local) | `magnify` (positive), `sculpt_magnify` | s v | `voxel_magnify` | 0.0088 | interactive |
 | Magnify / Pinch (SDF) | — | `magnify` deformer | s | `magnify_pinch` | 0.101 | gesture |
-| Rotate | Twist | `pose` / `pose_line` | s | **none** | — | — |
+| Rotate | Twist | `pose` / `pose_line` | s | `pose_region` | ‖ | gesture |
 | SnakeHook | Tube / SnakeHook | `brush::snakehook` | s | `snakehook_tendrils` | 0.212 | gesture |
-| — | Tube | `brush::tube` | s | **none** | — | — |
+| — | Tube | `brush::tube` | s | `tube_create` | ‖ | gesture |
 | Trim (Rect/Circle/Lasso) | Trim | `cut::cut_item` | s | `cut_create` / `cut_passes` | 0.0001 / 0.077 | gesture |
-| Trim Curve | Trim (curve) | `CutShape::from_open_curve` | s | **none** | — | — |
+| Trim Curve | Trim (curve) | `CutShape::from_open_curve` | s | `trim_curve` | ‖ | gesture |
 | Clip | Trim | `cut::cut_item` | s | `cut_passes` | 0.077 | gesture |
 | Surface Noise | Noise | `noise` deformer | s | `noise_detail` | 0.269 | gesture |
 | Mask | Mask | mask fields + stroke engine | s v | `mask_paint` | 0.0058 | interactive |
 | Mask (freeze effect) | Mask | mask-gated verbs | s v | `mask_freeze` | 0.0140 | interactive |
 | Extract | Split / Extract | `brush::mask_extrude` | s v | `mask_extrude` | 3094.7 | operation |
-| ZSpheres | — | `Prim::armature` | s | **none** | — | — |
+| ZSpheres | — | `Prim::armature` | s | `armature_edit` | ‖ | gesture |
 | Alphas | Alphas | `sculpt_carve_alpha` | v | `voxel_carve_alpha` | 0.0011 | interactive |
 | — | Paint | `voxel_paint_brush` | v | `voxel_paint` | 0.0036 | interactive |
 | — | Smudge | `sculpt_smudge` | v | `voxel_smudge` | 0.026 | gesture |
 | — | (fill holes) | `sculpt_fill_cavities` | v | `voxel_fill_cavities` | 0.62 | operation |
 | Dynamesh | Voxel Remesh | `Layer.consolidate` | s | `sdf_consolidate` | 1537.5 ‡ | operation |
-| — | Multires | `VoxelGrid::add_level` | v | **none** | — | — |
+| — | Multires | `VoxelGrid::add_level` | v | `voxel_add_level` | ‖ | operation |
+| — | Multires (editing under one) | `sculpt_smooth`, one level finer | v | `voxel_smooth_l2` | ‖ | interactive |
+| — | (large brush) | `sculpt_smooth` at radius 32 | v | `voxel_smooth_r32` | ‖ | interactive |
+| — | (display) | `VoxelGrid::mesh_greedy` | v | `voxel_mesh_whole` | ‖ | operation |
+| — | (display, incremental) | `mesh_greedy_chunks` | v | `voxel_mesh_dirty` | ‖ | interactive |
 | Blob | — | *not implemented* | | | | |
 | Slice / Knife | Split | *not implemented* | | | | |
 | surface-mode mesh brushes | — | *out of scope* | | | | |
+
+‖ **Case added, not yet measured on device.** Four of these arrived with the tube/Trim Curve/pose/armature cases and the rest close the gaps #86 part 3 and #89 named — the display path and the level stack, neither of which the gate could see, while every edit verb above reported two orders of magnitude of headroom. Their budgets in `tests/device/baseline.json` are hand-set ceilings carrying the PROVISIONAL note; the numbers land here when the gate next runs on the reference device.
 
 ‡ **Known stale, in the safe direction.** Since this baseline was taken,
 `consolidate`'s bake batches its lattice samples through the CPU backend's
@@ -125,10 +131,17 @@ Only three things miss, and one of them is not in the gate at all.
 | voxel display (`clay_voxel_mesh`) | ~25 ms † | 4.17 ms | **~6×** |
 
 † Desktop measurement at cell 0.02 on a ~1.07M-cell sculpt — see the caveat
-below. There is no device case for it; that is the point. This row was ~551 ms
-and ~130× until the mask build stopped probing the chunk map once per cell
-(#86 part 1, a 22× ratio measured back to back on one machine and applied to
-the 551 ms figure, which was taken on the same one).
+below. This row was ~551 ms and ~130× until the mask build stopped probing the
+chunk map once per cell (#86 part 1, a 22× ratio measured back to back on one
+machine and applied to the 551 ms figure, which was taken on the same one).
+
+There are now device cases for both halves of this row — `voxel_mesh_whole` and
+`voxel_mesh_dirty` — so the next gate run replaces this desktop number with a
+device one. Until it does, the ~6× stands on a measurement `docs/RELEASE.md`
+forbids comparing against the device baseline, which is the reason the cases
+exist rather than a reason to trust the figure. What #86 part 2 changed is
+which number matters: a dab now re-meshes only the chunks it dirtied, so the
+frame pays `voxel_mesh_dirty` and the whole-grid sweep is the export path.
 
 Three things worth saying about that table:
 
