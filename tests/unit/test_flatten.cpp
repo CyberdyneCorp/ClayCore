@@ -347,18 +347,36 @@ TEST_CASE("flatten: the sample Lipschitz survives a round trip") {
     SUBCASE("and a blob written before the field existed reads as 1") {
         // The header size IS the index offset, so an older layout is not a
         // version to negotiate — it simply has no such field. The current
-        // header is 13 floats ([12] the feather); a pre-Lipschitz layout
-        // drops both appended fields.
+        // header is 14 floats ([12] the feather, [13] the colour offset); a
+        // pre-Lipschitz layout drops all three appended fields.
         std::vector<float> older = blob;
-        REQUIRE(static_cast<std::size_t>(older[8]) == 13);
-        older.erase(older.begin() + 11, older.begin() + 13);
+        REQUIRE(static_cast<std::size_t>(older[8]) == 14);
+        older.erase(older.begin() + 11, older.begin() + 14);
         older[8] = 11;
-        older[9] = older[9] - 2;
-        older[10] = older[10] - 2;
+        older[9] = older[9] - 3;
+        older[10] = older[10] - 3;
         auto legacy = FieldVolume::from_blob(older);
         REQUIRE(legacy.has_value());
         CHECK(legacy->sample_lipschitz() == doctest::Approx(1.0f));
         CHECK(legacy->brick_count() == after.brick_count());
+    }
+
+    SUBCASE("and a blob written before COLOUR existed reads as uncoloured") {
+        // The same rule one field later. A 13-float header has no slot 13, and
+        // reading one there would read the first index entry as an offset —
+        // which is why from_blob asks the header size rather than the blob
+        // length.
+        std::vector<float> older = blob;
+        REQUIRE(static_cast<std::size_t>(older[8]) == 14);
+        older.erase(older.begin() + 13);
+        older[8] = 13;
+        older[9] = older[9] - 1;
+        older[10] = older[10] - 1;
+        auto legacy = FieldVolume::from_blob(older);
+        REQUIRE(legacy.has_value());
+        CHECK_FALSE(legacy->has_color());
+        CHECK(legacy->brick_count() == after.brick_count());
+        CHECK(legacy->sample_lipschitz() == doctest::Approx(after.sample_lipschitz()));
     }
 }
 
