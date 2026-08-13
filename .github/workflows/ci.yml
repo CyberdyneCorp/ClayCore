@@ -392,5 +392,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install -g @fission-ai/openspec@latest
+      - run: npm install -g @fission-ai/openspec@1.8.0
       - run: openspec validate --all --strict
