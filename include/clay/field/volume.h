@@ -158,6 +158,15 @@ class FieldVolume {
     // contract. Does nothing to a volume with no stored samples.
     void fill_colors(const std::function<kernel::cfloat3(kernel::cfloat3)>& c);
 
+    // The same, in windows, so a producer with a thread pool fills colour the
+    // way it fills distance. `fill` receives count packed xyz positions and
+    // writes count*3 floats. A serial producer wants fill_colors above; this
+    // exists because a bake that parallelised its distances and not its
+    // colours stops being faster than the serial bake it replaced.
+    using ColorBlockFill =
+        std::function<void(const float* points_xyz, std::size_t count, float* out_rgb)>;
+    void fill_colors_blocks(const ColorBlockFill& fill);
+
     // Whether `p` lands in a brick that stores samples. The two halves of
     // eval()'s contract are not the same thing as "within the band": a brick
     // spans kBrickDim cells and is kept whole, so a stored brick holds samples

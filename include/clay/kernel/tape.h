@@ -558,14 +558,17 @@ CLAY_FN float ctape_profile_dist(CLAY_FPTR prof, CLAY_FPTR blob,
     return CLAY_TAPE_FAR;
 }
 
-// `out_color` is written ONLY by a sampled volume that carries colour of its
-// own, and only where it has samples. Every other prim leaves it untouched, so
-// the caller seeds it with the item's own colour and reads back whichever
+// `out_color` is INOUT rather than out, and that is load-bearing: the caller
+// SEEDS it with the item's own colour and a prim that has no colour of its own
+// leaves it alone. GLSL's `out` is copy-out, so an unwritten parameter would
+// come back as garbage there while working everywhere else — which is exactly
+// what the Vulkan parity run caught. Only a sampled volume carrying colour
+// writes it, and only where it has samples, so the caller reads back whichever
 // applies — which is how one opcode gains a per-sample colour without every
 // other prim paying for a colour it does not have. Widening the return type to
 // CTapeValue was the alternative and would have charged all of them.
 CLAY_FN float ctape_prim_dist(CLAY_UINT_T op, CLAY_FPTR q,
-                              CLAY_FPTR blob, cfloat3 lp, CLAY_OUT(cfloat3) out_color) {
+                              CLAY_FPTR blob, cfloat3 lp, CLAY_INOUT(cfloat3) out_color) {
     // q points at the prim-specific params (after xform/scale/round/color).
     if (op == ctape_sphere) return sd_sphere(lp, CLAY_AT(q, 0));
     if (op == ctape_box) return sd_box(lp, cf3(CLAY_AT(q, 0), CLAY_AT(q, 1), CLAY_AT(q, 2)));
@@ -944,7 +947,7 @@ CLAY_FN CTapeValue ctape_combine_values(CTapeValue a, CTapeValue b, int mode, in
 // primitive's distance function. Repetition calls this once per cell it
 // needs (twice for radial arrays).
 CLAY_FN float ctape_prim_local(CLAY_UINT_T op, CLAY_FPTR pr,
-                               CLAY_FPTR blob, cfloat3 lp, CLAY_OUT(cfloat3) out_color) {
+                               CLAY_FPTR blob, cfloat3 lp, CLAY_INOUT(cfloat3) out_color) {
     CLAY_FPTR deform =
         CLAY_OFF(pr, CLAY_TAPE_PRIM_HEADER + CLAY_TAPE_PRIM_PARAMS + CLAY_TAPE_REPEAT_FLOATS);
     int deform_count = CLAY_INT(CLAY_AT(deform, 0));

@@ -141,6 +141,47 @@ FieldVolume FieldVolume::sample_colored(const std::function<float(cfloat3)>& f,
     return v;
 }
 
+void FieldVolume::fill_colors_blocks(const ColorBlockFill& fill) {
+    // Same samples as fill_colors, handed over in windows. The window is sized
+    // to occupy a pool without holding every sample's colour at once, which is
+    // the same trade sample_blocks makes for the distances.
+    if (!fill || data_.empty()) return;
+    const BrickGrid grid{origin_, cell_size_, band_, {bcount_[0], bcount_[1], bcount_[2]}};
+    colors_.assign(data_.size(), 0u);
+
+    constexpr std::size_t kWindowBricks = 512;
+    std::vector<float> points(kWindowBricks * kBrickSamples * 3);
+    std::vector<float> rgb(kWindowBricks * kBrickSamples * 3);
+    std::vector<std::int32_t> entries;
+    entries.reserve(kWindowBricks);
+
+    for (std::size_t slot = 0; slot < index_.size();) {
+        entries.clear();
+        std::size_t n = 0;
+        // Gather the next window of STORED bricks; the empty ones have no
+        // samples to colour.
+        for (; slot < index_.size() && entries.size() < kWindowBricks; ++slot) {
+            const std::int32_t entry = index_[slot];
+            if (entry == kBrickEmpty) continue;
+            for (int i = 0; i < kBrickSamples; ++i) {
+                const cfloat3 p = grid.sample_position(slot, i);
+                points[n * 3] = p.x;
+                points[n * 3 + 1] = p.y;
+                points[n * 3 + 2] = p.z;
+                ++n;
+            }
+            entries.push_back(entry);
+        }
+        if (entries.empty()) break;
+        fill(points.data(), n, rgb.data());
+        std::size_t at = 0;
+        for (const std::int32_t entry : entries)
+            for (int i = 0; i < kBrickSamples; ++i, ++at)
+                colors_[static_cast<std::size_t>(entry) + static_cast<std::size_t>(i)] =
+                    pack_color(cf3(rgb[at * 3], rgb[at * 3 + 1], rgb[at * 3 + 2]));
+    }
+}
+
 void FieldVolume::fill_colors(const std::function<cfloat3(cfloat3)>& c) {
     // Only the samples that were KEPT. The bricks sparsity dropped are empty
     // space; a colour there would be a colour for nothing, and asking for one

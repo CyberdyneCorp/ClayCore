@@ -21,7 +21,7 @@ namespace eval {
 
 inline scene::BakePointEval pooled_bake_eval() {
     return [](const scene::Tape& tape, const float* points_xyz, std::size_t count,
-              float* out_distances) {
+              float* out_distances, float* out_colors_rgb) {
         Backend* cpu = Registry::instance().find("cpu");
         if (!cpu) return false;
         PointQuery q;
@@ -29,6 +29,7 @@ inline scene::BakePointEval pooled_bake_eval() {
         q.count = count;
         PointResults res;
         res.distances = out_distances;
+        res.colors_rgb = out_colors_rgb;  // null when only distances were asked for
         return cpu->eval_points(tape, q, res) == Status::Ok;
     };
 }

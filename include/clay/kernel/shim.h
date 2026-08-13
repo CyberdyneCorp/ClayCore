@@ -329,6 +329,13 @@ float clay_fmod(float a, float b) { return a - b * trunc(a / b); }
 #define CLAY_UINT(x) uint(x)
 #define CLAY_FLOATC(x) float(x)
 #define CLAY_OUT(T) out T
+// INOUT, distinct from OUT, and the difference is real in exactly one dialect:
+// GLSL's `out` is COPY-OUT, so a parameter the callee does not write comes back
+// as garbage rather than as what the caller put there. Every other dialect here
+// passes a pointer, where an unwritten parameter simply keeps its value. A
+// parameter the caller SEEDS and the callee may leave alone must be inout, or
+// it works everywhere except Vulkan — which is what the parity suite caught.
+#define CLAY_INOUT(T) inout T
 #define CLAY_SET(p, v) p = v
 #define CLAY_OUTARG(x) x
 
@@ -348,6 +355,7 @@ float clay_fmod(float a, float b) { return a - b * trunc(a / b); }
 #define CLAY_UINT(x) (cuint)x
 #define CLAY_FLOATC(x) (float)x
 #define CLAY_OUT(T) CLAY_THREAD T*
+#define CLAY_INOUT(T) CLAY_THREAD T*
 #define CLAY_SET(p, v) *p = v
 #define CLAY_OUTARG(x) &x
 
