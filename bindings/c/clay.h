@@ -1315,9 +1315,11 @@ typedef struct clay_quad_params {
     int32_t blur;         /* voxels, dual mode only: 0..8 passes */
     uint32_t level;       /* voxels only: resolution level, 0 = coarsest */
     /* appended after the original layout; all three default to 0 */
-    uint64_t target_quads;  /* 0: no search, mesh once at cell_size */
-    float tolerance;        /* fraction of the target; <= 0 means 0.10 */
-    int32_t max_iterations; /* whole meshes the search may build; <= 0 means 4.
+    uint64_t target_quads;  /* 0: no search, mesh once at cell_size.
+                             * Above CLAY_MAX_BATCH is refused */
+    float tolerance;        /* fraction of the target, below 1; <= 0 means 0.10 */
+    int32_t max_iterations; /* whole meshes the search may build, 0..64; 0 means 4
+                             * and a negative is refused.
                              * Not used in faces mode: see clay_mesh_quad_report */
 } clay_quad_params;
 
@@ -1369,7 +1371,10 @@ clay_result clay_mesh_copy_quads(const clay_mesh* mesh, uint32_t* dst, size_t ds
  * level toward the finest, stops at the first level that reaches the target,
  * and returns the nearer of the two it lands between — so it is monotonic,
  * it costs at most one mesh per level, and `max_iterations` does not apply to
- * it. A level step is a factor of about four in count, so `within_tolerance`
+ * it. The bracketing pair is NOT the price: the walk starts at the coarsest
+ * level and meshes every level on the way, so a target met at level k reports
+ * `iterations` = k+1, and a host budgeting a slider prices the stack's length.
+ * A level step is a factor of about four in count, so `within_tolerance`
  * is usually unreachable there, and `cell_size` names the level that was
  * chosen.
  *

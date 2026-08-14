@@ -218,6 +218,52 @@ TEST_CASE("c abi: an iteration cap nobody could have meant is refused") {
     CHECK(mesh == nullptr);
 }
 
+// REGRESSION (review round 2): the two bindings disagreed about what the count
+// knobs' zero MEANS. clay_quad_params documents "<= 0 means the default" and
+// this binding honoured it, while pyclay raised on tolerance 0 and on
+// max_iterations 0 — the documented C defaults were errors in Python. The rule
+// is one rule now: 0 defaults in both, a tolerance of 1 or more says nothing
+// and is refused in both, and a target past CLAY_MAX_BATCH is refused in both.
+TEST_CASE("c abi: the count knobs default at zero and are bounded at the far end") {
+    Doc doc;
+    SUBCASE("zero is the default and meshes, it does not fail") {
+        clay_quad_params p = quad_defaults();
+        p.target_quads = 3000;
+        p.tolerance = 0.0f;      // means 0.10
+        p.max_iterations = 0;    // means 4
+        Owned mesh;
+        REQUIRE(clay_document_mesh_quads(doc, &p, &mesh.m) == CLAY_OK);
+        clay_quad_report report{};
+        report.struct_size = sizeof(report);
+        REQUIRE(clay_mesh_quad_report(mesh, &report) == CLAY_OK);
+        CHECK(report.iterations > 0);
+        CHECK(report.quad_count > 0);
+    }
+    SUBCASE("a tolerance of 100% of the target reports nothing and is refused") {
+        clay_quad_params p = quad_defaults();
+        p.target_quads = 3000;
+        p.tolerance = 1.0f;
+        clay_mesh* mesh = nullptr;
+        CHECK(clay_document_mesh_quads(doc, &p, &mesh) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(mesh == nullptr);
+    }
+    SUBCASE("a negative iteration cap is a mistake, not a request for the default") {
+        clay_quad_params p = quad_defaults();
+        p.target_quads = 3000;
+        p.max_iterations = -1;
+        clay_mesh* mesh = nullptr;
+        CHECK(clay_document_mesh_quads(doc, &p, &mesh) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(mesh == nullptr);
+    }
+    SUBCASE("a target past the batch ceiling is refused before anything is meshed") {
+        clay_quad_params p = quad_defaults();
+        p.target_quads = static_cast<std::uint64_t>(CLAY_MAX_BATCH) + 1;
+        clay_mesh* mesh = nullptr;
+        CHECK(clay_document_mesh_quads(doc, &p, &mesh) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(mesh == nullptr);
+    }
+}
+
 TEST_CASE("c abi: a voxel grid quad-meshes in both modes") {
     CGrid grid(0.1f, 7);
     clay_quad_params p = quad_defaults();

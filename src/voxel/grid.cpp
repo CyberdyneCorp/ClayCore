@@ -1128,8 +1128,14 @@ mesh::Mesh VoxelGrid::faces_quads_fit(const QuadOptions& options, const mesh::Qu
 
     if (target.target == 0) {
         // No search, so the caller's own level stands and the report is here
-        // only to echo which lattice that was.
-        const std::size_t level = std::min(options.level, levels_.size() - 1);
+        // only to echo which lattice that was. A level the grid does not have
+        // comes back empty and zeroed rather than clamped onto the finest:
+        // with no target this call IS mesh_quads with a report attached, and
+        // mesh_quads answers an out-of-range level with an empty mesh, as does
+        // dual mode. Clamping here would hand a caller who passed a stale
+        // level a full-resolution mesh and a report saying it was asked for.
+        const std::size_t level = options.level;
+        if (level >= levels_.size()) return out;
         out = mesh_level(level);
         fit->cell_size = levels_[level].voxel_size;
         fit->quad_count = out.quad_count();

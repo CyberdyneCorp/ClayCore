@@ -839,6 +839,83 @@ TEST_CASE("the faces target walks the level stack, and says when it ran out") {
     }
 }
 
+// REGRESSION (review round 2): the headers claimed the walk "costs two meshes
+// whenever the target falls inside the stack". It does not — it always starts
+// at level 0 and charges every level on the way, so a target met at level k
+// costs k+1. A host that budgeted two meshes for a slider on a five-level grid
+// bought five. This pins the ACTUAL rule to the whole stack, one target per
+// level, so the number in the documentation cannot drift back to two without a
+// failure here.
+TEST_CASE("the ladder charges every level it passes, not the bracketing pair") {
+    VoxelGrid g = cube_grid(4);
+    REQUIRE(g.add_level() == 1);
+    REQUIRE(g.add_level() == 2);
+    REQUIRE(g.add_level() == 3);
+    VoxelGrid::QuadOptions faces;
+    faces.mode = VoxelGrid::QuadOptions::Mode::Faces;
+
+    std::vector<std::size_t> counts;
+    for (std::size_t l = 0; l < g.level_count(); ++l) {
+        VoxelGrid::QuadOptions at = faces;
+        at.level = l;
+        counts.push_back(g.mesh_quads(at).quad_count());
+    }
+    REQUIRE(counts.size() == 4);
+    for (std::size_t l = 1; l < counts.size(); ++l) REQUIRE(counts[l] > counts[l - 1]);
+
+    // One target per level, each landing strictly inside the gap below that
+    // level so the walk must stop exactly there. The cost is the level's index
+    // plus one, and the deepest of them is the whole stack — never two.
+    for (std::size_t stop = 1; stop < counts.size(); ++stop) {
+        mesh::QuadTarget want;
+        want.target = counts[stop - 1] + (counts[stop] - counts[stop - 1]) / 2;
+        mesh::QuadFit fit;
+        g.mesh_quads_fit(faces, want, &fit);
+
+        CHECK(fit.iterations == static_cast<int>(stop) + 1);
+        CHECK_FALSE(fit.clamped);  // it fell inside the stack, whatever it cost
+    }
+
+    // Stated as its own assertion because it is the sentence that was wrong:
+    // a target bracketed between the two FINEST levels of a four-level stack
+    // costs four meshes, not two.
+    mesh::QuadTarget deep;
+    deep.target = counts[2] + (counts[3] - counts[2]) / 2;
+    mesh::QuadFit fit;
+    g.mesh_quads_fit(faces, deep, &fit);
+    CHECK(fit.iterations == 4);
+}
+
+// REGRESSION (review round 2): with no target, faces mode clamped an
+// out-of-range level onto the finest one and meshed it — so mesh_quads_fit
+// answered a stale level with a full-resolution mesh and a report saying that
+// level was asked for, while mesh_quads and dual mode both answered the same
+// options with an empty mesh.
+TEST_CASE("an untargeted fit at a level the grid does not have is empty, in both modes") {
+    VoxelGrid g = cube_grid(6);
+    REQUIRE(g.add_level() == 1);
+    for (const VoxelGrid::QuadOptions::Mode mode :
+         {VoxelGrid::QuadOptions::Mode::Dual, VoxelGrid::QuadOptions::Mode::Faces}) {
+        VoxelGrid::QuadOptions options;
+        options.mode = mode;
+        options.level = 99;
+        REQUIRE(g.mesh_quads(options).quad_count() == 0);
+
+        mesh::QuadFit fit;
+        const Mesh q = g.mesh_quads_fit(options, {}, &fit);
+        CHECK(q.quad_count() == 0);
+        CHECK(q.positions.empty());
+        CHECK(fit.quad_count == 0);
+        CHECK(fit.cell_size == 0.0f);
+        CHECK(fit.iterations == 0);
+        CHECK_FALSE(fit.clamped);
+        // Nothing was meshed, so the report is the zeroed one and not the
+        // "nothing was asked for, so nothing was missed" true of a level that
+        // does exist.
+        CHECK_FALSE(fit.within_tolerance);
+    }
+}
+
 TEST_CASE("a fit with no target is the plain mesher with a report attached") {
     VoxelGrid g = cube_grid(10);
     VoxelGrid::QuadOptions dual;

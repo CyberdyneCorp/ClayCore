@@ -53,41 +53,79 @@ bool better_count(std::size_t count, std::size_t best, double want) {
     return static_cast<double>(count) <= want && static_cast<double>(best) > want;
 }
 
+// A cell size forced into the range the source can actually mesh, with a note
+// when it had to move: `clamped` is the report's word for "the range ran out",
+// so the fact that the search WANTED to go further has to survive the clamp
+// rather than be lost in the returned number. A NaN is caught BY NAME and sent
+// to the fine end: it compares false against every bound, so an ordinary range
+// test would pass it straight through as if it were in range.
+float clamp_cell(float c, float min_cell, float max_cell, bool* clamped) {
+    if (!std::isfinite(c) || c < min_cell) {
+        *clamped = true;
+        return min_cell;
+    }
+    if (c > max_cell) {
+        *clamped = true;
+        return max_cell;
+    }
+    return c;
+}
+
+// Did this count land close enough to stop? One definition, used both to break
+// the loop and to fill the report, so the flag a caller reads cannot disagree
+// with the condition the search stopped on. An empty mesh never counts as a
+// hit, however close 0 is to a small target.
+bool within_count(std::size_t count, double want, float tolerance) {
+    return count > 0 && std::fabs(static_cast<double>(count) - want) <=
+                            static_cast<double>(tolerance) * want;
+}
+
+// How far to move the cell size after a count of `count`. The count goes as
+// cell^-2, so sqrt(count/want) is the correction, bounded to a factor of two
+// either way so one wild lattice cannot throw the search out of the region.
+//
+// A lattice that found NOTHING carries no information about how far off it is
+// — sqrt(0 / want) is zero, and the shape is simply not resolved yet — so the
+// step is a plain refinement instead.
+double step_ratio(std::size_t count, double want) {
+    if (count == 0) return 0.5;
+    return std::clamp(std::sqrt(static_cast<double>(count) / want), 0.5, 2.0);
+}
+
+// Is [min_cell, max_cell] a range a search can move inside? Both finite and
+// positive and in order; anything else is a caller error and comes back as the
+// zeroed report rather than as a mesh at a made-up cell size.
+bool searchable_range(float min_cell, float max_cell) {
+    if (!(min_cell > 0.0f) || !std::isfinite(min_cell)) return false;
+    return std::isfinite(max_cell) && max_cell >= min_cell;
+}
+
+// One mesh at one cell size, and the report a caller who asked for no count
+// still needs: which lattice this actually is, which a caller who passed 0
+// does not know. No search ran, so no iteration is charged and there is no
+// tolerance to have missed.
+QuadFit mesh_once(const std::function<Mesh(float)>& mesh_at, float cell, bool clamped,
+                  Mesh* out_mesh) {
+    QuadFit fit;
+    Mesh m = mesh_at(cell);
+    fit.cell_size = cell;
+    fit.quad_count = m.quad_count();
+    fit.within_tolerance = true;
+    fit.clamped = clamped;
+    if (out_mesh) *out_mesh = std::move(m);
+    return fit;
+}
+
 }  // namespace
 
 QuadFit fit_quad_cell(const std::function<Mesh(float)>& mesh_at, float seed_cell, float min_cell,
                       float max_cell, const QuadTarget& target, Mesh* out_mesh) {
     QuadFit fit;
-    if (!mesh_at) return fit;
-    if (!(min_cell > 0.0f) || !std::isfinite(min_cell)) return fit;
-    if (!(max_cell >= min_cell) || !std::isfinite(max_cell)) return fit;
+    if (!mesh_at || !searchable_range(min_cell, max_cell)) return fit;
 
     bool clamped = false;
-    auto clamp_cell = [&](float c) {
-        if (!std::isfinite(c) || c < min_cell) {
-            clamped = true;
-            return min_cell;
-        }
-        if (c > max_cell) {
-            clamped = true;
-            return max_cell;
-        }
-        return c;
-    };
-
-    float cell = clamp_cell(seed_cell);
-    if (target.target == 0) {
-        // No search ran, so no iteration is charged and there is no tolerance
-        // to have missed. The report is here to echo the cell size the mesh
-        // was actually built at, which a caller who passed 0 does not know.
-        Mesh m = mesh_at(cell);
-        fit.cell_size = cell;
-        fit.quad_count = m.quad_count();
-        fit.within_tolerance = true;
-        fit.clamped = clamped;
-        if (out_mesh) *out_mesh = std::move(m);
-        return fit;
-    }
+    float cell = clamp_cell(seed_cell, min_cell, max_cell, &clamped);
+    if (target.target == 0) return mesh_once(mesh_at, cell, clamped, out_mesh);
 
     const double want = static_cast<double>(target.target);
     const float tolerance = target.tolerance > 0.0f ? target.tolerance : 0.10f;
@@ -105,17 +143,11 @@ QuadFit fit_quad_cell(const std::function<Mesh(float)>& mesh_at, float seed_cell
             fit.quad_count = count;
             have_best = true;
         }
-        if (count > 0 &&
-            std::fabs(static_cast<double>(count) - want) <= static_cast<double>(tolerance) * want)
-            break;
+        if (within_count(count, want, tolerance)) break;
 
-        // A lattice that found NOTHING carries no information about how far
-        // off it is — sqrt(0 / want) is zero, and the shape is simply not
-        // resolved yet — so the step is a plain refinement instead.
-        double ratio = 0.5;
-        if (count > 0)
-            ratio = std::clamp(std::sqrt(static_cast<double>(count) / want), 0.5, 2.0);
-        const float next = clamp_cell(static_cast<float>(static_cast<double>(cell) * ratio));
+        const double ratio = step_ratio(count, want);
+        const float next = clamp_cell(static_cast<float>(static_cast<double>(cell) * ratio),
+                                      min_cell, max_cell, &clamped);
         // The next lattice is the one just meshed: either the correction was
         // below the float's resolution or a limit is where we already stand,
         // and another iteration would rebuild the same mesh.
@@ -123,9 +155,7 @@ QuadFit fit_quad_cell(const std::function<Mesh(float)>& mesh_at, float seed_cell
         cell = next;
     }
 
-    fit.within_tolerance =
-        fit.quad_count > 0 && std::fabs(static_cast<double>(fit.quad_count) - want) <=
-                                  static_cast<double>(tolerance) * want;
+    fit.within_tolerance = within_count(fit.quad_count, want, tolerance);
     fit.clamped = clamped;
     if (out_mesh) *out_mesh = std::move(best);
     return fit;
@@ -166,9 +196,7 @@ QuadFit fit_quad_ladder(const std::function<Mesh(std::size_t)>& mesh_at, std::si
     // have been needed) or off the fine end (every rung meshed and the target
     // is still above the last one's count). There is no third case: the walk
     // either brackets the target or runs out of ladder.
-    fit.within_tolerance =
-        fit.quad_count > 0 && std::fabs(static_cast<double>(fit.quad_count) - want) <=
-                                  static_cast<double>(tolerance) * want;
+    fit.within_tolerance = within_count(fit.quad_count, want, tolerance);
     fit.clamped = coarsest_count > want || !reached;
     if (out_rung) *out_rung = best_rung;
     if (out_mesh) *out_mesh = std::move(best);

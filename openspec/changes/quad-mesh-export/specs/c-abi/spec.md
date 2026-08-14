@@ -17,6 +17,8 @@ A call naming NEITHER a cell size nor a target SHALL be refused: neither names a
 
 The iteration cap SHALL be bounded at this boundary and the target SHALL be bounded by `CLAY_MAX_BATCH`, because every iteration is a whole mesh: a byte count passed where a mesh count belongs, or a negative widened to an unsigned, would otherwise buy that many dense field evaluations. Both are refusals rather than clamps, for the reason every other count check here is.
 
+A tolerance or an iteration cap of ZERO SHALL mean the default, because the appended descriptor fields arrive as zero from a caller who declared only the original layout. A NEGATIVE iteration cap SHALL be refused rather than read as that default — it is a mistake and not a request — and a tolerance of 1 or more SHALL be refused, because 100% of the target makes `within_tolerance` true for almost any count and so reports nothing. These rules SHALL hold identically in the Python binding: the two SHALL not disagree about what a value means.
+
 The faces mode SHALL be voxels only. A document asked for it SHALL be refused with `CLAY_ERROR_INVALID_ARGUMENT` rather than quietly given the dual: a silent substitution of a smooth mesh for a boxy one is visible in the render and invisible in the return code.
 
 These SHALL be NEW entry points. `clay_document_mesh`, `clay_document_mesh_combined`, `clay_voxel_mesh`, `clay_voxel_mesh_smooth` and `clay_voxel_mesh_chunks` SHALL return exactly what they return today, carrying no quads.
@@ -34,6 +36,11 @@ The C header SHALL state, at these entry points, that the output is a lattice-de
 #### Scenario: A cost knob nobody could have meant is refused
 - **WHEN** a host passes an iteration cap far above what any search would spend, or a target above the batch ceiling
 - **THEN** the call returns `CLAY_ERROR_INVALID_ARGUMENT` and no mesh is produced
+
+#### Scenario: The count knobs default at zero and are bounded at the far end
+- **WHEN** a host passes a tolerance of zero and an iteration cap of zero alongside a target
+- **THEN** the call meshes with the documented defaults and reports a search that ran
+- **AND** a negative iteration cap, and a tolerance of 1 or more, each return `CLAY_ERROR_INVALID_ARGUMENT`
 
 #### Scenario: A descriptor that predates the fields still meshes
 - **WHEN** a caller declares the descriptor's original size

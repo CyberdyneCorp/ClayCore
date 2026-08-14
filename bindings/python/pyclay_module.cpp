@@ -913,21 +913,51 @@ PyMesh mesh_document(const PyDocument& d, int resolution, nb::handle voxel_size,
 // ZRemesher's output must learn it from the documentation and not from the
 // mesh.
 
+// clay.h's CLAY_MAX_BATCH, restated because pyclay builds against the C++ API
+// and never sees the C ABI's header. The two must hold the same number: it is
+// what turns a mistyped target — a byte count, a shift that went one place too
+// far — into an error instead of an hour of meshing.
+constexpr long long kMaxQuadTarget = 16777216;  // 1 << 24
+
 // The count controls, shared by the document and the voxel entry points so
-// there is one set of rules for what a target means.
+// there is one set of rules for what a target means. The rules are the C
+// ABI's, knob for knob: clay_quad_params documents the same three fields, and
+// a value that binding accepts must not be refused here — one input, one
+// answer, in both bindings.
 mesh::QuadTarget quad_target_from(nb::handle target, float tolerance, int max_iterations) {
     mesh::QuadTarget want;
     if (!target.is_none()) {
-        const long long asked = nb::cast<long long>(target);
+        long long asked = 0;
+        // try_cast, not cast: an integer too large for a long long escapes
+        // nb::cast as a bare std::bad_cast, which is not one of this API's
+        // errors and tells a caller nothing. 2**63 is out of range for the
+        // same reason 2**40 is, and should say so in the same words.
+        if (!nb::try_cast<long long>(target, asked))
+            throw std::invalid_argument("target must be a whole number of quads, 0.." +
+                                        std::to_string(kMaxQuadTarget));
         if (asked < 0) throw std::invalid_argument("target must be >= 0");
+        if (asked > kMaxQuadTarget)
+            throw std::invalid_argument("target above the ceiling of " +
+                                        std::to_string(kMaxQuadTarget) + " quads: " +
+                                        std::to_string(asked));
         want.target = static_cast<std::size_t>(asked);
     }
-    if (!(tolerance > 0.0f) || tolerance >= 1.0f)
-        throw std::invalid_argument("tolerance is a fraction of the target, in (0, 1)");
+    // <= 0 means the default, which is what clay_quad_params says and what a C
+    // caller who declared only the original struct layout sends. A NaN or an
+    // infinity is refused rather than folded into that default: it fails every
+    // comparison on the way in, so it would silently become 0.10 here while
+    // read_quad_params rejects it with "tolerance must be finite".
+    if (!std::isfinite(tolerance))
+        throw std::invalid_argument("tolerance must be finite; <= 0 means the default");
+    if (tolerance >= 1.0f)
+        throw std::invalid_argument(
+            "tolerance is a fraction of the target, below 1; <= 0 means the default");
     // Every iteration is a whole mesh, so this is a cost knob and an absurd
     // value buys that many dense field evaluations rather than a better answer.
-    if (max_iterations < 1 || max_iterations > 64)
-        throw std::invalid_argument("max_iterations must be 1..64");
+    // 0 is the default, as in the C struct; a NEGATIVE is a mistake and is
+    // refused rather than read as one.
+    if (max_iterations < 0 || max_iterations > 64)
+        throw std::invalid_argument("max_iterations must be 0..64; 0 means the default");
     want.tolerance = tolerance;
     want.max_iterations = max_iterations;
     return want;
@@ -3490,6 +3520,9 @@ NB_MODULE(pyclay, m) {
              "goes as cell^-2, so landing inside 5-10% is the expectation; read\n"
              "Mesh.quad_report for what actually came out. Each iteration is a WHOLE\n"
              "mesh, so max_iterations is a cost knob.\n\n"
+             "The knobs take the C ABI's rules: tolerance <= 0 and max_iterations 0\n"
+             "mean the defaults (0.10, 4), a negative max_iterations is refused, and\n"
+             "target is capped at 16777216 quads.\n\n"
              "mode is 'dual'; 'faces' is voxels only and raises here.")
         .def("add_voxel_layer",
              [](PyDocument& d, const std::string& name, float voxel_size) {
@@ -4609,8 +4642,13 @@ NB_MODULE(pyclay, m) {
              "first level that reaches the target, returns the nearer of the two it\n"
              "landed between, and ignores max_iterations because the stack is its own\n"
              "bound. quad_report['clamped'] there means the STACK RAN OUT — the target\n"
-             "is outside what any level of this grid yields. Mesh.quad_report says\n"
-             "what actually happened.")
+             "is outside what any level of this grid yields, and quad_report\n"
+             "['iterations'] counts every level meshed from the coarsest, so a target\n"
+             "met at level k costs k+1 meshes and not the two of the bracket.\n"
+             "Mesh.quad_report says what actually happened.\n\n"
+             "The knobs take the C ABI's rules: tolerance <= 0 and max_iterations 0\n"
+             "mean the defaults (0.10, 4), a negative max_iterations is refused, and\n"
+             "target is capped at 16777216 quads.")
         .def("sample_step_field",
              [](const PyVoxelGrid& g, nb::handle points) {
                  PointsView pts = to_points(points);

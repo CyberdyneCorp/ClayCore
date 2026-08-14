@@ -1263,11 +1263,19 @@ clay_result read_quad_params(const clay_quad_params* params, clay_quad_params* o
     if (!std::isfinite(out->tolerance))
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "tolerance must be finite; <= 0 means the default");
+    // A tolerance of 1 or more is 100% of the target, which makes
+    // within_tolerance true for almost any count and so reports nothing. Bound
+    // here rather than in the engine so pyclay and this binding refuse the
+    // same value with the same words.
+    if (out->tolerance >= 1.0f)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "tolerance is a fraction of the target, below 1; <= 0 means the default");
     // Bounded here rather than in the engine: every iteration is a whole mesh,
     // so a caller who passed a byte count or a negative widened by mistake
     // would otherwise buy that many dense field evaluations.
     if (out->max_iterations < 0 || out->max_iterations > 64)
-        return fail(CLAY_ERROR_INVALID_ARGUMENT, "max_iterations must be 0..64");
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "max_iterations must be 0..64; 0 means the default");
     if (out->target_quads > CLAY_MAX_BATCH)
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "target_quads above CLAY_MAX_BATCH: " + std::to_string(out->target_quads));

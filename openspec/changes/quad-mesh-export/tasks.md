@@ -185,3 +185,43 @@
 - [x] 11.7 `examples/44_quad_export.py` asserts the dual/faces count identity it
       previously guarded behind an `if`, matching what the gallery README
       already states.
+
+## 12. Review round 2
+
+- [x] 12.1 **REGRESSION** (`the ladder charges every level it passes, not the
+      bracketing pair`): the ladder walk's cost was documented as "two meshes
+      whenever the target falls inside the stack" in `quad_mesh.h`, `grid.h`
+      and the voxel-engine spec. It is not — the walk always starts at rung 0
+      and charges every rung on the way, so a target met at level k costs k+1.
+      Measured on a five-level grid (per-level 54/216/864/3456/13824): target
+      400 -> 3 iterations, 1500 -> 4, 5000 -> 5, all with `clamped` false. The
+      branch's own test already asserted 3 for a bracketed case, so the header
+      was refuted inside the same commit. All four documents now state k+1, and
+      the new test pins it for every level of a four-level stack.
+- [x] 12.2 **REGRESSION** (`an untargeted fit at a level the grid does not have
+      is empty, in both modes`): `mesh_quads_fit` with no target in faces mode
+      clamped an out-of-range level onto the finest and meshed it — 600 quads
+      where `mesh_quads` with the same options returns 0 — breaking "with no
+      target this is mesh_quads with a report attached" and disagreeing with
+      dual mode. It now returns the empty mesh and the zeroed report.
+- [x] 12.3 **REGRESSION** (`c abi: the count knobs default at zero and are
+      bounded at the far end`, `test_the_quad_count_knobs_take_the_c_abis_rules`):
+      the two bindings disagreed about the knobs' defaulting rule. `tolerance`
+      and `max_iterations` of 0 now mean the default in BOTH — that is what the
+      C descriptor documents and what a caller declaring only the original
+      layout sends — a negative cap and a tolerance of 1 or more are refused in
+      both, pyclay caps `target` at `CLAY_MAX_BATCH` as the C ABI does, and a
+      target too large for a `long long` raises this API's error instead of
+      nanobind's `std::bad_cast`. The pyclay test that asserted `tolerance=0.0`
+      raises is updated deliberately, with the reason in place.
+- [x] 12.4 The ladder's rising count is stated as an ASSUMPTION ABOUT THE
+      SOURCE rather than a property of ladders, since it is what licenses the
+      early stop; the note names what would break (a stop at the first rung
+      reporting `clamped` while a nearer rung sat unmeshed) and why the voxel
+      stack satisfies it despite not being a strict mip.
+- [x] 12.5 `fit_quad_cell` split along its seams — `clamp_cell`, `within_count`,
+      `step_ratio`, `searchable_range`, `mesh_once` — taking it from CCN 22 /
+      60 NLOC to 12 / 34 and leaving `src/mesh/quad_mesh.cpp` with no lizard
+      warning. `within_count` is a real dedup: the loop's stop condition and
+      the reported `within_tolerance` were the same expression written twice,
+      in both the cell search and the ladder walk.

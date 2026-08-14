@@ -100,7 +100,11 @@ against, and for voxels the grid's own voxel size — below that a finer lattice
 resamples the same step field and buys quads without buying detail. In the
 voxel FACES mode there is no cell size at all, so the lever is the resolution
 **level** and the granularity is a factor of about four per step: a caller who
-asks for 50,000 and receives 12,000 chose a level.
+asks for 50,000 and receives 12,000 chose a level. That search is a WALK from
+the coarsest level, one mesh per level, stopping at the first level to reach
+the target — so a target met at level `k` costs `k+1` meshes and reports that
+in `iterations`. Budget a slider against the stack's length, not against the
+two levels the target ends up between.
 
 The report (`clay_mesh_quad_report`, `Mesh.quad_report`) describes a meshing
 CALL, not a surface. A mesh loaded from a file, read back out of a document, or

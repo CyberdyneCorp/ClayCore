@@ -4068,8 +4068,49 @@ def test_quad_meshing_refuses_what_it_cannot_do():
         doc.mesh_quads()
     with pytest.raises(ValueError, match="max_iterations"):
         doc.mesh_quads(target=1000, max_iterations=1000)
+    # tolerance=0.0 USED to raise here. It no longer does, deliberately:
+    # clay_quad_params documents "<= 0 means 0.10" and the C binding honours
+    # it, so refusing it in Python made the documented C default an error in
+    # one binding and not the other. The bound that stayed is the far end.
     with pytest.raises(ValueError, match="tolerance"):
-        doc.mesh_quads(target=1000, tolerance=0.0)
+        doc.mesh_quads(target=1000, tolerance=1.0)
+
+
+# REGRESSION (review round 2): pyclay and the C ABI disagreed about what the
+# count knobs' zero MEANS. clay_quad_params documents "<= 0 means the default"
+# for tolerance and max_iterations and read_quad_params accepts both, while
+# pyclay raised ValueError on each — so the documented C default was an error
+# in Python. In the other direction pyclay had no ceiling on `target` at all
+# (2**40 ran for nineteen seconds; 2**63 escaped as a bare std::bad_cast from
+# nanobind rather than as one of this API's errors).
+def test_the_quad_count_knobs_take_the_c_abis_rules():
+    doc, _ = build_body()
+
+    # Zero is the default, not an error, for both knobs and on both entry
+    # points — the same values a C caller who declared only the original
+    # struct layout sends.
+    for kwargs in ({"tolerance": 0.0}, {"max_iterations": 0}, {"tolerance": -1.0}):
+        mesh = doc.mesh_quads(target=1000, **kwargs)
+        assert mesh.quad_count > 0
+        assert mesh.quad_report["iterations"] > 0
+
+    _, grid = _sphere_sculpt()
+    assert grid.mesh_quads(target=500, tolerance=0.0).quad_count > 0
+    assert grid.mesh_quads(target=500, max_iterations=0).quad_count > 0
+
+    # And the far ends are refused, as they are in C.
+    with pytest.raises(ValueError, match="below 1"):
+        doc.mesh_quads(target=1000, tolerance=1.0)
+    with pytest.raises(ValueError, match="finite"):
+        doc.mesh_quads(target=1000, tolerance=float("nan"))
+    with pytest.raises(ValueError, match="max_iterations must be 0..64"):
+        doc.mesh_quads(target=1000, max_iterations=-1)
+    # CLAY_MAX_BATCH. Without this a mistyped target meshed until it finished.
+    with pytest.raises(ValueError, match="above the ceiling"):
+        doc.mesh_quads(target=16777217)
+    # Too large for a long long: an API error, not nanobind's std::bad_cast.
+    with pytest.raises(ValueError, match="whole number of quads"):
+        doc.mesh_quads(target=2**63)
 
 
 def _sphere_sculpt(voxel_size=0.05):

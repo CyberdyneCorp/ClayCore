@@ -413,9 +413,13 @@ class VoxelGrid {
     //    search is mesh/quad_mesh.h's LADDER walk over the stack rather than
     //    its secant: it meshes from the coarsest level toward the finest and
     //    keeps the closest count, stopping as soon as one reaches or passes the
-    //    target, because the count rises with every level. Two meshes in the
-    //    common case, at most one per level ever, and `max_iterations` does not
-    //    apply — a stack is its own bound, and walking all of it costs about a
+    //    target, because the count rises with every level — an assumption about
+    //    the stack, stated in mesh/quad_mesh.h, not a property of ladders. At
+    //    most one mesh per level ever, and one for EVERY level up to the one
+    //    that stops the walk: it starts at level 0, so a target met at level k
+    //    costs k+1 meshes and `iterations` reports that. Budget against the
+    //    stack's length, not against the bracketing pair. `max_iterations` does
+    //    not apply — a stack is its own bound, and walking all of it costs about a
     //    third more than meshing its finest level alone, which a target above
     //    every level buys anyway. The step is a factor of about four, so
     //    "within tolerance" is usually unreachable, and `clamped` says the

@@ -191,6 +191,15 @@ QuadFit fit_quad_cell(const std::function<Mesh(float)>& mesh_at, float seed_cell
 // rule fit_quad_cell uses — never-empty over empty, then distance, then the
 // candidate that does not exceed the target — and returns THAT mesh.
 //
+// The rising count is an ASSUMPTION ABOUT THE SOURCE, not a property of
+// ladders, and it is what licenses the early stop. A source whose rungs are
+// not ordered by count would have the walk stop at its first overshoot and
+// report `clamped` while a nearer, unmeshed rung sat further along. The voxel
+// stack satisfies it because a finer level resolves at least the faces a
+// coarser one does; note that it is not a strict mip, so a scattered cloud of
+// fine voxels leaves coarse rungs EMPTY — that stays sound only because the
+// never-empty-over-empty rule above refuses to keep an empty rung.
+//
 // max_iterations does NOT apply here, and that is the one place this parts
 // company with fit_quad_cell. It exists there because a secant over a
 // continuum has no natural end and every step costs a whole dense mesh. A
@@ -210,8 +219,11 @@ QuadFit fit_quad_cell(const std::function<Mesh(float)>& mesh_at, float seed_cell
 // four in count, so within_tolerance is unreachable for most targets and this
 // distinction is the whole of what the report can tell a caller.
 //
-// `iterations` is the rungs meshed, which is at most the ladder's length and
-// is two whenever the target falls inside it.
+// `iterations` is the rungs meshed. The walk always starts at rung 0 and
+// charges every rung it passes, so a target met at rung k costs k+1 meshes,
+// not the two the bracketing pair suggests — the rungs below the bracket were
+// meshed to get there. It is bounded by the ladder's length, and that length
+// is what a caller budgeting a slider must price against.
 //
 // `out_rung` receives the rung the returned mesh came from. A ladder has no
 // cell size of its own, so QuadFit::cell_size comes back 0 and it is the

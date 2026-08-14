@@ -13,6 +13,13 @@ Every entry point SHALL carry a name in the C ABI under the prefix rules the bin
 
 The docstrings SHALL state that this is a lattice-derived quad grid and NOT field-aligned retopology — no edge loops, no feature-placed poles, not animation-ready — and SHALL state that a target is approached rather than hit.
 
+The count knobs SHALL take the C ABI's rules, value for value, so that one input gets one answer in both bindings. A tolerance or an iteration cap of zero or below SHALL mean the DEFAULT rather than raise, because that is what `clay_quad_params` documents and what a C caller who declared only the original struct layout sends; a negative iteration cap, a non-finite tolerance, a tolerance of 1 or more, and a target above `CLAY_MAX_BATCH` SHALL be refused in both. A target too large to be read as an integer at all SHALL raise this API's own error and not leak the binding library's cast failure.
+
+#### Scenario: The count knobs default and refuse identically in both bindings
+- **WHEN** a script passes a tolerance or an iteration cap of zero, the values the C descriptor treats as "use the default"
+- **THEN** the call meshes with the defaults rather than raising
+- **AND** a negative iteration cap, a tolerance of 1 or more, and a target above the batch ceiling each raise, as they do across the C ABI
+
 #### Scenario: A document quad-meshes from Python
 - **WHEN** a document is quad-meshed at a given cell size
 - **THEN** the returned mesh reports a non-zero quad count and its triangles are that quad list's triangulation

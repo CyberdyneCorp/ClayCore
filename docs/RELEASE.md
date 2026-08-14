@@ -264,9 +264,11 @@ forward-refuse).
    documented, and not a bug. The voxel FACES mode is the exception to all of
    this: it has no cell size, so its search walks the grid's resolution levels
    from the coarsest and stops at the first that reaches the target. That one
-   is monotonic, costs at most one mesh per level, ignores `max_iterations`,
-   and reports `clamped` to mean the level STACK ran out — the target is
-   outside what any level of the grid yields.
+   is monotonic, costs at most one mesh per level — and one for EVERY level up
+   to the one that stops it, so a target met at level `k` reports `iterations`
+   `k+1` and not the two of the bracket — ignores `max_iterations`, and reports
+   `clamped` to mean the level STACK ran out: the target is outside what any
+   level of the grid yields.
 
    **`.clayspace` does NOT move for this.** The mesh stream carries quads as a
    tail APPENDED after the triangle indices, with no attribute-mask bit and no
