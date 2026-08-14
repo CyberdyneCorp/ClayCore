@@ -187,7 +187,8 @@ Adjacency Adjacency::build(const Mesh& m, float weld_epsilon) {
 
 void geodesic_region(const Mesh& m, const Adjacency& adj, kernel::cfloat3 seed_position,
                      float radius, WalkScratch& scratch, std::vector<std::uint32_t>* out_classes,
-                     std::vector<float>* out_distance, std::uint32_t seed_hint) {
+                     std::vector<float>* out_distance, std::uint32_t seed_hint,
+                     float path_budget_scale) {
     out_classes->clear();
     out_distance->clear();
     const std::uint32_t classes = static_cast<std::uint32_t>(adj.class_count());
@@ -219,7 +220,10 @@ void geodesic_region(const Mesh& m, const Adjacency& adj, kernel::cfloat3 seed_p
         scratch.distance.assign(classes, WalkScratch::kUnreached);
     scratch.dirty.clear();
 
-    using Entry = std::pair<float, std::uint32_t>;  // (distance, class)
+    const float budget = radius * (path_budget_scale > 0.0f ? path_budget_scale : 1.0f);
+    const float radius2 = radius * radius;
+
+    using Entry = std::pair<float, std::uint32_t>;  // (path length, class)
     std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> frontier;
     const float seed_d = kernel::clength(position_of(seed) - seed_position);
     if (seed_d > radius) return;
@@ -231,7 +235,7 @@ void geodesic_region(const Mesh& m, const Adjacency& adj, kernel::cfloat3 seed_p
         const Entry top = frontier.top();
         frontier.pop();
         // A class can be pushed more than once; the first pop is its final
-        // distance and the rest are stale.
+        // path length and the rest are stale.
         if (top.first > scratch.distance[top.second]) continue;
         out_classes->push_back(top.second);
         out_distance->push_back(top.first);
@@ -241,8 +245,12 @@ void geodesic_region(const Mesh& m, const Adjacency& adj, kernel::cfloat3 seed_p
         const std::uint32_t* ring = adj.ring(top.second, &n);
         for (std::size_t i = 0; i < n; ++i) {
             const std::uint32_t nb = ring[i];
-            const float d = top.first + kernel::clength(position_of(nb) - p);
-            if (d > radius) continue;
+            const kernel::cfloat3 q = position_of(nb);
+            // (a) the path never leaves the ball...
+            if (kernel::cdot2(q - seed_position) > radius2) continue;
+            // ...and (b) it stays inside the budget.
+            const float d = top.first + kernel::clength(q - p);
+            if (d > budget) continue;
             const float known = scratch.distance[nb];
             if (known >= 0.0f && known <= d) continue;
             if (known < 0.0f) scratch.dirty.push_back(nb);

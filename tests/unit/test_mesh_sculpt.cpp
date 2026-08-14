@@ -328,6 +328,27 @@ TEST_CASE("a surface-measured falloff does not reach across a closed mouth") {
     CHECK(lower_moved(true) == 0);
 }
 
+TEST_CASE("the surface walk is not clipped by the grid it walks on") {
+    // The regression for a ragged rim. A path along EDGES overestimates
+    // geodesic distance — on a structured grid by up to sqrt(2), where a
+    // diagonal has to zigzag — so a region bounded by path length alone stops
+    // short in some directions and not others. Bounding it by the BALL and
+    // weighing by the straight line makes the two modes agree exactly on a
+    // connected sheet, which is what this asserts.
+    const Mesh base = plane_grid(24, 1.0f);
+    auto run = [&](bool geodesic) {
+        Mesh m = base;
+        MeshSculptor sculptor(m);
+        MeshBrushSettings s = centred(cf3(0, 0, 0), 0.6f, 0.7f);
+        s.geodesic = geodesic;
+        sculptor.stamp(MeshBrush::Draw, s);
+        return m;
+    };
+    const Mesh walked = run(true), straight = run(false);
+    CHECK(same_bytes(walked.positions, straight.positions));
+    CHECK_FALSE(same_bytes(walked.positions, base.positions));
+}
+
 // -- the verbs ---------------------------------------------------------------
 
 TEST_CASE("draw takes one direction and inflate takes each vertex's own") {

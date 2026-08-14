@@ -81,6 +81,7 @@ inline constexpr std::uint32_t kNoClass = 0xffffffffu;
 // a host's slider typo is otherwise an unbounded amount of work.
 inline constexpr int kMaxSmoothIterations = 64;
 
+
 struct MeshBrushSettings {
     // Where the stamp lands, in the mesh's own space, and how far it reaches.
     kernel::cfloat3 center = kernel::cf3(0, 0, 0);

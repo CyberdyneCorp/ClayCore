@@ -247,7 +247,24 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
         const std::uint32_t c = r.classes[i];
         std::size_t mc = 0;
         const kernel::cfloat3 p = mesh_.positions[adjacency_.members(c, &mc)[0]];
-        float w = falloff_weight(settings.falloff, distance_[i] / settings.radius);
+        // THE WALK DECIDES WHAT IS REACHED; THE STRAIGHT LINE DECIDES HOW MUCH.
+        //
+        // Weighing by the walk's own distance was tried first and looks wrong:
+        // an edge path overestimates geodesic distance by a direction-dependent
+        // amount, so on an irregular triangulation the falloff picks up a
+        // visible herringbone banding that a render shows and the numbers do
+        // not. The straight-line distance carries no such bias, and it is
+        // bounded by the walk's — a class the walk reached within the radius is
+        // within the radius in space too — so weighing by it costs nothing.
+        //
+        // What survives is exactly the property the walk exists for: the chin
+        // is not REACHED from the upper lip, so it is not in the region at all
+        // and its weight never comes up. The price is a step at the region's
+        // rim on a strongly folded surface, where the two distances diverge; on
+        // ordinary curvature they agree to a few percent and the falloff there
+        // is already near zero.
+        float w = falloff_weight(settings.falloff,
+                                 kernel::clength(p - settings.center) / settings.radius);
         if (gate) w *= 1.0f - std::clamp(gate(p), 0.0f, 1.0f);
         if (w <= 0.0f) continue;
         r.classes[kept] = c;

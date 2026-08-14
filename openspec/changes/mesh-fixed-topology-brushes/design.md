@@ -60,28 +60,49 @@ itself. The default is `1e-5` **relative to the mesh's bounding-box diagonal**,
 so it does not change meaning when a model is authored in millimetres. It is a
 parameter, and 0 means exact-bit welding for a caller who knows their mesh.
 
-## Geodesic falloff
+## The region a brush reaches
 
 The Move Topological lesson: a brush on the upper lip must not move the chin,
 even though the chin is within the Euclidean radius through the closed mouth.
 
-The walk is **Dijkstra over the class graph with Euclidean edge lengths**,
-seeded at the class nearest the brush centre, bounded by the brush radius.
-That is an approximation of geodesic distance (it is the shortest path along
-EDGES, not across faces, so it overestimates by up to ~4% on a regular
-triangulation), and the header says so. It is the right approximation here
-because a falloff is a soft weight: an error that shrinks the effective radius
-slightly and uniformly is invisible, and the property that matters — the chin
-is not reachable without walking around the lips — is exact.
+A class is in the region when a path over the one-ring leads to it that **(a)
+never leaves the ball of the brush radius, and (b) is itself no longer than a
+path budget** — 1.6 × the radius by default. The walk is Dijkstra over the class
+graph with Euclidean edge lengths, seeded at the class nearest the brush centre;
+ties in the frontier break on class index, so it is deterministic.
+
+**The weight comes from the STRAIGHT-LINE distance, not from the path.** This
+pair of decisions was arrived at by looking at renders, and both halves are
+load-bearing:
+
+- Weighing by the path length was tried first. An edge path overestimates true
+  geodesic distance by a direction-dependent amount, and the falloff picks that
+  up as visible **herringbone banding** across the stamp — obvious in a render,
+  invisible in any number a test was checking. The straight-line distance
+  carries no such bias, and it is bounded by the path length, so a class the
+  walk admitted is inside the radius in space too.
+- Bounding the region by path length alone was tried next. The same
+  overestimate makes the walk stop *short* in some directions and not others,
+  which leaves a **ragged rim** where the falloff was supposed to reach zero
+  smoothly. On a structured grid the overestimate reaches √2, because a
+  diagonal direction has to zigzag; on a marching-cubes mesh it is a few
+  percent. Bounding by the ball removes it outright: the rim is now the
+  falloff's own zero.
+
+What survives is exactly the property the walk exists for. The chin is inside
+the ball, but every path to it leaves the ball or exceeds the budget, so it is
+not in the region and its weight never comes up. The budget is what
+distinguishes this from a plain connected-component flood: without it, a path
+that runs the long way round the mouth *inside* the ball would admit the chin.
+
+The frontier is a binary heap over classes with a `dist` scratch array reused
+across stamps (a stroke resolves hundreds of stamps; reallocating a per-class
+array each time is the whole cost).
 
 Euclidean mode stays available and is the default for `flatten` and `scrape`,
 where the artist means "everything under this disc" and a surface walk would
-refuse to flatten across a groove.
-
-The frontier is a binary heap over classes with a `dist` scratch array reused
-across stamps (a stroke resolves hundreds of stamps; reallocating a
-per-class array each time is the whole cost). Ties in the heap break on class
-index, so the walk is deterministic.
+refuse to flatten across a groove. On a connected sheet the two modes now agree
+bit for bit, which is asserted.
 
 ## One stamp = gather a region, then apply
 
@@ -129,7 +150,7 @@ position `p`, pre-stamp normal `n`, brush centre `c`, radius `r`:
 | `smooth` | `w * (laplacian(p) - p)`, `laplacian` = one-ring mean |
 | `pinch` | `w * strength * ((c - p) - n * dot(c - p, n))` — the TANGENTIAL part only, so a pinch gathers along the surface instead of sinking the region. Negative strength spreads (magnify) |
 | `flatten` | `w * strength * (proj_plane(p) - p)`, clamped by `FlattenMode` to the cut side, the fill side, or neither |
-| `clay` | `draw`, then clamped so no vertex passes the plane offset `strength * r` along `average_normal` from the region's centroid — the clamp is what makes flat-topped strips instead of a swell |
+| `clay` | a FILL-ONLY flatten onto a plane floating `strength * r` along `average_normal` from the region's centroid: material is added up to the plane and no further, which is what makes flat-topped strips instead of a swell. On a flat surface it is indistinguishable from `draw`; the difference is what it does to an uneven one |
 | `crease` | `draw` with a negative amplitude and a squared falloff, plus `pinch`, summed before either is written |
 | `scrape` | `flatten(CutOnly)` plus `smooth * 0.5`, summed from one snapshot |
 | `polish` | `smooth * gate(i)`, `gate` = `1` where the one-ring's normals agree within `polish_angle` and falling to 0 at twice it — a hard edge disagrees, so it survives |

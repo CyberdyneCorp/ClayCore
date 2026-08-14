@@ -21,16 +21,24 @@ The structure SHALL be checkable against a mesh (`matches`) by vertex and index 
 - **WHEN** an adjacency built for one mesh is passed with a mesh of a different vertex or index count
 - **THEN** the call is refused rather than reading out of bounds
 
-### Requirement: Surface-measured falloff
-The library SHALL offer a falloff measured ALONG THE SURFACE — a bounded Dijkstra walk over the one-ring with Euclidean edge lengths, seeded at the class nearest the brush centre — in addition to a straight-line falloff.
+### Requirement: A region measured along the surface
+The library SHALL offer a region measured ALONG THE SURFACE in addition to a straight-line one. A class SHALL be in the surface-measured region when a path over the one-ring leads to it that (a) never leaves the ball of the brush radius and (b) is itself no longer than a path budget larger than that radius.
 
 The walk SHALL be deterministic: ties in the frontier SHALL break on class index, so the same brush on the same mesh reaches the same classes in the same order on every platform.
 
-The straight-line falloff SHALL remain available and SHALL be the default for the verbs whose meaning is "everything under this disc".
+The WEIGHT at a class SHALL come from the straight-line distance to the brush centre in both modes, never from the path length. An edge path overestimates geodesic distance by a direction-dependent amount, and a falloff driven by it bands visibly; bounding the region by the ball is what keeps the rim the falloff's own zero rather than wherever the walk happened to stop.
+
+Consequently, on a CONNECTED sheet the two modes SHALL produce identical results: the surface measurement SHALL cost nothing where there is nothing for it to exclude.
+
+The straight-line region SHALL remain available and SHALL be the default for the verbs whose meaning is "everything under this disc".
 
 #### Scenario: A lip does not drag the chin
 - **WHEN** a surface-measured brush is placed on the upper lip of a closed-mouth head with a radius that reaches the chin through the closed mouth
 - **THEN** the chin's vertices are outside the region and do not move
+
+#### Scenario: A walk over a structured grid is not clipped
+- **WHEN** the same stamp is applied to a flat triangulated grid in both modes
+- **THEN** the two results are bit-identical, and neither leaves a rim the falloff did not put there
 
 ### Requirement: Fixed-topology mesh brushes
 The library SHALL provide vertex-displacement brushes over a mesh's own triangles: `grab`, `draw`, `inflate`, `smooth`, `pinch`, `flatten`, `clay`, `crease`, `scrape`, `polish` and `snakehook`.
@@ -60,19 +68,19 @@ Applying a verb SHALL be DETERMINISTIC: the same mesh, the same settings and the
 - **THEN** the gated vertices are bit-identical to their input positions and the ungated ones moved
 
 ### Requirement: One stamp is one operation
-Each stamp SHALL be resolved against a PRE-STAMP SNAPSHOT of the region — positions, normals, the region's averaged normal, its centroid and its best-fit plane — so a composed verb is a single operation rather than a sequence of calls.
+Each stamp SHALL be resolved against a PRE-STAMP SNAPSHOT of the region — positions, normals, the region's weighted average normal, its weighted centroid and the plane those two define (or the plane the caller gave) — so a composed verb is a single operation rather than a sequence of calls.
 
 `scrape` SHALL be flatten-cut-only and smooth from ONE snapshot, and `crease` SHALL be a tight negative draw and a pinch summed within ONE stamp. Calling the components in sequence SHALL NOT be expected to produce the same result, for the reason `sculpt_scrape` already states.
 
-`clay` SHALL clamp its deposit to a plane floating at the stamp height along the region's averaged normal, which is what makes flat-topped strips rather than a swell.
+`clay` SHALL clamp its deposit to a plane floating at the stamp height along the region's averaged normal — material is added UP TO the plane and no further — which is what makes flat-topped strips rather than a swell. On a flat surface it SHALL be indistinguishable from `draw`; the difference is what the two do to an uneven one.
 
 `polish` SHALL gate its smoothing by the agreement of the one-ring's normals: full strength where they agree within a threshold angle and falling to zero at twice it, so noise is removed and a hard edge survives.
 
 `snakehook` SHALL re-anchor its falloff on the dragged position each stamp. Extreme triangle stretch under it SHALL be documented behaviour rather than a defect.
 
 #### Scenario: Clay leaves a flat top
-- **WHEN** a `clay` stroke is drawn across a sphere
-- **THEN** the deposited strip's outer vertices lie on a common plane, and a `draw` stroke at the same settings does not
+- **WHEN** a `clay` stamp lands on an uneven surface
+- **THEN** the deposit's outer vertices lie on a common plane, and a `draw` stamp at the same settings carries the unevenness up with it
 
 #### Scenario: Polish keeps a hard edge
 - **WHEN** `polish` runs over a noisy chamfered box across the chamfer

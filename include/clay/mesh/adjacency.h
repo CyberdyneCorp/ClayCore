@@ -122,28 +122,46 @@ struct WalkScratch {
     static constexpr float kUnreached = -1.0f;
 };
 
-// Classes within `radius` of `seed_position`, measured ALONG THE SURFACE:
-// bounded Dijkstra over the ring with Euclidean edge lengths, seeded at the
-// class nearest `seed_position` among `seed_hint`'s ring (or searched linearly
-// when no hint is given).
+// The classes a brush REACHES, which is not the same question as which
+// classes are near it.
 //
-// WHAT THIS APPROXIMATES, so the header says it rather than a reader
-// discovering it: the shortest path along EDGES, which overestimates true
-// geodesic distance — by up to about 4% on a regular triangulation, more on a
-// coarse or badly shaped one. That is the right approximation for a falloff,
-// which is a soft weight: a slightly and uniformly smaller effective radius is
-// invisible, while the property that matters — the chin is not reachable from
-// the upper lip without walking around the mouth — is exact and is the whole
-// reason this exists.
+// A class is in the region when a path over the one-ring leads to it that
+//
+//   (a) never leaves the ball of `radius` about `seed_position`, and
+//   (b) is itself no longer than `path_budget`.
+//
+// (a) is what makes the region exactly the set a straight-line falloff has
+// something to say about: nothing outside the ball is admitted, so the weight
+// at the rim is the falloff's own zero rather than wherever a walk happened to
+// stop. (b) is what makes it GEODESIC rather than merely connected — the chin
+// is inside the ball when the brush is on the upper lip, and the only path to
+// it runs the long way round the mouth.
+//
+// WHY BOTH, rather than path length alone. The walk measures a path along
+// EDGES, which overestimates true geodesic distance — by a few percent on a
+// well-shaped irregular triangulation and by up to sqrt(2) on a structured
+// grid, where a diagonal direction has to zigzag. A region bounded by path
+// length alone therefore stops SHORT in some directions and not others, and
+// the ragged rim that leaves is visible in a render. Bounding the region by
+// the ball removes that entirely, and the path budget — deliberately looser
+// than the radius, see kDefaultPathBudget — still costs the chin its place.
 //
 // Deterministic: frontier ties break on class index, so the same brush reaches
 // the same classes in the same order on every platform.
 //
-// Appends (class, surface distance) pairs to `out_classes` / `out_distance`,
-// which are CLEARED first.
+// Appends (class, PATH distance) pairs to `out_classes` / `out_distance`,
+// which are CLEARED first. The path distance is reported because a caller may
+// want it; the weights the brushes apply come from the straight line.
+
+// How much longer than the radius a path may be. Covers the structured-grid
+// worst case with room to spare, and is still short enough that a brush on the
+// upper lip cannot walk round the mouth to the chin.
+inline constexpr float kDefaultPathBudget = 1.6f;
+
 void geodesic_region(const Mesh& m, const Adjacency& adj, kernel::cfloat3 seed_position,
                      float radius, WalkScratch& scratch, std::vector<std::uint32_t>* out_classes,
-                     std::vector<float>* out_distance, std::uint32_t seed_hint = 0xffffffffu);
+                     std::vector<float>* out_distance, std::uint32_t seed_hint = 0xffffffffu,
+                     float path_budget_scale = kDefaultPathBudget);
 
 // The same set measured in a straight line: every class whose position is
 // within `radius` of `centre`. What a verb whose meaning is "everything under
