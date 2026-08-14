@@ -49,10 +49,10 @@ layers, alphas on SDF layers and the asset-finishing pipeline have not.
 |---|---|---|---|---|
 | **Representation** | SDF edit list + sparse voxel grids | Multires mesh (+ DynaMesh) | Voxel + surface mesh | Multires mesh |
 | **Non-destructive history** | **The document *is* the history.** Every edit stays re-editable forever | Layers record passes; the mesh itself is baked | Largely destructive past a bake | Modifier stack, but sculpt strokes are destructive |
-| **Topology management** | **Not a concept** — an SDF has none | DynaMesh, ZRemesher | Auto-retopo, its strength | Dyntopo, Remesh |
+| **Topology management** | **Not a concept** — an SDF has none, and a mesh layer's is PRESERVED rather than managed: the mesh brushes move vertices and never touch the index buffer | DynaMesh, ZRemesher | Auto-retopo, its strength | Dyntopo, Remesh |
 | **Field correctness** | **Exactness + Lipschitz tracked per node**, so step size is derived, not tuned | n/a — mesh | n/a — mixed | n/a — mesh |
 | **Booleans** | **Watertight by construction**, 2-manifold meshing | Live Boolean, then remesh | Voxel booleans, robust | BMesh booleans, fragile on bad input |
-| **Brush vocabulary** | Core set complete (see below) | The reference: ~36 surface brushes plus the core | Broad, voxel + surface modes | Solid core set |
+| **Brush vocabulary** | Core set complete on fields and voxels, plus 11 fixed-topology verbs on a mesh layer (see below) | The reference: ~36 surface brushes plus the core | Broad, voxel + surface modes | Solid core set |
 | **Masking** | **Weak** — voxel-scoped, reaches SDF only via stroke stamps | First class, protects the surface from *any* op | First class | First class |
 | **Sculpt layers** | **Absent** | Headline feature | Present | Present |
 | **Alphas / stamps** | Voxel only | Deep, VDM support | Deep | Present |
@@ -93,9 +93,38 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 | Layers | — | ⬜ the same missing concept |
 | Alphas | `sculpt_carve_alpha` | 🟡 voxel only |
 | Masking | mask fields | 🟡 voxel-scoped; see below |
-| Elastic, ZProject | — | ❌ mesh-era ideas that do not survive the representation change |
 | Slice / Knife | — | ❌ polygroup splits need two items; no single-solid equivalent |
-| The ~36 surface brushes | — | ❌ deliberate: an SDF sidesteps topology, and dynamic tessellation is not this engine's fight |
+| Surface brushes on a MESH (Standard, Move, Inflate, Smooth, Pinch, Flatten, Clay, DamStandard, Trim Dynamic, hPolish, SnakeHook) | `mesh::MeshSculptor`, 11 verbs | ✅ on a mesh LAYER's own triangles, with topology fixed — see below |
+| Elastic (Blender), ZProject | — | 🟡 Elastic was filed "does not survive the representation change", which was true for fields and is no longer true on a mesh layer. Undecided rather than rejected; it is the one entry that is new *math* rather than a new composition of the eleven |
+| Dyntopo, LiveClay, multires | — | ❌ deliberate: an SDF sidesteps topology, and dynamic tessellation is not this engine's fight |
+
+### Surface brushes: the row that moved
+
+This is the one line of the comparison that changed direction, so it is worth
+stating rather than leaving to a table cell.
+
+**What ZBrush's ~36 surface brushes and claycore's eleven mesh verbs have in
+common** is that both move vertices on a mesh. **Where they part** is that
+ZBrush's re-tessellate as they go — that is what Dyntopo, LiveClay and multires
+are for, and it is what lets a Move brush draw a lobe out of a sheet
+indefinitely. claycore's do not: `indices` and `quads` come out byte for byte,
+and a large grab stretches the triangles it has instead. That stretch is the
+signal the mesh wants retopo — the same signal Blender gives with Dyntopo off —
+and it is where this stops on purpose.
+
+So the honest position is neither "we have surface brushes now" nor the old
+"❌ out of scope":
+
+- **The verb set is there.** Grab, draw, inflate, smooth, pinch, flatten, clay,
+  crease, scrape, polish and snakehook, with masks, strokes and undo, on a mesh
+  layer's own triangles.
+- **The topology tier is not, and will not be.** No brush here adds a polygon,
+  so detail beyond what the mesh already carries needs a retopo pass — which
+  is the pipeline this exists to serve rather than a workaround for it.
+- **The use it earns is the RETURN TRIP**, not free-form sculpting. Sculpt on
+  SDF or voxels, quad-export, retopo and UV elsewhere, then refine on the mesh
+  that came back — which was impossible before, because the only way in was
+  `Volume.from_mesh` and it resamples the topology away.
 
 ---
 
@@ -198,9 +227,23 @@ drag: it reaches as far as the drag goes and the field stays exact (step scale
 Recorded so they read as decisions rather than oversights. In full in
 [`../openspec/ROADMAP.md`](../openspec/ROADMAP.md).
 
-- **Mesh surface-mode sculpting** (ZBrush's surface brushes, 3DCoat's LiveClay).
-  An SDF sidesteps topology entirely; competing on dynamic tessellation is not
-  this engine's fight.
+- **Topology-CHANGING mesh sculpting** — dyntopo, multires, remeshing,
+  subdivision (3DCoat's LiveClay, ZBrush's dynamic tessellation). An SDF
+  sidesteps topology entirely; competing on dynamic tessellation is not this
+  engine's fight.
+
+  **Amended, not deleted.** This row used to read "mesh surface-mode
+  sculpting", and that was wider than the decision behind it. Moving the
+  vertices that already exist is a different claim from tessellating new ones,
+  and it is the one the pipeline needed: a retopologized quad mesh re-enters a
+  document as a mesh layer, and resampling it through `Volume.from_mesh` to
+  edit it destroys the topology somebody just paid for. So fixed-topology mesh
+  brushes landed — eleven verbs, vertices only, `indices` and `quads`
+  byte-identical before and after — and the boundary moved to where the
+  original reasoning actually put it. See
+  [`docs/07-brushes-and-features.md` § 8](07-brushes-and-features.md). A large
+  grab stretches triangles and `snakehook` stretches them badly; that is the
+  signal the mesh wants retopo, and it is where this stops.
 - **Subdivision multires on the SDF side.** Resolution is an evaluation
   parameter for an SDF layer, so the Res+/Resample apparatus has nothing to
   attach to there. Voxel layers now DO carry a level stack — level 0 coarsest,
@@ -223,7 +266,8 @@ Every claycore claim above is verifiable in this repository:
 
 | Claim | How to check |
 |---|---|
-| 16 combine ops, 14 deformers, 5 blends, 10 voxel verbs | `docs/07-brushes-and-features.md` — its coverage is asserted against the enums |
+| 16 combine ops, 14 deformers, 5 blends, 10 voxel verbs, 11 mesh verbs | `docs/07-brushes-and-features.md` — its coverage is asserted against the enums |
+| A mesh brush never changes topology | `tests/unit/test_mesh_sculpt.cpp` compares `indices` and `quads` BYTE FOR BYTE after every verb, on a quad-exported mesh |
 | Brush parity table | `examples/` — every verb has a runnable script with committed renders and self-checks |
 | Exactness / Lipschitz is real | `tests/unit/test_*.cpp` measure the declared bound against the field's actual steepest slope |
 | Backend parity | `tests/unit/test_parity.cpp`, and `clay parity-fixture` for host-side checking |

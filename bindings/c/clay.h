@@ -2619,6 +2619,224 @@ clay_result clay_layer_apply_stroke(clay_document* doc, clay_layer_id layer,
                                     const clay_mask* mask, clay_node_id* out_nodes,
                                     size_t* count);
 
+/* -- fixed-topology mesh brushes ------------------------------------------- */
+
+/* The classical sculpting mode, on a mesh layer's own triangles: vertices move
+ * and TOPOLOGY NEVER CHANGES. No verb here creates, splits, deletes or reorders
+ * a polygon or a vertex, so a quad mesh sculpted through these entry points is
+ * still the same quad mesh, corner for corner — which is the entire reason they
+ * exist, since the alternative for editing a mesh layer is
+ * clay_item_volume_from_mesh, which resamples the model and throws the
+ * retopology away.
+ *
+ * Stated rather than hidden: a large grab STRETCHES triangles, and
+ * CLAY_MESH_BRUSH_SNAKEHOOK stretches them to the extreme. That is the artist's
+ * information that the mesh wants retopo, exactly as Blender behaves with
+ * Dyntopo off. It is not a defect and no call here will refuse it.
+ *
+ * This does not change what a document evaluates to. A sculpted mesh layer is
+ * still never evaluated, never blended with a field, and exports exactly as its
+ * (now edited) vertices say. */
+
+typedef enum clay_mesh_brush {
+    CLAY_MESH_BRUSH_GRAB = 0,      /* drag the region by the stroke delta */
+    CLAY_MESH_BRUSH_DRAW = 1,      /* displace along the REGION's averaged normal */
+    CLAY_MESH_BRUSH_INFLATE = 2,   /* displace along EACH VERTEX's own normal */
+    CLAY_MESH_BRUSH_SMOOTH = 3,    /* Laplacian average over the one-ring */
+    CLAY_MESH_BRUSH_PINCH = 4,     /* signed: + gathers, - spreads (magnify) */
+    CLAY_MESH_BRUSH_FLATTEN = 5,   /* project onto a plane, clay_flatten_mode */
+    CLAY_MESH_BRUSH_CLAY = 6,      /* draw's deposit clamped to a plane */
+    CLAY_MESH_BRUSH_CREASE = 7,    /* a tight negative draw and a pinch, in one stamp */
+    CLAY_MESH_BRUSH_SCRAPE = 8,    /* flatten cut-only and smooth, one snapshot */
+    CLAY_MESH_BRUSH_POLISH = 9,    /* smooth gated by dihedral angle */
+    CLAY_MESH_BRUSH_SNAKEHOOK = 10 /* grab re-anchored along the drag */
+} clay_mesh_brush;
+
+/* The same four curves, the same values and the same weights as
+ * CLAY_FALLOFF_*, declared apart because the mesh brushes live below the voxel
+ * engine in the module layering and cannot see its enum. */
+typedef enum clay_mesh_falloff {
+    CLAY_MESH_FALLOFF_CONSTANT = 0,
+    CLAY_MESH_FALLOFF_LINEAR = 1,
+    CLAY_MESH_FALLOFF_SMOOTH = 2,
+    CLAY_MESH_FALLOFF_GAUSSIAN = 3
+} clay_mesh_falloff;
+
+/* "I do not know which class the brush is on; find it." */
+#define CLAY_MESH_NO_CLASS 0xffffffffu
+
+/* The most smoothing passes one stamp will run, checked at this boundary
+ * because each pass walks the whole region again. */
+#define CLAY_MESH_MAX_SMOOTH_ITERATIONS 64
+
+typedef struct clay_mesh_brush_desc {
+    uint32_t struct_size; /* = sizeof(clay_mesh_brush_desc); required */
+    int32_t verb;         /* clay_mesh_brush */
+    float center[3];      /* in the MESH's own space */
+    float radius;         /* must be > 0 */
+    /* Signed for every verb that has a sign, and scaled into world units by
+     * the radius, so a brush behaves the same at any size. */
+    float strength;
+    int32_t falloff; /* clay_mesh_falloff */
+    /* GRAB and SNAKEHOOK: the motion this stamp applies. Ignored by the rest,
+     * and ignored by clay_mesh_sculptor_apply_stroke, which takes it from the
+     * motion between stamps. */
+    float direction[3];
+    /* DRAW, CLAY and CREASE: an explicit deposit direction. All zeroes — the
+     * default — means the region's averaged normal, which is what makes draw a
+     * rounded swell rather than a balloon. */
+    float deposit_normal[3];
+    /* Measure the falloff ALONG THE SURFACE rather than in a straight line: a
+     * brush on the upper lip must not drag the chin through a closed mouth.
+     * FLATTEN and SCRAPE want it off — they mean "everything under this disc",
+     * and a surface walk refuses to flatten across a groove. */
+    int32_t geodesic;
+    /* The surface walk's seed, when the pick already told the caller which
+     * triangle it hit; CLAY_MESH_NO_CLASS to search. Searching is a linear scan
+     * over the mesh and is the wrong thing to do per stamp on a large one. */
+    uint32_t seed_class;
+    int32_t flatten_mode;    /* clay_flatten_mode, for FLATTEN and SCRAPE */
+    int32_t use_given_plane; /* otherwise the region's own centroid and normal */
+    float plane_point[3];
+    float plane_normal[3];
+    /* POLISH's gate, in radians: how far the surface around a vertex may bend
+     * before the smoothing fades out. Full strength up to this angle, zero at
+     * twice it. clay_mesh_brush_defaults sets it tight on purpose — a loose
+     * gate is a plain smooth under another name. */
+    float polish_angle;
+    int32_t smooth_iterations; /* 1..CLAY_MESH_MAX_SMOOTH_ITERATIONS */
+} clay_mesh_brush_desc;
+
+/* The engine's defaults, so a host fills in what it means and takes the rest.
+ * The verb defaults to DRAW and the geodesic flag to on. */
+clay_result clay_mesh_brush_defaults(clay_mesh_brush_desc* out_desc);
+
+/* A SCULPTING SESSION over one mesh, owning the two structures that are
+ * expensive to build and cheap to keep: the vertex adjacency and the ray-query
+ * tree. Building an adjacency per stamp is the whole cost of a stroke, which is
+ * why this is a handle rather than a free function.
+ *
+ * The adjacency NEVER needs rebuilding: no verb changes topology, so it cannot
+ * go stale. The BVH does — positions move under it — and
+ * clay_mesh_sculptor_refresh is how a caller decides when to pay for that.
+ *
+ * The mesh must outlive the sculptor. A sculptor over a mesh LAYER's triangles
+ * refuses every call once that layer is gone, rather than reading freed
+ * storage, and refuses one over a LOCKED or GHOSTED layer, because both flags
+ * mean "never edited" and a vertex displacement is an edit. */
+typedef struct clay_mesh_sculptor clay_mesh_sculptor;
+
+/* A sparse, coalesced record of what a gesture moved: the undo a mesh stroke
+ * cannot get from the edit list, because vertex displacement is destructive and
+ * is not an edit item.
+ *
+ * A vertex touched by forty stamps of one stroke appears ONCE, keeping the
+ * first "before" and the last "after", so the record's size is bounded by the
+ * vertices the stroke reached rather than by the stamps it took.
+ *
+ * Reverting restores positions AND normals bit-exactly, and never touches the
+ * index or quad buffers — there is nothing there to restore, which is the
+ * fixed-topology contract paying off. */
+typedef struct clay_mesh_deltas clay_mesh_deltas;
+
+/* Where a mesh sits. Its own descriptor rather than four loose arguments,
+ * because it appears in two calls and a host that got the argument order wrong
+ * would see a brush land somewhere plausible. All-zero rotation reads as
+ * identity and a zero scale reads as 1, so a zeroed struct is the identity.
+ *
+ * Named a FRAME rather than a transform because clay_mesh_transform is already
+ * a call that returns a transformed copy of a mesh. */
+typedef struct clay_mesh_frame {
+    uint32_t struct_size; /* = sizeof(clay_mesh_frame); required */
+    float position[3];
+    float rotation[4]; /* quaternion x y z w */
+    float scale;       /* uniform */
+} clay_mesh_frame;
+
+/* `weld_epsilon` is relative to the mesh's bounding-box diagonal — vertices
+ * closer than that are one point of the surface, which is what lets a brush
+ * cross a UV seam without opening a crack. Pass 0 for exact-bit welding, or a
+ * negative value for the engine's default. */
+clay_result clay_mesh_sculptor_create(clay_mesh* mesh, float weld_epsilon,
+                                      clay_mesh_sculptor** out_sculptor);
+void clay_mesh_sculptor_destroy(clay_mesh_sculptor* sculptor);
+
+clay_result clay_mesh_sculptor_vertex_count(const clay_mesh_sculptor* sculptor, size_t* out_count);
+/* Welded classes: fewer than the vertex count exactly where the mesh has
+ * seams, which is how a host can tell it imported a split model. */
+clay_result clay_mesh_sculptor_class_count(const clay_mesh_sculptor* sculptor, size_t* out_count);
+
+/* One stamp. `mask` and `deltas` may be NULL. *out_moved receives how many weld
+ * classes moved — zero for a stamp that reached nothing, that was fully masked,
+ * or whose settings amount to no displacement. */
+clay_result clay_mesh_sculptor_stamp(clay_mesh_sculptor* sculptor, const clay_mesh_brush_desc* desc,
+                                     const clay_mask* mask, clay_mesh_deltas* deltas,
+                                     size_t* out_moved);
+
+/* Resolve a stroke and apply it — the fourth consumer of the stroke engine,
+ * after the grid, the mask and the edit list. Spacing, pressure response,
+ * deterministic jitter, taper, steady stroke and buildup-versus-clamped
+ * accumulation all reach mesh sculpting with no new machinery.
+ *
+ * The descriptor's radius and strength are IGNORED: each stamp brings its own
+ * from the preset, which is what makes pressure and taper shape a mesh stroke
+ * exactly as they shape a voxel one.
+ *
+ * GRAB anchors on the first stamp and drags by the motion between stamps;
+ * SNAKEHOOK re-anchors on every stamp, so its region walks with the pull.
+ *
+ * `mesh_to_world` is the layer transform and is used ONLY to find each vertex
+ * on the mask's world-addressed lattice; NULL means identity. Everything else
+ * here is in the mesh's own space.
+ *
+ * `defer_normals` non-zero recomputes normals once at the end instead of per
+ * stamp. Faster, identical result.
+ *
+ * With one `deltas` record passed through a whole gesture, reverting it is one
+ * undo step. */
+clay_result clay_mesh_sculptor_apply_stroke(clay_mesh_sculptor* sculptor,
+                                            const float* samples_xyzpt, size_t sample_count,
+                                            const clay_stroke_preset* preset,
+                                            const clay_mesh_brush_desc* desc, const clay_mask* mask,
+                                            const clay_mesh_frame* mesh_to_world,
+                                            int32_t defer_normals, clay_mesh_deltas* deltas,
+                                            size_t* out_applied);
+
+/* Rebuild the ray-query tree over the vertices as they now are. */
+clay_result clay_mesh_sculptor_refresh(clay_mesh_sculptor* sculptor);
+
+typedef struct clay_mesh_hit {
+    uint32_t struct_size; /* = sizeof(clay_mesh_hit); required, as every descriptor's is */
+    int32_t hit;
+    float t;
+    float position[3];
+    float normal[3]; /* world space, unit */
+    uint32_t triangle;
+    float u, v; /* barycentrics: p = a*(1-u-v) + b*u + c*v */
+    /* A weld class of the triangle hit, ready to hand back as the descriptor's
+     * seed_class so the surface walk starts where the finger did. */
+    uint32_t seed_class;
+} clay_mesh_hit;
+
+/* Turn a tap into a brush centre. `xform` is where the mesh sits, or NULL for
+ * identity — the ray goes into layer space and the hit comes back out here,
+ * because a caller doing that by hand gets a brush whose radius changes when
+ * the layer is scaled, and gets it wrong silently.
+ *
+ * Back faces are NOT culled: a sculptor working on the inside of a shell means
+ * it. A miss sets out_hit->hit to 0 and leaves the rest untouched. */
+clay_result clay_mesh_sculptor_raycast(clay_mesh_sculptor* sculptor, const float origin[3],
+                                       const float direction[3], const clay_mesh_frame* xform,
+                                       clay_mesh_hit* out_hit);
+
+clay_mesh_deltas* clay_mesh_deltas_create(void);
+void clay_mesh_deltas_destroy(clay_mesh_deltas* deltas);
+clay_result clay_mesh_deltas_vertex_count(const clay_mesh_deltas* deltas, size_t* out_count);
+/* Both are idempotent. Refused against a sculptor bound to a different mesh. */
+clay_result clay_mesh_deltas_revert(const clay_mesh_deltas* deltas, clay_mesh_sculptor* sculptor);
+clay_result clay_mesh_deltas_apply(const clay_mesh_deltas* deltas, clay_mesh_sculptor* sculptor);
+clay_result clay_mesh_deltas_clear(clay_mesh_deltas* deltas);
+
 /* Fill pockets inside the footprint: an empty cell with at least four of its
  * six face neighbours occupied is inside a cavity rather than beside a
  * surface, and `passes` iterations reach that many cells deep. An open face and

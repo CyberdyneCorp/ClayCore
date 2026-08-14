@@ -15,17 +15,27 @@
 #include <string>
 #include <vector>
 
+#include "clay/brush/mask_extrude.h"
+#include "clay/brush/move.h"
+#include "clay/brush/stroke.h"
+#include "clay/brush/tube.h"
+#include "clay/cut/cut.h"
 #include "clay/eval/backend.h"
 #include "clay/eval/bake_points.h"
+#include "clay/field/flatten.h"
+#include "clay/field/move_topological.h"
+#include "clay/field/relax.h"
+#include "clay/field/volume.h"
 #include "clay/io/clayspace.h"
 #include "clay/io/mesh_io.h"
+#include "clay/mesh/bvh.h"
 #include "clay/mesh/decimate.h"
 #include "clay/mesh/dual_contouring.h"
 #include "clay/mesh/marching.h"
 #include "clay/mesh/quad_mesh.h"
-#include "clay/mesh/bvh.h"
-#include "clay/mesh/to_field.h"
+#include "clay/mesh/sculpt.h"
 #include "clay/mesh/surface_nets.h"
+#include "clay/mesh/to_field.h"
 #include "clay/mesh/validate.h"
 #include "clay/pick/pick.h"
 #include "clay/scene/armature.h"
@@ -33,18 +43,9 @@
 #include "clay/scene/commands.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/tape.h"
-#include "clay/voxel/grid.h"
-#include "clay/brush/mask_extrude.h"
-#include "clay/brush/move.h"
-#include "clay/brush/stroke.h"
-#include "clay/brush/tube.h"
-#include "clay/cut/cut.h"
-#include "clay/field/flatten.h"
-#include "clay/field/move_topological.h"
-#include "clay/field/relax.h"
-#include "clay/field/volume.h"
-#include "clay/voxel/mask.h"
 #include "clay/version.h"
+#include "clay/voxel/grid.h"
+#include "clay/voxel/mask.h"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -123,6 +124,43 @@ brush::MaskExtrudeSettings extrude_settings(float thickness, const std::string& 
     if (!cell_size.is_none()) s.cell_size = nb::cast<float>(cell_size);
     if (!band.is_none()) s.band = nb::cast<float>(band);
     return s;
+}
+
+mesh::MeshBrush parse_mesh_brush(const std::string& verb) {
+    // One spelling per verb, as parse_extrude_side already argues: every string
+    // pyclay accepts is a capability the C ABI has to be able to name, and an
+    // alias would be a second enumerator meaning what the first one does.
+    if (verb == "grab") return mesh::MeshBrush::Grab;
+    if (verb == "draw") return mesh::MeshBrush::Draw;
+    if (verb == "inflate") return mesh::MeshBrush::Inflate;
+    if (verb == "smooth") return mesh::MeshBrush::Smooth;
+    if (verb == "pinch") return mesh::MeshBrush::Pinch;
+    if (verb == "flatten") return mesh::MeshBrush::Flatten;
+    if (verb == "clay") return mesh::MeshBrush::Clay;
+    if (verb == "crease") return mesh::MeshBrush::Crease;
+    if (verb == "scrape") return mesh::MeshBrush::Scrape;
+    if (verb == "polish") return mesh::MeshBrush::Polish;
+    if (verb == "snakehook") return mesh::MeshBrush::Snakehook;
+    throw std::invalid_argument(
+        "verb must be one of 'grab', 'draw', 'inflate', 'smooth', 'pinch', 'flatten', 'clay', "
+        "'crease', 'scrape', 'polish', 'snakehook', got '" +
+        verb + "'");
+}
+
+mesh::MeshFalloff parse_mesh_falloff(const std::string& falloff) {
+    if (falloff == "constant") return mesh::MeshFalloff::Constant;
+    if (falloff == "linear") return mesh::MeshFalloff::Linear;
+    if (falloff == "smooth") return mesh::MeshFalloff::Smooth;
+    if (falloff == "gaussian") return mesh::MeshFalloff::Gaussian;
+    throw std::invalid_argument(
+        "falloff must be 'constant', 'linear', 'smooth' or 'gaussian', got '" + falloff + "'");
+}
+
+field::FlattenMode parse_flatten_mode(const std::string& mode) {
+    if (mode == "two_sided") return field::FlattenMode::TwoSided;
+    if (mode == "cut") return field::FlattenMode::CutOnly;
+    if (mode == "fill") return field::FlattenMode::FillOnly;
+    throw std::invalid_argument("mode must be 'two_sided', 'cut' or 'fill', got '" + mode + "'");
 }
 
 voxel::BrushFalloff parse_falloff(const std::string& falloff) {
@@ -314,6 +352,53 @@ struct PyMesh {
             throw std::runtime_error("mesh layer was removed from its document");
         return it->second;
     }
+
+    // The same triangles, for a caller that is going to MOVE them: the mesh
+    // brushes, and nothing else. A borrowed mesh resolves to the document's own
+    // storage, so sculpting a layer edits the layer rather than a copy.
+    //
+    // Ghost and lock both mean "never edited", and a vertex displacement is an
+    // edit, so both refuse here — the rule every other edit in this library
+    // follows, applied at the one place a mesh layer can now be changed.
+    mesh::Mesh& editable() {
+        if (!doc) return m;
+        const scene::Layer* l = doc->document.find_layer(layer);
+        if (!l) throw std::runtime_error("mesh layer was removed from its document");
+        if (l->protected_from_edits())
+            throw std::runtime_error(std::string("layer '") + l->name + "' is " +
+                                     (l->ghost ? "ghosted" : "locked") + " and takes no edits");
+        auto it = doc->mesh_layers.find(layer);
+        if (it == doc->mesh_layers.end())
+            throw std::runtime_error("mesh layer was removed from its document");
+        return it->second;
+    }
+};
+
+// A sculpting session over one Mesh. The engine's MeshSculptor holds its mesh
+// BY REFERENCE, and a Python Mesh is an ordinary object that can be collected,
+// so the session keeps the Python object alive and re-resolves the triangles on
+// every call: a mesh layer removed mid-session becomes an exception rather than
+// a read of freed storage.
+struct PyMeshSculptor {
+    nb::object owner;  // the Python Mesh, kept alive for the session's lifetime
+    PyMesh* mesh = nullptr;
+    mesh::Mesh* bound = nullptr;
+    std::shared_ptr<mesh::MeshSculptor> sculptor;
+
+    mesh::MeshSculptor& live(bool for_edit) const {
+        if (!sculptor) throw std::runtime_error("this sculptor was never built");
+        mesh::Mesh& now = for_edit ? mesh->editable() : const_cast<mesh::Mesh&>(mesh->data());
+        if (&now != bound)
+            throw std::runtime_error("the mesh this sculptor was built over has been replaced");
+        if (!sculptor->valid())
+            throw std::runtime_error(
+                "the mesh changed its vertex or index count under this sculptor");
+        return *sculptor;
+    }
+};
+
+struct PyVertexDeltas {
+    std::shared_ptr<mesh::VertexDeltas> deltas = std::make_shared<mesh::VertexDeltas>();
 };
 
 // Zero-copy (owner-tracked) view over a vector of cfloat3 (plain x,y,z floats).
@@ -368,6 +453,54 @@ mesh::Mesh load_mesh_any(const std::string& path, const io::ImportBudget& limits
 // real use, or an explicit ((lo), (hi)) pair for a caller that wants to bound
 // it by hand.
 math::Aabb to_aabb(nb::handle obj);
+
+// -- mesh brush helpers --------------------------------------------------------
+
+// One place that turns a Python call into a MeshBrushSettings, shared by `stamp`
+// and `apply_stroke`, so the two cannot drift about what an argument means.
+// Every refusal here mirrors a refusal in the C ABI, which is the standing rule
+// for these two bindings: they must not disagree about what a value is.
+mesh::MeshBrushSettings mesh_brush_settings(const std::string& verb, nb::handle center,
+                                            float radius, float strength,
+                                            const std::string& falloff, nb::handle direction,
+                                            nb::handle deposit_normal, nb::handle geodesic,
+                                            nb::handle seed_class, const std::string& flatten_mode,
+                                            nb::handle plane_point, nb::handle plane_normal,
+                                            float polish_angle, int smooth_iterations,
+                                            mesh::MeshBrush* out_verb) {
+    *out_verb = parse_mesh_brush(verb);
+    if (!(radius > 0.0f)) throw std::invalid_argument("radius must be > 0");
+    if (smooth_iterations < 1 || smooth_iterations > mesh::kMaxSmoothIterations)
+        throw std::invalid_argument("smooth_iterations must be in 1.." +
+                                    std::to_string(mesh::kMaxSmoothIterations));
+    mesh::MeshBrushSettings settings;
+    if (!center.is_none()) settings.center = to_f3(center, "center");
+    settings.radius = radius;
+    settings.strength = strength;
+    settings.falloff = parse_mesh_falloff(falloff);
+    if (!direction.is_none()) settings.direction = to_f3(direction, "direction");
+    if (!deposit_normal.is_none())
+        settings.deposit_normal = to_f3(deposit_normal, "deposit_normal");
+    // None means "whatever this verb should do", which is off for the two whose
+    // meaning is "everything under this disc".
+    settings.geodesic =
+        geodesic.is_none() ? mesh::default_geodesic(*out_verb) : nb::cast<bool>(geodesic);
+    settings.seed_class =
+        seed_class.is_none() ? mesh::kNoClass : nb::cast<std::uint32_t>(seed_class);
+    settings.flatten_mode = parse_flatten_mode(flatten_mode);
+    // A plane is given when EITHER half of it is, so a caller who names only the
+    // normal gets the plane they meant rather than a silently ignored argument.
+    settings.use_given_plane = !plane_point.is_none() || !plane_normal.is_none();
+    if (!plane_point.is_none()) settings.plane_point = to_f3(plane_point, "plane_point");
+    if (!plane_normal.is_none()) {
+        settings.plane_normal = to_f3(plane_normal, "plane_normal");
+        if (!(kernel::clength(settings.plane_normal) > 1e-6f))
+            throw std::invalid_argument("plane_normal must not be zero length");
+    }
+    settings.polish_angle = polish_angle;
+    settings.smooth_iterations = smooth_iterations;
+    return settings;
+}
 
 // -- stroke engine helpers -----------------------------------------------------
 
@@ -2213,12 +2346,7 @@ NB_MODULE(pyclay, m) {
                 if (!(kernel::clength(settings.plane_normal) > 1e-6f))
                     throw std::invalid_argument("plane_normal must not be zero length");
                 settings.strength = strength;
-                if (mode == "two_sided") settings.mode = field::FlattenMode::TwoSided;
-                else if (mode == "cut") settings.mode = field::FlattenMode::CutOnly;
-                else if (mode == "fill") settings.mode = field::FlattenMode::FillOnly;
-                else
-                    throw std::invalid_argument(
-                        "mode must be 'two_sided', 'cut' or 'fill', got '" + mode + "'");
+                settings.mode = parse_flatten_mode(mode);
                 if (!centre.is_none()) settings.centre = to_f3(centre, "centre");
                 if (!(region_radius > 0.0f))
                     throw std::invalid_argument(
@@ -2887,6 +3015,222 @@ NB_MODULE(pyclay, m) {
         .def("save",
              [](const PyMesh& pm, const std::string& path) { save_mesh_any(pm.data(), path); },
              "path"_a, "Save by extension: .obj, .ply, .fbx or .glb");
+
+    // -- fixed-topology mesh brushes -------------------------------------------------
+    nb::class_<PyVertexDeltas>(
+        m, "VertexDeltas",
+        "What one sculpting gesture moved, and how to put it back.\n\n"
+        "A mesh stroke is destructive vertex displacement, not an edit item, so\n"
+        "it cannot undo through the document's command stack the way an SDF\n"
+        "stroke does. This is the undo it gets instead: a SPARSE record of the\n"
+        "vertices a stroke actually reached, with their positions and normals\n"
+        "before and after.\n\n"
+        "COALESCED. A vertex passed over forty times by one stroke appears once,\n"
+        "keeping the first `before` and the last `after`, so the record's size is\n"
+        "bounded by the vertices reached rather than by the stamps taken — and\n"
+        "reverting one is one undo step.\n\n"
+        "`revert` restores positions AND normals bit-exactly, and never touches\n"
+        "the index or quad buffers, because nothing here can change them.")
+        .def("__init__", [](PyVertexDeltas* self) { new (self) PyVertexDeltas(); })
+        .def_prop_ro(
+            "vertex_count", [](const PyVertexDeltas& d) { return d.deltas->size(); },
+            "How many vertices this gesture reached")
+        .def(
+            "revert",
+            [](const PyVertexDeltas& d, PyMeshSculptor& s) {
+                if (!d.deltas->revert(s.live(true).mesh()))
+                    throw std::invalid_argument("this record does not belong to this mesh");
+            },
+            "sculptor"_a, "Put the mesh back as it was. Idempotent.")
+        .def(
+            "apply",
+            [](const PyVertexDeltas& d, PyMeshSculptor& s) {
+                if (!d.deltas->apply(s.live(true).mesh()))
+                    throw std::invalid_argument("this record does not belong to this mesh");
+            },
+            "sculptor"_a, "Redo: put the mesh back as the gesture left it. Idempotent.")
+        .def(
+            "clear", [](PyVertexDeltas& d) { d.deltas->clear(); },
+            "Start a new gesture in the same record");
+
+    nb::class_<PyMeshSculptor>(
+        m, "MeshSculptor",
+        "The classical sculpting mode, on a mesh layer's own triangles.\n\n"
+        "TOPOLOGY NEVER CHANGES. No verb here creates, splits, deletes or\n"
+        "reorders a polygon or a vertex — `indices` and `quads` come out byte\n"
+        "for byte as they went in, so a quad mesh sculpted here is still the\n"
+        "same quad mesh. That is the whole point: the only other way to edit a\n"
+        "mesh layer is `Volume.from_mesh`, which resamples the model onto a\n"
+        "lattice and throws away the retopology somebody paid for.\n\n"
+        "Said plainly rather than discovered: a large grab STRETCHES triangles,\n"
+        "and 'snakehook' stretches them to the extreme. That is the signal the\n"
+        "mesh wants retopo, exactly as Blender behaves with Dyntopo off.\n\n"
+        "Built over a Mesh — including the one a mesh LAYER hands back, in which\n"
+        "case sculpting edits the document's own triangles rather than a copy.\n"
+        "A locked or ghosted layer refuses, because both mean 'never edited'.\n\n"
+        "The adjacency it builds never goes stale, since no verb can change the\n"
+        "topology it describes. The ray tree does — positions move under it — so\n"
+        "`refresh` is how you decide when to pay for rebuilding it.")
+        .def(
+            "__init__",
+            [](PyMeshSculptor* self, nb::object mesh, float weld_epsilon) {
+                PyMesh* pm = nb::cast<PyMesh*>(mesh);
+                mesh::Mesh& data = pm->editable();
+                if (data.triangle_count() == 0)
+                    throw std::invalid_argument("a mesh with no triangles has no surface");
+                if (weld_epsilon < 0.0f) throw std::invalid_argument("weld_epsilon must be >= 0");
+                new (self) PyMeshSculptor();
+                self->owner = mesh;
+                self->mesh = pm;
+                self->bound = &data;
+                self->sculptor = std::make_shared<mesh::MeshSculptor>(data, weld_epsilon);
+            },
+            "mesh"_a, "weld_epsilon"_a = mesh::kDefaultWeldEpsilon,
+            "`weld_epsilon` is relative to the bounding-box diagonal: vertices\n"
+            "closer than that are one point of the surface, which is what lets a\n"
+            "brush cross a UV seam without opening a crack. 0 welds on exact bits.")
+        .def_prop_ro(
+            "vertex_count",
+            [](const PyMeshSculptor& s) { return s.live(false).adjacency().vertex_count(); })
+        .def_prop_ro(
+            "class_count",
+            [](const PyMeshSculptor& s) { return s.live(false).adjacency().class_count(); },
+            "Welded classes — fewer than `vertex_count` exactly where the mesh\n"
+            "has seams, which is how you can tell you imported a split model.")
+        .def(
+            "stamp",
+            [](PyMeshSculptor& s, const std::string& verb, nb::handle center, float radius,
+               float strength, const std::string& falloff, nb::handle direction,
+               nb::handle deposit_normal, nb::handle geodesic, nb::handle seed_class,
+               const std::string& flatten_mode, nb::handle plane_point, nb::handle plane_normal,
+               float polish_angle, int smooth_iterations, nb::handle mask, nb::handle deltas) {
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    verb, center, radius, strength, falloff, direction, deposit_normal, geodesic,
+                    seed_class, flatten_mode, plane_point, plane_normal, polish_angle,
+                    smooth_iterations, &chosen);
+                mesh::VertexDeltas* record =
+                    deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
+                field::MaskGate gate = mask_gate_of(mask);
+                mesh::MeshSculptor& live = s.live(true);
+                nb::gil_scoped_release release;
+                return live.stamp(chosen, settings, gate, record);
+            },
+            "verb"_a, "center"_a, "radius"_a, "strength"_a = 0.5f, "falloff"_a = "smooth",
+            "direction"_a = nb::none(), "deposit_normal"_a = nb::none(), "geodesic"_a = nb::none(),
+            "seed_class"_a = nb::none(), "flatten_mode"_a = "two_sided",
+            "plane_point"_a = nb::none(), "plane_normal"_a = nb::none(), "polish_angle"_a = 0.20f,
+            "smooth_iterations"_a = 1, "mask"_a = nb::none(), "deltas"_a = nb::none(),
+            "One stamp; returns how many welded classes moved.\n\n"
+            "`verb` is one of:\n"
+            "  'grab'      drag the region by `direction`\n"
+            "  'draw'      displace along the REGION's averaged normal\n"
+            "  'inflate'   displace along EACH VERTEX's own normal (signed)\n"
+            "  'smooth'    Laplacian average over the one-ring\n"
+            "  'pinch'     signed: + gathers tangentially, - spreads (magnify)\n"
+            "  'flatten'   project onto a plane, per `flatten_mode`\n"
+            "  'clay'      draw's deposit CLAMPED to a plane: flat-topped strips\n"
+            "  'crease'    a tight negative draw and a pinch, in ONE stamp\n"
+            "  'scrape'    flatten cut-only and smooth, from ONE snapshot\n"
+            "  'polish'    smooth gated by dihedral angle: noise goes, edges stay\n"
+            "  'snakehook' grab re-anchored along the drag (see `apply_stroke`)\n\n"
+            "`geodesic` measures the falloff ALONG THE SURFACE, so a brush on the\n"
+            "upper lip does not drag the chin through a closed mouth. None takes\n"
+            "the verb's default: off for 'flatten' and 'scrape', which mean\n"
+            "'everything under this disc'.\n\n"
+            "`mask` freezes: each vertex's weight is scaled by (1 - mask) at its\n"
+            "world position, for every verb, with no per-verb code.")
+        .def(
+            "apply_stroke",
+            [](PyMeshSculptor& s, nb::handle samples, const brush::StrokePreset& preset,
+               const std::string& verb, const std::string& falloff, nb::handle deposit_normal,
+               nb::handle geodesic, nb::handle seed_class, const std::string& flatten_mode,
+               nb::handle plane_point, nb::handle plane_normal, float polish_angle,
+               int smooth_iterations, float strength, nb::handle mask, nb::handle deltas,
+               bool defer_normals) {
+                mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
+                // The radius is the STAMP's, so a placeholder goes in here.
+                mesh::MeshBrushSettings settings = mesh_brush_settings(
+                    verb, nb::none(), 1.0f, strength, falloff, nb::none(), deposit_normal, geodesic,
+                    seed_class, flatten_mode, plane_point, plane_normal, polish_angle,
+                    smooth_iterations, &chosen);
+                std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
+                mesh::VertexDeltas* record =
+                    deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
+                const voxel::MaskField* field_mask = borrow_mask(mask);
+                brush::MeshStrokeOptions options;
+                options.defer_normals = defer_normals;
+                mesh::MeshSculptor& live = s.live(true);
+                nb::gil_scoped_release release;
+                return brush::apply_to_mesh(live, brush::resolve_stroke(in, preset), chosen,
+                                            settings, field_mask, record, options);
+            },
+            "samples"_a, "preset"_a, "verb"_a, "falloff"_a = "smooth",
+            "deposit_normal"_a = nb::none(), "geodesic"_a = nb::none(), "seed_class"_a = nb::none(),
+            "flatten_mode"_a = "two_sided", "plane_point"_a = nb::none(),
+            "plane_normal"_a = nb::none(), "polish_angle"_a = 0.20f, "smooth_iterations"_a = 1,
+            "strength"_a = 1.0f, "mask"_a = nb::none(), "deltas"_a = nb::none(),
+            "defer_normals"_a = false,
+            "Resolve a stroke and apply it — the stroke engine's FOURTH consumer,\n"
+            "after the voxel grid, the mask and the edit list. Spacing, pressure\n"
+            "response, deterministic jitter, taper, steady stroke and\n"
+            "buildup-versus-clamped accumulation all reach mesh sculpting with no\n"
+            "new machinery. Buildup is what turns one 'clay' stamp into\n"
+            "ClayBuildup.\n\n"
+            "Each stamp brings its own radius and strength from the preset;\n"
+            "`strength` here multiplies them, it does not replace them.\n\n"
+            "'grab' anchors on the first stamp and drags by the motion between\n"
+            "stamps; 'snakehook' re-anchors on every stamp, so its region walks\n"
+            "with the pull. Returns how many stamps moved a vertex.")
+        .def(
+            "raycast",
+            [](PyMeshSculptor& s, nb::handle origin, nb::handle direction, nb::handle position,
+               nb::handle rotation_axis, float rotation_angle, float scale) {
+                math::Ray ray;
+                ray.origin = to_f3(origin, "origin");
+                ray.dir = to_f3(direction, "direction");
+                if (!(kernel::clength(ray.dir) > 0.0f))
+                    throw std::invalid_argument("direction has no length");
+                ray.dir = kernel::cnormalize(ray.dir);
+                if (!(scale > 0.0f)) throw std::invalid_argument("scale must be > 0");
+                math::Transform xform;
+                if (!position.is_none()) xform.position = to_f3(position, "position");
+                if (!rotation_axis.is_none())
+                    xform.rotation = math::Quat::from_axis_angle(
+                        kernel::cnormalize(to_f3(rotation_axis, "rotation_axis")), rotation_angle);
+                xform.scale = scale;
+
+                mesh::MeshSculptor& live = s.live(false);
+                const mesh::Mesh& mm = live.mesh();
+                const pick::MeshHit hit = pick::raycast_mesh(mm, live.bvh(), ray, xform);
+                if (!hit.hit) return nb::object(nb::none());
+                nb::dict out;
+                out["t"] = hit.t;
+                out["position"] = nb::make_tuple(hit.position.x, hit.position.y, hit.position.z);
+                out["normal"] = nb::make_tuple(hit.normal.x, hit.normal.y, hit.normal.z);
+                out["triangle"] = hit.triangle;
+                out["u"] = hit.u;
+                out["v"] = hit.v;
+                out["seed_class"] = live.adjacency().class_of(mm.indices[hit.triangle * 3]);
+                return nb::object(out);
+            },
+            "origin"_a, "direction"_a, "position"_a = nb::none(), "rotation_axis"_a = nb::none(),
+            "rotation_angle"_a = 0.0f, "scale"_a = 1.0f,
+            "Where a ray meets the mesh, or None. The layer transform is applied\n"
+            "HERE — the ray goes into layer space and the hit comes back out —\n"
+            "because a caller doing that by hand gets a brush whose radius\n"
+            "changes when the layer is scaled, and gets it wrong silently.\n\n"
+            "Back faces are NOT culled: a sculptor working on the inside of a\n"
+            "shell means it.\n\n"
+            "The dict carries `seed_class`, which is what `stamp`'s `seed_class`\n"
+            "wants: it starts the surface walk where the finger did, instead of\n"
+            "scanning the whole mesh for the nearest vertex.")
+        .def(
+            "refresh", [](PyMeshSculptor& s) { s.live(false).refresh_bvh(); },
+            "Rebuild the ray tree over the vertices as they now are. Until you\n"
+            "call this, `raycast` reports the surface as it was when the tree was\n"
+            "built — which is usually what a stroke wants, since a brush that\n"
+            "keeps its depth from the first pick is how sculpting feels right.");
 
     // -- layer -----------------------------------------------------------------------
     nb::class_<PyLayer>(m, "Layer", "SDF layer: an ordered edit list inside a Document")

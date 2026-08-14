@@ -36,10 +36,19 @@ ALLOWED = {
     # sampled field (below it). It cannot live in field without making
     # field -> voxel -> scene -> field a cycle, and brush already sits above
     # both. Nothing in field knows about brush.
-    "brush": {"kernel", "math", "scene", "voxel", "field"},
+    # brush -> mesh is apply_to_mesh, the stroke engine's fourth consumer: a
+    # resolved stroke stamped onto a mesh layer's own vertices. It is the one
+    # call that sees both a mesh and a mask, which is exactly why it lives
+    # here — mesh may not include voxel (voxel already includes mesh), so a
+    # masked mesh brush cannot live in mesh. No cycle: nothing in mesh knows
+    # about brush.
+    "brush": {"kernel", "math", "scene", "voxel", "field", "mesh"},
     "cut": {"kernel", "math", "scene"},
     "field": {"kernel", "math"},  # a sampled field is a leaf payload, below scene
-    "pick": {"kernel", "math", "scene", "eval", "brick", "voxel"},
+    # pick -> mesh is raycast_mesh. A mesh layer never enters a tape, so
+    # raycast_scene cannot see one and never will; picking one means asking its
+    # BVH directly. Nothing in mesh knows about pick.
+    "pick": {"kernel", "math", "scene", "eval", "brick", "voxel", "mesh"},
     "io": {"kernel", "math", "scene", "eval", "brick", "voxel", "mesh", "field"},
 }
 CORE_MODULES = set(ALLOWED)

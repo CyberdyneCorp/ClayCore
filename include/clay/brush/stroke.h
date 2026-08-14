@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "clay/math/transform.h"
+#include "clay/mesh/sculpt.h"
 #include "clay/scene/document.h"
 #include "clay/voxel/grid.h"
 #include "clay/voxel/mask.h"
@@ -188,6 +189,52 @@ std::vector<scene::Node> stamps_to_nodes(scene::SdfContent& content,
                                          const std::vector<Stamp>& stamps,
                                          const scene::Node& templ,
                                          const voxel::MaskField* mask = nullptr);
+
+// -- the fourth consumer: a mesh layer's own triangles -------------------------
+//
+// `resolve_stroke` was built to be consumed more than once, and this is the
+// fourth: spacing, pressure response, deterministic jitter, taper, steady
+// stroke and buildup-versus-clamped accumulation reach FIXED-TOPOLOGY MESH
+// SCULPTING with no new machinery, exactly as they reached the mask brush. The
+// per-stamp strength is what turns one `Clay` stamp into ClayBuildup.
+//
+// SPACES, because this is the one call in the engine that straddles two. The
+// stamps, the settings and the sculptor's mesh are all in the MESH's OWN
+// space. The MASK is world-addressed by design (see voxel/mask.h), so
+// `mesh_to_world` is how a vertex is found on the mask lattice — identity when
+// the layer is untransformed, which is the common case and the default.
+//
+// Nothing here enters a tape, an edit list or the parity fixture. A sculpted
+// mesh layer is still never evaluated.
+struct MeshStrokeOptions {
+    // Recompute normals once at the end of the stroke rather than per stamp.
+    // Faster, identical result; a live preview wants it off.
+    bool defer_normals = false;
+
+    // Where the mesh sits, for sampling the mask alone.
+    math::Transform mesh_to_world = math::Transform::identity();
+};
+
+// Apply a resolved stroke to a mesh. Returns the number of stamps that moved a
+// vertex — a stamp that reached nothing, or that landed in a fully masked
+// region, is not one of them.
+//
+// `settings.radius` and `settings.strength` are IGNORED: each stamp brings its
+// own, which is what makes pressure and taper shape a mesh stroke exactly as
+// they shape a voxel one. Everything else in `settings` is the brush.
+//
+// GRAB anchors on the FIRST stamp and drags by the motion between stamps;
+// SNAKEHOOK re-anchors on every stamp, so its region walks with the pull. That
+// one difference is the whole of the difference between them, and it lives
+// here rather than in the verb because it is a fact about a STROKE.
+//
+// `deltas`, when given, accumulates the whole call into one coalesced record —
+// one gesture, one undo step.
+std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>& stamps,
+                          mesh::MeshBrush verb, const mesh::MeshBrushSettings& settings,
+                          const voxel::MaskField* mask = nullptr,
+                          mesh::VertexDeltas* deltas = nullptr,
+                          const MeshStrokeOptions& options = {});
 
 // -- snakehook ----------------------------------------------------------------
 //

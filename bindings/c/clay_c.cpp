@@ -2,38 +2,40 @@
 // thread-local error details, no exceptions cross this boundary (the core
 // builds with -fno-exceptions on GCC/Clang).
 
-#include "clay.h"
-
 #include <algorithm>
 #include <atomic>
 #include <cmath>
-#include <mutex>
 #include <cstddef>
 #include <cstring>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 
-#include "desc_version.h"
-
 #include "../../backends/cpu/thread_pool.h"
-
+#include "clay.h"
+#include "clay/brush/mask_extrude.h"
+#include "clay/brush/move.h"
+#include "clay/brush/stroke.h"
+#include "clay/brush/tube.h"
+#include "clay/cut/cut.h"
 #include "clay/eval/backend.h"
 #include "clay/eval/bake_points.h"
-#include "clay/io/clayspace.h"
-#include <memory>
-
-#include "clay/io/mesh_io.h"
 #include "clay/field/flatten.h"
 #include "clay/field/move_topological.h"
 #include "clay/field/relax.h"
-#include "clay/mesh/to_field.h"
+#include "clay/io/clayspace.h"
+#include "clay/io/mesh_io.h"
+#include "clay/io/parity_fixture.h"
 #include "clay/mesh/decimate.h"
 #include "clay/mesh/dual_contouring.h"
 #include "clay/mesh/marching.h"
 #include "clay/mesh/quad_mesh.h"
+#include "clay/mesh/sculpt.h"
 #include "clay/mesh/surface_nets.h"
+#include "clay/mesh/to_field.h"
 #include "clay/mesh/validate.h"
 #include "clay/pick/pick.h"
 #include "clay/scene/armature.h"
@@ -42,15 +44,10 @@
 #include "clay/scene/consolidate.h"
 #include "clay/scene/cull_index.h"
 #include "clay/scene/tape.h"
-#include "clay/io/parity_fixture.h"
 #include "clay/version.h"
 #include "clay/voxel/grid.h"
-#include "clay/brush/mask_extrude.h"
-#include "clay/brush/move.h"
-#include "clay/brush/stroke.h"
-#include "clay/brush/tube.h"
-#include "clay/cut/cut.h"
 #include "clay/voxel/mask.h"
+#include "desc_version.h"
 
 using namespace clay;
 
@@ -6866,6 +6863,348 @@ clay_result clay_brick_cache_raycast_many(const clay_brick_cache* cache,
             }
         });
     write_ray_hits(hits, count, out_hits, out_t, out_positions_xyz, out_normals_xyz);
+    return CLAY_OK;
+}
+
+}  // extern "C" — the mesh-brush plumbing below takes C++ types
+
+// -- fixed-topology mesh brushes ---------------------------------------------
+
+// A sculpting session. The engine's MeshSculptor holds its mesh BY REFERENCE,
+// and a mesh layer's triangles can be removed from under it, so the handle
+// remembers what it was built over and every call checks that the answer has
+// not changed. A layer removed mid-session becomes a refusal rather than a read
+// of freed storage.
+struct clay_mesh_sculptor {
+    clay_mesh* mesh = nullptr;
+    mesh::Mesh* bound = nullptr;
+    std::unique_ptr<mesh::MeshSculptor> sculptor;
+};
+
+struct clay_mesh_deltas {
+    mesh::VertexDeltas deltas;
+};
+
+namespace {
+
+constexpr std::size_t kMeshBrushDescOriginal =
+    offsetof(clay_mesh_brush_desc, smooth_iterations) + sizeof(std::int32_t);
+constexpr std::size_t kMeshFrameOriginal = offsetof(clay_mesh_frame, scale) + sizeof(float);
+constexpr std::size_t kMeshHitOriginal =
+    offsetof(clay_mesh_hit, seed_class) + sizeof(std::uint32_t);
+
+mesh::Mesh* mesh_data_mut(clay_mesh* mesh) {
+    if (!mesh) return nullptr;
+    if (!mesh->doc) return &mesh->data;
+    auto it = mesh->doc->doc.mesh_layers.find(mesh->layer);
+    return it == mesh->doc->doc.mesh_layers.end() ? nullptr : &it->second;
+}
+
+// Locked and ghosted both mean "never edited", and a vertex displacement is an
+// edit. Checked per call rather than at create time: a layer can be locked
+// while a session is open, and the lock has to win.
+//
+// A REMOVED layer is refused here too. Its triangles survive removal — the
+// undo stack needs them — so reading a borrowed handle still answers, on the
+// ABI's standing rule that reading is not editing. Sculpting content that
+// belongs to no layer is a different thing, and it is a mistake.
+clay_result mesh_layer_editable(const clay_mesh* mesh) {
+    if (!mesh->doc) return CLAY_OK;  // a standalone mesh belongs to no layer
+    const scene::Layer* l = mesh->doc->doc.document.find_layer(mesh->layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "the mesh layer is no longer in its document");
+    if (l->protected_from_edits())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    std::string("layer ") + std::to_string(mesh->layer) + " is " +
+                        (l->ghost ? "ghosted" : "locked") + " and takes no edits");
+    return CLAY_OK;
+}
+
+clay_result resolve_sculptor(clay_mesh_sculptor* s, bool for_edit) {
+    if (!s || !s->sculptor) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh sculptor");
+    mesh::Mesh* now = mesh_data_mut(s->mesh);
+    if (!now || now != s->bound)
+        return fail(CLAY_ERROR_NOT_FOUND,
+                    "the mesh this sculptor was built over is no longer in its document");
+    if (!s->sculptor->valid())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the mesh changed its vertex or index count under this sculptor");
+    return for_edit ? mesh_layer_editable(s->mesh) : CLAY_OK;
+}
+
+bool mesh_brush_is_known(std::int32_t verb) {
+    return verb >= 0 && verb <= static_cast<std::int32_t>(mesh::MeshBrush::Snakehook);
+}
+
+bool mesh_falloff_is_known(std::int32_t curve) {
+    return curve >= 0 && curve <= static_cast<std::int32_t>(mesh::MeshFalloff::Gaussian);
+}
+
+// Every refusal here is a refusal rather than a clamp, on the same footing as
+// the mesher enums: a value outside the declared list is a mistake, and mapping
+// it onto the default hides the mistake behind a plausible result.
+clay_result read_mesh_brush(const clay_mesh_brush_desc* src, mesh::MeshBrush* out_verb,
+                            mesh::MeshBrushSettings* out) {
+    if (!src) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh brush descriptor");
+    clay_mesh_brush_desc d;
+    clay_result r = read_desc(src, kMeshBrushDescOriginal, &d);
+    if (r != CLAY_OK) return r;
+    if (!mesh_brush_is_known(d.verb))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown mesh brush: " + std::to_string(d.verb));
+    if (!mesh_falloff_is_known(d.falloff))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "unknown mesh falloff: " + std::to_string(d.falloff));
+    if (d.flatten_mode < 0 ||
+        d.flatten_mode > static_cast<std::int32_t>(field::FlattenMode::FillOnly))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "unknown flatten mode: " + std::to_string(d.flatten_mode));
+    if (!(d.radius > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "brush radius must be > 0");
+    // Zero reads as "one pass", because a host that declared only the original
+    // layout sends the appended fields as zero.
+    if (d.smooth_iterations == 0) d.smooth_iterations = 1;
+    if (d.smooth_iterations < 0 || d.smooth_iterations > CLAY_MESH_MAX_SMOOTH_ITERATIONS)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "smooth_iterations must be in 1.." +
+                        std::to_string(CLAY_MESH_MAX_SMOOTH_ITERATIONS) + ", got " +
+                        std::to_string(d.smooth_iterations));
+
+    *out_verb = static_cast<mesh::MeshBrush>(d.verb);
+    out->center = kernel::cf3(d.center[0], d.center[1], d.center[2]);
+    out->radius = d.radius;
+    out->strength = d.strength;
+    out->falloff = static_cast<mesh::MeshFalloff>(d.falloff);
+    out->direction = kernel::cf3(d.direction[0], d.direction[1], d.direction[2]);
+    out->deposit_normal =
+        kernel::cf3(d.deposit_normal[0], d.deposit_normal[1], d.deposit_normal[2]);
+    out->geodesic = d.geodesic != 0;
+    out->seed_class = d.seed_class;
+    out->flatten_mode = static_cast<field::FlattenMode>(d.flatten_mode);
+    out->use_given_plane = d.use_given_plane != 0;
+    out->plane_point = kernel::cf3(d.plane_point[0], d.plane_point[1], d.plane_point[2]);
+    out->plane_normal = kernel::cf3(d.plane_normal[0], d.plane_normal[1], d.plane_normal[2]);
+    out->polish_angle = d.polish_angle;
+    out->smooth_iterations = d.smooth_iterations;
+    return CLAY_OK;
+}
+
+clay_result read_mesh_frame(const clay_mesh_frame* src, math::Transform* out) {
+    *out = math::Transform::identity();
+    if (!src) return CLAY_OK;
+    clay_mesh_frame d;
+    clay_result r = read_desc(src, kMeshFrameOriginal, &d);
+    if (r != CLAY_OK) return r;
+    out->position = kernel::cf3(d.position[0], d.position[1], d.position[2]);
+    const float qlen = std::sqrt(d.rotation[0] * d.rotation[0] + d.rotation[1] * d.rotation[1] +
+                                 d.rotation[2] * d.rotation[2] + d.rotation[3] * d.rotation[3]);
+    out->rotation = qlen > 0.0f ? math::Quat{d.rotation[0] / qlen, d.rotation[1] / qlen,
+                                             d.rotation[2] / qlen, d.rotation[3] / qlen}
+                                : math::Quat::identity();
+    out->scale = d.scale != 0.0f ? d.scale : 1.0f;
+    if (!(out->scale > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "frame scale must be > 0");
+    return CLAY_OK;
+}
+
+}  // namespace
+
+extern "C" {
+
+clay_result clay_mesh_brush_defaults(clay_mesh_brush_desc* out_desc) {
+    if (!out_desc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null descriptor");
+    const mesh::MeshBrushSettings d;
+    clay_mesh_brush_desc out{};
+    out.struct_size = static_cast<std::uint32_t>(sizeof(clay_mesh_brush_desc));
+    out.verb = CLAY_MESH_BRUSH_DRAW;
+    write_f3(out.center, d.center);
+    out.radius = d.radius;
+    out.strength = d.strength;
+    out.falloff = static_cast<std::int32_t>(d.falloff);
+    write_f3(out.direction, d.direction);
+    write_f3(out.deposit_normal, d.deposit_normal);
+    out.geodesic = d.geodesic ? 1 : 0;
+    out.seed_class = CLAY_MESH_NO_CLASS;
+    out.flatten_mode = static_cast<std::int32_t>(d.flatten_mode);
+    out.use_given_plane = 0;
+    write_f3(out.plane_point, d.plane_point);
+    write_f3(out.plane_normal, d.plane_normal);
+    out.polish_angle = d.polish_angle;
+    out.smooth_iterations = d.smooth_iterations;
+    *out_desc = out;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_create(clay_mesh* mesh, float weld_epsilon,
+                                      clay_mesh_sculptor** out_sculptor) {
+    if (!out_sculptor) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_sculptor");
+    *out_sculptor = nullptr;
+    if (!mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh");
+    mesh::Mesh* data = mesh_data_mut(mesh);
+    if (!data) return fail(CLAY_ERROR_NOT_FOUND, "the mesh layer is no longer in its document");
+    if (data->positions.empty() || data->indices.empty())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a mesh with no triangles has no surface");
+    auto handle = std::make_unique<clay_mesh_sculptor>();
+    handle->mesh = mesh;
+    handle->bound = data;
+    handle->sculptor = std::make_unique<mesh::MeshSculptor>(
+        *data, weld_epsilon < 0.0f ? mesh::kDefaultWeldEpsilon : weld_epsilon);
+    *out_sculptor = handle.release();
+    return CLAY_OK;
+}
+
+void clay_mesh_sculptor_destroy(clay_mesh_sculptor* sculptor) { delete sculptor; }
+
+clay_result clay_mesh_sculptor_vertex_count(const clay_mesh_sculptor* sculptor, size_t* out_count) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh sculptor");
+    if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_count");
+    *out_count = sculptor->sculptor->adjacency().vertex_count();
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_class_count(const clay_mesh_sculptor* sculptor, size_t* out_count) {
+    if (!sculptor || !sculptor->sculptor)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh sculptor");
+    if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_count");
+    *out_count = sculptor->sculptor->adjacency().class_count();
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_stamp(clay_mesh_sculptor* sculptor, const clay_mesh_brush_desc* desc,
+                                     const clay_mask* mask, clay_mesh_deltas* deltas,
+                                     size_t* out_moved) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/true);
+    if (r != CLAY_OK) return r;
+    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
+    mesh::MeshBrushSettings settings;
+    r = read_mesh_brush(desc, &verb, &settings);
+    if (r != CLAY_OK) return r;
+
+    field::MaskGate gate;
+    if (mask) {
+        voxel::MaskField* field_mask = nullptr;
+        r = resolve_mask(mask, &field_mask);
+        if (r != CLAY_OK) return r;
+        gate = [field_mask](kernel::cfloat3 p) { return field_mask->sample(p); };
+    }
+    const std::size_t moved =
+        sculptor->sculptor->stamp(verb, settings, gate, deltas ? &deltas->deltas : nullptr);
+    if (out_moved) *out_moved = moved;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_apply_stroke(clay_mesh_sculptor* sculptor,
+                                            const float* samples_xyzpt, size_t sample_count,
+                                            const clay_stroke_preset* preset,
+                                            const clay_mesh_brush_desc* desc, const clay_mask* mask,
+                                            const clay_mesh_frame* mesh_to_world,
+                                            int32_t defer_normals, clay_mesh_deltas* deltas,
+                                            size_t* out_applied) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/true);
+    if (r != CLAY_OK) return r;
+    mesh::MeshBrush verb = mesh::MeshBrush::Draw;
+    mesh::MeshBrushSettings settings;
+    r = read_mesh_brush(desc, &verb, &settings);
+    if (r != CLAY_OK) return r;
+    brush::MeshStrokeOptions options;
+    options.defer_normals = defer_normals != 0;
+    r = read_mesh_frame(mesh_to_world, &options.mesh_to_world);
+    if (r != CLAY_OK) return r;
+
+    std::vector<brush::StrokeSample> samples;
+    brush::StrokePreset resolved;
+    r = read_stroke(samples_xyzpt, sample_count, preset, &samples, &resolved);
+    if (r != CLAY_OK) return r;
+
+    voxel::MaskField* field_mask = nullptr;
+    if (mask) {
+        r = resolve_mask(mask, &field_mask);
+        if (r != CLAY_OK) return r;
+    }
+    const std::size_t applied =
+        brush::apply_to_mesh(*sculptor->sculptor, brush::resolve_stroke(samples, resolved), verb,
+                             settings, field_mask, deltas ? &deltas->deltas : nullptr, options);
+    if (out_applied) *out_applied = applied;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_refresh(clay_mesh_sculptor* sculptor) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
+    if (r != CLAY_OK) return r;
+    sculptor->sculptor->refresh_bvh();
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_raycast(clay_mesh_sculptor* sculptor, const float origin[3],
+                                       const float direction[3], const clay_mesh_frame* xform,
+                                       clay_mesh_hit* out_hit) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
+    if (r != CLAY_OK) return r;
+    if (!origin || !direction) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null ray");
+    if (!out_hit) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_hit");
+    clay_mesh_hit probe;
+    r = read_desc(out_hit, kMeshHitOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    math::Transform frame;
+    r = read_mesh_frame(xform, &frame);
+    if (r != CLAY_OK) return r;
+
+    math::Ray ray;
+    ray.origin = kernel::cf3(origin[0], origin[1], origin[2]);
+    ray.dir = kernel::cf3(direction[0], direction[1], direction[2]);
+    if (!(kernel::clength(ray.dir) > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "ray direction has no length");
+    ray.dir = kernel::cnormalize(ray.dir);
+
+    const mesh::Mesh& m = sculptor->sculptor->mesh();
+    const pick::MeshHit hit = pick::raycast_mesh(m, sculptor->sculptor->bvh(), ray, frame);
+    clay_mesh_hit out{};
+    out.struct_size = out_hit->struct_size;
+    out.hit = hit.hit ? 1 : 0;
+    if (hit.hit) {
+        out.t = hit.t;
+        write_f3(out.position, hit.position);
+        write_f3(out.normal, hit.normal);
+        out.triangle = hit.triangle;
+        out.u = hit.u;
+        out.v = hit.v;
+        out.seed_class = sculptor->sculptor->adjacency().class_of(m.indices[hit.triangle * 3]);
+    } else {
+        out.seed_class = CLAY_MESH_NO_CLASS;
+    }
+    *out_hit = out;
+    return CLAY_OK;
+}
+
+clay_mesh_deltas* clay_mesh_deltas_create(void) { return new clay_mesh_deltas(); }
+
+void clay_mesh_deltas_destroy(clay_mesh_deltas* deltas) { delete deltas; }
+
+clay_result clay_mesh_deltas_vertex_count(const clay_mesh_deltas* deltas, size_t* out_count) {
+    if (!deltas) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null delta record");
+    if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_count");
+    *out_count = deltas->deltas.size();
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_deltas_revert(const clay_mesh_deltas* deltas, clay_mesh_sculptor* sculptor) {
+    if (!deltas) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null delta record");
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/true);
+    if (r != CLAY_OK) return r;
+    if (!deltas->deltas.revert(sculptor->sculptor->mesh()))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this record does not belong to this mesh");
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_deltas_apply(const clay_mesh_deltas* deltas, clay_mesh_sculptor* sculptor) {
+    if (!deltas) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null delta record");
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/true);
+    if (r != CLAY_OK) return r;
+    if (!deltas->deltas.apply(sculptor->sculptor->mesh()))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this record does not belong to this mesh");
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_deltas_clear(clay_mesh_deltas* deltas) {
+    if (!deltas) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null delta record");
+    deltas->deltas.clear();
     return CLAY_OK;
 }
 

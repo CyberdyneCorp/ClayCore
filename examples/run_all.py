@@ -74,6 +74,9 @@ EXAMPLES = [
     "42_representation_round_trip",
     "43_consolidation_keeps_colour",
     "44_quad_export",
+    "45_mesh_brushes",
+    "46_mesh_brush_compositions",
+    "47_mesh_brush_reach_and_undo",
 ]
 
 
@@ -90,15 +93,18 @@ CAPABILITY_EXAMPLES = {
     "scene-model": "10_editing",
     "brick-cache": None,          # an internal cache; its effect is meshing speed, not a picture
     "evaluation-backends": None,  # the same field on four devices — a parity test, not a render
-    # plus 19_mesh_import for the reverse direction and 44_quad_export for quads
+    # plus 19_mesh_import for the reverse direction, 44_quad_export for quads,
+    # and 45-47 for the fixed-topology mesh brushes
     "meshing": "08_meshing_and_io",
-    "picking": "10_editing",
+    "picking": "10_editing",  # plus 45_mesh_brushes for raycasting a mesh layer
     "file-io": "08_meshing_and_io",
     # plus 11_masks, 33_mask_extrude, and 39_multi_resolution for the level stack
     "voxel-engine": "15_voxel_verbs_and_repair",
     "file-io": "08_meshing_and_io",  # plus 36_mesh_layers for the mesh chunk
     "voxel-engine": "15_voxel_verbs_and_repair",  # plus 11_masks and 33_mask_extrude
-    "brush-engine": "12_strokes",   # plus 26_move_brush and 11_masks for the mask brush
+    # plus 26_move_brush and 11_masks for the mask brush, and 45_mesh_brushes
+    # for apply_to_mesh, the fourth consumer
+    "brush-engine": "12_strokes",
     "cut-tool": "14_cut",
     "python-bindings": None,      # every example IS this capability
     "c-abi": None,                # exercised from Swift and C, not from the gallery

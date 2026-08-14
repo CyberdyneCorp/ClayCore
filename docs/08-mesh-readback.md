@@ -464,8 +464,8 @@ not a hole.
 
 ## Editing and handing geometry back
 
-The read path is read-only in every language — there is no call that mutates an
-existing mesh's vertices in place. Rebuild instead:
+The read path is read-only in every language, and rebuilding is how you hand an
+edited mesh back:
 
 ```python
 moved = np.array(mesh.positions)
@@ -483,9 +483,19 @@ takes positions and indices only — an edited mesh comes back without normals,
 colours or uvs. `clay_mesh_transform` is the exception worth knowing: it moves
 positions by a transform and rotates normals rather than dropping them.
 
-To sculpt an imported model rather than carry it, sample it into a field with
-`clay_item_volume_from_mesh` (`clay.Volume.from_mesh` in Python) — see
-[05 §7](05-claycore-library.md#7-meshing--mesh-processing-claymesh).
+**A mesh layer's vertices CAN be moved in place**, by the fixed-topology mesh
+brushes — `mesh::MeshSculptor`, `clay.MeshSculptor`, `clay_mesh_sculptor_*`.
+They move vertices and nothing else: `indices` and `quads` come out byte for
+byte as they went in, so a quad export re-imported after a retopo pass survives
+being sculpted. Undo is a sparse `VertexDeltas` record rather than the command
+stack, because a vertex displacement is not an edit item. See
+[07 § 8](07-brushes-and-features.md).
+
+To sculpt an imported model by RESAMPLING it instead — which is what you want
+when the triangles are a means rather than the deliverable — sample it into a
+field with `clay_item_volume_from_mesh` (`clay.Volume.from_mesh` in Python); see
+[05 §7](05-claycore-library.md#7-meshing--mesh-processing-claymesh). That path
+discards the topology, which is exactly the difference between the two.
 
 ## Runnable examples
 
@@ -494,5 +504,6 @@ To sculpt an imported model rather than carry it, sample it into a field with
 | `examples/08_meshing_and_io.py` | the three meshers compared, validation, every export format |
 | `examples/19_mesh_import.py` | reading `positions` / `indices` off an imported model |
 | `examples/36_mesh_layers.py` | a borrowed mesh layer, and that its arrays are views |
+| `examples/45_mesh_brushes.py` | moving a carried mesh's vertices without touching its topology |
 | `tests/unit/test_c_mesh_copy.cpp` | `clay_vertex_layout` including every refused layout |
 | `tests/c_api/smoke.c` | a pure-C consumer end to end |

@@ -609,6 +609,7 @@ The rest is the host seam — gaps hosts actually hit, each from an issue:
 | Change | Notes |
 |---|---|
 | `add-mesh-layers` **first slice landed 2026-08-09** | A document can CARRY an imported mesh, as opposed to sampling one: a third `LayerKind`, the triangles stored beside the document keyed by layer id where voxel grids and masks already live, a `MESH` chunk in `.clayspace` (1.4 → 1.5, backward-open), and the attach/lookup/bounds surface in both bindings. The placement is the design: `tools/check_layering.py` withholds `mesh` from `clay::scene`, so "a mesh layer does not change what the document evaluates to" is structural rather than maintained. **Not in the slice:** the merged export (`clay_mesh_transform` / `_concat` plus the convenience call that appends every visible mesh layer to the meshed field), and `max_file_bytes` on `clay_import_budget` with a budget-taking document load beside the existing one. Both are separable and neither is about meshes reaching the field, which stays out permanently. |
+| `mesh-fixed-topology-brushes` **landed 2026-08-14** | Vertex displacement on a mesh layer's own triangles — the eleven classical verbs, with `indices` and `quads` byte-identical before and after. The hole the round trip left: sculpt SDF → quad export → retopo elsewhere → and then the retopologized mesh could only re-enter through `Volume::from_mesh`, which resamples it and throws away what was paid for. Three prerequisites, all new: adjacency over **weld classes** (a ring built over raw indices stops at every UV seam), a **ray query** on the BVH so mesh layers are pickable at all, and **sparse vertex deltas** because a vertex displacement is not an edit item and `scene::Command` has no variant for one. Two decisions were made from renders rather than from tests: the surface-measured region is bounded by the brush's BALL and weighed by the STRAIGHT LINE, because a falloff driven by an edge-path distance bands visibly and a region bounded by one leaves a ragged rim; and polish's gate reads neighbouring CLASS normals, spread by one ring and then feathered, because per-face normals cannot tell noise from a feature and an unfeathered gate leaves a bead along everything it protected. The non-goal below was narrowed to topology-CHANGING sculpting rather than deleted. |
 | `add-claycore-bridge` (ClayCore half) | A retopo-oriented mesh export profile, plus a field-evaluation callback so a baker can sample exact normals and AO from the field rather than raycasting a mesh. The other half lives in CyberRemesherAndUV. This is the product story, and neither engine has the seam yet. |
 
 ## Phase 4 — parametric and scatter
@@ -643,9 +644,13 @@ needs them, and listed so they are not mistaken for oversights:
 
 Recorded so they are decisions rather than oversights:
 
-- **Mesh surface-mode sculpting** (their LiveClay, ZBrush's 36 surface brushes).
-  An SDF sidesteps topology entirely; competing on dynamic tessellation is not
-  this engine's fight.
+- **Topology-CHANGING mesh sculpting** — dyntopo, multires, remeshing,
+  subdivision (their LiveClay, ZBrush's dynamic tessellation). An SDF sidesteps
+  topology entirely; competing on dynamic tessellation is not this engine's
+  fight. **Amended 2026-08-14, not dropped**: this row used to say "mesh
+  surface-mode sculpting", which was wider than the decision behind it. Moving
+  the vertices that already exist is a different claim, and
+  `mesh-fixed-topology-brushes` makes it; tessellating new ones stays out.
 - **Subdivision multires.** Resolution is an evaluation parameter here, so the
   whole Res+/Resample/multires apparatus has nothing to attach to.
 - **Node-graph texturing UI.** The edit list already *is* non-destructive
