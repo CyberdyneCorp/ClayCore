@@ -60,6 +60,8 @@ add_library(claycore
   src/mesh/validate.cpp
   src/mesh/decimate.cpp
   src/mesh/bvh.cpp
+  src/mesh/adjacency.cpp
+  src/mesh/sculpt.cpp
   src/mesh/to_field.cpp
   src/pick/pick.cpp
   src/io/file_bytes.cpp

@@ -352,6 +352,65 @@ std::size_t apply_to_mask(voxel::MaskField& mask, const std::vector<Stamp>& stam
     return stamps.size();
 }
 
+std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>& stamps,
+                          mesh::MeshBrush verb, const mesh::MeshBrushSettings& settings,
+                          const voxel::MaskField* mask, mesh::VertexDeltas* deltas,
+                          const MeshStrokeOptions& options) {
+    if (stamps.empty() || !sculptor.valid()) return 0;
+
+    // The mask reaches every verb here and nowhere else: one conversion from
+    // the world-addressed lattice to the per-vertex weight the verbs already
+    // take, so a painted mask protects polygons from all eleven of them with
+    // no per-verb code.
+    field::MaskGate mask_gate;
+    if (mask) {
+        const math::Transform to_world = options.mesh_to_world;
+        mask_gate = [mask, to_world](kernel::cfloat3 p) { return mask->sample(to_world.apply(p)); };
+    }
+
+    const bool was_deferring = sculptor.defer_normals();
+    sculptor.set_defer_normals(options.defer_normals);
+
+    // GRAB is anchored and SNAKEHOOK walks. Both drag by the motion BETWEEN
+    // stamps, so a stroke that stops moving stops pulling.
+    const bool dragging = verb == mesh::MeshBrush::Grab || verb == mesh::MeshBrush::Snakehook;
+    const bool anchored = verb == mesh::MeshBrush::Grab;
+
+    std::size_t applied = 0;
+    kernel::cfloat3 previous = stamps.front().position;
+    for (std::size_t i = 0; i < stamps.size(); ++i) {
+        Stamp s = stamps[i];
+        // The same early-out apply_to_grid takes, and for the same reason: a
+        // stamp whose centre is frozen costs nothing rather than gathering a
+        // region it is not allowed to move. Partially masked stamps still run,
+        // and their vertices are weighed one by one below.
+        if (mask && mask->sample(options.mesh_to_world.apply(s.position)) >= 1.0f) {
+            previous = s.position;
+            continue;
+        }
+
+        mesh::MeshBrushSettings stamp_settings = settings;
+        stamp_settings.radius = s.radius;
+        stamp_settings.strength = settings.strength * s.strength;
+        if (dragging) {
+            stamp_settings.direction = s.position - previous;
+            stamp_settings.center = anchored ? stamps.front().position : s.position;
+            // An anchored grab keeps its own seed too, or the walk would chase
+            // the geometry it is dragging.
+            if (anchored) stamp_settings.seed_class = settings.seed_class;
+        } else {
+            stamp_settings.center = s.position;
+        }
+        previous = s.position;
+
+        if (sculptor.stamp(verb, stamp_settings, mask_gate, deltas) > 0) ++applied;
+    }
+
+    if (options.defer_normals) sculptor.flush_normals(deltas);
+    sculptor.set_defer_normals(was_deferring);
+    return applied;
+}
+
 std::vector<scene::Node> stamps_to_nodes(scene::SdfContent& content,
                                          const std::vector<Stamp>& stamps,
                                          const scene::Node& templ,

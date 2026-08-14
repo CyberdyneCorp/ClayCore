@@ -193,6 +193,55 @@ SceneHit raycast_bricks(const brick::BrickCache& cache, const math::Ray& ray,
 }
 
 // ---------------------------------------------------------------------------
+// mesh picking
+// ---------------------------------------------------------------------------
+
+MeshHit raycast_mesh(const mesh::Mesh& m, const mesh::Bvh& bvh, const math::Ray& ray,
+                     const math::Transform& xform, float tmax) {
+    MeshHit out;
+    if (bvh.empty() || m.indices.empty()) return out;
+
+    // Into layer space. The transform's scale is uniform, so a direction stays
+    // unit after the inverse rotation and only the scale divides — which is
+    // also why `t` comes back multiplied by it rather than recomputed.
+    const math::Transform inv = xform.inverse();
+    math::Ray local{inv.apply(ray.origin), xform.rotation.conjugate().rotate(ray.dir)};
+    local.dir = kernel::cnormalize(local.dir);
+    const float scale = xform.scale != 0.0f ? xform.scale : 1.0f;
+
+    const mesh::Bvh::RayHit hit = bvh.raycast(local, 0.0f, tmax / scale);
+    if (!hit.hit) return out;
+
+    const std::uint32_t i0 = m.indices[hit.triangle * 3];
+    const std::uint32_t i1 = m.indices[hit.triangle * 3 + 1];
+    const std::uint32_t i2 = m.indices[hit.triangle * 3 + 2];
+    const float w = 1.0f - hit.u - hit.v;
+    const cfloat3 local_p =
+        m.positions[i0] * w + m.positions[i1] * hit.u + m.positions[i2] * hit.v;
+
+    cfloat3 local_n;
+    if (m.normals.size() == m.positions.size()) {
+        local_n = m.normals[i0] * w + m.normals[i1] * hit.u + m.normals[i2] * hit.v;
+    } else {
+        local_n = kernel::ccross(m.positions[i1] - m.positions[i0],
+                                 m.positions[i2] - m.positions[i0]);
+    }
+    const float len = kernel::clength(local_n);
+    // A zero-area triangle or three cancelling vertex normals: report the face
+    // as facing the ray rather than handing back a zero vector.
+    local_n = len > 1e-20f ? local_n / len : -local.dir;
+
+    out.hit = true;
+    out.t = hit.t * scale;
+    out.position = xform.apply(local_p);
+    out.normal = kernel::cnormalize(xform.rotation.rotate(local_n));
+    out.triangle = hit.triangle;
+    out.u = hit.u;
+    out.v = hit.v;
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // snapping
 // ---------------------------------------------------------------------------
 

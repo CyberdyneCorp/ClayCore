@@ -91,7 +91,8 @@ Bvh Bvh::build(const Mesh& m) {
         std::uint32_t i0 = m.indices[t * 3], i1 = m.indices[t * 3 + 1], i2 = m.indices[t * 3 + 2];
         const std::size_t n = m.positions.size();
         if (i0 >= n || i1 >= n || i2 >= n) continue;  // a bad index drops its triangle
-        bvh.tris_.push_back(Tri{m.positions[i0], m.positions[i1], m.positions[i2]});
+        bvh.tris_.push_back(Tri{m.positions[i0], m.positions[i1], m.positions[i2],
+                                static_cast<std::uint32_t>(t)});
     }
     if (!bvh.tris_.empty()) bvh.build_node(0, static_cast<std::int32_t>(bvh.tris_.size()));
     return bvh;
@@ -175,6 +176,56 @@ std::int32_t Bvh::build_node(std::int32_t first, std::int32_t count) {
 
 math::Aabb Bvh::bounds() const {
     return nodes_.empty() ? math::Aabb() : nodes_[0].box;
+}
+
+Bvh::RayHit Bvh::raycast(const math::Ray& ray, float tmin, float tmax) const {
+    RayHit best;
+    if (nodes_.empty()) return best;
+
+    // Explicit stack rather than recursion: a query runs per Pencil event and
+    // a deep tree on a scanned mesh should not be a stack depth question.
+    std::int32_t stack[64];
+    int top = 0;
+    stack[top++] = 0;
+    float nearest = tmax;
+    while (top > 0) {
+        const std::int32_t self = stack[--top];
+        const Node& n = nodes_[static_cast<std::size_t>(self)];
+        float t0 = 0.0f, t1 = 0.0f;
+        if (!math::ray_aabb(ray, n.box, &t0, &t1)) continue;
+        if (t0 > nearest || t1 < tmin) continue;
+        if (n.count > 0) {
+            for (std::int32_t i = 0; i < n.count; ++i) {
+                const Tri& tri = tris_[static_cast<std::size_t>(n.first + i)];
+                // Möller–Trumbore, two-sided: the determinant's SIGN is not
+                // tested, only its magnitude, so a back face hits too.
+                const cfloat3 e1 = tri.b - tri.a, e2 = tri.c - tri.a;
+                const cfloat3 pv = cross3(ray.dir, e2);
+                const float det = dot3(e1, pv);
+                if (std::fabs(det) < 1e-20f) continue;
+                const float inv = 1.0f / det;
+                const cfloat3 tv = ray.origin - tri.a;
+                const float u = dot3(tv, pv) * inv;
+                if (u < 0.0f || u > 1.0f) continue;
+                const cfloat3 qv = cross3(tv, e1);
+                const float v = dot3(ray.dir, qv) * inv;
+                if (v < 0.0f || u + v > 1.0f) continue;
+                const float t = dot3(e2, qv) * inv;
+                if (t < tmin || t > nearest) continue;
+                nearest = t;
+                best = RayHit{true, t, tri.source, u, v};
+            }
+            continue;
+        }
+        // The build splits at the median, so the tree is balanced and 64 levels
+        // covers more triangles than a machine can hold. The guard is a bound
+        // on a corrupted tree, not a case that happens.
+        if (top + 2 <= static_cast<int>(sizeof(stack) / sizeof(stack[0]))) {
+            stack[top++] = self + 1;  // the left child is always the next node
+            stack[top++] = n.right;
+        }
+    }
+    return best;
 }
 
 float Bvh::unsigned_distance(cfloat3 p) const {

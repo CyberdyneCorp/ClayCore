@@ -28,6 +28,7 @@ add_executable(clay_unit_tests
   unit/test_mask.cpp
   unit/test_stroke_engine.cpp
   unit/test_mesh.cpp
+  unit/test_mesh_sculpt.cpp
   unit/test_meshers.cpp
   unit/test_pick.cpp
   unit/test_io.cpp

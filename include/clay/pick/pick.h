@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "clay/brick/cache.h"
+#include "clay/mesh/bvh.h"
 #include "clay/scene/document.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
@@ -58,6 +59,37 @@ SceneHit raycast_bricks(const brick::BrickCache& cache, const math::Ray& ray,
 // Attribute a world position to the nearest (layer, item) of the document.
 void attribute(const scene::Document& doc, kernel::cfloat3 position, scene::LayerId* layer,
                scene::NodeId* item);
+
+// -- mesh picking ------------------------------------------------------------
+//
+// A mesh layer carries triangles that never enter a tape, so raycast_scene
+// cannot see one and never will — that is the layer's whole design. A brush on
+// a mesh layer still needs a surface point and a normal, and this is where it
+// gets them.
+//
+// The BVH is the caller's, not built here: building it is the expensive part
+// and a stroke does hundreds of these. mesh::MeshSculptor keeps one.
+
+struct MeshHit {
+    bool hit = false;
+    float t = 0.0f;
+    kernel::cfloat3 position = kernel::cf3(0, 0, 0);
+    kernel::cfloat3 normal = kernel::cf3(0, 1, 0);  // world space, unit
+    std::uint32_t triangle = 0;
+    float u = 0.0f, v = 0.0f;  // barycentrics on that triangle
+};
+
+// Raycast a mesh held under `xform`. The conversion is done HERE — the ray into
+// layer space, the hit back into world — because a caller doing it by hand gets
+// a brush whose radius changes when a layer is scaled, and gets it wrong
+// silently.
+//
+// The normal is interpolated from the mesh's own vertex normals when it has
+// them and is the geometric face normal when it does not, so a model imported
+// without normals is still pickable.
+MeshHit raycast_mesh(const mesh::Mesh& m, const mesh::Bvh& bvh, const math::Ray& ray,
+                     const math::Transform& xform = math::Transform::identity(),
+                     float tmax = 1e6f);
 
 // -- surface snapping --------------------------------------------------------
 

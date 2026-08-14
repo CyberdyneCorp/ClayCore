@@ -64,9 +64,30 @@ class Bvh {
         return is_inside(p, beta) ? -d : d;
     }
 
+    // The nearest triangle a ray meets, and where on it. `triangle` is the
+    // index in the SOURCE mesh, not in this tree's own order — the build
+    // permutes triangles, so a hit that named its own storage would be useless
+    // to the caller.
+    //
+    // NO BACK-FACE CULLING: a sculptor pulling on the inside of a shell means
+    // it, and a hit reported only from outside would make half a model
+    // unpickable.
+    struct RayHit {
+        bool hit = false;
+        float t = 0.0f;
+        std::uint32_t triangle = 0;
+        // Barycentrics of the hit: p == a*(1-u-v) + b*u + c*v.
+        float u = 0.0f, v = 0.0f;
+    };
+    RayHit raycast(const math::Ray& ray, float tmin = 0.0f, float tmax = 1e30f) const;
+
   private:
     struct Tri {
         kernel::cfloat3 a, b, c;
+        // Where this triangle came from. Carried INSIDE the triangle rather
+        // than in a parallel array because the build reorders `tris_` with
+        // nth_element, and a parallel array would have to be permuted in step.
+        std::uint32_t source = 0;
     };
     struct Node {
         math::Aabb box;
