@@ -101,6 +101,17 @@ underneath you.
   vs clamped — a stroke resolves into ordinary edit items
 - Armatures (see the next section) and layer mirrors
 
+| | |
+|---|---|
+| ![extended combine ops](examples/output/02_blends_extended.png) | ![noise deformer](examples/output/24_noise_weathered.png) |
+| The extended combine ops: groove, tongue, pipe, engrave, emboss, inset, shell, replace ([`02_blends.py`](examples/02_blends.py)) | The noise deformer weathering a box — and composing with a boolean bite ([`24_noise.py`](examples/24_noise.py)) |
+| ![stroke](examples/output/12_stroke_sdf.png) | ![cut tool](examples/output/14_cut_shapes.png) |
+| A stroke: one gesture, one undo step, ordinary edit-list nodes ([`12_strokes.py`](examples/12_strokes.py)) | The cut tool — rect, circle, polygon and lasso, each an exact prism ([`14_cut.py`](examples/14_cut.py)) |
+| ![snakehook](examples/output/22_snakehook_creature.png) | ![claybuildup and smooth](examples/output/29_claybuildup_smooth.png) |
+| Snakehook tendrils grown from a sphere ([`22_snakehook.py`](examples/22_snakehook.py)) | The blockout pair: a ClayBuildup stroke, then Smooth ([`29_claybuildup_smooth.py`](examples/29_claybuildup_smooth.py)) |
+| ![flatten modes](examples/output/21_flatten_modes.png) | ![mask extrude](examples/output/33_extract.png) |
+| Flatten's modes: two-sided, cut-only (hPolish), fill-only ([`21_flatten.py`](examples/21_flatten.py)) | Mask extrude: a painted patch pulled off as a solid ([`33_mask_extrude.py`](examples/33_mask_extrude.py)) |
+
 **Voxel layers**:
 
 - 10 sculpting verbs: smooth, inflate/erode, flatten, pinch, magnify, grab,
@@ -111,6 +122,15 @@ underneath you.
 - Pre-bake repair: report, close holes, fill voids
 - A stack of resolution levels — block out coarse, `add_level` to refine where
   the detail goes, without paying for a fine grid everywhere
+
+| | |
+|---|---|
+| ![voxel sculpting verbs](examples/output/09_sculpt_verbs.png) | ![carve with alpha](examples/output/15_carve_alpha.png) |
+| The sculpting verbs over a bumpy slab ([`09_sculpt_brushes.py`](examples/09_sculpt_brushes.py)) | Carve-with-alpha: a stamp pattern cut into the top face ([`15_voxel_verbs_and_repair.py`](examples/15_voxel_verbs_and_repair.py)) |
+| ![mask freeze](examples/output/11_mask_freeze.png) | ![repair](examples/output/15_repair.png) |
+| A mask freezes cells: the same brush, unmasked and masked ([`11_masks.py`](examples/11_masks.py)) | Pre-bake repair: pierced shell, holes closed, voids filled ([`15_voxel_verbs_and_repair.py`](examples/15_voxel_verbs_and_repair.py)) |
+| ![resolution levels](examples/output/36_levels.png) | ![smooth display](examples/output/41_voxel_smooth_display.png) |
+| The resolution level stack: the same sculpt at level 0, 1 and 2 ([`39_multi_resolution.py`](examples/39_multi_resolution.py)) | The same grid meshed blocky, smoothed, and for display ([`41_voxel_smooth_display.py`](examples/41_voxel_smooth_display.py)) |
 
 The **stroke engine and masks span both sides**: the same resolved stroke
 writes SDF nodes (`stamps_to_nodes`), voxels (`apply_to_grid`) or a mask
