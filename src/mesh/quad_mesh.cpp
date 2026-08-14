@@ -172,14 +172,20 @@ QuadFit fit_quad_ladder(const std::function<Mesh(std::size_t)>& mesh_at, std::si
 
     Mesh best;
     std::size_t best_rung = 0;
-    double coarsest_count = 0.0;
+    // The coarse end of the ladder is the first rung that YIELDS anything, not
+    // rung 0. A voxel stack is not a strict mip: a scattered fine sculpt leaves
+    // the coarse rungs empty, and an empty rung's count of 0 never exceeds a
+    // target. Testing rung 0 instead would report every target below the first
+    // usable rung's yield as unclamped — telling the caller a nearer rung
+    // exists on a ladder whose every usable rung overshoots.
+    std::size_t coarsest_usable_count = 0;
     bool have_best = false;
     bool reached = false;  // a rung's count met or passed the target
     for (std::size_t rung = 0; rung < rungs; ++rung) {
         Mesh m = mesh_at(rung);
         const std::size_t count = m.quad_count();
         ++fit.iterations;
-        if (rung == 0) coarsest_count = static_cast<double>(count);
+        if (coarsest_usable_count == 0) coarsest_usable_count = count;
         if (!have_best || better_count(count, fit.quad_count, want)) {
             best = std::move(m);
             fit.quad_count = count;
@@ -192,12 +198,14 @@ QuadFit fit_quad_ladder(const std::function<Mesh(std::size_t)>& mesh_at, std::si
         }
     }
 
-    // Off the coarse end (rung 0 already overshot, so a coarser ladder would
-    // have been needed) or off the fine end (every rung meshed and the target
-    // is still above the last one's count). There is no third case: the walk
-    // either brackets the target or runs out of ladder.
+    // Off the coarse end (the first rung that yields anything already overshot,
+    // so a coarser ladder would have been needed) or off the fine end (every
+    // rung meshed and the target is still above the last one's count). There is
+    // no third case: the walk either brackets the target between two usable
+    // rungs or runs out of ladder. An exact hit is neither end — the rung's
+    // count equals the target, so nothing overshot it.
     fit.within_tolerance = within_count(fit.quad_count, want, tolerance);
-    fit.clamped = coarsest_count > want || !reached;
+    fit.clamped = coarsest_usable_count > want || !reached;
     if (out_rung) *out_rung = best_rung;
     if (out_mesh) *out_mesh = std::move(best);
     return fit;

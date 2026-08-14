@@ -25,7 +25,7 @@ The faces search SHALL be a WALK of that stack and not a search over a cell size
 
 With NO target the count search SHALL be the plain quad mesher with a report attached, in both modes and for every input the plain mesher takes. A level the grid does not have SHALL therefore come back as an EMPTY mesh and a zeroed report, as the plain mesher already answers it, rather than be clamped onto the finest level — clamping would hand a caller who passed a stale level a full-resolution mesh and a report naming a level they did not ask for.
 
-`clamped` in faces mode SHALL mean THE STACK RAN OUT — the target is below what the coarsest level yields, or above what the finest yields. A target falling BETWEEN two levels SHALL NOT be reported as clamped even when the level returned is far from it; that is what `within_tolerance` false says. The documented meaning of the flag and the search that sets it SHALL be the same thing, because this feature's premise is that a caller learns the behaviour from the documentation rather than from the mesh.
+`clamped` in faces mode SHALL mean THE STACK RAN OUT — the target is below what the COARSEST LEVEL THAT YIELDS ANYTHING gives, or above what the finest yields. The qualifier is normative, not prose: the stack is not a strict mip, a sculpt made only at a fine level leaves the coarse levels EMPTY, and an empty level meshes to zero quads, which is below every target without being a level the caller can be handed. Reading the coarse end off level 0 would therefore report a grid whose every usable level overshoots as if it bracketed the target. A level whose count EQUALS the target SHALL NOT be reported as clamped — nothing overshot and nothing ran out. A target falling BETWEEN two levels SHALL NOT be reported as clamped even when the level returned is far from it; that is what `within_tolerance` false says. The documented meaning of the flag and the search that sets it SHALL be the same thing, because this feature's premise is that a caller learns the behaviour from the documentation rather than from the mesh.
 
 #### Scenario: A faces target inside the stack brackets it and is not clamped
 - **WHEN** a multi-level grid is asked in faces mode for a count between two levels' counts
@@ -35,6 +35,11 @@ With NO target the count search SHALL be the plain quad mesher with a report att
 #### Scenario: A faces target outside the stack reports the stack running out
 - **WHEN** a multi-level grid is asked in faces mode for a count below what its coarsest level yields, or above what its finest level yields
 - **THEN** the end level is returned and `clamped` is true, and a stack longer than `max_iterations` still reaches its end
+
+#### Scenario: An empty coarse level is not the coarse end of the stack
+- **WHEN** a grid sculpted only at a fine level — its coarse levels empty — is asked in faces mode for a count below what its first non-empty level yields
+- **THEN** that level's mesh is returned and `clamped` is true, because no level of this grid is nearer
+- **AND** the same grid asked for exactly that level's count reports `clamped` false and `within_tolerance` true
 
 #### Scenario: An untargeted fit at a level the grid does not have is empty
 - **WHEN** a grid is quad-meshed with no target at a level index beyond its stack, in either mode

@@ -104,14 +104,18 @@ mesh::Mesh VoxelGrid::dual_mesh(std::size_t level, int blur_in, float cell_size,
     out = keep_quads ? mesh::mesh_lattice_quads(sample, cell_min, cell_max, origin, cell)
                      : mesh::mesh_lattice_nets(sample, cell_min, cell_max, origin, cell);
 
-    // Colour per vertex, from the palette entries actually around it.
-    //
-    // A smooth surface has no facet to carry one palette index the way a greedy
-    // quad does: a vertex sits between up to eight voxels. Averaging the
-    // OCCUPIED ones among them is what makes two colours meet in a gradient
-    // across a cell instead of a hard line the geometry no longer has. Empty
-    // neighbours are skipped rather than counted as black, which would darken
-    // every silhouette.
+    blend_dual_colors(level, vs, out);
+    return out;
+}
+
+// Colour per vertex, from the palette entries actually around it.
+//
+// A smooth surface has no facet to carry one palette index the way a greedy
+// quad does: a vertex sits between up to eight voxels. Averaging the OCCUPIED
+// ones among them is what makes two colours meet in a gradient across a cell
+// instead of a hard line the geometry no longer has. Empty neighbours are
+// skipped rather than counted as black, which would darken every silhouette.
+void VoxelGrid::blend_dual_colors(std::size_t level, float vs, mesh::Mesh& out) const {
     out.colors.resize(out.positions.size());
     for (std::size_t i = 0; i < out.positions.size(); ++i) {
         const cfloat3 p = out.positions[i];
@@ -135,7 +139,6 @@ mesh::Mesh VoxelGrid::dual_mesh(std::size_t level, int blur_in, float cell_size,
                 }
         out.colors[i] = n > 0 ? sum * (1.0f / static_cast<float>(n)) : cf3(0.7f, 0.7f, 0.7f);
     }
-    return out;
 }
 
 }  // namespace voxel

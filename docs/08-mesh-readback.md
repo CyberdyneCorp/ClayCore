@@ -104,7 +104,10 @@ asks for 50,000 and receives 12,000 chose a level. That search is a WALK from
 the coarsest level, one mesh per level, stopping at the first level to reach
 the target — so a target met at level `k` costs `k+1` meshes and reports that
 in `iterations`. Budget a slider against the stack's length, not against the
-two levels the target ends up between.
+two levels the target ends up between. `clamped` there names the ends of the
+STACK: below what the coarsest level that yields anything gives, or above what
+the finest gives. Coarse levels are often EMPTY — a stack is not a strict mip —
+and an empty level is not one of those ends.
 
 The report (`clay_mesh_quad_report`, `Mesh.quad_report`) describes a meshing
 CALL, not a surface. A mesh loaded from a file, read back out of a document, or

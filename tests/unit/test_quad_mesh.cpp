@@ -8,6 +8,8 @@
 // moved: the triangle meshers, their meshes and their exported bytes.
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -886,6 +888,136 @@ TEST_CASE("the ladder charges every level it passes, not the bracketing pair") {
     CHECK(fit.iterations == 4);
 }
 
+// REGRESSION (review round 3): the coarse end of the ladder was read off LEVEL
+// 0 rather than off the coarsest level that yields anything. A voxel stack is
+// not a strict mip — a sculpt made only at a fine level leaves the coarse
+// levels EMPTY — and an empty level meshes to 0 quads, which is below every
+// target. So the walk found level 0 at 0, did not treat that as an overshoot,
+// carried on to the first level with geometry in it, overshot there, and
+// reported `clamped` FALSE: the caller was told the grid holds a level nearer
+// to the target when every level it has overshoots. This is the fourth case
+// the headers assert does not exist, so it is pinned here.
+TEST_CASE("an empty coarse level is not the coarse end of the faces ladder") {
+    // A SCATTERED sculpt made entirely at the finest level: every voxel sits
+    // alone in its parent cell, and a coarse cell is occupied only when at
+    // least half its eight children are, so the downsample leaves levels 1 and
+    // 0 genuinely empty. This is the case the quad_mesh.h header names — "a
+    // scattered cloud of fine voxels leaves coarse rungs EMPTY" — and it is
+    // not exotic: detail added without blocking out a coarse form first.
+    VoxelGrid g(0.4f);
+    REQUIRE(g.add_level() == 1);
+    REQUIRE(g.add_level() == 2);
+    REQUIRE(g.set_active_level(2));
+    const std::uint8_t c = g.palette_add(cf3(1, 1, 1));
+    for (int x = 0; x < 8; x += 2)
+        for (int y = 0; y < 8; y += 2)
+            for (int z = 0; z < 8; z += 2) g.set({x, y, z}, c);
+
+    REQUIRE(g.level_occupied_count(0) == 0);
+    REQUIRE(g.level_occupied_count(1) == 0);
+    REQUIRE(g.level_occupied_count(2) > 0);
+
+    VoxelGrid::QuadOptions faces;
+    faces.mode = VoxelGrid::QuadOptions::Mode::Faces;
+    std::vector<std::size_t> counts;
+    for (std::size_t l = 0; l < g.level_count(); ++l) {
+        VoxelGrid::QuadOptions at = faces;
+        at.level = l;
+        counts.push_back(g.mesh_quads(at).quad_count());
+    }
+    REQUIRE(counts[0] == 0);
+    REQUIRE(counts[1] == 0);
+    REQUIRE(counts[2] > 0);
+
+    mesh::QuadFit fit;
+    SUBCASE("a target below the only level that yields anything is clamped") {
+        mesh::QuadTarget want;
+        want.target = counts[2] / 4;
+        const Mesh q = g.mesh_quads_fit(faces, want, &fit);
+
+        // The empty levels are meshed and rejected — never-empty beats empty —
+        // so the mesh is the one level with geometry, and the walk stops there.
+        CHECK(fit.quad_count == counts[2]);
+        CHECK(q.quad_count() == counts[2]);
+        CHECK(fit.cell_size == g.level_voxel_size(2));
+        CHECK(fit.iterations == 3);
+        CHECK_FALSE(fit.within_tolerance);
+        CHECK(fit.clamped);  // no level of this grid is nearer: the stack ran out
+    }
+    SUBCASE("the level that yields anything hitting the target exactly is not clamped") {
+        // The other side of the same test: reading the coarse end off the
+        // first non-empty level must not turn an exact hit into a clamp.
+        mesh::QuadTarget want;
+        want.target = counts[2];
+        g.mesh_quads_fit(faces, want, &fit);
+
+        CHECK(fit.quad_count == counts[2]);
+        CHECK(fit.iterations == 3);
+        CHECK(fit.within_tolerance);
+        CHECK_FALSE(fit.clamped);
+    }
+    SUBCASE("a target above every level still reports the fine end") {
+        mesh::QuadTarget want;
+        want.target = counts[2] * 100;
+        g.mesh_quads_fit(faces, want, &fit);
+
+        CHECK(fit.quad_count == counts[2]);
+        CHECK(fit.iterations == 3);
+        CHECK(fit.clamped);
+    }
+    SUBCASE("a grid whose every level is empty is clamped, not bracketed") {
+        VoxelGrid bare(0.4f);
+        REQUIRE(bare.add_level() == 1);
+        mesh::QuadTarget want;
+        want.target = 100;
+        const Mesh q = bare.mesh_quads_fit(faces, want, &fit);
+
+        CHECK(q.quad_count() == 0);
+        CHECK(fit.quad_count == 0);
+        CHECK(fit.clamped);
+        CHECK_FALSE(fit.within_tolerance);
+    }
+}
+
+// The same defect at the level the flag is computed, with counts supplied
+// directly: a ladder is not required to be a mip, and this is the shape the
+// voxel stack takes when only its fine end is sculpted.
+TEST_CASE("the ladder reads its coarse end off the first rung that yields anything") {
+    auto ladder = [](std::vector<std::size_t> counts) {
+        return [counts](std::size_t rung) {
+            Mesh m;
+            // Only the quad COUNT is read here, and quads_consistent() is not
+            // asked of these, so four indices per quad over one dummy vertex
+            // is enough to stand in for a rung of that size.
+            m.positions.push_back(cf3(0, 0, 0));
+            m.quads.assign(counts[rung] * 4, 0u);
+            return m;
+        };
+    };
+
+    mesh::QuadTarget want;
+    want.target = 10;
+    mesh::QuadFit fit;
+    std::size_t rung = 0;
+
+    // Empty, empty, 1728: the target is off the COARSE end even though rung 0
+    // reports 0, because 0 is not a rung the caller can be handed.
+    fit = mesh::fit_quad_ladder(ladder({0, 0, 1728}), 3, want, &rung, nullptr);
+    CHECK(fit.quad_count == 1728);
+    CHECK(rung == 2);
+    CHECK(fit.iterations == 3);
+    CHECK(fit.clamped);
+
+    // With a usable rung BELOW the target the same stack brackets it, so the
+    // fix must not have made every empty-prefixed ladder clamp.
+    want.target = 200;
+    fit = mesh::fit_quad_ladder(ladder({0, 96, 1728}), 3, want, &rung, nullptr);
+    CHECK(fit.quad_count == 96);
+    CHECK(rung == 1);
+    CHECK(fit.iterations == 3);
+    CHECK_FALSE(fit.clamped);
+}
+
 // REGRESSION (review round 2): with no target, faces mode clamped an
 // out-of-range level onto the finest one and meshed it — so mesh_quads_fit
 // answered a stale level with a full-resolution mesh and a report saying that
@@ -1064,6 +1196,62 @@ TEST_CASE("FBX writes four indices per polygon with the complement end marker") 
     REQUIRE(io::load_fbx(fbx.data(), fbx.size(), &back).ok());
     CHECK(back.triangle_count() == 4);
     CHECK(back.positions.size() >= 6);
+}
+
+// REGRESSION (review round 3): mesh_io.h said the readers "fan-triangulate
+// every face they read", which made the re-import sound diagonal-for-diagonal
+// identical in every format. It is not. OBJ and PLY go through this library's
+// own parsers and do fan on the writer's 0-2 diagonal; FBX goes through ufbx,
+// whose ufbx_triangulate_face picks its own diagonal per quad. On a
+// quad-meshed sphere that flips about 40% of the faces and moves the enclosed
+// volume by a couple of parts in a thousand, so a caller diffing an FBX round
+// trip against the index buffer it saved sees a mesh that looks wrong and is
+// not. Both halves are pinned here: the exact guarantee where there is one,
+// and the surface-level one where there is not.
+TEST_CASE("a quad round trip is exact through OBJ and PLY, and same-surface through FBX") {
+    const Mesh q = two_quads();
+    REQUIRE(q.quad_count() == 2);
+
+    Mesh obj_back;
+    REQUIRE(io::load_obj(io::save_obj(q), &obj_back).ok());
+    CHECK(obj_back.indices == q.indices);  // the writer's own diagonal, kept
+
+    Mesh ply_back;
+    const std::vector<std::uint8_t> ply = io::save_ply(q, /*binary=*/true);
+    REQUIRE(io::load_ply(ply.data(), ply.size(), &ply_back).ok());
+    CHECK(ply_back.indices == q.indices);
+
+    // FBX is NOT asserted index for index: ufbx owns that choice and a future
+    // version may make it differently. What must hold is that the triangles
+    // still cover exactly the quads that were written — each one is three of
+    // some written quad's four corners, by POSITION, since the reader is free
+    // to renumber vertices as well as to re-cut faces.
+    std::set<std::set<std::array<float, 3>>> quad_corners;
+    for (std::size_t i = 0; i < q.quad_count(); ++i) {
+        std::set<std::array<float, 3>> corners;
+        for (int k = 0; k < 4; ++k) {
+            const cfloat3& p = q.positions[q.quads[i * 4 + k]];
+            corners.insert({p.x, p.y, p.z});
+        }
+        quad_corners.insert(corners);
+    }
+    const std::vector<std::uint8_t> fbx = io::save_fbx(q);
+    Mesh fbx_back;
+    REQUIRE(io::load_fbx(fbx.data(), fbx.size(), &fbx_back).ok());
+    CHECK(fbx_back.quads.empty());
+    CHECK(fbx_back.triangle_count() == 2 * q.quad_count());
+    for (std::size_t t = 0; t < fbx_back.triangle_count(); ++t) {
+        std::set<std::array<float, 3>> tri;
+        for (int k = 0; k < 3; ++k) {
+            const cfloat3& p = fbx_back.positions[fbx_back.indices[t * 3 + k]];
+            tri.insert({p.x, p.y, p.z});
+        }
+        bool inside_a_quad = false;
+        for (const auto& corners : quad_corners)
+            if (std::includes(corners.begin(), corners.end(), tri.begin(), tri.end()))
+                inside_a_quad = true;
+        CHECK(inside_a_quad);
+    }
 }
 
 TEST_CASE("GLB keeps triangulating, because glTF has no quads") {

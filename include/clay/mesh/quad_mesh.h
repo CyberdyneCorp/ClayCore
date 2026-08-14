@@ -62,6 +62,10 @@
 //        but this case (108 four-quad edges in both modes). A caller who
 //        needs a manifold from such a sculpt has to thicken the diagonal, not
 //        change mesher.
+//    Two is the count for THIS mesher. VoxelGrid's faces mode adds a third of
+//    its own — its corner weld is keyed by palette index, so a painted sculpt
+//    is split along every colour seam — and voxel/grid.h is where that one is
+//    stated, next to the weld that causes it.
 //    mesh_tape (marching) remains the watertight, 2-manifold export path and
 //    is unaffected by any of this.
 //
@@ -198,7 +202,11 @@ QuadFit fit_quad_cell(const std::function<Mesh(float)>& mesh_at, float seed_cell
 // stack satisfies it because a finer level resolves at least the faces a
 // coarser one does; note that it is not a strict mip, so a scattered cloud of
 // fine voxels leaves coarse rungs EMPTY — that stays sound only because the
-// never-empty-over-empty rule above refuses to keep an empty rung.
+// never-empty-over-empty rule above refuses to keep an empty rung, and because
+// `clamped` below reads the COARSE END off the first rung that yields
+// anything rather than off rung 0. An empty rung's count is 0, and 0 exceeds
+// no target, so measuring the coarse end at rung 0 would report a ladder whose
+// every usable rung overshoots as if it bracketed the target.
 //
 // max_iterations does NOT apply here, and that is the one place this parts
 // company with fit_quad_cell. It exists there because a secant over a
@@ -211,8 +219,13 @@ QuadFit fit_quad_cell(const std::function<Mesh(float)>& mesh_at, float seed_cell
 // of `clamped`, or a silent third case with no flag at all.
 //
 // `clamped` says THE LADDER RAN OUT, which is the honest reading of a fixed
-// list: the target is below what rung 0 yields or above what the last rung
-// yields, and no rung of this source is nearer than the end that was returned.
+// list: the target is below what the COARSEST RUNG THAT YIELDS ANYTHING gives
+// or above what the last rung gives, and no rung of this source is nearer than
+// the end that was returned. "Yields anything" and not "rung 0" because empty
+// coarse rungs are ordinary on a voxel stack, as above: on a ladder whose
+// counts run 0, 0, 1728, a target of 10 is off the coarse end even though rung
+// 0 reports 0. An exact hit is neither end — the rung's count equals the
+// target, so nothing overshot and nothing ran out.
 // A target falling BETWEEN two rungs is NOT clamped even when it lands far
 // off — both neighbours were meshed and the nearer one is the answer, which is
 // what within_tolerance = false says. A ladder step is typically a factor of

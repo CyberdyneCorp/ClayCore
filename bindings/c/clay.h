@@ -1388,10 +1388,13 @@ clay_result clay_mesh_copy_quads(const clay_mesh* mesh, uint32_t* dst, size_t ds
  * and, for voxels, the grid's own voxel size, below which a finer lattice
  * resamples the same step field and buys quads without buying detail. In faces
  * mode it is the STACK RUNNING OUT: the target is below what the coarsest
- * level yields or above what the finest yields, and no level of this grid is
- * nearer than the one returned. A faces target that falls BETWEEN two levels
- * is not clamped even when it lands far off — both were meshed and neither is
- * nearer, which is what `within_tolerance` 0 says.
+ * level THAT YIELDS ANYTHING gives or above what the finest yields, and no
+ * level of this grid is nearer than the one returned. The qualifier is load
+ * bearing — a stack is not a strict mip, so a sculpt made only at a fine level
+ * leaves the coarse levels empty, and an empty level's 0 quads are below every
+ * target without bracketing any of them. A faces target that falls BETWEEN
+ * two levels is not clamped even when it lands far off — both were meshed and
+ * neither is nearer, which is what `within_tolerance` 0 says.
  *
  * A mesh that was NOT quad-meshed is refused with CLAY_ERROR_INVALID_ARGUMENT
  * rather than answered with zeroes: zeroes are indistinguishable from a search

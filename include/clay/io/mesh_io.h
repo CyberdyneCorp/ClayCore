@@ -17,12 +17,22 @@
 // not the writer. MeshBufferView is triangles too, for the same kind of
 // reason: it is the GPU readback path and a GPU draws triangles.
 //
-// The READERS are unchanged and still fan-triangulate every face they read, so
-// a quad file this library wrote re-imports as TRIANGLES with no quads. That
-// asymmetry is stated rather than left to be discovered: preserving faces on
-// import is a second direction with its own validation questions, and the
-// readers already hold the face list, so it stays a cheap follow-up rather
-// than a hidden gap.
+// The READERS are unchanged, so a quad file this library wrote re-imports as
+// TRIANGLES with no quads. That asymmetry is stated rather than left to be
+// discovered: preserving faces on import is a second direction with its own
+// validation questions, and the readers already hold the face list, so it
+// stays a cheap follow-up rather than a hidden gap.
+//
+// The triangles are not always the ones that were WRITTEN, and that differs by
+// format. OBJ and PLY are read by this library's own parsers, which FAN a face
+// on the same 0-2 diagonal the quad writer's triangles use, so a save/load
+// round trip returns the identical triangle set. FBX is read through ufbx,
+// whose ufbx_triangulate_face picks its own diagonal per quad — on a
+// quad-meshed sphere roughly 40% of the quads come back split the other way,
+// and the solid's measured volume moves by a couple of parts in a thousand
+// because a non-planar quad's two diagonals cut different solids. Nothing is
+// wrong with either triangulation; a caller comparing an FBX round trip
+// against the mesh it saved must compare the SURFACE and not the index buffer.
 
 #include <string>
 #include <vector>

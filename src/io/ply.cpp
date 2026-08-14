@@ -12,6 +12,43 @@ namespace io {
 
 using kernel::cf3;
 
+namespace {
+
+// PLY's face property is a variable-length list, so the corner COUNT is data
+// and one loop writes triangles and quads alike. The two writers are lifted out
+// of save_ply because save_ply already carries the binary/ascii split twice over
+// — once for vertices and once for faces — and the face half is the half that
+// says nothing about the vertex format.
+void write_faces_binary(std::vector<std::uint8_t>& out,
+                        const std::vector<std::uint32_t>& face_indices, std::size_t face_count,
+                        std::size_t face_corners) {
+    for (std::size_t f = 0; f < face_count; ++f) {
+        out.push_back(static_cast<std::uint8_t>(face_corners));
+        for (std::size_t c = 0; c < face_corners; ++c) {
+            const std::int32_t v = static_cast<std::int32_t>(face_indices[f * face_corners + c]);
+            std::uint8_t b[4];
+            std::memcpy(b, &v, 4);
+            out.insert(out.end(), b, b + 4);
+        }
+    }
+}
+
+void write_faces_ascii(std::string& body, const std::vector<std::uint32_t>& face_indices,
+                       std::size_t face_count, std::size_t face_corners) {
+    char line[256];
+    for (std::size_t f = 0; f < face_count; ++f) {
+        std::snprintf(line, sizeof line, "%zu", face_corners);
+        body += line;
+        for (std::size_t c = 0; c < face_corners; ++c) {
+            std::snprintf(line, sizeof line, " %u", face_indices[f * face_corners + c]);
+            body += line;
+        }
+        body += "\n";
+    }
+}
+
+}  // namespace
+
 std::vector<std::uint8_t> save_ply(const mesh::Mesh& m, bool binary) {
     const bool colors = m.colors.size() == m.positions.size();
     const bool normals = m.normals.size() == m.positions.size();
@@ -39,11 +76,6 @@ std::vector<std::uint8_t> save_ply(const mesh::Mesh& m, bool binary) {
         std::memcpy(b, &f, 4);
         out.insert(out.end(), b, b + 4);
     };
-    auto puti = [&](std::int32_t v) {
-        std::uint8_t b[4];
-        std::memcpy(b, &v, 4);
-        out.insert(out.end(), b, b + 4);
-    };
     auto to_u8 = [](float c) {
         return static_cast<std::uint8_t>(kernel::cclamp(c, 0.0f, 1.0f) * 255.0f + 0.5f);
     };
@@ -64,11 +96,7 @@ std::vector<std::uint8_t> save_ply(const mesh::Mesh& m, bool binary) {
                 out.push_back(to_u8(m.colors[i].z));
             }
         }
-        for (std::size_t f = 0; f < face_count; ++f) {
-            out.push_back(static_cast<std::uint8_t>(face_corners));
-            for (std::size_t c = 0; c < face_corners; ++c)
-                puti(static_cast<std::int32_t>(face_indices[f * face_corners + c]));
-        }
+        write_faces_binary(out, face_indices, face_count, face_corners);
     } else {
         char line[256];
         std::string body;
@@ -88,15 +116,7 @@ std::vector<std::uint8_t> save_ply(const mesh::Mesh& m, bool binary) {
             }
             body += "\n";
         }
-        for (std::size_t f = 0; f < face_count; ++f) {
-            std::snprintf(line, sizeof line, "%zu", face_corners);
-            body += line;
-            for (std::size_t c = 0; c < face_corners; ++c) {
-                std::snprintf(line, sizeof line, " %u", face_indices[f * face_corners + c]);
-                body += line;
-            }
-            body += "\n";
-        }
+        write_faces_ascii(body, face_indices, face_count, face_corners);
         out.insert(out.end(), body.begin(), body.end());
     }
     return out;

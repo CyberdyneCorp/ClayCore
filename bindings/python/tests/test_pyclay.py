@@ -4190,6 +4190,44 @@ def test_the_faces_target_walks_the_level_stack():
     assert above["within_tolerance"] is False
 
 
+def test_an_empty_coarse_level_is_not_the_coarse_end_of_the_stack():
+    """REGRESSION (round 3): faces mode read the coarse end of the ladder off
+    LEVEL 0 rather than off the coarsest level that yields anything. A voxel
+    stack is not a strict mip — a scattered fine sculpt leaves the coarse
+    levels empty — and an empty level meshes to 0 quads, which is below every
+    target. So a grid whose every non-empty level overshoots the target came
+    back with `clamped` False, telling the caller a nearer level existed."""
+    doc = clay.Document()
+    grid = doc.add_voxel_layer("sculpt", voxel_size=0.4)
+    grid.add_level()
+    grid.add_level()
+    grid.active_level = 2
+    # Every voxel alone in its parent cell: a coarse cell needs half its eight
+    # children, so the downsample leaves levels 1 and 0 genuinely empty.
+    for x in range(0, 8, 2):
+        for y in range(0, 8, 2):
+            for z in range(0, 8, 2):
+                grid.set((x, y, z), 1)
+
+    occupied = [grid.level_occupied_count(l) for l in range(grid.level_count)]
+    assert occupied[0] == 0 and occupied[1] == 0 and occupied[2] > 0
+    counts = [grid.mesh_quads(mode="faces", level=l).quad_count
+              for l in range(grid.level_count)]
+    assert counts[0] == 0 and counts[1] == 0 and counts[2] > 0
+
+    below = grid.mesh_quads(mode="faces", target=counts[2] // 4).quad_report
+    assert below["quad_count"] == counts[2]
+    assert below["iterations"] == 3
+    assert below["within_tolerance"] is False
+    assert below["clamped"] is True  # the stack ran out; no level is nearer
+
+    # The other side: an exact hit on that level is neither end of the ladder.
+    exact = grid.mesh_quads(mode="faces", target=counts[2]).quad_report
+    assert exact["quad_count"] == counts[2]
+    assert exact["within_tolerance"] is True
+    assert exact["clamped"] is False
+
+
 def test_a_voxel_target_finer_than_the_grid_reports_the_clamp():
     _, grid = _sphere_sculpt()
     mesh = grid.mesh_quads(target=1_000_000)

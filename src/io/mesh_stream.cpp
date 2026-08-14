@@ -72,6 +72,41 @@ void read_f3(const std::uint8_t*& p, std::vector<kernel::cfloat3>* out, std::siz
     }
 }
 
+// The quad tail, once the caller has established that bytes remain for one.
+// Absent is the normal case and is not an error — every mesh written before
+// this section existed, and every triangle mesh written since, ends before it —
+// so the absent case stays at the call site and only the present one is here.
+//
+// Present but malformed is refused, exactly as an out-of-range triangle index
+// is: a chunk this library did not write is not trusted to be half right, and a
+// quad list that contradicts the triangles beside it would travel on as a mesh
+// whose two index arrays describe different surfaces.
+//
+// This claims the FIRST tail: a later minor that appends another section must
+// write it after the quads (bytes past the quad list are ignored here, which is
+// where it goes), because a section written before them would be read as a quad
+// count and refused.
+IoStatus read_quad_tail(const std::uint8_t*& p, std::uint64_t tail, std::uint64_t vertex_count,
+                        mesh::Mesh* m) {
+    if (tail < 4) return IoStatus::fail(IoError::Malformed, "truncated mesh quad section");
+    const std::uint64_t quad_count = take_u32(p);
+    if (quad_count * 4 * 4 > tail - 4)
+        return IoStatus::fail(IoError::Malformed,
+                              "mesh stream declares " + std::to_string(quad_count) +
+                                  " quads but does not carry them");
+    m->quads.reserve(static_cast<std::size_t>(quad_count) * 4);
+    for (std::uint64_t i = 0; i < quad_count * 4; ++i) {
+        std::uint32_t index = take_u32(p);
+        if (index >= vertex_count)
+            return IoStatus::fail(IoError::Malformed, "a mesh quad points past the vertices");
+        m->quads.push_back(index);
+    }
+    if (!mesh::quads_consistent(*m))
+        return IoStatus::fail(IoError::Malformed,
+                              "a mesh quad section is not the triangulation beside it");
+    return IoStatus::success();
+}
+
 }  // namespace
 
 std::vector<std::uint8_t> save_mesh_stream(const mesh::Mesh& m) {
@@ -172,37 +207,10 @@ IoStatus load_mesh_stream(const std::uint8_t* data, std::size_t size, mesh::Mesh
         m.indices.push_back(index);
     }
 
-    // The quad tail, when bytes remain for one. Absent is the normal case and
-    // is not an error — every mesh written before this section existed, and
-    // every triangle mesh written since, ends here.
-    //
-    // Present but malformed is refused, exactly as an out-of-range triangle
-    // index is: a chunk this library did not write is not trusted to be half
-    // right, and a quad list that contradicts the triangles beside it would
-    // travel on as a mesh whose two index arrays describe different surfaces.
-    //
-    // This claims the FIRST tail: a later minor that appends another section
-    // must write it after the quads (bytes past the quad list are ignored
-    // here, which is where it goes), because a section written before them
-    // would be read as a quad count and refused.
     const std::uint64_t tail = body - declared;
     if (tail != 0) {
-        if (tail < 4) return IoStatus::fail(IoError::Malformed, "truncated mesh quad section");
-        const std::uint64_t quad_count = take_u32(p);
-        if (quad_count * 4 * 4 > tail - 4)
-            return IoStatus::fail(IoError::Malformed,
-                                  "mesh stream declares " + std::to_string(quad_count) +
-                                      " quads but does not carry them");
-        m.quads.reserve(static_cast<std::size_t>(quad_count) * 4);
-        for (std::uint64_t i = 0; i < quad_count * 4; ++i) {
-            std::uint32_t index = take_u32(p);
-            if (index >= vertex_count)
-                return IoStatus::fail(IoError::Malformed, "a mesh quad points past the vertices");
-            m.quads.push_back(index);
-        }
-        if (!mesh::quads_consistent(m))
-            return IoStatus::fail(IoError::Malformed,
-                                  "a mesh quad section is not the triangulation beside it");
+        const IoStatus quads = read_quad_tail(p, tail, vertex_count, &m);
+        if (!quads.ok()) return quads;
     }
     *out = std::move(m);
     return IoStatus::success();

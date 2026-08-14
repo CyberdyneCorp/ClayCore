@@ -36,7 +36,7 @@ Any operation that rewrites `indices` SHALL clear the quad array rather than lea
 ### Requirement: The lattice dual is the quad mesher
 The module SHALL provide a quad mesher for tapes built on the LATTICE DUAL — the surface-nets construction already in `dual_grid_mesh`, one vertex per sign-changing cell and one quad per sign-changing lattice edge — retaining the four corners it already computes.
 
-The dual is chosen over greedy merging because merged rectangles create T-JUNCTIONS where one long quad abuts several short ones, and a T-junction cracks under subdivision and splits normals. No vertex of the dual lands in the interior of another face's edge, and every quad edge is shared by at most two quads.
+The dual is chosen over greedy merging because merged rectangles create T-JUNCTIONS where one long quad abuts several short ones, and a T-junction cracks under subdivision and splits normals. No vertex of the dual lands in the interior of another face's edge. Over a CONTINUOUS field — an SDF tape — every quad edge is then shared by at most two quads. That bound SHALL NOT be stated unqualified, because the same mesher over a voxel occupancy field does exceed it: two solid cells meeting only along a lattice EDGE put that quad edge in FOUR quads, and a checkerboard is nothing but that case. It is the shape having no manifold surface to find, not the mesher erring, and it is why the non-manifold statement below has two causes and not one.
 
 Vertex valence AVERAGES exactly four — every quad contributes four corners and the mesh has as many vertices as quads — but SHALL NOT be claimed to be four everywhere. A cell the surface enters through a corner has six of its twelve lattice edges change sign and belongs to six quads; one clipped by a corner belongs to three. Measured on a sphere the distribution is roughly 55% valence four with the rest at three, five and six, and it does not tighten with resolution: it is the lattice's discrete curvature, and a mesher that placed valence four everywhere would be doing retopology.
 
@@ -45,7 +45,7 @@ The mesher SHALL NOT change the diagonal on which it triangulates. It triangulat
 Two properties of the output SHALL be stated in the header rather than discovered:
 
 - **The quads are NOT planar.** Four cell vertices around a lattice edge are placed independently and nothing makes them coplanar, so a consumer that triangulates on its own terms may shade a face differently than this library's triangulation does. No planarisation is performed: flattening a face moves vertices off the surface, trading a shading artifact for a geometric error.
-- **The output is NOT manifold and NOT watertight**, for the reason the surface-nets header already gives — a cell the surface crosses twice gets a single vertex and pinches the sheets. The marching mesher remains the watertight, 2-manifold export path and is unaffected.
+- **The output is NOT manifold and NOT watertight**, for TWO reasons, only the first of which the surface-nets header already gives: a cell the surface crosses twice gets a single vertex and pinches the sheets; and DIAGONAL occupancy, which a voxel sculpt produces constantly, puts one quad edge in FOUR quads where two cells meet along a lattice edge, and shares a single vertex between two disjoint sheets — a bowtie — where they meet only at a corner. The marching mesher remains the watertight, 2-manifold export path and is unaffected.
 
 #### Scenario: A quad-meshed sphere is quads all the way
 - **WHEN** a sphere tape is quad-meshed

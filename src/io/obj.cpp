@@ -12,6 +12,35 @@ namespace io {
 using kernel::cf2;
 using kernel::cf3;
 
+namespace {
+
+// One `f` line of n corners. Lifted out of save_obj rather than left a lambda
+// inside it because the four-way corner spelling is the whole of the format's
+// complexity here, and leaving it nested charged save_obj for it.
+//
+// The corner spelling is the same whether n is 3 or 4: the vertex index doubles
+// as the vt and vn index, because claycore meshes are vertex-aligned. OBJ is
+// 1-based, hence the +1.
+void write_face(std::string& out, const std::uint32_t* face, int n, bool normals, bool uvs) {
+    out += "f";
+    char corner[64];
+    for (int i = 0; i < n; ++i) {
+        const std::uint32_t a = face[i] + 1;
+        if (normals && uvs)
+            std::snprintf(corner, sizeof corner, " %u/%u/%u", a, a, a);
+        else if (normals)
+            std::snprintf(corner, sizeof corner, " %u//%u", a, a);
+        else if (uvs)
+            std::snprintf(corner, sizeof corner, " %u/%u", a, a);
+        else
+            std::snprintf(corner, sizeof corner, " %u", a);
+        out += corner;
+    }
+    out += "\n";
+}
+
+}  // namespace
+
 std::string save_obj(const mesh::Mesh& m, const std::string& object_name,
                      const std::string& mtl_name) {
     std::string out;
@@ -45,31 +74,15 @@ std::string save_obj(const mesh::Mesh& m, const std::string& object_name,
         std::snprintf(line, sizeof line, "vt %.9g %.9g\n", m.uvs[i].x, m.uvs[i].y);
         out += line;
     }
-    // A quad mesh writes its QUADS — that is the point of carrying them — and
-    // a mesh without them writes exactly the triangles it always did, byte for
-    // byte. The corner spelling is the same in both: the vertex index doubles
-    // as the vt and vn index, because claycore meshes are vertex-aligned.
-    auto face_line = [&](const std::uint32_t* face, int n) {
-        out += "f";
-        char corner[64];
-        for (int i = 0; i < n; ++i) {
-            const std::uint32_t a = face[i] + 1;
-            if (normals && uvs)
-                std::snprintf(corner, sizeof corner, " %u/%u/%u", a, a, a);
-            else if (normals)
-                std::snprintf(corner, sizeof corner, " %u//%u", a, a);
-            else if (uvs)
-                std::snprintf(corner, sizeof corner, " %u/%u", a, a);
-            else
-                std::snprintf(corner, sizeof corner, " %u", a);
-            out += corner;
-        }
-        out += "\n";
-    };
+    // A quad mesh writes its QUADS — that is the point of carrying them — and a
+    // mesh without them writes exactly the triangles it always did, byte for
+    // byte.
     if (m.has_quads())
-        for (std::size_t q = 0; q < m.quad_count(); ++q) face_line(&m.quads[q * 4], 4);
+        for (std::size_t q = 0; q < m.quad_count(); ++q)
+            write_face(out, &m.quads[q * 4], 4, normals, uvs);
     else
-        for (std::size_t t = 0; t < m.triangle_count(); ++t) face_line(&m.indices[t * 3], 3);
+        for (std::size_t t = 0; t < m.triangle_count(); ++t)
+            write_face(out, &m.indices[t * 3], 3, normals, uvs);
     return out;
 }
 

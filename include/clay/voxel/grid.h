@@ -369,9 +369,19 @@ class VoxelGrid {
     //  - Faces is one planar, axis-aligned quad per exposed voxel face: the
     //    greedy sweep with merging switched off, so it is the boxes the model
     //    actually is. It is dense (~surface area / voxel²), it WELDS corners
-    //    and it carries NO vertex normals — see mesh_quads' definition for why
-    //    both are forced. mesh_greedy is unchanged and remains the merged,
-    //    per-face-normal, triangle path.
+    //    WITHIN A PALETTE COLOUR and it carries NO vertex normals — see
+    //    mesh_quads' definition for why both are forced. mesh_greedy is
+    //    unchanged and remains the merged, per-face-normal, triangle path.
+    //    The weld key is the lattice corner AND the palette index, which is
+    //    what keeps per-face colour once four faces share one vertex, and it
+    //    means a PAINTED sculpt is SPLIT along every colour seam: the corner
+    //    exists once per colour, so the seam's quad edges are used once each
+    //    and an importer reports the mesh as open there. On a two-colour
+    //    12x6x6 block that is 386 vertices for 362 distinct positions and 48
+    //    singly-used edges. It is a split, not a hole — the winding stays
+    //    consistent and the enclosed volume is still exact — but it is a THIRD
+    //    way a faces mesh is non-manifold, beyond the two mesh/quad_mesh.h
+    //    enumerates, and the only one this mode adds on its own.
     //
     // Faces mode has no cell size: its lattice IS the grid. Its count lever is
     // the resolution LEVEL, so its granularity is about a factor of four per
@@ -423,12 +433,15 @@ class VoxelGrid {
     //    third more than meshing its finest level alone, which a target above
     //    every level buys anyway. The step is a factor of about four, so
     //    "within tolerance" is usually unreachable, and `clamped` says the
-    //    STACK RAN OUT — the target is below what level 0 yields or above what
-    //    the finest yields. A target that falls between two levels is NOT
-    //    clamped even when the nearer level is far off: both were meshed and
-    //    neither is nearer, which is what `within_tolerance` false says. A
-    //    caller who asks for 50,000 and receives 12,000 with `clamped` set is
-    //    being told that no level of this grid is nearer. `cell_size` in the
+    //    STACK RAN OUT — the target is below what the COARSEST LEVEL THAT
+    //    YIELDS ANYTHING gives, or above what the finest yields. Not "level 0":
+    //    a stack is not a strict mip, so a sculpt made only at a fine level
+    //    leaves the coarse levels EMPTY, and an empty level's 0 quads overshoot
+    //    nothing. A target that falls between two levels is NOT clamped even
+    //    when the nearer level is far off: both were meshed and neither is
+    //    nearer, which is what `within_tolerance` false says. A caller who asks
+    //    for 50,000 and receives 12,000 with `clamped` set is being told that
+    //    no level of this grid is nearer. `cell_size` in the
     //    report is the chosen level's voxel size, which is what names the level
     //    back. `min_cell_size` has no meaning here — the levels are the only
     //    lattices there are.
@@ -622,6 +635,11 @@ class VoxelGrid {
     // drift into two surfaces: `keep_quads` and the generalised cell size are
     // the only things that vary.
     mesh::Mesh dual_mesh(std::size_t level, int blur, float cell_size, bool keep_quads) const;
+    // Per-vertex palette blend for that dual, which is the half of it that
+    // reads the grid rather than the lattice. Split out so dual_mesh stays the
+    // lattice construction and this stays the colour rule; the two share
+    // nothing but the positions.
+    void blend_dual_colors(std::size_t level, float voxel_size, mesh::Mesh& out) const;
     // The two halves of mesh_quads_fit, kept apart because the two modes have
     // different levers: the dual searches a cell size, faces walks the level
     // stack. One function doing both was a chain of mode tests around code
