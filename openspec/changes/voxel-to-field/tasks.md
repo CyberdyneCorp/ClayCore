@@ -31,9 +31,11 @@
 
 ## 4. Still open, deliberately
 
-- [ ] 4.1 A colour channel on `FieldVolume`, which would make this one item
-      rather than one per entry. A storage change touching consolidation,
-      serialisation and the brick cache; worth it only if palettes get large.
+- [x] 4.1 A colour channel on `FieldVolume`, which makes this one item rather
+      than one per entry. Deferred here deliberately and then delivered by the
+      `volume-color-channel` change (PR #115): a sampled volume carries an
+      optional packed-RGB8 colour per sample, so `clay_voxel_to_layer` now
+      produces ONE item carrying the palette.
 - [x] 4.2 pyclay surface (`Volume.from_voxels`) and a gallery example
       (`42_representation_round_trip`) showing the round trip.
 - [x] 4.3 The SDF-to-voxel direction's guarantees written down, which the issue
