@@ -8,10 +8,12 @@
 // moved: the triangle meshers, their meshes and their exported bytes.
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "clay/brick/cache.h"
 #include "clay/eval/backend.h"
@@ -419,6 +421,252 @@ TEST_CASE("the consistency check catches a quad list that lies") {
         mesh::drop_quads(q);
         CHECK(mesh::quads_consistent(q));
     }
+}
+
+// -- the count search --------------------------------------------------------
+
+TEST_CASE("a target is approached and what was produced is reported") {
+    scene::Tape t = sphere_tape(1.0f);
+    mesh::QuadTarget want;
+    want.target = 4000;
+    mesh::QuadFit fit;
+    const Mesh q = mesh::mesh_tape_quads_fit(t, kSphereRegion, 0.0f, want, {}, &fit);
+
+    REQUIRE(fit.quad_count == q.quad_count());
+    CHECK(mesh::quads_consistent(q));
+    CHECK(fit.within_tolerance);
+    CHECK_FALSE(fit.clamped);
+    CHECK(fit.iterations > 0);
+    CHECK(fit.iterations <= 4);
+    CHECK(fit.cell_size > 0.0f);
+    // The contract is the tolerance, not the exact number: assert the band the
+    // header promises rather than a count that would re-baseline itself the
+    // first time the lattice moves by a rounding.
+    CHECK(std::abs(static_cast<double>(fit.quad_count) - 4000.0) <= 400.0);
+
+    // And the report describes THIS mesh: meshing again at the cell size it
+    // named reproduces the count it named.
+    CHECK(mesh::mesh_tape_quads(t, kSphereRegion, fit.cell_size).quad_count() == fit.quad_count);
+}
+
+TEST_CASE("a shape with thin features is still landed on") {
+    // Two thin plates joined by a thinner post: coarse lattices lose the post
+    // entirely, so the count does not fall smoothly with cell size and a
+    // search that assumed it did would step past its own answer.
+    static scene::Document doc;
+    doc = scene::Document{};
+    scene::Layer& l = doc.add_sdf_layer("l");
+    l.sdf->insert(item(scene::Prim::box(cf3(0.9f, 0.05f, 0.9f)), cf3(0, -0.5f, 0)));
+    l.sdf->insert(item(scene::Prim::box(cf3(0.9f, 0.05f, 0.9f)), cf3(0, 0.5f, 0)));
+    l.sdf->insert(item(scene::Prim::box(cf3(0.06f, 0.5f, 0.06f)), cf3(0, 0, 0)));
+    scene::Tape t = scene::compile_document(doc);
+
+    mesh::QuadTarget want;
+    want.target = 6000;
+    want.max_iterations = 6;
+    mesh::QuadFit fit;
+    const Mesh q = mesh::mesh_tape_quads_fit(t, {cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)},
+                                             0.0f, want, {}, &fit);
+    REQUIRE(q.quad_count() > 0);
+    CHECK(fit.quad_count == q.quad_count());
+    CHECK(fit.within_tolerance);
+    CHECK(mesh::quads_consistent(q));
+}
+
+TEST_CASE("an explicit cell size skips the search") {
+    scene::Tape t = sphere_tape(1.0f);
+    mesh::QuadFit fit;
+    const Mesh q = mesh::mesh_tape_quads_fit(t, kSphereRegion, 0.12f, {}, {}, &fit);
+
+    CHECK(fit.iterations == 0);
+    CHECK(fit.cell_size == 0.12f);
+    CHECK(fit.within_tolerance);  // nothing was asked for, so nothing was missed
+    CHECK_FALSE(fit.clamped);
+    CHECK(same_geometry(q, mesh::mesh_tape_quads(t, kSphereRegion, 0.12f)));
+    CHECK(fit.quad_count == q.quad_count());
+}
+
+TEST_CASE("neither a cell size nor a target meshes nothing") {
+    scene::Tape t = sphere_tape(1.0f);
+    mesh::QuadFit fit;
+    const Mesh q = mesh::mesh_tape_quads_fit(t, kSphereRegion, 0.0f, {}, {}, &fit);
+    CHECK(q.empty());
+    CHECK(fit.cell_size == 0.0f);
+    CHECK(fit.quad_count == 0);
+}
+
+TEST_CASE("the search never asks for a lattice outside the limits it was given") {
+    // Directly, against a mesher that only COUNTS, because the limit that
+    // matters in the field is the sample ceiling — and meshing at it means a
+    // gigabyte of lattice per run, which is not something to spend on every
+    // test. The property is the same one either way: the cell size handed to
+    // the mesher stays inside [min, max], so the real search can never ask
+    // mesh_tape_quads for a lattice it would refuse and then read the refusal
+    // as a shape that vanished.
+    std::vector<float> asked;
+    auto counting_mesher = [&asked](float cell) {
+        asked.push_back(cell);
+        Mesh m;  // area / cell^2 quads, as the real relationship goes
+        const std::size_t quads = static_cast<std::size_t>(12.0 / (cell * cell));
+        m.positions.resize(quads == 0 ? 0 : quads);
+        m.quads.resize(quads * 4, 0);
+        m.indices.resize(quads * 6, 0);
+        return m;
+    };
+
+    mesh::QuadTarget want;
+    want.target = 100000000;  // far more than the fine limit below can produce
+    want.max_iterations = 8;
+    const mesh::QuadFit fit = mesh::fit_quad_cell(counting_mesher, 1.0f, 0.05f, 4.0f, want,
+                                                  nullptr);
+    REQUIRE_FALSE(asked.empty());
+    for (float cell : asked) {
+        CHECK(cell >= 0.05f);
+        CHECK(cell <= 4.0f);
+    }
+    CHECK(fit.clamped);
+    CHECK_FALSE(fit.within_tolerance);
+    CHECK(fit.cell_size == 0.05f);  // the finest it is allowed, not the one it wanted
+    CHECK(fit.quad_count > 0);
+    // And it stops there rather than spending the whole cap re-meshing the
+    // limit it is already standing on.
+    CHECK(fit.iterations < 8);
+}
+
+TEST_CASE("a target the fine limit cannot reach stops at the limit and says so") {
+    scene::Tape t = sphere_tape(1.0f);
+    mesh::QuadTarget want;
+    want.target = 4000000;
+    // The caller's own floor, which is the same clamp the sample ceiling
+    // applies and reports through the same flag — and one that does not cost a
+    // gigabyte of lattice to reach.
+    want.min_cell_size = 0.05f;
+    mesh::QuadFit fit;
+    const Mesh q = mesh::mesh_tape_quads_fit(t, kSphereRegion, 0.0f, want, {}, &fit);
+
+    REQUIRE(q.quad_count() > 0);  // the finest lattice it is allowed, not nothing
+    CHECK(fit.clamped);
+    CHECK_FALSE(fit.within_tolerance);
+    CHECK(fit.cell_size == 0.05f);
+    CHECK(fit.quad_count == q.quad_count());
+    CHECK(fit.iterations <= 4);
+    CHECK(mesh::quads_consistent(q));
+}
+
+TEST_CASE("a target so small the shape collapses reports the best real mesh") {
+    scene::Tape t = sphere_tape(1.0f);
+    mesh::QuadTarget want;
+    want.target = 1;  // no lattice produces one quad; a coarse enough one produces none
+    mesh::QuadFit fit;
+    const Mesh q = mesh::mesh_tape_quads_fit(t, kSphereRegion, 0.0f, want, {}, &fit);
+
+    CHECK_FALSE(fit.within_tolerance);
+    CHECK(fit.quad_count > 0);  // the collapse is never the answer
+    CHECK(fit.quad_count == q.quad_count());
+    CHECK(mesh::quads_consistent(q));
+}
+
+TEST_CASE("a tolerance far below the granularity exhausts the cap rather than looping") {
+    scene::Tape t = sphere_tape(1.0f);
+    mesh::QuadTarget want;
+    want.target = 4000;
+    want.tolerance = 1e-6f;  // an exact count, which the lattice cannot produce
+    want.max_iterations = 5;
+    mesh::QuadFit fit;
+    const Mesh q = mesh::mesh_tape_quads_fit(t, kSphereRegion, 0.0f, want, {}, &fit);
+
+    CHECK(fit.iterations <= 5);
+    CHECK_FALSE(fit.within_tolerance);
+    CHECK(fit.quad_count > 0);
+    // Still the best attempt, which is well inside the band the default
+    // tolerance would have accepted.
+    CHECK(std::abs(static_cast<double>(fit.quad_count) - 4000.0) <= 400.0);
+    CHECK(fit.quad_count == q.quad_count());
+}
+
+TEST_CASE("the voxel dual reaches a target and clamps at the voxel size") {
+    VoxelGrid g = cube_grid(24);
+    VoxelGrid::QuadOptions dual;
+    mesh::QuadFit fit;
+
+    SUBCASE("a reachable target") {
+        mesh::QuadTarget want;
+        want.target = 900;
+        const Mesh q = g.mesh_quads_fit(dual, want, &fit);
+        REQUIRE(q.quad_count() > 0);
+        CHECK(fit.quad_count == q.quad_count());
+        CHECK(fit.within_tolerance);
+        CHECK(fit.cell_size >= g.voxel_size());
+        CHECK(mesh::quads_consistent(q));
+    }
+    SUBCASE("a target finer than the grid holds") {
+        // The clamp mesh_quads already applies, reported instead of silent: a
+        // finer lattice over a step field buys quads and no detail.
+        mesh::QuadTarget want;
+        want.target = 1000000;
+        const Mesh q = g.mesh_quads_fit(dual, want, &fit);
+        CHECK(fit.clamped);
+        CHECK_FALSE(fit.within_tolerance);
+        CHECK(fit.cell_size == g.voxel_size());
+        CHECK(same_geometry(q, g.mesh_quads()));
+    }
+}
+
+TEST_CASE("faces mode picks a LEVEL, and says which one it picked") {
+    VoxelGrid g = cube_grid(16);
+    REQUIRE(g.add_level() == 1);
+    VoxelGrid::QuadOptions faces;
+    faces.mode = VoxelGrid::QuadOptions::Mode::Faces;
+
+    const Mesh coarse = g.mesh_quads(faces);
+    VoxelGrid::QuadOptions fine_opts = faces;
+    fine_opts.level = 1;
+    const Mesh fine = g.mesh_quads(fine_opts);
+    REQUIRE(fine.quad_count() > coarse.quad_count());
+
+    // Ask for what the fine level holds and the fine level is what comes back,
+    // vertex for vertex — the level is the lever, not a rounding of one.
+    mesh::QuadTarget want;
+    want.target = fine.quad_count();
+    mesh::QuadFit fit;
+    const Mesh q = g.mesh_quads_fit(faces, want, &fit);
+    CHECK(fit.cell_size == g.level_voxel_size(1));
+    CHECK(fit.quad_count == fine.quad_count());
+    CHECK(same_geometry(q, fine));
+
+    // And a target between two levels lands on the nearer one rather than
+    // pretending a lattice exists between them.
+    want.target = coarse.quad_count() + 1;
+    const Mesh near_coarse = g.mesh_quads_fit(faces, want, &fit);
+    CHECK(fit.cell_size == g.level_voxel_size(0));
+    CHECK(same_geometry(near_coarse, coarse));
+    CHECK(fit.iterations > 0);
+}
+
+TEST_CASE("faces mode on a one-level grid has no lever and reports the clamp") {
+    VoxelGrid g = cube_grid(8);
+    VoxelGrid::QuadOptions faces;
+    faces.mode = VoxelGrid::QuadOptions::Mode::Faces;
+    mesh::QuadTarget want;
+    want.target = 10;  // far below what the only level yields
+    mesh::QuadFit fit;
+    const Mesh q = g.mesh_quads_fit(faces, want, &fit);
+
+    CHECK(same_geometry(q, g.mesh_quads(faces)));
+    CHECK(fit.clamped);
+    CHECK_FALSE(fit.within_tolerance);
+    CHECK(fit.cell_size == g.voxel_size());
+}
+
+TEST_CASE("a fit with no target is the plain mesher with a report attached") {
+    VoxelGrid g = cube_grid(10);
+    VoxelGrid::QuadOptions dual;
+    mesh::QuadFit fit;
+    const Mesh q = g.mesh_quads_fit(dual, {}, &fit);
+    CHECK(same_geometry(q, g.mesh_quads()));
+    CHECK(fit.iterations == 0);
+    CHECK(fit.cell_size == g.voxel_size());
+    CHECK(fit.quad_count == q.quad_count());
 }
 
 // -- export ------------------------------------------------------------------

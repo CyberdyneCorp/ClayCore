@@ -3999,3 +3999,148 @@ def test_a_sign_is_plus_or_minus_one():
     assert a.signs == [1, 1]  # positive by default
     a.signs = [1, -1]
     assert a.signs == [1, -1]
+
+
+# -- quad meshing (python-bindings spec: quad meshing from Python) -----------
+#
+# The mesh gains an array; nothing an existing script reads changes value. That
+# is asserted here rather than assumed, because it is the property the whole
+# storage decision rests on.
+
+
+def test_quad_mesh_is_quads_beside_the_triangles():
+    doc, _ = build_body()
+    mesh = doc.mesh_quads(cell_size=0.05)
+    assert mesh.quad_count > 0
+    assert mesh.quads.shape == (mesh.quad_count, 4)
+    assert mesh.quads.dtype == np.uint32
+    assert mesh.quads.max() < mesh.positions.shape[0]
+
+    # indices is still the triangulation of exactly those quads, in order.
+    assert mesh.indices.shape == (mesh.quad_count * 2, 3)
+    tris = mesh.indices.reshape(mesh.quad_count, 6)
+    q = mesh.quads
+    assert np.array_equal(tris[:, 0:3], q[:, [0, 1, 2]])
+    assert np.array_equal(tris[:, 3:6], q[:, [0, 2, 3]])
+
+
+def test_a_triangle_mesh_has_an_empty_quad_view():
+    doc, _ = build_body()
+    for mesh in (doc.mesh(resolution=48), doc.mesh(resolution=48, mesher="nets")):
+        assert mesh.quad_count == 0
+        assert mesh.quads.shape == (0, 4)      # not None: shape code needs no null check
+        assert mesh.quads.dtype == np.uint32
+        with pytest.raises(ValueError, match="not produced by a quad mesher"):
+            mesh.quad_report
+
+
+def test_a_quad_target_is_approached_and_reported():
+    doc, _ = build_body()
+    mesh = doc.mesh_quads(target=8000)
+    report = mesh.quad_report
+    assert report["quad_count"] == mesh.quad_count
+    assert report["target"] == 8000
+    assert report["within_tolerance"] is True
+    assert report["clamped"] is False
+    assert 0 < report["iterations"] <= 4
+    # The contract is the tolerance, not the number: 10% by default.
+    assert abs(mesh.quad_count - 8000) <= 800
+    # And the report describes this mesh: the cell size it names reproduces it.
+    assert doc.mesh_quads(cell_size=report["cell_size"]).quad_count == mesh.quad_count
+
+
+def test_an_explicit_cell_size_spends_no_iterations():
+    doc, _ = build_body()
+    mesh = doc.mesh_quads(cell_size=0.06)
+    report = mesh.quad_report
+    assert report["iterations"] == 0
+    assert report["cell_size"] == pytest.approx(0.06)
+    assert report["target"] == 0
+
+
+def test_quad_meshing_refuses_what_it_cannot_do():
+    doc, _ = build_body()
+    with pytest.raises(ValueError, match="VOXEL faces"):
+        doc.mesh_quads(cell_size=0.1, mode="faces")
+    with pytest.raises(ValueError, match="mode must be 'dual'"):
+        doc.mesh_quads(cell_size=0.1, mode="quadriflow")
+    with pytest.raises(ValueError, match="neither names a lattice"):
+        doc.mesh_quads()
+    with pytest.raises(ValueError, match="max_iterations"):
+        doc.mesh_quads(target=1000, max_iterations=1000)
+    with pytest.raises(ValueError, match="tolerance"):
+        doc.mesh_quads(target=1000, tolerance=0.0)
+
+
+def _sphere_sculpt(voxel_size=0.05):
+    doc = clay.Document()
+    grid = doc.add_voxel_layer("sculpt", voxel_size=voxel_size)
+    source = clay.Document()
+    source.add_sdf_layer("s").add(clay.Sphere(r=0.5))
+    grid.rasterize(source)
+    return doc, grid
+
+
+def test_voxel_quad_modes_and_the_smooth_identity():
+    _, grid = _sphere_sculpt()
+    dual = grid.mesh_quads()
+    smooth = grid.mesh_smooth()
+    # Dual at the grid's own voxel size IS the smooth mesh, plus its quads.
+    assert np.array_equal(dual.positions, smooth.positions)
+    assert np.array_equal(dual.indices, smooth.indices)
+    assert dual.quad_count == smooth.triangle_count // 2
+    assert smooth.quad_count == 0
+
+    faces = grid.mesh_quads(mode="faces")
+    assert faces.quad_count > 0
+    # A welded corner faces three ways at once, so faces mode carries none.
+    assert faces.normals.shape == (0, 3)
+    # And greedy meshing is untouched by any of this.
+    assert grid.mesh().quad_count == 0
+
+    with pytest.raises(ValueError, match="mode must be 'dual' or 'faces'"):
+        grid.mesh_quads(mode="zremesher")
+    with pytest.raises(ValueError, match="resolution level"):
+        grid.mesh_quads(level=4)
+
+
+def test_a_voxel_target_finer_than_the_grid_reports_the_clamp():
+    _, grid = _sphere_sculpt()
+    mesh = grid.mesh_quads(target=1_000_000)
+    report = mesh.quad_report
+    assert report["clamped"] is True
+    assert report["within_tolerance"] is False
+    assert report["cell_size"] == pytest.approx(0.05)
+    assert report["quad_count"] == mesh.quad_count > 0
+
+
+def test_quads_survive_a_document_round_trip(tmp_path):
+    doc, _ = build_body()
+    mesh = doc.mesh_quads(cell_size=0.07)
+    carrier = clay.Document()
+    carrier.add_mesh_layer(mesh, name="quads")
+    path = str(tmp_path / "quads.clayspace")
+    carrier.save(path)
+    back = clay.load(path).mesh_layer("quads")
+    assert back.quad_count == mesh.quad_count
+    assert np.array_equal(back.quads, mesh.quads)
+    # The geometry crossed; the report did not, because a mesh read out of a
+    # document was produced by no meshing call.
+    with pytest.raises(ValueError, match="not produced by a quad mesher"):
+        back.quad_report
+
+
+def test_quads_reach_the_files_that_carry_them(tmp_path):
+    doc, _ = build_body()
+    mesh = doc.mesh_quads(cell_size=0.09)
+    obj = tmp_path / "quads.obj"
+    mesh.save(str(obj))
+    faces = [line for line in obj.read_text().splitlines() if line.startswith("f ")]
+    assert len(faces) == mesh.quad_count
+    assert all(len(line.split()) == 5 for line in faces)  # f + four corners
+
+    # glTF 2.0 has no quad primitive mode, so GLB is the triangulation. Written
+    # here rather than discovered in Blender.
+    glb = tmp_path / "quads.glb"
+    mesh.save(str(glb))
+    assert glb.stat().st_size > 0

@@ -9,6 +9,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -20,6 +21,7 @@
 #include "clay/mesh/decimate.h"
 #include "clay/mesh/dual_contouring.h"
 #include "clay/mesh/marching.h"
+#include "clay/mesh/quad_mesh.h"
 #include "clay/mesh/bvh.h"
 #include "clay/mesh/to_field.h"
 #include "clay/mesh/surface_nets.h"
@@ -296,6 +298,13 @@ struct PyMesh {
     mesh::Mesh m;                           // the owned mesh; empty on a borrow
     std::shared_ptr<io::ClaySpaceDoc> doc;  // non-null: borrowed from a mesh layer
     scene::LayerId layer = 0;
+
+    // How this mesh was quad-meshed, when it was. On the wrapper rather than
+    // on mesh::Mesh because it describes a CALL: a mesh loaded from a file or
+    // read back out of a document was produced by no meshing call, and
+    // quad_report raises for it rather than answering with zeroes.
+    std::optional<mesh::QuadFit> fit;
+    std::size_t fit_target = 0;
 
     const mesh::Mesh& data() const {
         if (!doc) return m;
@@ -893,6 +902,100 @@ PyMesh mesh_document(const PyDocument& d, int resolution, nb::handle voxel_size,
             out.m = mesh::decimate(out.m, opts);
         }
     }
+    return out;
+}
+
+// -- quad meshing -------------------------------------------------------------
+//
+// A LATTICE-DERIVED QUAD GRID, not field-aligned retopology. The docstrings
+// say so at every entry point, because a user reaching for this expecting
+// ZRemesher's output must learn it from the documentation and not from the
+// mesh.
+
+// The count controls, shared by the document and the voxel entry points so
+// there is one set of rules for what a target means.
+mesh::QuadTarget quad_target_from(nb::handle target, float tolerance, int max_iterations) {
+    mesh::QuadTarget want;
+    if (!target.is_none()) {
+        const long long asked = nb::cast<long long>(target);
+        if (asked < 0) throw std::invalid_argument("target must be >= 0");
+        want.target = static_cast<std::size_t>(asked);
+    }
+    if (!(tolerance > 0.0f) || tolerance >= 1.0f)
+        throw std::invalid_argument("tolerance is a fraction of the target, in (0, 1)");
+    // Every iteration is a whole mesh, so this is a cost knob and an absurd
+    // value buys that many dense field evaluations rather than a better answer.
+    if (max_iterations < 1 || max_iterations > 64)
+        throw std::invalid_argument("max_iterations must be 1..64");
+    want.tolerance = tolerance;
+    want.max_iterations = max_iterations;
+    return want;
+}
+
+nb::object quad_report_dict(const mesh::QuadFit& fit, std::size_t target) {
+    nb::dict out;
+    out["cell_size"] = fit.cell_size;
+    out["target"] = target;
+    out["quad_count"] = fit.quad_count;
+    out["iterations"] = fit.iterations;
+    out["within_tolerance"] = fit.within_tolerance;
+    out["clamped"] = fit.clamped;
+    return out;
+}
+
+PyMesh mesh_document_quads(const PyDocument& d, nb::handle cell_size, nb::handle target,
+                           float tolerance, int max_iterations, const std::string& mode) {
+    if (mode == "faces")
+        throw std::invalid_argument(
+            "the 'faces' mode meshes exposed VOXEL faces, and a document has none — use "
+            "VoxelGrid.mesh_quads(mode='faces'), or 'dual' here");
+    if (mode != "dual") throw std::invalid_argument("mode must be 'dual', got '" + mode + "'");
+
+    scene::Tape tape = scene::compile_document(d.doc->document);
+    if (tape.empty() || tape.bounds.empty() || tape.bounds.is_infinite())
+        throw std::invalid_argument("document has no bounded SDF content to mesh");
+    const float cell = cell_size.is_none() ? 0.0f : nb::cast<float>(cell_size);
+    const mesh::QuadTarget want = quad_target_from(target, tolerance, max_iterations);
+    if (!(cell > 0.0f) && want.target == 0)
+        throw std::invalid_argument(
+            "give a cell_size, a target, or both — neither names a lattice");
+
+    PyMesh out;
+    mesh::QuadFit fit;
+    {
+        nb::gil_scoped_release release;
+        out.m = mesh::mesh_tape_quads_fit(tape, tape.bounds, cell, want, {}, &fit);
+    }
+    out.fit = fit;
+    out.fit_target = want.target;
+    return out;
+}
+
+PyMesh mesh_voxel_quads(const voxel::VoxelGrid& grid, const std::string& mode,
+                        nb::handle cell_size, nb::handle target, float tolerance,
+                        int max_iterations, int blur, std::size_t level) {
+    voxel::VoxelGrid::QuadOptions options;
+    if (mode == "faces") {
+        options.mode = voxel::VoxelGrid::QuadOptions::Mode::Faces;
+    } else if (mode != "dual") {
+        throw std::invalid_argument("mode must be 'dual' or 'faces', got '" + mode + "'");
+    }
+    if (blur < 0 || blur > 8) throw std::invalid_argument("blur must be 0..8 passes");
+    if (level >= grid.level_count())
+        throw std::invalid_argument("no such resolution level: " + std::to_string(level));
+    options.cell_size = cell_size.is_none() ? 0.0f : nb::cast<float>(cell_size);
+    options.blur = blur;
+    options.level = level;
+    const mesh::QuadTarget want = quad_target_from(target, tolerance, max_iterations);
+
+    PyMesh out;
+    mesh::QuadFit fit;
+    {
+        nb::gil_scoped_release release;
+        out.m = grid.mesh_quads_fit(options, want, &fit);
+    }
+    out.fit = fit;
+    out.fit_target = want.target;
     return out;
 }
 
@@ -2676,6 +2779,40 @@ NB_MODULE(pyclay, m) {
                          return nb::cast(nb::ndarray<nb::numpy, const std::uint32_t>(
                              mm.indices.data(), {mm.indices.size() / 3, 3}, self));
                      })
+        .def_prop_ro("quads",
+                     [](nb::object self) -> nb::object {
+                         const mesh::Mesh& mm = nb::cast<const PyMesh&>(self).data();
+                         // An empty (0, 4) rather than None, matching how
+                         // `indices` presents an empty mesh: a caller can shape
+                         // code against it without a null check.
+                         if (mm.quads.empty()) {
+                             nb::module_ np = nb::module_::import_("numpy");
+                             return np.attr("empty")(nb::make_tuple(0, 4), "dtype"_a = "uint32");
+                         }
+                         return nb::cast(nb::ndarray<nb::numpy, const std::uint32_t>(
+                             mm.quads.data(), {mm.quads.size() / 4, 4}, self));
+                     },
+                     "The quads, (Q, 4) uint32, zero-copy — empty (0, 4) on a mesh that has\n"
+                     "none, which is every mesh from an ordinary mesher or a file.\n\n"
+                     "These sit BESIDE the triangles, never instead of them: `indices` still\n"
+                     "holds exactly this list's triangulation, quad q = (a, b, c, d) being\n"
+                     "triangles (a, b, c) and (a, c, d), so nothing an existing script reads\n"
+                     "changes value.")
+        .def_prop_ro("quad_count", [](const PyMesh& pm) { return pm.data().quad_count(); })
+        .def_prop_ro("quad_report",
+                     [](const PyMesh& pm) {
+                         if (!pm.fit)
+                             throw std::invalid_argument(
+                                 "this mesh was not produced by a quad mesher, so there is no "
+                                 "search to report — a mesh loaded from a file or read back "
+                                 "out of a document has no cell size or target behind it");
+                         return quad_report_dict(*pm.fit, pm.fit_target);
+                     },
+                     "How this mesh was quad-meshed: cell_size, target, quad_count,\n"
+                     "iterations, within_tolerance, clamped. Raises on a mesh that was not\n"
+                     "quad-meshed, rather than reporting zeroes you cannot tell from a\n"
+                     "search that found nothing.\n\n"
+                     "A TARGET IS APPROACHED, NEVER HIT — read Document.mesh_quads.")
         .def_prop_ro("triangle_count", [](const PyMesh& pm) { return pm.data().triangle_count(); })
         .def("is_watertight",
              [](const PyMesh& pm) { return mesh::validate(pm.data()).watertight; },
@@ -3321,6 +3458,25 @@ NB_MODULE(pyclay, m) {
              "decimate"_a = nb::none(), "backend"_a = "cpu", "mesher"_a = "marching",
              "experimental"_a = false,
              "Mesh the document (marching over its influence bounds) -> Mesh")
+        .def("mesh_quads", &mesh_document_quads, "cell_size"_a = nb::none(),
+             "target"_a = nb::none(), "tolerance"_a = 0.10f, "max_iterations"_a = 4,
+             "mode"_a = "dual",
+             "Mesh the document as QUADS (lattice dual) -> Mesh.\n\n"
+             "WHAT THIS IS NOT: a REGULAR QUAD GRID DERIVED FROM A SAMPLING LATTICE,\n"
+             "which is NOT field-aligned retopology. The quads follow the lattice and\n"
+             "not the form — no edge loops around a limb or a mouth, no poles at\n"
+             "features, density does not follow curvature, and the result is NOT\n"
+             "animation-ready. This is the input a retopology pass REPLACES, not the\n"
+             "output one produces. For ZRemesher-style topology, use a quad remesher.\n\n"
+             "What it IS good for: quads in a DCC that prefers them, subdividing a\n"
+             "sculpt, and exporting as .obj/.ply/.fbx with four-corner faces (.glb\n"
+             "stays triangles — glTF 2.0 has no quad primitive mode).\n\n"
+             "`cell_size` is the lattice. `target` asks for a COUNT instead, which is a\n"
+             "search over cell size: THE TARGET IS APPROACHED, NEVER HIT. The count\n"
+             "goes as cell^-2, so landing inside 5-10% is the expectation; read\n"
+             "Mesh.quad_report for what actually came out. Each iteration is a WHOLE\n"
+             "mesh, so max_iterations is a cost knob.\n\n"
+             "mode is 'dual'; 'faces' is voxels only and raises here.")
         .def("add_voxel_layer",
              [](PyDocument& d, const std::string& name, float voxel_size) {
                  if (voxel_size <= 0.0f) throw std::invalid_argument("voxel_size must be > 0");
@@ -4407,6 +4563,35 @@ NB_MODULE(pyclay, m) {
              "passes and can erase a thin feature, so it is 0 by default. A "
              "preview mesh: not manifold, not watertight — mesh() is the "
              "export path and is unaffected.")
+        .def("mesh_quads",
+             [](const PyVoxelGrid& g, const std::string& mode, nb::handle cell_size,
+                nb::handle target, float tolerance, int max_iterations, int blur,
+                std::size_t level) {
+                 return mesh_voxel_quads(g.grid(), mode, cell_size, target, tolerance,
+                                         max_iterations, blur, level);
+             },
+             "mode"_a = "dual", "cell_size"_a = nb::none(), "target"_a = nb::none(),
+             "tolerance"_a = 0.10f, "max_iterations"_a = 4, "blur"_a = 0, "level"_a = 0,
+             "Mesh the sculpt as QUADS -> Mesh.\n\n"
+             "WHAT THIS IS NOT: a REGULAR QUAD GRID DERIVED FROM A LATTICE, which is\n"
+             "NOT field-aligned retopology — no edge loops following the form, no\n"
+             "poles at features, not animation-ready. It is the input a retopology\n"
+             "pass REPLACES.\n\n"
+             "Two modes, because a voxel sculpt is two different subjects:\n"
+             "  'dual'  the rounded form — the same lattice dual mesh_smooth builds,\n"
+             "          quads meeting four to a vertex on average. cell_size\n"
+             "          generalises the lattice; coarser low-passes and can drop a\n"
+             "          one-voxel feature, finer is CLAMPED to the voxel size because\n"
+             "          occupancy is a step field. At the voxel size with blur 0 this\n"
+             "          is mesh_smooth's mesh plus its quads.\n"
+             "  'faces' one planar quad per exposed voxel face — the boxes the model\n"
+             "          actually is. Dense, corners welded within a palette colour,\n"
+             "          and NO vertex normals: a welded corner faces three ways at\n"
+             "          once. mesh() is unchanged and stays the merged triangle path.\n\n"
+             "`target` asks for a COUNT: APPROACHED, NEVER HIT. In 'faces' mode the\n"
+             "lever is the resolution LEVEL, a factor of about four per step, so a\n"
+             "target usually lands on the nearest level rather than inside the\n"
+             "tolerance. Mesh.quad_report says what actually happened.")
         .def("sample_step_field",
              [](const PyVoxelGrid& g, nb::handle points) {
                  PointsView pts = to_points(points);

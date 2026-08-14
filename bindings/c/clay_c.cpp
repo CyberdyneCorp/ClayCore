@@ -32,6 +32,7 @@
 #include "clay/mesh/decimate.h"
 #include "clay/mesh/dual_contouring.h"
 #include "clay/mesh/marching.h"
+#include "clay/mesh/quad_mesh.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/validate.h"
 #include "clay/pick/pick.h"
@@ -385,6 +386,18 @@ bool mesher_is_known(std::int32_t v) {
     return false;
 }
 
+// Same rule for the quad mode, and for the same reason: nothing downstream
+// enumerates it, so an unknown value must be refused here rather than
+// defaulted into the dual.
+bool quad_mode_is_known(std::int32_t v) {
+    if (v < 0 || v > 0xff) return false;
+    switch (static_cast<clay_quad_mode>(v)) {
+        case CLAY_QUAD_DUAL:
+        case CLAY_QUAD_FACES: return true;
+    }
+    return false;
+}
+
 // Versioned descriptor structs (c-abi spec): the prefix rule lives in
 // desc_version.h; this maps its verdict onto the boundary's error code and
 // detail message. struct_size is required — there is no "0 means the original
@@ -438,6 +451,13 @@ constexpr std::size_t kBrickMeshParamsOriginal =
     offsetof(clay_brick_mesh_params, gradient_eps) + sizeof(float);
 constexpr std::size_t kVertexLayoutOriginal =
     offsetof(clay_vertex_layout, uv_offset) + sizeof(std::int32_t);
+// The meshing fields alone. The count controls sit past this, so a caller who
+// declares only the lattice gets the mesher with no search — which is the
+// layout this descriptor would have had if the target had arrived later.
+constexpr std::size_t kQuadParamsOriginal =
+    offsetof(clay_quad_params, level) + sizeof(std::uint32_t);
+constexpr std::size_t kQuadReportOriginal =
+    offsetof(clay_quad_report, clamped) + sizeof(std::int32_t);
 constexpr std::size_t kDeviceDescOriginal =
     offsetof(clay_device_desc, queue_family) + sizeof(std::uint32_t);
 constexpr std::size_t kDeviceBufferOriginal =
@@ -807,6 +827,18 @@ struct clay_mesh {
     mesh::Mesh data;               // the owned mesh; empty on a borrow
     clay_document* doc = nullptr;  // non-null: borrowed from a mesh layer
     clay_layer_id layer = 0;
+
+    // How this mesh was quad-meshed, when it was. Held on the HANDLE rather
+    // than on mesh::Mesh because it describes a CALL and not a surface: a mesh
+    // that travelled through a file, a document layer or a concatenation was
+    // not produced by one, and clay_mesh_quad_report refuses it rather than
+    // answering with zeroes a host cannot tell from a search that found
+    // nothing.
+    struct QuadProvenance {
+        mesh::QuadFit fit;
+        std::uint64_t target = 0;
+    };
+    std::optional<QuadProvenance> quad_provenance;
 };
 
 struct clay_document {
@@ -1212,6 +1244,36 @@ clay_result mesh_with(std::int32_t mesher, bool experimental, const scene::Tape&
     } else {
         *out = mesh::mesh_tape(tape, region, voxel);
     }
+    return CLAY_OK;
+}
+
+// The quad descriptor, read and checked once for both sources. The count
+// controls land in a mesh::QuadTarget, which is the same struct the engine's
+// own search takes — there is no second set of defaults here to drift from the
+// ones the header documents.
+clay_result read_quad_params(const clay_quad_params* params, clay_quad_params* out,
+                             mesh::QuadTarget* target) {
+    clay_result r = read_desc(params, kQuadParamsOriginal, out);
+    if (r != CLAY_OK) return r;
+    if (!quad_mode_is_known(out->mode))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "unknown quad mode: " + std::to_string(out->mode));
+    if (out->cell_size != 0.0f && !std::isfinite(out->cell_size))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "cell size must be finite");
+    if (!std::isfinite(out->tolerance))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "tolerance must be finite; <= 0 means the default");
+    // Bounded here rather than in the engine: every iteration is a whole mesh,
+    // so a caller who passed a byte count or a negative widened by mistake
+    // would otherwise buy that many dense field evaluations.
+    if (out->max_iterations < 0 || out->max_iterations > 64)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "max_iterations must be 0..64");
+    if (out->target_quads > CLAY_MAX_BATCH)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "target_quads above CLAY_MAX_BATCH: " + std::to_string(out->target_quads));
+    target->target = static_cast<std::size_t>(out->target_quads);
+    target->tolerance = out->tolerance;
+    target->max_iterations = out->max_iterations;
     return CLAY_OK;
 }
 
@@ -3389,6 +3451,47 @@ clay_result clay_document_mesh(const clay_document* doc, const clay_mesh_params*
     return CLAY_OK;
 }
 
+clay_result clay_document_mesh_quads(const clay_document* doc, const clay_quad_params* params,
+                                     clay_mesh** out_mesh) {
+    if (!doc || !params || !out_mesh)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_mesh = nullptr;
+    clay_quad_params p;
+    mesh::QuadTarget target;
+    clay_result r = read_quad_params(params, &p, &target);
+    if (r != CLAY_OK) return r;
+    // Refused rather than quietly given the dual: substituting a smooth mesh
+    // for a boxy one is a change the caller sees in the render and cannot see
+    // in the return code.
+    if (p.mode == CLAY_QUAD_FACES)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the faces mode is a voxel mode — it meshes exposed voxel faces, and a "
+                    "document has none; use clay_voxel_mesh_quads or CLAY_QUAD_DUAL");
+
+    std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
+    const scene::Tape& tape = *tape_ref;
+    if (tape.empty()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty document");
+    const math::Aabb region = tape.bounds;
+    if (region.empty() || region.is_infinite())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "unbounded scene");
+    if (p.cell_size <= 0.0f && p.target_quads == 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "give a cell_size, a target_quads, or both — neither names a lattice");
+
+    mesh::QuadFit fit;
+    mesh::Mesh m = mesh::mesh_tape_quads_fit(tape, region, p.cell_size, target, {}, &fit);
+    // The search stops at the mesher's own sample ceiling, so an empty mesh
+    // here is a shape with no surface in the region rather than a lattice
+    // nobody could afford.
+    if (m.empty()) return fail(CLAY_ERROR_BACKEND, "quad meshing produced no faces");
+
+    auto* handle = new clay_mesh();
+    handle->data = std::move(m);
+    handle->quad_provenance = clay_mesh::QuadProvenance{fit, p.target_quads};
+    *out_mesh = handle;
+    return CLAY_OK;
+}
+
 void clay_mesh_destroy(clay_mesh* mesh) {
     // A borrowed handle belongs to its document, which keeps it by address.
     if (mesh && !mesh->doc) delete mesh;
@@ -3537,6 +3640,54 @@ clay_result clay_mesh_copy_indices(const clay_mesh* mesh, uint32_t* dst, size_t 
     if (r != CLAY_OK) return r;
     if (!m->indices.empty())
         std::memcpy(dst, m->indices.data(), m->indices.size() * sizeof(std::uint32_t));
+    return CLAY_OK;
+}
+
+size_t clay_mesh_quad_count(const clay_mesh* mesh) {
+    const mesh::Mesh* m = mesh_data(mesh);
+    return m ? m->quad_count() : 0;
+}
+const uint32_t* clay_mesh_quads(const clay_mesh* mesh) {
+    const mesh::Mesh* m = mesh_data(mesh);
+    return m && !m->quads.empty() ? m->quads.data() : nullptr;
+}
+
+clay_result clay_mesh_copy_quads(const clay_mesh* mesh, uint32_t* dst, size_t dst_count) {
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh, &m);
+    if (r != CLAY_OK) return r;
+    if (!dst) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null destination");
+    r = exact_capacity("quad index", m->quads.size(), 1, dst_count);
+    if (r != CLAY_OK) return r;
+    if (!m->quads.empty())
+        std::memcpy(dst, m->quads.data(), m->quads.size() * sizeof(std::uint32_t));
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_quad_report(const clay_mesh* mesh, clay_quad_report* out_report) {
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh, &m);
+    if (r != CLAY_OK) return r;
+    if (!out_report) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null report");
+    if (!mesh->quad_provenance)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this mesh was not produced by a quad mesher, so there is no search to "
+                    "report — a mesh loaded from a file, concatenated, or meshed by any other "
+                    "call has no cell size or target behind it");
+    clay_quad_report probe;
+    r = read_desc(out_report, kQuadReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_report->struct_size;
+    *out_report = clay_quad_report{};
+    out_report->struct_size = declared;
+
+    const clay_mesh::QuadProvenance& p = *mesh->quad_provenance;
+    out_report->cell_size = p.fit.cell_size;
+    out_report->target_quads = p.target;
+    out_report->quad_count = static_cast<std::uint64_t>(p.fit.quad_count);
+    out_report->iterations = p.fit.iterations;
+    out_report->within_tolerance = p.fit.within_tolerance ? 1 : 0;
+    out_report->clamped = p.fit.clamped ? 1 : 0;
     return CLAY_OK;
 }
 
@@ -4136,19 +4287,27 @@ const mesh::Mesh* mesh_of(const clay_mesh* handle) {
 mesh::Mesh concat_meshes(const std::vector<const mesh::Mesh*>& parts) {
     mesh::Mesh out;
     bool keep_normals = !parts.empty(), keep_colors = !parts.empty(), keep_uvs = !parts.empty();
-    std::size_t vertices = 0, indices = 0;
+    // The quads follow the same all-or-nothing rule, and they must: a result
+    // that is quads over part of itself has an `indices` array that is no
+    // longer its quad list's triangulation, which is the invariant every quad
+    // consumer reads.
+    bool keep_quads = !parts.empty();
+    std::size_t vertices = 0, indices = 0, quads = 0;
     for (const mesh::Mesh* m : parts) {
         keep_normals = keep_normals && m->normals.size() == m->positions.size();
         keep_colors = keep_colors && m->colors.size() == m->positions.size();
         keep_uvs = keep_uvs && m->uvs.size() == m->positions.size();
+        keep_quads = keep_quads && m->has_quads();
         vertices += m->positions.size();
         indices += m->indices.size();
+        quads += m->quads.size();
     }
     out.positions.reserve(vertices);
     out.indices.reserve(indices);
     if (keep_normals) out.normals.reserve(vertices);
     if (keep_colors) out.colors.reserve(vertices);
     if (keep_uvs) out.uvs.reserve(vertices);
+    if (keep_quads) out.quads.reserve(quads);
 
     std::uint32_t base = 0;
     for (const mesh::Mesh* m : parts) {
@@ -4157,6 +4316,8 @@ mesh::Mesh concat_meshes(const std::vector<const mesh::Mesh*>& parts) {
         if (keep_colors) out.colors.insert(out.colors.end(), m->colors.begin(), m->colors.end());
         if (keep_uvs) out.uvs.insert(out.uvs.end(), m->uvs.begin(), m->uvs.end());
         for (std::uint32_t i : m->indices) out.indices.push_back(i + base);
+        if (keep_quads)
+            for (std::uint32_t i : m->quads) out.quads.push_back(i + base);
         base += static_cast<std::uint32_t>(m->positions.size());
     }
     return out;
@@ -4182,6 +4343,9 @@ clay_result clay_mesh_transform(const clay_mesh* mesh, const float position[3],
 
     auto* handle = new clay_mesh();
     handle->data = *src;
+    // The quads come with the copy and stay valid: nothing here rewrites an
+    // index. So does the report — this is the same mesh, moved.
+    handle->quad_provenance = mesh->quad_provenance;
     for (kernel::cfloat3& v : handle->data.positions) v = xform.apply(v);
     // Normals rotate, but do not translate and do not scale: a uniform scale
     // leaves a direction unchanged, and adding the position would turn a
@@ -5574,6 +5738,44 @@ clay_result clay_voxel_mesh_smooth(const clay_voxel_grid* grid, int32_t blur,
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "blur must be 0..8 passes");
     auto* handle = new clay_mesh();
     handle->data = g->mesh_smooth(voxel::VoxelGrid::SmoothOptions{blur});
+    *out_mesh = handle;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_mesh_quads(const clay_voxel_grid* grid, const clay_quad_params* params,
+                                  clay_mesh** out_mesh) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (!params || !out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_mesh = nullptr;
+    clay_quad_params p;
+    mesh::QuadTarget target;
+    r = read_quad_params(params, &p, &target);
+    if (r != CLAY_OK) return r;
+    // The same bounds clay_voxel_mesh_smooth applies, for the same reason: a
+    // negative is a caller bug, and each pass is a full sweep over the
+    // occupied box.
+    if (p.blur < 0 || p.blur > 8)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "blur must be 0..8 passes");
+    if (p.level >= g->level_count())
+        return fail(CLAY_ERROR_NOT_FOUND,
+                    "no such resolution level: " + std::to_string(p.level));
+
+    voxel::VoxelGrid::QuadOptions options;
+    options.mode = p.mode == CLAY_QUAD_FACES ? voxel::VoxelGrid::QuadOptions::Mode::Faces
+                                             : voxel::VoxelGrid::QuadOptions::Mode::Dual;
+    options.cell_size = p.cell_size;
+    options.blur = p.blur;
+    options.level = p.level;
+
+    mesh::QuadFit fit;
+    auto* handle = new clay_mesh();
+    handle->data = g->mesh_quads_fit(options, target, &fit);
+    // An empty grid yields an empty mesh rather than an error, as
+    // clay_voxel_mesh does: a frame in which nothing is occupied is not a
+    // failure.
+    handle->quad_provenance = clay_mesh::QuadProvenance{fit, p.target_quads};
     *out_mesh = handle;
     return CLAY_OK;
 }

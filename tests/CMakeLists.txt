@@ -88,6 +88,7 @@ add_executable(clay_unit_tests
   unit/test_groups.cpp
   unit/test_mesh_layers.cpp
   unit/test_quad_mesh.cpp
+  unit/test_c_quad_mesh.cpp
   unit/test_c_mesh_layer.cpp
   unit/test_grid_batch_device.cpp
   unit/test_vulkan_dispatch.cpp)

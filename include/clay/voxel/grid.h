@@ -31,6 +31,7 @@
 #include "clay/math/geom.h"
 #include "clay/field/volume.h"
 #include "clay/mesh/mesh_data.h"
+#include "clay/mesh/quad_mesh.h"  // QuadTarget / QuadFit, shared with the SDF side
 #include "clay/scene/tape.h"
 
 namespace clay {
@@ -393,6 +394,34 @@ class VoxelGrid {
     mesh::Mesh mesh_quads() const { return mesh_quads(QuadOptions{}); }
     mesh::Mesh mesh_quads(const QuadOptions& options) const;
 
+    // The same mesh, asked for by COUNT instead of by cell size, reporting
+    // what it actually produced (mesh/quad_mesh.h states what a target can and
+    // cannot promise — it is approached, never hit).
+    //
+    // The lever differs by mode, and so does the granularity:
+    //
+    //  - DUAL searches the cell size, between the level's own voxel size and a
+    //    lattice one cell across the sculpt. The floor is the clamp mesh_quads
+    //    already applies — a finer lattice resamples the same step field — so a
+    //    target above what the voxel size itself yields comes back at the voxel
+    //    size with `clamped` set, rather than as a finer mesh with no more
+    //    detail in it. Its seed, when the caller names no cell size, is
+    //    estimated from the occupied cell count: a solid of N cells has on the
+    //    order of 6*N^(2/3) faces of surface, which is a starting point for the
+    //    secant and nothing more.
+    //  - FACES has no cell size at all, so the lever is the LEVEL. It meshes
+    //    from the coarsest level toward the finest and keeps the closest count,
+    //    stopping as soon as one overshoots, because the count rises with every
+    //    level. The step is a factor of about four, so "within tolerance" is
+    //    usually unreachable and `clamped` says the stack ran out; a caller who
+    //    asks for 50,000 and receives 12,000 is being told that no level of
+    //    this grid is nearer. `cell_size` in the report is the chosen level's
+    //    voxel size, which is what names the level back.
+    //
+    // With `target.target == 0` this is mesh_quads with a report attached.
+    mesh::Mesh mesh_quads_fit(const QuadOptions& options, const mesh::QuadTarget& target,
+                              mesh::QuadFit* out_fit) const;
+
     // -- back into the document ----------------------------------------------
     // The sculpt as a FIELD, so it can be an operand again (#90).
     //
@@ -578,6 +607,14 @@ class VoxelGrid {
     // drift into two surfaces: `keep_quads` and the generalised cell size are
     // the only things that vary.
     mesh::Mesh dual_mesh(std::size_t level, int blur, float cell_size, bool keep_quads) const;
+    // The two halves of mesh_quads_fit, kept apart because the two modes have
+    // different levers: the dual searches a cell size, faces walks the level
+    // stack. One function doing both was a chain of mode tests around code
+    // that shares nothing but the report it fills in.
+    mesh::Mesh dual_quads_fit(const QuadOptions& options, const mesh::QuadTarget& target,
+                              mesh::QuadFit* fit) const;
+    mesh::Mesh faces_quads_fit(const QuadOptions& options, const mesh::QuadTarget& target,
+                               mesh::QuadFit* fit) const;
     // One face direction's sweep over one chunk-aligned (u, v) window of one
     // chunk slab: build each slice's exposure mask, greedy-merge it, emit.
     // The whole-grid mesh hands it a window spanning a slab's chunks, which is

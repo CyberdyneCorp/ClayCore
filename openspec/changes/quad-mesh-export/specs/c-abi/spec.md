@@ -9,7 +9,13 @@ The C ABI SHALL expose quad meshing for both sources: the document's SDF content
 
 The descriptor SHALL carry the leading `uint32_t struct_size` every descriptor in this ABI carries, so the count controls can be appended to later without a major bump.
 
+The descriptor SHALL also carry the two controls that belong to the voxel source alone — the occupancy blur the smooth mesher already takes, and the resolution LEVEL, which in faces mode is the count lever. Both SHALL be ignored for a document, so one descriptor serves both entry points rather than two that must be kept in step.
+
 The mode SHALL be checked against the declared list and an unknown value SHALL be rejected rather than mapped onto the default, as the mesher enum already is. The dual mode SHALL be zero, so a caller whose declared size predates the field gets the lattice dual.
+
+A call naming NEITHER a cell size nor a target SHALL be refused: neither names a lattice, and picking one on the caller's behalf would spend an unbounded amount of work on a number nobody chose.
+
+The iteration cap SHALL be bounded at this boundary and the target SHALL be bounded by `CLAY_MAX_BATCH`, because every iteration is a whole mesh: a byte count passed where a mesh count belongs, or a negative widened to an unsigned, would otherwise buy that many dense field evaluations. Both are refusals rather than clamps, for the reason every other count check here is.
 
 The faces mode SHALL be voxels only. A document asked for it SHALL be refused with `CLAY_ERROR_INVALID_ARGUMENT` rather than quietly given the dual: a silent substitution of a smooth mesh for a boxy one is visible in the render and invisible in the return code.
 
@@ -24,6 +30,10 @@ The C header SHALL state, at these entry points, that the output is a lattice-de
 #### Scenario: Faces mode on a document is refused
 - **WHEN** a host asks a document for the faces mode
 - **THEN** the call returns `CLAY_ERROR_INVALID_ARGUMENT` with a detail message, and no mesh is produced
+
+#### Scenario: A cost knob nobody could have meant is refused
+- **WHEN** a host passes an iteration cap far above what any search would spend, or a target above the batch ceiling
+- **THEN** the call returns `CLAY_ERROR_INVALID_ARGUMENT` and no mesh is produced
 
 #### Scenario: A descriptor that predates the fields still meshes
 - **WHEN** a caller declares the descriptor's original size
@@ -41,6 +51,10 @@ A mesh carrying no quads SHALL report a count of zero and a null pointer, never 
 The existing accessors — vertex count, index count, positions, normals, colours, uvs, indices, the interleaved vertex copy, bounds, validation and save — SHALL be unaffected. The index accessors SHALL keep reporting the triangulation, because that is what a GPU consumer draws.
 
 A mesh SHALL additionally report how it was produced: the lattice cell size it was meshed at, the target it was given (zero when none), the count it reached, the iterations the search spent, whether it landed inside the tolerance, and whether it clamped. This is the ONLY way a host learns that a target of fifty thousand produced thirty-one thousand because a ceiling stopped the search. Asking a mesh that was not quad-meshed SHALL be refused rather than answered with zeroes.
+
+The report describes a meshing CALL and not a surface, and SHALL travel exactly as far as that statement stays true. A transform carries it, because the result is the same mesh moved. A concatenation SHALL NOT, because it was produced by no single call. A mesh borrowed back out of a document layer SHALL NOT either, for the same reason: the geometry crossed, the call did not.
+
+`clamped` and `within_tolerance` are independent, and BOTH SHALL be reported as they are: a search that stopped at a limit and happened to land inside the tolerance there sets both, and each is a true statement about what happened.
 
 #### Scenario: A host reads the quads
 - **WHEN** a host quad-meshes and reads the quad count and pointer

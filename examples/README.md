@@ -497,6 +497,38 @@ moves what gets exported, not what is stored.
 
 ![mesh layer and sculpt](output/36_mesh_layers.png)
 
+### 44 — exporting quads, and what "quads" means here
+
+**This is a regular quad grid derived from a sampling lattice. It is not
+field-aligned retopology.** The quads follow the lattice, not the form: no edge
+loops around a limb or a mouth, no poles at features, no denser rows where
+curvature asks for them, and nothing animation-ready. It is the input a
+retopology pass *replaces*, not the output one produces. The wireframes are the
+honest statement of that — the grid runs straight across the flat and wraps the
+bulge without ever noticing where the two meet.
+
+![quad density](output/44_quad_density.png)
+
+The same form at ~400, ~1000 and ~2000 quads. **A count is a target the mesher
+approaches, never one it hits**: the only lever is the lattice cell size, so
+asking for a number is a short search over it and the script prints requested
+against actual for every mesh. Count goes as `cell⁻²`, so landing inside 5-10%
+is the expectation and the report says whether it converged, what cell size it
+settled on, and how many meshes that cost.
+
+`OBJ`, `PLY` and `FBX` carry the quads as four-corner faces. **`GLB` does
+not** — glTF 2.0 defines no quad primitive mode, so the writer emits the same
+surface as triangles. The script prints that rather than leaving it to be
+discovered in Blender.
+
+![voxel quad modes](output/44_voxel_modes.png)
+
+A voxel sculpt is two different subjects. Left is the **dual**: the rounded
+form, the same lattice the smooth mesher builds. Right is **faces**: one planar
+quad per exposed voxel face, which is the boxes the model actually is. The two
+carry the *same number of quads* — a sign-changing lattice edge is exactly an
+exposed face — and completely different surfaces.
+
 ## Notes
 
 - **This page documents 00-17 and the two showcase examples.** The gallery

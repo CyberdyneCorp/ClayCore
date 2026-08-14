@@ -66,8 +66,13 @@ Each iteration is a full mesh, including a full dense field evaluation on the ta
 
 The search SHALL clamp rather than fail:
 
-- It SHALL never request a lattice the mesher's own resolution pricing would refuse; it stops at that ceiling and reports that it clamped.
-- When the shape's own topology collapses before the target is reached, it SHALL return its best result and report that it did not converge, rather than returning the collapse as the answer.
+- It SHALL never request a lattice the mesher's own resolution pricing would refuse; it stops at that ceiling and reports that it clamped. A caller MAY impose a floor of its own on top of that one, and reaching either is reported the same way.
+- It SHALL also bound the COARSE end at a lattice too sparse to span the region at all, and report reaching that as clamped for the same reason: the search stopped at a limit rather than at the target.
+- When the shape's own topology collapses before the target is reached, it SHALL return its best result and report that it did not converge, rather than returning the collapse as the answer. A candidate that produced NO quads SHALL never be preferred over one that produced some.
+
+The clamped flag and the tolerance flag are independent. A search that stopped at a limit and landed inside the tolerance there SHALL report both, because both happened.
+
+The search SHALL be one implementation, shared by every source that has a cell size, so the tape path and the voxel path cannot drift into two different contracts for the same promise.
 
 Decimation SHALL NOT be used to approach a target: quadric edge collapse is a triangle operation and breaks the quad pairing on its first collapse.
 

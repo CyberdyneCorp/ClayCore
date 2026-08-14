@@ -73,6 +73,7 @@ EXAMPLES = [
     "41_voxel_smooth_display",
     "42_representation_round_trip",
     "43_consolidation_keeps_colour",
+    "44_quad_export",
 ]
 
 
@@ -89,7 +90,8 @@ CAPABILITY_EXAMPLES = {
     "scene-model": "10_editing",
     "brick-cache": None,          # an internal cache; its effect is meshing speed, not a picture
     "evaluation-backends": None,  # the same field on four devices — a parity test, not a render
-    "meshing": "08_meshing_and_io",  # plus 19_mesh_import for the reverse direction
+    # plus 19_mesh_import for the reverse direction and 44_quad_export for quads
+    "meshing": "08_meshing_and_io",
     "picking": "10_editing",
     "file-io": "08_meshing_and_io",
     # plus 11_masks, 33_mask_extrude, and 39_multi_resolution for the level stack

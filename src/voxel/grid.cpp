@@ -7,6 +7,7 @@
 #include <deque>
 #include <limits>
 #include <map>
+#include <utility>
 
 namespace clay {
 namespace voxel {
@@ -1052,6 +1053,118 @@ mesh::Mesh VoxelGrid::mesh_quads(const QuadOptions& options) const {
             sweep_window(level, dir.axis, dir.sign, slab_index, slab.u0, slab.v0,
                          slab.u1 - slab.u0 + 1, slab.v1 - slab.v0 + 1, mask, out, &weld);
     }
+    return out;
+}
+
+namespace {
+
+// A seed cell size for a target count, from the cells a level holds rather
+// than from a mesh nobody has built yet. A solid of N cubes exposes on the
+// order of 6*N^(2/3) faces, the count is area / cell^2, and the search
+// corrects from there — this only has to be the right order of magnitude, and
+// a hollow shell (all faces exposed) is the case it underestimates.
+float seed_cell_for(std::size_t occupied, float voxel_size, std::size_t target) {
+    if (occupied == 0 || target == 0) return voxel_size;
+    const double faces = 6.0 * std::cbrt(static_cast<double>(occupied) *
+                                         static_cast<double>(occupied));
+    const double area = faces * static_cast<double>(voxel_size) * voxel_size;
+    return static_cast<float>(std::sqrt(area / static_cast<double>(target)));
+}
+
+}  // namespace
+
+// The dual's lever is the cell size, between the level's own voxel size — the
+// clamp mesh_quads already applies, because a finer lattice resamples the same
+// step field — and a lattice one cell across the whole sculpt.
+mesh::Mesh VoxelGrid::dual_quads_fit(const QuadOptions& options, const mesh::QuadTarget& target,
+                                     mesh::QuadFit* fit) const {
+    mesh::Mesh out;
+    if (options.level >= levels_.size()) return out;
+    const float vs = levels_[options.level].voxel_size;
+
+    // The coarse limit, taken from the chunk KEYS rather than from the
+    // occupied cells: it only has to bound the search, and walking every voxel
+    // to bound it would cost more than the extra iteration it might save.
+    float span = vs;
+    const ChunkMap& chunks = levels_[options.level].chunks;
+    if (!chunks.empty()) {
+        VoxelCoord lo = chunks.begin()->first, hi = lo;
+        for (const auto& [key, chunk] : chunks) {
+            lo = {std::min(lo.x, key.x), std::min(lo.y, key.y), std::min(lo.z, key.z)};
+            hi = {std::max(hi.x, key.x), std::max(hi.y, key.y), std::max(hi.z, key.z)};
+        }
+        const int cells = (std::max({hi.x - lo.x, hi.y - lo.y, hi.z - lo.z}) + 1) * kChunkDim;
+        span = std::max(vs, static_cast<float>(cells) * vs);
+    }
+
+    const float floor_cell = (std::isfinite(target.min_cell_size) && target.min_cell_size > vs)
+                                 ? std::min(target.min_cell_size, span)
+                                 : vs;
+    const float seed = (std::isfinite(options.cell_size) && options.cell_size > 0.0f)
+                           ? options.cell_size
+                           : seed_cell_for(level_occupied_count(options.level), vs, target.target);
+    *fit = mesh::fit_quad_cell(
+        [&](float cell) { return dual_mesh(options.level, options.blur, cell, true); }, seed,
+        floor_cell, span, target, &out);
+    return out;
+}
+
+// Faces mode has no cell size, so the search moves over the LEVEL stack and a
+// cell size is only how a level is named: the mesher maps the cell the search
+// asks for onto the level whose voxel size is nearest in RATIO, which is the
+// right measure when the levels are a factor of two apart. Memoised, because
+// the quantisation makes "the step landed back on a level already meshed" the
+// common case and each of these is a whole mesh.
+mesh::Mesh VoxelGrid::faces_quads_fit(const QuadOptions& options, const mesh::QuadTarget& target,
+                                      mesh::QuadFit* fit) const {
+    mesh::Mesh out;
+    if (levels_.empty()) return out;
+    const std::size_t finest = levels_.size() - 1;
+
+    auto level_for = [this](float cell) {
+        std::size_t best = 0;
+        double best_error = std::numeric_limits<double>::infinity();
+        for (std::size_t l = 0; l < levels_.size(); ++l) {
+            const double error = std::fabs(std::log(static_cast<double>(levels_[l].voxel_size) /
+                                                    static_cast<double>(cell)));
+            if (error < best_error) {
+                best_error = error;
+                best = l;
+            }
+        }
+        return best;
+    };
+
+    std::map<std::size_t, mesh::Mesh> meshed;
+    const float seed = target.target == 0
+                           ? levels_[std::min(options.level, finest)].voxel_size
+                           : seed_cell_for(level_occupied_count(finest),
+                                           levels_[finest].voxel_size, target.target);
+    *fit = mesh::fit_quad_cell(
+        [&](float cell) {
+            const std::size_t level = level_for(cell);
+            auto it = meshed.find(level);
+            if (it == meshed.end()) {
+                QuadOptions at = options;
+                at.level = level;
+                it = meshed.emplace(level, mesh_quads(at)).first;
+            }
+            return it->second;
+        },
+        seed, levels_[finest].voxel_size, levels_[0].voxel_size, target, &out);
+    // The report names the lattice the mesh was built on, and here that is a
+    // level rather than the continuous cell size the search walked over.
+    if (fit->cell_size > 0.0f) fit->cell_size = levels_[level_for(fit->cell_size)].voxel_size;
+    return out;
+}
+
+mesh::Mesh VoxelGrid::mesh_quads_fit(const QuadOptions& options, const mesh::QuadTarget& target,
+                                     mesh::QuadFit* out_fit) const {
+    mesh::QuadFit fit;
+    mesh::Mesh out = options.mode == QuadOptions::Mode::Dual
+                         ? dual_quads_fit(options, target, &fit)
+                         : faces_quads_fit(options, target, &fit);
+    if (out_fit) *out_fit = fit;
     return out;
 }
 
