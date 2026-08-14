@@ -66,8 +66,9 @@
 - [x] 5.3 FBX writes four indices per polygon with the complement end marker.
 - [x] 5.4 GLB unchanged; `mesh_io.h` and the C header both say why (glTF 2.0 has
       no quad primitive mode).
-- [x] 5.5 `mesh_io.h` states that the READERS still fan-triangulate, so a quad
-      file re-imports as triangles.
+- [x] 5.5 `mesh_io.h` and the C header state that the READERS are unchanged, so
+      a quad file re-imports as triangles — and which triangles: OBJ and PLY
+      keep the writer's diagonal, FBX does not.
 
 ## 6. The mesh stream
 
@@ -225,3 +226,39 @@
       warning. `within_count` is a real dedup: the loop's stop condition and
       the reported `within_tolerance` were the same expression written twice,
       in both the cell search and the ladder walk.
+
+## 13. Review round 4
+
+- [x] 13.1 The fine limit of the count search is a cell size the mesher will
+      actually mesh. It was bisected in double and narrowed with a plain cast
+      to float; round-to-nearest lands below the bound about half the time, and
+      a cell below the bound is one `mesh_tape_quads` refuses — so a target past
+      the ceiling clamped onto a refused lattice, got an empty mesh, and
+      reported `quad_count = 0` with `clamped` set. Through the C ABI that came
+      back as `CLAY_ERROR_BACKEND` "quad meshing produced no faces": a
+      resolution limit read as a shape that vanished. Measured on a sphere of
+      radius 0.4: the floor priced at 268,435,462.24 samples against a ceiling
+      of 268,435,456, so every target at or above 2,481,308 returned nothing
+      where one float ulp coarser meshes 1,948,668 quads; 245 of 500 random
+      boxes had the same floor.
+- [x] 13.2 The narrowed floor is stepped back up until the pricing accepts it,
+      and the bisection runs 64 halvings rather than 40 so the cast is the only
+      rounding left — at 40 the bound itself was a float ulp or two wide once
+      the floor sat several decades below the coarse end, which gave away
+      resolution the mesher would have granted.
+- [x] 13.3 `finest_affordable_cell` and `lattice_affordable` are named in
+      `quad_mesh.h`, and `mesh_tape_quads` prices through the same
+      `lattice_affordable` the floor is checked against — the defect was two
+      spellings of one bound, so there is now only one.
+- [x] 13.4 Regression test drives the REAL pricing floor rather than a
+      caller-supplied `min_cell_size` (which is affordable by construction and
+      never exercised the narrowing): the reported region plus a sweep of cubes
+      and slabs, each floor affordable and each one step finer refused, the
+      mesher's own refusal asserted on the side that costs nothing, and the
+      end-to-end search driven over a mesher that refuses exactly what
+      `mesh_tape_quads` refuses.
+- [x] 13.5 The C header's blanket "the READERS still fan-triangulate" is
+      replaced by the per-format statement `mesh_io.h` already carries, and the
+      flipped-quad figure in both is corrected to what is measured: 43% to 50%
+      of the quads over cell sizes 0.3 down to 0.06 on a sphere of radius 1,
+      not 40% and not 80%.

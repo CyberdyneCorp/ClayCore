@@ -655,6 +655,96 @@ TEST_CASE("a target the fine limit cannot reach stops at the limit and says so")
     CHECK(mesh::quads_consistent(q));
 }
 
+// REGRESSION (review round 4): the fine limit was bisected in DOUBLE and then
+// narrowed with a plain cast to float. Round-to-nearest lands BELOW the bound
+// about half the time, and a cell size below the bound is one mesh_tape_quads
+// refuses — so the search clamped to it, got an empty mesh back, and reported
+// quad_count = 0 with clamped = true. Through the C ABI that surfaced as
+// CLAY_ERROR_BACKEND "quad meshing produced no faces": a resolution limit read
+// as a shape that vanished, which is the exact outcome quad_mesh.h:261-264
+// promises cannot happen. Measured on the region below before the fix: the
+// floor priced at 268,435,462.24 samples against a ceiling of 268,435,456, and
+// every target at or above 2,481,308 came back empty; one float ulp coarser
+// meshes 1,948,668 quads.
+//
+// The limit is driven HERE rather than through a caller's min_cell_size,
+// because a caller's floor is affordable by construction and so never
+// exercises the narrowing at all — the gap the test above names in its own
+// comment. What is not done here is meshing AT the limit: by definition that
+// lattice is kMaxGridSamples points, a gigabyte and some seconds per run. The
+// refused side of the boundary is free, though — mesh_tape_quads prices before
+// it allocates — so the tie between this floor and the mesher's own pricing is
+// asserted against the real mesher in the direction that costs nothing.
+TEST_CASE("the fine limit is a cell size the mesher will actually accept") {
+    // The reported case: a sphere of radius 0.4 in its own bounds.
+    const math::Aabb region{cf3(-0.4f, -0.4f, -0.4f), cf3(0.4f, 0.4f, 0.4f)};
+    const float floor_cell = mesh::finest_affordable_cell(region, 0.8f);
+    CHECK(mesh::lattice_affordable(region, floor_cell));
+    CHECK_FALSE(mesh::lattice_affordable(region, std::nextafter(floor_cell, 0.0f)));
+
+    scene::Tape t = sphere_tape(0.4f);
+    // The mesher agrees, on the side that does not cost a lattice: one ulp
+    // finer than the floor is refused, so the floor is not merely affordable
+    // by some other arithmetic — it is where THIS mesher's pricing stops.
+    CHECK(mesh::mesh_tape_quads(t, region, std::nextafter(floor_cell, 0.0f)).empty());
+
+    // The end-to-end consequence, spelled out without paying for the lattice:
+    // a mesher that refuses exactly what mesh_tape_quads refuses — the same
+    // lattice_affordable call, which is the one mesh_tape_quads itself makes —
+    // searched over the same floor mesh_tape_quads_fit hands it. Before the
+    // fix this walked straight into the refusal and reported 0 quads.
+    mesh::QuadTarget want;
+    want.target = 4000000;
+    std::vector<float> asked;
+    auto priced_mesher = [&](float cell) {
+        asked.push_back(cell);
+        Mesh m;
+        if (!mesh::lattice_affordable(region, cell)) return m;  // the refusal, verbatim
+        const std::size_t quads = static_cast<std::size_t>(2.0 / (cell * cell));
+        m.positions.resize(quads);
+        m.quads.resize(quads * 4, 0);
+        m.indices.resize(quads * 6, 0);
+        return m;
+    };
+    // The seed mesh_tape_quads_fit derives for this region and target —
+    // sqrt(area / target) over the box's own 6 * 0.8^2 — which is already
+    // finer than the floor, so the very first lattice is the clamped one.
+    // That is the path the failure took: not a search that walked down to the
+    // limit, but one that started at it.
+    const float seed = std::sqrt(6.0f * 0.8f * 0.8f / 4000000.0f);
+    REQUIRE(seed < floor_cell);
+    const mesh::QuadFit fit =
+        mesh::fit_quad_cell(priced_mesher, seed, floor_cell, 0.8f, want, nullptr);
+    CHECK(fit.quad_count > 0);  // the finest lattice it is allowed, never nothing
+    CHECK(fit.clamped);
+    CHECK_FALSE(fit.within_tolerance);
+    CHECK(fit.cell_size == floor_cell);
+    for (float cell : asked) CHECK(mesh::lattice_affordable(region, cell));
+
+    // And it is not a property of one region. Boxes of every shape: cubes over
+    // three decades, and slabs and needles whose extents differ by a hundred.
+    std::vector<math::Aabb> regions;
+    for (float e = 0.01f; e < 1000.0f; e *= 2.3f)
+        regions.push_back({cf3(0, 0, 0), cf3(e, e, e)});
+    for (float a = 0.05f; a < 40.0f; a *= 1.7f)
+        for (float b = 0.05f; b < 40.0f; b *= 1.9f) {
+            regions.push_back({cf3(0, 0, 0), cf3(a, b, b)});
+            regions.push_back({cf3(-a, -b, -a * 0.01f), cf3(a, b, a * 0.01f)});
+        }
+    REQUIRE(regions.size() > 100);
+    for (const math::Aabb& r : regions) {
+        const cfloat3 e = r.extent();
+        const float coarse = std::max(e.x, std::max(e.y, e.z));
+        const float f = mesh::finest_affordable_cell(r, coarse);
+        INFO("extent ", e.x, " ", e.y, " ", e.z, " floor ", f);
+        CHECK(mesh::lattice_affordable(r, f));
+        // The finest one, not merely an affordable one: a floor that gave the
+        // bound away by more than a rounding step would cost the caller
+        // resolution the mesher would have granted.
+        if (f < coarse) CHECK_FALSE(mesh::lattice_affordable(r, std::nextafter(f, 0.0f)));
+    }
+}
+
 TEST_CASE("a target so small the shape collapses reports the best real mesh") {
     scene::Tape t = sphere_tape(1.0f);
     mesh::QuadTarget want;
@@ -1203,8 +1293,9 @@ TEST_CASE("FBX writes four indices per polygon with the complement end marker") 
 // identical in every format. It is not. OBJ and PLY go through this library's
 // own parsers and do fan on the writer's 0-2 diagonal; FBX goes through ufbx,
 // whose ufbx_triangulate_face picks its own diagonal per quad. On a
-// quad-meshed sphere that flips about 40% of the faces and moves the enclosed
-// volume by a couple of parts in a thousand, so a caller diffing an FBX round
+// quad-meshed sphere that flips close to half of the faces — 43% to 50%
+// measured over cell sizes 0.3 down to 0.06 — and moves the enclosed volume
+// with them, by 0.5% at the coarsest of those, so a caller diffing an FBX round
 // trip against the index buffer it saved sees a mesh that looks wrong and is
 // not. Both halves are pinned here: the exact guarantee where there is one,
 // and the surface-level one where there is not.

@@ -1432,8 +1432,14 @@ clay_result clay_mesh_validate(const clay_mesh* mesh, int32_t* out_watertight,
  * same surface. Said here because "I exported GLB and got triangles" is the
  * one surprising outcome of quad meshing, and it is not a bug.
  *
- * The READERS still fan-triangulate, so a quad file loaded back through
- * clay_mesh_load comes back as triangles. */
+ * The READERS are unchanged, so a quad file loaded back through clay_mesh_load
+ * comes back as TRIANGLES with no quads. Which triangles differs by format.
+ * .obj and .ply are read by this library's own parsers, which fan a face on
+ * the same diagonal the quad writer used, so the index buffer survives the
+ * round trip. .fbx is read through ufbx, which picks its own diagonal per quad
+ * — close to half of them come back split the other way, and the solid's
+ * measured volume moves with them. Neither triangulation is wrong; a caller
+ * checking an FBX round trip must compare the SURFACE, not the indices. */
 clay_result clay_mesh_save(const clay_mesh* mesh, const char* path);
 
 /* Guardrails for an importer, checked against the file's DECLARED counts before

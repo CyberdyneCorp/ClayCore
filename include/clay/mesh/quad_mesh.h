@@ -103,6 +103,27 @@ Mesh mesh_lattice_quads(const std::function<float(int, int, int)>& sample, const
 Mesh mesh_tape_quads(const scene::Tape& tape, const math::Aabb& region, float cell_size,
                      const MeshingOptions& options = {});
 
+// mesh_tape_quads' own pricing, asked without meshing: would it lattice this
+// region at this cell size, or refuse it as more than kMaxGridSamples sample
+// points? False for a region it would not mesh at any cell size (empty or
+// infinite) and for a cell size that is not finite and positive.
+bool lattice_affordable(const math::Aabb& region, float cell_size);
+
+// The finest cell size lattice_affordable still accepts for this region, given
+// a `coarse` one it already accepts. Found by bisection rather than by solving
+// the cubic: the sample count is monotone in the cell size, the halvings pin
+// the bound well below a float ulp, and an inverted cubic would have to be
+// checked against the pricing anyway to be trusted.
+//
+// The return value is AFFORDABLE, not merely near the bound — the bisection
+// runs in double and narrowing to float rounds to nearest, so the last step is
+// back up to a float the pricing accepts. That is the whole contract: this is
+// the number the count search clamps to, and a floor mesh_tape_quads would
+// refuse turns a resolution limit into an empty mesh. If `coarse` is itself
+// refused there is no affordable cell size at all and `coarse` comes back
+// unchanged.
+float finest_affordable_cell(const math::Aabb& region, float coarse);
+
 // -- asking for a quad COUNT --------------------------------------------------
 //
 // The lattice cell size is the only lever on how many quads come out, so a

@@ -27,12 +27,14 @@
 // format. OBJ and PLY are read by this library's own parsers, which FAN a face
 // on the same 0-2 diagonal the quad writer's triangles use, so a save/load
 // round trip returns the identical triangle set. FBX is read through ufbx,
-// whose ufbx_triangulate_face picks its own diagonal per quad — on a
-// quad-meshed sphere roughly 40% of the quads come back split the other way,
-// and the solid's measured volume moves by a couple of parts in a thousand
-// because a non-planar quad's two diagonals cut different solids. Nothing is
-// wrong with either triangulation; a caller comparing an FBX round trip
-// against the mesh it saved must compare the SURFACE and not the index buffer.
+// whose ufbx_triangulate_face picks its own diagonal per quad — close to half
+// of them come back split the other way, and the solid's measured volume moves
+// with them, because a non-planar quad's two diagonals cut different solids.
+// Measured on a sphere of radius 1 in a 3^3 region: 43% to 50% of the quads
+// flipped at cell sizes from 0.3 down to 0.06, and the volume moved 0.52% at
+// the coarsest of those and 0.02% at the finest. Nothing is wrong with either
+// triangulation; a caller comparing an FBX round trip against the mesh it
+// saved must compare the SURFACE and not the index buffer.
 
 #include <string>
 #include <vector>

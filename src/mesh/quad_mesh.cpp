@@ -22,24 +22,6 @@ double lattice_samples(const math::Aabb& region, double cell) {
     return dx * dy * dz;
 }
 
-// The finest cell size the mesher would still accept for this region. Found by
-// bisection rather than by solving the cubic: the count is monotone in the
-// cell size, forty halvings pin it to a part in 10^12, and an inverted cubic
-// would have to be checked against the pricing anyway to be trusted.
-float pricing_floor(const math::Aabb& region, float coarse) {
-    double lo = static_cast<double>(coarse) * 1e-9;  // certainly refused
-    double hi = static_cast<double>(coarse);         // certainly affordable
-    if (!(lattice_samples(region, hi) <= static_cast<double>(kMaxGridSamples))) return coarse;
-    for (int i = 0; i < 40; ++i) {
-        const double mid = 0.5 * (lo + hi);
-        if (lattice_samples(region, mid) <= static_cast<double>(kMaxGridSamples))
-            hi = mid;
-        else
-            lo = mid;
-    }
-    return static_cast<float>(hi);
-}
-
 // Is `count` a better answer to `want` than `best` is? Never-empty beats
 // empty first, so a target that collapses the shape's topology comes back as
 // the best REAL mesh rather than as the collapse; then plain distance; then
@@ -117,6 +99,44 @@ QuadFit mesh_once(const std::function<Mesh(float)>& mesh_at, float cell, bool cl
 }
 
 }  // namespace
+
+bool lattice_affordable(const math::Aabb& region, float cell_size) {
+    if (region.empty() || region.is_infinite()) return false;
+    if (!(cell_size > 0.0f) || !std::isfinite(cell_size)) return false;
+    return lattice_samples(region, static_cast<double>(cell_size)) <=
+           static_cast<double>(kMaxGridSamples);
+}
+
+float finest_affordable_cell(const math::Aabb& region, float coarse) {
+    if (!lattice_affordable(region, coarse)) return coarse;
+    double lo = static_cast<double>(coarse) * 1e-9;  // certainly refused
+    double hi = static_cast<double>(coarse);         // certainly affordable
+    // Sixty-four halvings, not forty: forty pin the bound to about a part in
+    // 10^12 of `coarse`, which is a FLOAT ulp or two once the floor is several
+    // decades below the coarse end — enough that the narrowing below would
+    // give away resolution the mesher was willing to grant. Sixty-four put the
+    // bound far under a float ulp, so the cast is the only rounding left.
+    for (int i = 0; i < 64; ++i) {
+        const double mid = 0.5 * (lo + hi);
+        if (lattice_samples(region, mid) <= static_cast<double>(kMaxGridSamples))
+            hi = mid;
+        else
+            lo = mid;
+    }
+    // `hi` is affordable, but narrowing it to float rounds to NEAREST, which
+    // lands BELOW it half the time — and a cell size below the bound is one
+    // mesh_tape_quads refuses, so a search clamping to it would get an empty
+    // mesh and read the refusal as a shape that vanished. So the narrowed
+    // value is stepped back up until it is affordable in its own right, which
+    // is what this function promises. The count is monotone in the cell size
+    // and the round is at most half an ulp, so the first step already clears
+    // it; the loop is written as a loop only so the promise does not rest on
+    // that arithmetic holding for every region.
+    float cell = static_cast<float>(hi);
+    while (cell < coarse && !lattice_affordable(region, cell))
+        cell = std::nextafter(cell, coarse);
+    return cell;
+}
 
 QuadFit fit_quad_cell(const std::function<Mesh(float)>& mesh_at, float seed_cell, float min_cell,
                       float max_cell, const QuadTarget& target, Mesh* out_mesh) {
@@ -250,7 +270,7 @@ Mesh mesh_tape_quads_fit(const scene::Tape& tape, const math::Aabb& region, floa
                                   ? target.min_cell_size
                                   : 0.0f;
     const float floor_cell =
-        std::min(std::max(pricing_floor(region, longest), asked_floor), longest);
+        std::min(std::max(finest_affordable_cell(region, longest), asked_floor), longest);
     fit = fit_quad_cell(
         [&](float cell) { return mesh_tape_quads(tape, region, cell, options); }, seed,
         floor_cell, longest, target, &mesh);
@@ -266,18 +286,16 @@ Mesh mesh_lattice_quads(const std::function<float(int, int, int)>& sample, const
 
 Mesh mesh_tape_quads(const scene::Tape& tape, const math::Aabb& region, float cell_size,
                      const MeshingOptions& options) {
-    if (region.empty() || region.is_infinite()) return {};
     // The same pricing mesh_tape applies, and for the same reason: the lattice
     // is sized from the caller's cell size, so an over-fine number ends the
     // process in the allocator rather than returning. Priced in double before
     // anything is cast to int. It is also what a count search needs — a
     // ceiling it can stop at and report, rather than an allocation it cannot
-    // survive to report.
-    if (!(cell_size > 0.0f) || !std::isfinite(cell_size)) return {};
-    const double dx = static_cast<double>(region.max.x - region.min.x) / cell_size + 2.0;
-    const double dy = static_cast<double>(region.max.y - region.min.y) / cell_size + 2.0;
-    const double dz = static_cast<double>(region.max.z - region.min.z) / cell_size + 2.0;
-    if (!(dx * dy * dz <= static_cast<double>(kMaxGridSamples))) return {};
+    // survive to report. Asked through lattice_affordable rather than spelled
+    // out here, so the refusal and the floor the search clamps to cannot be
+    // two different numbers: that gap is exactly how a clamped search came
+    // back with an empty mesh.
+    if (!lattice_affordable(region, cell_size)) return {};
 
     return detail::tape_nets_mesh(tape, region, cell_size, options, /*keep_quads=*/true);
 }

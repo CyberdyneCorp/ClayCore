@@ -66,7 +66,7 @@ Each iteration is a full mesh, including a full dense field evaluation on the ta
 
 The search SHALL clamp rather than fail:
 
-- It SHALL never request a lattice the mesher's own resolution pricing would refuse; it stops at that ceiling and reports that it clamped. A caller MAY impose a floor of its own on top of that one, and reaching either is reported the same way.
+- It SHALL never request a lattice the mesher's own resolution pricing would refuse; it stops at that ceiling and reports that it clamped. A caller MAY impose a floor of its own on top of that one, and reaching either is reported the same way. The ceiling SHALL be a cell size that pricing accepts IN THE TYPE THE MESHER TAKES, not merely one near the bound: a floor arrived at by rounding a wider computation is on the wrong side of the bound half the time, and a refused floor turns a resolution limit into an empty mesh.
 - It SHALL also bound the COARSE end at a lattice too sparse to span the region at all, and report reaching that as clamped for the same reason: the search stopped at a limit rather than at the target.
 - When the shape's own topology collapses before the target is reached, it SHALL return its best result and report that it did not converge, rather than returning the collapse as the answer. A candidate that produced NO quads SHALL never be preferred over one that produced some.
 
@@ -83,6 +83,10 @@ Decimation SHALL NOT be used to approach a target: quadric edge collapse is a tr
 #### Scenario: An unreachable target reports rather than lies
 - **WHEN** a target is requested that the resolution ceiling cannot reach
 - **THEN** the mesher returns the mesh at the finest lattice it is allowed, and the report states the actual count, the cell size, and that the search clamped
+
+#### Scenario: The limit the search clamps to is one the mesher accepts
+- **WHEN** the fine limit of the search is computed for a region
+- **THEN** the mesher's own pricing accepts that cell size, and one representable step finer is refused — so a target beyond the ceiling returns that lattice's mesh and never an empty one reported as a resolution limit
 
 #### Scenario: An explicit cell size skips the search
 - **WHEN** a cell size is given and no target
