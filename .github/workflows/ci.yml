@@ -113,6 +113,12 @@ jobs:
       # RUNNING the smoke against the real slices stays release-time.
       - name: Swift smoke type-check (clay.h is consumable from Swift)
         run: ./tools/check_swift_smoke.sh typecheck
+      # The only runner with a Swift toolchain, so the only one where this gate
+      # reads the product's linkage out of SwiftPM rather than out of the
+      # manifest text. It also runs in the Linux gates job, weaker, so a
+      # contributor without Xcode still gets the signal.
+      - name: SwiftPM product linkage (#112)
+        run: python3 tools/check_swift_package.py
 
   # The OLDEST AppleClang still on a hosted runner, and the row that catches
   # what the rest of this matrix cannot: issue #71 was C++20 parenthesized
@@ -183,6 +189,12 @@ jobs:
       # module, and the two readings must agree
       - name: Binding parity (C ABI vs pyclay)
         run: python3 tools/check_binding_parity.py
+      # No Swift toolchain here, so this reads Package.swift as text; the macOS
+      # job runs the same gate authoritatively. Both, because the failure it
+      # guards shipped for four releases and cost every Xcode 26 consumer a
+      # wall of undefined symbols.
+      - name: SwiftPM product linkage (#112)
+        run: python3 tools/check_swift_package.py
 
   # READ THE NAME. This job gates the Vulkan backend's PLUMBING — that the
   # generated GLSL compiles, that the SPIR-V is valid, that descriptors bind,

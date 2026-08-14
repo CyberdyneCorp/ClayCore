@@ -16,7 +16,29 @@ let package = Package(
     name: "claycore",
     platforms: [.macOS(.v12), .iOS(.v16)],
     products: [
-        .library(name: "claycore", targets: ["ClayCoreLink"]),
+        // STATIC, and it must stay that way (#112).
+        //
+        // Left automatic, Xcode 26 builds this product as a DYNAMIC
+        // PackageProduct framework in Debug. That framework links
+        // libclaycore-*.a, but ClayCoreLink is one empty Swift file that
+        // references no archive member, so the linker pulls ZERO objects: the
+        // framework exports no clay_* symbols and every consuming app fails to
+        // link with every symbol undefined. The archive is fine throughout —
+        // `nm -gU` shows them all — which is what makes the failure so hard to
+        // read from the app side.
+        //
+        // At 0.25.0 the product WAS the binaryTarget, which Xcode always links
+        // directly into the client; vending ClayCoreLink instead (0.26, to
+        // carry the Metal/Foundation linker settings a binaryTarget cannot)
+        // is what opened this. Declaring the product static removes the
+        // dynamic-framework path entirely rather than relying on which
+        // configuration Xcode chose.
+        //
+        // `swift run claycore-smoke` CANNOT catch a regression here: an
+        // executable's direct symbol references pull the archive members
+        // whatever the product linkage, which is exactly the reference the
+        // empty wrapper lacks. tools/check_swift_package.py gates it instead.
+        .library(name: "claycore", type: .static, targets: ["ClayCoreLink"]),
         .executable(name: "claycore-smoke", targets: ["claycore-smoke"]),
     ],
     targets: [
