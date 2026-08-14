@@ -52,6 +52,133 @@ write PNGs with the standard library.
 | Twist, bend, taper, displace — and chain order | 2D profiles revolved into 3D |
 | ![voxels](examples/output/07_voxel_edits.png) | ![transitions](examples/output/06_transition_linear.png) |
 | Voxel brushes, fills and palettes | Morphing a box into a sphere |
+| ![round trip](examples/output/42_representation_round_trip.png) | ![armature](examples/output/40_armature.png) |
+| SDF → voxel → SDF: blocked out as fields, sculpted as voxels, back as an operand | An armature — a ZSphere tree skinned by its blend |
+
+## Two ways to sculpt: SDF and voxel
+
+claycore carries two representations side by side, and a document can hold
+layers of both. They are not two APIs for one thing — each is good at what the
+other is structurally bad at, and the intended workflow uses both.
+
+An **SDF layer** is an ordered list of parametric edits — primitives, booleans,
+blends, deformers, strokes — compiled into a flat tape and evaluated as a
+continuous distance field. A **voxel layer** is a sparse palette-indexed grid of
+occupied cells, edited in place.
+
+| | SDF layers | Voxel layers |
+|---|---|---|
+| **What an edit is** | A node in an edit list — re-editable forever: retransform, re-blend, reorder, remove | An in-place cell write — immediate, but not replayable |
+| **History** | The document *is* the history; undo/redo, coalescing and serialization come for free | No history; a host snapshots if it wants undo |
+| **Resolution** | An evaluation parameter — the field is continuous, so there is no "too coarse" | Real storage, chosen up front — with a stack of levels to refine only where the detail goes |
+| **Precision** | Exactness and Lipschitz bounds tracked per node; booleans are watertight by construction, raymarching provably correct | Occupancy, not distance — a bound, not a metric |
+| **Free-form sculpting** | Smooth/flatten **bake** into volumes, and chained bakes steepen the field until consolidation redistances it | Smooth, inflate, pinch, smudge chain forever at no cost — each verb is a local cell operation |
+| **Colour** | Per item, plus `Paint` regions | Per cell, via the palette |
+| **Scaling cost** | Deep edit lists degrade the safe step scale (grab/relief/noise items each cost some) | Flat per-cell cost however many edits landed |
+
+The short version: **block out and hard-surface on SDF, free-form sculpt on
+voxels.** The SDF side is where a model stays parametric — change a blend
+radius from an hour ago, mirror a layer, cut with an exact prism. The voxel
+side is where you push material around like clay without the field steepening
+underneath you.
+
+### What each side has
+
+**SDF layers** (per-verb detail in
+[`docs/07-brushes-and-features.md`](docs/07-brushes-and-features.md)):
+
+- 16 combine ops — add/subtract/intersect/paint plus the extended set (groove,
+  tongue, pipe, engrave, emboss, inset, shell, replace, relief/incise) — under
+  5 blend profiles
+- 14 deformers: twist, bend, taper, displace, noise, elongate, and the
+  brush-like grab, pose, pose-line and magnify (pinch is magnify with a
+  negative sign)
+- Resolvers: the cut tool (rect/circle/polygon/lasso/trim-curve), snakehook,
+  the Move brush (drags the *assembled* surface), and tubes
+- Baked field operations: relax (Smooth), flatten (two-sided / hPolish cut-only
+  / fill-only), Move Topological, and mask extrude
+- The stroke engine: spacing, pressure, jitter, taper, steady stroke, buildup
+  vs clamped — a stroke resolves into ordinary edit items
+- Armatures (see the next section) and layer mirrors
+
+**Voxel layers**:
+
+- 10 sculpting verbs: smooth, inflate/erode, flatten, pinch, magnify, grab,
+  fill-cavities, scrape, smudge, and carve-with-alpha (alphas are voxel-only
+  today)
+- Cube/sphere paint and erase brushes with falloff curves and strength, box
+  and line fills, flood select, mirrored edits
+- Pre-bake repair: report, close holes, fill voids
+- A stack of resolution levels — block out coarse, `add_level` to refine where
+  the detail goes, without paying for a fine grid everywhere
+
+The **stroke engine and masks span both sides**: the same resolved stroke
+writes SDF nodes (`stamps_to_nodes`), voxels (`apply_to_grid`) or a mask
+(`apply_to_mask`), and a painted mask freezes a region against every verb on
+either representation.
+
+### Converting between them
+
+![A sculpt crossing representations and coming back — examples/42_representation_round_trip.py](examples/output/42_representation_round_trip.png)
+
+The bridge runs both ways, so the intended round trip works: **block out on
+SDF, rasterize to voxels, sculpt with the voxel verbs, come back as an
+ordinary SDF operand** — and boolean against it, blend it, keep sculpting.
+[`examples/42_representation_round_trip.py`](examples/42_representation_round_trip.py)
+makes exactly that trip.
+
+**SDF → voxel** — `VoxelGrid.rasterize(doc, region)` in Python,
+`clay_voxel_rasterize` in C. Cells whose centre evaluates inside are set, and
+colour comes from the tape's colour field via nearest palette entry. Lossy in
+the ways lattice sampling is, stated rather than hidden: the surface moves by
+up to half a cell, a feature thinner than a cell can vanish (rasterize finer —
+nothing downstream can invent what was never stored), a sharp edge becomes a
+staircase at the cell size, and only the region you pass is rasterized.
+
+**Voxel → SDF** — `Volume.from_voxels(grid)` in Python,
+`clay_item_volume_from_voxels` in C, or `clay_voxel_to_layer` to convert a
+whole coloured sculpt into a new layer in one call (one volume item per palette
+entry, so colour survives). Direct — no mesh detour: occupancy is read by
+trilinear interpolation between cell centres and **redistanced**, so the result
+carries a Lipschitz bound a raymarcher and a blend can trust. Non-destructive:
+the grid is untouched, and the result is an ordinary volume item in an
+ordinary SDF layer.
+
+What conversion costs, in both directions: the surface is preserved to within
+about a cell, and the colour survives. Exactness and the procedural history do
+not — once rasterized, the parametric items behind the sculpt are no longer
+reachable from the voxel side, which is why the return trip hands back a new
+layer instead of touching the original.
+
+## Armatures: blocking figures out with ZSpheres
+
+![An armature figure — examples/output/40_armature.png](examples/output/40_armature.png)
+
+claycore supports ZBrush-style **ZSpheres** as a first-class primitive:
+`Prim::armature` is a **tree** of spheres — each node names a parent, each link
+is the sphere-swept cone between the two — and the whole tree is one edit item.
+`blend_k` is the skin: at 0 the links are a hard union and you see the
+armature; above it the smooth union fills the crotches between links, which is
+what turns a stick figure into a body. There is no separate skinning pass.
+
+What it buys is *structure*: the same figure that takes forty-odd hand-placed
+primitives is 18 armature nodes and a tree, and **moving the shoulder is one
+edit the whole arm follows** — `move` carries every descendant.
+[`examples/40_armature.py`](examples/40_armature.py) measures exactly that.
+
+The editing vocabulary: `add_child` (plain, or **mirrored** — add a node and
+its reflection through x = 0 in one edit, so you build one arm and get two),
+`move`, `set_radius`, `set_sign`, `delete_subtree`. Every edit is undoable as a
+whole-tree replace, so one undo puts a whole arm back. **Negative nodes** are
+ZBrush's negative ZSphere: flip a node's sign and its subtree *carves* instead
+of building — eye sockets, mouth cavities and the hollow of an ear are blocked
+out this way, and skin never bridges a hollow's opening because links only
+form between nodes of the same sign.
+
+A placed armature also **reads back** — nodes, radii, parent topology and
+signs — so a host that reloaded a document can re-pose a rig it did not
+author. Details, including the two load-bearing evaluation rules, are in
+[`docs/07-brushes-and-features.md` §6](docs/07-brushes-and-features.md).
 
 ## What ships today
 
