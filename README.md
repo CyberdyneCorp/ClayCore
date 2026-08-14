@@ -315,6 +315,7 @@ python3 tools/package_kernels.py --verify   # ...and it still matches the repo
 python3 tools/check_licenses.py        # permissive-license manifest gate
 python3 examples/run_all.py            # every example runs (needs pyclay built)
 python3 tools/check_binding_parity.py  # the C ABI reaches what pyclay reaches
+python3 tools/check_swift_package.py   # the SwiftPM library product stays statically linked
 ./tools/check_swift_smoke.sh all       # Swift on macOS and in the iOS Simulator
 swift run claycore-smoke               # the same, through the SwiftPM manifest
 ```
