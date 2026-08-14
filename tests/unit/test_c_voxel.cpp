@@ -1,5 +1,7 @@
 #include <doctest/doctest.h>
 
+#include <cmath>
+
 #include <cstdio>
 
 #include <cstring>
@@ -742,4 +744,53 @@ TEST_CASE("the spec's sculpting sequence lands cell for cell and buffer for buff
     INFO("diverging mesh values: " << diverged);
     CHECK(diverged == 0);
     clay_mesh_destroy(got);
+}
+
+TEST_CASE("c abi: a mesh rasterizes straight to cells, region optional") {
+    // Twelve triangles bounding a box, wound outward — built by hand so the
+    // fixture carries no meshing error into a test about sampling.
+    const float positions[24] = {-0.3f, -0.2f, -0.25f, 0.3f,  -0.2f, -0.25f,
+                                 0.3f,  0.2f,  -0.25f, -0.3f, 0.2f,  -0.25f,
+                                 -0.3f, -0.2f, 0.25f,  0.3f,  -0.2f, 0.25f,
+                                 0.3f,  0.2f,  0.25f,  -0.3f, 0.2f,  0.25f};
+    const std::uint32_t faces[36] = {0, 3, 2, 0, 2, 1, 4, 5, 6, 4, 6, 7,
+                                     0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2,
+                                     0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5};
+    clay_mesh* m = nullptr;
+    REQUIRE(clay_mesh_from_triangles(positions, 8, faces, 36, &m) == CLAY_OK);
+
+    clay_voxel_grid* grid = clay_voxel_grid_create(0.02f);
+    REQUIRE(grid != nullptr);
+    // NULL region: a mesh always has bounds, which is the whole difference
+    // from clay_voxel_rasterize.
+    REQUIRE(clay_voxel_rasterize_mesh(grid, m, nullptr, nullptr) == CLAY_OK);
+    size_t filled = 0;
+    REQUIRE(clay_voxel_occupied_count(grid, &filled) == CLAY_OK);
+    CHECK(filled > 0);
+
+    // An explicit region bounds the work.
+    clay_voxel_grid* half = clay_voxel_grid_create(0.02f);
+    const float lo[3] = {0.0f, -0.4f, -0.4f}, hi[3] = {0.4f, 0.4f, 0.4f};
+    REQUIRE(clay_voxel_rasterize_mesh(half, m, lo, hi) == CLAY_OK);
+    size_t half_filled = 0;
+    REQUIRE(clay_voxel_occupied_count(half, &half_filled) == CLAY_OK);
+    CHECK(half_filled > 0);
+    CHECK(half_filled < filled);
+
+    // The refusals, each leaving the grid as it was.
+    clay_voxel_grid* untouched = clay_voxel_grid_create(0.02f);
+    const float nan_hi[3] = {std::nanf(""), 0.4f, 0.4f};
+    CHECK(clay_voxel_rasterize_mesh(untouched, m, lo, nan_hi) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_voxel_rasterize_mesh(untouched, m, lo, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_voxel_rasterize_mesh(untouched, nullptr, nullptr, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_voxel_rasterize_mesh(nullptr, m, nullptr, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    size_t none = 1;
+    REQUIRE(clay_voxel_occupied_count(untouched, &none) == CLAY_OK);
+    CHECK(none == 0);
+
+    clay_voxel_grid_destroy(untouched);
+    clay_voxel_grid_destroy(half);
+    clay_voxel_grid_destroy(grid);
+    clay_mesh_destroy(m);
 }

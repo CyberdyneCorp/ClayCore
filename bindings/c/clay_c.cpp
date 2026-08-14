@@ -5857,6 +5857,35 @@ clay_result clay_voxel_mesh_chunks(const clay_voxel_grid* grid, const int32_t* k
     return CLAY_OK;
 }
 
+clay_result clay_voxel_rasterize_mesh(clay_voxel_grid* grid, const clay_mesh* mesh,
+                                      const float region_min[3], const float region_max[3]) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    const mesh::Mesh* m = nullptr;
+    r = resolve_mesh(mesh, &m);
+    if (r != CLAY_OK) return r;
+    if (m->empty()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "the mesh has no triangles");
+    if ((region_min == nullptr) != (region_max == nullptr))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a region needs both a min and a max");
+
+    // No region means the mesh's own bounds, which a mesh always has — that is
+    // the difference from clay_voxel_rasterize, where a document may not.
+    if (!region_min) {
+        g->rasterize_mesh(*m);
+        return CLAY_OK;
+    }
+    const math::Aabb box{kernel::cf3(region_min[0], region_min[1], region_min[2]),
+                         kernel::cf3(region_max[0], region_max[1], region_max[2])};
+    // Checked before the grid is touched, so a rejected call leaves it as it
+    // was rather than half-rasterized.
+    if (!box_is_finite(box) || box.empty() || box.is_infinite())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the region must be finite, non-empty and bounded");
+    g->rasterize_mesh(*m, box);
+    return CLAY_OK;
+}
+
 clay_result clay_voxel_rasterize(clay_voxel_grid* grid, const clay_document* doc,
                                  const float region_min[3], const float region_max[3]) {
     voxel::VoxelGrid* g = nullptr;

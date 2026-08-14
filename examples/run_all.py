@@ -77,6 +77,7 @@ EXAMPLES = [
     "45_mesh_brushes",
     "46_mesh_brush_compositions",
     "47_mesh_brush_reach_and_undo",
+    "48_mesh_to_voxels",
 ]
 
 
@@ -98,7 +99,8 @@ CAPABILITY_EXAMPLES = {
     "meshing": "08_meshing_and_io",
     "picking": "10_editing",  # plus 45_mesh_brushes for raycasting a mesh layer
     "file-io": "08_meshing_and_io",
-    # plus 11_masks, 33_mask_extrude, and 39_multi_resolution for the level stack
+    # plus 11_masks, 33_mask_extrude, 39_multi_resolution for the level stack,
+    # and 48_mesh_to_voxels for the triangles-to-cells bridge
     "voxel-engine": "15_voxel_verbs_and_repair",
     "file-io": "08_meshing_and_io",  # plus 36_mesh_layers for the mesh chunk
     "voxel-engine": "15_voxel_verbs_and_repair",  # plus 11_masks and 33_mask_extrude

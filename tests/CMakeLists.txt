@@ -24,6 +24,7 @@ add_executable(clay_unit_tests
   unit/test_voxel_incremental_mesh.cpp
   unit/test_voxel_mesh_smooth.cpp
   unit/test_voxel_to_field.cpp
+  unit/test_voxel_rasterize_mesh.cpp
   unit/test_volume_color.cpp
   unit/test_mask.cpp
   unit/test_stroke_engine.cpp
