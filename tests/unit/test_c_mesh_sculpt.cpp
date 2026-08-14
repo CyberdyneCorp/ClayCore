@@ -1,0 +1,412 @@
+// The C ABI's fixed-topology mesh brushes (c-abi spec): the sculpting session,
+// the verbs, strokes and masks, vertex-delta undo and mesh picking.
+//
+// What these defend is the boundary rather than the maths — the C++ suite owns
+// the maths. Here: unknown enumerators are refused rather than mapped onto a
+// default, cost knobs are bounded, a protected layer takes no edits, and a
+// session whose layer disappeared says so instead of reading freed storage.
+
+#include <doctest/doctest.h>
+
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <vector>
+
+#include "clay.h"
+
+namespace {
+
+struct Doc {
+    clay_document* doc = clay_document_create();
+    Doc() = default;
+    ~Doc() { clay_document_destroy(doc); }
+    Doc(const Doc&) = delete;
+    Doc& operator=(const Doc&) = delete;
+};
+
+// A grid on the XZ plane: enough vertices that a falloff has something to
+// choose between, and flat, so a displacement is obvious.
+struct Grid {
+    std::vector<float> positions;
+    std::vector<std::uint32_t> indices;
+};
+
+Grid grid(int n, float half) {
+    Grid g;
+    const float step = 2.0f * half / static_cast<float>(n);
+    for (int z = 0; z <= n; ++z)
+        for (int x = 0; x <= n; ++x) {
+            g.positions.push_back(-half + step * static_cast<float>(x));
+            g.positions.push_back(0.0f);
+            g.positions.push_back(-half + step * static_cast<float>(z));
+        }
+    const std::uint32_t stride = static_cast<std::uint32_t>(n + 1);
+    for (std::uint32_t z = 0; z < static_cast<std::uint32_t>(n); ++z)
+        for (std::uint32_t x = 0; x < static_cast<std::uint32_t>(n); ++x) {
+            const std::uint32_t a = z * stride + x, b = a + 1, c = a + stride, d = c + 1;
+            for (std::uint32_t i : {a, c, b, b, c, d}) g.indices.push_back(i);
+        }
+    return g;
+}
+
+clay_mesh* grid_mesh(int n = 12, float half = 1.0f) {
+    const Grid g = grid(n, half);
+    clay_mesh* m = nullptr;
+    REQUIRE(clay_mesh_from_triangles(g.positions.data(), g.positions.size() / 3, g.indices.data(),
+                                     g.indices.size(), &m) == CLAY_OK);
+    return m;
+}
+
+clay_mesh_brush_desc brush(int32_t verb, float radius, float strength) {
+    clay_mesh_brush_desc d;
+    REQUIRE(clay_mesh_brush_defaults(&d) == CLAY_OK);
+    d.verb = verb;
+    d.radius = radius;
+    d.strength = strength;
+    return d;
+}
+
+std::vector<float> positions_of(const clay_mesh* m) {
+    const float* p = clay_mesh_positions(m);
+    return std::vector<float>(p, p + clay_mesh_vertex_count(m) * 3);
+}
+
+std::vector<std::uint32_t> indices_of(const clay_mesh* m) {
+    const std::uint32_t* i = clay_mesh_indices(m);
+    return std::vector<std::uint32_t>(i, i + clay_mesh_index_count(m));
+}
+
+}  // namespace
+
+TEST_CASE("c abi: a sculpting session stamps a mesh and leaves its topology alone") {
+    clay_mesh* m = grid_mesh();
+    const std::vector<float> before = positions_of(m);
+    const std::vector<std::uint32_t> topology = indices_of(m);
+
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(m, -1.0f, &s) == CLAY_OK);
+
+    std::size_t vertices = 0, classes = 0;
+    CHECK(clay_mesh_sculptor_vertex_count(s, &vertices) == CLAY_OK);
+    CHECK(clay_mesh_sculptor_class_count(s, &classes) == CLAY_OK);
+    CHECK(vertices == before.size() / 3);
+    CHECK(classes == vertices);  // this grid has no seams
+
+    const clay_mesh_brush_desc d = brush(CLAY_MESH_BRUSH_DRAW, 0.5f, 0.5f);
+    std::size_t moved = 0;
+    CHECK(clay_mesh_sculptor_stamp(s, &d, nullptr, nullptr, &moved) == CLAY_OK);
+    CHECK(moved > 0);
+
+    CHECK(indices_of(m) == topology);
+    CHECK(positions_of(m) != before);
+
+    clay_mesh_sculptor_destroy(s);
+    clay_mesh_destroy(m);
+}
+
+TEST_CASE("c abi: every verb is reachable and none of them rewrites the index buffer") {
+    for (int32_t verb = CLAY_MESH_BRUSH_GRAB; verb <= CLAY_MESH_BRUSH_SNAKEHOOK; ++verb) {
+        clay_mesh* m = grid_mesh();
+        const std::vector<std::uint32_t> topology = indices_of(m);
+        clay_mesh_sculptor* s = nullptr;
+        REQUIRE(clay_mesh_sculptor_create(m, -1.0f, &s) == CLAY_OK);
+
+        clay_mesh_brush_desc d = brush(verb, 0.5f, 0.5f);
+        d.direction[1] = 0.1f;  // grab and snakehook need a motion
+        d.geodesic = verb == CLAY_MESH_BRUSH_FLATTEN || verb == CLAY_MESH_BRUSH_SCRAPE ? 0 : 1;
+        std::size_t moved = 0;
+        CAPTURE(verb);
+        CHECK(clay_mesh_sculptor_stamp(s, &d, nullptr, nullptr, &moved) == CLAY_OK);
+        CHECK(indices_of(m) == topology);
+
+        clay_mesh_sculptor_destroy(s);
+        clay_mesh_destroy(m);
+    }
+}
+
+TEST_CASE("c abi: unknown enumerators and unmeanable knobs are refused, not defaulted") {
+    clay_mesh* m = grid_mesh();
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(m, -1.0f, &s) == CLAY_OK);
+    const std::vector<float> before = positions_of(m);
+
+    auto refused = [&](clay_mesh_brush_desc d) {
+        return clay_mesh_sculptor_stamp(s, &d, nullptr, nullptr, nullptr) ==
+               CLAY_ERROR_INVALID_ARGUMENT;
+    };
+
+    clay_mesh_brush_desc d = brush(CLAY_MESH_BRUSH_DRAW, 0.5f, 0.5f);
+    d.verb = 99;
+    CHECK(refused(d));
+
+    d = brush(CLAY_MESH_BRUSH_DRAW, 0.5f, 0.5f);
+    d.falloff = 7;
+    CHECK(refused(d));
+
+    d = brush(CLAY_MESH_BRUSH_FLATTEN, 0.5f, 0.5f);
+    d.flatten_mode = 5;
+    CHECK(refused(d));
+
+    d = brush(CLAY_MESH_BRUSH_DRAW, 0.0f, 0.5f);
+    CHECK(refused(d));
+
+    d = brush(CLAY_MESH_BRUSH_SMOOTH, 0.5f, 0.5f);
+    d.smooth_iterations = CLAY_MESH_MAX_SMOOTH_ITERATIONS + 1;
+    CHECK(refused(d));
+
+    d = brush(CLAY_MESH_BRUSH_DRAW, 0.5f, 0.5f);
+    d.struct_size = 4;  // below the original layout
+    CHECK(refused(d));
+
+    // Not one of them touched the mesh.
+    CHECK(positions_of(m) == before);
+
+    // Zero iterations, which is what a host that declared only the original
+    // layout sends, means one pass rather than a refusal.
+    d = brush(CLAY_MESH_BRUSH_SMOOTH, 0.5f, 0.5f);
+    d.smooth_iterations = 0;
+    CHECK(clay_mesh_sculptor_stamp(s, &d, nullptr, nullptr, nullptr) == CLAY_OK);
+
+    clay_mesh_sculptor_destroy(s);
+    clay_mesh_destroy(m);
+}
+
+TEST_CASE("c abi: a stroke reaches a mesh, and one record undoes it bit-exactly") {
+    clay_mesh* m = grid_mesh(16, 1.0f);
+    const std::vector<float> before = positions_of(m);
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(m, -1.0f, &s) == CLAY_OK);
+
+    clay_stroke_preset preset;
+    REQUIRE(clay_stroke_preset_defaults(&preset) == CLAY_OK);
+    preset.radius = 0.25f;
+    preset.strength = 0.8f;
+
+    std::vector<float> samples;
+    for (int i = 0; i < 8; ++i) {
+        samples.push_back(-0.4f + 0.1f * static_cast<float>(i));
+        samples.push_back(0.0f);
+        samples.push_back(0.0f);
+        samples.push_back(1.0f);  // pressure
+        samples.push_back(0.0f);  // tilt
+    }
+
+    clay_mesh_deltas* deltas = clay_mesh_deltas_create();
+    REQUIRE(deltas != nullptr);
+    const clay_mesh_brush_desc d = brush(CLAY_MESH_BRUSH_DRAW, 0.25f, 1.0f);
+    std::size_t applied = 0;
+    CHECK(clay_mesh_sculptor_apply_stroke(s, samples.data(), samples.size() / 5, &preset, &d,
+                                          nullptr, nullptr, 0, deltas, &applied) == CLAY_OK);
+    CHECK(applied > 1);
+    CHECK(positions_of(m) != before);
+
+    std::size_t touched = 0;
+    CHECK(clay_mesh_deltas_vertex_count(deltas, &touched) == CLAY_OK);
+    CHECK(touched > 0);
+    CHECK(touched <= clay_mesh_vertex_count(m));  // coalesced: one record per vertex
+
+    CHECK(clay_mesh_deltas_revert(deltas, s) == CLAY_OK);
+    CHECK(positions_of(m) == before);
+    // Idempotent, and re-applicable.
+    CHECK(clay_mesh_deltas_revert(deltas, s) == CLAY_OK);
+    CHECK(positions_of(m) == before);
+    CHECK(clay_mesh_deltas_apply(deltas, s) == CLAY_OK);
+    CHECK(positions_of(m) != before);
+
+    CHECK(clay_mesh_deltas_clear(deltas) == CLAY_OK);
+    CHECK(clay_mesh_deltas_vertex_count(deltas, &touched) == CLAY_OK);
+    CHECK(touched == 0);
+
+    clay_mesh_deltas_destroy(deltas);
+    clay_mesh_sculptor_destroy(s);
+    clay_mesh_destroy(m);
+}
+
+TEST_CASE("c abi: a mask gates a mesh stroke") {
+    clay_mesh* m = grid_mesh(16, 1.0f);
+    const std::vector<float> before = positions_of(m);
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(m, -1.0f, &s) == CLAY_OK);
+
+    clay_mask* mask = clay_mask_create(0.05f);
+    REQUIRE(mask != nullptr);
+    const float centre[3] = {0.6f, 0.0f, 0.0f};
+    clay_brush_params bp;
+    std::memset(&bp, 0, sizeof bp);
+    bp.struct_size = static_cast<std::uint32_t>(sizeof bp);
+    bp.size = 40;
+    bp.shape = CLAY_BRUSH_SHAPE_CUBE;
+    bp.falloff = CLAY_BRUSH_FALLOFF_CONSTANT;
+    bp.strength = 1.0f;
+    REQUIRE(clay_mask_paint(mask, centre, &bp, 1.0f) == CLAY_OK);
+
+    clay_stroke_preset preset;
+    REQUIRE(clay_stroke_preset_defaults(&preset) == CLAY_OK);
+    preset.radius = 0.25f;
+    preset.strength = 1.0f;
+    const float samples[10] = {-0.4f, 0, 0, 1, 0, 0.4f, 0, 0, 1, 0};
+
+    const clay_mesh_brush_desc d = brush(CLAY_MESH_BRUSH_DRAW, 0.25f, 1.0f);
+    std::size_t applied = 0;
+    CHECK(clay_mesh_sculptor_apply_stroke(s, samples, 2, &preset, &d, mask, nullptr, 0, nullptr,
+                                          &applied) == CLAY_OK);
+    CHECK(applied > 0);
+
+    const std::vector<float> after = positions_of(m);
+    bool frozen_held = true, free_moved = false;
+    for (std::size_t v = 0; v * 3 + 2 < after.size(); ++v) {
+        const float x = before[v * 3], z = before[v * 3 + 2];
+        if (x > 0.5f && std::fabs(z) < 0.4f) {
+            if (after[v * 3 + 1] != before[v * 3 + 1]) frozen_held = false;
+        } else if (after[v * 3 + 1] != before[v * 3 + 1]) {
+            free_moved = true;
+        }
+    }
+    CHECK(frozen_held);
+    CHECK(free_moved);
+
+    clay_mask_destroy(mask);
+    clay_mesh_sculptor_destroy(s);
+    clay_mesh_destroy(m);
+}
+
+TEST_CASE("c abi: a raycast turns a tap into a brush centre and a walk seed") {
+    clay_mesh* m = grid_mesh(8, 1.0f);
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(m, -1.0f, &s) == CLAY_OK);
+
+    const float origin[3] = {0.21f, 1.0f, -0.13f};
+    const float direction[3] = {0.0f, -1.0f, 0.0f};
+    clay_mesh_hit hit;
+    std::memset(&hit, 0, sizeof hit);
+    hit.struct_size = static_cast<std::uint32_t>(sizeof hit);
+    REQUIRE(clay_mesh_sculptor_raycast(s, origin, direction, nullptr, &hit) == CLAY_OK);
+    CHECK(hit.hit == 1);
+    CHECK(hit.t == doctest::Approx(1.0f).epsilon(1e-4));
+    CHECK(hit.position[1] == doctest::Approx(0.0f).epsilon(1e-5));
+    CHECK(hit.normal[1] == doctest::Approx(1.0f).epsilon(1e-4));
+    CHECK(hit.seed_class != CLAY_MESH_NO_CLASS);
+
+    // The hit feeds straight back into a stamp.
+    clay_mesh_brush_desc d = brush(CLAY_MESH_BRUSH_DRAW, 0.3f, 0.5f);
+    std::memcpy(d.center, hit.position, sizeof d.center);
+    d.seed_class = hit.seed_class;
+    std::size_t moved = 0;
+    CHECK(clay_mesh_sculptor_stamp(s, &d, nullptr, nullptr, &moved) == CLAY_OK);
+    CHECK(moved > 0);
+
+    // A ray pointed away reports a miss rather than a hit at the origin.
+    const float away[3] = {9.0f, 1.0f, 9.0f};
+    REQUIRE(clay_mesh_sculptor_raycast(s, away, direction, nullptr, &hit) == CLAY_OK);
+    CHECK(hit.hit == 0);
+
+    // A direction with no length is a mistake, not a request.
+    const float still[3] = {0.0f, 0.0f, 0.0f};
+    CHECK(clay_mesh_sculptor_raycast(s, origin, still, nullptr, &hit) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+
+    clay_mesh_sculptor_destroy(s);
+    clay_mesh_destroy(m);
+}
+
+TEST_CASE("c abi: a raycast reads a frame, and refuses one that scales to nothing") {
+    clay_mesh* m = grid_mesh(8, 1.0f);
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(m, -1.0f, &s) == CLAY_OK);
+
+    clay_mesh_frame frame;
+    std::memset(&frame, 0, sizeof frame);
+    frame.struct_size = static_cast<std::uint32_t>(sizeof frame);
+    frame.position[1] = 2.0f;
+    frame.scale = 0.0f;  // a zeroed frame reads as the identity, scale included
+
+    const float origin[3] = {0.1f, 5.0f, 0.1f};
+    const float direction[3] = {0.0f, -1.0f, 0.0f};
+    clay_mesh_hit hit;
+    std::memset(&hit, 0, sizeof hit);
+    hit.struct_size = static_cast<std::uint32_t>(sizeof hit);
+    REQUIRE(clay_mesh_sculptor_raycast(s, origin, direction, &frame, &hit) == CLAY_OK);
+    CHECK(hit.hit == 1);
+    CHECK(hit.position[1] == doctest::Approx(2.0f).epsilon(1e-4));
+
+    frame.scale = -1.0f;
+    CHECK(clay_mesh_sculptor_raycast(s, origin, direction, &frame, &hit) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+
+    clay_mesh_sculptor_destroy(s);
+    clay_mesh_destroy(m);
+}
+
+TEST_CASE("c abi: a mesh layer sculpts in place, and a locked one refuses") {
+    Doc d;
+    clay_mesh* source = grid_mesh(8, 1.0f);
+    clay_mesh_layer_desc desc;
+    std::memset(&desc, 0, sizeof desc);
+    desc.struct_size = static_cast<std::uint32_t>(sizeof desc);
+    desc.name = "carried";
+    clay_layer_id layer = 0;
+    clay_mesh* borrowed = nullptr;
+    REQUIRE(clay_document_add_mesh_layer(d.doc, source, &desc, &layer, &borrowed) == CLAY_OK);
+    clay_mesh_destroy(source);
+
+    const std::vector<float> before = positions_of(borrowed);
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(borrowed, -1.0f, &s) == CLAY_OK);
+
+    const clay_mesh_brush_desc brush_desc = brush(CLAY_MESH_BRUSH_DRAW, 0.5f, 0.5f);
+    std::size_t moved = 0;
+    CHECK(clay_mesh_sculptor_stamp(s, &brush_desc, nullptr, nullptr, &moved) == CLAY_OK);
+    CHECK(moved > 0);
+    // The DOCUMENT's own triangles changed, not a copy.
+    CHECK(positions_of(borrowed) != before);
+
+    // Lock it and the same stamp is refused.
+    REQUIRE(clay_document_set_layer_protection(d.doc, layer, 0, 1) == CLAY_OK);
+    const std::vector<float> locked_state = positions_of(borrowed);
+    CHECK(clay_mesh_sculptor_stamp(s, &brush_desc, nullptr, nullptr, &moved) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(positions_of(borrowed) == locked_state);
+    REQUIRE(clay_document_set_layer_protection(d.doc, layer, 0, 0) == CLAY_OK);
+
+    // A ghosted layer says the same thing for its own reason.
+    REQUIRE(clay_document_set_layer_protection(d.doc, layer, 1, 0) == CLAY_OK);
+    CHECK(clay_mesh_sculptor_stamp(s, &brush_desc, nullptr, nullptr, &moved) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_document_set_layer_protection(d.doc, layer, 0, 0) == CLAY_OK);
+
+    // And a session outliving its layer refuses instead of reading freed memory.
+    REQUIRE(clay_document_remove_layer(d.doc, layer) == CLAY_OK);
+    CHECK(clay_mesh_sculptor_stamp(s, &brush_desc, nullptr, nullptr, &moved) ==
+          CLAY_ERROR_NOT_FOUND);
+
+    clay_mesh_sculptor_destroy(s);
+    clay_mesh_destroy(borrowed);
+}
+
+TEST_CASE("c abi: the null paths refuse rather than crash") {
+    clay_mesh_sculptor* s = reinterpret_cast<clay_mesh_sculptor*>(1);
+    CHECK(clay_mesh_sculptor_create(nullptr, -1.0f, &s) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(s == nullptr);
+
+    clay_mesh* m = grid_mesh(4, 1.0f);
+    CHECK(clay_mesh_sculptor_create(m, -1.0f, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_mesh_sculptor_create(m, -1.0f, &s) == CLAY_OK);
+
+    const clay_mesh_brush_desc d = brush(CLAY_MESH_BRUSH_DRAW, 0.5f, 0.5f);
+    CHECK(clay_mesh_sculptor_stamp(nullptr, &d, nullptr, nullptr, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_mesh_sculptor_stamp(s, nullptr, nullptr, nullptr, nullptr) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_mesh_brush_defaults(nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_mesh_deltas_vertex_count(nullptr, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_mesh_deltas_revert(nullptr, s) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_mesh_deltas_clear(nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    // Destroying a null handle is a no-op, as every destroy in this ABI is.
+    clay_mesh_sculptor_destroy(nullptr);
+    clay_mesh_deltas_destroy(nullptr);
+
+    clay_mesh_sculptor_destroy(s);
+    clay_mesh_destroy(m);
+}
