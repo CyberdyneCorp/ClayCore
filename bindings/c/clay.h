@@ -1247,6 +1247,172 @@ clay_result clay_mesh_copy_vertices(const clay_mesh* mesh, const clay_vertex_lay
                                     void* dst, size_t dst_bytes);
 clay_result clay_mesh_copy_indices(const clay_mesh* mesh, uint32_t* dst, size_t dst_count);
 
+/* -- quad meshing ----------------------------------------------------------
+ *
+ * A mesh from the calls below carries its QUADS beside its triangles. It does
+ * not carry them INSTEAD: `indices` still holds exactly the triangulation of
+ * those quads — quad q = (a, b, c, d) is triangles (a, b, c) and (a, c, d) at
+ * indices[6q .. 6q+5] — so every accessor above answers as it always did and a
+ * host that ignores the quads draws the mesh it always drew.
+ *
+ * WHAT THIS IS NOT, and it is the first thing to read. These produce a REGULAR
+ * QUAD GRID DERIVED FROM A SAMPLING LATTICE. That is NOT field-aligned
+ * retopology. The quads follow the lattice and not the form: no edge loops run
+ * around a limb or a mouth, no poles are placed at features, density does not
+ * follow curvature, and the result is NOT animation-ready — deforming it
+ * pinches wherever the topology disagrees with the shape, which is everywhere.
+ * This is the input a retopology pass REPLACES, not the output one produces. A
+ * host offering this as "remesh to quads" beside ZRemesher, QuadRemesher or
+ * Instant Meshes will have its users compare the two, so say what it is.
+ *
+ * What it IS good for: getting quads into a DCC that prefers them, subdividing
+ * a sculpt, and exporting a voxel model as the box faces it actually is.
+ *
+ * The output is not manifold and not watertight, for the reason
+ * clay_voxel_mesh_smooth already gives — a cell the surface crosses twice gets
+ * one vertex and the sheets pinch. CLAY_MESHER_MARCHING through
+ * clay_document_mesh remains the watertight, 2-manifold export path. */
+
+/* Which lattice the quads come from. Dual is 0 because that is what a caller
+ * whose struct_size predates the field gets, and it is the mode that works for
+ * both sources. Checked against this list; an unknown value is rejected rather
+ * than mapped onto the default, exactly as clay_mesher is. */
+typedef enum clay_quad_mode {
+    /* The lattice dual (surface nets): the rounded form, quads meeting four to
+     * a vertex on average and no T-junctions. Both sources. */
+    CLAY_QUAD_DUAL = 0,
+    /* One planar, axis-aligned quad per exposed voxel face — the boxes the
+     * model actually is. VOXELS ONLY: a document asked for it is refused
+     * rather than quietly given the dual, because substituting a smooth mesh
+     * for a boxy one is visible in the render and invisible in the return
+     * code. Dense (~area / voxel²), corners welded within a palette colour,
+     * and it carries NO vertex normals: a welded corner is shared by faces
+     * pointing three ways, averaging would round the cube, and duplicating
+     * would undo the weld. clay_voxel_mesh is unchanged and remains the
+     * merged, per-face-normal, triangle path. */
+    CLAY_QUAD_FACES = 1
+} clay_quad_mode;
+
+/* What to mesh, and how many quads to aim at.
+ *
+ * `cell_size` is the lattice the quads come from and the lever on how many
+ * there are. `target_quads` asks for a COUNT instead, which is a short search
+ * over cell size — see the contract at clay_mesh_quad_report before wiring a
+ * slider to it, because a target is approached and never hit. Giving both uses
+ * the cell size as the search's starting point.
+ *
+ * `blur` and `level` are the voxel side's: `blur` is
+ * clay_voxel_mesh_smooth's, and `level` names a resolution level explicitly
+ * rather than following the active one — in faces mode it IS the count lever,
+ * so a target chooses it. Both are ignored for a document.
+ *
+ * The count controls are appended after the meshing fields, so a caller
+ * declaring only the original layout meshes at a cell size with no search. */
+typedef struct clay_quad_params {
+    uint32_t struct_size; /* = sizeof(clay_quad_params); required */
+    float cell_size;      /* world units; <= 0 means "from the target", or the source's own */
+    int32_t mode;         /* clay_quad_mode */
+    int32_t blur;         /* voxels, dual mode only: 0..8 passes */
+    uint32_t level;       /* voxels only: resolution level, 0 = coarsest */
+    /* appended after the original layout; all three default to 0 */
+    uint64_t target_quads;  /* 0: no search, mesh once at cell_size.
+                             * Above CLAY_MAX_BATCH is refused */
+    float tolerance;        /* fraction of the target, below 1; <= 0 means 0.10 */
+    int32_t max_iterations; /* whole meshes the search may build, 0..64; 0 means 4
+                             * and a negative is refused.
+                             * Not used in faces mode: see clay_mesh_quad_report */
+} clay_quad_params;
+
+/* Quad-meshes the document's SDF content. A NEW entry point: clay_document_mesh
+ * returns exactly what it always returned and carries no quads.
+ * CLAY_QUAD_FACES here is CLAY_ERROR_INVALID_ARGUMENT — it is a voxel mode.
+ * Free the result with clay_mesh_destroy. */
+clay_result clay_document_mesh_quads(const clay_document* doc, const clay_quad_params* params,
+                                     clay_mesh** out_mesh);
+
+/* The quads of a mesh that has them: four indices per quad, all inside
+ * clay_mesh_vertex_count. A mesh carrying none — every mesher that predates
+ * quad meshing, anything loaded from a file, anything built from triangles —
+ * reports a count of 0 and a NULL pointer rather than a pairing of its
+ * triangles invented here. The pointer is borrowed and valid until
+ * clay_mesh_destroy, like every other borrowed mesh pointer.
+ *
+ * dst_count for the copy is 4 * clay_mesh_quad_count exactly, required rather
+ * than inferred for the same reason clay_mesh_copy_indices requires one. */
+size_t clay_mesh_quad_count(const clay_mesh* mesh);
+const uint32_t* clay_mesh_quads(const clay_mesh* mesh);
+clay_result clay_mesh_copy_quads(const clay_mesh* mesh, uint32_t* dst, size_t dst_count);
+
+/* How a mesh was produced, which is the ONLY way a host learns that a target
+ * of fifty thousand produced thirty-one thousand because a limit stopped the
+ * search rather than because something went wrong.
+ *
+ * THE TARGET IS A HINT WITH A REPORTED ACTUAL. It is not a ceiling and not an
+ * exact count. A ceiling cannot be promised because the count is NOT monotonic
+ * in cell size: a finer lattice can resolve a thin feature the coarser one
+ * missed entirely and so ADD surface. Where two candidates are equally close
+ * the search prefers the one that does not exceed the target, so "about this
+ * many" usually reads the way a user expects — without being promised.
+ *
+ * GRANULARITY. The count goes as cell^-2, so a 1% change in cell size moves it
+ * about 2%. Landing inside 5-10% is the expectation, `tolerance` defaults to
+ * 0.10, and a tolerance much below about 2% will exhaust `max_iterations` and
+ * come back with `within_tolerance` 0 and the best attempt.
+ *
+ * NOR IS THE RESULT MONOTONIC IN THE TARGET. Two nearby targets are two
+ * independent searches, each from its own seed and each stopping after its own
+ * handful of meshes, so a slightly smaller target can come back with slightly
+ * MORE quads. A host wiring a slider should expect the count to move backwards
+ * occasionally; a larger `max_iterations` makes it rarer and never rules it
+ * out.
+ *
+ * FACES MODE IS DIFFERENT, because its lattices are the grid's resolution
+ * LEVELS and not a continuum. The search walks the stack from the coarsest
+ * level toward the finest, stops at the first level that reaches the target,
+ * and returns the nearer of the two it lands between — so it is monotonic,
+ * it costs at most one mesh per level, and `max_iterations` does not apply to
+ * it. The bracketing pair is NOT the price: the walk starts at the coarsest
+ * level and meshes every level on the way, so a target met at level k reports
+ * `iterations` = k+1, and a host budgeting a slider prices the stack's length.
+ * A level step is a factor of about four in count, so `within_tolerance`
+ * is usually unreachable there, and `cell_size` names the level that was
+ * chosen.
+ *
+ * COST. EVERY ITERATION IS A WHOLE MESH, including a whole dense field
+ * evaluation on the document path. `max_iterations` is a cost knob, not a
+ * quality knob.
+ *
+ * `clamped` means the search wanted a lattice the source cannot give it and
+ * settled for the nearest one it can. Over a cell size that is a limit — the
+ * fine end being the sample ceiling clay_document_mesh already prices against
+ * and, for voxels, the grid's own voxel size, below which a finer lattice
+ * resamples the same step field and buys quads without buying detail. In faces
+ * mode it is the STACK RUNNING OUT: the target is below what the coarsest
+ * level THAT YIELDS ANYTHING gives or above what the finest yields, and no
+ * level of this grid is nearer than the one returned. The qualifier is load
+ * bearing — a stack is not a strict mip, so a sculpt made only at a fine level
+ * leaves the coarse levels empty, and an empty level's 0 quads are below every
+ * target without bracketing any of them. A faces target that falls BETWEEN
+ * two levels is not clamped even when it lands far off — both were meshed and
+ * neither is nearer, which is what `within_tolerance` 0 says.
+ *
+ * A mesh that was NOT quad-meshed is refused with CLAY_ERROR_INVALID_ARGUMENT
+ * rather than answered with zeroes: zeroes are indistinguishable from a search
+ * that found nothing. clay_mesh_transform carries the report with the mesh;
+ * clay_mesh_concat does not, because a concatenation was produced by no single
+ * meshing call. */
+typedef struct clay_quad_report {
+    uint32_t struct_size;    /* = sizeof(clay_quad_report); required */
+    float cell_size;         /* the lattice the mesh was built on */
+    uint64_t target_quads;   /* what was asked for; 0 when no target was given */
+    uint64_t quad_count;     /* what was actually produced */
+    int32_t iterations;      /* whole meshes the SEARCH built; 0 when none ran */
+    int32_t within_tolerance;/* 0/1 */
+    int32_t clamped;         /* 0/1 */
+} clay_quad_report;
+
+clay_result clay_mesh_quad_report(const clay_mesh* mesh, clay_quad_report* out_report);
+
 /* The box enclosing the mesh's positions — how a host frames an imported
  * model. It is answered here rather than by clay_layer_bounds because that
  * query is derived from SDF shapes and would report an empty box for a mesh
@@ -1258,7 +1424,22 @@ clay_result clay_mesh_bounds(const clay_mesh* mesh, float out_min[3], float out_
 clay_result clay_mesh_validate(const clay_mesh* mesh, int32_t* out_watertight,
                                int32_t* out_manifold);
 
-/* Save by extension: .obj, .ply, .fbx, .glb */
+/* Save by extension: .obj, .ply, .fbx, .glb
+ *
+ * QUADS: .obj, .ply and .fbx carry them, and a mesh with quads writes
+ * four-corner faces in all three. .GLB DOES NOT — glTF 2.0 defines no quad
+ * primitive mode, so the writer keeps writing the triangulation, which is the
+ * same surface. Said here because "I exported GLB and got triangles" is the
+ * one surprising outcome of quad meshing, and it is not a bug.
+ *
+ * The READERS are unchanged, so a quad file loaded back through clay_mesh_load
+ * comes back as TRIANGLES with no quads. Which triangles differs by format.
+ * .obj and .ply are read by this library's own parsers, which fan a face on
+ * the same diagonal the quad writer used, so the index buffer survives the
+ * round trip. .fbx is read through ufbx, which picks its own diagonal per quad
+ * — close to half of them come back split the other way, and the solid's
+ * measured volume moves with them. Neither triangulation is wrong; a caller
+ * checking an FBX round trip must compare the SURFACE, not the indices. */
 clay_result clay_mesh_save(const clay_mesh* mesh, const char* path);
 
 /* Guardrails for an importer, checked against the file's DECLARED counts before
@@ -1329,7 +1510,12 @@ typedef struct clay_mesh_layer_desc {
  * an enabled undo stack records it and it serializes with the document. Over
  * the descriptor's budget returns CLAY_ERROR_BUDGET_EXCEEDED and the document
  * is unchanged. `out_mesh` is BORROWED — see the lifetime note above
- * clay_document_add_voxel_layer. */
+ * clay_document_add_voxel_layer.
+ *
+ * Quads are part of the geometry copied, so a quad mesh attached here comes
+ * back a quad mesh through `out_mesh` and survives a save and reload. The quad
+ * REPORT does not: it describes a meshing call, and a mesh read out of a
+ * document was not produced by one. */
 clay_result clay_document_add_mesh_layer(clay_document* doc, const clay_mesh* mesh,
                                          const clay_mesh_layer_desc* desc,
                                          clay_layer_id* out_layer, clay_mesh** out_mesh);
@@ -1362,7 +1548,11 @@ clay_result clay_mesh_layer(const clay_mesh* mesh, clay_layer_id* out_layer);
  * Takes a transform on the same terms as every other transform in this ABI:
  * `position` and `rotation_axis` are required and the axis must be non-zero,
  * `scale` must be > 0. A second convention for "no rotation" would be one
- * more thing to get wrong. Free the result with clay_mesh_destroy. */
+ * more thing to get wrong. Free the result with clay_mesh_destroy.
+ *
+ * Quads survive: this rewrites positions and touches no index, so the quad
+ * list still describes the triangles beside it. So does the quad report — it
+ * is the same mesh, moved. */
 clay_result clay_mesh_transform(const clay_mesh* mesh, const float position[3],
                                 const float rotation_axis[3], float rotation_angle,
                                 float scale, clay_mesh** out_mesh);
@@ -1375,6 +1565,13 @@ clay_result clay_mesh_transform(const clay_mesh* mesh, const float position[3],
  * and no call in this ABI may return one. So concatenating a mesh that carries
  * uvs with one that does not yields a mesh with no uvs at all. Said here
  * because the alternative is discovering it in an exported file.
+ *
+ * QUADS FOLLOW THE SAME RULE, for the same reason: they survive only when
+ * EVERY input carries them, rebased as the triangles are, and are dropped
+ * entirely otherwise. A result that was quads over part of itself and
+ * triangles over the rest is not a quad mesh, and it would break the invariant
+ * that `indices` is exactly the quad list's triangulation. The quad REPORT is
+ * always dropped — a concatenation was produced by no single meshing call.
  *
  * `meshes` is `count` mesh pointers, none NULL. Free the result with
  * clay_mesh_destroy. */
@@ -2626,6 +2823,26 @@ clay_result clay_voxel_mesh(const clay_voxel_grid* grid, clay_mesh** out_mesh);
  * An empty grid yields an empty mesh rather than an error, as above. */
 clay_result clay_voxel_mesh_smooth(const clay_voxel_grid* grid, int32_t blur,
                                    clay_mesh** out_mesh);
+
+/* The sculpt as QUADS. The descriptor, the two modes, the count contract and
+ * the retopology disclaimer are all at clay_quad_params — read them there;
+ * this is that call with a grid as the source.
+ *
+ * A NEW entry point. clay_voxel_mesh, clay_voxel_mesh_smooth and
+ * clay_voxel_mesh_chunks return exactly what they returned before and carry no
+ * quads.
+ *
+ * CLAY_QUAD_DUAL at the level's own voxel size with blur 0 is
+ * clay_voxel_mesh_smooth's mesh for that level, vertex for vertex and index
+ * for index, plus the quads. A COARSER cell low-passes the occupancy and can
+ * drop a one-voxel feature entirely, the same trade `blur` makes; a FINER one
+ * is clamped to the voxel size, because occupancy is a step field and
+ * resampling it finer buys quads and no detail.
+ *
+ * Free the result with clay_mesh_destroy. An empty grid yields an empty mesh
+ * rather than an error, as clay_voxel_mesh does. */
+clay_result clay_voxel_mesh_quads(const clay_voxel_grid* grid, const clay_quad_params* params,
+                                  clay_mesh** out_mesh);
 
 /* The sculpt back into the document as an OPERAND, in a new layer (#90).
  *

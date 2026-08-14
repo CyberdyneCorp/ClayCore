@@ -226,6 +226,68 @@ forward-refuse).
    by name, which is why the old rule was discarding a working backend over a
    kernel nothing could call.
 
+   **Unreleased also adds QUAD MESHING, and the first thing to say about it is
+   what it is not: a REGULAR QUAD GRID DERIVED FROM A SAMPLING LATTICE, NOT
+   field-aligned retopology.** The quads follow the lattice and not the form —
+   no edge loops around a limb or a mouth, no poles at features, density does
+   not follow curvature, nothing animation-ready. It is the input a retopology
+   pass replaces, not the output one produces. A host that ships it beside
+   ZRemesher or QuadRemesher and calls it "remesh to quads" will have its users
+   compare the two, so the header, the docstrings, the docs and
+   `examples/44_quad_export.py` all say this and none of them says otherwise.
+
+   **Additive, and nothing existing moved.** `mesh::Mesh` grew a `quads` array
+   that is EMPTY on every mesh this library produced before — `indices` still
+   holds exactly the triangulation of those quads, so decimation, the BVH,
+   validation, the exporters, the C accessors and the mesh stream keep
+   returning byte-identical results and were not modified. `clay_document_mesh`,
+   `clay_voxel_mesh`, `clay_voxel_mesh_smooth` and `clay_voxel_mesh_chunks`
+   return exactly what they returned before and carry no quads.
+
+   Six new symbols, two new structs and one new enum:
+   `clay_document_mesh_quads`, `clay_voxel_mesh_quads`, `clay_mesh_quad_count`,
+   `clay_mesh_quads`, `clay_mesh_copy_quads`, `clay_mesh_quad_report`, with
+   `clay_quad_params`, `clay_quad_report` and `clay_quad_mode`. No signature
+   changed and no existing struct grew, so code compiled against 0.30.0 keeps
+   linking; the minor bump this earns is SemVer for new surface, and it lands
+   with the release commit as every other minor here does.
+
+   **The count contract is the part to read before wiring a slider to it.** A
+   target quad count is a HINT WITH A REPORTED ACTUAL — not a ceiling and not an
+   exact count. The lattice cell size is the only lever, the count goes as
+   `cell⁻²`, and it is not even monotonic in cell size (a finer lattice can
+   resolve a thin feature the coarser one missed and ADD surface). So the
+   mesher searches, lands inside about 5-10%, and reports what it produced
+   through `clay_mesh_quad_report`; every iteration is a whole mesh, so
+   `max_iterations` is a cost knob. Two nearby targets are two independent
+   searches, so the count can move BACKWARDS as a slider moves forward — rare,
+   documented, and not a bug. The voxel FACES mode is the exception to all of
+   this: it has no cell size, so its search walks the grid's resolution levels
+   from the coarsest and stops at the first that reaches the target. That one
+   is monotonic, costs at most one mesh per level — and one for EVERY level up
+   to the one that stops it, so a target met at level `k` reports `iterations`
+   `k+1` and not the two of the bracket — ignores `max_iterations`, and reports
+   `clamped` to mean the level STACK ran out: the target is below what the
+   coarsest level that YIELDS ANYTHING gives, or above what the finest gives.
+   The qualifier matters — a stack is not a strict mip, so a sculpt made only
+   at a fine level leaves the coarse levels empty, and an empty level is not a
+   level the caller can be handed.
+
+   **`.clayspace` does NOT move for this.** The mesh stream carries quads as a
+   tail APPENDED after the triangle indices, with no attribute-mask bit and no
+   minor bump, precisely so an older build opens a document holding a quad mesh
+   layer and reads it as the triangles it already is instead of refusing the
+   whole document over a recoverable, redundant section. A tail that is present
+   but malformed is refused, and the writer never emits one its own loader
+   would reject.
+
+   **GLB stays triangles.** OBJ, PLY and FBX write four-corner faces; glTF 2.0
+   defines no quad primitive mode, so the GLB writer keeps writing the
+   triangulation. "I exported GLB and got triangles" is the most likely bug
+   report this feature can generate and it is not a bug, which is why it is
+   stated at `clay_mesh_save`, in `mesh_io.h`, in the docs and in the example's
+   printed output.
+
    **Unreleased carries a KERNEL DIALECT change and a format minor**, which
    makes it the first release since 0.24.x that asks anything of a host
    outside this repository. `volume-color-channel` gives a sampled volume an

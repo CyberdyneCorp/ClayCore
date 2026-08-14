@@ -22,15 +22,18 @@ struct Mesh {
     std::vector<kernel::cfloat3> colors;   // empty or positions.size()
     std::vector<kernel::cfloat2> uvs;      // empty or positions.size()
     std::vector<std::uint32_t> indices;    // triangle list
+    std::vector<std::uint32_t> quads;      // empty, or 4 per quad
 };
 ```
 
 Four properties the rest of this document leans on:
 
-- **Faces are triangles, always.** `indices` is a flat triangle list, three
-  entries per face, each an index into `positions`. There are no n-gons and no
-  face-size array to consult; a quad in an imported OBJ was triangulated on the
-  way in.
+- **`indices` is triangles, always.** A flat triangle list, three entries per
+  face, each an index into `positions`. There are no n-gons and no face-size
+  array to consult; a quad in an imported OBJ was triangulated on the way in.
+  A mesh from a QUAD MESHER additionally carries `quads` — but `indices` still
+  holds exactly the triangulation of those quads, so nothing that reads
+  `indices` has to know. See [quads](#quads) below.
 - **Vertices are welded and shared** on the SDF meshers. Two triangles meeting at
   an edge reference the same vertex, which is what makes the marching output
   watertight and 2-manifold by construction. It also means you cannot assume
@@ -43,6 +46,76 @@ Four properties the rest of this document leans on:
   padding it. So `normals.empty()` is a complete test; you never have to
   bounds-check per vertex.
 - **Winding is outward**, toward the positive side of the field.
+
+<a name="quads"></a>
+### Quads
+
+The quad meshers (`include/clay/mesh/quad_mesh.h`, `VoxelGrid::mesh_quads`)
+fill `quads` with four indices per face and leave `indices` holding that quad
+list's triangulation: quad `q = (a, b, c, d)` is triangles `(a, b, c)` and
+`(a, c, d)` at `indices[6q .. 6q+5]`, over the same positions. So
+`indices.size() == quads.size() / 4 * 6`, `quads.empty()` is the complete test
+for "is this a quad mesh", and every consumer that predates quads — decimation,
+the BVH, validation, the exporters, the C accessors, the mesh stream — sees the
+same triangle mesh it always saw. `mesh::quads_consistent()` checks the
+invariant; any operation that rewrites `indices` calls `mesh::drop_quads()`,
+which is why a decimated quad mesh comes back as triangles.
+
+**This is a lattice-derived quad grid, not retopology.** The quads follow the
+sampling lattice, not the form: no edge loops around a limb or a mouth, no
+poles placed at features, density does not follow curvature, and the result is
+not animation-ready. It is the input a retopology pass replaces, not the output
+one produces. The quads are also NOT planar, and the output is not manifold or
+watertight — the marching mesher remains the path for that.
+
+On export, **OBJ, PLY and FBX write the quads** (`f a b c d`, a four-index face
+row, a four-index polygon). **GLB does not, and that is not a defect**: glTF
+2.0 defines no quad primitive mode, so the writer keeps writing the
+triangulation. The readers are unchanged too — a quad file this library wrote
+re-imports as triangles.
+
+#### Asking for a count
+
+The lattice cell size is the only lever on how many quads come out, so a
+requested count is a short search over it — `mesh::mesh_tape_quads_fit`,
+`VoxelGrid::mesh_quads_fit`, `clay_quad_params.target_quads`,
+`Document.mesh_quads(target=...)`.
+
+**A target is approached, never hit, and what came out is reported.** A ceiling
+is not promised either: the count is not monotonic in cell size, because a
+finer lattice can resolve a thin feature the coarser one missed and so add
+surface. Where two candidates tie, the one that does not exceed the target
+wins.
+
+The count goes as `cell⁻²`, so a 1% change in cell size moves it about 2%:
+landing inside 5-10% is the expectation, the default tolerance is 10%, and a
+much tighter one exhausts the iteration cap and comes back with the best
+attempt and `within_tolerance` clear. **Every iteration is a whole mesh**,
+including a whole dense field evaluation on the SDF path, so `max_iterations`
+is a cost knob with a small default.
+
+The search clamps rather than fails, and says which end it clamped at through
+`clamped`: the fine end is the sample ceiling every dense mesher here prices
+against, and for voxels the grid's own voxel size — below that a finer lattice
+resamples the same step field and buys quads without buying detail. In the
+voxel FACES mode there is no cell size at all, so the lever is the resolution
+**level** and the granularity is a factor of about four per step: a caller who
+asks for 50,000 and receives 12,000 chose a level. That search is a WALK from
+the coarsest level, one mesh per level, stopping at the first level to reach
+the target — so a target met at level `k` costs `k+1` meshes and reports that
+in `iterations`. Budget a slider against the stack's length, not against the
+two levels the target ends up between. `clamped` there names the ends of the
+STACK: below what the coarsest level that yields anything gives, or above what
+the finest gives. Coarse levels are often EMPTY — a stack is not a strict mip —
+and an empty level is not one of those ends.
+
+The report (`clay_mesh_quad_report`, `Mesh.quad_report`) describes a meshing
+CALL, not a surface. A mesh loaded from a file, read back out of a document, or
+concatenated was produced by no such call and is refused rather than answered
+with zeroes.
+
+`examples/44_quad_export.py` is the gallery version of all of this: the same
+form at three target counts, with requested against actual printed for each.
 
 ## Where a mesh comes from
 

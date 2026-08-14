@@ -3999,3 +3999,272 @@ def test_a_sign_is_plus_or_minus_one():
     assert a.signs == [1, 1]  # positive by default
     a.signs = [1, -1]
     assert a.signs == [1, -1]
+
+
+# -- quad meshing (python-bindings spec: quad meshing from Python) -----------
+#
+# The mesh gains an array; nothing an existing script reads changes value. That
+# is asserted here rather than assumed, because it is the property the whole
+# storage decision rests on.
+
+
+def test_quad_mesh_is_quads_beside_the_triangles():
+    doc, _ = build_body()
+    mesh = doc.mesh_quads(cell_size=0.05)
+    assert mesh.quad_count > 0
+    assert mesh.quads.shape == (mesh.quad_count, 4)
+    assert mesh.quads.dtype == np.uint32
+    assert mesh.quads.max() < mesh.positions.shape[0]
+
+    # indices is still the triangulation of exactly those quads, in order.
+    assert mesh.indices.shape == (mesh.quad_count * 2, 3)
+    tris = mesh.indices.reshape(mesh.quad_count, 6)
+    q = mesh.quads
+    assert np.array_equal(tris[:, 0:3], q[:, [0, 1, 2]])
+    assert np.array_equal(tris[:, 3:6], q[:, [0, 2, 3]])
+
+
+def test_a_triangle_mesh_has_an_empty_quad_view():
+    doc, _ = build_body()
+    for mesh in (doc.mesh(resolution=48), doc.mesh(resolution=48, mesher="nets")):
+        assert mesh.quad_count == 0
+        assert mesh.quads.shape == (0, 4)      # not None: shape code needs no null check
+        assert mesh.quads.dtype == np.uint32
+        with pytest.raises(ValueError, match="not produced by a quad mesher"):
+            mesh.quad_report
+
+
+def test_a_quad_target_is_approached_and_reported():
+    doc, _ = build_body()
+    mesh = doc.mesh_quads(target=8000)
+    report = mesh.quad_report
+    assert report["quad_count"] == mesh.quad_count
+    assert report["target"] == 8000
+    assert report["within_tolerance"] is True
+    assert report["clamped"] is False
+    assert 0 < report["iterations"] <= 4
+    # The contract is the tolerance, not the number: 10% by default.
+    assert abs(mesh.quad_count - 8000) <= 800
+    # And the report describes this mesh: the cell size it names reproduces it.
+    assert doc.mesh_quads(cell_size=report["cell_size"]).quad_count == mesh.quad_count
+
+
+def test_an_explicit_cell_size_spends_no_iterations():
+    doc, _ = build_body()
+    mesh = doc.mesh_quads(cell_size=0.06)
+    report = mesh.quad_report
+    assert report["iterations"] == 0
+    assert report["cell_size"] == pytest.approx(0.06)
+    assert report["target"] == 0
+
+
+def test_quad_meshing_refuses_what_it_cannot_do():
+    doc, _ = build_body()
+    with pytest.raises(ValueError, match="VOXEL faces"):
+        doc.mesh_quads(cell_size=0.1, mode="faces")
+    with pytest.raises(ValueError, match="mode must be 'dual'"):
+        doc.mesh_quads(cell_size=0.1, mode="quadriflow")
+    with pytest.raises(ValueError, match="neither names a lattice"):
+        doc.mesh_quads()
+    with pytest.raises(ValueError, match="max_iterations"):
+        doc.mesh_quads(target=1000, max_iterations=1000)
+    # tolerance=0.0 USED to raise here. It no longer does, deliberately:
+    # clay_quad_params documents "<= 0 means 0.10" and the C binding honours
+    # it, so refusing it in Python made the documented C default an error in
+    # one binding and not the other. The bound that stayed is the far end.
+    with pytest.raises(ValueError, match="tolerance"):
+        doc.mesh_quads(target=1000, tolerance=1.0)
+
+
+# REGRESSION (review round 2): pyclay and the C ABI disagreed about what the
+# count knobs' zero MEANS. clay_quad_params documents "<= 0 means the default"
+# for tolerance and max_iterations and read_quad_params accepts both, while
+# pyclay raised ValueError on each — so the documented C default was an error
+# in Python. In the other direction pyclay had no ceiling on `target` at all
+# (2**40 ran for nineteen seconds; 2**63 escaped as a bare std::bad_cast from
+# nanobind rather than as one of this API's errors).
+def test_the_quad_count_knobs_take_the_c_abis_rules():
+    doc, _ = build_body()
+
+    # Zero is the default, not an error, for both knobs and on both entry
+    # points — the same values a C caller who declared only the original
+    # struct layout sends.
+    for kwargs in ({"tolerance": 0.0}, {"max_iterations": 0}, {"tolerance": -1.0}):
+        mesh = doc.mesh_quads(target=1000, **kwargs)
+        assert mesh.quad_count > 0
+        assert mesh.quad_report["iterations"] > 0
+
+    _, grid = _sphere_sculpt()
+    assert grid.mesh_quads(target=500, tolerance=0.0).quad_count > 0
+    assert grid.mesh_quads(target=500, max_iterations=0).quad_count > 0
+
+    # And the far ends are refused, as they are in C.
+    with pytest.raises(ValueError, match="below 1"):
+        doc.mesh_quads(target=1000, tolerance=1.0)
+    with pytest.raises(ValueError, match="finite"):
+        doc.mesh_quads(target=1000, tolerance=float("nan"))
+    with pytest.raises(ValueError, match="max_iterations must be 0..64"):
+        doc.mesh_quads(target=1000, max_iterations=-1)
+    # CLAY_MAX_BATCH. Without this a mistyped target meshed until it finished.
+    with pytest.raises(ValueError, match="above the ceiling"):
+        doc.mesh_quads(target=16777217)
+    # Too large for a long long: an API error, not nanobind's std::bad_cast.
+    with pytest.raises(ValueError, match="whole number of quads"):
+        doc.mesh_quads(target=2**63)
+
+
+def _sphere_sculpt(voxel_size=0.05):
+    doc = clay.Document()
+    grid = doc.add_voxel_layer("sculpt", voxel_size=voxel_size)
+    source = clay.Document()
+    source.add_sdf_layer("s").add(clay.Sphere(r=0.5))
+    grid.rasterize(source)
+    return doc, grid
+
+
+def test_voxel_quad_modes_and_the_smooth_identity():
+    _, grid = _sphere_sculpt()
+    dual = grid.mesh_quads()
+    smooth = grid.mesh_smooth()
+    # Dual at the grid's own voxel size IS the smooth mesh, plus its quads.
+    assert np.array_equal(dual.positions, smooth.positions)
+    assert np.array_equal(dual.indices, smooth.indices)
+    assert dual.quad_count == smooth.triangle_count // 2
+    assert smooth.quad_count == 0
+
+    faces = grid.mesh_quads(mode="faces")
+    assert faces.quad_count > 0
+    # A welded corner faces three ways at once, so faces mode carries none.
+    assert faces.normals.shape == (0, 3)
+    # And greedy meshing is untouched by any of this.
+    assert grid.mesh().quad_count == 0
+
+    with pytest.raises(ValueError, match="mode must be 'dual' or 'faces'"):
+        grid.mesh_quads(mode="zremesher")
+    with pytest.raises(ValueError, match="resolution level"):
+        grid.mesh_quads(level=4)
+
+
+def test_a_non_finite_cell_size_is_refused_here_as_it_is_in_c():
+    """REGRESSION: a NaN passes every `> 0` test, so it used to fall through to
+    the "no cell size given" branch and be answered with an estimated seed —
+    while clay_quad_params refused the same value. Same input, one answer."""
+    doc, _ = build_body()
+    _, grid = _sphere_sculpt()
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="cell_size must be finite"):
+            doc.mesh_quads(cell_size=bad, target=100)
+        with pytest.raises(ValueError, match="cell_size must be finite"):
+            grid.mesh_quads(cell_size=bad)
+
+
+def test_the_faces_target_walks_the_level_stack():
+    """REGRESSION: faces mode is a walk of the resolution stack, and `clamped`
+    means the stack ran out — not that some cell-size limit was reached."""
+    _, grid = _sphere_sculpt(voxel_size=0.1)
+    source = clay.Document()
+    source.add_sdf_layer("s").add(clay.Sphere(r=0.5))
+    for _ in range(2):
+        grid.add_level()
+        grid.rasterize(source)
+    counts = [grid.mesh_quads(mode="faces", level=l).quad_count
+              for l in range(grid.level_count)]
+    assert counts == sorted(counts) and counts[0] < counts[-1]
+
+    # Inside the stack: both neighbours meshed, the nearer returned, no clamp.
+    inside = grid.mesh_quads(mode="faces", target=counts[0] + 1).quad_report
+    assert inside["quad_count"] == counts[0]
+    assert inside["iterations"] == 2
+    assert inside["clamped"] is False
+
+    # Off either end: the end level, and the report says the stack ran out.
+    below = grid.mesh_quads(mode="faces", target=1).quad_report
+    assert below["quad_count"] == counts[0]
+    assert below["clamped"] is True
+    # max_iterations does not truncate the walk — the stack is its own bound.
+    above = grid.mesh_quads(mode="faces", target=10 * counts[-1],
+                            max_iterations=1).quad_report
+    assert above["quad_count"] == counts[-1]
+    assert above["iterations"] == grid.level_count
+    assert above["clamped"] is True
+    assert above["within_tolerance"] is False
+
+
+def test_an_empty_coarse_level_is_not_the_coarse_end_of_the_stack():
+    """REGRESSION (round 3): faces mode read the coarse end of the ladder off
+    LEVEL 0 rather than off the coarsest level that yields anything. A voxel
+    stack is not a strict mip — a scattered fine sculpt leaves the coarse
+    levels empty — and an empty level meshes to 0 quads, which is below every
+    target. So a grid whose every non-empty level overshoots the target came
+    back with `clamped` False, telling the caller a nearer level existed."""
+    doc = clay.Document()
+    grid = doc.add_voxel_layer("sculpt", voxel_size=0.4)
+    grid.add_level()
+    grid.add_level()
+    grid.active_level = 2
+    # Every voxel alone in its parent cell: a coarse cell needs half its eight
+    # children, so the downsample leaves levels 1 and 0 genuinely empty.
+    for x in range(0, 8, 2):
+        for y in range(0, 8, 2):
+            for z in range(0, 8, 2):
+                grid.set((x, y, z), 1)
+
+    occupied = [grid.level_occupied_count(l) for l in range(grid.level_count)]
+    assert occupied[0] == 0 and occupied[1] == 0 and occupied[2] > 0
+    counts = [grid.mesh_quads(mode="faces", level=l).quad_count
+              for l in range(grid.level_count)]
+    assert counts[0] == 0 and counts[1] == 0 and counts[2] > 0
+
+    below = grid.mesh_quads(mode="faces", target=counts[2] // 4).quad_report
+    assert below["quad_count"] == counts[2]
+    assert below["iterations"] == 3
+    assert below["within_tolerance"] is False
+    assert below["clamped"] is True  # the stack ran out; no level is nearer
+
+    # The other side: an exact hit on that level is neither end of the ladder.
+    exact = grid.mesh_quads(mode="faces", target=counts[2]).quad_report
+    assert exact["quad_count"] == counts[2]
+    assert exact["within_tolerance"] is True
+    assert exact["clamped"] is False
+
+
+def test_a_voxel_target_finer_than_the_grid_reports_the_clamp():
+    _, grid = _sphere_sculpt()
+    mesh = grid.mesh_quads(target=1_000_000)
+    report = mesh.quad_report
+    assert report["clamped"] is True
+    assert report["within_tolerance"] is False
+    assert report["cell_size"] == pytest.approx(0.05)
+    assert report["quad_count"] == mesh.quad_count > 0
+
+
+def test_quads_survive_a_document_round_trip(tmp_path):
+    doc, _ = build_body()
+    mesh = doc.mesh_quads(cell_size=0.07)
+    carrier = clay.Document()
+    carrier.add_mesh_layer(mesh, name="quads")
+    path = str(tmp_path / "quads.clayspace")
+    carrier.save(path)
+    back = clay.load(path).mesh_layer("quads")
+    assert back.quad_count == mesh.quad_count
+    assert np.array_equal(back.quads, mesh.quads)
+    # The geometry crossed; the report did not, because a mesh read out of a
+    # document was produced by no meshing call.
+    with pytest.raises(ValueError, match="not produced by a quad mesher"):
+        back.quad_report
+
+
+def test_quads_reach_the_files_that_carry_them(tmp_path):
+    doc, _ = build_body()
+    mesh = doc.mesh_quads(cell_size=0.09)
+    obj = tmp_path / "quads.obj"
+    mesh.save(str(obj))
+    faces = [line for line in obj.read_text().splitlines() if line.startswith("f ")]
+    assert len(faces) == mesh.quad_count
+    assert all(len(line.split()) == 5 for line in faces)  # f + four corners
+
+    # glTF 2.0 has no quad primitive mode, so GLB is the triangulation. Written
+    # here rather than discovered in Blender.
+    glb = tmp_path / "quads.glb"
+    mesh.save(str(glb))
+    assert glb.stat().st_size > 0

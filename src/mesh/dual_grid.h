@@ -14,6 +14,7 @@
 #include "clay/eval/backend.h"
 #include "clay/kernel/shim.h"
 #include "clay/math/geom.h"
+#include "clay/mesh/marching.h"  // MeshingOptions + apply_tape_attributes
 #include "clay/mesh/mesh_data.h"
 #include "clay/scene/tape.h"
 
@@ -78,14 +79,31 @@ inline TapeGrid eval_tape_grid(const scene::Tape& tape, const math::Aabb& region
     return g;
 }
 
+// Gibson surface nets vertex: centroid of the cell's edge crossings (always
+// inside the cell — it is a convex combination of points on the cell). Here
+// rather than in surface_nets.cpp because the quad mesher places its vertices
+// with it too, and two copies of this would be two surfaces.
+inline kernel::cfloat3 nets_vertex(const DualCrossing* crossings, int count, kernel::cfloat3 lo,
+                                   kernel::cfloat3 hi) {
+    if (count == 0) return (lo + hi) * 0.5f;  // unreachable for sign-changing cells
+    kernel::cfloat3 sum = kernel::cf3(0, 0, 0);
+    for (int i = 0; i < count; ++i) sum = sum + crossings[i].pos;
+    return sum / static_cast<float>(count);
+}
+
 // Core dual-grid mesher. Cells [cell_min, cell_max) are visited; a lattice
 // edge produces a quad only when all four adjacent cells own vertices, so
 // callers wanting closed output must pad the range by one ring of positive
 // samples (as the tape-level wrappers do).
+//
+// `keep_quads` additionally records the four corners in Mesh::quads. It
+// changes nothing else — same vertices, same triangles, same 0-2 diagonal —
+// so the quad meshers and the triangle meshers are one code path and cannot
+// drift into two that disagree about where the surface is.
 inline Mesh dual_grid_mesh(const std::function<float(int, int, int)>& sample,
                            const int cell_min[3], const int cell_max[3], kernel::cfloat3 origin,
-                           float spacing, const DualNormalFn& normal_at,
-                           const DualPlacer& place) {
+                           float spacing, const DualNormalFn& normal_at, const DualPlacer& place,
+                           bool keep_quads = false) {
     using kernel::cf3;
     using kernel::cfloat3;
     // corner bit c: x=1, y=2, z=4 (same convention as the marching mesher)
@@ -154,6 +172,7 @@ inline Mesh dual_grid_mesh(const std::function<float(int, int, int)>& sample,
                     if (!c11 || !c01 || !c00 || !c10) continue;  // open lattice boundary
                     std::uint32_t quad[4] = {*c11, *c01, *c00, *c10};
                     if (f0 >= 0.0f) std::swap(quad[1], quad[3]);  // wind toward positive field
+                    if (keep_quads) m.quads.insert(m.quads.end(), quad, quad + 4);
                     m.indices.push_back(quad[0]);
                     m.indices.push_back(quad[1]);
                     m.indices.push_back(quad[2]);
@@ -162,6 +181,26 @@ inline Mesh dual_grid_mesh(const std::function<float(int, int, int)>& sample,
                     m.indices.push_back(quad[3]);
                 }
             }
+    return m;
+}
+
+// The tape-level surface-nets mesh, shared by mesh_tape_nets and
+// mesh_tape_quads so the two cannot drift apart: one lattice, one sampler, one
+// closing ring of out-of-range positive samples, one attribute pass.
+// `keep_quads` is the ONLY difference between the two calls, which is what
+// makes "the quad mesh is the nets mesh plus its quads" a property of the code
+// rather than of a test.
+inline Mesh tape_nets_mesh(const scene::Tape& tape, const math::Aabb& region, float cell_size,
+                           const MeshingOptions& options, bool keep_quads) {
+    TapeGrid grid = eval_tape_grid(tape, region, cell_size);
+    if (!grid.ok) return {};
+    auto sample = [&](int i, int j, int k) { return grid.at(i, j, k); };
+    // one extra cell ring: out-of-range samples are positive, so geometry
+    // crossing the region boundary is closed (same ring as mesh_tape)
+    int cmin[3] = {-1, -1, -1};
+    int cmax[3] = {grid.nx, grid.ny, grid.nz};
+    Mesh m = dual_grid_mesh(sample, cmin, cmax, region.min, cell_size, {}, nets_vertex, keep_quads);
+    apply_tape_attributes(m, tape, options);
     return m;
 }
 
