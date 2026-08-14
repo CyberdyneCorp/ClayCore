@@ -88,8 +88,7 @@ struct MeshHit {
 // them and is the geometric face normal when it does not, so a model imported
 // without normals is still pickable.
 MeshHit raycast_mesh(const mesh::Mesh& m, const mesh::Bvh& bvh, const math::Ray& ray,
-                     const math::Transform& xform = math::Transform::identity(),
-                     float tmax = 1e6f);
+                     const math::Transform& xform = math::Transform::identity(), float tmax = 1e6f);
 
 // -- surface snapping --------------------------------------------------------
 

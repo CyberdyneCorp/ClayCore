@@ -170,7 +170,8 @@ Adjacency Adjacency::build(const Mesh& m, float weld_epsilon) {
     ring_pairs.reserve(m.indices.size() * 2);
     tri_pairs.reserve(m.indices.size());
     for (std::size_t t = 0; t < a.triangle_count_; ++t) {
-        const std::uint32_t c[3] = {a.class_of_[m.indices[t * 3]], a.class_of_[m.indices[t * 3 + 1]],
+        const std::uint32_t c[3] = {a.class_of_[m.indices[t * 3]],
+                                    a.class_of_[m.indices[t * 3 + 1]],
                                     a.class_of_[m.indices[t * 3 + 2]]};
         for (int i = 0; i < 3; ++i) {
             tri_pairs.emplace_back(c[i], static_cast<std::uint32_t>(t));

@@ -2,7 +2,7 @@
 
 Every sculpting verb claycore ships, what it does, and how it is parameterised.
 
-The engine has no brush *objects*. What a host calls a brush is one of five
+The engine has no brush *objects*. What a host calls a brush is one of six
 mechanisms, and knowing which one a verb is tells you most of what you need:
 whether it is exact, whether it can be undone as an edit, and whether it bakes.
 
@@ -13,6 +13,7 @@ whether it is exact, whether it can be undone as an edit, and whether it bakes.
 | **Baked field operation** | Samples a field into a narrow-band `FieldVolume` with the operation applied. | Result is a bound field, not a distance — it declares the Lipschitz it measured | Replaces the item's volume |
 | **Resolver** | A pure function turning a gesture into an *ordinary item*. No document is read or touched. | Whatever the item it produces is | Ordinary edit |
 | **Voxel verb** | An in-place edit of a palette-indexed grid. | n/a — occupancy, not a field | **Not on the undo stack** — the command vocabulary covers document edits only |
+| **Mesh verb** | An in-place displacement of a mesh layer's own vertices. Topology never changes. | n/a — triangles, not a field | **Not on the undo stack** either; a sparse `VertexDeltas` record restores the gesture bit-exactly instead |
 
 Two rules hold throughout and explain most of the API shapes below:
 
@@ -20,9 +21,11 @@ Two rules hold throughout and explain most of the API shapes below:
   normal it already has, in world units. Picking and cameras stay in the host.
 - **Everything a document brush produces is an ordinary edit**, so undo,
   coalescing, serialization and instancing apply without any brush-specific
-  machinery. Voxel verbs are the exception: they mutate a grid in place, and
-  `scene::Command` has no voxel variant, so a host that wants undo over voxel
-  edits is snapshotting them itself today (roadmap item).
+  machinery. Voxel and mesh verbs are the exception: they mutate storage beside
+  the document in place, and `scene::Command` has no variant for either. A host
+  that wants undo over voxel edits is snapshotting them itself today (roadmap
+  item); for mesh edits it keeps a `mesh::VertexDeltas` per gesture, which is
+  bounded by the vertices the gesture reached rather than by the mesh.
 
 ---
 
@@ -620,7 +623,97 @@ and so give an upper bound rather than an exact tally.
 
 ---
 
-## 8. ZBrush equivalents
+## 8. Fixed-topology mesh brushes
+
+The classical sculpting mode — vertices move, on a mesh layer's own triangles —
+with one line held above everything else: **topology never changes.** No verb
+here creates, splits, deletes or reorders a polygon or a vertex. `indices` and
+`quads` come out byte for byte as they went in, so a quad mesh sculpted here is
+still the same quad mesh.
+
+That is the whole reason they exist. A mesh layer carries triangles verbatim
+(§ [`docs/08`](08-mesh-readback.md)), and until these landed the only way to
+*edit* one was `Volume::from_mesh`, which resamples the model onto a lattice:
+the sculpt comes back, the edge loops and the uvs do not. The round trip
+`quad_mesh` and `add-representation-round-trip` built is sculpt SDF → quad
+export → retopo/UV elsewhere → bake, and the step it had no verb for is the one
+an artist wants next — refine ON the retopologized mesh.
+
+This does not change what a document evaluates to. A sculpted mesh layer is
+still never evaluated, never blends with a field, and exports exactly as its
+(now edited) vertices say.
+
+| Verb | What it does to the vertices |
+|---|---|
+| `Grab` | Drag the region by the stroke's per-stamp motion. Polygons stretch or compress; none are created |
+| `Draw` | Displace along the **region's averaged normal** — one shared direction per stamp, which is what makes it a rounded organic swell rather than a balloon |
+| `Inflate` | Displace along **each vertex's own normal**, signed. The per-vertex direction is exactly what distinguishes it from draw |
+| `Smooth` | Laplacian average over the one-ring, weighted by falloff |
+| `Pinch` | Signed **tangential** gather (+) or spread (−) about the brush centre — one deformation with one sign, as `magnify` is for fields. The normal component is removed, so a pinch gathers along the surface instead of sinking the region |
+| `Flatten` | Project toward a plane, with the same `TwoSided` / `CutOnly` / `FillOnly` mode `field::flatten` established — because cut-only *is* Trim Dynamic and hPolish |
+| `Clay` | Draw's deposit **clamped to a plane** floating at the stamp height: material is added up to the plane and no further, which is what makes flat-topped strips instead of a swell. On a flat surface it is draw; the difference is what it does to an uneven one |
+| `Crease` | A tight negative draw **and** a pinch in one stamp. Sequenced separately they leave a rounded ditch, because the pinch would gather vertices the draw had already pushed down |
+| `Scrape` | Flatten cut-only **and** smooth from one snapshot, mirroring the `sculpt_scrape` rule that calling the two in sequence is not the same thing |
+| `Polish` | Smooth **gated by how much the surface bends**: full strength where the normals around a vertex agree, fading to zero at twice the threshold angle. Noise goes, hard edges stay, and `polish_angle` is the whole brush |
+| `Snakehook` | Grab re-anchored on the class it is dragging, so the region walks with the pull. On fixed topology it stretches triangles to the extreme — **stated behaviour, not a defect**: that stretch is the artist's signal the mesh wants retopo, exactly as Blender behaves with Dyntopo off. `brush::snakehook` remains the verb for GROWING new volume |
+
+**One stamp is one operation.** Every verb reads a *pre-stamp snapshot* of the
+region — positions, normals, the region's averaged normal, its centroid and its
+plane — so `draw` does not chase its own deposit, `smooth`'s Laplacian is a
+simultaneous average rather than a vertex-order-dependent sweep, and the
+composed verbs are single operations rather than sequences.
+
+**Reach is measured along the surface.** The Move Topological rule: a brush on
+the upper lip must not drag the chin through a closed mouth. A class is in the
+region when a path over the one-ring reaches it without leaving the brush's ball
+and within a path budget; the *weight* then comes from the straight-line
+distance, because a path measured along edges overestimates geodesic distance by
+a direction-dependent amount and a falloff driven by it bands visibly. On a
+connected sheet the surface-measured and straight-line modes agree bit for bit.
+
+**Adjacency is built over weld classes**, not raw indices. A UV seam, a hard
+edge or a per-face normal duplicates a position into independent indices, and a
+ring built over those stops dead at every seam. Vertices sharing a position are
+one class, and every verb writes one displacement to all of a class's members —
+so a seam cannot open into a crack.
+
+**Masks reach every verb for free.** Each vertex's weight is scaled by
+`1 − mask` at its world position, the rule every voxel verb already follows, so
+a painted mask protects polygons from all eleven verbs — `Grab` and `Snakehook`
+included — with no per-verb code.
+
+**The stroke engine gained its fourth consumer.** `resolve_stroke` already fed
+`apply_to_grid`, `stamps_to_nodes` and `apply_to_mask`; `apply_to_mesh` inherits
+spacing, pressure curves, deterministic jitter, taper, steady stroke and
+buildup-versus-clamped accumulation with no new machinery. Buildup accumulation
+is what turns one `Clay` stamp into ClayBuildup.
+
+**Undo is a vertex-delta record.** A mesh stroke is destructive vertex
+displacement, not an edit-list node, so it cannot undo through the command
+vocabulary the way an SDF stroke does. `mesh::VertexDeltas` records the vertices
+a gesture actually reached — sparse, and coalesced so one stroke is one step —
+and restores positions *and* normals bit-exactly. `indices` and `quads` are not
+recorded, because nothing here can change them.
+
+**Mesh layers became pickable.** `raycast_scene` cannot see a mesh layer and
+never will — that is the layer's design — so `pick::raycast_mesh` asks the BVH
+directly, through the layer transform, and hands back the surface point, the
+normal and the weld class a surface walk should start from. Back faces are not
+culled: a sculptor working inside a shell means it.
+
+**Not dynamic topology.** No dyntopo, no multires, no remeshing, no
+subdivision — see the amended non-goal in
+[`docs/sculpt_comparison.md`](sculpt_comparison.md). Not in the parity system
+either: this is CPU-side like the voxel verbs, and the determinism bar is
+asserted instead — same stroke, same mesh, same result, bit for bit.
+
+Runnable: [`examples/45_mesh_brushes.py`](../examples/45_mesh_brushes.py),
+[`46_mesh_brush_compositions.py`](../examples/46_mesh_brush_compositions.py) and
+[`47_mesh_brush_reach_and_undo.py`](../examples/47_mesh_brush_reach_and_undo.py).
+
+---
+
+## 9. ZBrush equivalents
 
 Where a ZBrush brush maps onto the list above. This is a map, not a claim of
 parity — the mechanism usually differs even where the result matches.
@@ -651,11 +744,12 @@ parity — the mechanism usually differs even where the result matches.
 | Blob | — | Not yet: `add-blob-brush`, unblocked by the noise field |
 | Slice / Knife (polygroup splits) | — | Splitting without removing volume has no single-solid equivalent; it needs two items |
 | ZRemesher (quad retopology) | partly — `mesh_quads` | **Not the same thing, and the difference matters.** claycore meshes a sculpt into a QUAD GRID DERIVED FROM ITS LATTICE: quad-only, regular, no T-junctions, with a target count you choose — enough to hand a form to a DCC as OBJ or FBX. What it is not is field-aligned: no edge loops following the form, no poles placed at features, density that does not follow curvature. A retopology pass REPLACES this rather than refining it |
-| Surface-mode mesh brushes | — | Out of scope: claycore sculpts fields and voxels, not meshes |
+| Surface-mode mesh brushes | `mesh::MeshSculptor` (§ 8) | **The non-goal was narrowed, not dropped.** Vertices move on a mesh layer's own triangles; dyntopo, multires and remeshing remain out of scope |
+| Dynamic tessellation (Dyntopo, LiveClay) | — | Out of scope on purpose: an SDF sidesteps topology entirely, and competing on dynamic tessellation is not this engine's fight |
 
 ---
 
-## 9. Where each is reachable
+## 10. Where each is reachable
 
 Names differ between bindings, so this lists them rather than ticking boxes.
 
@@ -687,6 +781,11 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Groups a host builds | `scene::Node::is_group` | `Layer.add_group(...)` | `clay_layer_add_group`, `clay_layer_add_item_in_group`, `clay_item_add_child`, `clay_layer_children`, `clay_layer_node_count`, `clay_layer_node_at` |
 | Quad meshing, with a target count | `mesh::mesh_tape_quads`, `mesh_tape_quads_fit`, `VoxelGrid::mesh_quads` | `Document.mesh_quads(...)`, `VoxelGrid.mesh_quads(...)` | `clay_document_mesh_quads`, `clay_voxel_mesh_quads` |
 | A mesh a document carries | `scene::LayerKind::Mesh` | `Document.add_mesh_layer(...)`, `.mesh_layer(...)` | `clay_document_add_mesh_layer`, `clay_document_mesh_layer`, `clay_mesh_layer` |
+| Fixed-topology mesh brushes | `mesh::MeshSculptor::stamp`, `mesh::MeshBrush` | `MeshSculptor.stamp(...)` | `clay_mesh_sculptor_stamp`, `CLAY_MESH_BRUSH_*` |
+| A mesh stroke | `brush::apply_to_mesh` | `MeshSculptor.apply_stroke(...)` | `clay_mesh_sculptor_apply_stroke` |
+| Mesh vertex adjacency | `mesh::Adjacency` | `MeshSculptor.class_count` | `clay_mesh_sculptor_class_count` |
+| Mesh stroke undo | `mesh::VertexDeltas` | `clay.VertexDeltas` | `clay_mesh_deltas_*` |
+| Picking a mesh layer | `pick::raycast_mesh`, `mesh::Bvh::raycast` | `MeshSculptor.raycast(...)` | `clay_mesh_sculptor_raycast` |
 
 Snakehook has no dedicated C entry point on purpose: it is a **resolver** that
 produces an ordinary stroke item, and the C ABI already builds those. A separate

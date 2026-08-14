@@ -49,30 +49,71 @@ kernel::cfloat3 face_normal(const Mesh& m, std::uint32_t tri) {
     return kernel::ccross(b - a, c - a);
 }
 
-// A weld class's geometric normal, area-weighted over its incident triangles.
+// The interior angle a triangle subtends at one of its corners.
+float corner_angle(const Mesh& m, std::uint32_t tri, int corner) {
+    const kernel::cfloat3& p = m.positions[m.indices[tri * 3 + corner]];
+    const kernel::cfloat3& a = m.positions[m.indices[tri * 3 + (corner + 1) % 3]];
+    const kernel::cfloat3& b = m.positions[m.indices[tri * 3 + (corner + 2) % 3]];
+    const kernel::cfloat3 u = a - p, v = b - p;
+    const float lu = kernel::clength(u), lv = kernel::clength(v);
+    if (lu < 1e-20f || lv < 1e-20f) return 0.0f;
+    return std::acos(std::clamp(kernel::cdot(u, v) / (lu * lv), -1.0f, 1.0f));
+}
+
+// A weld class's geometric normal, ANGLE-weighted over its incident triangles.
+//
 // GEOMETRIC rather than the mesh's stored normals on purpose: displacement is
 // about where the surface is, not about how it shades, and this way a mesh
 // imported without normals sculpts exactly like one that has them.
+//
+// Angle-weighted rather than area-weighted, which is the more usual choice and
+// is wrong here. A lattice-derived mesh — anything marching cubes or surface
+// nets produced, which is most of what this library hands back — has triangles
+// of wildly uneven area, so an area-weighted normal leans toward whichever
+// neighbour happens to be large and varies at the LATTICE's frequency rather
+// than the surface's. `inflate`, which displaces each vertex along its own
+// normal, turns that straight into a golf-ball dimple across the stamp. The
+// angle at the corner is a property of the surface rather than of how it was
+// triangulated, and the dimple goes away.
 kernel::cfloat3 class_normal(const Mesh& m, const Adjacency& adj, std::uint32_t cls) {
     std::size_t n = 0;
     const std::uint32_t* tris = adj.triangles_of(cls, &n);
     kernel::cfloat3 sum = kernel::cf3(0, 0, 0);
-    for (std::size_t i = 0; i < n; ++i) sum = sum + face_normal(m, tris[i]);
+    for (std::size_t i = 0; i < n; ++i) {
+        const kernel::cfloat3 face = safe_normalize(face_normal(m, tris[i]), kernel::cf3(0, 0, 0));
+        for (int corner = 0; corner < 3; ++corner)
+            if (adj.class_of(m.indices[tris[i] * 3 + corner]) == cls)
+                sum = sum + face * corner_angle(m, tris[i], corner);
+    }
     return safe_normalize(sum, kernel::cf3(0, 1, 0));
 }
 
-// How far the faces around a class disagree, in radians: the widest angle
-// between the class normal and any incident face's normal. Polish's gate.
-float ring_disagreement(const Mesh& m, const Adjacency& adj, std::uint32_t cls,
-                        kernel::cfloat3 n) {
+// How far the surface around a class BENDS, in radians: the MEAN angle between
+// its normal and a NEIGHBOURING CLASS's normal. Polish's gate.
+//
+// Two choices here, both made against the surface polish is actually for — a
+// noisy flat beside a hard edge — and both wrong in the obvious reading.
+//
+// NEIGHBOURING CLASSES rather than incident FACES. "Dihedral angle" says
+// faces, and on a noisy surface the faces are useless: noise tilts each one by
+// more than a chamfer bends the whole surface, so every flat looks like an edge
+// and polish declines to do anything at all. A class normal is already an
+// angle-weighted average over its one-ring of faces, so most of the noise is out
+// of it and what is left is the shape — which is what the gate means to read.
+//
+// The MEAN rather than the widest. The widest is one sample out of six and
+// carries the residual noise straight back in; the mean is the statistic that
+// says "how much does the surface bend here", which is the question.
+float ring_disagreement(const Mesh& m, const Adjacency& adj, std::uint32_t cls, kernel::cfloat3 n) {
     std::size_t count = 0;
-    const std::uint32_t* tris = adj.triangles_of(cls, &count);
-    float worst = 0.0f;
+    const std::uint32_t* ring = adj.ring(cls, &count);
+    if (count == 0) return 0.0f;
+    float total = 0.0f;
     for (std::size_t i = 0; i < count; ++i) {
-        const kernel::cfloat3 fn = safe_normalize(face_normal(m, tris[i]), n);
-        worst = std::max(worst, std::acos(std::clamp(kernel::cdot(fn, n), -1.0f, 1.0f)));
+        const kernel::cfloat3 nb = class_normal(m, adj, ring[i]);
+        total += std::acos(std::clamp(kernel::cdot(nb, n), -1.0f, 1.0f));
     }
-    return worst;
+    return total / static_cast<float>(count);
 }
 
 // Everything one stamp reads. Bundled so the verbs below are free functions
@@ -84,9 +125,9 @@ struct StampContext {
     const MeshBrushSettings& settings;
 
     kernel::cfloat3 deposit_direction() const {
-        return is_zero(settings.deposit_normal) ? region.average_normal
-                                                : safe_normalize(settings.deposit_normal,
-                                                                 region.average_normal);
+        return is_zero(settings.deposit_normal)
+                   ? region.average_normal
+                   : safe_normalize(settings.deposit_normal, region.average_normal);
     }
 };
 
@@ -227,6 +268,25 @@ const Bvh& MeshSculptor::bvh() {
 
 void MeshSculptor::refresh_bvh() { bvh_ = std::make_unique<Bvh>(Bvh::build(mesh_)); }
 
+kernel::cfloat3 MeshSculptor::class_position(std::uint32_t cls) const {
+    std::size_t n = 0;
+    return mesh_.positions[adjacency_.members(cls, &n)[0]];
+}
+
+std::uint32_t MeshSculptor::nearest_class(kernel::cfloat3 p) const {
+    const std::uint32_t classes = static_cast<std::uint32_t>(adjacency_.class_count());
+    std::uint32_t best = kNoClass;
+    float best_d2 = 0.0f;
+    for (std::uint32_t c = 0; c < classes; ++c) {
+        const float d2 = kernel::cdot2(class_position(c) - p);
+        if (best == kNoClass || d2 < best_d2) {
+            best = c;
+            best_d2 = d2;
+        }
+    }
+    return best;
+}
+
 void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGate& gate) {
     BrushRegion& r = region_;
     if (settings.geodesic)
@@ -265,6 +325,17 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
         // is already near zero.
         float w = falloff_weight(settings.falloff,
                                  kernel::clength(p - settings.center) / settings.radius);
+        // ...and fade out over the last stretch of the walk's path budget, so
+        // the rim is smooth even where the two bounds disagree. See
+        // kPathTaperStart.
+        if (settings.geodesic) {
+            const float over = (distance_[i] / settings.radius - kPathTaperStart) /
+                               (kDefaultPathBudget - kPathTaperStart);
+            if (over > 0.0f) {
+                const float t = std::clamp(over, 0.0f, 1.0f);
+                w *= 1.0f - t * t * (3.0f - 2.0f * t);
+            }
+        }
         if (gate) w *= 1.0f - std::clamp(gate(p), 0.0f, 1.0f);
         if (w <= 0.0f) continue;
         r.classes[kept] = c;
@@ -370,8 +441,8 @@ void verb_clay(const StampContext& ctx, std::vector<kernel::cfloat3>* d) {
     const field::FlattenMode side =
         height >= 0.0f ? field::FlattenMode::FillOnly : field::FlattenMode::CutOnly;
     for (std::size_t i = 0; i < ctx.region.size(); ++i)
-        (*d)[i] = plane_offset(ctx.region.positions[i], plane_pt, dir, side) *
-                  ctx.region.weights[i];
+        (*d)[i] =
+            plane_offset(ctx.region.positions[i], plane_pt, dir, side) * ctx.region.weights[i];
 }
 
 void verb_crease(const StampContext& ctx, std::vector<kernel::cfloat3>* d) {
@@ -388,15 +459,66 @@ void verb_crease(const StampContext& ctx, std::vector<kernel::cfloat3>* d) {
     }
 }
 
+// Polish's gate, per region class: full strength where the surface around a
+// class is near-planar, fading to zero where it bends, so noise goes and a hard
+// edge stays.
+//
+// SPREAD, THEN FEATHERED, and the order matters.
+//
+// Raw, the gate steps from 1 to 0 across a single edge, and what a polish
+// leaves along every feature it protected is a bead of untouched vertices
+// beside a fully smoothed flat — visible in a render, and a worse artefact
+// than the noise it removed.
+//
+// Feathering alone does not fix it, because it eats the protection: a crease
+// one vertex wide has gate 0 at the crease and 1 on both sides, and averaging
+// pulls it straight back up — the crease is then smoothed away, which is the
+// one thing polish exists not to do. So the gate is SPREAD first (each class
+// takes the minimum over its own ring), widening the protected band to cover
+// the feature's neighbours, and only then feathered.
+constexpr int kPolishGateSpread = 1;
+constexpr int kPolishGateFeather = 2;
+
+void polish_gate(const StampContext& ctx, std::vector<float>* gate, std::vector<float>* scratch) {
+    const BrushRegion& r = ctx.region;
+    const float a = std::max(ctx.settings.polish_angle, 1e-4f);
+    gate->resize(r.size());
+    scratch->resize(r.size());
+    for (std::size_t i = 0; i < r.size(); ++i) {
+        const float angle = ring_disagreement(ctx.mesh, ctx.adj, r.classes[i], r.normals[i]);
+        (*gate)[i] = 1.0f - std::clamp((angle - a) / a, 0.0f, 1.0f);
+    }
+    for (int pass = 0; pass < kPolishGateSpread + kPolishGateFeather; ++pass) {
+        const bool spreading = pass < kPolishGateSpread;
+        for (std::size_t i = 0; i < r.size(); ++i) {
+            std::size_t n = 0;
+            const std::uint32_t* ring = ctx.adj.ring(r.classes[i], &n);
+            float lowest = (*gate)[i], total = (*gate)[i], count = 1.0f;
+            for (std::size_t k = 0; k < n; ++k) {
+                const std::uint32_t slot = r.slot[ring[k]];
+                // A neighbour outside the region is outside the brush too;
+                // taking it as ungated would smooth past the rim.
+                if (slot == kNoClass) continue;
+                lowest = std::min(lowest, (*gate)[slot]);
+                total += (*gate)[slot];
+                count += 1.0f;
+            }
+            (*scratch)[i] = spreading ? lowest : total / count;
+        }
+        gate->swap(*scratch);
+    }
+}
+
 // Smooth, polish and scrape all need the Laplacian target, and scrape needs the
 // plane as well — from the SAME snapshot, which is the rule sculpt_scrape
 // already states for voxels: calling flatten and then smooth in sequence is not
 // this.
 void verb_smooth_family(MeshBrush verb, const StampContext& ctx,
                         std::vector<kernel::cfloat3>* smoothed,
-                        std::vector<kernel::cfloat3>* scratch,
-                        std::vector<kernel::cfloat3>* d) {
+                        std::vector<kernel::cfloat3>* scratch, std::vector<float>* gate,
+                        std::vector<float>* gate_scratch, std::vector<kernel::cfloat3>* d) {
     smooth_targets(ctx, ctx.settings.smooth_iterations, smoothed, scratch);
+    if (verb == MeshBrush::Polish) polish_gate(ctx, gate, gate_scratch);
     const BrushRegion& r = ctx.region;
     const float s = std::clamp(ctx.settings.strength, 0.0f, 1.0f);
     for (std::size_t i = 0; i < r.size(); ++i) {
@@ -406,13 +528,11 @@ void verb_smooth_family(MeshBrush verb, const StampContext& ctx,
         if (verb == MeshBrush::Smooth) {
             (*d)[i] = relax * (w * s);
         } else if (verb == MeshBrush::Polish) {
-            // Full strength where the one-ring's normals agree, fading to zero
-            // at twice the threshold. A hard edge disagrees, so it survives a
-            // pass that removes the noise beside it.
-            const float angle = ring_disagreement(ctx.mesh, ctx.adj, r.classes[i], r.normals[i]);
-            const float a = std::max(ctx.settings.polish_angle, 1e-4f);
-            const float keep = 1.0f - std::clamp((angle - a) / a, 0.0f, 1.0f);
-            (*d)[i] = relax * (w * s * keep);
+            // Gated: see polish_gate. The gate is computed for the whole region
+            // first, because it is averaged over the ring — a per-vertex gate
+            // switches from 1 to 0 across a single edge and leaves a bead of
+            // unsmoothed vertices along every feature it protected.
+            (*d)[i] = relax * (w * s * (*gate)[i]);
         } else {
             // Scrape: the cut and the relax together, both against the snapshot.
             const kernel::cfloat3 cut =
@@ -462,7 +582,8 @@ std::size_t MeshSculptor::stamp(MeshBrush verb, const MeshBrushSettings& setting
         case MeshBrush::Smooth:
         case MeshBrush::Polish:
         case MeshBrush::Scrape:
-            verb_smooth_family(verb, ctx, &smoothed_, &smooth_tmp_, &displacement_);
+            verb_smooth_family(verb, ctx, &smoothed_, &smooth_tmp_, &gate_, &gate_tmp_,
+                               &displacement_);
             break;
     }
     return write(record);
@@ -532,12 +653,17 @@ void MeshSculptor::recompute_normals(const std::vector<std::uint32_t>& classes,
         std::size_t tc = 0;
         const std::uint32_t* tris = adjacency_.triangles_of(c, &tc);
         for (std::size_t k = 0; k < tc; ++k) {
-            const kernel::cfloat3 fn = face_normal(mesh_, tris[k]);
+            // Angle-weighted, for the reason class_normal gives: an
+            // area-weighted normal on a lattice-derived mesh tracks the
+            // lattice rather than the surface.
+            const kernel::cfloat3 fn =
+                safe_normalize(face_normal(mesh_, tris[k]), kernel::cf3(0, 0, 0));
             for (int corner = 0; corner < 3; ++corner) {
                 const std::uint32_t v = mesh_.indices[tris[k] * 3 + corner];
                 // Only this class's own corners: a split vertex keeps its own
                 // faces, which is what preserves a hard edge's shading.
-                if (adjacency_.class_of(v) == c) mesh_.normals[v] = mesh_.normals[v] + fn;
+                if (adjacency_.class_of(v) == c)
+                    mesh_.normals[v] = mesh_.normals[v] + fn * corner_angle(mesh_, tris[k], corner);
             }
         }
     }

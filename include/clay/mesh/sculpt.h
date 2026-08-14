@@ -60,18 +60,18 @@ enum class MeshFalloff : std::uint8_t {
 // snapshot rather than a sequence of calls — see `BrushRegion`.
 enum class MeshBrush : std::uint8_t {
     // -- the primitives ------------------------------------------------------
-    Grab = 0,       // drag the region by the stroke delta
-    Draw = 1,       // displace along the REGION's averaged normal
-    Inflate = 2,    // displace along EACH VERTEX's own normal, signed
-    Smooth = 3,     // Laplacian average over the one-ring
-    Pinch = 4,      // signed tangential gather (+) / spread (-) about the centre
-    Flatten = 5,    // project toward a plane, in one of three modes
+    Grab = 0,     // drag the region by the stroke delta
+    Draw = 1,     // displace along the REGION's averaged normal
+    Inflate = 2,  // displace along EACH VERTEX's own normal, signed
+    Smooth = 3,   // Laplacian average over the one-ring
+    Pinch = 4,    // signed tangential gather (+) / spread (-) about the centre
+    Flatten = 5,  // project toward a plane, in one of three modes
     // -- the compositions ----------------------------------------------------
-    Clay = 6,       // draw's deposit CLAMPED to a plane at the stamp height
-    Crease = 7,     // a tight negative draw and a pinch, in one stamp
-    Scrape = 8,     // flatten cut-only and smooth, from one snapshot
-    Polish = 9,     // smooth GATED by dihedral angle: noise goes, edges stay
-    Snakehook = 10, // grab re-anchored along the drag
+    Clay = 6,        // draw's deposit CLAMPED to a plane at the stamp height
+    Crease = 7,      // a tight negative draw and a pinch, in one stamp
+    Scrape = 8,      // flatten cut-only and smooth, from one snapshot
+    Polish = 9,      // smooth GATED by dihedral angle: noise goes, edges stay
+    Snakehook = 10,  // grab re-anchored along the drag
 };
 
 inline constexpr std::uint32_t kNoClass = 0xffffffffu;
@@ -80,7 +80,6 @@ inline constexpr std::uint32_t kNoClass = 0xffffffffu;
 // preference: each pass walks the whole region again, so a count arriving from
 // a host's slider typo is otherwise an unbounded amount of work.
 inline constexpr int kMaxSmoothIterations = 64;
-
 
 struct MeshBrushSettings {
     // Where the stamp lands, in the mesh's own space, and how far it reaches.
@@ -129,10 +128,16 @@ struct MeshBrushSettings {
     kernel::cfloat3 plane_point = kernel::cf3(0, 0, 0);
     kernel::cfloat3 plane_normal = kernel::cf3(0, 1, 0);
 
-    // Polish: how far the one-ring's face normals may disagree before the
+    // Polish: how far the surface around a vertex may bend before the
     // smoothing fades out, in radians. Full strength up to this angle, zero at
-    // twice it — so a chamfer survives a pass that removes the noise beside it.
-    float polish_angle = 0.35f;
+    // twice it — so an edge survives a pass that removes the noise beside it.
+    //
+    // The default is deliberately TIGHT. Measured on a dented box (see
+    // examples/46), 0.2 removes marginally more roughness than a plain smooth
+    // while moving the box's edges a third as far; by 0.45 the gate is open
+    // almost everywhere and polish is a plain smooth wearing a different name,
+    // which is not a useful default for a brush called polish.
+    float polish_angle = 0.20f;
 
     // Smooth, Polish and Scrape: passes per stamp. Bounded by
     // kMaxSmoothIterations.
@@ -192,7 +197,7 @@ struct BrushRegion {
 // bar. `indices` and `quads` are not recorded because nothing can change them
 // — the contract paying off.
 class VertexDeltas {
-  public:
+   public:
     std::size_t size() const { return vertices_.size(); }
     bool empty() const { return vertices_.empty(); }
     const std::vector<std::uint32_t>& vertices() const { return vertices_; }
@@ -213,7 +218,7 @@ class VertexDeltas {
     // and after a deferred normal recomputation, so the last word wins.
     void sync_after(std::uint32_t v, const Mesh& m);
 
-  private:
+   private:
     std::vector<std::uint32_t> vertices_;
     std::vector<kernel::cfloat3> before_position_, after_position_;
     std::vector<kernel::cfloat3> before_normal_, after_normal_;
@@ -228,7 +233,7 @@ class VertexDeltas {
 // change its vertex or index count while one exists — which for this feature
 // means nothing else may change it at all, since no verb here can.
 class MeshSculptor {
-  public:
+   public:
     explicit MeshSculptor(Mesh& m, float weld_epsilon = kDefaultWeldEpsilon);
     // For a caller that already built an adjacency (an importer, a test). The
     // adjacency must match `m`; it is checked.
@@ -266,6 +271,12 @@ class MeshSculptor {
     // pending. `record` is updated so a deferred stroke's undo is still exact.
     void flush_normals(VertexDeltas* record = nullptr);
 
+    // Where a weld class sits, and which one is nearest a point. The second is
+    // a LINEAR SCAN — fine once per stroke to find an anchor, wrong per stamp
+    // on a large mesh, which is what `MeshBrushSettings::seed_class` is for.
+    kernel::cfloat3 class_position(std::uint32_t cls) const;
+    std::uint32_t nearest_class(kernel::cfloat3 p) const;
+
     // -- picking -------------------------------------------------------------
     // Built lazily on the first query. Positions move under it: a sculpted
     // mesh reports the surface as it was until `refresh_bvh` runs. That is the
@@ -275,7 +286,7 @@ class MeshSculptor {
     const Bvh& bvh();
     void refresh_bvh();
 
-  private:
+   private:
     void gather(const MeshBrushSettings& settings, const field::MaskGate& gate);
     std::size_t write(VertexDeltas* record);
     void recompute_normals(const std::vector<std::uint32_t>& classes, VertexDeltas* record);
@@ -287,6 +298,7 @@ class MeshSculptor {
     std::vector<float> distance_;
     std::vector<kernel::cfloat3> displacement_;
     std::vector<kernel::cfloat3> smoothed_, smooth_tmp_;
+    std::vector<float> gate_, gate_tmp_;
     std::vector<std::uint32_t> pending_normals_, deferred_normals_;
     std::vector<char> normal_mark_;
     std::unique_ptr<Bvh> bvh_;

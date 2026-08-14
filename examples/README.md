@@ -533,6 +533,34 @@ The script asserts that identity rather than checking for it; a coarser dual
 cell or a blur pass resamples the occupancy and breaks it, which is why it is
 stated with its conditions.
 
+## 45-47 — fixed-topology mesh brushes
+
+Every other brush in this gallery edits a field. These edit the **vertices of a
+mesh a document is carrying**, and hold one line while they do: topology never
+changes. The index buffer that goes in comes out byte for byte, which is the
+whole reason they exist — a retopologized quad mesh re-enters a document as a
+mesh layer, and the only other way to edit one is `Volume.from_mesh`, which
+resamples it and throws the edge loops and uvs away.
+
+- **`45_mesh_brushes`** — the six primitives (grab, draw, inflate, smooth,
+  pinch, flatten) on an imported OBJ, driven from a real pick. Draw and inflate
+  side by side, because they look like one brush and are not: draw takes ONE
+  direction for the stamp and inflate takes each vertex's own, and the script
+  measures the difference rather than asserting it. Ends on a quad export
+  sculpted with a stroke and the quad list compared element for element.
+- **`46_mesh_brush_compositions`** — clay, crease, scrape, polish and
+  snakehook. Each is one stamp against one snapshot rather than a sequence of
+  calls, for the reason `sculpt_scrape` already gives. Clay's flat top is
+  measured against a plane fit; polish's gate is swept over three angles, which
+  is the honest way to show a tradeoff; snakehook's triangles stretch 6x and
+  the script says so, because that stretch is the artist's signal the mesh
+  wants retopo and not a defect.
+- **`47_mesh_brush_reach_and_undo`** — the three things that make the above
+  usable on a real asset. A brush on the inside of one prong of a fork must not
+  dent the other, which is the Move Topological rule and is visible in the
+  render. A mask freezes half a stroke, for a displacement verb and for smooth.
+  And a whole gesture undoes from its vertex deltas, bit for bit.
+
 ## Notes
 
 - **This page documents 00-17 and the two showcase examples.** The gallery

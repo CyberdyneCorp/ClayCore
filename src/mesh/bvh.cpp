@@ -91,8 +91,8 @@ Bvh Bvh::build(const Mesh& m) {
         std::uint32_t i0 = m.indices[t * 3], i1 = m.indices[t * 3 + 1], i2 = m.indices[t * 3 + 2];
         const std::size_t n = m.positions.size();
         if (i0 >= n || i1 >= n || i2 >= n) continue;  // a bad index drops its triangle
-        bvh.tris_.push_back(Tri{m.positions[i0], m.positions[i1], m.positions[i2],
-                                static_cast<std::uint32_t>(t)});
+        bvh.tris_.push_back(
+            Tri{m.positions[i0], m.positions[i1], m.positions[i2], static_cast<std::uint32_t>(t)});
     }
     if (!bvh.tris_.empty()) bvh.build_node(0, static_cast<std::int32_t>(bvh.tris_.size()));
     return bvh;

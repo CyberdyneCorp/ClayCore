@@ -44,13 +44,28 @@ import _render as R
 EYE, TARGET = (2.4, 1.9, 2.9), (0.0, 0.0, 0.0)
 
 
-def source_shape(doc):
+def source_shape(doc, bumps=True):
+    """The model, and a handful of bumps where the brush will land.
+
+    The bumps are there so `smooth` and `flatten` have something to do — on a
+    surface that is already smooth and already near-planar under the footprint,
+    both are correct and both are invisible, which makes for a poor picture and
+    a misleading one."""
     layer = doc.add_sdf_layer("source")
     layer.add(clay.Sphere(r=0.62))
     layer.add(clay.Capsule(a=(0, 0.35, 0), b=(0, 0.95, 0), r=0.22),
               blend=clay.Smooth(0.14))
     layer.add(clay.Torus(R=0.55, r=0.10, position=(0, -0.35, 0)),
               blend=clay.Smooth(0.06))
+    if bumps:
+        rng = np.random.default_rng(45)
+        for _ in range(14):
+            d = rng.normal(size=3)
+            d[2] = abs(d[2]) + 0.6          # keep them on the side the camera sees
+            d /= np.linalg.norm(d)
+            layer.add(clay.Sphere(r=float(rng.uniform(0.05, 0.09)),
+                                  position=tuple(d * 0.60)),
+                      blend=clay.Smooth(0.05))
     return layer
 
 
@@ -128,7 +143,7 @@ def main():
         ("grab", dict(strength=1.0, direction=(0.22, 0.12, 0.0), **common)),
         ("draw", dict(strength=0.55, **common)),
         ("inflate", dict(strength=0.55, **common)),
-        ("smooth", dict(strength=1.0, smooth_iterations=6, **common)),
+        ("smooth", dict(strength=1.0, smooth_iterations=10, **common)),
         ("pinch", dict(strength=0.8, **common)),
         ("flatten", dict(strength=1.0, **common)),
     ]
@@ -151,9 +166,14 @@ def main():
                     caption="untouched, then " + ", ".join(labels))
 
     # --- draw against inflate, which is where the difference lives ------------
+    # A moderate strength on purpose. Pushed hard, inflate folds a dense
+    # lattice-derived mesh over itself — every vertex moving along its OWN
+    # normal is what does it, and on fixed topology there is nothing to
+    # re-tessellate the fold away. That is the contract showing its edge, and
+    # 46's snakehook is where it is shown deliberately.
     drawn, inflated = copy_of(model), copy_of(model)
-    clay.MeshSculptor(drawn).stamp("draw", strength=0.9, **common)
-    clay.MeshSculptor(inflated).stamp("inflate", strength=0.9, **common)
+    clay.MeshSculptor(drawn).stamp("draw", strength=0.45, **common)
+    clay.MeshSculptor(inflated).stamp("inflate", strength=0.45, **common)
     R.side_by_side(
         R.render_array(preview(drawn), eye=EYE, target=TARGET, width=240, height=240),
         R.render_array(preview(inflated), eye=EYE, target=TARGET, width=240, height=240),
@@ -179,7 +199,7 @@ def main():
 
     # --- the case the feature exists for: a quad mesh survives a stroke -------
     quad_doc = clay.Document()
-    source_shape(quad_doc)
+    source_shape(quad_doc, bumps=False)   # a retopo mesh is clean by definition
     quads = quad_doc.mesh_quads(cell_size=0.055)
     quads_before = np.array(quads.quads, copy=True)
     positions_before = np.array(quads.positions, copy=True)

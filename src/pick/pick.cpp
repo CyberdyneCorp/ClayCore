@@ -216,15 +216,14 @@ MeshHit raycast_mesh(const mesh::Mesh& m, const mesh::Bvh& bvh, const math::Ray&
     const std::uint32_t i1 = m.indices[hit.triangle * 3 + 1];
     const std::uint32_t i2 = m.indices[hit.triangle * 3 + 2];
     const float w = 1.0f - hit.u - hit.v;
-    const cfloat3 local_p =
-        m.positions[i0] * w + m.positions[i1] * hit.u + m.positions[i2] * hit.v;
+    const cfloat3 local_p = m.positions[i0] * w + m.positions[i1] * hit.u + m.positions[i2] * hit.v;
 
     cfloat3 local_n;
     if (m.normals.size() == m.positions.size()) {
         local_n = m.normals[i0] * w + m.normals[i1] * hit.u + m.normals[i2] * hit.v;
     } else {
-        local_n = kernel::ccross(m.positions[i1] - m.positions[i0],
-                                 m.positions[i2] - m.positions[i0]);
+        local_n =
+            kernel::ccross(m.positions[i1] - m.positions[i0], m.positions[i2] - m.positions[i0]);
     }
     const float len = kernel::clength(local_n);
     // A zero-area triangle or three cancelling vertex normals: report the face

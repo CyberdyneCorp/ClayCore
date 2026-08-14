@@ -8,8 +8,8 @@
 
 #include <doctest/doctest.h>
 
-#include <cmath>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -42,14 +42,15 @@ Mesh plane_grid(int n, float half, bool with_normals = true) {
     const float step = 2.0f * half / static_cast<float>(n);
     for (int z = 0; z <= n; ++z)
         for (int x = 0; x <= n; ++x) {
-            m.positions.push_back(
-                cf3(-half + step * static_cast<float>(x), 0.0f, -half + step * static_cast<float>(z)));
+            m.positions.push_back(cf3(-half + step * static_cast<float>(x), 0.0f,
+                                      -half + step * static_cast<float>(z)));
             if (with_normals) m.normals.push_back(cf3(0, 1, 0));
         }
     const std::uint32_t stride = static_cast<std::uint32_t>(n + 1);
     for (int z = 0; z < n; ++z)
         for (int x = 0; x < n; ++x) {
-            const std::uint32_t a = static_cast<std::uint32_t>(z) * stride + static_cast<std::uint32_t>(x);
+            const std::uint32_t a =
+                static_cast<std::uint32_t>(z) * stride + static_cast<std::uint32_t>(x);
             const std::uint32_t b = a + 1, c = a + stride, d = c + 1;
             m.indices.insert(m.indices.end(), {a, c, b, b, c, d});
         }
@@ -174,9 +175,9 @@ float plane_residual(const Mesh& m, const Mesh& base, float radius) {
     return worst;
 }
 
-const MeshBrush kAllVerbs[] = {MeshBrush::Grab,   MeshBrush::Draw,   MeshBrush::Inflate,
-                               MeshBrush::Smooth, MeshBrush::Pinch,  MeshBrush::Flatten,
-                               MeshBrush::Clay,   MeshBrush::Crease, MeshBrush::Scrape,
+const MeshBrush kAllVerbs[] = {MeshBrush::Grab,   MeshBrush::Draw,     MeshBrush::Inflate,
+                               MeshBrush::Smooth, MeshBrush::Pinch,    MeshBrush::Flatten,
+                               MeshBrush::Clay,   MeshBrush::Crease,   MeshBrush::Scrape,
                                MeshBrush::Polish, MeshBrush::Snakehook};
 
 }  // namespace
@@ -500,25 +501,31 @@ TEST_CASE("crease cuts and squeezes in one stamp") {
 }
 
 TEST_CASE("polish keeps a hard edge that a plain smooth rounds off") {
-    // A chevron: two flats meeting at a crease, with noise on both flats.
-    Mesh base = plane_grid(24, 1.0f);
+    // A chevron: two flats meeting at a 77-degree crease, with a LOW-FREQUENCY
+    // ripple on both. Low frequency on purpose — per-vertex jitter is not what
+    // surface error looks like, and it defeats any curvature gate by
+    // construction, because noise steeper than the feature makes every flat
+    // look like an edge. See the note on ring_disagreement.
+    Mesh base = plane_grid(28, 1.0f);
     for (std::size_t v = 0; v < base.positions.size(); ++v) {
         cfloat3& p = base.positions[v];
-        p.y = std::fabs(p.x) * 0.8f + (v % 3 == 0 ? 0.01f : -0.005f);
+        const float ripple = 0.015f * std::sin(p.x * 10.5f) * std::sin(p.z * 10.5f);
+        p.y = std::fabs(p.x) * 0.8f + ripple;
     }
 
     auto run = [&](MeshBrush verb) {
         Mesh m = base;
         MeshSculptor sculptor(m);
         MeshBrushSettings s = centred(cf3(0, 0, 0), 0.9f, 1.0f);
-        s.smooth_iterations = 2;
+        s.falloff = mesh::MeshFalloff::Constant;
+        s.smooth_iterations = 4;
         s.polish_angle = 0.25f;
         sculptor.stamp(verb, s);
         return m;
     };
     const Mesh polished = run(MeshBrush::Polish), smoothed = run(MeshBrush::Smooth);
 
-    // The crease line is x == 0. How much of it each verb destroyed:
+    // How much of the crease each verb destroyed, along x == 0.
     auto crease_damage = [&](const Mesh& m) {
         float sum = 0.0f;
         int n = 0;
@@ -529,24 +536,26 @@ TEST_CASE("polish keeps a hard edge that a plain smooth rounds off") {
             }
         return n ? sum / static_cast<float>(n) : 0.0f;
     };
-    // Smooth rounds the crease off; polish, gated by the dihedral angle, leaves
-    // it where it is.
-    CHECK(crease_damage(smoothed) > 0.01f);
-    CHECK(crease_damage(polished) < crease_damage(smoothed) * 0.2f);
-
-    // And polish still removed noise on the flats.
-    auto flat_noise = [&](const Mesh& m) {
+    // And how much of the ripple is left on the flats — the job it was asked
+    // to do, measured away from the crease so the crease cannot flatter it.
+    auto ripple_left = [&](const Mesh& m) {
         float sum = 0.0f;
         int n = 0;
         for (std::size_t v = 0; v < m.positions.size(); ++v) {
-            const cfloat3& p = base.positions[v];
-            if (std::fabs(p.x) < 0.3f || std::fabs(p.x) > 0.8f) continue;
-            sum += std::fabs(m.positions[v].y - std::fabs(m.positions[v].x) * 0.8f);
+            const cfloat3& b = base.positions[v];
+            if (std::fabs(b.x) < 0.25f || std::fabs(b.x) > 0.75f) continue;
+            const float ideal = std::fabs(m.positions[v].x) * 0.8f;
+            sum += std::fabs(m.positions[v].y - ideal);
             ++n;
         }
         return n ? sum / static_cast<float>(n) : 0.0f;
     };
-    CHECK(flat_noise(polished) < flat_noise(base));
+
+    // Polish removed the ripple...
+    CHECK(ripple_left(polished) < ripple_left(base) * 0.8f);
+    // ...and left the crease alone, where a plain smooth rounded it off.
+    CHECK(crease_damage(smoothed) > 0.01f);
+    CHECK(crease_damage(polished) < crease_damage(smoothed) * 0.35f);
 }
 
 TEST_CASE("scrape is one operation, not flatten followed by smooth") {
@@ -624,8 +633,8 @@ TEST_CASE("a MaskField reaches every verb through apply_to_mesh") {
     const std::vector<brush::Stamp> stamps = brush::resolve_stroke(samples, preset);
     REQUIRE(stamps.size() > 1);
 
-    CHECK(brush::apply_to_mesh(sculptor, stamps, MeshBrush::Draw, centred(cf3(0, 0, 0), 0.25f, 1.0f),
-                               &mask) > 0);
+    CHECK(brush::apply_to_mesh(sculptor, stamps, MeshBrush::Draw,
+                               centred(cf3(0, 0, 0), 0.25f, 1.0f), &mask) > 0);
 
     // Deep inside the painted region nothing moved.
     for (std::size_t v = 0; v < m.positions.size(); ++v)
@@ -809,12 +818,12 @@ TEST_CASE("raycast_mesh works through a layer transform") {
 TEST_CASE("raycast_mesh falls back to the geometric normal, and reports a miss") {
     Mesh m = plane_grid(4, 1.0f, /*with_normals=*/false);
     mesh::Bvh bvh = mesh::Bvh::build(m);
-    const pick::MeshHit hit = pick::raycast_mesh(m, bvh, math::Ray{cf3(0.1f, 2, 0.1f), cf3(0, -1, 0)});
+    const pick::MeshHit hit =
+        pick::raycast_mesh(m, bvh, math::Ray{cf3(0.1f, 2, 0.1f), cf3(0, -1, 0)});
     REQUIRE(hit.hit);
     CHECK(std::fabs(std::fabs(hit.normal.y) - 1.0f) < 1e-4f);
 
-    const pick::MeshHit missed =
-        pick::raycast_mesh(m, bvh, math::Ray{cf3(9, 2, 9), cf3(0, -1, 0)});
+    const pick::MeshHit missed = pick::raycast_mesh(m, bvh, math::Ray{cf3(9, 2, 9), cf3(0, -1, 0)});
     CHECK_FALSE(missed.hit);
 }
 

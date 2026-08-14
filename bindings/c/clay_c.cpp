@@ -2,39 +2,40 @@
 // thread-local error details, no exceptions cross this boundary (the core
 // builds with -fno-exceptions on GCC/Clang).
 
-#include "clay.h"
-
 #include <algorithm>
 #include <atomic>
 #include <cmath>
-#include <mutex>
 #include <cstddef>
 #include <cstring>
 #include <map>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 
-#include "desc_version.h"
-
 #include "../../backends/cpu/thread_pool.h"
-
+#include "clay.h"
+#include "clay/brush/mask_extrude.h"
+#include "clay/brush/move.h"
+#include "clay/brush/stroke.h"
+#include "clay/brush/tube.h"
+#include "clay/cut/cut.h"
 #include "clay/eval/backend.h"
 #include "clay/eval/bake_points.h"
-#include "clay/io/clayspace.h"
-#include <memory>
-
-#include "clay/io/mesh_io.h"
 #include "clay/field/flatten.h"
 #include "clay/field/move_topological.h"
 #include "clay/field/relax.h"
-#include "clay/mesh/to_field.h"
+#include "clay/io/clayspace.h"
+#include "clay/io/mesh_io.h"
+#include "clay/io/parity_fixture.h"
 #include "clay/mesh/decimate.h"
 #include "clay/mesh/dual_contouring.h"
 #include "clay/mesh/marching.h"
 #include "clay/mesh/quad_mesh.h"
 #include "clay/mesh/sculpt.h"
 #include "clay/mesh/surface_nets.h"
+#include "clay/mesh/to_field.h"
 #include "clay/mesh/validate.h"
 #include "clay/pick/pick.h"
 #include "clay/scene/armature.h"
@@ -43,15 +44,10 @@
 #include "clay/scene/consolidate.h"
 #include "clay/scene/cull_index.h"
 #include "clay/scene/tape.h"
-#include "clay/io/parity_fixture.h"
 #include "clay/version.h"
 #include "clay/voxel/grid.h"
-#include "clay/brush/mask_extrude.h"
-#include "clay/brush/move.h"
-#include "clay/brush/stroke.h"
-#include "clay/brush/tube.h"
-#include "clay/cut/cut.h"
 #include "clay/voxel/mask.h"
+#include "desc_version.h"
 
 using namespace clay;
 
@@ -6894,7 +6890,8 @@ namespace {
 constexpr std::size_t kMeshBrushDescOriginal =
     offsetof(clay_mesh_brush_desc, smooth_iterations) + sizeof(std::int32_t);
 constexpr std::size_t kMeshFrameOriginal = offsetof(clay_mesh_frame, scale) + sizeof(float);
-constexpr std::size_t kMeshHitOriginal = offsetof(clay_mesh_hit, seed_class) + sizeof(std::uint32_t);
+constexpr std::size_t kMeshHitOriginal =
+    offsetof(clay_mesh_hit, seed_class) + sizeof(std::uint32_t);
 
 mesh::Mesh* mesh_data_mut(clay_mesh* mesh) {
     if (!mesh) return nullptr;
@@ -6914,8 +6911,7 @@ mesh::Mesh* mesh_data_mut(clay_mesh* mesh) {
 clay_result mesh_layer_editable(const clay_mesh* mesh) {
     if (!mesh->doc) return CLAY_OK;  // a standalone mesh belongs to no layer
     const scene::Layer* l = mesh->doc->doc.document.find_layer(mesh->layer);
-    if (!l)
-        return fail(CLAY_ERROR_NOT_FOUND, "the mesh layer is no longer in its document");
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "the mesh layer is no longer in its document");
     if (l->protected_from_edits())
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     std::string("layer ") + std::to_string(mesh->layer) + " is " +
@@ -6957,7 +6953,8 @@ clay_result read_mesh_brush(const clay_mesh_brush_desc* src, mesh::MeshBrush* ou
     if (!mesh_falloff_is_known(d.falloff))
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "unknown mesh falloff: " + std::to_string(d.falloff));
-    if (d.flatten_mode < 0 || d.flatten_mode > static_cast<std::int32_t>(field::FlattenMode::FillOnly))
+    if (d.flatten_mode < 0 ||
+        d.flatten_mode > static_cast<std::int32_t>(field::FlattenMode::FillOnly))
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "unknown flatten mode: " + std::to_string(d.flatten_mode));
     if (!(d.radius > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "brush radius must be > 0");
@@ -7054,8 +7051,7 @@ clay_result clay_mesh_sculptor_create(clay_mesh* mesh, float weld_epsilon,
 
 void clay_mesh_sculptor_destroy(clay_mesh_sculptor* sculptor) { delete sculptor; }
 
-clay_result clay_mesh_sculptor_vertex_count(const clay_mesh_sculptor* sculptor,
-                                            size_t* out_count) {
+clay_result clay_mesh_sculptor_vertex_count(const clay_mesh_sculptor* sculptor, size_t* out_count) {
     if (!sculptor || !sculptor->sculptor)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null mesh sculptor");
     if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_count");
@@ -7071,9 +7067,9 @@ clay_result clay_mesh_sculptor_class_count(const clay_mesh_sculptor* sculptor, s
     return CLAY_OK;
 }
 
-clay_result clay_mesh_sculptor_stamp(clay_mesh_sculptor* sculptor,
-                                     const clay_mesh_brush_desc* desc, const clay_mask* mask,
-                                     clay_mesh_deltas* deltas, size_t* out_moved) {
+clay_result clay_mesh_sculptor_stamp(clay_mesh_sculptor* sculptor, const clay_mesh_brush_desc* desc,
+                                     const clay_mask* mask, clay_mesh_deltas* deltas,
+                                     size_t* out_moved) {
     clay_result r = resolve_sculptor(sculptor, /*for_edit=*/true);
     if (r != CLAY_OK) return r;
     mesh::MeshBrush verb = mesh::MeshBrush::Draw;
@@ -7097,8 +7093,7 @@ clay_result clay_mesh_sculptor_stamp(clay_mesh_sculptor* sculptor,
 clay_result clay_mesh_sculptor_apply_stroke(clay_mesh_sculptor* sculptor,
                                             const float* samples_xyzpt, size_t sample_count,
                                             const clay_stroke_preset* preset,
-                                            const clay_mesh_brush_desc* desc,
-                                            const clay_mask* mask,
+                                            const clay_mesh_brush_desc* desc, const clay_mask* mask,
                                             const clay_mesh_frame* mesh_to_world,
                                             int32_t defer_normals, clay_mesh_deltas* deltas,
                                             size_t* out_applied) {
@@ -7123,9 +7118,9 @@ clay_result clay_mesh_sculptor_apply_stroke(clay_mesh_sculptor* sculptor,
         r = resolve_mask(mask, &field_mask);
         if (r != CLAY_OK) return r;
     }
-    const std::size_t applied = brush::apply_to_mesh(
-        *sculptor->sculptor, brush::resolve_stroke(samples, resolved), verb, settings, field_mask,
-        deltas ? &deltas->deltas : nullptr, options);
+    const std::size_t applied =
+        brush::apply_to_mesh(*sculptor->sculptor, brush::resolve_stroke(samples, resolved), verb,
+                             settings, field_mask, deltas ? &deltas->deltas : nullptr, options);
     if (out_applied) *out_applied = applied;
     return CLAY_OK;
 }

@@ -2699,7 +2699,11 @@ typedef struct clay_mesh_brush_desc {
     int32_t use_given_plane; /* otherwise the region's own centroid and normal */
     float plane_point[3];
     float plane_normal[3];
-    float polish_angle;        /* radians; POLISH's dihedral gate */
+    /* POLISH's gate, in radians: how far the surface around a vertex may bend
+     * before the smoothing fades out. Full strength up to this angle, zero at
+     * twice it. clay_mesh_brush_defaults sets it tight on purpose — a loose
+     * gate is a plain smooth under another name. */
+    float polish_angle;
     int32_t smooth_iterations; /* 1..CLAY_MESH_MAX_SMOOTH_ITERATIONS */
 } clay_mesh_brush_desc;
 
@@ -2765,9 +2769,9 @@ clay_result clay_mesh_sculptor_class_count(const clay_mesh_sculptor* sculptor, s
 /* One stamp. `mask` and `deltas` may be NULL. *out_moved receives how many weld
  * classes moved — zero for a stamp that reached nothing, that was fully masked,
  * or whose settings amount to no displacement. */
-clay_result clay_mesh_sculptor_stamp(clay_mesh_sculptor* sculptor,
-                                     const clay_mesh_brush_desc* desc, const clay_mask* mask,
-                                     clay_mesh_deltas* deltas, size_t* out_moved);
+clay_result clay_mesh_sculptor_stamp(clay_mesh_sculptor* sculptor, const clay_mesh_brush_desc* desc,
+                                     const clay_mask* mask, clay_mesh_deltas* deltas,
+                                     size_t* out_moved);
 
 /* Resolve a stroke and apply it — the fourth consumer of the stroke engine,
  * after the grid, the mask and the edit list. Spacing, pressure response,
@@ -2793,8 +2797,7 @@ clay_result clay_mesh_sculptor_stamp(clay_mesh_sculptor* sculptor,
 clay_result clay_mesh_sculptor_apply_stroke(clay_mesh_sculptor* sculptor,
                                             const float* samples_xyzpt, size_t sample_count,
                                             const clay_stroke_preset* preset,
-                                            const clay_mesh_brush_desc* desc,
-                                            const clay_mask* mask,
+                                            const clay_mesh_brush_desc* desc, const clay_mask* mask,
                                             const clay_mesh_frame* mesh_to_world,
                                             int32_t defer_normals, clay_mesh_deltas* deltas,
                                             size_t* out_applied);
@@ -2809,7 +2812,7 @@ typedef struct clay_mesh_hit {
     float position[3];
     float normal[3]; /* world space, unit */
     uint32_t triangle;
-    float u, v;      /* barycentrics: p = a*(1-u-v) + b*u + c*v */
+    float u, v; /* barycentrics: p = a*(1-u-v) + b*u + c*v */
     /* A weld class of the triangle hit, ready to hand back as the descriptor's
      * seed_class so the surface walk starts where the finger did. */
     uint32_t seed_class;

@@ -47,7 +47,7 @@ namespace mesh {
 inline constexpr float kDefaultWeldEpsilon = 1e-5f;
 
 class Adjacency {
-  public:
+   public:
     // Build over `m`. `weld_epsilon` is relative to the bounding-box diagonal;
     // pass 0 for exact-bit welding, which is what a caller who generated the
     // mesh themselves and knows there are no near-duplicates wants.
@@ -59,9 +59,9 @@ class Adjacency {
     static Adjacency build(const Mesh& m, float weld_epsilon = kDefaultWeldEpsilon);
 
     std::size_t vertex_count() const { return class_of_.size(); }
-    std::size_t class_count() const { return class_members_offsets_.empty()
-                                          ? 0
-                                          : class_members_offsets_.size() - 1; }
+    std::size_t class_count() const {
+        return class_members_offsets_.empty() ? 0 : class_members_offsets_.size() - 1;
+    }
     std::size_t triangle_count() const { return triangle_count_; }
 
     // Which weld class a raw vertex index belongs to.
@@ -89,11 +89,10 @@ class Adjacency {
     // never invalidate it; a caller who reused one across two meshes has a bug
     // that this turns into a refusal instead of a read out of bounds.
     bool matches(const Mesh& m) const {
-        return m.positions.size() == class_of_.size() &&
-               m.indices.size() == triangle_count_ * 3;
+        return m.positions.size() == class_of_.size() && m.indices.size() == triangle_count_ * 3;
     }
 
-  private:
+   private:
     static const std::uint32_t* span(const std::vector<std::uint32_t>& offsets,
                                      const std::vector<std::uint32_t>& values, std::uint32_t i,
                                      std::size_t* count) {
@@ -102,7 +101,7 @@ class Adjacency {
         return values.data() + begin;
     }
 
-    std::vector<std::uint32_t> class_of_;             // per raw vertex
+    std::vector<std::uint32_t> class_of_;               // per raw vertex
     std::vector<std::uint32_t> class_members_offsets_;  // class_count + 1
     std::vector<std::uint32_t> class_members_;
     std::vector<std::uint32_t> ring_offsets_;  // class_count + 1
@@ -117,7 +116,7 @@ class Adjacency {
 // may have a million vertices; allocating a per-class array per stamp is the
 // entire cost of the stroke, so the caller keeps one of these.
 struct WalkScratch {
-    std::vector<float> distance;      // per class; kUnreached where untouched
+    std::vector<float> distance;       // per class; kUnreached where untouched
     std::vector<std::uint32_t> dirty;  // classes to reset, so the reset is O(reached)
     static constexpr float kUnreached = -1.0f;
 };
@@ -153,10 +152,24 @@ struct WalkScratch {
 // which are CLEARED first. The path distance is reported because a caller may
 // want it; the weights the brushes apply come from the straight line.
 
-// How much longer than the radius a path may be. Covers the structured-grid
-// worst case with room to spare, and is still short enough that a brush on the
-// upper lip cannot walk round the mouth to the chin.
-inline constexpr float kDefaultPathBudget = 1.6f;
+// How much longer than the radius a path may be, and where the weight starts
+// fading out toward it.
+//
+// The budget covers the structured-grid worst case (a zigzagged diagonal costs
+// sqrt(2) times the straight line) with room to spare, and is still short
+// enough that a long detour inside the ball costs a class its place. It buys no
+// extra work on an ordinary surface, because the ball bounds the region first.
+//
+// The TAPER is what keeps the region's rim smooth where the two bounds
+// disagree. On a strongly curved surface — the inside of one prong of a fork —
+// the walk can stop at a class whose straight-line weight is still appreciable,
+// and an abrupt stop there is a visible step. Fading the weight to zero over
+// the last stretch of the budget removes it. The taper starts ABOVE the
+// structured-grid worst case on purpose: below that it would fire on an
+// ordinary flat sheet, where there is nothing to fix and the straight-line
+// falloff is exactly right.
+inline constexpr float kDefaultPathBudget = 2.0f;
+inline constexpr float kPathTaperStart = 1.5f;
 
 void geodesic_region(const Mesh& m, const Adjacency& adj, kernel::cfloat3 seed_position,
                      float radius, WalkScratch& scratch, std::vector<std::uint32_t>* out_classes,

@@ -198,9 +198,23 @@ drag: it reaches as far as the drag goes and the field stays exact (step scale
 Recorded so they read as decisions rather than oversights. In full in
 [`../openspec/ROADMAP.md`](../openspec/ROADMAP.md).
 
-- **Mesh surface-mode sculpting** (ZBrush's surface brushes, 3DCoat's LiveClay).
-  An SDF sidesteps topology entirely; competing on dynamic tessellation is not
-  this engine's fight.
+- **Topology-CHANGING mesh sculpting** — dyntopo, multires, remeshing,
+  subdivision (3DCoat's LiveClay, ZBrush's dynamic tessellation). An SDF
+  sidesteps topology entirely; competing on dynamic tessellation is not this
+  engine's fight.
+
+  **Amended, not deleted.** This row used to read "mesh surface-mode
+  sculpting", and that was wider than the decision behind it. Moving the
+  vertices that already exist is a different claim from tessellating new ones,
+  and it is the one the pipeline needed: a retopologized quad mesh re-enters a
+  document as a mesh layer, and resampling it through `Volume.from_mesh` to
+  edit it destroys the topology somebody just paid for. So fixed-topology mesh
+  brushes landed — eleven verbs, vertices only, `indices` and `quads`
+  byte-identical before and after — and the boundary moved to where the
+  original reasoning actually put it. See
+  [`docs/07-brushes-and-features.md` § 8](07-brushes-and-features.md). A large
+  grab stretches triangles and `snakehook` stretches them badly; that is the
+  signal the mesh wants retopo, and it is where this stops.
 - **Subdivision multires on the SDF side.** Resolution is an evaluation
   parameter for an SDF layer, so the Res+/Resample apparatus has nothing to
   attach to there. Voxel layers now DO carry a level stack — level 0 coarsest,

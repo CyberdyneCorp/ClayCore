@@ -376,6 +376,24 @@ std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>
     const bool dragging = verb == mesh::MeshBrush::Grab || verb == mesh::MeshBrush::Snakehook;
     const bool anchored = verb == mesh::MeshBrush::Grab;
 
+    // SNAKEHOOK re-anchors ON THE SURFACE IT IS DRAGGING, not on the cursor.
+    //
+    // Anchoring on the stamp position instead was the obvious reading and it
+    // does not work: the vertex at the centre moves by the falloff's weight
+    // rather than by the whole delta, so the surface falls behind the cursor a
+    // little on every stamp, and a few stamps later the brush is beyond its own
+    // radius from the mesh and stops reaching it — the tendril stops growing
+    // exactly when the pull gets interesting. Anchoring on the class being
+    // dragged fixes it outright: that class is at the centre, so its weight is
+    // 1, so it moves by the full delta and the anchor keeps up by construction.
+    std::uint32_t anchor = mesh::kNoClass;
+    if (verb == mesh::MeshBrush::Snakehook) {
+        anchor = settings.seed_class;
+        // One linear scan per stroke when the caller had no pick to hand over.
+        if (anchor >= sculptor.adjacency().class_count())
+            anchor = sculptor.nearest_class(stamps.front().position);
+    }
+
     std::size_t applied = 0;
     kernel::cfloat3 previous = stamps.front().position;
     for (std::size_t i = 0; i < stamps.size(); ++i) {
@@ -394,10 +412,13 @@ std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>
         stamp_settings.strength = settings.strength * s.strength;
         if (dragging) {
             stamp_settings.direction = s.position - previous;
-            stamp_settings.center = anchored ? stamps.front().position : s.position;
-            // An anchored grab keeps its own seed too, or the walk would chase
-            // the geometry it is dragging.
-            if (anchored) stamp_settings.seed_class = settings.seed_class;
+            if (anchored) {
+                stamp_settings.center = stamps.front().position;
+                stamp_settings.seed_class = settings.seed_class;
+            } else {
+                stamp_settings.center = sculptor.class_position(anchor);
+                stamp_settings.seed_class = anchor;
+            }
         } else {
             stamp_settings.center = s.position;
         }
