@@ -54,12 +54,17 @@ write PNGs with the standard library.
 | Voxel brushes, fills and palettes | Morphing a box into a sphere |
 | ![round trip](examples/output/42_representation_round_trip.png) | ![armature](examples/output/40_armature.png) |
 | SDF → voxel → SDF: blocked out as fields, sculpted as voxels, back as an operand | An armature — a ZSphere tree skinned by its blend |
+| ![mesh brushes](examples/output/45_mesh_brushes_primitives.png) | ![quads survive](examples/output/45_quads_survive.png) |
+| Sculpting a carried mesh's own vertices — and never its polygons | A quad export before and after a stroke; the quad list is unchanged |
 
 ## Two ways to sculpt: SDF and voxel
 
 claycore carries two representations side by side, and a document can hold
 layers of both. They are not two APIs for one thing — each is good at what the
-other is structurally bad at, and the intended workflow uses both.
+other is structurally bad at, and the intended workflow uses both. (A layer can
+also hold a **mesh**, which is a carrier rather than a third way to sculpt — but
+one whose vertices are now editable in place; see
+[below](#the-third-thing-a-layer-can-hold-a-mesh-and-now-an-editable-one).)
 
 An **SDF layer** is an ordered list of parametric edits — primitives, booleans,
 blends, deformers, strokes — compiled into a flat tape and evaluated as a
@@ -170,6 +175,42 @@ not — once rasterized, the parametric items behind the sculpt are no longer
 reachable from the voxel side, which is why the return trip hands back a new
 layer instead of touching the original.
 
+### The third thing a layer can hold: a mesh, and now an editable one
+
+![A quad export before and after a stroke — examples/45_mesh_brushes.py](examples/output/45_quads_survive.png)
+
+A **mesh layer** is neither of the two above: it carries imported triangles
+*verbatim* and is never evaluated — no tape, no blend, no influence bound. That
+is what a scan, a kit part or a piece of retopology needs, and it is enforced by
+the module layering rather than by a promise.
+
+It used to be read-only in every sense that mattered. The only way to *edit* one
+was `Volume.from_mesh`, which resamples the model onto a lattice: the sculpt
+comes back, the edge loops and the uvs do not — so a mesh that had just been
+retopologized could not be touched without spending the retopology.
+
+**Fixed-topology mesh brushes** are the eleven classical verbs — grab, draw,
+inflate, smooth, pinch, flatten, clay, crease, scrape, polish, snakehook —
+applied to a mesh layer's own vertices, holding one line above everything else:
+**topology never changes.** No polygon is created, split or deleted; `indices`
+and `quads` come out byte for byte, which the tests compare rather than count.
+
+That is the whole point rather than a limitation. It closes the **return trip**:
+sculpt on SDF or voxels → quad-export → retopo and UV elsewhere → bring the mesh
+back and *refine it in place*. Masks, strokes (pressure, spacing, taper, buildup)
+and a sparse bit-exact undo record all reach it; a mesh layer is also pickable
+now, since a raycast against a field could never see one.
+
+Stated rather than discovered: a large grab **stretches** triangles and
+`snakehook` stretches them to the extreme. That is the artist's signal the mesh
+wants retopo, exactly as Blender behaves with Dyntopo off — it is where this
+stops, and `docs/sculpt_comparison.md` records the boundary as a decision.
+
+| | |
+|---|---|
+| ![reach along the surface](examples/output/47_reach.png) | ![polish against smooth](examples/output/46_polish_vs_smooth.png) |
+| Reach measured along the surface (left) versus in a straight line: one dents both prongs ([`47_mesh_brush_reach_and_undo.py`](examples/47_mesh_brush_reach_and_undo.py)) | The same heavy pass through polish and through smooth — the dihedral gate is what still holds the corners up ([`46_mesh_brush_compositions.py`](examples/46_mesh_brush_compositions.py)) |
+
 ## Armatures: blocking figures out with ZSpheres
 
 ![An armature figure — examples/output/40_armature.png](examples/output/40_armature.png)
@@ -212,8 +253,9 @@ compares to Blender, ZBrush and 3DCoat, and what is still missing, is in
 | Kernels | 24 exact + 4 bound 3D primitives (including the unbounded plane and infinite cylinder), 9 exact 2D profiles with extrude/revolve lifts, N-profile lofts, and sweeps along a guide with parallel-transported frames, hard/quadratic/cubic/circular/chamfer blends plus 8 extended modes (groove, tongue, pipe, engrave, emboss, inset, shell, replace) and relief/incise, whose item is a REGION rather than geometry, transforms, mirrors, grid and radial repetition, 14 deformers (twist/bend/taper/displace/wrap-around/linear+radial ramps, plus grab, pose, pose-line and magnify with finite support, and fractal gradient noise on an integer hash) and elongation (exact about the origin, per-axis for any primitive), spatial morphs, all reachable from a document, lifts, 33 easing curves, stroke chains and control-point curves (hard/spline/B-spline/Bezier points with local-space handles, closed, tessellated to a document tolerance), armatures — ZBrush's ZSpheres: a TREE of spheres skinned by the same sphere-swept links and smooth union a stroke uses, so moving a shoulder carries the arm — per-node exactness/Lipschitz tracking |
 | Tools | Cut tool: a shape drawn on a frame (rect, circle, polygon, spline lasso) resolved into an ordinary extruded item — a prism, not a frustum; the sweep is sized to cut through, keep-inner/keep-outer is the op, rounding bevels the walls |
 | Brushes | Stroke engine: samples in, edit items out — arc-length spacing, pressure curves, deterministic jitter, taper, rotate-along-stroke, steady stroke, buildup vs clamped; versioned presets; strokes become ordinary edits, so undo, coalescing and serialization apply unchanged |
+| Mesh sculpting | Fixed-topology brushes on a mesh LAYER's own triangles — the eleven classical verbs (grab, draw, inflate, smooth, pinch, flatten, clay, crease, scrape, polish, snakehook) moving vertices and **never polygons**: `indices` and `quads` are byte-identical before and after, so a retopologized quad mesh survives being sculpted. Vertex adjacency over weld classes (a ring built over raw indices stops at every UV seam), reach measured along the surface so a brush on one prong does not dent the other, masks reaching all eleven verbs by one rule, strokes through the same engine the SDF and voxel brushes use, a sparse coalesced undo record that restores a gesture bit-exactly, and mesh layers become pickable. NOT dynamic topology: no dyntopo, no multires, no remeshing — a large pull stretches the triangles it has, which is the signal the mesh wants retopo |
 | Sculpting | Resolvers that turn a gesture into an ordinary edit — the Move brush (drags the *assembled* surface, coalescing over a drag and previewable), snakehook tendrils, and the cut tool; baked field operations relax and flatten, which sample a region into a narrow-band volume and declare the Lipschitz they measured; consolidation collapses a layer into one **redistanced** volume so a chain of bakes stops steepening — six hPolish passes hold the declared Lipschitz at √3 instead of reaching 32 — with a field report and a cost estimate to decide when it is worth doing |
-| Scene | Layers with visibility plus ghost (shown, unpickable, uneditable) and lock (shown and pickable, uneditable), ordered edit lists, nested groups a host can build through the C ABI (a group is an op over its children, `CLAY_OP_INLINE` included, so a sub-expression is sayable rather than pre-flattened), mesh layers — a document CARRIES an imported mesh, saved and reloaded with the `.clayspace` and exported alongside sculpted content, never evaluated and never compiled into a tape — shared-content instancing, editing placed nodes (retransform, swap primitive, recolour, re-blend, move, remove) and layers (visibility, transform, reorder, remove) through one command vocabulary, opt-in undo/redo with stroke coalescing and grouping, influence bounds, flat postfix tape with per-brick culling, invertible+serializable undo commands |
+| Scene | Layers with visibility plus ghost (shown, unpickable, uneditable) and lock (shown and pickable, uneditable), ordered edit lists, nested groups a host can build through the C ABI (a group is an op over its children, `CLAY_OP_INLINE` included, so a sub-expression is sayable rather than pre-flattened), mesh layers — a document CARRIES an imported mesh, saved and reloaded with the `.clayspace` and exported alongside sculpted content, never evaluated and never compiled into a tape, and now **editable in place** by the fixed-topology mesh brushes rather than only through a resampling round trip — shared-content instancing, editing placed nodes (retransform, swap primitive, recolour, re-blend, move, remove) and layers (visibility, transform, reorder, remove) through one command vocabulary, opt-in undo/redo with stroke coalescing and grouping, influence bounds, flat postfix tape with per-brick culling, invertible+serializable undo commands |
 | Evaluation | CPU (reference + threaded batch), Metal, CUDA, OpenCL, Vulkan compute — one interface, runtime registry, tolerance-gated parity. The Vulkan shaders are GLSL generated from the same kernel headers every other backend compiles, so a fifth backend is not a fifth copy of the maths |
 | Storage | Sparse fp16 narrow-band brick cache with dirty tracking, LOD mips, memory budget, reachable from the C ABI so a packaged host refills incrementally (a brush dab re-evaluates the bricks its influence bound reaches, not the model); palette-indexed colored voxel grids that can carry a **stack of resolution levels** (block the form out coarse, refine where the detail goes, without paying for a fine grid everywhere), with cube/sphere brushes, falloff curves and strength, 10 sculpting verbs (smooth, inflate/erode, flatten, pinch, magnify, grab, fill-cavities, scrape, smudge, carve-with-alpha), pre-bake repair (report, close holes, fill voids), box and line fills, mirrored edits and flood select; paintable per-layer mask fields that freeze a region against any edit — including the SDF field verbs — and survive resolution changes, painted along a stroke like any other brush, with a bounded complement and mask extrude (ZBrush's Extract: a masked patch pulled off as a solid, on either representation) |
 | Meshing | Marching tetrahedra (watertight + 2-manifold by construction), surface nets preview, flagged dual contouring, **quad-only meshing** from either representation with a target quad count (a lattice-derived quad grid — regular, no T-junctions, export-clean; NOT field-aligned retopology, so no edge loops and nothing animation-ready), meshoptimizer decimation, validation, vertex colors/normals/UVs |

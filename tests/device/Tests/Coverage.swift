@@ -177,6 +177,32 @@ enum Coverage {
         .exempt("item_volume_move_topological",
                 because: "reachable only on a volume item, and layer_move_surface "
                        + "is the verb a host drives for Move. Measured there."),
+        // NOT a decision that these should never be measured — an unmeasured
+        // gap, named so it is visible to the gate rather than invisible to it.
+        // The alternative was leaving clay_mesh_sculptor_* out of
+        // VERB_PATTERNS, which is exactly the failure that list exists to
+        // prevent and is how tube, Trim Curve, pose and the level stack all
+        // went missing without anything reporting them missing.
+        //
+        // Closing it needs a mesh-layer fixture in the harness — every case
+        // here drives a field or a grid, and a mesh brush needs an imported
+        // mesh, its adjacency built once, and a pick to aim from. The cost
+        // shape is also different enough to be worth its own number rather
+        // than an inherited one: a stamp is O(vertices the falloff reached)
+        // after an O(vertices) adjacency build the session pays once.
+        .exempt("mesh_sculptor_stamp",
+                because: "unmeasured: the device harness has no mesh-layer "
+                       + "fixture, so no case drives a mesh brush yet. Named "
+                       + "here rather than left out of VERB_PATTERNS, which "
+                       + "would make the whole family invisible to this gate. "
+                       + "Closing it needs an imported mesh in the harness and "
+                       + "a session that builds the adjacency once."),
+        .exempt("mesh_sculptor_apply_stroke",
+                because: "unmeasured, as mesh_sculptor_stamp is and for the "
+                       + "same reason. The stroke path is the one worth "
+                       + "measuring first when the fixture exists: it is what "
+                       + "a drag actually drives, and it amortises the "
+                       + "adjacency the stamp path pays for separately."),
         .exempt("cut_polygon_from_curve",
                 because: "the CLOSED tessellation of the same control points the "
                        + "open variant measured by trim_curve tessellates. The "

@@ -57,7 +57,7 @@ took half a second to appear. The table below is still per-verb edit cost;
 
 A map onto ZBrush and Nomad Sculpt, not a claim of parity — the mechanism
 usually differs even where the result matches. `v` marks the voxel
-representation, `s` the SDF one.
+representation, `s` the SDF one, `m` a mesh layer's own triangles.
 
 | ZBrush | Nomad | claycore | rep | device case | p95 (ms) | class |
 |---|---|---|---|---|---|---|
@@ -73,6 +73,7 @@ representation, `s` the SDF one.
 | Flatten | Flatten | `field::flatten` (two-sided) | s | `sdf_flatten` | 6.05 | operation |
 | Flatten | Flatten | `sculpt_flatten` | v | `voxel_flatten` | 0.0097 | interactive |
 | hPolish, Planar, Trim | Scrape / Planar | `field::flatten` cut-only | s | `volume_hpolish` | 111.4 | operation |
+| The surface brushes, on a mesh LAYER (Standard, Move, Inflate, Smooth, Pinch, Flatten, Clay, DamStandard, Trim Dynamic, hPolish, SnakeHook) | — | `mesh::MeshSculptor`, 11 verbs | m | *(unmeasured — see Named gaps)* | — | — |
 | — | Scrape | `sculpt_scrape` | v | `voxel_scrape` | 0.0118 | interactive |
 | Pinch | Pinch | `magnify` (negative), `sculpt_pinch` | s v | `voxel_pinch` | 0.0091 | interactive |
 | Magnify | Inflate (local) | `magnify` (positive), `sculpt_magnify` | s v | `voxel_magnify` | 0.0088 | interactive |
@@ -480,9 +481,20 @@ Audited at 0.29.0, per brush:
 | Extract / mask extrude | 1 | 1 | 2 | 1 |
 | Stroke engine | 4 | 4 | 5 | 1 |
 | Consolidate | 3 | 3 | 1 | 1 |
+| mesh grab | 2 | 2 | 3 | 1 |
+| mesh draw | 3 | 4 | 22 | 7 |
+| mesh inflate | 1 | 2 | 3 | 1 |
+| mesh smooth | 3 | 3 | 7 | 2 |
+| mesh pinch | 1 | 1 | 4 | 1 |
+| mesh flatten | 1 | 2 | 5 | 2 |
+| mesh clay | 1 | 2 | 3 | 1 |
+| mesh crease | 1 | 1 | 3 | 1 |
+| mesh scrape | 1 | 1 | 3 | 1 |
+| mesh polish | 1 | 2 | 3 | 1 |
+| mesh snakehook | 2 | 2 | 3 | 1 |
 
 **Every brush has at least one runnable example and at least one committed
-render, and all 41 examples' named PNGs are present in `examples/output/`.**
+render, and all 48 examples' named PNGs are present in `examples/output/`.**
 The gallery is the visual regression suite: `python3 examples/run_all.py`
 re-runs every script, and each carries its own self-checks alongside the render.
 
@@ -504,8 +516,9 @@ Everything below is a **missing latency case**, not a missing test or render.
 | voxel meshing (display) | **measured at v0.30.0** — `voxel_mesh_whole`, `voxel_mesh_dirty` |
 | large-radius verbs | **measured at v0.30.0** — `voxel_smooth_r32` |
 | the level stack | **measured at v0.30.0** — `voxel_add_level`, `voxel_smooth_l2` |
+| the 11 fixed-topology mesh brushes | **unmeasured, named on the record** — `mesh_sculptor_stamp` and `mesh_sculptor_apply_stroke` are exempt in `Coverage.swift` with "no mesh-layer fixture", not with a reason they should never be measured. The first real gap since v0.30.0 |
 
-**Every brush in the inventory now has a case or a recorded exemption.** That
+**Every brush in the inventory has a case or a recorded exemption.** That
 was not true at 0.29.0: `VERB_PATTERNS` in `tools/check_device_coverage.py` is
 a named set of patterns rather than "every `clay_` function", so a verb it did
 not name was invisible to the coverage gate — which is how tube, Trim Curve,
@@ -516,11 +529,20 @@ without anything reporting them missing. The list now names
 `clay_voxel_(add|drop)_level`. Extending it failed the gate until the cases
 existed, which was the intended order.
 
-Nothing remains unmeasured. v0.30.0 ran all 59 cases on the reference device,
-and every budget in `tests/device/baseline.json` is now derived from a
-measurement rather than hand-set. What this document cannot tell you is
-whether a brush's *result* looks right — see the note on the voxel display
-above, and the gallery.
+v0.30.0 ran all 59 cases on the reference device, and every budget in
+`tests/device/baseline.json` is derived from a measurement rather than
+hand-set. **The mesh brushes are the one family added since, and they are
+unmeasured** — the harness drives fields and grids, and a mesh brush needs an
+imported mesh with its adjacency built and a pick to aim from. They are exempt
+on the record rather than absent from `VERB_PATTERNS`, which is the distinction
+this whole section exists to make: the gate can now see them, and it says they
+have no case.
+
+What the numbers that DO exist cannot tell you is whether a brush's *result*
+looks right — see the note on the voxel display above, and the gallery. For the
+mesh brushes that gap is the other way round: the result is checked hard (the
+index and quad buffers are compared byte for byte, and three gallery entries
+render every verb) and the latency is not checked at all.
 
 ## What to do, in order
 
@@ -529,7 +551,15 @@ are all done — v0.30.0 measured all nine new cases on the reference iPad and
 every one of them fits. **Latency is no longer the voxel path's problem.**
 What is left:
 
-1. **Give a voxel sculpt a display that is not cubes.** `mesh_greedy` emits
+1. **Measure the mesh brushes.** They are the one family with no device case
+   at all, exempt on the record rather than invisible. The harness needs an
+   imported mesh with its adjacency built once, and a pick to aim the stamp
+   from — every case today drives a field or a grid. The stroke path is the
+   one to do first: it is what a drag drives, and it amortises the adjacency
+   build the stamp path pays for on its own. Until then the fixed-topology
+   verbs have a hard correctness gate and no latency number, which is the
+   opposite of the voxel path's position at 0.29.0.
+2. **Give a voxel sculpt a display that is not cubes.** `mesh_greedy` emits
    axis-aligned quads, so every voxel render in the gallery is blocky while the
    SDF renders look like clay. This is now the largest visible gap between what
    claycore produces and what a sculptor expects, and it is the one thing on
@@ -541,13 +571,13 @@ What is left:
    is missing is the bridge between them, which is what
    [#90](https://github.com/CyberdyneCorp/ClayCore/issues/90) asks for on
    workflow grounds and which turns out to answer this too.
-2. **The SDF stamp's 1.15× is a tuning problem, not an architecture one** — and
+3. **The SDF stamp's 1.15× is a tuning problem, not an architecture one** — and
    `add-item-spatial-index` is the change that addresses the per-brick tape
    compile behind both `sdf_stamp_cpu` and `sdf_stamp_bricks`. Worth sizing
    against the crossovers rather than the worst point: the CPU path is fine
    below ~850 stamps and Metal is fine above ~180, so the genuinely
    unserved window is narrow.
-3. **Decide whether a stroke brush needs a per-dab case.** Tier 3 above is
+4. **Decide whether a stroke brush needs a per-dab case.** Tier 3 above is
    measured per gesture, so nothing says whether ClayBuildup or Crease can show
    a dab live — only what a whole stroke costs. That is a real gap in this
    document's ability to answer "which brushes are online", and it is a

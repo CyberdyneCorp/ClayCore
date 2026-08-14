@@ -60,6 +60,11 @@ VERB_PATTERNS = [
     # costs 8^d cell writes for d finer levels), so it belongs with the verbs
     # rather than with the accessors that report a stack.
     r"clay_voxel_(add|drop)_level",
+    # The fixed-topology mesh brushes. One stamp and one stroke, not eleven
+    # entries: the verb is a field of the descriptor, so the entry points are
+    # what a host calls and what a latency case would drive. The raycast is a
+    # pick query rather than a verb and is deliberately not matched.
+    r"clay_mesh_sculptor_(stamp|apply_stroke)",
 ]
 
 # Verbs the engine has no C entry point for, so pattern-matching clay.h cannot
