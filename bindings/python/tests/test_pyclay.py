@@ -4268,3 +4268,164 @@ def test_quads_reach_the_files_that_carry_them(tmp_path):
     glb = tmp_path / "quads.glb"
     mesh.save(str(glb))
     assert glb.stat().st_size > 0
+
+
+# -- fixed-topology mesh brushes ------------------------------------------------
+# The contract these defend is that topology never changes. `indices` and
+# `quads` are compared element for element, not counted: a rewrite to the same
+# length would still have destroyed the retopology the feature exists to keep.
+
+
+def _plane_grid(n=12, half=1.0):
+    """A flat triangulated grid. Analytic, so 'did exactly these vertices move'
+    has an obvious right answer."""
+    step = 2.0 * half / n
+    positions = [(-half + step * x, 0.0, -half + step * z)
+                 for z in range(n + 1) for x in range(n + 1)]
+    indices = []
+    stride = n + 1
+    for z in range(n):
+        for x in range(n):
+            a = z * stride + x
+            indices += [a, a + stride, a + 1, a + 1, a + stride, a + stride + 1]
+    return clay.Mesh.from_triangles(np.array(positions, dtype=np.float32),
+                                    np.array(indices, dtype=np.uint32))
+
+
+def _bumpy_grid(n=12, half=1.0):
+    m = _plane_grid(n, half)
+    p = np.array(m.positions, copy=True)
+    p[::3, 1] = 0.04
+    p[1::3, 1] = -0.02
+    return clay.Mesh.from_triangles(p, np.array(m.indices, copy=True))
+
+
+def test_every_mesh_verb_moves_vertices_and_none_moves_a_polygon():
+    verbs = ["grab", "draw", "inflate", "smooth", "pinch", "flatten",
+             "clay", "crease", "scrape", "polish", "snakehook"]
+    for verb in verbs:
+        m = _bumpy_grid()
+        topology = np.array(m.indices, copy=True)
+        before = np.array(m.positions, copy=True)
+        sculptor = clay.MeshSculptor(m)
+        moved = sculptor.stamp(verb, center=(0, 0, 0), radius=0.5, strength=0.5,
+                               direction=(0, 0.1, 0))
+        assert moved > 0, verb
+        assert np.array_equal(np.array(m.indices), topology), verb
+        assert not np.array_equal(np.array(m.positions), before), verb
+
+
+def test_a_mesh_stroke_undoes_bit_exactly_as_one_gesture():
+    m = _plane_grid(16)
+    before = np.array(m.positions, copy=True)
+    sculptor = clay.MeshSculptor(m)
+
+    preset = clay.StrokePreset(radius=0.25, strength=0.8)
+    samples = np.array([[-0.4 + 0.1 * i, 0.0, 0.0] for i in range(8)], dtype=np.float32)
+    deltas = clay.VertexDeltas()
+    applied = sculptor.apply_stroke(samples, preset, "draw", deltas=deltas)
+    assert applied > 1
+    assert not np.array_equal(np.array(m.positions), before)
+
+    # Coalesced: one entry per vertex reached, not one per stamp.
+    assert 0 < deltas.vertex_count <= len(before)
+
+    deltas.revert(sculptor)
+    assert np.array_equal(np.array(m.positions), before)
+    deltas.revert(sculptor)  # idempotent
+    assert np.array_equal(np.array(m.positions), before)
+    deltas.apply(sculptor)
+    assert not np.array_equal(np.array(m.positions), before)
+
+
+def test_a_mask_freezes_a_mesh_stroke_vertex_by_vertex():
+    m = _plane_grid(16)
+    before = np.array(m.positions, copy=True)
+    sculptor = clay.MeshSculptor(m)
+
+    mask = clay.MaskField(cell_size=0.05)
+    mask.paint((0.6, 0.0, 0.0), size=40, shape="cube", falloff="constant", strength=1.0)
+
+    preset = clay.StrokePreset(radius=0.25, strength=1.0)
+    samples = np.array([[-0.4, 0, 0], [0.4, 0, 0]], dtype=np.float32)
+    assert sculptor.apply_stroke(samples, preset, "draw", mask=mask) > 0
+
+    after = np.array(m.positions)
+    frozen = (before[:, 0] > 0.5) & (np.abs(before[:, 2]) < 0.4)
+    assert frozen.any()
+    assert np.array_equal(after[frozen], before[frozen])
+    assert not np.array_equal(after[~frozen], before[~frozen])
+
+
+def test_a_surface_falloff_does_not_reach_across_a_gap():
+    # Two sheets a hair apart, sharing no edge: the closed mouth. A straight
+    # line reaches the lower one; a surface walk would have to leave the sheet.
+    upper = _plane_grid(8)
+    p = np.array(upper.positions, copy=True)
+    i = np.array(upper.indices, copy=True)
+    lower = p.copy()
+    lower[:, 1] -= 0.02
+    both = clay.Mesh.from_triangles(np.vstack([p, lower]),
+                                    np.concatenate([i, i + len(p)]))
+    base = np.array(both.positions, copy=True)
+
+    def lower_moved(geodesic):
+        m = clay.Mesh.from_triangles(base.copy(), np.array(both.indices, copy=True))
+        clay.MeshSculptor(m).stamp("draw", center=(0, 0, 0), radius=0.5,
+                                   strength=1.0, falloff="constant", geodesic=geodesic)
+        after = np.array(m.positions)
+        return int((after[len(p):, 1] != base[len(p):, 1]).sum())
+
+    assert lower_moved(False) > 0
+    assert lower_moved(True) == 0
+
+
+def test_a_mesh_layer_is_sculpted_in_place_and_a_locked_one_refuses():
+    doc = clay.Document()
+    borrowed = doc.add_mesh_layer(_plane_grid(8), name="carried")
+    layer_id = borrowed.layer
+    before = np.array(borrowed.positions, copy=True)
+
+    sculptor = clay.MeshSculptor(borrowed)
+    assert sculptor.stamp("draw", center=(0, 0, 0), radius=0.5, strength=0.5) > 0
+    # The DOCUMENT's own triangles moved, not a copy of them.
+    assert not np.array_equal(np.array(doc.mesh_layer("carried").positions), before)
+
+    doc.set_layer_protection(layer_id, locked=True)
+    with pytest.raises(Exception):
+        sculptor.stamp("draw", center=(0, 0, 0), radius=0.5, strength=0.5)
+    doc.set_layer_protection(layer_id, locked=False, ghost=True)
+    with pytest.raises(Exception):
+        sculptor.stamp("draw", center=(0, 0, 0), radius=0.5, strength=0.5)
+
+
+def test_a_raycast_hands_back_the_seed_the_walk_wants():
+    m = _plane_grid(8)
+    sculptor = clay.MeshSculptor(m)
+    hit = sculptor.raycast((0.21, 1.0, -0.13), (0, -1, 0))
+    assert hit is not None
+    assert hit["t"] == pytest.approx(1.0, rel=1e-4)
+    assert hit["position"][1] == pytest.approx(0.0, abs=1e-5)
+    assert hit["normal"][1] == pytest.approx(1.0, rel=1e-4)
+
+    moved = sculptor.stamp("draw", center=hit["position"], radius=0.3,
+                           strength=0.5, seed_class=hit["seed_class"])
+    assert moved > 0
+    assert sculptor.raycast((9.0, 1.0, 9.0), (0, -1, 0)) is None
+
+
+def test_the_mesh_brush_arguments_refuse_what_c_refuses():
+    m = _plane_grid(6)
+    sculptor = clay.MeshSculptor(m)
+    with pytest.raises(ValueError):
+        sculptor.stamp("nope", center=(0, 0, 0), radius=0.5)
+    with pytest.raises(ValueError):
+        sculptor.stamp("draw", center=(0, 0, 0), radius=0.0)
+    with pytest.raises(ValueError):
+        sculptor.stamp("draw", center=(0, 0, 0), radius=0.5, falloff="cosine")
+    with pytest.raises(ValueError):
+        sculptor.stamp("flatten", center=(0, 0, 0), radius=0.5, flatten_mode="sideways")
+    with pytest.raises(ValueError):
+        sculptor.stamp("smooth", center=(0, 0, 0), radius=0.5, smooth_iterations=0)
+    with pytest.raises(ValueError):
+        sculptor.stamp("smooth", center=(0, 0, 0), radius=0.5, smooth_iterations=1000)
