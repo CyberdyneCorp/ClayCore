@@ -525,9 +525,13 @@ discovered in Blender.
 
 A voxel sculpt is two different subjects. Left is the **dual**: the rounded
 form, the same lattice the smooth mesher builds. Right is **faces**: one planar
-quad per exposed voxel face, which is the boxes the model actually is. The two
-carry the *same number of quads* — a sign-changing lattice edge is exactly an
-exposed face — and completely different surfaces.
+quad per exposed voxel face, which is the boxes the model actually is. At the
+grid's own voxel size with no blur the two carry the *same number of quads* — a
+sign-changing lattice edge is exactly an exposed face, and the four cells
+around such an edge always own a vertex — and completely different surfaces.
+The script asserts that identity rather than checking for it; a coarser dual
+cell or a blur pass resamples the occupancy and breaks it, which is why it is
+stated with its conditions.
 
 ## Notes
 

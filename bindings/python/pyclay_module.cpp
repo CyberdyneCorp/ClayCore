@@ -8,6 +8,7 @@
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/vector.h>
 
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -932,6 +933,19 @@ mesh::QuadTarget quad_target_from(nb::handle target, float tolerance, int max_it
     return want;
 }
 
+// The lattice, read the way the C ABI reads it. A NaN or an infinity is
+// refused rather than passed through: it fails every `> 0` test on the way in,
+// so it would silently become "no cell size given" and be answered with an
+// estimated seed, while clay_document_mesh_quads refuses the same value with
+// "cell size must be finite". One input, one answer, in both bindings.
+float quad_cell_from(nb::handle cell_size) {
+    if (cell_size.is_none()) return 0.0f;
+    const float cell = nb::cast<float>(cell_size);
+    if (cell != 0.0f && !std::isfinite(cell))
+        throw std::invalid_argument("cell_size must be finite");
+    return cell;
+}
+
 nb::object quad_report_dict(const mesh::QuadFit& fit, std::size_t target) {
     nb::dict out;
     out["cell_size"] = fit.cell_size;
@@ -954,7 +968,7 @@ PyMesh mesh_document_quads(const PyDocument& d, nb::handle cell_size, nb::handle
     scene::Tape tape = scene::compile_document(d.doc->document);
     if (tape.empty() || tape.bounds.empty() || tape.bounds.is_infinite())
         throw std::invalid_argument("document has no bounded SDF content to mesh");
-    const float cell = cell_size.is_none() ? 0.0f : nb::cast<float>(cell_size);
+    const float cell = quad_cell_from(cell_size);
     const mesh::QuadTarget want = quad_target_from(target, tolerance, max_iterations);
     if (!(cell > 0.0f) && want.target == 0)
         throw std::invalid_argument(
@@ -983,7 +997,7 @@ PyMesh mesh_voxel_quads(const voxel::VoxelGrid& grid, const std::string& mode,
     if (blur < 0 || blur > 8) throw std::invalid_argument("blur must be 0..8 passes");
     if (level >= grid.level_count())
         throw std::invalid_argument("no such resolution level: " + std::to_string(level));
-    options.cell_size = cell_size.is_none() ? 0.0f : nb::cast<float>(cell_size);
+    options.cell_size = quad_cell_from(cell_size);
     options.blur = blur;
     options.level = level;
     const mesh::QuadTarget want = quad_target_from(target, tolerance, max_iterations);
@@ -4591,7 +4605,12 @@ NB_MODULE(pyclay, m) {
              "`target` asks for a COUNT: APPROACHED, NEVER HIT. In 'faces' mode the\n"
              "lever is the resolution LEVEL, a factor of about four per step, so a\n"
              "target usually lands on the nearest level rather than inside the\n"
-             "tolerance. Mesh.quad_report says what actually happened.")
+             "tolerance: the search walks the stack coarsest first, stops at the\n"
+             "first level that reaches the target, returns the nearer of the two it\n"
+             "landed between, and ignores max_iterations because the stack is its own\n"
+             "bound. quad_report['clamped'] there means the STACK RAN OUT — the target\n"
+             "is outside what any level of this grid yields. Mesh.quad_report says\n"
+             "what actually happened.")
         .def("sample_step_field",
              [](const PyVoxelGrid& g, nb::handle points) {
                  PointsView pts = to_points(points);

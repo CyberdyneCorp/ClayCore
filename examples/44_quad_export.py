@@ -223,15 +223,21 @@ def main():
           f"by design:")
     print("  a welded corner is shared by faces pointing three ways and has no "
           "single normal.")
-    # The two counts agreeing is an identity, not a coincidence, and it is
+    # The two counts agreeing is an IDENTITY here, not a coincidence, and it is
     # worth saying so before it reads as a copy-paste bug: a lattice edge
     # changes sign exactly where an occupied voxel meets an empty one, which is
-    # exactly an exposed face. Same number of quads, completely different
-    # surfaces — which is what the picture shows.
-    if dual.quad_count == faces_mesh.quad_count:
-        print("  the two counts agree because a sign-changing lattice edge IS an "
-              "exposed face;")
-        print("  what differs is where the vertices go, not how many quads there are.")
+    # exactly an exposed face, and the four cells around such an edge always
+    # own a vertex. Same number of quads, completely different surfaces — which
+    # is what the picture shows. Asserted rather than guarded by an `if`: the
+    # conditions are this call's own (the grid's voxel size, blur 0), so a
+    # mismatch is a regression and not a case to print around. A coarser dual
+    # cell size or a blur pass resamples the occupancy and does break it.
+    if dual.quad_count != faces_mesh.quad_count:
+        raise SystemExit(f"the dual/faces count identity broke: {dual.quad_count} "
+                         f"!= {faces_mesh.quad_count}")
+    print("  the two counts agree because a sign-changing lattice edge IS an "
+          "exposed face;")
+    print("  what differs is where the vertices go, not how many quads there are.")
 
     voxel_eye, voxel_target = R.orbit_camera(faces_mesh.bounds, fov_degrees=32.0,
                                              elevation=28.0, margin=0.78)

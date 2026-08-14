@@ -409,14 +409,25 @@ class VoxelGrid {
     //    estimated from the occupied cell count: a solid of N cells has on the
     //    order of 6*N^(2/3) faces of surface, which is a starting point for the
     //    secant and nothing more.
-    //  - FACES has no cell size at all, so the lever is the LEVEL. It meshes
-    //    from the coarsest level toward the finest and keeps the closest count,
-    //    stopping as soon as one overshoots, because the count rises with every
-    //    level. The step is a factor of about four, so "within tolerance" is
-    //    usually unreachable and `clamped` says the stack ran out; a caller who
-    //    asks for 50,000 and receives 12,000 is being told that no level of
-    //    this grid is nearer. `cell_size` in the report is the chosen level's
-    //    voxel size, which is what names the level back.
+    //  - FACES has no cell size at all, so the lever is the LEVEL, and the
+    //    search is mesh/quad_mesh.h's LADDER walk over the stack rather than
+    //    its secant: it meshes from the coarsest level toward the finest and
+    //    keeps the closest count, stopping as soon as one reaches or passes the
+    //    target, because the count rises with every level. Two meshes in the
+    //    common case, at most one per level ever, and `max_iterations` does not
+    //    apply — a stack is its own bound, and walking all of it costs about a
+    //    third more than meshing its finest level alone, which a target above
+    //    every level buys anyway. The step is a factor of about four, so
+    //    "within tolerance" is usually unreachable, and `clamped` says the
+    //    STACK RAN OUT — the target is below what level 0 yields or above what
+    //    the finest yields. A target that falls between two levels is NOT
+    //    clamped even when the nearer level is far off: both were meshed and
+    //    neither is nearer, which is what `within_tolerance` false says. A
+    //    caller who asks for 50,000 and receives 12,000 with `clamped` set is
+    //    being told that no level of this grid is nearer. `cell_size` in the
+    //    report is the chosen level's voxel size, which is what names the level
+    //    back. `min_cell_size` has no meaning here — the levels are the only
+    //    lattices there are.
     //
     // With `target.target == 0` this is mesh_quads with a report attached.
     mesh::Mesh mesh_quads_fit(const QuadOptions& options, const mesh::QuadTarget& target,

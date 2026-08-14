@@ -259,7 +259,14 @@ forward-refuse).
    resolve a thin feature the coarser one missed and ADD surface). So the
    mesher searches, lands inside about 5-10%, and reports what it produced
    through `clay_mesh_quad_report`; every iteration is a whole mesh, so
-   `max_iterations` is a cost knob.
+   `max_iterations` is a cost knob. Two nearby targets are two independent
+   searches, so the count can move BACKWARDS as a slider moves forward — rare,
+   documented, and not a bug. The voxel FACES mode is the exception to all of
+   this: it has no cell size, so its search walks the grid's resolution levels
+   from the coarsest and stops at the first that reaches the target. That one
+   is monotonic, costs at most one mesh per level, ignores `max_iterations`,
+   and reports `clamped` to mean the level STACK ran out — the target is
+   outside what any level of the grid yields.
 
    **`.clayspace` does NOT move for this.** The mesh stream carries quads as a
    tail APPENDED after the triangle indices, with no attribute-mask bit and no

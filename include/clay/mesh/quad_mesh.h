@@ -17,7 +17,7 @@
 // What it IS good for: getting quads into a DCC that prefers them,
 // subdividing a sculpt, and exporting a voxel model as the box faces it is.
 //
-// Three properties of the output, stated rather than discovered:
+// Four properties of the output, stated rather than discovered:
 //
 //  - VALENCE AVERAGES FOUR AND IS NOT FOUR EVERYWHERE. One vertex per surface
 //    cell and one quad per crossing lattice edge makes the two counts equal,
@@ -35,10 +35,35 @@
 //    differently than this library's triangulation does. Nothing is
 //    planarised: flattening a face moves its vertices off the surface, which
 //    trades a shading artifact for a geometric error.
-//  - THE OUTPUT IS NOT MANIFOLD AND NOT WATERTIGHT, for the reason
-//    mesh/surface_nets.h already gives — a cell the surface crosses twice
-//    gets one vertex and the two sheets pinch. mesh_tape (marching) remains
-//    the watertight, 2-manifold export path and is unaffected by any of this.
+//  - SOME QUADS ARE VANISHINGLY SMALL. A cell whose vertex lands on top of a
+//    neighbour's — which symmetry on a thin feature makes happen, the two
+//    crossings of a wall averaging to the same point — leaves a quad with
+//    near-zero area. On a thin capsule a handful of quads come out around
+//    1e-15 of a unit against a median near 1e-4. This is INHERITED, not
+//    introduced: the same cells produce the same degenerate TRIANGLES in
+//    mesh_tape_nets at the same cell size, position for position. It is
+//    called out here because a zero-area face is what a DCC importer warns
+//    about first, and because a mesh validator will find it before the user
+//    does. Nothing welds them away — collapsing a face moves vertices that
+//    the field put where they are, and the triangle path has always shipped
+//    them.
+//
+//  - THE OUTPUT IS NOT MANIFOLD AND NOT WATERTIGHT, for TWO reasons, only the
+//    first of which mesh/surface_nets.h gives:
+//      * a cell the surface crosses twice gets one vertex and the two sheets
+//        pinch; and
+//      * DIAGONAL occupancy, which a voxel sculpt produces constantly. Two
+//        solid cells that meet only along a lattice EDGE put one quad edge in
+//        FOUR quads, and there is no consistent winding across it; two that
+//        meet only at a CORNER share one vertex between two otherwise
+//        disjoint sheets, which is a bowtie. Both are the shape being what it
+//        is rather than either mode getting it wrong — a diagonal solid has
+//        no manifold surface to find — and a 4x4x4 checkerboard is nothing
+//        but this case (108 four-quad edges in both modes). A caller who
+//        needs a manifold from such a sculpt has to thicken the diagonal, not
+//        change mesher.
+//    mesh_tape (marching) remains the watertight, 2-manifold export path and
+//    is unaffected by any of this.
 //
 // The quads ride in Mesh::quads BESIDE the triangles, never instead of them;
 // mesh/mesh_data.h states that invariant, and quads_consistent() below is how
@@ -95,6 +120,14 @@ Mesh mesh_tape_quads(const scene::Tape& tape, const math::Aabb& region, float ce
 // within_tolerance = false. No rounding trick fixes that — the count is how
 // many lattice edges the surface crosses.
 //
+// NOR IS THE RESULT MONOTONIC IN THE TARGET. Each search starts from its own
+// seed and stops after its own handful of meshes, so two nearby targets are
+// two independent walks over a non-monotonic count: asking a voxel sphere for
+// 4 quads can return more of them than asking for 10, because the smaller
+// target's walk never visited the candidate the larger one landed on. A host
+// wiring a slider to this should expect the count to move backwards
+// occasionally; raising max_iterations makes it rarer and never rules it out.
+//
 // COST. EVERY ITERATION IS A WHOLE MESH, including a whole dense field
 // evaluation on the tape path. max_iterations is therefore a cost knob rather
 // than a quality knob, its default is deliberately small, and a caller who
@@ -115,11 +148,15 @@ struct QuadFit {
     std::size_t quad_count = 0;   // what it actually produced
     int iterations = 0;           // meshes the SEARCH built; 0 when none ran
     bool within_tolerance = false;
-    // The search wanted a cell size outside the limits and meshed at the limit
-    // instead — the fine end being the mesher's sample pricing (and, for
-    // voxels, the grid's own voxel size), the coarse end being a lattice too
-    // sparse to span the region at all. True even if the clamped mesh then
-    // happened to land inside the tolerance: both statements are then true.
+    // The search wanted a lattice the source cannot give it and settled for
+    // the nearest one it can. Over a continuous cell size (fit_quad_cell) that
+    // is a limit: the fine end is the mesher's sample pricing (and, for
+    // voxels, the grid's own voxel size), the coarse end a lattice too sparse
+    // to span the region at all. Over a LADDER of fixed lattices
+    // (fit_quad_ladder) it is the ladder's end: the target lies below what the
+    // coarsest rung yields or above what the finest does. True even if the
+    // clamped mesh then happened to land inside the tolerance: both statements
+    // are then true.
     bool clamped = false;
 };
 
@@ -142,6 +179,49 @@ struct QuadFit {
 // nothing was asked for, so nothing was missed.
 QuadFit fit_quad_cell(const std::function<Mesh(float)>& mesh_at, float seed_cell, float min_cell,
                       float max_cell, const QuadTarget& target, Mesh* out_mesh);
+
+// The same search over a LADDER instead of a continuum, for a source whose
+// lattices are a fixed, ordered list rather than a number a secant can move —
+// the voxel grid's level stack, where there is no cell size to step at all.
+//
+// Walks rung 0 (the coarsest, fewest quads) toward rung rungs-1 and STOPS at
+// the first rung whose count reaches or passes the target: the count rises
+// along the ladder, so no later rung can be nearer than the two this brackets
+// the target between. It keeps the closest of the rungs it meshed by the same
+// rule fit_quad_cell uses — never-empty over empty, then distance, then the
+// candidate that does not exceed the target — and returns THAT mesh.
+//
+// max_iterations does NOT apply here, and that is the one place this parts
+// company with fit_quad_cell. It exists there because a secant over a
+// continuum has no natural end and every step costs a whole dense mesh. A
+// ladder ends where the ladder ends, and the rungs are ordered coarse to fine,
+// so the walk's total cost is dominated by its LAST rung — a stack whose count
+// quadruples per level costs about a third more to walk in full than to mesh
+// its finest level once. Capping that would buy nothing and would cost the
+// contract below: a cap that stopped the walk early would be a third meaning
+// of `clamped`, or a silent third case with no flag at all.
+//
+// `clamped` says THE LADDER RAN OUT, which is the honest reading of a fixed
+// list: the target is below what rung 0 yields or above what the last rung
+// yields, and no rung of this source is nearer than the end that was returned.
+// A target falling BETWEEN two rungs is NOT clamped even when it lands far
+// off — both neighbours were meshed and the nearer one is the answer, which is
+// what within_tolerance = false says. A ladder step is typically a factor of
+// four in count, so within_tolerance is unreachable for most targets and this
+// distinction is the whole of what the report can tell a caller.
+//
+// `iterations` is the rungs meshed, which is at most the ladder's length and
+// is two whenever the target falls inside it.
+//
+// `out_rung` receives the rung the returned mesh came from. A ladder has no
+// cell size of its own, so QuadFit::cell_size comes back 0 and it is the
+// caller that fills in what the rung is called — a voxel level's own voxel
+// size, say. That is the one field of the report it must supply. A target of 0
+// has no meaning here: there is no seed rung to echo, so the report comes back
+// zeroed and no mesh is built. A caller with no target meshes its own default
+// rung directly instead.
+QuadFit fit_quad_ladder(const std::function<Mesh(std::size_t)>& mesh_at, std::size_t rungs,
+                        const QuadTarget& target, std::size_t* out_rung, Mesh* out_mesh);
 
 // mesh_tape_quads with a target: the same mesh at the cell size the search
 // settles on, plus the report of how it got there.

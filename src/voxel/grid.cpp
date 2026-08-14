@@ -1109,52 +1109,39 @@ mesh::Mesh VoxelGrid::dual_quads_fit(const QuadOptions& options, const mesh::Qua
     return out;
 }
 
-// Faces mode has no cell size, so the search moves over the LEVEL stack and a
-// cell size is only how a level is named: the mesher maps the cell the search
-// asks for onto the level whose voxel size is nearest in RATIO, which is the
-// right measure when the levels are a factor of two apart. Memoised, because
-// the quantisation makes "the step landed back on a level already meshed" the
-// common case and each of these is a whole mesh.
+// Faces mode has no cell size to step, so the target search is the LADDER walk
+// over the level stack: coarsest level first, stopping at the first level that
+// reaches the target. mesh/quad_mesh.h holds the contract, including what
+// `clamped` means when the lattices are a fixed list — the stack ran out, not
+// a limit was hit.
 mesh::Mesh VoxelGrid::faces_quads_fit(const QuadOptions& options, const mesh::QuadTarget& target,
                                       mesh::QuadFit* fit) const {
     mesh::Mesh out;
+    *fit = mesh::QuadFit{};
     if (levels_.empty()) return out;
-    const std::size_t finest = levels_.size() - 1;
 
-    auto level_for = [this](float cell) {
-        std::size_t best = 0;
-        double best_error = std::numeric_limits<double>::infinity();
-        for (std::size_t l = 0; l < levels_.size(); ++l) {
-            const double error = std::fabs(std::log(static_cast<double>(levels_[l].voxel_size) /
-                                                    static_cast<double>(cell)));
-            if (error < best_error) {
-                best_error = error;
-                best = l;
-            }
-        }
-        return best;
+    auto mesh_level = [&](std::size_t level) {
+        QuadOptions at = options;
+        at.level = level;
+        return mesh_quads(at);
     };
 
-    std::map<std::size_t, mesh::Mesh> meshed;
-    const float seed = target.target == 0
-                           ? levels_[std::min(options.level, finest)].voxel_size
-                           : seed_cell_for(level_occupied_count(finest),
-                                           levels_[finest].voxel_size, target.target);
-    *fit = mesh::fit_quad_cell(
-        [&](float cell) {
-            const std::size_t level = level_for(cell);
-            auto it = meshed.find(level);
-            if (it == meshed.end()) {
-                QuadOptions at = options;
-                at.level = level;
-                it = meshed.emplace(level, mesh_quads(at)).first;
-            }
-            return it->second;
-        },
-        seed, levels_[finest].voxel_size, levels_[0].voxel_size, target, &out);
-    // The report names the lattice the mesh was built on, and here that is a
-    // level rather than the continuous cell size the search walked over.
-    if (fit->cell_size > 0.0f) fit->cell_size = levels_[level_for(fit->cell_size)].voxel_size;
+    if (target.target == 0) {
+        // No search, so the caller's own level stands and the report is here
+        // only to echo which lattice that was.
+        const std::size_t level = std::min(options.level, levels_.size() - 1);
+        out = mesh_level(level);
+        fit->cell_size = levels_[level].voxel_size;
+        fit->quad_count = out.quad_count();
+        fit->within_tolerance = true;
+        return out;
+    }
+
+    std::size_t rung = 0;
+    *fit = mesh::fit_quad_ladder(mesh_level, levels_.size(), target, &rung, &out);
+    // The one field the ladder cannot fill: it walked rungs, and what names a
+    // rung back to a caller is the level's voxel size.
+    fit->cell_size = levels_[rung].voxel_size;
     return out;
 }
 

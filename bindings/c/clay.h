@@ -1317,7 +1317,8 @@ typedef struct clay_quad_params {
     /* appended after the original layout; all three default to 0 */
     uint64_t target_quads;  /* 0: no search, mesh once at cell_size */
     float tolerance;        /* fraction of the target; <= 0 means 0.10 */
-    int32_t max_iterations; /* whole meshes the search may build; <= 0 means 4 */
+    int32_t max_iterations; /* whole meshes the search may build; <= 0 means 4.
+                             * Not used in faces mode: see clay_mesh_quad_report */
 } clay_quad_params;
 
 /* Quad-meshes the document's SDF content. A NEW entry point: clay_document_mesh
@@ -1354,20 +1355,38 @@ clay_result clay_mesh_copy_quads(const clay_mesh* mesh, uint32_t* dst, size_t ds
  * GRANULARITY. The count goes as cell^-2, so a 1% change in cell size moves it
  * about 2%. Landing inside 5-10% is the expectation, `tolerance` defaults to
  * 0.10, and a tolerance much below about 2% will exhaust `max_iterations` and
- * come back with `within_tolerance` 0 and the best attempt. In faces mode the
- * lever is the resolution LEVEL, a factor of about four per step, so
- * `within_tolerance` is usually unreachable there and `cell_size` names the
- * level that was chosen.
+ * come back with `within_tolerance` 0 and the best attempt.
+ *
+ * NOR IS THE RESULT MONOTONIC IN THE TARGET. Two nearby targets are two
+ * independent searches, each from its own seed and each stopping after its own
+ * handful of meshes, so a slightly smaller target can come back with slightly
+ * MORE quads. A host wiring a slider should expect the count to move backwards
+ * occasionally; a larger `max_iterations` makes it rarer and never rules it
+ * out.
+ *
+ * FACES MODE IS DIFFERENT, because its lattices are the grid's resolution
+ * LEVELS and not a continuum. The search walks the stack from the coarsest
+ * level toward the finest, stops at the first level that reaches the target,
+ * and returns the nearer of the two it lands between — so it is monotonic,
+ * it costs at most one mesh per level, and `max_iterations` does not apply to
+ * it. A level step is a factor of about four in count, so `within_tolerance`
+ * is usually unreachable there, and `cell_size` names the level that was
+ * chosen.
  *
  * COST. EVERY ITERATION IS A WHOLE MESH, including a whole dense field
  * evaluation on the document path. `max_iterations` is a cost knob, not a
  * quality knob.
  *
- * `clamped` means the search wanted a lattice outside what is allowed and
- * meshed at the limit instead — the fine end being the sample ceiling
- * clay_document_mesh already prices against and, for voxels, the grid's own
- * voxel size, below which a finer lattice resamples the same step field and
- * buys quads without buying detail.
+ * `clamped` means the search wanted a lattice the source cannot give it and
+ * settled for the nearest one it can. Over a cell size that is a limit — the
+ * fine end being the sample ceiling clay_document_mesh already prices against
+ * and, for voxels, the grid's own voxel size, below which a finer lattice
+ * resamples the same step field and buys quads without buying detail. In faces
+ * mode it is the STACK RUNNING OUT: the target is below what the coarsest
+ * level yields or above what the finest yields, and no level of this grid is
+ * nearer than the one returned. A faces target that falls BETWEEN two levels
+ * is not clamped even when it lands far off — both were meshed and neither is
+ * nearer, which is what `within_tolerance` 0 says.
  *
  * A mesh that was NOT quad-meshed is refused with CLAY_ERROR_INVALID_ARGUMENT
  * rather than answered with zeroes: zeroes are indistinguishable from a search

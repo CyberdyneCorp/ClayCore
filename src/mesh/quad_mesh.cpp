@@ -131,6 +131,50 @@ QuadFit fit_quad_cell(const std::function<Mesh(float)>& mesh_at, float seed_cell
     return fit;
 }
 
+QuadFit fit_quad_ladder(const std::function<Mesh(std::size_t)>& mesh_at, std::size_t rungs,
+                        const QuadTarget& target, std::size_t* out_rung, Mesh* out_mesh) {
+    QuadFit fit;
+    if (out_rung) *out_rung = 0;
+    if (!mesh_at || rungs == 0 || target.target == 0) return fit;
+
+    const double want = static_cast<double>(target.target);
+    const float tolerance = target.tolerance > 0.0f ? target.tolerance : 0.10f;
+
+    Mesh best;
+    std::size_t best_rung = 0;
+    double coarsest_count = 0.0;
+    bool have_best = false;
+    bool reached = false;  // a rung's count met or passed the target
+    for (std::size_t rung = 0; rung < rungs; ++rung) {
+        Mesh m = mesh_at(rung);
+        const std::size_t count = m.quad_count();
+        ++fit.iterations;
+        if (rung == 0) coarsest_count = static_cast<double>(count);
+        if (!have_best || better_count(count, fit.quad_count, want)) {
+            best = std::move(m);
+            fit.quad_count = count;
+            best_rung = rung;
+            have_best = true;
+        }
+        if (static_cast<double>(count) >= want) {
+            reached = true;
+            break;
+        }
+    }
+
+    // Off the coarse end (rung 0 already overshot, so a coarser ladder would
+    // have been needed) or off the fine end (every rung meshed and the target
+    // is still above the last one's count). There is no third case: the walk
+    // either brackets the target or runs out of ladder.
+    fit.within_tolerance =
+        fit.quad_count > 0 && std::fabs(static_cast<double>(fit.quad_count) - want) <=
+                                  static_cast<double>(tolerance) * want;
+    fit.clamped = coarsest_count > want || !reached;
+    if (out_rung) *out_rung = best_rung;
+    if (out_mesh) *out_mesh = std::move(best);
+    return fit;
+}
+
 Mesh mesh_tape_quads_fit(const scene::Tape& tape, const math::Aabb& region, float cell_size,
                          const QuadTarget& target, const MeshingOptions& options,
                          QuadFit* out_fit) {

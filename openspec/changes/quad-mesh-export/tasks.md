@@ -160,3 +160,28 @@
 - [x] 10.4 `docs/RELEASE.md`: the new ABI surface, the appended stream section
       that older readers skip, and — first, not buried — that this is a lattice
       quad grid rather than retopology.
+
+## 11. Review round 1
+
+- [x] 11.1 `mesh::fit_quad_ladder` — the discrete stack walk the faces header
+      always described: coarsest level first, stop at the first level that
+      reaches the target, keep the nearer of the two it brackets. Faces mode
+      uses it instead of running the continuous secant and rounding each step
+      to the nearest level, which walked no order, never tested for overshoot,
+      and left `clamped` meaning something the header did not say.
+- [x] 11.2 `clamped` in faces mode means the STACK ran out, and the walk cannot
+      be stopped short by `max_iterations`; grid.h, clay.h, the pyclay
+      docstring and the spec all say the same thing.
+- [x] 11.3 The per-level memoisation map goes with it: the walk holds the best
+      mesh and the current one, not every level it meshed.
+- [x] 11.4 pyclay refuses a non-finite `cell_size` where the C ABI already did,
+      instead of letting a NaN fall through to "no cell size given".
+- [x] 11.5 `mesh/quad_mesh.h` states two more properties of the output: the
+      near-degenerate quads a thin symmetric feature produces (inherited from
+      the nets triangles, not introduced here), and diagonal occupancy as the
+      second, more common cause of non-manifoldness.
+- [x] 11.6 The count is documented as non-monotonic in the TARGET as well as in
+      the cell size, because a host wiring a slider will see it move backwards.
+- [x] 11.7 `examples/44_quad_export.py` asserts the dual/faces count identity it
+      previously guarded behind an `if`, matching what the gallery README
+      already states.

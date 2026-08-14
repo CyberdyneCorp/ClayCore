@@ -21,6 +21,18 @@ Faces mode SHALL NOT emit vertex normals. A welded corner is shared by faces poi
 
 Faces mode has no cell size — its lattice is the grid. Its count lever SHALL be the multi-resolution LEVEL the grid already carries, so its granularity is roughly a factor of four per step, and a requested target SHALL pick the nearest level. This SHALL be stated, because a caller who asks for fifty thousand quads and receives twelve thousand needs to know a level was chosen rather than a bug hit.
 
+The faces search SHALL be a WALK of that stack and not a search over a cell size that is then rounded to a level: it meshes the coarsest level first, stops at the first level whose count reaches or passes the target, and returns the nearer of the two levels it landed between. The count rises with every level, so no later level can be nearer, and the walk therefore costs two meshes whenever the target falls inside the stack and at most one mesh per level ever. `max_iterations` SHALL NOT apply to it: a stack is its own bound, and because each level holds about a quarter of the next one's faces, walking the whole stack costs about a third more than meshing its finest level alone — which a target above every level buys in any case.
+
+`clamped` in faces mode SHALL mean THE STACK RAN OUT — the target is below what the coarsest level yields, or above what the finest yields. A target falling BETWEEN two levels SHALL NOT be reported as clamped even when the level returned is far from it; that is what `within_tolerance` false says. The documented meaning of the flag and the search that sets it SHALL be the same thing, because this feature's premise is that a caller learns the behaviour from the documentation rather than from the mesh.
+
+#### Scenario: A faces target inside the stack brackets it and is not clamped
+- **WHEN** a multi-level grid is asked in faces mode for a count between two levels' counts
+- **THEN** both bracketing levels are meshed, the nearer one is returned and named in the report, and `clamped` is false
+
+#### Scenario: A faces target outside the stack reports the stack running out
+- **WHEN** a multi-level grid is asked in faces mode for a count below what its coarsest level yields, or above what its finest level yields
+- **THEN** the end level is returned and `clamped` is true, and a stack longer than `max_iterations` still reaches its end
+
 #### Scenario: Dual mode at the grid's own resolution is the smooth mesh
 - **WHEN** a sculpt is quad-meshed in dual mode at the grid's voxel size with no blur
 - **THEN** the positions and triangle indices are identical to `mesh_smooth`'s, and the mesh additionally carries one quad per two triangles

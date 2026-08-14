@@ -4104,6 +4104,51 @@ def test_voxel_quad_modes_and_the_smooth_identity():
         grid.mesh_quads(level=4)
 
 
+def test_a_non_finite_cell_size_is_refused_here_as_it_is_in_c():
+    """REGRESSION: a NaN passes every `> 0` test, so it used to fall through to
+    the "no cell size given" branch and be answered with an estimated seed —
+    while clay_quad_params refused the same value. Same input, one answer."""
+    doc, _ = build_body()
+    _, grid = _sphere_sculpt()
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(ValueError, match="cell_size must be finite"):
+            doc.mesh_quads(cell_size=bad, target=100)
+        with pytest.raises(ValueError, match="cell_size must be finite"):
+            grid.mesh_quads(cell_size=bad)
+
+
+def test_the_faces_target_walks_the_level_stack():
+    """REGRESSION: faces mode is a walk of the resolution stack, and `clamped`
+    means the stack ran out — not that some cell-size limit was reached."""
+    _, grid = _sphere_sculpt(voxel_size=0.1)
+    source = clay.Document()
+    source.add_sdf_layer("s").add(clay.Sphere(r=0.5))
+    for _ in range(2):
+        grid.add_level()
+        grid.rasterize(source)
+    counts = [grid.mesh_quads(mode="faces", level=l).quad_count
+              for l in range(grid.level_count)]
+    assert counts == sorted(counts) and counts[0] < counts[-1]
+
+    # Inside the stack: both neighbours meshed, the nearer returned, no clamp.
+    inside = grid.mesh_quads(mode="faces", target=counts[0] + 1).quad_report
+    assert inside["quad_count"] == counts[0]
+    assert inside["iterations"] == 2
+    assert inside["clamped"] is False
+
+    # Off either end: the end level, and the report says the stack ran out.
+    below = grid.mesh_quads(mode="faces", target=1).quad_report
+    assert below["quad_count"] == counts[0]
+    assert below["clamped"] is True
+    # max_iterations does not truncate the walk — the stack is its own bound.
+    above = grid.mesh_quads(mode="faces", target=10 * counts[-1],
+                            max_iterations=1).quad_report
+    assert above["quad_count"] == counts[-1]
+    assert above["iterations"] == grid.level_count
+    assert above["clamped"] is True
+    assert above["within_tolerance"] is False
+
+
 def test_a_voxel_target_finer_than_the_grid_reports_the_clamp():
     _, grid = _sphere_sculpt()
     mesh = grid.mesh_quads(target=1_000_000)

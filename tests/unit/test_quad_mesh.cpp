@@ -101,6 +101,42 @@ TEST_CASE("the quad mesh IS the nets mesh") {
     CHECK(quads.quad_count() == nets.triangle_count() / 2);
 }
 
+// quad_mesh.h states that a thin symmetric feature produces a few
+// near-degenerate faces and that they are INHERITED rather than introduced.
+// The second half is the load-bearing half — it is what says this feature adds
+// no defect — so it is measured on a shape that actually produces them, not
+// only on the sphere above where none appear.
+TEST_CASE("the near-degenerate faces of a thin shape are the nets mesh's own") {
+    static scene::Document doc;
+    doc = scene::Document{};
+    scene::Layer& l = doc.add_sdf_layer("l");
+    l.sdf->insert(item(scene::Prim::capsule(cf3(-0.3f, 0, 0), cf3(0.3f, 0, 0), 0.02f),
+                       cf3(0, 0, 0)));
+    scene::Tape t = scene::compile_document(doc);
+    const math::Aabb region{cf3(-0.5f, -0.2f, -0.2f), cf3(0.5f, 0.2f, 0.2f)};
+
+    const Mesh nets = mesh::mesh_tape_nets(t, region, 0.02f);
+    const Mesh quads = mesh::mesh_tape_quads(t, region, 0.02f);
+    REQUIRE(quads.quad_count() > 0);
+    CHECK(same_geometry(nets, quads));
+
+    auto tiny_triangles = [](const Mesh& m) {
+        std::size_t n = 0;
+        for (std::size_t i = 0; i + 2 < m.indices.size(); i += 3) {
+            const cfloat3 a = m.positions[m.indices[i]];
+            const cfloat3 b = m.positions[m.indices[i + 1]];
+            const cfloat3 c = m.positions[m.indices[i + 2]];
+            if (clength(ccross(b - a, c - a)) < 1e-12f) ++n;
+        }
+        return n;
+    };
+    // The two thin walls of the capsule average to the same point in a cell
+    // the axis passes through, which collapses a face. Whatever the count is,
+    // the triangle path shipped exactly the same ones before quads existed.
+    CHECK(tiny_triangles(quads) > 0);
+    CHECK(tiny_triangles(quads) == tiny_triangles(nets));
+}
+
 TEST_CASE("every existing mesher returns an empty quad array") {
     scene::Tape t = sphere_tape(1.0f);
     CHECK(mesh::mesh_tape(t, kSphereRegion, 0.15f).quads.empty());
@@ -366,6 +402,70 @@ TEST_CASE("faces mode winds every face outward, on both signs of all three axes"
         directions.insert(axis * 2 + (sign > 0.0f ? 1 : 0));
     }
     CHECK(directions.size() == 6);  // all three axes, both signs
+}
+
+// The SECOND cause of non-manifoldness, which quad_mesh.h names beside the
+// double-crossed cell because it is the one a voxel sculpt actually produces.
+// Nothing here is a defect to fix — a diagonal solid has no manifold surface —
+// but the header's claim about it is a claim, so it is measured.
+TEST_CASE("diagonal occupancy is non-manifold in both modes, as the header says") {
+    auto two_cells = [](VoxelCoord a, VoxelCoord b) {
+        VoxelGrid g(0.1f);
+        const std::uint8_t c = g.palette_add(cf3(1, 1, 1));
+        g.fill_box(a, a, c);
+        g.fill_box(b, b, c);
+        return g;
+    };
+    auto over_used_edges = [](const Mesh& m) {
+        std::map<std::pair<std::uint32_t, std::uint32_t>, int> uses;
+        for (std::size_t q = 0; q < m.quad_count(); ++q) {
+            const std::uint32_t* c = &m.quads[q * 4];
+            for (int k = 0; k < 4; ++k) {
+                const std::uint32_t a = c[k], b = c[(k + 1) % 4];
+                uses[{std::min(a, b), std::max(a, b)}] += 1;
+            }
+        }
+        std::map<int, std::size_t> histogram;
+        for (const auto& [edge, n] : uses) histogram[n] += 1;
+        return histogram;
+    };
+
+    VoxelGrid::QuadOptions faces;
+    faces.mode = VoxelGrid::QuadOptions::Mode::Faces;
+
+    SUBCASE("cells sharing only a lattice edge put one edge in four quads") {
+        VoxelGrid g = two_cells({0, 0, 0}, {1, 1, 0});
+        for (const Mesh& m : {g.mesh_quads(faces), g.mesh_quads()}) {
+            REQUIRE(m.quad_count() == 12);
+            const auto histogram = over_used_edges(m);
+            CHECK(histogram.at(2) == 22);
+            CHECK(histogram.at(4) == 1);  // the shared lattice edge
+            CHECK(histogram.size() == 2);
+        }
+    }
+    SUBCASE("cells sharing only a corner are edge-manifold and bowtied") {
+        VoxelGrid g = two_cells({0, 0, 0}, {1, 1, 1});
+        const Mesh m = g.mesh_quads(faces);
+        REQUIRE(m.quad_count() == 12);
+        const auto histogram = over_used_edges(m);
+        CHECK(histogram.at(2) == 24);
+        CHECK(histogram.size() == 1);  // no edge over two...
+        // ...but the two cubes' 16 corners come back as 15 positions: the
+        // shared one belongs to two sheets that meet nowhere else.
+        CHECK(m.positions.size() == 15);
+    }
+    SUBCASE("a checkerboard is nothing but that case") {
+        VoxelGrid g(0.1f);
+        const std::uint8_t c = g.palette_add(cf3(1, 1, 1));
+        for (int x = 0; x < 4; ++x)
+            for (int y = 0; y < 4; ++y)
+                for (int z = 0; z < 4; ++z)
+                    if ((x + y + z) % 2 == 0) g.fill_box({x, y, z}, {x, y, z}, c);
+        for (const Mesh& m : {g.mesh_quads(faces), g.mesh_quads()}) {
+            REQUIRE(m.quad_count() == 192);
+            CHECK(over_used_edges(m).at(4) == 108);
+        }
+    }
 }
 
 TEST_CASE("greedy meshing is untouched by faces mode existing") {
@@ -656,6 +756,87 @@ TEST_CASE("faces mode on a one-level grid has no lever and reports the clamp") {
     CHECK(fit.clamped);
     CHECK_FALSE(fit.within_tolerance);
     CHECK(fit.cell_size == g.voxel_size());
+}
+
+// REGRESSION (review round 1): the faces search is the WALK its header
+// describes and not a secant over a cell size that is rounded to a level
+// afterwards. The old search never visited the stack in order, never tested
+// for an overshoot, and set `clamped` from a cell-size limit — so a target
+// that simply fell between two levels came back with `clamped` false and a
+// target the stack could not reach came back with `clamped` false too, which
+// is the same answer for two opposite situations.
+TEST_CASE("the faces target walks the level stack, and says when it ran out") {
+    VoxelGrid g = cube_grid(4);
+    REQUIRE(g.add_level() == 1);
+    REQUIRE(g.add_level() == 2);
+    REQUIRE(g.add_level() == 3);
+    VoxelGrid::QuadOptions faces;
+    faces.mode = VoxelGrid::QuadOptions::Mode::Faces;
+
+    std::vector<std::size_t> counts;
+    for (std::size_t l = 0; l < g.level_count(); ++l) {
+        VoxelGrid::QuadOptions at = faces;
+        at.level = l;
+        counts.push_back(g.mesh_quads(at).quad_count());
+    }
+    REQUIRE(counts.size() == 4);
+    for (std::size_t l = 1; l < counts.size(); ++l) REQUIRE(counts[l] > counts[l - 1]);
+
+    mesh::QuadFit fit;
+    SUBCASE("a target between two levels brackets it and is not clamped") {
+        // Nearer the coarse level of the pair, so that is what must come back:
+        // the finer one was meshed, compared and rejected.
+        mesh::QuadTarget want;
+        want.target = counts[1] + (counts[2] - counts[1]) / 4;
+        const Mesh q = g.mesh_quads_fit(faces, want, &fit);
+
+        CHECK(fit.quad_count == counts[1]);
+        CHECK(fit.cell_size == g.level_voxel_size(1));
+        CHECK(fit.iterations == 3);  // levels 0, 1, 2 — it stops at the overshoot
+        CHECK_FALSE(fit.clamped);    // the stack holds this target; no level is nearer
+        CHECK_FALSE(fit.within_tolerance);
+        CHECK(fit.quad_count == q.quad_count());
+    }
+    SUBCASE("a target below the coarsest level is the coarse end of the stack") {
+        mesh::QuadTarget want;
+        want.target = counts[0] / 2;
+        const Mesh q = g.mesh_quads_fit(faces, want, &fit);
+
+        CHECK(fit.quad_count == counts[0]);
+        CHECK(fit.cell_size == g.level_voxel_size(0));
+        CHECK(fit.iterations == 1);  // the first level already overshot
+        CHECK(fit.clamped);
+        CHECK_FALSE(fit.within_tolerance);
+    }
+    SUBCASE("a target above the finest level reaches the fine end of the stack") {
+        mesh::QuadTarget want;
+        want.target = counts.back() * 100;
+        // The cost knob does NOT truncate the walk: a stack is its own bound,
+        // and stopping at level 1 here would report a level as the best the
+        // grid holds while two finer ones sat unmeshed.
+        want.max_iterations = 1;
+        const Mesh q = g.mesh_quads_fit(faces, want, &fit);
+
+        CHECK(fit.quad_count == counts.back());
+        CHECK(fit.cell_size == g.level_voxel_size(g.level_count() - 1));
+        CHECK(fit.iterations == static_cast<int>(g.level_count()));
+        CHECK(fit.clamped);
+        CHECK_FALSE(fit.within_tolerance);
+        VoxelGrid::QuadOptions finest = faces;
+        finest.level = g.level_count() - 1;
+        CHECK(same_geometry(q, g.mesh_quads(finest)));
+    }
+    SUBCASE("a target a level hits exactly stops there") {
+        mesh::QuadTarget want;
+        want.target = counts[2];
+        const Mesh q = g.mesh_quads_fit(faces, want, &fit);
+
+        CHECK(fit.quad_count == counts[2]);
+        CHECK(fit.cell_size == g.level_voxel_size(2));
+        CHECK(fit.iterations == 3);
+        CHECK(fit.within_tolerance);
+        CHECK_FALSE(fit.clamped);
+    }
 }
 
 TEST_CASE("a fit with no target is the plain mesher with a report attached") {
