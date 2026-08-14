@@ -30,6 +30,7 @@
 
 #include "clay/math/geom.h"
 #include "clay/field/volume.h"
+#include "clay/mesh/bvh.h"
 #include "clay/mesh/mesh_data.h"
 #include "clay/mesh/quad_mesh.h"  // QuadTarget / QuadFit, shared with the SDF side
 #include "clay/scene/tape.h"
@@ -591,6 +592,45 @@ class VoxelGrid {
     //  - THE REGION BOUNDS THE WORK. Content outside it is not rasterized and
     //    is not reported as missing.
     void rasterize_tape(const scene::Tape& tape, const math::Aabb& world_region);
+
+    // The same conversion from TRIANGLES, in one sampling.
+    //
+    // An imported model could already reach an SDF layer in one step
+    // (mesh::to_field) but reached a grid only through a document: triangles
+    // to a narrow band, then band to cells. Each of those places the surface
+    // within about half a cell of its own lattice, so the detour quantised a
+    // field that was itself quantised, and a feature that survived the first
+    // sampling could fall between centres on the second. This is that trip
+    // with one sampling instead of two.
+    //
+    // Membership is the GENERALIZED WINDING NUMBER at the cell centre — the
+    // same sign mesh::Bvh uses and for the same reason. Ray parity breaks on a
+    // single hole and the closest-triangle pseudonormal is meaningless near an
+    // opening; real assets have holes, flipped normals and self-intersections,
+    // so dirty input is the input. A model with a missing cap rasterizes
+    // without flipping a half-space.
+    //
+    // COLOUR comes from the mesh's vertex colours when it has them,
+    // interpolated at the closest point on the nearest triangle and quantised
+    // to the palette by nearest entry, exactly as rasterize_tape quantises the
+    // tape's colour field. A mesh with no colours gets one neutral entry — the
+    // grid's colour is per cell and there is nothing else to read.
+    //
+    // Everything rasterize_tape's note says about what sampling costs applies
+    // here unchanged: the surface moves by up to half a cell, a feature thinner
+    // than a cell can vanish (rasterize finer — nothing downstream can invent
+    // what was never stored), a sharp edge staircases at the cell size, and
+    // colours closer than the palette tolerance become one.
+    //
+    // NOT retopology and not remeshing: occupancy sampling, nothing more. The
+    // mesh is not modified, and a mesh a DOCUMENT carries stays never-evaluated
+    // — this is an explicit conversion a caller asks for, like every bridge.
+    void rasterize_mesh(const mesh::Mesh& m);
+    // The same, bounded. A mesh cannot be unbounded, so unlike rasterize_tape
+    // the region is optional and defaults to the mesh's own bounds; an explicit
+    // one is how a caller rasterizes a part of a model, and content outside it
+    // is not rasterized and is not reported as missing.
+    void rasterize_mesh(const mesh::Mesh& m, const math::Aabb& world_region);
 
   private:
     struct Chunk {

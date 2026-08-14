@@ -169,6 +169,18 @@ carries a Lipschitz bound a raymarcher and a blend can trust. Non-destructive:
 the grid is untouched, and the result is an ordinary volume item in an
 ordinary SDF layer.
 
+**Mesh → voxel** — `VoxelGrid.rasterize_mesh(mesh)` in Python,
+`clay_voxel_rasterize_mesh` in C. An imported model reached an SDF layer in one
+step and a grid only in four, paying **two** samplings: triangles into a narrow
+band, then the band into cells. Each places the surface within about half a cell
+of its own lattice, so the second quantised a field that was already quantised.
+This asks the triangles directly — membership by the same generalized winding
+number `Volume.from_mesh` uses, so a hole degrades the sign instead of flipping
+a half-space. Two things fall out of doing it once: a feature thinner than a cell
+survives where the detour lost it, and **the model's vertex colours reach the
+palette**, which the detour cannot carry because a distance field has no colour
+in it. The region is optional here — a document may be unbounded, a mesh cannot.
+
 What conversion costs, in both directions: the surface is preserved to within
 about a cell, and the colour survives. Exactness and the procedural history do
 not — once rasterized, the parametric items behind the sculpt are no longer

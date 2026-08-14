@@ -5061,7 +5061,54 @@ NB_MODULE(pyclay, m) {
                  grid.rasterize_tape(tape, box);
              },
              "document"_a, "region"_a = nb::none(),
-             "Rasterize an SDF document into voxels (colors sampled from the field)");
+             "Rasterize an SDF document into voxels (colors sampled from the field)")
+        .def("rasterize_mesh",
+             [](PyVoxelGrid& g, const PyMesh& source, nb::handle region) {
+                 const mesh::Mesh& m = source.data();
+                 if (m.empty()) throw std::invalid_argument("the mesh has no triangles");
+                 std::optional<math::Aabb> box;
+                 if (!region.is_none()) {
+                     nb::sequence s = nb::cast<nb::sequence>(region);
+                     if (nb::len(s) != 2)
+                         throw std::invalid_argument("region must be ((minx,miny,minz), (max...))");
+                     box = math::Aabb{to_f3(s[0], "region min"), to_f3(s[1], "region max")};
+                     if (box->empty() || box->is_infinite())
+                         throw std::invalid_argument(
+                             "the region must be finite, non-empty and bounded");
+                 }
+                 voxel::VoxelGrid& grid = g.grid();
+                 nb::gil_scoped_release release;
+                 if (box)
+                     grid.rasterize_mesh(m, *box);
+                 else
+                     grid.rasterize_mesh(m);
+             },
+             "mesh"_a, "region"_a = nb::none(),
+             "Rasterize a TRIANGLE MESH into voxels, in one sampling.\n\n"
+             "An imported model reaches an SDF layer in one step (Volume.from_mesh)\n"
+             "but reached a grid only through a document: triangles to a narrow band,\n"
+             "band into a layer, layer rasterized. Each of those places the surface\n"
+             "within about half a cell of its own lattice, so the detour quantised a\n"
+             "field that was itself quantised — and a feature that survived the first\n"
+             "sampling could fall between centres on the second.\n\n"
+             "Membership is the GENERALIZED WINDING NUMBER at the cell centre: the\n"
+             "sign that survives a hole, a flipped normal and a self-intersection,\n"
+             "because those are what imported meshes have. A model with a missing\n"
+             "cap rasterizes without flipping a half-space.\n\n"
+             "Colour comes from the mesh's vertex colours where it has them,\n"
+             "interpolated at the closest point on the nearest triangle and quantised\n"
+             "to the palette by nearest entry. A mesh with no colours takes one\n"
+             "neutral entry — a grid's colour is per cell and there is nothing else\n"
+             "to read.\n\n"
+             "`region` is OPTIONAL here, unlike `rasterize`: a document can be\n"
+             "unbounded and a mesh cannot, so None means the mesh's own bounds.\n\n"
+             "What the sampling costs: the surface moves by up to half a cell, a\n"
+             "feature thinner than a cell can vanish (rasterize finer — nothing\n"
+             "downstream can invent what was never stored), a sharp edge staircases,\n"
+             "and two colours closer than the palette tolerance become one.\n\n"
+             "NOT retopology and not remeshing. The mesh is not modified, and a mesh\n"
+             "a document CARRIES stays never-evaluated — this is an explicit\n"
+             "conversion you ask for, like every bridge.");
 
     m.def("load",
           [](const std::string& path) {

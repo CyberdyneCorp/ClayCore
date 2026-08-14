@@ -4429,3 +4429,71 @@ def test_the_mesh_brush_arguments_refuse_what_c_refuses():
         sculptor.stamp("smooth", center=(0, 0, 0), radius=0.5, smooth_iterations=0)
     with pytest.raises(ValueError):
         sculptor.stamp("smooth", center=(0, 0, 0), radius=0.5, smooth_iterations=1000)
+
+
+# -- triangles straight to cells ------------------------------------------------
+
+
+def _box_mesh(lo, hi, colors=None):
+    """Twelve triangles bounding a box, wound outward."""
+    p = np.array([[lo[0], lo[1], lo[2]], [hi[0], lo[1], lo[2]], [hi[0], hi[1], lo[2]],
+                  [lo[0], hi[1], lo[2]], [lo[0], lo[1], hi[2]], [hi[0], lo[1], hi[2]],
+                  [hi[0], hi[1], hi[2]], [lo[0], hi[1], hi[2]]], dtype=np.float32)
+    f = np.array([0, 3, 2, 0, 2, 1, 4, 5, 6, 4, 6, 7,
+                  0, 1, 5, 0, 5, 4, 3, 7, 6, 3, 6, 2,
+                  0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5], dtype=np.uint32)
+    return clay.Mesh.from_triangles(p, f)
+
+
+def test_rasterize_mesh_fills_the_solid_and_defaults_its_region():
+    m = _box_mesh((-0.3, -0.2, -0.25), (0.3, 0.2, 0.25))
+    grid = clay.VoxelGrid(0.02)
+    grid.rasterize_mesh(m)                      # None region = the mesh's bounds
+    assert grid.occupied_count > 0
+
+    # An explicit region bounds the work and says nothing about the rest.
+    half = clay.VoxelGrid(0.02)
+    half.rasterize_mesh(m, region=((0.0, -0.4, -0.4), (0.4, 0.4, 0.4)))
+    assert 0 < half.occupied_count < grid.occupied_count
+
+
+def test_rasterize_mesh_survives_a_hole():
+    # A parity ray cast flips a half-space on one missing face; the winding
+    # number does not, which is the whole reason for the sign choice.
+    whole = _box_mesh((-0.3, -0.2, -0.25), (0.3, 0.2, 0.25))
+    # pyclay exposes indices as (N, 3), so this drops the two triangles of ONE
+    # face — not six indices, which is the same edit spelled for the C++ side.
+    holed = clay.Mesh.from_triangles(np.array(whole.positions, copy=True),
+                                     np.array(whole.indices, copy=True)[:-2])
+    a, b = clay.VoxelGrid(0.02), clay.VoxelGrid(0.02)
+    a.rasterize_mesh(whole)
+    b.rasterize_mesh(holed)
+    assert b.occupied_count > a.occupied_count * 0.8
+
+
+def test_rasterize_mesh_refuses_what_it_cannot_mean():
+    m = _box_mesh((-0.2, -0.2, -0.2), (0.2, 0.2, 0.2))
+    grid = clay.VoxelGrid(0.02)
+    with pytest.raises(Exception):
+        grid.rasterize_mesh(m, region=((1.0, 1.0, 1.0), (0.0, 0.0, 0.0)))   # inverted
+    with pytest.raises(Exception):
+        grid.rasterize_mesh(m, region=((0.0, 0.0), (1.0, 1.0)))             # malformed
+    assert grid.occupied_count == 0
+
+
+def test_rasterize_mesh_beats_the_document_detour_on_a_thin_feature():
+    # The four-step chain this replaces: triangles -> band -> layer -> cells.
+    cell = 0.02
+    slab = _box_mesh((-0.30, -0.014, -0.30), (0.30, 0.014, 0.30))
+    region = ((-0.5, -0.5, -0.5), (0.5, 0.5, 0.5))
+
+    direct = clay.VoxelGrid(cell)
+    direct.rasterize_mesh(slab, region=region)
+
+    doc = clay.Document()
+    doc.add_sdf_layer("import").add(clay.Volume.from_mesh(slab, cell=cell))
+    detoured = clay.VoxelGrid(cell)
+    detoured.rasterize(doc, region=region)
+
+    assert direct.occupied_count > 0
+    assert direct.occupied_count >= detoured.occupied_count

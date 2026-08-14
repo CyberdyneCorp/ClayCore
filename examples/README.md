@@ -561,6 +561,24 @@ resamples it and throws the edge loops and uvs away.
   render. A mask freezes half a stroke, for a displacement verb and for smooth.
   And a whole gesture undoes from its vertex deltas, bit for bit.
 
+## 48 — an imported model straight to voxels
+
+`19_mesh_import` takes triangles into a *field* in one step. Reaching the voxel
+verbs took four, and paid for **two** samplings: triangles into a narrow band,
+then the band into cells — so the second quantised a field that was already
+quantised, and the document in the middle existed only to be thrown away.
+
+`rasterize_mesh` asks the triangles directly. The script measures that rather
+than describing it: the two paths agree to 99.8% of the cells on a thick model,
+the direct one keeps 12% more of a fin thinner than two cells, and **only the
+direct one carries the model's colour** — `Volume.from_mesh` samples a distance
+field, which has no colour in it, so the detour reaches the palette with nothing
+to quantise. It also rasterizes a model with its cap deleted on purpose: the
+generalized winding number degrades across the opening instead of flipping a
+half-space, which is what a parity ray cast would do and is why the sign is
+what it is. It ends by sculpting the import with the voxel verbs, since
+reaching them without a document is the point of the trip.
+
 ## Notes
 
 - **This page documents 00-17 and the two showcase examples.** The gallery

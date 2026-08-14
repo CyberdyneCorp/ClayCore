@@ -1213,6 +1213,65 @@ float VoxelGrid::sample_step_field(cfloat3 world_p) const {
     return get(c) != 0 ? -0.5f * vs : 0.5f * vs;
 }
 
+namespace {
+
+// The colour a cell takes from a mesh that carries vertex colours: the nearest
+// triangle's, interpolated at the closest point. Reading it from the CLOSEST
+// POINT rather than the nearest vertex is what keeps a large triangle's
+// interior from taking one corner's colour.
+kernel::cfloat3 mesh_colour_at(const mesh::Mesh& m, const mesh::Bvh& bvh, kernel::cfloat3 p,
+                               kernel::cfloat3 fallback) {
+    if (m.colors.size() != m.positions.size()) return fallback;
+    const mesh::Bvh::ClosestPoint hit = bvh.closest(p);
+    if (!hit.found || hit.triangle * 3 + 2 >= m.indices.size()) return fallback;
+    const std::uint32_t i0 = m.indices[hit.triangle * 3];
+    const std::uint32_t i1 = m.indices[hit.triangle * 3 + 1];
+    const std::uint32_t i2 = m.indices[hit.triangle * 3 + 2];
+    const float w = 1.0f - hit.u - hit.v;
+    return m.colors[i0] * w + m.colors[i1] * hit.u + m.colors[i2] * hit.v;
+}
+
+}  // namespace
+
+void VoxelGrid::rasterize_mesh(const mesh::Mesh& m) {
+    if (m.empty() || m.positions.empty()) return;
+    math::Aabb bounds;
+    for (const kernel::cfloat3& p : m.positions) bounds.expand(p);
+    rasterize_mesh(m, bounds);
+}
+
+void VoxelGrid::rasterize_mesh(const mesh::Mesh& m, const math::Aabb& world_region) {
+    if (m.empty() || world_region.empty() || world_region.is_infinite()) return;
+    const mesh::Bvh bvh = mesh::Bvh::build(m);
+    if (bvh.empty()) return;  // every triangle had a bad index
+
+    // A mesh with no colours still has to land somewhere in the palette, and a
+    // grid's colour is per cell: there is nothing to read, so one neutral entry
+    // is the honest answer rather than a colour invented per cell.
+    const kernel::cfloat3 neutral = cf3(0.8f, 0.8f, 0.8f);
+
+    const float vs = voxel_size();
+    std::int32_t x0 = static_cast<std::int32_t>(std::floor(world_region.min.x / vs));
+    std::int32_t y0 = static_cast<std::int32_t>(std::floor(world_region.min.y / vs));
+    std::int32_t z0 = static_cast<std::int32_t>(std::floor(world_region.min.z / vs));
+    std::int32_t x1 = static_cast<std::int32_t>(std::floor(world_region.max.x / vs));
+    std::int32_t y1 = static_cast<std::int32_t>(std::floor(world_region.max.y / vs));
+    std::int32_t z1 = static_cast<std::int32_t>(std::floor(world_region.max.z / vs));
+    for (std::int32_t z = z0; z <= z1; ++z)
+        for (std::int32_t y = y0; y <= y1; ++y)
+            for (std::int32_t x = x0; x <= x1; ++x) {
+                cfloat3 center = cf3((static_cast<float>(x) + 0.5f) * vs,
+                                     (static_cast<float>(y) + 0.5f) * vs,
+                                     (static_cast<float>(z) + 0.5f) * vs);
+                if (!bvh.is_inside(center)) continue;
+                // The closest-point query only runs for a cell that is IN, and
+                // only when there is a colour to read: it is the expensive half
+                // and most cells are neither.
+                set({x, y, z},
+                    palette_add(mesh_colour_at(m, bvh, center, neutral), 1.0f / 64.0f));
+            }
+}
+
 void VoxelGrid::rasterize_tape(const scene::Tape& tape, const math::Aabb& world_region) {
     if (world_region.empty() || world_region.is_infinite()) return;
     const float vs = voxel_size();

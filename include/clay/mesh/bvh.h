@@ -64,6 +64,24 @@ class Bvh {
         return is_inside(p, beta) ? -d : d;
     }
 
+    // The nearest point ON the surface, and which triangle carries it.
+    //
+    // `unsigned_distance` is this query with the answer thrown away, and is
+    // implemented in terms of it. What the extra information buys is any
+    // ATTRIBUTE transfer — a colour, a uv, a normal — read from the triangle
+    // the closest point landed on and interpolated by its barycentrics.
+    // `VoxelGrid::rasterize_mesh` is the first caller: it is how an imported
+    // model's vertex colours reach a palette.
+    struct ClosestPoint {
+        bool found = false;
+        float distance = 0.0f;
+        kernel::cfloat3 point = kernel::cf3(0, 0, 0);
+        std::uint32_t triangle = 0;
+        // Barycentrics of `point`: it == a*(1-u-v) + b*u + c*v.
+        float u = 0.0f, v = 0.0f;
+    };
+    ClosestPoint closest(kernel::cfloat3 p) const;
+
     // The nearest triangle a ray meets, and where on it. `triangle` is the
     // index in the SOURCE mesh, not in this tree's own order — the build
     // permutes triangles, so a hit that named its own storage would be useless

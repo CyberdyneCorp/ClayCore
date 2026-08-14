@@ -3219,6 +3219,42 @@ clay_result clay_voxel_mesh_chunks(const clay_voxel_grid* grid, const int32_t* k
 clay_result clay_voxel_rasterize(clay_voxel_grid* grid, const clay_document* doc,
                                  const float region_min[3], const float region_max[3]);
 
+/* The same conversion from TRIANGLES, in ONE sampling.
+ *
+ * An imported model could already reach an SDF layer in one step
+ * (clay_item_volume_from_mesh) but reached a grid only through a document:
+ * triangles to a narrow band, band into a layer, layer rasterized. Each of
+ * those places the surface within about half a cell of its own lattice, so the
+ * detour quantised a field that was itself quantised, and a feature that
+ * survived the first sampling could fall between centres on the second.
+ *
+ * Membership is the GENERALIZED WINDING NUMBER at the cell centre — the sign
+ * that survives a hole, a flipped normal and a self-intersection, because those
+ * are what imported meshes have. A model with a missing cap rasterizes without
+ * flipping a half-space.
+ *
+ * Colour comes from the mesh's vertex colours where it has them, interpolated
+ * at the closest point on the nearest triangle and quantised to the palette by
+ * nearest entry, exactly as clay_voxel_rasterize quantises the tape's colour
+ * field. A mesh with no colours takes one neutral entry.
+ *
+ * The REGION IS OPTIONAL here, unlike clay_voxel_rasterize: a document can be
+ * unbounded and a mesh cannot, so NULL means the mesh's own bounds. Passing one
+ * bounds the work; content outside it is not rasterized and is not reported as
+ * missing. Both pointers or neither, as elsewhere in this ABI.
+ *
+ * What the sampling costs is the same statement clay_voxel_rasterize carries:
+ * the surface moves by up to half a cell, a feature thinner than a cell can
+ * vanish (rasterize finer — nothing downstream can invent what was never
+ * stored), a sharp edge staircases at the cell size, and two colours closer
+ * than the palette tolerance become one.
+ *
+ * NOT retopology and not remeshing: occupancy sampling, nothing more. The mesh
+ * is not modified, and a mesh a document CARRIES stays never-evaluated — this
+ * is an explicit conversion a caller asks for, like every bridge. */
+clay_result clay_voxel_rasterize_mesh(clay_voxel_grid* grid, const clay_mesh* mesh,
+                                      const float region_min[3], const float region_max[3]);
+
 /* -- voxel picking --------------------------------------------------------- */
 
 /* The cube face a picking ray entered a cell through. The neighbour across it

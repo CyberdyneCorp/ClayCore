@@ -25,6 +25,24 @@ cfloat3 cross3(cfloat3 a, cfloat3 b) {
 
 float length3(cfloat3 v) { return std::sqrt(dot3(v, v)); }
 
+// Barycentrics of a point already known to lie in a triangle's plane, by the
+// projected-area method. A degenerate triangle has no basis to express them in
+// and reports the first corner, which is the only answer that is on the
+// triangle at all.
+void barycentric(cfloat3 p, cfloat3 a, cfloat3 b, cfloat3 c, float* u, float* v) {
+    cfloat3 v0 = b - a, v1 = c - a, v2 = p - a;
+    float d00 = dot3(v0, v0), d01 = dot3(v0, v1), d11 = dot3(v1, v1);
+    float d20 = dot3(v2, v0), d21 = dot3(v2, v1);
+    float denom = d00 * d11 - d01 * d01;
+    if (std::fabs(denom) < 1e-20f) {
+        *u = 0.0f;
+        *v = 0.0f;
+        return;
+    }
+    *u = (d11 * d20 - d01 * d21) / denom;
+    *v = (d00 * d21 - d01 * d20) / denom;
+}
+
 // Closest point on a triangle to p (Ericson, Real-Time Collision Detection).
 // The seven cases are the three vertex regions, the three edge regions and the
 // interior; each one returns as soon as it is identified.
@@ -228,9 +246,10 @@ Bvh::RayHit Bvh::raycast(const math::Ray& ray, float tmin, float tmax) const {
     return best;
 }
 
-float Bvh::unsigned_distance(cfloat3 p) const {
-    if (nodes_.empty()) return 3.4e38f;
-    float best = 3.4e38f;
+Bvh::ClosestPoint Bvh::closest(cfloat3 p) const {
+    ClosestPoint best;
+    if (nodes_.empty()) return best;
+    float best_d2 = 3.4e38f;
     // Explicit stack, nearest child first: descending the closer subtree first
     // sets a tight bound early, which is what makes the far one prunable.
     std::vector<std::int32_t> stack;
@@ -239,12 +258,21 @@ float Bvh::unsigned_distance(cfloat3 p) const {
         std::int32_t index = stack.back();
         stack.pop_back();
         const Node& n = nodes_[static_cast<std::size_t>(index)];
-        if (squared_distance_to_box(n.box, p) >= best) continue;
+        if (squared_distance_to_box(n.box, p) >= best_d2) continue;
         if (n.count > 0) {
             for (std::int32_t i = 0; i < n.count; ++i) {
                 const Tri& t = tris_[static_cast<std::size_t>(n.first + i)];
                 cfloat3 q = closest_on_triangle(p, t.a, t.b, t.c);
-                best = std::min(best, dot3(p - q, p - q));
+                float d2 = dot3(p - q, p - q);
+                // Strictly less, so a tie keeps the triangle found first and
+                // which one that is does not depend on the traversal order.
+                if (d2 < best_d2) {
+                    best_d2 = d2;
+                    best.found = true;
+                    best.point = q;
+                    best.triangle = t.source;
+                    barycentric(q, t.a, t.b, t.c, &best.u, &best.v);
+                }
             }
             continue;
         }
@@ -260,7 +288,14 @@ float Bvh::unsigned_distance(cfloat3 p) const {
             stack.push_back(right);
         }
     }
-    return std::sqrt(best);
+    if (best.found) best.distance = std::sqrt(best_d2);
+    return best;
+}
+
+float Bvh::unsigned_distance(cfloat3 p) const {
+    const ClosestPoint hit = closest(p);
+    // The same 3.4e38 an empty tree reported when this was its own traversal.
+    return hit.found ? hit.distance : 3.4e38f;
 }
 
 float Bvh::winding_number(cfloat3 p, float beta) const {
