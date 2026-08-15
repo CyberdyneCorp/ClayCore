@@ -1,5 +1,26 @@
 #pragma once
 
+// THE ONE DATA-PARALLEL PRIMITIVE, and where it lives is the point.
+//
+// This used to be backends/cpu/thread_pool.h — a private header of the CPU
+// backend, reached by the C bindings through a `../../backends/cpu/` relative
+// include because there was no other way to name it. The layering rule is that
+// no module depends on a backend (tools/check_layering.py), so the core library
+// could not use the pool at all: every mesher, every voxel verb, redistance,
+// the mask distance transform and the per-brick cull were single-threaded not
+// because they resist parallelism but because they could not legally reach the
+// only pool in the tree.
+//
+// It sits below everything now, in its own module that depends on nothing but
+// the standard library, so a core module can use it and the layering gate can
+// SEE that it does. That is the whole of this module's reason to exist.
+//
+// It is NOT a task system: no futures, no dependencies, no work stealing
+// between unrelated jobs. One primitive — split [0, n) into contiguous chunks
+// and run them — because that is the shape every consumer here has, and the
+// house rule they all obey is disjoint output slices through the same scalar
+// arithmetic, so the pool CHANGES SPEED AND NOTHING ELSE.
+//
 // Minimal persistent thread pool for batch dispatch. One global pool sized
 // to hardware concurrency; parallel_for splits [0, n) into contiguous
 // chunks. Job state lives in a shared_ptr so a late-waking worker can never
@@ -42,7 +63,7 @@
 #include <vector>
 
 namespace clay {
-namespace backends_cpu {
+namespace parallel {
 
 class ThreadPool {
   public:
@@ -204,5 +225,13 @@ class ThreadPool {
     bool stop_ = false;
 };
 
-}  // namespace backends_cpu
+// The entry point call sites should use. `ThreadPool::instance().parallel_for`
+// still works and is what this forwards to; this exists so a call site reads
+// `parallel::for_range(n, 1, fn)` rather than stuttering the word twice.
+inline void for_range(std::size_t n, std::size_t min_chunk,
+                      const std::function<void(std::size_t, std::size_t)>& fn) {
+    ThreadPool::instance().parallel_for(n, min_chunk, fn);
+}
+
+}  // namespace parallel
 }  // namespace clay

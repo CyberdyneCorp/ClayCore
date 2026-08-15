@@ -47,6 +47,7 @@ claycore/
 │   │   ├── lift.h       #   extrude, revolve, shell/onion, round      (01 §2.6)
 │   │   ├── ease.h       #   easing-curve library (fogleman-style)
 │   │   └── field.h      #   normals (tetrahedron), AO, soft-shadow, raycast steppers (01 §3)
+│   ├── parallel/        # the one data-parallel primitive: a batch thread pool, below everything
 │   ├── math/            # host-side geometry: AABB, transforms, quats, ray, frustum
 │   ├── scene/           # document model: layers, groups, edit items, tape compiler, undo commands
 │   ├── eval/            # backend-agnostic evaluation API + backend registry
@@ -57,7 +58,7 @@ claycore/
 │   └── io/              # document format, OBJ/MTL, FBX (ufbx), PLY, glTF; USD hooks
 ├── src/                 # CPU implementations, backend hosts
 ├── backends/
-│   ├── cpu/             # scalar reference + SIMD batch + thread-pool dispatch
+│   ├── cpu/             # scalar reference + SIMD batch (dispatch via clay/parallel)
 │   ├── metal/           # metal-cpp host; kernels compiled from include/clay/kernel via MSL
 │   ├── cuda/            # NVRTC/nvcc host; same headers
 │   └── opencl/          # OpenCL 3.0 host; kernels via C-compatible subset (see §5)
@@ -68,7 +69,22 @@ claycore/
 └── tools/               # clay-cli: eval/mesh/convert/validate from the command line
 ```
 
-Dependency rule: `kernel` depends on nothing; `scene`/`brick`/`mesh` depend on `kernel`+`math`; backends depend on `eval`; `io` and bindings sit on top. No module depends on a backend.
+Dependency rule: `kernel` and `parallel` depend on nothing; `scene`/`brick`/`mesh` depend on `kernel`+`math`; backends depend on `eval`; `io` and bindings sit on top. **No module depends on a backend**, and `tools/check_layering.py` gates it.
+
+That last rule is why `parallel` is its own module rather than living where it
+started. The thread pool was a private header of the CPU backend, so the rule
+locked the core library out of the only pool in the tree: every mesher, every
+voxel verb, redistance, the mask distance transform and the per-brick tape cull
+were single-threaded not because they resist parallelism but because they could
+not legally reach it. It sits below everything now — depending on nothing but
+the standard library — so a core module can use it and the gate can see that it
+does.
+
+**The library therefore spawns threads**, which the "the caller owns threading
+and queues" principle in §2 does not say and should: one process-wide pool,
+`hardware_concurrency() - 1` workers, created lazily the first time anything
+dispatches a batch. Making it host-configurable (worker count, QoS class) is
+`add-mobile-thread-scheduling` and is not done.
 
 ## 4. Operation inventory (the complete SDF vocabulary)
 

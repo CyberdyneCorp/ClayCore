@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-#include "../../backends/cpu/thread_pool.h"
+#include "clay/parallel/thread_pool.h"
 #include "clay.h"
 #include "clay/brush/mask_extrude.h"
 #include "clay/brush/move.h"
@@ -6878,7 +6878,7 @@ clay_result clay_brick_cache_raycast_many(const clay_brick_cache* cache,
     // by exactly one chunk with the same arithmetic the serial loop used and
     // writes only its own slot, so the outputs match the serial loop bit for
     // bit, in order.
-    backends_cpu::ThreadPool::instance().parallel_for(
+    parallel::ThreadPool::instance().parallel_for(
         count, 1, [&](std::size_t b, std::size_t e) {
             for (std::size_t i = b; i < e; ++i) {
                 math::Ray ray;

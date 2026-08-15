@@ -11,7 +11,7 @@
 - [x] 1.9 Test: "every element of a batch is computed exactly once" still holds under the new join, including the ragged and single-chunk cases
 - [ ] 1.10 Stress test the shutdown and late-worker paths, which the shared_ptr job state exists to make safe — the join is being changed underneath them
 - [x] 1.11 Measure the join-spin CPU time again after the change, and record it. The claim is that it goes to approximately zero, not that it gets better
-- [ ] 1.12 Document in `docs/05-claycore-library.md` that the library spawns a pool at all, and how a host sizes it — today's "the caller owns threading and queues" reads as though it does not
+- [x] 1.12 Document in `docs/05-claycore-library.md` that the library spawns a pool at all, and how a host sizes it — today's "the caller owns threading and queues" reads as though it does not
 
 ## Nested safety — added after #119's inventory, taken early with the join
 
@@ -32,6 +32,25 @@ has one job slot.
       the defect is a silent serialization rather than a wrong answer — the
       test that catches it is the one asserting the nested range ran on one
       thread (measured: 187 threads without the guard, 1 with it).
+
+## The pool moved below the layering line
+
+Not in the list above either, and the reason it is here rather than in its own
+plan: it is the same defect the list is about, one level up. The pool was a
+PRIVATE HEADER OF THE CPU BACKEND, and `tools/check_layering.py` enforces that
+no module depends on a backend — so the core library could not reach the only
+pool in the tree, and the C bindings reached it through a `../../backends/cpu/`
+relative include because there was no legal way to name it.
+
+- [x] M.1 `clay::parallel` — its own module under `include/clay/`, depending on
+      nothing but the standard library, so everything above it may use it.
+- [x] M.2 The layering table gains it, and gains the edge from every module that
+      may dispatch work, so the gate SEES the dependency rather than the code
+      sneaking around it.
+- [x] M.3 `parallel::for_range` as the entry point call sites use, so a call
+      site does not stutter the word twice.
+- [x] M.4 Verified that a core module can now include it and that the layering
+      gate accepts it — the unlock this move exists for.
 
 ## What this slice deliberately leaves
 

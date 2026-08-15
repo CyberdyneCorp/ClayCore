@@ -13,7 +13,7 @@
 #include "clay/math/geom.h"
 
 #include "../common/grid_mesh.h"
-#include "thread_pool.h"
+#include "clay/parallel/thread_pool.h"
 
 namespace clay {
 namespace eval {
@@ -53,7 +53,7 @@ class CpuBackend final : public Backend {
     Status eval_points(const scene::Tape& tape, const PointQuery& q,
                        const PointResults& out) override {
         if (!q.points_xyz || !out.distances) return Status::InvalidInput;
-        backends_cpu::ThreadPool::instance().parallel_for(
+        parallel::ThreadPool::instance().parallel_for(
             q.count, 256, [&](std::size_t b, std::size_t e) {
                 PointQuery sub = q;
                 sub.points_xyz = q.points_xyz + b * 3;
@@ -81,7 +81,7 @@ class CpuBackend final : public Backend {
         for (std::size_t i = 0; i < q.count; ++i)
             if (!q.tapes[i] || q.offsets[i] > q.offsets[i + 1]) return Status::InvalidInput;
         const std::size_t first = q.offsets[0];
-        backends_cpu::ThreadPool::instance().parallel_for(
+        parallel::ThreadPool::instance().parallel_for(
             q.offsets[q.count] - first, 64, [&](std::size_t b, std::size_t e) {
                 std::size_t at = first + b;
                 const std::size_t last = first + e;
@@ -112,7 +112,7 @@ class CpuBackend final : public Backend {
                      float* out_colors_rgb) override {
         if (!out_values || q.nx <= 0 || q.ny <= 0 || q.nz <= 0) return Status::InvalidInput;
         std::size_t nxy = static_cast<std::size_t>(q.nx) * static_cast<std::size_t>(q.ny);
-        backends_cpu::ThreadPool::instance().parallel_for(
+        parallel::ThreadPool::instance().parallel_for(
             static_cast<std::size_t>(q.nz), 1, [&](std::size_t z0, std::size_t z1) {
                 for (std::size_t z = z0; z < z1; ++z) {
                     for (int y = 0; y < q.ny; ++y) {
@@ -145,7 +145,7 @@ class CpuBackend final : public Backend {
     Status raycast(const scene::Tape& tape, const RayQuery& q, RayHit* hits) override {
         if (!q.rays || !hits) return Status::InvalidInput;
         float step_scale = tape.safe_step_scale();
-        backends_cpu::ThreadPool::instance().parallel_for(
+        parallel::ThreadPool::instance().parallel_for(
             q.count, 16, [&](std::size_t b, std::size_t e) {
                 for (std::size_t i = b; i < e; ++i) {
                     cfloat3 ro = cf3(q.rays[i * 6], q.rays[i * 6 + 1], q.rays[i * 6 + 2]);

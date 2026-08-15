@@ -24,9 +24,9 @@
 #include <thread>
 #include <vector>
 
-#include "../../backends/cpu/thread_pool.h"
+#include "clay/parallel/thread_pool.h"
 
-using clay::backends_cpu::ThreadPool;
+using clay::parallel::ThreadPool;
 
 namespace {
 
