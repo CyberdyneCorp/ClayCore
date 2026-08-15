@@ -67,6 +67,37 @@
       not measured, and is the reason this box is not ticked.
       `check_device_bench.py --update` is still not run.
 
+## 3b. Where mask_extrude's regression actually is
+
+Bisected after 3.2 disproved the proposal's guess. Same harness method, the
+device case's fixture, medians of three at 1000 stamps on the Mac:
+
+| commit | | 1000 stamps | step |
+|---|---|---|---|
+| `50a301a5` | v0.30.0 | 3250.1 ms | — |
+| `196d403` | before colour | 3281.3 ms | x1.01 |
+| **`ac7460a`** | **the tape colour out-parameter** | **3751.7 ms** | **x1.14** |
+| `85f1679` | the producers write colour | 3785.0 ms | x1.01 |
+| `71118c1` | after the pass was pooled | 3806.7 ms | x1.01 |
+| `b1868d4` | main | 3825.7 ms | x1.00 |
+| this branch | with the colour-pass skip | 3843.1 ms | x1.00 |
+
+- [x] 3b.1 It is `ac7460a`, not the colour pass. Every other step is inside
+      noise, and this change's fix moves it by nothing — which is what the
+      device already said and this explains.
+- [x] 3b.2 The Mac accounts for x1.18 of the device's x1.51 across the whole
+      range. Stated rather than papered over: the step is in the same place on
+      both, and it is BIGGER on the tablet. `sdf_consolidate`'s leftover says
+      the same thing — x1.12 residual here against x1.29 there — so the
+      out-parameter costs more on device than it does on this machine, and the
+      Mac cannot be used to size it.
+- [ ] 3b.3 A change of its own. `ctape_eval` threads colour through every prim
+      evaluation whether or not the caller wants colour, and its heaviest
+      consumers — mask extrude, the bake's distance pass, meshing, raycast —
+      want distance only. Not taken here: it is a kernel header compiled as
+      five dialects, and bundling it behind a scene-module fix would put a
+      cross-backend change in a PR nobody would review as one.
+
 ## 4. What the gate could not see
 
 - [x] 4.1 `BM_ConsolidateColoredGrownDoc` — the same 193-node layer with two

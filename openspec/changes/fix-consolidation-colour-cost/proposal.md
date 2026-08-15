@@ -73,5 +73,9 @@ takes the pass exactly as it does today.
   to fit the new number. The budget is what says a case is too slow whether or
   not it regressed; fitting it to the measurement is what the class exists to
   prevent.
-- **`mask_extrude` is not bisected.** Same evaluation path, so the same fix is
-  expected to cover it, but that is inference. The device re-run measures it.
+- **`mask_extrude` is not fixed here, and the guess about it was wrong.** This
+  said the same fix was expected to cover it and called that inference; the
+  device re-run then measured it unmoved (3695 -> 3787 ms), and a bisect put
+  its regression at `ac7460a` — the tape out-parameter above — rather than at
+  the colour pass. See tasks 3b. It needs its own change, and it is now over
+  budget rather than merely regressed, so that change is not optional.
