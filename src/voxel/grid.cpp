@@ -443,7 +443,12 @@ void VoxelGrid::record_detail(std::size_t level, VoxelCoord c) {
     // an offset against it. Recording one would put an entry in the map for a
     // cell the level does not store, and the map is meant to be exactly the
     // cells that differ.
-    if (!chunk_is_refined(level, chunk_key(c))) return;
+    //
+    // The `whole` test is spelled out rather than left to the short-circuit
+    // inside chunk_is_refined, for the reason #137 gives about subdivide_into:
+    // the short-circuit saves the set lookup and not the chunk_key(), which is
+    // three divisions. This runs once per child of every propagated write.
+    if (!levels_[level].whole && !chunk_is_refined(level, chunk_key(c))) return;
     std::uint8_t v = cell_at(level, c);
     if (v == cell_at(level - 1, parent_cell(c)))
         levels_[level].detail.erase(c);
@@ -493,12 +498,17 @@ void VoxelGrid::propagate_up(std::size_t from, VoxelCoord c) {
     if (from + 1 >= levels_.size() || !has_children(c)) return;
     const std::size_t fine = from + 1;
     const std::uint8_t predicted = cell_at(from, c);
+    // Hoisted for the same reason record_detail above spells it out: constant
+    // on a whole level, and reaching it costs a chunk_key() per child. This
+    // recurses, so a two-level stack pays it eight times per write and a
+    // three-level stack sixty-four.
+    const bool whole = levels_[fine].whole;
     for (int i = 0; i < kChildren; ++i) {
         VoxelCoord child = child_cell(c, i);
         // An unrefined chunk already reads as its parent, so there is nothing
         // to replay into it — and writing would materialise exactly the storage
         // the region exists to avoid.
-        if (!chunk_is_refined(fine, chunk_key(child))) continue;
+        if (!whole && !chunk_is_refined(fine, chunk_key(child))) continue;
         auto& detail = levels_[fine].detail;
         auto it = detail.find(child);
         std::uint8_t v = it != detail.end() ? it->second : predicted;
