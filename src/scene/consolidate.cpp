@@ -59,6 +59,44 @@ bool is_volume_item(const Node& n) {
     return !n.is_group && n.prim.type == PrimType::Volume && n.volume != nullptr;
 }
 
+// Whether the layer can produce more than one colour, and so whether filling a
+// colour channel buys anything. Filling it is a SECOND evaluation of the tape
+// at every surviving sample; where the layer has one colour the result is that
+// colour repeated, which the node's own colour already reports (scene-model:
+// "the node's colour SHALL remain the answer ... for a volume with no colour").
+//
+// Two ways a layer holds more than one colour, and the second is why a test on
+// node colours alone is not enough: a volume whose SAMPLES carry colour has one
+// node colour and many sample colours, so a re-consolidated character would be
+// silently flattened by the cheaper test.
+//
+// Every node is scanned — groups included, and hidden nodes included. Whether
+// either reaches the tape depends on what the compiler does with it, and the
+// asymmetry decides the doubt: being wrong in the direction of DOING the pass
+// costs time on a document that already has more than one colour, and being
+// wrong the other way loses colour. So a hidden red dab in a grey layer buys
+// the pass it does not need, which is a slow bake rather than a wrong one.
+bool color_varies(const SdfContent& content, const std::vector<NodeId>& ids) {
+    std::vector<NodeId> pending(ids.rbegin(), ids.rend());
+    bool seen = false;
+    kernel::cfloat3 first = kernel::cf3(0, 0, 0);
+    while (!pending.empty()) {
+        const NodeId id = pending.back();
+        pending.pop_back();
+        const Node* n = content.find(id);
+        if (!n) continue;
+        if (is_volume_item(*n) && n->volume->has_color()) return true;
+        if (!seen) {
+            first = n->color;
+            seen = true;
+        } else if (n->color.x != first.x || n->color.y != first.y || n->color.z != first.z) {
+            return true;
+        }
+        pending.insert(pending.end(), n->children.rbegin(), n->children.rend());
+    }
+    return false;
+}
+
 // Descend, counting nodes and the two things that degrade a chain. Written as
 // an explicit stack rather than a recursion because the only reason to recurse
 // here would be to walk a tree the arena can already walk flat.
@@ -132,6 +170,10 @@ void fill_window(const Tape& tape, const BakePointEval& point_eval,
 
 }  // namespace
 
+bool layer_colors_vary(const Layer& layer) {
+    return layer.sdf && color_varies(*layer.sdf, layer.sdf->roots);
+}
+
 FieldReport report_layer(const Layer& layer, float advise_below_step_scale) {
     FieldReport out;
     const Tape tape = compile_layer(visible_view(layer));
@@ -196,18 +238,27 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
     // colour pass beside a pooled distance pass makes the pooled bake no
     // faster than the serial one it replaced — measured, by the benchmark gate
     // that compares exactly those two.
-    volume.fill_colors_blocks([&tape, &point_eval](const float* points_xyz, std::size_t count,
-                                                  float* out_rgb) {
-        std::vector<float> scratch(count);
-        if (point_eval && point_eval(tape, points_xyz, count, scratch.data(), out_rgb)) return;
-        for (std::size_t i = 0; i < count; ++i) {
-            const kernel::CTapeValue v = tape.eval(
-                kernel::cf3(points_xyz[i * 3], points_xyz[i * 3 + 1], points_xyz[i * 3 + 2]));
-            out_rgb[i * 3] = v.color.x;
-            out_rgb[i * 3 + 1] = v.color.y;
-            out_rgb[i * 3 + 2] = v.color.z;
-        }
-    });
+    //
+    // And SKIPPED ENTIRELY where the layer holds one colour, which is what
+    // pooling it was not enough to fix: pooled or not, it is a second
+    // evaluation of the tape at every surviving sample, and a grey sculpt was
+    // paying it to recover a constant. Measured on the reference iPad at 916 ms
+    // against a 786 ms budget, where the release before colour landed took
+    // 524 ms.
+    if (layer_colors_vary(layer)) {
+        volume.fill_colors_blocks([&tape, &point_eval](const float* points_xyz, std::size_t count,
+                                                      float* out_rgb) {
+            std::vector<float> scratch(count);
+            if (point_eval && point_eval(tape, points_xyz, count, scratch.data(), out_rgb)) return;
+            for (std::size_t i = 0; i < count; ++i) {
+                const kernel::CTapeValue v = tape.eval(
+                    kernel::cf3(points_xyz[i * 3], points_xyz[i * 3 + 1], points_xyz[i * 3 + 2]));
+                out_rgb[i * 3] = v.color.x;
+                out_rgb[i * 3 + 1] = v.color.y;
+                out_rgb[i * 3 + 2] = v.color.z;
+            }
+        });
+    }
     // Re-measured because redistance and compact both changed the samples
     // since sample() measured them. Declaring anything smaller than this would
     // be the overstep the bound exists to prevent, so it is measured rather

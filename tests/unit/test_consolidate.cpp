@@ -509,7 +509,12 @@ FieldVolume serial_bake(const scene::Layer& layer, const scene::ConsolidationPar
     // to as well — this test's whole point is that the pooled grid bake and a
     // serial full-tape bake produce the SAME BYTES, and a channel present in
     // one and absent in the other is a difference in the bytes.
-    v.fill_colors([&tape](kernel::cfloat3 p) { return tape.eval(p).color; });
+    //
+    // Including WHETHER it fills one: a layer of one colour gets no channel,
+    // and the rule comes from scene::layer_colors_vary rather than being
+    // restated here, so the reference cannot drift from the bake it checks.
+    if (scene::layer_colors_vary(layer))
+        v.fill_colors([&tape](kernel::cfloat3 p) { return tape.eval(p).color; });
     v.set_sample_lipschitz(v.measure_sample_lipschitz());
     return v;
 }
