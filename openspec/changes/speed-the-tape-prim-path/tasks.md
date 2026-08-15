@@ -45,14 +45,29 @@
       `sdf_consolidate` 370.1 -> 324.4 ms, which does not return to its 243.4
       ms pre-colour figure because the rest of that one is the colour PASS —
       `fix-consolidation-colour-cost`, complementary and already open.
-- [ ] 4.2 Device gate on the reference iPad, from a clean tree. `mask_extrude`
-      back inside its 3751 ms budget. The Mac understates this cost — x1.18
-      here against the device's x1.51 — so this is measured, not predicted.
+- [x] 4.2 Device gate on the reference iPad, from a clean tree, thermal
+      `nominal` at both ends. **`mask_extrude` 3786.6 -> 2711.1 ms** — from
+      1.51x over the v0.30.0 baseline to 1.08x, well inside its 3751 ms budget.
+      The device recovered MORE than the Mac did (1.40x against 1.16x), which
+      is the same asymmetry the bisect found in the other direction: this cost
+      is bigger on the tablet, both to pay and to remove.
 - [ ] 4.3 Whether the two changes together return `sdf_consolidate` to its
-      v0.30.0 baseline. Predicted ~243-250 ms on the Mac; recorded either way.
-- [ ] 4.4 `sdf_stamp_cpu`, still unexplained from the last gate. It evaluates
-      the same prim path, so it is a candidate to be fixed here — or to be the
-      device noise it looked like. This is where that gets settled.
+      v0.30.0 baseline. On device, each alone: 916.4 -> 678.8 ms with the
+      colour-pass skip, 916.4 -> 772.5 ms with this. Neither is enough on its
+      own — this change's gate run still fails `sdf_consolidate` at 1.47x, and
+      it is the ONLY failure left in the 59. Predicted ~243-250 ms on the Mac
+      for the pair; recorded either way.
+- [x] 4.4 `sdf_stamp_cpu` was NOT device noise. **6.43 -> 4.51 ms**, against a
+      4.32 ms baseline: 1.04x, effectively recovered. `sdf_stamp_bricks` came
+      back with it, 5.40 -> 4.47 ms, below its own 4.86 ms baseline.
+
+      Worth recording as a wrong call rather than a lucky one. The last gate
+      report reasoned that the two stamp cases moving in OPPOSITE directions
+      across two runs looked like noise. The run-to-run scatter was real — 5.39
+      then 6.43 on near-identical code — but the level underneath it was this
+      defect, and the reasoning would have closed the question if anything had
+      been concluded from it. It was left open because "looks like noise" is
+      not a measurement; that is the only reason it got measured.
 
 ## 5. Not in this change
 
