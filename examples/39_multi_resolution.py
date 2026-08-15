@@ -63,7 +63,7 @@ def report(grid):
 
 
 def main():
-    R.banner("36 multi-resolution")
+    R.banner("39 multi-resolution")
 
     g = blockout()
     trim = g.palette_add("#ef476f")
@@ -114,7 +114,7 @@ def main():
     R.contact_sheet([tile(g, 0, azimuth=35.0, elevation=22.0),
                      tile(g, 1, azimuth=35.0, elevation=22.0),
                      tile(g, 2, azimuth=35.0, elevation=22.0)],
-                    "36_levels.png", columns=3,
+                    "39_levels.png", columns=3,
                     caption="the same sculpt at level 0, 1 and 2")
 
     g.active_level = 2

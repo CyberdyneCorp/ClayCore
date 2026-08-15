@@ -281,7 +281,7 @@ against the baseline.
 **What no measurement fixes is what the result looks like.** `mesh_greedy`
 emits axis-aligned quads, so a voxel sculpt displays as cubes however fast the
 meshing gets — the gallery shows it plainly (`09_sculpt_verbs`, `15_smudge`,
-`36_levels`). The path that fits the frame is the blocky one and the path that
+`39_levels`). The path that fits the frame is the blocky one and the path that
 looks like clay is the SDF one, which is the 1.15× miss above. That is a
 display gap rather than a latency gap, tracked in
 [#108](https://github.com/CyberdyneCorp/ClayCore/issues/108); nothing in this

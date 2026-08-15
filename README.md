@@ -134,7 +134,7 @@ underneath you.
 | The sculpting verbs over a bumpy slab ([`09_sculpt_brushes.py`](examples/09_sculpt_brushes.py)) | Carve-with-alpha: a stamp pattern cut into the top face ([`15_voxel_verbs_and_repair.py`](examples/15_voxel_verbs_and_repair.py)) |
 | ![mask freeze](examples/output/11_mask_freeze.png) | ![repair](examples/output/15_repair.png) |
 | A mask freezes cells: the same brush, unmasked and masked ([`11_masks.py`](examples/11_masks.py)) | Pre-bake repair: pierced shell, holes closed, voids filled ([`15_voxel_verbs_and_repair.py`](examples/15_voxel_verbs_and_repair.py)) |
-| ![resolution levels](examples/output/36_levels.png) | ![smooth display](examples/output/41_voxel_smooth_display.png) |
+| ![resolution levels](examples/output/39_levels.png) | ![smooth display](examples/output/41_voxel_smooth_display.png) |
 | The resolution level stack: the same sculpt at level 0, 1 and 2 ([`39_multi_resolution.py`](examples/39_multi_resolution.py)) | The same grid meshed blocky, smoothed, and for display ([`41_voxel_smooth_display.py`](examples/41_voxel_smooth_display.py)) |
 
 The **stroke engine and masks span both sides**: the same resolved stroke
