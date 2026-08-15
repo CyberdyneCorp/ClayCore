@@ -4,7 +4,7 @@
 
 Issue #108, found by running the gallery at v0.30.0 and looking at it. Every
 voxel render is cubes; every SDF render is clay. The brushes are not the
-problem — `15_smudge` puts its nubs in the right place and `36_levels` shows
+problem — `15_smudge` puts its nubs in the right place and `39_levels` shows
 its fine ribs — but `VoxelGrid::mesh_greedy` emits axis-aligned quads, so
 occupancy is displayed as boxes.
 
