@@ -37,7 +37,10 @@ std::optional<field::FieldVolume> to_field(const Bvh& bvh, const ImportSettings&
     kernel::cfloat3 pad = cf3(padding, padding, padding);
     math::Aabb region{box.min - pad, box.max + pad};
 
-    return field::FieldVolume::sample(
+    // sample_parallel: a BVH signed-distance query is pure — a const tree and a
+    // generalized winding number — and it is the expensive half of every mesh
+    // import. 4767 -> 216 ms for a 9k-triangle model at a 0.01 cell.
+    return field::FieldVolume::sample_parallel(
         [&bvh, beta](kernel::cfloat3 p) { return bvh.signed_distance(p, beta); }, region, cell,
         band);
 }

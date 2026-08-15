@@ -590,3 +590,64 @@ TEST_CASE("volume: a volume reads its own blob, not the tape's") {
     }
     CHECK(worst < 1e-6f);
 }
+
+TEST_CASE("sample_parallel is byte-identical to sample") {
+    // The whole contract of the parallel sampler: same samples, same sparsity,
+    // same far bounds, same measured Lipschitz. Not "within a tolerance" —
+    // each sample depends only on its own position, so no ordering can change
+    // any of them, and the comparison is exact.
+    //
+    // The function is deliberately NOT a smooth analytic one: a field with
+    // structure at the sample scale is what would expose a mis-partitioned
+    // window, where a smooth one would look plausible either way.
+    auto f = [](kernel::cfloat3 p) {
+        const float sphere = kernel::clength(p) - 0.55f;
+        const float ripple = 0.04f * std::sin(p.x * 37.0f) * std::sin(p.y * 31.0f) *
+                             std::sin(p.z * 41.0f);
+        return sphere + ripple;
+    };
+    const math::Aabb region{cf3(-0.8f, -0.8f, -0.8f), cf3(0.8f, 0.8f, 0.8f)};
+
+    for (float cell : {0.05f, 0.02f, 0.011f}) {
+        CAPTURE(cell);
+        const FieldVolume a = FieldVolume::sample(f, region, cell, cell * 3.0f);
+        const FieldVolume b =
+            FieldVolume::sample_parallel(f, region, cell, cell * 3.0f);
+
+        CHECK(a.brick_count() == b.brick_count());
+        CHECK(a.cell_size() == b.cell_size());
+        CHECK(a.band() == b.band());
+        CHECK(a.sample_lipschitz() == b.sample_lipschitz());
+        CHECK(a.bounds().min.x == b.bounds().min.x);
+        CHECK(a.bounds().max.z == b.bounds().max.z);
+
+        // And the field itself, at points the samples do not sit on, so the
+        // interpolation and the far bounds are compared too.
+        clay_test::Lcg rng(2200);
+        for (int i = 0; i < 800; ++i) {
+            const kernel::cfloat3 p = rng.vec3(-1.1f, 1.1f);
+            REQUIRE(b.eval(p) == a.eval(p));
+        }
+    }
+}
+
+TEST_CASE("sample_parallel gives the same answer every time") {
+    // A race would show up as an answer that VARIES rather than one that is
+    // wrong, so this runs the same sample repeatedly and requires identity.
+    auto f = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.5f + 0.03f * std::sin(p.x * 53.0f); };
+    const math::Aabb region{cf3(-0.7f, -0.7f, -0.7f), cf3(0.7f, 0.7f, 0.7f)};
+
+    const FieldVolume first =
+        FieldVolume::sample_parallel(f, region, 0.012f, 0.036f);
+    clay_test::Lcg rng(2201);
+    std::vector<kernel::cfloat3> probes;
+    for (int i = 0; i < 400; ++i) probes.push_back(rng.vec3(-1.0f, 1.0f));
+
+    for (int run = 0; run < 6; ++run) {
+        const FieldVolume again =
+            FieldVolume::sample_parallel(f, region, 0.012f, 0.036f);
+        CAPTURE(run);
+        REQUIRE(again.brick_count() == first.brick_count());
+        for (const kernel::cfloat3& p : probes) REQUIRE(again.eval(p) == first.eval(p));
+    }
+}

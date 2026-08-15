@@ -14,6 +14,7 @@
 #include "clay/brick/cache.h"
 #include "clay/eval/backend.h"
 #include "clay/mesh/marching.h"
+#include "clay/mesh/to_field.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/field/redistance.h"
 #include "clay/scene/bounds.h"
@@ -404,6 +405,46 @@ BENCHMARK(BM_SurfaceNets)->Unit(benchmark::kMillisecond);
 // The shared mutation is the PALETTE: `palette_add` inserts a nearest-entry
 // match, so it cannot run concurrently. That is what the two-phase split is
 // for here, exactly as it is for the verbs.
+// Importing a mesh as a field — `Volume.from_mesh`, and the first thing that
+// happens to every model a host loads. Per sample it is a BVH signed-distance
+// query with a generalized winding number, which is pure and expensive: the
+// shape #119 calls "per plane/row… nothing; disjoint slices".
+void BM_MeshToField(benchmark::State& state) {
+    // An icosphere by hand — a real triangle soup rather than a handful of
+    // quads, and built here so the benchmark does not depend on the mesher.
+    mesh::Mesh m;
+    const int rings = 48, seg = 96;
+    for (int i = 0; i <= rings; ++i) {
+        const float phi = 3.14159265f * static_cast<float>(i) / static_cast<float>(rings);
+        for (int j = 0; j < seg; ++j) {
+            const float th = 6.2831853f * static_cast<float>(j) / static_cast<float>(seg);
+            m.positions.push_back(cf3(0.5f * std::sin(phi) * std::cos(th), 0.5f * std::cos(phi),
+                                      0.5f * std::sin(phi) * std::sin(th)));
+        }
+    }
+    auto at = [&](int i, int j) {
+        return static_cast<std::uint32_t>(i * seg + (j % seg));
+    };
+    for (int i = 0; i < rings; ++i)
+        for (int j = 0; j < seg; ++j) {
+            m.indices.push_back(at(i, j));
+            m.indices.push_back(at(i + 1, j));
+            m.indices.push_back(at(i + 1, j + 1));
+            m.indices.push_back(at(i, j));
+            m.indices.push_back(at(i + 1, j + 1));
+            m.indices.push_back(at(i, j + 1));
+        }
+
+    mesh::ImportSettings settings;
+    settings.cell_size = 0.01f;
+    for (auto _ : state) {
+        std::optional<field::FieldVolume> v = mesh::to_field(m, settings);
+        benchmark::DoNotOptimize(v.has_value());
+        state.counters["tris"] = static_cast<double>(m.triangle_count());
+    }
+}
+BENCHMARK(BM_MeshToField)->Unit(benchmark::kMillisecond);
+
 void BM_VoxelRasterizeTape(benchmark::State& state) {
     scene::Document doc;
     scene::Layer& l = doc.add_sdf_layer("l");
