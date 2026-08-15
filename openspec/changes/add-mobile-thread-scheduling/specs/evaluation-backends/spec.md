@@ -38,3 +38,18 @@ A thread that has no chunk left to claim SHALL wait without consuming CPU until 
 #### Scenario: Completion is still exact
 - **WHEN** any batch completes
 - **THEN** every element has been computed exactly once and no worker is still inside the batch's function
+
+### Requirement: A nested dispatch does not evict the job it is nested inside
+A `parallel_for` issued from inside another `parallel_for`'s work SHALL run on the thread that issued it and SHALL NOT be submitted to the pool.
+
+The pool advertises one job at a time. A nested submission would replace the job the calling worker is running: the outer job stops being advertised, every worker that has not yet woken for it never will, and its remaining chunks fall to whichever threads are already inside it. That is not a deadlock and not a wrong answer — it is a silent collapse to serial that is indistinguishable from parallelism that did not help, which is why it SHALL be prevented structurally rather than documented as a caller's responsibility.
+
+The guard SHALL restore the previous nesting state rather than clearing it, so a nested inline call does not report the pool as free to the frame above it.
+
+#### Scenario: A nested batch runs on one thread
+- **WHEN** a batch is dispatched from inside another batch's work
+- **THEN** the nested range is computed entirely on the thread that issued it, and the outer range still covers every element exactly once
+
+#### Scenario: The collapse cannot return unnoticed
+- **WHEN** the nesting guard is removed
+- **THEN** a test fails on the nested batch being spread across pool threads, rather than passing because the results are still correct

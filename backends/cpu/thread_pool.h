@@ -4,6 +4,34 @@
 // to hardware concurrency; parallel_for splits [0, n) into contiguous
 // chunks. Job state lives in a shared_ptr so a late-waking worker can never
 // touch a completed call's stack (it just finds no chunks left).
+//
+// TWO PROPERTIES THIS FILE OWES ITS CALLERS, both of which cost more than they
+// look and are stated here because the code that implements them is small
+// enough to read as incidental.
+//
+// NESTED CALLS RUN INLINE. There is one `current_` job slot, so a
+// parallel_for issued from inside a worker would REPLACE the job that worker
+// is running: the outer job stops being advertised, every worker that has not
+// yet woken for it never will, and its remaining chunks fall to whichever
+// threads are already inside it — usually one. Not a deadlock, which is what
+// makes it dangerous: it is a silent collapse to serial that looks exactly
+// like parallelism that did not help. A nested call therefore runs on the
+// calling thread and does not touch the pool at all.
+//
+// This is a guard placed BEFORE the first nested caller rather than a fix for
+// an observed bug. Nothing nests today — consolidate's injected evaluator is
+// the only pooled call under another operation and that operation assembles
+// serially — but the moment a second subsystem adopts the pool (brick meshing
+// over independent bricks, whose per-brick work evaluates through it) two
+// layers stack and this is what stops the second one from eating the first.
+//
+// A THREAD WITH NO WORK LEFT SLEEPS. The join used to spin on yield() until
+// the stragglers finished, on the thread the caller is waiting on — which on
+// an interactive path is the thread a user is waiting on. It blocks on a
+// condition variable now. The guarantee the spin provided is unchanged and is
+// the reason the wait is written the way it is: once `done` reaches
+// `num_tasks`, every chunk has been claimed AND returned, so no worker is
+// inside `fn`.
 
 #include <atomic>
 #include <condition_variable>
@@ -27,6 +55,12 @@ class ThreadPool {
     void parallel_for(std::size_t n, std::size_t min_chunk,
                       const std::function<void(std::size_t, std::size_t)>& fn) {
         if (n == 0) return;
+        // Nested: run it here. See the note at the top of this file — going to
+        // the pool would evict the job this thread is already running.
+        if (in_job()) {
+            fn(0, n);
+            return;
+        }
         std::size_t workers = threads_.size() + 1;  // + calling thread
         // One chunk per worker meant the atomic claim counter in run() never
         // rebalanced: each thread took exactly one chunk and a thread that
@@ -62,10 +96,20 @@ class ThreadPool {
         }
         cv_.notify_all();
         run(*job);  // calling thread participates
-        // all chunks are claimed before done reaches num_tasks, so once done
-        // equals num_tasks no worker can be inside fn
-        while (job->done.load(std::memory_order_acquire) < num_tasks)
-            std::this_thread::yield();
+        // All chunks are claimed before done reaches num_tasks, so once done
+        // equals num_tasks no worker can be inside fn. The calling thread has
+        // run out of chunks to claim by the time it gets here; it waits for
+        // the stragglers rather than burning a core yielding at them.
+        //
+        // No lost wakeup: the finisher takes `job->mutex` before notifying, and
+        // this thread holds it from the predicate check until wait() releases
+        // it, so a notify cannot land in between.
+        {
+            std::unique_lock<std::mutex> lock(job->mutex);
+            job->finished.wait(lock, [&] {
+                return job->done.load(std::memory_order_acquire) >= num_tasks;
+            });
+        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
             current_.reset();
@@ -80,16 +124,45 @@ class ThreadPool {
         std::size_t num_tasks = 0;
         std::atomic<std::size_t> next{0};
         std::atomic<std::size_t> done{0};
+        // Waited on by the thread that issued the job, signalled by whichever
+        // thread finishes the last chunk. In the Job rather than the pool so a
+        // late worker signalling a completed call touches state the caller's
+        // shared_ptr is still keeping alive.
+        std::mutex mutex;
+        std::condition_variable finished;
+    };
+
+    // True while this thread is inside a job's `fn`, on a worker or on the
+    // thread that issued the job — both can reach user code that calls back in.
+    static bool& in_job() {
+        static thread_local bool active = false;
+        return active;
+    }
+
+    // Sets the nesting flag for the duration of a scope and restores what it
+    // was, rather than clearing it: a nested inline call must not tell the
+    // frame above it that the pool is free again.
+    struct InJobScope {
+        bool previous;
+        InJobScope() : previous(in_job()) { in_job() = true; }
+        ~InJobScope() { in_job() = previous; }
     };
 
     static void run(Job& job) {
+        InJobScope scope;
         for (;;) {
             std::size_t idx = job.next.fetch_add(1, std::memory_order_relaxed);
             if (idx >= job.num_tasks) break;
             std::size_t b = idx * job.chunk;
             std::size_t e = b + job.chunk < job.n ? b + job.chunk : job.n;
             job.fn(b, e);
-            job.done.fetch_add(1, std::memory_order_release);
+            // The thread that lands the last chunk wakes the issuer. Taking the
+            // mutex is what closes the lost-wakeup window; it is uncontended in
+            // every case but this one.
+            if (job.done.fetch_add(1, std::memory_order_release) + 1 == job.num_tasks) {
+                std::lock_guard<std::mutex> lock(job.mutex);
+                job.finished.notify_all();
+            }
         }
     }
 
