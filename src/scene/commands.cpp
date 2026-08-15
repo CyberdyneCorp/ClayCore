@@ -395,9 +395,12 @@ void write_deformers(Writer& w, const std::vector<Deformer>& deformers) {
         // A lattice's cage, length-prefixed the same way. Its SIZE is implied
         // by the divisions already on the wire, but it is written explicitly
         // so a reader validates rather than trusts three floats it just read.
-        if (d.type == kernel::cdeform_lattice) {
+        if (Deformer::is_lattice(d.type)) {
             w.u32(static_cast<std::uint32_t>(d.cage.size()));
             for (const kernel::cfloat3& o : d.cage) w.pod(o);
+            // The placement, for the transformed form only, so a document
+            // using the axis-aligned one writes the bytes it always did.
+            if (d.type == kernel::cdeform_lattice_xform) w.pod(d.cage_xform);
         }
     }
 }
@@ -526,7 +529,7 @@ std::vector<Deformer> read_deformers(Reader& r) {
             for (std::uint32_t g = 0; g < gc && r.ok; ++g)
                 d.guide.push_back(read_point(r));
         }
-        if (d.type == kernel::cdeform_lattice) {
+        if (Deformer::is_lattice(d.type)) {
             std::uint32_t cc = r.u32();
             const std::size_t expected = static_cast<std::size_t>(d.a) *
                                          static_cast<std::size_t>(d.b) *
@@ -540,6 +543,7 @@ std::vector<Deformer> read_deformers(Reader& r) {
             d.cage.clear();
             for (std::uint32_t e = 0; e < cc && r.ok; ++e)
                 d.cage.push_back(r.pod<kernel::cfloat3>());
+            if (d.type == kernel::cdeform_lattice_xform) d.cage_xform = r.pod<math::Transform>();
         }
         out.push_back(d);
     }

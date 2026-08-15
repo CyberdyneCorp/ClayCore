@@ -2646,6 +2646,50 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
                             const float displacement[3], const clay_move_params* params,
                             size_t* out_applied);
 
+/* One CAGE over a layer — ZBrush's Gizmo Lattice, which acts on the whole
+ * subtool rather than on one item in its own frame.
+ *
+ * The cage is placed in the WORLD by position/axis/angle/scale and spans
+ * [box_min, box_max] in its own space. `offsets_xyz` is nx*ny*nz x, y, z drags
+ * in that space, x-fastest — index (i, j, k) at ((k*ny + j)*nx + i)*3 — or NULL
+ * for an untouched cage, which does nothing.
+ *
+ * Resolved into one lattice deformer per item, each carrying the transform that
+ * takes that item's frame into the cage's. That is what makes it exact for a
+ * ROTATED item: a lattice box is axis-aligned by construction, so no per-item
+ * box reproduces a world-placed cage, and resampling one onto a per-item grid
+ * would approximate what this does exactly.
+ *
+ * It reaches EVERY item in the layer, unlike clay_layer_move_surface. A
+ * lattice's displacement outside its box is CLAMPED rather than zero, so
+ * material out there travels rigidly with the nearest part of the cage —
+ * skipping distant items would tear the form.
+ *
+ * The whole cage is ONE undo step. Divisions must be in [2, 4] per axis; the
+ * cage is evaluated per sample, at nx*ny*nz multiply-adds each time. */
+typedef struct clay_gizmo_cage {
+    uint32_t struct_size;
+    float position[3];
+    float axis[3];      /* rotation axis; the zero vector means no rotation */
+    float angle;        /* radians */
+    float scale;        /* uniform, > 0 */
+    float box_min[3];
+    float box_max[3];
+    int32_t nx, ny, nz;
+} clay_gizmo_cage;
+
+/* Which nodes a cage WOULD warp, without touching the document. Size-query
+ * pattern: call with out_nodes == NULL to receive the count, then again with a
+ * buffer of that size. */
+clay_result clay_layer_lattice_gizmo_preview(const clay_document* doc, clay_layer_id layer,
+                                             const clay_gizmo_cage* cage,
+                                             const float* offsets_xyz, clay_node_id* out_nodes,
+                                             size_t capacity, size_t* out_count);
+
+clay_result clay_layer_lattice_gizmo(clay_document* doc, clay_layer_id layer,
+                                     const clay_gizmo_cage* cage, const float* offsets_xyz,
+                                     size_t* out_applied);
+
 /* Add one domain warp to a node ALREADY IN a document, undoably.
  *
  * clay_item_add_deformer builds an item; this edits a placed one, which
