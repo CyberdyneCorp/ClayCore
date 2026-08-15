@@ -47,6 +47,14 @@ FASTER_THAN = [
     # since both sides pay the same serial redistance floor (4.7x on an
     # M2 Max).
     ("BM_ConsolidateGrownDoc", "BM_ConsolidateSerialGrownDoc"),
+    # And the colour pass, which the pair above cannot see: it compares the
+    # pooled bake against the serial reference, and when the bake started
+    # filling a colour channel BOTH sides of that comparison moved, so a 1.5x
+    # regression on the reference iPad still read as a pass here. A one-colour
+    # layer must be FASTER than a two-colour one over the same document,
+    # because the second evaluation of the tape is exactly the difference
+    # between them. Catches a uniform layer paying for colour it cannot show.
+    ("BM_ConsolidateGrownDoc", "BM_ConsolidateColoredGrownDoc"),
     # Batched brick raycast (accel/parallel-raycast): the batched C-ABI call
     # fans its rays across the CPU backend's pool and must beat the same rays
     # issued one single-ray call at a time (kept in the benchmark as the

@@ -125,6 +125,63 @@ TEST_CASE("consolidating a two-colour layer keeps both colours") {
     CHECK(in_blue.x < 0.3f);
 }
 
+TEST_CASE("consolidating a one-colour layer fills no colour channel") {
+    // Filling it is a second evaluation of the tape at every surviving sample,
+    // and for a layer of one colour it recovers a constant the node's own
+    // colour already reports. Measured on the reference iPad: 916 ms against a
+    // 786 ms budget, where the release before colour landed took 524 ms.
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("body");
+    scene::Node a = clay_test::item(scene::Prim::sphere(0.35f), kernel::cf3(-0.25f, 0, 0));
+    a.color = kernel::cf3(1, 0, 0);
+    scene::Node b = clay_test::item(scene::Prim::sphere(0.35f), kernel::cf3(0.25f, 0, 0));
+    b.color = kernel::cf3(1, 0, 0);  // the SAME colour, which is the whole point
+    l.sdf->insert(a);
+    l.sdf->insert(b);
+
+    scene::ConsolidationParams params;
+    params.cell_size = 0.03f;
+    params.band = 0.09f;
+    std::optional<field::FieldVolume> baked = scene::bake_layer(l, params, nullptr, nullptr);
+    REQUIRE(baked.has_value());
+    CHECK_FALSE(baked->has_color());
+
+    // ...and it is still a bake: the shape is there, colour is what was
+    // skipped. A volume that came back empty would pass the check above.
+    CHECK(baked->brick_count() > 0);
+    CHECK(baked->eval(kernel::cf3(-0.25f, 0, 0)) < 0.0f);
+    CHECK(baked->eval(kernel::cf3(0.25f, 0, 0)) < 0.0f);
+}
+
+TEST_CASE("re-consolidating a coloured volume keeps its sample colours") {
+    // The case a test on node colours alone gets wrong. This layer holds ONE
+    // node, so its node colours are trivially uniform — but the volume under it
+    // carries two colours in its samples, and skipping the pass here would
+    // flatten a character that had already been consolidated once.
+    auto dist = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.5f; };
+    auto col = [](kernel::cfloat3 p) {
+        return p.x < 0 ? kernel::cf3(1, 0, 0) : kernel::cf3(0, 0, 1);
+    };
+    math::Aabb region{kernel::cf3(-1, -1, -1), kernel::cf3(1, 1, 1)};
+
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("already-baked");
+    scene::Node n;
+    n.prim = scene::Prim::volume();
+    n.volume = std::make_shared<const field::FieldVolume>(
+        field::FieldVolume::sample_colored(dist, col, region, 0.05f, 0.15f));
+    l.sdf->insert(n);
+
+    scene::ConsolidationParams params;
+    params.cell_size = 0.05f;
+    params.band = 0.15f;
+    std::optional<field::FieldVolume> baked = scene::bake_layer(l, params, nullptr, nullptr);
+    REQUIRE(baked.has_value());
+    REQUIRE(baked->has_color());
+    CHECK(baked->eval_color(kernel::cf3(-0.45f, 0, 0)).x > 0.7f);
+    CHECK(baked->eval_color(kernel::cf3(0.45f, 0, 0)).z > 0.7f);
+}
+
 TEST_CASE("Paint still overrides a coloured volume") {
     // The operator whose whole job is to set colour. A volume that ignored it
     // would make painting over a consolidated layer impossible.

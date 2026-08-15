@@ -232,7 +232,10 @@ this whole document is about.
 `volume-color-channel` is the second, and it is gentler. `ctape_prim_dist`
 gained a trailing colour out-parameter, and a sampled volume's blob grew a
 colour section addressed by a new header slot. A host that recompiles gets
-per-sample colour from a consolidated layer or a converted voxel sculpt; a host
+per-sample colour from a consolidated layer that HAS more than one colour in it
+— a layer of one colour bakes no colour section, because the node's own colour
+already reports it and filling one would cost a second evaluation of the tape at
+every sample — or from a converted voxel sculpt; a host
 that does not gets **the same distances it always did**, because every section
 of a volume is addressed by the offsets its header carries and a reader that
 stops before the new slot never looks for colour. So this one is a compile

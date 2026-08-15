@@ -138,6 +138,18 @@ struct ConsolidationCost {
 // for marching cost; pass 0 to measure without asking for advice.
 FieldReport report_layer(const Layer& layer, float advise_below_step_scale = 0.0f);
 
+// Whether baking this layer will carry a colour channel, which it does exactly
+// when the layer can produce more than one colour: two or more distinct node
+// colours in its tree, or a node whose volume carries colour in its SAMPLES —
+// the second because such a node has one colour and its samples have many, so a
+// test on node colours alone would flatten a re-consolidated layer.
+//
+// Public because filling that channel is a SECOND evaluation of the tape at
+// every surviving sample, so it is a real part of what consolidation costs and
+// a caller may want to know before paying it. It is also the rule any reference
+// implementation of the bake has to apply to get the same bytes.
+bool layer_colors_vary(const Layer& layer);
+
 // Sample a layer's field into a volume, without touching the document. This is
 // the "what would it cost" half: the numbers it reports are the numbers the
 // real thing produces, because it IS the real thing with the result thrown

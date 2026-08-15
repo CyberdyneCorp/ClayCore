@@ -514,6 +514,37 @@ void BM_ConsolidateSerialGrownDoc(benchmark::State& state) {
 }
 BENCHMARK(BM_ConsolidateSerialGrownDoc)->Unit(benchmark::kMillisecond);
 
+// The same layer with TWO colours in it, which is what makes the bake fill a
+// colour channel — a SECOND evaluation of the tape at every surviving sample.
+// check_bench.py requires the one-colour bake above to be FASTER than this one,
+// which is what catches a uniform layer paying for colour it cannot show.
+//
+// It is a pair rather than a ceiling on purpose. That defect shipped once
+// already, in the release that added colour, and nothing in CI reported it: the
+// only gate on this bake compared it against the serial reference, and both
+// sides of that comparison moved together, so a 1.5x regression read as a 7x
+// win. A ratio between two paths that differ ONLY in whether the pass is taken
+// cannot wash out that way, and unlike a millisecond floor it does not have to
+// be re-tuned for whatever runner CI is on.
+void BM_ConsolidateColoredGrownDoc(benchmark::State& state) {
+    scene::Document doc = sculpted_sphere(192);
+    // One dab of a second colour is the whole difference: the layer can now
+    // produce more than one colour, so the channel has to be filled.
+    scene::Node red;
+    red.prim = scene::Prim::sphere(0.04f);
+    red.xform.position = cf3(-1.0f, 0, 0);
+    red.color = cf3(1, 0, 0);
+    doc.layers.front().sdf->insert(red);
+    scene::ConsolidationParams params;
+    params.cell_size = 0.05f;
+    for (auto _ : state) {
+        std::optional<field::FieldVolume> v =
+            scene::bake_layer(doc.layers.front(), params, nullptr, eval::pooled_bake_eval());
+        benchmark::DoNotOptimize(v->sample_count());
+    }
+}
+BENCHMARK(BM_ConsolidateColoredGrownDoc)->Unit(benchmark::kMillisecond);
+
 // Batched brick raycast (accel/parallel-raycast): clay_brick_cache_raycast_many
 // fans its rays out across the CPU backend's pool; the serial reference is the
 // single-ray C-ABI call issued once per ray, which marches identically and by
