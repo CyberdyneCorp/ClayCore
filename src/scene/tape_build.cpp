@@ -150,6 +150,18 @@ struct Compiler {
                                  ? static_cast<float>(emit_guide(guide)) : 0.0f;
                 handle_count = static_cast<float>(guide.size());
             }
+            if (d.type == kernel::cdeform_lattice) {
+                // The cage goes in the blob for the same reason a guide does:
+                // nx*ny*nz offsets are not a fixed number of floats. Only slot
+                // 1 is a handle here — the divisions and box ride the record.
+                handle_off = static_cast<float>(tape.blob.size());
+                for (const kernel::cfloat3& o : d.cage) {
+                    tape.blob.push_back(o.x);
+                    tape.blob.push_back(o.y);
+                    tape.blob.push_back(o.z);
+                }
+                handle_count = d.a;  // nx, which slot 2 carries for a lattice
+            }
             tape.params.push_back(static_cast<float>(d.type));
             tape.params.push_back(handle_off);
             tape.params.push_back(handle_count);

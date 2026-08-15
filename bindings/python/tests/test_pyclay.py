@@ -1315,6 +1315,82 @@ def test_bend_curve_survives_the_clayspace_round_trip(tmp_path):
     assert np.array_equal(before, clay.load(str(path)).eval(pts))
 
 
+def test_an_sdf_lattice_with_an_untouched_cage_is_the_undeformed_item():
+    def field(prim):
+        doc = clay.Document()
+        doc.add_sdf_layer("l").add(prim)
+        rng = np.random.default_rng(21)
+        pts = rng.uniform(-1.5, 1.5, size=(400, 3)).astype(np.float32)
+        return doc.eval(pts)
+
+    plain = field(clay.Sphere(r=0.7))
+    caged = field(clay.Sphere(r=0.7).lattice(((-1, -1, -1), (1, 1, 1))))
+    assert np.allclose(plain, caged, atol=1e-5)
+
+
+def test_an_sdf_lattice_travels_less_than_nominal():
+    # The documented cost of authoring the cage as the INVERSE warp. Measured
+    # rather than asserted: `grab` and `pose` have exactly this character.
+    box = ((-1.0, -1.0, -1.0), (1.0, 1.0, 1.0))
+    nominal = 0.5
+    offsets = np.zeros((27, 3), dtype=np.float32)
+    offsets[:, 0] = nominal          # drag every control point +X
+
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Sphere(r=0.6).lattice(box, offsets))
+    plain = clay.Document()
+    plain.add_sdf_layer("l").add(clay.Sphere(r=0.6))
+
+    # A UNIFORM cage is the exception: it is a pure translation, so it travels
+    # the whole nominal amount. The basis is a partition of unity.
+    probe = np.array([[nominal, 0.0, 0.0]], dtype=np.float32)
+    assert doc.eval(probe)[0] == pytest.approx(plain.eval(np.zeros((1, 3), np.float32))[0],
+                                               abs=1e-5)
+    # ...and it costs no step scale either, because nothing varies.
+    assert doc.safe_step_scale() == pytest.approx(1.0, abs=1e-5)
+
+
+def test_an_sdf_lattice_that_varies_costs_step_scale():
+    box = ((-1.0, -1.0, -1.0), (1.0, 1.0, 1.0))
+    offsets = np.zeros((27, 3), dtype=np.float32)
+    for k in range(3):
+        for j in range(3):
+            for i in range(3):
+                offsets[(k * 3 + j) * 3 + i, 0] = 0.4 if i % 2 else -0.4
+
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Sphere(r=0.6).lattice(box, offsets))
+    # rate = (3-1) * 0.8 / 2.0 = 0.8, so the scale is 1/(1+0.8).
+    assert doc.safe_step_scale() == pytest.approx(1.0 / 1.8, rel=1e-3)
+
+
+def test_an_sdf_lattice_refuses_what_it_cannot_evaluate():
+    box = ((-1.0, -1.0, -1.0), (1.0, 1.0, 1.0))
+    with pytest.raises(ValueError, match=r"\[2, 4\]"):
+        clay.Sphere(r=1.0).lattice(box, nx=5)
+    with pytest.raises(ValueError, match=r"\[2, 4\]"):
+        clay.Sphere(r=1.0).lattice(box, nz=1)
+    with pytest.raises(ValueError, match="empty"):
+        clay.Sphere(r=1.0).lattice(((1, 1, 1), (0, 0, 0)))
+    with pytest.raises(ValueError, match="one entry per control point"):
+        clay.Sphere(r=1.0).lattice(box, np.zeros((5, 3), dtype=np.float32))
+
+
+def test_an_sdf_lattice_survives_the_clayspace_round_trip(tmp_path):
+    box = ((-0.8, -0.8, -0.8), (0.8, 0.8, 0.8))
+    rng = np.random.default_rng(22)
+    offsets = rng.uniform(-0.2, 0.2, size=(3 * 3 * 2, 3)).astype(np.float32)
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(
+        clay.Box(size=(1.0, 1.2, 0.8)).lattice(box, offsets, nx=3, ny=3, nz=2).twist(0.3))
+
+    pts = rng.uniform(-2, 2, size=(256, 3)).astype(np.float32)
+    before = doc.eval(pts)
+    path = tmp_path / "caged.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(pts))
+
+
 def test_wrap_around_needs_a_non_degenerate_interval():
     # The interval fixes the cylinder radius, so x0 == x1 has no meaning.
     with pytest.raises(ValueError, match="x0 != x1"):

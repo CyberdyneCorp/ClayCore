@@ -1319,3 +1319,245 @@ TEST_CASE("a bend_curve survives the document round trip, guide and all") {
         CHECK(b.eval(p).d == doctest::Approx(a.eval(p).d).epsilon(1e-5));
     }
 }
+
+// -- a lattice cage on an SDF item (sdf-kernels, lattice-on-sdf-items) -------
+//
+// The cage's offsets ARE the inverse warp, which is the design decision:
+// forward FFD has no closed-form inverse and a deformer must run backwards.
+// What that costs is that the warp travels a little LESS than nominal, the
+// same character `grab` and `pose` carry — measured below rather than assumed.
+
+namespace {
+
+// Every control point of a cage dragged by the same vector.
+Deformer uniform_cage(cfloat3 lo, cfloat3 hi, cfloat3 by, int n = 3) {
+    Deformer d = Deformer::lattice(lo, hi, n, n, n);
+    for (int k = 0; k < n; ++k)
+        for (int j = 0; j < n; ++j)
+            for (int i = 0; i < n; ++i) d.set_cage_offset(i, j, k, by);
+    return d;
+}
+
+}  // namespace
+
+TEST_CASE("an untouched cage is the undeformed field") {
+    // Offsets rather than positions buys this exactly, with no special case.
+    const float r = 0.7f;
+    scene::Tape plain = scene::compile_document(one_item(scene::Prim::sphere(r), {}));
+    scene::Tape caged = scene::compile_document(one_item(
+        scene::Prim::sphere(r), {Deformer::lattice(cf3(-1, -1, -1), cf3(1, 1, 1), 3, 3, 3)}));
+
+    clay_test::Lcg rng(1170);
+    for (int i = 0; i < 500; ++i) {
+        const cfloat3 p = rng.vec3(-2, 2);
+        CAPTURE(p.x);
+        CHECK(caged.eval(p).d == doctest::Approx(plain.eval(p).d).epsilon(1e-5));
+    }
+}
+
+TEST_CASE("a uniformly dragged cage translates the field exactly") {
+    // The basis is a partition of unity, so every point picks up the same
+    // offset — and since the cage is the INVERSE warp, the field moves by the
+    // negative of it. That sign is the whole convention, so it is asserted.
+    const float r = 0.6f;
+    const cfloat3 by = cf3(0.3f, -0.2f, 0.1f);
+    scene::Tape plain = scene::compile_document(one_item(scene::Prim::sphere(r), {}));
+    scene::Tape moved = scene::compile_document(
+        one_item(scene::Prim::sphere(r), {uniform_cage(cf3(-1, -1, -1), cf3(1, 1, 1), by)}));
+
+    clay_test::Lcg rng(1171);
+    for (int i = 0; i < 400; ++i) {
+        const cfloat3 p = rng.vec3(-1.5f, 1.5f);
+        // The offsets are what was DRAGGED, so the material travels WITH the
+        // drag: the field at p is the undeformed field at p - by.
+        CHECK(moved.eval(p).d == doctest::Approx(plain.eval(p - by).d).epsilon(1e-5));
+    }
+}
+
+TEST_CASE("two per axis is exactly trilinear, and the corners interpolate") {
+    // Degree is one less than the point count, so there is no separate linear
+    // path to keep in step. Checked against a hand-written blend.
+    const cfloat3 lo = cf3(-1, -1, -1), hi = cf3(1, 1, 1);
+    Deformer d = Deformer::lattice(lo, hi, 2, 2, 2);
+    cfloat3 corner[8];
+    for (int c = 0; c < 8; ++c) {
+        corner[c] = cf3(0.05f * static_cast<float>(c + 1), -0.03f * static_cast<float>(c),
+                        0.02f * static_cast<float>(c));
+        d.set_cage_offset(c & 1, (c >> 1) & 1, (c >> 2) & 1, corner[c]);
+    }
+    // The offsets, laid out as the blob will hold them.
+    std::vector<float> flat;
+    for (const cfloat3& o : d.cage) {
+        flat.push_back(o.x);
+        flat.push_back(o.y);
+        flat.push_back(o.z);
+    }
+
+    for (float z = -1.0f; z <= 1.0f; z += 0.5f)
+        for (float y = -1.0f; y <= 1.0f; y += 0.5f)
+            for (float x = -1.0f; x <= 1.0f; x += 0.5f) {
+                const float s = (x + 1) * 0.5f, t = (y + 1) * 0.5f, u = (z + 1) * 0.5f;
+                cfloat3 want = cf3(0, 0, 0);
+                for (int c = 0; c < 8; ++c) {
+                    const float wx = (c & 1) ? s : 1 - s;
+                    const float wy = ((c >> 1) & 1) ? t : 1 - t;
+                    const float wz = ((c >> 2) & 1) ? u : 1 - u;
+                    want = want + corner[c] * (wx * wy * wz);
+                }
+                // Negated back, since clattice_point subtracts the drag.
+                const cfloat3 got =
+                    cf3(x, y, z) - clattice_point(flat.data(), 2, 2, 2, lo, hi, cf3(x, y, z));
+                CAPTURE(x);
+                CAPTURE(y);
+                CAPTURE(z);
+                CHECK(got.x == doctest::Approx(want.x).epsilon(1e-4));
+                CHECK(got.y == doctest::Approx(want.y).epsilon(1e-4));
+            }
+
+    // A corner control point is interpolated: dragging it moves that corner of
+    // the box by the whole amount, and the opposite corner not at all.
+    Deformer one = Deformer::lattice(lo, hi, 3, 3, 3);
+    one.set_cage_offset(0, 0, 0, cf3(0.5f, 0, 0));
+    std::vector<float> f2;
+    for (const cfloat3& o : one.cage) {
+        f2.push_back(o.x);
+        f2.push_back(o.y);
+        f2.push_back(o.z);
+    }
+    CHECK((lo - clattice_point(f2.data(), 3, 3, 3, lo, hi, lo)).x ==
+          doctest::Approx(0.5f).epsilon(1e-5));
+    CHECK((hi - clattice_point(f2.data(), 3, 3, 3, lo, hi, hi)).x ==
+          doctest::Approx(0.0f).epsilon(1e-5));
+}
+
+TEST_CASE("material outside the cage travels rigidly, it is not drawn onto it") {
+    const cfloat3 lo = cf3(-1, -1, -1), hi = cf3(1, 1, 1);
+    Deformer d = uniform_cage(lo, hi, cf3(0.0f, 0.4f, 0.0f));
+    std::vector<float> flat;
+    for (const cfloat3& o : d.cage) {
+        flat.push_back(o.x);
+        flat.push_back(o.y);
+        flat.push_back(o.z);
+    }
+    const cfloat3 outside = cf3(7.0f, 0.0f, 0.0f);
+    const cfloat3 mapped = clattice_point(flat.data(), 3, 3, 3, lo, hi, outside);
+    // Carried along by the drag — the SAMPLE moves against it, which is what
+    // makes the material move with it — and it keeps its own x.
+    CHECK((mapped - outside).y == doctest::Approx(-0.4f).epsilon(1e-5));
+    CHECK(mapped.x == doctest::Approx(7.0f).epsilon(1e-5));
+}
+
+TEST_CASE("the lattice bound follows how fast the cage varies, not how far") {
+    // The reason the bound is taken from the DIFFERENCES. Two cages with the
+    // same largest offset: one translates the item rigidly (no gradient at
+    // all), the other alternates between neighbours (all gradient).
+    const cfloat3 lo = cf3(-1, -1, -1), hi = cf3(1, 1, 1);
+    const float amount = 0.4f;
+
+    Deformer rigid = uniform_cage(lo, hi, cf3(amount, 0, 0));
+    Deformer alternating = Deformer::lattice(lo, hi, 3, 3, 3);
+    for (int k = 0; k < 3; ++k)
+        for (int j = 0; j < 3; ++j)
+            for (int i = 0; i < 3; ++i)
+                alternating.set_cage_offset(i, j, k, cf3((i % 2) ? amount : -amount, 0, 0));
+
+    const float rigid_scale =
+        scene::compile_document(one_item(scene::Prim::sphere(0.7f), {rigid})).safe_step_scale();
+    const float alt_scale =
+        scene::compile_document(one_item(scene::Prim::sphere(0.7f), {alternating}))
+            .safe_step_scale();
+    CAPTURE(rigid_scale);
+    CAPTURE(alt_scale);
+    // A rigid translation costs nothing: the field is just moved.
+    CHECK(rigid_scale == doctest::Approx(1.0f).epsilon(1e-5));
+    // The alternating cage is the one that actually distorts, and it pays —
+    // by exactly the Bernstein derivative bound rather than by some amount.
+    // Neighbours differ by 2*amount over an extent of 2, at degree 2:
+    //     rate = (n - 1) * |difference| / extent = 2 * 0.8 / 2 = 0.8
+    //     scale = 1 / (1 + rate)
+    // Asserting the value rather than a threshold is what makes this a test of
+    // the formula instead of a test of a number somebody once observed.
+    const float rate = 2.0f * (2.0f * amount) / 2.0f;
+    CHECK(alt_scale == doctest::Approx(1.0f / (1.0f + rate)).epsilon(1e-4));
+    CHECK(alt_scale < rigid_scale);
+}
+
+TEST_CASE("a lattice steps conservatively over a non-uniform cage") {
+    const cfloat3 lo = cf3(-0.9f, -0.9f, -0.9f), hi = cf3(0.9f, 0.9f, 0.9f);
+    Deformer d = Deformer::lattice(lo, hi, 3, 3, 3);
+    // A twist-ish cage: the top layer rotated, the middle bulged.
+    d.set_cage_offset(0, 2, 0, cf3(0.35f, 0.0f, -0.30f));
+    d.set_cage_offset(2, 2, 2, cf3(-0.35f, 0.0f, 0.30f));
+    d.set_cage_offset(1, 1, 1, cf3(0.0f, 0.25f, 0.0f));
+
+    scene::Tape tape = scene::compile_document(one_item(scene::Prim::sphere(0.7f), {d}));
+    CHECK(tape.safe_step_scale() < 1.0f);
+    clay_test::check_conservative_steps([&](cfloat3 p) { return tape.eval(p).d; },
+                                        tape.safe_step_scale(), 3.0f, 400, 1172);
+}
+
+TEST_CASE("a lattice item is a bound field and its influence contains the warp") {
+    const cfloat3 lo = cf3(-0.8f, -0.8f, -0.8f), hi = cf3(0.8f, 0.8f, 0.8f);
+    Deformer d = Deformer::lattice(lo, hi, 3, 3, 3);
+    d.set_cage_offset(2, 2, 2, cf3(0.6f, 0.0f, 0.0f));
+
+    scene::Document doc = one_item(scene::Prim::sphere(0.5f), {d});
+    scene::Node probe = clay_test::item(scene::Prim::sphere(0.5f), cf3(0, 0, 0));
+    probe.deformers = {d};
+    const math::Aabb bound = scene::item_geometry_bound(probe, doc.layers[0]);
+    const math::Aabb plain =
+        scene::item_geometry_bound(clay_test::item(scene::Prim::sphere(0.5f), cf3(0, 0, 0)),
+                                   doc.layers[0]);
+    CHECK(!bound.empty());
+    // Grown by the largest offset, which a convex combination cannot exceed.
+    CHECK(bound.max.x >= plain.max.x + 0.59f);
+    CHECK(scene::deformers_break_exactness(probe));
+}
+
+TEST_CASE("a lattice survives the document round trip, cage and all") {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::box(cf3(0.5f, 0.5f, 0.5f)), cf3(0, 0, 0));
+    Deformer d = Deformer::lattice(cf3(-0.6f, -0.6f, -0.6f), cf3(0.6f, 0.6f, 0.6f), 3, 2, 4);
+    d.set_cage_offset(1, 1, 2, cf3(0.2f, -0.1f, 0.05f));
+    d.set_cage_offset(2, 0, 3, cf3(-0.15f, 0.2f, 0.0f));
+    n.deformers.push_back(d);
+    // A second deformer after it, so a mis-encoded cage length desynchronises
+    // the reader rather than merely losing itself.
+    n.deformers.push_back(Deformer::twist(0.6f));
+    l.sdf->insert(n);
+
+    std::vector<std::uint8_t> bytes = scene::serialize_document(doc);
+    std::optional<scene::Document> back = scene::deserialize_document(bytes.data(), bytes.size());
+    REQUIRE(back.has_value());
+    CHECK(scene::serialize_document(*back) == bytes);
+
+    clay_test::Lcg rng(1173);
+    scene::Tape a = scene::compile_document(doc), b = scene::compile_document(*back);
+    for (int i = 0; i < 200; ++i) {
+        const cfloat3 p = rng.vec3(-2, 2);
+        CHECK(b.eval(p).d == doctest::Approx(a.eval(p).d).epsilon(1e-5));
+    }
+}
+
+TEST_CASE("the cage's divisions are clamped where the cost lives") {
+    // Capped low because this evaluates PER SAMPLE, at nx*ny*nz multiply-adds
+    // each time — unlike the mesh lattice, which runs once per vertex.
+    Deformer low = Deformer::lattice(cf3(0, 0, 0), cf3(1, 1, 1), 1, 0, -3);
+    CHECK(static_cast<int>(low.a) == 2);
+    CHECK(static_cast<int>(low.b) == 2);
+    CHECK(static_cast<int>(low.c) == 2);
+    CHECK(low.cage.size() == 8u);
+
+    Deformer high = Deformer::lattice(cf3(0, 0, 0), cf3(1, 1, 1), 99, 99, 99);
+    CHECK(static_cast<int>(high.a) == scene::Deformer::kMaxLatticeDivisions);
+    CHECK(high.cage.size() == static_cast<std::size_t>(scene::Deformer::kMaxLatticeDivisions *
+                                                       scene::Deformer::kMaxLatticeDivisions *
+                                                       scene::Deformer::kMaxLatticeDivisions));
+
+    // An out-of-range control point reads zero and writes nowhere.
+    Deformer d = Deformer::lattice(cf3(0, 0, 0), cf3(1, 1, 1), 3, 3, 3);
+    d.set_cage_offset(9, 9, 9, cf3(5, 5, 5));
+    for (const cfloat3& o : d.cage) CHECK(clength(o) == 0.0f);
+    CHECK(clength(d.cage_offset(-1, 0, 0)) == 0.0f);
+}

@@ -479,8 +479,8 @@ static_assert(sizeof kProfileParams / sizeof kProfileParams[0] == kernel::cprofi
 
 // -1 marks a kind whose payload is not a flat float array, so the generic
 // clay_item_add_deformer cannot take it and says so by name.
-constexpr int kDeformParams[] = {1, 1, 4, 2, 2, 3, 9, 3, 3, 8, 8, 10, 5, 5, 3, 3, -1};
-static_assert(sizeof kDeformParams / sizeof kDeformParams[0] == kernel::cdeform_bend_curve + 1);
+constexpr int kDeformParams[] = {1, 1, 4, 2, 2, 3, 9, 3, 3, 8, 8, 10, 5, 5, 3, 3, -1, -1};
+static_assert(sizeof kDeformParams / sizeof kDeformParams[0] == kernel::cdeform_lattice + 1);
 
 clay_result check_params(const char* what, const float* params, std::size_t count, int expected) {
     if (count != static_cast<std::size_t>(expected))
@@ -2446,7 +2446,8 @@ clay_result clay_item_add_deformer(clay_item* item, int32_t deform, const float*
     if (kDeformParams[deform] < 0)
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "this deformer carries a payload that is not a parameter list; "
-                    "use its own entry point (bend_curve: clay_item_add_bend_curve)");
+                    "use its own entry point (bend_curve: clay_item_add_bend_curve, "
+                    "lattice: clay_item_add_lattice)");
     clay_result r = check_params("deformer", params, param_count, kDeformParams[deform]);
     if (r != CLAY_OK) return r;
     if ((r = check_ease(ease)) != CLAY_OK) return r;
@@ -2485,6 +2486,30 @@ clay_result clay_item_add_bend_curve(clay_item* item, const float* guide_xyz, si
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "bend_curve guide has zero length");
 
     item->node.deformers.push_back(scene::Deformer::bend_curve(std::move(guide), t0, t1));
+    return CLAY_OK;
+}
+
+clay_result clay_item_add_lattice(clay_item* item, const float min[3], const float max[3],
+                                  int32_t nx, int32_t ny, int32_t nz, const float* offsets_xyz) {
+    if (!item || !min || !max) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item or box");
+    const int cap = scene::Deformer::kMaxLatticeDivisions;
+    if (nx < 2 || ny < 2 || nz < 2 || nx > cap || ny > cap || nz > cap)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "lattice divisions must be in [2, " + std::to_string(cap) +
+                        "] per axis; the cage is evaluated per sample, at nx*ny*nz "
+                        "multiply-adds each time");
+    const math::Aabb box{kernel::cf3(min[0], min[1], min[2]),
+                         kernel::cf3(max[0], max[1], max[2])};
+    if (box.empty())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the cage's box is empty; there is nothing to span");
+
+    scene::Deformer d = scene::Deformer::lattice(box.min, box.max, nx, ny, nz);
+    if (offsets_xyz) {
+        for (std::size_t n = 0; n < d.cage.size(); ++n)
+            d.cage[n] = kernel::cf3(offsets_xyz[n * 3], offsets_xyz[n * 3 + 1],
+                                    offsets_xyz[n * 3 + 2]);
+    }
+    item->node.deformers.push_back(std::move(d));
     return CLAY_OK;
 }
 

@@ -113,6 +113,9 @@ COVERED_ELSEWHERE = {
     "at":            ("11_masks.py", "placement, not a domain warp — it sets a position"),
     "repeat_grid":   ("04_repetition.py", "placement, not a domain warp"),
     "repeat_radial": ("04_repetition.py", "placement, not a domain warp"),
+    "lattice":       ("50_sdf_lattice.py",
+                      "a cage is not a one-line warp, and the page it earns is "
+                      "about what running FFD backwards costs"),
 }
 
 

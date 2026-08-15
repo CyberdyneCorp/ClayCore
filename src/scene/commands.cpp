@@ -392,6 +392,13 @@ void write_deformers(Writer& w, const std::vector<Deformer>& deformers) {
             w.u32(static_cast<std::uint32_t>(d.guide.size()));
             for (const StrokePoint& sp : d.guide) write_point(w, sp);
         }
+        // A lattice's cage, length-prefixed the same way. Its SIZE is implied
+        // by the divisions already on the wire, but it is written explicitly
+        // so a reader validates rather than trusts three floats it just read.
+        if (d.type == kernel::cdeform_lattice) {
+            w.u32(static_cast<std::uint32_t>(d.cage.size()));
+            for (const kernel::cfloat3& o : d.cage) w.pod(o);
+        }
     }
 }
 
@@ -518,6 +525,21 @@ std::vector<Deformer> read_deformers(Reader& r) {
             }
             for (std::uint32_t g = 0; g < gc && r.ok; ++g)
                 d.guide.push_back(read_point(r));
+        }
+        if (d.type == kernel::cdeform_lattice) {
+            std::uint32_t cc = r.u32();
+            const std::size_t expected = static_cast<std::size_t>(d.a) *
+                                         static_cast<std::size_t>(d.b) *
+                                         static_cast<std::size_t>(d.c);
+            // 12 bytes per offset, and the count has to agree with the
+            // divisions — a file claiming otherwise is corrupt, not old.
+            if (!r.ok || cc > r.remaining / 12 || cc != expected) {
+                r.ok = false;
+                return out;
+            }
+            d.cage.clear();
+            for (std::uint32_t e = 0; e < cc && r.ok; ++e)
+                d.cage.push_back(r.pod<kernel::cfloat3>());
         }
         out.push_back(d);
     }

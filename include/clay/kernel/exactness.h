@@ -275,4 +275,27 @@ CLAY_FN CFieldInfo cfi_bend_curve(CFieldInfo a, float cross_extent, float bend_r
     return CFieldInfo{false, a.lipschitz * (bend_radius / headroom) * stretch};
 }
 
+// lattice cage. The bound comes from the Bernstein DERIVATIVE, which is the
+// only thing that says how fast the warp varies:
+//
+//     d/ds sum_i B_{n,i}(s) d_i  =  n * sum_i B_{n-1,i}(s) (d_{i+1} - d_i)
+//
+// so the displacement's rate along an axis is bounded by
+// degree * max|neighbouring offset difference| / box extent. The basis is a
+// partition of unity, so the sum of |B| is 1 and the max over i is enough.
+//
+// The OFFSETS' magnitudes are deliberately not used: they say how far the warp
+// moves material, not how fast it changes, and a cage that translates a whole
+// item rigidly has large offsets and zero gradient. Bounding by magnitude would
+// charge that translation a step-scale penalty it does not deserve, and — worse
+// — would UNDER-charge a cage with small but sharply alternating offsets, which
+// is the case that actually folds.
+//
+// The Jacobian of p -> p + D(p) is I + grad(D), so the Lipschitz factor is at
+// most 1 + |grad(D)|, bounded here by the Frobenius norm of the per-axis rates.
+CLAY_FN CFieldInfo cfi_lattice(CFieldInfo a, float rate_x, float rate_y, float rate_z) {
+    float g = csqrt(rate_x * rate_x + rate_y * rate_y + rate_z * rate_z);
+    return CFieldInfo{false, a.lipschitz * (1.0f + g)};
+}
+
 CLAY_NS_END
