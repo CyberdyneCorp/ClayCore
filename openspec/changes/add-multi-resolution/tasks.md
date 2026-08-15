@@ -19,10 +19,13 @@
   solid does not move — but it is not the smoothing an SDF or a mesh multires
   would do, and a subdivided surface is blockier than a surface authored at the
   fine level.
-- **Only whole-grid subdivision.** A level covers the whole lattice; there is no
-  way to refine one region and leave the rest coarse. Memory therefore follows
-  the bounding content rather than the surface, which is the cost the proposal
-  listed for choosing levels.
+- ~~**Only whole-grid subdivision.**~~ **Answered by `refine-a-region`.** A level
+  can now be refined over a region: outside it the level has no storage and
+  reads its parent's value, so the lattice stays uniform and complete and only
+  what is STORED changes. Refinement is at chunk granularity, and a write
+  outside the region refines what it touched. The original cost stood as
+  written — measured at exactly 8x per level over the occupied volume, on the
+  same three-primitive form `docs/09` uses.
 - **No level-aware SDF bridges.** `rasterize_tape` and `sample_step_field` act
   on the active level, which is correct but means rasterising into a stack fills
   one level and averages/replays into the others rather than rasterising each at

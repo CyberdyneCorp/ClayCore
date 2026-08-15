@@ -5241,6 +5241,48 @@ clay_result clay_voxel_add_level(clay_voxel_grid* grid, size_t* out_level) {
     return CLAY_OK;
 }
 
+clay_result clay_voxel_add_level_region(clay_voxel_grid* grid, const float min[3],
+                                        const float max[3], size_t* out_level) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (!min || !max) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null region");
+    math::Aabb region{kernel::cf3(min[0], min[1], min[2]), kernel::cf3(max[0], max[1], max[2])};
+    if (region.empty())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the region is empty; there is nothing to refine");
+    std::size_t before = g->level_count();
+    std::size_t level = g->add_level(region);
+    if (g->level_count() == before)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the level stack is capped at " + std::to_string(voxel::VoxelGrid::kMaxLevels));
+    if (out_level) *out_level = level;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_level_chunk_count(const clay_voxel_grid* grid, size_t level,
+                                         size_t* out_count) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_count");
+    if (level >= g->level_count())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "no such level: " + std::to_string(level));
+    *out_count = g->level_refined_chunk_count(level);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_level_is_whole(const clay_voxel_grid* grid, size_t level,
+                                      int32_t* out_whole) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (!out_whole) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_whole");
+    if (level >= g->level_count())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "no such level: " + std::to_string(level));
+    *out_whole = g->level_is_whole(level) ? 1 : 0;
+    return CLAY_OK;
+}
+
 clay_result clay_voxel_drop_level(clay_voxel_grid* grid) {
     voxel::VoxelGrid* g = nullptr;
     clay_result r = resolve(grid, &g);

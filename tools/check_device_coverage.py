@@ -59,7 +59,12 @@ VERB_PATTERNS = [
     # Subdividing. A level is charged to the EDIT that crosses it (a write
     # costs 8^d cell writes for d finer levels), so it belongs with the verbs
     # rather than with the accessors that report a stack.
-    r"clay_voxel_(add|drop)_level",
+    #
+    # The `_region` suffix is spelled out rather than left to the prefix: a
+    # pattern here is matched only where it is followed by "(", so
+    # `clay_voxel_add_level` does NOT cover `clay_voxel_add_level_region`. That
+    # is precisely how the level stack went missing from this list once before.
+    r"clay_voxel_(add|drop)_level(_region)?",
     # The fixed-topology mesh brushes. One stamp and one stroke, not eleven
     # entries: the verb is a field of the descriptor, so the entry points are
     # what a host calls and what a latency case would drive. The raycast is a

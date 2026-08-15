@@ -4629,6 +4629,41 @@ NB_MODULE(pyclay, m) {
              "Appends a level at half the finest cell size, subdividing every\n"
              "occupied cell into its eight children so the solid is unchanged.\n"
              "Returns the new level's index.")
+        .def("add_level_region",
+             [](PyVoxelGrid& g, nb::handle region) {
+                 const math::Aabb box = to_aabb(region);
+                 if (box.empty())
+                     throw std::invalid_argument(
+                         "the region is empty; there is nothing to refine");
+                 std::size_t before = g.grid().level_count();
+                 std::size_t level = g.grid().add_level(box);
+                 if (g.grid().level_count() == before)
+                     throw std::invalid_argument("the level stack is at its cap");
+                 return level;
+             },
+             "region"_a,
+             "Appends a level refined only over `region` ((min, max) in world\n"
+             "units, rounded OUT to whole chunks).\n\n"
+             "Outside the region the level has no storage and reads its parent's\n"
+             "value, so the lattice is still uniform and complete — only what is\n"
+             "STORED changes, and meshing, bounds and neighbour indexing are as\n"
+             "they were. Writing outside the region refines what the write\n"
+             "touched, so a brush straddling the boundary works.\n\n"
+             "Adding a whole level costs eight times the OCCUPIED VOLUME, and\n"
+             "occupancy is volumetric. A chunk is 32 cells across, so a region\n"
+             "smaller than that still costs one: the saving is on a form\n"
+             "spanning many chunks at the resolution being authored, which is\n"
+             "the case a level stack is for.")
+        .def("level_chunk_count",
+             [](const PyVoxelGrid& g, std::size_t level) {
+                 return g.grid().level_refined_chunk_count(level);
+             },
+             "level"_a, "How many chunks a level stores.")
+        .def("level_is_whole",
+             [](const PyVoxelGrid& g, std::size_t level) { return g.grid().level_is_whole(level); },
+             "level"_a,
+             "Whether a level stores the whole lattice. True for a level added\n"
+             "without a region, and for every grid written before regions existed.")
         .def("drop_level", [](PyVoxelGrid& g) { return g.grid().drop_level(); },
              "Drops the finest level and the detail only it held. False when\n"
              "there is only one left.")

@@ -95,6 +95,7 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 | — | (fill holes) | `sculpt_fill_cavities` | v | `voxel_fill_cavities` | 0.62 | operation |
 | Dynamesh | Voxel Remesh | `Layer.consolidate` | s | `sdf_consolidate` | 1537.5 ‡ | operation |
 | — | Multires | `VoxelGrid::add_level` | v | `voxel_add_level` | 0.511 | operation |
+| — | Multires (over a region) | `VoxelGrid::add_level(region)` | v | — | — | operation |
 | — | Multires (editing under one) | `sculpt_smooth`, one level finer | v | `voxel_smooth_l2` | 0.0149 | interactive |
 | — | (large brush) | `sculpt_smooth` at radius 32 | v | `voxel_smooth_r32` | 0.479 | interactive |
 | — | (display) | `VoxelGrid::mesh_greedy` | v | `voxel_mesh_whole` | 4.72 | operation |
@@ -516,6 +517,7 @@ Everything below is a **missing latency case**, not a missing test or render.
 | voxel meshing (display) | **measured at v0.30.0** — `voxel_mesh_whole`, `voxel_mesh_dirty` |
 | large-radius verbs | **measured at v0.30.0** — `voxel_smooth_r32` |
 | the level stack | **measured at v0.30.0** — `voxel_add_level`, `voxel_smooth_l2` |
+| `voxel_add_level_region` | **unmeasured, named on the record** — it does strictly LESS work than the measured `voxel_add_level` (it seeds the region's chunks rather than every occupied cell), so the measured figure bounds it. Worth its own case once a device fixture exercises a region |
 | the 11 fixed-topology mesh brushes | **unmeasured, named on the record** — `mesh_sculptor_stamp` and `mesh_sculptor_apply_stroke` are exempt in `Coverage.swift` with "no mesh-layer fixture", not with a reason they should never be measured. The first real gap since v0.30.0 |
 
 **Every brush in the inventory has a case or a recorded exemption.** That

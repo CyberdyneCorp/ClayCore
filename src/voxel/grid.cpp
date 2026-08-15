@@ -73,16 +73,54 @@ void VoxelGrid::palette_set(std::uint8_t index, cfloat3 color) {
 
 // -- single voxel ------------------------------------------------------------
 
+// For a chunk a level does not store, the single ancestor chunk whose cells it
+// mirrors, and how many levels up that is. One coarse chunk covers exactly the
+// eight fine chunks below it, so walking up is a halving per level rather than
+// a search.
+//
+// This exists so that reading an inherited chunk costs ONE map lookup rather
+// than a recursive cell_at per cell. bounds_min/bounds_max are called per ray
+// by the raycaster; a hash and a recursion per cell there is the difference
+// between a render and a hang.
+const VoxelGrid::Chunk* VoxelGrid::inherited_chunk(std::size_t level, VoxelCoord key,
+                                                   int* out_up) const {
+    int up = 0;
+    while (level > 0 && !chunk_is_refined(level, key)) {
+        key = {fdiv(key.x, 2), fdiv(key.y, 2), fdiv(key.z, 2)};
+        --level;
+        ++up;
+    }
+    *out_up = up;
+    auto it = levels_[level].chunks.find(key);
+    return it == levels_[level].chunks.end() ? nullptr : &it->second;
+}
+
+bool VoxelGrid::chunk_is_refined(std::size_t level, VoxelCoord key) const {
+    const Level& lv = levels_[level];
+    return lv.whole || lv.refined.find(key) != lv.refined.end();
+}
+
 std::uint8_t VoxelGrid::cell_at(std::size_t level, VoxelCoord c) const {
+    const VoxelCoord key = chunk_key(c);
+    // An unrefined chunk is not empty — it is UNSTORED, and its value is the
+    // one its parent carries. Reading it as empty is the single mistake that
+    // would turn regional refinement from a storage change into a hole in the
+    // solid, so the fallback comes before the chunk lookup rather than after a
+    // miss.
+    if (level > 0 && !chunk_is_refined(level, key)) return cell_at(level - 1, parent_cell(c));
     const ChunkMap& chunks = levels_[level].chunks;
-    auto it = chunks.find(chunk_key(c));
+    auto it = chunks.find(key);
     return it == chunks.end() ? 0 : it->second.data[chunk_offset(c)];
 }
 
 // Returns whether the cell actually changed, which is what change_count counts.
 bool VoxelGrid::write_cell(std::size_t level, VoxelCoord c, std::uint8_t index) {
-    ChunkMap& chunks = levels_[level].chunks;
     VoxelCoord key = chunk_key(c);
+    // Writing where the level has no storage gives it some. Refusing instead
+    // would break every brush whose footprint straddles a boundary, which is
+    // the common case rather than the exceptional one.
+    if (level > 0 && !chunk_is_refined(level, key)) refine_chunk(level, key);
+    ChunkMap& chunks = levels_[level].chunks;
     auto it = chunks.find(key);
     if (it == chunks.end()) {
         if (index == 0) return false;
@@ -98,7 +136,13 @@ bool VoxelGrid::write_cell(std::size_t level, VoxelCoord c, std::uint8_t index) 
     // this grid spells empty space. It is marked dirty BELOW rather than
     // skipped: a host holding its quads has to be told to drop them.
     if (it->second.occupied == 0) chunks.erase(it);
-    if (changed) mark_chunk_dirty(level, c, key);
+    if (changed) {
+        mark_chunk_dirty(level, c, key);
+        // Any level ABOVE this one inherits from it, so a write here can move
+        // their extents too. Cheap to drop them all; the walk only re-runs
+        // when something asks.
+        for (std::size_t i = level; i < levels_.size(); ++i) levels_[i].bounds_valid = false;
+    }
     return changed;
 }
 
@@ -130,7 +174,18 @@ void VoxelGrid::mark_chunk_dirty(std::size_t level, VoxelCoord c, VoxelCoord key
     if (!on_face) return;
     auto neighbour = [&](std::int32_t dx, std::int32_t dy, std::int32_t dz) {
         VoxelCoord n{key.x + dx, key.y + dy, key.z + dz};
-        if (lv.chunks.find(n) != lv.chunks.end()) lv.dirty.insert(n);
+        if (lv.chunks.find(n) != lv.chunks.end()) {
+            lv.dirty.insert(n);
+            return;
+        }
+        // A chunk this level does not STORE can still carry material, inherited
+        // from its parent — and it emits faces across this boundary just as a
+        // stored one would. Asking the cell rather than the chunk map is what
+        // keeps a host from leaving stale quads on a neighbour it was never
+        // told about.
+        if (level == 0 || lv.whole) return;
+        const VoxelCoord across{c.x + dx, c.y + dy, c.z + dz};
+        if (cell_at(level, across) != 0) lv.dirty.insert(n);
     };
     if (lx == 0) neighbour(-1, 0, 0);
     if (lx == kChunkDim - 1) neighbour(1, 0, 0);
@@ -195,6 +250,23 @@ std::size_t VoxelGrid::level_occupied_count(std::size_t level) const {
     std::size_t n = 0;
     for (const auto& [key, chunk] : levels_[level].chunks)
         n += static_cast<std::size_t>(chunk.occupied);
+    if (level == 0 || levels_[level].whole) return n;
+    // A partially refined level HAS the material its unrefined chunks inherit,
+    // and this counts the solid rather than the storage — the same solid
+    // bounds() describes and the mesher meshes. Reporting storage here would
+    // leave two accessors disagreeing about what a level is; what a level COSTS
+    // is level_refined_chunk_count, which is what memory actually follows.
+    //
+    // Walked per cell only for the inherited part, and only on a partial level.
+    for (const VoxelCoord& key : material_chunk_keys(level)) {
+        if (chunk_is_refined(level, key)) continue;  // counted above
+        for (int z = 0; z < kChunkDim; ++z)
+            for (int y = 0; y < kChunkDim; ++y)
+                for (int x = 0; x < kChunkDim; ++x)
+                    if (cell_at(level, {key.x * kChunkDim + x, key.y * kChunkDim + y,
+                                        key.z * kChunkDim + z}) != 0)
+                        ++n;
+    }
     return n;
 }
 
@@ -215,6 +287,110 @@ std::size_t VoxelGrid::add_level() {
     std::size_t fine = levels_.size() - 1;
     subdivide_into(fine);
     return fine;
+}
+
+std::size_t VoxelGrid::add_level(const math::Aabb& region) {
+    if (levels_.size() >= kMaxLevels) return levels_.size() - 1;
+    const float half = levels_.back().voxel_size * 0.5f;
+    Level& lv = levels_.emplace_back();
+    lv.voxel_size = half;
+    lv.whole = false;
+    std::size_t fine = levels_.size() - 1;
+    if (region.empty()) return fine;  // a level that stores nothing reads as its parent
+
+    // World bounds to fine cells to chunk keys, rounded OUT at both ends: a
+    // region is a request for detail somewhere, and half a chunk of detail is
+    // not a thing this grid can store.
+    auto key_of = [&](float v) {
+        return static_cast<std::int32_t>(
+            std::floor(std::floor(v / half) / static_cast<float>(kChunkDim)));
+    };
+    const std::int32_t x0 = key_of(region.min.x), x1 = key_of(region.max.x);
+    const std::int32_t y0 = key_of(region.min.y), y1 = key_of(region.max.y);
+    const std::int32_t z0 = key_of(region.min.z), z1 = key_of(region.max.z);
+    for (std::int32_t z = z0; z <= z1; ++z)
+        for (std::int32_t y = y0; y <= y1; ++y)
+            for (std::int32_t x = x0; x <= x1; ++x) levels_[fine].refined.insert({x, y, z});
+
+    seed_refined_chunks(fine);
+    return fine;
+}
+
+// Chunk keys where this level HAS material, which is not the same as the
+// chunks it STORES: an unrefined chunk reads its parent, so the parent's
+// material is at this level too.
+//
+// Every consumer that enumerates chunks — bounds, the meshing slabs, the dirty
+// set — asks this rather than walking `chunks`. Reading VALUES was already
+// safe, because the sweeps go through `cell_at`; what a region breaks is the
+// question "which chunks are worth visiting", and that is the whole of it.
+std::vector<VoxelCoord> VoxelGrid::material_chunk_keys(std::size_t level) const {
+    std::vector<VoxelCoord> keys;
+    if (level >= levels_.size()) return keys;
+    const Level& lv = levels_[level];
+    keys.reserve(lv.chunks.size());
+    for (const auto& [key, chunk] : lv.chunks)
+        if (chunk.occupied > 0) keys.push_back(key);
+    if (level == 0 || lv.whole) return keys;
+    // One coarse chunk's cells subdivide into exactly eight fine chunks, so the
+    // inherited keys are that expansion — minus the ones this level stores,
+    // which are already above.
+    for (const VoxelCoord& pk : material_chunk_keys(level - 1))
+        for (int i = 0; i < 8; ++i) {
+            const VoxelCoord k{pk.x * 2 + (i & 1), pk.y * 2 + ((i >> 1) & 1),
+                               pk.z * 2 + ((i >> 2) & 1)};
+            if (!chunk_is_refined(level, k)) keys.push_back(k);
+        }
+    return keys;
+}
+
+std::size_t VoxelGrid::level_refined_chunk_count(std::size_t level) const {
+    if (level >= levels_.size()) return 0;
+    return levels_[level].whole ? levels_[level].chunks.size() : levels_[level].refined.size();
+}
+
+bool VoxelGrid::level_is_whole(std::size_t level) const {
+    return level < levels_.size() && levels_[level].whole;
+}
+
+// Fill one already-refined chunk with what its parent says, so giving a level
+// storage cannot change the solid.
+//
+// Read through cell_at on the PARENT rather than off the parent's chunk data:
+// the level below may itself be partial, and the material in the chunks it
+// does not store is exactly as real as the material in the ones it does. A
+// seeding that walked only stored chunks leaves a hole one chunk wide
+// wherever a region is stacked over an inherited area.
+void VoxelGrid::seed_chunk(std::size_t level, VoxelCoord key) {
+    for (int z = 0; z < kChunkDim; ++z)
+        for (int y = 0; y < kChunkDim; ++y)
+            for (int x = 0; x < kChunkDim; ++x) {
+                const VoxelCoord c{key.x * kChunkDim + x, key.y * kChunkDim + y,
+                                   key.z * kChunkDim + z};
+                const std::uint8_t v = cell_at(level - 1, parent_cell(c));
+                if (v != 0) write_cell(level, c, v);
+            }
+}
+
+// Storage for one chunk, seeded from the parent so the solid does not move.
+void VoxelGrid::refine_chunk(std::size_t level, VoxelCoord key) {
+    if (level == 0 || chunk_is_refined(level, key)) return;
+    // Upward-closed: a fine edit propagates DOWN, and needs somewhere coarse to
+    // land. Two fine chunks per axis share one coarse chunk, so the ancestor is
+    // a single key rather than a range.
+    refine_chunk(level - 1, {fdiv(key.x, 2), fdiv(key.y, 2), fdiv(key.z, 2)});
+    // Marked BEFORE seeding: the seeding writes go through write_cell, which
+    // would otherwise see an unrefined chunk and recurse into here forever.
+    levels_[level].refined.insert(key);
+    seed_chunk(level, key);
+}
+
+// Every chunk a partially refined level was given, filled from the level below.
+void VoxelGrid::seed_refined_chunks(std::size_t fine) {
+    // Copied, because seeding writes propagate and may refine further chunks.
+    const std::vector<VoxelCoord> keys(levels_[fine].refined.begin(),
+                                       levels_[fine].refined.end());
+    for (const VoxelCoord& key : keys) seed_chunk(fine, key);
 }
 
 bool VoxelGrid::drop_level() {
@@ -240,7 +416,13 @@ void VoxelGrid::subdivide_into(std::size_t fine) {
                     VoxelCoord c{key.x * kChunkDim + x, key.y * kChunkDim + y,
                                  key.z * kChunkDim + z};
                     if (!has_children(c)) continue;
-                    for (int i = 0; i < kChildren; ++i) write_cell(fine, child_cell(c, i), v);
+                    for (int i = 0; i < kChildren; ++i) {
+                        const VoxelCoord child = child_cell(c, i);
+                        // Outside the refined set the fine level already READS
+                        // as this cell, so writing it would only buy storage.
+                        if (!chunk_is_refined(fine, chunk_key(child))) continue;
+                        write_cell(fine, child, v);
+                    }
                 }
     }
 }
@@ -249,6 +431,11 @@ void VoxelGrid::subdivide_into(std::size_t fine) {
 // that do, so it stays the size of the detail rather than the size of the level.
 void VoxelGrid::record_detail(std::size_t level, VoxelCoord c) {
     if (level == 0) return;
+    // An unrefined cell reads as its parent BY DEFINITION, so it can never be
+    // an offset against it. Recording one would put an entry in the map for a
+    // cell the level does not store, and the map is meant to be exactly the
+    // cells that differ.
+    if (!chunk_is_refined(level, chunk_key(c))) return;
     std::uint8_t v = cell_at(level, c);
     if (v == cell_at(level - 1, parent_cell(c)))
         levels_[level].detail.erase(c);
@@ -300,6 +487,10 @@ void VoxelGrid::propagate_up(std::size_t from, VoxelCoord c) {
     const std::uint8_t predicted = cell_at(from, c);
     for (int i = 0; i < kChildren; ++i) {
         VoxelCoord child = child_cell(c, i);
+        // An unrefined chunk already reads as its parent, so there is nothing
+        // to replay into it — and writing would materialise exactly the storage
+        // the region exists to avoid.
+        if (!chunk_is_refined(fine, chunk_key(child))) continue;
         auto& detail = levels_[fine].detail;
         auto it = detail.find(child);
         std::uint8_t v = it != detail.end() ? it->second : predicted;
@@ -409,44 +600,62 @@ void VoxelGrid::paint_mirrored(VoxelCoord c, std::uint8_t index, std::uint8_t ax
 
 std::size_t VoxelGrid::occupied_count() const { return level_occupied_count(active_); }
 
-std::optional<VoxelCoord> VoxelGrid::bounds_min() const {
-    std::optional<VoxelCoord> out;
-    for (const auto& [key, chunk] : levels_[active_].chunks) {
+// One walk for both ends, cached on the level.
+//
+// bounds_min/bounds_max used to walk every material cell each, and
+// raycast_voxels asks for both PER RAY — so rendering a grid paid two full
+// walks per pixel, which was the whole of a 29 s render on a 65k-cell sculpt.
+// Computing them together and remembering the answer makes the walk happen
+// once per edit instead of once per ray.
+void VoxelGrid::ensure_bounds() const {
+    Level& lv = const_cast<Level&>(levels_[active_]);
+    if (lv.bounds_valid) return;
+    bool any = false;
+    VoxelCoord lo{}, hi{};
+    const ChunkMap& chunks = lv.chunks;
+    for (const VoxelCoord& key : material_chunk_keys(active_)) {
+        auto it = chunks.find(key);
+        int up = 0;
+        const Chunk* src = it != chunks.end() ? &it->second : inherited_chunk(active_, key, &up);
+        if (!src) continue;
         for (int z = 0; z < kChunkDim; ++z)
             for (int y = 0; y < kChunkDim; ++y)
                 for (int x = 0; x < kChunkDim; ++x) {
-                    if (!chunk.data[(static_cast<std::size_t>(z) * kChunkDim + y) * kChunkDim + x])
-                        continue;
-                    VoxelCoord c{key.x * kChunkDim + x, key.y * kChunkDim + y,
-                                 key.z * kChunkDim + z};
-                    if (!out)
-                        out = c;
-                    else
-                        *out = {std::min(out->x, c.x), std::min(out->y, c.y),
-                                std::min(out->z, c.z)};
+                    const VoxelCoord c{key.x * kChunkDim + x, key.y * kChunkDim + y,
+                                       key.z * kChunkDim + z};
+                    // An inherited chunk mirrors its ancestor's cells, so the
+                    // read is that chunk's data at the shifted coordinate.
+                    const VoxelCoord a =
+                        up == 0 ? c : VoxelCoord{c.x >> up, c.y >> up, c.z >> up};
+                    const std::size_t ox = static_cast<std::size_t>(fmod_pos(a.x, kChunkDim));
+                    const std::size_t oy = static_cast<std::size_t>(fmod_pos(a.y, kChunkDim));
+                    const std::size_t oz = static_cast<std::size_t>(fmod_pos(a.z, kChunkDim));
+                    if (!src->data[(oz * kChunkDim + oy) * kChunkDim + ox]) continue;
+                    if (!any) {
+                        lo = hi = c;
+                        any = true;
+                    } else {
+                        lo = {std::min(lo.x, c.x), std::min(lo.y, c.y), std::min(lo.z, c.z)};
+                        hi = {std::max(hi.x, c.x), std::max(hi.y, c.y), std::max(hi.z, c.z)};
+                    }
                 }
     }
-    return out;
+    lv.bounds_lo = lo;
+    lv.bounds_hi = hi;
+    lv.bounds_empty = !any;
+    lv.bounds_valid = true;
+}
+
+std::optional<VoxelCoord> VoxelGrid::bounds_min() const {
+    ensure_bounds();
+    const Level& lv = levels_[active_];
+    return lv.bounds_empty ? std::nullopt : std::optional<VoxelCoord>(lv.bounds_lo);
 }
 
 std::optional<VoxelCoord> VoxelGrid::bounds_max() const {
-    std::optional<VoxelCoord> out;
-    for (const auto& [key, chunk] : levels_[active_].chunks) {
-        for (int z = 0; z < kChunkDim; ++z)
-            for (int y = 0; y < kChunkDim; ++y)
-                for (int x = 0; x < kChunkDim; ++x) {
-                    if (!chunk.data[(static_cast<std::size_t>(z) * kChunkDim + y) * kChunkDim + x])
-                        continue;
-                    VoxelCoord c{key.x * kChunkDim + x, key.y * kChunkDim + y,
-                                 key.z * kChunkDim + z};
-                    if (!out)
-                        out = c;
-                    else
-                        *out = {std::max(out->x, c.x), std::max(out->y, c.y),
-                                std::max(out->z, c.z)};
-                }
-    }
-    return out;
+    ensure_bounds();
+    const Level& lv = levels_[active_];
+    return lv.bounds_empty ? std::nullopt : std::optional<VoxelCoord>(lv.bounds_hi);
 }
 
 std::optional<VoxelCoord> VoxelGrid::build_plane_pick(const math::Ray& ray,
@@ -493,7 +702,13 @@ namespace {
 // coarsest level's chunks and never looks, which is what makes an older build
 // open a multi-resolution document at the coarsest level rather than fail; a
 // reader that does look needs the tag to tell a tail from a truncated file.
-constexpr std::uint32_t kLevelTail = 0x564C4343u;  // "CCLV" little-endian
+constexpr std::uint32_t kLevelTail = 0x564C4343u;   // "CCLV" little-endian
+// A tail that also carries each level's refined-chunk set. A separate tag
+// rather than a field on the old one, so a grid whose levels are all whole
+// still writes the exact bytes it always did — and a reader predating regions
+// meets an unknown tag, which it already handles by opening the grid at its
+// coarsest level rather than by failing.
+constexpr std::uint32_t kRegionTail = 0x56524343u;  // "CCRV"
 
 // Ceiling on the cells a tail may ask the reader to MATERIALISE. kMaxLevels
 // bounds how many levels a stream can name but not what naming them costs:
@@ -553,10 +768,29 @@ std::vector<std::uint8_t> VoxelGrid::serialize() const {
     // from the level below — because everything else is reproducible by
     // subdividing. A level carrying no detail therefore costs four bytes, which
     // is the answer to whether a stack has to multiply the file size.
-    put32(kLevelTail);
+    bool any_partial = false;
+    for (const Level& lv : levels_) any_partial = any_partial || !lv.whole;
+    put32(any_partial ? kRegionTail : kLevelTail);
     put32(static_cast<std::uint32_t>(levels_.size()));
     put32(static_cast<std::uint32_t>(active_));
     for (std::size_t i = 1; i < levels_.size(); ++i) {
+        if (any_partial) {
+            // Ordered, like the detail below it, so the stream stays a
+            // canonical form of the grid rather than a hash-order snapshot.
+            std::vector<std::tuple<int, int, int>> keys;
+            keys.reserve(levels_[i].refined.size());
+            for (const VoxelCoord& k : levels_[i].refined) keys.push_back({k.x, k.y, k.z});
+            std::sort(keys.begin(), keys.end());
+            // A whole level inside a stack that has partial ones is written as
+            // "whole" rather than as every one of its chunk keys.
+            put32(levels_[i].whole ? 0xFFFFFFFFu : static_cast<std::uint32_t>(keys.size()));
+            if (!levels_[i].whole)
+                for (const auto& k : keys) {
+                    put32(static_cast<std::uint32_t>(std::get<0>(k)));
+                    put32(static_cast<std::uint32_t>(std::get<1>(k)));
+                    put32(static_cast<std::uint32_t>(std::get<2>(k)));
+                }
+        }
         std::map<std::tuple<int, int, int>, std::uint8_t> ordered_detail;
         for (const auto& [c, v] : levels_[i].detail) ordered_detail[{c.x, c.y, c.z}] = v;
         put32(static_cast<std::uint32_t>(ordered_detail.size()));
@@ -633,11 +867,12 @@ std::optional<VoxelGrid> VoxelGrid::deserialize(const std::uint8_t* data, std::s
     // No tail, or a stream written before there was one: a single-level grid,
     // which is what an older document is.
     std::uint32_t tag = 0;
-    if (pos + 4 > size || !get32(&tag) || tag != kLevelTail) {
+    if (pos + 4 > size || !get32(&tag) || (tag != kLevelTail && tag != kRegionTail)) {
         grid.mark_every_chunk_dirty();
         return grid;
     }
-    if (!grid.read_level_tail(data, size, &pos, palette_count)) return std::nullopt;
+    if (!grid.read_level_tail(data, size, &pos, palette_count, tag == kRegionTail))
+        return std::nullopt;
     grid.mark_every_chunk_dirty();
     return grid;
 }
@@ -657,7 +892,7 @@ void VoxelGrid::mark_every_chunk_dirty() {
 }
 
 bool VoxelGrid::read_level_tail(const std::uint8_t* data, std::size_t size, std::size_t* pos,
-                                std::uint32_t palette_count) {
+                                std::uint32_t palette_count, bool has_regions) {
     auto get32 = [&](std::uint32_t* v) {
         if (*pos + 4 > size) return false;
         *v = 0;
@@ -679,6 +914,25 @@ bool VoxelGrid::read_level_tail(const std::uint8_t* data, std::size_t size, std:
     }
 
     for (std::uint32_t i = 1; i < level_count; ++i) {
+        // The refined set comes first, because add_level below has to know
+        // which chunks to seed before it seeds any of them.
+        std::vector<VoxelCoord> refined;
+        bool whole = true;
+        if (has_regions) {
+            std::uint32_t n = 0;
+            if (!get32(&n)) return false;
+            if (n != 0xFFFFFFFFu) {
+                whole = false;
+                if (n > (size - *pos) / 12) return false;  // 12 bytes per key
+                refined.reserve(n);
+                for (std::uint32_t e = 0; e < n; ++e) {
+                    std::uint32_t x, y, z;
+                    if (!get32(&x) || !get32(&y) || !get32(&z)) return false;
+                    refined.push_back({static_cast<std::int32_t>(x), static_cast<std::int32_t>(y),
+                                       static_cast<std::int32_t>(z)});
+                }
+            }
+        }
         std::uint32_t detail_count = 0;
         if (!get32(&detail_count)) return false;
         // 13 bytes per entry, so a count the rest of the payload cannot possibly
@@ -689,7 +943,20 @@ bool VoxelGrid::read_level_tail(const std::uint8_t* data, std::size_t size, std:
         // level exists yet to replay into and an offset is simply restored —
         // going through set() would average it back DOWN and rewrite the
         // coarser levels the file just supplied.
-        if (add_level() != i) return false;  // the cap refused; the indices would drift
+        if (whole) {
+            if (add_level() != i) return false;  // the cap refused; the indices would drift
+        } else {
+            // Built by hand rather than through add_level(region): the file
+            // carries the chunk KEYS, and turning them back into a world box to
+            // re-derive them would round twice and could land on a different set.
+            if (levels_.size() >= kMaxLevels) return false;
+            Level& lv = levels_.emplace_back();
+            lv.voxel_size = levels_[levels_.size() - 2].voxel_size * 0.5f;
+            lv.whole = false;
+            if (levels_.size() - 1 != i) return false;
+            for (const VoxelCoord& k : refined) lv.refined.insert(k);
+            seed_refined_chunks(i);
+        }
         for (std::uint32_t e = 0; e < detail_count; ++e) {
             std::uint32_t x, y, z;
             if (!get32(&x) || !get32(&y) || !get32(&z) || *pos >= size) return false;
@@ -737,10 +1004,8 @@ struct Slab {
 // Templated only so an anonymous-namespace function can take VoxelGrid's
 // private chunk map without naming it; both quad meshing and greedy meshing
 // sweep the same slabs, and two copies of this would be two surfaces.
-template <typename ChunkMapT>
-void collect_slabs(const ChunkMapT& chunks, int axis, std::map<int, Slab>& out) {
-    for (const auto& [key, chunk] : chunks) {
-        if (chunk.occupied <= 0) continue;
+void collect_slabs(const std::vector<VoxelCoord>& keys, int axis, std::map<int, Slab>& out) {
+    for (const VoxelCoord& key : keys) {
         const int sa = axis_of(key, axis);
         const int cu = u_of(key, axis) * kChunkDim;
         const int cv = v_of(key, axis) * kChunkDim;
@@ -883,8 +1148,8 @@ void VoxelGrid::sweep_window(std::size_t level, int axis, int sign, int slab_ind
 mesh::Mesh VoxelGrid::mesh_greedy(std::size_t level) const {
     mesh::Mesh out;
     if (level >= levels_.size()) return out;
-    const ChunkMap& chunks = levels_[level].chunks;
-    if (chunks.empty()) return out;
+    const std::vector<VoxelCoord> keys = material_chunk_keys(level);
+    if (keys.empty()) return out;
 
     // The sweep runs per occupied CHUNK SLAB rather than over the whole
     // occupied bounding box. A grid is sparse by construction, and a bounding
@@ -905,7 +1170,7 @@ mesh::Mesh VoxelGrid::mesh_greedy(std::size_t level) const {
     std::vector<std::uint8_t> mask;
     for (const Dir& dir : kDirs) {
         std::map<int, Slab> slabs;
-        collect_slabs(chunks, dir.axis, slabs);
+        collect_slabs(keys, dir.axis, slabs);
         for (const auto& [slab_index, slab] : slabs)
             sweep_window(level, dir.axis, dir.sign, slab_index, slab.u0, slab.v0,
                          slab.u1 - slab.u0 + 1, slab.v1 - slab.v0 + 1, mask, out);
@@ -914,13 +1179,7 @@ mesh::Mesh VoxelGrid::mesh_greedy(std::size_t level) const {
 }
 
 std::vector<VoxelCoord> VoxelGrid::occupied_chunk_keys(std::size_t level) const {
-    std::vector<VoxelCoord> keys;
-    if (level >= levels_.size()) return keys;
-    const ChunkMap& chunks = levels_[level].chunks;
-    keys.reserve(chunks.size());
-    for (const auto& [key, chunk] : chunks)
-        if (chunk.occupied > 0) keys.push_back(key);
-    return keys;
+    return material_chunk_keys(level);
 }
 
 // Per chunk, the same sweep over a window of exactly one chunk. The exposure
@@ -1037,8 +1296,8 @@ mesh::Mesh VoxelGrid::mesh_quads(const QuadOptions& options) const {
     mesh::Mesh out;
     const std::size_t level = options.level;
     if (level >= levels_.size()) return out;
-    const ChunkMap& chunks = levels_[level].chunks;
-    if (chunks.empty()) return out;
+    const std::vector<VoxelCoord> keys = material_chunk_keys(level);
+    if (keys.empty()) return out;
 
     // The same sweep mesh_greedy runs, over the same slabs, with the merge
     // switched off. Sharing it is the point: the exposure test — and therefore
@@ -1048,7 +1307,7 @@ mesh::Mesh VoxelGrid::mesh_quads(const QuadOptions& options) const {
     std::vector<std::uint8_t> mask;
     for (const Dir& dir : kDirs) {
         std::map<int, Slab> slabs;
-        collect_slabs(chunks, dir.axis, slabs);
+        collect_slabs(keys, dir.axis, slabs);
         for (const auto& [slab_index, slab] : slabs)
             sweep_window(level, dir.axis, dir.sign, slab_index, slab.u0, slab.v0,
                          slab.u1 - slab.u0 + 1, slab.v1 - slab.v0 + 1, mask, out, &weld);
@@ -1086,10 +1345,10 @@ mesh::Mesh VoxelGrid::dual_quads_fit(const QuadOptions& options, const mesh::Qua
     // occupied cells: it only has to bound the search, and walking every voxel
     // to bound it would cost more than the extra iteration it might save.
     float span = vs;
-    const ChunkMap& chunks = levels_[options.level].chunks;
-    if (!chunks.empty()) {
-        VoxelCoord lo = chunks.begin()->first, hi = lo;
-        for (const auto& [key, chunk] : chunks) {
+    const std::vector<VoxelCoord> span_keys = material_chunk_keys(options.level);
+    if (!span_keys.empty()) {
+        VoxelCoord lo = span_keys.front(), hi = lo;
+        for (const VoxelCoord& key : span_keys) {
             lo = {std::min(lo.x, key.x), std::min(lo.y, key.y), std::min(lo.z, key.z)};
             hi = {std::max(hi.x, key.x), std::max(hi.y, key.y), std::max(hi.z, key.z)};
         }
