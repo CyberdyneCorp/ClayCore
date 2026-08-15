@@ -1,5 +1,7 @@
 #include "clay/mesh/marching.h"
 
+#include "clay/parallel/thread_pool.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -554,29 +556,99 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
         straddlers;
     if (is_subset) straddlers = collect_straddlers(cache, *keys, global_sample, lod);
 
-    // ONE builder for every brick: lattice-edge welding spans brick seams,
-    // keeping the result watertight across the sparse set.
+    // MARCH IN PARALLEL, WELD SERIALLY — and the split is forced by what makes
+    // this mesh watertight rather than chosen for convenience.
+    //
+    // Marching a brick is pure: it reads the cache, which is a const lookup and
+    // a half-to-float, and writes only its own output. Bricks are independent,
+    // which is the premise of the sparse cache. So that half fans out.
+    //
+    // The welding cannot. ONE Builder serves every brick precisely so that a
+    // lattice edge shared by two bricks yields ONE vertex — that is what keeps
+    // the sparse set watertight at brick seams, and it means the vertex map is
+    // shared mutable state that every brick touches. Sharding it per brick and
+    // concatenating would duplicate every seam vertex and open the mesh along
+    // every brick boundary.
+    //
+    // So phase one records what each brick WOULD emit, into the same
+    // ShellCollector the straddler pass already uses for exactly this reason —
+    // "no welding, since every recorded edge is re-emitted through the Builder
+    // that welds" — and phase two replays those recordings through the single
+    // Builder, in key order, calling edge_vertex in the same order the serial
+    // loop called it.
+    //
+    // That last sentence is the correctness argument: the Builder sees an
+    // identical call sequence, so it produces an identical vertex array, an
+    // identical index array and identical ranges. Byte-identity with the serial
+    // path is by construction rather than by tolerance, which is the house rule
+    // for anything the pool touches.
+    // Bound const so the parallel phase below cannot write to it, and so a
+    // reader can see that it does not: every thread looks this map up and none
+    // of them touches it.
+    const auto& shared_straddlers = straddlers;
+    // IN WAVES, because the recordings are transient memory that scales with
+    // the model. Each brick's recorder holds one entry per edge_vertex call —
+    // three per triangle, undeduplicated, since the welding it feeds is what
+    // deduplicates — which measured ~40 KB per surface brick. Recording every
+    // brick before welding any of them cost 94 MB on a 2,327-brick sphere and
+    // would cost several hundred on a dense model, on a device that kills apps
+    // for memory and whose brick budget is already a named concern.
+    //
+    // A wave is marched in parallel, welded, and its buffers reused. The weld
+    // still walks keys in order across waves, so the builder sees the same call
+    // sequence and the output is unchanged; only the peak is bounded. The wave
+    // is large enough that the pool still has many chunks per worker to balance
+    // across, so bounding the memory costs no parallelism.
+    constexpr std::size_t kBricksPerWave = 512;
+    std::vector<ShellCollector> recorded;
     Builder b(cf3(0, 0, 0), vs);
-    for (const brick::BrickKey& key : *keys) {
+    std::vector<std::uint32_t> remap;
+    for (std::size_t wave = 0; wave < keys->size(); wave += kBricksPerWave) {
+    const std::size_t wave_end = std::min(wave + kBricksPerWave, keys->size());
+    const std::size_t wave_n = wave_end - wave;
+    recorded.clear();
+    recorded.resize(wave_n);
+    parallel::for_range(wave_n, 1, [&](std::size_t first, std::size_t last) {
+        for (std::size_t w = first; w < last; ++w) {
+            const std::size_t ki = wave + w;
+            const brick::BrickKey& key = (*keys)[ki];
+            ShellCollector& rec = recorded[w];
+            int cmin[3] = {key.x * dim, key.y * dim, key.z * dim};
+            int cmax[3] = {key.x * dim + dim, key.y * dim + dim, key.z * dim + dim};
+            march_cells(rec, global_sample, cmin, cmax);
+            // The key's straddlers are recorded after its own cells, which is
+            // where the serial loop emitted them, so the replay below lands
+            // them inside this key's range exactly as before.
+            if (auto it = shared_straddlers.find(key); it != shared_straddlers.end())
+                for (const ShellTriangle& tri : it->second) {
+                    std::uint32_t v[3];
+                    for (int c = 0; c < 3; ++c)
+                        v[c] = rec.edge_vertex(tri[c].p0, tri[c].f0, tri[c].p1, tri[c].f1);
+                    rec.triangle(v[0], v[1], v[2]);
+                }
+        }
+    });
+
+    for (std::size_t w = 0; w < wave_n; ++w) {
+        const std::size_t ki = wave + w;
         const std::uint32_t v0 = static_cast<std::uint32_t>(b.out.positions.size());
         const std::uint32_t i0 = static_cast<std::uint32_t>(b.out.indices.size());
-        int cmin[3] = {key.x * dim, key.y * dim, key.z * dim};
-        int cmax[3] = {key.x * dim + dim, key.y * dim + dim, key.z * dim + dim};
-        march_cells(b, global_sample, cmin, cmax);
-        // The key's straddlers land inside its range, after its own cells, so
-        // the ranges keep partitioning the mesh. Re-emitting through the same
-        // Builder welds them onto the seam vertices the interior already made.
-        if (auto it = straddlers.find(key); it != straddlers.end())
-            for (const ShellTriangle& tri : it->second) {
-                std::uint32_t v[3];
-                for (int c = 0; c < 3; ++c)
-                    v[c] = b.edge_vertex(tri[c].p0, tri[c].f0, tri[c].p1, tri[c].f1);
-                b.triangle(v[0], v[1], v[2]);
-            }
+        const ShellCollector& rec = recorded[w];
+        // ShellCollector does not weld, so one lattice edge used by several
+        // tets appears several times here; the Builder dedups them exactly as
+        // it deduped the repeated calls the serial march made.
+        remap.assign(rec.edges.size(), 0);
+        for (std::size_t v = 0; v < rec.edges.size(); ++v) {
+            const ShellEdge& e = rec.edges[v];
+            remap[v] = b.edge_vertex(e.p0, e.f0, e.p1, e.f1);
+        }
+        for (const std::array<std::uint32_t, 3>& tri : rec.tris)
+            b.triangle(remap[tri[0]], remap[tri[1]], remap[tri[2]]);
         if (out_ranges)
-            out_ranges->push_back({key, v0,
+            out_ranges->push_back({(*keys)[ki], v0,
                                    static_cast<std::uint32_t>(b.out.positions.size()) - v0, i0,
                                    static_cast<std::uint32_t>(b.out.indices.size()) - i0});
+    }
     }
     Mesh m = std::move(b.out);
     // Level 0 only: the per-brick culled tapes are bit-identical to the full

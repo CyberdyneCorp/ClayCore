@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <cstring>
 #include <string>
 
 #include "clay/brick/cache.h"
@@ -7,6 +8,7 @@
 #include "clay/mesh/decimate.h"
 #include "clay/mesh/marching.h"
 #include "clay/mesh/validate.h"
+#include "clay/parallel/thread_pool.h"
 #include "kernel_utils.h"
 #include "scene_utils.h"
 
@@ -123,6 +125,99 @@ TEST_CASE("brick-cache meshing is watertight across brick seams") {
     CHECK(r.watertight);  // no holes at brick boundaries
     CHECK(r.manifold);
     CHECK(r.oriented);
+}
+
+TEST_CASE("parallel brick meshing is deterministic and welds across seams") {
+    // mesh_bricks marches bricks concurrently and welds them through ONE
+    // Builder afterwards. The welding is what makes the sparse set watertight,
+    // and it is exactly the shared mutable state a naive per-brick fan-out
+    // would shard — so what is worth asserting is that the result is still one
+    // welded mesh, and that it is the SAME mesh every run.
+    scene::Document doc = gnarly_document();
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    brick::BrickCache cache(brick::BrickConfig{8, 0.08f, 3, 0});
+    cache.mark_dirty(scene::layer_influence_bound(doc.layers[0]));
+    for (const brick::BrickRequest& req : cache.take_dirty()) {
+        scene::CullRegion cull{cache.cull_region(req.key)};
+        scene::Tape tape = scene::compile_document(doc, &cull);
+        std::vector<float> values(static_cast<std::size_t>(req.grid.nx) * req.grid.ny *
+                                  req.grid.nz);
+        REQUIRE(cpu->eval_grid(tape, req.grid, values.data()) == eval::Status::Ok);
+        cache.submit(req, values.data());
+    }
+    // Enough bricks that the pool actually splits the work; one brick would
+    // take the single-chunk path and prove nothing about the fan-out.
+    REQUIRE(cache.surface_bricks().size() > 16);
+
+    std::vector<mesh::BrickMeshRange> ranges_a, ranges_b;
+    Mesh a = mesh::mesh_bricks(cache, nullptr, {}, nullptr, &ranges_a);
+    REQUIRE(!a.empty());
+
+    // Byte-identical across runs. A race in the march, or a weld order that
+    // depended on which thread got there first, shows up here.
+    for (int run = 0; run < 8; ++run) {
+        ranges_b.clear();
+        Mesh b = mesh::mesh_bricks(cache, nullptr, {}, nullptr, &ranges_b);
+        REQUIRE(b.positions.size() == a.positions.size());
+        REQUIRE(b.indices.size() == a.indices.size());
+        CHECK(std::memcmp(b.positions.data(), a.positions.data(),
+                          a.positions.size() * sizeof(kernel::cfloat3)) == 0);
+        CHECK(std::memcmp(b.indices.data(), a.indices.data(),
+                          a.indices.size() * sizeof(std::uint32_t)) == 0);
+        REQUIRE(ranges_b.size() == ranges_a.size());
+        CHECK(std::memcmp(ranges_b.data(), ranges_a.data(),
+                          ranges_a.size() * sizeof(mesh::BrickMeshRange)) == 0);
+    }
+
+    // And it is still ONE welded mesh rather than per-brick shells that happen
+    // to touch: sharding the vertex map would duplicate every seam vertex and
+    // this is what would fail.
+    ValidationReport r = mesh::validate(a);
+    CHECK(r.watertight);
+    CHECK(r.manifold);
+    CHECK(r.oriented);
+
+    // The ranges still partition the mesh, which the subset path relies on.
+    std::size_t vertices = 0, indices = 0;
+    for (const mesh::BrickMeshRange& range : ranges_a) {
+        vertices += range.vertex_count;
+        indices += range.index_count;
+    }
+    CHECK(vertices == a.positions.size());
+    CHECK(indices == a.indices.size());
+}
+
+TEST_CASE("brick meshing from inside a pooled loop still welds") {
+    // mesh_bricks now dispatches, so a caller that is ALREADY inside a
+    // parallel_for makes it a nested dispatch — which the pool runs inline.
+    // The result must be the same mesh, which is what says the nesting guard
+    // and this fan-out compose rather than merely coexist.
+    scene::Document doc = gnarly_document();
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    brick::BrickCache cache(brick::BrickConfig{8, 0.08f, 3, 0});
+    cache.mark_dirty(scene::layer_influence_bound(doc.layers[0]));
+    for (const brick::BrickRequest& req : cache.take_dirty()) {
+        scene::CullRegion cull{cache.cull_region(req.key)};
+        scene::Tape tape = scene::compile_document(doc, &cull);
+        std::vector<float> values(static_cast<std::size_t>(req.grid.nx) * req.grid.ny *
+                                  req.grid.nz);
+        REQUIRE(cpu->eval_grid(tape, req.grid, values.data()) == eval::Status::Ok);
+        cache.submit(req, values.data());
+    }
+    const Mesh direct = mesh::mesh_bricks(cache, nullptr, {});
+    REQUIRE(!direct.empty());
+
+    std::vector<Mesh> nested(4);
+    clay::parallel::for_range(nested.size(), 1, [&](std::size_t b, std::size_t e) {
+        for (std::size_t i = b; i < e; ++i) nested[i] = mesh::mesh_bricks(cache, nullptr, {});
+    });
+    for (const Mesh& m : nested) {
+        REQUIRE(m.positions.size() == direct.positions.size());
+        CHECK(std::memcmp(m.positions.data(), direct.positions.data(),
+                          direct.positions.size() * sizeof(kernel::cfloat3)) == 0);
+        CHECK(std::memcmp(m.indices.data(), direct.indices.data(),
+                          direct.indices.size() * sizeof(std::uint32_t)) == 0);
+    }
 }
 
 TEST_CASE("vertex attributes: blend-faithful colors and gradient normals") {
