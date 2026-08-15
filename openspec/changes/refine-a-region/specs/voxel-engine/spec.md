@@ -68,6 +68,8 @@ The cache SHALL be invalidated for the level written AND for every level above i
 
 Reading an inherited chunk SHALL resolve its ancestor chunk ONCE and index that chunk's data directly, rather than calling the per-cell accessor, which would hash and recurse per cell.
 
+Caching makes the two accessors lazily mutating, so concurrent first calls on one grid race. This SHALL be documented where the cache lives rather than left implicit, because a `const` method otherwise carries the expectation that concurrent readers are safe.
+
 #### Scenario: The extent follows an edit that shrinks it
 - **WHEN** the cell at the extreme of a grid's extent is erased
 - **THEN** the reported extent pulls back in, rather than keeping the erased cell

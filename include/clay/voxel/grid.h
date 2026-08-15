@@ -692,6 +692,13 @@ class VoxelGrid {
         // cell, and raycast_voxels asks for both PER RAY — so a render paid
         // that walk once per pixel. Invalidated by write_cell, which every
         // verb funnels through, so a stale one is not reachable by editing.
+        //
+        // HAZARD: this makes bounds_min/bounds_max lazily MUTATING, so two
+        // threads calling them concurrently on a grid whose cache is cold race
+        // — the usual "const methods admit concurrent readers" expectation does
+        // not hold here. Nothing in the tree does that (the raycast loop is
+        // serial), and a host that raycasts in parallel should ask for the
+        // bounds once before the loop, which is cheaper anyway.
         VoxelCoord bounds_lo{}, bounds_hi{};
         bool bounds_valid = false;
         bool bounds_empty = false;
