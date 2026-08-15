@@ -397,6 +397,35 @@ BENCHMARK(BM_SurfaceNets)->Unit(benchmark::kMillisecond);
 //
 // Split into two counters, because the design question is which half dominates:
 // deciding (parallelizable, pure) or writing (serial, mutates the chunk map).
+// Rasterizing a document into cells: a tape evaluation PER CELL, which is the
+// shape #119 predicts is parallel — a compiled tape is const during eval and
+// the kernels hold no state, so any number of threads can hammer one.
+//
+// The shared mutation is the PALETTE: `palette_add` inserts a nearest-entry
+// match, so it cannot run concurrently. That is what the two-phase split is
+// for here, exactly as it is for the verbs.
+void BM_VoxelRasterizeTape(benchmark::State& state) {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node ball;
+    ball.prim = scene::Prim::sphere(0.55f);
+    l.sdf->insert(ball);
+    scene::Node cap;
+    cap.prim = scene::Prim::capsule(cf3(0, 0.2f, 0), cf3(0, 0.8f, 0), 0.2f);
+    cap.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.12f};
+    l.sdf->insert(cap);
+    const scene::Tape tape = scene::compile_document(doc);
+    const math::Aabb region{cf3(-0.8f, -0.8f, -0.8f), cf3(0.8f, 1.0f, 0.8f)};
+
+    for (auto _ : state) {
+        voxel::VoxelGrid g(0.02f);
+        g.rasterize_tape(tape, region);
+        benchmark::DoNotOptimize(g.occupied_count());
+        state.counters["cells"] = static_cast<double>(g.occupied_count());
+    }
+}
+BENCHMARK(BM_VoxelRasterizeTape)->Unit(benchmark::kMillisecond);
+
 void BM_VoxelSculptSmoothR32(benchmark::State& state) {
     voxel::VoxelGrid g(0.02f);
     std::uint8_t c = g.palette_add(cf3(0.8f, 0.4f, 0.2f));

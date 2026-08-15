@@ -222,3 +222,80 @@ TEST_CASE("rasterize_mesh reports its writes like every other verb") {
     grid.rasterize_mesh(m);
     CHECK(grid.change_count() == after);
 }
+
+TEST_CASE("rasterizing is deterministic, palette indices included") {
+    // Both rasterize paths evaluate in parallel and write serially. What a
+    // race would show up as is an answer that VARIES — and here it would vary
+    // in the palette too, because `palette_add` assigns indices in first-seen
+    // order and an index is what the grid stores. So the check is the whole
+    // serialised document, eight times, not just the occupancy.
+    Mesh m = box_mesh(cf3(-0.3f, -0.3f, -0.3f), cf3(0.3f, 0.3f, 0.3f));
+    m.colors.resize(m.positions.size());
+    for (std::size_t v = 0; v < m.positions.size(); ++v)
+        m.colors[v] = m.positions[v].x < 0.0f ? cf3(1, 0, 0)
+                                              : (m.positions[v].y < 0.0f ? cf3(0, 1, 0)
+                                                                        : cf3(0, 0, 1));
+
+    std::vector<std::uint8_t> first;
+    for (int run = 0; run < 8; ++run) {
+        VoxelGrid g(0.01f);  // fine enough that the region spans many planes
+        g.rasterize_mesh(m);
+        const std::vector<std::uint8_t> bytes = g.serialize();
+        if (run == 0)
+            first = bytes;
+        else {
+            CAPTURE(run);
+            CHECK(bytes == first);
+        }
+    }
+    REQUIRE(!first.empty());
+
+    // ...and the same for a tape, whose colours also reach the palette.
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node a = item(scene::Prim::sphere(0.4f), cf3(-0.15f, 0, 0));
+    a.color = cf3(0.9f, 0.2f, 0.1f);
+    l.sdf->insert(a);
+    scene::Node b = item(scene::Prim::sphere(0.4f), cf3(0.15f, 0, 0));
+    b.color = cf3(0.1f, 0.3f, 0.9f);
+    b.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.1f};
+    l.sdf->insert(b);
+    const scene::Tape tape = scene::compile_document(doc);
+    const math::Aabb region{cf3(-0.7f, -0.5f, -0.5f), cf3(0.7f, 0.5f, 0.5f)};
+
+    std::vector<std::uint8_t> tape_first;
+    for (int run = 0; run < 8; ++run) {
+        VoxelGrid g(0.01f);
+        g.rasterize_tape(tape, region);
+        const std::vector<std::uint8_t> bytes = g.serialize();
+        if (run == 0)
+            tape_first = bytes;
+        else {
+            CAPTURE(run);
+            CHECK(bytes == tape_first);
+        }
+    }
+    REQUIRE(!tape_first.empty());
+    // Both colours made it, so the palette really was exercised.
+    VoxelGrid probe(0.01f);
+    probe.rasterize_tape(tape, region);
+    CHECK(probe.palette_size() >= 3);  // empty + two
+}
+
+TEST_CASE("a rasterize spanning many waves is the same as one spanning few") {
+    // The work is done in WAVES of planes so the pending list stays bounded.
+    // A wave boundary must not be visible in the result: the same region
+    // rasterized at a cell size that makes it one wave and at one that makes
+    // it many has to agree about the solid it produces.
+    const Mesh m = box_mesh(cf3(-0.25f, -0.25f, -0.25f), cf3(0.25f, 0.25f, 0.25f));
+    VoxelGrid coarse(0.05f);   // ~10 planes: one wave
+    VoxelGrid fine(0.01f);     // ~50 planes: several
+    coarse.rasterize_mesh(m);
+    fine.rasterize_mesh(m);
+
+    // Volume agrees to within the surface's own half-cell on each.
+    const float cv = static_cast<float>(coarse.occupied_count()) * 0.05f * 0.05f * 0.05f;
+    const float fv = static_cast<float>(fine.occupied_count()) * 0.01f * 0.01f * 0.01f;
+    CHECK(cv == doctest::Approx(0.5f * 0.5f * 0.5f).epsilon(0.15));
+    CHECK(fv == doctest::Approx(0.5f * 0.5f * 0.5f).epsilon(0.05));
+}
