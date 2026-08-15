@@ -442,3 +442,332 @@ TEST_CASE("a tail cannot ask for more cells than it supplies") {
         CHECK(back->level_count() == VoxelGrid::kMaxLevels);
     }
 }
+
+// -- regional refinement (voxel-engine, refine-a-region) ---------------------
+//
+// The claim is that this is a STORAGE change and not a semantic one: every
+// cell of every level still has a value, so nothing about what the grid MEANS
+// may move. The tests below are ordered by how much damage getting one wrong
+// would do — an unrefined chunk reading as empty would be a hole in the solid,
+// which is why that one comes first.
+
+namespace {
+
+// A ball of material, big enough to span several chunks at the fine level so
+// "refined here, not there" is a real distinction rather than one chunk.
+VoxelGrid ball(float cell, int radius) {
+    VoxelGrid g(cell);
+    const std::uint8_t idx = g.palette_add(cf3(0.8f, 0.4f, 0.2f));
+    for (int z = -radius; z <= radius; ++z)
+        for (int y = -radius; y <= radius; ++y)
+            for (int x = -radius; x <= radius; ++x)
+                if (x * x + y * y + z * z <= radius * radius) g.set({x, y, z}, idx);
+    return g;
+}
+
+}  // namespace
+
+TEST_CASE("an unrefined chunk reads its parent, not empty") {
+    // The mistake that would turn this from a storage change into a hole in
+    // the solid. A level with NO refined chunks at all is the sharpest form of
+    // it: every read has to come from the parent.
+    VoxelGrid g = ball(0.05f, 20);
+    const std::size_t coarse_cells = g.level_occupied_count(0);
+    REQUIRE(coarse_cells > 0);
+
+    const math::Aabb nowhere{cf3(100.0f, 100.0f, 100.0f), cf3(100.1f, 100.1f, 100.1f)};
+    const std::size_t fine = g.add_level(nowhere);
+    REQUIRE(fine == 1);
+    CHECK(!g.level_is_whole(fine));
+
+    // Barely anything is STORED at the fine level — a region is rounded out to
+    // whole chunks, so even one placed in empty space costs exactly one...
+    CHECK(g.level_refined_chunk_count(fine) == 1);
+    // ...and yet the level has all the material, because it inherits it, and
+    // every fine cell inside the ball reads as such.
+    CHECK(g.level_occupied_count(fine) == coarse_cells * 8);
+    g.set_active_level(fine);
+    int solid = 0, empty = 0;
+    for (int z = -30; z <= 30; z += 3)
+        for (int y = -30; y <= 30; y += 3)
+            for (int x = -30; x <= 30; x += 3)
+                (g.get({x, y, z}) != 0 ? solid : empty)++;
+    CHECK(solid > 0);
+    CHECK(empty > 0);  // and it is a ball, not everything
+}
+
+TEST_CASE("refining a region does not move the solid") {
+    // Adding a level is exact by construction at the whole-lattice level; a
+    // region must not weaken that. Compared against the SAME grid refined
+    // wholly, so the claim is "a region changes storage and nothing else".
+    VoxelGrid regional = ball(0.05f, 18);
+    VoxelGrid whole = regional;
+
+    whole.add_level();
+    regional.add_level(math::Aabb{cf3(-0.2f, -0.2f, -0.2f), cf3(0.2f, 0.2f, 0.2f)});
+    REQUIRE(whole.level_count() == 2);
+    REQUIRE(regional.level_count() == 2);
+
+    for (std::size_t level = 0; level < 2; ++level) {
+        CAPTURE(level);
+        CHECK(level_cells(regional, level) == level_cells(whole, level));
+    }
+}
+
+TEST_CASE("a region costs its region") {
+    // The point of the change. Same grid, same level, one refined wholly and
+    // one over a patch of it: the stored cell count has to follow the region
+    // rather than the occupied volume.
+    //
+    // A PLATE rather than the ball above, and a deliberately large one: at the
+    // fine level a chunk is 32 cells across, and a region is rounded out to
+    // whole chunks. On a solid only a couple of chunks wide that rounding is
+    // most of the solid, and the saving this exists to buy would not show. It
+    // shows on the case that motivated it — a form spanning many chunks at the
+    // resolution being authored — and stating that is more useful than picking
+    // a fixture that flatters the number.
+    VoxelGrid whole(0.05f);
+    const std::uint8_t idx = whole.palette_add(cf3(0.6f, 0.6f, 0.6f));
+    whole.fill_box({-110, -1, -110}, {110, 0, 110}, idx);
+    VoxelGrid regional = whole;
+
+    whole.add_level();
+    // One chunk's worth of detail at the fine level: 32 cells of 0.025.
+    regional.add_level(math::Aabb{cf3(0.0f, 0.0f, 0.0f), cf3(0.2f, 0.05f, 0.2f)});
+
+    // The cost signal is CHUNKS, because that is what memory follows: a chunk
+    // is 32^3 cells whether or not they are occupied. Occupied counts are
+    // about the SOLID and agree by design — a partially refined level still
+    // has all its parent's material, it just does not store it.
+    const std::size_t whole_chunks = whole.level_refined_chunk_count(1);
+    const std::size_t regional_chunks = regional.level_refined_chunk_count(1);
+    CAPTURE(whole_chunks);
+    CAPTURE(regional_chunks);
+    CHECK(whole.level_occupied_count(1) == whole.level_occupied_count(0) * 8);
+    CHECK(regional.level_occupied_count(1) == whole.level_occupied_count(1));
+    // An order of magnitude of storage, for the same solid.
+    CHECK(regional_chunks * 10 < whole_chunks);
+    CHECK(whole.level_is_whole(1));
+    CHECK(!regional.level_is_whole(1));
+
+    // ...and the solid is the same one at both levels, which is what makes the
+    // saving free rather than a trade.
+    for (std::size_t level = 0; level < 2; ++level) {
+        CAPTURE(level);
+        CHECK(level_cells(regional, level) == level_cells(whole, level));
+    }
+}
+
+TEST_CASE("a brush straddling the boundary writes every cell it covers") {
+    // Refusing writes outside the region would break any footprint that
+    // crosses a boundary, which is the common case. Instead the write refines
+    // what it reached — so the stored set follows what was TOUCHED.
+    VoxelGrid g = ball(0.05f, 16);
+    const math::Aabb corner{cf3(0.0f, 0.0f, 0.0f), cf3(0.2f, 0.2f, 0.2f)};
+    const std::size_t fine = g.add_level(corner);
+    g.set_active_level(fine);
+    const std::size_t before = g.level_refined_chunk_count(fine);
+
+    // A cell far outside the region, and its neighbours: every one has to take
+    // the write.
+    const std::uint8_t idx = g.palette_add(cf3(0.1f, 0.9f, 0.1f));
+    const VoxelCoord far{-24, -24, -24};
+    g.set_brush(far, 5, idx, BrushShape::Cube);
+    CHECK(g.get(far) == idx);
+    for (int d = -2; d <= 2; ++d) CHECK(g.get({far.x + d, far.y, far.z}) == idx);
+    // ...and the level now stores the chunks it reached, but not the whole
+    // lattice.
+    CHECK(g.level_refined_chunk_count(fine) > before);
+    CHECK(!g.level_is_whole(fine));
+}
+
+TEST_CASE("refining a chunk on demand preserves every cell the write missed") {
+    // Seeding from the parent is what keeps the solid still. A write into an
+    // unrefined chunk materialises it, and the cells the write did not touch
+    // have to read exactly as they did a moment earlier.
+    VoxelGrid g = ball(0.05f, 16);
+    const std::size_t fine = g.add_level(math::Aabb{cf3(0.4f, 0.4f, 0.4f), cf3(0.5f, 0.5f, 0.5f)});
+    g.set_active_level(fine);
+
+    // Read a slab of cells in a chunk that is not refined, write ONE cell in
+    // it, then read them all back.
+    const VoxelCoord probe{-10, -10, -10};
+    std::vector<std::uint8_t> before;
+    for (int d = 1; d <= 12; ++d) before.push_back(g.get({probe.x + d, probe.y, probe.z}));
+
+    const std::uint8_t idx = g.palette_add(cf3(0.1f, 0.1f, 0.9f));
+    g.set(probe, idx);
+    CHECK(g.get(probe) == idx);
+    for (int d = 1; d <= 12; ++d) {
+        CAPTURE(d);
+        CHECK(g.get({probe.x + d, probe.y, probe.z}) == before[static_cast<std::size_t>(d - 1)]);
+    }
+}
+
+TEST_CASE("a partially refined grid round-trips, and a whole one is byte-identical") {
+    VoxelGrid regional = ball(0.05f, 14);
+    regional.add_level(math::Aabb{cf3(-0.15f, -0.15f, -0.15f), cf3(0.15f, 0.15f, 0.15f)});
+    regional.set_active_level(1);
+    regional.set({3, 3, 3}, regional.palette_add(cf3(0.2f, 0.9f, 0.3f)));
+
+    const std::vector<std::uint8_t> bytes = regional.serialize();
+    std::optional<VoxelGrid> back = VoxelGrid::deserialize(bytes.data(), bytes.size());
+    REQUIRE(back.has_value());
+    CHECK(back->level_count() == regional.level_count());
+    CHECK(back->level_is_whole(1) == regional.level_is_whole(1));
+    CHECK(back->level_refined_chunk_count(1) == regional.level_refined_chunk_count(1));
+    for (std::size_t level = 0; level < regional.level_count(); ++level) {
+        CAPTURE(level);
+        CHECK(level_cells(*back, level) == level_cells(regional, level));
+    }
+    // And it is a canonical form: serialising the reloaded grid gives the same
+    // bytes, so hash order cannot leak into the stream.
+    CHECK(back->serialize() == bytes);
+
+    // The grid that uses no region pays nothing for the feature existing.
+    VoxelGrid whole = ball(0.05f, 14);
+    whole.add_level();
+    const std::vector<std::uint8_t> whole_bytes = whole.serialize();
+    std::optional<VoxelGrid> whole_back =
+        VoxelGrid::deserialize(whole_bytes.data(), whole_bytes.size());
+    REQUIRE(whole_back.has_value());
+    CHECK(whole_back->serialize() == whole_bytes);
+    CHECK(whole_back->level_is_whole(1));
+}
+
+TEST_CASE("meshing a partially refined level has no crack at the boundary") {
+    // The reason the fallback is defined as "the parent's value" rather than
+    // as a separate representation: the level is still a complete uniform
+    // lattice, so the mesher sees no boundary at all. A crack would show up as
+    // interior faces the whole-lattice mesh does not have.
+    VoxelGrid regional = ball(0.05f, 14);
+    VoxelGrid whole = regional;
+    regional.add_level(math::Aabb{cf3(-0.1f, -0.1f, -0.1f), cf3(0.1f, 0.1f, 0.1f)});
+    whole.add_level();
+    regional.set_active_level(1);
+    whole.set_active_level(1);
+
+    const mesh::Mesh a = regional.mesh_greedy();
+    const mesh::Mesh b = whole.mesh_greedy();
+    CHECK(a.positions.size() == b.positions.size());
+    CHECK(a.indices.size() == b.indices.size());
+}
+
+TEST_CASE("a region refined over a level that is itself partial has no hole") {
+    // Seeding a new level walks the level below it. That level may itself be
+    // partial, and the material in the chunks it does NOT store is exactly as
+    // real as the material in the ones it does — so a second region stacked on
+    // a first must not read empty where the first inherits.
+    VoxelGrid g(0.05f);
+    const std::uint8_t idx = g.palette_add(cf3(0.6f, 0.6f, 0.6f));
+    g.fill_box({-90, 0, -90}, {90, 1, 90}, idx);
+
+    // Level 1 refined over one corner, level 2 over a DIFFERENT corner — one
+    // the level below inherits rather than stores.
+    const std::size_t l1 = g.add_level(math::Aabb{cf3(2.0f, 0.0f, 2.0f), cf3(2.4f, 0.1f, 2.4f)});
+    REQUIRE(l1 == 1);
+    const std::size_t l2 = g.add_level(math::Aabb{cf3(-2.4f, 0.0f, -2.4f), cf3(-2.0f, 0.1f, -2.0f)});
+    REQUIRE(l2 == 2);
+
+    // A cell inside the second region, in the plate: it must be material.
+    // Level 2 STORES it, and what it was seeded from is level 1's inherited
+    // value — which is level 0's.
+    g.set_active_level(l2);
+    const VoxelCoord probe{-88, 2, -88};
+    CAPTURE(probe.x);
+    CHECK(g.get(probe) == idx);
+
+    // And the solid is the same one at every level.
+    VoxelGrid whole(0.05f);
+    whole.palette_add(cf3(0.6f, 0.6f, 0.6f));
+    whole.fill_box({-90, 0, -90}, {90, 1, 90}, idx);
+    whole.add_level();
+    whole.add_level();
+    for (std::size_t level = 0; level <= 2; ++level) {
+        CAPTURE(level);
+        CHECK(g.level_occupied_count(level) == whole.level_occupied_count(level));
+    }
+}
+
+TEST_CASE("the cached bounds follow every edit, at every level") {
+    // bounds_min/bounds_max are cached because raycast_voxels asks for both
+    // PER RAY, and the walk they do is over every material cell — two full
+    // walks per pixel, which was 29 s of a 29 s render. The cache is only
+    // sound if every write drops it, so this exercises the ways a write can
+    // move an extent: growing it, shrinking it, and doing so at a level other
+    // than the one being asked.
+    VoxelGrid g(0.1f);
+    const std::uint8_t idx = g.palette_add(cf3(0.4f, 0.7f, 0.4f));
+    CHECK(!g.bounds_min().has_value());  // empty: no extent at all
+
+    g.set({0, 0, 0}, idx);
+    REQUIRE(g.bounds_min().has_value());
+    CHECK(*g.bounds_min() == VoxelCoord{0, 0, 0});
+    CHECK(*g.bounds_max() == VoxelCoord{0, 0, 0});
+
+    // Grow.
+    g.set({5, 6, 7}, idx);
+    CHECK(*g.bounds_max() == VoxelCoord{5, 6, 7});
+    g.set({-3, -4, -5}, idx);
+    CHECK(*g.bounds_min() == VoxelCoord{-3, -4, -5});
+
+    // Shrink: erasing the extreme cell has to pull the extent back in, which
+    // is the direction a cache that only ever grew would get wrong.
+    g.erase({5, 6, 7});
+    CHECK(*g.bounds_max() == VoxelCoord{0, 0, 0});
+    g.erase({-3, -4, -5});
+    CHECK(*g.bounds_min() == VoxelCoord{0, 0, 0});
+
+    // Emptied entirely.
+    g.erase({0, 0, 0});
+    CHECK(!g.bounds_min().has_value());
+    CHECK(!g.bounds_max().has_value());
+
+    // Across levels: a write at the coarse level moves the FINE level's
+    // extent too, because the fine level is carrying it.
+    g.set({0, 0, 0}, idx);
+    REQUIRE(g.add_level() == 1);
+    g.set_active_level(1);
+    const VoxelCoord fine_max = *g.bounds_max();
+    g.set_active_level(0);
+    g.set({9, 0, 0}, idx);            // a broad stroke, coarse
+    g.set_active_level(1);
+    CHECK(*g.bounds_max() != fine_max);  // the fine level saw it
+    CHECK(g.bounds_max()->x > fine_max.x);
+
+    // And a write at the FINE level moves the coarse extent, once enough
+    // children are occupied for the average to carry it down.
+    g.set_active_level(1);
+    const VoxelCoord coarse_before = [&] {
+        VoxelGrid copy = g;
+        copy.set_active_level(0);
+        return *copy.bounds_max();
+    }();
+    for (int i = 0; i < 8; ++i)
+        g.set({40 + (i & 1), (i >> 1) & 1, (i >> 2) & 1}, idx);
+    g.set_active_level(0);
+    CHECK(g.bounds_max()->x > coarse_before.x);
+}
+
+TEST_CASE("a partially refined level reports the same bounds as a whole one") {
+    // The cache reads inherited chunks through their ancestor's data rather
+    // than through cell_at, which is a different code path from the stored
+    // one — so it gets its own comparison against the whole-lattice answer.
+    VoxelGrid whole(0.05f);
+    const std::uint8_t idx = whole.palette_add(cf3(0.6f, 0.6f, 0.6f));
+    whole.fill_box({-40, 0, -40}, {40, 1, 40}, idx);
+    VoxelGrid regional = whole;
+
+    whole.add_level();
+    regional.add_level(math::Aabb{cf3(0.0f, 0.0f, 0.0f), cf3(0.2f, 0.05f, 0.2f)});
+    whole.set_active_level(1);
+    regional.set_active_level(1);
+
+    REQUIRE(whole.bounds_min().has_value());
+    CHECK(*regional.bounds_min() == *whole.bounds_min());
+    CHECK(*regional.bounds_max() == *whole.bounds_max());
+
+    // ...and it keeps following edits once the level is partial.
+    regional.set({-200, 4, -200}, idx);
+    CHECK(regional.bounds_min()->x == -200);
+}

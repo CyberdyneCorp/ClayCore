@@ -122,7 +122,10 @@ class VoxelGrid {
     std::size_t level_count() const { return levels_.size(); }
     std::size_t active_level() const { return active_; }
     float level_voxel_size(std::size_t level) const;
-    // Occupied cells at one level, so a caller can report what each costs.
+    // Occupied cells at one level — the SOLID, including material a partially
+    // refined level inherits from its parent rather than stores itself. What a
+    // level COSTS is level_refined_chunk_count below: memory follows chunks,
+    // and a level that stores nothing still has all its parent's material.
     std::size_t level_occupied_count(std::size_t level) const;
     // One cell of ONE level, without making it active. get() answers for the
     // active level; this is what a reader spanning levels needs — the smooth
@@ -142,6 +145,26 @@ class VoxelGrid {
     // already had — so level_count() is what says whether the stack grew.
     static constexpr std::size_t kMaxLevels = 16;
     std::size_t add_level();
+    // The same, refined only over `region` (world units, rounded OUT to whole
+    // chunks). Outside it the new level has no storage and reads its parent's
+    // value, so the lattice is still uniform and complete — only what is STORED
+    // changes. That is what keeps integer cell coordinates, O(1) neighbours and
+    // the meshing of any level exactly as they were.
+    //
+    // Adding a level costs eight times the OCCUPIED VOLUME, and occupancy is
+    // volumetric: the same solid that meshes to 2,640 triangles is 7,328 cells,
+    // and three whole-lattice levels over it is 3.75M. A region is how a
+    // sculptor refines the ribs without storing the skull at rib resolution.
+    //
+    // Writing outside the region refines what the write touched, so a brush
+    // straddling the boundary works and the stored set follows what was
+    // actually touched rather than what was reserved.
+    std::size_t add_level(const math::Aabb& region);
+    // How many chunks a level stores, and whether it stores all of them. A
+    // whole level is what add_level() with no region gives, and is what every
+    // grid written before regions existed is.
+    std::size_t level_refined_chunk_count(std::size_t level) const;
+    bool level_is_whole(std::size_t level) const;
     // Drops the finest level, along with the detail only it held. False when
     // there is only one level, since a grid always has at least one.
     bool drop_level();
@@ -649,12 +672,37 @@ class VoxelGrid {
         float voxel_size = 0.1f;
         ChunkMap chunks;
         std::unordered_map<VoxelCoord, std::uint8_t, VoxelCoordHash> detail;
+        // Which chunks this level actually STORES. Only consulted when `whole`
+        // is false; a chunk absent from it reads its parent's value rather than
+        // reading empty, which is the whole of regional refinement.
+        //
+        // Separate from `chunks` because the two answer different questions: a
+        // chunk that is refined and has been emptied is erased from `chunks`
+        // (a missing chunk is how this grid spells empty space) but stays here,
+        // so "empty" and "not refined" do not read alike.
+        std::unordered_set<VoxelCoord, VoxelCoordHash> refined;
+        bool whole = true;  // level 0 always; add_level() with no region too
         // Chunks whose meshed surface a write could have changed, since the
         // last drain. `dirty_memo` is the last key marked: writes walk a
         // footprint, so consecutive cells nearly always share a chunk, and an
         // interior cell of a chunk already marked needs no set probe at all.
         // A rasterize writes a million cells into eighty chunks, and the memo
         // is what keeps that a million compares rather than a million hashes.
+        // Cached occupied extent. bounds_min/bounds_max walk every material
+        // cell, and raycast_voxels asks for both PER RAY — so a render paid
+        // that walk once per pixel. Invalidated by write_cell, which every
+        // verb funnels through, so a stale one is not reachable by editing.
+        //
+        // HAZARD: this makes bounds_min/bounds_max lazily MUTATING, so two
+        // threads calling them concurrently on a grid whose cache is cold race
+        // — the usual "const methods admit concurrent readers" expectation does
+        // not hold here. Nothing in the tree does that (the raycast loop is
+        // serial), and a host that raycasts in parallel should ask for the
+        // bounds once before the loop, which is cheaper anyway.
+        VoxelCoord bounds_lo{}, bounds_hi{};
+        bool bounds_valid = false;
+        bool bounds_empty = false;
+
         std::unordered_set<VoxelCoord, VoxelCoordHash> dirty;
         VoxelCoord dirty_memo{};
         bool dirty_memo_valid = false;
@@ -719,11 +767,24 @@ class VoxelGrid {
     void propagate_down(std::size_t from, VoxelCoord c);
     void propagate_up(std::size_t from, VoxelCoord c);
     void subdivide_into(std::size_t fine);
+    bool chunk_is_refined(std::size_t level, VoxelCoord key) const;
+    // Gives a level storage for one chunk, seeded from its parent so the solid
+    // does not move, and materialises the ancestors that a downward propagation
+    // will need somewhere to write into.
+    void refine_chunk(std::size_t level, VoxelCoord key);
+    void seed_chunk(std::size_t level, VoxelCoord key);
+    void seed_refined_chunks(std::size_t fine);
+    const Chunk* inherited_chunk(std::size_t level, VoxelCoord key, int* out_up) const;
+    void ensure_bounds() const;
+    // Chunk keys where a level HAS material, which is not the chunks it
+    // STORES: an unrefined chunk reads its parent, so the parent's material is
+    // at this level too. Every enumeration over a level goes through here.
+    std::vector<VoxelCoord> material_chunk_keys(std::size_t level) const;
     // The serialised level tail, read into a grid that already holds its
     // coarsest level. Advances `pos`; false leaves the grid unusable and the
     // caller refuses the stream.
     bool read_level_tail(const std::uint8_t* data, std::size_t size, std::size_t* pos,
-                         std::uint32_t palette_count);
+                         std::uint32_t palette_count, bool has_regions);
 
     std::uint64_t change_count_ = 0;
     std::vector<kernel::cfloat3> palette_;

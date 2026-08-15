@@ -2017,6 +2017,21 @@ clay_result clay_voxel_set_active_level(clay_voxel_grid* grid, size_t level);
  * eight times the cells of the one below, so a stream naming an arbitrary count
  * would be a request to allocate one. */
 clay_result clay_voxel_add_level(clay_voxel_grid* grid, size_t* out_level);
+/* The same, refined only over a region: min[3], max[3] in WORLD units, rounded
+ * OUT to whole chunks. Outside the region the new level has no storage and
+ * reads its parent's value, so the lattice is still uniform and complete — only
+ * what is STORED changes, and meshing, bounds and neighbour indexing are as
+ * they were.
+ *
+ * Writing outside the region refines what the write touched, so a brush that
+ * straddles the boundary works and the stored set follows what was touched
+ * rather than what was reserved.
+ *
+ * A chunk is 32 cells across, so a region smaller than that still costs one.
+ * The saving is on a form spanning many chunks at the resolution being
+ * authored, which is the case a level stack is for. */
+clay_result clay_voxel_add_level_region(clay_voxel_grid* grid, const float min[3],
+                                        const float max[3], size_t* out_level);
 /* Drops the finest level. CLAY_ERROR_INVALID_ARGUMENT when only one is left,
  * since a grid always has at least one. */
 clay_result clay_voxel_drop_level(clay_voxel_grid* grid);
@@ -2026,6 +2041,12 @@ clay_result clay_voxel_level_voxel_size(const clay_voxel_grid* grid, size_t leve
                                         float* out_voxel_size);
 clay_result clay_voxel_level_occupied_count(const clay_voxel_grid* grid, size_t level,
                                             size_t* out_count);
+/* How many chunks a level stores, and whether it stores all of them. A level
+ * added with no region is whole, which is what every grid written before
+ * regions existed is. */
+clay_result clay_voxel_level_chunk_count(const clay_voxel_grid* grid, size_t level,
+                                         size_t* out_count);
+clay_result clay_voxel_level_is_whole(const clay_voxel_grid* grid, size_t level, int32_t* out_whole);
 
 /* -- palette --------------------------------------------------------------- */
 

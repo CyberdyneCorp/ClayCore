@@ -913,6 +913,63 @@ def test_voxel_levels_block_out_then_refine():
         g.active_level = 3
 
 
+def _plate(cell=0.05, half=100):
+    """A wide, thin slab: it spans many chunks at the fine level, which is where
+    a region is worth having. A chunk is 32 cells across, so on a form only a
+    couple of chunks wide the rounding-out is most of the form."""
+    g = clay.VoxelGrid(cell)
+    idx = g.palette_add((0.6, 0.6, 0.6))
+    g.fill_box((-half, 0, -half), (half, 1, half), idx)
+    return g, idx
+
+
+def test_refining_a_region_costs_the_region_and_not_the_volume():
+    whole, _ = _plate()
+    regional, _ = _plate()
+    whole.add_level()
+    regional.add_level_region(((0.0, 0.0, 0.0), (0.2, 0.05, 0.2)))
+
+    assert whole.level_is_whole(1)
+    assert not regional.level_is_whole(1)
+    # The cost signal is CHUNKS — memory follows chunks, and a chunk is 32^3
+    # cells whether or not they are occupied. Occupied counts are about the
+    # SOLID and agree by design: a partially refined level still has all its
+    # parent's material, it just does not store it.
+    assert regional.level_chunk_count(1) * 10 < whole.level_chunk_count(1)
+    assert regional.level_occupied_count(1) == whole.level_occupied_count(1)
+
+
+def test_an_unrefined_chunk_reads_its_parent_not_empty():
+    # The mistake that would make this a hole in the solid rather than a
+    # storage change.
+    g, idx = _plate()
+    g.add_level_region(((0.0, 0.0, 0.0), (0.2, 0.05, 0.2)))
+    g.active_level = 1
+    # A fine cell far outside the region, inside the plate: material.
+    assert g.get((-150, 1, -150)) == idx
+    # And one outside the plate entirely: still empty.
+    assert g.get((-150, 40, -150)) == 0
+
+
+def test_a_region_does_not_move_the_solid():
+    whole, _ = _plate(half=40)
+    regional, _ = _plate(half=40)
+    whole.add_level()
+    regional.add_level_region(((0.0, 0.0, 0.0), (0.2, 0.05, 0.2)))
+    for level in (0, 1):
+        whole.active_level = level
+        regional.active_level = level
+        assert whole.occupied_count == regional.occupied_count
+        assert whole.bounds() == regional.bounds()
+
+
+def test_add_level_region_refuses_an_empty_region():
+    g, _ = _plate(half=8)
+    with pytest.raises(ValueError, match="empty"):
+        g.add_level_region(((1.0, 1.0, 1.0), (0.0, 0.0, 0.0)))
+    assert g.level_count == 1
+
+
 def test_voxel_levels_survive_a_document_round_trip(tmp_path):
     doc = clay.Document()
     grid = doc.add_voxel_layer("blocks", voxel_size=0.2)
