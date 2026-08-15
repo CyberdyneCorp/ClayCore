@@ -401,6 +401,49 @@ void BM_VoxelMeshSparseChunk(benchmark::State& state) {
 }
 BENCHMARK(BM_VoxelMeshSparseChunk)->Unit(benchmark::kMillisecond);
 
+// Subdividing a WHOLE level: the cost the region-refined level stack (#134)
+// added to the path that does not use it. `chunk_is_refined` short-circuits on
+// `whole`, but reaching it costs a chunk_key() — three divisions — for each of
+// the eight children of every material cell, so the test is dead work exactly
+// where it is hottest. Measured on the device gate at 2.36x (voxel_add_level,
+// 0.51 -> 1.21 ms) and 2.47x here (0.53 -> 1.31 ms at 1000 stamps).
+//
+// The ceiling here is honest about what it can do. Fixed 0.46 ms against
+// unfixed 0.84 ms on an M-series Mac: 1.84x, and a shared CI runner is easily
+// 2x slower than this machine, so no threshold catches 1.84x without flaking on
+// the runner. The ceiling is set for the order-of-magnitude case this file's
+// header describes, and THE DEVICE GATE is what catches this size of change —
+// which is how it was found. The benchmark still earns its place by putting the
+// number in CI output where a 5x would be obvious.
+void BM_VoxelAddLevelWhole(benchmark::State& state) {
+    voxel::VoxelGrid g(0.02f);
+    std::uint8_t c = g.palette_add(cf3(0.8f, 0.4f, 0.2f));
+    // SCATTERED material, not one solid block. The shape matters more than the
+    // amount: the cost this gates is a per-child chunk_key(), and a solid block
+    // lives in a handful of chunks where write_cell's own bookkeeping dominates
+    // it — measured at 1.14x there against 2.47x here, which would have let the
+    // regression back in. This is the device case's own spread: the same
+    // low-discrepancy walk over a 40-cell scale, a small blob at each stop.
+    const double golden = 0.6180339887;
+    for (int i = 0; i < 400; ++i) {
+        const int bx = int((std::fmod(double(i) * golden, 1.0) * 1.6 - 0.8) * 40);
+        const int by = int((std::fmod(double(i) * golden * golden, 1.0) * 1.6 - 0.8) * 40);
+        const int bz = int((std::fmod(double(i) * golden * golden * golden, 1.0) * 1.6 - 0.8) * 40);
+        for (int z = 0; z < 4; ++z)
+            for (int y = 0; y < 4; ++y)
+                for (int x = 0; x < 4; ++x) g.set({bx + x, by + y, bz + z}, c);
+    }
+    for (auto _ : state) {
+        g.add_level();
+        benchmark::DoNotOptimize(g.level_count());
+        state.PauseTiming();
+        g.drop_level();
+        state.ResumeTiming();
+    }
+    state.counters["cells"] = static_cast<double>(g.occupied_count());
+}
+BENCHMARK(BM_VoxelAddLevelWhole)->Unit(benchmark::kMillisecond);
+
 // The scaling shape: one voxel in each of 64 chunks. Cost is linear in occupied
 // chunks and independent of how much material each holds, so this is the
 // per-chunk number times 64 and catches the same regression with more signal

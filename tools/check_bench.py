@@ -23,6 +23,17 @@ FLOORS = {
     # which is the same generosity as the ceilings above. A ratio against a
     # solid chunk would be the wrong gate — see the note on the benchmarks.
     "BM_VoxelMeshSparseChunk": {"max_ms": 2},
+    # Subdividing a whole level. #134 gave the level stack region-refinement,
+    # and the per-child chunk_key() its refinement test needs is dead work on a
+    # whole level — 2.36x on the device gate (voxel_add_level, 0.51 -> 1.21 ms),
+    # 1.84x on this benchmark (0.46 -> 0.84 ms on an M-series Mac).
+    #
+    # This ceiling does NOT catch that. 1.84x is inside the spread between this
+    # machine and a shared runner, so a threshold tight enough to fail on it
+    # would flake on CI instead. It is set for the order-of-magnitude case, per
+    # this file's own docstring, and the DEVICE GATE is what holds the tighter
+    # line — it is what found this one.
+    "BM_VoxelAddLevelWhole": {"max_ms": 2.5},
     "BM_VoxelMeshSparse64Chunks": {"max_ms": 120},
     # Part 2 of the same issue: two chunks of that 64-chunk grid, meshed
     # through the regional call. It is the bench above divided by 32 — 0.40 ms
