@@ -733,7 +733,7 @@ parity — the mechanism usually differs even where the result matches.
 | Gizmo Twist | `twist_range` | The gizmo acts inside its box: the rotation ramps across the span and holds beyond. Plain `twist` winds the whole item, which is the difference |
 | Gizmo Bend Arc | `bend_range` | Angle-limited bend, same shape |
 | Gizmo Bend Curve | `bend_curve` | A bend along an arbitrary guide. Implemented as the INVERSE of the swept primitive — the same nearest-point query and transported frames, read from the other end — so the two agree about what a guide is by construction |
-| Gizmo Lattice / FFD | — | Not yet, and now the last of the four. A claycore deformer is an INVERSE point map, and forward FFD has no closed-form inverse; #116 records the three candidate answers and picking one is a design decision rather than an implementation detail. The blob-carried payload it needs already exists, because `bend_curve` needed the same thing for its guide |
+| Gizmo Lattice / FFD | `mesh::Lattice` on a mesh layer; **still absent on SDF items** | Available where ZBrush and Blender actually do it — on VERTICES. Both run FFD FORWARD, because a mesh knows where its vertices are; neither inverts anything, and neither has to. On an SDF item the same cage is the hard problem #116 describes: a claycore deformer is an INVERSE point map and forward FFD has no closed-form inverse, so that form still needs one of the issue's three compromises. The blob-carried payload it would need already exists, from `bend_curve` |
 | Pinch | `magnify` (negative), `sculpt_pinch` | One signed strength, not two verbs |
 | Magnify | `magnify` (positive), `sculpt_magnify` | Maxon's own page calls them inverses |
 | Smooth | `field::relax`, `sculpt_smooth` | Bakes on the SDF side |
@@ -792,6 +792,7 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Triangles straight to voxels | `VoxelGrid::rasterize_mesh` | `VoxelGrid.rasterize_mesh(...)` | `clay_voxel_rasterize_mesh` |
 | A mesh a document carries | `scene::LayerKind::Mesh` | `Document.add_mesh_layer(...)`, `.mesh_layer(...)` | `clay_document_add_mesh_layer`, `clay_document_mesh_layer`, `clay_mesh_layer` |
 | Fixed-topology mesh brushes | `mesh::MeshSculptor::stamp`, `mesh::MeshBrush` | `MeshSculptor.stamp(...)` | `clay_mesh_sculptor_stamp`, `CLAY_MESH_BRUSH_*` |
+| Lattice cage on a mesh layer | `mesh::Lattice`, `mesh::MeshSculptor::apply_lattice` | `Lattice(...)`, `MeshSculptor.lattice(...)` | `clay_mesh_lattice_*`, `clay_mesh_sculptor_lattice` |
 | A mesh stroke | `brush::apply_to_mesh` | `MeshSculptor.apply_stroke(...)` | `clay_mesh_sculptor_apply_stroke` |
 | Mesh vertex adjacency | `mesh::Adjacency` | `MeshSculptor.class_count` | `clay_mesh_sculptor_class_count` |
 | Mesh stroke undo | `mesh::VertexDeltas` | `clay.VertexDeltas` | `clay_mesh_deltas_*` |

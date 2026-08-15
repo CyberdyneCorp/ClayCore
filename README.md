@@ -209,6 +209,11 @@ applied to a mesh layer's own vertices, holding one line above everything else:
 **topology never changes.** No polygon is created, split or deleted; `indices`
 and `quads` come out byte for byte, which the tests compare rather than count.
 
+A **lattice cage** works on the same layer: drag a few control points and the
+whole form follows. It is the one ZBrush gizmo deformer that is not an SDF
+deformer here, and deliberately — ZBrush and Blender both apply FFD *forward* to
+vertices, which a mesh allows and an implicit field does not.
+
 That is the whole point rather than a limitation. It closes the **return trip**:
 sculpt on SDF or voxels → quad-export → retopo and UV elsewhere → bring the mesh
 back and *refine it in place*. Masks, strokes (pressure, spacing, taper, buildup)

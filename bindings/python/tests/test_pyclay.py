@@ -4443,6 +4443,85 @@ def test_every_mesh_verb_moves_vertices_and_none_moves_a_polygon():
         assert not np.array_equal(np.array(m.positions), before), verb
 
 
+# --- the lattice cage (lattice-on-a-mesh) -----------------------------------
+
+
+def _cage(box=((-1, -1, -1), (1, 1, 1)), n=3):
+    return clay.Lattice(box, nx=n, ny=n, nz=n)
+
+
+def test_an_untouched_cage_changes_nothing():
+    # Offsets rather than positions is what buys this: the identity is exact by
+    # construction, not to within a tolerance.
+    m = _bumpy_grid()
+    before = np.array(m.positions, copy=True)
+    cage = _cage()
+    assert cage.is_identity
+    assert cage.displacement((0.3, -0.2, 0.7)) == (0.0, 0.0, 0.0)
+
+    assert clay.MeshSculptor(m).lattice(cage) == 0
+    assert np.array_equal(np.array(m.positions), before)
+
+
+def test_a_uniformly_dragged_cage_translates_the_mesh():
+    m = _bumpy_grid()
+    before = np.array(m.positions, copy=True)
+    cage = _cage()
+    by = (0.25, -0.5, 0.125)
+    for k in range(3):
+        for j in range(3):
+            for i in range(3):
+                cage.set_offset(i, j, k, by)
+    assert not cage.is_identity
+
+    moved = clay.MeshSculptor(m).lattice(cage)
+    assert moved == len(before)
+    assert np.allclose(np.array(m.positions), before + np.array(by, dtype=np.float32), atol=1e-5)
+
+
+def test_a_cage_corner_is_interpolated():
+    # Bernstein interpolates its end points, which is what makes a lattice UI
+    # behave: dragging a corner takes that corner of the box with it.
+    cage = _cage()
+    cage.set_offset(0, 0, 0, (0.5, 0.25, -0.125))
+    assert cage.displacement((-1, -1, -1)) == pytest.approx((0.5, 0.25, -0.125), abs=1e-6)
+    assert cage.displacement((1, 1, 1)) == pytest.approx((0.0, 0.0, 0.0), abs=1e-6)
+
+
+def test_material_outside_the_cage_travels_rigidly():
+    # Not drawn onto the box: the offset is clamped, the POSITION is not.
+    cage = _cage()
+    for k in range(3):
+        for j in range(3):
+            for i in range(3):
+                cage.set_offset(i, j, k, (0.0, 0.5, 0.0))
+    d = cage.displacement((5.0, 0.0, 0.0))
+    assert d == pytest.approx((0.0, 0.5, 0.0), abs=1e-6)
+
+
+def test_a_lattice_keeps_topology_and_is_one_undo_step():
+    m = _bumpy_grid()
+    topology = np.array(m.indices, copy=True)
+    before = np.array(m.positions, copy=True)
+
+    cage = _cage()
+    cage.set_offset(1, 1, 1, (0.0, 0.8, 0.0))
+
+    deltas = clay.VertexDeltas()
+    sculptor = clay.MeshSculptor(m)
+    assert sculptor.lattice(cage, deltas=deltas) > 0
+    assert np.array_equal(np.array(m.indices), topology)
+    assert not np.array_equal(np.array(m.positions), before)
+
+    deltas.revert(sculptor)
+    assert np.array_equal(np.array(m.positions), before)
+
+
+def test_a_cage_clamps_its_divisions():
+    assert clay.Lattice(((0, 0, 0), (1, 1, 1)), nx=0, ny=1, nz=-4).divisions == (2, 2, 2)
+    assert clay.Lattice(((0, 0, 0), (1, 1, 1)), nx=9999).divisions[0] == 32
+
+
 def test_a_mesh_stroke_undoes_bit_exactly_as_one_gesture():
     m = _plane_grid(16)
     before = np.array(m.positions, copy=True)

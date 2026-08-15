@@ -410,3 +410,88 @@ TEST_CASE("c abi: the null paths refuse rather than crash") {
     clay_mesh_sculptor_destroy(s);
     clay_mesh_destroy(m);
 }
+
+TEST_CASE("c abi: a lattice cage deforms the mesh and leaves its topology alone") {
+    clay_mesh* m = grid_mesh();
+    const std::vector<float> before = positions_of(m);
+    const std::vector<std::uint32_t> topology = indices_of(m);
+
+    clay_mesh_sculptor* s = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(m, -1.0f, &s) == CLAY_OK);
+
+    // A cage over the grid, given some height so the Y axis is not degenerate.
+    const float lo[3] = {-1.0f, -1.0f, -1.0f}, hi[3] = {1.0f, 1.0f, 1.0f};
+    clay_mesh_lattice* cage = clay_mesh_lattice_create(lo, hi, 3, 3, 3);
+    REQUIRE(cage != nullptr);
+
+    int32_t nx = 0, ny = 0, nz = 0;
+    CHECK(clay_mesh_lattice_divisions(cage, &nx, &ny, &nz) == CLAY_OK);
+    CHECK((nx == 3 && ny == 3 && nz == 3));
+
+    // Untouched: the identity, and applying it moves nothing.
+    int32_t identity = 0;
+    CHECK(clay_mesh_lattice_is_identity(cage, &identity) == CLAY_OK);
+    CHECK(identity == 1);
+    std::size_t moved = 99;
+    CHECK(clay_mesh_sculptor_lattice(s, cage, nullptr, &moved) == CLAY_OK);
+    CHECK(moved == 0);
+    CHECK(positions_of(m) == before);
+
+    // Drag the middle control point up.
+    const float pull[3] = {0.0f, 0.8f, 0.0f};
+    CHECK(clay_mesh_lattice_set_offset(cage, 1, 1, 1, pull) == CLAY_OK);
+    CHECK(clay_mesh_lattice_is_identity(cage, &identity) == CLAY_OK);
+    CHECK(identity == 0);
+
+    float got[3] = {0, 0, 0};
+    CHECK(clay_mesh_lattice_offset(cage, 1, 1, 1, got) == CLAY_OK);
+    CHECK(got[1] == doctest::Approx(0.8f));
+    // rest is the box's centre; position is rest plus the drag.
+    CHECK(clay_mesh_lattice_rest(cage, 1, 1, 1, got) == CLAY_OK);
+    CHECK(got[1] == doctest::Approx(0.0f));
+    CHECK(clay_mesh_lattice_position(cage, 1, 1, 1, got) == CLAY_OK);
+    CHECK(got[1] == doctest::Approx(0.8f));
+
+    // The displacement is previewable without applying it.
+    const float centre[3] = {0.0f, 0.0f, 0.0f};
+    CHECK(clay_mesh_lattice_displacement(cage, centre, got) == CLAY_OK);
+    CHECK(got[1] > 0.0f);
+
+    clay_mesh_deltas* deltas = clay_mesh_deltas_create();
+    REQUIRE(deltas != nullptr);
+    CHECK(clay_mesh_sculptor_lattice(s, cage, deltas, &moved) == CLAY_OK);
+    CHECK(moved > 0);
+    CHECK(positions_of(m) != before);
+    CHECK(indices_of(m) == topology);  // the contract, byte for byte
+
+    // One undo step.
+    CHECK(clay_mesh_deltas_revert(deltas, s) == CLAY_OK);
+    CHECK(positions_of(m) == before);
+
+    clay_mesh_deltas_destroy(deltas);
+    clay_mesh_lattice_destroy(cage);
+    clay_mesh_sculptor_destroy(s);
+    clay_mesh_destroy(m);
+}
+
+TEST_CASE("c abi: a lattice refuses null arguments and clamps its divisions") {
+    const float lo[3] = {0, 0, 0}, hi[3] = {1, 1, 1};
+    CHECK(clay_mesh_lattice_create(nullptr, hi, 3, 3, 3) == nullptr);
+    CHECK(clay_mesh_lattice_create(lo, nullptr, 3, 3, 3) == nullptr);
+
+    // Divisions below two cannot span an axis; above the cap is a slider typo.
+    clay_mesh_lattice* low = clay_mesh_lattice_create(lo, hi, 0, 1, -5);
+    REQUIRE(low != nullptr);
+    int32_t nx = 0, ny = 0, nz = 0;
+    CHECK(clay_mesh_lattice_divisions(low, &nx, &ny, &nz) == CLAY_OK);
+    CHECK((nx == 2 && ny == 2 && nz == 2));
+    clay_mesh_lattice_destroy(low);
+
+    int32_t identity = 0;
+    CHECK(clay_mesh_lattice_is_identity(nullptr, &identity) == CLAY_ERROR_INVALID_ARGUMENT);
+    float out[3];
+    CHECK(clay_mesh_lattice_displacement(nullptr, lo, out) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    // Destroying null is a no-op, as everywhere else in this ABI.
+    clay_mesh_lattice_destroy(nullptr);
+}

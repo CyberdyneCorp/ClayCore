@@ -2826,6 +2826,59 @@ clay_result clay_mesh_sculptor_stamp(clay_mesh_sculptor* sculptor, const clay_me
                                      const clay_mask* mask, clay_mesh_deltas* deltas,
                                      size_t* out_moved);
 
+/* A LATTICE (free-form deformation) cage over the whole mesh — ZBrush's Gizmo
+ * Lattice, Blender's Lattice modifier.
+ *
+ * This runs FORWARD, and that is why it exists on a mesh and not on an SDF
+ * item: a claycore SDF deformer is an inverse point map, and forward FFD has no
+ * closed-form inverse. A mesh already knows where its vertices are, so nothing
+ * here inverts, iterates or approximates.
+ *
+ * The cage holds control-point OFFSETS, so a cage nobody has touched is exactly
+ * the identity. min/max give the box it spans, in the mesh's own space; nx, ny,
+ * nz are control points per axis and are clamped into [2, 32]. Evaluation is
+ * trivariate Bernstein, so 2 per axis is exactly trilinear and the corner
+ * control points are interpolated — dragging a corner moves that corner of the
+ * box exactly.
+ *
+ * A vertex OUTSIDE the box travels rigidly with the nearest point of the cage
+ * rather than being drawn onto it. An axis on which the box is flat reads as
+ * the middle, so none of its control points are dead. */
+typedef struct clay_mesh_lattice clay_mesh_lattice;
+
+clay_mesh_lattice* clay_mesh_lattice_create(const float min[3], const float max[3], int32_t nx,
+                                            int32_t ny, int32_t nz);
+void clay_mesh_lattice_destroy(clay_mesh_lattice* lattice);
+/* Control points per axis, after clamping. */
+clay_result clay_mesh_lattice_divisions(const clay_mesh_lattice* lattice, int32_t* out_nx,
+                                        int32_t* out_ny, int32_t* out_nz);
+/* How far a control point has been dragged, and where it started. Out-of-range
+ * indices read zero and write nowhere. */
+clay_result clay_mesh_lattice_set_offset(clay_mesh_lattice* lattice, int32_t i, int32_t j,
+                                         int32_t k, const float offset[3]);
+clay_result clay_mesh_lattice_offset(const clay_mesh_lattice* lattice, int32_t i, int32_t j,
+                                     int32_t k, float out_offset[3]);
+clay_result clay_mesh_lattice_rest(const clay_mesh_lattice* lattice, int32_t i, int32_t j,
+                                   int32_t k, float out_rest[3]);
+/* Where the control point is NOW — rest plus offset, which is what a UI draws
+ * for the cage's handles. */
+clay_result clay_mesh_lattice_position(const clay_mesh_lattice* lattice, int32_t i, int32_t j,
+                                       int32_t k, float out_position[3]);
+/* Non-zero while no control point has been dragged. Worth asking before
+ * walking a mesh: an untouched cage moves nothing. */
+clay_result clay_mesh_lattice_is_identity(const clay_mesh_lattice* lattice, int32_t* out_identity);
+/* What the cage moves a point by — exactly zero everywhere for an untouched
+ * cage. Exposed so a host can preview the warp without applying it. */
+clay_result clay_mesh_lattice_displacement(const clay_mesh_lattice* lattice, const float p[3],
+                                           float out_displacement[3]);
+
+/* Apply the cage to every vertex. `deltas` may be NULL. *out_moved receives how
+ * many vertices moved — zero for an untouched cage, which is skipped rather
+ * than written back over itself. */
+clay_result clay_mesh_sculptor_lattice(clay_mesh_sculptor* sculptor,
+                                       const clay_mesh_lattice* lattice, clay_mesh_deltas* deltas,
+                                       size_t* out_moved);
+
 /* Resolve a stroke and apply it — the fourth consumer of the stroke engine,
  * after the grid, the mask and the edit list. Spacing, pressure response,
  * deterministic jitter, taper, steady stroke and buildup-versus-clamped

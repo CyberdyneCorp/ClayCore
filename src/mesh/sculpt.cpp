@@ -638,6 +638,54 @@ void MeshSculptor::flush_normals(VertexDeltas* record) {
     deferred_normals_.clear();
 }
 
+std::size_t MeshSculptor::apply_lattice(const Lattice& cage, VertexDeltas* record) {
+    // An untouched cage displaces nothing anywhere, so the walk is skipped
+    // rather than run to write every vertex back to itself — which would also
+    // fill an undo record with entries that changed nothing.
+    if (cage.is_identity()) return 0;
+
+    std::size_t moved = 0;
+    // By WELD CLASS rather than by raw vertex, so that position-coincident
+    // vertices — the split ones holding a hard edge — stay coincident. Walking
+    // `positions` directly would give each copy its own evaluation; they agree
+    // mathematically, but only up to float rounding, and a seam that opens by
+    // an ulp is a visible crack.
+    const std::uint32_t classes = adjacency_.class_count();
+    std::vector<std::uint32_t> touched;
+    touched.reserve(classes);
+    for (std::uint32_t c = 0; c < classes; ++c) {
+        std::size_t count = 0;
+        const std::uint32_t* members = adjacency_.members(c, &count);
+        if (count == 0) continue;
+        const kernel::cfloat3 d = cage.displacement(mesh_.positions[members[0]]);
+        if (d.x == 0.0f && d.y == 0.0f && d.z == 0.0f) continue;
+        for (std::size_t k = 0; k < count; ++k) {
+            if (record) record->note(members[k], mesh_);
+            mesh_.positions[members[k]] = mesh_.positions[members[k]] + d;
+            ++moved;
+        }
+        touched.push_back(c);
+    }
+    if (touched.empty()) return 0;
+
+    // The cage moved vertices, so their normals are stale — and their
+    // neighbours' are too, since a face normal is shared. Recomputing over the
+    // touched classes is what every stamp does; deferring follows the same
+    // switch, so a host draining a gesture pays once.
+    if (defer_normals_) {
+        deferred_normals_.insert(deferred_normals_.end(), touched.begin(), touched.end());
+    } else {
+        recompute_normals(touched, record);
+    }
+    if (record)
+        for (std::uint32_t c : touched) {
+            std::size_t count = 0;
+            const std::uint32_t* members = adjacency_.members(c, &count);
+            for (std::size_t k = 0; k < count; ++k) record->sync_after(members[k], mesh_);
+        }
+    return moved;
+}
+
 void MeshSculptor::recompute_normals(const std::vector<std::uint32_t>& classes,
                                      VertexDeltas* record) {
     if (mesh_.normals.size() != mesh_.positions.size() || mesh_.normals.empty()) return;
