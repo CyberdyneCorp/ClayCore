@@ -254,6 +254,11 @@ enum CDeformType {
     // irregular, which is the whole point. k = amplitude, a = frequency,
     // b = octaves, c = gain, e0 = seed
     cdeform_noise = 13,
+    // Ranged twist and bend: the same rotation as 0 and 1 with the angle
+    // ramped across a span and held beyond it, which is what a gizmo's box
+    // does. k = radians per unit, a = t0, b = t1, ease in slot 5.
+    cdeform_twist_range = 14,
+    cdeform_bend_range = 15,
 };
 
 // Apply one deformer record to the local point. No deformer corrects the
@@ -263,6 +268,14 @@ CLAY_FN cfloat3 ctape_deform_point(CLAY_FPTR rec, cfloat3 p) {
     int type = CLAY_INT(CLAY_AT(rec, 0));
     if (type == cdeform_twist) return ctwist_point(p, CLAY_AT(rec, 1));
     if (type == cdeform_bend) return cbend_point(p, CLAY_AT(rec, 1));
+    if (type == cdeform_twist_range) {
+        return ctwist_range_point(p, CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3),
+                                  CLAY_INT(CLAY_AT(rec, 5)));
+    }
+    if (type == cdeform_bend_range) {
+        return cbend_range_point(p, CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3),
+                                 CLAY_INT(CLAY_AT(rec, 5)));
+    }
     if (type == cdeform_taper) {
         // NOTE: deliberately no ctaper_dist here. Multiplying the distance by
         // min(s,1) would keep the field conservative on its own, but it also

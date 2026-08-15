@@ -189,7 +189,7 @@ host whose falloff reaches too far.
 **Every combine op the kernel implements now has a case**, and the suite checks
 that by scanning the compiled tapes rather than the case names, so an op added
 without one is a gate failure. Deformer kinds and primitive families are not yet
-held to that standard — the set exercises 5 of 14 deformers — so a passing
+held to that standard — the set exercises 7 of 16 deformers — so a passing
 fixture says less about those than it does about the combine modes.
 
 Six of those carry data in the out-of-line blob, and two carry a lot of it:

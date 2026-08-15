@@ -27,6 +27,15 @@ CASES = [
     ("twist 1.5", lambda: clay.Box(size=(0.7, 1.8, 0.7)).twist(1.5)),
     ("twist 3.0", lambda: clay.Box(size=(0.7, 1.8, 0.7)).twist(3.0)),
     ("bend 0.8", lambda: clay.Box(size=(0.7, 1.8, 0.7)).bend(0.8)),
+    # The RANGED pair: the same rotations, ramped across a span and HELD
+    # beyond it — which is what a gizmo's box does and what `twist` above
+    # cannot express. The material past the span travels rigidly instead of
+    # continuing to wind, so the top of this box is straight where "twist 3.0"
+    # is still turning.
+    ("twist_range", lambda: clay.Box(size=(0.7, 1.8, 0.7)).twist_range(
+        radians_per_unit=3.0, y0=-0.5, y1=0.5, ease=3)),
+    ("bend_range", lambda: clay.Box(size=(0.7, 1.8, 0.7)).bend_range(
+        radians_per_unit=1.4, x0=-0.35, x1=0.35, ease=3)),
     ("taper", lambda: clay.Box(size=(0.9, 1.8, 0.9)).taper(
         y0=-0.9, y1=0.9, s0=1.0, s1=0.25)),
     ("displace", lambda: clay.Sphere(r=0.9).displace(amplitude=0.08, frequency=7.0)),

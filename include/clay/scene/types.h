@@ -420,6 +420,29 @@ struct Deformer {
         return d;
     }
     // Displace along Y by dz, eased across the radial band r0 -> r1.
+    // Ranged twist: k radians per unit, ramped across [y0, y1] and held past
+    // it. With a linear ease and a range covering the content this IS twist.
+    static Deformer twist_range(float radians_per_unit, float y0, float y1,
+                                std::uint8_t ease = 0) {
+        Deformer d;
+        d.type = kernel::cdeform_twist_range;
+        d.k = radians_per_unit;
+        d.a = y0;
+        d.b = y1;
+        d.ease = ease;
+        return d;
+    }
+    // The same for bend, across [x0, x1].
+    static Deformer bend_range(float radians_per_unit, float x0, float x1,
+                               std::uint8_t ease = 0) {
+        Deformer d;
+        d.type = kernel::cdeform_bend_range;
+        d.k = radians_per_unit;
+        d.a = x0;
+        d.b = x1;
+        d.ease = ease;
+        return d;
+    }
     static Deformer bend_radial(float r0, float r1, float dz, std::uint8_t ease = 0) {
         Deformer d;
         d.type = kernel::cdeform_bend_radial;

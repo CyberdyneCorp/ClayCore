@@ -1,5 +1,8 @@
 #include <doctest/doctest.h>
 
+#include <cmath>
+#include <random>
+
 #include "clay/kernel/deform.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
@@ -126,6 +129,13 @@ TEST_CASE("tracked step scale stays conservative under every deformer") {
                                        {Deformer::taper(-1.0f, 1.0f, 1.0f, 0.4f)})});
     cases.push_back({"displace", one_item(scene::Prim::sphere(1.0f),
                                           {Deformer::displace(0.05f, 5.0f)})});
+    // The ranged pair, EASED: an eased ramp is steeper somewhere in the middle
+    // than its average rate — smoothstep peaks at 1.5x — so this is the case
+    // that catches a bound derived from the average.
+    cases.push_back({"twist_range", one_item(scene::Prim::box(cf3(0.5f, 1.0f, 0.5f)),
+                                             {Deformer::twist_range(1.6f, -0.5f, 0.5f, 3)})});
+    cases.push_back({"bend_range", one_item(scene::Prim::capped_cylinder(0.3f, 1.2f),
+                                            {Deformer::bend_range(1.0f, -0.4f, 0.4f, 3)})});
     cases.push_back({"chain", one_item(scene::Prim::box(cf3(0.4f, 1.0f, 0.4f)),
                                        {Deformer::twist(0.9f),
                                         Deformer::taper(-1.0f, 1.0f, 1.0f, 0.5f)})});
@@ -1038,4 +1048,84 @@ TEST_CASE("widening the deformer record left old documents readable") {
     std::optional<scene::Document> back = scene::deserialize_document(bytes.data(), bytes.size());
     REQUIRE(back.has_value());
     CHECK(scene::serialize_document(*back) == bytes);
+}
+
+TEST_CASE("a ranged twist over its whole span IS the unranged twist") {
+    // The property that makes this a RANGE on an existing deformation rather
+    // than a second one to keep in step. With a linear ease and a span that
+    // covers the content, every point inside the span must warp identically.
+    const float k = 1.3f;
+    for (float y = -1.0f; y <= 1.0f; y += 0.1f)
+        for (float x = -0.7f; x <= 0.7f; x += 0.35f)
+            for (float z = -0.7f; z <= 0.7f; z += 0.35f) {
+                const cfloat3 p = cf3(x, y, z);
+                const cfloat3 plain = kernel::ctwist_point(p, k);
+                // range [0, 1] with a linear ease: angle = k*(1-0)*clamp(y,0,1)
+                const cfloat3 ranged = kernel::ctwist_range_point(p, k, 0.0f, 1.0f, 0);
+                if (y >= 0.0f && y <= 1.0f) {
+                    CAPTURE(y);
+                    CHECK(ranged.x == doctest::Approx(plain.x).epsilon(1e-5));
+                    CHECK(ranged.y == doctest::Approx(plain.y).epsilon(1e-5));
+                    CHECK(ranged.z == doctest::Approx(plain.z).epsilon(1e-5));
+                }
+            }
+}
+
+TEST_CASE("a ranged bend over its whole span IS the unranged bend") {
+    const float k = 0.9f;
+    for (float x = -1.0f; x <= 1.0f; x += 0.1f)
+        for (float y = -0.6f; y <= 0.6f; y += 0.3f) {
+            const cfloat3 p = cf3(x, y, 0.2f);
+            const cfloat3 plain = kernel::cbend_point(p, k);
+            const cfloat3 ranged = kernel::cbend_range_point(p, k, 0.0f, 1.0f, 0);
+            if (x >= 0.0f && x <= 1.0f) {
+                CAPTURE(x);
+                CHECK(ranged.x == doctest::Approx(plain.x).epsilon(1e-5));
+                CHECK(ranged.y == doctest::Approx(plain.y).epsilon(1e-5));
+                CHECK(ranged.z == doctest::Approx(plain.z).epsilon(1e-5));
+            }
+        }
+}
+
+TEST_CASE("outside its span a ranged twist holds, it does not keep winding") {
+    // What the range is FOR: a gizmo's box twists what is inside it and moves
+    // the rest rigidly. Past y1 the angle is constant, so two points that
+    // differ only in height above the span rotate by the same amount.
+    const float k = 1.7f, y0 = -0.25f, y1 = 0.25f;
+    auto angle_at = [&](float y) {
+        const cfloat3 p = kernel::ctwist_range_point(cf3(1.0f, y, 0.0f), k, y0, y1, 0);
+        return std::atan2(p.z, p.x);
+    };
+    const float above_a = angle_at(0.5f), above_b = angle_at(2.0f);
+    CHECK(above_a == doctest::Approx(above_b).epsilon(1e-5));
+    // ...where the unranged twist keeps winding with height.
+    auto plain_angle_at = [&](float y) {
+        const cfloat3 p = kernel::ctwist_point(cf3(1.0f, y, 0.0f), k);
+        return std::atan2(p.z, p.x);
+    };
+    CHECK(plain_angle_at(0.5f) != doctest::Approx(plain_angle_at(2.0f)).epsilon(1e-3));
+
+    // Below the span it holds too, at the other end.
+    CHECK(angle_at(-0.5f) == doctest::Approx(angle_at(-2.0f)).epsilon(1e-5));
+    // And the two ends differ, or the range would be doing nothing.
+    CHECK(angle_at(2.0f) != doctest::Approx(angle_at(-2.0f)).epsilon(1e-3));
+}
+
+TEST_CASE("a steeper ease on a ranged twist declares a tighter step scale") {
+    // The ranged bound is charged the angular rate the ease actually REACHES,
+    // not the average rate across the span: an eased ramp is steeper somewhere
+    // in the middle — smoothstep peaks at 1.5x linear — and the declaration has
+    // to cover the steepest point. So a steeper curve must cost step scale,
+    // which is what says the ease is wired into the bound at all rather than
+    // being applied only to the warp.
+    auto scale_with = [](std::uint8_t ease) {
+        scene::Document doc = one_item(scene::Prim::box(cf3(0.5f, 1.0f, 0.5f)),
+                                       {Deformer::twist_range(1.6f, -0.5f, 0.5f, ease)});
+        return scene::compile_document(doc).safe_step_scale();
+    };
+    const float linear = scale_with(0), smooth = scale_with(3);
+    CAPTURE(linear);
+    CAPTURE(smooth);
+    CHECK(linear < 1.0f);
+    CHECK(smooth < linear);  // steeper somewhere => a tighter bound everywhere
 }
