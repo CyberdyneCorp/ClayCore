@@ -150,7 +150,24 @@ struct Compiler {
                                  ? static_cast<float>(emit_guide(guide)) : 0.0f;
                 handle_count = static_cast<float>(guide.size());
             }
-            if (d.type == kernel::cdeform_lattice) {
+            if (d.type == kernel::cdeform_lattice_xform) {
+                // Transform, then its inverse, then the offsets. The inverse is
+                // stored rather than derived per sample: it is a quaternion
+                // conjugate and a divide to recover something known here.
+                handle_off = static_cast<float>(tape.blob.size());
+                for (const kernel::cfloat4x4& m :
+                     {d.cage_xform.matrix(), d.cage_xform.inverse_matrix()}) {
+                    const float cage_xf[12] = {m.c0.x, m.c0.y, m.c0.z, m.c1.x, m.c1.y, m.c1.z,
+                                          m.c2.x, m.c2.y, m.c2.z, m.c3.x, m.c3.y, m.c3.z};
+                    tape.blob.insert(tape.blob.end(), cage_xf, cage_xf + 12);
+                }
+                for (const kernel::cfloat3& o : d.cage) {
+                    tape.blob.push_back(o.x);
+                    tape.blob.push_back(o.y);
+                    tape.blob.push_back(o.z);
+                }
+                handle_count = d.a;
+            } else if (d.type == kernel::cdeform_lattice) {
                 // The cage goes in the blob for the same reason a guide does:
                 // nx*ny*nz offsets are not a fixed number of floats. Only slot
                 // 1 is a handle here — the divisions and box ride the record.

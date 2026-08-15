@@ -235,13 +235,22 @@ Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& defor
                 b = Aabb{cf3(-r, -r, b.min.z), cf3(r, r, b.max.z)};
                 break;
             }
+            case kernel::cdeform_lattice_xform:
             case kernel::cdeform_lattice: {
                 // A Bernstein combination of the offsets is a convex
                 // combination, so no point moves further than the largest of
                 // them. Dilating by that is tight and needs no evaluation.
+                //
+                // The offsets are in CAGE space, so a transformed cage's
+                // displacement is that over the transform's scale once it is
+                // back in the item's frame.
                 float reach = 0.0f;
                 for (const kernel::cfloat3& o : d.cage)
                     reach = kernel::cmax(reach, kernel::clength(o));
+                if (d.type == kernel::cdeform_lattice_xform) {
+                    const float s = kernel::cabs(d.cage_xform.scale);
+                    reach = s > 1e-6f ? reach / s : reach;
+                }
                 b = b.dilated(reach);
                 break;
             }
@@ -411,7 +420,7 @@ bool deformers_break_exactness(const Node& item) {
         if (d.type == kernel::cdeform_elongate_axis) return true;
         // A lattice warps space non-uniformly; the result is a bound field
         // rather than a distance, whatever the Lipschitz factor comes out as.
-        if (d.type == kernel::cdeform_lattice) return true;
+        if (Deformer::is_lattice(d.type)) return true;
         if (d.type == kernel::cdeform_elongate && !prim_is_origin_symmetric(item.prim.type))
             return true;
     }
@@ -449,7 +458,13 @@ float deformer_lipschitz(const Node& item) {
             info = d.type == kernel::cdeform_twist_range
                        ? kernel::cfi_twist(info, d.k * ease_max_slope(d.ease), radius)
                        : kernel::cfi_bend(info, d.k * ease_max_slope(d.ease), radius);
-        } else if (d.type == kernel::cdeform_lattice) {
+        } else if (d.type == kernel::cdeform_lattice ||
+                   d.type == kernel::cdeform_lattice_xform) {
+            // The SAME bound for both forms, and the reason is worth stating
+            // rather than rederiving: the transform is rigid with uniform
+            // scale, so with T = sR the warp's Jacobian in the item's frame is
+            // R⁻¹ J R — similar to the cage-space Jacobian, hence the same
+            // norm. A transform cannot make the field steeper.
             // The DIFFERENCES between neighbouring control points, not their
             // magnitudes: the first says how fast the warp varies, the second
             // only how far it moves material. A cage that translates an item

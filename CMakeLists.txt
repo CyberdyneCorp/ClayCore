@@ -52,6 +52,7 @@ add_library(claycore
   src/brush/stroke.cpp
   src/brush/mask_extrude.cpp
   src/brush/tube.cpp
+  src/brush/lattice_gizmo.cpp
   src/brush/move.cpp
   src/mesh/marching.cpp
   src/mesh/surface_nets.cpp

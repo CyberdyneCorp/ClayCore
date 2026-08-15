@@ -269,6 +269,11 @@ enum CDeformType {
     // record exactly: k = blob offset, a/b/c = nx/ny/nz, ext[0..2] = box min,
     // ext[3..5] = box max.
     cdeform_lattice = 17,
+    // The same cage through a TRANSFORM, so one world-placed cage can act on
+    // items in any frame. Its own opcode rather than a flag, so the
+    // axis-aligned path above pays nothing. k = blob offset (transform,
+    // inverse, then offsets), a/b/c = nx/ny/nz, ext = the box in CAGE space.
+    cdeform_lattice_xform = 18,
 };
 
 // Apply one deformer record to the local point. No deformer corrects the
@@ -329,6 +334,13 @@ CLAY_FN cfloat3 ctape_deform_point(CLAY_FPTR rec, CLAY_FPTR blob, cfloat3 p) {
                               CLAY_INT(CLAY_AT(rec, 3)), CLAY_INT(CLAY_AT(rec, 4)),
                               cf3(CLAY_AT(rec, 6), CLAY_AT(rec, 7), CLAY_AT(rec, 8)),
                               cf3(CLAY_AT(rec, 9), CLAY_AT(rec, 10), CLAY_AT(rec, 11)), p);
+    }
+    if (type == cdeform_lattice_xform) {
+        return clattice_xform_point(CLAY_OFF(blob, CLAY_INT(CLAY_AT(rec, 1))),
+                                    CLAY_INT(CLAY_AT(rec, 2)), CLAY_INT(CLAY_AT(rec, 3)),
+                                    CLAY_INT(CLAY_AT(rec, 4)),
+                                    cf3(CLAY_AT(rec, 6), CLAY_AT(rec, 7), CLAY_AT(rec, 8)),
+                                    cf3(CLAY_AT(rec, 9), CLAY_AT(rec, 10), CLAY_AT(rec, 11)), p);
     }
     if (type == cdeform_bend_curve) {
         return cbend_curve_point(CLAY_OFF(blob, CLAY_INT(CLAY_AT(rec, 1))),

@@ -337,6 +337,38 @@ CLAY_FN cfloat3 clattice_point(CLAY_FPTR offsets, int nx, int ny, int nz, cfloat
     return p - sum;
 }
 
+// The same cage, applied through a TRANSFORM: map the point into the cage's own
+// space, warp it there, map it back.
+//
+//     p' = Tinv( T(p) + D(T(p)) )
+//
+// This is what lets ONE cage placed in the world act on items in any frame. A
+// lattice box is axis-aligned by construction, so a world-axis-aligned cage is
+// not axis-aligned in a rotated item's local space and no per-item box
+// reproduces it. Resampling the cage onto a per-item grid would approximate
+// what this does exactly.
+//
+// A SEPARATE ENTRY POINT rather than a flag on clattice_point, so the
+// axis-aligned cage pays nothing for this existing — adding per-sample work to
+// a path that does not need it is the defect #137 and #140 had to undo.
+//
+// `blob` holds the forward transform (12 floats, column-major affine), then its
+// inverse (12), then the offsets. The inverse is stored rather than derived
+// because deriving it per sample is a quaternion conjugate and a divide, every
+// sample, to recover something known at compile time.
+CLAY_FN cfloat3 caffine12(CLAY_FPTR m, cfloat3 p) {
+    return cf3(CLAY_AT(m, 0) * p.x + CLAY_AT(m, 3) * p.y + CLAY_AT(m, 6) * p.z + CLAY_AT(m, 9),
+               CLAY_AT(m, 1) * p.x + CLAY_AT(m, 4) * p.y + CLAY_AT(m, 7) * p.z + CLAY_AT(m, 10),
+               CLAY_AT(m, 2) * p.x + CLAY_AT(m, 5) * p.y + CLAY_AT(m, 8) * p.z + CLAY_AT(m, 11));
+}
+
+CLAY_FN cfloat3 clattice_xform_point(CLAY_FPTR blob, int nx, int ny, int nz, cfloat3 lo, cfloat3 hi,
+                                     cfloat3 p) {
+    cfloat3 q = caffine12(blob, p);
+    cfloat3 warped = clattice_point(CLAY_OFF(blob, 24), nx, ny, nz, lo, hi, q);
+    return caffine12(CLAY_OFF(blob, 12), warped);
+}
+
 // Spatial morph weights: the interpreter evaluates both subtrees and mixes
 // distances by w (a bound: lerped fields are not distances).
 CLAY_FN float ctransition_linear_weight(cfloat3 p, cfloat3 a, cfloat3 b, int ease_type) {

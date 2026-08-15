@@ -17,6 +17,7 @@
 #include "clay/parallel/thread_pool.h"
 #include "clay.h"
 #include "clay/brush/mask_extrude.h"
+#include "clay/brush/lattice_gizmo.h"
 #include "clay/brush/move.h"
 #include "clay/brush/stroke.h"
 #include "clay/brush/tube.h"
@@ -436,6 +437,8 @@ constexpr std::size_t kFlattenParamsOriginal =
     offsetof(clay_flatten_params, falloff) + sizeof(float);
 constexpr std::size_t kMaskExtrudeParamsOriginal =
     offsetof(clay_mask_extrude_params, band) + sizeof(float);
+constexpr std::size_t kGizmoCageOriginal =
+    offsetof(clay_gizmo_cage, nz) + sizeof(std::int32_t);
 constexpr std::size_t kMoveParamsOriginal =
     offsetof(clay_move_params, front_only) + sizeof(std::int32_t);
 constexpr std::size_t kImportBudgetOriginal =
@@ -3014,6 +3017,101 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
         const scene::Node* n = l->sdf->find(w.node);
         if (!n) continue;
         scene::SetDeformersCmd cmd{layer, w.node, brush::moved_chain(*n, w)};
+        r = apply_edit(doc, scene::Command{cmd}, "node not found");
+        if (r != CLAY_OK) {
+            if (doc->undo) doc->undo->end_group();
+            return r;
+        }
+        ++applied;
+    }
+    if (doc->undo) doc->undo->end_group();
+    if (out_applied) *out_applied = applied;
+    return CLAY_OK;
+}
+
+namespace {
+
+clay_result resolve_gizmo(const clay_document* doc, clay_layer_id layer,
+                          const clay_gizmo_cage* desc, const float* offsets_xyz,
+                          const scene::Layer** out_layer,
+                          std::vector<brush::LatticeWarp>* out_warps) {
+    if (!doc || !desc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or cage");
+    clay_gizmo_cage d;
+    clay_result r = read_desc(desc, kGizmoCageOriginal, &d);
+    if (r != CLAY_OK) return r;
+    desc = &d;
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "no layer with id " + std::to_string(layer));
+    if (l->kind != scene::LayerKind::Sdf || !l->sdf)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this layer holds no SDF content to cage");
+
+    const int cap = scene::Deformer::kMaxLatticeDivisions;
+    if (desc->nx < 2 || desc->ny < 2 || desc->nz < 2 || desc->nx > cap || desc->ny > cap ||
+        desc->nz > cap)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "lattice divisions must be in [2, " + std::to_string(cap) +
+                        "] per axis; the cage is evaluated per sample");
+    if (!(desc->scale > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the cage's scale must be > 0");
+
+    brush::GizmoCage cage;
+    cage.placement.position = kernel::cf3(desc->position[0], desc->position[1], desc->position[2]);
+    const kernel::cfloat3 axis = kernel::cf3(desc->axis[0], desc->axis[1], desc->axis[2]);
+    if (kernel::clength(axis) > 1e-9f)
+        cage.placement.rotation = math::Quat::from_axis_angle(axis, desc->angle);
+    cage.placement.scale = desc->scale;
+    cage.box_min = kernel::cf3(desc->box_min[0], desc->box_min[1], desc->box_min[2]);
+    cage.box_max = kernel::cf3(desc->box_max[0], desc->box_max[1], desc->box_max[2]);
+    if (!(cage.box_max.x > cage.box_min.x || cage.box_max.y > cage.box_min.y ||
+          cage.box_max.z > cage.box_min.z))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the cage's box is empty");
+    cage.nx = desc->nx;
+    cage.ny = desc->ny;
+    cage.nz = desc->nz;
+    cage.offsets.assign(cage.point_count(), kernel::cf3(0, 0, 0));
+    if (offsets_xyz)
+        for (std::size_t i = 0; i < cage.offsets.size(); ++i)
+            cage.offsets[i] = kernel::cf3(offsets_xyz[i * 3], offsets_xyz[i * 3 + 1],
+                                          offsets_xyz[i * 3 + 2]);
+
+    *out_layer = l;
+    *out_warps = brush::lattice_gizmo(*l, cage);
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_layer_lattice_gizmo_preview(const clay_document* doc, clay_layer_id layer,
+                                             const clay_gizmo_cage* cage,
+                                             const float* offsets_xyz, clay_node_id* out_nodes,
+                                             size_t capacity, size_t* out_count) {
+    const scene::Layer* l = nullptr;
+    std::vector<brush::LatticeWarp> warps;
+    clay_result r = resolve_gizmo(doc, layer, cage, offsets_xyz, &l, &warps);
+    if (r != CLAY_OK) return r;
+    if (out_count) *out_count = warps.size();
+    if (!out_nodes) return CLAY_OK;
+    if (capacity < warps.size())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "buffer too small for the warped nodes");
+    for (std::size_t i = 0; i < warps.size(); ++i) out_nodes[i] = warps[i].node;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_lattice_gizmo(clay_document* doc, clay_layer_id layer,
+                                     const clay_gizmo_cage* cage, const float* offsets_xyz,
+                                     size_t* out_applied) {
+    const scene::Layer* l = nullptr;
+    std::vector<brush::LatticeWarp> warps;
+    clay_result r = resolve_gizmo(doc, layer, cage, offsets_xyz, &l, &warps);
+    if (r != CLAY_OK) return r;
+
+    // One group for the whole cage: it is one gesture.
+    if (doc->undo) doc->undo->begin_group();
+    std::size_t applied = 0;
+    for (const brush::LatticeWarp& w : warps) {
+        const scene::Node* n = l->sdf->find(w.node);
+        if (!n) continue;
+        scene::SetDeformersCmd cmd{layer, w.node, brush::caged_chain(*n, w)};
         r = apply_edit(doc, scene::Command{cmd}, "node not found");
         if (r != CLAY_OK) {
             if (doc->undo) doc->undo->end_group();

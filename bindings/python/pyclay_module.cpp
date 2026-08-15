@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "clay/brush/mask_extrude.h"
+#include "clay/brush/lattice_gizmo.h"
 #include "clay/brush/move.h"
 #include "clay/brush/stroke.h"
 #include "clay/brush/tube.h"
@@ -3690,6 +3691,91 @@ NB_MODULE(pyclay, m) {
              "Resolve a stroke and append one edit per stamp; returns their node "
              "ids. The prim is the stamp template, scaled to each stamp's radius. "
              "The whole stroke is one undo step, and a masked stamp emits nothing.")
+        .def("lattice_gizmo",
+             [](PyLayer& l, nb::handle placement_position, nb::handle placement_axis,
+                float placement_angle, float placement_scale, nb::handle box,
+                nb::handle offsets, int nx, int ny, int nz, bool preview) {
+                 brush::GizmoCage cage;
+                 // None is "not placed" rather than an error: a cage at the
+                 // origin with no rotation is the common case, and making a
+                 // caller spell it out would be noise.
+                 if (!placement_position.is_none())
+                     cage.placement.position = to_f3(placement_position, "position");
+                 if (!placement_axis.is_none()) {
+                     const kernel::cfloat3 axis = to_f3(placement_axis, "axis");
+                     if (kernel::clength(axis) > 1e-9f)
+                         cage.placement.rotation =
+                             math::Quat::from_axis_angle(axis, placement_angle);
+                 }
+                 if (!(placement_scale > 0.0f))
+                     throw std::invalid_argument("the cage's scale must be > 0");
+                 cage.placement.scale = placement_scale;
+                 const math::Aabb b = to_aabb(box);
+                 if (b.empty())
+                     throw std::invalid_argument("the cage's box is empty; there is nothing to span");
+                 cage.box_min = b.min;
+                 cage.box_max = b.max;
+                 const int cap = scene::Deformer::kMaxLatticeDivisions;
+                 if (nx < 2 || ny < 2 || nz < 2 || nx > cap || ny > cap || nz > cap)
+                     throw std::invalid_argument(
+                         "lattice divisions must be in [2, " + std::to_string(cap) +
+                         "] per axis: the cage is evaluated per sample");
+                 cage.nx = nx;
+                 cage.ny = ny;
+                 cage.nz = nz;
+                 cage.offsets.assign(cage.point_count(), kernel::cf3(0, 0, 0));
+                 if (!offsets.is_none()) {
+                     PointsView v = to_points(offsets);
+                     if (v.count != cage.offsets.size())
+                         throw std::invalid_argument(
+                             "offsets must have one entry per control point (" +
+                             std::to_string(cage.offsets.size()) + ")");
+                     for (std::size_t i = 0; i < cage.offsets.size(); ++i)
+                         cage.offsets[i] = kernel::cf3(v.data[i * 3], v.data[i * 3 + 1],
+                                                       v.data[i * 3 + 2]);
+                 }
+
+                 const std::vector<brush::LatticeWarp> warps =
+                     brush::lattice_gizmo(l.layer(), cage);
+                 std::vector<scene::NodeId> touched;
+                 if (preview) {
+                     for (const brush::LatticeWarp& w : warps) touched.push_back(w.node);
+                     return touched;
+                 }
+                 // One undo group for the whole cage: it is one gesture.
+                 UndoRef undo = l.undo ? *l.undo : UndoRef();
+                 if (undo) undo->begin_group();
+                 for (const brush::LatticeWarp& w : warps) {
+                     const scene::Node* n = l.layer().sdf->find(w.node);
+                     if (!n) continue;
+                     apply_or_throw(l.doc->document,
+                                    scene::Command{scene::SetDeformersCmd{
+                                        l.id, w.node, brush::caged_chain(*n, w)}},
+                                    "lattice_gizmo", l.undo.get());
+                     touched.push_back(w.node);
+                 }
+                 if (undo) undo->end_group();
+                 return touched;
+             },
+             "position"_a = nb::none(), "axis"_a = nb::none(), "angle"_a = 0.0f,
+             "scale"_a = 1.0f, "box"_a = nb::none(), "offsets"_a = nb::none(), "nx"_a = 3,
+             "ny"_a = 3, "nz"_a = 3, "preview"_a = false,
+             "One CAGE over this layer — ZBrush's Gizmo Lattice, which acts on the\n"
+             "whole subtool rather than on one item in its own frame.\n\n"
+             "The cage is placed in the WORLD by position/axis/angle/scale and\n"
+             "spans `box` in its own space. `offsets` is an (nx*ny*nz, 3) array of\n"
+             "control-point drags in that space, x-fastest — index (i, j, k) at\n"
+             "(k*ny + j)*nx + i.\n\n"
+             "Resolved into one lattice deformer per item, each carrying the\n"
+             "transform that takes that item's frame into the cage's. That is what\n"
+             "makes it exact for a ROTATED item: a lattice box is axis-aligned by\n"
+             "construction, so no per-item box reproduces a world-placed cage.\n\n"
+             "Reaches EVERY item, unlike `move_surface`. A lattice's displacement\n"
+             "outside its box is CLAMPED rather than zero, so material out there\n"
+             "travels rigidly — skipping distant items would tear the form.\n\n"
+             "`preview=True` reports which nodes it WOULD warp without touching the\n"
+             "document. Returns the nodes that took a warp; the whole cage is one\n"
+             "undo step. An untouched cage does nothing and returns nothing.")
         .def("move_surface_preview",
              [](PyLayer& l, nb::handle centre, nb::handle displacement, float radius,
                 int ease, bool front_only) {

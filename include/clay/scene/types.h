@@ -396,6 +396,13 @@ struct Deformer {
     // with the drag as it does on the mesh lattice.
     std::vector<kernel::cfloat3> cage;
 
+    // Where the cage sits relative to the item, for `lattice_transformed`, and
+    // ignored by every other type. The point is mapped by this into the cage's
+    // own space, warped, and mapped back — which is what lets ONE cage placed
+    // in the world act on items in any frame, including rotated ones that no
+    // axis-aligned per-item box could reproduce.
+    math::Transform cage_xform;
+
     // How many extension floats this type carries; the serializer and the
     // reader both take their count from here, dispatching on the type.
     static int ext_count(std::uint8_t type) {
@@ -405,7 +412,8 @@ struct Deformer {
         if (type == kernel::cdeform_magnify) return 1;
         if (type == kernel::cdeform_noise) return 1;
         // The box, which is what the record has room for beside the handle.
-        if (type == kernel::cdeform_lattice) return 6;
+        if (type == kernel::cdeform_lattice || type == kernel::cdeform_lattice_xform)
+            return 6;
         return 0;
     }
 
@@ -540,13 +548,13 @@ struct Deformer {
     // `ck` rather than `k`: this struct already has a member called k.
     void set_cage_offset(int i, int j, int ck, kernel::cfloat3 v) {
         const int nx = static_cast<int>(a), ny = static_cast<int>(b), nz = static_cast<int>(c);
-        if (type != kernel::cdeform_lattice) return;
+        if (!is_lattice(type)) return;
         if (i < 0 || j < 0 || ck < 0 || i >= nx || j >= ny || ck >= nz) return;
         cage[static_cast<std::size_t>((ck * ny + j) * nx + i)] = v;
     }
     kernel::cfloat3 cage_offset(int i, int j, int ck) const {
         const int nx = static_cast<int>(a), ny = static_cast<int>(b), nz = static_cast<int>(c);
-        if (type != kernel::cdeform_lattice) return kernel::cf3(0, 0, 0);
+        if (!is_lattice(type)) return kernel::cf3(0, 0, 0);
         if (i < 0 || j < 0 || ck < 0 || i >= nx || j >= ny || ck >= nz) return kernel::cf3(0, 0, 0);
         return cage[static_cast<std::size_t>((ck * ny + j) * nx + i)];
     }
@@ -561,6 +569,25 @@ struct Deformer {
         };
         return kernel::cf3(along(ext[0], ext[3], i, nx), along(ext[1], ext[4], j, ny),
                            along(ext[2], ext[5], ck, nz));
+    }
+
+    // The same cage, applied through `local_to_cage` — the transform taking a
+    // point in the ITEM's frame into the cage's own. `brush::lattice_gizmo`
+    // computes it; a caller placing a cage by hand on an unrotated item wants
+    // `lattice` above, which costs less per sample.
+    static Deformer lattice_transformed(kernel::cfloat3 box_min, kernel::cfloat3 box_max,
+                                        const math::Transform& local_to_cage, int nx = 3,
+                                        int ny = 3, int nz = 3) {
+        Deformer d = lattice(box_min, box_max, nx, ny, nz);
+        d.type = kernel::cdeform_lattice_xform;
+        d.cage_xform = local_to_cage;
+        return d;
+    }
+
+    // True for either lattice form, which is what most call sites actually
+    // mean when they ask.
+    static bool is_lattice(std::uint8_t type) {
+        return type == kernel::cdeform_lattice || type == kernel::cdeform_lattice_xform;
     }
 
     static Deformer bend_radial(float r0, float r1, float dz, std::uint8_t ease = 0) {

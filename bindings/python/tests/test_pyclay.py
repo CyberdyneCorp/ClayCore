@@ -1391,6 +1391,88 @@ def test_an_sdf_lattice_survives_the_clayspace_round_trip(tmp_path):
     assert np.array_equal(before, clay.load(str(path)).eval(pts))
 
 
+# --- one cage over a layer (lattice-gizmo) -----------------------------------
+
+
+def _two_item_layer():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=0.35, position=(-0.5, 0, 0)))
+    layer.add(clay.Sphere(r=0.35, position=(0.5, 0, 0)))
+    return doc, layer
+
+
+def _pull(nx=3, ny=3, nz=3, at=(2, 1, 1), drag=(0.45, 0.0, 0.0)):
+    offsets = np.zeros((nx * ny * nz, 3), dtype=np.float32)
+    i, j, k = at
+    offsets[(k * ny + j) * nx + i] = drag
+    return offsets
+
+
+def test_a_cage_over_a_layer_reaches_every_item():
+    # Not move_surface's reachability: a lattice's displacement outside its box
+    # is CLAMPED rather than zero, so an item out there travels rigidly.
+    doc, layer = _two_item_layer()
+    layer.add(clay.Sphere(r=0.3, position=(9.0, 0, 0)))   # far outside the cage
+    box = ((-1.0, -1.0, -1.0), (1.0, 1.0, 1.0))
+    previewed = layer.lattice_gizmo(box=box, offsets=_pull(), preview=True)
+    assert len(previewed) == 3
+
+
+def test_a_cage_changes_the_field_and_is_one_undo_step():
+    doc, layer = _two_item_layer()
+    doc.enable_undo()
+    rng = np.random.default_rng(31)
+    pts = rng.uniform(-1.2, 1.2, size=(256, 3)).astype(np.float32)
+    before = doc.eval(pts)
+
+    touched = layer.lattice_gizmo(box=((-1.0, -1.0, -1.0), (1.0, 1.0, 1.0)),
+                                  offsets=_pull())
+    assert len(touched) == 2
+    assert not np.allclose(doc.eval(pts), before)
+
+    doc.undo()
+    assert np.allclose(doc.eval(pts), before)
+
+
+def test_an_untouched_cage_does_nothing():
+    doc, layer = _two_item_layer()
+    assert layer.lattice_gizmo(box=((-1.0, -1.0, -1.0), (1.0, 1.0, 1.0))) == []
+    assert layer.lattice_gizmo(box=((-1.0, -1.0, -1.0), (1.0, 1.0, 1.0)),
+                               preview=True) == []
+
+
+def test_a_cage_placed_in_the_world_reaches_what_it_covers():
+    # The placement is what makes it a gizmo rather than a per-item modifier:
+    # the same cage moved somewhere else warps a different part of the form.
+    def tip_of(position):
+        doc, layer = _two_item_layer()
+        layer.lattice_gizmo(position=position, box=((-0.6, -0.6, -0.6), (0.6, 0.6, 0.6)),
+                            offsets=_pull(drag=(0.0, 0.5, 0.0)))
+        # How high the field reaches above each ball.
+        probe = np.array([[-0.5, 0.5, 0.0], [0.5, 0.5, 0.0]], dtype=np.float32)
+        return doc.eval(probe)
+
+    over_left = tip_of((-0.5, 0.0, 0.0))
+    over_right = tip_of((0.5, 0.0, 0.0))
+    # Placing it over the left ball affects the two differently from placing it
+    # over the right one — mirrored, since the form is symmetric.
+    assert not np.allclose(over_left, over_right)
+
+
+def test_a_cage_refuses_what_it_cannot_evaluate():
+    doc, layer = _two_item_layer()
+    box = ((-1.0, -1.0, -1.0), (1.0, 1.0, 1.0))
+    with pytest.raises(ValueError, match=r"\[2, 4\]"):
+        layer.lattice_gizmo(box=box, nx=5)
+    with pytest.raises(ValueError, match="empty"):
+        layer.lattice_gizmo(box=((1, 1, 1), (0, 0, 0)))
+    with pytest.raises(ValueError, match="scale must be"):
+        layer.lattice_gizmo(box=box, scale=0.0)
+    with pytest.raises(ValueError, match="one entry per control point"):
+        layer.lattice_gizmo(box=box, offsets=np.zeros((5, 3), dtype=np.float32))
+
+
 def test_wrap_around_needs_a_non_degenerate_interval():
     # The interval fixes the cylinder radius, so x0 == x1 has no meaning.
     with pytest.raises(ValueError, match="x0 != x1"):
