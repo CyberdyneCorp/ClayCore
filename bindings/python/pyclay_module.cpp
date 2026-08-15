@@ -31,6 +31,7 @@
 #include "clay/mesh/bvh.h"
 #include "clay/mesh/decimate.h"
 #include "clay/mesh/dual_contouring.h"
+#include "clay/mesh/lattice.h"
 #include "clay/mesh/marching.h"
 #include "clay/mesh/quad_mesh.h"
 #include "clay/mesh/sculpt.h"
@@ -380,6 +381,12 @@ struct PyMesh {
 // so the session keeps the Python object alive and re-resolves the triangles on
 // every call: a mesh layer removed mid-session becomes an exception rather than
 // a read of freed storage.
+// A lattice cage. Held by value: it is a small offset array, and a copy is
+// cheaper than the indirection a shared handle would add.
+struct PyLattice {
+    mesh::Lattice cage{math::Aabb{}, 3, 3, 3};
+};
+
 struct PyMeshSculptor {
     nb::object owner;  // the Python Mesh, kept alive for the session's lifetime
     PyMesh* mesh = nullptr;
@@ -3124,6 +3131,73 @@ NB_MODULE(pyclay, m) {
             "clear", [](PyVertexDeltas& d) { d.deltas->clear(); },
             "Start a new gesture in the same record");
 
+    nb::class_<PyLattice>(
+        m, "Lattice",
+        "A lattice (free-form deformation) cage — ZBrush's Gizmo Lattice,\n"
+        "Blender's Lattice modifier.\n\n"
+        "This runs FORWARD, which is why it works on a mesh layer and not on an\n"
+        "SDF item: a claycore SDF deformer is an inverse point map, and forward\n"
+        "FFD has no closed-form inverse. A mesh already knows where its vertices\n"
+        "are, so nothing here inverts, iterates or approximates.\n\n"
+        "The cage holds control-point OFFSETS, so a cage nobody has touched is\n"
+        "exactly the identity. Evaluation is trivariate Bernstein: 2 points per\n"
+        "axis is exactly trilinear, and the corner control points are\n"
+        "interpolated, so dragging a corner moves that corner of the box exactly.\n\n"
+        "A vertex OUTSIDE the box travels rigidly with the nearest point of the\n"
+        "cage rather than being drawn onto it. An axis on which the box is flat\n"
+        "— what a cage over a plane's own bounds gives — reads as the middle, so\n"
+        "none of its control points are dead.")
+        .def(
+            "__init__",
+            [](PyLattice* self, nb::handle box, int nx, int ny, int nz) {
+                new (self) PyLattice{mesh::Lattice(to_aabb(box), nx, ny, nz)};
+            },
+            "box"_a, "nx"_a = 3, "ny"_a = 3, "nz"_a = 3,
+            "A cage over `box` ((min, max) in the mesh's own space) with nx*ny*nz\n"
+            "control points, every offset zero. Divisions are clamped into [2, 32].")
+        .def_prop_ro("divisions",
+                     [](const PyLattice& l) {
+                         return nb::make_tuple(l.cage.nx(), l.cage.ny(), l.cage.nz());
+                     })
+        .def_prop_ro("is_identity", [](const PyLattice& l) { return l.cage.is_identity(); },
+                     "True while no control point has been dragged.")
+        .def(
+            "set_offset",
+            [](PyLattice& l, int i, int j, int k, nb::handle offset) {
+                l.cage.set_offset(i, j, k, to_f3(offset, "offset"));
+            },
+            "i"_a, "j"_a, "k"_a, "offset"_a,
+            "Drag one control point. Out-of-range indices write nowhere.")
+        .def(
+            "offset",
+            [](const PyLattice& l, int i, int j, int k) {
+                const kernel::cfloat3 o = l.cage.offset(i, j, k);
+                return nb::make_tuple(o.x, o.y, o.z);
+            },
+            "i"_a, "j"_a, "k"_a)
+        .def(
+            "rest",
+            [](const PyLattice& l, int i, int j, int k) {
+                const kernel::cfloat3 o = l.cage.rest(i, j, k);
+                return nb::make_tuple(o.x, o.y, o.z);
+            },
+            "i"_a, "j"_a, "k"_a, "Where the control point started — what a UI draws.")
+        .def(
+            "position",
+            [](const PyLattice& l, int i, int j, int k) {
+                const kernel::cfloat3 o = l.cage.position(i, j, k);
+                return nb::make_tuple(o.x, o.y, o.z);
+            },
+            "i"_a, "j"_a, "k"_a, "Where the control point is now.")
+        .def(
+            "displacement",
+            [](const PyLattice& l, nb::handle p) {
+                const kernel::cfloat3 d = l.cage.displacement(to_f3(p, "p"));
+                return nb::make_tuple(d.x, d.y, d.z);
+            },
+            "p"_a, "What this cage moves a point at `p` by. Exactly zero everywhere\n"
+            "for an untouched cage.");
+
     nb::class_<PyMeshSculptor>(
         m, "MeshSculptor",
         "The classical sculpting mode, on a mesh layer's own triangles.\n\n"
@@ -3211,6 +3285,22 @@ NB_MODULE(pyclay, m) {
             "'everything under this disc'.\n\n"
             "`mask` freezes: each vertex's weight is scaled by (1 - mask) at its\n"
             "world position, for every verb, with no per-verb code.")
+        .def(
+            "lattice",
+            [](PyMeshSculptor& s, const PyLattice& cage, nb::handle deltas) {
+                mesh::VertexDeltas* record =
+                    deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
+                mesh::MeshSculptor& live = s.live(true);
+                nb::gil_scoped_release release;
+                return live.apply_lattice(cage.cage, record);
+            },
+            "cage"_a, "deltas"_a = nb::none(),
+            "Apply a Lattice to every vertex; returns how many moved.\n\n"
+            "Not a brush: no centre, no radius, no falloff, because the cage IS\n"
+            "the falloff. An untouched cage moves nothing and is skipped rather\n"
+            "than written back over itself, so it also adds nothing to `deltas`.\n\n"
+            "Topology never changes, as with every verb here, and the whole\n"
+            "lattice is ONE undo step.")
         .def(
             "apply_stroke",
             [](PyMeshSculptor& s, nb::handle samples, const brush::StrokePreset& preset,

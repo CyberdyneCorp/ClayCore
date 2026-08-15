@@ -61,6 +61,7 @@ add_library(claycore
   src/mesh/decimate.cpp
   src/mesh/bvh.cpp
   src/mesh/adjacency.cpp
+  src/mesh/lattice.cpp
   src/mesh/sculpt.cpp
   src/mesh/to_field.cpp
   src/pick/pick.cpp

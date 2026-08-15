@@ -41,6 +41,7 @@
 #include "clay/field/relax.h"    // MaskGate
 #include "clay/mesh/adjacency.h"
 #include "clay/mesh/bvh.h"
+#include "clay/mesh/lattice.h"
 #include "clay/mesh/mesh_data.h"
 
 namespace clay {
@@ -256,6 +257,19 @@ class MeshSculptor {
     // `record`, when given, accumulates into the caller's gesture.
     std::size_t stamp(MeshBrush verb, const MeshBrushSettings& settings,
                       const field::MaskGate& gate = {}, VertexDeltas* record = nullptr);
+
+    // A LATTICE over the whole mesh — ZBrush's Gizmo Lattice, Blender's
+    // Lattice modifier. Not a brush: it takes no centre, no radius and no
+    // falloff, because a cage IS the falloff. Every vertex moves by the cage's
+    // displacement at its own position, which for an untouched cage is exactly
+    // zero everywhere.
+    //
+    // Forward, with no inversion anywhere — see `mesh/lattice.h` for why that
+    // is available here and not on an SDF item.
+    //
+    // Returns how many vertices actually moved, and records into `record` the
+    // same way a stamp does, so a lattice is one undo step.
+    std::size_t apply_lattice(const Lattice& cage, VertexDeltas* record = nullptr);
 
     // Normals follow the vertices. A moved vertex with a stale normal shades
     // wrong immediately, so this runs per stamp by default — but a host

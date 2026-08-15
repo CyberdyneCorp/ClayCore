@@ -52,7 +52,7 @@ layers, alphas on SDF layers and the asset-finishing pipeline have not.
 | **Topology management** | **Not a concept** — an SDF has none, and a mesh layer's is PRESERVED rather than managed: the mesh brushes move vertices and never touch the index buffer | DynaMesh, ZRemesher | Auto-retopo, its strength | Dyntopo, Remesh |
 | **Field correctness** | **Exactness + Lipschitz tracked per node**, so step size is derived, not tuned | n/a — mesh | n/a — mixed | n/a — mesh |
 | **Booleans** | **Watertight by construction**, 2-manifold meshing | Live Boolean, then remesh | Voxel booleans, robust | BMesh booleans, fragile on bad input |
-| **Brush vocabulary** | Core set complete on fields and voxels, plus 11 fixed-topology verbs on a mesh layer (see below) | The reference: ~36 surface brushes plus the core | Broad, voxel + surface modes | Solid core set |
+| **Brush vocabulary** | Core set complete on fields and voxels, plus 11 fixed-topology verbs and a lattice cage on a mesh layer (see below) | The reference: ~36 surface brushes plus the core | Broad, voxel + surface modes | Solid core set |
 | **Masking** | **Weak** — voxel-scoped, reaches SDF only via stroke stamps | First class, protects the surface from *any* op | First class | First class |
 | **Sculpt layers** | **Absent** | Headline feature | Present | Present |
 | **Alphas / stamps** | Voxel only | Deep, VDM support | Deep | Present |

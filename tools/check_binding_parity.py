@@ -42,6 +42,7 @@ CLASS_PREFIX = {
     "MaskField": ("clay_mask_",),
     "MeshSculptor": ("clay_mesh_sculptor_",),
     "VertexDeltas": ("clay_mesh_deltas_",),
+    "Lattice": ("clay_mesh_lattice_",),
     "StrokePreset": ("clay_stroke_preset_",),
     # An inspection surface with no C counterpart; every member is exempt with
     # a reason. See CLASS_CTOR['MeshQuery'].
@@ -148,6 +149,7 @@ CLASS_CTOR = {
     "MaskField": "clay_mask_create",
     "MeshSculptor": "clay_mesh_sculptor_create",
     "VertexDeltas": "clay_mesh_deltas_create",
+    "Lattice": "clay_mesh_lattice_create",
     "Accumulation": None,
     "StrokePreset": "clay_stroke_preset_defaults",
     "Cut": "clay_cut_create",

@@ -33,6 +33,7 @@
 #include "clay/mesh/dual_contouring.h"
 #include "clay/mesh/marching.h"
 #include "clay/mesh/quad_mesh.h"
+#include "clay/mesh/lattice.h"
 #include "clay/mesh/sculpt.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/to_field.h"
@@ -7010,6 +7011,10 @@ struct clay_mesh_deltas {
     mesh::VertexDeltas deltas;
 };
 
+struct clay_mesh_lattice {
+    mesh::Lattice cage;
+};
+
 namespace {
 
 constexpr std::size_t kMeshBrushDescOriginal =
@@ -7211,6 +7216,91 @@ clay_result clay_mesh_sculptor_stamp(clay_mesh_sculptor* sculptor, const clay_me
     }
     const std::size_t moved =
         sculptor->sculptor->stamp(verb, settings, gate, deltas ? &deltas->deltas : nullptr);
+    if (out_moved) *out_moved = moved;
+    return CLAY_OK;
+}
+
+clay_mesh_lattice* clay_mesh_lattice_create(const float min[3], const float max[3], int32_t nx,
+                                            int32_t ny, int32_t nz) {
+    if (!min || !max) return nullptr;
+    const math::Aabb box{kernel::cf3(min[0], min[1], min[2]),
+                         kernel::cf3(max[0], max[1], max[2])};
+    return new clay_mesh_lattice{mesh::Lattice(box, nx, ny, nz)};
+}
+
+void clay_mesh_lattice_destroy(clay_mesh_lattice* lattice) { delete lattice; }
+
+clay_result clay_mesh_lattice_divisions(const clay_mesh_lattice* lattice, int32_t* out_nx,
+                                        int32_t* out_ny, int32_t* out_nz) {
+    if (!lattice) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null lattice");
+    if (out_nx) *out_nx = lattice->cage.nx();
+    if (out_ny) *out_ny = lattice->cage.ny();
+    if (out_nz) *out_nz = lattice->cage.nz();
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_lattice_set_offset(clay_mesh_lattice* lattice, int32_t i, int32_t j,
+                                         int32_t k, const float offset[3]) {
+    if (!lattice || !offset) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null lattice or offset");
+    lattice->cage.set_offset(i, j, k, kernel::cf3(offset[0], offset[1], offset[2]));
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_lattice_offset(const clay_mesh_lattice* lattice, int32_t i, int32_t j,
+                                     int32_t k, float out_offset[3]) {
+    if (!lattice || !out_offset) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null lattice or out");
+    const kernel::cfloat3 o = lattice->cage.offset(i, j, k);
+    out_offset[0] = o.x;
+    out_offset[1] = o.y;
+    out_offset[2] = o.z;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_lattice_rest(const clay_mesh_lattice* lattice, int32_t i, int32_t j,
+                                   int32_t k, float out_rest[3]) {
+    if (!lattice || !out_rest) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null lattice or out");
+    const kernel::cfloat3 o = lattice->cage.rest(i, j, k);
+    out_rest[0] = o.x;
+    out_rest[1] = o.y;
+    out_rest[2] = o.z;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_lattice_position(const clay_mesh_lattice* lattice, int32_t i, int32_t j,
+                                       int32_t k, float out_position[3]) {
+    if (!lattice || !out_position) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null lattice or out");
+    const kernel::cfloat3 o = lattice->cage.position(i, j, k);
+    out_position[0] = o.x;
+    out_position[1] = o.y;
+    out_position[2] = o.z;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_lattice_is_identity(const clay_mesh_lattice* lattice, int32_t* out_identity) {
+    if (!lattice || !out_identity) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null lattice or out");
+    *out_identity = lattice->cage.is_identity() ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_lattice_displacement(const clay_mesh_lattice* lattice, const float p[3],
+                                           float out_displacement[3]) {
+    if (!lattice || !p || !out_displacement)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null lattice, point or out");
+    const kernel::cfloat3 d = lattice->cage.displacement(kernel::cf3(p[0], p[1], p[2]));
+    out_displacement[0] = d.x;
+    out_displacement[1] = d.y;
+    out_displacement[2] = d.z;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_lattice(clay_mesh_sculptor* sculptor,
+                                       const clay_mesh_lattice* lattice, clay_mesh_deltas* deltas,
+                                       size_t* out_moved) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/true);
+    if (r != CLAY_OK) return r;
+    if (!lattice) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null lattice");
+    const std::size_t moved =
+        sculptor->sculptor->apply_lattice(lattice->cage, deltas ? &deltas->deltas : nullptr);
     if (out_moved) *out_moved = moved;
     return CLAY_OK;
 }
