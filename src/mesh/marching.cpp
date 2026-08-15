@@ -1,5 +1,7 @@
 #include "clay/mesh/marching.h"
 
+#include "clay/parallel/thread_pool.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -554,27 +556,71 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
         straddlers;
     if (is_subset) straddlers = collect_straddlers(cache, *keys, global_sample, lod);
 
-    // ONE builder for every brick: lattice-edge welding spans brick seams,
-    // keeping the result watertight across the sparse set.
+    // MARCH IN PARALLEL, WELD SERIALLY — and the split is forced by what makes
+    // this mesh watertight rather than chosen for convenience.
+    //
+    // Marching a brick is pure: it reads the cache, which is a const lookup and
+    // a half-to-float, and writes only its own output. Bricks are independent,
+    // which is the premise of the sparse cache. So that half fans out.
+    //
+    // The welding cannot. ONE Builder serves every brick precisely so that a
+    // lattice edge shared by two bricks yields ONE vertex — that is what keeps
+    // the sparse set watertight at brick seams, and it means the vertex map is
+    // shared mutable state that every brick touches. Sharding it per brick and
+    // concatenating would duplicate every seam vertex and open the mesh along
+    // every brick boundary.
+    //
+    // So phase one records what each brick WOULD emit, into the same
+    // ShellCollector the straddler pass already uses for exactly this reason —
+    // "no welding, since every recorded edge is re-emitted through the Builder
+    // that welds" — and phase two replays those recordings through the single
+    // Builder, in key order, calling edge_vertex in the same order the serial
+    // loop called it.
+    //
+    // That last sentence is the correctness argument: the Builder sees an
+    // identical call sequence, so it produces an identical vertex array, an
+    // identical index array and identical ranges. Byte-identity with the serial
+    // path is by construction rather than by tolerance, which is the house rule
+    // for anything the pool touches.
+    std::vector<ShellCollector> recorded(keys->size());
+    parallel::for_range(keys->size(), 1, [&](std::size_t first, std::size_t last) {
+        for (std::size_t ki = first; ki < last; ++ki) {
+            const brick::BrickKey& key = (*keys)[ki];
+            ShellCollector& rec = recorded[ki];
+            int cmin[3] = {key.x * dim, key.y * dim, key.z * dim};
+            int cmax[3] = {key.x * dim + dim, key.y * dim + dim, key.z * dim + dim};
+            march_cells(rec, global_sample, cmin, cmax);
+            // The key's straddlers are recorded after its own cells, which is
+            // where the serial loop emitted them, so the replay below lands
+            // them inside this key's range exactly as before.
+            if (auto it = straddlers.find(key); it != straddlers.end())
+                for (const ShellTriangle& tri : it->second) {
+                    std::uint32_t v[3];
+                    for (int c = 0; c < 3; ++c)
+                        v[c] = rec.edge_vertex(tri[c].p0, tri[c].f0, tri[c].p1, tri[c].f1);
+                    rec.triangle(v[0], v[1], v[2]);
+                }
+        }
+    });
+
     Builder b(cf3(0, 0, 0), vs);
-    for (const brick::BrickKey& key : *keys) {
+    std::vector<std::uint32_t> remap;
+    for (std::size_t ki = 0; ki < keys->size(); ++ki) {
         const std::uint32_t v0 = static_cast<std::uint32_t>(b.out.positions.size());
         const std::uint32_t i0 = static_cast<std::uint32_t>(b.out.indices.size());
-        int cmin[3] = {key.x * dim, key.y * dim, key.z * dim};
-        int cmax[3] = {key.x * dim + dim, key.y * dim + dim, key.z * dim + dim};
-        march_cells(b, global_sample, cmin, cmax);
-        // The key's straddlers land inside its range, after its own cells, so
-        // the ranges keep partitioning the mesh. Re-emitting through the same
-        // Builder welds them onto the seam vertices the interior already made.
-        if (auto it = straddlers.find(key); it != straddlers.end())
-            for (const ShellTriangle& tri : it->second) {
-                std::uint32_t v[3];
-                for (int c = 0; c < 3; ++c)
-                    v[c] = b.edge_vertex(tri[c].p0, tri[c].f0, tri[c].p1, tri[c].f1);
-                b.triangle(v[0], v[1], v[2]);
-            }
+        const ShellCollector& rec = recorded[ki];
+        // ShellCollector does not weld, so one lattice edge used by several
+        // tets appears several times here; the Builder dedups them exactly as
+        // it deduped the repeated calls the serial march made.
+        remap.assign(rec.edges.size(), 0);
+        for (std::size_t v = 0; v < rec.edges.size(); ++v) {
+            const ShellEdge& e = rec.edges[v];
+            remap[v] = b.edge_vertex(e.p0, e.f0, e.p1, e.f1);
+        }
+        for (const std::array<std::uint32_t, 3>& tri : rec.tris)
+            b.triangle(remap[tri[0]], remap[tri[1]], remap[tri[2]]);
         if (out_ranges)
-            out_ranges->push_back({key, v0,
+            out_ranges->push_back({(*keys)[ki], v0,
                                    static_cast<std::uint32_t>(b.out.positions.size()) - v0, i0,
                                    static_cast<std::uint32_t>(b.out.indices.size()) - i0});
     }
