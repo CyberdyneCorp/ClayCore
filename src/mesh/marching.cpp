@@ -582,6 +582,10 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
     // identical index array and identical ranges. Byte-identity with the serial
     // path is by construction rather than by tolerance, which is the house rule
     // for anything the pool touches.
+    // Bound const so the parallel phase below cannot write to it, and so a
+    // reader can see that it does not: every thread looks this map up and none
+    // of them touches it.
+    const auto& shared_straddlers = straddlers;
     std::vector<ShellCollector> recorded(keys->size());
     parallel::for_range(keys->size(), 1, [&](std::size_t first, std::size_t last) {
         for (std::size_t ki = first; ki < last; ++ki) {
@@ -593,7 +597,7 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
             // The key's straddlers are recorded after its own cells, which is
             // where the serial loop emitted them, so the replay below lands
             // them inside this key's range exactly as before.
-            if (auto it = straddlers.find(key); it != straddlers.end())
+            if (auto it = shared_straddlers.find(key); it != shared_straddlers.end())
                 for (const ShellTriangle& tri : it->second) {
                     std::uint32_t v[3];
                     for (int c = 0; c < 3; ++c)
