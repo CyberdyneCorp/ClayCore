@@ -586,11 +586,33 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
     // reader can see that it does not: every thread looks this map up and none
     // of them touches it.
     const auto& shared_straddlers = straddlers;
-    std::vector<ShellCollector> recorded(keys->size());
-    parallel::for_range(keys->size(), 1, [&](std::size_t first, std::size_t last) {
-        for (std::size_t ki = first; ki < last; ++ki) {
+    // IN WAVES, because the recordings are transient memory that scales with
+    // the model. Each brick's recorder holds one entry per edge_vertex call —
+    // three per triangle, undeduplicated, since the welding it feeds is what
+    // deduplicates — which measured ~40 KB per surface brick. Recording every
+    // brick before welding any of them cost 94 MB on a 2,327-brick sphere and
+    // would cost several hundred on a dense model, on a device that kills apps
+    // for memory and whose brick budget is already a named concern.
+    //
+    // A wave is marched in parallel, welded, and its buffers reused. The weld
+    // still walks keys in order across waves, so the builder sees the same call
+    // sequence and the output is unchanged; only the peak is bounded. The wave
+    // is large enough that the pool still has many chunks per worker to balance
+    // across, so bounding the memory costs no parallelism.
+    constexpr std::size_t kBricksPerWave = 512;
+    std::vector<ShellCollector> recorded;
+    Builder b(cf3(0, 0, 0), vs);
+    std::vector<std::uint32_t> remap;
+    for (std::size_t wave = 0; wave < keys->size(); wave += kBricksPerWave) {
+    const std::size_t wave_end = std::min(wave + kBricksPerWave, keys->size());
+    const std::size_t wave_n = wave_end - wave;
+    recorded.clear();
+    recorded.resize(wave_n);
+    parallel::for_range(wave_n, 1, [&](std::size_t first, std::size_t last) {
+        for (std::size_t w = first; w < last; ++w) {
+            const std::size_t ki = wave + w;
             const brick::BrickKey& key = (*keys)[ki];
-            ShellCollector& rec = recorded[ki];
+            ShellCollector& rec = recorded[w];
             int cmin[3] = {key.x * dim, key.y * dim, key.z * dim};
             int cmax[3] = {key.x * dim + dim, key.y * dim + dim, key.z * dim + dim};
             march_cells(rec, global_sample, cmin, cmax);
@@ -607,12 +629,11 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
         }
     });
 
-    Builder b(cf3(0, 0, 0), vs);
-    std::vector<std::uint32_t> remap;
-    for (std::size_t ki = 0; ki < keys->size(); ++ki) {
+    for (std::size_t w = 0; w < wave_n; ++w) {
+        const std::size_t ki = wave + w;
         const std::uint32_t v0 = static_cast<std::uint32_t>(b.out.positions.size());
         const std::uint32_t i0 = static_cast<std::uint32_t>(b.out.indices.size());
-        const ShellCollector& rec = recorded[ki];
+        const ShellCollector& rec = recorded[w];
         // ShellCollector does not weld, so one lattice edge used by several
         // tets appears several times here; the Builder dedups them exactly as
         // it deduped the repeated calls the serial march made.
@@ -627,6 +648,7 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
             out_ranges->push_back({(*keys)[ki], v0,
                                    static_cast<std::uint32_t>(b.out.positions.size()) - v0, i0,
                                    static_cast<std::uint32_t>(b.out.indices.size()) - i0});
+    }
     }
     Mesh m = std::move(b.out);
     // Level 0 only: the per-brick culled tapes are bit-identical to the full

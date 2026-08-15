@@ -11,6 +11,16 @@
       visibly a shared read and not a shared write.
 - [x] 1.4 The source states why the welding cannot be sharded, since "bricks are
       independent" is true of the march and false of the weld.
+- [x] 1.5 MARCH IN WAVES. Recording every brick before welding any of them made
+      the transient recorder memory scale with the model — measured 94 MB on a
+      2,327-brick sphere, and several hundred on a dense one, on a device that
+      kills apps for memory and whose brick budget is already a named concern
+      (`add-brick-cache-eviction`). A wave of 512 bricks is marched, welded and
+      its buffers reused, which bounds that contribution to a CONSTANT instead:
+      94 MB -> 51 MB on the same fixture, and flat as the model grows. The weld
+      still walks keys in order across waves, so the output is unchanged
+      (verified: same hash) and the benchmark is unchanged (7.46 -> 7.56 ms,
+      inside the noise).
 
 ## 2. Evidence
 
@@ -25,8 +35,13 @@
 - [x] 2.4 In-tree test that meshing from INSIDE a pooled loop gives the same
       mesh, so the nesting guard and this fan-out compose.
 - [x] 2.5 ThreadSanitizer over the brick, mesh and pool suites: no races
-      (verified the runtime was actually linked and instrumented).
+      (verified the runtime was actually linked and instrumented). Needs
+      `setarch -R` on this kernel — TSan aborts with "unexpected memory
+      mapping" under the default ASLR entropy, which is an environment failure
+      and not a race report; noted so the next person does not read the abort
+      as a finding.
 - [x] 2.6 asan/ubsan green.
+- [x] 2.6b Peak-RSS measured before and after the waving, on the same fixture.
 - [x] 2.7 Before/after measured back to back on the same machine, both binaries
       real: 276 bricks 30.9 ms -> 7.46 ms, 80 bricks with gradients 10.9 ms ->
       4.49 ms, an 8-brick dab 1.37 ms -> 0.98 ms.
