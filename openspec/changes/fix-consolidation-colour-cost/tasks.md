@@ -42,12 +42,30 @@
       session and **248.2 ms** at `196d403`, the last commit before colour.
       That is the `ac7460a` residual (271.9 ms) and nothing more, which is what
       this change set out to recover.
-- [ ] 3.2 Device gate on the reference iPad (`iPad15,5`, UDID
-      `00008122-000410410A6B801C`), from a clean tree. `sdf_consolidate` back
-      inside its 786 ms `operation` budget, and `mask_extrude` reported —
-      whether the same fix covers it is measured here, not assumed.
-- [ ] 3.3 Commit `tests/device/last-gate.json` from the passing run. The
-      budget is NOT re-seeded: `check_device_bench.py --update` is not run.
+- [x] 3.2 Device gate on the reference iPad (`iPad15,5`, UDID
+      `00008122-000410410A6B801C`), from a clean tree, thermal `nominal` at
+      both ends. **`sdf_consolidate` 916.4 ms -> 678.8 ms**, back inside its
+      786 ms budget and no longer a failure. It is still 1.29x the v0.30.0
+      baseline of 524.3 ms — a larger residual than the Mac's 1.12x, so the
+      out-parameter costs more on the tablet than it does here.
+
+      **`mask_extrude` is NOT covered: 3695 ms -> 3787 ms, unmoved.** That was
+      inference in the proposal and it was wrong; it needs its own bisect. It
+      has also crossed its budget (3751 ms) rather than merely regressing.
+
+      Recorded because a gate is not a scoreboard: the first attempt CRASHED,
+      `testVoxelSessionsAndGallery` killed by signal on device, no results
+      collected. The retry completed. Not reproduced, not diagnosed, and not
+      counted as a pass for anything.
+- [ ] 3.3 Commit `tests/device/last-gate.json` from the passing run. BLOCKED:
+      the gate does not pass, so no stamp was written and there is nothing to
+      commit. Two cases still fail — `mask_extrude` above, and
+      `sdf_stamp_cpu` at 6.43 ms against a 4.32 ms baseline (x1.49). The
+      second is very likely device noise rather than this change: nothing on
+      the stamp path went through consolidation, and `sdf_stamp_bricks` moved
+      the OTHER way over the same two runs (5.68 -> 5.40 ms). "Very likely" is
+      not measured, and is the reason this box is not ticked.
+      `check_device_bench.py --update` is still not run.
 
 ## 4. What the gate could not see
 
