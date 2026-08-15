@@ -62,10 +62,15 @@ FLOORS = {
     # #119 correctly predicted was parallel (unlike the verbs, where the
     # snapshot turned out to dominate). 42.1 -> 7.0 ms, 6.0x.
     #
-    # Gateable here, unusually, because 6x is well outside runner spread: this
-    # ceiling is set at roughly twice the parallel figure, so it trips if the
-    # split is lost without flaking on a slower machine.
-    "BM_VoxelRasterizeTape": {"max_ms": 15},
+    # The ceiling is set from the RUNNER, not from a development machine, and
+    # the first attempt got that wrong: 15 ms was twice the 7.0 ms measured
+    # locally, and CI runs this at 21.3 ms. The runner is ~3x slower — which is
+    # the spread every other note in this file warns about and this one talked
+    # itself out of.
+    #
+    # 60 ms is ~2.8x the observed runner figure and well under the ~128 ms the
+    # serial path would take there, so it still catches the split being lost.
+    "BM_VoxelRasterizeTape": {"max_ms": 60},
     "BM_VoxelMeshSparse64Chunks": {"max_ms": 120},
     # Part 2 of the same issue: two chunks of that 64-chunk grid, meshed
     # through the regional call. It is the bench above divided by 32 — 0.40 ms
