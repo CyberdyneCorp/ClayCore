@@ -1,3 +1,19 @@
+> **ARCHIVED WITH A CORRECTION (2026-08-14).** This change's `MODIFIED`
+> requirement for `c-abi` — *Armatures across the ABI* — was written BEFORE
+> `add-armature-node-signs` (#99) landed, and it was archived afterwards. Applying
+> it as written rolled the living spec back to the pre-signs text in two places:
+> it deleted the paragraph requiring a per-node sign, its setter and the fifth
+> tree edit, and it narrowed the readback paragraph to drop the signs readback
+> and its padding rule. Both were restored by hand in the archiving commit; the
+> delta below is left as it was written so the record is what happened.
+>
+> **The general hazard, which is why this note exists:** a `MODIFIED` delta
+> carries a full replacement body, so it silently reverts anything added to that
+> requirement between the delta being written and the change being archived. A
+> long-unarchived change with a `MODIFIED` requirement is a rollback waiting to
+> be applied. Archive promptly, or re-read the living requirement before
+> archiving late.
+
 # Proposal: read a placed armature's tree back
 
 ## Why

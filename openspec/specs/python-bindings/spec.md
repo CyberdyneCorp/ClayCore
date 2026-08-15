@@ -612,3 +612,115 @@ The module SHALL expose resolving a path into a tube, with the point type, the s
 - **WHEN** the armature example runs
 - **THEN** it builds a rig holding negative nodes and renders the carved result alongside the all-positive rig
 
+### Requirement: MeshSculptor
+`pyclay` SHALL expose a `MeshSculptor` constructed over a `Mesh` — including the borrowed mesh a mesh LAYER hands back, so sculpting a layer edits the document's own triangles rather than a copy.
+
+It SHALL expose one stamp, one whole stroke, a ray query, a BVH refresh, and the counts a caller needs to see the structure it built.
+
+Sculpting a borrowed mesh whose layer has been removed SHALL raise, as every other borrowed-mesh access already does.
+
+A LOCKED or GHOSTED layer SHALL refuse to be sculpted, because those flags mean "never edited" and a vertex displacement is an edit.
+
+#### Scenario: A mesh layer is sculpted in place
+- **WHEN** a document's mesh layer is fetched, sculpted through a `MeshSculptor`, and the layer is read back
+- **THEN** the layer's positions show the edit and its indices and quads are unchanged
+
+#### Scenario: A protected layer refuses
+- **WHEN** a sculptor is asked to stamp a mesh borrowed from a locked or ghosted layer
+- **THEN** it raises and the mesh is unchanged
+
+### Requirement: The verbs and their settings from Python
+`pyclay` SHALL expose the verb set as an enumeration and the brush settings as keyword arguments with the same defaults the C++ header declares, so a Python caller and a C caller reading the same documentation get the same stroke.
+
+The signed convention SHALL be preserved: one `pinch` verb whose negative strength magnifies, and one `flatten` verb taking the `TwoSided` / `CutOnly` / `FillOnly` mode.
+
+Invalid arguments SHALL raise rather than be clamped, matching the C ABI's refusals so the two do not disagree about what a value means.
+
+#### Scenario: The bindings agree with the ABI about a refusal
+- **WHEN** a non-positive radius or an out-of-range iteration count is passed
+- **THEN** Python raises and C returns `CLAY_ERROR_INVALID_ARGUMENT`
+
+### Requirement: VertexDeltas from Python
+`pyclay` SHALL expose the vertex-delta record with its vertex count, revert, apply and clear, and it SHALL be usable as one undo step across a whole gesture.
+
+#### Scenario: Undo from Python is bit-exact
+- **WHEN** a stroke is applied with a record and the record is reverted
+- **THEN** the mesh's positions and normals compare equal bit for bit to a copy taken before the stroke
+
+### Requirement: Binding parity holds
+`tools/check_binding_parity.py` SHALL pass with every capability added here reachable from the C ABI, or exempt with a stated reason.
+
+#### Scenario: The gate passes
+- **WHEN** the parity gate runs against the built module and `clay.h`
+- **THEN** it reports no unmatched capability and no stale exemption
+
+### Requirement: Quad meshing from Python
+`pyclay` SHALL expose quad meshing on a document and on a voxel grid, taking a lattice cell size OR a target quad count, a tolerance, an iteration cap and a mode, and returning a `Mesh`.
+
+The mode SHALL be spelled as a string, as the mesher choice already is, and an unrecognised one SHALL raise rather than fall back. Asking a document for the voxel-only faces mode SHALL raise, for the same reason the C ABI refuses it.
+
+Every entry point SHALL carry a name in the C ABI under the prefix rules the binding-parity gate applies, so the surface stays reachable from C without an exemption.
+
+The docstrings SHALL state that this is a lattice-derived quad grid and NOT field-aligned retopology — no edge loops, no feature-placed poles, not animation-ready — and SHALL state that a target is approached rather than hit.
+
+The count knobs SHALL take the C ABI's rules, value for value, so that one input gets one answer in both bindings. A tolerance or an iteration cap of zero or below SHALL mean the DEFAULT rather than raise, because that is what `clay_quad_params` documents and what a C caller who declared only the original struct layout sends; a negative iteration cap, a non-finite tolerance, a tolerance of 1 or more, and a target above `CLAY_MAX_BATCH` SHALL be refused in both. A target too large to be read as an integer at all SHALL raise this API's own error and not leak the binding library's cast failure.
+
+#### Scenario: The count knobs default and refuse identically in both bindings
+- **WHEN** a script passes a tolerance or an iteration cap of zero, the values the C descriptor treats as "use the default"
+- **THEN** the call meshes with the defaults rather than raising
+- **AND** a negative iteration cap, a tolerance of 1 or more, and a target above the batch ceiling each raise, as they do across the C ABI
+
+#### Scenario: A document quad-meshes from Python
+- **WHEN** a document is quad-meshed at a given cell size
+- **THEN** the returned mesh reports a non-zero quad count and its triangles are that quad list's triangulation
+
+#### Scenario: An unknown mode raises
+- **WHEN** a mode outside the documented list is passed
+- **THEN** a `ValueError` names the modes that exist
+
+#### Scenario: Faces mode on a document raises
+- **WHEN** a document is asked for the voxel-only faces mode
+- **THEN** it raises, naming the voxel grid as the source that mode belongs to
+
+### Requirement: A Python mesh exposes its quads as numpy
+`Mesh` SHALL expose its quads as a numpy view shaped `(Q, 4)` of `uint32`, zero-copy and lifetime-bound to the mesh exactly as the position, normal, colour, uv and index views already are, and SHALL expose the quad count.
+
+A mesh with no quads SHALL present an empty `(0, 4)` array, matching how the index view already presents an empty mesh, so a caller can shape code against it without a null check.
+
+The existing `indices` view SHALL keep returning the triangulation shaped `(T, 3)`, and `triangle_count` SHALL keep counting triangles. Nothing an existing script reads changes value.
+
+`Mesh` SHALL also report how the mesh was produced — the cell size, the target asked for, the count reached, the iterations spent, whether it converged and whether it clamped — so a script that asks for a count can print what it got. A mesh that was not quad-meshed SHALL raise rather than report zeroes.
+
+#### Scenario: Quads come back as numpy
+- **WHEN** a script reads the quad view of a quad mesh
+- **THEN** it is an `(Q, 4)` uint32 array whose every entry indexes a vertex, and modifying the mesh's owner does not invalidate it while the view lives
+
+#### Scenario: A triangle mesh has an empty quad view
+- **WHEN** a script reads the quad view of a mesh from any existing mesher or from a file
+- **THEN** it is an empty `(0, 4)` array and the quad count is zero
+
+#### Scenario: The report is printable
+- **WHEN** a script quad-meshes with a target and reads the report
+- **THEN** it names the cell size, the target, the count actually produced, and whether the search converged
+
+### Requirement: VoxelGrid.rasterize_mesh
+`pyclay` SHALL expose mesh rasterization on `VoxelGrid`, taking a `Mesh` and an optional region, with the region defaulting to the mesh's own bounds.
+
+Invalid arguments SHALL raise rather than be clamped, matching the C ABI's refusals so the two do not disagree about what a value means.
+
+The GIL SHALL be released around the work, as it is for the other heavy grid calls.
+
+#### Scenario: An imported model reaches the voxel verbs
+- **WHEN** a mesh is loaded and rasterized, and a sculpting verb is then applied
+- **THEN** the grid is occupied and the verb changes cells, with no document constructed on the way
+
+#### Scenario: The bindings agree with the ABI about a refusal
+- **WHEN** an inverted or malformed region is passed
+- **THEN** Python raises and C returns `CLAY_ERROR_INVALID_ARGUMENT`
+
+<!-- Binding parity is NOT restated here. `mesh-fixed-topology-brushes` added
+     "Binding parity holds" to this capability's living spec, and a delta that
+     re-adds an existing requirement is refused on archive — correctly: the
+     requirement is standing, and every change owes it rather than each one
+     declaring its own copy. -->
+

@@ -132,3 +132,68 @@ The fixture's own expectations SHALL be gated by the test suite against both the
 - **WHEN** a case's recorded distances are examined
 - **THEN** at least one probe lies near that case's surface rather than all of them in empty space
 
+### Requirement: The SwiftPM library product is statically linked
+The `claycore` SwiftPM library product SHALL be declared with an explicit
+`type: .static` rather than left automatic.
+
+An automatic product lets the toolchain choose, and Xcode 26 chooses a dynamic
+`PackageProduct` framework in Debug builds. The product's only target carries no
+code — it exists to hold the `Metal` and `Foundation` linker settings a
+`binaryTarget` cannot — so nothing in it references the slice archive and the
+linker pulls no objects from it. The framework then exports no `clay_*` symbol
+and every consuming application fails to link, while the archive itself contains
+every symbol.
+
+A gate SHALL check this declaration in CI. Where a Swift toolchain is available
+the gate SHALL read the product's type from SwiftPM itself; where one is not it
+MAY read the manifest as text, and SHALL report which of the two it did, so a
+passing result is not read as a stronger claim than it is.
+
+The gate SHALL state, in its failure output, why the linkage matters — the
+symptom is a wall of undefined symbols in a consuming app and points nowhere
+near this manifest.
+
+#### Scenario: An Xcode consumer links
+- **WHEN** an application consumes the package on a toolchain that would build an automatic library product as a dynamic framework
+- **THEN** the product is static, the archive's objects are linked into the client, and the application's `clay_*` symbols resolve
+
+#### Scenario: The linkage cannot silently revert
+- **WHEN** the explicit static declaration is removed from the manifest
+- **THEN** the CI gate fails and names the product, the required declaration and the consequence
+
+#### Scenario: The gate does not overstate what it checked
+- **WHEN** the gate runs on a machine with no Swift toolchain
+- **THEN** it reports that it read the manifest as text rather than through SwiftPM
+
+### Requirement: The kernel package and the tape encoding share a version
+The published kernels artifact and the tape encoding a consumer feeds them SHALL carry one version. A host compiles the published headers and feeds them an exported tape; those two only work together, so they SHALL NOT be versioned independently.
+
+The host parity fixture SHALL cover the exported-tape path, not only the fixture's own bundled tapes: a consumer's evaluator agreeing on a fixture and disagreeing on a live document is the failure this fixture exists to prevent.
+
+#### Scenario: The package states the tape version it expects
+- **WHEN** the kernels artifact is built
+- **THEN** it records the tape encoding version its headers evaluate
+
+#### Scenario: The fixture covers a live tape
+- **WHEN** the parity fixture is exercised
+- **THEN** it includes a tape obtained through the export path, evaluated by the published headers, and gates it at the same tolerance
+
+### Requirement: The host parity fixture is reachable from the C ABI
+The parity fixture SHALL be obtainable through the C ABI, not only by running the command-line tool. A host that consumes this library as a packaged framework runs its tests against that framework and cannot invoke a tool that is not in it, so a fixture reachable only from the CLI is a gate that host cannot run.
+
+The bytes obtained through the ABI SHALL be identical to those the command-line tool writes, and SHALL be deterministic across calls within one build, so that a consumer can diff two runs and attribute any difference to a change it made.
+
+The fixture SHALL carry what a consumer needs to gate its own evaluator without consulting this library again: the composed tapes, the probe points, this library's reference distance and colour at each probe, the tolerances to apply, and the safe step scale a sphere tracer needs.
+
+#### Scenario: A host gates its preview from its own test bundle
+- **WHEN** a consumer linking only the packaged library requests the fixture through the ABI and evaluates the same tapes with its own shader
+- **THEN** it can assert agreement within the stated tolerances without invoking any tool outside its bundle
+
+#### Scenario: The two producers agree
+- **WHEN** the fixture is obtained through the ABI and written by the command-line tool from the same build
+- **THEN** the two are byte-identical
+
+#### Scenario: Repeated calls are diffable
+- **WHEN** the fixture is requested twice in one process
+- **THEN** the bytes are identical, so a difference between two runs is a change in the library rather than in the generator
+

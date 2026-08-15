@@ -531,3 +531,189 @@ The cost SHALL follow the chunks named and not the grid: meshing k of a grid's n
 - **WHEN** one brush dab on a realistic sculpt dirties a handful of a grid's occupied chunks and those chunks are re-meshed
 - **THEN** the work is a small multiple of one chunk's cost rather than the whole grid's, and the ratio to the whole-grid re-mesh is about the ratio of the counts
 
+### Requirement: A voxel grid meshes to quads in two modes
+`VoxelGrid` SHALL provide a quad mesher offering two modes, because a voxel sculpt is two different subjects depending on what the user made.
+
+**Dual mode** SHALL be the lattice dual over the same occupancy field `mesh_smooth` builds — the rounded form, quads meeting four to a vertex on average — generalised to a lattice cell size other than the grid's voxel size by sampling that occupancy TRILINEARLY.
+
+At the grid's own voxel size with no blur the sampler reads exactly the values `mesh_smooth` reads, so dual mode SHALL return `mesh_smooth`'s mesh vertex for vertex and index for index, differing only by the quad array. This identity is what keeps the two on one code path rather than two that drift.
+
+A cell size COARSER than a voxel low-passes the occupancy and CAN drop a one-voxel-thick feature entirely — the same failure `blur` already carries, for the same reason, and stated in the same place. A cell size FINER than a voxel resamples the same step field: it adds quads and no detail, so the count search SHALL clamp there and report that it clamped.
+
+**Faces mode** SHALL emit one planar, axis-aligned quad per exposed voxel face — the greedy sweep with merging switched off. It SHALL NOT change `mesh_greedy`, whose merged output and its existing per-chunk guarantees are untouched.
+
+Faces mode SHALL WELD its corners, keyed by lattice corner AND palette index. Today's `emit_quad` pushes four fresh vertices per face, so a greedy mesh arrives in a DCC as disconnected rectangles; welding makes it a connected quad grid within a colour region, and splits it at a colour boundary so per-face palette colour survives — which is why those vertices were duplicated in the first place.
+
+Faces mode SHALL NOT emit vertex normals. A welded corner is shared by faces pointing three ways and has no single normal; averaging would round a cube and duplicating would undo the weld. The quads are planar, so a consumer derives the face normal from the face. A caller who needs per-face normals uses `mesh_greedy` and gets triangles, as today.
+
+Faces mode has no cell size — its lattice is the grid. Its count lever SHALL be the multi-resolution LEVEL the grid already carries, so its granularity is roughly a factor of four per step, and a requested target SHALL pick the nearest level. This SHALL be stated, because a caller who asks for fifty thousand quads and receives twelve thousand needs to know a level was chosen rather than a bug hit.
+
+The faces search SHALL be a WALK of that stack and not a search over a cell size that is then rounded to a level: it meshes the coarsest level first, stops at the first level whose count reaches or passes the target, and returns the nearer of the two levels it landed between. The count rises with every level, so no later level can be nearer. The walk SHALL mesh each level at most once, and it starts at the coarsest, so it costs one mesh for every level up to and including the one that stops it: a target met at level k costs k+1 meshes, which is what `iterations` SHALL report. A caller budgeting for this SHALL be told to price the stack's length and not the bracketing pair, because the levels below the bracket were meshed to reach it. `max_iterations` SHALL NOT apply to it: a stack is its own bound, and because each level holds about a quarter of the next one's faces, walking the whole stack costs about a third more than meshing its finest level alone — which a target above every level buys in any case.
+
+With NO target the count search SHALL be the plain quad mesher with a report attached, in both modes and for every input the plain mesher takes. A level the grid does not have SHALL therefore come back as an EMPTY mesh and a zeroed report, as the plain mesher already answers it, rather than be clamped onto the finest level — clamping would hand a caller who passed a stale level a full-resolution mesh and a report naming a level they did not ask for.
+
+`clamped` in faces mode SHALL mean THE STACK RAN OUT — the target is below what the COARSEST LEVEL THAT YIELDS ANYTHING gives, or above what the finest yields. The qualifier is normative, not prose: the stack is not a strict mip, a sculpt made only at a fine level leaves the coarse levels EMPTY, and an empty level meshes to zero quads, which is below every target without being a level the caller can be handed. Reading the coarse end off level 0 would therefore report a grid whose every usable level overshoots as if it bracketed the target. A level whose count EQUALS the target SHALL NOT be reported as clamped — nothing overshot and nothing ran out. A target falling BETWEEN two levels SHALL NOT be reported as clamped even when the level returned is far from it; that is what `within_tolerance` false says. The documented meaning of the flag and the search that sets it SHALL be the same thing, because this feature's premise is that a caller learns the behaviour from the documentation rather than from the mesh.
+
+#### Scenario: A faces target inside the stack brackets it and is not clamped
+- **WHEN** a multi-level grid is asked in faces mode for a count between two levels' counts
+- **THEN** both bracketing levels are meshed, the nearer one is returned and named in the report, and `clamped` is false
+- **AND** `iterations` is the stopping level's index plus one, counting every level meshed from the coarsest, rather than the two levels of the bracket
+
+#### Scenario: A faces target outside the stack reports the stack running out
+- **WHEN** a multi-level grid is asked in faces mode for a count below what its coarsest level yields, or above what its finest level yields
+- **THEN** the end level is returned and `clamped` is true, and a stack longer than `max_iterations` still reaches its end
+
+#### Scenario: An empty coarse level is not the coarse end of the stack
+- **WHEN** a grid sculpted only at a fine level — its coarse levels empty — is asked in faces mode for a count below what its first non-empty level yields
+- **THEN** that level's mesh is returned and `clamped` is true, because no level of this grid is nearer
+- **AND** the same grid asked for exactly that level's count reports `clamped` false and `within_tolerance` true
+
+#### Scenario: An untargeted fit at a level the grid does not have is empty
+- **WHEN** a grid is quad-meshed with no target at a level index beyond its stack, in either mode
+- **THEN** the mesh is empty and the report is zeroed, matching what the plain quad mesher returns for the same options
+
+#### Scenario: Dual mode at the grid's own resolution is the smooth mesh
+- **WHEN** a sculpt is quad-meshed in dual mode at the grid's voxel size with no blur
+- **THEN** the positions and triangle indices are identical to `mesh_smooth`'s, and the mesh additionally carries one quad per two triangles
+
+#### Scenario: Faces mode is one quad per exposed face
+- **WHEN** a solid block of voxels is quad-meshed in faces mode
+- **THEN** the output carries exactly one quad per exposed voxel face, every quad is planar and axis-aligned, and the quads cover exactly the surface `mesh_greedy` covers over the same cells
+
+#### Scenario: Faces mode welds within a colour and splits across one
+- **WHEN** a two-colour slab is quad-meshed in faces mode
+- **THEN** faces of the same palette index sharing a lattice corner share one vertex, and the corner on the boundary between two palette indices appears once per colour
+
+#### Scenario: Greedy meshing is untouched
+- **WHEN** `mesh_greedy` and `mesh_greedy_chunks` run after faces mode exists
+- **THEN** their output is identical, vertex for vertex and index for index, to what they produced before it
+
+#### Scenario: A cell finer than a voxel is clamped
+- **WHEN** dual mode is asked for a cell size below the grid's voxel size
+- **THEN** it meshes at the voxel size and reports that it clamped, rather than spending the quads on detail the grid does not hold
+
+### Requirement: A grid meshes smoothly as well as blockily
+A grid SHALL offer a smooth surface mesh beside `mesh_greedy`, so a sculpt can be displayed as a form rather than as boxes. Greedy meshing emits axis-aligned quads by construction, which is correct for hard-surface work and for export and is the wrong picture of an organic sculpt.
+
+The smooth mesher SHALL place one vertex per surface cell at the centroid of that cell's edge crossings, over occupancy sampled at voxel centres. The centroid is what does the smoothing: a corner cell's vertex is pulled toward the average of its crossings, so the corner rounds without any filtering step. No occupied cell SHALL disappear as a consequence of smoothing at the default setting — a lone voxel has a sign change on each of its six edges and SHALL still produce a surface.
+
+An optional occupancy blur MAY be offered for a smoother result and SHALL NOT be the default, because a blur is what erases thin features: an isolated voxel under a 3x3x3 tent sits near 0.3 occupancy, below the isolevel, and vanishes. A caller asking for it is asking for that trade.
+
+The documentation SHALL state which setting an organic sculpt wants, because the default is not it: the unblurred surface rounds corners but still terraces, since every crossing over binary occupancy interpolates to the same midpoint. One blur pass is what reads as clay. A default that silently deletes thin detail is the wrong default however good it looks, so the recommendation belongs in prose rather than in the default.
+
+Vertex colour SHALL be the average of the palette colours of the occupied cells adjacent to that vertex. A smooth surface has no per-quad facet to carry one palette entry, so two colours meeting gradate across a cell rather than meeting on a line.
+
+`mesh_greedy` SHALL be unchanged in behaviour and output. It remains what export uses and what a hard-surface voxel sculpt wants, and the smooth mesher SHALL NOT be described as replacing it.
+
+The smooth mesher SHALL be documented as a PREVIEW path and SHALL NOT claim manifold or watertight output, for the reason `mesh/surface_nets.h` already gives: a cell crossed twice by the surface receives one vertex and the sheets pinch.
+
+#### Scenario: A cube sculpt rounds rather than staying a cube
+- **WHEN** a solid box of voxels is meshed smoothly
+- **THEN** its corners are rounded, its faces are not planar quads spanning the box, and the same grid meshed with `mesh_greedy` still returns the flat-faced box unchanged
+
+#### Scenario: A lone voxel survives
+- **WHEN** a grid holding one occupied cell is meshed smoothly at the default setting
+- **THEN** it produces a closed surface around that cell rather than an empty mesh
+
+#### Scenario: Colour blends across a boundary rather than facetting
+- **WHEN** two adjacent regions of different palette indices are meshed smoothly
+- **THEN** vertices between them carry a blend of the two palette colours, and no vertex carries a colour absent from the palette
+
+#### Scenario: The blocky mesh is untouched
+- **WHEN** any grid is meshed with `mesh_greedy` before and after this change
+- **THEN** the vertex and index buffers are byte-identical
+
+### Requirement: A grid converts to a field without a mesh in between
+A grid SHALL convert directly to a sampled field, so a sculpt can re-enter the document as an operand. The existing route — mesh the grid, sample the triangles — resamples twice, builds a BVH to do it, and drops the palette, and SHALL NOT be the only way back.
+
+The conversion SHALL locate the surface by reading occupancy with trilinear interpolation between cell CENTRES rather than as cells, so the isosurface is a surface and not a staircase. Nothing SHALL be filtered by default, so no occupied cell disappears; an optional blur MAY be offered and SHALL be documented as costing thin features.
+
+The result SHALL be redistanced, so its stored values are the distance to their own zero set and it carries a Lipschitz bound. A field whose values are an occupancy ramp crosses zero in the right place and says nothing truthful about distance, and every marcher and blend downstream would be working from a guess.
+
+The conversion SHALL accept ONE palette index, converting only the cells carrying it. A field has nowhere to store a palette, so converting per entry is what lets colour survive: the parts placed together are the whole solid and the interface between two colours is interior to their union.
+
+The conversion SHALL NOT modify the grid.
+
+The conversion SHALL be documented as LOSSY IN BOTH DIRECTIONS. Going to voxels quantises to the lattice and no care on the way back recovers a boolean's sharp edge; coming back turns binary occupancy into a distance. What is preserved is the surface within about a cell and the colour; what is not is exactness and the procedural history.
+
+#### Scenario: A sculpt makes the return trip
+- **WHEN** a document is blocked out with booleans, rasterized into a grid, sculpted with the voxel verbs, and converted back
+- **THEN** the result is an operand: it can be placed in a layer and booleaned against, and it evaluates solid where the sculpt is and carved where a subtraction was placed
+
+#### Scenario: The surface comes back within a cell
+- **WHEN** a ball of voxels is converted and the field is sampled where the ball's surface is, on and off axis
+- **THEN** the field reads within about a cell of zero at every such point
+
+#### Scenario: The field measures distance, not occupancy
+- **WHEN** a converted field is sampled deep inside the solid
+- **THEN** the value is approximately the distance to the surface rather than a fraction of an occupancy step
+
+#### Scenario: One palette entry converts alone
+- **WHEN** a grid carrying two palette entries is converted once per entry
+- **THEN** each result is solid only where its own entry's cells are, and an entry the grid does not carry converts to nothing
+
+### Requirement: The SDF-to-voxel direction states what it guarantees
+The direction that already worked SHALL say what it preserves, because a round trip is only as trustworthy as the half nobody wrote down. `rasterize_tape` sets the cells whose CENTRE evaluates inside the tape, over the world region it is given, and colours each from the tape's colour field through the nearest palette entry, adding entries as needed.
+
+What that guarantees, and what it does not, SHALL be stated rather than inferred:
+
+- **The surface moves by up to half a cell.** Membership is decided at the cell centre, so a surface passing through a cell includes or excludes the whole cell. This is the quantisation the return trip cannot undo and it is the reason the round-trip tolerance is a cell rather than zero.
+- **A feature thinner than a cell may vanish entirely.** Nothing samples between centres, so a wall, a rib or a gap narrower than the lattice can fall between them and leave no cells at all. Rasterizing finer is the only answer; the return trip cannot invent what was never stored.
+- **A sharp edge becomes a staircase**, at the cell size, in the lattice's axes. It comes back from a conversion rounded rather than sharp, and no care on the return recovers it — the information is gone at this step, not the next one.
+- **Colour is quantised to the palette**, by nearest entry, and entries are added as needed up to the palette's limit. Two colours closer than the palette's tolerance become one.
+- **The region bounds the work.** Content outside the region given is not rasterized and is not reported as missing; a caller that passes a region smaller than the document silently voxelises part of it.
+
+These are properties of sampling a continuous field onto a lattice rather than defects, and a caller SHALL be able to read them without measuring them.
+
+#### Scenario: The quantisation is stated where a caller reads it
+- **WHEN** a caller looks up what rasterizing a document into a grid preserves
+- **THEN** the half-cell surface movement, the loss of sub-cell features, the staircased edge, the palette quantisation and the region bound are all documented, rather than being discoverable only by experiment
+
+### Requirement: Rasterizing a triangle mesh
+`VoxelGrid` SHALL rasterize a triangle mesh directly into cells, in ONE sampling, without an intermediate field or document.
+
+Membership SHALL be decided at the cell centre by the GENERALIZED WINDING NUMBER, the same sign the mesh-to-field import uses. A mesh with a hole, a flipped normal or a self-intersection SHALL rasterize without inverting a half-space: the sign degrades continuously across an opening rather than flipping, which a ray-parity or nearest-triangle-normal test cannot do.
+
+The region SHALL be OPTIONAL and SHALL default to the mesh's own bounds. A document can be unbounded and a mesh cannot, so the default exists here where it does not for a tape. An explicit region SHALL bound the work, and content outside it SHALL be neither rasterized nor reported as missing.
+
+Colour SHALL come from the mesh's vertex colours where it carries them, read at the closest point on the nearest triangle and quantised to the palette by nearest entry. A mesh carrying no colours SHALL take a single neutral entry rather than a colour invented per cell.
+
+The grid's existing contracts SHALL hold unchanged: the change counter SHALL move only for cells whose value actually changed, so rasterizing the same mesh twice SHALL report no change the second time.
+
+An empty mesh, an empty or infinite region, and a mesh whose every index is out of range SHALL each leave the grid untouched and SHALL NOT be errors.
+
+#### Scenario: The solid the triangles bound is filled
+- **WHEN** a closed mesh is rasterized
+- **THEN** cells inside it are occupied, cells outside are not, and the occupied volume matches the solid's to within the surface's own half-cell
+
+#### Scenario: A hole degrades the sign rather than inverting it
+- **WHEN** a mesh missing one face is rasterized
+- **THEN** the interior is still occupied, the exterior is still empty, and most of the solid survives
+
+#### Scenario: One sampling keeps what two lose
+- **WHEN** a feature thinner than two cells is rasterized directly and through the field-then-document detour
+- **THEN** the direct path occupies at least as many cells, and on a thick shape the two agree to within about a cell of surface
+
+#### Scenario: Colour survives the direct path
+- **WHEN** a mesh carrying vertex colours is rasterized
+- **THEN** the palette carries the mesh's colours, where the same model through the detour arrives with none because a distance field carries no colour
+
+#### Scenario: Rasterizing twice changes nothing the second time
+- **WHEN** the same mesh is rasterized into the same grid twice
+- **THEN** the change counter moves on the first call and not on the second
+
+### Requirement: The BVH names the triangle nearest a point
+`mesh::Bvh` SHALL answer a closest-point query with the point on the surface, the source triangle carrying it, and that point's barycentric coordinates — so an attribute on the mesh can be read where the query landed.
+
+The unsigned-distance query SHALL be defined in terms of it, so the two cannot disagree about which point is nearest, and its results SHALL be unchanged.
+
+A tie between two equally near triangles SHALL resolve to the one found first, so the answer does not depend on the order the tree happened to be traversed in.
+
+#### Scenario: An attribute can be read off the nearest triangle
+- **WHEN** the closest point to a query is on a triangle whose corners carry different colours
+- **THEN** the returned barycentrics reconstruct the point from those corners, and interpolating the corner colours by them gives the colour at that point
+
+#### Scenario: Distances did not move
+- **WHEN** the same unsigned-distance and winding queries are run before and after this change
+- **THEN** the results are identical
+

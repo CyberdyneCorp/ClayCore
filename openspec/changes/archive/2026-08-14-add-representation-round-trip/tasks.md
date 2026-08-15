@@ -1,4 +1,11 @@
-# Tasks: add-representation-round-trip
+# Tasks: SUPERSEDED — see proposal.md
+
+Deliberately left unticked. `voxel-to-field` delivered this capability, and
+ticking these would claim its work for a plan that did not do it. Task 1.1 —
+"conversion in place, or a new layer beside the original" — was answered as a
+new layer beside the original, which is why the requirement in
+`specs/scene-model/` describes a design this library does not implement.
+
 
 - [ ] 1.1 DECIDE: conversion in place, or a new layer beside the original, and record why
 - [ ] 1.2 Voxel to narrow-band signed distance directly, without the mesh detour, with a real Lipschitz bound rather than the step function
