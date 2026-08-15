@@ -14,11 +14,17 @@
 
 ## Not done
 
-- **Up-sampling does not interpolate.** Occupancy is binary, so subdivision
-  splits a cell into eight children with the same index. That is exact — the
-  solid does not move — but it is not the smoothing an SDF or a mesh multires
-  would do, and a subdivided surface is blockier than a surface authored at the
-  fine level.
+- **Up-sampling does not interpolate — and WILL NOT.** Occupancy is binary, so
+  subdivision splits a cell into eight children with the same index. There is
+  nothing to interpolate except by inventing a smoothed boundary, and that is a
+  remesh rather than an up-sample: it would move the surface, breaking "adding a
+  level cannot move the surface", which is documented and tested.
+
+  The complaint behind it — a subdivided surface is blockier than one authored
+  at the fine level — is answered at DISPLAY time instead: `mesh_smooth` runs
+  surface nets over the same occupancy and rounds corners without erasing thin
+  features (#108). That is the right place for it, because it changes the
+  picture without changing what the grid stores.
 - ~~**Only whole-grid subdivision.**~~ **Answered by `refine-a-region`.** A level
   can now be refined over a region: outside it the level has no storage and
   reads its parent's value, so the lattice stays uniform and complete and only
@@ -26,10 +32,19 @@
   outside the region refines what it touched. The original cost stood as
   written — measured at exactly 8x per level over the occupied volume, on the
   same three-primitive form `docs/09` uses.
-- **No level-aware SDF bridges.** `rasterize_tape` and `sample_step_field` act
-  on the active level, which is correct but means rasterising into a stack fills
-  one level and averages/replays into the others rather than rasterising each at
-  its own resolution.
+- **No level-aware SDF bridges — and DELIBERATELY.** `rasterize_tape` and
+  `sample_step_field` act on the active level, so rasterising into a stack fills
+  one level and averages/replays into the others.
+
+  Sampling each level at its own cell centres is more faithful and costs the
+  invariant this stack is built on: a coarse level is the DOWNSAMPLE of the fine
+  one. Break it and `drop_level` starts changing the solid, and the detail map —
+  exactly the cells that differ from their parent — grows toward every cell,
+  taking the serialised size with it.
+
+  The gap is narrower than it reads, too: setting the active level and
+  rasterising already gives THAT level its true sampling. What is unavailable is
+  every level true at once, which is also the case that costs the most storage.
 - **No brick-cache work.** Stated rather than built, because the cache does not
   touch `VoxelGrid` at all.
 - [ ] 1.1 DECIDE and record: discrete levels vs adaptive refinement. The proposal recommends levels because the brush dither hashes a cell coordinate, and platform-reproducible strokes are enforced by the parity suite
