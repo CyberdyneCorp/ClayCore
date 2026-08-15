@@ -249,6 +249,94 @@ CLAY_FN cfloat3 cbend_curve_point(CLAY_FPTR guide, int count, cfloat3 p, float t
     return cf3(t0 + u * (t1 - t0), cdot(perp, f.normal), cdot(perp, f.binormal));
 }
 
+// A LATTICE (free-form deformation) cage — ZBrush's Gizmo Lattice, on an SDF
+// item rather than on vertices.
+//
+// The cage's control-point offsets ARE THE INVERSE WARP, which is the whole
+// design decision. Forward FFD has no closed-form inverse, and a claycore
+// deformer must run backwards: it answers "where did the material at p come
+// from". The three ways out are Newton-inverting per sample (iteration inside
+// every backend's inner loop — not this dialect), baking through a sampled
+// volume (exact, and the cage stops being editable), or authoring the cage AS
+// the inverse. This is the third.
+//
+// What that costs, stated rather than implied: this is NOT the exact inverse
+// of forward FFD. The two differ by a term proportional to how the basis VARIES
+// along the displacement, so the error points the way the basis gradient does —
+// it over-travels a drag toward rising weight and under-travels one pointing
+// away. `grab`'s weight always falls off along its drag, which is why that one
+// always under-travels; a lattice does not inherit the sign. Measured against
+// the forward cage on a mesh layer, the difference is under 1.5% of the drag
+// (examples/50_sdf_lattice.py).
+//
+// Cost per sample is nx * ny * nz multiply-adds, which is why divisions are
+// capped low here and not on the mesh lattice: that one evaluates once per
+// vertex, this one runs inside the raymarcher.
+#define CLAY_LATTICE_MAX_DIV 4
+
+// Where p sits in the box on one axis, clamped to [0, 1].
+//
+// Clamped because the offset field is only DEFINED over the cage: a point
+// beyond it takes the offset of the nearest part and travels rigidly. A
+// degenerate axis reads as the middle, so none of its control points are dead.
+CLAY_FN float clattice_param(float v, float lo, float hi) {
+    float span = hi - lo;
+    if (!(span > 1e-9f)) return 0.5f;
+    return cclamp((v - lo) / span, 0.0f, 1.0f);
+}
+
+CLAY_FN cfloat3 clattice_point(CLAY_FPTR offsets, int nx, int ny, int nz, cfloat3 lo, cfloat3 hi,
+                               cfloat3 p) {
+    if (nx < 2 || ny < 2 || nz < 2) return p;
+    // ONE FLAT local array, and the recurrence written inline rather than in a
+    // helper. An array out-parameter is not portable across this dialect —
+    // Metal wants an address space on the pointer and GLSL wants a sized inout
+    // — and a flat local is the spelling every profile accepts.
+    float basis[3 * CLAY_LATTICE_MAX_DIV];
+    int n[3];
+    float t[3];
+    n[0] = nx;
+    n[1] = ny;
+    n[2] = nz;
+    t[0] = clattice_param(p.x, lo.x, hi.x);
+    t[1] = clattice_param(p.y, lo.y, hi.y);
+    t[2] = clattice_param(p.z, lo.z, hi.z);
+    for (int a = 0; a < 3; ++a) {
+        // De Casteljau's recurrence rather than binomials times powers: no
+        // factorials, nothing to overflow, better conditioned.
+        int base = a * CLAY_LATTICE_MAX_DIV;
+        basis[base] = 1.0f;
+        for (int d = 1; d < n[a]; ++d) {
+            basis[base + d] = t[a] * basis[base + d - 1];
+            for (int i = d - 1; i > 0; --i)
+                basis[base + i] = (1.0f - t[a]) * basis[base + i] + t[a] * basis[base + i - 1];
+            basis[base] = (1.0f - t[a]) * basis[base];
+        }
+    }
+
+    cfloat3 sum = cf3(0, 0, 0);
+    for (int k = 0; k < nz; ++k)
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i < nx; ++i) {
+                float w = basis[i] * basis[CLAY_LATTICE_MAX_DIV + j] *
+                          basis[2 * CLAY_LATTICE_MAX_DIV + k];
+                int at = ((k * ny + j) * nx + i) * 3;
+                sum = sum + cf3(CLAY_AT(offsets, at), CLAY_AT(offsets, at + 1),
+                                CLAY_AT(offsets, at + 2)) * w;
+            }
+    // MINUS, and this is the whole inverse-cage convention in one operator.
+    //
+    // The offsets are what the artist DRAGGED, so that dragging a control
+    // point +X moves material +X — which is what a lattice means, and what the
+    // mesh lattice does with a plus for the same reason. This one is the
+    // INVERSE map, so it samples the undeformed field on the opposite side.
+    //
+    // Storing the already-negated sample offset instead would make the two
+    // lattices disagree about what a positive offset means, and every caller
+    // would have to remember which was which.
+    return p - sum;
+}
+
 // Spatial morph weights: the interpreter evaluates both subtrees and mixes
 // distances by w (a bound: lerped fields are not distances).
 CLAY_FN float ctransition_linear_weight(cfloat3 p, cfloat3 a, cfloat3 b, int ease_type) {

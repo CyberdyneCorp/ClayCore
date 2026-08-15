@@ -382,6 +382,20 @@ struct Deformer {
     // has no meaning here and is ignored.
     std::vector<StrokePoint> guide;
 
+    // The cage for `lattice`, and empty for every other type: nx*ny*nz
+    // control-point OFFSETS in x-fastest order. Like the guide above it does
+    // not fit the record, so the compiler writes it into the tape's blob and
+    // the record holds a handle — the machinery `bend_curve` added.
+    //
+    // OFFSETS rather than positions, so an untouched cage is exactly the
+    // identity, and they are the INVERSE warp: forward FFD has no closed-form
+    // inverse and a deformer must run backwards, so the cage is authored as the
+    // map it needs to be. It is not the EXACT inverse — it differs from forward
+    // FFD by a term proportional to how the basis varies along the
+    // displacement — but the offsets are what was DRAGGED, so material travels
+    // with the drag as it does on the mesh lattice.
+    std::vector<kernel::cfloat3> cage;
+
     // How many extension floats this type carries; the serializer and the
     // reader both take their count from here, dispatching on the type.
     static int ext_count(std::uint8_t type) {
@@ -390,6 +404,8 @@ struct Deformer {
         if (type == kernel::cdeform_grab || type == kernel::cdeform_pose) return 4;
         if (type == kernel::cdeform_magnify) return 1;
         if (type == kernel::cdeform_noise) return 1;
+        // The box, which is what the record has room for beside the handle.
+        if (type == kernel::cdeform_lattice) return 6;
         return 0;
     }
 
@@ -491,6 +507,62 @@ struct Deformer {
         d.guide = std::move(guide);
         return d;
     }
+    // A lattice cage over the item's local box. Divisions are clamped into
+    // [2, kMaxLatticeDivisions]; the cap is low because this is evaluated PER
+    // SAMPLE in the raymarcher, at nx*ny*nz multiply-adds each time — unlike
+    // the mesh lattice, which runs once per vertex and can afford far more.
+    //
+    // The offsets start at zero, which is exactly the identity. Set them with
+    // `set_cage_offset` and the compiler does the rest.
+    static constexpr int kMaxLatticeDivisions = CLAY_LATTICE_MAX_DIV;
+    static Deformer lattice(kernel::cfloat3 box_min, kernel::cfloat3 box_max, int nx = 3,
+                            int ny = 3, int nz = 3) {
+        Deformer d;
+        d.type = kernel::cdeform_lattice;
+        auto clamp_div = [](int n) {
+            return n < 2 ? 2 : (n > kMaxLatticeDivisions ? kMaxLatticeDivisions : n);
+        };
+        d.a = static_cast<float>(clamp_div(nx));
+        d.b = static_cast<float>(clamp_div(ny));
+        d.c = static_cast<float>(clamp_div(nz));
+        d.ext[0] = box_min.x;
+        d.ext[1] = box_min.y;
+        d.ext[2] = box_min.z;
+        d.ext[3] = box_max.x;
+        d.ext[4] = box_max.y;
+        d.ext[5] = box_max.z;
+        d.cage.assign(static_cast<std::size_t>(d.a) * static_cast<std::size_t>(d.b) *
+                          static_cast<std::size_t>(d.c),
+                      kernel::cf3(0, 0, 0));
+        return d;
+    }
+    // Drag one control point. Out-of-range indices write nowhere.
+    // `ck` rather than `k`: this struct already has a member called k.
+    void set_cage_offset(int i, int j, int ck, kernel::cfloat3 v) {
+        const int nx = static_cast<int>(a), ny = static_cast<int>(b), nz = static_cast<int>(c);
+        if (type != kernel::cdeform_lattice) return;
+        if (i < 0 || j < 0 || ck < 0 || i >= nx || j >= ny || ck >= nz) return;
+        cage[static_cast<std::size_t>((ck * ny + j) * nx + i)] = v;
+    }
+    kernel::cfloat3 cage_offset(int i, int j, int ck) const {
+        const int nx = static_cast<int>(a), ny = static_cast<int>(b), nz = static_cast<int>(c);
+        if (type != kernel::cdeform_lattice) return kernel::cf3(0, 0, 0);
+        if (i < 0 || j < 0 || ck < 0 || i >= nx || j >= ny || ck >= nz) return kernel::cf3(0, 0, 0);
+        return cage[static_cast<std::size_t>((ck * ny + j) * nx + i)];
+    }
+    // Where a control point started, derived from the box so the two cannot
+    // disagree.
+    kernel::cfloat3 cage_rest(int i, int j, int ck) const {
+        const int nx = static_cast<int>(a), ny = static_cast<int>(b), nz = static_cast<int>(c);
+        auto along = [](float lo, float hi, int idx, int count) {
+            return count < 2 ? lo
+                             : lo + (hi - lo) * (static_cast<float>(idx) /
+                                                 static_cast<float>(count - 1));
+        };
+        return kernel::cf3(along(ext[0], ext[3], i, nx), along(ext[1], ext[4], j, ny),
+                           along(ext[2], ext[5], ck, nz));
+    }
+
     static Deformer bend_radial(float r0, float r1, float dz, std::uint8_t ease = 0) {
         Deformer d;
         d.type = kernel::cdeform_bend_radial;

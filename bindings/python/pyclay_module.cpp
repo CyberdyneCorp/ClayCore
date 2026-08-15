@@ -1407,6 +1407,57 @@ NB_MODULE(pyclay, m) {
              },
              "a"_a, "b"_a, "v"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
              "Displace by v, eased along the segment a -> b")
+        .def("lattice",
+             [](nb::object self, nb::handle box, nb::handle offsets, int nx, int ny, int nz) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 const int cap = scene::Deformer::kMaxLatticeDivisions;
+                 if (nx < 2 || ny < 2 || nz < 2 || nx > cap || ny > cap || nz > cap)
+                     throw std::invalid_argument(
+                         "lattice divisions must be in [2, " + std::to_string(cap) +
+                         "] per axis: the cage is evaluated per sample, at nx*ny*nz "
+                         "multiply-adds each time");
+                 const math::Aabb b = to_aabb(box);
+                 if (b.empty())
+                     throw std::invalid_argument(
+                         "the cage's box is empty; there is nothing to span");
+                 scene::Deformer d = scene::Deformer::lattice(b.min, b.max, nx, ny, nz);
+                 if (!offsets.is_none()) {
+                     PointsView v = to_points(offsets);
+                     if (v.count != d.cage.size())
+                         throw std::invalid_argument(
+                             "offsets must have one entry per control point (" +
+                             std::to_string(d.cage.size()) + ")");
+                     for (std::size_t n = 0; n < d.cage.size(); ++n)
+                         d.cage[n] = kernel::cf3(v.data[n * 3], v.data[n * 3 + 1],
+                                                 v.data[n * 3 + 2]);
+                 }
+                 p.deformers.push_back(std::move(d));
+                 return self;
+             },
+             "box"_a, "offsets"_a = nb::none(), "nx"_a = 3, "ny"_a = 3, "nz"_a = 3,
+             nb::rv_policy::reference_internal,
+             "A LATTICE cage over the item's local `box` — ZBrush's Gizmo Lattice.\n\n"
+             "`offsets` is an (nx*ny*nz, 3) array of control-point offsets in\n"
+             "x-fastest order — index (i, j, k) at (k*ny + j)*nx + i — or None for\n"
+             "an untouched cage, which is exactly the identity.\n\n"
+             "The offsets are what you DRAGGED, and the cage is applied as the\n"
+             "INVERSE warp — which is the design decision rather than a detail:\n"
+             "forward FFD has no closed-form inverse, and a claycore deformer runs\n"
+             "backwards. Material travels WITH the drag, as on the mesh lattice.\n\n"
+             "It is not the EXACT inverse. It differs from forward FFD by a term\n"
+             "proportional to how the basis varies along the displacement, so it\n"
+             "over-travels a drag toward rising weight and under-travels one\n"
+             "pointing away — under 1.5% of the drag, measured against the forward\n"
+             "cage. (`grab` always under-travels, because its weight always falls\n"
+             "off along the drag; a lattice does not inherit that sign.)\n\n"
+             "For FORWARD FFD with no approximation, use the mesh-layer lattice\n"
+             "(`Lattice` with `MeshSculptor.lattice`) — which is what ZBrush and\n"
+             "Blender actually do, because a mesh knows where its vertices are.\n\n"
+             "Divisions are capped at 4 per axis, far below the mesh lattice's 32,\n"
+             "because this is evaluated PER SAMPLE inside the raymarcher.\n\n"
+             "Two per axis is exactly trilinear and the corners are interpolated.\n"
+             "A point outside the box travels rigidly with the nearest part of the\n"
+             "cage rather than being drawn onto it.")
         .def("bend_curve",
              [](nb::object self, nb::handle guide, float t0, float t1,
                 const std::string& point_type) {

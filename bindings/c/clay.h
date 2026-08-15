@@ -238,7 +238,27 @@ typedef enum clay_deform {
      *
      * Its guide does not fit a flat float array, so it is the one kind
      * clay_item_add_deformer does NOT take: use clay_item_add_bend_curve. */
-    CLAY_DEFORM_BEND_CURVE = 16
+    CLAY_DEFORM_BEND_CURVE = 16,
+    /* A LATTICE (free-form deformation) cage — ZBrush's Gizmo Lattice, on an
+     * SDF item.
+     *
+     * The cage's control-point OFFSETS are the INVERSE warp, and that is the
+     * design decision rather than an implementation detail: forward FFD has no
+     * closed-form inverse, and a claycore deformer runs backwards. It is not
+     * the EXACT inverse: it differs from forward FFD by a term proportional to
+     * how the basis varies along the displacement, so it over-travels a drag
+     * toward rising weight and under-travels one pointing away. Measured
+     * against the forward cage, the difference is under 1.5% of the drag.
+     * (CLAY_DEFORM_GRAB always under-travels, because its weight always falls
+     * off along the drag; a lattice does not inherit that sign.)
+     *
+     * For FORWARD FFD with no approximation, use the mesh-layer lattice
+     * (clay_mesh_lattice_*), which is what ZBrush and Blender actually do —
+     * a mesh knows where its vertices are, so nothing has to be inverted.
+     *
+     * Its cage does not fit a flat float array, so like CLAY_DEFORM_BEND_CURVE
+     * it has its own entry point: clay_item_add_lattice. */
+    CLAY_DEFORM_LATTICE = 17
 } clay_deform;
 
 /* Easing curves are given by index; 0 is linear. Only the taper deformer and
@@ -588,6 +608,23 @@ clay_result clay_item_add_deformer(clay_item* item, int32_t deform, const float*
  * t0 == t1. */
 clay_result clay_item_add_bend_curve(clay_item* item, const float* guide_xyz, size_t point_count,
                                      int32_t point_type, float t0, float t1);
+
+/* Appends a CLAY_DEFORM_LATTICE to the item's chain. Its own entry point
+ * because a cage is not a fixed number of floats.
+ *
+ * min/max give the cage's box in the item's LOCAL space; nx, ny, nz are control
+ * points per axis and must be in [2, 4]. `offsets_xyz` is nx*ny*nz x, y, z
+ * triples in x-fastest order — index (i, j, k) at ((k*ny + j)*nx + i)*3 — or
+ * NULL for an untouched cage, which is exactly the identity.
+ *
+ * The cap is four rather than the mesh lattice's 32 because this is evaluated
+ * PER SAMPLE inside the raymarcher, at nx*ny*nz multiply-adds each time.
+ *
+ * Evaluation is trivariate Bernstein, so two per axis is exactly trilinear and
+ * the corner control points are interpolated. A point outside the box travels
+ * rigidly with the nearest part of the cage rather than being drawn onto it. */
+clay_result clay_item_add_lattice(clay_item* item, const float min[3], const float max[3],
+                                  int32_t nx, int32_t ny, int32_t nz, const float* offsets_xyz);
 
 /* Repetition of the item, applied before the deformer chain (so an array
  * repeats the deformed shape). One per item: the last call wins.

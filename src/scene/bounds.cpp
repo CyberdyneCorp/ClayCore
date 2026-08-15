@@ -235,6 +235,16 @@ Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& defor
                 b = Aabb{cf3(-r, -r, b.min.z), cf3(r, r, b.max.z)};
                 break;
             }
+            case kernel::cdeform_lattice: {
+                // A Bernstein combination of the offsets is a convex
+                // combination, so no point moves further than the largest of
+                // them. Dilating by that is tight and needs no evaluation.
+                float reach = 0.0f;
+                for (const kernel::cfloat3& o : d.cage)
+                    reach = kernel::cmax(reach, kernel::clength(o));
+                b = b.dilated(reach);
+                break;
+            }
             case kernel::cdeform_bend_curve: {
                 // NOT contained by the undeformed item's own neighbourhood, as
                 // the rotations above are: a curve can carry material anywhere
@@ -399,6 +409,9 @@ bool deformers_break_exactness(const Node& item) {
         // Per-axis elongation leaves a flat plateau inside the stretch, which
         // is not a distance for any primitive.
         if (d.type == kernel::cdeform_elongate_axis) return true;
+        // A lattice warps space non-uniformly; the result is a bound field
+        // rather than a distance, whatever the Lipschitz factor comes out as.
+        if (d.type == kernel::cdeform_lattice) return true;
         if (d.type == kernel::cdeform_elongate && !prim_is_origin_symmetric(item.prim.type))
             return true;
     }
@@ -436,6 +449,44 @@ float deformer_lipschitz(const Node& item) {
             info = d.type == kernel::cdeform_twist_range
                        ? kernel::cfi_twist(info, d.k * ease_max_slope(d.ease), radius)
                        : kernel::cfi_bend(info, d.k * ease_max_slope(d.ease), radius);
+        } else if (d.type == kernel::cdeform_lattice) {
+            // The DIFFERENCES between neighbouring control points, not their
+            // magnitudes: the first says how fast the warp varies, the second
+            // only how far it moves material. A cage that translates an item
+            // rigidly has large offsets and zero gradient.
+            const int nx = static_cast<int>(d.a), ny = static_cast<int>(d.b),
+                      nz = static_cast<int>(d.c);
+            const kernel::cfloat3 extent =
+                kernel::cf3(d.ext[3] - d.ext[0], d.ext[4] - d.ext[1], d.ext[5] - d.ext[2]);
+            float worst[3] = {0.0f, 0.0f, 0.0f};
+            auto at = [&](int i, int j, int k) {
+                return d.cage[static_cast<std::size_t>((k * ny + j) * nx + i)];
+            };
+            if (!d.cage.empty() && nx >= 2 && ny >= 2 && nz >= 2) {
+                for (int k = 0; k < nz; ++k)
+                    for (int j = 0; j < ny; ++j)
+                        for (int i = 0; i < nx; ++i) {
+                            if (i + 1 < nx)
+                                worst[0] = kernel::cmax(
+                                    worst[0], kernel::clength(at(i + 1, j, k) - at(i, j, k)));
+                            if (j + 1 < ny)
+                                worst[1] = kernel::cmax(
+                                    worst[1], kernel::clength(at(i, j + 1, k) - at(i, j, k)));
+                            if (k + 1 < nz)
+                                worst[2] = kernel::cmax(
+                                    worst[2], kernel::clength(at(i, j, k + 1) - at(i, j, k)));
+                        }
+            }
+            // rate = degree * max|difference| / extent, the Bernstein
+            // derivative bound. A flat axis contributes nothing: every point
+            // reads the same parameter on it, so the warp cannot vary there.
+            auto rate = [](float diff, int count, float span) {
+                if (!(span > 1e-6f) || count < 2) return 0.0f;
+                return static_cast<float>(count - 1) * diff / span;
+            };
+            info = kernel::cfi_lattice(info, rate(worst[0], nx, kernel::cabs(extent.x)),
+                                       rate(worst[1], ny, kernel::cabs(extent.y)),
+                                       rate(worst[2], nz, kernel::cabs(extent.z)));
         } else if (d.type == kernel::cdeform_bend_curve) {
             // Both terms the geometry actually charges: the curvature
             // compression on the inside of the tightest bend, and the rescale

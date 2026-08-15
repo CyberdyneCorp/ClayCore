@@ -150,6 +150,26 @@ Document bend_along_curve() {
     return doc;
 }
 
+// A lattice with a NON-UNIFORM cage.
+//
+// Uniform would be a translation — the basis is a partition of unity — and a
+// backend that added the offsets and never evaluated the basis would pass it.
+// This one varies on every axis, so the Bernstein weights have to be right.
+Document lattice_cage() {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("caged");
+    Node n = item(Prim::box(cf3(0.5f, 0.7f, 0.4f)), cf3(0, 0, 0), kColorA);
+    scene::Deformer d =
+        scene::Deformer::lattice(cf3(-0.7f, -0.9f, -0.6f), cf3(0.7f, 0.9f, 0.6f), 3, 3, 2);
+    d.set_cage_offset(0, 2, 0, cf3(0.30f, 0.05f, -0.22f));
+    d.set_cage_offset(2, 2, 1, cf3(-0.28f, -0.10f, 0.24f));
+    d.set_cage_offset(1, 1, 0, cf3(0.0f, 0.26f, 0.12f));
+    d.set_cage_offset(1, 0, 1, cf3(0.14f, -0.18f, 0.0f));
+    n.deformers.push_back(d);
+    l.sdf->insert(n);
+    return doc;
+}
+
 Document region_deformer() {
     Document doc;
     Layer& l = doc.add_sdf_layer("region");
@@ -581,6 +601,9 @@ std::vector<FixtureCase> kernel_parity_cases() {
     add_case(&cases, "bend_along_curve",
              "an item bent along a guide that turns and climbs; frames come from the blob",
              bend_along_curve());
+    add_case(&cases, "lattice_cage",
+             "a lattice whose cage varies on every axis; offsets live in the blob",
+             lattice_cage());
     add_case(&cases, "deformer_region", "grab: a finitely supported pull on part of a sphere",
              region_deformer());
     add_case(&cases, "repetition_finite_grid", "clamped-cell array with neighbour evaluation",

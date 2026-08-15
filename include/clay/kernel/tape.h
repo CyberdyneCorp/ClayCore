@@ -264,6 +264,11 @@ enum CDeformType {
     // blob exactly as a sweep's does and the record holds a handle to it:
     // k = guide offset, a = guide vertex count, b = t0, c = t1.
     cdeform_bend_curve = 16,
+    // A lattice cage, as the INVERSE warp (see clattice_point). The offsets are
+    // blob-carried like a bend curve's guide; the box and divisions fit the
+    // record exactly: k = blob offset, a/b/c = nx/ny/nz, ext[0..2] = box min,
+    // ext[3..5] = box max.
+    cdeform_lattice = 17,
 };
 
 // Apply one deformer record to the local point. No deformer corrects the
@@ -319,6 +324,12 @@ CLAY_FN cfloat3 ctape_deform_point(CLAY_FPTR rec, CLAY_FPTR blob, cfloat3 p) {
     }
     if (type == cdeform_elongate_axis)
         return celongate_axis_point(p, cf3(CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3)));
+    if (type == cdeform_lattice) {
+        return clattice_point(CLAY_OFF(blob, CLAY_INT(CLAY_AT(rec, 1))), CLAY_INT(CLAY_AT(rec, 2)),
+                              CLAY_INT(CLAY_AT(rec, 3)), CLAY_INT(CLAY_AT(rec, 4)),
+                              cf3(CLAY_AT(rec, 6), CLAY_AT(rec, 7), CLAY_AT(rec, 8)),
+                              cf3(CLAY_AT(rec, 9), CLAY_AT(rec, 10), CLAY_AT(rec, 11)), p);
+    }
     if (type == cdeform_bend_curve) {
         return cbend_curve_point(CLAY_OFF(blob, CLAY_INT(CLAY_AT(rec, 1))),
                                  CLAY_INT(CLAY_AT(rec, 2)), p, CLAY_AT(rec, 3), CLAY_AT(rec, 4));
