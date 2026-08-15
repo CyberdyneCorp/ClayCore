@@ -34,6 +34,22 @@ FLOORS = {
     # this file's own docstring, and the DEVICE GATE is what holds the tighter
     # line — it is what found this one.
     "BM_VoxelAddLevelWhole": {"max_ms": 2.5},
+    # Writing INTO a whole level stack — the same defect #137 hoisted out of
+    # subdivide_into, in the two places propagation reaches it: record_detail
+    # (via refresh_detail, per child of every downward step) and propagate_up
+    # (per child, recursing per level). Both constant-true on a whole level,
+    # both costing a chunk_key() to reach.
+    #
+    # It is a SMALLER fraction here than on add_level, and the ceiling says so
+    # rather than implying a gate it cannot be: 0.232 -> 0.211 ms measured back
+    # to back at 7 repetitions with ASLR off, so 1.10x. subdivide_into's inner
+    # loop is almost nothing BUT the key; a write is dominated by write_cell's
+    # own hash and chunk lookup, which the key is a tenth of.
+    #
+    # No threshold catches 1.10x without flaking on a shared runner. This is
+    # here to put the number in CI output — no other benchmark covers writing
+    # under a level stack at all — and the DEVICE gate holds the tighter line.
+    "BM_VoxelWriteUnderLevels": {"max_ms": 1.5},
     "BM_VoxelMeshSparse64Chunks": {"max_ms": 120},
     # Part 2 of the same issue: two chunks of that 64-chunk grid, meshed
     # through the regional call. It is the bench above divided by 32 — 0.40 ms

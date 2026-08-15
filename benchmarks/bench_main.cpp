@@ -444,6 +444,58 @@ void BM_VoxelAddLevelWhole(benchmark::State& state) {
 }
 BENCHMARK(BM_VoxelAddLevelWhole)->Unit(benchmark::kMillisecond);
 
+// WRITING into a whole level stack, which is the same defect #137 fixed in
+// subdivide_into and the hotter half of it. `add_level` pays the per-child
+// chunk_key() once; a WRITE pays it in both directions, every time:
+//
+//   propagate_down -> refresh_detail -> record_detail, once per child
+//   propagate_up,                       once per child, recursing per level
+//
+// Both tests are constant-true on a whole level, and both cost three divisions
+// to reach. A sculpting session is writes, not add_levels, so this is the path
+// that carries the cost in practice.
+//
+// SCATTERED for the reason BM_VoxelAddLevelWhole scatters: a solid block lives
+// in a handful of chunks where write_cell's own bookkeeping dominates the key,
+// which is exactly the fixture that would let the regression back in.
+//
+// The ceiling is the same order-of-magnitude gate the file's header describes;
+// the device case (`voxel_smooth_l2`, a verb one level finer) is what holds the
+// tighter line.
+void BM_VoxelWriteUnderLevels(benchmark::State& state) {
+    voxel::VoxelGrid g(0.02f);
+    std::uint8_t c = g.palette_add(cf3(0.8f, 0.4f, 0.2f));
+    const double golden = 0.6180339887;
+    for (int i = 0; i < 200; ++i) {
+        const int bx = int((std::fmod(double(i) * golden, 1.0) * 1.6 - 0.8) * 40);
+        const int by = int((std::fmod(double(i) * golden * golden, 1.0) * 1.6 - 0.8) * 40);
+        const int bz = int((std::fmod(double(i) * golden * golden * golden, 1.0) * 1.6 - 0.8) * 40);
+        for (int z = 0; z < 4; ++z)
+            for (int y = 0; y < 4; ++y)
+                for (int x = 0; x < 4; ++x) g.set({bx + x, by + y, bz + z}, c);
+    }
+    // Two levels above the one being written, so propagation runs in both
+    // directions and more than one level deep.
+    g.add_level();
+    g.add_level();
+    g.set_active_level(1);
+
+    int n = 0;
+    for (auto _ : state) {
+        // A moving brush, so the writes do not all land in one chunk and the
+        // key is recomputed the way a stroke recomputes it.
+        const int bx = int((std::fmod(double(n) * golden, 1.0) * 1.6 - 0.8) * 60);
+        const int by = int((std::fmod(double(n) * golden * golden, 1.0) * 1.6 - 0.8) * 60);
+        const int bz = int((std::fmod(double(n) * golden * golden * golden, 1.0) * 1.6 - 0.8) * 60);
+        for (int z = 0; z < 6; ++z)
+            for (int y = 0; y < 6; ++y)
+                for (int x = 0; x < 6; ++x) g.set({bx + x, by + y, bz + z}, c);
+        ++n;
+    }
+    state.counters["cells"] = static_cast<double>(g.occupied_count());
+}
+BENCHMARK(BM_VoxelWriteUnderLevels)->Unit(benchmark::kMillisecond);
+
 // The scaling shape: one voxel in each of 64 chunks. Cost is linear in occupied
 // chunks and independent of how much material each holds, so this is the
 // per-chunk number times 64 and catches the same regression with more signal
