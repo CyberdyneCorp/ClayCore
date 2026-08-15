@@ -43,6 +43,22 @@ inline constexpr float kMinCurveTolerance = 1e-5f;
 std::vector<StrokePoint> tessellate_curve(const std::vector<StrokePoint>& points, bool closed,
                                           float tolerance);
 
+// A guide's total arc length, and its tightest turn.
+//
+// Shared by the swept primitive, which carries profiles ALONG a guide, and by
+// the bend-along-a-curve deformer, which reads the same geometry from the
+// other end. Two copies would be two things to keep in step, and they decide
+// the same safety bound.
+//
+// The bend radius is the CIRCUMRADIUS of each consecutive triple, not the turn
+// angle over the arc: an angle estimate is fooled by tessellation density,
+// reading a finely-sampled gentle curve as a tight one because short segments
+// accumulate angle. Both take an ALREADY TESSELLATED guide, because what
+// bounds the field is the polyline that was compiled rather than the ideal
+// curve behind it.
+float guide_arc_length(const std::vector<StrokePoint>& guide);
+float guide_bend_radius(const std::vector<StrokePoint>& guide);
+
 // Whether a point list needs tessellating at all. Cheap, and it lets the
 // compiler and the bounds walk skip the copy for the common case.
 bool curve_is_polyline(const std::vector<StrokePoint>& points, bool closed);

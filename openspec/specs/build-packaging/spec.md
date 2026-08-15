@@ -104,7 +104,7 @@ The case set SHALL cover the surface that a hand-written host preview gets wrong
 
 The case set SHALL TRACK THE KERNEL SET rather than a list fixed when the fixture was written. EVERY combine op the kernel implements SHALL have at least one case exercising it, checked against the op enumeration rather than against a list of names, so an op that ships without a case is a gate failure rather than a discovery. A feature that ships without one leaves the fixture reading as validation while asserting nothing about it, which is worse than absent coverage.
 
-Deformer kinds and primitive families are NOT yet held to that standard: the case set exercises 7 of 16 deformers and 13 primitive opcodes, and the cases that would close those gaps are follow-up work. This is stated rather than implied so a consumer knows what a passing fixture does and does not cover.
+Deformer kinds and primitive families are NOT yet held to that standard: the case set exercises 8 of 17 deformers and 13 primitive opcodes, and the cases that would close those gaps are follow-up work. This is stated rather than implied so a consumer knows what a passing fixture does and does not cover.
 
 Where a feature is a pair sharing one kernel branch with the sign or direction taken from the mode — relief and incise, magnify and pinch — the case set SHALL cover BOTH, since a backend can reproduce one and invert the other.
 

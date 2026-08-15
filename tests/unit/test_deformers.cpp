@@ -6,6 +6,7 @@
 #include "clay/kernel/deform.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
+#include "clay/scene/curve.h"
 #include "clay/scene/tape.h"
 #include "kernel_utils.h"
 #include "scene_utils.h"
@@ -28,6 +29,32 @@ scene::Document one_item(scene::Prim prim, const std::vector<Deformer>& deformer
     n.deformers = deformers;
     l.sdf->insert(n);
     return doc;
+}
+
+
+// A guide as HARD control points, so it compiles to itself and the test knows
+// exactly which polyline the field was built from — no tessellation standing
+// between the assertion and the geometry.
+std::vector<scene::StrokePoint> polyline(const std::vector<cfloat3>& pts) {
+    std::vector<scene::StrokePoint> out;
+    for (cfloat3 p : pts) {
+        scene::StrokePoint sp;
+        sp.pos = p;
+        sp.type = scene::StrokePointType::Hard;
+        out.push_back(sp);
+    }
+    return out;
+}
+
+// A quarter circle in the XY plane, from (r,0,0) round to (0,r,0), sampled
+// finely enough that the polyline is a fair stand-in for the arc.
+std::vector<scene::StrokePoint> quarter_arc(float r, int segments) {
+    std::vector<cfloat3> pts;
+    for (int i = 0; i <= segments; ++i) {
+        const float a = 1.5707963f * static_cast<float>(i) / static_cast<float>(segments);
+        pts.push_back(cf3(r * std::cos(a), r * std::sin(a), 0.0f));
+    }
+    return polyline(pts);
 }
 
 }  // namespace
@@ -136,6 +163,13 @@ TEST_CASE("tracked step scale stays conservative under every deformer") {
                                              {Deformer::twist_range(1.6f, -0.5f, 0.5f, 3)})});
     cases.push_back({"bend_range", one_item(scene::Prim::capped_cylinder(0.3f, 1.2f),
                                             {Deformer::bend_range(1.0f, -0.4f, 0.4f, 3)})});
+    // A guide that TURNS. The bound has to cover both the curvature
+    // compression on the inside of the bend and the rescale from laying the
+    // item's span onto the guide's arc length; a case with a straight guide
+    // would pass with neither term wired in.
+    cases.push_back({"bend_curve", one_item(scene::Prim::box(cf3(0.9f, 0.2f, 0.2f)),
+                                            {Deformer::bend_curve(quarter_arc(1.1f, 32),
+                                                                  -0.9f, 0.9f)})});
     cases.push_back({"chain", one_item(scene::Prim::box(cf3(0.4f, 1.0f, 0.4f)),
                                        {Deformer::twist(0.9f),
                                         Deformer::taper(-1.0f, 1.0f, 1.0f, 0.5f)})});
@@ -1128,4 +1162,160 @@ TEST_CASE("a steeper ease on a ranged twist declares a tighter step scale") {
     CAPTURE(smooth);
     CHECK(linear < 1.0f);
     CHECK(smooth < linear);  // steeper somewhere => a tighter bound everywhere
+}
+
+// -- bend along a curve (sdf-kernels, bend-along-a-curve) --------------------
+//
+// The deformer is the INVERSE of a sweep, so what these establish is that it
+// undoes the right thing: a straight guide undoes nothing, a point ON the
+// guide reads the item's own axis at the matching arc length, and material
+// travels to where the guide goes rather than staying where it was.
+
+TEST_CASE("a guide running straight down the axis is the identity") {
+    // What makes this a GENERALIZATION of the undeformed item rather than a
+    // second deformation to keep in step with it. Asserted through the
+    // compiler, so the guide emission and its transported frames are on trial
+    // too rather than only the point map.
+    const cfloat3 half = cf3(0.9f, 0.3f, 0.2f);
+    scene::Document plain = one_item(scene::Prim::box(half), {});
+    scene::Document bent = one_item(
+        scene::Prim::box(half),
+        {Deformer::bend_curve(polyline({cf3(-0.9f, 0, 0), cf3(0, 0, 0), cf3(0.9f, 0, 0)}),
+                              -0.9f, 0.9f)});
+
+    scene::Tape a = scene::compile_document(plain);
+    scene::Tape b = scene::compile_document(bent);
+    clay_test::Lcg rng(1160);
+    for (int i = 0; i < 800; ++i) {
+        const cfloat3 p = rng.vec3(-1.5f, 1.5f);
+        CAPTURE(p.x);
+        CAPTURE(p.y);
+        CAPTURE(p.z);
+        CHECK(b.eval(p).d == doctest::Approx(a.eval(p).d).epsilon(1e-4));
+    }
+}
+
+TEST_CASE("a point on the guide reads the item's axis at the matching arc length") {
+    // The map's core claim, and the one that catches an arc length, a span
+    // mapping or a transported frame that is off. ON the guide the
+    // perpendicular offset is zero by construction, so the deformed field
+    // there must equal the undeformed field at the axis point the arc length
+    // corresponds to — whatever the guide is doing in between.
+    const float r = 1.0f;
+    const int segments = 64;
+    const float t0 = -1.0f, t1 = 1.0f;
+    std::vector<scene::StrokePoint> guide = quarter_arc(r, segments);
+
+    const cfloat3 half = cf3(1.0f, 0.25f, 0.25f);
+    scene::Tape plain = scene::compile_document(one_item(scene::Prim::box(half), {}));
+    scene::Tape bent = scene::compile_document(
+        one_item(scene::Prim::box(half), {Deformer::bend_curve(guide, t0, t1)}));
+
+    const float total = scene::guide_arc_length(guide);
+    REQUIRE(total > 0.0f);
+    // Walk the guide's own vertices: each one's arc length is known exactly.
+    float s = 0.0f;
+    for (std::size_t i = 1; i + 1 < guide.size(); ++i) {
+        s += kernel::clength(guide[i].pos - guide[i - 1].pos);
+        const float u = s / total;
+        const float axis_x = t0 + u * (t1 - t0);
+        CAPTURE(u);
+        CHECK(bent.eval(guide[i].pos).d ==
+              doctest::Approx(plain.eval(cf3(axis_x, 0, 0)).d).epsilon(1e-3));
+    }
+}
+
+TEST_CASE("material travels to where the guide goes") {
+    // A long box on X, bent round a quarter circle: its far end has to end up
+    // near the arc's far end, which is a place the undeformed box is nowhere
+    // near — and the item's influence bound has to contain it, or culling
+    // would throw away the bricks the surface is in.
+    const float r = 1.0f;
+    std::vector<scene::StrokePoint> guide = quarter_arc(r, 48);
+    const float total = scene::guide_arc_length(guide);
+
+    scene::Document doc = one_item(scene::Prim::box(cf3(1.0f, 0.15f, 0.15f)),
+                                   {Deformer::bend_curve(guide, -1.0f, 1.0f)});
+    scene::Tape tape = scene::compile_document(doc);
+
+    // A point most of the way round the arc. NOT the arc's exact endpoint,
+    // which is the image of the box's end FACE and so sits at distance zero —
+    // an assertion there would turn on float noise rather than on the material
+    // having travelled.
+    const float a = 0.85f * 1.5707963f;
+    const cfloat3 along_arc = cf3(r * std::cos(a), r * std::sin(a), 0.0f);
+    CHECK(tape.eval(along_arc).d < 0.0f);                       // inside the bent box
+    // ...and a long way from where the undeformed box reaches.
+    scene::Tape plain =
+        scene::compile_document(one_item(scene::Prim::box(cf3(1.0f, 0.15f, 0.15f)), {}));
+    CHECK(plain.eval(along_arc).d > 0.5f);
+
+    // The influence bound has to contain the travelled material, or culling
+    // throws away the very bricks the surface ended up in.
+    scene::Node probe = clay_test::item(scene::Prim::box(cf3(1.0f, 0.15f, 0.15f)), cf3(0, 0, 0));
+    probe.deformers = {Deformer::bend_curve(guide, -1.0f, 1.0f)};
+    const math::Aabb bound = scene::item_geometry_bound(probe, doc.layers[0]);
+    CHECK(!bound.empty());
+    CHECK(bound.max.y >= r - 1e-3f);
+    CAPTURE(total);
+}
+
+TEST_CASE("a cross-section wider than the tightest bend degrades rather than lying") {
+    // The fold case. A guide is editable after the fact, so this is NOT
+    // refused — but the compiled tape has to stop claiming the field is a
+    // distance, or the marcher steps straight through a surface.
+    std::vector<scene::StrokePoint> tight = quarter_arc(0.20f, 24);
+    scene::Tape folded = scene::compile_document(one_item(
+        scene::Prim::box(cf3(0.3f, 0.5f, 0.5f)), {Deformer::bend_curve(tight, -0.3f, 0.3f)}));
+    // Same item on a gentle guide, for contrast: the tightness is what costs,
+    // not the presence of a guide.
+    std::vector<scene::StrokePoint> gentle = quarter_arc(4.0f, 24);
+    scene::Tape easy = scene::compile_document(one_item(
+        scene::Prim::box(cf3(0.3f, 0.5f, 0.5f)), {Deformer::bend_curve(gentle, -0.3f, 0.3f)}));
+
+    CAPTURE(folded.safe_step_scale());
+    CAPTURE(easy.safe_step_scale());
+    CHECK(folded.safe_step_scale() < 1e-3f);
+    CHECK(easy.safe_step_scale() > folded.safe_step_scale());
+}
+
+TEST_CASE("a guide with fewer than two points passes the point through") {
+    // Not an error: a caller can still fix a degenerate guide by editing it,
+    // and dropping the deformer would silently change what the document means.
+    const cfloat3 half = cf3(0.5f, 0.5f, 0.5f);
+    scene::Tape plain = scene::compile_document(one_item(scene::Prim::box(half), {}));
+    scene::Tape one_point = scene::compile_document(one_item(
+        scene::Prim::box(half), {Deformer::bend_curve(polyline({cf3(0, 0, 0)}), -1.0f, 1.0f)}));
+    scene::Tape no_points = scene::compile_document(
+        one_item(scene::Prim::box(half), {Deformer::bend_curve({}, -1.0f, 1.0f)}));
+
+    clay_test::Lcg rng(1161);
+    for (int i = 0; i < 200; ++i) {
+        const cfloat3 p = rng.vec3(-1.5f, 1.5f);
+        CHECK(one_point.eval(p).d == doctest::Approx(plain.eval(p).d).epsilon(1e-5));
+        CHECK(no_points.eval(p).d == doctest::Approx(plain.eval(p).d).epsilon(1e-5));
+    }
+}
+
+TEST_CASE("a bend_curve survives the document round trip, guide and all") {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::box(cf3(0.8f, 0.2f, 0.2f)), cf3(0, 0, 0));
+    n.deformers.push_back(scene::Deformer::bend_curve(quarter_arc(0.9f, 5), -0.8f, 0.8f));
+    // A second deformer AFTER it, so a guide whose length was mis-encoded
+    // would desynchronise the reader rather than merely losing itself.
+    n.deformers.push_back(scene::Deformer::twist(0.7f));
+    l.sdf->insert(n);
+
+    std::vector<std::uint8_t> bytes = scene::serialize_document(doc);
+    std::optional<scene::Document> back = scene::deserialize_document(bytes.data(), bytes.size());
+    REQUIRE(back.has_value());
+    CHECK(scene::serialize_document(*back) == bytes);
+    // And it still compiles to the same field.
+    clay_test::Lcg rng(1162);
+    scene::Tape a = scene::compile_document(doc), b = scene::compile_document(*back);
+    for (int i = 0; i < 200; ++i) {
+        const cfloat3 p = rng.vec3(-2, 2);
+        CHECK(b.eval(p).d == doctest::Approx(a.eval(p).d).epsilon(1e-5));
+    }
 }

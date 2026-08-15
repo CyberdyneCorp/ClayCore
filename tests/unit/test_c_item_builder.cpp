@@ -1658,3 +1658,62 @@ TEST_CASE("pose_line reaches the C ABI") {
     }
     clay_document_destroy(doc);
 }
+
+TEST_CASE("every declared deformer kind is actually accepted by the C ABI") {
+    // Regression. `clay_item_add_deformer` bounds its kind against a NAMED
+    // enumerator rather than the count, so each time a deformer is added the
+    // bound has to move with it — and twice now it did not. A kind that is
+    // declared in the header, documented, given a parameter count and handled
+    // by make_deformer is still unreachable if this guard has not caught up.
+    //
+    // The binding parity gate cannot see it: it checks that the ENUMERATOR
+    // exists, not that any call accepts it. So the check belongs here, and it
+    // walks the whole enum rather than naming the kinds that broke, which is
+    // what stops the third occurrence.
+    struct Kind {
+        clay_deform kind;
+        std::vector<float> params;
+    };
+    // One legal parameter set per kind, in enum order.
+    const std::vector<Kind> kinds = {
+        {CLAY_DEFORM_TWIST, {0.7f}},
+        {CLAY_DEFORM_BEND, {0.5f}},
+        {CLAY_DEFORM_TAPER, {-1.0f, 1.0f, 1.0f, 0.5f}},
+        {CLAY_DEFORM_DISPLACE, {0.05f, 5.0f}},
+        {CLAY_DEFORM_WRAP_AROUND, {-1.0f, 1.0f}},
+        {CLAY_DEFORM_ELONGATE, {0.1f, 0.2f, 0.3f}},
+        {CLAY_DEFORM_BEND_LINEAR, {-1, 0, 0, 1, 0, 0, 0, 0.3f, 0}},
+        {CLAY_DEFORM_BEND_RADIAL, {0.2f, 0.9f, 0.3f}},
+        {CLAY_DEFORM_ELONGATE_AXIS, {0.1f, 0.2f, 0.3f}},
+        {CLAY_DEFORM_GRAB, {0, 0, 0, 0.8f, 0.2f, 0.1f, 0, 0}},
+        {CLAY_DEFORM_POSE, {0, 0, 0, 0.8f, 0, 1, 0, 0.5f}},
+        {CLAY_DEFORM_POSE_LINE, {-1, 0, 0, 1, 0, 0, 0, 1, 0, 0.5f}},
+        {CLAY_DEFORM_MAGNIFY, {0, 0.45f, 0, 1.2f, 0.4f}},
+        {CLAY_DEFORM_NOISE, {0.12f, 3.0f, 4.0f, 0.5f, 7.0f}},
+        {CLAY_DEFORM_TWIST_RANGE, {1.6f, -0.5f, 0.5f}},
+        {CLAY_DEFORM_BEND_RANGE, {1.4f, -0.4f, 0.4f}},
+    };
+
+    for (const Kind& k : kinds) {
+        CDoc built;
+        float size[3] = {0.4f, 0.9f, 0.4f};
+        clay_item* item = clay_item_create(CLAY_PRIM_BOX, size, 3);
+        REQUIRE(item != nullptr);
+        CAPTURE(static_cast<int>(k.kind));
+        CHECK(clay_item_add_deformer(item, k.kind, k.params.data(), k.params.size(),
+                                     CLAY_EASE_LINEAR) == CLAY_OK);
+        clay_item_destroy(item);
+    }
+
+    // Bending along a curve carries a GUIDE, which does not fit a flat float
+    // array, so it has its own entry point — and the generic call has to say
+    // so rather than reporting it as an unknown kind.
+    CDoc built;
+    float size[3] = {0.4f, 0.9f, 0.4f};
+    clay_item* item = clay_item_create(CLAY_PRIM_BOX, size, 3);
+    REQUIRE(item != nullptr);
+    float unused[3] = {0, 0, 0};
+    CHECK(clay_item_add_deformer(item, CLAY_DEFORM_BEND_CURVE, unused, 3, CLAY_EASE_LINEAR) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    clay_item_destroy(item);
+}

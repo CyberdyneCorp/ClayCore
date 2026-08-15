@@ -102,4 +102,52 @@ CLAY_FN CSweepHit csweep_nearest(CLAY_FPTR guide, int count, cfloat3 p) {
     return hit;
 }
 
+// The moving frame at a hit: where on the guide, which way it points, and how
+// far along it that is.
+//
+// Shared rather than written once per caller. A sweep asks "given an arc
+// length, where does the profile sit"; bending along a curve asks the same
+// question backwards — "given a point, what arc length is it at, and where in
+// that frame". They are the same geometry read from either end, and sharing
+// the construction is what makes them agree by construction rather than by
+// inspection.
+typedef struct CSweepFrameT {
+    cfloat3 origin;    // the point on the guide the hit projected to
+    cfloat3 tangent;
+    cfloat3 normal;    // parallel-transported, so it neither flips nor vanishes
+    cfloat3 binormal;
+    float arclen;      // arc length reached at `origin`
+    float seg_len;
+} CSweepFrame;
+
+CLAY_FN CSweepFrame csweep_frame(CLAY_FPTR guide, CSweepHit hit) {
+    CLAY_FPTR va = CLAY_OFF(guide, hit.seg * CLAY_SWEPT_VERTEX_FLOATS);
+    CLAY_FPTR vb = CLAY_OFF(va, CLAY_SWEPT_VERTEX_FLOATS);
+    cfloat3 a = cf3(CLAY_AT(va, 0), CLAY_AT(va, 1), CLAY_AT(va, 2));
+    cfloat3 b = cf3(CLAY_AT(vb, 0), CLAY_AT(vb, 1), CLAY_AT(vb, 2));
+    cfloat3 ab = b - a;
+    float seg_len = clength(ab);
+
+    CSweepFrame f;
+    f.seg_len = seg_len;
+    f.origin = a + ab * hit.t;
+    f.tangent = seg_len > 1e-9f ? ab * (1.0f / seg_len) : cf3(0, 0, 1);
+
+    // The two end normals were transported when the item compiled; lerp and
+    // re-orthogonalize, which is enough for a polyline guide and avoids a
+    // slerp in the inner loop.
+    cfloat3 na = cf3(CLAY_AT(va, 3), CLAY_AT(va, 4), CLAY_AT(va, 5));
+    cfloat3 nb = cf3(CLAY_AT(vb, 3), CLAY_AT(vb, 4), CLAY_AT(vb, 5));
+    cfloat3 n = cnormalize(cmix(na, nb, hit.t));
+    f.normal = cnormalize(n - f.tangent * cdot(n, f.tangent));
+    f.binormal = ccross(f.tangent, f.normal);
+    f.arclen = CLAY_AT(va, 6) + hit.t * seg_len;
+    return f;
+}
+
+// Total arc length of a guide: the last vertex's own reading.
+CLAY_FN float csweep_length(CLAY_FPTR guide, int count) {
+    return count < 2 ? 0.0f : CLAY_AT(guide, (count - 1) * CLAY_SWEPT_VERTEX_FLOATS + 6);
+}
+
 CLAY_NS_END

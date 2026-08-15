@@ -10,6 +10,9 @@
 #include "clay/kernel/noise.h"
 #include "clay/kernel/shim.h"
 #include "clay/kernel/ease.h"
+// For the guide query and moving frame, which bending along a curve shares
+// with the swept primitive rather than reimplementing.
+#include "clay/kernel/lift.h"
 
 CLAY_NS_BEGIN
 
@@ -205,6 +208,45 @@ CLAY_FN cfloat3 cwrap_around_point(cfloat3 p, float x0, float x1) {
     float a = catan2(p.y, p.x);
     float x = x0 + (a * 0.15915494f + 0.5f) * per;  // a/2pi
     return cf3(x, clength(cf2(p.x, p.y)) - r, p.z);
+}
+
+// Bend along a DRAWN guide rather than at a constant rate — ZBrush's Gizmo 3D
+// Bend Curve. `bend` and `bend_range` turn about a fixed axis, so every bend
+// they can express is a circular arc; this lays the item's local X span
+// [t0, t1] onto the guide's ARC LENGTH and carries the material on the guide's
+// parallel-transported frames.
+//
+// The INVERSE of Prim::swept, and deliberately built from the sweep's own
+// query. A sweep asks "given an arc length, where does the profile sit"; a
+// deformer is an inverse point map and asks the opposite — "given a point,
+// what arc length is it at, and where in that frame". Same geometry, read from
+// the other end.
+//
+// A guide running straight along X is the IDENTITY: the transported normal is
+// constant, s = p.x - t0, and the map returns p unchanged. That is what makes
+// this a generalization of the undeformed item rather than a second thing to
+// keep in step with it.
+CLAY_FN cfloat3 cbend_curve_point(CLAY_FPTR guide, int count, cfloat3 p, float t0, float t1) {
+    if (count < 2) return p;
+    CSweepHit hit = csweep_nearest(guide, count, p);
+    CSweepFrame f = csweep_frame(guide, hit);
+    float total = csweep_length(guide, count);
+
+    cfloat3 offset = p - f.origin;
+    float axial = cdot(offset, f.tangent);
+    cfloat3 perp = offset - f.tangent * axial;
+
+    // Everywhere but the ends the projection makes the offset perpendicular by
+    // construction, so `axial` is zero and adding it changes nothing. Past an
+    // end the nearest point was CLAMPED, and the leftover tangential part is
+    // the overshoot — it has to keep travelling, or every point beyond the
+    // guide would collapse onto its end cap.
+    float s = f.arclen;
+    if (hit.seg == 0 && hit.t <= 0.0f) s += axial;
+    if (hit.seg == count - 2 && hit.t >= 1.0f) s += axial;
+
+    float u = total > 1e-9f ? s / total : 0.0f;
+    return cf3(t0 + u * (t1 - t0), cdot(perp, f.normal), cdot(perp, f.binormal));
 }
 
 // Spatial morph weights: the interpreter evaluates both subtrees and mixes

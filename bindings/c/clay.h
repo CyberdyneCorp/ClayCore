@@ -205,7 +205,8 @@ typedef enum clay_blend {
  *   ELONGATE_AXIS hx hy hz  per-axis stretch; a bound for any primitive
  *   GRAB      cx cy cz r dx dy dz front   pull a region; identity past r
  *   POSE      cx cy cz r ax ay az angle   rotate a region about its centre
- *   POSE_LINE ax ay az bx by bz nx ny nz angle  ramp a rotation along a -> b */
+ *   POSE_LINE ax ay az bx by bz nx ny nz angle  ramp a rotation along a -> b
+ *   BEND_CURVE            a drawn guide; see clay_item_add_bend_curve */
 typedef enum clay_deform {
     CLAY_DEFORM_TWIST = 0,
     CLAY_DEFORM_BEND = 1,
@@ -229,7 +230,15 @@ typedef enum clay_deform {
      * not global state, so the same seed always gives the same field. */
     CLAY_DEFORM_NOISE = 13,
     CLAY_DEFORM_TWIST_RANGE = 14,
-    CLAY_DEFORM_BEND_RANGE = 15
+    CLAY_DEFORM_BEND_RANGE = 15,
+    /* Bend along a DRAWN guide instead of at a constant rate — ZBrush's Gizmo
+     * Bend Curve. The item's local X span is laid onto the guide's arc length
+     * and the material rides the guide's frames, so this is the inverse of the
+     * swept primitive rather than a second kind of bend.
+     *
+     * Its guide does not fit a flat float array, so it is the one kind
+     * clay_item_add_deformer does NOT take: use clay_item_add_bend_curve. */
+    CLAY_DEFORM_BEND_CURVE = 16
 } clay_deform;
 
 /* Easing curves are given by index; 0 is linear. Only the taper deformer and
@@ -564,6 +573,21 @@ clay_result clay_item_set_mirror(clay_item* item, int32_t mirror);
  * taper only. */
 clay_result clay_item_add_deformer(clay_item* item, int32_t deform, const float* params,
                                    size_t param_count, int32_t ease);
+
+/* Appends a CLAY_DEFORM_BEND_CURVE to the item's chain. Its own entry point
+ * because a guide is not a fixed number of floats, which is the one thing the
+ * call above cannot express.
+ *
+ * `guide_xyz` is point_count x, y, z triples in the item's LOCAL space, and
+ * `point_type` (CLAY_POINT_*) is the smooth/sharp toggle — a guide is the same
+ * kind of curve every other item takes, so it gets B-spline smoothing for free
+ * and tessellates to the document's own curve tolerance.
+ *
+ * [t0, t1] is the item's span along local X that gets laid onto the guide. A
+ * guide of fewer than two points, or one of zero length, is refused, as is
+ * t0 == t1. */
+clay_result clay_item_add_bend_curve(clay_item* item, const float* guide_xyz, size_t point_count,
+                                     int32_t point_type, float t0, float t1);
 
 /* Repetition of the item, applied before the deformer chain (so an array
  * repeats the deformed shape). One per item: the last call wins.
