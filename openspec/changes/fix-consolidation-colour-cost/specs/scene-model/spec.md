@@ -30,6 +30,6 @@ The decision SHALL be made from the absorbed set rather than from the samples, s
 - **WHEN** the layer is consolidated again
 - **THEN** the colour pass is taken and both colours survive, even though the absorbed set holds a single node colour
 
-#### Scenario: Paint overrides a consolidated volume's colour
+#### Scenario: Painting over a consolidated volume still works
 - **WHEN** a Paint operation is applied over a consolidated coloured volume
 - **THEN** the painted colour is reported, overriding the volume's own
