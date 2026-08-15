@@ -202,7 +202,8 @@ Aabb prim_local_bounds(const Node& item) {
 // bend are rotations, so the warped shape stays inside the axis-aligned hull
 // of the original's rotational sweep about the relevant axis; taper scales
 // the cross-section; displacement moves the surface by at most its amplitude.
-Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& deformers) {
+Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& deformers,
+                           float curve_tolerance) {
     Aabb b = local;
     for (const Deformer& d : deformers) {
         if (b.empty()) break;
@@ -232,6 +233,32 @@ Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& defor
                     r = kernel::cmax(r, kernel::clength(kernel::cf2(x, y)));
                 }
                 b = Aabb{cf3(-r, -r, b.min.z), cf3(r, r, b.max.z)};
+                break;
+            }
+            case kernel::cdeform_bend_curve: {
+                // NOT contained by the undeformed item's own neighbourhood, as
+                // the rotations above are: a curve can carry material anywhere
+                // the guide goes. The hull is the guide's own extent grown by
+                // how far the item reaches from its axis.
+                //
+                // Tessellated at the SAME tolerance the compiler uses, because
+                // the field is defined by the compiled polyline rather than by
+                // the ideal curve — a coarser sampling here would cut inside
+                // the bulge of a spline and understate the bound.
+                std::vector<StrokePoint> tess =
+                    curve_is_polyline(d.guide, false)
+                        ? d.guide
+                        : tessellate_curve(d.guide, false, curve_tolerance);
+                if (tess.size() < 2) break;  // no guide: the kernel passes the point through
+                float r = 0.0f;
+                for (int i = 0; i < 4; ++i) {
+                    float y = (i & 1) ? b.max.y : b.min.y;
+                    float z = (i & 2) ? b.max.z : b.min.z;
+                    r = kernel::cmax(r, kernel::clength(kernel::cf2(y, z)));
+                }
+                Aabb g;
+                for (const StrokePoint& sp : tess) g.expand(sp.pos);
+                b = g.dilated(r);
                 break;
             }
             case kernel::cdeform_taper: {
@@ -409,6 +436,28 @@ float deformer_lipschitz(const Node& item) {
             info = d.type == kernel::cdeform_twist_range
                        ? kernel::cfi_twist(info, d.k * ease_max_slope(d.ease), radius)
                        : kernel::cfi_bend(info, d.k * ease_max_slope(d.ease), radius);
+        } else if (d.type == kernel::cdeform_bend_curve) {
+            // Both terms the geometry actually charges: the curvature
+            // compression on the inside of the tightest bend, and the rescale
+            // from laying the item's span onto the guide's arc length. The
+            // bend radius is measured the same way the sweep measures it —
+            // by circumradius, which tessellation density cannot fool.
+            std::vector<StrokePoint> tess =
+                curve_is_polyline(d.guide, false)
+                    ? d.guide
+                    : tessellate_curve(d.guide, false, item.curve_tolerance);
+            if (tess.size() >= 2) {
+                float cross = 0.0f;
+                if (!local.empty()) {
+                    for (int i = 0; i < 4; ++i) {
+                        float y = (i & 1) ? local.max.y : local.min.y;
+                        float z = (i & 2) ? local.max.z : local.min.z;
+                        cross = kernel::cmax(cross, kernel::clength(kernel::cf2(y, z)));
+                    }
+                }
+                info = kernel::cfi_bend_curve(info, cross, guide_bend_radius(tess),
+                                              kernel::cabs(d.c - d.b), guide_arc_length(tess));
+            }
         } else if (d.type == kernel::cdeform_taper) {
             float s_min = kernel::cmin(d.b, d.c);
             float s_max = kernel::cmax(d.b, d.c);
@@ -491,7 +540,8 @@ Aabb repeated_local_bounds(const Aabb& local, const Repeat& r) {
 
 Aabb item_local_bounds(const Node& item) {
     Aabb local = prim_local_bounds(item);
-    if (!item.deformers.empty()) local = deformed_local_bounds(local, item.deformers);
+    if (!item.deformers.empty())
+        local = deformed_local_bounds(local, item.deformers, item.curve_tolerance);
     if (item.repeat.active()) local = repeated_local_bounds(local, item.repeat);
     return local;
 }

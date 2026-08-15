@@ -55,24 +55,8 @@ kernel::CFieldInfo swept_field_info(const Node& item) {
                                          ? item.stroke
                                          : tessellate_curve(item.stroke, false,
                                                             item.curve_tolerance);
-    // The CIRCUMRADIUS of each consecutive triple, not the turn angle over the
-    // arc: the angle estimate is fooled by tessellation density, reading a
-    // finely-sampled gentle curve as a tight one because short segments
-    // accumulate angle. A circumradius is the radius of the circle through the
-    // three points and is stable however finely the guide is sampled.
-    float tightest = 1e6f;
-    float total_len = 0.0f;
-    for (std::size_t i = 1; i < guide.size(); ++i)
-        total_len += kernel::clength(guide[i].pos - guide[i - 1].pos);
-    for (std::size_t i = 1; i + 1 < guide.size(); ++i) {
-        kernel::cfloat3 u = guide[i].pos - guide[i - 1].pos;
-        kernel::cfloat3 v = guide[i + 1].pos - guide[i].pos;
-        kernel::cfloat3 w = guide[i + 1].pos - guide[i - 1].pos;
-        float lu = kernel::clength(u), lv = kernel::clength(v), lw = kernel::clength(w);
-        float area2 = kernel::clength(kernel::ccross(u, v));  // 2 * triangle area
-        if (area2 < 1e-9f) continue;                          // collinear: straight
-        tightest = kernel::cmin(tightest, lu * lv * lw / (2.0f * area2));
-    }
+    const float tightest = guide_bend_radius(guide);
+    const float total_len = guide_arc_length(guide);
     float widest = 0.0f;
     for (std::size_t i = 0; i < item.profiles.size(); ++i) {
         const std::vector<kernel::cfloat2>& pts =
@@ -120,7 +104,8 @@ struct Compiler {
 
     void emit_prim(unsigned int op, const cfloat4x4& inv, float scale, float round,
                    kernel::cfloat3 color, const float* prim_params, int prim_param_count,
-                   const std::vector<Deformer>& deformers, const Repeat& repeat = Repeat{}) {
+                   const std::vector<Deformer>& deformers, const Repeat& repeat = Repeat{},
+                   float curve_tolerance = 0.01f) {
         CTapeInstr instr;
         instr.op = op;
         instr.param_offset = static_cast<unsigned int>(tape.params.size());
@@ -147,9 +132,27 @@ struct Compiler {
         tape.params.push_back(repeat.counts.z);
         tape.params.push_back(static_cast<float>(deformers.size()));
         for (const Deformer& d : deformers) {
+            // A guide is not a fixed size, so it goes in the blob and slots 1
+            // and 2 carry a handle to it — the same arrangement a swept
+            // primitive uses. Emitted here rather than by the caller because
+            // this is where the record that has to point at it is written.
+            float handle_off = d.k, handle_count = d.a;
+            if (d.type == kernel::cdeform_bend_curve) {
+                std::vector<StrokePoint> guide =
+                    curve_is_polyline(d.guide, false)
+                        ? d.guide
+                        : tessellate_curve(d.guide, false, curve_tolerance);
+                // Fewer than two points is no curve at all. The record is
+                // still emitted, with a count the kernel reads as "leave the
+                // point alone" — refusing here would drop a deformer the
+                // caller can still fix by editing its guide.
+                handle_off = guide.size() >= 2
+                                 ? static_cast<float>(emit_guide(guide)) : 0.0f;
+                handle_count = static_cast<float>(guide.size());
+            }
             tape.params.push_back(static_cast<float>(d.type));
-            tape.params.push_back(d.k);
-            tape.params.push_back(d.a);
+            tape.params.push_back(handle_off);
+            tape.params.push_back(handle_count);
             tape.params.push_back(d.b);
             tape.params.push_back(d.c);
             tape.params.push_back(static_cast<float>(d.ease));
@@ -344,21 +347,18 @@ struct Compiler {
         return records;
     }
 
-    // A sweep's guide, with a PARALLEL-TRANSPORTED frame per vertex.
+    // A guide polyline into the blob, one 7-float vertex each: position,
+    // PARALLEL-TRANSPORTED normal, arc length. Returns the blob offset.
     //
     // Transport is sequential — each frame is the previous one rotated by the
     // minimum turn that carries the old tangent onto the new — so it cannot be
-    // done per sample, which is exactly why the frames go in the blob. A
-    // Frenet frame would flip at an inflection and be undefined where the
-    // guide is straight; this one does neither.
-    void emit_swept(const Node& item, const kernel::cfloat4x4& inv_world, float scale,
-                    float round_world) {
-        std::vector<StrokePoint> guide =
-            curve_is_polyline(item.stroke, false)
-                ? item.stroke
-                : tessellate_curve(item.stroke, false, item.curve_tolerance);
-        if (guide.size() < 2 || item.profiles.size() < 2) return;
-
+    // done per sample, which is exactly why the frames go in the blob. A Frenet
+    // frame would flip at an inflection and be undefined where the guide is
+    // straight; this one does neither.
+    //
+    // Shared by the swept primitive and by the bend-along-a-curve deformer, so
+    // the two cannot disagree about what a guide's frames are.
+    std::size_t emit_guide(const std::vector<StrokePoint>& guide) {
         std::size_t guide_offset = tape.blob.size();
         kernel::cfloat3 prev_tangent = kernel::cnormalize(guide[1].pos - guide[0].pos);
         // A first normal perpendicular to the tangent; which one is arbitrary,
@@ -400,6 +400,19 @@ struct Compiler {
             tape.blob.push_back(normal.z);
             tape.blob.push_back(arclen);
         }
+        return guide_offset;
+    }
+
+    // A sweep: the guide's frames, then the profiles carried along them.
+    void emit_swept(const Node& item, const kernel::cfloat4x4& inv_world, float scale,
+                    float round_world) {
+        std::vector<StrokePoint> guide =
+            curve_is_polyline(item.stroke, false)
+                ? item.stroke
+                : tessellate_curve(item.stroke, false, item.curve_tolerance);
+        if (guide.size() < 2 || item.profiles.size() < 2) return;
+
+        std::size_t guide_offset = emit_guide(guide);
 
         std::size_t records = emit_profile_records(item);
         float prim_params[5] = {static_cast<float>(guide_offset),
@@ -408,7 +421,7 @@ struct Compiler {
                                 static_cast<float>(item.profiles.size()),
                                 item.prim.params[0]};
         emit_prim(kernel::ctape_swept, inv_world, scale, round_world, item.color, prim_params, 5,
-                  item.deformers, item.repeat);
+                  item.deformers, item.repeat, item.curve_tolerance);
     }
 
     // -- items ---------------------------------------------------------------
@@ -436,7 +449,8 @@ struct Compiler {
                 tape.blob.push_back(sp.radius);
             }
             emit_prim(kernel::ctape_stroke, inv_world, scale, round_world, item.color,
-                      prim_params, 3, item.deformers, item.repeat);
+                      prim_params, 3, item.deformers, item.repeat,
+                      item.curve_tolerance);
         } else if (prim_is_armature(item.prim.type)) {
             // Nodes verbatim: an armature's links are straight, so unlike the
             // stroke there is no curve to tessellate. The parents ride in the
@@ -475,7 +489,8 @@ struct Compiler {
                 tape.blob.push_back(sign < 0 ? -1.0f : 1.0f);
             }
             emit_prim(kernel::ctape_armature, inv_world, scale, round_world, item.color,
-                      prim_params, 5, item.deformers, item.repeat);
+                      prim_params, 5, item.deformers, item.repeat,
+                      item.curve_tolerance);
         } else if (prim_is_volume(item.prim.type)) {
             if (!item.volume || item.volume->empty()) return;  // nothing to read
             std::vector<float> flat = item.volume->to_blob();
@@ -485,7 +500,8 @@ struct Compiler {
             float prim_params[1] = {static_cast<float>(tape.blob.size())};
             tape.blob.insert(tape.blob.end(), flat.begin(), flat.end());
             emit_prim(kernel::ctape_volume, inv_world, scale, round_world, item.color,
-                      prim_params, 1, item.deformers, item.repeat);
+                      prim_params, 1, item.deformers, item.repeat,
+                      item.curve_tolerance);
         } else if (prim_is_swept(item.prim.type)) {
             emit_swept(item, inv_world, scale, round_world);
         } else if (prim_is_loft(item.prim.type)) {
@@ -494,7 +510,7 @@ struct Compiler {
                                     static_cast<float>(records),
                                     static_cast<float>(item.profiles.size())};
             emit_prim(kernel::ctape_loft, inv_world, scale, round_world, item.color, prim_params,
-                      4, item.deformers, item.repeat);
+                      4, item.deformers, item.repeat, item.curve_tolerance);
         } else if (prim_is_lift(item.prim.type)) {
             // [profile type][p0..p3][lift param]; polygon vertices go to the
             // out-of-line pool as consecutive (x, y) pairs
@@ -512,11 +528,11 @@ struct Compiler {
             prim_params[CLAY_TAPE_PROFILE_FLOATS] = item.prim.params[0];
             emit_prim(static_cast<unsigned int>(item.prim.type), inv_world, scale, round_world,
                       item.color, prim_params, CLAY_TAPE_PROFILE_FLOATS + 1, item.deformers,
-                      item.repeat);
+                      item.repeat, item.curve_tolerance);
         } else {
             emit_prim(static_cast<unsigned int>(item.prim.type), inv_world, scale, round_world,
                       item.color, item.prim.params, kMaxPrimParams, item.deformers,
-                      item.repeat);
+                      item.repeat, item.curve_tolerance);
         }
     }
 

@@ -165,5 +165,28 @@ std::vector<StrokePoint> tessellate_curve(const std::vector<StrokePoint>& points
     return out;
 }
 
+float guide_arc_length(const std::vector<StrokePoint>& guide) {
+    float total = 0.0f;
+    for (std::size_t i = 1; i < guide.size(); ++i)
+        total += kernel::clength(guide[i].pos - guide[i - 1].pos);
+    return total;
+}
+
+float guide_bend_radius(const std::vector<StrokePoint>& guide) {
+    // The circle through each consecutive triple: r = |u||v||w| / (4 * area),
+    // written with 2*area because the cross product gives that directly.
+    float tightest = 1e6f;
+    for (std::size_t i = 1; i + 1 < guide.size(); ++i) {
+        kernel::cfloat3 u = guide[i].pos - guide[i - 1].pos;
+        kernel::cfloat3 v = guide[i + 1].pos - guide[i].pos;
+        kernel::cfloat3 w = guide[i + 1].pos - guide[i - 1].pos;
+        float lu = kernel::clength(u), lv = kernel::clength(v), lw = kernel::clength(w);
+        float area2 = kernel::clength(kernel::ccross(u, v));  // 2 * triangle area
+        if (area2 < 1e-9f) continue;                          // collinear: straight
+        tightest = kernel::cmin(tightest, lu * lv * lw / (2.0f * area2));
+    }
+    return tightest;
+}
+
 }  // namespace scene
 }  // namespace clay

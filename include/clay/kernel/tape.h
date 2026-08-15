@@ -259,12 +259,19 @@ enum CDeformType {
     // does. k = radians per unit, a = t0, b = t1, ease in slot 5.
     cdeform_twist_range = 14,
     cdeform_bend_range = 15,
+    // Bend along a DRAWN guide rather than at a constant rate. The first
+    // deformer whose payload is not a fixed size, so the guide lives in the
+    // blob exactly as a sweep's does and the record holds a handle to it:
+    // k = guide offset, a = guide vertex count, b = t0, c = t1.
+    cdeform_bend_curve = 16,
 };
 
 // Apply one deformer record to the local point. No deformer corrects the
 // distance: safety is carried by the tape's tracked Lipschitz factor, which
 // also keeps influence bounds tight (see the taper note below).
-CLAY_FN cfloat3 ctape_deform_point(CLAY_FPTR rec, cfloat3 p) {
+// `blob` is threaded through for the deformers whose payload does not fit a
+// fixed record; the ones that carry everything inline ignore it.
+CLAY_FN cfloat3 ctape_deform_point(CLAY_FPTR rec, CLAY_FPTR blob, cfloat3 p) {
     int type = CLAY_INT(CLAY_AT(rec, 0));
     if (type == cdeform_twist) return ctwist_point(p, CLAY_AT(rec, 1));
     if (type == cdeform_bend) return cbend_point(p, CLAY_AT(rec, 1));
@@ -312,6 +319,10 @@ CLAY_FN cfloat3 ctape_deform_point(CLAY_FPTR rec, cfloat3 p) {
     }
     if (type == cdeform_elongate_axis)
         return celongate_axis_point(p, cf3(CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3)));
+    if (type == cdeform_bend_curve) {
+        return cbend_curve_point(CLAY_OFF(blob, CLAY_INT(CLAY_AT(rec, 1))),
+                                 CLAY_INT(CLAY_AT(rec, 2)), p, CLAY_AT(rec, 3), CLAY_AT(rec, 4));
+    }
     if (type == cdeform_elongate) {
         // The correction rides ctape_deform_offset, which the chain evaluates
         // at this same pre-warp point — exactly what elongation needs.
@@ -738,28 +749,19 @@ CLAY_FN float ctape_prim_dist(CLAY_UINT_T op, CLAY_FPTR q,
         int profile_count = CLAY_INT(CLAY_AT(q, 3));
         if (guide_count < 2 || profile_count < 2) return CLAY_TAPE_FAR;
 
-        CSweepHit hit = csweep_nearest(CLAY_OFF(blob, guide_off), guide_count, lp);
+        CLAY_FPTR guide = CLAY_OFF(blob, guide_off);
+        CSweepHit hit = csweep_nearest(guide, guide_count, lp);
         int seg = hit.seg;
         float t = hit.t;
 
-        CLAY_FPTR va = CLAY_OFF(blob, guide_off + seg * CLAY_SWEPT_VERTEX_FLOATS);
-        CLAY_FPTR vb = CLAY_OFF(va, CLAY_SWEPT_VERTEX_FLOATS);
-        cfloat3 a = cf3(CLAY_AT(va, 0), CLAY_AT(va, 1), CLAY_AT(va, 2));
-        cfloat3 b = cf3(CLAY_AT(vb, 0), CLAY_AT(vb, 1), CLAY_AT(vb, 2));
-        cfloat3 tangent = b - a;
-        float seg_len = clength(tangent);
-        tangent = seg_len > 1e-9f ? tangent * (1.0f / seg_len) : cf3(0, 0, 1);
+        // The frame construction is shared with the bend-along-a-curve
+        // deformer, which asks this same question backwards.
+        CSweepFrame fr = csweep_frame(guide, hit);
+        cfloat3 tangent = fr.tangent;
+        cfloat3 normal = fr.normal;
+        cfloat3 binormal = fr.binormal;
 
-        // The two end normals were transported when the item compiled; lerp
-        // and re-orthogonalize, which is enough for a polyline guide and
-        // avoids a slerp in the inner loop.
-        cfloat3 na = cf3(CLAY_AT(va, 3), CLAY_AT(va, 4), CLAY_AT(va, 5));
-        cfloat3 nb = cf3(CLAY_AT(vb, 3), CLAY_AT(vb, 4), CLAY_AT(vb, 5));
-        cfloat3 normal = cnormalize(cmix(na, nb, t));
-        normal = cnormalize(normal - tangent * cdot(normal, tangent));
-        cfloat3 binormal = ccross(tangent, normal);
-
-        cfloat3 offset = lp - (a + (b - a) * t);
+        cfloat3 offset = lp - fr.origin;
         // The tangential part of the offset is only non-zero where the nearest
         // point was CLAMPED to an end of the guide — everywhere else the
         // projection makes the offset perpendicular by construction. Beyond an
@@ -774,8 +776,8 @@ CLAY_FN float ctape_prim_dist(CLAY_UINT_T op, CLAY_FPTR q,
 
         // Profiles are distributed by ARC LENGTH, so a guide whose vertices
         // bunch does not bunch the profiles.
-        float total = CLAY_AT(blob, guide_off + (guide_count - 1) * CLAY_SWEPT_VERTEX_FLOATS + 6);
-        float s = CLAY_AT(va, 6) + t * seg_len;
+        float total = csweep_length(guide, guide_count);
+        float s = fr.arclen;
         float u = cclamp(total > 1e-9f ? s / total : 0.0f, 0.0f, 1.0f) *
                   CLAY_FLOATC((profile_count - 1));
         int i = CLAY_INT(u);
@@ -969,7 +971,7 @@ CLAY_FN float ctape_prim_local(CLAY_UINT_T op, CLAY_FPTR pr,
     for (int di = 0; di < deform_count; ++di) {
         CLAY_FPTR rec = CLAY_OFF(deform, 1 + di * CLAY_TAPE_DEFORM_FLOATS);
         offset += ctape_deform_offset(rec, wp);
-        wp = ctape_deform_point(rec, wp);
+        wp = ctape_deform_point(rec, blob, wp);
     }
     return ctape_prim_dist(op, CLAY_OFF(pr, CLAY_TAPE_PRIM_HEADER), blob, wp, out_color) + offset;
 }

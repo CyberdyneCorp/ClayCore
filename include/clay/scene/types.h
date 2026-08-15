@@ -337,6 +337,28 @@ struct Profile {
 
 // One domain warp on an item (kernel/tape.h CDeformType). Ordered chains
 // apply in authoring order: the point is warped by deformers[0] first.
+// How a point joins the one after it. Hard is the original behaviour and
+// stays the default, so a point list written before types existed means what
+// it always meant.
+enum class StrokePointType : std::uint8_t {
+    Hard = 0,   // straight to the next point
+    Spline,     // Catmull-Rom through the control points
+    BSpline,    // uniform cubic B-spline; approximating, so it smooths corners
+    Bezier,     // cubic through the points, shaped by the handles below
+};
+
+struct StrokePoint {
+    kernel::cfloat3 pos;
+    float radius = 0.0f;
+    StrokePointType type = StrokePointType::Hard;
+    // Bezier only, in the item's LOCAL space and relative to pos. 3DCoat keeps
+    // its handles in screen space and its own users call that a wart: the
+    // handles then depend on the camera, so a curve means something different
+    // depending on where you were standing when you edited it.
+    kernel::cfloat3 in_handle = kernel::cf3(0, 0, 0);
+    kernel::cfloat3 out_handle = kernel::cf3(0, 0, 0);
+};
+
 struct Deformer {
     std::uint8_t type = kernel::cdeform_twist;
     float k = 0.0f;      // twist/bend: radians per unit; taper: y0; displace: amplitude
@@ -348,6 +370,17 @@ struct Deformer {
     // and k/a/b/c hold four. Written only for the types that use them, so the
     // document format needs no version bump.
     float ext[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+    // The guide for `bend_curve`, and empty for every other type. A curve is
+    // not a fixed size, so it cannot live in the record; the compiler writes
+    // it into the tape's blob and puts a handle in slots 1 and 2, exactly as a
+    // swept primitive does with its own guide.
+    //
+    // Typed control points rather than bare positions, so it tessellates
+    // through the same `tessellate_curve` every other curve in the document
+    // uses and an artist gets B-spline smoothing for free. `StrokePoint::radius`
+    // has no meaning here and is ignored.
+    std::vector<StrokePoint> guide;
 
     // How many extension floats this type carries; the serializer and the
     // reader both take their count from here, dispatching on the type.
@@ -441,6 +474,21 @@ struct Deformer {
         d.a = x0;
         d.b = x1;
         d.ease = ease;
+        return d;
+    }
+    // Bend along a DRAWN guide instead of at a constant rate — the item's
+    // local X span [t0, t1] is laid onto the guide's arc length and the
+    // material rides the guide's parallel-transported frames.
+    //
+    // Slots 1 and 2 of the compiled record hold the guide's blob offset and
+    // vertex count, which only exist once the tape is built, so `k` and `a`
+    // are left for the compiler to fill and the span lives in `b` and `c`.
+    static Deformer bend_curve(std::vector<StrokePoint> guide, float t0, float t1) {
+        Deformer d;
+        d.type = kernel::cdeform_bend_curve;
+        d.b = t0;
+        d.c = t1;
+        d.guide = std::move(guide);
         return d;
     }
     static Deformer bend_radial(float r0, float r1, float dz, std::uint8_t ease = 0) {
@@ -558,28 +606,6 @@ struct Deformer {
         d.a = frequency;
         return d;
     }
-};
-
-// How a point joins the one after it. Hard is the original behaviour and
-// stays the default, so a point list written before types existed means what
-// it always meant.
-enum class StrokePointType : std::uint8_t {
-    Hard = 0,   // straight to the next point
-    Spline,     // Catmull-Rom through the control points
-    BSpline,    // uniform cubic B-spline; approximating, so it smooths corners
-    Bezier,     // cubic through the points, shaped by the handles below
-};
-
-struct StrokePoint {
-    kernel::cfloat3 pos;
-    float radius = 0.0f;
-    StrokePointType type = StrokePointType::Hard;
-    // Bezier only, in the item's LOCAL space and relative to pos. 3DCoat keeps
-    // its handles in screen space and its own users call that a wart: the
-    // handles then depend on the camera, so a curve means something different
-    // depending on where you were standing when you edited it.
-    kernel::cfloat3 in_handle = kernel::cf3(0, 0, 0);
-    kernel::cfloat3 out_handle = kernel::cf3(0, 0, 0);
 };
 
 struct Node {

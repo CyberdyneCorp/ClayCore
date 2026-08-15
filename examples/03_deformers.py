@@ -15,6 +15,15 @@ import pyclay as clay
 import _render as R
 
 
+def _s_curve():
+    """An S: it turns one way and then the other, which no constant-rate bend
+    can do. Handed over as control points and smoothed by the default B-spline,
+    the same way any other curve in a document is authored."""
+    x = np.linspace(-1.1, 1.1, 5)
+    return np.stack([x, 0.42 * np.sin(np.pi * x / 1.1), np.zeros_like(x)],
+                    axis=1).astype(np.float32)
+
+
 def deformed(make):
     doc = clay.Document()
     layer = doc.add_sdf_layer("l")
@@ -36,6 +45,13 @@ CASES = [
         radians_per_unit=3.0, y0=-0.5, y1=0.5, ease=3)),
     ("bend_range", lambda: clay.Box(size=(0.7, 1.8, 0.7)).bend_range(
         radians_per_unit=1.4, x0=-0.35, x1=0.35, ease=3)),
+    # bend_curve bends along a DRAWN guide, so the axis takes a shape no
+    # constant rate can produce — every bend `bend` can express is a circular
+    # arc, and this one changes its mind halfway. The inverse of a sweep: the
+    # box's X span is laid onto the guide's arc length and the material rides
+    # the guide's frames.
+    ("bend_curve", lambda: clay.Box(size=(1.8, 0.32, 0.32)).bend_curve(
+        guide=_s_curve(), t0=-0.9, t1=0.9)),
     ("taper", lambda: clay.Box(size=(0.9, 1.8, 0.9)).taper(
         y0=-0.9, y1=0.9, s0=1.0, s1=0.25)),
     ("displace", lambda: clay.Sphere(r=0.9).displace(amplitude=0.08, frequency=7.0)),

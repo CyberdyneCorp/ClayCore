@@ -43,6 +43,7 @@
 #include "clay/scene/commands.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/cull_index.h"
+#include "clay/scene/curve.h"
 #include "clay/scene/tape.h"
 #include "clay/version.h"
 #include "clay/voxel/grid.h"
@@ -475,8 +476,10 @@ static_assert(sizeof kPrimParams / sizeof kPrimParams[0] == kernel::ctape_prim_c
 constexpr int kProfileParams[] = {1, 2, 1, 1, 3, 2, 0};  // polygon: vertices instead
 static_assert(sizeof kProfileParams / sizeof kProfileParams[0] == kernel::cprofile_polygon + 1);
 
-constexpr int kDeformParams[] = {1, 1, 4, 2, 2, 3, 9, 3, 3, 8, 8, 10, 5, 5, 3, 3};
-static_assert(sizeof kDeformParams / sizeof kDeformParams[0] == kernel::cdeform_bend_range + 1);
+// -1 marks a kind whose payload is not a flat float array, so the generic
+// clay_item_add_deformer cannot take it and says so by name.
+constexpr int kDeformParams[] = {1, 1, 4, 2, 2, 3, 9, 3, 3, 8, 8, 10, 5, 5, 3, 3, -1};
+static_assert(sizeof kDeformParams / sizeof kDeformParams[0] == kernel::cdeform_bend_curve + 1);
 
 clay_result check_params(const char* what, const float* params, std::size_t count, int expected) {
     if (count != static_cast<std::size_t>(expected))
@@ -2430,12 +2433,19 @@ clay_result clay_item_set_mirror(clay_item* item, int32_t mirror) {
 clay_result clay_item_add_deformer(clay_item* item, int32_t deform, const float* params,
                                    size_t param_count, int32_t ease) {
     if (!item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item");
-    // NOISE, not POSE_LINE. The bound was not moved when magnify and noise were
-    // added, so both were declared, documented, given parameter counts, handled
-    // by make_deformer — and refused here. The binding parity gate cannot see
-    // it: it checks that the ENUMERATOR exists, not that a call accepts it.
-    if (deform < 0 || deform > CLAY_DEFORM_NOISE)
+    // Bounded by the TABLE's own size rather than by a named enumerator. Twice
+    // now a deformer was declared, documented, given a parameter count and
+    // handled by make_deformer, and still refused here because this bound was
+    // left naming the previous last kind — magnify and noise the first time,
+    // the ranged pair the second. The binding parity gate cannot see it: it
+    // checks that the ENUMERATOR exists, not that a call accepts it.
+    constexpr int kDeformKinds = sizeof kDeformParams / sizeof kDeformParams[0];
+    if (deform < 0 || deform >= kDeformKinds)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown deformer kind");
+    if (kDeformParams[deform] < 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this deformer carries a payload that is not a parameter list; "
+                    "use its own entry point (bend_curve: clay_item_add_bend_curve)");
     clay_result r = check_params("deformer", params, param_count, kDeformParams[deform]);
     if (r != CLAY_OK) return r;
     if ((r = check_ease(ease)) != CLAY_OK) return r;
@@ -2443,6 +2453,37 @@ clay_result clay_item_add_deformer(clay_item* item, int32_t deform, const float*
     if ((r = make_deformer(deform, params, &d)) != CLAY_OK) return r;
     d.ease = static_cast<std::uint8_t>(ease);
     item->node.deformers.push_back(d);  // chain order is call order
+    return CLAY_OK;
+}
+
+clay_result clay_item_add_bend_curve(clay_item* item, const float* guide_xyz, size_t point_count,
+                                     int32_t point_type, float t0, float t1) {
+    if (!item || !guide_xyz) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item or guide");
+    clay_result r = check_batch("guide points", point_count);
+    if (r != CLAY_OK) return r;
+    if (point_count < 2)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "bend_curve needs at least two guide points");
+    if (!point_type_is_known(point_type))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "unknown point type: " + std::to_string(point_type));
+    if (t0 == t1) return fail(CLAY_ERROR_INVALID_ARGUMENT, "bend_curve needs t0 != t1");
+
+    std::vector<scene::StrokePoint> guide;
+    guide.reserve(point_count);
+    for (std::size_t i = 0; i < point_count; ++i) {
+        scene::StrokePoint sp;
+        sp.pos = kernel::cf3(guide_xyz[i * 3], guide_xyz[i * 3 + 1], guide_xyz[i * 3 + 2]);
+        sp.type = static_cast<scene::StrokePointType>(point_type);
+        guide.push_back(sp);
+    }
+    // A guide of zero length has no arc to lay the span onto, and the division
+    // that maps one to the other would be by zero. Measured on the CONTROL
+    // points: tessellating a curve whose points all coincide cannot give it
+    // length, so this catches the degenerate case before it costs anything.
+    if (!(scene::guide_arc_length(guide) > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "bend_curve guide has zero length");
+
+    item->node.deformers.push_back(scene::Deformer::bend_curve(std::move(guide), t0, t1));
     return CLAY_OK;
 }
 

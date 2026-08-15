@@ -123,6 +123,33 @@ Document ranged_twist_bend() {
     return doc;
 }
 
+// Bending along a guide that TURNS, and turns out of the plane it started in.
+//
+// The guide's frames are parallel-transported by the COMPILER and read from
+// the blob, so a backend that fetched the arc length but ignored the frames —
+// or that transported them in the wrong direction — gets a visibly different
+// field rather than a rounding difference. A straight guide would pass with
+// none of that working.
+Document bend_along_curve() {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("curved");
+    Node n = item(Prim::box(cf3(0.9f, 0.22f, 0.16f)), cf3(0, 0, 0), kColorA);
+    std::vector<scene::StrokePoint> guide;
+    for (int i = 0; i <= 12; ++i) {
+        const float t = static_cast<float>(i) / 12.0f;
+        const float a = 2.2f * t;
+        scene::StrokePoint sp;
+        // A helix arc: it curves in XY and climbs in Z, so the transported
+        // frame has to rotate about more than one axis on the way along.
+        sp.pos = cf3(0.9f * std::cos(a) - 0.9f, 0.9f * std::sin(a), 0.35f * t);
+        sp.type = scene::StrokePointType::Hard;
+        guide.push_back(sp);
+    }
+    n.deformers.push_back(scene::Deformer::bend_curve(guide, -0.9f, 0.9f));
+    l.sdf->insert(n);
+    return doc;
+}
+
 Document region_deformer() {
     Document doc;
     Layer& l = doc.add_sdf_layer("region");
@@ -551,6 +578,9 @@ std::vector<FixtureCase> kernel_parity_cases() {
     add_case(&cases, "ranged_twist_bend",
              "twist and bend ramped across a span and held beyond it, eased",
              ranged_twist_bend());
+    add_case(&cases, "bend_along_curve",
+             "an item bent along a guide that turns and climbs; frames come from the blob",
+             bend_along_curve());
     add_case(&cases, "deformer_region", "grab: a finitely supported pull on part of a sphere",
              region_deformer());
     add_case(&cases, "repetition_finite_grid", "clamped-cell array with neighbour evaluation",

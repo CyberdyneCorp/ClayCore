@@ -385,6 +385,13 @@ void write_deformers(Writer& w, const std::vector<Deformer>& deformers) {
         // extension floats follow. Old files carry only old types and decode
         // exactly as before.
         for (int e = 0; e < Deformer::ext_count(d.type); ++e) w.pod(d.ext[e]);
+        // A bend_curve's guide, length-prefixed. Only that type writes one, so
+        // the reader knows from the type whether to expect it and every file
+        // written before this existed decodes exactly as it did.
+        if (d.type == kernel::cdeform_bend_curve) {
+            w.u32(static_cast<std::uint32_t>(d.guide.size()));
+            for (const StrokePoint& sp : d.guide) write_point(w, sp);
+        }
     }
 }
 
@@ -500,6 +507,18 @@ std::vector<Deformer> read_deformers(Reader& r) {
         d.c = r.pod<float>();
         d.ease = r.pod<std::uint8_t>();
         for (int e = 0; e < Deformer::ext_count(d.type); ++e) d.ext[e] = r.pod<float>();
+        if (d.type == kernel::cdeform_bend_curve) {
+            std::uint32_t gc = r.u32();
+            // Same shape of guard the deformer count itself uses: a corrupt
+            // length must not make the reader allocate against a file that
+            // cannot possibly contain that many points.
+            if (!r.ok || gc > r.remaining / 4) {
+                r.ok = false;
+                return out;
+            }
+            for (std::uint32_t g = 0; g < gc && r.ok; ++g)
+                d.guide.push_back(read_point(r));
+        }
         out.push_back(d);
     }
     return out;

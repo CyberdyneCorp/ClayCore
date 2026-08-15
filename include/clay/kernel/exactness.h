@@ -252,4 +252,27 @@ CLAY_FN CFieldInfo cfi_swept(float profile_extent, float bend_radius, float prof
     return CFieldInfo{false, (bend_radius / headroom) * lerp};
 }
 
+// bend along a guide curve. TWO terms, the same shape cfi_swept pays for the
+// same geometry read from the other end:
+//
+//   curvature — a point at perpendicular offset r inside a bend of radius R is
+//   compressed by R / (R - r). When the item's cross-section reaches the
+//   tightest bend the map folds through itself; as with a sweep that is NOT
+//   refused, because a guide is editable after the fact, and it degrades to a
+//   very small step instead of a claim the field is a distance.
+//
+//   axial rescale — the item's span is laid onto the guide's arc length, so
+//   the axis direction is scaled by span / guide_len. Only a value ABOVE one
+//   costs anything: a guide longer than the span CONTRACTS, and contraction
+//   cannot make the marcher overstep. The perpendicular directions are
+//   untouched by the rescale, so the max is taken against 1 rather than the
+//   ratio being used bare.
+CLAY_FN CFieldInfo cfi_bend_curve(CFieldInfo a, float cross_extent, float bend_radius,
+                                  float span_len, float guide_len) {
+    float headroom = bend_radius - cross_extent;
+    if (headroom <= 1e-4f) return CFieldInfo{false, 1e4f};
+    float stretch = cmax(span_len / cmax(guide_len, 1e-6f), 1.0f);
+    return CFieldInfo{false, a.lipschitz * (bend_radius / headroom) * stretch};
+}
+
 CLAY_NS_END

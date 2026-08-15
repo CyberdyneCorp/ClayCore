@@ -49,8 +49,16 @@ inline CTapeValue ref_eval_item(const scene::Node& item, const scene::Layer& lay
             float rec[CLAY_TAPE_DEFORM_FLOATS] = {static_cast<float>(def.type), def.k, def.a,
                                                   def.b, def.c, static_cast<float>(def.ease)};
             for (int e = 0; e < scene::Deformer::ext_count(def.type); ++e) rec[6 + e] = def.ext[e];
+            // bend_curve reads a guide the COMPILER wrote into the blob, with
+            // parallel-transported frames. Mirroring that here would be a
+            // second implementation of the very thing this reference exists to
+            // check independently, so it is left out: an item using one warps
+            // here as if undeformed and fails the comparison loudly rather
+            // than agreeing by construction. Its evidence is direct instead —
+            // a straight guide is the identity, a circular one is `bend`.
+            if (def.type == kernel::cdeform_bend_curve) continue;
             offset += ctape_deform_offset(rec, lp);
-            lp = ctape_deform_point(rec, lp);
+            lp = ctape_deform_point(rec, nullptr, lp);
         }
         cfloat3 ignored_color = cf3(0, 0, 0);  // this reference walks distance only
         float d;

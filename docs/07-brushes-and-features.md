@@ -147,6 +147,7 @@ with a centre and a finite radius — are marked ●.
 | `bend` | Bend along X, radians per unit | radians/unit |
 | `twist_range` | Twist RAMPED across `[y0, y1]` and **held** beyond it. A gizmo's twist acts inside its box; `twist` winds the whole item | radians/unit, y0, y1, ease |
 | `bend_range` | The same for bend, across `[x0, x1]` — ZBrush's Bend Arc is angle-limited this way | radians/unit, x0, x1, ease |
+| `bend_curve` | Bend along a DRAWN guide: the local X span is laid onto the guide's arc length and the material rides its parallel-transported frames. Every bend a constant rate can express is a circular arc; this is the one that is not | guide points, t0, t1, point type |
 | `bend_linear` | Bend a segment about a direction, eased | a, b, v, ease |
 | `bend_radial` | Bend between two radii over a depth, eased | r0, r1, dz, ease |
 | `taper` | Scale between two heights, eased | y0, y1, s0, s1, ease |
@@ -730,8 +731,9 @@ parity — the mechanism usually differs even where the result matches.
 | Move | `brush::move_brush` | Drags the assembled surface. Nudges form rather than growing it: a large pull buds rather than stretches, and a stroke's drags compound the step scale — use `snakehook` to pull a lobe out |
 | Rotate | `pose` / `pose_line` | Radial, or ramped along a line |
 | Gizmo Twist | `twist_range` | The gizmo acts inside its box: the rotation ramps across the span and holds beyond. Plain `twist` winds the whole item, which is the difference |
-| Gizmo Bend Arc | `bend_range` | Angle-limited bend, same shape. Bend Curve — a bend along an arbitrary guide — is still missing (#116) |
-| Gizmo Lattice / FFD | — | Not yet, and the interesting one: a claycore deformer is an INVERSE point map, and forward FFD has no closed-form inverse. #116 records the three candidate answers |
+| Gizmo Bend Arc | `bend_range` | Angle-limited bend, same shape |
+| Gizmo Bend Curve | `bend_curve` | A bend along an arbitrary guide. Implemented as the INVERSE of the swept primitive — the same nearest-point query and transported frames, read from the other end — so the two agree about what a guide is by construction |
+| Gizmo Lattice / FFD | — | Not yet, and now the last of the four. A claycore deformer is an INVERSE point map, and forward FFD has no closed-form inverse; #116 records the three candidate answers and picking one is a design decision rather than an implementation detail. The blob-carried payload it needs already exists, because `bend_curve` needed the same thing for its guide |
 | Pinch | `magnify` (negative), `sculpt_pinch` | One signed strength, not two verbs |
 | Magnify | `magnify` (positive), `sculpt_magnify` | Maxon's own page calls them inverses |
 | Smooth | `field::relax`, `sculpt_smooth` | Bakes on the SDF side |
@@ -764,6 +766,7 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Blends | `scene::Blend`, `BlendProfile` | `clay.Smooth/Cubic/Circular/Chamfer(k)` | `clay_item_set_blend`, `CLAY_BLEND_*` |
 | Deformers | `scene::Deformer::twist(...)` etc. | methods on the prim: `p.twist(...)`, `p.noise(...)`, `p.magnify(...)` | `clay_item_add_deformer` |
 | Ranged twist / bend | `Deformer::twist_range`, `bend_range` | `p.twist_range(...)`, `p.bend_range(...)` | `CLAY_DEFORM_TWIST_RANGE`, `CLAY_DEFORM_BEND_RANGE` |
+| Bend along a curve | `Deformer::bend_curve` | `p.bend_curve(...)` | `clay_item_add_bend_curve` — its own entry point, because a guide is not a fixed number of floats |
 | Stroke engine | `brush::resolve_stroke`, `StrokePreset` | `clay.StrokePreset`, `layer.apply_stroke(...)` | `clay_stroke_resolve`, `clay_stroke_preset_*`, `clay_layer_apply_stroke`, `clay_voxel_apply_stroke` |
 | Smooth — `relax` on SDF layers | `field::relax`, `VoxelGrid::sculpt_smooth` | `Volume.relaxed(...)`, `VoxelGrid.sculpt_smooth(...)` | `clay_item_volume_relax`, `clay_item_volume_relax_from`, `clay_voxel_sculpt_smooth` |
 | Flatten | `field::flatten` | `Volume.flattened(...)`, `Volume.flattened_from(...)` | `clay_item_volume_flatten`, `clay_item_volume_flatten_from` |

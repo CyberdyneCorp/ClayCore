@@ -1187,6 +1187,77 @@ def test_deformers_survive_clayspace_round_trip(tmp_path):
     assert np.array_equal(before, after)
 
 
+def _arc_guide(radius, segments=32, quarter=1.0):
+    a = np.linspace(0.0, quarter * np.pi / 2.0, segments + 1)
+    return np.stack([radius * np.cos(a), radius * np.sin(a), np.zeros_like(a)], axis=1)
+
+
+def test_bend_curve_along_a_straight_guide_is_the_undeformed_item():
+    # What makes it a generalization of the item rather than a second thing to
+    # keep in step: with the guide running down the item's own axis, nothing
+    # moves.
+    straight = np.array([[-0.9, 0, 0], [0, 0, 0], [0.9, 0, 0]], dtype=np.float32)
+
+    def field(prim):
+        doc = clay.Document()
+        doc.add_sdf_layer("l").add(prim)
+        rng = np.random.default_rng(11)
+        pts = rng.uniform(-1.5, 1.5, size=(512, 3)).astype(np.float32)
+        return doc.eval(pts)
+
+    plain = field(clay.Box(size=(1.8, 0.6, 0.4)))
+    bent = field(clay.Box(size=(1.8, 0.6, 0.4)).bend_curve(straight, -0.9, 0.9,
+                                                           point_type="hard"))
+    assert np.allclose(plain, bent, atol=1e-4)
+
+
+def test_bend_curve_carries_material_along_the_guide():
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(
+        clay.Box(size=(2.0, 0.3, 0.3)).bend_curve(_arc_guide(1.0), -1.0, 1.0,
+                                                  point_type="hard"))
+    plain = clay.Document()
+    plain.add_sdf_layer("l").add(clay.Box(size=(2.0, 0.3, 0.3)))
+
+    # A point most of the way round the arc: the box's material has to be
+    # there. Not the arc's exact endpoint, which is the box's own end FACE and
+    # so sits at distance zero — an assertion that would turn on float noise
+    # rather than on the deformer working.
+    a = 0.85 * np.pi / 2.0
+    far = np.array([[np.cos(a), np.sin(a), 0.0]], dtype=np.float32)
+    assert doc.eval(far)[0] < 0.0        # inside the bent box
+    assert plain.eval(far)[0] > 0.5      # nowhere near the straight one
+    # A curved guide is a bound field, so the step scale has to drop.
+    assert doc.safe_step_scale() < 1.0
+
+
+def test_bend_curve_refuses_a_guide_that_cannot_mean_anything():
+    one_point = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
+    with pytest.raises(ValueError, match="at least two"):
+        clay.Sphere(r=1.0).bend_curve(one_point, -1.0, 1.0)
+
+    coincident = np.zeros((4, 3), dtype=np.float32)
+    with pytest.raises(ValueError, match="zero length"):
+        clay.Sphere(r=1.0).bend_curve(coincident, -1.0, 1.0)
+
+    with pytest.raises(ValueError, match="t0 != t1"):
+        clay.Sphere(r=1.0).bend_curve(_arc_guide(1.0), 0.5, 0.5)
+
+
+def test_bend_curve_survives_the_clayspace_round_trip(tmp_path):
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(
+        clay.Box(size=(1.6, 0.3, 0.3)).bend_curve(_arc_guide(0.9, segments=8), -0.8, 0.8,
+                                                  point_type="hard").twist(0.4))
+    rng = np.random.default_rng(12)
+    pts = rng.uniform(-2, 2, size=(256, 3)).astype(np.float32)
+    before = doc.eval(pts)
+
+    path = tmp_path / "curved.clayspace"
+    doc.save(str(path))
+    assert np.array_equal(before, clay.load(str(path)).eval(pts))
+
+
 def test_wrap_around_needs_a_non_degenerate_interval():
     # The interval fixes the cylinder radius, so x0 == x1 has no meaning.
     with pytest.raises(ValueError, match="x0 != x1"):

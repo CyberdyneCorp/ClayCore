@@ -42,6 +42,7 @@
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
 #include "clay/scene/consolidate.h"
+#include "clay/scene/curve.h"
 #include "clay/scene/tape.h"
 #include "clay/version.h"
 #include "clay/voxel/grid.h"
@@ -1399,6 +1400,43 @@ NB_MODULE(pyclay, m) {
              },
              "a"_a, "b"_a, "v"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
              "Displace by v, eased along the segment a -> b")
+        .def("bend_curve",
+             [](nb::object self, nb::handle guide, float t0, float t1,
+                const std::string& point_type) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 PointsView v = to_points(guide);
+                 if (v.count < 2)
+                     throw std::invalid_argument(
+                         "bend_curve needs at least two guide points");
+                 if (t0 == t1)
+                     throw std::invalid_argument(
+                         "bend_curve needs t0 != t1: the span is what gets laid on the guide");
+                 std::vector<scene::StrokePoint> points;
+                 points.reserve(v.count);
+                 for (std::size_t i = 0; i < v.count; ++i) {
+                     scene::StrokePoint sp;
+                     sp.pos = kernel::cf3(v.data[i * 3], v.data[i * 3 + 1], v.data[i * 3 + 2]);
+                     sp.type = parse_point_type(point_type);
+                     points.push_back(sp);
+                 }
+                 if (!(scene::guide_arc_length(points) > 0.0f))
+                     throw std::invalid_argument(
+                         "bend_curve guide has zero length: there is no arc to lay the span on");
+                 p.deformers.push_back(scene::Deformer::bend_curve(std::move(points), t0, t1));
+                 return self;
+             },
+             "guide"_a, "t0"_a, "t1"_a, "point_type"_a = "bspline",
+             nb::rv_policy::reference_internal,
+             "Bend along a DRAWN guide instead of at a constant rate.\n\n"
+             "`bend` turns about a fixed axis at a fixed rate, so every bend it can\n"
+             "express is a circular arc. This lays the item's local X span [t0, t1]\n"
+             "onto the guide's ARC LENGTH and carries the material on the guide's\n"
+             "parallel-transported frames — ZBrush's Gizmo Bend Curve.\n\n"
+             "It is the inverse of a swept primitive rather than a second kind of\n"
+             "bend, and it shares the sweep's machinery: `guide` is the same kind of\n"
+             "curve every other item takes, so `point_type` gives it B-spline\n"
+             "smoothing and it tessellates to the document's curve tolerance.\n\n"
+             "A guide running straight along X is exactly the undeformed item.")
         .def("twist_range",
              [](nb::object self, float radians_per_unit, float y0, float y1, int ease) {
                  PyPrim& p = nb::cast<PyPrim&>(self);
