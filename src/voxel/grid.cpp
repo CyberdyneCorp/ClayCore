@@ -1,3 +1,4 @@
+#include "clay/parallel/thread_pool.h"
 #include "clay/voxel/grid.h"
 
 #include <algorithm>
@@ -1574,19 +1575,43 @@ void VoxelGrid::rasterize_mesh(const mesh::Mesh& m, const math::Aabb& world_regi
     std::int32_t x1 = static_cast<std::int32_t>(std::floor(world_region.max.x / vs));
     std::int32_t y1 = static_cast<std::int32_t>(std::floor(world_region.max.y / vs));
     std::int32_t z1 = static_cast<std::int32_t>(std::floor(world_region.max.z / vs));
-    for (std::int32_t z = z0; z <= z1; ++z)
-        for (std::int32_t y = y0; y <= y1; ++y)
-            for (std::int32_t x = x0; x <= x1; ++x) {
-                cfloat3 center = cf3((static_cast<float>(x) + 0.5f) * vs,
-                                     (static_cast<float>(y) + 0.5f) * vs,
-                                     (static_cast<float>(z) + 0.5f) * vs);
-                if (!bvh.is_inside(center)) continue;
-                // The closest-point query only runs for a cell that is IN, and
-                // only when there is a colour to read: it is the expensive half
-                // and most cells are neither.
-                set({x, y, z},
-                    palette_add(mesh_colour_at(m, bvh, center, neutral), 1.0f / 64.0f));
+    // The same two-phase split rasterize_tape uses, for the same reason: the
+    // winding number and the closest-point query are pure reads of a const BVH,
+    // and the palette insert is not.
+    struct Hit {
+        std::int32_t x, y, z;
+        kernel::cfloat3 color;
+    };
+    constexpr std::int32_t kPlanesPerWave = 32;
+    if (x1 < x0 || y1 < y0) return;
+
+    std::vector<std::vector<Hit>> hits(static_cast<std::size_t>(kPlanesPerWave));
+    for (std::int32_t wave = z0; wave <= z1; wave += kPlanesPerWave) {
+        const std::int32_t wave_end = std::min<std::int32_t>(wave + kPlanesPerWave - 1, z1);
+        const std::size_t planes = static_cast<std::size_t>(wave_end - wave + 1);
+        for (std::size_t i = 0; i < planes; ++i) hits[i].clear();
+
+        parallel::for_range(planes, 1, [&](std::size_t b, std::size_t e) {
+            for (std::size_t i = b; i < e; ++i) {
+                const std::int32_t z = wave + static_cast<std::int32_t>(i);
+                std::vector<Hit>& out = hits[i];
+                for (std::int32_t y = y0; y <= y1; ++y)
+                    for (std::int32_t x = x0; x <= x1; ++x) {
+                        cfloat3 center = cf3((static_cast<float>(x) + 0.5f) * vs,
+                                             (static_cast<float>(y) + 0.5f) * vs,
+                                             (static_cast<float>(z) + 0.5f) * vs);
+                        if (!bvh.is_inside(center)) continue;
+                        // The closest-point query only runs for a cell that is
+                        // IN: it is the expensive half and most cells are not.
+                        out.push_back({x, y, z, mesh_colour_at(m, bvh, center, neutral)});
+                    }
             }
+        });
+
+        for (std::size_t i = 0; i < planes; ++i)
+            for (const Hit& h : hits[i])
+                set({h.x, h.y, h.z}, palette_add(h.color, 1.0f / 64.0f));
+    }
 }
 
 void VoxelGrid::rasterize_tape(const scene::Tape& tape, const math::Aabb& world_region) {
@@ -1598,15 +1623,57 @@ void VoxelGrid::rasterize_tape(const scene::Tape& tape, const math::Aabb& world_
     std::int32_t x1 = static_cast<std::int32_t>(std::floor(world_region.max.x / vs));
     std::int32_t y1 = static_cast<std::int32_t>(std::floor(world_region.max.y / vs));
     std::int32_t z1 = static_cast<std::int32_t>(std::floor(world_region.max.z / vs));
-    for (std::int32_t z = z0; z <= z1; ++z)
-        for (std::int32_t y = y0; y <= y1; ++y)
-            for (std::int32_t x = x0; x <= x1; ++x) {
-                cfloat3 center = cf3((static_cast<float>(x) + 0.5f) * vs,
-                                     (static_cast<float>(y) + 0.5f) * vs,
-                                     (static_cast<float>(z) + 0.5f) * vs);
-                kernel::CTapeValue v = tape.eval(center);
-                if (v.d < 0.0f) set({x, y, z}, palette_add(v.color, 1.0f / 64.0f));
+    // EVALUATE in parallel, WRITE serially — the same two-phase split the
+    // sculpting verbs use, and for the same two reasons.
+    //
+    // A compiled tape is const during eval and the kernels hold no state, so
+    // any number of threads can hammer one; the C ABI already promises that of
+    // `clay_brick_cache_eval_requests`. What cannot run concurrently is the
+    // WRITING: `set` mutates a chunk map and `palette_add` inserts a
+    // nearest-entry match into a shared palette.
+    //
+    // Byte-identity is by construction. Planes are decided into their own
+    // buckets and applied in plane order, so the palette sees colours in the
+    // order the serial walk saw them and gets the same indices — which matters
+    // more here than for a verb, because a palette index is stored.
+    //
+    // WAVES, so the pending list is bounded by the wave rather than by the
+    // region: a document rasterized at a fine cell is millions of cells, and
+    // holding a colour for every one of them would trade time for a memory
+    // spike. The same shape parallel brick meshing uses for the same reason.
+    struct Hit {
+        std::int32_t x, y, z;
+        cfloat3 color;
+    };
+    constexpr std::int32_t kPlanesPerWave = 32;
+    const std::int32_t nx = x1 - x0 + 1, ny = y1 - y0 + 1;
+    if (nx <= 0 || ny <= 0) return;
+
+    std::vector<std::vector<Hit>> hits(static_cast<std::size_t>(kPlanesPerWave));
+    for (std::int32_t wave = z0; wave <= z1; wave += kPlanesPerWave) {
+        const std::int32_t wave_end = std::min<std::int32_t>(wave + kPlanesPerWave - 1, z1);
+        const std::size_t planes = static_cast<std::size_t>(wave_end - wave + 1);
+        for (std::size_t i = 0; i < planes; ++i) hits[i].clear();
+
+        parallel::for_range(planes, 1, [&](std::size_t b, std::size_t e) {
+            for (std::size_t i = b; i < e; ++i) {
+                const std::int32_t z = wave + static_cast<std::int32_t>(i);
+                std::vector<Hit>& out = hits[i];
+                for (std::int32_t y = y0; y <= y1; ++y)
+                    for (std::int32_t x = x0; x <= x1; ++x) {
+                        cfloat3 center = cf3((static_cast<float>(x) + 0.5f) * vs,
+                                             (static_cast<float>(y) + 0.5f) * vs,
+                                             (static_cast<float>(z) + 0.5f) * vs);
+                        kernel::CTapeValue v = tape.eval(center);
+                        if (v.d < 0.0f) out.push_back({x, y, z, v.color});
+                    }
             }
+        });
+
+        for (std::size_t i = 0; i < planes; ++i)
+            for (const Hit& h : hits[i])
+                set({h.x, h.y, h.z}, palette_add(h.color, 1.0f / 64.0f));
+    }
 }
 
 }  // namespace voxel

@@ -58,6 +58,14 @@ FLOORS = {
     # that half alone is 3.45x, far outside runner spread, unlike the threading
     # half which is not gateable here for the usual reason.
     "BM_VoxelSculptSmoothR32": {"max_ms": 0.9},
+    # Rasterizing a document into cells — a tape evaluation per cell, the case
+    # #119 correctly predicted was parallel (unlike the verbs, where the
+    # snapshot turned out to dominate). 42.1 -> 7.0 ms, 6.0x.
+    #
+    # Gateable here, unusually, because 6x is well outside runner spread: this
+    # ceiling is set at roughly twice the parallel figure, so it trips if the
+    # split is lost without flaking on a slower machine.
+    "BM_VoxelRasterizeTape": {"max_ms": 15},
     "BM_VoxelMeshSparse64Chunks": {"max_ms": 120},
     # Part 2 of the same issue: two chunks of that 64-chunk grid, meshed
     # through the regional call. It is the bench above divided by 32 — 0.40 ms
