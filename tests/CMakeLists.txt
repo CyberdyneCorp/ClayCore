@@ -15,6 +15,7 @@ add_executable(clay_unit_tests
   unit/test_commands.cpp
   unit/test_parity.cpp
   unit/test_backend_partial.cpp
+  unit/test_thread_pool.cpp
   unit/test_backend_residency.cpp
   unit/test_points_batch.cpp
   unit/test_parity_fixture.cpp
