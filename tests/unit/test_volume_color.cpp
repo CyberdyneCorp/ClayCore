@@ -74,6 +74,53 @@ TEST_CASE("the tape reports a coloured volume's own colour") {
     CHECK(right.y < 0.3f);
 }
 
+TEST_CASE("a tape holding a volume AND analytic prims routes each to its own path") {
+    // The dispatch, exercised. `ctape_volume` reaches its own entry point and
+    // every other prim reaches the one with no colour out-parameter, so a wrong
+    // branch is a wrong COLOUR rather than a wrong distance — a sphere that
+    // took the volume path would read a blob it does not have, and a volume
+    // that took the analytic path would report the item's constant.
+    auto dist = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.5f; };
+    auto col = [](kernel::cfloat3 p) {
+        return p.x < 0 ? kernel::cf3(1, 0, 0) : kernel::cf3(0, 0, 1);
+    };
+    math::Aabb region{kernel::cf3(-1, -1, -1), kernel::cf3(1, 1, 1)};
+
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("mixed");
+    scene::Node vol;
+    vol.prim = scene::Prim::volume();
+    vol.volume = std::make_shared<const field::FieldVolume>(
+        field::FieldVolume::sample_colored(dist, col, region, 0.05f, 0.15f));
+    vol.color = kernel::cf3(0, 1, 0);  // must not win inside the volume
+    l.sdf->insert(vol);
+
+    // Analytic, well clear of the volume's sampled box, with a colour of its
+    // own that the volume's samples must not leak into.
+    scene::Node ball = clay_test::item(scene::Prim::sphere(0.3f), kernel::cf3(1.6f, 0, 0));
+    ball.color = kernel::cf3(0, 1, 0);
+    l.sdf->insert(ball);
+
+    const scene::Tape tape = scene::compile_document(doc);
+    auto shade = [&](kernel::cfloat3 p) {
+        float d = 0;
+        kernel::cfloat3 c = kernel::cf3(0, 0, 0);
+        eval::PointQuery q{reinterpret_cast<const float*>(&p), 1, 1e-4f};
+        eval::eval_points_reference(
+            tape, q, eval::PointResults{&d, nullptr, reinterpret_cast<float*>(&c)});
+        return c;
+    };
+
+    const kernel::cfloat3 in_volume_left = shade(kernel::cf3(-0.5f, 0, 0));
+    const kernel::cfloat3 in_volume_right = shade(kernel::cf3(0.5f, 0, 0));
+    const kernel::cfloat3 in_ball = shade(kernel::cf3(1.6f, 0, 0));
+    CHECK(in_volume_left.x > 0.7f);   // the volume's samples, not the item's green
+    CHECK(in_volume_right.z > 0.7f);
+    CHECK(in_ball.y > 0.7f);          // the sphere's own colour
+    CHECK(in_ball.x < 0.3f);
+    CHECK(in_ball.z < 0.3f);
+}
+
 TEST_CASE("an uncoloured volume still reports the item's colour") {
     auto dist = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.5f; };
     math::Aabb region{kernel::cf3(-1, -1, -1), kernel::cf3(1, 1, 1)};

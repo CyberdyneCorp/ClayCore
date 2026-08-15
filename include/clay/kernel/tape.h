@@ -591,8 +591,107 @@ CLAY_FN float ctape_profile_dist(CLAY_FPTR prof, CLAY_FPTR blob,
 // applies — which is how one opcode gains a per-sample colour without every
 // other prim paying for a colour it does not have. Widening the return type to
 // CTapeValue was the alternative and would have charged all of them.
+// The ONE opcode that writes colour, lifted out of ctape_prim_dist so that
+// the other forty do not carry an out-parameter they never touch. See the
+// dispatch in ctape_prim_local for why that is worth a function.
+CLAY_FN float ctape_volume_dist(CLAY_FPTR q, CLAY_FPTR blob, cfloat3 lp,
+                                CLAY_INOUT(cfloat3) out_color) {
+    CLAY_FPTR h = blob + CLAY_INT(CLAY_AT(q, 0));
+    cfloat3 origin = cf3(CLAY_AT(h, 0), CLAY_AT(h, 1), CLAY_AT(h, 2));
+    float cell = CLAY_AT(h, 3);
+    int bcx = CLAY_INT(CLAY_AT(h, 5)), bcy = CLAY_INT(CLAY_AT(h, 6)), bcz = CLAY_INT(CLAY_AT(h, 7));
+    int index_off = CLAY_INT(CLAY_AT(h, 8)), far_off = CLAY_INT(CLAY_AT(h, 9)), data_off = CLAY_INT(CLAY_AT(h, 10));
+    if (bcx <= 0 || bcy <= 0 || bcz <= 0 || cell <= 0.0f) return CLAY_TAPE_FAR;
+
+    float span_x = CLAY_FLOATC((bcx * CLAY_BRICK_DIM)) * cell;
+    float span_y = CLAY_FLOATC((bcy * CLAY_BRICK_DIM)) * cell;
+    float span_z = CLAY_FLOATC((bcz * CLAY_BRICK_DIM)) * cell;
+    // The point projected onto the sampled box, and how far outside it is.
+    // The lookup below runs on the PROJECTED point, so it always reads a
+    // real brick; the outside distance is folded in afterwards.
+    cfloat3 cp = cf3(cclamp(lp.x, origin.x, origin.x + span_x),
+                     cclamp(lp.y, origin.y, origin.y + span_y),
+                     cclamp(lp.z, origin.z, origin.z + span_z));
+    float outside = clength(lp - cp);
+
+    float gx = (cp.x - origin.x) / cell;
+    float gy = (cp.y - origin.y) / cell;
+    float gz = (cp.z - origin.z) / cell;
+    int cx = CLAY_INT(cclamp(cfloor(gx), 0.0f, CLAY_FLOATC((bcx * CLAY_BRICK_DIM - 1))));
+    int cy = CLAY_INT(cclamp(cfloor(gy), 0.0f, CLAY_FLOATC((bcy * CLAY_BRICK_DIM - 1))));
+    int cz = CLAY_INT(cclamp(cfloor(gz), 0.0f, CLAY_FLOATC((bcz * CLAY_BRICK_DIM - 1))));
+    int bx = cx / CLAY_BRICK_DIM, by = cy / CLAY_BRICK_DIM, bz = cz / CLAY_BRICK_DIM;
+    int slot = (bz * bcy + by) * bcx + bx;
+    // Relative to the VOLUME's own blob, not the tape's. to_blob writes
+    // index/far/data offsets past its own 12-float header, so they are only
+    // absolute when the volume happens to sit at blob offset 0 — which is
+    // true exactly when nothing else out-of-line was emitted before it. A
+    // stroke, loft, swept or armature earlier in the layer puts its payload
+    // there first, and the volume then read whatever those had written.
+    int entry = CLAY_INT(CLAY_AT(h, index_off + slot));
+    // An empty brick carries its own signed lower bound: the gap in bricks
+    // to the nearest brick that HAS samples, floored at the band less half
+    // a cell diagonal. A flat band width would be conservative but useless
+    // — the marcher would creep across the empty majority of the region in
+    // steps that never grew. See FieldVolume::far_value().
+    if (entry < 0) return ctape_volume_outside(CLAY_AT(h, far_off + slot), outside);
+
+    CLAY_FPTR block = CLAY_OFF(h, data_off + entry);
+    int lx = cx - bx * CLAY_BRICK_DIM;
+    int ly = cy - by * CLAY_BRICK_DIM;
+    int lz = cz - bz * CLAY_BRICK_DIM;
+    float fx = cclamp(gx - CLAY_FLOATC(cx), 0.0f, 1.0f);
+    float fy = cclamp(gy - CLAY_FLOATC(cy), 0.0f, 1.0f);
+    float fz = cclamp(gz - CLAY_FLOATC(cz), 0.0f, 1.0f);
+    const int n = CLAY_BRICK_DIM + 1;
+    // The halo is why this needs no neighbouring brick: lx+1 is always in
+    // range, so a trilinear tap is one array read.
+    float c00 = cmix(CLAY_AT(block, ((lz)*n + ly) * n + lx), CLAY_AT(block, ((lz)*n + ly) * n + lx + 1), fx);
+    float c10 =
+        cmix(CLAY_AT(block, ((lz)*n + ly + 1) * n + lx), CLAY_AT(block, ((lz)*n + ly + 1) * n + lx + 1), fx);
+    float c01 =
+        cmix(CLAY_AT(block, ((lz + 1) * n + ly) * n + lx), CLAY_AT(block, ((lz + 1) * n + ly) * n + lx + 1), fx);
+    float c11 = cmix(CLAY_AT(block, ((lz + 1) * n + ly + 1) * n + lx),
+                     CLAY_AT(block, ((lz + 1) * n + ly + 1) * n + lx + 1), fx);
+
+    // Slot 13 is the colour offset, 0 when this volume carries none — and
+    // a volume written before colour existed has a 13-float header and no
+    // slot 13 at all, which is why the header size decides whether to look
+    // rather than the blob's length. Colour is interpolated at the SAME
+    // eight samples as the distance: a nearest-sample read would facet a
+    // surface that has none.
+    int header_size = index_off;
+    if (header_size >= 14) {
+        int color_off = CLAY_INT(CLAY_AT(h, 13));
+        if (color_off > 0) {
+            CLAY_FPTR cblock = CLAY_OFF(h, color_off + entry);
+            // UNPACK BEFORE MIXING. Interpolating the packed words and
+            // unpacking the result mixes the channels through their own
+            // carries — a green halfway between two blues, and a blue that
+            // is whatever the arithmetic left over. Each corner becomes a
+            // colour first, and the mix is then an ordinary colour mix.
+            cfloat3 q000 = cunpack_color(CLAY_AT(cblock, ((lz)*n + ly) * n + lx));
+            cfloat3 q100 = cunpack_color(CLAY_AT(cblock, ((lz)*n + ly) * n + lx + 1));
+            cfloat3 q010 = cunpack_color(CLAY_AT(cblock, ((lz)*n + ly + 1) * n + lx));
+            cfloat3 q110 = cunpack_color(CLAY_AT(cblock, ((lz)*n + ly + 1) * n + lx + 1));
+            cfloat3 q001 = cunpack_color(CLAY_AT(cblock, ((lz + 1) * n + ly) * n + lx));
+            cfloat3 q101 = cunpack_color(CLAY_AT(cblock, ((lz + 1) * n + ly) * n + lx + 1));
+            cfloat3 q011 = cunpack_color(CLAY_AT(cblock, ((lz + 1) * n + ly + 1) * n + lx));
+            cfloat3 q111 =
+                cunpack_color(CLAY_AT(cblock, ((lz + 1) * n + ly + 1) * n + lx + 1));
+            cfloat3 k00 = cmix3(q000, q100, fx);
+            cfloat3 k10 = cmix3(q010, q110, fx);
+            cfloat3 k01 = cmix3(q001, q101, fx);
+            cfloat3 k11 = cmix3(q011, q111, fx);
+            CLAY_SET(out_color, cmix3(cmix3(k00, k10, fy), cmix3(k01, k11, fy), fz));
+        }
+    }
+    return ctape_volume_outside(cmix(cmix(c00, c10, fy), cmix(c01, c11, fy), fz), outside);
+    return CLAY_TAPE_FAR;
+}
+
 CLAY_FN float ctape_prim_dist(CLAY_UINT_T op, CLAY_FPTR q,
-                              CLAY_FPTR blob, cfloat3 lp, CLAY_INOUT(cfloat3) out_color) {
+                              CLAY_FPTR blob, cfloat3 lp) {
     // q points at the prim-specific params (after xform/scale/round/color).
     if (op == ctape_sphere) return sd_sphere(lp, CLAY_AT(q, 0));
     if (op == ctape_box) return sd_box(lp, cf3(CLAY_AT(q, 0), CLAY_AT(q, 1), CLAY_AT(q, 2)));
@@ -648,99 +747,6 @@ CLAY_FN float ctape_prim_dist(CLAY_UINT_T op, CLAY_FPTR q,
         float da = ctape_profile_dist(CLAY_OFF(blob, off + i * CLAY_TAPE_PROFILE_FLOATS), blob, xy);
         float db = ctape_profile_dist(CLAY_OFF(blob, off + (i + 1) * CLAY_TAPE_PROFILE_FLOATS), blob, xy);
         return cop_loft(da, db, u, lp.z, h);
-    }
-    if (op == ctape_volume) {
-        CLAY_FPTR h = blob + CLAY_INT(CLAY_AT(q, 0));
-        cfloat3 origin = cf3(CLAY_AT(h, 0), CLAY_AT(h, 1), CLAY_AT(h, 2));
-        float cell = CLAY_AT(h, 3);
-        int bcx = CLAY_INT(CLAY_AT(h, 5)), bcy = CLAY_INT(CLAY_AT(h, 6)), bcz = CLAY_INT(CLAY_AT(h, 7));
-        int index_off = CLAY_INT(CLAY_AT(h, 8)), far_off = CLAY_INT(CLAY_AT(h, 9)), data_off = CLAY_INT(CLAY_AT(h, 10));
-        if (bcx <= 0 || bcy <= 0 || bcz <= 0 || cell <= 0.0f) return CLAY_TAPE_FAR;
-
-        float span_x = CLAY_FLOATC((bcx * CLAY_BRICK_DIM)) * cell;
-        float span_y = CLAY_FLOATC((bcy * CLAY_BRICK_DIM)) * cell;
-        float span_z = CLAY_FLOATC((bcz * CLAY_BRICK_DIM)) * cell;
-        // The point projected onto the sampled box, and how far outside it is.
-        // The lookup below runs on the PROJECTED point, so it always reads a
-        // real brick; the outside distance is folded in afterwards.
-        cfloat3 cp = cf3(cclamp(lp.x, origin.x, origin.x + span_x),
-                         cclamp(lp.y, origin.y, origin.y + span_y),
-                         cclamp(lp.z, origin.z, origin.z + span_z));
-        float outside = clength(lp - cp);
-
-        float gx = (cp.x - origin.x) / cell;
-        float gy = (cp.y - origin.y) / cell;
-        float gz = (cp.z - origin.z) / cell;
-        int cx = CLAY_INT(cclamp(cfloor(gx), 0.0f, CLAY_FLOATC((bcx * CLAY_BRICK_DIM - 1))));
-        int cy = CLAY_INT(cclamp(cfloor(gy), 0.0f, CLAY_FLOATC((bcy * CLAY_BRICK_DIM - 1))));
-        int cz = CLAY_INT(cclamp(cfloor(gz), 0.0f, CLAY_FLOATC((bcz * CLAY_BRICK_DIM - 1))));
-        int bx = cx / CLAY_BRICK_DIM, by = cy / CLAY_BRICK_DIM, bz = cz / CLAY_BRICK_DIM;
-        int slot = (bz * bcy + by) * bcx + bx;
-        // Relative to the VOLUME's own blob, not the tape's. to_blob writes
-        // index/far/data offsets past its own 12-float header, so they are only
-        // absolute when the volume happens to sit at blob offset 0 — which is
-        // true exactly when nothing else out-of-line was emitted before it. A
-        // stroke, loft, swept or armature earlier in the layer puts its payload
-        // there first, and the volume then read whatever those had written.
-        int entry = CLAY_INT(CLAY_AT(h, index_off + slot));
-        // An empty brick carries its own signed lower bound: the gap in bricks
-        // to the nearest brick that HAS samples, floored at the band less half
-        // a cell diagonal. A flat band width would be conservative but useless
-        // — the marcher would creep across the empty majority of the region in
-        // steps that never grew. See FieldVolume::far_value().
-        if (entry < 0) return ctape_volume_outside(CLAY_AT(h, far_off + slot), outside);
-
-        CLAY_FPTR block = CLAY_OFF(h, data_off + entry);
-        int lx = cx - bx * CLAY_BRICK_DIM;
-        int ly = cy - by * CLAY_BRICK_DIM;
-        int lz = cz - bz * CLAY_BRICK_DIM;
-        float fx = cclamp(gx - CLAY_FLOATC(cx), 0.0f, 1.0f);
-        float fy = cclamp(gy - CLAY_FLOATC(cy), 0.0f, 1.0f);
-        float fz = cclamp(gz - CLAY_FLOATC(cz), 0.0f, 1.0f);
-        const int n = CLAY_BRICK_DIM + 1;
-        // The halo is why this needs no neighbouring brick: lx+1 is always in
-        // range, so a trilinear tap is one array read.
-        float c00 = cmix(CLAY_AT(block, ((lz)*n + ly) * n + lx), CLAY_AT(block, ((lz)*n + ly) * n + lx + 1), fx);
-        float c10 =
-            cmix(CLAY_AT(block, ((lz)*n + ly + 1) * n + lx), CLAY_AT(block, ((lz)*n + ly + 1) * n + lx + 1), fx);
-        float c01 =
-            cmix(CLAY_AT(block, ((lz + 1) * n + ly) * n + lx), CLAY_AT(block, ((lz + 1) * n + ly) * n + lx + 1), fx);
-        float c11 = cmix(CLAY_AT(block, ((lz + 1) * n + ly + 1) * n + lx),
-                         CLAY_AT(block, ((lz + 1) * n + ly + 1) * n + lx + 1), fx);
-
-        // Slot 13 is the colour offset, 0 when this volume carries none — and
-        // a volume written before colour existed has a 13-float header and no
-        // slot 13 at all, which is why the header size decides whether to look
-        // rather than the blob's length. Colour is interpolated at the SAME
-        // eight samples as the distance: a nearest-sample read would facet a
-        // surface that has none.
-        int header_size = index_off;
-        if (header_size >= 14) {
-            int color_off = CLAY_INT(CLAY_AT(h, 13));
-            if (color_off > 0) {
-                CLAY_FPTR cblock = CLAY_OFF(h, color_off + entry);
-                // UNPACK BEFORE MIXING. Interpolating the packed words and
-                // unpacking the result mixes the channels through their own
-                // carries — a green halfway between two blues, and a blue that
-                // is whatever the arithmetic left over. Each corner becomes a
-                // colour first, and the mix is then an ordinary colour mix.
-                cfloat3 q000 = cunpack_color(CLAY_AT(cblock, ((lz)*n + ly) * n + lx));
-                cfloat3 q100 = cunpack_color(CLAY_AT(cblock, ((lz)*n + ly) * n + lx + 1));
-                cfloat3 q010 = cunpack_color(CLAY_AT(cblock, ((lz)*n + ly + 1) * n + lx));
-                cfloat3 q110 = cunpack_color(CLAY_AT(cblock, ((lz)*n + ly + 1) * n + lx + 1));
-                cfloat3 q001 = cunpack_color(CLAY_AT(cblock, ((lz + 1) * n + ly) * n + lx));
-                cfloat3 q101 = cunpack_color(CLAY_AT(cblock, ((lz + 1) * n + ly) * n + lx + 1));
-                cfloat3 q011 = cunpack_color(CLAY_AT(cblock, ((lz + 1) * n + ly + 1) * n + lx));
-                cfloat3 q111 =
-                    cunpack_color(CLAY_AT(cblock, ((lz + 1) * n + ly + 1) * n + lx + 1));
-                cfloat3 k00 = cmix3(q000, q100, fx);
-                cfloat3 k10 = cmix3(q010, q110, fx);
-                cfloat3 k01 = cmix3(q001, q101, fx);
-                cfloat3 k11 = cmix3(q011, q111, fx);
-                CLAY_SET(out_color, cmix3(cmix3(k00, k10, fy), cmix3(k01, k11, fy), fz));
-            }
-        }
-        return ctape_volume_outside(cmix(cmix(c00, c10, fy), cmix(c01, c11, fy), fz), outside);
     }
     if (op == ctape_swept) {
         int guide_off = CLAY_INT(CLAY_AT(q, 0));
@@ -973,7 +979,12 @@ CLAY_FN float ctape_prim_local(CLAY_UINT_T op, CLAY_FPTR pr,
         offset += ctape_deform_offset(rec, wp);
         wp = ctape_deform_point(rec, blob, wp);
     }
-    return ctape_prim_dist(op, CLAY_OFF(pr, CLAY_TAPE_PRIM_HEADER), blob, wp, out_color) + offset;
+    // Only a sampled volume can write colour, so only it is handed the
+    // out-parameter. Every other prim evaluates without one.
+    if (op == ctape_volume)
+        return ctape_volume_dist(CLAY_OFF(pr, CLAY_TAPE_PRIM_HEADER), blob, wp,
+                                 out_color) + offset;
+    return ctape_prim_dist(op, CLAY_OFF(pr, CLAY_TAPE_PRIM_HEADER), blob, wp) + offset;
 }
 
 // The fixed interpreter every backend ships. Postfix stack machine; empty

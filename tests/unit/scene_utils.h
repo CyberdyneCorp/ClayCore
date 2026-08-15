@@ -60,7 +60,6 @@ inline CTapeValue ref_eval_item(const scene::Node& item, const scene::Layer& lay
             offset += ctape_deform_offset(rec, lp);
             lp = ctape_deform_point(rec, nullptr, lp);
         }
-        cfloat3 ignored_color = cf3(0, 0, 0);  // this reference walks distance only
         float d;
         if (item.prim.type == scene::PrimType::Stroke) {
             std::vector<float> pts;
@@ -87,10 +86,10 @@ inline CTapeValue ref_eval_item(const scene::Node& item, const scene::Layer& lay
             }
             prof[CLAY_TAPE_PROFILE_FLOATS] = item.prim.params[0];
             d = ctape_prim_dist(static_cast<unsigned int>(item.prim.type), prof.data(),
-                                verts.data(), lp, CLAY_OUTARG(ignored_color));
+                                verts.data(), lp);
         } else {
             d = ctape_prim_dist(static_cast<unsigned int>(item.prim.type), item.prim.params,
-                                nullptr, lp, CLAY_OUTARG(ignored_color));
+                                nullptr, lp);
         }
         return (d + offset) * world.scale - item.rounding * world.scale;
     };
