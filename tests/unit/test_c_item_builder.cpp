@@ -1694,26 +1694,83 @@ TEST_CASE("every declared deformer kind is actually accepted by the C ABI") {
         {CLAY_DEFORM_BEND_RANGE, {1.4f, -0.4f, 0.4f}},
     };
 
+    // BOTH DOORS. There are two ways into a deformer chain — building an item
+    // and editing a placed node — and when the first guard was fixed the
+    // second was left naming an enumerator, so five kinds were reachable on a
+    // builder and refused on a placed node. A test that walked only one door
+    // is what let that through, so this walks both.
     for (const Kind& k : kinds) {
+        CAPTURE(static_cast<int>(k.kind));
+
         CDoc built;
         float size[3] = {0.4f, 0.9f, 0.4f};
         clay_item* item = clay_item_create(CLAY_PRIM_BOX, size, 3);
         REQUIRE(item != nullptr);
-        CAPTURE(static_cast<int>(k.kind));
         CHECK(clay_item_add_deformer(item, k.kind, k.params.data(), k.params.size(),
                                      CLAY_EASE_LINEAR) == CLAY_OK);
+        clay_node_id node = 0;
+        REQUIRE(clay_layer_add_item(built.doc, built.layer, item, &node) == CLAY_OK);
         clay_item_destroy(item);
+
+        // ...and the same kind onto the node now that it is placed.
+        CHECK(clay_layer_add_deformer(built.doc, built.layer, node, k.kind, k.params.data(),
+                                      k.params.size(), CLAY_EASE_LINEAR,
+                                      /*at_front=*/1) == CLAY_OK);
     }
 
-    // Bending along a curve carries a GUIDE, which does not fit a flat float
-    // array, so it has its own entry point — and the generic call has to say
-    // so rather than reporting it as an unknown kind.
+    // The payload-carrying kinds have their own doors, and BOTH generic calls
+    // have to say so rather than reporting them as unknown kinds.
     CDoc built;
     float size[3] = {0.4f, 0.9f, 0.4f};
     clay_item* item = clay_item_create(CLAY_PRIM_BOX, size, 3);
     REQUIRE(item != nullptr);
     float unused[3] = {0, 0, 0};
-    CHECK(clay_item_add_deformer(item, CLAY_DEFORM_BEND_CURVE, unused, 3, CLAY_EASE_LINEAR) ==
-          CLAY_ERROR_INVALID_ARGUMENT);
+    for (clay_deform kind : {CLAY_DEFORM_BEND_CURVE, CLAY_DEFORM_LATTICE}) {
+        CAPTURE(static_cast<int>(kind));
+        CHECK(clay_item_add_deformer(item, kind, unused, 3, CLAY_EASE_LINEAR) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+    }
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(built.doc, built.layer, item, &node) == CLAY_OK);
     clay_item_destroy(item);
+    for (clay_deform kind : {CLAY_DEFORM_BEND_CURVE, CLAY_DEFORM_LATTICE}) {
+        CAPTURE(static_cast<int>(kind));
+        CHECK(clay_layer_add_deformer(built.doc, built.layer, node, kind, unused, 3,
+                                      CLAY_EASE_LINEAR, 0) == CLAY_ERROR_INVALID_ARGUMENT);
+    }
+}
+
+TEST_CASE("a guide and a cage reach a PLACED node through their own doors") {
+    // #116 asks every stage for "SetDeformersCmd reachability — deformers on
+    // placed nodes". A guide and a cage cannot go through the flat-array call,
+    // so without these they were buildable and not editable.
+    CDoc built;
+    float size[3] = {0.5f, 0.5f, 0.5f};
+    clay_item* item = clay_item_create(CLAY_PRIM_BOX, size, 3);
+    REQUIRE(item != nullptr);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(built.doc, built.layer, item, &node) == CLAY_OK);
+    clay_item_destroy(item);
+
+    const float guide[9] = {-0.8f, 0, 0, 0, 0.2f, 0, 0.8f, 0, 0};
+    CHECK(clay_layer_add_bend_curve(built.doc, built.layer, node, guide, 3, CLAY_POINT_HARD,
+                                    -0.5f, 0.5f, /*at_front=*/1) == CLAY_OK);
+
+    const float lo[3] = {-1, -1, -1}, hi[3] = {1, 1, 1};
+    std::vector<float> offsets(3 * 3 * 3 * 3, 0.0f);
+    offsets[((1 * 3 + 1) * 3 + 2) * 3] = 0.3f;
+    CHECK(clay_layer_add_lattice(built.doc, built.layer, node, lo, hi, 3, 3, 3, offsets.data(),
+                                 /*at_front=*/0) == CLAY_OK);
+
+    // Both landed, and the refusals travelled with them rather than being
+    // re-implemented at the second door.
+    CHECK(clay_layer_add_bend_curve(built.doc, built.layer, node, guide, 1, CLAY_POINT_HARD,
+                                    -0.5f, 0.5f, 0) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_layer_add_lattice(built.doc, built.layer, node, lo, hi, 9, 3, 3, nullptr, 0) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_layer_add_lattice(built.doc, built.layer, node, hi, lo, 3, 3, 3, nullptr, 0) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    // A node that is not there is not found, at either door.
+    CHECK(clay_layer_add_bend_curve(built.doc, built.layer, 9999, guide, 3, CLAY_POINT_HARD,
+                                    -0.5f, 0.5f, 0) == CLAY_ERROR_NOT_FOUND);
 }

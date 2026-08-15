@@ -2705,6 +2705,21 @@ clay_result clay_layer_add_deformer(clay_document* doc, clay_layer_id layer, cla
                                     int32_t deform, const float* params, size_t param_count,
                                     int32_t ease, int32_t at_front);
 
+/* The same, for the two kinds whose payload is not a parameter list — a guide
+ * and a cage are not a fixed number of floats, so they cannot go through the
+ * call above and have their own doors here exactly as they do on a builder
+ * (clay_item_add_bend_curve, clay_item_add_lattice).
+ *
+ * Arguments and refusals are the builder entry points'; `at_front` is the
+ * ordering rule described above. */
+clay_result clay_layer_add_bend_curve(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                      const float* guide_xyz, size_t point_count,
+                                      int32_t point_type, float t0, float t1, int32_t at_front);
+
+clay_result clay_layer_add_lattice(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                   const float min[3], const float max[3], int32_t nx, int32_t ny,
+                                   int32_t nz, const float* offsets_xyz, int32_t at_front);
+
 /* Resolve a stroke and paint it into a mask. The third stroke consumer, and
  * what makes masking the same gesture as sculpting: spacing, pressure, taper,
  * steady stroke and jitter reach a mask stroke because they are resolved before
