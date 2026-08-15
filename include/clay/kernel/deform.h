@@ -25,6 +25,31 @@ CLAY_FN cfloat3 cbend_point(cfloat3 p, float k) {
     return cf3(c * p.x - s * p.y, s * p.x + c * p.y, p.z);
 }
 
+// RANGED twist and bend — ZBrush's Gizmo 3D acts inside the gizmo's box, and
+// the two above act on the whole item. The ranged pair ramps the rotation
+// across [t0, t1] with an easing curve and HOLDS it beyond, so the material
+// past the range travels rigidly instead of continuing to wind.
+//
+// Deliberately the same rotation as the unranged form with the angle
+// substituted, rather than a second formulation: with a linear ease and a
+// range that covers the content, `ctwist_range_point(p, k, y0, y1, 0)` is
+// `ctwist_point(p, k)` for every point inside the range, which is asserted
+// rather than assumed. That is what makes this a range on an existing
+// deformation rather than a new one to keep in step.
+CLAY_FN cfloat3 ctwist_range_point(cfloat3 p, float k, float y0, float y1, int ease_type) {
+    float t = cease(ease_type, cclamp((p.y - y0) / (y1 - y0), 0.0f, 1.0f));
+    float angle = k * (y1 - y0) * t;
+    float c = ccos(angle), s = csin(angle);
+    return cf3(c * p.x - s * p.z, p.y, s * p.x + c * p.z);
+}
+
+CLAY_FN cfloat3 cbend_range_point(cfloat3 p, float k, float x0, float x1, int ease_type) {
+    float t = cease(ease_type, cclamp((p.x - x0) / (x1 - x0), 0.0f, 1.0f));
+    float angle = k * (x1 - x0) * t;
+    float c = ccos(angle), s = csin(angle);
+    return cf3(c * p.x - s * p.y, s * p.x + c * p.y, p.z);
+}
+
 // Taper along Y between y0 and y1: cross-section scale goes s0 -> s1 with an
 // easing curve. Returns the warped point; the field value must be multiplied
 // by cmin(s0, s1) (conservative) by the interpreter.

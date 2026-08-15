@@ -196,6 +196,12 @@ typedef enum clay_blend {
  *   ELONGATE  hx hy hz      insert flat sections of half-extent h per axis
  *   BEND_LINEAR ax ay az bx by bz vx vy vz   displace by v, eased along a->b
  *   BEND_RADIAL r0 r1 dz  displace along Y by dz, eased across r0->r1
+ *   TWIST_RANGE k y0 y1   twist at k rad/unit, ramped across y0->y1 and HELD
+ *                         beyond it — ZBrush's Gizmo twist acts inside its box,
+ *                         where CLAY_DEFORM_TWIST winds the whole item. With a
+ *                         linear ease and a range covering the content the two
+ *                         agree exactly, which is asserted rather than implied.
+ *   BEND_RANGE  k x0 x1   the same for bend, across x0->x1
  *   ELONGATE_AXIS hx hy hz  per-axis stretch; a bound for any primitive
  *   GRAB      cx cy cz r dx dy dz front   pull a region; identity past r
  *   POSE      cx cy cz r ax ay az angle   rotate a region about its centre
@@ -221,7 +227,9 @@ typedef enum clay_deform {
      * octaves, gain, seed. The irregular sibling of CLAY_DEFORM_DISPLACE,
      * whose sine is regular by construction. The seed is an ordinary parameter,
      * not global state, so the same seed always gives the same field. */
-    CLAY_DEFORM_NOISE = 13
+    CLAY_DEFORM_NOISE = 13,
+    CLAY_DEFORM_TWIST_RANGE = 14,
+    CLAY_DEFORM_BEND_RANGE = 15
 } clay_deform;
 
 /* Easing curves are given by index; 0 is linear. Only the taper deformer and

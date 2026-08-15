@@ -266,7 +266,7 @@ Every claycore claim above is verifiable in this repository:
 
 | Claim | How to check |
 |---|---|
-| 16 combine ops, 14 deformers, 5 blends, 10 voxel verbs, 11 mesh verbs | `docs/07-brushes-and-features.md` — its coverage is asserted against the enums |
+| 16 combine ops, 16 deformers, 5 blends, 10 voxel verbs, 11 mesh verbs | `docs/07-brushes-and-features.md` — its coverage is asserted against the enums |
 | A mesh brush never changes topology | `tests/unit/test_mesh_sculpt.cpp` compares `indices` and `quads` BYTE FOR BYTE after every verb, on a quad-exported mesh |
 | Brush parity table | `examples/` — every verb has a runnable script with committed renders and self-checks |
 | Exactness / Lipschitz is real | `tests/unit/test_*.cpp` measure the declared bound against the field's actual steepest slope |

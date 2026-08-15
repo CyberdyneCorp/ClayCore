@@ -133,6 +133,8 @@ static_assert(CLAY_DEFORM_MAGNIFY == static_cast<int>(kernel::cdeform_magnify));
 static_assert(CLAY_DEFORM_NOISE == static_cast<int>(kernel::cdeform_noise));
 static_assert(CLAY_DEFORM_POSE == static_cast<int>(kernel::cdeform_pose));
 static_assert(CLAY_DEFORM_POSE_LINE == static_cast<int>(kernel::cdeform_pose_line));
+static_assert(CLAY_DEFORM_TWIST_RANGE == static_cast<int>(kernel::cdeform_twist_range));
+static_assert(CLAY_DEFORM_BEND_RANGE == static_cast<int>(kernel::cdeform_bend_range));
 
 static_assert(CLAY_PROFILE_CIRCLE == static_cast<int>(kernel::cprofile_circle));
 static_assert(CLAY_PROFILE_BOX == static_cast<int>(kernel::cprofile_box));
@@ -473,8 +475,8 @@ static_assert(sizeof kPrimParams / sizeof kPrimParams[0] == kernel::ctape_prim_c
 constexpr int kProfileParams[] = {1, 2, 1, 1, 3, 2, 0};  // polygon: vertices instead
 static_assert(sizeof kProfileParams / sizeof kProfileParams[0] == kernel::cprofile_polygon + 1);
 
-constexpr int kDeformParams[] = {1, 1, 4, 2, 2, 3, 9, 3, 3, 8, 8, 10, 5, 5};
-static_assert(sizeof kDeformParams / sizeof kDeformParams[0] == kernel::cdeform_noise + 1);
+constexpr int kDeformParams[] = {1, 1, 4, 2, 2, 3, 9, 3, 3, 8, 8, 10, 5, 5, 3, 3};
+static_assert(sizeof kDeformParams / sizeof kDeformParams[0] == kernel::cdeform_bend_range + 1);
 
 clay_result check_params(const char* what, const float* params, std::size_t count, int expected) {
     if (count != static_cast<std::size_t>(expected))
@@ -711,6 +713,17 @@ clay_result make_deformer(std::int32_t kind, const float* p, scene::Deformer* ou
     } else if (kind == CLAY_DEFORM_BEND_RADIAL) {
         if (p[0] == p[1]) return fail(CLAY_ERROR_INVALID_ARGUMENT, "bend_radial needs r0 != r1");
         *out = scene::Deformer::bend_radial(p[0], p[1], p[2]);
+    } else if (kind == CLAY_DEFORM_TWIST_RANGE) {
+        // A zero-width range is a division by zero in the ramp, not a twist
+        // that happens instantly — refused for the reason bend_radial's band
+        // is refused.
+        if (p[1] == p[2])
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "twist_range needs y0 != y1");
+        *out = scene::Deformer::twist_range(p[0], p[1], p[2]);
+    } else if (kind == CLAY_DEFORM_BEND_RANGE) {
+        if (p[1] == p[2])
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "bend_range needs x0 != x1");
+        *out = scene::Deformer::bend_range(p[0], p[1], p[2]);
     } else if (kind == CLAY_DEFORM_GRAB) {
         if (!(p[3] > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "grab radius must be > 0");
         *out = scene::Deformer::grab(kernel::cf3(p[0], p[1], p[2]), p[3],

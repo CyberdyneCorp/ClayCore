@@ -108,6 +108,21 @@ Document deformer_chain() {
     return doc;
 }
 
+// The ranged pair, with an eased ramp so the case exercises the ease slot as
+// well as the range — a linear ramp would only prove the equivalence the unit
+// test already asserts, and would let a backend that ignored the ease pass.
+Document ranged_twist_bend() {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("ranged");
+    Node a = item(Prim::box(cf3(0.35f, 0.9f, 0.3f)), cf3(-0.7f, 0, 0), kColorA);
+    a.deformers.push_back(scene::Deformer::twist_range(2.1f, -0.5f, 0.5f, 3));
+    l.sdf->insert(a);
+    Node b = item(Prim::box(cf3(0.9f, 0.3f, 0.3f)), cf3(0.9f, 0, 0), kColorB);
+    b.deformers.push_back(scene::Deformer::bend_range(1.4f, -0.4f, 0.4f, 3));
+    l.sdf->insert(b);
+    return doc;
+}
+
 Document region_deformer() {
     Document doc;
     Layer& l = doc.add_sdf_layer("region");
@@ -533,6 +548,9 @@ std::vector<FixtureCase> kernel_parity_cases() {
              transition_pair(Op::TransitionRadial));
     add_case(&cases, "deformer_chain", "twist then taper, applied in authoring order",
              deformer_chain());
+    add_case(&cases, "ranged_twist_bend",
+             "twist and bend ramped across a span and held beyond it, eased",
+             ranged_twist_bend());
     add_case(&cases, "deformer_region", "grab: a finitely supported pull on part of a sphere",
              region_deformer());
     add_case(&cases, "repetition_finite_grid", "clamped-cell array with neighbour evaluation",

@@ -1399,6 +1399,39 @@ NB_MODULE(pyclay, m) {
              },
              "a"_a, "b"_a, "v"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
              "Displace by v, eased along the segment a -> b")
+        .def("twist_range",
+             [](nb::object self, float radians_per_unit, float y0, float y1, int ease) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 if (y0 == y1)
+                     throw std::invalid_argument(
+                         "twist_range needs y0 != y1: the span is the ramp");
+                 p.deformers.push_back(scene::Deformer::twist_range(
+                     radians_per_unit, y0, y1, static_cast<std::uint8_t>(ease)));
+                 return self;
+             },
+             "radians_per_unit"_a, "y0"_a, "y1"_a, "ease"_a = 0,
+             nb::rv_policy::reference_internal,
+             "Twist about Y at k rad/unit, RAMPED across y0 -> y1 and held beyond.\n\n"
+             "`twist` winds the whole item; a gizmo's twist acts inside its box, and\n"
+             "this is that. Material past the range travels rigidly rather than\n"
+             "continuing to wind.\n\n"
+             "With a linear ease and a range covering the content it is exactly\n"
+             "`twist` — the same rotation with the angle ramped, not a second\n"
+             "deformation to keep in step.")
+        .def("bend_range",
+             [](nb::object self, float radians_per_unit, float x0, float x1, int ease) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 if (x0 == x1)
+                     throw std::invalid_argument(
+                         "bend_range needs x0 != x1: the span is the ramp");
+                 p.deformers.push_back(scene::Deformer::bend_range(
+                     radians_per_unit, x0, x1, static_cast<std::uint8_t>(ease)));
+                 return self;
+             },
+             "radians_per_unit"_a, "x0"_a, "x1"_a, "ease"_a = 0,
+             nb::rv_policy::reference_internal,
+             "Bend along X at k rad/unit, ramped across x0 -> x1 and held beyond —\n"
+             "ZBrush's Bend Arc is angle-limited this way, where `bend` is not.")
         .def("bend_radial",
              [](nb::object self, float r0, float r1, float dz, int ease) {
                  PyPrim& p = nb::cast<PyPrim&>(self);

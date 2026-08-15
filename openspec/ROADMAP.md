@@ -33,7 +33,9 @@ landed between v0.22.1 and v0.30.0 is summarised at the end of this section:
   grid/radial repetition, mirror with blended seam. Every kernel capability is
   reachable from a document — loft was the last one that was not. Relief and
   incise are the only ops whose item is a REGION rather than geometry.
-- **14 deformers** — twist, bend, taper, displace, wrap_around, elongate,
+- **16 deformers** — twist and bend (whole-item, and ranged across a span
+  and held beyond it, which is what a gizmo box does), taper, displace,
+  wrap_around, elongate,
   elongate_axis, bend_linear, bend_radial, plus grab, pose and pose_line with
   finite support, plus magnify (signed: magnify and pinch are one deformation)
   and noise. Every point-warp implemented in the kernel headers is reachable

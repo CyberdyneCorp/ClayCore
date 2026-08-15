@@ -207,8 +207,11 @@ Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& defor
     for (const Deformer& d : deformers) {
         if (b.empty()) break;
         switch (d.type) {
+            case kernel::cdeform_twist_range:
             case kernel::cdeform_twist: {
-                // rotation about Y: |(x,z)| preserved -> hull is the cylinder
+                // rotation about Y: |(x,z)| preserved -> hull is the cylinder.
+                // The RANGED form rotates by at most what the unranged one
+                // does over the same span, so the same cylinder contains it.
                 float r = 0.0f;
                 for (int i = 0; i < 4; ++i) {
                     float x = (i & 1) ? b.max.x : b.min.x;
@@ -218,8 +221,10 @@ Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& defor
                 b = Aabb{cf3(-r, b.min.y, -r), cf3(r, b.max.y, r)};
                 break;
             }
+            case kernel::cdeform_bend_range:
             case kernel::cdeform_bend: {
-                // rotation of (x,y) about the origin: |(x,y)| preserved
+                // rotation of (x,y) about the origin: |(x,y)| preserved; the
+                // ranged form is contained by the unranged hull, as above.
                 float r = 0.0f;
                 for (int i = 0; i < 4; ++i) {
                     float x = (i & 1) ? b.max.x : b.min.x;
@@ -384,15 +389,26 @@ float deformer_lipschitz(const Node& item) {
                 float x = (i & 1) ? local.max.x : local.min.x;
                 float y = (i & 2) ? local.max.y : local.min.y;
                 float z = (i & 4) ? local.max.z : local.min.z;
-                radius = kernel::cmax(radius, d.type == kernel::cdeform_twist
-                                                  ? kernel::clength(kernel::cf2(x, z))
-                                                  : kernel::clength(kernel::cf2(x, y)));
+                const bool about_y = d.type == kernel::cdeform_twist ||
+                                     d.type == kernel::cdeform_twist_range;
+                radius = kernel::cmax(radius, about_y ? kernel::clength(kernel::cf2(x, z))
+                                                      : kernel::clength(kernel::cf2(x, y)));
             }
         }
         if (d.type == kernel::cdeform_twist) {
             info = kernel::cfi_twist(info, d.k, radius);
         } else if (d.type == kernel::cdeform_bend) {
             info = kernel::cfi_bend(info, d.k, radius);
+        } else if (d.type == kernel::cdeform_twist_range ||
+                   d.type == kernel::cdeform_bend_range) {
+            // Same bound with the ANGULAR RATE the ease actually reaches. The
+            // ranged form winds k radians per unit on average across its span,
+            // but an eased ramp is steeper than linear somewhere in the middle
+            // — smoothstep peaks at 1.5x — and the Lipschitz has to cover the
+            // steepest point rather than the average.
+            info = d.type == kernel::cdeform_twist_range
+                       ? kernel::cfi_twist(info, d.k * ease_max_slope(d.ease), radius)
+                       : kernel::cfi_bend(info, d.k * ease_max_slope(d.ease), radius);
         } else if (d.type == kernel::cdeform_taper) {
             float s_min = kernel::cmin(d.b, d.c);
             float s_max = kernel::cmax(d.b, d.c);
