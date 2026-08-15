@@ -50,6 +50,14 @@ FLOORS = {
     # here to put the number in CI output — no other benchmark covers writing
     # under a level stack at all — and the DEVICE gate holds the tighter line.
     "BM_VoxelWriteUnderLevels": {"max_ms": 1.5},
+    # A large-radius voxel verb — the device gate's own voxel_smooth_r32 size,
+    # measured here on a machine with a fan. 1.15 -> 0.14 ms (8.1x) when the
+    # snapshot stopped hashing per cell and the decide pass went on the pool.
+    #
+    # The ceiling is set where a REGRESSION of the snapshot fix would trip it:
+    # that half alone is 3.45x, far outside runner spread, unlike the threading
+    # half which is not gateable here for the usual reason.
+    "BM_VoxelSculptSmoothR32": {"max_ms": 0.9},
     "BM_VoxelMeshSparse64Chunks": {"max_ms": 120},
     # Part 2 of the same issue: two chunks of that 64-chunk grid, meshed
     # through the regional call. It is the bench above divided by 32 — 0.40 ms

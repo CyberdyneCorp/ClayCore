@@ -11,6 +11,7 @@
 #include <cmath>
 #include <vector>
 
+#include "clay/parallel/thread_pool.h"
 #include "clay/voxel/grid.h"
 #include "clay/voxel/mask.h"
 
@@ -127,10 +128,10 @@ Region snapshot(const VoxelGrid& g, VoxelCoord c, int n, int pad) {
     r.ny = r.hi.y - r.lo.y + 1;
     r.nz = r.hi.z - r.lo.z + 1;
     r.cells.resize(static_cast<std::size_t>(r.nx) * r.ny * r.nz);
-    std::size_t i = 0;
-    for (int z = r.lo.z; z <= r.hi.z; ++z)
-        for (int y = r.lo.y; y <= r.hi.y; ++y)
-            for (int x = r.lo.x; x <= r.hi.x; ++x) r.cells[i++] = g.get({x, y, z});
+    // One resolve per run of cells sharing a chunk, rather than a hash lookup
+    // per cell — see VoxelGrid::read_region. This snapshot was 85% of a
+    // size-32 verb before that existed.
+    g.read_region(r.lo, r.hi, r.cells.data());
     return r;
 }
 
@@ -207,6 +208,67 @@ void for_each_brush_cell(VoxelCoord c, const BrushParams& p, float voxel_size, F
             }
 }
 
+// One cell the decide pass wants written.
+struct PendingWrite {
+    VoxelCoord c;
+    std::uint8_t v;
+};
+using WriteSink = std::vector<PendingWrite>;
+
+// Below this a footprint is not worth splitting: the pool's own dispatch costs
+// more than deciding a handful of cells, and a size-3 dab is the common case.
+constexpr int kParallelBrushSpan = 12;
+
+// The verbs' two-phase shape, made parallel — DECIDE in parallel, APPLY
+// serially.
+//
+// The split was already in the semantics rather than being introduced here:
+// every verb reads from an immutable `before` snapshot ("a cell's outcome never
+// depends on a neighbour the same call changed"), so the decision for every
+// cell is pure and independent. What is not thread-safe is the writing —
+// `set()` mutates a chunk map, the change counter, the dirty set, and
+// propagates across levels — so nothing writes until every decision is in.
+//
+// BYTE-IDENTITY IS BY CONSTRUCTION, not by hope. Work is partitioned into
+// contiguous Z SLABS, each slab's writes are collected into its own sink, and
+// the sinks are applied in slab order — so the sequence of `set()` calls is
+// exactly the sequence the serial walk made. The pool changes speed and
+// nothing else, which is the house rule it already states.
+template <typename Decide>
+void brush_pass(VoxelGrid& grid, VoxelCoord c, const BrushParams& p, float voxel_size,
+                Decide&& decide) {
+    const BrushExtent e = brush_extent(p.size);
+    const int span = e.hi - e.lo + 1;
+    if (span <= 0) return;
+
+    auto decide_plane = [&](int z, WriteSink* sink) {
+        for (int y = e.lo; y <= e.hi; ++y)
+            for (int x = e.lo; x <= e.hi; ++x) {
+                if (!in_footprint(x, y, z, p.size, e, p.shape)) continue;
+                VoxelCoord w{c.x + x, c.y + y, c.z + z};
+                float weight = falloff_weight(p.falloff, normalized_distance(x, y, z, p.size, e)) *
+                               p.strength;
+                if (p.mask) weight *= 1.0f - mask_at(*p.mask, w, voxel_size);
+                if (passes(w, weight, p.seed)) decide(w, *sink);
+            }
+    };
+
+    if (span < kParallelBrushSpan) {
+        WriteSink sink;
+        for (int z = e.lo; z <= e.hi; ++z) decide_plane(z, &sink);
+        for (const PendingWrite& pw : sink) grid.set(pw.c, pw.v);
+        return;
+    }
+
+    std::vector<WriteSink> sinks(static_cast<std::size_t>(span));
+    parallel::for_range(static_cast<std::size_t>(span), 1, [&](std::size_t b, std::size_t end) {
+        for (std::size_t i = b; i < end; ++i)
+            decide_plane(e.lo + static_cast<int>(i), &sinks[i]);
+    });
+    for (const WriteSink& sink : sinks)
+        for (const PendingWrite& pw : sink) grid.set(pw.c, pw.v);
+}
+
 // Fill empty cells that are mostly surrounded by material, `passes` times.
 //
 // This started as a morphological closing, which is the textbook answer and is
@@ -256,15 +318,15 @@ void VoxelGrid::paint_brush(VoxelCoord c, const BrushParams& p, std::uint8_t ind
 
 void VoxelGrid::sculpt_smooth(VoxelCoord c, const BrushParams& p) {
     Region before = snapshot(*this, c, p.size, 1);
-    for_each_brush_cell(c, p, voxel_size(), [&](VoxelCoord w) {
+    brush_pass(*this, c, p, voxel_size(), [&](VoxelCoord w, WriteSink& out) {
         int n = occupied_neighbours_26(before, w.x, w.y, w.z);
         bool occupied = before.at(w.x, w.y, w.z) != 0;
         // Majority of the 26 neighbours decides: under-supported material
         // goes, well-surrounded gaps fill.
         if (occupied && n < 13) {
-            set(w, 0);
+            out.push_back({w, 0});
         } else if (!occupied && n > 13) {
-            set(w, majority_colour(before, w.x, w.y, w.z));
+            out.push_back({w, majority_colour(before, w.x, w.y, w.z)});
         }
     });
 }
@@ -274,12 +336,12 @@ void VoxelGrid::sculpt_inflate(VoxelCoord c, const BrushParams& p, int amount) {
     bool grow = amount > 0;
     for (int step = 0; step < steps; ++step) {
         Region before = snapshot(*this, c, p.size, 1);
-        for_each_brush_cell(c, p, voxel_size(), [&](VoxelCoord w) {
+        brush_pass(*this, c, p, voxel_size(), [&](VoxelCoord w, WriteSink& out) {
             bool occupied = before.at(w.x, w.y, w.z) != 0;
             if (grow && !occupied && has_occupied_face_neighbour(before, w.x, w.y, w.z)) {
-                set(w, majority_colour(before, w.x, w.y, w.z));
+                out.push_back({w, majority_colour(before, w.x, w.y, w.z)});
             } else if (!grow && occupied && has_empty_face_neighbour(before, w.x, w.y, w.z)) {
-                set(w, 0);
+                out.push_back({w, 0});
             }
         });
     }
@@ -289,16 +351,16 @@ void VoxelGrid::sculpt_flatten(VoxelCoord c, const BrushParams& p, kernel::cfloa
                                float offset_cells) {
     kernel::cfloat3 n = kernel::cnormalize(normal);
     Region before = snapshot(*this, c, p.size, 1);
-    for_each_brush_cell(c, p, voxel_size(), [&](VoxelCoord w) {
+    brush_pass(*this, c, p, voxel_size(), [&](VoxelCoord w, WriteSink& out) {
         // Signed distance from the plane through the brush centre, in cells.
         float side = (static_cast<float>(w.x - c.x)) * n.x + (static_cast<float>(w.y - c.y)) * n.y +
                      (static_cast<float>(w.z - c.z)) * n.z - offset_cells;
         bool occupied = before.at(w.x, w.y, w.z) != 0;
         if (side > 0.0f && occupied) {
-            set(w, 0);  // material proud of the plane comes off
+            out.push_back({w, 0});  // material proud of the plane comes off
         } else if (side <= 0.0f && !occupied &&
                    has_occupied_face_neighbour(before, w.x, w.y, w.z)) {
-            set(w, majority_colour(before, w.x, w.y, w.z));  // hollows fill in
+            out.push_back({w, majority_colour(before, w.x, w.y, w.z)});  // hollows fill in
         }
     });
 }
@@ -316,8 +378,11 @@ void VoxelGrid::sculpt_fill_cavities(VoxelCoord c, const BrushParams& p, int wid
     // sees the material on the other side of it.
     Region closed = snapshot(*this, c, p.size, width + 1);
     fill_pockets(closed, width);
-    for_each_brush_cell(c, p, voxel_size(), [&](VoxelCoord w) {
-        if (get(w) == 0 && closed.at(w.x, w.y, w.z) != 0) set(w, closed.at(w.x, w.y, w.z));
+    brush_pass(*this, c, p, voxel_size(), [&](VoxelCoord w, WriteSink& out) {
+        // `get` reads the LIVE grid, which is safe here because the decide
+        // pass writes nothing — every write waits for the apply below.
+        if (get(w) == 0 && closed.at(w.x, w.y, w.z) != 0)
+            out.push_back({w, closed.at(w.x, w.y, w.z)});
     });
 }
 
@@ -334,7 +399,7 @@ void VoxelGrid::sculpt_scrape(VoxelCoord c, const BrushParams& p, cfloat3 normal
                                    static_cast<float>(c.z) + 0.5f),
                                n) +
                   offset_cells;
-    for_each_brush_cell(c, p, voxel_size(), [&](VoxelCoord w) {
+    brush_pass(*this, c, p, voxel_size(), [&](VoxelCoord w, WriteSink& out) {
         float height = kernel::cdot(cf3(static_cast<float>(w.x) + 0.5f,
                                         static_cast<float>(w.y) + 0.5f,
                                         static_cast<float>(w.z) + 0.5f),
@@ -343,11 +408,11 @@ void VoxelGrid::sculpt_scrape(VoxelCoord c, const BrushParams& p, cfloat3 normal
         bool occupied = before.at(w.x, w.y, w.z) != 0;
         int neighbours = occupied_neighbours_26(before, w.x, w.y, w.z);
         if (occupied && height > 0.0f) {
-            set(w, 0);  // proud of the plane: scraped off
+            out.push_back({w, 0});  // proud of the plane: scraped off
         } else if (occupied && neighbours < 13) {
-            set(w, 0);  // under-supported: the smoothing half
+            out.push_back({w, 0});  // under-supported: the smoothing half
         } else if (!occupied && height <= 0.0f && neighbours > 13) {
-            set(w, majority_colour(before, w.x, w.y, w.z));  // a hollow below the plane
+            out.push_back({w, majority_colour(before, w.x, w.y, w.z)});  // a hollow below
         }
     });
 }
@@ -359,7 +424,7 @@ void VoxelGrid::sculpt_smudge(VoxelCoord c, const BrushParams& p, cfloat3 displa
     Region before = snapshot(*this, c, p.size, pad);
     cfloat3 step = displacement * (1.0f / voxel_size());
 
-    for_each_brush_cell(c, p, voxel_size(), [&](VoxelCoord w) {
+    brush_pass(*this, c, p, voxel_size(), [&](VoxelCoord w, WriteSink& out) {
         bool occupied = before.at(w.x, w.y, w.z) != 0;
         // Only the skin moves. An interior cell has no empty face neighbour,
         // so it is left exactly where it was — that is the whole difference
@@ -374,9 +439,9 @@ void VoxelGrid::sculpt_smudge(VoxelCoord c, const BrushParams& p, cfloat3 displa
         // Dragged material lands; behind the drag the skin is left to the
         // interior it uncovered rather than punched through.
         if (source != 0) {
-            set(w, source);
+            out.push_back({w, source});
         } else if (occupied && !has_occupied_face_neighbour(before, from.x, from.y, from.z)) {
-            set(w, 0);
+            out.push_back({w, 0});
         }
     });
 }
@@ -434,7 +499,7 @@ void VoxelGrid::sculpt_grab(VoxelCoord c, const BrushParams& p, kernel::cfloat3 
     float radius = static_cast<float>(p.size) * 0.5f;
     kernel::cfloat3 centre = kernel::cf3(0, 0, 0);  // offsets are relative to c
 
-    for_each_brush_cell(c, p, voxel_size(), [&](VoxelCoord w) {
+    brush_pass(*this, c, p, voxel_size(), [&](VoxelCoord w, WriteSink& out) {
         // Where this cell's material came from, in cell units, through the same
         // map cgrab_point applies to a point.
         kernel::cfloat3 local = kernel::cf3(static_cast<float>(w.x - c.x),
@@ -447,7 +512,7 @@ void VoxelGrid::sculpt_grab(VoxelCoord c, const BrushParams& p, kernel::cfloat3 
         VoxelCoord from{c.x + static_cast<std::int32_t>(cnearest(src.x)),
                         c.y + static_cast<std::int32_t>(cnearest(src.y)),
                         c.z + static_cast<std::int32_t>(cnearest(src.z))};
-        set(w, before.at(from.x, from.y, from.z));
+        out.push_back({w, before.at(from.x, from.y, from.z)});
     });
     (void)e;
 }
@@ -480,16 +545,18 @@ bool radial_step(VoxelCoord centre, VoxelCoord w, bool inward, VoxelCoord* targe
 void radial_sculpt(VoxelGrid& grid, VoxelCoord c, const BrushParams& p, float voxel_size,
                    bool inward) {
     Region before = snapshot(grid, c, p.size, 1);
-    for_each_brush_cell(c, p, voxel_size, [&](VoxelCoord w) {
+    brush_pass(grid, c, p, voxel_size, [&](VoxelCoord w, WriteSink& out) {
         if (before.at(w.x, w.y, w.z) == 0) return;
         if (!has_empty_face_neighbour(before, w.x, w.y, w.z)) return;  // interior
 
         VoxelCoord target;
         if (!radial_step(c, w, inward, &target)) return;
 
+        // TWO writes for one cell, and their order matters: the vacate must
+        // land before the fill, exactly as it did serially.
         std::uint8_t colour = before.at(w.x, w.y, w.z);
-        grid.set(w, 0);
-        if (before.at(target.x, target.y, target.z) == 0) grid.set(target, colour);
+        out.push_back({w, 0});
+        if (before.at(target.x, target.y, target.z) == 0) out.push_back({target, colour});
     });
 }
 
