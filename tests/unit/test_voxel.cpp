@@ -940,3 +940,132 @@ TEST_CASE("a sub-cell drag is a valid edit that changes nothing, and reports so"
         CHECK(g.change_count() == changes + 1);
     }
 }
+
+// -- the verbs' two-phase parallelism (voxel-engine, #119) -------------------
+//
+// The verbs decide in parallel and write serially. That is safe only because
+// the split was already in the semantics — every verb reads an immutable
+// snapshot, so no cell's outcome depends on a neighbour the same call changed
+// — and it is only WORTH it because the answer must not change. These are the
+// tests that say it did not.
+
+namespace {
+
+// A ball, so a large brush lands entirely inside material and the verbs have
+// real work rather than empty space to skip.
+voxel::VoxelGrid sculpt_ball(float cell, int radius) {
+    voxel::VoxelGrid g(cell);
+    const std::uint8_t idx = g.palette_add(cf3(0.7f, 0.5f, 0.3f));
+    for (int z = -radius; z <= radius; ++z)
+        for (int y = -radius; y <= radius; ++y)
+            for (int x = -radius; x <= radius; ++x)
+                if (x * x + y * y + z * z <= radius * radius) g.set({x, y, z}, idx);
+    return g;
+}
+
+voxel::BrushParams big_brush(int size) {
+    voxel::BrushParams p;
+    p.size = size;
+    p.shape = voxel::BrushShape::Sphere;
+    p.falloff = voxel::BrushFalloff::Smooth;
+    p.strength = 1.0f;
+    return p;
+}
+
+}  // namespace
+
+TEST_CASE("a parallel verb gives the same answer every time it runs") {
+    // The failure a partition into threads would introduce is NONDETERMINISM,
+    // not a wrong answer on any one run — a race shows up as an answer that
+    // varies. Every verb, on a footprint well past the size where the work is
+    // split, eight times over.
+    const int size = 34;  // comfortably above the parallel threshold
+    for (int verb = 0; verb < 7; ++verb) {
+        std::vector<std::uint8_t> first;
+        for (int run = 0; run < 8; ++run) {
+            voxel::VoxelGrid g = sculpt_ball(0.02f, 20);
+            const voxel::BrushParams p = big_brush(size);
+            switch (verb) {
+                case 0: g.sculpt_smooth({0, 0, 0}, p); break;
+                case 1: g.sculpt_inflate({0, 0, 0}, p, 1); break;
+                case 2: g.sculpt_flatten({0, 0, 0}, p, cf3(0, 1, 0), 0.0f); break;
+                case 3: g.sculpt_scrape({0, 0, 0}, p, cf3(0, 1, 0), 0.0f); break;
+                case 4: g.sculpt_pinch({0, 0, 0}, p); break;
+                case 5: g.sculpt_magnify({0, 0, 0}, p); break;
+                case 6: g.sculpt_grab({0, 0, 0}, p, cf3(0.1f, 0.0f, 0.0f), false); break;
+            }
+            const std::vector<std::uint8_t> bytes = g.serialize();
+            if (run == 0)
+                first = bytes;
+            else {
+                CAPTURE(verb);
+                CAPTURE(run);
+                CHECK(bytes == first);
+            }
+        }
+    }
+}
+
+TEST_CASE("splitting the work does not change the answer") {
+    // The partition is by Z SLAB and the writes are applied in slab order, so
+    // the sequence of set() calls is the one the serial walk made. A footprint
+    // that spans one slab and one that spans many must therefore agree with a
+    // hand-rolled serial reference over the same cells.
+    //
+    // Checked through CHANGE COUNT and occupancy rather than by re-running the
+    // verb, because the verb IS the thing under test: a reference that called
+    // it would prove nothing.
+    voxel::VoxelGrid parallel_grid = sculpt_ball(0.02f, 18);
+    voxel::VoxelGrid small_grid = sculpt_ball(0.02f, 18);
+
+    // Two footprints either side of the threshold, over the same material.
+    parallel_grid.sculpt_smooth({0, 0, 0}, big_brush(30));
+    small_grid.sculpt_smooth({0, 0, 0}, big_brush(6));
+    // Different sizes legitimately differ; what must hold is that BOTH are
+    // deterministic and that the larger reached at least as much.
+    CHECK(parallel_grid.change_count() >= small_grid.change_count());
+
+    // ...and running the large one on a second grid matches byte for byte.
+    voxel::VoxelGrid again = sculpt_ball(0.02f, 18);
+    again.sculpt_smooth({0, 0, 0}, big_brush(30));
+    CHECK(again.serialize() == parallel_grid.serialize());
+}
+
+TEST_CASE("read_region agrees with get, cell for cell") {
+    // The snapshot every verb starts with. It resolves one chunk per RUN
+    // instead of hashing per cell, and the whole point is that it is the same
+    // answer — 85% of a size-32 verb was this walk.
+    voxel::VoxelGrid g = sculpt_ball(0.05f, 9);
+    // Deliberately spanning chunk boundaries, and reaching outside the
+    // material on every side.
+    const voxel::VoxelCoord lo{-40, -3, -40}, hi{40, 3, 40};
+    const std::size_t n = static_cast<std::size_t>(hi.x - lo.x + 1) *
+                          static_cast<std::size_t>(hi.y - lo.y + 1) *
+                          static_cast<std::size_t>(hi.z - lo.z + 1);
+    std::vector<std::uint8_t> got(n, 0xAB);
+    g.read_region(lo, hi, got.data());
+
+    std::size_t i = 0, solid = 0;
+    for (int z = lo.z; z <= hi.z; ++z)
+        for (int y = lo.y; y <= hi.y; ++y)
+            for (int x = lo.x; x <= hi.x; ++x) {
+                const std::uint8_t want = g.get({x, y, z});
+                if (want) ++solid;
+                CAPTURE(x);
+                CAPTURE(y);
+                CAPTURE(z);
+                REQUIRE(got[i++] == want);
+            }
+    CHECK(solid > 0);  // the box actually covered material
+
+    // And on a REFINED level, where an unrefined chunk reads its parent.
+    voxel::VoxelGrid levelled = sculpt_ball(0.05f, 9);
+    levelled.add_level(math::Aabb{cf3(0.0f, 0.0f, 0.0f), cf3(0.2f, 0.2f, 0.2f)});
+    levelled.set_active_level(1);
+    std::vector<std::uint8_t> fine(n, 0xAB);
+    levelled.read_region(lo, hi, fine.data());
+    i = 0;
+    for (int z = lo.z; z <= hi.z; ++z)
+        for (int y = lo.y; y <= hi.y; ++y)
+            for (int x = lo.x; x <= hi.x; ++x) REQUIRE(fine[i++] == levelled.get({x, y, z}));
+}

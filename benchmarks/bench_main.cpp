@@ -389,6 +389,40 @@ BENCHMARK(BM_SurfaceNets)->Unit(benchmark::kMillisecond);
 // (0.16 ms against the 2 ms ceiling, 9.6 ms against the 120 ms one), and still
 // far below the 3.8 ms / 256 ms the per-cell lookup cost here, which is what
 // they are there to catch coming back.
+// A LARGE-RADIUS voxel verb, which is the shape #119 wants parallel: the
+// footprint is n^3 cells, each decided from a 26-neighbour read of an
+// immutable snapshot, and only the cells that CHANGE are written. Size 32 is
+// the device gate's own `voxel_smooth_r32` radius, so this measures the same
+// thing on a machine with a fan.
+//
+// Split into two counters, because the design question is which half dominates:
+// deciding (parallelizable, pure) or writing (serial, mutates the chunk map).
+void BM_VoxelSculptSmoothR32(benchmark::State& state) {
+    voxel::VoxelGrid g(0.02f);
+    std::uint8_t c = g.palette_add(cf3(0.8f, 0.4f, 0.2f));
+    // A blob big enough that a size-32 brush lands entirely inside material,
+    // so the verb does the work rather than skipping empty space.
+    for (int z = -24; z <= 24; ++z)
+        for (int y = -24; y <= 24; ++y)
+            for (int x = -24; x <= 24; ++x)
+                if (x * x + y * y + z * z <= 24 * 24) g.set({x, y, z}, c);
+
+    voxel::BrushParams p;
+    p.size = 32;
+    p.shape = voxel::BrushShape::Sphere;
+    p.falloff = voxel::BrushFalloff::Smooth;
+    p.strength = 1.0f;
+
+    const std::size_t before = g.change_count();
+    for (auto _ : state) {
+        g.sculpt_smooth({0, 0, 0}, p);
+        benchmark::DoNotOptimize(g.change_count());
+    }
+    state.counters["writes"] = static_cast<double>(g.change_count() - before);
+    state.counters["cells"] = static_cast<double>(g.occupied_count());
+}
+BENCHMARK(BM_VoxelSculptSmoothR32)->Unit(benchmark::kMillisecond);
+
 void BM_VoxelMeshSparseChunk(benchmark::State& state) {
     voxel::VoxelGrid g(0.1f);
     std::uint8_t c = g.palette_add(cf3(0.8f, 0.4f, 0.2f));

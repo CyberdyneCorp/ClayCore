@@ -219,6 +219,46 @@ std::size_t VoxelGrid::dirty_chunk_count(std::size_t level) const {
 
 std::uint8_t VoxelGrid::get(VoxelCoord c) const { return cell_at(active_, c); }
 
+void VoxelGrid::read_region(VoxelCoord lo, VoxelCoord hi, std::uint8_t* out) const {
+    if (!out) return;
+    const ChunkMap& chunks = levels_[active_].chunks;
+    std::size_t i = 0;
+    for (std::int32_t z = lo.z; z <= hi.z; ++z)
+        for (std::int32_t y = lo.y; y <= hi.y; ++y) {
+            std::int32_t x = lo.x;
+            while (x <= hi.x) {
+                const VoxelCoord key = chunk_key({x, y, z});
+                // This chunk covers x up to its own last column; the run ends
+                // there or at the caller's box, whichever comes first.
+                const std::int32_t chunk_last = (key.x + 1) * kChunkDim - 1;
+                const std::int32_t run_last = chunk_last < hi.x ? chunk_last : hi.x;
+
+                // ONE resolve for the whole run — the point of this function.
+                int up = 0;
+                auto it = chunks.find(key);
+                const Chunk* src =
+                    it != chunks.end() ? &it->second : inherited_chunk(active_, key, &up);
+                if (!src) {
+                    for (std::int32_t cx = x; cx <= run_last; ++cx) out[i++] = 0;
+                    x = run_last + 1;
+                    continue;
+                }
+                for (std::int32_t cx = x; cx <= run_last; ++cx) {
+                    // An inherited chunk mirrors its ancestor's cells, so the
+                    // read is that chunk's data at the shifted coordinate.
+                    const std::int32_t ax = up == 0 ? cx : (cx >> up);
+                    const std::int32_t ay = up == 0 ? y : (y >> up);
+                    const std::int32_t az = up == 0 ? z : (z >> up);
+                    const std::size_t ox = static_cast<std::size_t>(fmod_pos(ax, kChunkDim));
+                    const std::size_t oy = static_cast<std::size_t>(fmod_pos(ay, kChunkDim));
+                    const std::size_t oz = static_cast<std::size_t>(fmod_pos(az, kChunkDim));
+                    out[i++] = src->data[(oz * kChunkDim + oy) * kChunkDim + ox];
+                }
+                x = run_last + 1;
+            }
+        }
+}
+
 std::uint8_t VoxelGrid::cell_index(std::size_t level, VoxelCoord c) const {
     return level < levels_.size() ? cell_at(level, c) : 0;
 }

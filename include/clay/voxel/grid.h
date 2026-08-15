@@ -127,6 +127,19 @@ class VoxelGrid {
     // level COSTS is level_refined_chunk_count below: memory follows chunks,
     // and a level that stores nothing still has all its parent's material.
     std::size_t level_occupied_count(std::size_t level) const;
+    // A dense box of cells into `out`, which must hold
+    // (hi-lo+1) cells on each axis, x fastest then y then z.
+    //
+    // Exists because the obvious loop — `get()` per cell — is a hash lookup per
+    // cell, and a chunk is 32 cells wide, so it repeats the same lookup 32
+    // times along every row. Every sculpting verb starts by snapshotting its
+    // footprint, and on a size-32 brush that snapshot was 85% of the verb.
+    //
+    // Resolved once per RUN of cells sharing a chunk instead. Reads the active
+    // level, and honours the refinement fallback: a level that does not store a
+    // chunk reads its parent's material, as everywhere else.
+    void read_region(VoxelCoord lo, VoxelCoord hi, std::uint8_t* out) const;
+
     // One cell of ONE level, without making it active. get() answers for the
     // active level; this is what a reader spanning levels needs — the smooth
     // mesher and the field conversion both take a level rather than assuming
