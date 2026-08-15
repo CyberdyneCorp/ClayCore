@@ -17,11 +17,19 @@ REPO = Path(__file__).resolve().parent.parent
 
 # module -> modules it may include (itself always allowed)
 ALLOWED = {
-    "kernel": set(),
-    "math": {"kernel"},
-    "scene": {"kernel", "math", "field"},
-    "eval": {"kernel", "math", "scene"},
-    "brick": {"kernel", "math", "scene", "eval"},
+    # The data-parallel primitive, below everything and depending on nothing but
+    # the standard library. It was a PRIVATE HEADER OF THE CPU BACKEND, which
+    # meant the rule below — no module depends on a backend — locked the core
+    # library out of the only pool in the tree: every mesher, every voxel verb,
+    # redistance and the per-brick cull were serial because they could not
+    # legally reach it, not because they resist parallelism. Moving it here is
+    # what lets a core module use it AND lets this gate see that it does.
+    "parallel": set(),
+    "kernel": set(),  # the GPU dialect: no host threading, deliberately
+    "math": {"parallel", "kernel"},
+    "scene": {"parallel", "kernel", "math", "field"},
+    "eval": {"parallel", "kernel", "math", "scene"},
+    "brick": {"parallel", "kernel", "math", "scene", "eval"},
     # voxel -> field is the return trip (#90): a sculpt converting into a
     # sampled field so it can be an operand again. It adds no edge to the
     # transitive graph — voxel already depends on scene, and scene depends on
@@ -30,8 +38,8 @@ ALLOWED = {
     # both see field, but a representation conversion is neither a brush nor a
     # mesher, and putting it there would hide it from the type that owns the
     # cells.
-    "voxel": {"kernel", "math", "scene", "mesh", "field"},  # mesh_data.h is a leaf data type
-    "mesh": {"kernel", "math", "scene", "eval", "brick", "field"},
+    "voxel": {"parallel", "kernel", "math", "scene", "mesh", "field"},  # mesh_data.h is a leaf data type
+    "mesh": {"parallel", "kernel", "math", "scene", "eval", "brick", "field"},
     # brush -> field is mask extrude: the join of a mask (above scene) and a
     # sampled field (below it). It cannot live in field without making
     # field -> voxel -> scene -> field a cycle, and brush already sits above
@@ -42,14 +50,14 @@ ALLOWED = {
     # here — mesh may not include voxel (voxel already includes mesh), so a
     # masked mesh brush cannot live in mesh. No cycle: nothing in mesh knows
     # about brush.
-    "brush": {"kernel", "math", "scene", "voxel", "field", "mesh"},
-    "cut": {"kernel", "math", "scene"},
-    "field": {"kernel", "math"},  # a sampled field is a leaf payload, below scene
+    "brush": {"parallel", "kernel", "math", "scene", "voxel", "field", "mesh"},
+    "cut": {"parallel", "kernel", "math", "scene"},
+    "field": {"parallel", "kernel", "math"},  # a sampled field is a leaf payload, below scene
     # pick -> mesh is raycast_mesh. A mesh layer never enters a tape, so
     # raycast_scene cannot see one and never will; picking one means asking its
     # BVH directly. Nothing in mesh knows about pick.
-    "pick": {"kernel", "math", "scene", "eval", "brick", "voxel", "mesh"},
-    "io": {"kernel", "math", "scene", "eval", "brick", "voxel", "mesh", "field"},
+    "pick": {"parallel", "kernel", "math", "scene", "eval", "brick", "voxel", "mesh"},
+    "io": {"parallel", "kernel", "math", "scene", "eval", "brick", "voxel", "mesh", "field"},
 }
 CORE_MODULES = set(ALLOWED)
 INCLUDE_RE = re.compile(r'#\s*include\s*[<"]clay/(\w+)/')
