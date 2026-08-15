@@ -3128,8 +3128,19 @@ clay_result clay_layer_add_deformer(clay_document* doc, clay_layer_id layer, cla
                                     int32_t deform, const float* params, size_t param_count,
                                     int32_t ease, int32_t at_front) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
-    if (deform < 0 || deform > CLAY_DEFORM_NOISE)
+    // Bounded by the TABLE, like clay_item_add_deformer. This is the SECOND
+    // door into a deformer chain and it was left naming an enumerator when the
+    // first one was fixed — so every kind added since noise was declared,
+    // documented, handled by make_deformer, reachable on a builder, and
+    // refused on a PLACED node. The test that walks the enum now walks both.
+    constexpr int kKinds = sizeof kDeformParams / sizeof kDeformParams[0];
+    if (deform < 0 || deform >= kKinds)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown deformer kind");
+    if (kDeformParams[deform] < 0)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this deformer carries a payload that is not a parameter list; "
+                    "use its own entry point (bend_curve: clay_layer_add_bend_curve, "
+                    "lattice: clay_layer_add_lattice)");
     clay_result r = check_params("deformer", params, param_count, kDeformParams[deform]);
     if (r != CLAY_OK) return r;
     if ((r = check_ease(ease)) != CLAY_OK) return r;
@@ -3150,6 +3161,52 @@ clay_result clay_layer_add_deformer(clay_document* doc, clay_layer_id layer, cla
     }
     return apply_edit(doc, scene::Command{scene::SetDeformersCmd{layer, node, std::move(chain)}},
                       "node not found");
+}
+
+namespace {
+
+// The shared half of "add this deformer to a node already in a document": find
+// the node, place the warp per `at_front`, and commit it as one edit. The two
+// payload-carrying kinds differ only in how their deformer is built.
+clay_result add_placed_deformer(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                scene::Deformer d, std::int32_t at_front) {
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l || !l->sdf) return fail(CLAY_ERROR_NOT_FOUND, "no SDF layer with that id");
+    const scene::Node* n = l->sdf->find(node);
+    if (!n) return fail(CLAY_ERROR_NOT_FOUND, "no node with that id in this layer");
+    std::vector<scene::Deformer> chain = n->deformers;
+    if (at_front != 0)
+        chain.insert(chain.begin(), std::move(d));
+    else
+        chain.push_back(std::move(d));
+    return apply_edit(doc, scene::Command{scene::SetDeformersCmd{layer, node, std::move(chain)}},
+                      "node not found");
+}
+
+}  // namespace
+
+clay_result clay_layer_add_bend_curve(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                      const float* guide_xyz, size_t point_count,
+                                      int32_t point_type, float t0, float t1, int32_t at_front) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    // Built through the builder entry point so the two cannot disagree about
+    // what is legal — one place for the refusals, one for the construction.
+    clay_item scratch;
+    clay_result r = clay_item_add_bend_curve(&scratch, guide_xyz, point_count, point_type, t0, t1);
+    if (r != CLAY_OK) return r;
+    return add_placed_deformer(doc, layer, node, std::move(scratch.node.deformers.front()),
+                               at_front);
+}
+
+clay_result clay_layer_add_lattice(clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                   const float min[3], const float max[3], int32_t nx, int32_t ny,
+                                   int32_t nz, const float* offsets_xyz, int32_t at_front) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    clay_item scratch;
+    clay_result r = clay_item_add_lattice(&scratch, min, max, nx, ny, nz, offsets_xyz);
+    if (r != CLAY_OK) return r;
+    return add_placed_deformer(doc, layer, node, std::move(scratch.node.deformers.front()),
+                               at_front);
 }
 
 clay_result clay_layer_apply_stroke(clay_document* doc, clay_layer_id layer_id,
