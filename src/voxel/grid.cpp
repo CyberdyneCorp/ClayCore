@@ -406,6 +406,14 @@ bool VoxelGrid::drop_level() {
 // from its parent — the detail map starts empty.
 void VoxelGrid::subdivide_into(std::size_t fine) {
     const ChunkMap& coarse = levels_[fine - 1].chunks;
+    // A WHOLE level refines everywhere, so the per-child refinement test below
+    // is constant-true — and reaching it costs a chunk_key(), which is three
+    // divisions, for each of the eight children of every material cell. Hoisted
+    // rather than trusted to the short-circuit inside chunk_is_refined: the
+    // short-circuit saves the set lookup, not the key. Measured on the device
+    // gate at 2.36x (voxel_add_level, 0.51 -> 1.21 ms) when the region-refined
+    // path added the test.
+    const bool whole = levels_[fine].whole;
     for (const auto& [key, chunk] : coarse) {
         for (int z = 0; z < kChunkDim; ++z)
             for (int y = 0; y < kChunkDim; ++y)
@@ -420,7 +428,7 @@ void VoxelGrid::subdivide_into(std::size_t fine) {
                         const VoxelCoord child = child_cell(c, i);
                         // Outside the refined set the fine level already READS
                         // as this cell, so writing it would only buy storage.
-                        if (!chunk_is_refined(fine, chunk_key(child))) continue;
+                        if (!whole && !chunk_is_refined(fine, chunk_key(child))) continue;
                         write_cell(fine, child, v);
                     }
                 }
