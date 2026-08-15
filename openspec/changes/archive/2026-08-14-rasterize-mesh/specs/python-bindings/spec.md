@@ -19,9 +19,8 @@ The GIL SHALL be released around the work, as it is for the other heavy grid cal
 - **WHEN** an inverted or malformed region is passed
 - **THEN** Python raises and C returns `CLAY_ERROR_INVALID_ARGUMENT`
 
-### Requirement: Binding parity holds
-`tools/check_binding_parity.py` SHALL pass with the capability reachable from the C ABI.
-
-#### Scenario: The gate passes
-- **WHEN** the parity gate runs against the built module and `clay.h`
-- **THEN** it reports no unmatched capability and no stale exemption
+<!-- Binding parity is NOT restated here. `mesh-fixed-topology-brushes` added
+     "Binding parity holds" to this capability's living spec, and a delta that
+     re-adds an existing requirement is refused on archive — correctly: the
+     requirement is standing, and every change owes it rather than each one
+     declaring its own copy. -->

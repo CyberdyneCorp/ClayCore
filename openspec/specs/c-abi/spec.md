@@ -615,9 +615,17 @@ The ABI SHALL expose the brick cache as an opaque handle the caller creates from
 
 There SHALL be exactly one refill path — mark dirty, drain requests, evaluate, submit — with the drain taking a capacity and reporting a count and a remainder rather than accepting a NULL buffer as a size query, and with the outcome of a submission (accepted, stale, over budget) crossing as an out-parameter with a success return, on the same footing as "nothing to undo".
 
+The refill path SHALL carry colour when the cache was configured for it: the batched evaluation call SHALL be able to produce a colour lattice beside the distances, and submission SHALL accept it, so that colour reaches the cache by the same route distance does and there is no second path to keep consistent.
+
 The handle SHALL take no lock and own no thread; the header SHALL state that calls on one handle are the host's to serialize and that the batched evaluation call, which takes no handle, is free-threaded against one const document. A batched const query — the many-ray raycast — MAY fan its rays out across the engine's shared worker pool, provided the call returns only after every worker is done with the cache and each output slot is byte-identical to what the single-ray call reports for the same ray.
 
 A dirty region SHALL be validated in 64-bit before the engine converts it: a non-finite or empty region, a brick coordinate outside `int32`, and a span above the batch ceiling SHALL each be refused with the cache left unchanged. Dirtying everything the cache tracks SHALL be spelled as the absence of a region, never as a region carrying an infinity.
+
+Brick readback SHALL write a consumer's own buffer at a fixed stride in the engine's stored bits, and SHALL accept an optional apron so that the stride is a padded, directly filterable tile when the consumer asks for one. The buffer length SHALL continue to be required exactly rather than inferred, against whichever stride the call was asked for.
+
+Meshing the cache SHALL accept an optional set of brick keys and an optional per-key range report, so a consumer can re-mesh and re-upload what a drain reported dirty. Passing no set SHALL mean every surface brick, which is the behaviour a caller has today.
+
+Brick raycasting SHALL have a batched form matching the document-level batched raycast in ray layout and in optional outputs.
 
 #### Scenario: A host refills from the header alone
 - **WHEN** a consumer with only `clay.h` marks a layer's influence bound dirty, drains the requests in fixed-size chunks, evaluates them and submits the values
@@ -638,6 +646,14 @@ A dirty region SHALL be validated in 64-bit before the engine converts it: a non
 #### Scenario: A batched raycast parallelizes without changing its answers
 - **WHEN** a host casts the same rays through the batched brick-cache raycast and one at a time through the single-ray call
 - **THEN** every batch slot holds exactly the hit flag, distance, position and normal the single-ray call reports for that ray, and no engine thread touches the cache after the batched call returns
+
+#### Scenario: A host uploads a colour atlas without meshing
+- **WHEN** a consumer configures a cache for colour, refills it, and reads the surface bricks back with colour and a one-voxel apron
+- **THEN** it holds directly uploadable, directly filterable distance and colour tiles for the whole narrow band, having compiled no kernel of its own
+
+#### Scenario: A dirty drain feeds the mesher
+- **WHEN** the keys a drain reported are handed to the cache mesher as its key set
+- **THEN** only those bricks are marched, and the per-key ranges name where each landed in the output
 
 ### Requirement: A voxel edit's effect is readable across the ABI
 The ABI SHALL expose the grid's change count as a query alongside the occupied count, taking a `uint64_t` out-parameter rather than a `size_t` because the counter is never reset and a 32-bit host would wrap it in a long session. A NULL out-parameter SHALL be tolerated, matching the other grid queries; a NULL grid SHALL be refused with an invalid-argument error.
@@ -884,4 +900,332 @@ Both calls SHALL be readable at any time and SHALL NOT require a document, a dev
 #### Scenario: A fully working backend has nothing to say
 - **WHEN** a registered backend has every operation available
 - **THEN** `clay_backend_diagnostic` succeeds with an empty string, and `clay_backend_supports` reports every operation as available
+
+### Requirement: The compiled tape is exportable
+A consumer SHALL be able to obtain a document's compiled tape through the C ABI: the instruction array, the parameter array and the out-of-line blob, in the layout the published kernel headers define, since the consumer's evaluator is compiled from those same headers.
+
+The export SHALL include what an evaluator cannot derive from the buffers alone: the field info the safe step scale comes from, and the tape's bounds. A host that guesses its step scale draws a wrong frame; one that guesses its bounds draws a slow one.
+
+The export SHALL carry the document revision the tape was compiled at, so a consumer can tell whether the copy it holds is still current without comparing buffers.
+
+Ownership across the boundary SHALL be explicit and SHALL NOT depend on the consumer noticing a mutation: no exported pointer may be silently invalidated by a subsequent edit.
+
+The tape encoding SHALL be versioned with the published kernel package, and a version the consumer does not support SHALL be detectable and refused rather than reinterpreted.
+
+#### Scenario: A host evaluates the exported tape
+- **WHEN** a consumer exports a tape and evaluates it with `ctape_eval` from the published kernel headers at the same points the library evaluates
+- **THEN** the results agree within the host-parity tolerance the fixture already gates
+
+#### Scenario: An edit is detectable without re-reading the tape
+- **WHEN** the document is edited after a tape was exported
+- **THEN** the consumer can tell that its copy is stale from the revision alone
+
+#### Scenario: An edit does not invalidate an export in use
+- **WHEN** a consumer holds an exported tape and the document is edited
+- **THEN** the data the consumer holds remains valid and readable for as long as the ownership rule says it does, and the rule does not depend on the consumer having observed the edit
+
+#### Scenario: A version mismatch is refused
+- **WHEN** a consumer built against a different kernel package version reads the export
+- **THEN** the mismatch is detectable and the export is refused rather than interpreted under the wrong layout
+
+#### Scenario: Exporting does not disturb evaluation
+- **WHEN** a tape is exported while the same document is being evaluated from another thread
+- **THEN** both proceed correctly, consistent with a document staying readable from several threads at once
+
+### Requirement: A host can discover a document's layers
+The C API SHALL let a host enumerate a document's layers by a count and an index, where the index is STACK POSITION — the order evaluation uses and `clay_document_move_layer` sets — so the set and the order of a reloaded document are recoverable together. An index at or beyond the count SHALL be a typed not-found, which is how a host walks without a sentinel. Ids SHALL remain stable across a save and reload, and enumeration SHALL go through the index rather than the id space, because a removal leaves a gap in the ids.
+
+Everything settable about a layer SHALL be readable back: a versioned info descriptor (leading `struct_size`, per the descriptor convention) SHALL carry the layer's id, representation, stack index, visibility and both protection flags in one call, and the layer's name SHALL be returned by the size-query pattern, since it is the one layer property without a fixed size. The representation SHALL be declared as an enumeration whose values match the layer record's kind byte in a saved document, appended and never renumbered.
+
+Reading is not editing: a ghosted, locked or hidden layer SHALL answer every discovery query normally. The addition SHALL be purely additive — no existing signature changes, no struct grows, no enumerator's value changes.
+
+#### Scenario: A reloaded document comes back whole
+- **WHEN** a document with SDF, voxel and mesh layers — renamed at creation, one hidden, one locked, one ghosted, reordered with a move, one layer removed — is saved, reloaded and enumerated
+- **THEN** the count, the stack order and every layer's id, name, representation, visibility and protection match what was saved, in a number of calls proportional to the layer count
+
+#### Scenario: Stack order is the enumeration order
+- **WHEN** a layer is moved to a new stack position and the document is enumerated
+- **THEN** the enumeration reflects the move, and each layer's reported stack index is the index that would re-address it
+
+#### Scenario: A removed layer's id is a gap, not a guess
+- **WHEN** a layer is removed and the document is saved and reloaded
+- **THEN** enumeration yields the surviving ids only, and the removed id is refused as not found by the info and name queries
+
+#### Scenario: The info descriptor is versioned like every other
+- **WHEN** a caller passes an info struct whose `struct_size` is zero or below the original layout
+- **THEN** the call is refused as an invalid argument rather than misread
+
+#### Scenario: The name query sizes before it writes
+- **WHEN** a host queries a layer's name with a null buffer and then with a buffer of the reported size
+- **THEN** it receives the required size including the terminator and then the name; a buffer that is too small is refused with the needed size reported and nothing written
+
+### Requirement: A mesh sculpting session
+The C ABI SHALL expose a **sculptor handle** created over a mesh, owning the two structures that are expensive to build and cheap to keep: the vertex adjacency and the ray-query BVH.
+
+The handle SHALL be the entry point for stamping, stroking and picking, because building an adjacency per stamp is the whole cost of a stroke and an interface that hid the build would pay it every time.
+
+The adjacency SHALL NOT need rebuilding after any verb, because no verb changes topology; the header SHALL say so. The BVH SHALL be refreshable by an explicit call, and the header SHALL state that positions moving without a refresh make picking report the surface as it was.
+
+The handle SHALL keep the mesh alive for its lifetime and SHALL be destroyed by its own destroy call.
+
+#### Scenario: A session is built once and stamped many times
+- **WHEN** a host creates a sculptor over a mesh and applies a hundred stamps
+- **THEN** the adjacency is built once, no call rebuilds it, and the mesh's index and quad buffers are unchanged throughout
+
+### Requirement: The verbs across the ABI
+The C ABI SHALL expose every verb — grab, draw, inflate, smooth, pinch, flatten, clay, crease, scrape, polish and snakehook — as enumerators on ONE versioned descriptor carrying the brush centre, radius, strength, falloff curve, direction, the surface-versus-straight-line falloff choice, the flatten mode with its optional explicit plane, the polish angle and the smoothing iteration count.
+
+The descriptor SHALL carry the leading `uint32_t struct_size` every descriptor in this ABI carries.
+
+An unknown verb, an unknown falloff and an unknown flatten mode SHALL each be REFUSED with `CLAY_ERROR_INVALID_ARGUMENT` rather than mapped onto the default, as the mesher enums already are. A non-positive radius SHALL be refused. A smoothing iteration count SHALL be bounded at this boundary, because each iteration walks the region again.
+
+#### Scenario: An unknown verb is refused
+- **WHEN** a host passes a verb value outside the declared list
+- **THEN** the call returns `CLAY_ERROR_INVALID_ARGUMENT` with a detail message and the mesh is unchanged
+
+#### Scenario: A cost knob nobody could have meant is refused
+- **WHEN** a host passes a smoothing iteration count far above what any brush would spend
+- **THEN** the call returns `CLAY_ERROR_INVALID_ARGUMENT` and the mesh is unchanged
+
+### Requirement: Strokes and masks across the ABI
+The C ABI SHALL expose a whole-stroke entry point taking the stroke preset descriptor and the stroke samples it already declares, resolving them through the same `resolve_stroke` the voxel and mask consumers use, and SHALL accept an optional mask handle gating every verb by `1 - mask`.
+
+It SHALL report how many stamps moved a vertex.
+
+#### Scenario: A stroke and a mask reach a mesh
+- **WHEN** a host resolves a stroke with a preset and applies it to a sculptor with a mask covering half the region
+- **THEN** only the unmasked vertices moved and the reported stamp count is the number that acted
+
+### Requirement: Vertex deltas across the ABI
+The C ABI SHALL expose a **delta record handle** that a stamp or a stroke writes into, reporting the number of vertices it holds, reverting the mesh to its pre-record state, re-applying, and clearing.
+
+Reverting SHALL restore positions and normals bit-exactly. The record SHALL coalesce, so passing one record through a whole gesture yields one undo step.
+
+#### Scenario: A host gets undo without snapshotting the mesh
+- **WHEN** a host passes one record through a stroke of many stamps and then reverts it
+- **THEN** the mesh's vertex buffer is byte-identical to its pre-stroke contents, and the record's vertex count is at most the number of vertices the stroke reached
+
+### Requirement: Mesh picking across the ABI
+The sculptor handle SHALL answer a ray query with a hit flag, the world-space position and normal, the triangle index, the barycentric coordinates and the ray parameter, taking the layer transform as the query's frame.
+
+#### Scenario: A host turns a tap into a brush centre
+- **WHEN** a host casts a ray at a mesh layer and feeds the returned position into a stamp descriptor
+- **THEN** the stamp lands on the surface the ray hit
+
+### Requirement: Quad meshing across the ABI
+The C ABI SHALL expose quad meshing for both sources: the document's SDF content and a voxel grid. Both SHALL take one versioned descriptor carrying the lattice cell size, an optional target quad count with its tolerance and iteration cap, and the mode.
+
+The descriptor SHALL carry the leading `uint32_t struct_size` every descriptor in this ABI carries, so the count controls can be appended to later without a major bump.
+
+The descriptor SHALL also carry the two controls that belong to the voxel source alone — the occupancy blur the smooth mesher already takes, and the resolution LEVEL, which in faces mode is the count lever. Both SHALL be ignored for a document, so one descriptor serves both entry points rather than two that must be kept in step.
+
+The mode SHALL be checked against the declared list and an unknown value SHALL be rejected rather than mapped onto the default, as the mesher enum already is. The dual mode SHALL be zero, so a caller whose declared size predates the field gets the lattice dual.
+
+A call naming NEITHER a cell size nor a target SHALL be refused: neither names a lattice, and picking one on the caller's behalf would spend an unbounded amount of work on a number nobody chose.
+
+The iteration cap SHALL be bounded at this boundary and the target SHALL be bounded by `CLAY_MAX_BATCH`, because every iteration is a whole mesh: a byte count passed where a mesh count belongs, or a negative widened to an unsigned, would otherwise buy that many dense field evaluations. Both are refusals rather than clamps, for the reason every other count check here is.
+
+A tolerance or an iteration cap of ZERO SHALL mean the default, because the appended descriptor fields arrive as zero from a caller who declared only the original layout. A NEGATIVE iteration cap SHALL be refused rather than read as that default — it is a mistake and not a request — and a tolerance of 1 or more SHALL be refused, because 100% of the target makes `within_tolerance` true for almost any count and so reports nothing. These rules SHALL hold identically in the Python binding: the two SHALL not disagree about what a value means.
+
+The faces mode SHALL be voxels only. A document asked for it SHALL be refused with `CLAY_ERROR_INVALID_ARGUMENT` rather than quietly given the dual: a silent substitution of a smooth mesh for a boxy one is visible in the render and invisible in the return code.
+
+These SHALL be NEW entry points. `clay_document_mesh`, `clay_document_mesh_combined`, `clay_voxel_mesh`, `clay_voxel_mesh_smooth` and `clay_voxel_mesh_chunks` SHALL return exactly what they return today, carrying no quads.
+
+The C header SHALL state, at these entry points, that the output is a lattice-derived quad grid and NOT field-aligned retopology — no edge loops, no feature-placed poles, not animation-ready.
+
+#### Scenario: A document quad-meshes
+- **WHEN** a host calls the document quad mesher with a cell size and the dual mode
+- **THEN** it receives a mesh whose quad count is non-zero and whose triangle indices are that quad list's triangulation
+
+#### Scenario: Faces mode on a document is refused
+- **WHEN** a host asks a document for the faces mode
+- **THEN** the call returns `CLAY_ERROR_INVALID_ARGUMENT` with a detail message, and no mesh is produced
+
+#### Scenario: A cost knob nobody could have meant is refused
+- **WHEN** a host passes an iteration cap far above what any search would spend, or a target above the batch ceiling
+- **THEN** the call returns `CLAY_ERROR_INVALID_ARGUMENT` and no mesh is produced
+
+#### Scenario: The count knobs default at zero and are bounded at the far end
+- **WHEN** a host passes a tolerance of zero and an iteration cap of zero alongside a target
+- **THEN** the call meshes with the documented defaults and reports a search that ran
+- **AND** a negative iteration cap, and a tolerance of 1 or more, each return `CLAY_ERROR_INVALID_ARGUMENT`
+
+#### Scenario: A descriptor that predates the fields still meshes
+- **WHEN** a caller declares the descriptor's original size
+- **THEN** the call meshes with the dual mode and no target, the appended fields taking their zero defaults
+
+#### Scenario: The existing meshers are untouched
+- **WHEN** the existing document, voxel, smooth and per-chunk mesh calls run after quad meshing exists
+- **THEN** each returns the same vertices and indices it returned before, and reports no quads
+
+### Requirement: A mesh reports its quads and how it reached them
+`clay_mesh` SHALL report its quad count, SHALL expose a borrowed pointer to the quad indices with the lifetime rule every other borrowed mesh pointer has, and SHALL offer a copy-into-a-caller-buffer form alongside the existing index copy, taking the exact element count for the same reason that one does.
+
+A mesh carrying no quads SHALL report a count of zero and a null pointer, never a fabricated pairing of its triangles.
+
+The existing accessors — vertex count, index count, positions, normals, colours, uvs, indices, the interleaved vertex copy, bounds, validation and save — SHALL be unaffected. The index accessors SHALL keep reporting the triangulation, because that is what a GPU consumer draws.
+
+A mesh SHALL additionally report how it was produced: the lattice cell size it was meshed at, the target it was given (zero when none), the count it reached, the iterations the search spent, whether it landed inside the tolerance, and whether it clamped. This is the ONLY way a host learns that a target of fifty thousand produced thirty-one thousand because a ceiling stopped the search. Asking a mesh that was not quad-meshed SHALL be refused rather than answered with zeroes.
+
+The report describes a meshing CALL and not a surface, and SHALL travel exactly as far as that statement stays true. A transform carries it, because the result is the same mesh moved. A concatenation SHALL NOT, because it was produced by no single call. A mesh borrowed back out of a document layer SHALL NOT either, for the same reason: the geometry crossed, the call did not.
+
+`clamped` and `within_tolerance` are independent, and BOTH SHALL be reported as they are: a search that stopped at a limit and happened to land inside the tolerance there sets both, and each is a true statement about what happened.
+
+#### Scenario: A host reads the quads
+- **WHEN** a host quad-meshes and reads the quad count and pointer
+- **THEN** the pointer addresses four indices per quad, all within the vertex count, valid until the mesh is destroyed
+
+#### Scenario: A triangle mesh reports no quads
+- **WHEN** a host reads the quad count of a mesh produced by any existing mesher, loaded from a file, or built from triangles
+- **THEN** the count is zero and the pointer is null
+
+#### Scenario: The report explains the number the host got
+- **WHEN** a host asks for a target the resolution ceiling cannot reach and then reads the report
+- **THEN** the report states the count actually produced, the cell size used, and that the search clamped without reaching the tolerance
+
+#### Scenario: A mesh that was never quad-meshed has no report
+- **WHEN** a host asks a mesh loaded from a file for its quad report
+- **THEN** the call is refused with an error code rather than answering with zeroes
+
+### Requirement: Quads follow a mesh through the calls that copy one
+A mesh transform SHALL keep the quads it was given: it moves positions and rotates normals and does not touch indices.
+
+Concatenation SHALL carry quads only when EVERY input carries them, rebasing them onto the concatenated vertices as it rebases the triangles, and SHALL drop them entirely otherwise. This is the attribute-drop rule the header already states for normals, colours and uvs, applied for the same reason: a result that was quads over part of itself and triangles over the rest is not a quad mesh, and no call in this ABI may return a mesh whose arrays contradict each other.
+
+Attaching a mesh as a document layer SHALL copy its quads with its geometry, and the borrowed mesh SHALL report them.
+
+Saving SHALL write quads in the formats that carry them. The header SHALL state at the save entry point that OBJ, PLY and FBX carry quads and that GLB does not, because glTF 2.0 has no quad primitive mode.
+
+#### Scenario: A transformed quad mesh is still a quad mesh
+- **WHEN** a quad mesh is transformed
+- **THEN** the result carries the same quad list over the moved positions
+
+#### Scenario: Mixed concatenation drops quads
+- **WHEN** a quad mesh is concatenated with a mesh carrying none
+- **THEN** the result carries no quads and its triangles are the concatenation, exactly as before
+
+#### Scenario: A quad mesh layer keeps its quads
+- **WHEN** a quad mesh is added as a document layer and the layer's mesh is borrowed back
+- **THEN** the borrowed mesh reports the same quad count and the same quad indices
+
+### Requirement: A host can display a voxel sculpt as a form
+The C ABI SHALL expose the smooth voxel mesh, so a host can show a sculpt as a rounded form rather than as boxes without meshing the grid itself.
+
+The call SHALL be additive and SHALL sit beside `clay_voxel_mesh` rather than replacing it: the blocky mesh stays reachable, keeps its behaviour byte for byte, and remains what a host uses for export and for hard-surface voxel work.
+
+It SHALL take the smoothing setting as an explicit argument rather than reading a mode from the grid, so two hosts sharing a document cannot disagree about what the grid looks like, and so a host can offer both pictures of one sculpt without mutating it.
+
+An empty grid SHALL yield an EMPTY mesh rather than an error, as `clay_voxel_mesh` does: a grid nobody has drawn in yet is an ordinary state of a session.
+
+#### Scenario: The same grid answers both ways
+- **WHEN** a host meshes one grid with `clay_voxel_mesh` and with the smooth call
+- **THEN** both succeed, the blocky mesh is byte-identical to what it was before the smooth call existed, and the smooth mesh describes a rounded form over the same occupancy
+
+#### Scenario: Smoothing is the caller's choice, not the document's
+- **WHEN** two hosts mesh the same unmodified grid with different smoothing settings
+- **THEN** each receives the mesh it asked for and the grid is unchanged by either call
+
+### Requirement: A host converts a coloured sculpt in one call
+Converting a voxel sculpt into the document SHALL be able to produce ONE volume carrying the palette, rather than one volume per palette entry. The per-entry conversion exists because a field had nowhere to store a palette; once it does, a forty-entry sculpt SHALL NOT become forty items.
+
+`clay_voxel_to_layer` SHALL keep its signature and produce a single item. This changes what a host counts after converting, and SHALL be stated in the header rather than discovered: a caller that counted one node per palette entry will now count one.
+
+Converting a SINGLE palette entry SHALL remain available, because it is how a caller assembles a sculpt by hand and how a host takes one part of a sculpt as its own operand.
+
+A host SHALL be able to ask whether a volume item carries colour, so it can tell a converted sculpt from a bake that predates this and choose what to show.
+
+#### Scenario: A coloured sculpt converts to one item
+- **WHEN** a host converts a voxel sculpt carrying several palette entries
+- **THEN** the layer holds one volume item, evaluating it reports each entry's colour in that entry's region, and the item reports that it carries colour
+
+#### Scenario: One entry still converts alone
+- **WHEN** a host converts a single palette index
+- **THEN** it receives an item solid only where that entry's cells are, as before
+
+### Requirement: A host converts a sculpt into a layer it can keep working on
+The C ABI SHALL let a host convert a voxel sculpt into a layer of operands, so the sculpt can be booleaned, blended and deformed again rather than only displayed or exported.
+
+The conversion SHALL be NON-DESTRUCTIVE: it SHALL create a new layer and SHALL leave the grid and the original layer untouched, so a host can offer "go back" by keeping what it had. The conversion is irreversible in what it discards — the procedural history — and a destructive default would cost a parametric model to one misclick.
+
+It SHALL place one volume item per palette entry the grid carries, each with that entry's colour, unioned without a blend. Colour is authored data and a trip that drops it is unattractive whatever it does to the geometry; a blend between the parts would round an interface that is interior to the solid they make together.
+
+It SHALL introduce no new layer kind and SHALL NOT move the document format version: the result is ordinary volume items in an ordinary SDF layer.
+
+A conversion that cannot produce anything SHALL fail without having modified the document, rather than leaving an empty layer behind.
+
+#### Scenario: The converted sculpt is an operand
+- **WHEN** a host converts a two-colour voxel sculpt into a layer
+- **THEN** the layer holds one item per palette entry, each carrying that entry's colour, and evaluating the layer reports solid inside the sculpt
+
+#### Scenario: The original survives the conversion
+- **WHEN** a sculpt is converted
+- **THEN** the grid still holds the cells it held, and the layer it lives in is unchanged
+
+#### Scenario: An empty grid leaves no wreckage
+- **WHEN** a grid holding nothing is converted
+- **THEN** the call is refused and the document has gained no layer
+
+### Requirement: Rasterizing a mesh across the ABI
+The C ABI SHALL expose mesh rasterization onto a voxel grid, taking a mesh handle and an OPTIONAL region.
+
+Both region pointers SHALL be given or neither, as elsewhere in this ABI, and a region that is not finite, is empty, or is unbounded SHALL be REFUSED before the grid is touched — so a rejected call leaves the grid as it was rather than half-rasterized, exactly as the document rasterizer already guarantees.
+
+A NULL region SHALL mean the mesh's own bounds rather than being an error, which is the one place this entry point differs from `clay_voxel_rasterize`: a document may have no bounded content and a mesh always does.
+
+A mesh with no triangles SHALL be refused with a typed error rather than silently doing nothing, because a caller that loaded a file and got nothing wants to know.
+
+The header SHALL carry the same statement of what the sampling preserves that the document rasterizer carries, and SHALL state that this is occupancy sampling and not retopology.
+
+#### Scenario: A host rasterizes an imported model
+- **WHEN** a host loads an OBJ and rasterizes it with a NULL region
+- **THEN** the grid is filled over the mesh's own bounds and the call returns `CLAY_OK`
+
+#### Scenario: A malformed region is refused and changes nothing
+- **WHEN** a host passes one region pointer, or a region carrying a non-finite bound
+- **THEN** the call returns `CLAY_ERROR_INVALID_ARGUMENT` and the grid is still empty
+
+### Requirement: A mesh can be copied into a caller's own vertex layout
+The ABI SHALL let a consumer copy a mesh's vertices into memory it owns, in an interleaved layout it describes, and its indices likewise — so that geometry reaches a mapped GPU buffer in one pass rather than through an interleave into a staging buffer followed by a copy.
+
+The layout SHALL be a versioned descriptor naming a stride and a byte offset per attribute, with an attribute omitted by naming no offset for it. It SHALL describe placement only: attributes are copied in the float form the mesh holds, and format conversion is not part of this descriptor.
+
+The destination length SHALL be required exactly and checked, never inferred, consistent with every other call that writes into a consumer's buffer. Requesting an attribute the mesh does not carry SHALL be refused rather than filled with a default, because a silently black or silently flat model is harder to diagnose than a returned error.
+
+The mesh SHALL remain the engine's, produced and freed as it is today; this requirement adds a copy-out and SHALL NOT make meshing write into caller memory, since a mesher cannot report its vertex count before it has run.
+
+#### Scenario: One pass into a mapped buffer
+- **WHEN** a consumer describes a position/normal/colour interleaved layout and copies a mesh into a buffer sized from the mesh's vertex count
+- **THEN** the buffer holds each vertex's attributes at the named offsets and stride, and the data matches the deinterleaved accessors element for element
+
+#### Scenario: An absent attribute is refused, not invented
+- **WHEN** a layout names a colour offset for a mesh that was meshed without colours
+- **THEN** the call is refused and nothing is written
+
+#### Scenario: A short destination is refused
+- **WHEN** the destination is smaller than the stride times the vertex count
+- **THEN** the call is refused rather than writing what the caller did not allocate
+
+### Requirement: Every primitive is reachable on a host preview path
+A consumer drawing this library's field on its own GPU SHALL be able to reproduce EVERY primitive the document can contain, including sampled volumes, without enumerating primitive kinds in its own code.
+
+A host that implements a subset of the dialect draws a subset of the document, and the subset that goes missing is not arbitrary: sampled volumes are what every regional verb produces, so a preview lacking them shows nothing for a whole class of brush until a bake lands. Neither published path SHALL require a consumer to name primitives — one evaluates the compiled tape, whose out-of-line payload carries a volume's samples, and the other reads bricks filled by evaluating that same tape.
+
+#### Scenario: A regional verb is visible before the bake
+- **WHEN** a document containing a sampled volume is drawn through either the exported tape or the brick payloads
+- **THEN** the volume contributes its surface, and the field a consumer evaluates agrees with the library's own at the same points
+
+#### Scenario: A volume is found wherever it sits in the payload
+- **WHEN** a sampled volume follows another item that carries out-of-line data, so it does not begin at the start of the payload
+- **THEN** it is still evaluated correctly on both paths
+
+### Requirement: A placed node answers what primitive it carries
+The C API SHALL let a host ask a placed item which primitive it carries, returning the same enumeration item creation takes, so that a host that reloaded a document picks the reader that applies instead of probing readers until one stops refusing. A group SHALL be refused with a typed invalid-argument error — the dual of the children query refusing an item — so every node answers exactly one of the two questions. Reading SHALL NOT be refused on a protected or hidden layer.
+
+#### Scenario: A reloading host finds its armature
+- **WHEN** a host asks a placed armature node and a placed sphere node what they carry
+- **THEN** it receives the armature and sphere enumerators it would have passed to create them
+
+#### Scenario: A group is the other question
+- **WHEN** the primitive of a group is asked for, and the children of an item
+- **THEN** both are refused as invalid arguments, and each node answers exactly one of the two queries
 

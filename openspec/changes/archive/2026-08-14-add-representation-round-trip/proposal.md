@@ -1,3 +1,39 @@
+# SUPERSEDED by `voxel-to-field` (retired 2026-08-14)
+
+**Do not implement this. It was delivered, under different requirement names
+and with one of its open questions answered the other way.**
+
+This plan was written before `voxel-to-field`, which shipped the capability it
+describes: `VoxelGrid::to_field`, `clay_item_volume_from_voxels`,
+`clay_voxel_to_layer`, and `examples/42_representation_round_trip.py` — the
+round trip this proposal is named for, running end to end. Its tasks stayed
+unticked, so it read as unstarted backlog for months while the work sat merged.
+
+Where each of its intents ended up:
+
+| this plan's requirement | delivered as |
+|---|---|
+| A grid converts directly to a field | `voxel-engine` — *A grid converts to a field without a mesh in between* |
+| Conversion is lossy, and says so | `voxel-engine` — *The SDF-to-voxel direction states what it guarantees* |
+| Conversion across the ABI | `c-abi` — *A host converts a sculpt into a layer it can keep working on* |
+| Conversion is an ordinary edit | **NOT delivered, and deliberately** — see below |
+
+**Task 1.1 was the real question and it was answered the other way.** It asked
+whether conversion happens IN PLACE or produces a new layer beside the original.
+The answer is a new layer: `clay_voxel_to_layer` adds one through
+`AddLayerCmd` — so it is undoable like any other layer edit — and leaves the
+grid untouched. The scene-model requirement below describes in-place conversion,
+which is the road not taken, and is why this change is archived with its spec
+deltas SKIPPED rather than applied: applying them would write a requirement the
+library deliberately does not meet, plus three duplicates under new names.
+
+The reasoning for that choice is in the README's "Converting between them":
+once rasterized, the parametric items behind a sculpt are no longer reachable
+from the voxel side, so the return trip hands back a new layer rather than
+destroying the original.
+
+---
+
 # Proposal: move a sculpt between the two representations
 
 ## Why
