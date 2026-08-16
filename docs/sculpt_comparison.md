@@ -87,7 +87,7 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 | SnakeHook | `brush::snakehook` | ✅ adds material rather than pulling it |
 | Tubes (Nomad Sculpt) | `brush::tube` | ✅ path, B-spline toggle, variable radius, profile, closed — a round tube stays exact |
 | Surface Noise | `noise` deformer | ✅ integer hash, so all backends agree |
-| Blob | — | ⬜ `add-blob-brush`, unblocked |
+| Blob | `blob` | ✅ noise under a brush region |
 | Pulling a lobe out | `brush::snakehook` | ✅ the verb for growing form; Move is the verb for nudging it |
 | Morph | — | ⬜ needs a stored morph target — a *document* concept |
 | Layers | — | ⬜ the same missing concept |
@@ -266,7 +266,7 @@ Every claycore claim above is verifiable in this repository:
 
 | Claim | How to check |
 |---|---|
-| 16 combine ops, 18 deformers, 5 blends, 10 voxel verbs, 11 mesh verbs | `docs/07-brushes-and-features.md` — its coverage is asserted against the enums |
+| 16 combine ops, 20 deformers, 5 blends, 10 voxel verbs, 11 mesh verbs | `docs/07-brushes-and-features.md` — its coverage is asserted against the enums |
 | A mesh brush never changes topology | `tests/unit/test_mesh_sculpt.cpp` compares `indices` and `quads` BYTE FOR BYTE after every verb, on a quad-exported mesh |
 | Brush parity table | `examples/` — every verb has a runnable script with committed renders and self-checks |
 | Exactness / Lipschitz is real | `tests/unit/test_*.cpp` measure the declared bound against the field's actual steepest slope |

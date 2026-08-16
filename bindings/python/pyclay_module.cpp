@@ -1408,6 +1408,29 @@ NB_MODULE(pyclay, m) {
              },
              "a"_a, "b"_a, "v"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
              "Displace by v, eased along the segment a -> b")
+        .def("blob",
+             [](nb::object self, nb::handle center, float radius, float amplitude,
+                float frequency, int octaves, float gain, std::uint32_t seed, int ease) {
+                 PyPrim& p = nb::cast<PyPrim&>(self);
+                 if (!(radius > 0.0f)) throw std::invalid_argument("blob needs a radius > 0");
+                 p.deformers.push_back(scene::Deformer::blob(
+                     to_f3(center, "center"), radius, amplitude, frequency, octaves, gain, seed,
+                     static_cast<std::uint8_t>(ease)));
+                 return self;
+             },
+             "center"_a, "radius"_a, "amplitude"_a, "frequency"_a = 6.0f, "octaves"_a = 3,
+             "gain"_a = 0.5f, "seed"_a = 0u, "ease"_a = 0, nb::rv_policy::reference_internal,
+             "ZBrush's BLOB: an irregular swelling under the brush, rather than\n"
+             "the smooth one `draw` gives.\n\n"
+             "`noise` with the finite support `grab` and `magnify` have — outside\n"
+             "`radius` the field is untouched, which is what makes it a brush\n"
+             "rather than a modifier.\n\n"
+             "The amplitude is signed and so is the noise, so ONE dab both swells\n"
+             "and eats in — which is what reads as blobby rather than as a\n"
+             "uniform bulge. A negative amplitude is not a second verb.\n\n"
+             "The seed is an ordinary parameter rather than global state, so two\n"
+             "items with the same seed look the same and an item's appearance\n"
+             "never depends on the order it was compiled in.")
         .def("lattice",
              [](nb::object self, nb::handle box, nb::handle offsets, int nx, int ny, int nz) {
                  PyPrim& p = nb::cast<PyPrim&>(self);

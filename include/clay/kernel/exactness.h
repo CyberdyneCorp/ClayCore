@@ -298,4 +298,21 @@ CLAY_FN CFieldInfo cfi_lattice(CFieldInfo a, float rate_x, float rate_y, float r
     return CFieldInfo{false, a.lipschitz * (1.0f + g)};
 }
 
+// blob: the noise bound, plus the term the REGION adds.
+//
+// The offset is amplitude * w(p) * fbm(p), so its gradient has two parts by the
+// product rule: the noise varying under a constant weight — which is cfi_noise
+// exactly — and the WEIGHT varying over a constant noise, which is the same
+// shape cfi_relief pays, |amplitude| * (weight's steepest slope) / radius.
+//
+// Both are charged. Dropping the second would under-bound a small radius, which
+// is precisely where a blob is used: the weight falls from 1 to 0 across the
+// radius, so a tight dab has a steep weight even where the noise is flat.
+CLAY_FN CFieldInfo cfi_blob(CFieldInfo a, float amplitude, float frequency, int octaves,
+                            float gain, float radius, float ease_slope) {
+    CFieldInfo n = cfi_noise(a, amplitude, frequency, octaves, gain);
+    const float region = cabs(amplitude) * ease_slope / cmax(radius, 1e-6f);
+    return CFieldInfo{false, n.lipschitz + region};
+}
+
 CLAY_NS_END

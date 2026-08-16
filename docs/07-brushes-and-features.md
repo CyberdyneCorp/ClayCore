@@ -748,7 +748,7 @@ parity — the mechanism usually differs even where the result matches.
 | Mask | mask fields, layer lock/ghost | Painted by the stroke engine like any brush; freezes every verb on both representations; survives resolution changes |
 | Extract | `brush::mask_extrude` | The mask is the region — no radius to supply. Outward, inward or centred, with a roundable rim |
 | Alphas | `sculpt_carve_alpha` | Voxel side only so far |
-| Blob | — | Not yet: `add-blob-brush`, unblocked by the noise field |
+| Blob | `blob` | Noise with the finite support `grab` and `magnify` have — outside the radius the field is untouched. One SIGNED amplitude, so a single dab both swells and eats in, which is what reads as blobby rather than as a uniform bulge |
 | Slice / Knife (polygroup splits) | — | Splitting without removing volume has no single-solid equivalent; it needs two items |
 | ZRemesher (quad retopology) | partly — `mesh_quads` | **Not the same thing, and the difference matters.** claycore meshes a sculpt into a QUAD GRID DERIVED FROM ITS LATTICE: quad-only, regular, no T-junctions, with a target count you choose — enough to hand a form to a DCC as OBJ or FBX. What it is not is field-aligned: no edge loops following the form, no poles placed at features, density that does not follow curvature. A retopology pass REPLACES this rather than refining it |
 | Surface-mode mesh brushes | `mesh::MeshSculptor` (§ 8) | **The non-goal was narrowed, not dropped.** Vertices move on a mesh layer's own triangles; dyntopo, multires and remeshing remain out of scope |

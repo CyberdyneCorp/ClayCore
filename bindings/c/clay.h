@@ -206,7 +206,8 @@ typedef enum clay_blend {
  *   GRAB      cx cy cz r dx dy dz front   pull a region; identity past r
  *   POSE      cx cy cz r ax ay az angle   rotate a region about its centre
  *   POSE_LINE ax ay az bx by bz nx ny nz angle  ramp a rotation along a -> b
- *   BEND_CURVE            a drawn guide; see clay_item_add_bend_curve */
+ *   BEND_CURVE            a drawn guide; see clay_item_add_bend_curve
+ *   BLOB      cx cy cz r amp freq octaves gain seed   noise with finite support */
 typedef enum clay_deform {
     CLAY_DEFORM_TWIST = 0,
     CLAY_DEFORM_BEND = 1,
@@ -258,7 +259,16 @@ typedef enum clay_deform {
      *
      * Its cage does not fit a flat float array, so like CLAY_DEFORM_BEND_CURVE
      * it has its own entry point: clay_item_add_lattice. */
-    CLAY_DEFORM_LATTICE = 17
+    CLAY_DEFORM_LATTICE = 17,
+    /* Blob (ZBrush's): an irregular swelling under the brush rather than the
+     * smooth one draw gives. Parameters: centre(3), radius, amplitude,
+     * frequency, octaves, gain, seed.
+     *
+     * It is CLAY_DEFORM_NOISE with the finite support CLAY_DEFORM_GRAB and
+     * CLAY_DEFORM_MAGNIFY have — outside the radius the field is untouched,
+     * which is what makes it a brush rather than a modifier. The amplitude is
+     * signed and so is the noise, so one dab both swells and eats in. */
+    CLAY_DEFORM_BLOB = 19
 } clay_deform;
 
 /* Easing curves are given by index; 0 is linear. Only the taper deformer and
