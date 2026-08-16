@@ -102,11 +102,26 @@ FLOORS = {
     # that and reported it as the cost of a dab, which overstated it 4x.
     #
     # What survives the correction is the SLOPE: the cull is linear in item
-    # count on both paths (0.019 -> 0.164 ms planned, over 10x the items), so
-    # the index lowered the constant and left the shape. That is what
-    # add-item-spatial-index is for, and at 2000 items it is not yet urgent —
-    # ~0.8 ms of culling extrapolated to 10k, against a 4.17 ms frame share.
+    # count on both paths (0.019 -> 0.178 ms planned, over 10x the items), so
+    # the index lowered the constant and left the shape.
     "BM_DeepDocRefillPlanned2000": {"max_ms": 4},
+    # 10 000 items, which is where add-item-spatial-index's argument lives. The
+    # extrapolation above is now MEASURED rather than estimated, and it lands
+    # where the estimate said: 0.926 ms of culling, 0.934 ms for the whole dab.
+    #
+    # That matters because the proposal was written before CullIndex and
+    # CullPlan existed and argues from ~15 ms of culling at this size. The
+    # index is 16x off that, and a dab at 10 000 items sits inside a 4.17 ms
+    # frame share rather than blowing it before evaluation starts.
+    #
+    # The slope is still real and still linear, and culling is still 99% of the
+    # dab's cost here (0.926 of 0.934) — so the spatial index is still the right
+    # next move on this path. What changed is the urgency, not the direction.
+    #
+    # Ceilings are ~6x the local number because the CI runner measures about 3x
+    # slower and a benchmark gate that flakes gets ignored.
+    "BM_DeepDocCullPlanned10000": {"max_ms": 6},
+    "BM_DeepDocRefillPlanned10000": {"max_ms": 6},
     "BM_DeepDocRefill2000": {"max_ms": 12},
     "BM_VoxelMeshSparse64Chunks": {"max_ms": 120},
     # Part 2 of the same issue: two chunks of that 64-chunk grid, meshed
