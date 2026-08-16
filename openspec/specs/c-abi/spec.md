@@ -1271,3 +1271,10 @@ An existing caller that never mentions a level SHALL get today's behaviour: a on
 - **WHEN** a caller selects, or asks the cell size or occupied count of, a level beyond the stack
 - **THEN** the call returns `CLAY_ERROR_INVALID_ARGUMENT` with the grid unchanged, rather than returning a plausible-looking zero
 
+### Requirement: Alphas reach the C ABI through their own entry point
+The C API SHALL expose applying an alpha to an item through a dedicated call rather than the flat deformer call, because a variable-length sample array does not fit that signature — the same reason bend curve has its own entry point. The samples SHALL be COPIED, so a caller may free its buffer immediately.
+
+#### Scenario: A malformed stamp is refused rather than applied
+- **WHEN** a caller passes a null sample pointer, a non-positive dimension, or a dimension that disagrees with the sample count
+- **THEN** the call is refused and the item is unchanged
+
