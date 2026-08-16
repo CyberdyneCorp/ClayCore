@@ -39,7 +39,9 @@ per-node exactness and Lipschitz tracking that makes raymarching provably
 correct, and portability across four backends from one kernel source with gated
 parity. As a **sculpting product**, it is at *"core brush vocabulary complete,
 workflow tier absent."* The brushes landed, sculpt layers landed on voxel
-layers, and alphas landed on SDF layers; masking-as-protection, sculpt layers on
+layers, alphas landed on SDF layers, and masking now protects against any
+operation rather than only against brushes; sculpt layers on SDF layers and the
+asset-finishing pipeline have not.
 SDF layers and the asset-finishing pipeline have not.
 
 ---
@@ -54,7 +56,7 @@ SDF layers and the asset-finishing pipeline have not.
 | **Field correctness** | **Exactness + Lipschitz tracked per node**, so step size is derived, not tuned | n/a — mesh | n/a — mixed | n/a — mesh |
 | **Booleans** | **Watertight by construction**, 2-manifold meshing | Live Boolean, then remesh | Voxel booleans, robust | BMesh booleans, fragile on bad input |
 | **Brush vocabulary** | Core set complete on fields and voxels, plus 11 fixed-topology verbs and a lattice cage on a mesh layer (see below) | The reference: ~36 surface brushes plus the core | Broad, voxel + surface modes | Solid core set |
-| **Masking** | **Weak** — voxel-scoped, reaches SDF only via stroke stamps | First class, protects the surface from *any* op | First class | First class |
+| **Masking** | **Protects the surface from any op**, on either representation — a gated item does not act where the mask protects | First class, protects the surface from *any* op | First class | First class |
 | **Sculpt layers** | **On voxel layers.** A pass is bracketed and its changed cells recorded, so its strength stays adjustable long after the strokes are finished; SDF layers do not have them yet | Headline feature | Present | Present |
 | **Alphas / stamps** | **Both representations**, scalar stamps only — no vector displacement maps | Deep, VDM support | Deep | Present |
 | **Surface colour** | Per-item colour + `Paint` regions; vertex colours at mesh time | Polypaint | **PBR texture painting — its moat** | Vertex paint + texture paint |
@@ -93,7 +95,7 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 | Morph | — | ⬜ needs a stored morph target; unblocked on voxels now that layers exist, still absent on SDF |
 | Layers | `VoxelGrid::begin_sculpt_layer` | 🟡 voxel layers only — an SDF pass is a weighted group, which waits on `expose-scene-groups` |
 | Alphas | `sculpt_carve_alpha` (voxel), `Deformer::alpha` (SDF) | ✅ both, scalar stamps |
-| Masking | mask fields | 🟡 voxel-scoped; see below |
+| Masking | mask fields, `Node::gate` | ✅ gates any operation on either representation — a boolean included; the gate is a measured DISTANCE, so its cost follows a width you set |
 | Slice / Knife | — | ❌ polygroup splits need two items; no single-solid equivalent |
 | Surface brushes on a MESH (Standard, Move, Inflate, Smooth, Pinch, Flatten, Clay, DamStandard, Trim Dynamic, hPolish, SnakeHook) | `mesh::MeshSculptor`, 11 verbs | ✅ on a mesh LAYER's own triangles, with topology fixed — see below |
 | Elastic (Blender), ZProject | — | 🟡 Elastic was filed "does not survive the representation change", which was true for fields and is no longer true on a mesh layer. Undecided rather than rejected; it is the one entry that is new *math* rather than a new composition of the eleven |
@@ -162,7 +164,7 @@ and that is the shape of the gap.
 
 | Gap | Today | Why it blocks parity |
 |---|---|---|
-| **Masking as a field concept** | Masks are stored beside *voxel* content and reach SDF edits only through the stroke engine, where a masked stamp is dropped or attenuated | ZBrush masking protects the **surface** from *any* operation. Nothing here gates an arbitrary op, or protects an existing surface from the next boolean. The single biggest missing concept. |
+| **Masking as a field concept** | **Landed.** An item carries a gate — the signed distance to a painted mask's region — and does not act where it protects | ZBrush masking protects the **surface** from *any* operation, and this now does too: the gate rides the combine record rather than being a mode, so it gates a boolean, a smooth union or an add alike. Both ends are exact — fully protected is the accumulated field bit for bit. What it costs is honest and visible: mixing two fields by a spatially varying weight is not a distance, so a narrow gate costs an order of magnitude of step scale and a wide one much less (`examples/54_masked_operations.py` measures it). The cost follows the falloff width you choose rather than how hard the brush edge that painted the mask was, which is why the gate carries a distance rather than paint. |
 | **Sculpt layers / morph targets** | **On voxel layers**; not on SDF layers | A layer that records a pass and replays it at an intensity is a *document* concept, not a brush. The voxel side has it: `begin_sculpt_layer`/`end_sculpt_layer` bracket a pass, and strength, visibility, reordering and merge-down follow (`examples/52_sculpt_layers.py`). What a **fraction** means differs from ZBrush by representation — ZBrush interpolates vertex offsets, and binary occupancy has nothing to interpolate, so a fractional strength is a reproducible fraction of the *cells*, dithered against the same cell-coordinate hash the falloff brushes use. On an SDF layer the equivalent is a weighted group rather than a diff, which waits on `expose-scene-groups`. Morph stays "not planned" for the SDF side only. |
 | **Alphas on SDF layers** | **Landed.** `Deformer::alpha` / `Prim.alpha(...)` / `clay_item_add_alpha` | Detail work in all three tools is alpha-driven, and it now works on the non-destructive representation rather than only the baked one. An alpha is a deformer — a distance offset under finite support — because it modulates an existing surface rather than adding material in the stamp's shape. The engine decodes no images; a host passes the samples. |
 
@@ -273,7 +275,7 @@ Every claycore claim above is verifiable in this repository:
 | Exactness / Lipschitz is real | `tests/unit/test_*.cpp` measure the declared bound against the field's actual steepest slope |
 | Backend parity | `tests/unit/test_parity.cpp`, and `clay parity-fixture` for host-side checking |
 | Watertight meshing | `tests/unit/test_mesh.cpp`, and `clay validate` |
-| Masking is voxel-scoped | `openspec/specs/scene-model/spec.md`, "A layer may carry a mask" |
+| Masking gates any operation | `tests/unit/test_masked_combine.cpp` — a gated boolean leaves the protected region exactly as it was, and marching by the declared step scale does not overshoot |
 | The gaps above | `openspec/ROADMAP.md` — pending rows and the deferred list |
 
 If a claim here stops being true, the test or gate that backs it should fail

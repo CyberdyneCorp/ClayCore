@@ -261,6 +261,10 @@ struct PyPrim {
     std::vector<scene::Profile> profiles;                       // Loft only
     std::vector<std::vector<kernel::cfloat2>> profile_polygons;  // Loft only
     std::shared_ptr<const field::FieldVolume> volume;            // Volume only
+    // The mask that gates this item's participation, measured to a signed
+    // distance by Prim.gate(). Null for the overwhelmingly common ungated item.
+    std::shared_ptr<const field::FieldVolume> gate;
+    float gate_width = 0.1f;
     scene::Repeat repeat;
     // Only a cut sets this today: it derives its own bevel, and losing it
     // between constructing the prim and placing it would be a trap. Layer.add
@@ -1501,6 +1505,45 @@ NB_MODULE(pyclay, m) {
             "them — so a flat stamp costs nothing for having large values, and a\n"
             "high-frequency one costs step scale honestly. Read it back with\n"
             "`Document.safe_step_scale()`.")
+        .def(
+            "gate",
+            [](nb::object self, nb::handle mask, float width, float threshold) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                const voxel::MaskField* m = borrow_mask(mask);
+                if (!m) throw std::invalid_argument("gate needs a MaskField");
+                if (!(width > 0.0f))
+                    throw std::invalid_argument(
+                        "a gate's width must be positive: a step in the field has no finite "
+                        "Lipschitz bound and nothing could march it");
+                // The measured band has to reach at least as far as the gate
+                // fades, or full protection is never reachable: the distance
+                // saturates at the band and the smoothstep never gets to 1.
+                // Twice the width leaves margin, and the pad matches so the
+                // sampled region actually contains it.
+                const float band = 2.0f * width;
+                std::optional<field::FieldVolume> measured =
+                    brush::mask_to_field(*m, threshold > 0.0f ? threshold : 0.5f, band, band);
+                if (!measured || measured->empty())
+                    throw std::invalid_argument(
+                        "the mask is empty or nothing reaches the threshold, so the gate "
+                        "would protect nothing");
+                p.gate = std::make_shared<const field::FieldVolume>(std::move(*measured));
+                p.gate_width = width;
+                return self;
+            },
+            "mask"_a, "width"_a = 0.1f, "threshold"_a = 0.5f, nb::rv_policy::reference_internal,
+            "Gate this item by a painted MASK: it does not act where the mask\n"
+            "protects. This is what makes masking protect a surface from ANY\n"
+            "operation — a boolean included — rather than only from a brush.\n\n"
+            "The mask is MEASURED, not stored: the item carries the signed\n"
+            "distance to `mask >= threshold`. That is what gives the gate a\n"
+            "Lipschitz bound worth having, since a distance is 1-Lipschitz and\n"
+            "the falloff's cost is set by `width` — which you choose — rather\n"
+            "than by however hard the brush edge that painted the mask was.\n"
+            "Painted softness is re-derived rather than preserved.\n\n"
+            "`width` is how far protection fades across, in world units. A WIDE\n"
+            "gate costs almost no step scale and a narrow one costs honestly;\n"
+            "read it back with `Document.safe_step_scale()`.")
         .def(
             "lattice",
             [](nb::object self, nb::handle box, nb::handle offsets, int nx, int ny, int nz) {
@@ -3574,6 +3617,8 @@ NB_MODULE(pyclay, m) {
                  n.profiles = prim.profiles;
                  n.profile_polygons = prim.profile_polygons;
                  n.volume = prim.volume;
+                 n.gate = prim.gate;
+                 n.gate_width = prim.gate_width;
                  n.repeat = prim.repeat;
                  n.op = op;
                  if (!blend.is_none()) {
@@ -3751,6 +3796,8 @@ NB_MODULE(pyclay, m) {
                  templ.profiles = prim.profiles;
                  templ.profile_polygons = prim.profile_polygons;
                  templ.volume = prim.volume;
+                 templ.gate = prim.gate;
+                 templ.gate_width = prim.gate_width;
                  templ.op = op;
                  // Rounding is not decoration for every op: groove and tongue read
                  // it as the channel half-width, and relief and incise as the

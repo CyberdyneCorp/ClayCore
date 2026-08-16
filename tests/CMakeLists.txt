@@ -76,6 +76,7 @@ add_executable(clay_unit_tests
   unit/test_c_move_brush.cpp
   unit/test_relief.cpp
   unit/test_mask_brush.cpp
+  unit/test_masked_combine.cpp
   unit/test_mask_extrude.cpp
   unit/test_c_mask_brush.cpp
   unit/test_c_pick_eval.cpp

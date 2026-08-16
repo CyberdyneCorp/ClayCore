@@ -910,6 +910,43 @@ struct Node {
     // share one set of samples.
     std::shared_ptr<const field::FieldVolume> volume;
 
+    // -- gate ----------------------------------------------------------------
+    // A MASK on this item's participation, and the thing that makes masking
+    // protect a surface from ANY operation rather than only from a brush.
+    //
+    // Masks gate AUTHORING elsewhere: a voxel edit consumes one per cell as it
+    // writes, and an SDF edit consumes one when a stroke becomes items. Neither
+    // touches an item already in the edit list, which is why a mask over an ear
+    // has never done anything about the next boolean. This does: where the gate
+    // says protected, the accumulated field is exactly what it was before this
+    // item combined.
+    //
+    // A SIGNED DISTANCE, not paint. Negative inside the protected region, and
+    // `brush::mask_to_field` is what produces one from a painted MaskField.
+    // Storing paint here instead would mean a Lipschitz bound set by however
+    // hard the artist's brush edge happened to be; a distance gives a
+    // 1-Lipschitz field whose falloff is `gate_width` — a number the caller
+    // chooses and can change without repainting.
+    //
+    // Shared for the same reason `volume` is: several items gated by one
+    // painted mask should not each carry a copy of it.
+    //
+    // ITS BAND MUST REACH AT LEAST `gate_width`. A sampled volume stores true
+    // distances only within its band and saturates past it, so a band narrower
+    // than the fade means the smoothstep never reaches 1 and the "fully
+    // protected" end is never actually reached — the surface comes back at 92%
+    // of where it should be, which reads as a subtle bug rather than as a
+    // misconfiguration. The bindings derive the band from the width for exactly
+    // this reason; a caller building the volume by hand owns the constraint.
+    std::shared_ptr<const field::FieldVolume> gate;
+    // How far the protection fades across, in world units. Zero would be a step
+    // in the field with no finite Lipschitz bound, so it is clamped to
+    // something small rather than honoured; a WIDE gate costs almost no step
+    // scale and a narrow one costs honestly.
+    float gate_width = 0.05f;
+
+    bool gated() const { return gate != nullptr; }
+
     // group fields
     std::vector<NodeId> children;
 };

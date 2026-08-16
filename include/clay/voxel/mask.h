@@ -11,12 +11,17 @@
 // that, and it is their worst-rated defect. World addressing makes the failure
 // unrepresentable rather than merely untested.
 //
-// Masking gates edits where they are AUTHORED, not where the field is
-// evaluated. Voxel edits consume the mask per cell at apply time; SDF edits
-// are declarative items with no per-point strength, so they consume it when a
-// stroke is turned into items (the stroke engine). A mask therefore protects a
-// region from what you do next; it does not retroactively gate items already
-// in the edit list.
+// Masking gates edits where they are AUTHORED: voxel edits consume the mask per
+// cell at apply time, and SDF strokes consume it when a stroke is turned into
+// items. That protects a region from what you do NEXT.
+//
+// It is no longer the only way a mask acts. An SDF item can also carry a GATE
+// (`scene::Node::gate`) and then does not act where the mask protects — which
+// is what makes a mask protect a surface from an arbitrary operation, a boolean
+// included, rather than only from a brush. The gate is not this field: it is the
+// signed distance to { mask >= threshold }, measured by `brush::mask_to_field`,
+// because a [0,1] paint value composed into a field expression puts a step in
+// the result and the Lipschitz bound stops meaning anything.
 
 #include <cstdint>
 #include <optional>

@@ -325,6 +325,29 @@ StrokePoint read_point(Reader& r) {
 // reason read_point and read_prim are: read_node is a long flat walk over the
 // record, and a nested multi-branch block in the middle of it is where that
 // walk stops being readable.
+// A node's gate, minor 11 and above — its own function for the reason
+// read_volume is one.
+void read_gate(Reader& r, Node& n) {
+    std::uint32_t bytes = r.u32();
+    if (bytes > r.remaining) {
+        r.ok = false;
+        return;
+    }
+    if (bytes == 0) return;  // a node without one wrote a zero length
+    std::vector<std::uint8_t> raw(bytes);
+    if (!r.bytes(raw.data(), raw.size())) return;
+    std::optional<field::FieldVolume> v = field::FieldVolume::deserialize(raw.data(), raw.size());
+    // A malformed gate fails the read rather than loading an item that would
+    // silently act everywhere. A gate that has quietly stopped protecting is
+    // the harder thing to notice, and the destructive direction.
+    if (!v) {
+        r.ok = false;
+        return;
+    }
+    n.gate = std::make_shared<field::FieldVolume>(std::move(*v));
+    n.gate_width = r.pod<float>();
+}
+
 void read_volume(Reader& r, Node& n) {
     std::uint32_t bytes = r.u32();
     if (bytes > r.remaining) {
@@ -504,6 +527,19 @@ void write_node(Writer& w, const Node& n) {
         w.u32(static_cast<std::uint32_t>(volume_bytes.size()));
         w.bytes(volume_bytes.data(), volume_bytes.size());
     }
+    // The item's GATE, from minor 11: the same shape as the volume above, a
+    // length then the bytes, so a node without one writes a zero and a build
+    // that predates gates reads exactly the bytes it always did. Writing AT an
+    // older minor drops the gate and keeps everything else — which makes an
+    // older minor a downgrade rather than a different document, and means a
+    // gated item degrades to an ungated one rather than to a missing one.
+    if (w.minor >= 11) {
+        std::vector<std::uint8_t> gate_bytes;
+        if (n.gate && !n.gate->empty()) gate_bytes = n.gate->serialize(false);
+        w.u32(static_cast<std::uint32_t>(gate_bytes.size()));
+        w.bytes(gate_bytes.data(), gate_bytes.size());
+        if (!gate_bytes.empty()) w.pod(n.gate_width);
+    }
     w.pod(n.transition.a);
     w.pod(n.transition.b);
     w.pod(n.transition.r0);
@@ -678,6 +714,7 @@ Node read_node(Reader& r) {
         }
     }
     if (r.minor >= 4) read_volume(r, n);
+    if (r.minor >= 11) read_gate(r, n);
     n.transition.a = r.pod<kernel::cfloat3>();
     n.transition.b = r.pod<kernel::cfloat3>();
     n.transition.r0 = r.pod<float>();

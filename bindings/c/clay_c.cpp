@@ -2538,6 +2538,34 @@ clay_result clay_item_add_alpha(clay_item* item, const float* samples, int32_t w
     return CLAY_OK;
 }
 
+clay_result clay_item_set_gate(clay_item* item, const clay_mask* mask, float threshold,
+                               float width) {
+    if (!item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item");
+    voxel::MaskField* m = nullptr;
+    clay_result r = resolve_mask(mask, &m);
+    if (r != CLAY_OK) return r;
+    if (!(width > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "a gate's width must be positive; a step in the field has no finite "
+                    "Lipschitz bound and nothing could march it");
+
+    // The measured band has to reach at least as far as the gate fades, or full
+    // protection is never reachable: the distance saturates at the band and the
+    // smoothstep never gets to 1. Twice the width leaves margin, and the pad
+    // matches so the sampled region actually contains it.
+    const float band = 2.0f * width;
+    std::optional<field::FieldVolume> measured =
+        brush::mask_to_field(*m, threshold > 0.0f ? threshold : 0.5f, band, band);
+    if (!measured || measured->empty())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the mask is empty or nothing reaches the threshold, so the gate would "
+                    "protect nothing");
+
+    item->node.gate = std::make_shared<const field::FieldVolume>(std::move(*measured));
+    item->node.gate_width = width;
+    return CLAY_OK;
+}
+
 clay_result clay_item_add_lattice(clay_item* item, const float min[3], const float max[3],
                                   int32_t nx, int32_t ny, int32_t nz, const float* offsets_xyz) {
     if (!item || !min || !max) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item or box");

@@ -118,7 +118,10 @@ inline constexpr std::uint16_t kClaySpaceMajor = 1;
 // voxel stream and falls back to the flattened grid, which is the honest
 // degradation — the sculpt is exactly what the layers composed to, it just
 // stops being dialable. Nothing is lost that the older build could have shown.
-inline constexpr std::uint16_t kClaySpaceMinor = 10;
+//
+// Minor 11 adds an item's gate to the scene payload, which IS a layout change
+// there — see scene::kSceneMinor.
+inline constexpr std::uint16_t kClaySpaceMinor = 11;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).

@@ -201,6 +201,13 @@ typedef struct CTapeValueT {
 // An alpha's blob payload starts with [w] [h] [extent] [radius] [amplitude],
 // then w*h samples. Named so the writer and the reader cannot disagree.
 #define CLAY_TAPE_ALPHA_HEADER 5
+// A combine record's shared prefix: [mode] [profile] [k] [rb] [gate offset],
+// with any mode-specific extras after it. The gate lives in the SHARED part
+// because it composes with every mode rather than being one — masking has to
+// gate a boolean, and a boolean is a mode. -1 in the gate slot means none.
+#define CLAY_TAPE_COMBINE_HEADER 5
+// A gate's blob record: [volume handle] [inverse transform, 12] [scale] [width].
+#define CLAY_TAPE_GATE_FLOATS 15
 #define CLAY_TAPE_PRIM_HEADER 17
 
 // Repetition an item can carry (repeat.h). Applied to the local point
@@ -923,6 +930,45 @@ CLAY_FN bool ctape_mode_is_transition(int mode) {
 // tape_build.cpp). A surface the volume moved FURTHER than its band is
 // therefore expressed only up to the band; bake with a band that covers the
 // verb, which is the same contract the volume's own accuracy already states.
+// A GATE on an item's participation: 1 where the item is fully protected from
+// acting, 0 where it acts unhindered.
+//
+// The payload is blob-carried because it is fifteen floats and a combine record
+// cannot afford them: [volume handle] [inverse transform, 12] [scale] [width].
+// The volume itself is an ordinary sampled field — the signed distance to the
+// protected region, negative inside — so evaluating it is `ctape_volume_dist`
+// and nothing new.
+//
+// The falloff is a smoothstep across `width` centred on the region's boundary,
+// which is the whole reason the payload is a DISTANCE rather than paint: a
+// distance is 1-Lipschitz, so the weight's own slope is 1.5/width, a number the
+// caller chose. Paint values would have made it whatever the artist's brush
+// edge happened to be.
+//
+// A width of zero would be a step with no finite Lipschitz bound, so it is
+// clamped rather than honoured — a gate that made the field unmarchable would
+// be a worse answer than a gate that is very slightly soft.
+CLAY_FN float ctape_gate_weight(CLAY_FPTR rec, CLAY_FPTR blob, cfloat3 p) {
+    float width = cmax(CLAY_AT(rec, 14), 1e-4f);
+
+    cfloat4x4 inv;
+    inv.c0 = cf4(CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3), 0.0f);
+    inv.c1 = cf4(CLAY_AT(rec, 4), CLAY_AT(rec, 5), CLAY_AT(rec, 6), 0.0f);
+    inv.c2 = cf4(CLAY_AT(rec, 7), CLAY_AT(rec, 8), CLAY_AT(rec, 9), 0.0f);
+    inv.c3 = cf4(CLAY_AT(rec, 10), CLAY_AT(rec, 11), CLAY_AT(rec, 12), 1.0f);
+    cfloat3 lp = cmul_point(inv, p);
+
+    cfloat3 ignored = cf3(0.0f, 0.0f, 0.0f);
+    // The stored distance is in the gate's own space; the scale carries it back
+    // to world units, exactly as a placed volume's does.
+    float d = ctape_volume_dist(rec, blob, lp, CLAY_OUTARG(ignored)) * CLAY_AT(rec, 13);
+
+    // Negative inside the protected region, so -width is fully protected and
+    // +width is fully open.
+    float t = cclamp(0.5f - d / (2.0f * width), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
 CLAY_FN CTapeValue ctape_replace_feather(CTapeValue a, CTapeValue b, CLAY_FPTR rec,
                                          CLAY_FPTR blob, cfloat3 p) {
     CLAY_FPTR h = blob + CLAY_INT(CLAY_AT(rec, 0));
@@ -1075,19 +1121,50 @@ CLAY_FN CTapeValue ctape_eval(CLAY_IPTR instrs, int instr_count,
                 --top;
             }
             int mode = CLAY_INT(CLAY_AT(pr, 0));
+            CTapeValue combined;
             if (ctape_mode_is_transition(mode)) {
                 // spatial morph: lerp BOTH operands by the weight at p. Not a
                 // distance — the tape's tracked field info records that.
-                float w = ctape_transition_weight(mode, CLAY_OFF(pr, 4), p);
-                CTapeValue r;
-                r.d = cmix(a.d, b.d, w);
-                r.color = cmix(a.color, b.color, w);
-                stack[top - 1] = r;
+                float w = ctape_transition_weight(mode, CLAY_OFF(pr, CLAY_TAPE_COMBINE_HEADER), p);
+                combined.d = cmix(a.d, b.d, w);
+                combined.color = cmix(a.color, b.color, w);
             } else if (mode == ccombine_replace_feather) {
-                stack[top - 1] = ctape_replace_feather(a, b, CLAY_OFF(pr, 4), blob, p);
+                combined =
+                    ctape_replace_feather(a, b, CLAY_OFF(pr, CLAY_TAPE_COMBINE_HEADER), blob, p);
             } else {
-                stack[top - 1] = ctape_combine_values(a, b, mode, CLAY_INT(CLAY_AT(pr, 1)), CLAY_AT(pr, 2), CLAY_AT(pr, 3));
+                combined = ctape_combine_values(a, b, mode, CLAY_INT(CLAY_AT(pr, 1)),
+                                                CLAY_AT(pr, 2), CLAY_AT(pr, 3));
             }
+            // A GATE, if this item carries one: where the mask protects, the
+            // result is what the accumulator already held — the item does not
+            // participate. Slot 4 is the gate payload's blob offset, and a
+            // negative value means no gate, which is the common case and costs
+            // one comparison.
+            //
+            // This composes with EVERY mode rather than being one of them,
+            // which is the point: masking has to gate a boolean, and a boolean
+            // is a mode.
+            int gate_off = CLAY_INT(CLAY_AT(pr, 4));
+            if (gate_off >= 0) {
+                float g = ctape_gate_weight(blob + gate_off, blob, p);
+                // Both ends have to be EXACT, and only one of them is exact
+                // through the mix. cmix(x, y, t) is x + (y - x) * t, so t == 0
+                // returns x bit for bit — but t == 1 returns x + (y - x), which
+                // is y only up to rounding. That last ULP is not cosmetic: it
+                // puts a seam of one float step along the whole border of every
+                // protected region, and "the protected region is exactly what
+                // it was" stops being true.
+                //
+                // So the fully-protected end is a branch rather than an
+                // arithmetic accident.
+                if (g >= 1.0f) {
+                    combined = a;
+                } else {
+                    combined.d = cmix(combined.d, a.d, g);
+                    combined.color = cmix(combined.color, a.color, g);
+                }
+            }
+            stack[top - 1] = combined;
         } else {
             if (top >= CLAY_TAPE_MAX_STACK) continue;
             cfloat4x4 inv;

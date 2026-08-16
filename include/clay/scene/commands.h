@@ -173,7 +173,10 @@ LayerId edited_layer(const Command& cmd);
 // Minor 10 changed no scene field — it moved in step with the container, whose
 // voxel payload gained sculpt layers. Writing a document AT minor 9 therefore
 // still produces exactly the bytes minor 9 always did.
-inline constexpr std::uint16_t kSceneMinor = 10;
+//
+// Minor 11 adds an item's GATE — the mask that protects a surface from any
+// operation.
+inline constexpr std::uint16_t kSceneMinor = 11;
 
 // Apply a command; returns its inverse, or nullopt if the target does not
 // exist or is protected (ghosted or locked). The document is unchanged in

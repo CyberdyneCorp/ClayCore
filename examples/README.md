@@ -632,6 +632,33 @@ There is deliberately **no committed model** here: alpha relief is
 high-frequency, the document meshes to 378k triangles at resolution 128, and the
 gallery's 400 KiB export budget lands somewhere around resolution 32 — which
 smooths away the very thing the file would be showing.
+## 54 — masking that gates any operation
+
+The one masks could not do before: protect a surface from a **boolean**. Masks
+gated *authoring* — a voxel edit consumed one per cell as it wrote, an SDF edit
+consumed one when a stroke became items — so a mask over an ear did nothing
+about the next subtract, because a subtract is an item in the edit list rather
+than a stroke passing through the mask.
+
+The renders bore a bar straight through a ball, then gate the same subtract with
+a mask over half of it: the hole comes back half filled in, and widening the
+gate's falloff softens the border. The script also runs the same gate over
+`SUBTRACT`, `ADD` and `INTERSECT` — each probed where that op actually acts,
+since adding a thin bar *inside* a ball changes nothing there — because a gate
+rides the combine record rather than being a mode, which is what lets it gate a
+boolean at all.
+
+Both ends are **exact**: fully protected is the accumulated field bit for bit,
+and unprotected is the ungated result bit for bit. That is not free arithmetic —
+`mix(x, y, 1)` is `x + (y - x)`, which is `y` only up to rounding, so the
+fully-protected end is a branch. Without it every protected region carries a
+one-float seam along its border.
+
+And the cost table is the honest part: mixing two fields by a spatially varying
+weight is not a distance, so a narrow gate costs an order of magnitude of step
+scale and a wide one much less. The gate carries a 1-Lipschitz **distance**
+rather than paint precisely so that cost follows a width you choose instead of
+however hard the brush edge that painted the mask happened to be.
 
 ## Notes
 

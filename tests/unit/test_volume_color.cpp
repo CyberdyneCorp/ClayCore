@@ -307,7 +307,13 @@ TEST_CASE("writing at minor 8 drops only the colour") {
     l.sdf->insert(n);
 
     const std::vector<std::uint8_t> older = scene::serialize_document(doc, 8);
-    const std::optional<scene::Document> back = scene::deserialize_document(older.data(), older.size());
+    // Read AT minor 8, not at the current one. A minor-8 stream is a minor-8
+    // stream; reading it as today's layout only happened to work while every
+    // section added since lived INSIDE the volume's own length-prefixed blob.
+    // The first outer section added after this — the item gate, at minor 11 —
+    // made the shortcut read a length that was never written.
+    const std::optional<scene::Document> back =
+        scene::deserialize_document(older.data(), older.size(), 8);
     REQUIRE(back.has_value());
     const scene::Node* restored = nullptr;
     for (const scene::NodeId id : back->layers.front().sdf->roots)

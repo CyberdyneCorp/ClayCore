@@ -245,6 +245,7 @@ struct Compiler {
         tape.params.push_back(0.0f);  // profile: unread by this mode
         tape.params.push_back(0.0f);  // k: unread
         tape.params.push_back(0.0f);  // rb: unread
+        tape.params.push_back(emit_gate(&item, &layer));
         tape.params.push_back(static_cast<float>(last_volume_blob));
         const float xf[12] = {inv.c0.x, inv.c0.y, inv.c0.z, inv.c1.x, inv.c1.y, inv.c1.z,
                               inv.c2.x, inv.c2.y, inv.c2.z, inv.c3.x, inv.c3.y, inv.c3.z};
@@ -254,7 +255,36 @@ struct Compiler {
 
     // rb: second radius of the two-parameter extended modes (groove/tongue
     // half-width), already in world units; 0 for everything else.
-    void emit_combine(Op op, Blend blend, float rb, const Transition* transition = nullptr) {
+    // The gate payload for an item that carries one, written into the blob and
+    // returned as its offset; -1 for an ungated item, which is almost all of
+    // them and costs one comparison in the kernel.
+    //
+    // Fifteen floats — a volume handle, the world-to-gate transform, the scale
+    // and the falloff width — which is why it is blob-carried rather than
+    // squeezed into the combine record.
+    float emit_gate(const Node* item, const Layer* layer) {
+        if (!item || !layer || !item->gated() || item->gate->empty()) return -1.0f;
+        const std::size_t rec = tape.blob.size();
+        // The volume's own samples first, then the record that points at them,
+        // so the offset the record stores is already known when it is written.
+        const std::size_t volume_off = tape.blob.size() + CLAY_TAPE_GATE_FLOATS;
+        tape.blob.push_back(static_cast<float>(volume_off));
+        // A gate is placed by the ITEM's transform, so it travels with the item
+        // it protects rather than staying where the mask was painted.
+        const math::Transform world = layer->xform * item->xform;
+        const kernel::cfloat4x4 inv = world.inverse_matrix();
+        for (float v : {inv.c0.x, inv.c0.y, inv.c0.z, inv.c1.x, inv.c1.y, inv.c1.z, inv.c2.x,
+                        inv.c2.y, inv.c2.z, inv.c3.x, inv.c3.y, inv.c3.z})
+            tape.blob.push_back(v);
+        tape.blob.push_back(world.scale);
+        tape.blob.push_back(item->gate_width);
+        const std::vector<float> flat = item->gate->to_blob();
+        tape.blob.insert(tape.blob.end(), flat.begin(), flat.end());
+        return static_cast<float>(rec);
+    }
+
+    void emit_combine(Op op, Blend blend, float rb, const Transition* transition = nullptr,
+                      const Node* gated = nullptr, const Layer* layer = nullptr) {
         CTapeInstr instr;
         instr.op = kernel::ctape_combine;
         instr.param_offset = static_cast<unsigned int>(tape.params.size());
@@ -263,6 +293,7 @@ struct Compiler {
         tape.params.push_back(static_cast<float>(static_cast<int>(blend.profile)));
         tape.params.push_back(blend.k);
         tape.params.push_back(rb);
+        tape.params.push_back(emit_gate(gated, layer));
         // transition modes append their own parameters after the shared four
         if (op == Op::TransitionLinear) {
             const Transition& t = transition ? *transition : default_transition_;
@@ -277,6 +308,17 @@ struct Compiler {
     }
 
     Transition default_transition_{};
+
+    // A gate's width is authored in the item's own units and applies in world
+    // space, so the layer's scale carries it across. Kept beside fold_info
+    // rather than threaded through it, because fold_info already takes its
+    // world rounding the same way and adding a second scale argument for one
+    // caller reads worse than a member the compile loop sets.
+    float layer_scale_for_gate_ = 1.0f;
+    // The gated item's own reach, set immediately before fold_info by the
+    // caller that already computed it, so the bound is not recomputed and
+    // cannot drift from the one culling used.
+    math::Aabb gate_reach_{};
 
     // -- field-info bookkeeping ----------------------------------------------
 
@@ -353,6 +395,32 @@ struct Compiler {
         else
             tape.info = smooth ? kernel::cfi_smooth_blend(tape.info, prim_info)
                                : kernel::cfi_boolean(tape.info, prim_info);
+
+        fold_gate(item);
+    }
+
+    // A GATE mixes the combined result back toward the accumulator by a
+    // spatially varying weight, so it costs what every other such mix here
+    // costs. Charged AFTER the op's own fold and in its own function: the gate
+    // acts on whatever that op produced, whichever op it was, so it is not one
+    // more branch in fold_info's dispatch — it is a second, unconditional step.
+    void fold_gate(const Node& item) {
+        if (!item.gated() || !item.gate || item.gate->empty()) return;
+        // How far the gated and ungated fields can differ. Bounded by the
+        // ITEM's own reach rather than the whole region's, because outside
+        // where the item acts the two are the same field and their difference
+        // is zero — a region-wide bound would charge a small gated dab as
+        // though it moved the entire document.
+        //
+        // Still loose: the difference only matters where the gate's weight
+        // VARIES, which is a band `width` wide around the mask's boundary, and
+        // nothing here knows where that sits relative to the item. Loose in the
+        // safe direction, which is the only kind worth being.
+        const math::Aabb& reach = gate_reach_;
+        const float diff_bound =
+            reach.empty() || reach.is_infinite() ? 1e3f : kernel::clength(reach.extent());
+        tape.info =
+            kernel::cfi_gate(tape.info, diff_bound, item.gate_width * layer_scale_for_gate_);
     }
 
     // The profile records for a loft or a sweep: vertices first so their
@@ -616,6 +684,7 @@ struct Compiler {
     // already on the stack below; returns whether one is there afterwards.
     bool compile_list(const std::vector<NodeId>& ids, const SdfContent& content,
                       const Layer& layer, bool have_acc) {
+        layer_scale_for_gate_ = layer.xform.scale;
         // Whether the cull dropped anything from THIS chain. A feathered
         // replace over a chain the cull emptied must still blend against the
         // far-field seed — the dropped items are real, just out of reach —
@@ -678,8 +747,9 @@ struct Compiler {
                     else
                         emit_combine(n->op, n->blend,
                                      n->rounding * layer.xform.scale * n->xform.scale,
-                                     &n->transition);
+                                     &n->transition, n, &layer);
                 }
+                gate_reach_ = geometry;
                 fold_info(*n, (have_acc || seeded) ? n->op : Op::Add, smooth && have_acc,
                           n->rounding * layer.xform.scale * n->xform.scale);
                 have_acc = true;
