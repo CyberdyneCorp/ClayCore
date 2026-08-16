@@ -78,6 +78,10 @@ EXAMPLES = [
     "46_mesh_brush_compositions",
     "47_mesh_brush_reach_and_undo",
     "48_mesh_to_voxels",
+    "49_mesh_lattice",
+    "50_sdf_lattice",
+    "51_lattice_gizmo",
+    "52_sculpt_layers",
 ]
 
 

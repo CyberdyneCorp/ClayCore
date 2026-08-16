@@ -794,3 +794,99 @@ TEST_CASE("c abi: a mesh rasterizes straight to cells, region optional") {
     clay_voxel_grid_destroy(grid);
     clay_mesh_destroy(m);
 }
+
+TEST_CASE("c abi: sculpt layers record, dial and survive a round trip") {
+    clay_voxel_grid* grid = clay_voxel_grid_create(0.1f);
+    REQUIRE(grid != nullptr);
+    int32_t idx = 0;
+    const float rgb[3] = {0.6f, 0.6f, 0.6f};
+    REQUIRE(clay_voxel_palette_add(grid, rgb, &idx) == CLAY_OK);
+    for (int32_t x = 0; x < 8; ++x) {
+        const int32_t cell[3] = {x, 0, 0};
+        REQUIRE(clay_voxel_set(grid, cell, idx) == CLAY_OK);
+    }
+    size_t base = 0;
+    REQUIRE(clay_voxel_occupied_count(grid, &base) == CLAY_OK);
+
+    size_t count = 1;
+    CHECK(clay_voxel_sculpt_layer_count(grid, &count) == CLAY_OK);
+    CHECK(count == 0);
+
+    size_t layer = 99;
+    CHECK(clay_voxel_begin_sculpt_layer(grid, "a pass", &layer) == CLAY_OK);
+    CHECK(layer == 0);
+    int32_t recording = 0;
+    CHECK(clay_voxel_recording_sculpt_layer(grid, &recording) == CLAY_OK);
+    CHECK(recording == 1);
+    // Nesting has no meaning, and the refusal says so rather than silently
+    // starting a second one.
+    CHECK(clay_voxel_begin_sculpt_layer(grid, "nested", nullptr) != CLAY_OK);
+
+    for (int32_t x = 0; x < 8; ++x) {
+        const int32_t cell[3] = {x, 1, 0};
+        REQUIRE(clay_voxel_set(grid, cell, idx) == CLAY_OK);
+    }
+    CHECK(clay_voxel_end_sculpt_layer(grid) == CLAY_OK);
+    CHECK(clay_voxel_recording_sculpt_layer(grid, &recording) == CLAY_OK);
+    CHECK(recording == 0);
+    // Ending twice is a no-op, not an error.
+    CHECK(clay_voxel_end_sculpt_layer(grid) == CLAY_OK);
+
+    CHECK(clay_voxel_sculpt_layer_count(grid, &count) == CLAY_OK);
+    CHECK(count == 1);
+    size_t cells = 0;
+    CHECK(clay_voxel_sculpt_layer_cell_count(grid, 0, &cells) == CLAY_OK);
+    CHECK(cells == 8);
+
+    // The name, by the size-query pattern.
+    size_t need = 0;
+    CHECK(clay_voxel_sculpt_layer_name(grid, 0, nullptr, &need) == CLAY_OK);
+    CHECK(need == 7);  // "a pass" + NUL
+    std::vector<char> buf(need);
+    size_t have = need;
+    CHECK(clay_voxel_sculpt_layer_name(grid, 0, buf.data(), &have) == CLAY_OK);
+    CHECK(std::string(buf.data()) == "a pass");
+    size_t tiny = 2;
+    char small[2];
+    CHECK(clay_voxel_sculpt_layer_name(grid, 0, small, &tiny) == CLAY_ERROR_BUFFER_TOO_SMALL);
+    CHECK(tiny == need);
+
+    // Dialling, from both ends.
+    size_t occupied = 0;
+    CHECK(clay_voxel_set_sculpt_layer_strength(grid, 0, 0.0f) == CLAY_OK);
+    CHECK(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK);
+    CHECK(occupied == base);
+    CHECK(clay_voxel_set_sculpt_layer_strength(grid, 0, 1.0f) == CLAY_OK);
+    CHECK(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK);
+    CHECK(occupied == base + 8);
+    float strength = 0.0f;
+    CHECK(clay_voxel_sculpt_layer_strength(grid, 0, &strength) == CLAY_OK);
+    CHECK(strength == doctest::Approx(1.0f));
+    // Clamped, not refused.
+    CHECK(clay_voxel_set_sculpt_layer_strength(grid, 0, 4.0f) == CLAY_OK);
+    CHECK(clay_voxel_sculpt_layer_strength(grid, 0, &strength) == CLAY_OK);
+    CHECK(strength == doctest::Approx(1.0f));
+
+    int32_t visible = 0;
+    CHECK(clay_voxel_sculpt_layer_visible(grid, 0, &visible) == CLAY_OK);
+    CHECK(visible == 1);
+    CHECK(clay_voxel_set_sculpt_layer_visible(grid, 0, 0) == CLAY_OK);
+    CHECK(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK);
+    CHECK(occupied == base);
+    CHECK(clay_voxel_set_sculpt_layer_visible(grid, 0, 1) == CLAY_OK);
+
+    // The bottom layer has nothing to merge into, and an index that does not
+    // exist is NOT_FOUND rather than a crash.
+    CHECK(clay_voxel_merge_sculpt_layer_down(grid, 0) != CLAY_OK);
+    CHECK(clay_voxel_sculpt_layer_strength(grid, 7, &strength) == CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_voxel_set_sculpt_layer_visible(grid, 7, 0) == CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_voxel_remove_sculpt_layer(grid, 7) == CLAY_ERROR_NOT_FOUND);
+
+    CHECK(clay_voxel_remove_sculpt_layer(grid, 0) == CLAY_OK);
+    CHECK(clay_voxel_sculpt_layer_count(grid, &count) == CLAY_OK);
+    CHECK(count == 0);
+    CHECK(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK);
+    CHECK(occupied == base);
+
+    CHECK(clay_voxel_grid_destroy(grid) == CLAY_OK);
+}

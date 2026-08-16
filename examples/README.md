@@ -579,14 +579,40 @@ half-space, which is what a parity ray cast would do and is why the sign is
 what it is. It ends by sculpting the import with the voxel verbs, since
 reaching them without a document is the point of the trip.
 
+## 49-51 — lattice cages, forward and inverse
+
+`49_mesh_lattice` puts a free-form cage over a mesh layer, where FFD runs
+**forward** and nothing is approximated — which is what ZBrush's Gizmo Lattice
+and Blender's Lattice modifier do, because a mesh knows where its vertices are.
+`50_sdf_lattice` puts one on an SDF item, where there are no vertices and every
+deformer is an *inverse* point map, and **measures** what authoring the cage as
+its own inverse costs: under 1.5% of the drag, and signed rather than
+always-less. `51_lattice_gizmo` resolves one world-placed cage into the
+per-item warps that reproduce it across a whole layer.
+
+## 52 — sculpt layers
+
+A pass you can dial back after you have made it. The script records a run of
+strokes into a layer, then renders the same form at five strengths, and checks
+the three properties the design rests on: 0 and 1 are **exact** (the form
+without the pass, and the pass applied directly), the same fraction picks the
+**same cells** when a second grid is built the same way, and dialling up is a
+**superset** of the step below rather than a reshuffle. It ends by saving and
+reloading, because the file stores the diff and not the result — a reloaded
+layer is still dialable.
+
+What a fraction *means* is the part worth reading the script for: a voxel is
+there or it is not, so 40% of a pass is a reproducible 40% of its **cells**,
+dithered against the same cell-coordinate hash the falloff brushes use.
+
 ## Notes
 
 - **This page documents 00-17 and the two showcase examples.** The gallery
   text has drifted behind the scripts; 18-33 and 36 run in CI and regenerate
   their output, they just have no section here yet.
-- **This page documents 00-17, the two showcase examples and 36.** The gallery
-  text has drifted behind the scripts; 18-33 run in CI and regenerate their
-  output, they just have no section here yet.
+- **This page documents 00-17, the two showcase examples, 36, 44-52.** The
+  gallery text has drifted behind the scripts; 18-33 run in CI and regenerate
+  their output, they just have no section here yet.
 - **Committed models are budgeted.** `_render.save_model` fails above 400 KiB
   so the repository does not accumulate large binaries; `export_model` is the
   one place meshing settings are tuned. Binary PLY is much smaller than ASCII

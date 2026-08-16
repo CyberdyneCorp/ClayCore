@@ -33,6 +33,7 @@ below are of the same grids, sliced open, so the interior is actually visible.
 """
 
 import pathlib
+import re
 
 import numpy as np
 
@@ -75,10 +76,27 @@ def tile(grid, **kwargs):
     return R.render_voxels_array(grid, eye=eye, target=target, width=210, height=195)
 
 
+# Bookkeeping that shares the sculpt_ prefix without being a verb: these do not
+# reshape anything, they record and dial a PASS made of the verbs below.
+# 52_sculpt_layers is their page, and naming it here keeps the exemption on the
+# record instead of widening the scan until it stops catching anything.
+SHOWN_ELSEWHERE = {
+    "sculpt_layer": "52_sculpt_layers",
+    "sculpt_layer_cell_count": "52_sculpt_layers",
+    "sculpt_layer_count": "52_sculpt_layers",
+    "sculpt_layer_name": "52_sculpt_layers",
+    "sculpt_layer_strength": "52_sculpt_layers",
+    "sculpt_layer_visible": "52_sculpt_layers",
+    "sculpt_layer_bytes": "52_sculpt_layers",
+    "sculpt_layers_bytes": "52_sculpt_layers",
+}
+
+
 def sculpt_verbs():
     """Every verb the binding exposes, read from it rather than listed here, so
     a new one shows up as a gap instead of being forgotten."""
-    return {m for m in dir(clay.VoxelGrid) if m.startswith(("sculpt_", "repair_"))}
+    return {m for m in dir(clay.VoxelGrid)
+            if m.startswith(("sculpt_", "repair_")) and m not in SHOWN_ELSEWHERE}
 
 
 def check_coverage():
@@ -93,6 +111,15 @@ def check_coverage():
     missing = {v for v in sculpt_verbs() if f".{v}(" not in src}
     if missing:
         raise SystemExit(f"voxel verbs with no example here: {sorted(missing)}")
+    # ...and an entry that points at a page which no longer covers it is the
+    # same gap wearing a different hat.
+    for verb, page in sorted(SHOWN_ELSEWHERE.items()):
+        other = pathlib.Path(__file__).with_name(f"{page}.py")
+        # Attribute access, not a call: some of these are properties, and
+        # requiring parentheses would report a page that does show them.
+        used = other.is_file() and re.search(rf"\.{verb}(?![A-Za-z0-9_])", other.read_text())
+        if not used:
+            raise SystemExit(f"{verb} is recorded as shown by {page}, which does not show it")
     print(f"  covered all {len(sculpt_verbs())} sculpt and repair verbs")
 
 

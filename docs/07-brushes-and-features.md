@@ -624,6 +624,69 @@ can be identical across an edit that moved a whole lump. The one caveat is
 `sculpt_pinch` and `sculpt_magnify`, which may revisit a cell within one call
 and so give an upper bound rather than an exact tally.
 
+### Sculpt layers: a pass you can dial back
+
+Bracket a run of verbs with `begin_sculpt_layer` / `end_sculpt_layer` and the
+grid records what those edits **changed** — for every cell it touched, the value
+before and the value after. The pass's strength stays adjustable afterwards.
+
+This is not undo, and the difference is the whole point. Undo is a **stack**:
+removing a pass from ten minutes ago discards everything since. A sculpt layer
+is **addressable** — make the wrinkles, keep sculpting for an hour, then take
+the wrinkles to 40% without disturbing anything made after them.
+
+A layer records what its pass **did**, not the brushes that did it. Dialling a
+layer replays recorded cells; it does not re-run the strokes. So a pass whose
+result depended on the layer beneath it — `sculpt_smooth` reads its neighbours,
+`sculpt_inflate` grows from what is already there — keeps the result it
+recorded when that layer is dialled away. Re-running instead would make a
+layer's content depend on whatever sits below it, which is the opposite of
+addressable, and would re-evaluate the whole stack on every slider move. This
+is what ZBrush's layers do too.
+
+**What a fraction means on binary occupancy** is where this departs from ZBrush
+by representation rather than by choice. ZBrush interpolates vertex offsets, a
+continuous quantity; a voxel is there or it is not. So a fractional strength is
+a reproducible fraction of the **cells**, dithered against the same
+cell-coordinate hash the falloff brushes use (`src/voxel/dither.h`, shared by
+both). Three properties follow:
+
+- the same strength picks the same cells on **every platform and every run** —
+  the hash is over integer cell coordinates, not an RNG draw;
+- raising the strength **adds** cells to the ones already showing rather than
+  reshuffling, because each layer holds one fixed seed;
+- **0 and 1 are exact** — the grid without the pass, and the pass applied
+  directly — because the dither admits none and all at the ends.
+
+Layers composite **bottom-up**, so the last one recorded wins where two
+overlap. `move_sculpt_layer` changes that, which is why reordering is a feature
+rather than a caveat; `merge_sculpt_layer_down` folds two passes into one that
+still dials, at full strength — keeping the upper layer's dither would bake a
+fractional subset in and leave the result unable to reach the other cells
+again.
+
+**Memory is reported, not enforced.** `sculpt_layer_bytes` and
+`sculpt_layer_total_bytes` say what the stack costs: a pass costs its own
+cells, not the model, so a stroke over a thousand cells is a thousand entries
+whether the grid holds a thousand voxels or a million. Nothing caps it, because
+a cap that silently stopped recording would leave the pass on the grid and
+un-dialable — a correctness bug wearing a memory limit's clothes. A host with a
+budget merges layers down (one entry per cell instead of two) or ends the
+layer. Both are decisions a user can see.
+
+They ride in the `.clayspace` voxel payload at **minor 10**, storing the diff
+rather than the result, so a reloaded document is still dialable. That payload
+is opaque to the container, so an older reader meets an unknown tag and falls
+back to the **flattened** grid — the sculpt is exactly what the layers composed
+to, it just stops being adjustable. Nothing is lost that the older build could
+have shown.
+
+**SDF layers do not have them.** A diff of changed cells has no counterpart in
+an edit list, where the equivalent is a weighted group; that waits on
+`expose-scene-groups`.
+
+`examples/52_sculpt_layers.py` renders one pass at five strengths.
+
 ---
 
 ## 8. Fixed-topology mesh brushes
@@ -775,6 +838,7 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Tube | `brush::tube` | `clay.tube(...)` | `clay_tube_create` |
 | Voxel verbs | `VoxelGrid::sculpt_*` | `VoxelGrid.sculpt_*` | `clay_voxel_sculpt_*` |
 | Did an edit change anything | `VoxelGrid::change_count()` | `VoxelGrid.change_count` | `clay_voxel_change_count` |
+| Sculpt layers (voxel) | `VoxelGrid::begin_sculpt_layer` / `end_sculpt_layer`, `set_sculpt_layer_strength`, `move_sculpt_layer`, `merge_sculpt_layer_down` | `with grid.sculpt_layer(name):`, `grid.set_sculpt_layer_strength(...)` | `clay_voxel_begin_sculpt_layer`, `clay_voxel_end_sculpt_layer`, `clay_voxel_set_sculpt_layer_strength`, `clay_voxel_move_sculpt_layer`, `clay_voxel_merge_sculpt_layer_down` |
 | Move brush | `brush::move_brush`, `moved_chain` | `Layer.move_surface(...)`, `.move_surface_preview(...)` | `clay_layer_move_surface`, `clay_layer_move_surface_preview` |
 | Move Topological | `field::move_topological` | `Volume.moved_topologically_from(...)` | `clay_item_volume_move_topological` |
 | Deformers on a placed node | `scene::SetDeformersCmd` | (through `move_surface`) | `clay_layer_add_deformer` |

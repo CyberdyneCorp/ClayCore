@@ -20,6 +20,7 @@ add_executable(clay_unit_tests
   unit/test_points_batch.cpp
   unit/test_parity_fixture.cpp
   unit/test_brick.cpp
+  unit/test_sculpt_layers.cpp
   unit/test_voxel.cpp
   unit/test_voxel_mesh_fixture.cpp
   unit/test_voxel_incremental_mesh.cpp
