@@ -402,6 +402,19 @@ void write_deformers(Writer& w, const std::vector<Deformer>& deformers) {
             // using the axis-aligned one writes the bytes it always did.
             if (d.type == kernel::cdeform_lattice_xform) w.pod(d.cage_xform);
         }
+        // An alpha's stamp: its five scalars, then the samples length-prefixed
+        // the same way. The DERIVED bound (steepest, peak) is deliberately not
+        // written — it is recomputed on load, so a file cannot carry a stale or
+        // hand-edited bound and produce an overshooting raymarch.
+        if (d.type == kernel::cdeform_alpha) {
+            w.pod(d.stamp.width);
+            w.pod(d.stamp.height);
+            w.pod(d.stamp.extent);
+            w.pod(d.stamp.radius);
+            w.pod(d.stamp.amplitude);
+            w.u32(static_cast<std::uint32_t>(d.stamp.samples.size()));
+            for (float v : d.stamp.samples) w.pod(v);
+        }
     }
 }
 
@@ -544,6 +557,28 @@ std::vector<Deformer> read_deformers(Reader& r) {
             for (std::uint32_t e = 0; e < cc && r.ok; ++e)
                 d.cage.push_back(r.pod<kernel::cfloat3>());
             if (d.type == kernel::cdeform_lattice_xform) d.cage_xform = r.pod<math::Transform>();
+        }
+        if (d.type == kernel::cdeform_alpha) {
+            d.stamp.width = r.pod<int>();
+            d.stamp.height = r.pod<int>();
+            d.stamp.extent = r.pod<float>();
+            d.stamp.radius = r.pod<float>();
+            d.stamp.amplitude = r.pod<float>();
+            const std::uint32_t sc = r.u32();
+            // Four bytes per sample, and the count has to agree with the
+            // dimensions — a file claiming otherwise is corrupt, not old.
+            const std::size_t expected =
+                static_cast<std::size_t>(d.stamp.width) * static_cast<std::size_t>(d.stamp.height);
+            if (!r.ok || sc > r.remaining / 4 || sc != expected) {
+                r.ok = false;
+                return out;
+            }
+            d.stamp.samples.clear();
+            d.stamp.samples.reserve(sc);
+            for (std::uint32_t e = 0; e < sc && r.ok; ++e)
+                d.stamp.samples.push_back(r.pod<float>());
+            // Always derived, never read — see the writer.
+            d.stamp.refresh();
         }
         out.push_back(d);
     }

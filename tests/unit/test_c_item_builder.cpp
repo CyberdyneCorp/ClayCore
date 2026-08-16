@@ -1774,3 +1774,104 @@ TEST_CASE("a guide and a cage reach a PLACED node through their own doors") {
     CHECK(clay_layer_add_bend_curve(built.doc, built.layer, 9999, guide, 3, CLAY_POINT_HARD,
                                     -0.5f, 0.5f, 0) == CLAY_ERROR_NOT_FOUND);
 }
+
+TEST_CASE("an alpha stamp crosses the boundary and evaluates identically") {
+    // The parity standard this file holds: the same edit through C and through
+    // the scene model must be the same field. An alpha is the interesting case
+    // for that, because its payload is COPIED across — a shallow handoff would
+    // pass every shape test here and read freed memory in a host.
+    std::vector<float> stamp(16 * 16);
+    for (int y = 0; y < 16; ++y)
+        for (int x = 0; x < 16; ++x)
+            stamp[static_cast<std::size_t>(y) * 16 + x] = ((x + y) & 1) ? 1.0f : 0.15f;
+
+    CDoc built;
+    float r[1] = {0.5f};
+    clay_item* item = clay_item_create(CLAY_PRIM_SPHERE, r, 1);
+    REQUIRE(item != nullptr);
+    const float centre[3] = {0.0f, 0.0f, 0.5f};
+    const float dir[3] = {0.0f, 0.0f, 1.0f};
+    const float tangent[3] = {1.0f, 0.0f, 0.0f};
+    REQUIRE(clay_item_add_alpha(item, stamp.data(), 16, 16, centre, dir, tangent, 0.6f, 0.4f, 0.15f,
+                                CLAY_EASE_LINEAR) == CLAY_OK);
+    REQUIRE(clay_layer_add_item(built.doc, built.layer, item, nullptr) == CLAY_OK);
+    clay_item_destroy(item);
+    // The caller's buffer goes away the moment the call returns, which is the
+    // contract the header states. Scribble on it so a shallow copy shows up as
+    // a difference rather than as luck.
+    for (float& v : stamp) v = -99.0f;
+
+    std::vector<float> original(16 * 16);
+    for (int y = 0; y < 16; ++y)
+        for (int x = 0; x < 16; ++x)
+            original[static_cast<std::size_t>(y) * 16 + x] = ((x + y) & 1) ? 1.0f : 0.15f;
+
+    RefDoc reference;
+    scene::Node n;
+    n.prim = scene::Prim::sphere(0.5f);
+    n.deformers = {scene::Deformer::alpha(cf3(0, 0, 0.5f), cf3(0, 0, 1), cf3(1, 0, 0),
+                                          original.data(), 16, 16, 0.6f, 0.4f, 0.15f)};
+    reference.add(n);
+
+    check_same_field(built.doc, reference.doc);
+}
+
+TEST_CASE("a malformed alpha is refused and leaves the item unchanged") {
+    // The spec scenario. Each of these is a caller mistake that would otherwise
+    // read past their buffer or append a deformer that quietly does nothing.
+    const std::vector<float> stamp(16 * 16, 0.5f);
+    const float centre[3] = {0.0f, 0.0f, 0.5f};
+    const float dir[3] = {0.0f, 0.0f, 1.0f};
+    const float tangent[3] = {1.0f, 0.0f, 0.0f};
+
+    float r[1] = {0.5f};
+    clay_item* item = clay_item_create(CLAY_PRIM_SPHERE, r, 1);
+    REQUIRE(item != nullptr);
+
+    CHECK(clay_item_add_alpha(nullptr, stamp.data(), 16, 16, centre, dir, tangent, 0.6f, 0.4f,
+                              0.15f, 0) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_item_add_alpha(item, nullptr, 16, 16, centre, dir, tangent, 0.6f, 0.4f, 0.15f, 0) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_item_add_alpha(item, stamp.data(), 16, 16, nullptr, dir, tangent, 0.6f, 0.4f, 0.15f,
+                              0) == CLAY_ERROR_INVALID_ARGUMENT);
+    // Below 2x2 there are no adjacent samples to interpolate between.
+    CHECK(clay_item_add_alpha(item, stamp.data(), 1, 16, centre, dir, tangent, 0.6f, 0.4f, 0.15f,
+                              0) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_item_add_alpha(item, stamp.data(), 16, 0, centre, dir, tangent, 0.6f, 0.4f, 0.15f,
+                              0) == CLAY_ERROR_INVALID_ARGUMENT);
+    // A degenerate extent divides by nothing.
+    CHECK(clay_item_add_alpha(item, stamp.data(), 16, 16, centre, dir, tangent, 0.0f, 0.4f, 0.15f,
+                              0) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_item_add_alpha(item, stamp.data(), 16, 16, centre, dir, tangent, -1.0f, 0.4f, 0.15f,
+                              0) == CLAY_ERROR_INVALID_ARGUMENT);
+    // An ease index nothing implements.
+    CHECK(clay_item_add_alpha(item, stamp.data(), 16, 16, centre, dir, tangent, 0.6f, 0.4f, 0.15f,
+                              CLAY_EASE_COUNT) == CLAY_ERROR_INVALID_ARGUMENT);
+    // A dimension pair whose product is absurd — the multiply a caller gets
+    // wrong, refused rather than allocated.
+    CHECK(clay_item_add_alpha(item, stamp.data(), 65536, 65536, centre, dir, tangent, 0.6f, 0.4f,
+                              0.15f, 0) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    // Every refusal left the item alone: adding it now gives a bare sphere.
+    CDoc built;
+    REQUIRE(clay_layer_add_item(built.doc, built.layer, item, nullptr) == CLAY_OK);
+    clay_item_destroy(item);
+
+    RefDoc reference;
+    scene::Node n;
+    n.prim = scene::Prim::sphere(0.5f);
+    reference.add(n);
+    check_same_field(built.doc, reference.doc);
+}
+
+TEST_CASE("an alpha is not reachable through the flat deformer call") {
+    // Its payload does not fit that signature, so the guard must refuse it
+    // rather than read whatever the param array happened to hold — the same
+    // rule bend_curve and lattice already live under.
+    float r[1] = {0.5f};
+    clay_item* item = clay_item_create(CLAY_PRIM_SPHERE, r, 1);
+    REQUIRE(item != nullptr);
+    float params[8] = {0, 0, 0.5f, 0.4f, 0.15f, 0, 0, 1};
+    CHECK(clay_item_add_deformer(item, CLAY_DEFORM_ALPHA, params, 8, CLAY_EASE_LINEAR) != CLAY_OK);
+    clay_item_destroy(item);
+}

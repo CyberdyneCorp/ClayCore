@@ -352,6 +352,15 @@ Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& defor
                 // that shows as culled-away geometry rather than as a crash.
                 b = b.dilated(kernel::cabs(d.ext[0]));
                 break;
+            case kernel::cdeform_alpha:
+                // The surface moves by amplitude * stamp, and the stamp's own
+                // largest value is what it actually reaches — a stamp that
+                // peaks at 0.4 cannot displace by the full amplitude. Charging
+                // the peak rather than the amplitude alone keeps the bound
+                // honest without loosening it; an all-zero stamp dilates by
+                // nothing, which is what makes it exactly the identity.
+                b = b.dilated(kernel::cabs(d.stamp.amplitude) * d.stamp.peak);
+                break;
             case kernel::cdeform_magnify: {
                 // The inverse map samples at centre + v * scale, so material at
                 // q appears at centre + (q - centre) / scale: MAGNIFYING pushes
@@ -562,6 +571,13 @@ float deformer_lipschitz(const Node& item) {
             // The noise bound plus the region's own gradient — see cfi_blob.
             info = kernel::cfi_blob(info, d.ext[0], d.ext[1], static_cast<int>(d.ext[2]),
                                     d.ext[3], d.c, ease_max_slope(d.ease));
+        } else if (d.type == kernel::cdeform_alpha) {
+            // The stamp's own steepness in world units, plus the region's
+            // gradient — see cfi_alpha. `world_slope` is derived from adjacent
+            // sample DIFFERENCES, so a flat stamp costs nothing however large
+            // its values are.
+            info = kernel::cfi_alpha(info, d.stamp.amplitude, d.stamp.world_slope(), d.stamp.peak,
+                                     d.stamp.radius, ease_max_slope(d.ease));
         } else if (d.type == kernel::cdeform_noise) {
             info = kernel::cfi_noise(info, d.k, d.a, static_cast<int>(d.b), d.c);
         } else if (d.type == kernel::cdeform_magnify) {

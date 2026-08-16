@@ -1287,414 +1287,471 @@ NB_MODULE(pyclay, m) {
     // -- primitives --------------------------------------------------------------
     nb::class_<PyPrim>(m, "Prim",
                        "A primitive plus placement (position, rotation_axis_angle, scale)")
-        .def("at",
-             [](nb::object self, nb::handle position) {
-                 nb::cast<PyPrim&>(self).xform.position = to_f3(position, "position");
-                 return self;
-             },
-             "position"_a, "Set the primitive position; returns self for chaining")
+        .def(
+            "at",
+            [](nb::object self, nb::handle position) {
+                nb::cast<PyPrim&>(self).xform.position = to_f3(position, "position");
+                return self;
+            },
+            "position"_a, "Set the primitive position; returns self for chaining")
         // -- deformer modifiers (add-tape-deformers). Chainable and ordered:
         // the point is warped by the first-called deformer first.
-        .def("twist",
-             [](nb::object self, float k) {
-                 nb::cast<PyPrim&>(self).deformers.push_back(scene::Deformer::twist(k));
-                 return self;
-             },
-             "k"_a, "Twist about Y at k radians per unit of height")
-        .def("bend",
-             [](nb::object self, float k) {
-                 nb::cast<PyPrim&>(self).deformers.push_back(scene::Deformer::bend(k));
-                 return self;
-             },
-             "k"_a, "Bend along X at k radians per unit")
-        .def("taper",
-             [](nb::object self, float y0, float y1, float s0, float s1, int ease) {
-                 if (y1 == y0) throw std::invalid_argument("taper needs y1 != y0");
-                 if (s0 <= 0.0f || s1 <= 0.0f)
-                     throw std::invalid_argument("taper scales must be > 0");
-                 if (ease < 0 || ease >= kernel::ease_count)
-                     throw std::invalid_argument("ease must be a valid easing curve index");
-                 nb::cast<PyPrim&>(self).deformers.push_back(scene::Deformer::taper(
-                     y0, y1, s0, s1, static_cast<std::uint8_t>(ease)));
-                 return self;
-             },
-             "y0"_a, "y1"_a, "s0"_a, "s1"_a, "ease"_a = 0,
-             "Scale the cross-section from s0 at y0 to s1 at y1 along an easing curve")
-        .def("noise",
-             [](nb::object self, float amplitude, float frequency, int octaves, float gain,
-                std::uint32_t seed) {
-                 PyPrim& p = nb::cast<PyPrim&>(self);
-                 if (octaves < 1) throw std::invalid_argument("noise needs at least one octave");
-                 if (!(frequency > 0.0f))
-                     throw std::invalid_argument("noise frequency must be > 0");
-                 p.deformers.push_back(
-                     scene::Deformer::noise(amplitude, frequency, octaves, gain, seed));
-                 return self;
-             },
-             "amplitude"_a, "frequency"_a, "octaves"_a = 4, "gain"_a = 0.5f, "seed"_a = 0u,
-             nb::rv_policy::reference_internal,
-             "Fractal gradient noise, offsetting the distance — the irregular\n"
-             "sibling of `displace`, whose sine is regular by construction and\n"
-             "gives an even corrugation instead.\n\n"
-             "The hash is INTEGER, and that is not an implementation detail: a\n"
-             "float hash amplifies the units-in-the-last-place difference between\n"
-             "each backend's `sin` into an O(1) difference, so it could not agree\n"
-             "across CPU, Metal, CUDA and OpenCL. Integer operations give the same\n"
-             "bits everywhere.\n\n"
-             "The SEED is an ordinary parameter, not global state: two items with\n"
-             "the same seed look the same, and an item's appearance never depends\n"
-             "on the order it was compiled in.\n\n"
-             "The fractal is normalized, so raising `octaves` adds finer detail\n"
-             "without growing the overall deviation — `amplitude` stays the one\n"
-             "control for how far the surface moves. Offsetting the distance\n"
-             "costs the marcher: the step scale drops with amplitude x frequency.")
-        .def("magnify",
-             [](nb::object self, nb::handle center, float radius, float strength, int ease) {
-                 PyPrim& p = nb::cast<PyPrim&>(self);
-                 if (!(radius > 0.0f))
-                     throw std::invalid_argument("magnify radius must be > 0");
-                 p.deformers.push_back(scene::Deformer::magnify(
-                     to_f3(center, "center"), radius, strength,
-                     static_cast<std::uint8_t>(ease)));
-                 return self;
-             },
-             "center"_a, "radius"_a, "strength"_a, "ease"_a = 0,
-             nb::rv_policy::reference_internal,
-             "Magnify and pinch, which are the same deformation: a radial scale\n"
-             "about `center` with finite support. ONE SIGNED STRENGTH covers both\n"
-             "— positive swells the surface away from the centre, negative gathers\n"
-             "it toward — so there is no separate pinch to go looking for.\n\n"
-             "Scaling space is not distance preserving, so the field stops being\n"
-             "exact and the document's safe step scale drops with the strength.\n"
-             "Support is finite: outside the radius nothing changes, which is what\n"
-             "keeps item influence bounds tight.")
-        .def("grab",
-             [](nb::object self, nb::handle center, float radius, nb::handle displacement,
-                int ease, bool front_only) {
-                 PyPrim& p = nb::cast<PyPrim&>(self);
-                 if (!(radius > 0.0f))
-                     throw std::invalid_argument("grab radius must be > 0");
-                 p.deformers.push_back(scene::Deformer::grab(
-                     to_f3(center, "center"), radius, to_f3(displacement, "displacement"),
-                     static_cast<std::uint8_t>(ease), front_only));
-                 return self;
-             },
-             "center"_a, "radius"_a, "displacement"_a, "ease"_a = 0, "front_only"_a = false,
-             nb::rv_policy::reference_internal,
-             "Pull a region of surface: displacement weighted from the centre out, "
-             "identity past the radius. front_only leaves the far side of a form "
-             "where it was. The surface travels less than the full displacement.")
-        .def("pose",
-             [](nb::object self, nb::handle center, float radius, nb::handle axis, float angle,
-                int ease) {
-                 PyPrim& p = nb::cast<PyPrim&>(self);
-                 if (!(radius > 0.0f))
-                     throw std::invalid_argument("pose radius must be > 0");
-                 p.deformers.push_back(scene::Deformer::pose(
-                     to_f3(center, "center"), radius, to_f3(axis, "axis"), angle,
-                     static_cast<std::uint8_t>(ease)));
-                 return self;
-             },
-             "center"_a, "radius"_a, "axis"_a, "angle"_a, "ease"_a = 0,
-             nb::rv_policy::reference_internal,
-             "Rotate a region about the centre, weighted the same way as grab")
-        .def("pose_line",
-             [](nb::object self, nb::handle a, nb::handle b, nb::handle axis, float angle,
-                int ease) {
-                 PyPrim& p = nb::cast<PyPrim&>(self);
-                 kernel::cfloat3 pa = to_f3(a, "a"), pb = to_f3(b, "b");
-                 if (kernel::cdot2(pb - pa) <= 0.0f)
-                     throw std::invalid_argument(
-                         "pose_line needs a != b: the segment is the ramp");
-                 p.deformers.push_back(scene::Deformer::pose_line(
-                     pa, pb, to_f3(axis, "axis"), angle, static_cast<std::uint8_t>(ease)));
-                 return self;
-             },
-             "a"_a, "b"_a, "axis"_a, "angle"_a, "ease"_a = 0,
-             nb::rv_policy::reference_internal,
-             "Rotate about the axis through a, ramping from nothing at a to the full "
-             "angle at b and beyond. Unlike pose() this does not stop at a radius: "
-             "everything past b turns with the tip.")
-        .def("bend_linear",
-             [](nb::object self, nb::handle a, nb::handle b, nb::handle v, int ease) {
-                 PyPrim& p = nb::cast<PyPrim&>(self);
-                 kernel::cfloat3 pa = to_f3(a, "a"), pb = to_f3(b, "b");
-                 if (kernel::cdot2(pb - pa) <= 0.0f)
-                     throw std::invalid_argument(
-                         "bend_linear needs a != b: the segment is the ramp span");
-                 p.deformers.push_back(scene::Deformer::bend_linear(
-                     pa, pb, to_f3(v, "v"), static_cast<std::uint8_t>(ease)));
-                 return self;
-             },
-             "a"_a, "b"_a, "v"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
-             "Displace by v, eased along the segment a -> b")
-        .def("blob",
-             [](nb::object self, nb::handle center, float radius, float amplitude,
-                float frequency, int octaves, float gain, std::uint32_t seed, int ease) {
-                 PyPrim& p = nb::cast<PyPrim&>(self);
-                 if (!(radius > 0.0f)) throw std::invalid_argument("blob needs a radius > 0");
-                 p.deformers.push_back(scene::Deformer::blob(
-                     to_f3(center, "center"), radius, amplitude, frequency, octaves, gain, seed,
-                     static_cast<std::uint8_t>(ease)));
-                 return self;
-             },
-             "center"_a, "radius"_a, "amplitude"_a, "frequency"_a = 6.0f, "octaves"_a = 3,
-             "gain"_a = 0.5f, "seed"_a = 0u, "ease"_a = 0, nb::rv_policy::reference_internal,
-             "ZBrush's BLOB: an irregular swelling under the brush, rather than\n"
-             "the smooth one `draw` gives.\n\n"
-             "`noise` with the finite support `grab` and `magnify` have — outside\n"
-             "`radius` the field is untouched, which is what makes it a brush\n"
-             "rather than a modifier.\n\n"
-             "The amplitude is signed and so is the noise, so ONE dab both swells\n"
-             "and eats in — which is what reads as blobby rather than as a\n"
-             "uniform bulge. A negative amplitude is not a second verb.\n\n"
-             "The seed is an ordinary parameter rather than global state, so two\n"
-             "items with the same seed look the same and an item's appearance\n"
-             "never depends on the order it was compiled in.")
-        .def("lattice",
-             [](nb::object self, nb::handle box, nb::handle offsets, int nx, int ny, int nz) {
-                 PyPrim& p = nb::cast<PyPrim&>(self);
-                 const int cap = scene::Deformer::kMaxLatticeDivisions;
-                 if (nx < 2 || ny < 2 || nz < 2 || nx > cap || ny > cap || nz > cap)
-                     throw std::invalid_argument(
-                         "lattice divisions must be in [2, " + std::to_string(cap) +
-                         "] per axis: the cage is evaluated per sample, at nx*ny*nz "
-                         "multiply-adds each time");
-                 const math::Aabb b = to_aabb(box);
-                 if (b.empty())
-                     throw std::invalid_argument(
-                         "the cage's box is empty; there is nothing to span");
-                 scene::Deformer d = scene::Deformer::lattice(b.min, b.max, nx, ny, nz);
-                 if (!offsets.is_none()) {
-                     PointsView v = to_points(offsets);
-                     if (v.count != d.cage.size())
-                         throw std::invalid_argument(
-                             "offsets must have one entry per control point (" +
-                             std::to_string(d.cage.size()) + ")");
-                     for (std::size_t n = 0; n < d.cage.size(); ++n)
-                         d.cage[n] = kernel::cf3(v.data[n * 3], v.data[n * 3 + 1],
-                                                 v.data[n * 3 + 2]);
-                 }
-                 p.deformers.push_back(std::move(d));
-                 return self;
-             },
-             "box"_a, "offsets"_a = nb::none(), "nx"_a = 3, "ny"_a = 3, "nz"_a = 3,
-             nb::rv_policy::reference_internal,
-             "A LATTICE cage over the item's local `box` — ZBrush's Gizmo Lattice.\n\n"
-             "`offsets` is an (nx*ny*nz, 3) array of control-point offsets in\n"
-             "x-fastest order — index (i, j, k) at (k*ny + j)*nx + i — or None for\n"
-             "an untouched cage, which is exactly the identity.\n\n"
-             "The offsets are what you DRAGGED, and the cage is applied as the\n"
-             "INVERSE warp — which is the design decision rather than a detail:\n"
-             "forward FFD has no closed-form inverse, and a claycore deformer runs\n"
-             "backwards. Material travels WITH the drag, as on the mesh lattice.\n\n"
-             "It is not the EXACT inverse. It differs from forward FFD by a term\n"
-             "proportional to how the basis varies along the displacement, so it\n"
-             "over-travels a drag toward rising weight and under-travels one\n"
-             "pointing away — under 1.5% of the drag, measured against the forward\n"
-             "cage. (`grab` always under-travels, because its weight always falls\n"
-             "off along the drag; a lattice does not inherit that sign.)\n\n"
-             "For FORWARD FFD with no approximation, use the mesh-layer lattice\n"
-             "(`Lattice` with `MeshSculptor.lattice`) — which is what ZBrush and\n"
-             "Blender actually do, because a mesh knows where its vertices are.\n\n"
-             "Divisions are capped at 4 per axis, far below the mesh lattice's 32,\n"
-             "because this is evaluated PER SAMPLE inside the raymarcher.\n\n"
-             "Two per axis is exactly trilinear and the corners are interpolated.\n"
-             "A point outside the box travels rigidly with the nearest part of the\n"
-             "cage rather than being drawn onto it.")
-        .def("bend_curve",
-             [](nb::object self, nb::handle guide, float t0, float t1,
-                const std::string& point_type) {
-                 PyPrim& p = nb::cast<PyPrim&>(self);
-                 PointsView v = to_points(guide);
-                 if (v.count < 2)
-                     throw std::invalid_argument(
-                         "bend_curve needs at least two guide points");
-                 if (t0 == t1)
-                     throw std::invalid_argument(
-                         "bend_curve needs t0 != t1: the span is what gets laid on the guide");
-                 std::vector<scene::StrokePoint> points;
-                 points.reserve(v.count);
-                 for (std::size_t i = 0; i < v.count; ++i) {
-                     scene::StrokePoint sp;
-                     sp.pos = kernel::cf3(v.data[i * 3], v.data[i * 3 + 1], v.data[i * 3 + 2]);
-                     sp.type = parse_point_type(point_type);
-                     points.push_back(sp);
-                 }
-                 if (!(scene::guide_arc_length(points) > 0.0f))
-                     throw std::invalid_argument(
-                         "bend_curve guide has zero length: there is no arc to lay the span on");
-                 p.deformers.push_back(scene::Deformer::bend_curve(std::move(points), t0, t1));
-                 return self;
-             },
-             "guide"_a, "t0"_a, "t1"_a, "point_type"_a = "bspline",
-             nb::rv_policy::reference_internal,
-             "Bend along a DRAWN guide instead of at a constant rate.\n\n"
-             "`bend` turns about a fixed axis at a fixed rate, so every bend it can\n"
-             "express is a circular arc. This lays the item's local X span [t0, t1]\n"
-             "onto the guide's ARC LENGTH and carries the material on the guide's\n"
-             "parallel-transported frames — ZBrush's Gizmo Bend Curve.\n\n"
-             "It is the inverse of a swept primitive rather than a second kind of\n"
-             "bend, and it shares the sweep's machinery: `guide` is the same kind of\n"
-             "curve every other item takes, so `point_type` gives it B-spline\n"
-             "smoothing and it tessellates to the document's curve tolerance.\n\n"
-             "A guide running straight along X is exactly the undeformed item.")
-        .def("twist_range",
-             [](nb::object self, float radians_per_unit, float y0, float y1, int ease) {
-                 PyPrim& p = nb::cast<PyPrim&>(self);
-                 if (y0 == y1)
-                     throw std::invalid_argument(
-                         "twist_range needs y0 != y1: the span is the ramp");
-                 p.deformers.push_back(scene::Deformer::twist_range(
-                     radians_per_unit, y0, y1, static_cast<std::uint8_t>(ease)));
-                 return self;
-             },
-             "radians_per_unit"_a, "y0"_a, "y1"_a, "ease"_a = 0,
-             nb::rv_policy::reference_internal,
-             "Twist about Y at k rad/unit, RAMPED across y0 -> y1 and held beyond.\n\n"
-             "`twist` winds the whole item; a gizmo's twist acts inside its box, and\n"
-             "this is that. Material past the range travels rigidly rather than\n"
-             "continuing to wind.\n\n"
-             "With a linear ease and a range covering the content it is exactly\n"
-             "`twist` — the same rotation with the angle ramped, not a second\n"
-             "deformation to keep in step.")
-        .def("bend_range",
-             [](nb::object self, float radians_per_unit, float x0, float x1, int ease) {
-                 PyPrim& p = nb::cast<PyPrim&>(self);
-                 if (x0 == x1)
-                     throw std::invalid_argument(
-                         "bend_range needs x0 != x1: the span is the ramp");
-                 p.deformers.push_back(scene::Deformer::bend_range(
-                     radians_per_unit, x0, x1, static_cast<std::uint8_t>(ease)));
-                 return self;
-             },
-             "radians_per_unit"_a, "x0"_a, "x1"_a, "ease"_a = 0,
-             nb::rv_policy::reference_internal,
-             "Bend along X at k rad/unit, ramped across x0 -> x1 and held beyond —\n"
-             "ZBrush's Bend Arc is angle-limited this way, where `bend` is not.")
-        .def("bend_radial",
-             [](nb::object self, float r0, float r1, float dz, int ease) {
-                 PyPrim& p = nb::cast<PyPrim&>(self);
-                 if (r0 == r1)
-                     throw std::invalid_argument(
-                         "bend_radial needs r0 != r1: the band is the ramp span");
-                 p.deformers.push_back(
-                     scene::Deformer::bend_radial(r0, r1, dz, static_cast<std::uint8_t>(ease)));
-                 return self;
-             },
-             "r0"_a, "r1"_a, "dz"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
-             "Displace along Y by dz, eased across the radial band r0 -> r1")
-        .def("elongate_axis",
-             [](nb::object self, nb::handle h) {
-                 PyPrim& p = nb::cast<PyPrim&>(self);
-                 kernel::cfloat3 e = to_f3(h, "elongate_axis half-extents");
-                 if (e.x < 0.0f || e.y < 0.0f || e.z < 0.0f)
-                     throw std::invalid_argument("elongate_axis half-extents must be >= 0");
-                 p.deformers.push_back(scene::Deformer::elongate_axis(e));
-                 return self;
-             },
-             "h"_a, nb::rv_policy::reference_internal,
-             "Per-axis elongation: works on any primitive, symmetric or not, but "
-             "the flat interior plateau makes the field a bound rather than exact.")
-        .def("elongate",
-             [](nb::object self, nb::handle h) {
-                 PyPrim& p = nb::cast<PyPrim&>(self);
-                 kernel::cfloat3 e = to_f3(h, "elongate half-extents");
-                 if (e.x < 0.0f || e.y < 0.0f || e.z < 0.0f)
-                     throw std::invalid_argument("elongate half-extents must be >= 0");
-                 p.deformers.push_back(scene::Deformer::elongate(e));
-                 return self;
-             },
-             "h"_a, nb::rv_policy::reference_internal,
-             "Insert flat sections of half-extent h along each axis: the shape "
-             "stretches without its ends distorting. Exact on an origin-symmetric "
-             "primitive, a bound otherwise.")
-        .def("displace",
-             [](nb::object self, float amplitude, float frequency) {
-                 nb::cast<PyPrim&>(self).deformers.push_back(
-                     scene::Deformer::displace(amplitude, frequency));
-                 return self;
-             },
-             "amplitude"_a, "frequency"_a,
-             "Procedural sine displacement of the field (amplitude in world units)")
-        .def("wrap_around",
-             [](nb::object self, float x0, float x1) {
-                 PyPrim& p = nb::cast<PyPrim&>(self);
-                 if (x0 == x1)
-                     throw std::invalid_argument(
-                         "wrap_around needs x0 != x1: the interval fixes the cylinder radius");
-                 p.deformers.push_back(scene::Deformer::wrap_around(x0, x1));
-                 return self;
-             },
-             "x0"_a, "x1"_a, nb::rv_policy::reference_internal,
-             "Bend the local X interval [x0, x1] around a cylinder about Z, so a "
-             "flat relief wraps around a column. Radius is (x1 - x0) / 2pi.")
-        .def("repeat_grid",
-             [](nb::object self, nb::handle spacing, nb::handle counts) {
-                 PyPrim& p = nb::cast<PyPrim&>(self);
-                 kernel::cfloat3 s3;
-                 if (nb::isinstance<nb::float_>(spacing) || nb::isinstance<nb::int_>(spacing)) {
-                     float v = nb::cast<float>(spacing);
-                     s3 = kernel::cf3(v, v, v);
-                 } else {
-                     s3 = to_f3(spacing, "spacing");
-                 }
-                 if (s3.x <= 0 || s3.y <= 0 || s3.z <= 0)
-                     throw std::invalid_argument("spacing must be > 0 on every axis");
-                 if (counts.is_none()) {
-                     p.repeat = scene::Repeat::grid_infinite(s3);
-                 } else {
-                     kernel::cfloat3 c = to_f3(counts, "counts");
-                     if (c.x < 0 || c.y < 0 || c.z < 0)
-                         throw std::invalid_argument("counts must be >= 0 (max cell index)");
-                     if (s3.x != s3.y || s3.y != s3.z)
-                         throw std::invalid_argument(
-                             "finite grids use one spacing for all axes");
-                     p.repeat = scene::Repeat::grid_finite(s3.x, c);
-                 }
-                 return self;
-             },
-             "spacing"_a, "counts"_a = nb::none(),
-             "Repeat on a grid: infinite without counts, otherwise the max cell "
-             "index per axis. An infinite grid is never culled (unbounded influence).")
-        .def("repeat_radial",
-             [](nb::object self, int count, float offset) {
-                 if (count < 2) throw std::invalid_argument("radial count must be >= 2");
-                 nb::cast<PyPrim&>(self).repeat = scene::Repeat::radial(count, offset);
-                 return self;
-             },
-             "count"_a, "offset"_a = 0.0f,
-             "Circular array of `count` copies about Y at the given radius")
-        .def_prop_ro("repeat",
-                     [](const PyPrim& p) -> nb::object {
-                         if (!p.repeat.active()) return nb::none();
-                         nb::dict d;
-                         const char* names[] = {"none", "grid_infinite", "grid_finite", "radial"};
-                         d["type"] = p.repeat.type < 4 ? names[p.repeat.type] : "unknown";
-                         d["spacing"] = nb::make_tuple(p.repeat.spacing.x, p.repeat.spacing.y,
-                                                       p.repeat.spacing.z);
-                         d["counts"] = nb::make_tuple(p.repeat.counts.x, p.repeat.counts.y,
-                                                      p.repeat.counts.z);
-                         return d;
-                     },
-                     "The repetition applied to this primitive, or None")
-        .def_prop_ro("deformers",
-                     [](const PyPrim& p) {
-                         nb::list out;
-                         for (const scene::Deformer& d : p.deformers) {
-                             nb::dict e;
-                             const char* names[] = {"twist", "bend", "taper", "displace"};
-                             e["type"] = d.type < 4 ? names[d.type] : "unknown";
-                             e["k"] = d.k;
-                             e["a"] = d.a;
-                             e["b"] = d.b;
-                             e["c"] = d.c;
-                             e["ease"] = d.ease;
-                             out.append(e);
-                         }
-                         return out;
-                     },
-                     "The deformer chain, in application order");
+        .def(
+            "twist",
+            [](nb::object self, float k) {
+                nb::cast<PyPrim&>(self).deformers.push_back(scene::Deformer::twist(k));
+                return self;
+            },
+            "k"_a, "Twist about Y at k radians per unit of height")
+        .def(
+            "bend",
+            [](nb::object self, float k) {
+                nb::cast<PyPrim&>(self).deformers.push_back(scene::Deformer::bend(k));
+                return self;
+            },
+            "k"_a, "Bend along X at k radians per unit")
+        .def(
+            "taper",
+            [](nb::object self, float y0, float y1, float s0, float s1, int ease) {
+                if (y1 == y0) throw std::invalid_argument("taper needs y1 != y0");
+                if (s0 <= 0.0f || s1 <= 0.0f)
+                    throw std::invalid_argument("taper scales must be > 0");
+                if (ease < 0 || ease >= kernel::ease_count)
+                    throw std::invalid_argument("ease must be a valid easing curve index");
+                nb::cast<PyPrim&>(self).deformers.push_back(
+                    scene::Deformer::taper(y0, y1, s0, s1, static_cast<std::uint8_t>(ease)));
+                return self;
+            },
+            "y0"_a, "y1"_a, "s0"_a, "s1"_a, "ease"_a = 0,
+            "Scale the cross-section from s0 at y0 to s1 at y1 along an easing curve")
+        .def(
+            "noise",
+            [](nb::object self, float amplitude, float frequency, int octaves, float gain,
+               std::uint32_t seed) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                if (octaves < 1) throw std::invalid_argument("noise needs at least one octave");
+                if (!(frequency > 0.0f)) throw std::invalid_argument("noise frequency must be > 0");
+                p.deformers.push_back(
+                    scene::Deformer::noise(amplitude, frequency, octaves, gain, seed));
+                return self;
+            },
+            "amplitude"_a, "frequency"_a, "octaves"_a = 4, "gain"_a = 0.5f, "seed"_a = 0u,
+            nb::rv_policy::reference_internal,
+            "Fractal gradient noise, offsetting the distance — the irregular\n"
+            "sibling of `displace`, whose sine is regular by construction and\n"
+            "gives an even corrugation instead.\n\n"
+            "The hash is INTEGER, and that is not an implementation detail: a\n"
+            "float hash amplifies the units-in-the-last-place difference between\n"
+            "each backend's `sin` into an O(1) difference, so it could not agree\n"
+            "across CPU, Metal, CUDA and OpenCL. Integer operations give the same\n"
+            "bits everywhere.\n\n"
+            "The SEED is an ordinary parameter, not global state: two items with\n"
+            "the same seed look the same, and an item's appearance never depends\n"
+            "on the order it was compiled in.\n\n"
+            "The fractal is normalized, so raising `octaves` adds finer detail\n"
+            "without growing the overall deviation — `amplitude` stays the one\n"
+            "control for how far the surface moves. Offsetting the distance\n"
+            "costs the marcher: the step scale drops with amplitude x frequency.")
+        .def(
+            "magnify",
+            [](nb::object self, nb::handle center, float radius, float strength, int ease) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                if (!(radius > 0.0f)) throw std::invalid_argument("magnify radius must be > 0");
+                p.deformers.push_back(scene::Deformer::magnify(
+                    to_f3(center, "center"), radius, strength, static_cast<std::uint8_t>(ease)));
+                return self;
+            },
+            "center"_a, "radius"_a, "strength"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
+            "Magnify and pinch, which are the same deformation: a radial scale\n"
+            "about `center` with finite support. ONE SIGNED STRENGTH covers both\n"
+            "— positive swells the surface away from the centre, negative gathers\n"
+            "it toward — so there is no separate pinch to go looking for.\n\n"
+            "Scaling space is not distance preserving, so the field stops being\n"
+            "exact and the document's safe step scale drops with the strength.\n"
+            "Support is finite: outside the radius nothing changes, which is what\n"
+            "keeps item influence bounds tight.")
+        .def(
+            "grab",
+            [](nb::object self, nb::handle center, float radius, nb::handle displacement, int ease,
+               bool front_only) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                if (!(radius > 0.0f)) throw std::invalid_argument("grab radius must be > 0");
+                p.deformers.push_back(scene::Deformer::grab(
+                    to_f3(center, "center"), radius, to_f3(displacement, "displacement"),
+                    static_cast<std::uint8_t>(ease), front_only));
+                return self;
+            },
+            "center"_a, "radius"_a, "displacement"_a, "ease"_a = 0, "front_only"_a = false,
+            nb::rv_policy::reference_internal,
+            "Pull a region of surface: displacement weighted from the centre out, "
+            "identity past the radius. front_only leaves the far side of a form "
+            "where it was. The surface travels less than the full displacement.")
+        .def(
+            "pose",
+            [](nb::object self, nb::handle center, float radius, nb::handle axis, float angle,
+               int ease) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                if (!(radius > 0.0f)) throw std::invalid_argument("pose radius must be > 0");
+                p.deformers.push_back(scene::Deformer::pose(to_f3(center, "center"), radius,
+                                                            to_f3(axis, "axis"), angle,
+                                                            static_cast<std::uint8_t>(ease)));
+                return self;
+            },
+            "center"_a, "radius"_a, "axis"_a, "angle"_a, "ease"_a = 0,
+            nb::rv_policy::reference_internal,
+            "Rotate a region about the centre, weighted the same way as grab")
+        .def(
+            "pose_line",
+            [](nb::object self, nb::handle a, nb::handle b, nb::handle axis, float angle,
+               int ease) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                kernel::cfloat3 pa = to_f3(a, "a"), pb = to_f3(b, "b");
+                if (kernel::cdot2(pb - pa) <= 0.0f)
+                    throw std::invalid_argument("pose_line needs a != b: the segment is the ramp");
+                p.deformers.push_back(scene::Deformer::pose_line(pa, pb, to_f3(axis, "axis"), angle,
+                                                                 static_cast<std::uint8_t>(ease)));
+                return self;
+            },
+            "a"_a, "b"_a, "axis"_a, "angle"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
+            "Rotate about the axis through a, ramping from nothing at a to the full "
+            "angle at b and beyond. Unlike pose() this does not stop at a radius: "
+            "everything past b turns with the tip.")
+        .def(
+            "bend_linear",
+            [](nb::object self, nb::handle a, nb::handle b, nb::handle v, int ease) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                kernel::cfloat3 pa = to_f3(a, "a"), pb = to_f3(b, "b");
+                if (kernel::cdot2(pb - pa) <= 0.0f)
+                    throw std::invalid_argument(
+                        "bend_linear needs a != b: the segment is the ramp span");
+                p.deformers.push_back(scene::Deformer::bend_linear(
+                    pa, pb, to_f3(v, "v"), static_cast<std::uint8_t>(ease)));
+                return self;
+            },
+            "a"_a, "b"_a, "v"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
+            "Displace by v, eased along the segment a -> b")
+        .def(
+            "blob",
+            [](nb::object self, nb::handle center, float radius, float amplitude, float frequency,
+               int octaves, float gain, std::uint32_t seed, int ease) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                if (!(radius > 0.0f)) throw std::invalid_argument("blob needs a radius > 0");
+                p.deformers.push_back(scene::Deformer::blob(to_f3(center, "center"), radius,
+                                                            amplitude, frequency, octaves, gain,
+                                                            seed, static_cast<std::uint8_t>(ease)));
+                return self;
+            },
+            "center"_a, "radius"_a, "amplitude"_a, "frequency"_a = 6.0f, "octaves"_a = 3,
+            "gain"_a = 0.5f, "seed"_a = 0u, "ease"_a = 0, nb::rv_policy::reference_internal,
+            "ZBrush's BLOB: an irregular swelling under the brush, rather than\n"
+            "the smooth one `draw` gives.\n\n"
+            "`noise` with the finite support `grab` and `magnify` have — outside\n"
+            "`radius` the field is untouched, which is what makes it a brush\n"
+            "rather than a modifier.\n\n"
+            "The amplitude is signed and so is the noise, so ONE dab both swells\n"
+            "and eats in — which is what reads as blobby rather than as a\n"
+            "uniform bulge. A negative amplitude is not a second verb.\n\n"
+            "The seed is an ordinary parameter rather than global state, so two\n"
+            "items with the same seed look the same and an item's appearance\n"
+            "never depends on the order it was compiled in.")
+        .def(
+            "alpha",
+            [](nb::object self, nb::handle samples, nb::handle centre, nb::handle direction,
+               nb::handle tangent, float extent, float radius, float amplitude, int ease) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                // A 2D array, because a stamp IS two-dimensional and letting a
+                // caller pass a flat one with separate dimensions is the
+                // multiply they would get wrong.
+                auto arr = nb::cast<nb::ndarray<const float, nb::ndim<2>, nb::c_contig>>(samples);
+                const int h = static_cast<int>(arr.shape(0));
+                const int w = static_cast<int>(arr.shape(1));
+                if (w < 2 || h < 2)
+                    throw std::invalid_argument(
+                        "an alpha needs at least 2x2 samples; there is nothing to "
+                        "interpolate below that");
+                if (!(extent > 0.0f))
+                    throw std::invalid_argument("an alpha's extent must be positive");
+                if (ease < 0 || ease >= kernel::ease_count)
+                    throw std::invalid_argument("ease must be a valid easing curve index");
+                p.deformers.push_back(
+                    scene::Deformer::alpha(to_f3(centre, "centre"), to_f3(direction, "direction"),
+                                           to_f3(tangent, "tangent"), arr.data(), w, h, extent,
+                                           radius, amplitude, static_cast<std::uint8_t>(ease)));
+                return self;
+            },
+            "samples"_a, "centre"_a, "direction"_a, "tangent"_a, "extent"_a, "radius"_a,
+            "amplitude"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
+            "An ALPHA stamp: a scalar image as a distance offset, under the same\n"
+            "radial falloff `blob`, `grab` and `magnify` use. Pores, fabric,\n"
+            "scales, stitching — how detail work is actually done.\n\n"
+            "`samples` is a 2D (height, width) float array in [0, 1], row-major.\n"
+            "It is COPIED. **The engine decodes no images** — load the PNG with\n"
+            "whatever you like and hand over the array.\n\n"
+            "A DEFORMER, not a primitive: an item shaped like the stamp would ADD\n"
+            "material in the stamp's shape, where an alpha modulates a surface\n"
+            "already there — pores in existing skin.\n\n"
+            "The stamp covers a square of side `extent` in the plane through\n"
+            "`centre` with normal `direction`; `tangent` orients it there and any\n"
+            "rough up will do, since it is re-orthogonalised. Outside `radius`\n"
+            "the field is untouched EXACTLY.\n\n"
+            "`amplitude` is how far the surface moves OUTWARD at a sample of 1, so\n"
+            "white is raised as in every sculpting package; negative carves.\n\n"
+            "The Lipschitz bound is DERIVED from the samples — the largest\n"
+            "difference between adjacent ones over the world distance between\n"
+            "them — so a flat stamp costs nothing for having large values, and a\n"
+            "high-frequency one costs step scale honestly. Read it back with\n"
+            "`Document.safe_step_scale()`.")
+        .def(
+            "lattice",
+            [](nb::object self, nb::handle box, nb::handle offsets, int nx, int ny, int nz) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                const int cap = scene::Deformer::kMaxLatticeDivisions;
+                if (nx < 2 || ny < 2 || nz < 2 || nx > cap || ny > cap || nz > cap)
+                    throw std::invalid_argument(
+                        "lattice divisions must be in [2, " + std::to_string(cap) +
+                        "] per axis: the cage is evaluated per sample, at nx*ny*nz "
+                        "multiply-adds each time");
+                const math::Aabb b = to_aabb(box);
+                if (b.empty())
+                    throw std::invalid_argument(
+                        "the cage's box is empty; there is nothing to span");
+                scene::Deformer d = scene::Deformer::lattice(b.min, b.max, nx, ny, nz);
+                if (!offsets.is_none()) {
+                    PointsView v = to_points(offsets);
+                    if (v.count != d.cage.size())
+                        throw std::invalid_argument(
+                            "offsets must have one entry per control point (" +
+                            std::to_string(d.cage.size()) + ")");
+                    for (std::size_t n = 0; n < d.cage.size(); ++n)
+                        d.cage[n] =
+                            kernel::cf3(v.data[n * 3], v.data[n * 3 + 1], v.data[n * 3 + 2]);
+                }
+                p.deformers.push_back(std::move(d));
+                return self;
+            },
+            "box"_a, "offsets"_a = nb::none(), "nx"_a = 3, "ny"_a = 3, "nz"_a = 3,
+            nb::rv_policy::reference_internal,
+            "A LATTICE cage over the item's local `box` — ZBrush's Gizmo Lattice.\n\n"
+            "`offsets` is an (nx*ny*nz, 3) array of control-point offsets in\n"
+            "x-fastest order — index (i, j, k) at (k*ny + j)*nx + i — or None for\n"
+            "an untouched cage, which is exactly the identity.\n\n"
+            "The offsets are what you DRAGGED, and the cage is applied as the\n"
+            "INVERSE warp — which is the design decision rather than a detail:\n"
+            "forward FFD has no closed-form inverse, and a claycore deformer runs\n"
+            "backwards. Material travels WITH the drag, as on the mesh lattice.\n\n"
+            "It is not the EXACT inverse. It differs from forward FFD by a term\n"
+            "proportional to how the basis varies along the displacement, so it\n"
+            "over-travels a drag toward rising weight and under-travels one\n"
+            "pointing away — under 1.5% of the drag, measured against the forward\n"
+            "cage. (`grab` always under-travels, because its weight always falls\n"
+            "off along the drag; a lattice does not inherit that sign.)\n\n"
+            "For FORWARD FFD with no approximation, use the mesh-layer lattice\n"
+            "(`Lattice` with `MeshSculptor.lattice`) — which is what ZBrush and\n"
+            "Blender actually do, because a mesh knows where its vertices are.\n\n"
+            "Divisions are capped at 4 per axis, far below the mesh lattice's 32,\n"
+            "because this is evaluated PER SAMPLE inside the raymarcher.\n\n"
+            "Two per axis is exactly trilinear and the corners are interpolated.\n"
+            "A point outside the box travels rigidly with the nearest part of the\n"
+            "cage rather than being drawn onto it.")
+        .def(
+            "bend_curve",
+            [](nb::object self, nb::handle guide, float t0, float t1,
+               const std::string& point_type) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                PointsView v = to_points(guide);
+                if (v.count < 2)
+                    throw std::invalid_argument("bend_curve needs at least two guide points");
+                if (t0 == t1)
+                    throw std::invalid_argument(
+                        "bend_curve needs t0 != t1: the span is what gets laid on the guide");
+                std::vector<scene::StrokePoint> points;
+                points.reserve(v.count);
+                for (std::size_t i = 0; i < v.count; ++i) {
+                    scene::StrokePoint sp;
+                    sp.pos = kernel::cf3(v.data[i * 3], v.data[i * 3 + 1], v.data[i * 3 + 2]);
+                    sp.type = parse_point_type(point_type);
+                    points.push_back(sp);
+                }
+                if (!(scene::guide_arc_length(points) > 0.0f))
+                    throw std::invalid_argument(
+                        "bend_curve guide has zero length: there is no arc to lay the span on");
+                p.deformers.push_back(scene::Deformer::bend_curve(std::move(points), t0, t1));
+                return self;
+            },
+            "guide"_a, "t0"_a, "t1"_a, "point_type"_a = "bspline",
+            nb::rv_policy::reference_internal,
+            "Bend along a DRAWN guide instead of at a constant rate.\n\n"
+            "`bend` turns about a fixed axis at a fixed rate, so every bend it can\n"
+            "express is a circular arc. This lays the item's local X span [t0, t1]\n"
+            "onto the guide's ARC LENGTH and carries the material on the guide's\n"
+            "parallel-transported frames — ZBrush's Gizmo Bend Curve.\n\n"
+            "It is the inverse of a swept primitive rather than a second kind of\n"
+            "bend, and it shares the sweep's machinery: `guide` is the same kind of\n"
+            "curve every other item takes, so `point_type` gives it B-spline\n"
+            "smoothing and it tessellates to the document's curve tolerance.\n\n"
+            "A guide running straight along X is exactly the undeformed item.")
+        .def(
+            "twist_range",
+            [](nb::object self, float radians_per_unit, float y0, float y1, int ease) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                if (y0 == y1)
+                    throw std::invalid_argument("twist_range needs y0 != y1: the span is the ramp");
+                p.deformers.push_back(scene::Deformer::twist_range(
+                    radians_per_unit, y0, y1, static_cast<std::uint8_t>(ease)));
+                return self;
+            },
+            "radians_per_unit"_a, "y0"_a, "y1"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
+            "Twist about Y at k rad/unit, RAMPED across y0 -> y1 and held beyond.\n\n"
+            "`twist` winds the whole item; a gizmo's twist acts inside its box, and\n"
+            "this is that. Material past the range travels rigidly rather than\n"
+            "continuing to wind.\n\n"
+            "With a linear ease and a range covering the content it is exactly\n"
+            "`twist` — the same rotation with the angle ramped, not a second\n"
+            "deformation to keep in step.")
+        .def(
+            "bend_range",
+            [](nb::object self, float radians_per_unit, float x0, float x1, int ease) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                if (x0 == x1)
+                    throw std::invalid_argument("bend_range needs x0 != x1: the span is the ramp");
+                p.deformers.push_back(scene::Deformer::bend_range(radians_per_unit, x0, x1,
+                                                                  static_cast<std::uint8_t>(ease)));
+                return self;
+            },
+            "radians_per_unit"_a, "x0"_a, "x1"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
+            "Bend along X at k rad/unit, ramped across x0 -> x1 and held beyond —\n"
+            "ZBrush's Bend Arc is angle-limited this way, where `bend` is not.")
+        .def(
+            "bend_radial",
+            [](nb::object self, float r0, float r1, float dz, int ease) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                if (r0 == r1)
+                    throw std::invalid_argument(
+                        "bend_radial needs r0 != r1: the band is the ramp span");
+                p.deformers.push_back(
+                    scene::Deformer::bend_radial(r0, r1, dz, static_cast<std::uint8_t>(ease)));
+                return self;
+            },
+            "r0"_a, "r1"_a, "dz"_a, "ease"_a = 0, nb::rv_policy::reference_internal,
+            "Displace along Y by dz, eased across the radial band r0 -> r1")
+        .def(
+            "elongate_axis",
+            [](nb::object self, nb::handle h) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                kernel::cfloat3 e = to_f3(h, "elongate_axis half-extents");
+                if (e.x < 0.0f || e.y < 0.0f || e.z < 0.0f)
+                    throw std::invalid_argument("elongate_axis half-extents must be >= 0");
+                p.deformers.push_back(scene::Deformer::elongate_axis(e));
+                return self;
+            },
+            "h"_a, nb::rv_policy::reference_internal,
+            "Per-axis elongation: works on any primitive, symmetric or not, but "
+            "the flat interior plateau makes the field a bound rather than exact.")
+        .def(
+            "elongate",
+            [](nb::object self, nb::handle h) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                kernel::cfloat3 e = to_f3(h, "elongate half-extents");
+                if (e.x < 0.0f || e.y < 0.0f || e.z < 0.0f)
+                    throw std::invalid_argument("elongate half-extents must be >= 0");
+                p.deformers.push_back(scene::Deformer::elongate(e));
+                return self;
+            },
+            "h"_a, nb::rv_policy::reference_internal,
+            "Insert flat sections of half-extent h along each axis: the shape "
+            "stretches without its ends distorting. Exact on an origin-symmetric "
+            "primitive, a bound otherwise.")
+        .def(
+            "displace",
+            [](nb::object self, float amplitude, float frequency) {
+                nb::cast<PyPrim&>(self).deformers.push_back(
+                    scene::Deformer::displace(amplitude, frequency));
+                return self;
+            },
+            "amplitude"_a, "frequency"_a,
+            "Procedural sine displacement of the field (amplitude in world units)")
+        .def(
+            "wrap_around",
+            [](nb::object self, float x0, float x1) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                if (x0 == x1)
+                    throw std::invalid_argument(
+                        "wrap_around needs x0 != x1: the interval fixes the cylinder radius");
+                p.deformers.push_back(scene::Deformer::wrap_around(x0, x1));
+                return self;
+            },
+            "x0"_a, "x1"_a, nb::rv_policy::reference_internal,
+            "Bend the local X interval [x0, x1] around a cylinder about Z, so a "
+            "flat relief wraps around a column. Radius is (x1 - x0) / 2pi.")
+        .def(
+            "repeat_grid",
+            [](nb::object self, nb::handle spacing, nb::handle counts) {
+                PyPrim& p = nb::cast<PyPrim&>(self);
+                kernel::cfloat3 s3;
+                if (nb::isinstance<nb::float_>(spacing) || nb::isinstance<nb::int_>(spacing)) {
+                    float v = nb::cast<float>(spacing);
+                    s3 = kernel::cf3(v, v, v);
+                } else {
+                    s3 = to_f3(spacing, "spacing");
+                }
+                if (s3.x <= 0 || s3.y <= 0 || s3.z <= 0)
+                    throw std::invalid_argument("spacing must be > 0 on every axis");
+                if (counts.is_none()) {
+                    p.repeat = scene::Repeat::grid_infinite(s3);
+                } else {
+                    kernel::cfloat3 c = to_f3(counts, "counts");
+                    if (c.x < 0 || c.y < 0 || c.z < 0)
+                        throw std::invalid_argument("counts must be >= 0 (max cell index)");
+                    if (s3.x != s3.y || s3.y != s3.z)
+                        throw std::invalid_argument("finite grids use one spacing for all axes");
+                    p.repeat = scene::Repeat::grid_finite(s3.x, c);
+                }
+                return self;
+            },
+            "spacing"_a, "counts"_a = nb::none(),
+            "Repeat on a grid: infinite without counts, otherwise the max cell "
+            "index per axis. An infinite grid is never culled (unbounded influence).")
+        .def(
+            "repeat_radial",
+            [](nb::object self, int count, float offset) {
+                if (count < 2) throw std::invalid_argument("radial count must be >= 2");
+                nb::cast<PyPrim&>(self).repeat = scene::Repeat::radial(count, offset);
+                return self;
+            },
+            "count"_a, "offset"_a = 0.0f,
+            "Circular array of `count` copies about Y at the given radius")
+        .def_prop_ro(
+            "repeat",
+            [](const PyPrim& p) -> nb::object {
+                if (!p.repeat.active()) return nb::none();
+                nb::dict d;
+                const char* names[] = {"none", "grid_infinite", "grid_finite", "radial"};
+                d["type"] = p.repeat.type < 4 ? names[p.repeat.type] : "unknown";
+                d["spacing"] =
+                    nb::make_tuple(p.repeat.spacing.x, p.repeat.spacing.y, p.repeat.spacing.z);
+                d["counts"] =
+                    nb::make_tuple(p.repeat.counts.x, p.repeat.counts.y, p.repeat.counts.z);
+                return d;
+            },
+            "The repetition applied to this primitive, or None")
+        .def_prop_ro(
+            "deformers",
+            [](const PyPrim& p) {
+                nb::list out;
+                for (const scene::Deformer& d : p.deformers) {
+                    nb::dict e;
+                    const char* names[] = {"twist", "bend", "taper", "displace"};
+                    e["type"] = d.type < 4 ? names[d.type] : "unknown";
+                    e["k"] = d.k;
+                    e["a"] = d.a;
+                    e["b"] = d.b;
+                    e["c"] = d.c;
+                    e["ease"] = d.ease;
+                    out.append(e);
+                }
+                return out;
+            },
+            "The deformer chain, in application order");
 
     // Every primitive constructor accepts position=(x, y, z),
     // rotation_axis_angle=((x, y, z), radians) and scale=<uniform factor>.

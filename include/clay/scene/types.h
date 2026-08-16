@@ -359,6 +359,71 @@ struct StrokePoint {
     kernel::cfloat3 out_handle = kernel::cf3(0, 0, 0);
 };
 
+// A caller-supplied alpha stamp: the scalar image an artist details with.
+//
+// THE ENGINE DECODES NO IMAGES. These are samples in [0,1] the caller already
+// has, row-major with u fastest. A library that compiles to five backends has
+// no business linking a PNG decoder, and a host that owns an alpha has already
+// paid that cost.
+struct AlphaStamp {
+    std::vector<float> samples;  // width * height, row-major, u fastest
+    int width = 0;
+    int height = 0;
+    float extent = 1.0f;     // world size of the square the stamp covers
+    float radius = 1.0f;     // the region's falloff radius
+    float amplitude = 0.0f;  // how far the surface moves at stamp value 1
+
+    // What the Lipschitz bound needs, derived from the samples rather than
+    // declared: the largest difference between ADJACENT samples, and the
+    // largest magnitude. Cached because a bound is recomputed on every tape
+    // build and a 4K stamp is sixteen million samples — but derived by
+    // refresh() rather than settable, so a caller cannot understate the bound
+    // and get an overshooting raymarch.
+    //
+    // Set through the factory or refresh(); a caller that writes `samples`
+    // directly MUST call refresh(), and deserialization always does, so a file
+    // cannot carry a stale one.
+    float steepest = 0.0f;  // max |adjacent difference|, in sample units
+    float peak = 0.0f;      // max |sample|
+
+    bool empty() const {
+        return width < 2 || height < 2 ||
+               samples.size() != static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    }
+
+    void refresh() {
+        steepest = 0.0f;
+        peak = 0.0f;
+        if (empty()) return;
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const float v = samples[static_cast<std::size_t>(y) * width + x];
+                peak = kernel::cmax(peak, kernel::cabs(v));
+                // Right and down neighbours only: every adjacent pair is
+                // visited exactly once that way.
+                if (x + 1 < width)
+                    steepest = kernel::cmax(
+                        steepest,
+                        kernel::cabs(samples[static_cast<std::size_t>(y) * width + x + 1] - v));
+                if (y + 1 < height)
+                    steepest = kernel::cmax(
+                        steepest,
+                        kernel::cabs(samples[static_cast<std::size_t>(y + 1) * width + x] - v));
+            }
+        }
+    }
+
+    // Steepness in WORLD units: the sample difference over the distance
+    // between two texels. This is what the bound charges, and it is why a
+    // stamp squeezed into a small extent costs more than the same stamp spread
+    // wide — the same relief over less distance is a steeper slope.
+    float world_slope() const {
+        if (empty() || extent <= 1e-9f) return 0.0f;
+        const int longest = width > height ? width : height;
+        return steepest * static_cast<float>(longest - 1) / extent;
+    }
+};
+
 struct Deformer {
     std::uint8_t type = kernel::cdeform_twist;
     float k = 0.0f;      // twist/bend: radians per unit; taper: y0; displace: amplitude
@@ -403,6 +468,11 @@ struct Deformer {
     // axis-aligned per-item box could reproduce.
     math::Transform cage_xform;
 
+    // The stamp for `alpha`, and empty for every other type. Like the guide and
+    // the cage above, it does not fit the record: the compiler writes it into
+    // the tape's blob behind a small header and the record holds a handle.
+    AlphaStamp stamp;
+
     // How many extension floats this type carries; the serializer and the
     // reader both take their count from here, dispatching on the type.
     static int ext_count(std::uint8_t type) {
@@ -415,6 +485,10 @@ struct Deformer {
         // The box, which is what the record has room for beside the handle.
         if (type == kernel::cdeform_lattice || type == kernel::cdeform_lattice_xform)
             return 6;
+        // Direction and tangent: the stamp's frame, which is what the record
+        // has room for beside the handle and the centre. Everything else rides
+        // the blob header.
+        if (type == kernel::cdeform_alpha) return 6;
         return 0;
     }
 
@@ -613,6 +687,57 @@ struct Deformer {
         d.ext[3] = gain;
         d.ext[4] = static_cast<float>(seed);
         d.ease = ease;
+        return d;
+    }
+
+    // An alpha stamp: a caller-supplied scalar image as a distance offset,
+    // under the same radial falloff `blob`, `grab` and `magnify` use.
+    //
+    // A DEFORMER, NOT A PRIMITIVE. An item shaped like the stamp would ADD
+    // material in the stamp's shape; an alpha modulates a surface already
+    // there — pores in existing skin. So it offsets the distance, exactly as
+    // `noise` and `blob` do, and the surface moves along its own normal.
+    //
+    // `dir` is where the stamp pushes, `tangent` orients it in the plane (any
+    // rough "up" works — it is re-orthogonalised, and a degenerate one falls
+    // back to a derived axis). `extent` is the world size of the square the
+    // stamp covers; `radius` is where the influence ends. Outside `radius` the
+    // field is untouched exactly, which is what makes this a brush rather than
+    // a modifier.
+    //
+    // `amplitude` is how far the surface moves OUTWARD at a stamp value of 1,
+    // so white is raised as it is in every sculpting package; a negative
+    // amplitude carves. (A deformer's offset is added to the distance, where
+    // positive means further away, so the kernel flips the sign once rather
+    // than making every caller do it.)
+    //
+    // `samples` are COPIED, so a caller may free its buffer immediately, and
+    // the bound is derived here rather than declared.
+    static Deformer alpha(kernel::cfloat3 centre, kernel::cfloat3 dir, kernel::cfloat3 tangent,
+                          const float* samples, int width, int height, float extent, float radius,
+                          float amplitude, std::uint8_t ease = 0) {
+        Deformer d;
+        d.type = kernel::cdeform_alpha;
+        // k is unused: the compiler overwrites slot 1 with the blob handle,
+        // exactly as it does for a bend curve's guide.
+        d.a = centre.x;
+        d.b = centre.y;
+        d.c = centre.z;
+        d.ext[0] = dir.x;
+        d.ext[1] = dir.y;
+        d.ext[2] = dir.z;
+        d.ext[3] = tangent.x;
+        d.ext[4] = tangent.y;
+        d.ext[5] = tangent.z;
+        d.ease = ease;
+        d.stamp.width = width;
+        d.stamp.height = height;
+        d.stamp.extent = extent;
+        d.stamp.radius = radius;
+        d.stamp.amplitude = amplitude;
+        if (samples && width >= 2 && height >= 2)
+            d.stamp.samples.assign(samples, samples + static_cast<std::size_t>(width) * height);
+        d.stamp.refresh();
         return d;
     }
 

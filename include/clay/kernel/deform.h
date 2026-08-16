@@ -395,6 +395,99 @@ CLAY_FN float cblob_offset(cfloat3 p, cfloat3 centre, float radius, float amplit
     return amplitude * w * cnoise_fbm(p * frequency, octaves, gain, seed);
 }
 
+// ALPHA — a caller-supplied 2D stamp as a distance offset, under the same
+// finite support the blob above uses. Pores, fabric, scales, stitching: the
+// technique every competing sculptor details with, and the one this engine had
+// on voxels (`sculpt_carve_alpha`) and not on fields.
+//
+// A DEFORMER RATHER THAN A PRIMITIVE, and that is the design. A primitive
+// shaped like the stamp would ADD material in the stamp's shape; an alpha
+// modulates a surface that is already there — it makes pores in existing skin.
+// So it is a distance offset, exactly as `noise` and `blob` are, and for the
+// same reason: the wanted motion is the surface moving along its own normal.
+//
+// THE ENGINE DECODES NO IMAGES. `stamp` is width*height samples in [0,1] that
+// the caller already has, row-major, u fastest. A library that runs on five
+// backends has no business linking an image decoder.
+//
+// The footprint is a square of side `extent` in the plane through `centre`
+// spanned by `tangent` and `dir x tangent`. Outside it the stamp CLAMPS to its
+// border rather than tiling — the conservative default, and the one every
+// other finite-support deformer here already uses beyond its span. The radial
+// weight is what actually ends the influence, so a border of zeros (the usual
+// case for a stamp cut out of an image) fades to nothing well before the
+// clamp matters.
+CLAY_FN float calpha_sample(CLAY_FPTR stamp, int w, int h, float u, float v) {
+    // Bilinear, because nearest would alias hard against a raymarcher: the
+    // step size is derived from a Lipschitz bound, and a stamp with a jump
+    // discontinuity has none that is finite.
+    float x = cclamp(u, 0.0f, 1.0f) * CLAY_FLOATC(w - 1);
+    float y = cclamp(v, 0.0f, 1.0f) * CLAY_FLOATC(h - 1);
+    int x0 = CLAY_INT(cfloor(x));
+    int y0 = CLAY_INT(cfloor(y));
+    int x1 = x0 + 1 < w ? x0 + 1 : w - 1;
+    int y1 = y0 + 1 < h ? y0 + 1 : h - 1;
+    float fx = x - CLAY_FLOATC(x0);
+    float fy = y - CLAY_FLOATC(y0);
+    float s00 = CLAY_AT(stamp, y0 * w + x0);
+    float s10 = CLAY_AT(stamp, y0 * w + x1);
+    float s01 = CLAY_AT(stamp, y1 * w + x0);
+    float s11 = CLAY_AT(stamp, y1 * w + x1);
+    return cmix(cmix(s00, s10, fx), cmix(s01, s11, fx), fy);
+}
+
+// The stamp's frame: `dir` is where it pushes, and the two in-plane axes are
+// what a point is projected onto to find (u, v). Its own function because the
+// exactness bound needs the same frame the offset uses, and two copies of a
+// re-orthogonalisation are two chances to disagree.
+CLAY_FN void calpha_frame(cfloat3 dir, cfloat3 tangent, CLAY_OUT(cfloat3) out_n,
+                          CLAY_OUT(cfloat3) out_t, CLAY_OUT(cfloat3) out_b) {
+    float dlen = clength(dir);
+    cfloat3 n = dlen > 1e-9f ? dir * (1.0f / dlen) : cf3(0.0f, 0.0f, 1.0f);
+    // Re-orthogonalise, so a caller's rough "up" still works rather than
+    // shearing the stamp.
+    cfloat3 t = tangent - n * cdot(tangent, n);
+    float tlen = clength(t);
+    if (tlen <= 1e-6f) {
+        // The caller's tangent was parallel to the direction (or absent).
+        // Cross with whichever axis n leans on least, which cannot be
+        // degenerate.
+        cfloat3 axis = cabs(n.x) < 0.9f ? cf3(1.0f, 0.0f, 0.0f) : cf3(0.0f, 1.0f, 0.0f);
+        t = ccross(n, axis);
+        tlen = clength(t);
+    }
+    cfloat3 tn = t * (1.0f / cmax(tlen, 1e-9f));
+    CLAY_SET(out_n, n);
+    CLAY_SET(out_t, tn);
+    CLAY_SET(out_b, ccross(n, tn));
+}
+
+CLAY_FN float calpha_offset(cfloat3 p, CLAY_FPTR stamp, int w, int h, cfloat3 centre, cfloat3 dir,
+                            cfloat3 tangent, float extent, float radius, float amplitude,
+                            int ease_type) {
+    float weight = cregion_weight(p, centre, radius, ease_type);
+    if (weight <= 0.0f) return 0.0f;
+    if (w < 2 || h < 2 || extent <= 1e-9f) return 0.0f;
+
+    cfloat3 n = cf3(0.0f, 0.0f, 1.0f);
+    cfloat3 t = cf3(1.0f, 0.0f, 0.0f);
+    cfloat3 b = cf3(0.0f, 1.0f, 0.0f);
+    calpha_frame(dir, tangent, CLAY_OUTARG(n), CLAY_OUTARG(t), CLAY_OUTARG(b));
+
+    cfloat3 rel = p - centre;
+    float u = cdot(rel, t) / extent + 0.5f;
+    float v = cdot(rel, b) / extent + 0.5f;
+
+    // NEGATED, and deliberately. A deformer's offset is ADDED to the distance,
+    // so a positive one pushes the surface IN. Every sculpting package treats
+    // white in an alpha as RAISED, and a height map that carved would be a
+    // footgun no comment could fix — so `amplitude` means how far the surface
+    // moves OUTWARD at a stamp value of 1, and the sign flip lives here rather
+    // than in every caller. A negative amplitude carves, which is the other
+    // thing an artist wants and now needs no explanation either.
+    return -amplitude * weight * calpha_sample(stamp, w, h, u, v);
+}
+
 // Spatial morph weights: the interpreter evaluates both subtrees and mixes
 // distances by w (a bound: lerped fields are not distances).
 CLAY_FN float ctransition_linear_weight(cfloat3 p, cfloat3 a, cfloat3 b, int ease_type) {

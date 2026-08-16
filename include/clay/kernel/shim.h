@@ -351,9 +351,18 @@ float clay_fmod(float a, float b) { return a - b * trunc(a / b); }
 #define CLAY_INSTR_OP(p, i) p[i].op
 #define CLAY_INSTR_PARAM(p, i) p[i].param_offset
 #define CLAY_UINT_T unsigned int
-#define CLAY_INT(x) (int)x
-#define CLAY_UINT(x) (cuint)x
-#define CLAY_FLOATC(x) (float)x
+// Parenthesised, unlike CLAY_OFF above, and the difference is not stylistic. A
+// C-style cast binds tighter than any binary operator, so the unparenthesised
+// form turned CLAY_FLOATC(h - 1) into ((float)h) - 1 — which compiled, ran, and
+// read one row off the end of an alpha stamp. The GLSL branch's functional
+// casts, float(x), never had the problem, so it only ever misbehaved on the
+// profiles the dialect gate cannot catch by compiling.
+//
+// Every existing call site that passes an expression already wraps it in a
+// second pair of parentheses, which is the workaround this replaces.
+#define CLAY_INT(x) (int)(x)
+#define CLAY_UINT(x) (cuint)(x)
+#define CLAY_FLOATC(x) (float)(x)
 #define CLAY_OUT(T) CLAY_THREAD T*
 #define CLAY_INOUT(T) CLAY_THREAD T*
 #define CLAY_SET(p, v) *p = v

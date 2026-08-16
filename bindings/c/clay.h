@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 31
+#define CLAY_ABI_MINOR 32
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -268,7 +268,27 @@ typedef enum clay_deform {
      * CLAY_DEFORM_MAGNIFY have — outside the radius the field is untouched,
      * which is what makes it a brush rather than a modifier. The amplitude is
      * signed and so is the noise, so one dab both swells and eats in. */
-    CLAY_DEFORM_BLOB = 19
+    CLAY_DEFORM_BLOB = 19,
+    /* An ALPHA stamp: a caller-supplied scalar image as a distance offset,
+     * under the same radial falloff blob, grab and magnify use. Pores, fabric,
+     * scales, stitching — the technique every competing sculptor details with,
+     * and until now this engine had it on voxels
+     * (clay_voxel_sculpt_carve_alpha) and not on fields.
+     *
+     * A DEFORMER, NOT A PRIMITIVE, and that is the design rather than an
+     * implementation detail. An item shaped like the stamp would ADD material
+     * in the stamp's shape; an alpha modulates a surface already there — pores
+     * in existing skin. So it offsets the distance, exactly as noise and blob
+     * do, and the surface moves along its own normal.
+     *
+     * THE ENGINE DECODES NO IMAGES. A host with an alpha has already loaded a
+     * PNG; it hands over the samples. That rule is what keeps an image decoder
+     * out of a library that compiles to five backends.
+     *
+     * Its samples do not fit a flat float array of fixed size, so like
+     * CLAY_DEFORM_BEND_CURVE and CLAY_DEFORM_LATTICE it has its own entry
+     * point: clay_item_add_alpha. */
+    CLAY_DEFORM_ALPHA = 20
 } clay_deform;
 
 /* Easing curves are given by index; 0 is linear. Only the taper deformer and
@@ -618,6 +638,36 @@ clay_result clay_item_add_deformer(clay_item* item, int32_t deform, const float*
  * t0 == t1. */
 clay_result clay_item_add_bend_curve(clay_item* item, const float* guide_xyz, size_t point_count,
                                      int32_t point_type, float t0, float t1);
+
+/* Appends a CLAY_DEFORM_ALPHA to the item's chain. Its own entry point because
+ * a stamp is not a fixed number of floats.
+ *
+ * `samples` is width * height values in [0, 1], ROW-MAJOR with u fastest, and
+ * is COPIED — a caller may free its buffer as soon as this returns.
+ *
+ * The stamp covers a square of side `extent` in the plane through `centre`
+ * whose normal is `direction`; `tangent` orients it in that plane and any
+ * rough "up" will do, since it is re-orthogonalised (one parallel to
+ * `direction` falls back to a derived axis rather than collapsing). `radius`
+ * is where the influence ends: outside it the field is untouched EXACTLY,
+ * which is what makes this a brush rather than a modifier.
+ *
+ * `amplitude` is how far the surface moves OUTWARD at a stamp value of 1, so
+ * white is raised as it is in every sculpting package; a negative amplitude
+ * carves.
+ *
+ * The Lipschitz bound is DERIVED from the samples, not declared: it comes from
+ * the largest difference between adjacent samples over the world distance
+ * between them. A flat stamp therefore costs nothing for having large values,
+ * and a high-frequency one costs step scale honestly — read it back with
+ * clay_document_safe_step_scale.
+ *
+ * Refused, leaving the item unchanged: a null `samples`, a width or height
+ * below 2 (nothing to interpolate), or a non-positive `extent`. */
+clay_result clay_item_add_alpha(clay_item* item, const float* samples, int32_t width,
+                                int32_t height, const float centre[3], const float direction[3],
+                                const float tangent[3], float extent, float radius, float amplitude,
+                                int32_t ease);
 
 /* Appends a CLAY_DEFORM_LATTICE to the item's chain. Its own entry point
  * because a cage is not a fixed number of floats.
