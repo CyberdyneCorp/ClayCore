@@ -2,11 +2,17 @@
 
 ## Why
 
+> **UPDATED after measurement.** The numbers below were taken before
+> `CullIndex` and `CullPlan` existed, and they no longer describe this build.
+> The arithmetic is kept because the *shape* it identifies is still right; the
+> magnitudes are wrong by about 16x and the "over budget before it evaluates a
+> single sample" conclusion no longer holds. See **Where it actually stands**.
+
 A brush dab dirties a flat number of bricks — 22 to 24, measured, whether the
 document holds 100 items or 2400. That was the design's premise and it holds.
 
-Its *time* does not hold. Over that same range a dab goes from 2.6 ms to
-8.8 ms, and the reason is one line:
+Its *time* did not hold. Over that same range a dab went from 2.6 ms to
+8.8 ms, and the reason was one line:
 
 ```cpp
 // bindings/c/clay_c.cpp:5009 — inside clay_brick_cache_eval_requests
@@ -36,6 +42,40 @@ revision, and consecutive bricks in a dab want twenty-four different cull
 regions, so every one of them misses by construction. Fanning the loop out over
 workers buys about 2× — it lowers the constant and leaves the slope exactly
 where it is. The slope is the bug.
+
+## Where it actually stands
+
+`CullIndex` (bounds computed once per document revision) and `CullPlan` (one
+coarse cull of every chain against a batch's union region, serving every brick
+in a dab) landed after this was written. Measured on the same fixture, 8 bricks:
+
+| Items | Culling alone | A whole dab: cull + compile + evaluate |
+|---|---|---|
+| 193 | 0.019 ms | 0.140 ms |
+| 2 400 | 0.178 ms | 0.332 ms |
+| 10 000 | **0.926 ms** | **0.934 ms** |
+
+Against the ~15 ms this proposal predicted for culling at 10 000 items, and
+against a 4.17 ms frame share. **The premise is 16x off and the conclusion is
+wrong**: a dab at 10 000 items fits comfortably inside the budget.
+
+Three things survive the correction, and they are why this is still worth doing
+rather than closing:
+
+- **The slope is exactly as described.** 0.019 -> 0.178 -> 0.926 ms is linear in
+  item count across a 52x range. `CullIndex` lowered the constant by 5.6x and
+  left the shape untouched — which is what this proposal predicted a
+  constant-factor fix would do.
+- **Culling is still 99% of a dab's cost** at 10 000 items (0.926 of 0.934), so
+  it is still the right thing to attack on this path. There is nothing else in
+  the measurement to attack.
+- **It runs out at 100 000.** Linear extrapolation puts culling at ~9 ms, which
+  is over budget. A real ceiling, an order of magnitude further out than the
+  original argument placed it.
+
+So: right direction, no longer urgent, and any implementation should be judged
+against the numbers above rather than the ones this proposal opened with.
+`BM_DeepDocCullPlanned10000` and `BM_DeepDocRefillPlanned10000` commit them.
 
 ## What changes
 

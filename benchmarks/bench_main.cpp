@@ -440,6 +440,12 @@ void BM_DeepDocCullPlanned193(benchmark::State& state) { deep_doc_cull_planned(s
 BENCHMARK(BM_DeepDocCullPlanned193)->Unit(benchmark::kMillisecond);
 void BM_DeepDocCullPlanned2000(benchmark::State& state) { deep_doc_cull_planned(state, 2000); }
 BENCHMARK(BM_DeepDocCullPlanned2000)->Unit(benchmark::kMillisecond);
+// 10 000 items is the size add-item-spatial-index calls over budget "before it
+// evaluates a single sample". Measured rather than extrapolated, because that
+// proposal's arithmetic predates CullIndex and CullPlan and no longer describes
+// this build.
+void BM_DeepDocCullPlanned10000(benchmark::State& state) { deep_doc_cull_planned(state, 10000); }
+BENCHMARK(BM_DeepDocCullPlanned10000)->Unit(benchmark::kMillisecond);
 
 void BM_DeepDocCull193(benchmark::State& state) { deep_doc_cull(state, 193); }
 BENCHMARK(BM_DeepDocCull193)->Unit(benchmark::kMillisecond);
@@ -508,6 +514,10 @@ void BM_DeepDocRefillPlanned193(benchmark::State& state) { deep_doc_refill_plann
 BENCHMARK(BM_DeepDocRefillPlanned193)->Unit(benchmark::kMillisecond);
 void BM_DeepDocRefillPlanned2000(benchmark::State& state) { deep_doc_refill_planned(state, 2000); }
 BENCHMARK(BM_DeepDocRefillPlanned2000)->Unit(benchmark::kMillisecond);
+// A dab's WHOLE cost at 10 000 items — cull, compile and evaluate — which is
+// the number the interactive budget is actually about.
+void BM_DeepDocRefillPlanned10000(benchmark::State& state) { deep_doc_refill_planned(state, 10000); }
+BENCHMARK(BM_DeepDocRefillPlanned10000)->Unit(benchmark::kMillisecond);
 
 void BM_DeepDocRefill193(benchmark::State& state) { deep_doc_refill(state, 193); }
 BENCHMARK(BM_DeepDocRefill193)->Unit(benchmark::kMillisecond);

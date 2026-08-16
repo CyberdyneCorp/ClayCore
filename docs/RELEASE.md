@@ -959,19 +959,37 @@ Tracked honestly rather than assumed done:
   ~16 bricks for a batched refill — are the numbers most likely to move on a
   GPU with a different dispatch cost. Re-measure on the target iPad before
   wiring up the split.
-- **A brush dab's brick COUNT is flat, but its cost is not** (added 0.24.0).
-  The count claim holds as designed and as tested: holding density constant
-  while the document grows from 100 to 2400 items, a dab keeps dirtying 22–24
-  bricks. Its *time* does not stay flat — 2.6 ms to 8.8 ms over that same range,
-  because `clay_brick_cache_eval_requests` compiles a culled tape per brick and
-  that compile walks every node in the document, measured at ~64 ns per item per
-  brick across a 24x range. A dab pays it ~24 times, so at 2400 items culling
-  alone is ~3.6 ms before a sample is evaluated, and the same rate puts a
-  10,000-item sculpt past the 4–8 ms interactive budget on culling alone.
-  Fanning out buys back about a factor of two, which lowers the constant without
-  changing the slope. Removing the slope needs a spatial index over items, built
-  once per edit and shared across the dab's bricks; the tape cache cannot help,
-  because consecutive bricks want different cull regions.
+- **A brush dab's brick count is flat, and its cost is now nearly so**
+  (added 0.24.0, **corrected by measurement**). The count claim holds as
+  designed and as tested: holding density constant while the document grows from
+  100 to 2400 items, a dab keeps dirtying 22–24 bricks.
+
+  Its *time* used to grow with it — 2.6 ms to 8.8 ms over that range — because
+  `clay_brick_cache_eval_requests` compiled a culled tape per brick and each
+  compile walked every node in the document. `CullIndex` (bounds computed once
+  per document revision) and `CullPlan` (one coarse cull against a batch's union
+  region, serving every brick in the dab) removed most of that. Measured on the
+  deep-edit-list fixture, 8 bricks:
+
+  | Items | Culling alone | A whole dab: cull + compile + evaluate |
+  |---|---|---|
+  | 193 | 0.019 ms | 0.140 ms |
+  | 2 400 | 0.178 ms | 0.332 ms |
+  | 10 000 | 0.926 ms | 0.934 ms |
+
+  So the earlier claim that a 10,000-item sculpt is past the 4–8 ms interactive
+  budget **on culling alone** is no longer true, and was wrong by about 16x once
+  the index landed. It is recorded here rather than quietly rewritten, because
+  the estimate was published and someone may have planned around it.
+
+  What survives is the SLOPE: culling is still linear in item count across a 52x
+  range, and it is still 99% of a dab's cost at 10 000 items. Removing it needs a
+  spatial index over items, built once per edit and shared across the dab's
+  bricks; the tape cache cannot help, because consecutive bricks want different
+  cull regions. That is `add-item-spatial-index`, and by this measurement it runs
+  out around 100,000 items rather than 10,000 — still worth doing, no longer
+  urgent. `BM_DeepDocCullPlanned10000` and `BM_DeepDocRefillPlanned10000` gate
+  the numbers above.
 - **pyclay does not reach the brick cache** (added 0.24.0).
   `check_binding_parity.py` prints it as an outstanding follow-up on every run
   rather than filing it as an exemption, because that gate runs one way — pyclay
