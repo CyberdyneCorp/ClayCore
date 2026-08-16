@@ -84,6 +84,7 @@ EXAMPLES = [
     "52_sculpt_layers",
     "53_sdf_alphas",
     "54_masked_operations",
+    "55_mesh_brush_vocabulary",
 ]
 
 

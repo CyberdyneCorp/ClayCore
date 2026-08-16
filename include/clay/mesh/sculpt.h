@@ -34,6 +34,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -73,6 +74,21 @@ enum class MeshBrush : std::uint8_t {
     Scrape = 8,      // flatten cut-only and smooth, from one snapshot
     Polish = 9,      // smooth GATED by dihedral angle: noise goes, edges stay
     Snakehook = 10,  // grab re-anchored along the drag
+    // -- the three the vocabulary was missing ---------------------------------
+    // Slide vertices ALONG the surface to even their spacing, rather than
+    // toward the Laplacian average. Smooth reshapes; this redistributes. It
+    // matters more here than in a tool that can subdivide: topology is fixed,
+    // so a large grab stretches the triangles it has and this is what recovers
+    // them without a round trip through a retopo pass.
+    Relax = 11,
+    // Deposit up to a fixed height above the surface as it was when the STROKE
+    // began, and no further. Every other deposit verb accumulates, so a slow
+    // stroke digs deeper than a fast one over the same path; this one does not.
+    // Needs the stroke's VertexDeltas to know where it started — see `stamp`.
+    Layer = 12,
+    // Push material along the surface in the drag direction. Grab carries the
+    // region rigidly; this slides it.
+    Nudge = 13,
 };
 
 inline constexpr std::uint32_t kNoClass = 0xffffffffu;
@@ -140,9 +156,45 @@ struct MeshBrushSettings {
     // which is not a useful default for a brush called polish.
     float polish_angle = 0.20f;
 
-    // Smooth, Polish and Scrape: passes per stamp. Bounded by
+    // Smooth, Polish, Scrape and Relax: passes per stamp. Bounded by
     // kMaxSmoothIterations.
     int smooth_iterations = 1;
+
+    // Layer only: how far above the stroke's STARTING surface the deposit may
+    // reach, in WORLD units.
+    //
+    // World rather than radius-relative, unlike `strength`, and that is the
+    // point rather than an inconsistency: a ceiling that moved when the brush
+    // resized would not be a ceiling. Negative digs to a floor instead.
+    float layer_height = 0.05f;
+
+    // -- alpha ---------------------------------------------------------------
+    // A caller-supplied scalar stamp scaling this brush's per-vertex weight, so
+    // detail work on a mesh layer is alpha-driven as it already is on voxels
+    // (sculpt_carve_alpha) and on SDF items (Deformer::alpha).
+    //
+    // THE ENGINE DECODES NO IMAGES: `alpha` is `alpha_width * alpha_height`
+    // samples in [0,1], row-major with u fastest, BORROWED for the duration of
+    // the call. Null — the default — leaves every verb exactly as it was.
+    //
+    // Sampled by the kernel's `calpha_sample`, the same function the SDF alpha
+    // uses, so one stamp reads identically on a mesh and on a field rather than
+    // through two bilinear lookups that could drift apart.
+    //
+    // It multiplies the WEIGHT, so it composes with every verb and every
+    // falloff without a line of per-verb code.
+    const float* alpha = nullptr;
+    int alpha_width = 0;
+    int alpha_height = 0;
+    // The square the stamp covers, in the plane through `center` whose normal
+    // is `alpha_direction`; `alpha_tangent` orients it there and any rough "up"
+    // works, since it is re-orthogonalised. Zero extent means the brush's own
+    // diameter, which is what a host stamping under the cursor wants.
+    kernel::cfloat3 alpha_direction = kernel::cf3(0, 0, 0);  // 0 = region normal
+    kernel::cfloat3 alpha_tangent = kernel::cf3(0, 0, 0);    // 0 = derived
+    float alpha_extent = 0.0f;                               // 0 = 2 * radius
+
+    bool has_alpha() const { return alpha != nullptr && alpha_width >= 2 && alpha_height >= 2; }
 };
 
 // Whether a verb measures its falloff along the surface by default. Flatten
@@ -210,6 +262,12 @@ class VertexDeltas {
     // mesh, which is worth a refusal rather than a corrupted buffer.
     bool revert(Mesh& m) const;
     bool apply(Mesh& m) const;
+
+    // Where `v` was when this record started following it, or nullopt if it
+    // has not been touched yet. Exists for `MeshBrush::Layer`, whose ceiling is
+    // measured from the surface as the STROKE found it — the record is already
+    // keeping exactly that, so the verb needs no per-stroke state of its own.
+    std::optional<kernel::cfloat3> origin_of(std::uint32_t v) const;
 
     // Capture `v`'s current position and normal, the FIRST time it is seen.
     // Called by the verbs before they write; public because
@@ -303,7 +361,12 @@ class MeshSculptor {
    private:
     void gather(const MeshBrushSettings& settings, const field::MaskGate& gate);
     std::size_t write(VertexDeltas* record);
+    void gather_stroke_origin(const VertexDeltas& record);
     void recompute_normals(const std::vector<std::uint32_t>& classes, VertexDeltas* record);
+
+    // Layer's per-entry stroke origin, kept as a member so a stroke does not
+    // reallocate it per stamp.
+    std::vector<kernel::cfloat3> origin_;
 
     Mesh& mesh_;
     Adjacency adjacency_;

@@ -97,7 +97,7 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 | Alphas | `sculpt_carve_alpha` (voxel), `Deformer::alpha` (SDF) | ✅ both, scalar stamps |
 | Masking | mask fields, `Node::gate` | ✅ gates any operation on either representation — a boolean included; the gate is a measured DISTANCE, so its cost follows a width you set |
 | Slice / Knife | — | ❌ polygroup splits need two items; no single-solid equivalent |
-| Surface brushes on a MESH (Standard, Move, Inflate, Smooth, Pinch, Flatten, Clay, DamStandard, Trim Dynamic, hPolish, SnakeHook) | `mesh::MeshSculptor`, 11 verbs | ✅ on a mesh LAYER's own triangles, with topology fixed — see below |
+| Surface brushes on a MESH (Standard, Move, Inflate, Smooth, Pinch, Flatten, Clay, DamStandard, Trim Dynamic, hPolish, SnakeHook, Layer, Nudge, Relax) | `mesh::MeshSculptor`, **14 verbs, with alphas** | ✅ on a mesh LAYER's own triangles, with topology fixed — see below |
 | Elastic (Blender), ZProject | — | 🟡 Elastic was filed "does not survive the representation change", which was true for fields and is no longer true on a mesh layer. Undecided rather than rejected; it is the one entry that is new *math* rather than a new composition of the eleven |
 | Dyntopo, LiveClay, multires | — | ❌ deliberate: an SDF sidesteps topology, and dynamic tessellation is not this engine's fight |
 
@@ -106,7 +106,7 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 This is the one line of the comparison that changed direction, so it is worth
 stating rather than leaving to a table cell.
 
-**What ZBrush's ~36 surface brushes and claycore's eleven mesh verbs have in
+**What ZBrush's ~36 surface brushes and claycore's fourteen mesh verbs have in
 common** is that both move vertices on a mesh. **Where they part** is that
 ZBrush's re-tessellate as they go — that is what Dyntopo, LiveClay and multires
 are for, and it is what lets a Move brush draw a lobe out of a sheet
@@ -119,8 +119,25 @@ So the honest position is neither "we have surface brushes now" nor the old
 "❌ out of scope":
 
 - **The verb set is there.** Grab, draw, inflate, smooth, pinch, flatten, clay,
-  crease, scrape, polish and snakehook, with masks, strokes and undo, on a mesh
-  layer's own triangles.
+  crease, scrape, polish, snakehook, **relax, layer and nudge**, with masks,
+  alphas, strokes and undo, on a mesh layer's own triangles.
+
+  Three of those close gaps the eleven left. **Relax** slides vertices along the
+  surface to even their spacing where smooth reshapes it — and it matters more
+  here than in a tool that can subdivide, because topology is fixed, so a large
+  grab stretches the triangles it has and this recovers them without a round
+  trip. Measured, its advantage over smooth is largest on a COARSE mesh (3.1x
+  less surface motion at 22k triangles, 1.7x at 180k), which is exactly where
+  stretching shows. **Layer** deposits to a ceiling instead of accumulating, so
+  a slow stroke and a fast one over the same path agree. **Nudge** pushes
+  material along the surface where grab carries it off.
+
+  And **alphas reach mesh brushes**, which they did not: voxels have had them
+  since 0.24 and SDF items gained them recently, leaving the representation an
+  artist reaches for *after* a retopo pass — when detail is the point — as the
+  one that could not stamp one. The stamp multiplies the brush's weight, so it
+  composes with every verb and falloff at once, and it is sampled by the kernel
+  function the SDF alpha uses, so one stamp reads the same on both.
 - **The topology tier is not, and will not be.** No brush here adds a polygon,
   so detail beyond what the mesh already carries needs a retopo pass — which
   is the pipeline this exists to serve rather than a workaround for it.

@@ -7538,6 +7538,27 @@ clay_result read_mesh_brush(const clay_mesh_brush_desc* src, mesh::MeshBrush* ou
     out->plane_normal = kernel::cf3(d.plane_normal[0], d.plane_normal[1], d.plane_normal[2]);
     out->polish_angle = d.polish_angle;
     out->smooth_iterations = d.smooth_iterations;
+    // Appended fields, all of which read ZERO as today's behaviour, because a
+    // host that declared only the original layout sends them as zero.
+    //
+    // layer_height is the exception worth naming: zero would make LAYER a
+    // silent no-op rather than an error, so it reads as the engine default the
+    // way smooth_iterations does. Every other verb ignores it.
+    if (d.layer_height != 0.0f) out->layer_height = d.layer_height;
+    if (d.alpha) {
+        if (d.alpha_width < 2 || d.alpha_height < 2)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "an alpha needs at least 2x2 samples; there is nothing to interpolate "
+                        "below that");
+        out->alpha = d.alpha;
+        out->alpha_width = d.alpha_width;
+        out->alpha_height = d.alpha_height;
+        out->alpha_direction =
+            kernel::cf3(d.alpha_direction[0], d.alpha_direction[1], d.alpha_direction[2]);
+        out->alpha_tangent =
+            kernel::cf3(d.alpha_tangent[0], d.alpha_tangent[1], d.alpha_tangent[2]);
+        out->alpha_extent = d.alpha_extent;
+    }
     return CLAY_OK;
 }
 
@@ -7582,6 +7603,9 @@ clay_result clay_mesh_brush_defaults(clay_mesh_brush_desc* out_desc) {
     write_f3(out.plane_normal, d.plane_normal);
     out.polish_angle = d.polish_angle;
     out.smooth_iterations = d.smooth_iterations;
+    out.layer_height = d.layer_height;
+    // The alpha stays null in the defaults: a stamp without one is the common
+    // case, and a default pointing at nothing a caller owns would be a trap.
     *out_desc = out;
     return CLAY_OK;
 }
