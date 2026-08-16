@@ -409,6 +409,38 @@ BENCHMARK(BM_SurfaceNets)->Unit(benchmark::kMillisecond);
 // happens to every model a host loads. Per sample it is a BVH signed-distance
 // query with a generalized winding number, which is pure and expensive: the
 // shape #119 calls "per plane/row… nothing; disjoint slices".
+// Meshing a whole document over a lattice — the export path, and #119's
+// "whole-document meshing per slab" with the seam welding it calls the only
+// genuinely fiddly one.
+//
+// The FIELD evaluation already runs on the pool (eval_grid is one of the CPU
+// backend's batch paths); what is serial is the marching-tets pass over the
+// evaluated lattice.
+void BM_MeshTapeWholeDoc(benchmark::State& state) {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node ball;
+    ball.prim = scene::Prim::sphere(0.55f);
+    l.sdf->insert(ball);
+    scene::Node cap;
+    cap.prim = scene::Prim::capsule(cf3(0, 0.2f, 0), cf3(0, 0.9f, 0), 0.18f);
+    cap.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.12f};
+    l.sdf->insert(cap);
+    scene::Node ring;
+    ring.prim = scene::Prim::torus(0.5f, 0.08f);
+    ring.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.06f};
+    l.sdf->insert(ring);
+    const scene::Tape tape = scene::compile_document(doc);
+    const math::Aabb region{cf3(-0.8f, -0.8f, -0.8f), cf3(0.8f, 1.1f, 0.8f)};
+
+    for (auto _ : state) {
+        mesh::Mesh m = mesh::mesh_tape(tape, region, 0.006f, {});
+        benchmark::DoNotOptimize(m.triangle_count());
+        state.counters["tris"] = static_cast<double>(m.triangle_count());
+    }
+}
+BENCHMARK(BM_MeshTapeWholeDoc)->Unit(benchmark::kMillisecond);
+
 void BM_MeshToField(benchmark::State& state) {
     // An icosphere by hand — a real triangle soup rather than a handful of
     // quads, and built here so the benchmark does not depend on the mesher.

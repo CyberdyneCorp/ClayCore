@@ -351,6 +351,75 @@ Mesh mesh_lattice(const std::function<float(int, int, int)>& sample, int cell_mi
     return std::move(b.out);
 }
 
+namespace {
+
+// The same lattice march, split across the pool — for a `sample` that is SAFE
+// TO CALL CONCURRENTLY.
+//
+// Internal, and the public mesh_lattice above stays serial, for the reason
+// FieldVolume::sample_parallel is a separate entry point: `sample` is a
+// caller-supplied function and it may hold state. mesh_tape's is a pure array
+// read of an already-evaluated grid, so it opts in; nothing else has to.
+//
+// THE SEAM WELD IS THE REPLAY, which is what makes this the same answer rather
+// than a nearly-identical one. A slab records its triangles WITHOUT welding;
+// the single Builder then re-emits every recorded edge through `edge_vertex`,
+// which dedups exactly as it deduped the repeated calls the serial march made.
+// Vertices shared across a slab boundary weld because the Builder sees both
+// sides — the same mechanism parallel brick meshing (#111) uses, and the answer
+// to the "vertex dedup across slab seams" #119 calls the fiddly one.
+//
+// Slabs are single Z planes replayed in Z order, and march_cells walks Z
+// outermost, so the Builder sees exactly the call sequence the serial march
+// made. Byte-identical by construction.
+//
+// In WAVES, so the recording is bounded by the wave rather than by the region:
+// a fine mesh is millions of triangles and recording all of them before
+// replaying any would trade time for a memory spike.
+Mesh mesh_lattice_parallel(const std::function<float(int, int, int)>& sample,
+                           const int cell_min[3], const int cell_max[3], kernel::cfloat3 origin,
+                           float spacing) {
+    Builder b(origin, spacing);
+    const int z0 = cell_min[2], z1 = cell_max[2];
+    // Below this the pool's dispatch costs more than the planes are worth.
+    constexpr int kMinParallelPlanes = 8;
+    if (z1 - z0 < kMinParallelPlanes) {
+        march_cells(b, sample, cell_min, cell_max);
+        return std::move(b.out);
+    }
+
+    constexpr int kPlanesPerWave = 64;
+    std::vector<ShellCollector> recorded;
+    std::vector<std::uint32_t> remap;
+    for (int wave = z0; wave < z1; wave += kPlanesPerWave) {
+        const int wave_end = std::min(wave + kPlanesPerWave, z1);
+        const std::size_t n = static_cast<std::size_t>(wave_end - wave);
+        recorded.clear();
+        recorded.resize(n);
+        parallel::for_range(n, 1, [&](std::size_t first, std::size_t last) {
+            for (std::size_t s = first; s < last; ++s) {
+                const int k = wave + static_cast<int>(s);
+                const int cmin[3] = {cell_min[0], cell_min[1], k};
+                const int cmax[3] = {cell_max[0], cell_max[1], k + 1};
+                march_cells(recorded[s], sample, cmin, cmax);
+            }
+        });
+        for (std::size_t s = 0; s < n; ++s) {
+            const ShellCollector& rec = recorded[s];
+            remap.assign(rec.edges.size(), 0);
+            for (std::size_t v = 0; v < rec.edges.size(); ++v) {
+                const ShellEdge& e = rec.edges[v];
+                remap[v] = b.edge_vertex(e.p0, e.f0, e.p1, e.f1);
+            }
+            for (const std::array<std::uint32_t, 3>& tri : rec.tris)
+                b.triangle(remap[tri[0]], remap[tri[1]], remap[tri[2]]);
+        }
+    }
+    return std::move(b.out);
+}
+
+}  // namespace
+
 Mesh mesh_tape(const scene::Tape& tape, const math::Aabb& region, float voxel_size,
                const MeshingOptions& options) {
     if (region.empty() || region.is_infinite()) return {};
@@ -387,7 +456,8 @@ Mesh mesh_tape(const scene::Tape& tape, const math::Aabb& region, float voxel_si
     // CLOSED against the positive out-of-range samples (stays watertight)
     int cmin[3] = {-1, -1, -1};
     int cmax[3] = {nx, ny, nz};
-    Mesh m = mesh_lattice(sample, cmin, cmax, region.min, voxel_size);
+    // Parallel: `sample` above is a pure read of the already-evaluated grid.
+    Mesh m = mesh_lattice_parallel(sample, cmin, cmax, region.min, voxel_size);
     apply_tape_attributes(m, tape, options);
     return m;
 }

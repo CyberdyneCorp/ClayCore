@@ -360,3 +360,83 @@ TEST_CASE("validator catches a hole and non-manifold fins") {
     degen.indices.push_back(1);
     CHECK(mesh::validate(degen).degenerate_triangles == 1);
 }
+
+TEST_CASE("the parallel lattice march welds seams exactly like the serial one") {
+    // #119 calls vertex dedup across slab seams "the only genuinely fiddly
+    // one". The answer is that slabs record WITHOUT welding and one Builder
+    // replays them, so a vertex shared across a slab boundary is deduped by
+    // the same code that deduped the serial march's repeated calls.
+    //
+    // Checked by building the serial mesh through the PUBLIC mesh_lattice over
+    // the same evaluated grid that mesh_tape marches in parallel, and
+    // requiring the two to be identical — vertex for vertex and index for
+    // index, not merely the same triangle count.
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node ball = clay_test::item(scene::Prim::sphere(0.45f), cf3(0, 0, 0));
+    l.sdf->insert(ball);
+    scene::Node cap = clay_test::item(scene::Prim::capsule(cf3(0, 0.1f, 0), cf3(0, 0.6f, 0), 0.16f),
+                                      cf3(0, 0, 0));
+    cap.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.1f};
+    l.sdf->insert(cap);
+    const scene::Tape tape = scene::compile_document(doc);
+    const math::Aabb region{cf3(-0.6f, -0.6f, -0.6f), cf3(0.6f, 0.8f, 0.6f)};
+
+    for (float cell : {0.05f, 0.02f, 0.012f}) {
+        CAPTURE(cell);
+        // The parallel path, through mesh_tape.
+        const mesh::Mesh parallel = mesh::mesh_tape(tape, region, cell, {});
+
+        // The serial reference: evaluate the same grid, march it through the
+        // public (serial) mesh_lattice with the same out-of-range convention.
+        const int nx = static_cast<int>(std::lround((region.max.x - region.min.x) / cell)) + 1;
+        const int ny = static_cast<int>(std::lround((region.max.y - region.min.y) / cell)) + 1;
+        const int nz = static_cast<int>(std::lround((region.max.z - region.min.z) / cell)) + 1;
+        std::vector<float> values(static_cast<std::size_t>(nx) * ny * nz);
+        for (int k = 0; k < nz; ++k)
+            for (int j = 0; j < ny; ++j)
+                for (int i = 0; i < nx; ++i)
+                    values[(static_cast<std::size_t>(k) * ny + j) * nx + i] =
+                        tape.eval(region.min + cf3(static_cast<float>(i) * cell,
+                                                   static_cast<float>(j) * cell,
+                                                   static_cast<float>(k) * cell)).d;
+        auto sample = [&](int i, int j, int k) -> float {
+            if (i < 0 || j < 0 || k < 0 || i >= nx || j >= ny || k >= nz) return std::fabs(cell);
+            return values[(static_cast<std::size_t>(k) * ny + j) * nx + i];
+        };
+        int cmin[3] = {-1, -1, -1};
+        int cmax[3] = {nx, ny, nz};
+        const mesh::Mesh serial = mesh::mesh_lattice(sample, cmin, cmax, region.min, cell);
+
+        REQUIRE(parallel.positions.size() == serial.positions.size());
+        REQUIRE(parallel.indices.size() == serial.indices.size());
+        CHECK(parallel.indices == serial.indices);
+        for (std::size_t v = 0; v < serial.positions.size(); ++v) {
+            CAPTURE(v);
+            REQUIRE(parallel.positions[v].x == serial.positions[v].x);
+            REQUIRE(parallel.positions[v].y == serial.positions[v].y);
+            REQUIRE(parallel.positions[v].z == serial.positions[v].z);
+        }
+        CHECK(serial.triangle_count() > 0);
+    }
+}
+
+TEST_CASE("meshing a document gives the same mesh every time") {
+    // A race in the slab march would show up as an answer that varies.
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    l.sdf->insert(clay_test::item(scene::Prim::sphere(0.5f), cf3(0, 0, 0)));
+    const scene::Tape tape = scene::compile_document(doc);
+    const math::Aabb region{cf3(-0.7f, -0.7f, -0.7f), cf3(0.7f, 0.7f, 0.7f)};
+
+    const mesh::Mesh first = mesh::mesh_tape(tape, region, 0.011f, {});
+    REQUIRE(first.triangle_count() > 0);
+    for (int run = 0; run < 6; ++run) {
+        const mesh::Mesh again = mesh::mesh_tape(tape, region, 0.011f, {});
+        CAPTURE(run);
+        REQUIRE(again.indices == first.indices);
+        REQUIRE(again.positions.size() == first.positions.size());
+        for (std::size_t v = 0; v < first.positions.size(); ++v)
+            REQUIRE(again.positions[v].x == first.positions[v].x);
+    }
+}

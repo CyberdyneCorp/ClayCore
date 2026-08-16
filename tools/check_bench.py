@@ -81,6 +81,15 @@ FLOORS = {
     # so 543 ms here is ~1.6 s there. 5000 leaves room over that and is far
     # under the ~14 s the serial path would take, which is what it catches.
     "BM_MeshToField": {"max_ms": 5000},
+    # Meshing a whole document over a lattice — the export path. 1062 -> 668 ms
+    # (1.59x) with the marching-tets pass on the pool.
+    #
+    # A modest ratio ON PURPOSE, and the ceiling says why rather than implying
+    # the split underperformed: the field evaluation was already parallel
+    # (eval_grid is a CPU batch path) and the WELD is still serial — one
+    # Builder deduping 1.2M triangles' vertices, which is what makes the seams
+    # exact. Amdahl, not a defect. Set from the runner at ~3x.
+    "BM_MeshTapeWholeDoc": {"max_ms": 4000},
     "BM_VoxelMeshSparse64Chunks": {"max_ms": 120},
     # Part 2 of the same issue: two chunks of that 64-chunk grid, meshed
     # through the regional call. It is the bench above divided by 32 — 0.40 ms
