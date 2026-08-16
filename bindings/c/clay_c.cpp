@@ -482,8 +482,8 @@ static_assert(sizeof kProfileParams / sizeof kProfileParams[0] == kernel::cprofi
 
 // -1 marks a kind whose payload is not a flat float array, so the generic
 // clay_item_add_deformer cannot take it and says so by name.
-constexpr int kDeformParams[] = {1, 1, 4, 2, 2, 3, 9, 3, 3, 8, 8, 10, 5, 5, 3, 3, -1, -1};
-static_assert(sizeof kDeformParams / sizeof kDeformParams[0] == kernel::cdeform_lattice + 1);
+constexpr int kDeformParams[] = {1, 1, 4, 2, 2, 3, 9, 3, 3, 8, 8, 10, 5, 5, 3, 3, -1, -1, -1, 9};
+static_assert(sizeof kDeformParams / sizeof kDeformParams[0] == kernel::cdeform_blob + 1);
 
 clay_result check_params(const char* what, const float* params, std::size_t count, int expected) {
     if (count != static_cast<std::size_t>(expected))
@@ -741,6 +741,11 @@ clay_result make_deformer(std::int32_t kind, const float* p, scene::Deformer* ou
         if (!(kernel::cdot2(b - a) > 0.0f))
             return fail(CLAY_ERROR_INVALID_ARGUMENT, "pose_line needs a != b");
         *out = scene::Deformer::pose_line(a, b, kernel::cf3(p[6], p[7], p[8]), p[9]);
+    } else if (kind == CLAY_DEFORM_BLOB) {
+        if (!(p[3] > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "blob needs a radius > 0");
+        *out = scene::Deformer::blob(kernel::cf3(p[0], p[1], p[2]), p[3], p[4], p[5],
+                                     static_cast<int>(p[6]), p[7],
+                                     static_cast<std::uint32_t>(p[8]));
     } else if (kind == CLAY_DEFORM_NOISE) {
         if (!(p[2] >= 1.0f))
             return fail(CLAY_ERROR_INVALID_ARGUMENT, "noise needs at least one octave");

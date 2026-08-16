@@ -274,6 +274,11 @@ enum CDeformType {
     // axis-aligned path above pays nothing. k = blob offset (transform,
     // inverse, then offsets), a/b/c = nx/ny/nz, ext = the box in CAGE space.
     cdeform_lattice_xform = 18,
+    // Blob: noise with finite support — the same fractal the whole-item noise
+    // uses, under the same radial falloff grab and magnify use.
+    // centre(k,a,b) radius(c) ease(5) amplitude(e0) frequency(e1) octaves(e2)
+    // gain(e3) seed(e4)
+    cdeform_blob = 19,
 };
 
 // Apply one deformer record to the local point. No deformer corrects the
@@ -368,6 +373,15 @@ CLAY_FN float ctape_deform_offset(CLAY_FPTR rec, cfloat3 p) {
         if (octaves < 1) octaves = 1;
         if (octaves > 8) octaves = 8;  // past this the octaves are below a cell
         return CLAY_AT(rec, 1) * cnoise_fbm(p * CLAY_AT(rec, 2), octaves, CLAY_AT(rec, 4), CLAY_UINT(CLAY_AT(rec, 6)));
+    }
+    if (type == cdeform_blob) {
+        int octaves = CLAY_INT(CLAY_AT(rec, 8));
+        if (octaves < 1) octaves = 1;
+        if (octaves > 8) octaves = 8;  // past this the octaves are below a cell
+        return cblob_offset(p, cf3(CLAY_AT(rec, 1), CLAY_AT(rec, 2), CLAY_AT(rec, 3)),
+                            CLAY_AT(rec, 4), CLAY_AT(rec, 6), CLAY_AT(rec, 7), octaves,
+                            CLAY_AT(rec, 9), CLAY_UINT(CLAY_AT(rec, 10)),
+                            CLAY_INT(CLAY_AT(rec, 5)));
     }
     if (type != cdeform_displace) return 0.0f;
     float amp = CLAY_AT(rec, 1);

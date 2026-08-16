@@ -170,6 +170,19 @@ Document lattice_cage() {
     return doc;
 }
 
+// Blob: noise under a REGION, which is the pair a backend can get wrong
+// independently — one that applied the fractal and ignored the falloff would
+// pass a noise-only scene and fail this one, and vice versa.
+Document blob_region() {
+    Document doc;
+    Layer& l = doc.add_sdf_layer("blob");
+    Node n = item(Prim::sphere(0.85f), cf3(0, 0, 0), kColorB);
+    n.deformers.push_back(scene::Deformer::blob(cf3(0.8f, 0.2f, 0.1f), 0.55f, 0.16f, 7.0f, 3,
+                                                0.5f, 13u, 3));
+    l.sdf->insert(n);
+    return doc;
+}
+
 Document region_deformer() {
     Document doc;
     Layer& l = doc.add_sdf_layer("region");
@@ -604,6 +617,9 @@ std::vector<FixtureCase> kernel_parity_cases() {
     add_case(&cases, "lattice_cage",
              "a lattice whose cage varies on every axis; offsets live in the blob",
              lattice_cage());
+    add_case(&cases, "blob_region",
+             "blob: fractal noise under a radial falloff, eased",
+             blob_region());
     add_case(&cases, "deformer_region", "grab: a finitely supported pull on part of a sphere",
              region_deformer());
     add_case(&cases, "repetition_finite_grid", "clamped-cell array with neighbour evaluation",

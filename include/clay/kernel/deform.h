@@ -369,6 +369,32 @@ CLAY_FN cfloat3 clattice_xform_point(CLAY_FPTR blob, int nx, int ny, int nz, cfl
     return caffine12(CLAY_OFF(blob, 12), warped);
 }
 
+// BLOB — ZBrush's Blob: an irregular swelling under the brush, rather than the
+// smooth one `draw` gives.
+//
+// It is `noise` with FINITE SUPPORT, and deliberately nothing more. The
+// fractal is the same `cnoise_fbm` the whole-item noise deformer offsets the
+// distance by; what this adds is `cregion_weight`, the same radial falloff
+// `grab`, `pose` and `magnify` use. Outside the radius the weight is zero, so
+// the field is untouched — which is what makes it a brush rather than a
+// modifier, and what lets the influence bound stay tight.
+//
+// A DISTANCE OFFSET, not a point warp, for the same reason noise is one: the
+// irregularity wanted here is the surface moving in and out along its own
+// normal, and offsetting the distance does exactly that. Warping the point
+// would slide material sideways instead.
+//
+// The sign is the artist's: a positive amplitude swells, a negative one eats
+// in, and the noise is signed so both happen within one dab — which is what
+// makes it read as blobby rather than as a uniform bulge.
+CLAY_FN float cblob_offset(cfloat3 p, cfloat3 centre, float radius, float amplitude,
+                           float frequency, int octaves, float gain, cuint seed,
+                           int ease_type) {
+    float w = cregion_weight(p, centre, radius, ease_type);
+    if (w <= 0.0f) return 0.0f;
+    return amplitude * w * cnoise_fbm(p * frequency, octaves, gain, seed);
+}
+
 // Spatial morph weights: the interpreter evaluates both subtrees and mixes
 // distances by w (a bound: lerped fields are not distances).
 CLAY_FN float ctransition_linear_weight(cfloat3 p, cfloat3 a, cfloat3 b, int ease_type) {

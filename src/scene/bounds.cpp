@@ -345,6 +345,13 @@ Aabb deformed_local_bounds(const Aabb& local, const std::vector<Deformer>& defor
                 // the amplitude really is the whole excursion.
                 b = b.dilated(kernel::cabs(d.k));
                 break;
+            case kernel::cdeform_blob:
+                // The same excursion, but the amplitude lives in ext[0] here —
+                // k is the region's centre. Sharing noise's case would have
+                // dilated by a COORDINATE, which is the kind of wrong bound
+                // that shows as culled-away geometry rather than as a crash.
+                b = b.dilated(kernel::cabs(d.ext[0]));
+                break;
             case kernel::cdeform_magnify: {
                 // The inverse map samples at centre + v * scale, so material at
                 // q appears at centre + (q - centre) / scale: MAGNIFYING pushes
@@ -551,6 +558,10 @@ float deformer_lipschitz(const Node& item) {
             }
             info = kernel::cfi_pose_line(info, d.ext[5], extent,
                                          kernel::clength(end - anchor), ease_max_slope(d.ease));
+        } else if (d.type == kernel::cdeform_blob) {
+            // The noise bound plus the region's own gradient — see cfi_blob.
+            info = kernel::cfi_blob(info, d.ext[0], d.ext[1], static_cast<int>(d.ext[2]),
+                                    d.ext[3], d.c, ease_max_slope(d.ease));
         } else if (d.type == kernel::cdeform_noise) {
             info = kernel::cfi_noise(info, d.k, d.a, static_cast<int>(d.b), d.c);
         } else if (d.type == kernel::cdeform_magnify) {

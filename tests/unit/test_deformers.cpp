@@ -1561,3 +1561,121 @@ TEST_CASE("the cage's divisions are clamped where the cost lives") {
     for (const cfloat3& o : d.cage) CHECK(clength(o) == 0.0f);
     CHECK(clength(d.cage_offset(-1, 0, 0)) == 0.0f);
 }
+
+// -- Blob (sdf-kernels, add-blob-brush) --------------------------------------
+//
+// ZBrush's Blob: an irregular swelling under the brush rather than the smooth
+// one `draw` gives. It is `noise` with the finite support `grab` and `magnify`
+// have, and the tests below are mostly about that support — a modifier that
+// reached past its radius would not be a brush.
+
+TEST_CASE("a blob leaves the field untouched past its radius") {
+    // The property that makes it a brush. Checked at the same bar `grab`,
+    // `pose` and `magnify` are held to in examples/03: EXACTLY untouched, not
+    // nearly.
+    const float r = 0.5f;
+    scene::Tape plain = scene::compile_document(one_item(scene::Prim::sphere(0.9f), {}));
+    scene::Tape blobbed = scene::compile_document(one_item(
+        scene::Prim::sphere(0.9f),
+        {Deformer::blob(cf3(0.9f, 0, 0), r, 0.15f, 8.0f, 3, 0.5f, 7u, 3)}));
+
+    clay_test::Lcg rng(1190);
+    int outside = 0, inside_changed = 0;
+    for (int i = 0; i < 2000; ++i) {
+        const cfloat3 p = rng.vec3(-2.5f, 2.5f);
+        const float d = clength(p - cf3(0.9f, 0, 0));
+        if (d > r) {
+            CAPTURE(d);
+            REQUIRE(blobbed.eval(p).d == doctest::Approx(plain.eval(p).d).epsilon(1e-6));
+            ++outside;
+        } else if (std::fabs(blobbed.eval(p).d - plain.eval(p).d) > 1e-6f) {
+            ++inside_changed;
+        }
+    }
+    CHECK(outside > 0);
+    CHECK(inside_changed > 0);  // and it does something inside
+}
+
+TEST_CASE("a blob both swells and eats in, within one dab") {
+    // What makes it read as blobby rather than as a uniform bulge: the noise
+    // is signed, so one region moves the surface both ways.
+    const float r = 0.6f;
+    scene::Tape plain = scene::compile_document(one_item(scene::Prim::sphere(0.8f), {}));
+    scene::Tape blobbed = scene::compile_document(one_item(
+        scene::Prim::sphere(0.8f),
+        {Deformer::blob(cf3(0.8f, 0, 0), r, 0.2f, 9.0f, 4, 0.5f, 3u, 3)}));
+
+    clay_test::Lcg rng(1191);
+    int up = 0, down = 0;
+    for (int i = 0; i < 3000; ++i) {
+        const cfloat3 p = rng.vec3(-1.5f, 1.5f);
+        if (clength(p - cf3(0.8f, 0, 0)) > r * 0.9f) continue;
+        const float delta = blobbed.eval(p).d - plain.eval(p).d;
+        if (delta > 1e-4f) ++up;
+        if (delta < -1e-4f) ++down;
+    }
+    CHECK(up > 0);
+    CHECK(down > 0);
+}
+
+TEST_CASE("a blob is a bound field and steps conservatively") {
+    // The declared factor charges the noise AND the region's own gradient —
+    // a tight radius has a steep weight even where the noise is flat, which
+    // is exactly where a blob is used.
+    scene::Document doc = one_item(scene::Prim::sphere(0.8f),
+                                   {Deformer::blob(cf3(0.8f, 0, 0), 0.4f, 0.18f, 7.0f, 3,
+                                                   0.5f, 11u, 3)});
+    scene::Tape tape = scene::compile_document(doc);
+    CHECK(tape.safe_step_scale() < 1.0f);
+    clay_test::check_conservative_steps([&](cfloat3 p) { return tape.eval(p).d; },
+                                        tape.safe_step_scale(), 3.0f, 400, 1192);
+
+    // A TIGHTER radius costs more step scale at the same amplitude, which is
+    // the region term doing its job — without it the two would tie.
+    auto scale_with = [](float radius) {
+        return scene::compile_document(
+                   one_item(scene::Prim::sphere(0.8f),
+                            {Deformer::blob(cf3(0.8f, 0, 0), radius, 0.18f, 7.0f, 3, 0.5f, 11u,
+                                            3)}))
+            .safe_step_scale();
+    };
+    CHECK(scale_with(0.2f) < scale_with(0.8f));
+}
+
+TEST_CASE("a blob's influence bound grows by its amplitude, not its centre") {
+    // The bug this catches: sharing noise's hull case would dilate by `k`,
+    // which for a blob is the region's centre X rather than the amplitude —
+    // a wrong bound shows up as culled-away geometry, not as a crash.
+    const float amplitude = 0.25f;
+    scene::Document doc = one_item(scene::Prim::sphere(0.5f), {});
+    scene::Node probe = clay_test::item(scene::Prim::sphere(0.5f), cf3(0, 0, 0));
+    probe.deformers = {Deformer::blob(cf3(3.0f, 0, 0), 0.4f, amplitude, 6.0f, 3, 0.5f, 0u, 3)};
+    const math::Aabb bound = scene::item_geometry_bound(probe, doc.layers[0]);
+    const math::Aabb plain = scene::item_geometry_bound(
+        clay_test::item(scene::Prim::sphere(0.5f), cf3(0, 0, 0)), doc.layers[0]);
+
+    // Grown by the amplitude (0.25), NOT by the centre's x (3.0).
+    CHECK(bound.max.x == doctest::Approx(plain.max.x + amplitude).epsilon(1e-4));
+    CHECK(bound.max.x < plain.max.x + 1.0f);
+    CHECK(scene::deformers_break_exactness(probe) == false);  // noise-like, not elongate-like
+}
+
+TEST_CASE("a blob survives the document round trip") {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node n = clay_test::item(scene::Prim::sphere(0.7f), cf3(0, 0, 0));
+    n.deformers.push_back(Deformer::blob(cf3(0.7f, 0.1f, 0), 0.45f, 0.2f, 8.0f, 4, 0.55f, 21u, 3));
+    n.deformers.push_back(Deformer::twist(0.4f));
+    l.sdf->insert(n);
+
+    std::vector<std::uint8_t> bytes = scene::serialize_document(doc);
+    std::optional<scene::Document> back = scene::deserialize_document(bytes.data(), bytes.size());
+    REQUIRE(back.has_value());
+    CHECK(scene::serialize_document(*back) == bytes);
+    clay_test::Lcg rng(1193);
+    scene::Tape a = scene::compile_document(doc), b = scene::compile_document(*back);
+    for (int i = 0; i < 200; ++i) {
+        const cfloat3 p = rng.vec3(-2, 2);
+        CHECK(b.eval(p).d == doctest::Approx(a.eval(p).d).epsilon(1e-5));
+    }
+}

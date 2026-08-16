@@ -411,6 +411,7 @@ struct Deformer {
         if (type == kernel::cdeform_grab || type == kernel::cdeform_pose) return 4;
         if (type == kernel::cdeform_magnify) return 1;
         if (type == kernel::cdeform_noise) return 1;
+        if (type == kernel::cdeform_blob) return 5;
         // The box, which is what the record has room for beside the handle.
         if (type == kernel::cdeform_lattice || type == kernel::cdeform_lattice_xform)
             return 6;
@@ -588,6 +589,31 @@ struct Deformer {
     // mean when they ask.
     static bool is_lattice(std::uint8_t type) {
         return type == kernel::cdeform_lattice || type == kernel::cdeform_lattice_xform;
+    }
+
+    // ZBrush's Blob: an irregular swelling under the brush rather than the
+    // smooth one `draw` gives. `noise` with the finite support `grab` and
+    // `magnify` have — outside the radius the field is untouched, which is
+    // what makes it a brush rather than a modifier.
+    //
+    // The amplitude is signed and so is the noise, so one dab both swells and
+    // eats in — which is what reads as blobby rather than as a uniform bulge.
+    static Deformer blob(kernel::cfloat3 centre, float radius, float amplitude,
+                         float frequency = 6.0f, int octaves = 3, float gain = 0.5f,
+                         std::uint32_t seed = 0, std::uint8_t ease = 0) {
+        Deformer d;
+        d.type = kernel::cdeform_blob;
+        d.k = centre.x;
+        d.a = centre.y;
+        d.b = centre.z;
+        d.c = radius;
+        d.ext[0] = amplitude;
+        d.ext[1] = frequency;
+        d.ext[2] = static_cast<float>(octaves);
+        d.ext[3] = gain;
+        d.ext[4] = static_cast<float>(seed);
+        d.ease = ease;
+        return d;
     }
 
     static Deformer bend_radial(float r0, float r1, float dz, std::uint8_t ease = 0) {

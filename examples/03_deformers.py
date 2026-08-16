@@ -71,6 +71,12 @@ CASES = [
     # The region deformers are the only ones with finite support: outside the
     # radius the field is untouched, which is what makes them behave like a
     # sculpting brush rather than a whole-item modifier.
+    # blob is ZBrush's: noise with the SAME finite support grab and magnify
+    # have, so it is a brush rather than a modifier. One dab both swells and
+    # eats in, because the amplitude is signed and so is the noise.
+    ("blob", lambda: clay.Sphere(r=0.8).blob(
+        center=(0.55, 0.45, 0.35), radius=0.75, amplitude=0.11, frequency=9.0,
+        octaves=4, seed=5, ease=3)),
     ("grab", lambda: clay.Sphere(r=0.8).grab(
         center=(0.8, 0, 0), radius=0.7, displacement=(0.5, 0.25, 0), ease=3)),
     # pose_line ramps the rotation along a segment, which is how a limb tapers
@@ -204,13 +210,16 @@ def main():
                             center=(0.8, 0, 0), radius=0.7,
                             axis=(0, 0, 1), angle=1.0, ease=2)),
                        ("magnify", lambda: clay.Sphere(r=0.8).magnify(
-                            center=(0.8, 0, 0), radius=0.7, strength=0.5, ease=2))):
+                            center=(0.8, 0, 0), radius=0.7, strength=0.5, ease=2)),
+                       ("blob", lambda: clay.Sphere(r=0.8).blob(
+                            center=(0.8, 0, 0), radius=0.7, amplitude=0.15,
+                            frequency=9.0, octaves=4, seed=5, ease=2))):
         d = clay.Document(); d.add_sdf_layer("l").add(make())
         p = clay.Document(); p.add_sdf_layer("l").add(clay.Sphere(r=0.8))
         outside = float(np.abs(d.eval(far) - p.eval(far)).max())
         if outside > 1e-5:
             raise SystemExit(f"{name} reached {outside:.2e} outside its radius — support is not finite")
-    print("  grab, pose and magnify leave the field untouched past their radius")
+    print("  grab, pose, magnify and blob leave the field untouched past their radius")
 
     # Coverage: a deformer with no case here is a gap in the gallery. Read
     # from this file's own source, so a case added to CASES counts and a method
