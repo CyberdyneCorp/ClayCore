@@ -320,12 +320,19 @@ scene::Document pole_dense_sphere(int nodes) {
 // fixture is 193 nodes; this is an order of magnitude past it, which is where
 // the epic says the per-brick cull's O(items) walk stops being affordable.
 //
-// Three benchmarks because the cost splits three ways and only one of them is
-// what `add-item-spatial-index` would fix:
+// TWO SETS, because the first version of this measured the wrong path and
+// concluded the wrong thing. `clay_brick_cache_eval_requests` builds one
+// CullIndex per revision and one CullPlan per batch, then compiles each brick
+// against the plan's survivor lists — so a bare `compile_document(doc, &cull)`
+// is NOT what a host pays. It is 5.5x slower.
 //
-//   compile — building one culled tape, which walks every item's bounds
-//   cull    — the per-brick region test alone, over a dab's worth of bricks
-//   refill  — compile + evaluate, which is what an edit actually pays
+//   *Planned  — index + plan, as the C ABI does it. THIS is the cost of a dab.
+//   the rest  — the unaccelerated compile, kept as the contrast that shows
+//               what CullIndex is already worth
+//
+// Both are kept rather than the wrong one deleted, because the pair is the
+// evidence for what the index buys and for what it does not: a 5.5x constant,
+// and a slope that is still linear in item count.
 //
 // A sculpt, not a cloud: dabs are placed ON the surface of a base sphere the
 // way a stroke leaves them, so the culled tapes are realistically dense rather
@@ -399,6 +406,41 @@ void deep_doc_cull(benchmark::State& state, int nodes) {
     state.counters["nodes"] = static_cast<double>(nodes);
     state.counters["bricks"] = static_cast<double>(dab.size());
 }
+// The SAME cull, through the CullIndex and CullPlan the C ABI actually uses.
+//
+// The pair above measures compile_document with a bare CullRegion, which is
+// NOT what a host pays: clay_brick_cache_eval_requests builds one index per
+// revision and one plan per batch, then compiles each brick against the
+// plan's survivor lists. Measuring the unaccelerated path and calling it the
+// cost of a dab overstates it — this is the correction.
+void deep_doc_cull_planned(benchmark::State& state, int nodes) {
+    scene::Document doc = deep_sphere(nodes);
+    brick::BrickCache cache = filled_cache(doc);
+    std::vector<brick::BrickKey> all = cache.surface_bricks();
+    std::vector<brick::BrickKey> dab(all.begin(),
+                                     all.begin() + std::min<std::size_t>(8, all.size()));
+    for (auto _ : state) {
+        // Per revision, as the document handle owns it.
+        const scene::CullIndex index(doc);
+        // Per batch: ONE region containing every brick's, which is what the
+        // plan requires and what the C ABI builds.
+        math::Aabb batch_region;
+        for (const brick::BrickKey& key : dab) batch_region.expand(cache.cull_region(key));
+        const scene::CullPlan plan = index.plan(batch_region);
+        for (const brick::BrickKey& key : dab) {
+            scene::CullRegion cull{cache.cull_region(key)};
+            scene::Tape tape = scene::compile_document(doc, &cull, &index, &plan);
+            benchmark::DoNotOptimize(tape.instrs.size());
+        }
+    }
+    state.counters["nodes"] = static_cast<double>(nodes);
+    state.counters["bricks"] = static_cast<double>(dab.size());
+}
+void BM_DeepDocCullPlanned193(benchmark::State& state) { deep_doc_cull_planned(state, 193); }
+BENCHMARK(BM_DeepDocCullPlanned193)->Unit(benchmark::kMillisecond);
+void BM_DeepDocCullPlanned2000(benchmark::State& state) { deep_doc_cull_planned(state, 2000); }
+BENCHMARK(BM_DeepDocCullPlanned2000)->Unit(benchmark::kMillisecond);
+
 void BM_DeepDocCull193(benchmark::State& state) { deep_doc_cull(state, 193); }
 BENCHMARK(BM_DeepDocCull193)->Unit(benchmark::kMillisecond);
 void BM_DeepDocCull2000(benchmark::State& state) { deep_doc_cull(state, 2000); }
@@ -434,6 +476,39 @@ void deep_doc_refill(benchmark::State& state, int nodes) {
     state.counters["bricks"] = static_cast<double>(reqs.size());
     state.counters["nodes"] = static_cast<double>(nodes);
 }
+// A refill through the index and plan — what a dab actually costs a host.
+void deep_doc_refill_planned(benchmark::State& state, int nodes) {
+    scene::Document doc = deep_sphere(nodes);
+    brick::BrickCache cache = filled_cache(doc);
+    brick::BrickCache probe(brick::BrickConfig{8, 0.05f, 3, 0});
+    probe.mark_dirty(scene::layer_influence_bound(doc.layers[0]));
+    std::vector<brick::BrickRequest> all_reqs = probe.take_dirty();
+    std::vector<brick::BrickRequest> reqs(
+        all_reqs.begin(), all_reqs.begin() + std::min<std::size_t>(8, all_reqs.size()));
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+
+    for (auto _ : state) {
+        const scene::CullIndex index(doc);
+        math::Aabb batch_region;
+        for (const brick::BrickRequest& req : reqs) batch_region.expand(cache.cull_region(req.key));
+        const scene::CullPlan plan = index.plan(batch_region);
+        for (const brick::BrickRequest& req : reqs) {
+            scene::CullRegion cull{cache.cull_region(req.key)};
+            scene::Tape tape = scene::compile_document(doc, &cull, &index, &plan);
+            std::vector<float> values(static_cast<std::size_t>(req.grid.nx) * req.grid.ny *
+                                      req.grid.nz);
+            cpu->eval_grid(tape, req.grid, values.data());
+            benchmark::DoNotOptimize(values[0]);
+        }
+    }
+    state.counters["nodes"] = static_cast<double>(nodes);
+    state.counters["bricks"] = static_cast<double>(reqs.size());
+}
+void BM_DeepDocRefillPlanned193(benchmark::State& state) { deep_doc_refill_planned(state, 193); }
+BENCHMARK(BM_DeepDocRefillPlanned193)->Unit(benchmark::kMillisecond);
+void BM_DeepDocRefillPlanned2000(benchmark::State& state) { deep_doc_refill_planned(state, 2000); }
+BENCHMARK(BM_DeepDocRefillPlanned2000)->Unit(benchmark::kMillisecond);
+
 void BM_DeepDocRefill193(benchmark::State& state) { deep_doc_refill(state, 193); }
 BENCHMARK(BM_DeepDocRefill193)->Unit(benchmark::kMillisecond);
 void BM_DeepDocRefill2000(benchmark::State& state) { deep_doc_refill(state, 2000); }

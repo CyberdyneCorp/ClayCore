@@ -91,14 +91,22 @@ FLOORS = {
     # exact. Amdahl, not a defect. Set from the runner at ~3x.
     "BM_MeshTapeWholeDoc": {"max_ms": 4000},
     # The deep edit list (#118 workstream C): 8 bricks refilled against a
-    # 2,000-item document — compile the culled tape and evaluate it, which is
-    # what one dab pays.
+    # 2,000-item document.
     #
-    # 1.28 ms here, of which 0.914 is the CULL: the per-brick region test walks
-    # every item, so it scales linearly (0.095 ms at 193 nodes, 0.914 at 2000)
-    # and costs 2.5x what evaluating the 83 surviving instructions costs. That
-    # is the measurement add-item-spatial-index exists to change, and this
-    # ceiling is here so the number cannot drift before it does.
+    # The gated one is the PLANNED path, because that is what a host pays:
+    # clay_brick_cache_eval_requests builds a CullIndex per revision and a
+    # CullPlan per batch. 0.321 ms, of which 0.164 is the cull.
+    #
+    # The unplanned one is gated too, as the contrast: 1.30 ms for the same
+    # work without the index. The first version of this benchmark measured only
+    # that and reported it as the cost of a dab, which overstated it 4x.
+    #
+    # What survives the correction is the SLOPE: the cull is linear in item
+    # count on both paths (0.019 -> 0.164 ms planned, over 10x the items), so
+    # the index lowered the constant and left the shape. That is what
+    # add-item-spatial-index is for, and at 2000 items it is not yet urgent —
+    # ~0.8 ms of culling extrapolated to 10k, against a 4.17 ms frame share.
+    "BM_DeepDocRefillPlanned2000": {"max_ms": 4},
     "BM_DeepDocRefill2000": {"max_ms": 12},
     "BM_VoxelMeshSparse64Chunks": {"max_ms": 120},
     # Part 2 of the same issue: two chunks of that 64-chunk grid, meshed
