@@ -90,6 +90,16 @@ FLOORS = {
     # Builder deduping 1.2M triangles' vertices, which is what makes the seams
     # exact. Amdahl, not a defect. Set from the runner at ~3x.
     "BM_MeshTapeWholeDoc": {"max_ms": 4000},
+    # The deep edit list (#118 workstream C): 8 bricks refilled against a
+    # 2,000-item document — compile the culled tape and evaluate it, which is
+    # what one dab pays.
+    #
+    # 1.28 ms here, of which 0.914 is the CULL: the per-brick region test walks
+    # every item, so it scales linearly (0.095 ms at 193 nodes, 0.914 at 2000)
+    # and costs 2.5x what evaluating the 83 surviving instructions costs. That
+    # is the measurement add-item-spatial-index exists to change, and this
+    # ceiling is here so the number cannot drift before it does.
+    "BM_DeepDocRefill2000": {"max_ms": 12},
     "BM_VoxelMeshSparse64Chunks": {"max_ms": 120},
     # Part 2 of the same issue: two chunks of that 64-chunk grid, meshed
     # through the regional call. It is the bench above divided by 32 — 0.40 ms
