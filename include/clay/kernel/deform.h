@@ -388,7 +388,7 @@ CLAY_FN cfloat3 clattice_xform_point(CLAY_FPTR blob, int nx, int ny, int nz, cfl
 // in, and the noise is signed so both happen within one dab — which is what
 // makes it read as blobby rather than as a uniform bulge.
 CLAY_FN float cblob_offset(cfloat3 p, cfloat3 centre, float radius, float amplitude,
-                           float frequency, int octaves, float gain, unsigned int seed,
+                           float frequency, int octaves, float gain, cuint seed,
                            int ease_type) {
     float w = cregion_weight(p, centre, radius, ease_type);
     if (w <= 0.0f) return 0.0f;
