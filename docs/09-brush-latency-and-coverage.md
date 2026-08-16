@@ -73,7 +73,7 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 | Flatten | Flatten | `field::flatten` (two-sided) | s | `sdf_flatten` | 6.05 | operation |
 | Flatten | Flatten | `sculpt_flatten` | v | `voxel_flatten` | 0.0097 | interactive |
 | hPolish, Planar, Trim | Scrape / Planar | `field::flatten` cut-only | s | `volume_hpolish` | 111.4 | operation |
-| The surface brushes, on a mesh LAYER (Standard, Move, Inflate, Smooth, Pinch, Flatten, Clay, DamStandard, Trim Dynamic, hPolish, SnakeHook) | — | `mesh::MeshSculptor`, 11 verbs | m | *(unmeasured — see Named gaps)* | — | — |
+| The surface brushes, on a mesh LAYER (Standard, Move, Inflate, Smooth, Pinch, Flatten, Clay, DamStandard, Trim Dynamic, hPolish, SnakeHook, Layer, Nudge, Relax) | — | `mesh::MeshSculptor`, 14 verbs, with alphas | m | *(unmeasured — see Named gaps)* | — | — |
 | — | Scrape | `sculpt_scrape` | v | `voxel_scrape` | 0.0118 | interactive |
 | Pinch | Pinch | `magnify` (negative), `sculpt_pinch` | s v | `voxel_pinch` | 0.0091 | interactive |
 | Magnify | Inflate (local) | `magnify` (positive), `sculpt_magnify` | s v | `voxel_magnify` | 0.0088 | interactive |

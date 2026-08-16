@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "clay/kernel/deform.h"  // calpha_sample, calpha_frame
+
 namespace clay {
 namespace mesh {
 namespace {
@@ -36,6 +38,27 @@ kernel::cfloat3 safe_normalize(kernel::cfloat3 v, kernel::cfloat3 fallback) {
 
 // The part of `v` that lies in the surface: what makes a pinch gather ALONG
 // the surface instead of sinking the region into it.
+// The stamp's frame for an alpha, derived once per gather. `calpha_frame` is
+// the kernel's, so a mesh stamp and an SDF one orient the same samples the same
+// way rather than through two constructions that could drift.
+struct AlphaFrame {
+    kernel::cfloat3 centre = kernel::cf3(0, 0, 0);
+    kernel::cfloat3 tangent = kernel::cf3(1, 0, 0);
+    kernel::cfloat3 binormal = kernel::cf3(0, 1, 0);
+    float extent = 1.0f;
+};
+
+// The alpha's value at a world point, or 1 where there is no alpha — so the
+// caller multiplies unconditionally and an absent stamp is exactly today's
+// weight rather than a branch per vertex.
+float alpha_at(const MeshBrushSettings& settings, const AlphaFrame& f, kernel::cfloat3 p) {
+    if (!settings.has_alpha()) return 1.0f;
+    const kernel::cfloat3 rel = p - f.centre;
+    const float u = kernel::cdot(rel, f.tangent) / f.extent + 0.5f;
+    const float v = kernel::cdot(rel, f.binormal) / f.extent + 0.5f;
+    return kernel::calpha_sample(settings.alpha, settings.alpha_width, settings.alpha_height, u, v);
+}
+
 kernel::cfloat3 tangential(kernel::cfloat3 v, kernel::cfloat3 n) {
     return v - n * kernel::cdot(v, n);
 }
@@ -205,6 +228,12 @@ void VertexDeltas::clear() {
     normals_ = false;
 }
 
+std::optional<kernel::cfloat3> VertexDeltas::origin_of(std::uint32_t v) const {
+    const auto it = slot_.find(v);
+    if (it == slot_.end()) return std::nullopt;
+    return before_position_[it->second];
+}
+
 void VertexDeltas::note(std::uint32_t v, const Mesh& m) {
     if (slot_.find(v) != slot_.end()) return;
     const bool has_normals = m.normals.size() == m.positions.size();
@@ -300,6 +329,27 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
     r.positions.resize(r.classes.size());
     r.normals.resize(r.classes.size());
 
+    // The alpha's frame, once for the whole stamp rather than per vertex. Its
+    // direction defaults to the brush's own averaged normal — which is not yet
+    // computed here, so an unset direction uses the mesh normal nearest the
+    // centre. Good enough, and cheaper than a second pass: the stamp is a disc
+    // on a surface, and its normal barely varies across one brush radius.
+    AlphaFrame alpha_frame;
+    if (settings.has_alpha()) {
+        alpha_frame.centre = settings.center;
+        alpha_frame.extent =
+            settings.alpha_extent > 0.0f ? settings.alpha_extent : 2.0f * settings.radius;
+        kernel::cfloat3 dir = settings.alpha_direction;
+        if (kernel::clength(dir) < 1e-9f) {
+            const std::uint32_t near = nearest_class(settings.center);
+            dir = near != kNoClass ? class_normal(mesh_, adjacency_, near) : kernel::cf3(0, 1, 0);
+        }
+        kernel::cfloat3 n, t, b;
+        kernel::calpha_frame(dir, settings.alpha_tangent, &n, &t, &b);
+        alpha_frame.tangent = t;
+        alpha_frame.binormal = b;
+    }
+
     // Weigh, snapshot, and drop what the falloff or the mask reduced to
     // nothing — compacting in place so the region is exactly what moves.
     std::size_t kept = 0;
@@ -337,6 +387,10 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
             }
         }
         if (gate) w *= 1.0f - std::clamp(gate(p), 0.0f, 1.0f);
+        // The alpha multiplies the WEIGHT, which is why it needs no per-verb
+        // code: every verb already scales by this, and every falloff already
+        // shaped it.
+        w *= alpha_at(settings, alpha_frame, p);
         if (w <= 0.0f) continue;
         r.classes[kept] = c;
         r.weights[kept] = w;
@@ -513,6 +567,76 @@ void polish_gate(const StampContext& ctx, std::vector<float>* gate, std::vector<
 // plane as well — from the SAME snapshot, which is the rule sculpt_scrape
 // already states for voxels: calling flatten and then smooth in sequence is not
 // this.
+// NUDGE — grab's tangential sibling. Grab carries the region rigidly, so a
+// drag across a surface lifts material off it; this slides material ALONG the
+// surface instead, which is what an artist means by nudging a feature sideways.
+//
+// Per-vertex tangent planes rather than the region's average normal: on a
+// curved region an averaged plane pushes the rim off the surface, which is the
+// artifact the verb exists to avoid.
+void verb_nudge(const StampContext& ctx, std::vector<kernel::cfloat3>* d) {
+    const BrushRegion& r = ctx.region;
+    for (std::size_t i = 0; i < r.size(); ++i)
+        (*d)[i] = tangential(ctx.settings.direction, r.normals[i]) * r.weights[i];
+}
+
+// RELAX — even the vertex spacing without reshaping the surface.
+//
+// Smooth moves toward the Laplacian average, which is INWARD on a convex region
+// — that is why smoothing shrinks. Relax takes the same target and removes its
+// normal component, so a vertex slides across the surface toward the centroid
+// of its neighbours and the shape stays.
+//
+// It is not exactly shape-preserving, and this is the one verb where that is
+// worth saying in the code rather than only in the docs: sliding along a
+// TANGENT PLANE leaves a curved surface by a second-order amount, so a relax
+// pass on a sphere shrinks it slightly. Re-projecting onto the pre-stamp
+// surface would fix that and turns a cheap verb into a closest-point query per
+// vertex; the drift is measured in examples/56 and is far below what smooth
+// moves at the same strength.
+//
+// It matters more here than in a tool that can subdivide. Topology is fixed by
+// contract, so a large grab stretches the triangles it has; this is what
+// recovers them without a round trip through a retopo pass.
+void verb_relax(const StampContext& ctx, const std::vector<kernel::cfloat3>& smoothed,
+                std::vector<kernel::cfloat3>* d) {
+    const BrushRegion& r = ctx.region;
+    const float s = std::clamp(ctx.settings.strength, 0.0f, 1.0f);
+    for (std::size_t i = 0; i < r.size(); ++i)
+        (*d)[i] = tangential(smoothed[i] - r.positions[i], r.normals[i]) * (r.weights[i] * s);
+}
+
+// LAYER — deposit to a CEILING rather than accumulating.
+//
+// Every other deposit verb adds to wherever the surface now is, so a slow
+// stroke digs deeper than a fast one over the same path. This one measures
+// against where the surface was when the STROKE began and stops at
+// `layer_height` above it, so the same path gives the same result at any speed.
+//
+// `origin` is that starting surface, per region entry: the stroke's own
+// VertexDeltas already records each vertex's position the first time the stroke
+// touches it, so the reference is a record the caller is already keeping rather
+// than new per-stroke state.
+void verb_layer(const StampContext& ctx, const std::vector<kernel::cfloat3>& origin,
+                std::vector<kernel::cfloat3>* d) {
+    const BrushRegion& r = ctx.region;
+    const kernel::cfloat3 dir = ctx.deposit_direction();
+    const float ceiling = ctx.settings.layer_height;
+    for (std::size_t i = 0; i < r.size(); ++i) {
+        // How far this vertex has already travelled along the deposit
+        // direction since the stroke began.
+        const float travelled = kernel::cdot(r.positions[i] - origin[i], dir);
+        // What is left of this vertex's share of the ceiling. The weight scales
+        // the CEILING, not the step, so the falloff shapes the layer's profile
+        // and repeated stamps converge on it instead of past it.
+        const float remaining = ceiling * r.weights[i] - travelled;
+        // Signed: a negative height digs to a floor, and the clamp has to run
+        // the other way for it.
+        const float step = ceiling >= 0.0f ? std::max(remaining, 0.0f) : std::min(remaining, 0.0f);
+        (*d)[i] = dir * (step * std::clamp(ctx.settings.strength, 0.0f, 1.0f));
+    }
+}
+
 void verb_smooth_family(MeshBrush verb, const StampContext& ctx,
                         std::vector<kernel::cfloat3>* smoothed,
                         std::vector<kernel::cfloat3>* scratch, std::vector<float>* gate,
@@ -585,8 +709,42 @@ std::size_t MeshSculptor::stamp(MeshBrush verb, const MeshBrushSettings& setting
             verb_smooth_family(verb, ctx, &smoothed_, &smooth_tmp_, &gate_, &gate_tmp_,
                                &displacement_);
             break;
+        case MeshBrush::Nudge:
+            verb_nudge(ctx, &displacement_);
+            break;
+        case MeshBrush::Relax:
+            // The same Laplacian target smooth uses, with its normal component
+            // removed by the verb — so the two cannot disagree about what the
+            // neighbourhood average is.
+            smooth_targets(ctx, settings.smooth_iterations, &smoothed_, &smooth_tmp_);
+            verb_relax(ctx, smoothed_, &displacement_);
+            break;
+        case MeshBrush::Layer:
+            // Without a record there is no stroke to measure from, and every
+            // stamp would clamp against the CURRENT surface — which is draw
+            // wearing layer's name. A verb that silently becomes a different
+            // verb is worse than one that refuses.
+            if (!record) return 0;
+            gather_stroke_origin(*record);
+            verb_layer(ctx, origin_, &displacement_);
+            break;
     }
     return write(record);
+}
+
+// The stroke's starting surface, per region entry — what LAYER measures its
+// ceiling from. The record already keeps each vertex's position from the first
+// time the stroke touched it, so this reads a reference the caller is keeping
+// rather than inventing per-stroke state.
+void MeshSculptor::gather_stroke_origin(const VertexDeltas& record) {
+    origin_.resize(region_.size());
+    for (std::size_t i = 0; i < region_.size(); ++i) {
+        std::size_t members = 0;
+        const std::uint32_t v = adjacency_.members(region_.classes[i], &members)[0];
+        const std::optional<kernel::cfloat3> seen = record.origin_of(v);
+        // Not yet touched by this stroke: it starts here.
+        origin_[i] = seen ? *seen : region_.positions[i];
+    }
 }
 
 std::size_t MeshSculptor::write(VertexDeltas* record) {

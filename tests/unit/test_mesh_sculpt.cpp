@@ -862,3 +862,373 @@ TEST_CASE("sculpting a mesh layer does not change what the document evaluates to
         for (float y = -1.0f; y <= 1.0f; y += 0.25f)
             CHECK(before.eval(cf3(x, y, 0.1f)).d == after.eval(cf3(x, y, 0.1f)).d);
 }
+
+// -- the verbs the vocabulary was missing --------------------------------------
+// Relax, Layer and Nudge, plus alphas on every verb at once
+// (close-mesh-brush-vocabulary).
+
+namespace {
+
+// A dome, because CURVATURE is what separates relax from smooth. On a flat
+// plane the Laplacian displacement is already tangential, so removing its
+// normal component changes nothing and the two verbs are identical — a fixture
+// that would pass the test while proving none of it.
+Mesh dome_grid(int n, float half) {
+    Mesh m;
+    const float step = 2.0f * half / static_cast<float>(n);
+    for (int z = 0; z <= n; ++z)
+        for (int x = 0; x <= n; ++x) {
+            const float px = -half + step * static_cast<float>(x);
+            const float pz = -half + step * static_cast<float>(z);
+            m.positions.push_back(cf3(px, 0.6f * std::exp(-(px * px + pz * pz) * 1.5f), pz));
+            m.normals.push_back(cf3(0, 1, 0));
+        }
+    const std::uint32_t stride = static_cast<std::uint32_t>(n + 1);
+    for (int z = 0; z < n; ++z)
+        for (int x = 0; x < n; ++x) {
+            const std::uint32_t a =
+                static_cast<std::uint32_t>(z) * stride + static_cast<std::uint32_t>(x);
+            const std::uint32_t b = a + 1, c = a + stride, d = c + 1;
+            for (std::uint32_t i : {a, c, b, b, c, d}) m.indices.push_back(i);
+        }
+    return m;
+}
+
+// The dome's analytic normal, so "how far did it move along the surface normal"
+// is measured against the shape rather than against the mesh's own stored
+// normals, which the verbs are busy changing.
+cfloat3 dome_normal(cfloat3 p) {
+    const float e = 0.6f * std::exp(-(p.x * p.x + p.z * p.z) * 1.5f);
+    return cnormalize(cf3(3.0f * p.x * e, 1.0f, 3.0f * p.z * e));
+}
+
+// Mean motion split into "along the surface normal" and "across the surface".
+void split_motion(const Mesh& before, const Mesh& after, cfloat3 c, float rad, float* along,
+                  float* across) {
+    double an = 0, tg = 0;
+    int k = 0;
+    for (std::size_t i = 0; i < before.positions.size(); ++i) {
+        if (clength(before.positions[i] - c) > rad) continue;
+        const cfloat3 d = after.positions[i] - before.positions[i];
+        const cfloat3 n = dome_normal(before.positions[i]);
+        const float along_n = cdot(d, n);
+        an += std::fabs(along_n);
+        tg += clength(d - n * along_n);
+        ++k;
+    }
+    *along = k ? static_cast<float>(an / k) : 0.0f;
+    *across = k ? static_cast<float>(tg / k) : 0.0f;
+}
+
+// Coefficient of variation of edge length in the region — how uneven the
+// triangulation is, which is what relax exists to lower.
+float edge_variation(const Mesh& m, cfloat3 c, float rad) {
+    std::vector<float> len;
+    for (std::size_t i = 0; i + 2 < m.indices.size(); i += 3)
+        for (int e = 0; e < 3; ++e) {
+            const cfloat3 a = m.positions[m.indices[i + e]];
+            const cfloat3 b = m.positions[m.indices[i + (e + 1) % 3]];
+            if (clength((a + b) * 0.5f - c) > rad) continue;
+            len.push_back(clength(a - b));
+        }
+    if (len.size() < 2) return 0.0f;
+    float mean = 0.0f;
+    for (float v : len) mean += v;
+    mean /= static_cast<float>(len.size());
+    float var = 0.0f;
+    for (float v : len) var += (v - mean) * (v - mean);
+    return std::sqrt(var / static_cast<float>(len.size())) / mean;
+}
+
+// A dome stretched sideways by a big grab — the state relax exists to recover,
+// and the one topology-fixed sculpting actually produces.
+Mesh stretched_dome(cfloat3 centre) {
+    Mesh m = dome_grid(48, 1.0f);
+    MeshSculptor sc(m);
+    MeshBrushSettings s;
+    s.center = centre;
+    s.radius = 0.7f;
+    s.direction = cf3(0.25f, 0, 0);
+    sc.stamp(MeshBrush::Grab, s, {}, nullptr);
+    return m;
+}
+
+}  // namespace
+
+TEST_CASE("relax evens the triangulation while barely moving the surface") {
+    // The distinction from smooth, which is the whole reason it is a separate
+    // verb: smooth moves toward the Laplacian average, which is INWARD on a
+    // convex region — that is why smoothing shrinks. Relax takes the same
+    // target and keeps only its tangential part.
+    const cfloat3 centre = cf3(0, 0.6f, 0);  // the dome's apex
+    const Mesh stretched = stretched_dome(centre);
+    const float before = edge_variation(stretched, centre, 0.45f);
+    REQUIRE(before > 0.1f);  // the grab really did stretch it
+
+    auto run = [&](MeshBrush verb) {
+        Mesh m = stretched;
+        MeshSculptor sc(m);
+        MeshBrushSettings s;
+        s.center = centre;
+        s.radius = 0.5f;
+        s.strength = 1.0f;
+        s.smooth_iterations = 2;
+        for (int i = 0; i < 8; ++i) sc.stamp(verb, s, {}, nullptr);
+        return m;
+    };
+    const Mesh relaxed = run(MeshBrush::Relax);
+    const Mesh smoothed = run(MeshBrush::Smooth);
+
+    float relax_along = 0, relax_across = 0, smooth_along = 0, smooth_across = 0;
+    split_motion(stretched, relaxed, centre, 0.45f, &relax_along, &relax_across);
+    split_motion(stretched, smoothed, centre, 0.45f, &smooth_along, &smooth_across);
+    CAPTURE(relax_along);
+    CAPTURE(smooth_along);
+
+    // Both even the triangulation...
+    CHECK(edge_variation(relaxed, centre, 0.45f) < before);
+    CHECK(edge_variation(smoothed, centre, 0.45f) < before);
+    // ...and relax does it while moving the SURFACE a fraction as far.
+    CHECK(relax_along < smooth_along * 0.5f);
+    // Its motion is mostly across the surface rather than through it, which is
+    // the property; it is not exactly zero, and the header says why.
+    CHECK(relax_across > relax_along * 2.0f);
+}
+
+TEST_CASE("layer deposits to a ceiling where draw keeps going") {
+    // Every other deposit verb accumulates, so a slow stroke digs deeper than a
+    // fast one over the same path. Layer measures against the surface as the
+    // STROKE found it and stops.
+    const cfloat3 centre = cf3(0, 0.6f, 0);
+    const Mesh base = dome_grid(48, 1.0f);
+
+    auto run = [&](MeshBrush verb, int stamps) {
+        Mesh m = base;
+        MeshSculptor sc(m);
+        VertexDeltas record;
+        MeshBrushSettings s;
+        s.center = centre;
+        s.radius = 0.5f;
+        s.strength = 0.15f;
+        s.layer_height = 0.08f;
+        s.deposit_normal = cf3(0, 1, 0);
+        for (int i = 0; i < stamps; ++i) sc.stamp(verb, s, {}, &record);
+        float along = 0, across = 0;
+        split_motion(base, m, centre, 0.1f, &along, &across);
+        return along;
+    };
+
+    const float layer_1 = run(MeshBrush::Layer, 1);
+    const float layer_12 = run(MeshBrush::Layer, 12);
+    const float draw_1 = run(MeshBrush::Draw, 1);
+    const float draw_12 = run(MeshBrush::Draw, 12);
+    CAPTURE(layer_1);
+    CAPTURE(layer_12);
+    CAPTURE(draw_12);
+
+    // Layer converges on its ceiling and never passes it.
+    CHECK(layer_12 > layer_1);
+    CHECK(layer_12 <= 0.08f + 1e-4f);
+    // Draw, at the same settings, is well past it.
+    CHECK(draw_12 > 0.08f * 2.0f);
+    CHECK(draw_12 > layer_12 * 3.0f);
+    // ...and one stamp of each is comparable, so the difference really is the
+    // accumulation rather than a strength mismatch in the fixture.
+    CHECK(draw_1 < 0.08f);
+}
+
+TEST_CASE("layer without a stroke record is refused rather than becoming draw") {
+    // With no record there is no stroke origin, so every stamp would clamp
+    // against the CURRENT surface — which is draw wearing layer's name. A verb
+    // that silently becomes a different verb is worse than one that refuses.
+    Mesh m = dome_grid(24, 1.0f);
+    const Mesh before = m;
+    MeshSculptor sc(m);
+    MeshBrushSettings s;
+    s.center = cf3(0, 0.6f, 0);
+    s.radius = 0.5f;
+    s.layer_height = 0.08f;
+
+    CHECK(sc.stamp(MeshBrush::Layer, s, {}, nullptr) == 0);
+    CHECK(same_bytes(m.positions, before.positions));
+
+    // With one, it works.
+    VertexDeltas record;
+    CHECK(sc.stamp(MeshBrush::Layer, s, {}, &record) > 0);
+}
+
+TEST_CASE("nudge moves material along the surface, where grab carries it off") {
+    // The distinction from grab: grab applies the drag rigidly, so a drag with
+    // a component off the surface lifts material off it. Nudge projects into
+    // each vertex's own tangent plane.
+    Mesh flat;
+    {
+        // A FLAT plane here on purpose: its tangent planes are exactly y = 0,
+        // so "did any motion leave the surface" is an exact question.
+        const int n = 24;
+        const float step = 2.0f / static_cast<float>(n);
+        for (int z = 0; z <= n; ++z)
+            for (int x = 0; x <= n; ++x) {
+                flat.positions.push_back(cf3(-1.0f + step * static_cast<float>(x), 0.0f,
+                                             -1.0f + step * static_cast<float>(z)));
+                flat.normals.push_back(cf3(0, 1, 0));
+            }
+        const std::uint32_t stride = static_cast<std::uint32_t>(n + 1);
+        for (int z = 0; z < n; ++z)
+            for (int x = 0; x < n; ++x) {
+                const std::uint32_t a =
+                    static_cast<std::uint32_t>(z) * stride + static_cast<std::uint32_t>(x);
+                const std::uint32_t b = a + 1, c = a + stride, d = c + 1;
+                for (std::uint32_t i : {a, c, b, b, c, d}) flat.indices.push_back(i);
+            }
+    }
+
+    // A drag half of which points straight off the plane.
+    const cfloat3 drag = cf3(0.2f, 0.2f, 0);
+    auto run = [&](MeshBrush verb) {
+        Mesh m = flat;
+        MeshSculptor sc(m);
+        MeshBrushSettings s;
+        s.center = cf3(0, 0, 0);
+        s.radius = 0.5f;
+        s.direction = drag;
+        sc.stamp(verb, s, {}, nullptr);
+        float off = 0, along = 0;
+        for (std::size_t i = 0; i < m.positions.size(); ++i) {
+            off = std::max(off, std::fabs(m.positions[i].y));
+            along = std::max(along, std::fabs(m.positions[i].x - flat.positions[i].x));
+        }
+        return std::pair<float, float>{off, along};
+    };
+
+    const auto nudged = run(MeshBrush::Nudge);
+    const auto grabbed = run(MeshBrush::Grab);
+    // Nudge stayed exactly in the plane and still moved material across it.
+    CHECK(nudged.first == doctest::Approx(0.0f).epsilon(1e-6));
+    CHECK(nudged.second > 0.1f);
+    // Grab, given the same drag, lifted it off.
+    CHECK(grabbed.first > 0.1f);
+}
+
+TEST_CASE("an absent alpha leaves every verb exactly as it was") {
+    // The additive claim. `alpha` defaults to null and multiplies the weight by
+    // 1, so this is byte-identity rather than a tolerance.
+    const Mesh base = dome_grid(32, 1.0f);
+    for (MeshBrush verb : {MeshBrush::Draw, MeshBrush::Inflate, MeshBrush::Smooth, MeshBrush::Pinch,
+                           MeshBrush::Clay, MeshBrush::Relax}) {
+        Mesh a = base, b = base;
+        MeshSculptor sa(a), sb(b);
+        MeshBrushSettings s;
+        s.center = cf3(0, 0.6f, 0);
+        s.radius = 0.5f;
+        s.strength = 0.4f;
+        MeshBrushSettings with_null = s;
+        with_null.alpha = nullptr;  // explicit, and the default
+
+        sa.stamp(verb, s, {}, nullptr);
+        sb.stamp(verb, with_null, {}, nullptr);
+        CAPTURE(static_cast<int>(verb));
+        REQUIRE(same_bytes(a.positions, b.positions));
+    }
+}
+
+TEST_CASE("an alpha gates every verb through one multiplication") {
+    // Folded into the WEIGHT rather than into each verb, so it composes with
+    // all of them and with every falloff at no per-verb cost.
+    const Mesh base = dome_grid(32, 1.0f);
+    const std::vector<float> zeros(16 * 16, 0.0f);
+    const std::vector<float> ones(16 * 16, 1.0f);
+
+    for (MeshBrush verb : {MeshBrush::Draw, MeshBrush::Inflate, MeshBrush::Pinch}) {
+        MeshBrushSettings s;
+        s.center = cf3(0, 0.6f, 0);
+        s.radius = 0.5f;
+        s.strength = 0.4f;
+        s.alpha_width = 16;
+        s.alpha_height = 16;
+        s.alpha_direction = cf3(0, 1, 0);
+        s.alpha_tangent = cf3(1, 0, 0);
+        CAPTURE(static_cast<int>(verb));
+
+        // An all-zero stamp moves nothing at all.
+        Mesh dead = base;
+        MeshSculptor sd(dead);
+        MeshBrushSettings zero = s;
+        zero.alpha = zeros.data();
+        CHECK(sd.stamp(verb, zero, {}, nullptr) == 0);
+        CHECK(same_bytes(dead.positions, base.positions));
+
+        // An all-ones stamp is the unmodulated brush.
+        Mesh full = base, plain = base;
+        MeshSculptor sf(full), sp(plain);
+        MeshBrushSettings one = s;
+        one.alpha = ones.data();
+        sf.stamp(verb, one, {}, nullptr);
+        sp.stamp(verb, s, {}, nullptr);
+        for (std::size_t i = 0; i < full.positions.size(); ++i)
+            REQUIRE(clength(full.positions[i] - plain.positions[i]) < 1e-6f);
+    }
+}
+
+TEST_CASE("an alpha's shape reaches the mesh") {
+    // Not just its magnitude: half the stamp masked off must move half the
+    // region. A stamp that was sampled at the wrong coordinates would still
+    // pass the all-zero and all-ones cases above.
+    const Mesh base = dome_grid(48, 1.0f);
+    std::vector<float> half(32 * 32, 0.0f);
+    for (int y = 0; y < 32; ++y)
+        for (int x = 16; x < 32; ++x) half[static_cast<std::size_t>(y) * 32 + x] = 1.0f;
+
+    Mesh m = base;
+    MeshSculptor sc(m);
+    MeshBrushSettings s;
+    s.center = cf3(0, 0.6f, 0);
+    s.radius = 0.6f;
+    s.strength = 0.4f;
+    s.alpha = half.data();
+    s.alpha_width = 32;
+    s.alpha_height = 32;
+    s.alpha_direction = cf3(0, 1, 0);
+    s.alpha_tangent = cf3(1, 0, 0);  // u runs along +x
+    s.deposit_normal = cf3(0, 1, 0);
+    sc.stamp(MeshBrush::Draw, s, {}, nullptr);
+
+    // The +u half moved; the -u half did not.
+    float moved_plus = 0, moved_minus = 0;
+    for (std::size_t i = 0; i < base.positions.size(); ++i) {
+        const float d = clength(m.positions[i] - base.positions[i]);
+        if (base.positions[i].x > 0.1f) moved_plus = std::max(moved_plus, d);
+        if (base.positions[i].x < -0.1f) moved_minus = std::max(moved_minus, d);
+    }
+    CAPTURE(moved_plus);
+    CAPTURE(moved_minus);
+    CHECK(moved_plus > 0.01f);
+    CHECK(moved_minus == doctest::Approx(0.0f).epsilon(1e-6));
+}
+
+TEST_CASE("the new verbs keep the standing mesh contract") {
+    // Topology never changes, and a stroke reverts bit-exactly. The contract
+    // every other verb is held to, checked for the three that are new.
+    const Mesh base = dome_grid(32, 1.0f);
+    for (MeshBrush verb : {MeshBrush::Relax, MeshBrush::Layer, MeshBrush::Nudge}) {
+        Mesh m = base;
+        MeshSculptor sc(m);
+        VertexDeltas record;
+        MeshBrushSettings s;
+        s.center = cf3(0, 0.6f, 0);
+        s.radius = 0.5f;
+        s.strength = 0.6f;
+        s.direction = cf3(0.1f, 0.05f, 0);
+        s.layer_height = 0.05f;
+        CAPTURE(static_cast<int>(verb));
+
+        for (int i = 0; i < 4; ++i) sc.stamp(verb, s, {}, &record);
+        REQUIRE(same_bytes(m.indices, base.indices));
+        REQUIRE(same_bytes(m.quads, base.quads));
+        CHECK(record.size() > 0);
+
+        REQUIRE(record.revert(m));
+        REQUIRE(same_bytes(m.positions, base.positions));
+        REQUIRE(same_bytes(m.normals, base.normals));
+    }
+}

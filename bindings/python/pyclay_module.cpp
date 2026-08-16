@@ -144,9 +144,12 @@ mesh::MeshBrush parse_mesh_brush(const std::string& verb) {
     if (verb == "scrape") return mesh::MeshBrush::Scrape;
     if (verb == "polish") return mesh::MeshBrush::Polish;
     if (verb == "snakehook") return mesh::MeshBrush::Snakehook;
+    if (verb == "relax") return mesh::MeshBrush::Relax;
+    if (verb == "layer") return mesh::MeshBrush::Layer;
+    if (verb == "nudge") return mesh::MeshBrush::Nudge;
     throw std::invalid_argument(
         "verb must be one of 'grab', 'draw', 'inflate', 'smooth', 'pinch', 'flatten', 'clay', "
-        "'crease', 'scrape', 'polish', 'snakehook', got '" +
+        "'crease', 'scrape', 'polish', 'snakehook', 'relax', 'layer', 'nudge', got '" +
         verb + "'");
 }
 
@@ -473,14 +476,13 @@ math::Aabb to_aabb(nb::handle obj);
 // and `apply_stroke`, so the two cannot drift about what an argument means.
 // Every refusal here mirrors a refusal in the C ABI, which is the standing rule
 // for these two bindings: they must not disagree about what a value is.
-mesh::MeshBrushSettings mesh_brush_settings(const std::string& verb, nb::handle center,
-                                            float radius, float strength,
-                                            const std::string& falloff, nb::handle direction,
-                                            nb::handle deposit_normal, nb::handle geodesic,
-                                            nb::handle seed_class, const std::string& flatten_mode,
-                                            nb::handle plane_point, nb::handle plane_normal,
-                                            float polish_angle, int smooth_iterations,
-                                            mesh::MeshBrush* out_verb) {
+mesh::MeshBrushSettings mesh_brush_settings(
+    const std::string& verb, nb::handle center, float radius, float strength,
+    const std::string& falloff, nb::handle direction, nb::handle deposit_normal,
+    nb::handle geodesic, nb::handle seed_class, const std::string& flatten_mode,
+    nb::handle plane_point, nb::handle plane_normal, float polish_angle, int smooth_iterations,
+    float layer_height, nb::handle alpha, nb::handle alpha_direction, nb::handle alpha_tangent,
+    float alpha_extent, mesh::MeshBrush* out_verb) {
     *out_verb = parse_mesh_brush(verb);
     if (!(radius > 0.0f)) throw std::invalid_argument("radius must be > 0");
     if (smooth_iterations < 1 || smooth_iterations > mesh::kMaxSmoothIterations)
@@ -512,6 +514,26 @@ mesh::MeshBrushSettings mesh_brush_settings(const std::string& verb, nb::handle 
     }
     settings.polish_angle = polish_angle;
     settings.smooth_iterations = smooth_iterations;
+    settings.layer_height = layer_height;
+    if (!alpha.is_none()) {
+        // A 2D array, because a stamp IS two-dimensional and letting a caller
+        // pass a flat one with separate dimensions is the multiply they would
+        // get wrong. NOT copied — nanobind keeps the array alive for the call,
+        // which is exactly as long as the samples are read.
+        auto arr = nb::cast<nb::ndarray<const float, nb::ndim<2>, nb::c_contig>>(alpha);
+        if (arr.shape(0) < 2 || arr.shape(1) < 2)
+            throw std::invalid_argument(
+                "an alpha needs at least 2x2 samples; there is nothing to interpolate below "
+                "that");
+        settings.alpha = arr.data();
+        settings.alpha_height = static_cast<int>(arr.shape(0));
+        settings.alpha_width = static_cast<int>(arr.shape(1));
+        if (!alpha_direction.is_none())
+            settings.alpha_direction = to_f3(alpha_direction, "alpha_direction");
+        if (!alpha_tangent.is_none())
+            settings.alpha_tangent = to_f3(alpha_tangent, "alpha_tangent");
+        settings.alpha_extent = alpha_extent;
+    }
     return settings;
 }
 
@@ -3443,12 +3465,15 @@ NB_MODULE(pyclay, m) {
                float strength, const std::string& falloff, nb::handle direction,
                nb::handle deposit_normal, nb::handle geodesic, nb::handle seed_class,
                const std::string& flatten_mode, nb::handle plane_point, nb::handle plane_normal,
-               float polish_angle, int smooth_iterations, nb::handle mask, nb::handle deltas) {
+               float polish_angle, int smooth_iterations, float layer_height, nb::handle alpha,
+               nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent,
+               nb::handle mask, nb::handle deltas) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, deposit_normal, geodesic,
                     seed_class, flatten_mode, plane_point, plane_normal, polish_angle,
-                    smooth_iterations, &chosen);
+                    smooth_iterations, layer_height, alpha, alpha_direction, alpha_tangent,
+                    alpha_extent, &chosen);
                 mesh::VertexDeltas* record =
                     deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
                 field::MaskGate gate = mask_gate_of(mask);
@@ -3460,7 +3485,9 @@ NB_MODULE(pyclay, m) {
             "direction"_a = nb::none(), "deposit_normal"_a = nb::none(), "geodesic"_a = nb::none(),
             "seed_class"_a = nb::none(), "flatten_mode"_a = "two_sided",
             "plane_point"_a = nb::none(), "plane_normal"_a = nb::none(), "polish_angle"_a = 0.20f,
-            "smooth_iterations"_a = 1, "mask"_a = nb::none(), "deltas"_a = nb::none(),
+            "smooth_iterations"_a = 1, "layer_height"_a = 0.05f, "alpha"_a = nb::none(),
+            "alpha_direction"_a = nb::none(), "alpha_tangent"_a = nb::none(),
+            "alpha_extent"_a = 0.0f, "mask"_a = nb::none(), "deltas"_a = nb::none(),
             "One stamp; returns how many welded classes moved.\n\n"
             "`verb` is one of:\n"
             "  'grab'      drag the region by `direction`\n"
@@ -3473,7 +3500,21 @@ NB_MODULE(pyclay, m) {
             "  'crease'    a tight negative draw and a pinch, in ONE stamp\n"
             "  'scrape'    flatten cut-only and smooth, from ONE snapshot\n"
             "  'polish'    smooth gated by dihedral angle: noise goes, edges stay\n"
-            "  'snakehook' grab re-anchored along the drag (see `apply_stroke`)\n\n"
+            "  'snakehook' grab re-anchored along the drag (see `apply_stroke`)\n"
+            "  'relax'     slide vertices ALONG the surface to even their spacing.\n"
+            "              Smooth reshapes; this redistributes. It matters here\n"
+            "              because topology is fixed: a big grab stretches the\n"
+            "              triangles it has, and this recovers them\n"
+            "  'layer'     deposit to a CEILING `layer_height` above the surface\n"
+            "              as the STROKE found it, so a slow stroke and a fast\n"
+            "              one over the same path agree. Needs `deltas`\n"
+            "  'nudge'     push material along the surface; grab carries it off\n\n"
+            "`alpha` is a 2D (height, width) float array in [0, 1] scaling the\n"
+            "brush's weight — how detail work is done on voxels and SDF items,\n"
+            "now here. **The engine decodes no images.** It multiplies the\n"
+            "WEIGHT, so it composes with every verb and falloff at once, and it\n"
+            "is sampled by the same kernel the SDF alpha uses, so one stamp\n"
+            "reads identically on a mesh and on a field.\n\n"
             "`geodesic` measures the falloff ALONG THE SURFACE, so a brush on the\n"
             "upper lip does not drag the chin through a closed mouth. None takes\n"
             "the verb's default: off for 'flatten' and 'scrape', which mean\n"
@@ -3502,14 +3543,18 @@ NB_MODULE(pyclay, m) {
                const std::string& verb, const std::string& falloff, nb::handle deposit_normal,
                nb::handle geodesic, nb::handle seed_class, const std::string& flatten_mode,
                nb::handle plane_point, nb::handle plane_normal, float polish_angle,
-               int smooth_iterations, float strength, nb::handle mask, nb::handle deltas,
-               bool defer_normals) {
+               int smooth_iterations, float layer_height, float strength, nb::handle mask,
+               nb::handle deltas, bool defer_normals) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 // The radius is the STAMP's, so a placeholder goes in here.
+                // No alpha on the stroke path: a stamp-oriented alpha along a
+                // stroke wants the frame to follow the stroke direction, which
+                // is its own decision — see the proposal's open question.
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, nb::none(), 1.0f, strength, falloff, nb::none(), deposit_normal, geodesic,
                     seed_class, flatten_mode, plane_point, plane_normal, polish_angle,
-                    smooth_iterations, &chosen);
+                    smooth_iterations, layer_height, nb::none(), nb::none(), nb::none(), 0.0f,
+                    &chosen);
                 std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
                 mesh::VertexDeltas* record =
                     deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
@@ -3525,8 +3570,8 @@ NB_MODULE(pyclay, m) {
             "deposit_normal"_a = nb::none(), "geodesic"_a = nb::none(), "seed_class"_a = nb::none(),
             "flatten_mode"_a = "two_sided", "plane_point"_a = nb::none(),
             "plane_normal"_a = nb::none(), "polish_angle"_a = 0.20f, "smooth_iterations"_a = 1,
-            "strength"_a = 1.0f, "mask"_a = nb::none(), "deltas"_a = nb::none(),
-            "defer_normals"_a = false,
+            "layer_height"_a = 0.05f, "strength"_a = 1.0f, "mask"_a = nb::none(),
+            "deltas"_a = nb::none(), "defer_normals"_a = false,
             "Resolve a stroke and apply it — the stroke engine's FOURTH consumer,\n"
             "after the voxel grid, the mask and the edit list. Spacing, pressure\n"
             "response, deterministic jitter, taper, steady stroke and\n"

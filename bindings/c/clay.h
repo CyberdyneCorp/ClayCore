@@ -2947,17 +2947,39 @@ clay_result clay_layer_apply_stroke(clay_document* doc, clay_layer_id layer,
  * (now edited) vertices say. */
 
 typedef enum clay_mesh_brush {
-    CLAY_MESH_BRUSH_GRAB = 0,      /* drag the region by the stroke delta */
-    CLAY_MESH_BRUSH_DRAW = 1,      /* displace along the REGION's averaged normal */
-    CLAY_MESH_BRUSH_INFLATE = 2,   /* displace along EACH VERTEX's own normal */
-    CLAY_MESH_BRUSH_SMOOTH = 3,    /* Laplacian average over the one-ring */
-    CLAY_MESH_BRUSH_PINCH = 4,     /* signed: + gathers, - spreads (magnify) */
-    CLAY_MESH_BRUSH_FLATTEN = 5,   /* project onto a plane, clay_flatten_mode */
-    CLAY_MESH_BRUSH_CLAY = 6,      /* draw's deposit clamped to a plane */
-    CLAY_MESH_BRUSH_CREASE = 7,    /* a tight negative draw and a pinch, in one stamp */
-    CLAY_MESH_BRUSH_SCRAPE = 8,    /* flatten cut-only and smooth, one snapshot */
-    CLAY_MESH_BRUSH_POLISH = 9,    /* smooth gated by dihedral angle */
-    CLAY_MESH_BRUSH_SNAKEHOOK = 10 /* grab re-anchored along the drag */
+    CLAY_MESH_BRUSH_GRAB = 0,       /* drag the region by the stroke delta */
+    CLAY_MESH_BRUSH_DRAW = 1,       /* displace along the REGION's averaged normal */
+    CLAY_MESH_BRUSH_INFLATE = 2,    /* displace along EACH VERTEX's own normal */
+    CLAY_MESH_BRUSH_SMOOTH = 3,     /* Laplacian average over the one-ring */
+    CLAY_MESH_BRUSH_PINCH = 4,      /* signed: + gathers, - spreads (magnify) */
+    CLAY_MESH_BRUSH_FLATTEN = 5,    /* project onto a plane, clay_flatten_mode */
+    CLAY_MESH_BRUSH_CLAY = 6,       /* draw's deposit clamped to a plane */
+    CLAY_MESH_BRUSH_CREASE = 7,     /* a tight negative draw and a pinch, in one stamp */
+    CLAY_MESH_BRUSH_SCRAPE = 8,     /* flatten cut-only and smooth, one snapshot */
+    CLAY_MESH_BRUSH_POLISH = 9,     /* smooth gated by dihedral angle */
+    CLAY_MESH_BRUSH_SNAKEHOOK = 10, /* grab re-anchored along the drag */
+    /* Slide vertices ALONG the surface to even their spacing, rather than
+     * toward the Laplacian average. Smooth reshapes; this redistributes.
+     *
+     * It matters more here than in a tool that can subdivide: topology is fixed
+     * by contract, so a large grab stretches the triangles it has, and this is
+     * what recovers them without a round trip through a retopo pass. Not
+     * exactly shape-preserving — sliding along a tangent PLANE leaves a curved
+     * surface by a second-order amount — but measured at a fraction of what
+     * smooth moves at the same strength. */
+    CLAY_MESH_BRUSH_RELAX = 11,
+    /* Deposit up to a fixed height above the surface as it was when the STROKE
+     * began, and no further. Every other deposit verb accumulates, so a slow
+     * stroke digs deeper than a fast one over the same path; this one does not.
+     *
+     * Needs the stroke's deltas record to know where it started, and is REFUSED
+     * without one — clamping against the current surface instead would make it
+     * draw under another name. */
+    CLAY_MESH_BRUSH_LAYER = 12,
+    /* Push material along the surface in the drag direction. Grab carries the
+     * region rigidly, so a drag with a component off the surface lifts material
+     * off it; this projects into each vertex's own tangent plane. */
+    CLAY_MESH_BRUSH_NUDGE = 13
 } clay_mesh_brush;
 
 /* The same four curves, the same values and the same weights as
@@ -3013,6 +3035,34 @@ typedef struct clay_mesh_brush_desc {
      * gate is a plain smooth under another name. */
     float polish_angle;
     int32_t smooth_iterations; /* 1..CLAY_MESH_MAX_SMOOTH_ITERATIONS */
+    /* LAYER's ceiling: how far above the stroke's STARTING surface the deposit
+     * may reach, in WORLD units. World rather than radius-relative, unlike
+     * `strength`, and that is the point rather than an inconsistency — a
+     * ceiling that moved when the brush resized would not be a ceiling.
+     * Negative digs to a floor instead. */
+    float layer_height;
+    /* An ALPHA: a scalar stamp scaling this brush's per-vertex weight, so
+     * detail work on a mesh layer is alpha-driven as it already is on voxels
+     * (clay_voxel_sculpt_carve_alpha) and on SDF items (clay_item_add_alpha).
+     *
+     * THE ENGINE DECODES NO IMAGES. `alpha` is alpha_width * alpha_height
+     * samples in [0,1], row-major with u fastest, BORROWED for the duration of
+     * the call — nothing is copied, so the buffer must outlive it. NULL, the
+     * default, leaves every verb exactly as it was.
+     *
+     * Sampled by the same kernel function the SDF alpha uses, so one stamp
+     * reads identically on a mesh and on a field. It multiplies the WEIGHT, so
+     * it composes with every verb and every falloff at once. */
+    const float* alpha;
+    int32_t alpha_width;
+    int32_t alpha_height;
+    /* The square the stamp covers, in the plane through the brush centre whose
+     * normal is alpha_direction; alpha_tangent orients it there and any rough
+     * "up" works. All zeroes on the direction means the surface normal under
+     * the centre; a zero extent means the brush's own diameter. */
+    float alpha_direction[3];
+    float alpha_tangent[3];
+    float alpha_extent;
 } clay_mesh_brush_desc;
 
 /* The engine's defaults, so a host fills in what it means and takes the rest.

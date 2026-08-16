@@ -5232,3 +5232,156 @@ def test_a_gate_refuses_what_it_cannot_protect():
     faint.fill(((0.0, -1.0, -1.0), (1.0, 1.0, 1.0)), 0.2)
     with pytest.raises(ValueError, match="protect nothing"):
         clay.Box(size=(1, 1, 1)).gate(faint, threshold=0.8)
+
+
+# -- the mesh verbs the vocabulary was missing ---------------------------------
+# Relax, Layer and Nudge, plus alphas on every mesh verb at once
+# (close-mesh-brush-vocabulary).
+
+
+def dome_mesh(n=48, half=1.0):
+    """A dome. CURVATURE is what separates relax from smooth — on a flat plane
+    the Laplacian displacement is already tangential, so removing its normal
+    component changes nothing and the two verbs are identical."""
+    positions, indices = [], []
+    for z in range(n + 1):
+        for x in range(n + 1):
+            px = -half + 2.0 * half * x / n
+            pz = -half + 2.0 * half * z / n
+            positions.append((px, 0.6 * float(np.exp(-(px * px + pz * pz) * 1.5)), pz))
+    stride = n + 1
+    for z in range(n):
+        for x in range(n):
+            a = z * stride + x
+            indices += [a, a + stride, a + 1, a + 1, a + stride, a + stride + 1]
+    return clay.Mesh.from_triangles(np.array(positions, dtype=np.float32),
+                                    np.array(indices, dtype=np.uint32))
+
+
+def dome_normals(p):
+    e = 0.6 * np.exp(-(p[:, 0] ** 2 + p[:, 2] ** 2) * 1.5)
+    n = np.stack([3.0 * p[:, 0] * e, np.ones_like(e), 3.0 * p[:, 2] * e], axis=1)
+    return n / np.linalg.norm(n, axis=1, keepdims=True)
+
+
+def split_motion(before, after, centre, radius):
+    """Mean motion split into 'along the surface normal' and 'across it'."""
+    near = np.linalg.norm(before - np.asarray(centre), axis=1) <= radius
+    d = (after - before)[near]
+    n = dome_normals(before[near])
+    along = np.einsum("ij,ij->i", d, n)
+    return float(np.abs(along).mean()), float(np.linalg.norm(d - n * along[:, None], axis=1).mean())
+
+
+def test_relax_evens_spacing_while_barely_moving_the_surface():
+    """The distinction from smooth: smooth moves toward the Laplacian average,
+    which is inward on a convex region — that is why smoothing shrinks."""
+    centre = (0.0, 0.6, 0.0)
+    stretched = dome_mesh()
+    clay.MeshSculptor(stretched).stamp("grab", center=centre, radius=0.7,
+                                       direction=(0.25, 0, 0))
+    start = np.array(stretched.positions, copy=True)
+
+    moved = {}
+    for verb in ("relax", "smooth"):
+        m = clay.Mesh.from_triangles(np.array(stretched.positions, copy=True),
+                                     np.array(stretched.indices, copy=True))
+        sc = clay.MeshSculptor(m)
+        for _ in range(8):
+            sc.stamp(verb, center=centre, radius=0.5, strength=1.0, smooth_iterations=2)
+        moved[verb] = split_motion(start, np.array(m.positions), centre, 0.45)
+
+    relax_along, relax_across = moved["relax"]
+    smooth_along, _ = moved["smooth"]
+    # Relax moves the SURFACE a fraction as far...
+    assert relax_along < smooth_along * 0.5
+    # ...and its own motion is mostly across the surface rather than through it.
+    assert relax_across > relax_along * 2.0
+
+
+def test_layer_deposits_to_a_ceiling_where_draw_keeps_going():
+    centre = (0.0, 0.6, 0.0)
+    base = np.array(dome_mesh().positions, copy=True)
+
+    def run(verb, stamps):
+        m = dome_mesh()
+        sc = clay.MeshSculptor(m)
+        record = clay.VertexDeltas()
+        for _ in range(stamps):
+            sc.stamp(verb, center=centre, radius=0.5, strength=0.15, layer_height=0.08,
+                     deposit_normal=(0, 1, 0), deltas=record)
+        return split_motion(base, np.array(m.positions), centre, 0.1)[0]
+
+    assert run("layer", 12) > run("layer", 1)      # it does build up...
+    assert run("layer", 12) <= 0.08 + 1e-4         # ...and stops at the ceiling
+    assert run("draw", 12) > 0.08 * 2.0            # draw does not
+    assert run("draw", 12) > run("layer", 12) * 3.0
+
+
+def test_layer_without_a_record_is_refused():
+    """No record means no stroke origin, so every stamp would clamp against the
+    current surface — draw wearing layer's name."""
+    m = dome_mesh(24)
+    before = np.array(m.positions, copy=True)
+    sc = clay.MeshSculptor(m)
+    assert sc.stamp("layer", center=(0, 0.6, 0), radius=0.5, layer_height=0.08) == 0
+    assert np.array_equal(np.array(m.positions), before)
+    assert sc.stamp("layer", center=(0, 0.6, 0), radius=0.5, layer_height=0.08,
+                    deltas=clay.VertexDeltas()) > 0
+
+
+def test_an_absent_alpha_leaves_every_verb_exactly_as_it_was():
+    base = dome_mesh(32)
+    for verb in ("draw", "inflate", "smooth", "pinch", "clay", "relax"):
+        a, b = dome_mesh(32), dome_mesh(32)
+        clay.MeshSculptor(a).stamp(verb, center=(0, 0.6, 0), radius=0.5, strength=0.4)
+        clay.MeshSculptor(b).stamp(verb, center=(0, 0.6, 0), radius=0.5, strength=0.4,
+                                   alpha=None)
+        assert np.array_equal(np.array(a.positions), np.array(b.positions)), verb
+
+
+def test_an_alpha_shape_reaches_the_mesh():
+    """Not just its magnitude: half the stamp masked off moves half the region.
+    A stamp sampled at the wrong coordinates would still pass an all-zero and
+    an all-ones check."""
+    base = np.array(dome_mesh().positions, copy=True)
+    half = np.zeros((32, 32), dtype=np.float32)
+    half[:, 16:] = 1.0
+
+    m = dome_mesh()
+    clay.MeshSculptor(m).stamp("draw", center=(0, 0.6, 0), radius=0.6, strength=0.4,
+                               alpha=half, alpha_direction=(0, 1, 0),
+                               alpha_tangent=(1, 0, 0), deposit_normal=(0, 1, 0))
+    moved = np.linalg.norm(np.array(m.positions) - base, axis=1)
+    assert moved[base[:, 0] > 0.1].max() > 0.01     # the +u half moved
+    assert moved[base[:, 0] < -0.1].max() == 0.0    # the -u half did not
+
+
+def test_an_all_zero_alpha_moves_nothing():
+    m = dome_mesh(32)
+    before = np.array(m.positions, copy=True)
+    zeros = np.zeros((16, 16), dtype=np.float32)
+    assert clay.MeshSculptor(m).stamp("draw", center=(0, 0.6, 0), radius=0.5, strength=0.4,
+                                      alpha=zeros, alpha_direction=(0, 1, 0)) == 0
+    assert np.array_equal(np.array(m.positions), before)
+
+
+def test_the_new_verbs_keep_the_mesh_contract():
+    for verb in ("relax", "layer", "nudge"):
+        m = dome_mesh(32)
+        base_pos = np.array(m.positions, copy=True)
+        base_idx = np.array(m.indices, copy=True)
+        sc = clay.MeshSculptor(m)
+        record = clay.VertexDeltas()
+        for _ in range(4):
+            sc.stamp(verb, center=(0, 0.6, 0), radius=0.5, strength=0.6,
+                     direction=(0.1, 0.05, 0), layer_height=0.05, deltas=record)
+        assert np.array_equal(np.array(m.indices), base_idx), verb
+        assert record.vertex_count > 0, verb
+        record.revert(sc)
+        assert np.array_equal(np.array(m.positions), base_pos), verb
+
+
+def test_a_bad_mesh_verb_names_the_new_ones():
+    with pytest.raises(ValueError, match="relax"):
+        clay.MeshSculptor(dome_mesh(8)).stamp("bogus", center=(0, 0, 0), radius=0.5)
