@@ -47,19 +47,11 @@
   every level true at once, which is also the case that costs the most storage.
 - **No brick-cache work.** Stated rather than built, because the cache does not
   touch `VoxelGrid` at all.
-- [ ] 1.1 DECIDE and record: discrete levels vs adaptive refinement. The proposal recommends levels because the brush dither hashes a cell coordinate, and platform-reproducible strokes are enforced by the parity suite
-- [ ] 1.2 Level stack on `VoxelGrid`: add a level, drop one, query the count and the active one
-- [ ] 1.3 Down-sample (average) and up-sample (interpolate) between adjacent levels, preserving finer detail as offsets so a round trip through a coarser level is not destructive
-- [ ] 1.4 Every verb states which level it acts on; the shared footprint walk carries it, so no verb can forget
-- [ ] 1.5 Meshing chooses a level explicitly rather than implicitly
-- [ ] 1.6 Brick cache: decide and state whether it caches per level or only the finest
-- [ ] 1.7 `.clayspace`: a new chunk, backward-open so an older reader opens the document at the coarsest level rather than failing
-- [ ] 1.8 Both bindings, C ABI additive; a grid built with one level behaves exactly as today
-- [ ] 1.9 Tests: a stroke at a coarse level survives a trip to fine and back; detail added at fine survives an edit at coarse; masks addressed in world units still select the same region at every level; the dither stays reproducible per level; single-level grids are bit-identical to today
-- [ ] 1.10 Example: block out coarse, subdivide, add detail only where it is needed, and report the memory each level costs
-- [ ] 0.1 SEQUENCING (see ROADMAP, "What can run in parallel"): runs FIRST and alone among the VoxelGrid changes; add-sculpt-layers and add-representation-round-trip both wait on it
-- [ ] 0.2 This change takes `.clayspace` minor **6**. The minors are assigned in the
-      roadmap rather than taken first-come, because three open changes each add a chunk and
-      two bumping independently yields a document claiming one minor while carrying one
-      feature. Bump `kClaySpaceMinor` and `kSceneMinor` together — a static_assert binds them
 
+- [x] 0.1 SEQUENCING (see ROADMAP, "What can run in parallel"): ran FIRST and alone among
+      the VoxelGrid changes; add-sculpt-layers and add-representation-round-trip both waited
+      on it
+- [x] 0.2 This change took `.clayspace` minor **8**, not the **6** the roadmap assigned in
+      advance. The minors are handed out by the roadmap rather than first-come so two
+      changes in flight cannot both claim a number, but the roadmap's guess was made before
+      two other changes landed ahead of this one. The rule held; the number moved.

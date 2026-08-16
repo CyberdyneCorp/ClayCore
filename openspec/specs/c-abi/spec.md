@@ -1229,3 +1229,45 @@ The C API SHALL let a host ask a placed item which primitive it carries, returni
 - **WHEN** the primitive of a group is asked for, and the children of an item
 - **THEN** both are refused as invalid arguments, and each node answers exactly one of the two queries
 
+### Requirement: Consolidation across the ABI
+The C API SHALL expose consolidating a layer and reporting its cost before it is paid, reusing what a volume already reports — bytes, brick count, sample count and sample Lipschitz. The addition SHALL be purely additive.
+
+The cost SHALL also carry what the sample Lipschitz IMPLIES — the declared
+Lipschitz and the safe step scale — because those are the numbers a host budgets
+a frame against, and deriving them from `sqrt(3) x max(l, 1)` in every binding
+would be re-implementing a kernel combinator outside the kernel.
+
+#### Scenario: The cost is knowable before consolidating
+- **WHEN** a host asks what consolidating a layer would cost
+- **THEN** it gets the memory and resolution it would spend, without the document changing
+
+#### Scenario: The quote is the bill
+- **WHEN** a host quotes a consolidation and then performs it with the same parameters
+- **THEN** the brick count and byte count it was quoted are the ones it pays
+
+### Requirement: The trigger is advisory across the ABI
+The C API SHALL let a host measure a layer's degradation and SHALL NOT consolidate on its own. The threshold that turns a measurement into advice SHALL be an argument of the query rather than document state, because a tolerance for marching cost belongs to a viewport, a device and a frame budget rather than to the artwork — and storing it would need a document format bump to carry it.
+
+#### Scenario: A host is told, and decides
+- **WHEN** a host asks for a layer's field report with a step-scale threshold
+- **THEN** it is told whether the layer has degraded past that threshold, and nothing is baked
+
+#### Scenario: A measurement without a threshold makes no recommendation
+- **WHEN** a host asks for a field report with a threshold of zero
+- **THEN** it gets the numbers and no advice
+
+### Requirement: Levels across the ABI
+The C API SHALL expose adding, dropping, counting and selecting levels, and reporting one level's cell size and occupied count without making it active first. Every verb SHALL act on the level the grid has selected.
+
+The addition SHALL be purely additive: it SHALL introduce new entry points only, SHALL NOT change the signature or layout of anything that already exists, and SHALL NOT move the ABI major. The level is therefore grid STATE rather than a parameter on every verb — passing it per call would have changed every voxel entry point's signature, which is exactly the break this requirement forbids.
+
+An existing caller that never mentions a level SHALL get today's behaviour: a one-level grid, on which the level calls that ask for a second level are refused with `CLAY_ERROR_INVALID_ARGUMENT` and the grid untouched.
+
+#### Scenario: An existing caller is unaffected
+- **WHEN** a program compiled before this change runs against the new library
+- **THEN** it links, and its grids behave as single-level grids exactly as before
+
+#### Scenario: A level a grid does not have is refused, not guessed
+- **WHEN** a caller selects, or asks the cell size or occupied count of, a level beyond the stack
+- **THEN** the call returns `CLAY_ERROR_INVALID_ARGUMENT` with the grid unchanged, rather than returning a plausible-looking zero
+
