@@ -47,6 +47,26 @@ class FieldVolume {
     static FieldVolume sample(const std::function<float(kernel::cfloat3)>& f,
                               const math::Aabb& region, float cell_size, float band);
 
+    // The same, on the thread pool — for an `f` that is SAFE TO CALL
+    // CONCURRENTLY.
+    //
+    // That contract is the whole difference, and it is why this is a separate
+    // entry point rather than a change to the one above. `sample`'s `f` may
+    // hold state: `brush::mask_extrude` passes one that accumulates a running
+    // minimum across the samples, and quietly threading it would have raced.
+    // Silently changing a public function's threading contract is not a thing
+    // to do to a consumer.
+    //
+    // Byte-identical to `sample` by construction, not by tolerance: samples are
+    // written to disjoint output slices and each value depends only on its own
+    // position, so no ordering can change any of them.
+    //
+    // Worth it where `f` is expensive. A mesh import is the case that motivated
+    // it: a BVH signed-distance query with a generalized winding number per
+    // sample, which was 4.8 seconds for a 9k-triangle model at a 0.01 cell.
+    static FieldVolume sample_parallel(const std::function<float(kernel::cfloat3)>& f,
+                                       const math::Aabb& region, float cell_size, float band);
+
     // The same, with a colour per sample. A volume built without one carries
     // NO colour array and costs exactly what it costs today — which is what
     // makes this free everywhere it is not used, and there are more of those

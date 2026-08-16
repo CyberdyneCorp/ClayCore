@@ -71,6 +71,16 @@ FLOORS = {
     # 60 ms is ~2.8x the observed runner figure and well under the ~128 ms the
     # serial path would take there, so it still catches the split being lost.
     "BM_VoxelRasterizeTape": {"max_ms": 60},
+    # Importing a mesh as a field — the first thing that happens to every model
+    # a host loads, and it was 4.8 SECONDS for a 9k-triangle model at a 0.01
+    # cell. A BVH signed-distance query with a generalized winding number per
+    # sample, which is pure: 4767 -> 543 ms on the pool, 8.8x.
+    #
+    # Set from the RUNNER: it is ~3x slower than a development machine (see the
+    # rasterize note above, where a ceiling taken from local numbers failed CI),
+    # so 543 ms here is ~1.6 s there. 5000 leaves room over that and is far
+    # under the ~14 s the serial path would take, which is what it catches.
+    "BM_MeshToField": {"max_ms": 5000},
     "BM_VoxelMeshSparse64Chunks": {"max_ms": 120},
     # Part 2 of the same issue: two chunks of that 64-chunk grid, meshed
     # through the regional call. It is the bench above divided by 32 — 0.40 ms

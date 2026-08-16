@@ -4,6 +4,8 @@
 
 #include "clay/field/volume.h"
 
+#include "clay/parallel/thread_pool.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -101,6 +103,25 @@ FieldVolume FieldVolume::sample(const std::function<float(cfloat3)>& f, const ma
             for (std::size_t s = 0; s < count; ++s)
                 for (int i = 0; i < kBrickSamples; ++i)
                     out[s * kBrickSamples + i] = f(grid.sample_position(first + s, i));
+        },
+        region, cell_size, band);
+}
+
+FieldVolume FieldVolume::sample_parallel(const std::function<float(cfloat3)>& f,
+                                         const math::Aabb& region, float cell_size, float band) {
+    // The same fill, over the same windows, split across the pool. The window
+    // sample_blocks already uses was sized "enough bricks per call to occupy a
+    // thread pool" — this is that call arriving.
+    //
+    // Disjoint output slices and a value that depends only on its own position,
+    // so the result cannot depend on how the work was split.
+    return sample_blocks(
+        [&f](const BrickGrid& grid, std::size_t first, std::size_t count, float* out) {
+            parallel::for_range(count, 1, [&](std::size_t b, std::size_t e) {
+                for (std::size_t s = b; s < e; ++s)
+                    for (int i = 0; i < kBrickSamples; ++i)
+                        out[s * kBrickSamples + i] = f(grid.sample_position(first + s, i));
+            });
         },
         region, cell_size, band);
 }
