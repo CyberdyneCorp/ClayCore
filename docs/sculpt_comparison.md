@@ -38,9 +38,9 @@ three on three specific axes: a fully non-destructive parametric edit list,
 per-node exactness and Lipschitz tracking that makes raymarching provably
 correct, and portability across four backends from one kernel source with gated
 parity. As a **sculpting product**, it is at *"core brush vocabulary complete,
-workflow tier absent."* The brushes landed, and sculpt layers landed on
-voxel layers; masking-as-protection, sculpt layers on SDF layers, alphas on SDF
-layers and the asset-finishing pipeline have not.
+workflow tier absent."* The brushes landed, sculpt layers landed on voxel
+layers, and alphas landed on SDF layers; masking-as-protection, sculpt layers on
+SDF layers and the asset-finishing pipeline have not.
 
 ---
 
@@ -56,7 +56,7 @@ layers and the asset-finishing pipeline have not.
 | **Brush vocabulary** | Core set complete on fields and voxels, plus 11 fixed-topology verbs and a lattice cage on a mesh layer (see below) | The reference: ~36 surface brushes plus the core | Broad, voxel + surface modes | Solid core set |
 | **Masking** | **Weak** — voxel-scoped, reaches SDF only via stroke stamps | First class, protects the surface from *any* op | First class | First class |
 | **Sculpt layers** | **On voxel layers.** A pass is bracketed and its changed cells recorded, so its strength stays adjustable long after the strokes are finished; SDF layers do not have them yet | Headline feature | Present | Present |
-| **Alphas / stamps** | Voxel only | Deep, VDM support | Deep | Present |
+| **Alphas / stamps** | **Both representations**, scalar stamps only — no vector displacement maps | Deep, VDM support | Deep | Present |
 | **Surface colour** | Per-item colour + `Paint` regions; vertex colours at mesh time | Polypaint | **PBR texture painting — its moat** | Vertex paint + texture paint |
 | **Scale** | ≥256³ per voxel layer, no streaming; SDF edit lists degrade step scale as they grow | Tens of millions of polys | Very large voxel scenes | Large, memory-bound |
 | **Embeddable** | **Yes — C ABI, SwiftPM, Python, headless** | No | No | No (as a library) |
@@ -90,9 +90,9 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 | Surface Noise | `noise` deformer | ✅ integer hash, so all backends agree |
 | Blob | `blob` | ✅ noise under a brush region |
 | Pulling a lobe out | `brush::snakehook` | ✅ the verb for growing form; Move is the verb for nudging it |
-| Morph | — | ⬜ needs a stored morph target — a *document* concept |
-| Layers | — | ⬜ the same missing concept |
-| Alphas | `sculpt_carve_alpha` | 🟡 voxel only |
+| Morph | — | ⬜ needs a stored morph target; unblocked on voxels now that layers exist, still absent on SDF |
+| Layers | `VoxelGrid::begin_sculpt_layer` | 🟡 voxel layers only — an SDF pass is a weighted group, which waits on `expose-scene-groups` |
+| Alphas | `sculpt_carve_alpha` (voxel), `Deformer::alpha` (SDF) | ✅ both, scalar stamps |
 | Masking | mask fields | 🟡 voxel-scoped; see below |
 | Slice / Knife | — | ❌ polygroup splits need two items; no single-solid equivalent |
 | Surface brushes on a MESH (Standard, Move, Inflate, Smooth, Pinch, Flatten, Clay, DamStandard, Trim Dynamic, hPolish, SnakeHook) | `mesh::MeshSculptor`, 11 verbs | ✅ on a mesh LAYER's own triangles, with topology fixed — see below |
@@ -164,7 +164,7 @@ and that is the shape of the gap.
 |---|---|---|
 | **Masking as a field concept** | Masks are stored beside *voxel* content and reach SDF edits only through the stroke engine, where a masked stamp is dropped or attenuated | ZBrush masking protects the **surface** from *any* operation. Nothing here gates an arbitrary op, or protects an existing surface from the next boolean. The single biggest missing concept. |
 | **Sculpt layers / morph targets** | **On voxel layers**; not on SDF layers | A layer that records a pass and replays it at an intensity is a *document* concept, not a brush. The voxel side has it: `begin_sculpt_layer`/`end_sculpt_layer` bracket a pass, and strength, visibility, reordering and merge-down follow (`examples/52_sculpt_layers.py`). What a **fraction** means differs from ZBrush by representation — ZBrush interpolates vertex offsets, and binary occupancy has nothing to interpolate, so a fractional strength is a reproducible fraction of the *cells*, dithered against the same cell-coordinate hash the falloff brushes use. On an SDF layer the equivalent is a weighted group rather than a diff, which waits on `expose-scene-groups`. Morph stays "not planned" for the SDF side only. |
-| **Alphas on SDF layers** | `sculpt_carve_alpha` is voxel only | Detail work in all three tools is alpha-driven. |
+| **Alphas on SDF layers** | **Landed.** `Deformer::alpha` / `Prim.alpha(...)` / `clay_item_add_alpha` | Detail work in all three tools is alpha-driven, and it now works on the non-destructive representation rather than only the baked one. An alpha is a deformer — a distance offset under finite support — because it modulates an existing surface rather than adding material in the stamp's shape. The engine decodes no images; a host passes the samples. |
 
 ### Tier 1b — Move is not a mesh Move, and a stroke compounds
 

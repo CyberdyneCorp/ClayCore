@@ -482,8 +482,14 @@ static_assert(sizeof kProfileParams / sizeof kProfileParams[0] == kernel::cprofi
 
 // -1 marks a kind whose payload is not a flat float array, so the generic
 // clay_item_add_deformer cannot take it and says so by name.
-constexpr int kDeformParams[] = {1, 1, 4, 2, 2, 3, 9, 3, 3, 8, 8, 10, 5, 5, 3, 3, -1, -1, -1, 9};
-static_assert(sizeof kDeformParams / sizeof kDeformParams[0] == kernel::cdeform_blob + 1);
+constexpr int kDeformParams[] = {1,  1, 4, 2, 2, 3,  9,  3,  3, 8, 8,
+                                 10, 5, 5, 3, 3, -1, -1, -1, 9, -1};
+static_assert(sizeof kDeformParams / sizeof kDeformParams[0] == kernel::cdeform_alpha + 1);
+
+// A ceiling on an alpha's sample count, so a caller's bad multiply is refused
+// rather than allocating whatever the product happened to be. 8192x8192 is far
+// past any stamp an artist uses and still an unambiguous mistake below.
+constexpr std::size_t kMaxAlphaSamples = 8192u * 8192u;
 
 clay_result check_params(const char* what, const float* params, std::size_t count, int expected) {
     if (count != static_cast<std::size_t>(expected))
@@ -2494,6 +2500,41 @@ clay_result clay_item_add_bend_curve(clay_item* item, const float* guide_xyz, si
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "bend_curve guide has zero length");
 
     item->node.deformers.push_back(scene::Deformer::bend_curve(std::move(guide), t0, t1));
+    return CLAY_OK;
+}
+
+clay_result clay_item_add_alpha(clay_item* item, const float* samples, int32_t width,
+                                int32_t height, const float centre[3], const float direction[3],
+                                const float tangent[3], float extent, float radius, float amplitude,
+                                int32_t ease) {
+    if (!item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item");
+    if (!samples) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null samples");
+    if (!centre || !direction || !tangent)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null centre, direction or tangent");
+    // Below 2 on an axis there are no adjacent samples to interpolate between,
+    // so the stamp would be inert; refusing says so rather than silently
+    // appending a deformer that does nothing.
+    if (width < 2 || height < 2)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "an alpha needs at least 2x2 samples; there is nothing to interpolate below "
+                    "that");
+    // The multiply is what a caller most easily gets wrong, and getting it
+    // wrong means reading past their buffer.
+    const std::size_t count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    if (count > kMaxAlphaSamples)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "an alpha of " + std::to_string(width) + "x" + std::to_string(height) +
+                        " exceeds the " + std::to_string(kMaxAlphaSamples) + "-sample ceiling");
+    if (!(extent > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "an alpha's extent must be positive");
+    if (ease < 0 || ease >= CLAY_EASE_COUNT)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "ease index out of range");
+
+    item->node.deformers.push_back(
+        scene::Deformer::alpha(kernel::cf3(centre[0], centre[1], centre[2]),
+                               kernel::cf3(direction[0], direction[1], direction[2]),
+                               kernel::cf3(tangent[0], tangent[1], tangent[2]), samples, width,
+                               height, extent, radius, amplitude, static_cast<std::uint8_t>(ease)));
     return CLAY_OK;
 }
 

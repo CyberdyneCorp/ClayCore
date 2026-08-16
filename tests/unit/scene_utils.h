@@ -57,10 +57,11 @@ inline CTapeValue ref_eval_item(const scene::Node& item, const scene::Layer& lay
             // than agreeing by construction. Its evidence is direct instead —
             // a straight guide is the identity, a circular one is `bend`.
             // ...and a lattice, for the same reason: its cage is blob-carried.
-            if (def.type == kernel::cdeform_bend_curve ||
-                def.type == kernel::cdeform_lattice)
+            // ...and an alpha, whose stamp is blob-carried too.
+            if (def.type == kernel::cdeform_bend_curve || def.type == kernel::cdeform_lattice ||
+                def.type == kernel::cdeform_alpha)
                 continue;
-            offset += ctape_deform_offset(rec, lp);
+            offset += ctape_deform_offset(rec, nullptr, lp);
             lp = ctape_deform_point(rec, nullptr, lp);
         }
         float d;

@@ -5020,3 +5020,116 @@ def test_sculpt_layer_index_errors():
     # The bottom layer has nothing below it.
     with pytest.raises(ValueError):
         g.merge_sculpt_layer_down(0)
+
+
+# -- alphas on SDF layers ------------------------------------------------------
+# A caller-supplied scalar stamp as a distance offset under finite support: how
+# detail work is actually done in every competing sculptor, and until now this
+# engine had it on voxels and not on fields.
+
+
+def alpha_doc(stamp, amplitude=0.15, extent=0.6, radius=0.4, tangent=(1, 0, 0)):
+    doc = clay.Document()
+    prim = clay.Sphere(r=0.5)
+    if stamp is not None:
+        prim = prim.alpha(stamp, centre=(0, 0, 0.5), direction=(0, 0, 1), tangent=tangent,
+                          extent=extent, radius=radius, amplitude=amplitude)
+    doc.add_sdf_layer("l").add(prim)
+    return doc
+
+
+def surface_along_z(doc, lo=0.0, hi=3.0, steps=70):
+    for _ in range(steps):
+        mid = 0.5 * (lo + hi)
+        if doc.eval(np.array([[0.0, 0.0, mid]], dtype=np.float32))[0] < 0.0:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def checker(n):
+    return (np.indices((n, n)).sum(axis=0) % 2).astype(np.float32)
+
+
+def test_alpha_all_zero_stamp_is_exactly_the_identity():
+    plain = alpha_doc(None)
+    zeroed = alpha_doc(np.zeros((16, 16), dtype=np.float32))
+    pts = np.random.default_rng(52).uniform(-1.2, 1.2, size=(512, 3)).astype(np.float32)
+    # Exactly: the offset is a product with the sample, so zero is a hard zero.
+    assert np.array_equal(plain.eval(pts), zeroed.eval(pts))
+    assert zeroed.safe_step_scale() == pytest.approx(plain.safe_step_scale())
+
+
+def test_alpha_white_is_raised_and_black_carved():
+    """The sign convention. Every sculpting package treats white as raised; a
+    deformer's offset is ADDED to the distance, where positive is further away,
+    so the kernel flips it once and this is the test that says it flipped."""
+    bare = surface_along_z(alpha_doc(None))
+    assert bare == pytest.approx(0.5, abs=1e-3)
+    raised = surface_along_z(alpha_doc(np.ones((16, 16), dtype=np.float32), amplitude=0.15))
+    carved = surface_along_z(alpha_doc(np.ones((16, 16), dtype=np.float32), amplitude=-0.15))
+    assert raised > bare
+    assert carved < bare
+
+
+def test_alpha_leaves_material_outside_the_radius_exactly_alone():
+    plain = alpha_doc(None)
+    marked = alpha_doc(checker(16), amplitude=0.2)
+    outside = np.array([[0, 0, -0.9], [0.9, 0, 0], [0, -0.9, 0], [-0.7, -0.7, -0.2]],
+                       dtype=np.float32)
+    # The fixture is honest: every probe is further than `radius` from the centre.
+    assert np.all(np.linalg.norm(outside - np.array([0, 0, 0.5]), axis=1) > 0.4)
+    assert np.array_equal(plain.eval(outside), marked.eval(outside))
+
+
+def test_alpha_bound_comes_from_steepness_not_from_values():
+    """A stamp of all ones has the largest possible VALUES and is perfectly
+    flat, so it displaces rigidly. A bound taken from magnitudes would charge it
+    as the steepest stamp there is."""
+    flat = alpha_doc(np.ones((16, 16), dtype=np.float32))
+    steep = alpha_doc(checker(16))
+    assert steep.safe_step_scale() < flat.safe_step_scale()
+
+    # A flat stamp's cost does not change with resolution.
+    for n in (4, 32, 128):
+        assert alpha_doc(np.ones((n, n), dtype=np.float32)).safe_step_scale() == pytest.approx(
+            flat.safe_step_scale())
+
+    # ...and the same relief spread wider is a gentler slope.
+    assert alpha_doc(checker(32), extent=1.5).safe_step_scale() > alpha_doc(
+        checker(32), extent=0.3).safe_step_scale()
+
+
+def test_alpha_survives_a_clayspace_round_trip(tmp_path):
+    stamp = checker(16)
+    stamp[0, 0] = 0.25  # asymmetric, so a transposed read would show
+    doc = alpha_doc(stamp, amplitude=0.2)
+    path = tmp_path / "alpha.clayspace"
+    doc.save(str(path))
+    back = clay.load(str(path))
+
+    pts = np.random.default_rng(7).uniform(-1.0, 1.0, size=(256, 3)).astype(np.float32)
+    assert np.array_equal(doc.eval(pts), back.eval(pts))
+    # The bound is recomputed on load rather than read, so a hand-edited file
+    # cannot claim a looser one than its samples deserve.
+    assert back.safe_step_scale() == pytest.approx(doc.safe_step_scale())
+
+
+def test_alpha_refuses_a_stamp_it_cannot_interpolate():
+    with pytest.raises(ValueError, match="2x2"):
+        alpha_doc(np.ones((1, 1), dtype=np.float32))
+    with pytest.raises(ValueError, match="extent"):
+        alpha_doc(np.ones((8, 8), dtype=np.float32), extent=0.0)
+    with pytest.raises(ValueError):
+        alpha_doc(np.ones((8, 8), dtype=np.float32), tangent=(0, 0))  # not a 3-vector
+
+
+def test_alpha_tangent_parallel_to_the_direction_still_works():
+    """A caller passing an up parallel to the push direction is a caller, not an
+    error: the frame falls back to a derived axis rather than collapsing."""
+    for tangent in ((0, 0, 1), (0, 0, 0)):
+        doc = alpha_doc(checker(16), tangent=tangent)
+        assert np.isfinite(doc.safe_step_scale())
+        assert doc.safe_step_scale() > 0.0
+        assert np.isfinite(doc.eval(np.array([[0, 0, 0.5]], dtype=np.float32))[0])

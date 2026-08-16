@@ -179,6 +179,21 @@ struct Compiler {
                 }
                 handle_count = d.a;  // nx, which slot 2 carries for a lattice
             }
+            if (d.type == kernel::cdeform_alpha) {
+                // Header then samples. The five scalars sit here rather than in
+                // the record because the record is exactly full with the handle,
+                // the centre and the stamp's frame — and dropping the frame to
+                // make room would cost the TANGENT, which is what lets an
+                // artist align a stamp to a seam.
+                handle_off = static_cast<float>(tape.blob.size());
+                tape.blob.push_back(static_cast<float>(d.stamp.width));
+                tape.blob.push_back(static_cast<float>(d.stamp.height));
+                tape.blob.push_back(d.stamp.extent);
+                tape.blob.push_back(d.stamp.radius);
+                tape.blob.push_back(d.stamp.amplitude);
+                tape.blob.insert(tape.blob.end(), d.stamp.samples.begin(), d.stamp.samples.end());
+                handle_count = d.a;  // the centre's x, which slot 2 carries here
+            }
             tape.params.push_back(static_cast<float>(d.type));
             tape.params.push_back(handle_off);
             tape.params.push_back(handle_count);

@@ -605,12 +605,40 @@ What a fraction *means* is the part worth reading the script for: a voxel is
 there or it is not, so 40% of a pass is a reproducible 40% of its **cells**,
 dithered against the same cell-coordinate hash the falloff brushes use.
 
+## 53 — alphas on an SDF layer
+
+The detailing technique every competing sculptor is built around — pores,
+fabric, scales, rivets — on the *non-destructive* representation rather than
+only the baked one. The stamps are **built in the script** rather than loaded,
+so there is no asset dependency and the frequency content of each one is
+something you can read off the code.
+
+An alpha is a **deformer, not a primitive**: an item shaped like the stamp
+would *add* material in the stamp's shape, where an alpha modulates a surface
+that is already there. So it is a distance offset under the same radial falloff
+`blob`, `grab` and `magnify` use, and outside that radius the field is untouched
+exactly.
+
+The section worth reading is the one that measures **what a stamp costs**. The
+Lipschitz bound comes from the largest difference between *adjacent* samples
+over the world distance between them, so the table shows a stamp of all ones —
+the largest possible values, perfectly flat — costing the *least* step scale of
+anything on the page, and a checkerboard costing the most. A bound taken from
+magnitudes would have charged them the other way round. The following table
+spreads one stamp over four extents and watches the cost fall, because the bound
+is a world slope rather than a sample difference.
+
+There is deliberately **no committed model** here: alpha relief is
+high-frequency, the document meshes to 378k triangles at resolution 128, and the
+gallery's 400 KiB export budget lands somewhere around resolution 32 — which
+smooths away the very thing the file would be showing.
+
 ## Notes
 
 - **This page documents 00-17 and the two showcase examples.** The gallery
   text has drifted behind the scripts; 18-33 and 36 run in CI and regenerate
   their output, they just have no section here yet.
-- **This page documents 00-17, the two showcase examples, 36, 44-52.** The
+- **This page documents 00-17, the two showcase examples, 36, 44-53.** The
   gallery text has drifted behind the scripts; 18-33 run in CI and regenerate
   their output, they just have no section here yet.
 - **Committed models are budgeted.** `_render.save_model` fails above 400 KiB

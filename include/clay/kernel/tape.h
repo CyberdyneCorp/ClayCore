@@ -198,6 +198,9 @@ typedef struct CTapeValueT {
 #define CLAY_TAPE_FAR 3.4e37f
 #define CLAY_TAPE_PRIM_PARAMS 7
 #define CLAY_TAPE_DEFORM_FLOATS 12
+// An alpha's blob payload starts with [w] [h] [extent] [radius] [amplitude],
+// then w*h samples. Named so the writer and the reader cannot disagree.
+#define CLAY_TAPE_ALPHA_HEADER 5
 #define CLAY_TAPE_PRIM_HEADER 17
 
 // Repetition an item can carry (repeat.h). Applied to the local point
@@ -235,18 +238,18 @@ CLAY_FN bool ctape_repeat_active(CLAY_FPTR rec) {
 
 // Domain warps an item can carry (deform.h). Values are serialization-stable.
 enum CDeformType {
-    cdeform_twist = 0,     // k = radians per unit about Y
-    cdeform_bend = 1,      // k = radians per unit along X
-    cdeform_taper = 2,     // k = y0, a = y1, b = s0, c = s1, ease
-    cdeform_displace = 3,  // k = amplitude, a = frequency
-    cdeform_wrap = 4,      // k = x0, a = x1: bend [x0,x1] about the Z axis
-    cdeform_elongate = 5,  // k, a, b = per-axis half-extents to insert
-    cdeform_bend_linear = 6,  // a(k,a,b) b(c,e0,e1) v(e2,e3,e4), eased
-    cdeform_bend_radial = 7,  // k = r0, a = r1, b = dz, eased
+    cdeform_twist = 0,          // k = radians per unit about Y
+    cdeform_bend = 1,           // k = radians per unit along X
+    cdeform_taper = 2,          // k = y0, a = y1, b = s0, c = s1, ease
+    cdeform_displace = 3,       // k = amplitude, a = frequency
+    cdeform_wrap = 4,           // k = x0, a = x1: bend [x0,x1] about the Z axis
+    cdeform_elongate = 5,       // k, a, b = per-axis half-extents to insert
+    cdeform_bend_linear = 6,    // a(k,a,b) b(c,e0,e1) v(e2,e3,e4), eased
+    cdeform_bend_radial = 7,    // k = r0, a = r1, b = dz, eased
     cdeform_elongate_axis = 8,  // k, a, b = half-extents; no correction
-    cdeform_grab = 9,      // centre(k,a,b) radius(c) disp(e0,e1,e2) front(e3)
-    cdeform_pose = 10,     // centre(k,a,b) radius(c) axis(e0,e1,e2) angle(e3)
-    cdeform_pose_line = 11,  // a(k,a,b) b(c,e0,e1) axis(e2,e3,e4) angle(e5)
+    cdeform_grab = 9,           // centre(k,a,b) radius(c) disp(e0,e1,e2) front(e3)
+    cdeform_pose = 10,          // centre(k,a,b) radius(c) axis(e0,e1,e2) angle(e3)
+    cdeform_pose_line = 11,     // a(k,a,b) b(c,e0,e1) axis(e2,e3,e4) angle(e5)
     // Radial scale about a centre. One signed strength: positive magnifies,
     // negative pinches. centre(k,a,b) radius(c) strength(e0)
     cdeform_magnify = 12,
@@ -279,6 +282,18 @@ enum CDeformType {
     // centre(k,a,b) radius(c) ease(5) amplitude(e0) frequency(e1) octaves(e2)
     // gain(e3) seed(e4)
     cdeform_blob = 19,
+    // A caller-supplied 2D stamp as a distance offset — pores, fabric, scales.
+    // The samples do not fit a record, so they ride in the blob as a bend
+    // curve's guide and a lattice's offsets do:
+    //   k = blob offset, centre(a,b,c), ease(5),
+    //   dir(e0,e1,e2), tangent(e3,e4,e5)
+    // which uses the record exactly. The three scalars that did not fit —
+    // width, height, extent, radius, amplitude — head the blob payload:
+    //   [w] [h] [extent] [radius] [amplitude] then w*h samples
+    // Putting them there rather than squeezing the frame out of the record
+    // keeps the TANGENT, and a stamp that cannot be rotated is one an artist
+    // cannot align to a seam.
+    cdeform_alpha = 20,
 };
 
 // Apply one deformer record to the local point. No deformer corrects the
@@ -361,7 +376,9 @@ CLAY_FN cfloat3 ctape_deform_point(CLAY_FPTR rec, CLAY_FPTR blob, cfloat3 p) {
 }
 
 // Post-primitive distance contribution of one deformer (0 for point warps).
-CLAY_FN float ctape_deform_offset(CLAY_FPTR rec, cfloat3 p) {
+// `blob` is threaded through for the same reason ctape_deform_point takes it:
+// an alpha's samples do not fit a record.
+CLAY_FN float ctape_deform_offset(CLAY_FPTR rec, CLAY_FPTR blob, cfloat3 p) {
     int type = CLAY_INT(CLAY_AT(rec, 0));
     if (type == cdeform_elongate) {
         float correction = 0.0f;
@@ -382,6 +399,16 @@ CLAY_FN float ctape_deform_offset(CLAY_FPTR rec, cfloat3 p) {
                             CLAY_AT(rec, 4), CLAY_AT(rec, 6), CLAY_AT(rec, 7), octaves,
                             CLAY_AT(rec, 9), CLAY_UINT(CLAY_AT(rec, 10)),
                             CLAY_INT(CLAY_AT(rec, 5)));
+    }
+    if (type == cdeform_alpha) {
+        int head = CLAY_INT(CLAY_AT(rec, 1));
+        return calpha_offset(p, blob + head + CLAY_TAPE_ALPHA_HEADER, CLAY_INT(CLAY_AT(blob, head)),
+                             CLAY_INT(CLAY_AT(blob, head + 1)),
+                             cf3(CLAY_AT(rec, 2), CLAY_AT(rec, 3), CLAY_AT(rec, 4)),
+                             cf3(CLAY_AT(rec, 6), CLAY_AT(rec, 7), CLAY_AT(rec, 8)),
+                             cf3(CLAY_AT(rec, 9), CLAY_AT(rec, 10), CLAY_AT(rec, 11)),
+                             CLAY_AT(blob, head + 2), CLAY_AT(blob, head + 3),
+                             CLAY_AT(blob, head + 4), CLAY_INT(CLAY_AT(rec, 5)));
     }
     if (type != cdeform_displace) return 0.0f;
     float amp = CLAY_AT(rec, 1);
@@ -1013,7 +1040,7 @@ CLAY_FN float ctape_prim_local(CLAY_UINT_T op, CLAY_FPTR pr,
     cfloat3 wp = lp;
     for (int di = 0; di < deform_count; ++di) {
         CLAY_FPTR rec = CLAY_OFF(deform, 1 + di * CLAY_TAPE_DEFORM_FLOATS);
-        offset += ctape_deform_offset(rec, wp);
+        offset += ctape_deform_offset(rec, blob, wp);
         wp = ctape_deform_point(rec, blob, wp);
     }
     // Only a sampled volume can write colour, so only it is handed the

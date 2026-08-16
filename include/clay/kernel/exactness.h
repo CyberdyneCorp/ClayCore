@@ -315,4 +315,33 @@ CLAY_FN CFieldInfo cfi_blob(CFieldInfo a, float amplitude, float frequency, int 
     return CFieldInfo{false, n.lipschitz + region};
 }
 
+// alpha: the same two-part product rule the blob pays, with the STAMP in place
+// of the noise.
+//
+// The offset is amplitude * w(p) * stamp(u, v), so the gradient has the stamp
+// varying under a constant weight, plus the weight varying over a constant
+// stamp.
+//
+// `slope` is the stamp's own steepness — the largest difference between
+// ADJACENT samples divided by the world distance between them. That
+// distinction is the whole content of this bound, and it is the one cfi_lattice
+// already had to learn: a bound taken from sample MAGNITUDES would charge a
+// stamp of all-ones, which is perfectly flat and displaces nothing, as though
+// it were the steepest possible. Worse, it would be wrong in the other
+// direction too — a stamp of small values with a hard edge between them is
+// steep while its magnitudes are tiny.
+//
+// Bilinear sampling is what makes a finite slope meaningful at all: nearest
+// would put a jump discontinuity in the field, which has no finite Lipschitz
+// bound and no correct step size.
+//
+// `peak` is the largest |sample|, which is what the weight term multiplies —
+// the weight's slope only matters where the stamp is actually non-zero.
+CLAY_FN CFieldInfo cfi_alpha(CFieldInfo a, float amplitude, float slope, float peak, float radius,
+                             float ease_slope) {
+    const float stamp = cabs(amplitude) * slope;
+    const float region = cabs(amplitude) * peak * ease_slope / cmax(radius, 1e-6f);
+    return CFieldInfo{false, a.lipschitz + stamp + region};
+}
+
 CLAY_NS_END

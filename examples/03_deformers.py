@@ -122,6 +122,9 @@ COVERED_ELSEWHERE = {
     "lattice":       ("50_sdf_lattice.py",
                       "a cage is not a one-line warp, and the page it earns is "
                       "about what running FFD backwards costs"),
+    "alpha":         ("53_sdf_alphas.py",
+                      "a stamp needs an image to be about, and the page it earns "
+                      "is about what its steepness costs in step scale"),
 }
 
 
