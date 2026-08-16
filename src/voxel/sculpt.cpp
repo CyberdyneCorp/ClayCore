@@ -13,6 +13,8 @@
 
 #include "clay/parallel/thread_pool.h"
 #include "clay/voxel/grid.h"
+
+#include "dither.h"
 #include "clay/voxel/mask.h"
 
 namespace clay {
@@ -69,28 +71,13 @@ inline float falloff_weight(BrushFalloff curve, float d) {
 
 inline float cnearest(float v) { return v < 0.0f ? -std::floor(-v + 0.5f) : std::floor(v + 0.5f); }
 
-// Deterministic per-cell threshold in [0, 1). Same cell + seed => same value
-// on every platform: integer mixing only, no floating point until the end.
-inline float cell_threshold(VoxelCoord c, std::uint32_t seed) {
-    std::uint32_t h = seed * 0x9E3779B9u;
-    h ^= static_cast<std::uint32_t>(c.x) * 0x85EBCA6Bu;
-    h = (h ^ (h >> 13)) * 0xC2B2AE35u;
-    h ^= static_cast<std::uint32_t>(c.y) * 0x27D4EB2Fu;
-    h = (h ^ (h >> 15)) * 0x165667B1u;
-    h ^= static_cast<std::uint32_t>(c.z) * 0x9E3779B1u;
-    h = (h ^ (h >> 16)) * 0x7FEB352Du;
-    h ^= h >> 15;
-    return static_cast<float>(h >> 8) / static_cast<float>(1u << 24);
-}
-
-// Whether this cell is touched by a stamp of the given weight. Weight >= 1
-// always passes and <= 0 never does, so a constant-falloff brush at full
-// strength is exactly the hard-edged brush.
-inline bool passes(VoxelCoord world, float weight, std::uint32_t seed) {
-    if (weight >= 1.0f) return true;
-    if (weight <= 0.0f) return false;
-    return weight > cell_threshold(world, seed);
-}
+// The dither moved to dither.h so sculpt layers use the SAME one: a layer at
+// 40% keeps 40% of its cells by the rule a brush at 40% strength touches 40%
+// of its footprint. Two definitions would be two things to keep in step, and
+// the cross-platform reproducibility the parity suite enforces is the thing
+// they would drift on.
+using dither::cell_threshold;
+using dither::passes;
 
 // A dense copy of a cell box, so verbs read pre-operation state. Reads
 // outside the box return 0 (empty), which is correct: the box is always

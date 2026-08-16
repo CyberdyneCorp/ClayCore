@@ -170,7 +170,10 @@ LayerId edited_layer(const Command& cmd);
 // The scene payload layout this build writes. It tracks the .clayspace
 // container's minor version, which is what a reader is told; io asserts they
 // agree so the two cannot drift.
-inline constexpr std::uint16_t kSceneMinor = 9;
+// Minor 10 changed no scene field — it moved in step with the container, whose
+// voxel payload gained sculpt layers. Writing a document AT minor 9 therefore
+// still produces exactly the bytes minor 9 always did.
+inline constexpr std::uint16_t kSceneMinor = 10;
 
 // Apply a command; returns its inverse, or nullopt if the target does not
 // exist or is protected (ghosted or locked). The document is unchanged in

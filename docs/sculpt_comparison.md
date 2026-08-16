@@ -38,8 +38,9 @@ three on three specific axes: a fully non-destructive parametric edit list,
 per-node exactness and Lipschitz tracking that makes raymarching provably
 correct, and portability across four backends from one kernel source with gated
 parity. As a **sculpting product**, it is at *"core brush vocabulary complete,
-workflow tier absent."* The brushes landed; masking-as-protection, sculpt
-layers, alphas on SDF layers and the asset-finishing pipeline have not.
+workflow tier absent."* The brushes landed, and sculpt layers landed on
+voxel layers; masking-as-protection, sculpt layers on SDF layers, alphas on SDF
+layers and the asset-finishing pipeline have not.
 
 ---
 
@@ -54,7 +55,7 @@ layers, alphas on SDF layers and the asset-finishing pipeline have not.
 | **Booleans** | **Watertight by construction**, 2-manifold meshing | Live Boolean, then remesh | Voxel booleans, robust | BMesh booleans, fragile on bad input |
 | **Brush vocabulary** | Core set complete on fields and voxels, plus 11 fixed-topology verbs and a lattice cage on a mesh layer (see below) | The reference: ~36 surface brushes plus the core | Broad, voxel + surface modes | Solid core set |
 | **Masking** | **Weak** — voxel-scoped, reaches SDF only via stroke stamps | First class, protects the surface from *any* op | First class | First class |
-| **Sculpt layers** | **Absent** | Headline feature | Present | Present |
+| **Sculpt layers** | **On voxel layers.** A pass is bracketed and its changed cells recorded, so its strength stays adjustable long after the strokes are finished; SDF layers do not have them yet | Headline feature | Present | Present |
 | **Alphas / stamps** | Voxel only | Deep, VDM support | Deep | Present |
 | **Surface colour** | Per-item colour + `Paint` regions; vertex colours at mesh time | Polypaint | **PBR texture painting — its moat** | Vertex paint + texture paint |
 | **Scale** | ≥256³ per voxel layer, no streaming; SDF edit lists degrade step scale as they grow | Tens of millions of polys | Very large voxel scenes | Large, memory-bound |
@@ -162,7 +163,7 @@ and that is the shape of the gap.
 | Gap | Today | Why it blocks parity |
 |---|---|---|
 | **Masking as a field concept** | Masks are stored beside *voxel* content and reach SDF edits only through the stroke engine, where a masked stamp is dropped or attenuated | ZBrush masking protects the **surface** from *any* operation. Nothing here gates an arbitrary op, or protects an existing surface from the next boolean. The single biggest missing concept. |
-| **Sculpt layers / morph targets** | Absent | A layer that records a pass and replays it at an intensity is a *document* concept, not a brush. Its absence is why Morph is filed "not planned". |
+| **Sculpt layers / morph targets** | **On voxel layers**; not on SDF layers | A layer that records a pass and replays it at an intensity is a *document* concept, not a brush. The voxel side has it: `begin_sculpt_layer`/`end_sculpt_layer` bracket a pass, and strength, visibility, reordering and merge-down follow (`examples/52_sculpt_layers.py`). What a **fraction** means differs from ZBrush by representation — ZBrush interpolates vertex offsets, and binary occupancy has nothing to interpolate, so a fractional strength is a reproducible fraction of the *cells*, dithered against the same cell-coordinate hash the falloff brushes use. On an SDF layer the equivalent is a weighted group rather than a diff, which waits on `expose-scene-groups`. Morph stays "not planned" for the SDF side only. |
 | **Alphas on SDF layers** | `sculpt_carve_alpha` is voxel only | Detail work in all three tools is alpha-driven. |
 
 ### Tier 1b — Move is not a mesh Move, and a stroke compounds

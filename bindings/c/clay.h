@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 30
+#define CLAY_ABI_MINOR 31
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -2148,6 +2148,75 @@ clay_result clay_voxel_erase_brush(clay_voxel_grid* grid, const int32_t cell[3],
                                    const clay_brush_params* brush);
 clay_result clay_voxel_paint_brush(clay_voxel_grid* grid, const int32_t cell[3],
                                    const clay_brush_params* brush, int32_t index);
+
+/* -- sculpt layers --------------------------------------------------------- */
+
+/* A pass you can dial back after making it — ZBrush's layers, on a voxel grid.
+ * Bracket any run of edits with begin/end and the grid remembers what those
+ * edits CHANGED, so their strength stays adjustable long after the strokes are
+ * finished. This is not undo: undo is a stack you pop, a sculpt layer is a
+ * slider you keep.
+ *
+ * A layer stores what its pass DID, not the brushes that did it. Dialling a
+ * layer replays recorded cells; it does not re-run the strokes. So a pass whose
+ * result depended on the layer under it keeps the result it recorded when that
+ * layer is dialled away — which is what a layer stack means, and what ZBrush
+ * does. Re-running would make a layer's content depend on what sits below it.
+ *
+ * On binary occupancy, a fractional strength is a fraction of the CELLS, chosen
+ * by the same cell-coordinate hash the falloff brushes dither with: the same
+ * strength picks the same cells on every platform and every run, and raising it
+ * ADDS cells to the ones already showing rather than reshuffling. Strength 0
+ * and 1 are exact — the grid without the pass, and the pass applied directly.
+ *
+ * Layers composite bottom-up, so the last one recorded wins where two overlap. */
+
+/* Starts recording. A name is optional (NULL for none) and is what a UI shows.
+ * Returns the new layer's index in *out_layer. Rejected while a layer is
+ * already recording — nesting has no meaning here, since a cell can only
+ * belong to one pass. */
+clay_result clay_voxel_begin_sculpt_layer(clay_voxel_grid* grid, const char* name,
+                                          size_t* out_layer);
+/* Stops recording. Edits after this belong to no layer and are not dialled
+ * away with one. A no-op when nothing is recording. */
+clay_result clay_voxel_end_sculpt_layer(clay_voxel_grid* grid);
+clay_result clay_voxel_recording_sculpt_layer(const clay_voxel_grid* grid, int32_t* out_recording);
+clay_result clay_voxel_sculpt_layer_count(const clay_voxel_grid* grid, size_t* out_count);
+/* By the size-query pattern clay_layer_name uses. */
+clay_result clay_voxel_sculpt_layer_name(const clay_voxel_grid* grid, size_t layer, char* buffer,
+                                         size_t* size);
+/* How many cells the pass changed — its cost, and whether it did anything. */
+clay_result clay_voxel_sculpt_layer_cell_count(const clay_voxel_grid* grid, size_t layer,
+                                               size_t* out_count);
+clay_result clay_voxel_sculpt_layer_strength(const clay_voxel_grid* grid, size_t layer,
+                                             float* out_strength);
+/* Clamped to [0, 1] rather than rejected: a slider that overshoots is a caller
+ * being a caller. */
+clay_result clay_voxel_set_sculpt_layer_strength(clay_voxel_grid* grid, size_t layer,
+                                                 float strength);
+clay_result clay_voxel_sculpt_layer_visible(const clay_voxel_grid* grid, size_t layer,
+                                            int32_t* out_visible);
+clay_result clay_voxel_set_sculpt_layer_visible(clay_voxel_grid* grid, size_t layer,
+                                                int32_t visible);
+/* Drops a layer and replays the ones above it. */
+clay_result clay_voxel_remove_sculpt_layer(clay_voxel_grid* grid, size_t layer);
+/* Folds `layer` into the one below at full strength, keeping the lower layer's
+ * name. Rejected for layer 0, which has nothing below it. */
+clay_result clay_voxel_merge_sculpt_layer_down(clay_voxel_grid* grid, size_t layer);
+/* Moves a layer within the stack, sliding the rest along. Order is meaningful:
+ * where two passes touched the same cell, moving one past the other changes
+ * which value survives. Replays the recorded diffs in the new order rather
+ * than re-running the strokes. */
+clay_result clay_voxel_move_sculpt_layer(clay_voxel_grid* grid, size_t from, size_t to);
+/* What the layers cost in memory — recorded cells plus the recording index.
+ * Nothing is enforced: a cap that silently stopped recording would leave a
+ * pass on the grid and un-dialable, which is a correctness bug wearing a
+ * memory limit's clothes. A host with a budget merges layers down (one entry
+ * per cell instead of two) or stops recording. Pass a layer index for one
+ * layer's share; clay_voxel_sculpt_layers_bytes is the whole stack. */
+clay_result clay_voxel_sculpt_layer_bytes(const clay_voxel_grid* grid, size_t layer,
+                                          size_t* out_bytes);
+clay_result clay_voxel_sculpt_layers_bytes(const clay_voxel_grid* grid, size_t* out_bytes);
 
 /* -- sculpting verbs ------------------------------------------------------- */
 

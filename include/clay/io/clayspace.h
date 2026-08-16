@@ -112,7 +112,13 @@ namespace clay {
 namespace io {
 
 inline constexpr std::uint16_t kClaySpaceMajor = 1;
-inline constexpr std::uint16_t kClaySpaceMinor = 9;
+// Minor 10 adds sculpt layers to the voxel payload. That payload is opaque to
+// this container, so the bump is a READER SIGNAL rather than a layout change
+// here: a minor-9 build opening a minor-10 file meets an unknown tag in the
+// voxel stream and falls back to the flattened grid, which is the honest
+// degradation — the sculpt is exactly what the layers composed to, it just
+// stops being dialable. Nothing is lost that the older build could have shown.
+inline constexpr std::uint16_t kClaySpaceMinor = 10;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).

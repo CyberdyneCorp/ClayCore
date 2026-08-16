@@ -5690,6 +5690,177 @@ clay_result clay_voxel_paint_brush(clay_voxel_grid* grid, const int32_t cell[3],
     return CLAY_OK;
 }
 
+/* -- sculpt layers --------------------------------------------------------- */
+
+namespace {
+
+// Every accessor here needs the same two things, and the index check is the
+// one a caller is most likely to get wrong.
+clay_result resolve_sculpt_layer(const clay_voxel_grid* grid, std::size_t layer,
+                                 voxel::VoxelGrid** out) {
+    clay_result r = resolve(const_cast<clay_voxel_grid*>(grid), out);
+    if (r != CLAY_OK) return r;
+    if (layer >= (*out)->sculpt_layer_count())
+        return fail(CLAY_ERROR_NOT_FOUND, "no sculpt layer " + std::to_string(layer));
+    return CLAY_OK;
+}
+
+}  // namespace
+
+clay_result clay_voxel_begin_sculpt_layer(clay_voxel_grid* grid, const char* name,
+                                          size_t* out_layer) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    if (g->recording_sculpt_layer())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a sculpt layer is already recording");
+    const std::size_t layer = g->begin_sculpt_layer(name ? std::string(name) : std::string());
+    if (out_layer) *out_layer = layer;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_end_sculpt_layer(clay_voxel_grid* grid) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(grid, &g);
+    if (r != CLAY_OK) return r;
+    g->end_sculpt_layer();
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_recording_sculpt_layer(const clay_voxel_grid* grid, int32_t* out_recording) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(const_cast<clay_voxel_grid*>(grid), &g);
+    if (r != CLAY_OK) return r;
+    if (!out_recording) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_recording");
+    *out_recording = g->recording_sculpt_layer() ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_layer_count(const clay_voxel_grid* grid, size_t* out_count) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(const_cast<clay_voxel_grid*>(grid), &g);
+    if (r != CLAY_OK) return r;
+    if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_count");
+    *out_count = g->sculpt_layer_count();
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_layer_name(const clay_voxel_grid* grid, size_t layer, char* buffer,
+                                         size_t* size) {
+    if (!size) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null size");
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve_sculpt_layer(grid, layer, &g);
+    if (r != CLAY_OK) return r;
+    const std::string& name = g->sculpt_layer_name(layer);
+    const std::size_t needed = name.size() + 1;
+    if (!buffer) {
+        *size = needed;
+        return CLAY_OK;
+    }
+    if (*size < needed) {
+        *size = needed;
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "the name needs " + std::to_string(needed) + " bytes");
+    }
+    std::memcpy(buffer, name.c_str(), needed);
+    *size = needed;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_layer_cell_count(const clay_voxel_grid* grid, size_t layer,
+                                               size_t* out_count) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve_sculpt_layer(grid, layer, &g);
+    if (r != CLAY_OK) return r;
+    if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_count");
+    *out_count = g->sculpt_layer_cell_count(layer);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_layer_strength(const clay_voxel_grid* grid, size_t layer,
+                                             float* out_strength) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve_sculpt_layer(grid, layer, &g);
+    if (r != CLAY_OK) return r;
+    if (!out_strength) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_strength");
+    *out_strength = g->sculpt_layer_strength(layer);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_set_sculpt_layer_strength(clay_voxel_grid* grid, size_t layer,
+                                                 float strength) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve_sculpt_layer(grid, layer, &g);
+    if (r != CLAY_OK) return r;
+    g->set_sculpt_layer_strength(layer, strength);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_layer_visible(const clay_voxel_grid* grid, size_t layer,
+                                            int32_t* out_visible) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve_sculpt_layer(grid, layer, &g);
+    if (r != CLAY_OK) return r;
+    if (!out_visible) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_visible");
+    *out_visible = g->sculpt_layer_visible(layer) ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_set_sculpt_layer_visible(clay_voxel_grid* grid, size_t layer,
+                                                int32_t visible) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve_sculpt_layer(grid, layer, &g);
+    if (r != CLAY_OK) return r;
+    g->set_sculpt_layer_visible(layer, visible != 0);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_remove_sculpt_layer(clay_voxel_grid* grid, size_t layer) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve_sculpt_layer(grid, layer, &g);
+    if (r != CLAY_OK) return r;
+    g->remove_sculpt_layer(layer);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_move_sculpt_layer(clay_voxel_grid* grid, size_t from, size_t to) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve_sculpt_layer(grid, from, &g);
+    if (r != CLAY_OK) return r;
+    if (to >= g->sculpt_layer_count())
+        return fail(CLAY_ERROR_NOT_FOUND, "no sculpt layer " + std::to_string(to));
+    g->move_sculpt_layer(from, to);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_layer_bytes(const clay_voxel_grid* grid, size_t layer,
+                                          size_t* out_bytes) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve_sculpt_layer(grid, layer, &g);
+    if (r != CLAY_OK) return r;
+    if (!out_bytes) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_bytes");
+    *out_bytes = g->sculpt_layer_bytes(layer);
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_sculpt_layers_bytes(const clay_voxel_grid* grid, size_t* out_bytes) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve(const_cast<clay_voxel_grid*>(grid), &g);
+    if (r != CLAY_OK) return r;
+    if (!out_bytes) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_bytes");
+    *out_bytes = g->sculpt_layer_total_bytes();
+    return CLAY_OK;
+}
+
+clay_result clay_voxel_merge_sculpt_layer_down(clay_voxel_grid* grid, size_t layer) {
+    voxel::VoxelGrid* g = nullptr;
+    clay_result r = resolve_sculpt_layer(grid, layer, &g);
+    if (r != CLAY_OK) return r;
+    if (!g->merge_sculpt_layer_down(layer))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "the bottom sculpt layer has nothing below it");
+    return CLAY_OK;
+}
+
 clay_result clay_voxel_sculpt_smooth(clay_voxel_grid* grid, const int32_t cell[3],
                                      const clay_brush_params* brush) {
     voxel::VoxelGrid* g = nullptr;

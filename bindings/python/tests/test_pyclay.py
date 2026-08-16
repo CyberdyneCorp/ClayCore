@@ -4862,3 +4862,161 @@ def test_rasterize_mesh_beats_the_document_detour_on_a_thin_feature():
 
     assert direct.occupied_count > 0
     assert direct.occupied_count >= detoured.occupied_count
+
+
+# -- sculpt layers -------------------------------------------------------------
+# A pass you can dial back after making it. The Python surface adds one thing
+# the C++ side does not have: the context manager, which is the only way to
+# guarantee a raising block cannot leave a grid recording forever.
+
+
+def sculpt_ball(radius=6, cell=0.1):
+    g = clay.VoxelGrid(cell)
+    idx = g.palette_add((0.6, 0.6, 0.6))
+    for z in range(-radius, radius + 1):
+        for y in range(-radius, radius + 1):
+            for x in range(-radius, radius + 1):
+                if x * x + y * y + z * z <= radius * radius:
+                    g.set((x, y, z), idx)
+    return g, idx
+
+
+def test_sculpt_layer_context_manager_records_a_pass():
+    g, idx = sculpt_ball()
+    base = g.occupied_count
+    assert g.sculpt_layer_count == 0
+
+    with g.sculpt_layer("wrinkles") as layer:
+        assert g.recording_sculpt_layer
+        g.sculpt_inflate((0, 6, 0), size=9, amount=2)
+    assert not g.recording_sculpt_layer
+
+    assert layer == 0
+    assert g.sculpt_layer_count == 1
+    assert g.sculpt_layer_name(0) == "wrinkles"
+    assert g.sculpt_layer_cell_count(0) > 0
+    full = g.occupied_count
+    assert full != base
+
+    # The two ends of the slider are exact.
+    g.set_sculpt_layer_strength(0, 0.0)
+    assert g.occupied_count == base
+    g.set_sculpt_layer_strength(0, 1.0)
+    assert g.occupied_count == full
+
+
+def test_sculpt_layer_scope_closes_when_the_block_raises():
+    """The reason the context manager exists. begin/end alone would leave a
+    grid recording for the rest of its life the first time a stroke loop threw,
+    and every later edit would silently join the abandoned pass."""
+    g, idx = sculpt_ball()
+    with pytest.raises(RuntimeError, match="stroke failed"):
+        with g.sculpt_layer("partial"):
+            g.set((0, 7, 0), idx)
+            raise RuntimeError("stroke failed")
+    assert not g.recording_sculpt_layer
+    # The partial pass is KEPT: those edits did happen, and a layer that owns
+    # them is more recoverable than one that disowns them.
+    assert g.sculpt_layer_count == 1
+    assert g.sculpt_layer_cell_count(0) == 1
+
+
+def test_sculpt_layer_fractional_strength_is_reproducible_and_monotone():
+    def at(strength):
+        g, _ = sculpt_ball()
+        with g.sculpt_layer():
+            g.sculpt_inflate((0, 6, 0), size=9, amount=2)
+        g.set_sculpt_layer_strength(0, strength)
+        return g.occupied_count
+
+    # Same strength, same answer — the cell-coordinate dither, not an RNG.
+    assert at(0.4) == at(0.4)
+    assert at(0.0) <= at(0.5) <= at(1.0)
+    assert at(0.0) < at(1.0)
+
+    # Dialling one grid around lands where building it there does.
+    g, _ = sculpt_ball()
+    with g.sculpt_layer():
+        g.sculpt_inflate((0, 6, 0), size=9, amount=2)
+    for s in (0.2, 0.9, 0.3, 0.7):
+        g.set_sculpt_layer_strength(0, s)
+    assert g.occupied_count == at(0.7)
+
+
+def test_sculpt_layers_stack_and_the_top_one_wins():
+    g, _ = sculpt_ball()
+    red = g.palette_add((0.9, 0.1, 0.1))
+    blue = g.palette_add((0.1, 0.1, 0.9))
+    probe = (0, 3, 0)
+
+    with g.sculpt_layer("red"):
+        g.set(probe, red)
+    with g.sculpt_layer("blue"):
+        g.set(probe, blue)
+    assert g.get(probe) == blue
+
+    g.set_sculpt_layer_visible(1, False)
+    assert g.get(probe) == red
+    assert not g.sculpt_layer_visible(1)
+    g.set_sculpt_layer_visible(1, True)
+    assert g.get(probe) == blue
+
+    # Merging down keeps the lower name and the visible result.
+    g.merge_sculpt_layer_down(1)
+    assert g.sculpt_layer_count == 1
+    assert g.sculpt_layer_name(0) == "red"
+    assert g.get(probe) == blue
+
+
+def test_sculpt_layers_survive_a_clayspace_round_trip(tmp_path):
+    doc = clay.Document()
+    grid = doc.add_voxel_layer("v", voxel_size=0.1)
+    idx = grid.palette_add((0.5, 0.5, 0.5))
+    for x in range(10):
+        grid.set((x, 0, 0), idx)
+    with grid.sculpt_layer("dialable"):
+        for x in range(10):
+            grid.set((x, 1, 0), idx)
+    grid.set_sculpt_layer_strength(0, 0.35)
+    composed = grid.occupied_count
+
+    path = tmp_path / "layers.clayspace"
+    doc.save(str(path))
+    reloaded = clay.load(str(path)).voxel_layer("v")
+    assert reloaded is not None
+    assert reloaded.sculpt_layer_count == 1
+    assert reloaded.sculpt_layer_name(0) == "dialable"
+    assert reloaded.sculpt_layer_strength(0) == pytest.approx(0.35)
+    assert reloaded.occupied_count == composed
+
+    # Still dialable, which is the reason the diff is stored and not the result.
+    reloaded.set_sculpt_layer_strength(0, 1.0)
+    grid.set_sculpt_layer_strength(0, 1.0)
+    assert reloaded.occupied_count == grid.occupied_count
+
+
+def test_sculpt_layer_index_errors():
+    g, _ = sculpt_ball(radius=2)
+    for call in (
+        lambda: g.sculpt_layer_name(0),
+        lambda: g.sculpt_layer_strength(0),
+        lambda: g.set_sculpt_layer_strength(0, 0.5),
+        lambda: g.set_sculpt_layer_visible(0, False),
+        lambda: g.remove_sculpt_layer(0),
+        lambda: g.merge_sculpt_layer_down(0),
+    ):
+        with pytest.raises(IndexError):
+            call()
+
+    with g.sculpt_layer("only"):
+        g.set((0, 0, 0), 1)
+    # Nesting has no meaning: a cell belongs to one pass.
+    with pytest.raises(ValueError):
+        with g.sculpt_layer("a"):
+            with g.sculpt_layer("b"):
+                pass
+    # ...and the outer one still closed.
+    assert not g.recording_sculpt_layer
+    # The bottom layer has nothing below it.
+    with pytest.raises(ValueError):
+        g.merge_sculpt_layer_down(0)

@@ -24,12 +24,13 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
-#include "clay/math/geom.h"
 #include "clay/field/volume.h"
+#include "clay/math/geom.h"
 #include "clay/mesh/bvh.h"
 #include "clay/mesh/mesh_data.h"
 #include "clay/mesh/quad_mesh.h"  // QuadTarget / QuadFit, shared with the SDF side
@@ -116,6 +117,83 @@ class VoxelGrid {
 
     // Cell size of the ACTIVE level.
     float voxel_size() const { return levels_[active_].voxel_size; }
+
+    // -- sculpt layers -------------------------------------------------------
+    //
+    // A pass you can dial back. `Layer` on a Document is an ORGANISATIONAL
+    // layer — it holds content and can be hidden or moved; this is a STRENGTH
+    // layer, the thing a sculptor uses to try a pass, look at it at 40%, and
+    // turn it off without undoing the twenty strokes that came after.
+    //
+    // Undo is not a substitute, and the difference is the point: undo is a
+    // STACK, so removing a pass from ten minutes ago discards everything
+    // since. A sculpt layer is ADDRESSABLE — you keep working and revisit it.
+    //
+    // What is recorded is the DIFFERENCE a pass made, not the result: for each
+    // cell it touched, the value before and the value after. That is what lets
+    // the strength be re-evaluated at any time, and it costs the pass rather
+    // than the model.
+    //
+    // PARTIAL STRENGTH ON BINARY OCCUPANCY is the interesting part, because
+    // 40% of a pass cannot mean 40% of a cell. It means a reproducible 40% of
+    // its CELLS, dithered against the same cell-coordinate hash the falloff
+    // brushes use — so a layer at 40% and a brush at 40% strength pick cells by
+    // one rule, and both are identical on every platform. At 1.0 the dither
+    // passes everything and the layer is exactly the pass applied directly; at
+    // 0.0 it passes nothing and the layer is exactly absent. Both are EXACT,
+    // not approximate.
+    std::size_t sculpt_layer_count() const { return sculpt_layers_.size(); }
+    // Start recording. Writes from here on are attributed to the new layer,
+    // which begins at full strength and visible. Returns its index.
+    std::size_t begin_sculpt_layer(std::string name = {});
+    // Stop recording. Further writes are attributed to no layer, exactly as
+    // they were before any layer existed.
+    void end_sculpt_layer();
+    bool recording_sculpt_layer() const { return recording_; }
+
+    const std::string& sculpt_layer_name(std::size_t layer) const;
+    // How many cells the pass touched — its cost, and what a host reports.
+    std::size_t sculpt_layer_cell_count(std::size_t layer) const;
+
+    float sculpt_layer_strength(std::size_t layer) const;
+    bool sculpt_layer_visible(std::size_t layer) const;
+    // Both recompose the grid: the layers above this one are reverted, the
+    // change applied, and they are replayed. False for a layer this grid does
+    // not have.
+    bool set_sculpt_layer_strength(std::size_t layer, float strength);
+    bool set_sculpt_layer_visible(std::size_t layer, bool visible);
+
+    // Discard a layer, leaving the grid as though the pass had never been
+    // made. Everything recorded after it is replayed on top.
+    bool remove_sculpt_layer(std::size_t layer);
+    // Fold a layer into the one below it, so two passes become one that can
+    // still be dialled. The lower layer keeps its own name and strength.
+    bool merge_sculpt_layer_down(std::size_t layer);
+    // Move a layer to another position in the stack, sliding the rest along.
+    // ORDER IS MEANINGFUL — layers composite bottom-up, so where two passes
+    // touched the same cell, moving one past the other changes which value
+    // survives. That is the point of being able to reorder, not a caveat.
+    //
+    // Each layer keeps the diff it RECORDED; reordering replays those diffs in
+    // the new order rather than re-running the strokes, for the reason
+    // remove_sculpt_layer does. False for an index this grid does not have,
+    // and a no-op when `to` equals `from`.
+    bool move_sculpt_layer(std::size_t from, std::size_t to);
+
+    // What the layers cost in memory: the recorded cells plus the lookup that
+    // makes recording O(1) per write. A layer costs its PASS, not the model —
+    // a stroke over a thousand cells is a thousand entries whatever the grid
+    // holds.
+    //
+    // NOTHING IS ENFORCED HERE, deliberately. A cap that silently dropped
+    // recording would turn a memory limit into a correctness bug — the pass
+    // would land on the grid and be un-dialable, with no signal at the point
+    // it mattered. A host that has a budget reads this and decides: merge
+    // down, which collapses two passes into one entry per cell, or end the
+    // layer and stop recording. Both are reversible decisions a user can
+    // understand; a truncated layer is not.
+    std::size_t sculpt_layer_bytes(std::size_t layer) const;
+    std::size_t sculpt_layer_total_bytes() const;
 
     // -- resolution levels ---------------------------------------------------
     // Level 0 is the coarsest; level k has half the cell size of level k-1.
@@ -681,6 +759,36 @@ class VoxelGrid {
     // cells from its new parent EXCEPT where a detail entry overrides it, so a
     // broad stroke and the fine detail already sculpted both survive. Empty for
     // level 0, which has nothing coarser to differ from.
+    // One pass, as the difference it made. Cells in the order the pass touched
+    // them, which is the order a replay must use.
+    struct SculptChange {
+        VoxelCoord cell;
+        std::uint8_t before = 0;
+        std::uint8_t after = 0;
+    };
+    struct SculptLayerRecord {
+        std::string name;
+        std::vector<SculptChange> changes;
+        std::unordered_map<VoxelCoord, std::size_t, VoxelCoordHash> index;
+        float strength = 1.0f;
+        bool visible = true;
+        // Fixed per layer so a strength change re-picks the SAME cells rather
+        // than a fresh random subset — dialling 0.4 to 0.5 must add cells, not
+        // reshuffle them.
+        std::uint32_t seed = 0;
+    };
+
+    bool read_tails(const std::uint8_t* data, std::size_t size, std::size_t* pos,
+                    std::size_t palette_count);
+    void write_sculpt_tail(std::vector<std::uint8_t>* out) const;
+    bool read_sculpt_tail(const std::uint8_t* data, std::size_t size, std::size_t* pos);
+    void revert_from(std::size_t first);
+    void apply_from(std::size_t first);
+
+    std::vector<SculptLayerRecord> sculpt_layers_;
+    bool recording_ = false;
+    std::uint32_t next_sculpt_seed_ = 1;
+
     struct Level {
         float voxel_size = 0.1f;
         ChunkMap chunks;

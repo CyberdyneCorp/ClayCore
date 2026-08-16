@@ -556,6 +556,20 @@ struct PyVoxelGrid {
     }
 };
 
+// `with grid.sculpt_layer("pass"):` — the shape a Python caller reaches for,
+// and the one that cannot leave a grid recording when the block raises. It
+// holds the grid by the same shared handle PyVoxelGrid does, so a scope over a
+// document's layer stays valid exactly as long as the grid does.
+struct PySculptLayerScope;
+
+// A sculpt layer index that does not exist is an IndexError rather than a
+// silent no-op — the C++ side returns false, which Python callers would not
+// see through a void binding.
+void check_sculpt_layer(const PyVoxelGrid& g, std::size_t layer) {
+    if (layer >= g.grid().sculpt_layer_count())
+        throw nb::index_error(("no sculpt layer " + std::to_string(layer)).c_str());
+}
+
 // Owns a mask, or borrows the one a document holds for a layer, mirroring
 // PyVoxelGrid so a mask edited through a document is the one that gets saved.
 struct PyMaskField {
@@ -570,6 +584,12 @@ struct PyMaskField {
             throw std::runtime_error("mask was removed from its document");
         return it->second;
     }
+};
+
+struct PySculptLayerScope {
+    PyVoxelGrid grid;
+    std::string name;
+    std::size_t index = 0;
 };
 
 field::MaskGate mask_gate_of(nb::handle mask) {
@@ -4844,627 +4864,800 @@ NB_MODULE(pyclay, m) {
              "`pad` widens the sampled region past the masked one; anything that\n"
              "reaches outside the mask needs it.");
 
-    nb::class_<PyVoxelGrid>(m, "VoxelGrid",
-                            "Palette-indexed colored voxel grid (chunked, sparse)")
-        .def("__init__",
-             [](PyVoxelGrid* self, float voxel_size) {
-                 if (voxel_size <= 0.0f) throw std::invalid_argument("voxel_size must be > 0");
-                 new (self) PyVoxelGrid();
-                 self->owned = std::make_shared<voxel::VoxelGrid>(voxel_size);
-             },
-             "voxel_size"_a = 0.1f)
-        .def_prop_ro("voxel_size", [](const PyVoxelGrid& g) { return g.grid().voxel_size(); },
-                     "Cell size of the active resolution level.")
-        .def_prop_ro("level_count", [](const PyVoxelGrid& g) { return g.grid().level_count(); },
-                     "Resolution levels: level 0 is the coarsest and level k has\n"
-                     "half the cell size of level k-1. A grid always has at least\n"
-                     "one, and a grid that never gains a second behaves exactly as\n"
-                     "a grid did before levels existed.")
-        .def_prop_rw("active_level", [](const PyVoxelGrid& g) { return g.grid().active_level(); },
-                     [](PyVoxelGrid& g, std::size_t level) {
-                         if (!g.grid().set_active_level(level))
-                             throw std::invalid_argument("no such resolution level");
-                     },
-                     "The level every verb acts on. Setting it is free: editing at\n"
-                     "a level already averages down into the coarser levels and\n"
-                     "replays into the finer ones from the offsets they hold.")
-        .def("add_level",
-             [](PyVoxelGrid& g) {
-                 std::size_t before = g.grid().level_count();
-                 std::size_t level = g.grid().add_level();
-                 if (g.grid().level_count() == before)
-                     throw std::invalid_argument("the level stack is at its cap");
-                 return level;
-             },
-             "Appends a level at half the finest cell size, subdividing every\n"
-             "occupied cell into its eight children so the solid is unchanged.\n"
-             "Returns the new level's index.")
-        .def("add_level_region",
-             [](PyVoxelGrid& g, nb::handle region) {
-                 const math::Aabb box = to_aabb(region);
-                 if (box.empty())
-                     throw std::invalid_argument(
-                         "the region is empty; there is nothing to refine");
-                 std::size_t before = g.grid().level_count();
-                 std::size_t level = g.grid().add_level(box);
-                 if (g.grid().level_count() == before)
-                     throw std::invalid_argument("the level stack is at its cap");
-                 return level;
-             },
-             "region"_a,
-             "Appends a level refined only over `region` ((min, max) in world\n"
-             "units, rounded OUT to whole chunks).\n\n"
-             "Outside the region the level has no storage and reads its parent's\n"
-             "value, so the lattice is still uniform and complete — only what is\n"
-             "STORED changes, and meshing, bounds and neighbour indexing are as\n"
-             "they were. Writing outside the region refines what the write\n"
-             "touched, so a brush straddling the boundary works.\n\n"
-             "Adding a whole level costs eight times the OCCUPIED VOLUME, and\n"
-             "occupancy is volumetric. A chunk is 32 cells across, so a region\n"
-             "smaller than that still costs one: the saving is on a form\n"
-             "spanning many chunks at the resolution being authored, which is\n"
-             "the case a level stack is for.")
-        .def("level_chunk_count",
-             [](const PyVoxelGrid& g, std::size_t level) {
-                 return g.grid().level_refined_chunk_count(level);
-             },
-             "level"_a, "How many chunks a level stores.")
-        .def("level_is_whole",
-             [](const PyVoxelGrid& g, std::size_t level) { return g.grid().level_is_whole(level); },
-             "level"_a,
-             "Whether a level stores the whole lattice. True for a level added\n"
-             "without a region, and for every grid written before regions existed.")
-        .def("drop_level", [](PyVoxelGrid& g) { return g.grid().drop_level(); },
-             "Drops the finest level and the detail only it held. False when\n"
-             "there is only one left.")
-        .def("level_voxel_size",
-             [](const PyVoxelGrid& g, std::size_t level) {
-                 if (level >= g.grid().level_count())
-                     throw std::invalid_argument("no such resolution level");
-                 return g.grid().level_voxel_size(level);
-             },
-             "level"_a)
-        .def("level_occupied_count",
-             [](const PyVoxelGrid& g, std::size_t level) {
-                 if (level >= g.grid().level_count())
-                     throw std::invalid_argument("no such resolution level");
-                 return g.grid().level_occupied_count(level);
-             },
-             "level"_a, "Occupied cells at one level — what that level costs.")
+    nb::class_<PySculptLayerScope>(
+        m, "SculptLayerScope",
+        "The context manager grid.sculpt_layer() returns; entering it starts\n"
+        "recording and leaving it stops, including when the block raises.")
+        .def("__enter__",
+             [](PySculptLayerScope& s) {
+                 if (s.grid.grid().recording_sculpt_layer())
+                     throw nb::value_error("a sculpt layer is already recording");
+                 s.index = s.grid.grid().begin_sculpt_layer(s.name);
+                 return s.index;
+             })
+        .def("__exit__",
+             // Variadic: the three arguments are None on a clean exit, and a
+             // typed signature would refuse them.
+             [](PySculptLayerScope& s, nb::args) {
+                 // Ends the pass whether the block finished or threw. The
+                 // partial pass is KEPT rather than rolled back: the edits
+                 // already happened, and a layer that records them is strictly
+                 // more recoverable than one that silently disowns them.
+                 s.grid.grid().end_sculpt_layer();
+                 return false;  // never swallow the exception
+             })
+        .def_prop_ro("index", [](const PySculptLayerScope& s) { return s.index; });
+
+    nb::class_<PyVoxelGrid>(m, "VoxelGrid", "Palette-indexed colored voxel grid (chunked, sparse)")
+        .def(
+            "__init__",
+            [](PyVoxelGrid* self, float voxel_size) {
+                if (voxel_size <= 0.0f) throw std::invalid_argument("voxel_size must be > 0");
+                new (self) PyVoxelGrid();
+                self->owned = std::make_shared<voxel::VoxelGrid>(voxel_size);
+            },
+            "voxel_size"_a = 0.1f)
+        .def_prop_ro(
+            "voxel_size", [](const PyVoxelGrid& g) { return g.grid().voxel_size(); },
+            "Cell size of the active resolution level.")
+        .def_prop_ro(
+            "level_count", [](const PyVoxelGrid& g) { return g.grid().level_count(); },
+            "Resolution levels: level 0 is the coarsest and level k has\n"
+            "half the cell size of level k-1. A grid always has at least\n"
+            "one, and a grid that never gains a second behaves exactly as\n"
+            "a grid did before levels existed.")
+        .def_prop_rw(
+            "active_level", [](const PyVoxelGrid& g) { return g.grid().active_level(); },
+            [](PyVoxelGrid& g, std::size_t level) {
+                if (!g.grid().set_active_level(level))
+                    throw std::invalid_argument("no such resolution level");
+            },
+            "The level every verb acts on. Setting it is free: editing at\n"
+            "a level already averages down into the coarser levels and\n"
+            "replays into the finer ones from the offsets they hold.")
+        .def(
+            "add_level",
+            [](PyVoxelGrid& g) {
+                std::size_t before = g.grid().level_count();
+                std::size_t level = g.grid().add_level();
+                if (g.grid().level_count() == before)
+                    throw std::invalid_argument("the level stack is at its cap");
+                return level;
+            },
+            "Appends a level at half the finest cell size, subdividing every\n"
+            "occupied cell into its eight children so the solid is unchanged.\n"
+            "Returns the new level's index.")
+        .def(
+            "add_level_region",
+            [](PyVoxelGrid& g, nb::handle region) {
+                const math::Aabb box = to_aabb(region);
+                if (box.empty())
+                    throw std::invalid_argument("the region is empty; there is nothing to refine");
+                std::size_t before = g.grid().level_count();
+                std::size_t level = g.grid().add_level(box);
+                if (g.grid().level_count() == before)
+                    throw std::invalid_argument("the level stack is at its cap");
+                return level;
+            },
+            "region"_a,
+            "Appends a level refined only over `region` ((min, max) in world\n"
+            "units, rounded OUT to whole chunks).\n\n"
+            "Outside the region the level has no storage and reads its parent's\n"
+            "value, so the lattice is still uniform and complete — only what is\n"
+            "STORED changes, and meshing, bounds and neighbour indexing are as\n"
+            "they were. Writing outside the region refines what the write\n"
+            "touched, so a brush straddling the boundary works.\n\n"
+            "Adding a whole level costs eight times the OCCUPIED VOLUME, and\n"
+            "occupancy is volumetric. A chunk is 32 cells across, so a region\n"
+            "smaller than that still costs one: the saving is on a form\n"
+            "spanning many chunks at the resolution being authored, which is\n"
+            "the case a level stack is for.")
+        .def(
+            "level_chunk_count",
+            [](const PyVoxelGrid& g, std::size_t level) {
+                return g.grid().level_refined_chunk_count(level);
+            },
+            "level"_a, "How many chunks a level stores.")
+        .def(
+            "level_is_whole",
+            [](const PyVoxelGrid& g, std::size_t level) { return g.grid().level_is_whole(level); },
+            "level"_a,
+            "Whether a level stores the whole lattice. True for a level added\n"
+            "without a region, and for every grid written before regions existed.")
+        .def(
+            "drop_level", [](PyVoxelGrid& g) { return g.grid().drop_level(); },
+            "Drops the finest level and the detail only it held. False when\n"
+            "there is only one left.")
+        .def(
+            "level_voxel_size",
+            [](const PyVoxelGrid& g, std::size_t level) {
+                if (level >= g.grid().level_count())
+                    throw std::invalid_argument("no such resolution level");
+                return g.grid().level_voxel_size(level);
+            },
+            "level"_a)
+        .def(
+            "level_occupied_count",
+            [](const PyVoxelGrid& g, std::size_t level) {
+                if (level >= g.grid().level_count())
+                    throw std::invalid_argument("no such resolution level");
+                return g.grid().level_occupied_count(level);
+            },
+            "level"_a, "Occupied cells at one level — what that level costs.")
         .def_prop_ro("occupied_count",
                      [](const PyVoxelGrid& g) { return g.grid().occupied_count(); })
-        .def_prop_ro("change_count",
-                     [](const PyVoxelGrid& g) { return g.grid().change_count(); },
-                     "Cell writes that actually changed a cell, since construction.\n"
-                     "Monotone and never reset, so only the difference between two\n"
-                     "reads means anything: it is how you tell an edit that did\n"
-                     "nothing — a sub-cell grab, a flatten on flat ground — from one\n"
-                     "that did. occupied_count cannot, since grab and magnify\n"
-                     "conserve material. Exact per cell except for pinch and\n"
-                     "magnify, which may revisit a cell and so over-count.")
-        .def_prop_ro("palette_size",
-                     [](const PyVoxelGrid& g) { return g.grid().palette_size(); })
-        .def("palette_add",
-             [](PyVoxelGrid& g, nb::handle color) {
-                 return g.grid().palette_add(parse_color(color));
-             },
-             "color"_a, "Add (or find) a palette entry; returns its index")
-        .def("palette_color",
-             [](const PyVoxelGrid& g, std::uint8_t index) {
-                 kernel::cfloat3 c = g.grid().palette_color(index);
-                 return nb::make_tuple(c.x, c.y, c.z);
-             },
-             "index"_a)
-        .def("palette_set",
-             [](PyVoxelGrid& g, std::uint8_t index, nb::handle color) {
-                 g.grid().palette_set(index, parse_color(color));
-             },
-             "index"_a, "color"_a, "Recolor a palette entry; voxel data is untouched")
-        .def("get", [](const PyVoxelGrid& g,
-                       nb::handle cell) { return g.grid().get(to_coord(cell)); }, "cell"_a)
-        .def("set",
-             [](PyVoxelGrid& g, nb::handle cell, std::uint8_t index) {
-                 g.grid().set(to_coord(cell), index);
-             },
-             "cell"_a, "index"_a)
-        .def("set_many",
-             [](PyVoxelGrid& g, nb::handle cells, std::uint8_t index) {
-                 std::vector<voxel::VoxelCoord> coords = to_coords(cells);
-                 voxel::VoxelGrid& grid = g.grid();
-                 nb::gil_scoped_release release;
-                 for (const voxel::VoxelCoord& c : coords) grid.set(c, index);
-             },
-             "cells"_a, "index"_a, "Set every cell of an (N, 3) int32 array in one call")
-        .def("erase", [](PyVoxelGrid& g,
-                         nb::handle cell) { g.grid().erase(to_coord(cell)); }, "cell"_a)
-        .def("erase_many",
-             [](PyVoxelGrid& g, nb::handle cells) {
-                 std::vector<voxel::VoxelCoord> coords = to_coords(cells);
-                 voxel::VoxelGrid& grid = g.grid();
-                 nb::gil_scoped_release release;
-                 for (const voxel::VoxelCoord& c : coords) grid.erase(c);
-             },
-             "cells"_a)
-        .def("paint",
-             [](PyVoxelGrid& g, nb::handle cell, std::uint8_t index) {
-                 g.grid().paint(to_coord(cell), index);
-             },
-             "cell"_a, "index"_a, "Recolor an occupied cell (no-op on empty cells)")
-        .def("set_brush",
-             [](PyVoxelGrid& g, nb::handle cell, int n, std::uint8_t index,
-                const std::string& shape, const std::string& falloff, float strength,
-                std::uint32_t seed, nb::handle mask) {
-                 g.grid().set_brush(to_coord(cell),
-                                    make_brush(n, shape, falloff, strength, seed, mask), index);
-             },
-             "cell"_a, "size"_a, "index"_a, "shape"_a = "cube", "falloff"_a = "constant",
-             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
-             "Brush footprint centered on the cell: 'cube' or 'sphere', size n "
-             "covering n cells per axis. falloff ('constant', 'linear', 'smooth', "
-             "'gaussian') and strength soften the edge by dithering coverage "
-             "deterministically against seed.")
-        .def("erase_brush",
-             [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
-                const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
-                 g.grid().erase_brush(to_coord(cell),
-                                      make_brush(n, shape, falloff, strength, seed, mask));
-             },
-             "cell"_a, "size"_a, "shape"_a = "cube", "falloff"_a = "constant",
-             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none())
-        .def("paint_brush",
-             [](PyVoxelGrid& g, nb::handle cell, int n, std::uint8_t index,
-                const std::string& shape, const std::string& falloff, float strength,
-                std::uint32_t seed, nb::handle mask) {
-                 g.grid().paint_brush(to_coord(cell),
-                                      make_brush(n, shape, falloff, strength, seed, mask), index);
-             },
-             "cell"_a, "size"_a, "index"_a, "shape"_a = "cube", "falloff"_a = "constant",
-             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
-             "Recolor occupied cells in the footprint; empty cells are untouched")
-        .def("sculpt_smooth",
-             [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
-                const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
-                 g.grid().sculpt_smooth(to_coord(cell),
-                                        make_brush(n, shape, falloff, strength, seed, mask));
-             },
-             "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant",
-             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
-             "Majority filter over the 26-neighbourhood: spurs dissolve, notches fill")
-        .def("sculpt_inflate",
-             [](PyVoxelGrid& g, nb::handle cell, int n, int amount, const std::string& shape,
-                const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
-                 g.grid().sculpt_inflate(to_coord(cell),
-                                         make_brush(n, shape, falloff, strength, seed, mask), amount);
-             },
-             "cell"_a, "size"_a, "amount"_a = 1, "shape"_a = "sphere",
-             "falloff"_a = "constant", "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
-             "Dilate for a positive amount, erode for a negative one")
-        .def("sculpt_flatten",
-             [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle normal, float offset,
-                const std::string& shape, const std::string& falloff, float strength,
-                std::uint32_t seed, nb::handle mask) {
-                 g.grid().sculpt_flatten(to_coord(cell),
-                                         make_brush(n, shape, falloff, strength, seed, mask),
-                                         to_f3(normal, "normal"), offset);
-             },
-             "cell"_a, "size"_a, "normal"_a, "offset"_a = 0.0f, "shape"_a = "sphere",
-             "falloff"_a = "constant", "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
-             "Pull the surface onto the plane through the brush centre")
-        .def("sculpt_grab",
-             [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle displacement,
-                const std::string& shape, const std::string& falloff, float strength,
-                std::uint32_t seed, bool front_only,
-                nb::handle mask) {
-                 g.grid().sculpt_grab(to_coord(cell),
-                                      make_brush(n, shape, falloff, strength, seed, mask),
-                                      to_f3(displacement, "displacement"), front_only);
-             },
-             "cell"_a, "size"_a, "displacement"_a, "shape"_a = "sphere",
-             "falloff"_a = "smooth", "strength"_a = 1.0f, "seed"_a = 0u,
-             "front_only"_a = false, "mask"_a = nb::none(),
-             "Translate occupancy through the same map the SDF grab uses. Binary "
-             "occupancy means this resamples nearest-cell, so material moves in "
-             "whole cells rather than flowing.")
-        .def("sculpt_pinch",
-             [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
-                const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
-                 g.grid().sculpt_pinch(to_coord(cell),
+        .def_prop_ro(
+            "change_count", [](const PyVoxelGrid& g) { return g.grid().change_count(); },
+            "Cell writes that actually changed a cell, since construction.\n"
+            "Monotone and never reset, so only the difference between two\n"
+            "reads means anything: it is how you tell an edit that did\n"
+            "nothing — a sub-cell grab, a flatten on flat ground — from one\n"
+            "that did. occupied_count cannot, since grab and magnify\n"
+            "conserve material. Exact per cell except for pinch and\n"
+            "magnify, which may revisit a cell and so over-count.")
+        .def_prop_ro("palette_size", [](const PyVoxelGrid& g) { return g.grid().palette_size(); })
+        .def(
+            "palette_add",
+            [](PyVoxelGrid& g, nb::handle color) {
+                return g.grid().palette_add(parse_color(color));
+            },
+            "color"_a, "Add (or find) a palette entry; returns its index")
+        .def(
+            "palette_color",
+            [](const PyVoxelGrid& g, std::uint8_t index) {
+                kernel::cfloat3 c = g.grid().palette_color(index);
+                return nb::make_tuple(c.x, c.y, c.z);
+            },
+            "index"_a)
+        .def(
+            "palette_set",
+            [](PyVoxelGrid& g, std::uint8_t index, nb::handle color) {
+                g.grid().palette_set(index, parse_color(color));
+            },
+            "index"_a, "color"_a, "Recolor a palette entry; voxel data is untouched")
+        .def(
+            "get",
+            [](const PyVoxelGrid& g, nb::handle cell) { return g.grid().get(to_coord(cell)); },
+            "cell"_a)
+        .def(
+            "set",
+            [](PyVoxelGrid& g, nb::handle cell, std::uint8_t index) {
+                g.grid().set(to_coord(cell), index);
+            },
+            "cell"_a, "index"_a)
+        .def(
+            "set_many",
+            [](PyVoxelGrid& g, nb::handle cells, std::uint8_t index) {
+                std::vector<voxel::VoxelCoord> coords = to_coords(cells);
+                voxel::VoxelGrid& grid = g.grid();
+                nb::gil_scoped_release release;
+                for (const voxel::VoxelCoord& c : coords) grid.set(c, index);
+            },
+            "cells"_a, "index"_a, "Set every cell of an (N, 3) int32 array in one call")
+        .def(
+            "erase", [](PyVoxelGrid& g, nb::handle cell) { g.grid().erase(to_coord(cell)); },
+            "cell"_a)
+        .def(
+            "erase_many",
+            [](PyVoxelGrid& g, nb::handle cells) {
+                std::vector<voxel::VoxelCoord> coords = to_coords(cells);
+                voxel::VoxelGrid& grid = g.grid();
+                nb::gil_scoped_release release;
+                for (const voxel::VoxelCoord& c : coords) grid.erase(c);
+            },
+            "cells"_a)
+        .def(
+            "paint",
+            [](PyVoxelGrid& g, nb::handle cell, std::uint8_t index) {
+                g.grid().paint(to_coord(cell), index);
+            },
+            "cell"_a, "index"_a, "Recolor an occupied cell (no-op on empty cells)")
+        .def(
+            "set_brush",
+            [](PyVoxelGrid& g, nb::handle cell, int n, std::uint8_t index, const std::string& shape,
+               const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
+                g.grid().set_brush(to_coord(cell),
+                                   make_brush(n, shape, falloff, strength, seed, mask), index);
+            },
+            "cell"_a, "size"_a, "index"_a, "shape"_a = "cube", "falloff"_a = "constant",
+            "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
+            "Brush footprint centered on the cell: 'cube' or 'sphere', size n "
+            "covering n cells per axis. falloff ('constant', 'linear', 'smooth', "
+            "'gaussian') and strength soften the edge by dithering coverage "
+            "deterministically against seed.")
+        .def(
+            "erase_brush",
+            [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
+               const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
+                g.grid().erase_brush(to_coord(cell),
+                                     make_brush(n, shape, falloff, strength, seed, mask));
+            },
+            "cell"_a, "size"_a, "shape"_a = "cube", "falloff"_a = "constant", "strength"_a = 1.0f,
+            "seed"_a = 0u, "mask"_a = nb::none())
+        .def(
+            "paint_brush",
+            [](PyVoxelGrid& g, nb::handle cell, int n, std::uint8_t index, const std::string& shape,
+               const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
+                g.grid().paint_brush(to_coord(cell),
+                                     make_brush(n, shape, falloff, strength, seed, mask), index);
+            },
+            "cell"_a, "size"_a, "index"_a, "shape"_a = "cube", "falloff"_a = "constant",
+            "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
+            "Recolor occupied cells in the footprint; empty cells are untouched")
+        // -- sculpt layers ----------------------------------------------
+        // A pass you can dial back after making it. `with grid.sculpt_layer():`
+        // is the shape a Python caller wants, so the context manager is the
+        // headline and begin/end sit behind it for the odd case that spans
+        // control flow.
+        .def(
+            "sculpt_layer",
+            [](const PyVoxelGrid& g, const std::string& name) {
+                return PySculptLayerScope{g, name, 0};
+            },
+            "name"_a = std::string(),
+            "A context manager: every edit inside the block joins one pass\n"
+            "whose strength stays adjustable afterwards.\n\n"
+            "    with grid.sculpt_layer(\"wrinkles\") as i:\n"
+            "        grid.sculpt_inflate(cell, size=9, amount=2)\n"
+            "    grid.set_sculpt_layer_strength(i, 0.4)")
+        .def(
+            "begin_sculpt_layer",
+            [](PyVoxelGrid& g, const std::string& name) {
+                if (g.grid().recording_sculpt_layer())
+                    throw nb::value_error("a sculpt layer is already recording");
+                return g.grid().begin_sculpt_layer(name);
+            },
+            "name"_a = std::string(),
+            "Start recording; every edit until end_sculpt_layer joins this pass")
+        .def(
+            "end_sculpt_layer", [](PyVoxelGrid& g) { g.grid().end_sculpt_layer(); },
+            "Stop recording. Later edits belong to no pass")
+        .def_prop_ro("recording_sculpt_layer",
+                     [](const PyVoxelGrid& g) { return g.grid().recording_sculpt_layer(); })
+        .def_prop_ro("sculpt_layer_count",
+                     [](const PyVoxelGrid& g) { return g.grid().sculpt_layer_count(); })
+        .def(
+            "sculpt_layer_name",
+            [](const PyVoxelGrid& g, std::size_t layer) {
+                check_sculpt_layer(g, layer);
+                return g.grid().sculpt_layer_name(layer);
+            },
+            "layer"_a)
+        .def(
+            "sculpt_layer_cell_count",
+            [](const PyVoxelGrid& g, std::size_t layer) {
+                check_sculpt_layer(g, layer);
+                return g.grid().sculpt_layer_cell_count(layer);
+            },
+            "layer"_a, "How many cells the pass changed")
+        .def(
+            "sculpt_layer_strength",
+            [](const PyVoxelGrid& g, std::size_t layer) {
+                check_sculpt_layer(g, layer);
+                return g.grid().sculpt_layer_strength(layer);
+            },
+            "layer"_a)
+        .def(
+            "set_sculpt_layer_strength",
+            [](PyVoxelGrid& g, std::size_t layer, float strength) {
+                check_sculpt_layer(g, layer);
+                g.grid().set_sculpt_layer_strength(layer, strength);
+            },
+            "layer"_a, "strength"_a,
+            "Clamped to [0, 1]. On binary occupancy a fraction is a "
+            "reproducible fraction of the CELLS; 0 and 1 are exact")
+        .def(
+            "sculpt_layer_visible",
+            [](const PyVoxelGrid& g, std::size_t layer) {
+                check_sculpt_layer(g, layer);
+                return g.grid().sculpt_layer_visible(layer);
+            },
+            "layer"_a)
+        .def(
+            "set_sculpt_layer_visible",
+            [](PyVoxelGrid& g, std::size_t layer, bool visible) {
+                check_sculpt_layer(g, layer);
+                g.grid().set_sculpt_layer_visible(layer, visible);
+            },
+            "layer"_a, "visible"_a)
+        .def(
+            "remove_sculpt_layer",
+            [](PyVoxelGrid& g, std::size_t layer) {
+                check_sculpt_layer(g, layer);
+                g.grid().remove_sculpt_layer(layer);
+            },
+            "layer"_a, "Drop a pass; the ones above it replay on what is left")
+        .def(
+            "merge_sculpt_layer_down",
+            [](PyVoxelGrid& g, std::size_t layer) {
+                check_sculpt_layer(g, layer);
+                if (!g.grid().merge_sculpt_layer_down(layer))
+                    throw nb::value_error("the bottom sculpt layer has nothing below it");
+            },
+            "layer"_a, "Fold a pass into the one below, keeping the lower name")
+        .def(
+            "move_sculpt_layer",
+            [](PyVoxelGrid& g, std::size_t from, std::size_t to) {
+                check_sculpt_layer(g, from);
+                check_sculpt_layer(g, to);
+                g.grid().move_sculpt_layer(from, to);
+            },
+            "from_"_a, "to"_a,
+            "Move a pass within the stack. Order is meaningful: where two\n"
+            "passes touched the same cell, the higher one wins")
+        .def(
+            "sculpt_layer_bytes",
+            [](const PyVoxelGrid& g, std::size_t layer) {
+                check_sculpt_layer(g, layer);
+                return g.grid().sculpt_layer_bytes(layer);
+            },
+            "layer"_a, "What one pass costs in memory — its cells, not the model")
+        .def_prop_ro(
+            "sculpt_layers_bytes",
+            [](const PyVoxelGrid& g) { return g.grid().sculpt_layer_total_bytes(); },
+            "What the whole stack costs. Nothing is enforced; merge down\n"
+            "or stop recording is the host's call")
+        .def(
+            "sculpt_smooth",
+            [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
+               const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
+                g.grid().sculpt_smooth(to_coord(cell),
                                        make_brush(n, shape, falloff, strength, seed, mask));
-             },
-             "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant",
-             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
-             "Move surface cells one step toward the brush centre")
-        .def("sculpt_magnify",
-             [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
-                const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
-                 g.grid().sculpt_magnify(to_coord(cell),
-                                         make_brush(n, shape, falloff, strength, seed, mask));
-             },
-             "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant",
-             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
-             "Move surface cells one step AWAY from the brush centre: pinch's\n"
-             "inverse, sharing its walk so the two cannot drift apart")
-        .def("sculpt_fill_cavities",
-             [](PyVoxelGrid& g, nb::handle cell, int n, int passes, const std::string& shape,
-                const std::string& falloff, float strength, std::uint32_t seed,
-                nb::handle mask) {
-                 g.grid().sculpt_fill_cavities(to_coord(cell),
-                                               make_brush(n, shape, falloff, strength, seed, mask),
-                                               passes);
-             },
-             "cell"_a, "size"_a, "passes"_a = 1, "shape"_a = "sphere", "falloff"_a = "constant",
-             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
-             "Fill pockets: an empty cell with at least four of its six face "
-             "neighbours occupied is inside a cavity rather than beside a surface. "
-             "A through-hole, an open face and a wide shallow dent are left alone — "
-             "smoothing is the verb for surface irregularity.")
-        .def("sculpt_scrape",
-             [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle normal, float offset,
-                const std::string& shape, const std::string& falloff, float strength,
-                std::uint32_t seed, nb::handle mask) {
-                 g.grid().sculpt_scrape(to_coord(cell),
+            },
+            "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant", "strength"_a = 1.0f,
+            "seed"_a = 0u, "mask"_a = nb::none(),
+            "Majority filter over the 26-neighbourhood: spurs dissolve, notches fill")
+        .def(
+            "sculpt_inflate",
+            [](PyVoxelGrid& g, nb::handle cell, int n, int amount, const std::string& shape,
+               const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
+                g.grid().sculpt_inflate(
+                    to_coord(cell), make_brush(n, shape, falloff, strength, seed, mask), amount);
+            },
+            "cell"_a, "size"_a, "amount"_a = 1, "shape"_a = "sphere", "falloff"_a = "constant",
+            "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
+            "Dilate for a positive amount, erode for a negative one")
+        .def(
+            "sculpt_flatten",
+            [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle normal, float offset,
+               const std::string& shape, const std::string& falloff, float strength,
+               std::uint32_t seed, nb::handle mask) {
+                g.grid().sculpt_flatten(to_coord(cell),
                                         make_brush(n, shape, falloff, strength, seed, mask),
                                         to_f3(normal, "normal"), offset);
-             },
-             "cell"_a, "size"_a, "normal"_a, "offset"_a = 0.0f, "shape"_a = "sphere",
-             "falloff"_a = "constant", "strength"_a = 1.0f, "seed"_a = 0u,
-             "mask"_a = nb::none(),
-             "Flatten onto the plane AND smooth, from ONE snapshot. Calling the two "
-             "verbs in sequence is not the same thing: the flatten's output would "
-             "feed the smooth's neighbourhood.")
-        .def("sculpt_smudge",
-             [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle displacement,
-                const std::string& shape, const std::string& falloff, float strength,
-                std::uint32_t seed, nb::handle mask) {
-                 g.grid().sculpt_smudge(to_coord(cell),
-                                        make_brush(n, shape, falloff, strength, seed, mask),
-                                        to_f3(displacement, "displacement"));
-             },
-             "cell"_a, "size"_a, "displacement"_a, "shape"_a = "sphere",
-             "falloff"_a = "smooth", "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
-             "Drag SURFACE material along a direction, leaving the interior where it "
-             "was. That is the difference from grab, which translates every cell in "
-             "its region: grab moves a lump, smudge smears a skin.")
-        .def("sculpt_carve_alpha",
-             [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle alpha, nb::handle direction,
-                std::uint8_t index, const std::string& shape, const std::string& falloff,
-                float strength, std::uint32_t seed, nb::handle mask) {
-                 nb::module_ np = nb::module_::import_("numpy");
-                 nb::object arr = np.attr("ascontiguousarray")(alpha, "dtype"_a = "float32");
-                 nb::ndarray<const float, nb::ndim<2>, nb::c_contig, nb::device::cpu> view;
-                 try {
-                     view = nb::cast<decltype(view)>(arr);
-                 } catch (const std::exception&) {
-                     throw std::invalid_argument("alpha must be an (H, W) float array");
-                 }
-                 if (!g.grid().sculpt_carve_alpha(
-                         to_coord(cell), make_brush(n, shape, falloff, strength, seed, mask),
-                         view.data(), static_cast<int>(view.shape(1)),
-                         static_cast<int>(view.shape(0)), to_f3(direction, "direction"), index))
-                     throw std::invalid_argument(
-                         "the alpha stamp is malformed: an empty grid, or a zero-length "
-                         "direction");
-             },
-             "cell"_a, "size"_a, "alpha"_a, "direction"_a, "index"_a = 0,
-             "shape"_a = "sphere", "falloff"_a = "constant", "strength"_a = 1.0f,
-             "seed"_a = 0u, "mask"_a = nb::none(),
-             "Carve modulated by an (H, W) alpha, projected onto the plane "
-             "perpendicular to `direction`. index 0 carves; a non-zero one deposits. "
-             "The engine decodes no images — a host that has an alpha has already "
-             "loaded the PNG.")
-        .def("repair_report",
-             [](const PyVoxelGrid& g) {
-                 voxel::VoxelGrid::RepairReport r = g.grid().repair_report();
-                 nb::dict out;
-                 out["enclosed_voids"] = r.enclosed_voids;
-                 out["void_cells"] = r.void_cells;
-                 out["largest_void"] = r.largest_void;
-                 out["airtight"] = r.airtight;
-                 return out;
-             },
-             "Non-destructive: what a pre-bake check wants to know without doing the "
-             "repair. A destructive operation whose input is somebody's sculpt should "
-             "be askable before it is answerable.")
-        .def("repair_close_holes",
-             [](PyVoxelGrid& g, int passes, nb::handle mask) {
-                 g.grid().repair_close_holes(passes, borrow_mask(mask));
-             },
-             "passes"_a = 1, "mask"_a = nb::none(),
-             "Seal perforations over the whole grid by the pocket rule. Only ever "
-             "adds cells, so no material is lost.")
-        .def("repair_fill_voids",
-             [](PyVoxelGrid& g, nb::handle mask) {
-                 g.grid().repair_fill_voids(borrow_mask(mask));
-             },
-             "mask"_a = nb::none(),
-             "Fill every empty cell the outside cannot reach, coloured from the shell "
-             "that encloses it. Enclosure is decided by a flood from outside the "
-             "bounds, not guessed at from a local neighbourhood.")
-        .def("apply_stroke",
-             [](PyVoxelGrid& g, nb::handle samples, const brush::StrokePreset& preset,
-                std::uint8_t index, const std::string& shape, const std::string& falloff,
-                nb::handle mask) {
-                 std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
-                 voxel::BrushShape s = parse_brush_shape(shape);
-                 voxel::BrushFalloff f = parse_falloff(falloff);
-                 const voxel::MaskField* m = borrow_mask(mask);
-                 voxel::VoxelGrid& grid = g.grid();
-                 nb::gil_scoped_release release;
-                 return brush::apply_to_grid(grid, brush::resolve_stroke(in, preset), index, s, f,
-                                             m);
-             },
-             "samples"_a, "preset"_a, "index"_a, "shape"_a = "sphere", "falloff"_a = "smooth",
-             "mask"_a = nb::none(),
-             "Resolve a stroke and stamp it into the grid; returns how many stamps "
-             "ran. Masked stamps are dropped, so a frozen region receives nothing.")
-        .def("mask_extrude",
-             [](const PyVoxelGrid& g, nb::handle mask, float thickness, const std::string& side,
-                float threshold, int border_smooth) {
-                 const voxel::MaskField* m = borrow_mask(mask);
-                 if (!m) throw std::invalid_argument("mask must be a MaskField");
-                 brush::MaskExtrudeSettings settings = extrude_settings(
-                     thickness, side, threshold, 0.0f, border_smooth, nb::none(), nb::none());
-                 const voxel::VoxelGrid& src = g.grid();
-                 std::optional<voxel::VoxelGrid> extract;
-                 {
-                     nb::gil_scoped_release release;
-                     extract = brush::mask_extrude(src, *m, settings);
-                 }
-                 if (!extract)
-                     throw std::invalid_argument(
-                         "nothing to extrude: the mask is empty, is not on the surface, or the "
-                         "grid is");
-                 PyVoxelGrid out;
-                 out.owned = std::make_shared<voxel::VoxelGrid>(std::move(*extract));
-                 return out;
-             },
-             "mask"_a, "thickness"_a, "side"_a = "outward", "threshold"_a = 0.5f,
-             "border_smooth"_a = 0,
-             "Mask extrude in CELL space: the masked cells of this grid's\n"
-             "surface, thickened, as a new grid carrying this one's colours.\n\n"
-             "It does not go through a sampled field — a grid already knows which\n"
-             "of its cells are on its surface, so resampling would cost a\n"
-             "conversion and lose the palette. The result agrees with\n"
-             "Document.mask_extrude to within a voxel, which is the point: what a\n"
-             "document means must not depend on how it is stored.\n\n"
-             "`border_round`, `cell_size` and `band` have no meaning here; the\n"
-             "grid's own resolution is the only one there is. Neither this grid\n"
-             "nor the mask is modified.")
-        .def("fill_box",
-             [](PyVoxelGrid& g, nb::handle a, nb::handle b, std::uint8_t index) {
-                 g.grid().fill_box(to_coord(a), to_coord(b), index);
-             },
-             "a"_a, "b"_a, "index"_a, "Inclusive-corner box fill")
-        .def("fill_line",
-             [](PyVoxelGrid& g, nb::handle a, nb::handle b, std::uint8_t index) {
-                 g.grid().fill_line(to_coord(a), to_coord(b), index);
-             },
-             "a"_a, "b"_a, "index"_a)
-        .def("set_mirrored",
-             [](PyVoxelGrid& g, nb::handle cell, std::uint8_t index, const std::string& axes) {
-                 std::uint8_t mask = 0;
-                 for (char c : axes) mask |= static_cast<std::uint8_t>(1u << parse_axis({c}));
-                 g.grid().set_mirrored(to_coord(cell), index, mask);
-             },
-             "cell"_a, "index"_a, "axes"_a = "x",
-             "Set the cell and every mirror combination of the given axes ('x', 'xz', ...)")
-        .def("paint_mirrored",
-             [](PyVoxelGrid& g, nb::handle cell, std::uint8_t index, const std::string& axes) {
-                 std::uint8_t mask = 0;
-                 for (char c : axes) mask |= static_cast<std::uint8_t>(1u << parse_axis({c}));
-                 g.grid().paint_mirrored(to_coord(cell), index, mask);
-             },
-             "cell"_a, "index"_a, "axes"_a = "x",
-             "Recolor the cell and every mirror combination (occupied cells only)")
-        .def("flood_select",
-             [](const PyVoxelGrid& g, nb::handle seed, bool same_color) {
-                 std::vector<voxel::VoxelCoord> sel =
-                     g.grid().flood_select(to_coord(seed), same_color);
-                 nb::module_ np = nb::module_::import_("numpy");
-                 nb::object arr = np.attr("empty")(nb::make_tuple(sel.size(), 3),
-                                                   "dtype"_a = "int32");
-                 auto view = nb::cast<nb::ndarray<std::int32_t, nb::ndim<2>, nb::c_contig>>(arr);
-                 for (std::size_t i = 0; i < sel.size(); ++i) {
-                     view.data()[i * 3 + 0] = sel[i].x;
-                     view.data()[i * 3 + 1] = sel[i].y;
-                     view.data()[i * 3 + 2] = sel[i].z;
-                 }
-                 return arr;
-             },
-             "seed"_a, "same_color"_a = true,
-             "6-connected flood select -> (N, 3) int32 coordinates")
-        .def("bounds",
-             [](const PyVoxelGrid& g) -> nb::object {
-                 auto lo = g.grid().bounds_min();
-                 auto hi = g.grid().bounds_max();
-                 if (!lo || !hi) return nb::none();
-                 return nb::make_tuple(nb::make_tuple(lo->x, lo->y, lo->z),
-                                       nb::make_tuple(hi->x, hi->y, hi->z));
-             },
-             "Inclusive cell bounds of occupied voxels, or None when empty")
-        .def("mesh",
-             [](const PyVoxelGrid& g) {
-                 PyMesh out;
-                 const voxel::VoxelGrid& grid = g.grid();
-                 {
-                     nb::gil_scoped_release release;
-                     out.m = grid.mesh_greedy();
-                 }
-                 return out;
-             },
-             "Greedy-mesh the grid (merged quads, per-face palette color)")
-        .def("mesh_smooth",
-             [](const PyVoxelGrid& g, int blur) {
-                 if (blur < 0 || blur > 8) throw nb::value_error("blur must be 0..8 passes");
-                 PyMesh out;
-                 const voxel::VoxelGrid& grid = g.grid();
-                 {
-                     nb::gil_scoped_release release;
-                     out.m = grid.mesh_smooth(voxel::VoxelGrid::SmoothOptions{blur});
-                 }
-                 return out;
-             },
-             "blur"_a = 0,
-             "Mesh the grid as a rounded form (surface nets over occupancy, "
-             "per-vertex blended palette color). blur adds 3x3x3 occupancy "
-             "passes and can erase a thin feature, so it is 0 by default. A "
-             "preview mesh: not manifold, not watertight — mesh() is the "
-             "export path and is unaffected.")
-        .def("mesh_quads",
-             [](const PyVoxelGrid& g, const std::string& mode, nb::handle cell_size,
-                nb::handle target, float tolerance, int max_iterations, int blur,
-                std::size_t level) {
-                 return mesh_voxel_quads(g.grid(), mode, cell_size, target, tolerance,
-                                         max_iterations, blur, level);
-             },
-             "mode"_a = "dual", "cell_size"_a = nb::none(), "target"_a = nb::none(),
-             "tolerance"_a = 0.10f, "max_iterations"_a = 4, "blur"_a = 0, "level"_a = 0,
-             "Mesh the sculpt as QUADS -> Mesh.\n\n"
-             "WHAT THIS IS NOT: a REGULAR QUAD GRID DERIVED FROM A LATTICE, which is\n"
-             "NOT field-aligned retopology — no edge loops following the form, no\n"
-             "poles at features, not animation-ready. It is the input a retopology\n"
-             "pass REPLACES.\n\n"
-             "Two modes, because a voxel sculpt is two different subjects:\n"
-             "  'dual'  the rounded form — the same lattice dual mesh_smooth builds,\n"
-             "          quads meeting four to a vertex on average. cell_size\n"
-             "          generalises the lattice; coarser low-passes and can drop a\n"
-             "          one-voxel feature, finer is CLAMPED to the voxel size because\n"
-             "          occupancy is a step field. At the voxel size with blur 0 this\n"
-             "          is mesh_smooth's mesh for the SAME LEVEL plus its quads —\n"
-             "          note `level` below defaults to 0 while mesh_smooth follows\n"
-             "          the ACTIVE level and cannot be asked for another, so on a\n"
-             "          multi-level grid the two default calls mesh different\n"
-             "          levels and match only when active_level is 0.\n"
-             "  'faces' one planar quad per exposed voxel face — the boxes the model\n"
-             "          actually is. Dense, corners welded within a palette colour,\n"
-             "          and NO vertex normals: a welded corner faces three ways at\n"
-             "          once. mesh() is unchanged and stays the merged triangle path.\n\n"
-             "`target` asks for a COUNT: APPROACHED, NEVER HIT. In 'faces' mode the\n"
-             "lever is the resolution LEVEL, a factor of about four per step, so a\n"
-             "target usually lands on the nearest level rather than inside the\n"
-             "tolerance: the search walks the stack coarsest first, stops at the\n"
-             "first level that reaches the target, returns the nearer of the two it\n"
-             "landed between, and ignores max_iterations because the stack is its own\n"
-             "bound. quad_report['clamped'] there means the STACK RAN OUT — the target\n"
-             "is below what the coarsest level THAT YIELDS ANYTHING gives or above\n"
-             "what the finest gives; empty coarse levels are ordinary on a grid\n"
-             "sculpted only at a fine level and do not count as a nearer end.\n"
-             "quad_report['iterations'] counts every level meshed from the coarsest,\n"
-             "so a target met at level k costs k+1 meshes, not the two of the\n"
-             "bracket.\n"
-             "Mesh.quad_report says what actually happened.\n\n"
-             "The knobs take the C ABI's rules: tolerance <= 0 and max_iterations 0\n"
-             "mean the defaults (0.10, 4), a negative max_iterations is refused, and\n"
-             "target is capped at 16777216 quads.")
-        .def("sample_step_field",
-             [](const PyVoxelGrid& g, nb::handle points) {
-                 PointsView pts = to_points(points);
-                 const voxel::VoxelGrid& grid = g.grid();
-                 float* out = new float[pts.count ? pts.count : 1];
-                 nb::capsule owner(out,
-                                   [](void* p) noexcept { delete[] static_cast<float*>(p); });
-                 {
-                     nb::gil_scoped_release release;
-                     for (std::size_t i = 0; i < pts.count; ++i)
-                         out[i] = grid.sample_step_field(kernel::cf3(pts.data[i * 3],
-                                                                     pts.data[i * 3 + 1],
-                                                                     pts.data[i * 3 + 2]));
-                 }
-                 return nb::cast(nb::ndarray<nb::numpy, float>(out, {pts.count}, owner));
-             },
-             "points"_a,
-             "Voxels as a step field for SDF compositing (a bound, not a distance)")
-        .def("raycast",
-             [](const PyVoxelGrid& g, nb::handle origin, nb::handle direction) -> nb::object {
-                 math::Ray ray{to_f3(origin, "origin"),
-                               kernel::cnormalize(to_f3(direction, "direction"))};
-                 pick::VoxelHit hit = pick::raycast_voxels(g.grid(), ray);
-                 if (!hit.hit) return nb::none();
-                 voxel::VoxelCoord adj = pick::adjacent_cell(hit);
-                 nb::dict d;
-                 d["cell"] = nb::make_tuple(hit.cell.x, hit.cell.y, hit.cell.z);
-                 d["face"] = hit.face;
-                 d["adjacent"] = nb::make_tuple(adj.x, adj.y, adj.z);
-                 d["t"] = hit.t;
-                 return d;
-             },
-             "origin"_a, "direction"_a,
-             "Pick a voxel: cell, entry face id, and the adjacent cell to place into")
-        .def("build_plane_pick",
-             [](const PyVoxelGrid& g, nb::handle origin, nb::handle direction,
-                std::int32_t plane_cell) -> nb::object {
-                 math::Ray ray{to_f3(origin, "origin"),
-                               kernel::cnormalize(to_f3(direction, "direction"))};
-                 auto cell = pick::pick_build_plane(g.grid(), ray, plane_cell);
-                 if (!cell) return nb::none();
-                 return nb::make_tuple(cell->x, cell->y, cell->z);
-             },
-             "origin"_a, "direction"_a, "plane_cell"_a = 0)
-        .def("rasterize",
-             [](PyVoxelGrid& g, const PyDocument& d, nb::handle region) {
-                 scene::Tape tape = scene::compile_document(d.doc->document);
-                 math::Aabb box = tape.bounds;
-                 if (!region.is_none()) {
-                     nb::sequence s = nb::cast<nb::sequence>(region);
-                     if (nb::len(s) != 2)
-                         throw std::invalid_argument("region must be ((minx,miny,minz), (max...))");
-                     box = math::Aabb{to_f3(s[0], "region min"), to_f3(s[1], "region max")};
-                 }
-                 if (box.empty() || box.is_infinite())
-                     throw std::invalid_argument("document has no bounded content to rasterize");
-                 voxel::VoxelGrid& grid = g.grid();
-                 nb::gil_scoped_release release;
-                 grid.rasterize_tape(tape, box);
-             },
-             "document"_a, "region"_a = nb::none(),
-             "Rasterize an SDF document into voxels (colors sampled from the field)")
-        .def("rasterize_mesh",
-             [](PyVoxelGrid& g, const PyMesh& source, nb::handle region) {
-                 const mesh::Mesh& m = source.data();
-                 if (m.empty()) throw std::invalid_argument("the mesh has no triangles");
-                 std::optional<math::Aabb> box;
-                 if (!region.is_none()) {
-                     nb::sequence s = nb::cast<nb::sequence>(region);
-                     if (nb::len(s) != 2)
-                         throw std::invalid_argument("region must be ((minx,miny,minz), (max...))");
-                     box = math::Aabb{to_f3(s[0], "region min"), to_f3(s[1], "region max")};
-                     if (box->empty() || box->is_infinite())
-                         throw std::invalid_argument(
-                             "the region must be finite, non-empty and bounded");
-                 }
-                 voxel::VoxelGrid& grid = g.grid();
-                 nb::gil_scoped_release release;
-                 if (box)
-                     grid.rasterize_mesh(m, *box);
-                 else
-                     grid.rasterize_mesh(m);
-             },
-             "mesh"_a, "region"_a = nb::none(),
-             "Rasterize a TRIANGLE MESH into voxels, in one sampling.\n\n"
-             "An imported model reaches an SDF layer in one step (Volume.from_mesh)\n"
-             "but reached a grid only through a document: triangles to a narrow band,\n"
-             "band into a layer, layer rasterized. Each of those places the surface\n"
-             "within about half a cell of its own lattice, so the detour quantised a\n"
-             "field that was itself quantised — and a feature that survived the first\n"
-             "sampling could fall between centres on the second.\n\n"
-             "Membership is the GENERALIZED WINDING NUMBER at the cell centre: the\n"
-             "sign that survives a hole, a flipped normal and a self-intersection,\n"
-             "because those are what imported meshes have. A model with a missing\n"
-             "cap rasterizes without flipping a half-space.\n\n"
-             "Colour comes from the mesh's vertex colours where it has them,\n"
-             "interpolated at the closest point on the nearest triangle and quantised\n"
-             "to the palette by nearest entry. A mesh with no colours takes one\n"
-             "neutral entry — a grid's colour is per cell and there is nothing else\n"
-             "to read.\n\n"
-             "`region` is OPTIONAL here, unlike `rasterize`: a document can be\n"
-             "unbounded and a mesh cannot, so None means the mesh's own bounds.\n\n"
-             "What the sampling costs: the surface moves by up to half a cell, a\n"
-             "feature thinner than a cell can vanish (rasterize finer — nothing\n"
-             "downstream can invent what was never stored), a sharp edge staircases,\n"
-             "and two colours closer than the palette tolerance become one.\n\n"
-             "NOT retopology and not remeshing. The mesh is not modified, and a mesh\n"
-             "a document CARRIES stays never-evaluated — this is an explicit\n"
-             "conversion you ask for, like every bridge.");
+            },
+            "cell"_a, "size"_a, "normal"_a, "offset"_a = 0.0f, "shape"_a = "sphere",
+            "falloff"_a = "constant", "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
+            "Pull the surface onto the plane through the brush centre")
+        .def(
+            "sculpt_grab",
+            [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle displacement,
+               const std::string& shape, const std::string& falloff, float strength,
+               std::uint32_t seed, bool front_only, nb::handle mask) {
+                g.grid().sculpt_grab(to_coord(cell),
+                                     make_brush(n, shape, falloff, strength, seed, mask),
+                                     to_f3(displacement, "displacement"), front_only);
+            },
+            "cell"_a, "size"_a, "displacement"_a, "shape"_a = "sphere", "falloff"_a = "smooth",
+            "strength"_a = 1.0f, "seed"_a = 0u, "front_only"_a = false, "mask"_a = nb::none(),
+            "Translate occupancy through the same map the SDF grab uses. Binary "
+            "occupancy means this resamples nearest-cell, so material moves in "
+            "whole cells rather than flowing.")
+        .def(
+            "sculpt_pinch",
+            [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
+               const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
+                g.grid().sculpt_pinch(to_coord(cell),
+                                      make_brush(n, shape, falloff, strength, seed, mask));
+            },
+            "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant", "strength"_a = 1.0f,
+            "seed"_a = 0u, "mask"_a = nb::none(),
+            "Move surface cells one step toward the brush centre")
+        .def(
+            "sculpt_magnify",
+            [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
+               const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
+                g.grid().sculpt_magnify(to_coord(cell),
+                                        make_brush(n, shape, falloff, strength, seed, mask));
+            },
+            "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant", "strength"_a = 1.0f,
+            "seed"_a = 0u, "mask"_a = nb::none(),
+            "Move surface cells one step AWAY from the brush centre: pinch's\n"
+            "inverse, sharing its walk so the two cannot drift apart")
+        .def(
+            "sculpt_fill_cavities",
+            [](PyVoxelGrid& g, nb::handle cell, int n, int passes, const std::string& shape,
+               const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
+                g.grid().sculpt_fill_cavities(
+                    to_coord(cell), make_brush(n, shape, falloff, strength, seed, mask), passes);
+            },
+            "cell"_a, "size"_a, "passes"_a = 1, "shape"_a = "sphere", "falloff"_a = "constant",
+            "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
+            "Fill pockets: an empty cell with at least four of its six face "
+            "neighbours occupied is inside a cavity rather than beside a surface. "
+            "A through-hole, an open face and a wide shallow dent are left alone — "
+            "smoothing is the verb for surface irregularity.")
+        .def(
+            "sculpt_scrape",
+            [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle normal, float offset,
+               const std::string& shape, const std::string& falloff, float strength,
+               std::uint32_t seed, nb::handle mask) {
+                g.grid().sculpt_scrape(to_coord(cell),
+                                       make_brush(n, shape, falloff, strength, seed, mask),
+                                       to_f3(normal, "normal"), offset);
+            },
+            "cell"_a, "size"_a, "normal"_a, "offset"_a = 0.0f, "shape"_a = "sphere",
+            "falloff"_a = "constant", "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
+            "Flatten onto the plane AND smooth, from ONE snapshot. Calling the two "
+            "verbs in sequence is not the same thing: the flatten's output would "
+            "feed the smooth's neighbourhood.")
+        .def(
+            "sculpt_smudge",
+            [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle displacement,
+               const std::string& shape, const std::string& falloff, float strength,
+               std::uint32_t seed, nb::handle mask) {
+                g.grid().sculpt_smudge(to_coord(cell),
+                                       make_brush(n, shape, falloff, strength, seed, mask),
+                                       to_f3(displacement, "displacement"));
+            },
+            "cell"_a, "size"_a, "displacement"_a, "shape"_a = "sphere", "falloff"_a = "smooth",
+            "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
+            "Drag SURFACE material along a direction, leaving the interior where it "
+            "was. That is the difference from grab, which translates every cell in "
+            "its region: grab moves a lump, smudge smears a skin.")
+        .def(
+            "sculpt_carve_alpha",
+            [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle alpha, nb::handle direction,
+               std::uint8_t index, const std::string& shape, const std::string& falloff,
+               float strength, std::uint32_t seed, nb::handle mask) {
+                nb::module_ np = nb::module_::import_("numpy");
+                nb::object arr = np.attr("ascontiguousarray")(alpha, "dtype"_a = "float32");
+                nb::ndarray<const float, nb::ndim<2>, nb::c_contig, nb::device::cpu> view;
+                try {
+                    view = nb::cast<decltype(view)>(arr);
+                } catch (const std::exception&) {
+                    throw std::invalid_argument("alpha must be an (H, W) float array");
+                }
+                if (!g.grid().sculpt_carve_alpha(
+                        to_coord(cell), make_brush(n, shape, falloff, strength, seed, mask),
+                        view.data(), static_cast<int>(view.shape(1)),
+                        static_cast<int>(view.shape(0)), to_f3(direction, "direction"), index))
+                    throw std::invalid_argument(
+                        "the alpha stamp is malformed: an empty grid, or a zero-length "
+                        "direction");
+            },
+            "cell"_a, "size"_a, "alpha"_a, "direction"_a, "index"_a = 0, "shape"_a = "sphere",
+            "falloff"_a = "constant", "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
+            "Carve modulated by an (H, W) alpha, projected onto the plane "
+            "perpendicular to `direction`. index 0 carves; a non-zero one deposits. "
+            "The engine decodes no images — a host that has an alpha has already "
+            "loaded the PNG.")
+        .def(
+            "repair_report",
+            [](const PyVoxelGrid& g) {
+                voxel::VoxelGrid::RepairReport r = g.grid().repair_report();
+                nb::dict out;
+                out["enclosed_voids"] = r.enclosed_voids;
+                out["void_cells"] = r.void_cells;
+                out["largest_void"] = r.largest_void;
+                out["airtight"] = r.airtight;
+                return out;
+            },
+            "Non-destructive: what a pre-bake check wants to know without doing the "
+            "repair. A destructive operation whose input is somebody's sculpt should "
+            "be askable before it is answerable.")
+        .def(
+            "repair_close_holes",
+            [](PyVoxelGrid& g, int passes, nb::handle mask) {
+                g.grid().repair_close_holes(passes, borrow_mask(mask));
+            },
+            "passes"_a = 1, "mask"_a = nb::none(),
+            "Seal perforations over the whole grid by the pocket rule. Only ever "
+            "adds cells, so no material is lost.")
+        .def(
+            "repair_fill_voids",
+            [](PyVoxelGrid& g, nb::handle mask) { g.grid().repair_fill_voids(borrow_mask(mask)); },
+            "mask"_a = nb::none(),
+            "Fill every empty cell the outside cannot reach, coloured from the shell "
+            "that encloses it. Enclosure is decided by a flood from outside the "
+            "bounds, not guessed at from a local neighbourhood.")
+        .def(
+            "apply_stroke",
+            [](PyVoxelGrid& g, nb::handle samples, const brush::StrokePreset& preset,
+               std::uint8_t index, const std::string& shape, const std::string& falloff,
+               nb::handle mask) {
+                std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
+                voxel::BrushShape s = parse_brush_shape(shape);
+                voxel::BrushFalloff f = parse_falloff(falloff);
+                const voxel::MaskField* m = borrow_mask(mask);
+                voxel::VoxelGrid& grid = g.grid();
+                nb::gil_scoped_release release;
+                return brush::apply_to_grid(grid, brush::resolve_stroke(in, preset), index, s, f,
+                                            m);
+            },
+            "samples"_a, "preset"_a, "index"_a, "shape"_a = "sphere", "falloff"_a = "smooth",
+            "mask"_a = nb::none(),
+            "Resolve a stroke and stamp it into the grid; returns how many stamps "
+            "ran. Masked stamps are dropped, so a frozen region receives nothing.")
+        .def(
+            "mask_extrude",
+            [](const PyVoxelGrid& g, nb::handle mask, float thickness, const std::string& side,
+               float threshold, int border_smooth) {
+                const voxel::MaskField* m = borrow_mask(mask);
+                if (!m) throw std::invalid_argument("mask must be a MaskField");
+                brush::MaskExtrudeSettings settings = extrude_settings(
+                    thickness, side, threshold, 0.0f, border_smooth, nb::none(), nb::none());
+                const voxel::VoxelGrid& src = g.grid();
+                std::optional<voxel::VoxelGrid> extract;
+                {
+                    nb::gil_scoped_release release;
+                    extract = brush::mask_extrude(src, *m, settings);
+                }
+                if (!extract)
+                    throw std::invalid_argument(
+                        "nothing to extrude: the mask is empty, is not on the surface, or the "
+                        "grid is");
+                PyVoxelGrid out;
+                out.owned = std::make_shared<voxel::VoxelGrid>(std::move(*extract));
+                return out;
+            },
+            "mask"_a, "thickness"_a, "side"_a = "outward", "threshold"_a = 0.5f,
+            "border_smooth"_a = 0,
+            "Mask extrude in CELL space: the masked cells of this grid's\n"
+            "surface, thickened, as a new grid carrying this one's colours.\n\n"
+            "It does not go through a sampled field — a grid already knows which\n"
+            "of its cells are on its surface, so resampling would cost a\n"
+            "conversion and lose the palette. The result agrees with\n"
+            "Document.mask_extrude to within a voxel, which is the point: what a\n"
+            "document means must not depend on how it is stored.\n\n"
+            "`border_round`, `cell_size` and `band` have no meaning here; the\n"
+            "grid's own resolution is the only one there is. Neither this grid\n"
+            "nor the mask is modified.")
+        .def(
+            "fill_box",
+            [](PyVoxelGrid& g, nb::handle a, nb::handle b, std::uint8_t index) {
+                g.grid().fill_box(to_coord(a), to_coord(b), index);
+            },
+            "a"_a, "b"_a, "index"_a, "Inclusive-corner box fill")
+        .def(
+            "fill_line",
+            [](PyVoxelGrid& g, nb::handle a, nb::handle b, std::uint8_t index) {
+                g.grid().fill_line(to_coord(a), to_coord(b), index);
+            },
+            "a"_a, "b"_a, "index"_a)
+        .def(
+            "set_mirrored",
+            [](PyVoxelGrid& g, nb::handle cell, std::uint8_t index, const std::string& axes) {
+                std::uint8_t mask = 0;
+                for (char c : axes) mask |= static_cast<std::uint8_t>(1u << parse_axis({c}));
+                g.grid().set_mirrored(to_coord(cell), index, mask);
+            },
+            "cell"_a, "index"_a, "axes"_a = "x",
+            "Set the cell and every mirror combination of the given axes ('x', 'xz', ...)")
+        .def(
+            "paint_mirrored",
+            [](PyVoxelGrid& g, nb::handle cell, std::uint8_t index, const std::string& axes) {
+                std::uint8_t mask = 0;
+                for (char c : axes) mask |= static_cast<std::uint8_t>(1u << parse_axis({c}));
+                g.grid().paint_mirrored(to_coord(cell), index, mask);
+            },
+            "cell"_a, "index"_a, "axes"_a = "x",
+            "Recolor the cell and every mirror combination (occupied cells only)")
+        .def(
+            "flood_select",
+            [](const PyVoxelGrid& g, nb::handle seed, bool same_color) {
+                std::vector<voxel::VoxelCoord> sel =
+                    g.grid().flood_select(to_coord(seed), same_color);
+                nb::module_ np = nb::module_::import_("numpy");
+                nb::object arr =
+                    np.attr("empty")(nb::make_tuple(sel.size(), 3), "dtype"_a = "int32");
+                auto view = nb::cast<nb::ndarray<std::int32_t, nb::ndim<2>, nb::c_contig>>(arr);
+                for (std::size_t i = 0; i < sel.size(); ++i) {
+                    view.data()[i * 3 + 0] = sel[i].x;
+                    view.data()[i * 3 + 1] = sel[i].y;
+                    view.data()[i * 3 + 2] = sel[i].z;
+                }
+                return arr;
+            },
+            "seed"_a, "same_color"_a = true, "6-connected flood select -> (N, 3) int32 coordinates")
+        .def(
+            "bounds",
+            [](const PyVoxelGrid& g) -> nb::object {
+                auto lo = g.grid().bounds_min();
+                auto hi = g.grid().bounds_max();
+                if (!lo || !hi) return nb::none();
+                return nb::make_tuple(nb::make_tuple(lo->x, lo->y, lo->z),
+                                      nb::make_tuple(hi->x, hi->y, hi->z));
+            },
+            "Inclusive cell bounds of occupied voxels, or None when empty")
+        .def(
+            "mesh",
+            [](const PyVoxelGrid& g) {
+                PyMesh out;
+                const voxel::VoxelGrid& grid = g.grid();
+                {
+                    nb::gil_scoped_release release;
+                    out.m = grid.mesh_greedy();
+                }
+                return out;
+            },
+            "Greedy-mesh the grid (merged quads, per-face palette color)")
+        .def(
+            "mesh_smooth",
+            [](const PyVoxelGrid& g, int blur) {
+                if (blur < 0 || blur > 8) throw nb::value_error("blur must be 0..8 passes");
+                PyMesh out;
+                const voxel::VoxelGrid& grid = g.grid();
+                {
+                    nb::gil_scoped_release release;
+                    out.m = grid.mesh_smooth(voxel::VoxelGrid::SmoothOptions{blur});
+                }
+                return out;
+            },
+            "blur"_a = 0,
+            "Mesh the grid as a rounded form (surface nets over occupancy, "
+            "per-vertex blended palette color). blur adds 3x3x3 occupancy "
+            "passes and can erase a thin feature, so it is 0 by default. A "
+            "preview mesh: not manifold, not watertight — mesh() is the "
+            "export path and is unaffected.")
+        .def(
+            "mesh_quads",
+            [](const PyVoxelGrid& g, const std::string& mode, nb::handle cell_size,
+               nb::handle target, float tolerance, int max_iterations, int blur,
+               std::size_t level) {
+                return mesh_voxel_quads(g.grid(), mode, cell_size, target, tolerance,
+                                        max_iterations, blur, level);
+            },
+            "mode"_a = "dual", "cell_size"_a = nb::none(), "target"_a = nb::none(),
+            "tolerance"_a = 0.10f, "max_iterations"_a = 4, "blur"_a = 0, "level"_a = 0,
+            "Mesh the sculpt as QUADS -> Mesh.\n\n"
+            "WHAT THIS IS NOT: a REGULAR QUAD GRID DERIVED FROM A LATTICE, which is\n"
+            "NOT field-aligned retopology — no edge loops following the form, no\n"
+            "poles at features, not animation-ready. It is the input a retopology\n"
+            "pass REPLACES.\n\n"
+            "Two modes, because a voxel sculpt is two different subjects:\n"
+            "  'dual'  the rounded form — the same lattice dual mesh_smooth builds,\n"
+            "          quads meeting four to a vertex on average. cell_size\n"
+            "          generalises the lattice; coarser low-passes and can drop a\n"
+            "          one-voxel feature, finer is CLAMPED to the voxel size because\n"
+            "          occupancy is a step field. At the voxel size with blur 0 this\n"
+            "          is mesh_smooth's mesh for the SAME LEVEL plus its quads —\n"
+            "          note `level` below defaults to 0 while mesh_smooth follows\n"
+            "          the ACTIVE level and cannot be asked for another, so on a\n"
+            "          multi-level grid the two default calls mesh different\n"
+            "          levels and match only when active_level is 0.\n"
+            "  'faces' one planar quad per exposed voxel face — the boxes the model\n"
+            "          actually is. Dense, corners welded within a palette colour,\n"
+            "          and NO vertex normals: a welded corner faces three ways at\n"
+            "          once. mesh() is unchanged and stays the merged triangle path.\n\n"
+            "`target` asks for a COUNT: APPROACHED, NEVER HIT. In 'faces' mode the\n"
+            "lever is the resolution LEVEL, a factor of about four per step, so a\n"
+            "target usually lands on the nearest level rather than inside the\n"
+            "tolerance: the search walks the stack coarsest first, stops at the\n"
+            "first level that reaches the target, returns the nearer of the two it\n"
+            "landed between, and ignores max_iterations because the stack is its own\n"
+            "bound. quad_report['clamped'] there means the STACK RAN OUT — the target\n"
+            "is below what the coarsest level THAT YIELDS ANYTHING gives or above\n"
+            "what the finest gives; empty coarse levels are ordinary on a grid\n"
+            "sculpted only at a fine level and do not count as a nearer end.\n"
+            "quad_report['iterations'] counts every level meshed from the coarsest,\n"
+            "so a target met at level k costs k+1 meshes, not the two of the\n"
+            "bracket.\n"
+            "Mesh.quad_report says what actually happened.\n\n"
+            "The knobs take the C ABI's rules: tolerance <= 0 and max_iterations 0\n"
+            "mean the defaults (0.10, 4), a negative max_iterations is refused, and\n"
+            "target is capped at 16777216 quads.")
+        .def(
+            "sample_step_field",
+            [](const PyVoxelGrid& g, nb::handle points) {
+                PointsView pts = to_points(points);
+                const voxel::VoxelGrid& grid = g.grid();
+                float* out = new float[pts.count ? pts.count : 1];
+                nb::capsule owner(out, [](void* p) noexcept { delete[] static_cast<float*>(p); });
+                {
+                    nb::gil_scoped_release release;
+                    for (std::size_t i = 0; i < pts.count; ++i)
+                        out[i] = grid.sample_step_field(
+                            kernel::cf3(pts.data[i * 3], pts.data[i * 3 + 1], pts.data[i * 3 + 2]));
+                }
+                return nb::cast(nb::ndarray<nb::numpy, float>(out, {pts.count}, owner));
+            },
+            "points"_a, "Voxels as a step field for SDF compositing (a bound, not a distance)")
+        .def(
+            "raycast",
+            [](const PyVoxelGrid& g, nb::handle origin, nb::handle direction) -> nb::object {
+                math::Ray ray{to_f3(origin, "origin"),
+                              kernel::cnormalize(to_f3(direction, "direction"))};
+                pick::VoxelHit hit = pick::raycast_voxels(g.grid(), ray);
+                if (!hit.hit) return nb::none();
+                voxel::VoxelCoord adj = pick::adjacent_cell(hit);
+                nb::dict d;
+                d["cell"] = nb::make_tuple(hit.cell.x, hit.cell.y, hit.cell.z);
+                d["face"] = hit.face;
+                d["adjacent"] = nb::make_tuple(adj.x, adj.y, adj.z);
+                d["t"] = hit.t;
+                return d;
+            },
+            "origin"_a, "direction"_a,
+            "Pick a voxel: cell, entry face id, and the adjacent cell to place into")
+        .def(
+            "build_plane_pick",
+            [](const PyVoxelGrid& g, nb::handle origin, nb::handle direction,
+               std::int32_t plane_cell) -> nb::object {
+                math::Ray ray{to_f3(origin, "origin"),
+                              kernel::cnormalize(to_f3(direction, "direction"))};
+                auto cell = pick::pick_build_plane(g.grid(), ray, plane_cell);
+                if (!cell) return nb::none();
+                return nb::make_tuple(cell->x, cell->y, cell->z);
+            },
+            "origin"_a, "direction"_a, "plane_cell"_a = 0)
+        .def(
+            "rasterize",
+            [](PyVoxelGrid& g, const PyDocument& d, nb::handle region) {
+                scene::Tape tape = scene::compile_document(d.doc->document);
+                math::Aabb box = tape.bounds;
+                if (!region.is_none()) {
+                    nb::sequence s = nb::cast<nb::sequence>(region);
+                    if (nb::len(s) != 2)
+                        throw std::invalid_argument("region must be ((minx,miny,minz), (max...))");
+                    box = math::Aabb{to_f3(s[0], "region min"), to_f3(s[1], "region max")};
+                }
+                if (box.empty() || box.is_infinite())
+                    throw std::invalid_argument("document has no bounded content to rasterize");
+                voxel::VoxelGrid& grid = g.grid();
+                nb::gil_scoped_release release;
+                grid.rasterize_tape(tape, box);
+            },
+            "document"_a, "region"_a = nb::none(),
+            "Rasterize an SDF document into voxels (colors sampled from the field)")
+        .def(
+            "rasterize_mesh",
+            [](PyVoxelGrid& g, const PyMesh& source, nb::handle region) {
+                const mesh::Mesh& m = source.data();
+                if (m.empty()) throw std::invalid_argument("the mesh has no triangles");
+                std::optional<math::Aabb> box;
+                if (!region.is_none()) {
+                    nb::sequence s = nb::cast<nb::sequence>(region);
+                    if (nb::len(s) != 2)
+                        throw std::invalid_argument("region must be ((minx,miny,minz), (max...))");
+                    box = math::Aabb{to_f3(s[0], "region min"), to_f3(s[1], "region max")};
+                    if (box->empty() || box->is_infinite())
+                        throw std::invalid_argument(
+                            "the region must be finite, non-empty and bounded");
+                }
+                voxel::VoxelGrid& grid = g.grid();
+                nb::gil_scoped_release release;
+                if (box)
+                    grid.rasterize_mesh(m, *box);
+                else
+                    grid.rasterize_mesh(m);
+            },
+            "mesh"_a, "region"_a = nb::none(),
+            "Rasterize a TRIANGLE MESH into voxels, in one sampling.\n\n"
+            "An imported model reaches an SDF layer in one step (Volume.from_mesh)\n"
+            "but reached a grid only through a document: triangles to a narrow band,\n"
+            "band into a layer, layer rasterized. Each of those places the surface\n"
+            "within about half a cell of its own lattice, so the detour quantised a\n"
+            "field that was itself quantised — and a feature that survived the first\n"
+            "sampling could fall between centres on the second.\n\n"
+            "Membership is the GENERALIZED WINDING NUMBER at the cell centre: the\n"
+            "sign that survives a hole, a flipped normal and a self-intersection,\n"
+            "because those are what imported meshes have. A model with a missing\n"
+            "cap rasterizes without flipping a half-space.\n\n"
+            "Colour comes from the mesh's vertex colours where it has them,\n"
+            "interpolated at the closest point on the nearest triangle and quantised\n"
+            "to the palette by nearest entry. A mesh with no colours takes one\n"
+            "neutral entry — a grid's colour is per cell and there is nothing else\n"
+            "to read.\n\n"
+            "`region` is OPTIONAL here, unlike `rasterize`: a document can be\n"
+            "unbounded and a mesh cannot, so None means the mesh's own bounds.\n\n"
+            "What the sampling costs: the surface moves by up to half a cell, a\n"
+            "feature thinner than a cell can vanish (rasterize finer — nothing\n"
+            "downstream can invent what was never stored), a sharp edge staircases,\n"
+            "and two colours closer than the palette tolerance become one.\n\n"
+            "NOT retopology and not remeshing. The mesh is not modified, and a mesh\n"
+            "a document CARRIES stays never-evaluated — this is an explicit\n"
+            "conversion you ask for, like every bridge.");
 
     m.def("load",
           [](const std::string& path) {

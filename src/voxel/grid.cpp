@@ -1,4 +1,3 @@
-#include "clay/parallel/thread_pool.h"
 #include "clay/voxel/grid.h"
 
 #include <algorithm>
@@ -9,6 +8,9 @@
 #include <limits>
 #include <map>
 #include <utility>
+
+#include "clay/parallel/thread_pool.h"
+#include "dither.h"
 
 namespace clay {
 namespace voxel {
@@ -267,13 +269,178 @@ std::uint8_t VoxelGrid::cell_index(std::size_t level, VoxelCoord c) const {
 void VoxelGrid::set(VoxelCoord c, std::uint8_t index) {
     // Every verb funnels its writes through here, so one compare instruments
     // all of them, and propagation below is charged to the edit rather than
-    // counted as further edits.
+    // counted as further edits — and one recording hook attributes all of them
+    // to the open sculpt layer.
+    if (recording_) {
+        SculptLayerRecord& rec = sculpt_layers_.back();
+        auto it = rec.index.find(c);
+        if (it == rec.index.end()) {
+            // FIRST touch keeps the before: the pass's starting state for this
+            // cell, whatever it does to it afterwards.
+            rec.index.emplace(c, rec.changes.size());
+            rec.changes.push_back({c, get(c), index});
+        } else {
+            rec.changes[it->second].after = index;
+        }
+    }
     if (write_cell(active_, c, index)) ++change_count_;
     if (levels_.size() == 1) return;  // the single-level grid: nothing to carry
     // Down first: it restates this cell's own offset against the parent it just
     // recomputed, which is what the walk back up then replays.
     propagate_down(active_, c);
     propagate_up(active_, c);
+}
+
+// -- sculpt layers -----------------------------------------------------------
+
+std::size_t VoxelGrid::begin_sculpt_layer(std::string name) {
+    end_sculpt_layer();
+    SculptLayerRecord rec;
+    rec.name = std::move(name);
+    rec.seed = next_sculpt_seed_++;
+    sculpt_layers_.push_back(std::move(rec));
+    recording_ = true;
+    return sculpt_layers_.size() - 1;
+}
+
+void VoxelGrid::end_sculpt_layer() { recording_ = false; }
+
+const std::string& VoxelGrid::sculpt_layer_name(std::size_t layer) const {
+    static const std::string kNone;
+    return layer < sculpt_layers_.size() ? sculpt_layers_[layer].name : kNone;
+}
+
+std::size_t VoxelGrid::sculpt_layer_cell_count(std::size_t layer) const {
+    return layer < sculpt_layers_.size() ? sculpt_layers_[layer].changes.size() : 0;
+}
+
+float VoxelGrid::sculpt_layer_strength(std::size_t layer) const {
+    return layer < sculpt_layers_.size() ? sculpt_layers_[layer].strength : 0.0f;
+}
+
+bool VoxelGrid::sculpt_layer_visible(std::size_t layer) const {
+    return layer < sculpt_layers_.size() && sculpt_layers_[layer].visible;
+}
+
+// Undo every layer from `first` upward, TOP DOWN.
+//
+// The order is the whole correctness argument. A layer's `before` was captured
+// against the state at the moment that layer ran — which is the base plus every
+// layer below it — so restoring them in reverse order walks that history
+// backwards exactly. Reverting bottom-up would restore a value that a later
+// layer had already overwritten.
+void VoxelGrid::revert_from(std::size_t first) {
+    const bool was_recording = recording_;
+    recording_ = false;  // a recompose is not a pass
+    for (std::size_t i = sculpt_layers_.size(); i > first; --i) {
+        const SculptLayerRecord& rec = sculpt_layers_[i - 1];
+        if (!rec.visible) continue;
+        // Backwards within the layer too: a pass that wrote one cell twice
+        // recorded only its first `before`, but a replay of the OTHER cells
+        // must still unwind in the order it laid them down.
+        for (std::size_t c = rec.changes.size(); c > 0; --c) {
+            const SculptChange& ch = rec.changes[c - 1];
+            if (dither::passes(ch.cell, rec.strength, rec.seed)) set(ch.cell, ch.before);
+        }
+    }
+    recording_ = was_recording;
+}
+
+// Replay every layer from `first` upward, bottom up, at its current strength.
+void VoxelGrid::apply_from(std::size_t first) {
+    const bool was_recording = recording_;
+    recording_ = false;
+    for (std::size_t i = first; i < sculpt_layers_.size(); ++i) {
+        const SculptLayerRecord& rec = sculpt_layers_[i];
+        if (!rec.visible) continue;
+        for (const SculptChange& ch : rec.changes)
+            if (dither::passes(ch.cell, rec.strength, rec.seed)) set(ch.cell, ch.after);
+    }
+    recording_ = was_recording;
+}
+
+bool VoxelGrid::set_sculpt_layer_strength(std::size_t layer, float strength) {
+    if (layer >= sculpt_layers_.size()) return false;
+    const float s = strength < 0.0f ? 0.0f : (strength > 1.0f ? 1.0f : strength);
+    if (s == sculpt_layers_[layer].strength) return true;
+    revert_from(layer);
+    sculpt_layers_[layer].strength = s;
+    apply_from(layer);
+    return true;
+}
+
+bool VoxelGrid::set_sculpt_layer_visible(std::size_t layer, bool visible) {
+    if (layer >= sculpt_layers_.size()) return false;
+    if (visible == sculpt_layers_[layer].visible) return true;
+    revert_from(layer);
+    sculpt_layers_[layer].visible = visible;
+    apply_from(layer);
+    return true;
+}
+
+bool VoxelGrid::remove_sculpt_layer(std::size_t layer) {
+    if (layer >= sculpt_layers_.size()) return false;
+    revert_from(layer);
+    sculpt_layers_.erase(sculpt_layers_.begin() + static_cast<std::ptrdiff_t>(layer));
+    apply_from(layer);
+    return true;
+}
+
+bool VoxelGrid::merge_sculpt_layer_down(std::size_t layer) {
+    // Nothing below to merge into.
+    if (layer == 0 || layer >= sculpt_layers_.size()) return false;
+    // Composed at FULL strength, because a merged pass is one pass: keeping
+    // the upper layer's dither would bake a fractional subset in and leave the
+    // result unable to reach the other cells again.
+    revert_from(layer - 1);
+    SculptLayerRecord upper = std::move(sculpt_layers_[layer]);
+    sculpt_layers_.erase(sculpt_layers_.begin() + static_cast<std::ptrdiff_t>(layer));
+    SculptLayerRecord& lower = sculpt_layers_[layer - 1];
+    for (const SculptChange& ch : upper.changes) {
+        auto it = lower.index.find(ch.cell);
+        if (it == lower.index.end()) {
+            lower.index.emplace(ch.cell, lower.changes.size());
+            lower.changes.push_back(ch);
+        } else {
+            // The lower layer already owns this cell: keep ITS before — that
+            // is the state both passes started from — and take the upper's
+            // after, which is where the pair ends up.
+            lower.changes[it->second].after = ch.after;
+        }
+    }
+    apply_from(layer - 1);
+    return true;
+}
+
+bool VoxelGrid::move_sculpt_layer(std::size_t from, std::size_t to) {
+    if (from >= sculpt_layers_.size() || to >= sculpt_layers_.size()) return false;
+    if (from == to) return true;
+    // Everything from the lower of the two positions is affected, so that is
+    // where the unwind starts.
+    const std::size_t first = std::min(from, to);
+    revert_from(first);
+    SculptLayerRecord moved = std::move(sculpt_layers_[from]);
+    sculpt_layers_.erase(sculpt_layers_.begin() + static_cast<std::ptrdiff_t>(from));
+    sculpt_layers_.insert(sculpt_layers_.begin() + static_cast<std::ptrdiff_t>(to),
+                          std::move(moved));
+    apply_from(first);
+    return true;
+}
+
+std::size_t VoxelGrid::sculpt_layer_bytes(std::size_t layer) const {
+    if (layer >= sculpt_layers_.size()) return 0;
+    const SculptLayerRecord& rec = sculpt_layers_[layer];
+    // The changes, plus the lookup that keeps recording O(1) per write. The
+    // node overhead of an unordered_map is not observable from here, so this
+    // counts key and value and says so rather than guessing at an allocator.
+    return rec.changes.size() * sizeof(SculptChange) +
+           rec.index.size() * (sizeof(VoxelCoord) + sizeof(std::size_t)) + rec.name.capacity();
+}
+
+std::size_t VoxelGrid::sculpt_layer_total_bytes() const {
+    std::size_t total = 0;
+    for (std::size_t i = 0; i < sculpt_layers_.size(); ++i) total += sculpt_layer_bytes(i);
+    return total;
 }
 
 void VoxelGrid::paint(VoxelCoord c, std::uint8_t index) {
@@ -768,7 +935,89 @@ constexpr std::uint32_t kLevelTail = 0x564C4343u;   // "CCLV" little-endian
 // meets an unknown tag, which it already handles by opening the grid at its
 // coarsest level rather than by failing.
 constexpr std::uint32_t kRegionTail = 0x56524343u;  // "CCRV"
+// Sculpt layers ride after the level tail, tagged, so a grid with none writes
+// the exact bytes it always did and a reader predating them meets an unknown
+// tag — which it already handles by opening the grid FLATTENED, which is the
+// honest degradation: the sculpt is what the layers composed to.
+constexpr std::uint32_t kSculptTail = 0x534C4343u;  // "CCLS"
 
+}  // namespace
+
+// The sculpt-layer tail: nothing at all when there are no layers, so a grid
+// that does not use them pays not one byte for the feature existing.
+void VoxelGrid::write_sculpt_tail(std::vector<std::uint8_t>* out) const {
+    if (sculpt_layers_.empty()) return;
+    auto put32 = [&](std::uint32_t v) {
+        for (int i = 0; i < 4; ++i)
+            out->push_back(static_cast<std::uint8_t>((v >> (i * 8)) & 0xFF));
+    };
+    auto putf = [&](float f) {
+        std::uint32_t bits;
+        std::memcpy(&bits, &f, 4);
+        put32(bits);
+    };
+    put32(kSculptTail);
+    put32(static_cast<std::uint32_t>(sculpt_layers_.size()));
+    for (const SculptLayerRecord& rec : sculpt_layers_) {
+        put32(static_cast<std::uint32_t>(rec.name.size()));
+        for (char ch : rec.name) out->push_back(static_cast<std::uint8_t>(ch));
+        putf(rec.strength);
+        put32(rec.visible ? 1u : 0u);
+        put32(rec.seed);
+        put32(static_cast<std::uint32_t>(rec.changes.size()));
+        // In the order the pass made them, because that is the order a replay
+        // has to use — this is a sequence, not a set.
+        for (const SculptChange& ch : rec.changes) {
+            put32(static_cast<std::uint32_t>(ch.cell.x));
+            put32(static_cast<std::uint32_t>(ch.cell.y));
+            put32(static_cast<std::uint32_t>(ch.cell.z));
+            out->push_back(ch.before);
+            out->push_back(ch.after);
+        }
+    }
+}
+
+bool VoxelGrid::read_sculpt_tail(const std::uint8_t* data, std::size_t size, std::size_t* pos) {
+    auto get32 = [&](std::uint32_t* v) {
+        if (*pos + 4 > size) return false;
+        *v = 0;
+        for (int i = 0; i < 4; ++i) *v |= static_cast<std::uint32_t>(data[(*pos)++]) << (i * 8);
+        return true;
+    };
+    std::uint32_t count = 0;
+    if (!get32(&count)) return false;
+    if (count > (size - *pos) / 20) return false;  // smallest possible encoded layer
+    for (std::uint32_t i = 0; i < count; ++i) {
+        SculptLayerRecord rec;
+        std::uint32_t n = 0;
+        if (!get32(&n) || n > size - *pos) return false;
+        rec.name.assign(reinterpret_cast<const char*>(data + *pos), n);
+        *pos += n;
+        std::uint32_t bits = 0, vis = 0, changes = 0;
+        if (!get32(&bits)) return false;
+        std::memcpy(&rec.strength, &bits, 4);
+        if (!get32(&vis) || !get32(&rec.seed) || !get32(&changes)) return false;
+        rec.visible = vis != 0;
+        if (changes > (size - *pos) / 14) return false;  // 14 bytes per change
+        rec.changes.reserve(changes);
+        for (std::uint32_t c = 0; c < changes; ++c) {
+            std::uint32_t x, y, z;
+            if (!get32(&x) || !get32(&y) || !get32(&z) || *pos + 2 > size) return false;
+            SculptChange ch;
+            ch.cell = {static_cast<std::int32_t>(x), static_cast<std::int32_t>(y),
+                       static_cast<std::int32_t>(z)};
+            ch.before = data[(*pos)++];
+            ch.after = data[(*pos)++];
+            rec.index.emplace(ch.cell, rec.changes.size());
+            rec.changes.push_back(ch);
+        }
+        next_sculpt_seed_ = std::max(next_sculpt_seed_, rec.seed + 1);
+        sculpt_layers_.push_back(std::move(rec));
+    }
+    return true;
+}
+
+namespace {
 // Ceiling on the cells a tail may ask the reader to MATERIALISE. kMaxLevels
 // bounds how many levels a stream can name but not what naming them costs:
 // every level is rebuilt by subdividing the one below, so a fixed-size tail
@@ -821,7 +1070,12 @@ std::vector<std::uint8_t> VoxelGrid::serialize() const {
         put32(static_cast<std::uint32_t>(rle.size()));
         out.insert(out.end(), rle.begin(), rle.end());
     }
-    if (levels_.size() == 1) return out;  // byte-for-byte the stream it always was
+    if (levels_.size() == 1) {
+        // Byte-for-byte the stream it always was — plus the sculpt tail, which
+        // is itself absent when there are no layers.
+        write_sculpt_tail(&out);
+        return out;
+    }
 
     // Finer levels ride along as their OFFSETS ONLY — the cells that differ
     // from the level below — because everything else is reproducible by
@@ -860,6 +1114,7 @@ std::vector<std::uint8_t> VoxelGrid::serialize() const {
             out.push_back(v);
         }
     }
+    write_sculpt_tail(&out);
     return out;
 }
 
@@ -925,15 +1180,36 @@ std::optional<VoxelGrid> VoxelGrid::deserialize(const std::uint8_t* data, std::s
     }
     // No tail, or a stream written before there was one: a single-level grid,
     // which is what an older document is.
-    std::uint32_t tag = 0;
-    if (pos + 4 > size || !get32(&tag) || (tag != kLevelTail && tag != kRegionTail)) {
-        grid.mark_every_chunk_dirty();
-        return grid;
-    }
-    if (!grid.read_level_tail(data, size, &pos, palette_count, tag == kRegionTail))
-        return std::nullopt;
+    if (!grid.read_tails(data, size, &pos, palette_count)) return std::nullopt;
     grid.mark_every_chunk_dirty();
     return grid;
+}
+
+// Everything after the base voxel stream: the level tail, the sculpt tail, or
+// neither. A tag this build does not know is not an error — it is an older
+// reader's view of a newer file, and stopping there yields the flattened grid,
+// which is what every tail here is an addition to. False means a tail WAS
+// recognised and then failed to decode, which is a corrupt file.
+bool VoxelGrid::read_tails(const std::uint8_t* data, std::size_t size, std::size_t* pos,
+                           std::size_t palette_count) {
+    auto tag_at = [&](std::uint32_t* out) {
+        if (*pos + 4 > size) return false;
+        *out = 0;
+        for (int i = 0; i < 4; ++i) *out |= static_cast<std::uint32_t>(data[*pos + i]) << (i * 8);
+        return true;
+    };
+    std::uint32_t tag = 0;
+    if (!tag_at(&tag)) return true;
+
+    if (tag == kLevelTail || tag == kRegionTail) {
+        *pos += 4;
+        if (!read_level_tail(data, size, pos, palette_count, tag == kRegionTail)) return false;
+        // Sculpt layers ride after the levels, when there are any.
+        if (!tag_at(&tag)) return true;
+    }
+    if (tag != kSculptTail) return true;  // unknown, or nothing more to read
+    *pos += 4;
+    return read_sculpt_tail(data, size, pos);
 }
 
 // A grid read back from a file has never been displayed, so every chunk it

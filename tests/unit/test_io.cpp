@@ -65,6 +65,41 @@ TEST_CASE("clayspace: bit-identical round trip with voxel layers and extras") {
     }
 }
 
+TEST_CASE("clayspace: a voxel layer's sculpt layers survive the file") {
+    // The voxel payload is opaque to the container, so this is the test that
+    // says the two actually travel together — the format bump to minor 10 is
+    // otherwise a number nothing checks.
+    io::ClaySpaceDoc cs = sample_clayspace();
+    REQUIRE(cs.voxel_layers.size() == 1);
+    voxel::VoxelGrid& grid = cs.voxel_layers.begin()->second;
+    const std::uint8_t idx = grid.palette_add(cf3(0.4f, 0.7f, 0.3f));
+
+    grid.begin_sculpt_layer("a dialable pass");
+    for (int i = 0; i < 12; ++i) grid.set({i, 1, 1}, idx);
+    grid.end_sculpt_layer();
+    grid.set_sculpt_layer_strength(0, 0.35f);
+    const std::size_t composed = grid.occupied_count();
+
+    std::vector<std::uint8_t> bytes = io::save_clayspace(cs);
+    io::ClaySpaceDoc back;
+    REQUIRE(io::load_clayspace(bytes.data(), bytes.size(), &back).ok());
+    CHECK(io::save_clayspace(back) == bytes);  // still canonical
+
+    REQUIRE(back.voxel_layers.size() == 1);
+    voxel::VoxelGrid& reloaded = back.voxel_layers.begin()->second;
+    REQUIRE(reloaded.sculpt_layer_count() == 1);
+    CHECK(reloaded.sculpt_layer_name(0) == "a dialable pass");
+    CHECK(reloaded.sculpt_layer_strength(0) == doctest::Approx(0.35f));
+    CHECK(reloaded.occupied_count() == composed);
+
+    // Still dialable after the round trip, which is the whole reason the diff
+    // is stored rather than the result.
+    CHECK(reloaded.set_sculpt_layer_strength(0, 1.0f));
+    CHECK(grid.set_sculpt_layer_strength(0, 1.0f));
+    CHECK(reloaded.occupied_count() == grid.occupied_count());
+    CHECK(reloaded.serialize() == grid.serialize());
+}
+
 TEST_CASE("clayspace: forward-refuse, truncation, unknown chunks") {
     std::vector<std::uint8_t> bytes = io::save_clayspace(sample_clayspace());
     io::ClaySpaceDoc out;

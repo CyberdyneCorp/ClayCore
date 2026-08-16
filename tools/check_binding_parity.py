@@ -44,6 +44,9 @@ CLASS_PREFIX = {
     "VertexDeltas": ("clay_mesh_deltas_",),
     "Lattice": ("clay_mesh_lattice_",),
     "StrokePreset": ("clay_stroke_preset_",),
+    # A Python-idiom wrapper over clay_voxel_begin/end_sculpt_layer. See
+    # CLASS_CTOR['SculptLayerScope'].
+    "SculptLayerScope": ("clay_voxel_",),
     # An inspection surface with no C counterpart; every member is exempt with
     # a reason. See CLASS_CTOR['MeshQuery'].
     "MeshQuery": ("clay_mesh_",),
@@ -152,6 +155,9 @@ CLASS_CTOR = {
     "Lattice": "clay_mesh_lattice_create",
     "Accumulation": None,
     "StrokePreset": "clay_stroke_preset_defaults",
+    # Built by VoxelGrid.sculpt_layer, which is itself exempt: `with` is a
+    # Python statement and C has no counterpart to bind to.
+    "SculptLayerScope": None,
     "Cut": "clay_cut_create",
     # Not clay_item_create: a volume needs samples, and that entry point has
     # none to give. Its producer takes a mesh.
@@ -209,6 +215,16 @@ CLASS_CTOR = {
 # instead of disappearing, and it fails when one becomes reachable in C or
 # vanishes from pyclay.
 EXEMPT = {
+    "VoxelGrid.sculpt_layer": "a Python-idiom wrapper, not a capability: it "
+                              "returns the context manager over "
+                              "clay_voxel_begin_sculpt_layer and "
+                              "clay_voxel_end_sculpt_layer, both of which C "
+                              "reaches directly. `with` is a Python statement "
+                              "and there is nothing in C for it to map to; a "
+                              "C caller brackets the pass itself",
+    "SculptLayerScope.index": "the layer index clay_voxel_begin_sculpt_layer "
+                              "already returns through its out parameter",
+
     "MeshQuery.distance": "an inspection surface, not a capability: C imports a "
                           "mesh with clay_item_volume_from_mesh and evaluates "
                           "through the document",
