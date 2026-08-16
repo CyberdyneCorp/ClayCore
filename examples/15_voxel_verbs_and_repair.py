@@ -87,6 +87,8 @@ SHOWN_ELSEWHERE = {
     "sculpt_layer_name": "52_sculpt_layers",
     "sculpt_layer_strength": "52_sculpt_layers",
     "sculpt_layer_visible": "52_sculpt_layers",
+    "sculpt_layer_bytes": "52_sculpt_layers",
+    "sculpt_layers_bytes": "52_sculpt_layers",
 }
 
 

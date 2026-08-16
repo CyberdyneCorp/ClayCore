@@ -146,6 +146,17 @@ def main():
         raise SystemExit("the same strength must pick the same cells")
     print("    and a second grid built the same way picks the same cells at 0.50")
 
+    # --- what it costs -------------------------------------------------------
+    # A layer costs its PASS, not the model, which is the property that makes
+    # keeping a stack of them affordable. Nothing enforces a budget: a cap that
+    # silently stopped recording would leave the pass on the grid and
+    # un-dialable, so the number is reported and the decision is the host's.
+    per_cell = grid.sculpt_layer_bytes(ridges) / grid.sculpt_layer_cell_count(ridges)
+    print(f"\n  the layer costs {grid.sculpt_layer_bytes(ridges)} bytes for "
+          f"{grid.sculpt_layer_cell_count(ridges)} cells ({per_cell:.0f} per cell),")
+    print(f"  against {base} voxels in the model — a pass costs its own cells,")
+    print(f"  not the form it sits on. The whole stack: {grid.sculpt_layers_bytes} bytes.")
+
     # --- the pictures --------------------------------------------------------
     tiles = []
     for s in (0.0, 0.25, 0.5, 0.75, 1.0):
