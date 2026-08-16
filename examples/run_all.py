@@ -83,6 +83,7 @@ EXAMPLES = [
     "51_lattice_gizmo",
     "52_sculpt_layers",
     "53_sdf_alphas",
+    "54_masked_operations",
 ]
 
 

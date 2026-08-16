@@ -5133,3 +5133,102 @@ def test_alpha_tangent_parallel_to_the_direction_still_works():
         assert np.isfinite(doc.safe_step_scale())
         assert doc.safe_step_scale() > 0.0
         assert np.isfinite(doc.eval(np.array([[0, 0, 0.5]], dtype=np.float32))[0])
+# -- masking that gates any operation ------------------------------------------
+# Masks gated AUTHORING before this: a voxel edit consumed one per cell as it
+# wrote, and an SDF edit consumed one when a stroke became items. Neither touched
+# an item already in the edit list, so a mask over an ear did nothing about the
+# next boolean.
+
+
+def protect_plus_x():
+    m = clay.MaskField(0.04)
+    m.fill(((0.0, -2.0, -2.0), (2.0, 2.0, 2.0)), 1.0)
+    return m
+
+
+def bored_ball(gate=None, width=0.15, op=None):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("l")
+    layer.add(clay.Sphere(r=1.0))
+    bar = clay.Box(size=(0.8, 0.8, 3.0))
+    if gate is not None:
+        bar = bar.gate(gate, width=width)
+    layer.add(bar, op=op or clay.Op.SUBTRACT)
+    return doc
+
+
+def solid_ball():
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Sphere(r=1.0))
+    return doc
+
+
+def test_a_gate_protects_a_surface_from_a_boolean():
+    solid, ungated = solid_ball(), bored_ball()
+    gated = bored_ball(protect_plus_x())
+    protected = np.array([[0.3, 0.0, 0.0]], dtype=np.float32)
+    open_side = np.array([[-0.3, 0.0, 0.0]], dtype=np.float32)
+
+    # The fixture means something: the ungated cut removes material here.
+    assert ungated.eval(protected)[0] != solid.eval(protected)[0]
+    # ...and the gated one does not, EXACTLY.
+    assert gated.eval(protected)[0] == solid.eval(protected)[0]
+    # The open side is the ungated result, exactly.
+    assert gated.eval(open_side)[0] == ungated.eval(open_side)[0]
+
+
+def test_a_gate_is_exact_across_the_whole_protected_region():
+    """Not at three lucky points. mix(x, y, t) is x + (y - x) * t, so t == 1
+    returns y only up to rounding — one float step, which is a seam along the
+    border of every protected region."""
+    solid, gated = solid_ball(), bored_ball(protect_plus_x())
+    xs = np.linspace(0.35, 1.4, 80, dtype=np.float32)
+    pts = np.stack([xs, np.zeros_like(xs), np.zeros_like(xs)], axis=1)
+    assert np.array_equal(gated.eval(pts), solid.eval(pts))
+
+
+def test_a_gate_composes_with_every_op():
+    """A gate rides the combine record rather than being a mode, which is what
+    lets it gate a boolean. Each op is probed where it actually acts: adding a
+    thin bar INSIDE a ball changes nothing there."""
+    solid = solid_ball()
+    for op, probe in ((clay.Op.SUBTRACT, (0.3, 0.0, 0.0)),
+                      (clay.Op.ADD, (0.3, 0.0, 1.2)),
+                      (clay.Op.INTERSECT, (0.3, 0.7, 0.0))):
+        p = np.array([probe], dtype=np.float32)
+        assert bored_ball(op=op).eval(p)[0] != solid.eval(p)[0], f"{op} fixture proves nothing"
+        assert bored_ball(protect_plus_x(), op=op).eval(p)[0] == solid.eval(p)[0]
+
+
+def test_a_gate_costs_step_scale_and_a_wider_one_costs_less():
+    ungated = bored_ball().safe_step_scale()
+    assert ungated == pytest.approx(1.0)
+    previous = 0.0
+    for width in (0.05, 0.1, 0.3, 0.8):
+        scale = bored_ball(protect_plus_x(), width=width).safe_step_scale()
+        assert scale < ungated, "a gate is never free"
+        assert scale > previous, "a wider gate must cost less"
+        previous = scale
+
+
+def test_a_gate_survives_the_file(tmp_path):
+    doc = bored_ball(protect_plus_x(), width=0.2)
+    path = tmp_path / "gated.clayspace"
+    doc.save(str(path))
+    back = clay.load(str(path))
+    pts = np.random.default_rng(54).uniform(-1.6, 1.6, size=(384, 3)).astype(np.float32)
+    assert np.array_equal(doc.eval(pts), back.eval(pts))
+    assert back.safe_step_scale() == pytest.approx(doc.safe_step_scale())
+
+
+def test_a_gate_refuses_what_it_cannot_protect():
+    empty = clay.MaskField(0.04)
+    with pytest.raises(ValueError, match="protect nothing"):
+        clay.Box(size=(1, 1, 1)).gate(empty)
+    with pytest.raises(ValueError, match="width"):
+        clay.Box(size=(1, 1, 1)).gate(protect_plus_x(), width=0.0)
+    # Nothing reaching the threshold is the same as no mask at all.
+    faint = clay.MaskField(0.04)
+    faint.fill(((0.0, -1.0, -1.0), (1.0, 1.0, 1.0)), 0.2)
+    with pytest.raises(ValueError, match="protect nothing"):
+        clay.Box(size=(1, 1, 1)).gate(faint, threshold=0.8)

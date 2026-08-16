@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 32
+#define CLAY_ABI_MINOR 33
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -2454,6 +2454,36 @@ typedef struct clay_mask_extrude_params {
     float cell_size;       /* sampling of the result; <= 0 means the mask's own */
     float band;            /* <= 0 means three cells */
 } clay_mask_extrude_params;
+
+/* Gates this item by a painted MASK, so the item does not act where the mask
+ * protects — which is what makes masking protect a surface from ANY operation
+ * rather than only from a brush.
+ *
+ * Masks gate AUTHORING elsewhere: clay_voxel_* edits consume one per cell as
+ * they write, and an SDF stroke consumes one when it becomes items. Neither
+ * touches an item already in the edit list, so a mask over an ear has never
+ * done anything about the next boolean. This does.
+ *
+ * The mask is MEASURED here, not stored: what the item carries is the signed
+ * distance to { mask >= threshold }, which clay_mask_to_field also exposes.
+ * That is what gives the gate a Lipschitz bound worth having — a distance is
+ * 1-Lipschitz, so the falloff's cost is set by `width`, which you choose,
+ * rather than by however hard the brush edge that painted the mask happened to
+ * be. Painted softness is therefore re-derived rather than preserved.
+ *
+ * `width` is how far the protection fades across, in world units. A WIDE gate
+ * costs almost no step scale and a NARROW one costs honestly; read the cost
+ * back with clay_safe_step_scale. Zero is clamped rather than honoured,
+ * because a step in the field has no finite bound and nothing could march it.
+ *
+ * `threshold` is the paint level that counts as protected; <= 0 means 0.5.
+ *
+ * The gate is COPIED into the item, so the caller's mask may change or be
+ * destroyed afterwards. Refused, leaving the item ungated, when the mask is
+ * empty or nothing reaches the threshold — a gate that protects nothing and
+ * reports success is harder to notice than a failure. */
+clay_result clay_item_set_gate(clay_item* item, const clay_mask* mask, float threshold,
+                               float width);
 
 /* The mask, measured: signed distance to the boundary of the masked region,
  * negative inside, as an item carrying a volume.

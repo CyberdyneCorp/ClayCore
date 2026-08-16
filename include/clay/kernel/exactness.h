@@ -173,6 +173,27 @@ CLAY_FN CFieldInfo cfi_transition(CFieldInfo a, CFieldInfo b, float diff_bound, 
     return CFieldInfo{false, l};
 }
 
+// gate (a mask on an item's participation): the same situation cfi_transition
+// describes, and charged the same way — the result is a mix of two fields by a
+// spatially varying weight, so it is not a distance and saying otherwise lets a
+// marcher walk through the surface.
+//
+// The weight is a smoothstep of a SIGNED DISTANCE across `width`. That is the
+// whole reason the gate carries a distance rather than paint: a distance is
+// 1-Lipschitz, so the weight's own slope is the smoothstep's peak (1.5) over
+// the width the caller chose — a number known in advance, not one the artist's
+// brush edge decided.
+//
+// `diff_bound` is how far apart the gated and ungated fields can be over the
+// region, which the compiler takes from the same extent cfi_transition uses.
+//
+// A WIDE gate is nearly free and a narrow one costs honestly, which is the
+// trade to expose rather than hide.
+CLAY_FN CFieldInfo cfi_gate(CFieldInfo a, float diff_bound, float width) {
+    const float slope = 1.5f / cmax(width, 1e-4f);
+    return CFieldInfo{false, a.lipschitz + diff_bound * slope};
+}
+
 // loft: interpolating two profile fields along the lift axis is the same
 // situation cfi_transition describes, in one dimension instead of three. The
 // mix adds |da - db| / (depth it is mixed across), and an easing curve
