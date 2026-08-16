@@ -313,6 +313,132 @@ scene::Document pole_dense_sphere(int nodes) {
 
 }  // namespace
 
+// -- the deep edit list (#118 workstream C) ---------------------------------
+//
+// "A 2,000-item document driven through the brick cache — the honest next
+// measurement, and the gate the rows below are judged by." The existing dense
+// fixture is 193 nodes; this is an order of magnitude past it, which is where
+// the epic says the per-brick cull's O(items) walk stops being affordable.
+//
+// Three benchmarks because the cost splits three ways and only one of them is
+// what `add-item-spatial-index` would fix:
+//
+//   compile — building one culled tape, which walks every item's bounds
+//   cull    — the per-brick region test alone, over a dab's worth of bricks
+//   refill  — compile + evaluate, which is what an edit actually pays
+//
+// A sculpt, not a cloud: dabs are placed ON the surface of a base sphere the
+// way a stroke leaves them, so the culled tapes are realistically dense rather
+// than trivially empty.
+namespace {
+
+scene::Document deep_sphere(int nodes) {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("sculpt");
+    scene::Node base;
+    base.prim = scene::Prim::sphere(1.0f);
+    l.sdf->insert(base);
+    // A low-discrepancy walk over the sphere, so the dabs cover it evenly
+    // rather than clumping the way a naive sin/cos pair does.
+    const double golden = 0.6180339887;
+    for (int i = 1; i < nodes; ++i) {
+        scene::Node dab;
+        dab.prim = scene::Prim::sphere(0.05f);
+        const double u = std::fmod(static_cast<double>(i) * golden, 1.0);
+        const double v = (static_cast<double>(i) + 0.5) / static_cast<double>(nodes);
+        const double phi = std::acos(1.0 - 2.0 * v);
+        const double th = 6.283185307 * u;
+        dab.xform.position = cf3(static_cast<float>(std::sin(phi) * std::cos(th)),
+                                 static_cast<float>(std::cos(phi)),
+                                 static_cast<float>(std::sin(phi) * std::sin(th)));
+        dab.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.03f};
+        l.sdf->insert(dab);
+    }
+    return doc;
+}
+
+}  // namespace
+
+// NAMED rather than Arg()-parameterised: check_bench.py keys a gate on the
+// part of the name before "/", so `BM_X/2000` and `BM_X/193` collapse to the
+// same key and the ceiling would gate whichever ran last. A trap worth not
+// leaving for the next person.
+void deep_doc_compile(benchmark::State& state, int nodes) {
+    scene::Document doc = deep_sphere(nodes);
+    brick::BrickCache cache = filled_cache(doc);
+    const std::vector<brick::BrickKey> all = cache.surface_bricks();
+    const scene::CullRegion cull{cache.cull_region(all.front())};
+    for (auto _ : state) {
+        scene::Tape tape = scene::compile_document(doc, &cull);
+        benchmark::DoNotOptimize(tape.instrs.size());
+        state.counters["instrs"] = static_cast<double>(tape.instrs.size());
+    }
+    state.counters["nodes"] = static_cast<double>(nodes);
+}
+void BM_DeepDocCompile193(benchmark::State& state) { deep_doc_compile(state, 193); }
+BENCHMARK(BM_DeepDocCompile193)->Unit(benchmark::kMillisecond);
+void BM_DeepDocCompile2000(benchmark::State& state) { deep_doc_compile(state, 2000); }
+BENCHMARK(BM_DeepDocCompile2000)->Unit(benchmark::kMillisecond);
+
+// The cull ALONE, over a dab's worth of bricks: this is the ~64 ns x item x
+// brick walk #118 says is past the interactive budget at 10k items before a
+// sample is evaluated.
+void deep_doc_cull(benchmark::State& state, int nodes) {
+    scene::Document doc = deep_sphere(nodes);
+    brick::BrickCache cache = filled_cache(doc);
+    std::vector<brick::BrickKey> all = cache.surface_bricks();
+    std::vector<brick::BrickKey> dab(all.begin(),
+                                     all.begin() + std::min<std::size_t>(8, all.size()));
+    for (auto _ : state) {
+        for (const brick::BrickKey& key : dab) {
+            scene::CullRegion cull{cache.cull_region(key)};
+            scene::Tape tape = scene::compile_document(doc, &cull);
+            benchmark::DoNotOptimize(tape.instrs.size());
+        }
+    }
+    state.counters["nodes"] = static_cast<double>(nodes);
+    state.counters["bricks"] = static_cast<double>(dab.size());
+}
+void BM_DeepDocCull193(benchmark::State& state) { deep_doc_cull(state, 193); }
+BENCHMARK(BM_DeepDocCull193)->Unit(benchmark::kMillisecond);
+void BM_DeepDocCull2000(benchmark::State& state) { deep_doc_cull(state, 2000); }
+BENCHMARK(BM_DeepDocCull2000)->Unit(benchmark::kMillisecond);
+
+// What an edit actually pays: compile the culled tape and evaluate it, for the
+// bricks a dab dirties.
+void deep_doc_refill(benchmark::State& state, int nodes) {
+    scene::Document doc = deep_sphere(nodes);
+    brick::BrickCache cache = filled_cache(doc);
+    std::vector<brick::BrickKey> all = cache.surface_bricks();
+    std::vector<brick::BrickKey> dab(all.begin(),
+                                     all.begin() + std::min<std::size_t>(8, all.size()));
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    // The requests a dab's worth of dirty bricks produces — taken once, since
+    // take_dirty drains and the loop below re-evaluates the same work.
+    brick::BrickCache probe(brick::BrickConfig{8, 0.05f, 3, 0});
+    probe.mark_dirty(scene::layer_influence_bound(doc.layers[0]));
+    std::vector<brick::BrickRequest> all_reqs = probe.take_dirty();
+    std::vector<brick::BrickRequest> reqs(
+        all_reqs.begin(), all_reqs.begin() + std::min<std::size_t>(8, all_reqs.size()));
+
+    for (auto _ : state) {
+        for (const brick::BrickRequest& req : reqs) {
+            scene::CullRegion cull{cache.cull_region(req.key)};
+            scene::Tape tape = scene::compile_document(doc, &cull);
+            std::vector<float> values(static_cast<std::size_t>(req.grid.nx) * req.grid.ny *
+                                      req.grid.nz);
+            cpu->eval_grid(tape, req.grid, values.data());
+            benchmark::DoNotOptimize(values[0]);
+        }
+    }
+    state.counters["bricks"] = static_cast<double>(reqs.size());
+    state.counters["nodes"] = static_cast<double>(nodes);
+}
+void BM_DeepDocRefill193(benchmark::State& state) { deep_doc_refill(state, 193); }
+BENCHMARK(BM_DeepDocRefill193)->Unit(benchmark::kMillisecond);
+void BM_DeepDocRefill2000(benchmark::State& state) { deep_doc_refill(state, 2000); }
+BENCHMARK(BM_DeepDocRefill2000)->Unit(benchmark::kMillisecond);
+
 void BM_MeshBricksGradDenseDoc(benchmark::State& state) {
     scene::Document doc = pole_dense_sphere(193);
     brick::BrickCache cache = filled_cache(doc);
