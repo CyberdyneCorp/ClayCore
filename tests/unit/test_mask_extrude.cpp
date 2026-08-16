@@ -349,3 +349,71 @@ TEST_CASE("mask extrude: voxel refusals produce nothing") {
     bad.thickness = 0.0f;
     CHECK_FALSE(brush::mask_extrude(g, cap_mask(), bad).has_value());
 }
+
+TEST_CASE("mask_to_field: the threshold decides what counts as masked") {
+    // A mask painted at partial strength has no boundary until one is chosen,
+    // and choosing it is the caller's rather than a constant buried inside.
+    MaskField m(0.05f);
+    // Full strength toward a partial TARGET, so the painted level really is
+    // 0.4: paint moves each cell toward the target BY the brush weight, so a
+    // strength of 0.4 toward 0.4 would land at 0.16 instead.
+    voxel::BrushParams p;
+    p.size = 13;
+    p.shape = voxel::BrushShape::Sphere;
+    p.falloff = voxel::BrushFalloff::Constant;
+    p.strength = 1.0f;
+    m.paint(cf3(0, 0, 0), p, 0.4f);
+    REQUIRE(m.sample(cf3(0, 0, 0)) == doctest::Approx(0.4f).epsilon(0.02));
+
+    const std::optional<FieldVolume> counted = brush::mask_to_field(m, 0.2f, 0.2f, 0.2f);
+    REQUIRE(counted.has_value());
+    CHECK(counted->eval(cf3(0, 0, 0)) < 0.0f);
+
+    // Above the paint level nothing is masked, so either there is no volume at
+    // all or its centre reads as outside — never as inside.
+    const std::optional<FieldVolume> ignored = brush::mask_to_field(m, 0.8f, 0.2f, 0.2f);
+    if (ignored.has_value()) CHECK(ignored->eval(cf3(0, 0, 0)) > 0.0f);
+}
+
+TEST_CASE("mask_to_field: two disjoint painted regions both measure as inside") {
+    // A mask is not one blob. The result has to have two zero sets with the gap
+    // between them reading as OUTSIDE — which is what an unsigned "distance to
+    // the nearest painted cell" would get wrong, and what makes this usable as
+    // a gate rather than only as a border preview.
+    MaskField m(0.05f);
+    voxel::BrushParams p;
+    p.size = 9;
+    p.shape = voxel::BrushShape::Sphere;
+    p.falloff = voxel::BrushFalloff::Constant;
+    p.strength = 1.0f;
+    m.paint(cf3(-0.5f, 0, 0), p, 1.0f);
+    m.paint(cf3(0.5f, 0, 0), p, 1.0f);
+
+    const std::optional<FieldVolume> d = brush::mask_to_field(m, 0.5f, 0.2f, 0.2f);
+    REQUIRE(d.has_value());
+    CHECK(d->eval(cf3(-0.5f, 0, 0)) < 0.0f);
+    CHECK(d->eval(cf3(0.5f, 0, 0)) < 0.0f);
+    CHECK(d->eval(cf3(0.0f, 0, 0)) > 0.0f);
+}
+
+TEST_CASE("mask_to_field: the same mask measures the same way twice") {
+    // Determinism across a round trip of the MASK, since the measurement is
+    // derived rather than stored: what has to hold is that a reloaded mask
+    // measures identically, not that the volume itself was serialized.
+    const MaskField m = cap_mask();
+    const std::vector<std::uint8_t> bytes = m.serialize();
+    const std::optional<MaskField> back = MaskField::deserialize(bytes.data(), bytes.size());
+    REQUIRE(back.has_value());
+
+    const std::optional<FieldVolume> a = brush::mask_to_field(m, 0.5f, 0.25f, 0.3f);
+    const std::optional<FieldVolume> b = brush::mask_to_field(*back, 0.5f, 0.25f, 0.3f);
+    REQUIRE(a.has_value());
+    REQUIRE(b.has_value());
+    CHECK(a->sample_count() == b->sample_count());
+    for (int i = 0; i < 64; ++i) {
+        const cfloat3 q = cf3(static_cast<float>(i % 4 - 2) * 0.2f,
+                              kRadius + static_cast<float>((i / 4) % 4 - 2) * 0.15f,
+                              static_cast<float>((i / 16) % 4 - 2) * 0.2f);
+        REQUIRE(a->eval(q) == b->eval(q));  // exactly: same input, same measurement
+    }
+}
