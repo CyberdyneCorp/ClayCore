@@ -6933,6 +6933,39 @@ clay_result clay_brick_cache_stats(const clay_brick_cache* cache, clay_brick_sta
     out_stats->dirty_bricks = cache->cache.dirty_count() + cache->staged_remaining();
     out_stats->memory_usage = cache->cache.memory_usage();
     out_stats->memory_budget = cache->cache.config().memory_budget;
+    // Appended field: a caller that declared only the original layout gets a
+    // struct that never contained it, and read_desc has already bounded the
+    // write to what they declared.
+    out_stats->bookkeeping_bytes = cache->cache.bookkeeping_bytes();
+    out_stats->brick_bytes = cache->cache.config().brick_bytes();
+    return CLAY_OK;
+}
+
+clay_result clay_brick_cache_trim(clay_brick_cache* cache, uint64_t target_bytes,
+                                  const float focus[3], uint64_t* out_dropped) {
+    if (!cache) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brick cache");
+    const std::size_t target = static_cast<std::size_t>(target_bytes);
+    // NULL focus is a statement rather than an omission: a host with no
+    // meaningful focus takes the deterministic-order trim.
+    const std::size_t dropped =
+        focus ? cache->cache.trim_to(target, kernel::cf3(focus[0], focus[1], focus[2]))
+              : cache->cache.trim_to(target);
+    if (out_dropped) *out_dropped = static_cast<std::uint64_t>(dropped);
+    return CLAY_OK;
+}
+
+clay_result clay_brick_cache_evict(clay_brick_cache* cache, const int32_t key[3],
+                                   uint64_t* out_dropped) {
+    if (!cache || !key) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brick cache or key");
+    const bool dropped = cache->cache.evict(brick::BrickKey{key[0], key[1], key[2]});
+    if (out_dropped) *out_dropped = dropped ? 1u : 0u;
+    return CLAY_OK;
+}
+
+clay_result clay_brick_cache_forget_empty(clay_brick_cache* cache, uint64_t* out_forgotten) {
+    if (!cache) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brick cache");
+    const std::size_t forgotten = cache->cache.forget_empty();
+    if (out_forgotten) *out_forgotten = static_cast<std::uint64_t>(forgotten);
     return CLAY_OK;
 }
 

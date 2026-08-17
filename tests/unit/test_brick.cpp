@@ -288,3 +288,277 @@ TEST_CASE("dirty everything re-queues bricks that were already waiting") {
     drained.mark_dirty(math::Aabb::infinite());
     CHECK(drained.dirty_count() == drained.tracked_count());
 }
+
+// -- eviction (add-brick-cache-eviction) --------------------------------------
+// The budget was a wall and is now a ceiling. What these defend is that
+// reclaiming memory loses no INFORMATION — an evicted brick is one that must be
+// re-evaluated if looked at again, which is what the dirty/request/submit cycle
+// already does.
+
+namespace {
+
+// A cache filled from a sphere, at a resolution that produces enough surface
+// bricks for a trim to have something to choose between.
+BrickCache filled_sphere_cache(const scene::Document& doc, eval::Backend* cpu,
+                               std::size_t budget = 0) {
+    BrickConfig cfg;
+    cfg.voxel_size = 0.03f;
+    cfg.dim = 8;
+    cfg.memory_budget = budget;
+    BrickCache cache(cfg);
+    cache.mark_dirty(math::Aabb{cf3(-1.2f, -1.2f, -1.2f), cf3(1.2f, 1.2f, 1.2f)});
+    fill_cache(cache, doc, cpu);
+    return cache;
+}
+
+}  // namespace
+
+TEST_CASE("an evicted brick re-evaluates to bit-identical data") {
+    // The claim the whole change rests on: eviction is a memory decision, never
+    // a data one. Not "within tolerance" — the same document evaluated against
+    // the same cull region must quantize to the same fp16 bits.
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    REQUIRE(cpu != nullptr);
+    scene::Document doc;
+    scene::Node body;
+    body.prim = scene::Prim::sphere(1.0f);
+    doc.add_sdf_layer("s").sdf->insert(body);
+
+    BrickCache cache = filled_sphere_cache(doc, cpu);
+    const std::vector<BrickKey> surface = cache.surface_bricks();
+    REQUIRE(surface.size() > 20);
+
+    // Snapshot a brick's decoded lattice, evict it, put it back.
+    const BrickKey key = surface[surface.size() / 2];
+    const int dim = cache.config().dim;
+    std::vector<float> before;
+    for (int k = 0; k < dim; ++k)
+        for (int j = 0; j < dim; ++j)
+            for (int i = 0; i < dim; ++i) before.push_back(cache.sample(key, i, j, k));
+
+    const std::size_t bytes_before = cache.memory_usage();
+    REQUIRE(cache.evict(key));
+    CHECK(cache.memory_usage() < bytes_before);
+    CHECK(cache.find(key) == nullptr);  // back to never-evaluated
+
+    // Re-dirty exactly that brick and refill it from the unchanged document.
+    cache.mark_dirty(cache.brick_bounds(key));
+    fill_cache(cache, doc, cpu);
+
+    std::vector<float> after;
+    for (int k = 0; k < dim; ++k)
+        for (int j = 0; j < dim; ++j)
+            for (int i = 0; i < dim; ++i) after.push_back(cache.sample(key, i, j, k));
+    REQUIRE(after.size() == before.size());
+    for (std::size_t i = 0; i < before.size(); ++i) REQUIRE(after[i] == before[i]);
+    CHECK(cache.memory_usage() == bytes_before);
+}
+
+TEST_CASE("trim reaches its target, and prefers to drop what is far away") {
+    // The policy decision, measured rather than asserted: a sculptor works in a
+    // NEIGHBOURHOOD, so the bricks they come back to are near where they are
+    // working. Evicting near the focus is the worst available choice.
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    REQUIRE(cpu != nullptr);
+    scene::Document doc;
+    scene::Node body;
+    body.prim = scene::Prim::sphere(1.0f);
+    doc.add_sdf_layer("s").sdf->insert(body);
+
+    BrickCache cache = filled_sphere_cache(doc, cpu);
+    const std::size_t full = cache.memory_usage();
+    REQUIRE(full > 0);
+
+    // Work at the +X pole; trim to half.
+    const cfloat3 focus = cf3(1.0f, 0, 0);
+    const std::size_t target = full / 2;
+    const std::size_t dropped = cache.trim_to(target, focus);
+    CHECK(dropped > 0);
+    CHECK(cache.memory_usage() <= target);
+
+    // What survived is nearer the focus than what went. Compare the mean
+    // distance of the survivors against the mean over everything that was there.
+    double kept_sum = 0;
+    std::size_t kept = 0;
+    for (const BrickKey& k : cache.surface_bricks()) {
+        const math::Aabb b = cache.brick_bounds(k);
+        kept_sum += clength((b.min + b.max) * 0.5f - focus);
+        ++kept;
+    }
+    REQUIRE(kept > 0);
+    const double kept_mean = kept_sum / static_cast<double>(kept);
+    // On a sphere of radius 1 focused at its +X pole, the mean distance over
+    // the whole shell is well past 1; the surviving half must be much nearer.
+    CAPTURE(kept_mean);
+    CHECK(kept_mean < 1.0);
+}
+
+TEST_CASE("trim never drops a brick the host is waiting on") {
+    // A dirty brick is already scheduled to be rewritten, so dropping it trades
+    // memory for the one thing the host is actively waiting on.
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    REQUIRE(cpu != nullptr);
+    scene::Document doc;
+    scene::Node body;
+    body.prim = scene::Prim::sphere(1.0f);
+    doc.add_sdf_layer("s").sdf->insert(body);
+
+    BrickCache cache = filled_sphere_cache(doc, cpu);
+    // Dirty a region WITHOUT draining it: those bricks are queued.
+    cache.mark_dirty(math::Aabb{cf3(0.8f, -0.2f, -0.2f), cf3(1.2f, 0.2f, 0.2f)});
+    const std::size_t queued = cache.dirty_count();
+    REQUIRE(queued > 0);
+
+    // Trim hard, from the far side, so the queued bricks are the ones the
+    // policy would most like to drop.
+    cache.trim_to(0, cf3(-1.0f, 0, 0));
+    CHECK(cache.dirty_count() == queued);  // nothing was taken out of the queue
+
+    // The queued work still completes and still lands.
+    const int refilled = fill_cache(cache, doc, cpu);
+    CHECK(refilled > 0);
+}
+
+TEST_CASE("eviction keeps the coarse stand-in that dirtying would have dropped") {
+    // The distinction worth having: DIRTYING a child invalidates its mip
+    // because the shape changed. EVICTION does not change the shape — it drops
+    // a cached copy of it — so the mip survives. That is the whole value of a
+    // memory-warning response: the silhouette stays at an eighth of the memory.
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    REQUIRE(cpu != nullptr);
+    scene::Document doc;
+    scene::Node body;
+    body.prim = scene::Prim::sphere(1.0f);
+    doc.add_sdf_layer("s").sdf->insert(body);
+
+    BrickCache cache = filled_sphere_cache(doc, cpu);
+    // Build every mip that can be built, then find one that took.
+    BrickKey coarse{0, 0, 0};
+    bool built = false;
+    for (const BrickKey& k : cache.surface_bricks()) {
+        const BrickKey c{k.x >> 1, k.y >> 1, k.z >> 1};
+        if (cache.build_mip(c)) {
+            coarse = c;
+            built = true;
+            break;
+        }
+    }
+    REQUIRE(built);
+    REQUIRE(cache.current_lod(coarse) == 1);
+
+    // Evict every child of that coarse key.
+    for (int dz = 0; dz < 2; ++dz)
+        for (int dy = 0; dy < 2; ++dy)
+            for (int dx = 0; dx < 2; ++dx)
+                cache.evict(BrickKey{coarse.x * 2 + dx, coarse.y * 2 + dy, coarse.z * 2 + dz});
+
+    // The mip is still there and still answers.
+    CHECK(cache.current_lod(coarse) == 1);
+    CHECK(cache.find_mip(coarse) != nullptr);
+}
+
+TEST_CASE("a cache that is never trimmed behaves exactly as it does today") {
+    // The additive claim, including at the budget wall: nothing about eviction
+    // exists until a host asks for it.
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    REQUIRE(cpu != nullptr);
+    scene::Document doc;
+    scene::Node body;
+    body.prim = scene::Prim::sphere(1.0f);
+    doc.add_sdf_layer("s").sdf->insert(body);
+
+    BrickCache untouched = filled_sphere_cache(doc, cpu);
+    const std::size_t bytes = untouched.memory_usage();
+    const std::size_t tracked = untouched.tracked_count();
+    CHECK(bytes > 0);
+
+    // Trimming to a target already met changes nothing at all.
+    CHECK(untouched.trim_to(bytes) == 0);
+    CHECK(untouched.trim_to(bytes, cf3(0, 0, 0)) == 0);
+    CHECK(untouched.memory_usage() == bytes);
+    CHECK(untouched.tracked_count() == tracked);
+
+    // And the budget wall still refuses rather than silently evicting.
+    BrickCache tight = filled_sphere_cache(doc, cpu, 4096);
+    CHECK(tight.memory_usage() <= 4096);
+}
+
+TEST_CASE("the per-key bookkeeping can be reported and reclaimed") {
+    // The growth tracked_count() exists to make visible: it grows with how much
+    // space has ever been dirtied, OUTSIDE the memory budget.
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    REQUIRE(cpu != nullptr);
+    scene::Document doc;
+    scene::Node body;
+    body.prim = scene::Prim::sphere(0.3f);
+    doc.add_sdf_layer("s").sdf->insert(body);
+
+    BrickConfig cfg;
+    cfg.voxel_size = 0.03f;
+    cfg.dim = 8;
+    BrickCache cache(cfg);
+    // Dirty far more space than the little sphere occupies — the long-session
+    // shape, where a map grows over territory that holds nothing.
+    cache.mark_dirty(math::Aabb{cf3(-1.5f, -1.5f, -1.5f), cf3(1.5f, 1.5f, 1.5f)});
+    fill_cache(cache, doc, cpu);
+
+    const std::size_t tracked = cache.tracked_count();
+    const std::size_t surface = cache.surface_bricks().size();
+    CAPTURE(tracked);
+    CAPTURE(surface);
+    REQUIRE(tracked > surface * 2);  // most of what is tracked holds nothing
+    CHECK(cache.bookkeeping_bytes() > 0);
+
+    const std::size_t bytes = cache.memory_usage();
+    const std::size_t forgotten = cache.forget_empty();
+    CHECK(forgotten > 0);
+    CHECK(cache.tracked_count() < tracked);
+    CHECK(cache.bookkeeping_bytes() < tracked * sizeof(BrickKey) * 8);
+    // ...and it reclaimed a different pool: the payloads are untouched.
+    CHECK(cache.memory_usage() == bytes);
+    CHECK(cache.surface_bricks().size() == surface);
+}
+
+TEST_CASE("forgetting a key never turns solid interior into empty space") {
+    // The distinction the first implementation got wrong. "Forget what holds no
+    // payload" is too wide: an INSIDE brick holds no lattice but carries real
+    // information — this region is solid — and an untracked key reads as
+    // OUTSIDE. Forgetting one reports the interior as empty, which is data loss
+    // wearing memory reclamation's clothes.
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    REQUIRE(cpu != nullptr);
+    scene::Document doc;
+    scene::Node body;
+    body.prim = scene::Prim::sphere(1.0f);
+    doc.add_sdf_layer("s").sdf->insert(body);
+
+    BrickConfig cfg;
+    cfg.voxel_size = 0.05f;
+    cfg.dim = 8;
+    BrickCache cache(cfg);
+    cache.mark_dirty(math::Aabb{cf3(-1.4f, -1.4f, -1.4f), cf3(1.4f, 1.4f, 1.4f)});
+    fill_cache(cache, doc, cpu);
+
+    // The brick holding the sphere's centre, found from its bounds — there is
+    // no public world-to-key helper and this test does not need one.
+    BrickKey centre{0, 0, 0};
+    bool found = false;
+    for (int z = -3; z <= 3 && !found; ++z)
+        for (int y = -3; y <= 3 && !found; ++y)
+            for (int x = -3; x <= 3 && !found; ++x) {
+                const math::Aabb b = cache.brick_bounds(BrickKey{x, y, z});
+                if (b.min.x <= 0.0f && 0.0f < b.max.x && b.min.y <= 0.0f && 0.0f < b.max.y &&
+                    b.min.z <= 0.0f && 0.0f < b.max.z) {
+                    centre = BrickKey{x, y, z};
+                    found = true;
+                }
+            }
+    REQUIRE(found);
+    const float inside_before = cache.sample(centre, 4, 4, 4);
+    REQUIRE(inside_before < 0.0f);  // deep inside the sphere
+
+    REQUIRE(cache.forget_empty() > 0);  // it did reclaim something
+
+    // ...and still does after. The interior survived the sweep.
+    CHECK(cache.sample(centre, 4, 4, 4) == inside_before);
+}
