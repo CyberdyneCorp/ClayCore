@@ -1232,3 +1232,28 @@ TEST_CASE("the new verbs keep the standing mesh contract") {
         REQUIRE(same_bytes(m.normals, base.normals));
     }
 }
+
+TEST_CASE("a mesh brush leaves vertex colours untouched") {
+    // Stated as a test rather than left implicit (decide-surface-colour): it is
+    // currently true by OMISSION — no verb writes colour — and a future colour
+    // brush must add colour writing deliberately rather than by accident. It is
+    // also what lets an imported model keep its colours through a sculpt.
+    Mesh base = dome_grid(24, 1.0f);
+    base.colors.assign(base.positions.size(), cf3(0.2f, 0.6f, 0.9f));
+    for (std::size_t i = 0; i < base.colors.size(); i += 3) base.colors[i] = cf3(0.9f, 0.1f, 0.1f);
+
+    for (MeshBrush verb : {MeshBrush::Draw, MeshBrush::Grab, MeshBrush::Smooth, MeshBrush::Relax,
+                           MeshBrush::Nudge, MeshBrush::Pinch}) {
+        Mesh m = base;
+        MeshSculptor sc(m);
+        VertexDeltas record;
+        MeshBrushSettings s;
+        s.center = cf3(0, 0.6f, 0);
+        s.radius = 0.5f;
+        s.strength = 0.6f;
+        s.direction = cf3(0.1f, 0.05f, 0);
+        CAPTURE(static_cast<int>(verb));
+        REQUIRE(sc.stamp(verb, s, {}, &record) > 0);  // it really did move something
+        REQUIRE(same_bytes(m.colors, base.colors));
+    }
+}
