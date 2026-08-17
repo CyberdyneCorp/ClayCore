@@ -572,3 +572,93 @@ TEST_CASE("a batched fill's order does not change the volume") {
     CHECK(serial.brick_count() > 0);
     CHECK(serial.serialize() == batched.serialize());
 }
+
+// -- surface colour (decide-surface-colour) -----------------------------------
+// The two properties the surface-colour decision rests on. Both were verified
+// by hand against this build before the decision was written; pinning them here
+// is what stops the decision quietly becoming false.
+
+TEST_CASE("painting colours a surface without moving it") {
+    // scene::Op::Paint is what makes polypaint on an SDF layer possible at all: a
+    // stroke of paint items stains the accumulated colour and leaves the
+    // distance alone, so colour is not a shape edit.
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("body");
+    scene::Node body;
+    body.prim = scene::Prim::sphere(1.0f);
+    body.color = cf3(0.69f, 0.69f, 0.69f);
+    l.sdf->insert(body);
+
+    const scene::Tape plain = compile_document(doc);
+
+    scene::Node stain;
+    stain.prim = scene::Prim::sphere(0.18f);
+    stain.xform.position = cf3(0, 0, 1.02f);
+    stain.op = scene::Op::Paint;
+    stain.color = cf3(0.878f, 0.188f, 0.125f);
+    l.sdf->insert(stain);
+    const scene::Tape painted = compile_document(doc);
+
+    // The DISTANCE is untouched everywhere, exactly.
+    // A deterministic lattice rather than a random walk: this is an exactness
+    // claim, so the points it is made at should not vary between runs.
+    for (int i = 0; i < 512; ++i) {
+        const kernel::cfloat3 p =
+            cf3(static_cast<float>(i % 8 - 4) * 0.45f, static_cast<float>((i / 8) % 8 - 4) * 0.45f,
+                static_cast<float>((i / 64) % 8 - 4) * 0.45f);
+        REQUIRE(painted.eval(p).d == plain.eval(p).d);
+    }
+
+    // ...and the colour under the stamp is the one that was authored, rather
+    // than a blend with the item beneath it.
+    const kernel::CTapeValue at = painted.eval(cf3(0, 0, 1.0f));
+    CHECK(at.color.x == doctest::Approx(0.878f));
+    CHECK(at.color.y == doctest::Approx(0.188f));
+    CHECK(at.color.z == doctest::Approx(0.125f));
+    // Well away from the stamp it is the body's own colour.
+    const kernel::CTapeValue away = painted.eval(cf3(0, 0, -1.0f));
+    CHECK(away.color.x == doctest::Approx(0.69f));
+}
+
+TEST_CASE("consolidation preserves painted colour exactly") {
+    // The property the whole surface-colour story rests on: colour resolution
+    // moves from ITEM-bound to TEXEL-bound by baking, and an artist does not
+    // repaint to get there. Consolidation is advertised as changing cost rather
+    // than appearance, and colour is part of appearance.
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("body");
+    scene::Node body;
+    body.prim = scene::Prim::sphere(1.0f);
+    body.color = cf3(0.69f, 0.69f, 0.69f);
+    l.sdf->insert(body);
+    for (int i = 0; i < 5; ++i) {
+        scene::Node stain;
+        stain.prim = scene::Prim::sphere(0.18f);
+        stain.xform.position = cf3(-0.4f + 0.2f * static_cast<float>(i), 0, 1.02f);
+        stain.op = scene::Op::Paint;
+        stain.color = cf3(0.878f, 0.188f, 0.125f);
+        l.sdf->insert(stain);
+    }
+
+    const scene::Tape before = compile_document(doc);
+    std::vector<kernel::cfloat3> probes;
+    for (int i = 0; i < 3; ++i)
+        probes.push_back(cf3(-0.4f + 0.4f * static_cast<float>(i), 0, 1.0f));
+    probes.push_back(cf3(0, 0, -1.0f));
+    probes.push_back(cf3(1.0f, 0, 0));
+    std::vector<kernel::cfloat3> was;
+    for (const kernel::cfloat3& p : probes) was.push_back(before.eval(p).color);
+
+    scene::ConsolidationParams params;
+    params.cell_size = 0.02f;
+    REQUIRE(scene::consolidate_layer(doc, l.id, params));
+
+    const scene::Tape after = compile_document(doc);
+    for (std::size_t i = 0; i < probes.size(); ++i) {
+        CAPTURE(i);
+        const kernel::cfloat3 now = after.eval(probes[i]).color;
+        CHECK(now.x == doctest::Approx(was[i].x).epsilon(0.02));
+        CHECK(now.y == doctest::Approx(was[i].y).epsilon(0.02));
+        CHECK(now.z == doctest::Approx(was[i].z).epsilon(0.02));
+    }
+}

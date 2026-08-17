@@ -630,6 +630,15 @@ analog, and a differentiator rather than a parity item).
 Not scheduled, and not rejected either — small enough to slot in when something
 needs them, and listed so they are not mistaken for oversights:
 
+- **Colour on a mesh layer's brushes.** `MeshSculptor` has fourteen verbs and
+  every one of them moves vertices; nothing writes `Mesh::colors`. Blender's
+  Paint and Smear are the missing pair. A mesh layer can CARRY imported vertex
+  colours and export them, but cannot have them edited — the odd one out now
+  that the SDF side paints through `Op::Paint` strokes and the voxel side
+  through its palette. Named by `decide-surface-colour` and pinned by a test
+  that every verb leaves `colors` byte-identical, so adding one is a deliberate
+  act rather than an accident.
+
 - **Procedural noise as a tape opcode.** `displace` is by-callable today, which
   is not portable across backends. A tape-expressible 3D noise field is the
   answer if node-style procedural detail ever becomes a goal.

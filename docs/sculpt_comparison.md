@@ -59,7 +59,7 @@ SDF layers and the asset-finishing pipeline have not.
 | **Masking** | **Protects the surface from any op**, on either representation — a gated item does not act where the mask protects | First class, protects the surface from *any* op | First class | First class |
 | **Sculpt layers** | **On voxel layers.** A pass is bracketed and its changed cells recorded, so its strength stays adjustable long after the strokes are finished; SDF layers do not have them yet | Headline feature | Present | Present |
 | **Alphas / stamps** | **Both representations**, scalar stamps only — no vector displacement maps | Deep, VDM support | Deep | Present |
-| **Surface colour** | Per-item colour + `Paint` regions; vertex colours at mesh time | Polypaint | **PBR texture painting — its moat** | Vertex paint + texture paint |
+| **Surface colour** | **Polypaint**: per-item colour, freehand `Paint` strokes, per-sample colour in sampled volumes, a 256-entry voxel palette, vertex colours at mesh time. No PBR channels — a declared non-goal for painting | Polypaint | **PBR texture painting — its moat** | Vertex paint + texture paint |
 | **Scale** | ≥256³ per voxel layer, no streaming; SDF edit lists degrade step scale as they grow | Tens of millions of polys | Very large voxel scenes | Large, memory-bound |
 | **Embeddable** | **Yes — C ABI, SwiftPM, Python, headless** | No | No | No (as a library) |
 | **GPU portability** | **One kernel source → CPU / Metal / CUDA / OpenCL, parity-gated** | Proprietary CPU-centric | GPU-assisted | GPU sculpt, single path |
@@ -225,10 +225,22 @@ drag: it reaches as far as the drag goes and the field stays exact (step scale
 - **The pipeline seam.** `add-claycore-bridge` (retopo/UV/bake) has not started;
   UV and baking live in a sibling repository and neither engine owns the seam
   yet. Without it you can sculpt but not ship.
-- **Surface colour authoring.** Colour is per-item plus `Paint` regions, with
-  vertex colours derived at mesh time. There is no polypaint and no PBR
-  painting. This is 3DCoat's moat, and deferring it caps the ceiling — worth
-  being deliberate about rather than drifting into.
+- **PBR material authoring.** Corrected by measurement
+  (`decide-surface-colour`): this row used to read "there is no polypaint and no
+  PBR painting", and the first half is false. **Polypaint works** — a stroke
+  applied with the `Paint` op is a freehand colour brush with pressure, spacing,
+  jitter and masking, it leaves the field bit-identical, and the colour it
+  writes is the one authored. A sampled volume carries per-sample RGB the tape
+  reads on every backend, and consolidating a painted layer preserves that
+  colour exactly, which is how colour resolution moves from ITEM-bound to
+  TEXEL-bound without repainting.
+
+  What is genuinely absent is **PBR channels** — roughness, metallic, normal —
+  and that is now a declared non-goal for painting rather than a gap: material
+  authoring wants a UV parameterisation and a texture set, UVs live in
+  CyberRemesherAndUV, and `add-claycore-bridge` is where a baker's
+  field-sampling callback belongs. 3DCoat's moat is the texture pipeline, not
+  the colour channel.
 
 ### Tier 3 — scale, and the quiet one
 
