@@ -422,6 +422,27 @@ clay_result read_desc(const Desc* src, std::size_t original, Desc* out) {
     }
 }
 
+// Fill a caller's OUTPUT descriptor, bounded by the size THEY declared.
+//
+// `read_desc` validates an incoming struct_size; it does not bound what we
+// write back afterwards, and the difference is a buffer overrun. The natural
+// spelling — `*out = clay_thing{}` then assign the fields — writes
+// sizeof(clay_thing) bytes as THIS build defines it, so the moment a descriptor
+// grows a field, every host compiled against the older header has its buffer
+// overwritten past the end.
+//
+// That is not hypothetical: growing clay_brick_stats by two fields segfaulted
+// the ctypes ABI check, which declares the ORIGINAL layout on purpose. The
+// checker is the reason this is a fixed bug rather than a shipped one.
+template <typename Desc>
+void write_desc(Desc* out, std::uint32_t declared, const Desc& value) {
+    const std::size_t n = std::min<std::size_t>(declared, sizeof(Desc));
+    std::memcpy(out, &value, n);
+    // The caller keeps the size they declared: it describes THEIR buffer, and
+    // handing back ours would tell them fields exist that were never written.
+    out->struct_size = declared;
+}
+
 // Original layouts (ABI 0.2.0), named by their last field so appending one
 // does not silently move the baseline.
 constexpr std::size_t kItemDescOriginal = offsetof(clay_item_desc, mirror) + sizeof(std::int32_t);
@@ -6923,21 +6944,21 @@ clay_result clay_brick_cache_stats(const clay_brick_cache* cache, clay_brick_sta
     clay_result r = read_desc(out_stats, kBrickStatsOriginal, &probe);
     if (r != CLAY_OK) return r;
     const std::uint32_t declared = out_stats->struct_size;
-    *out_stats = clay_brick_stats{};
-    out_stats->struct_size = declared;
-    out_stats->tracked_bricks = cache->cache.tracked_count();
-    out_stats->surface_bricks = cache->cache.surface_bricks().size();
+    clay_brick_stats filled{};
+    clay_brick_stats* const out_stats_v = &filled;
+    out_stats_v->tracked_bricks = cache->cache.tracked_count();
+    out_stats_v->surface_bricks = cache->cache.surface_bricks().size();
     // What is still queued INSIDE the engine plus what this binding drained
     // into staging and has not handed out yet: both are bricks the host still
     // owes an evaluation.
-    out_stats->dirty_bricks = cache->cache.dirty_count() + cache->staged_remaining();
-    out_stats->memory_usage = cache->cache.memory_usage();
-    out_stats->memory_budget = cache->cache.config().memory_budget;
-    // Appended field: a caller that declared only the original layout gets a
-    // struct that never contained it, and read_desc has already bounded the
-    // write to what they declared.
-    out_stats->bookkeeping_bytes = cache->cache.bookkeeping_bytes();
-    out_stats->brick_bytes = cache->cache.config().brick_bytes();
+    out_stats_v->dirty_bricks = cache->cache.dirty_count() + cache->staged_remaining();
+    out_stats_v->memory_usage = cache->cache.memory_usage();
+    out_stats_v->memory_budget = cache->cache.config().memory_budget;
+    out_stats_v->bookkeeping_bytes = cache->cache.bookkeeping_bytes();
+    out_stats_v->brick_bytes = cache->cache.config().brick_bytes();
+    // Bounded by what the caller declared: a host compiled against the layout
+    // before these two fields existed gets exactly the struct it allocated.
+    write_desc(out_stats, declared, filled);
     return CLAY_OK;
 }
 
