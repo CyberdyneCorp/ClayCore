@@ -55,7 +55,7 @@ SDF layers and the asset-finishing pipeline have not.
 | **Topology management** | **Not a concept** — an SDF has none, and a mesh layer's is PRESERVED rather than managed: the mesh brushes move vertices and never touch the index buffer | DynaMesh, ZRemesher | Auto-retopo, its strength | Dyntopo, Remesh |
 | **Field correctness** | **Exactness + Lipschitz tracked per node**, so step size is derived, not tuned | n/a — mesh | n/a — mixed | n/a — mesh |
 | **Booleans** | **Watertight by construction**, 2-manifold meshing | Live Boolean, then remesh | Voxel booleans, robust | BMesh booleans, fragile on bad input |
-| **Brush vocabulary** | Core set complete on fields and voxels, plus 11 fixed-topology verbs and a lattice cage on a mesh layer (see below) | The reference: ~36 surface brushes plus the core | Broad, voxel + surface modes | Solid core set |
+| **Brush vocabulary** | Core set complete on fields and voxels, plus 16 fixed-topology verbs (14 that move vertices, 2 that write colour) and a lattice cage on a mesh layer (see below) | The reference: ~36 surface brushes plus the core | Broad, voxel + surface modes | Solid core set |
 | **Masking** | **Protects the surface from any op**, on either representation — a gated item does not act where the mask protects | First class, protects the surface from *any* op | First class | First class |
 | **Sculpt layers** | **On voxel layers.** A pass is bracketed and its changed cells recorded, so its strength stays adjustable long after the strokes are finished; SDF layers do not have them yet | Headline feature | Present | Present |
 | **Alphas / stamps** | **Both representations**, scalar stamps only — no vector displacement maps | Deep, VDM support | Deep | Present |
@@ -90,6 +90,7 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 | SnakeHook | `brush::snakehook` | ✅ adds material rather than pulling it |
 | Tubes (Nomad Sculpt) | `brush::tube` | ✅ path, B-spline toggle, variable radius, profile, closed — a round tube stays exact |
 | Surface Noise | `noise` deformer | ✅ integer hash, so all backends agree |
+| Deformation palette (Taper, Twist, Bend, Flatten, Inflate, Noise) | 21 `Deformer`s — `taper`, `twist` (+`twist_range`), `bend` (+`bend_range`, `bend_linear`, `bend_radial`, `bend_curve`), `elongate`, `wrap_around`, `magnify`, `noise`, `displace`, `blob`, `alpha`, `grab`, `pose`, `pose_line`, `lattice` | 🟡 **SDF items only.** They are inverse point maps on an item's local space, so they compose and stay non-destructive — but a MESH layer takes a lattice cage instead (`clay_mesh_lattice_*`), and a VOXEL layer takes none. Deforming a mesh by taper/twist today means converting it to an SDF item first, which resamples |
 | Blob | `blob` | ✅ noise under a brush region |
 | Pulling a lobe out | `brush::snakehook` | ✅ the verb for growing form; Move is the verb for nudging it |
 | Morph | — | ⬜ needs a stored morph target; unblocked on voxels now that layers exist, still absent on SDF |
@@ -98,6 +99,7 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 | Masking | mask fields, `Node::gate` | ✅ gates any operation on either representation — a boolean included; the gate is a measured DISTANCE, so its cost follows a width you set |
 | Slice / Knife | — | ❌ polygroup splits need two items; no single-solid equivalent |
 | Surface brushes on a MESH (Standard, Move, Inflate, Smooth, Pinch, Flatten, Clay, DamStandard, Trim Dynamic, hPolish, SnakeHook, Layer, Nudge, Relax) | `mesh::MeshSculptor`, **14 verbs, with alphas** | ✅ on a mesh LAYER's own triangles, with topology fixed — see below |
+| Polypaint / Smear on a MESH | `mesh::MeshSculptor` `paint`, `smear` | ✅ the only two verbs that move no vertex; they refuse a mesh with no colour attribute rather than creating one |
 | Elastic (Blender), ZProject | — | 🟡 Elastic was filed "does not survive the representation change", which was true for fields and is no longer true on a mesh layer. Undecided rather than rejected; it is the one entry that is new *math* rather than a new composition of the eleven |
 | Dyntopo, LiveClay, multires | — | ❌ deliberate: an SDF sidesteps topology, and dynamic tessellation is not this engine's fight |
 
