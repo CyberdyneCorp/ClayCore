@@ -35,6 +35,7 @@ add_executable(clay_unit_tests
   unit/test_lattice_gizmo.cpp
   unit/test_mesh_lattice.cpp
   unit/test_mesh_sculpt.cpp
+  unit/test_mesh_deform.cpp
   unit/test_meshers.cpp
   unit/test_pick.cpp
   unit/test_io.cpp

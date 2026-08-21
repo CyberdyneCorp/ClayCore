@@ -41,6 +41,7 @@
 #include "clay/field/flatten.h"  // FlattenMode
 #include "clay/field/relax.h"    // MaskGate
 #include "clay/mesh/adjacency.h"
+#include "clay/mesh/deform.h"
 #include "clay/mesh/bvh.h"
 #include "clay/mesh/lattice.h"
 #include "clay/mesh/mesh_data.h"
@@ -361,6 +362,20 @@ class MeshSculptor {
     // Returns how many vertices actually moved, and records into `record` the
     // same way a stamp does, so a lattice is one undo step.
     std::size_t apply_lattice(const Lattice& cage, VertexDeltas* record = nullptr);
+
+    // A whole-form deformer — taper or twist — over every vertex, scaled by
+    // the gate. Returns how many vertices moved.
+    //
+    // The WHOLE mesh rather than a brush region, because a deformer states
+    // something about the form and a brush states something about a dab; that
+    // is also what ZBrush's Deformation palette does. The gate is what holds
+    // part of the form still, and a fully gated vertex is bit-identical to
+    // where it started.
+    //
+    // An identity deformer walks nothing and records nothing.
+    std::size_t apply_deformer(const MeshDeformSettings& settings,
+                               const field::MaskGate& gate = {},
+                               VertexDeltas* record = nullptr);
 
     // Normals follow the vertices. A moved vertex with a stale normal shades
     // wrong immediately, so this runs per stamp by default — but a host

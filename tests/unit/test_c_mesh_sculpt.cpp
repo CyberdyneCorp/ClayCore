@@ -578,3 +578,88 @@ TEST_CASE("c abi: a descriptor from before the colour field still stamps the old
     clay_mesh_sculptor_destroy(sc);
     clay_mesh_destroy(mesh);
 }
+
+// -- whole-form deformers across the boundary (add-mesh-deformers) ------------
+
+TEST_CASE("c abi: a taper reaches a mesh layer and a mask holds part of it still") {
+    clay_mesh* mesh = grid_mesh(16, 1.0f);
+    clay_mesh_sculptor* sc = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(mesh, 0.0f, &sc) == CLAY_OK);
+
+    clay_mesh_deform_desc d{};
+    d.struct_size = sizeof(d);
+    REQUIRE(clay_mesh_deform_defaults(&d) == CLAY_OK);
+    CHECK(d.span > 0.0f);
+    CHECK(d.scale_start == 1.0f);
+
+    // The defaults are an identity, so they move nothing.
+    std::size_t moved = 1;
+    REQUIRE(clay_mesh_sculptor_deform(sc, &d, nullptr, nullptr, &moved) == CLAY_OK);
+    CHECK(moved == 0);
+
+    // The grid lies in the XZ plane, so a taper along X has a span to act on.
+    d.verb = CLAY_MESH_DEFORM_TAPER;
+    d.origin[0] = -1.0f;
+    d.axis[0] = 1.0f;
+    d.axis[1] = 0.0f;
+    d.span = 2.0f;
+    d.scale_end = 0.25f;
+    REQUIRE(clay_mesh_sculptor_deform(sc, &d, nullptr, nullptr, &moved) == CLAY_OK);
+    CHECK(moved > 0);
+
+    SUBCASE("a preview does not apply anything") {
+        const float p[3] = {0.0f, 0.0f, 1.0f};
+        float out[3] = {0, 0, 0};
+        REQUIRE(clay_mesh_deform_point(&d, p, out) == CLAY_OK);
+        // Halfway along the span, the cross-section is scaled between the ends.
+        CHECK(out[2] < p[2]);
+        CHECK(out[0] == doctest::Approx(p[0]));
+    }
+
+    SUBCASE("unknown verbs and unmeanable knobs are refused") {
+        clay_mesh_deform_desc bad = d;
+        bad.verb = 99;
+        CHECK(clay_mesh_sculptor_deform(sc, &bad, nullptr, nullptr, &moved) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+        bad = d;
+        bad.span = 0.0f;
+        CHECK(clay_mesh_sculptor_deform(sc, &bad, nullptr, nullptr, &moved) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+        bad = d;
+        bad.axis[0] = bad.axis[1] = bad.axis[2] = 0.0f;
+        CHECK(clay_mesh_sculptor_deform(sc, &bad, nullptr, nullptr, &moved) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+        bad = d;
+        bad.ease = CLAY_EASE_COUNT;
+        CHECK(clay_mesh_sculptor_deform(sc, &bad, nullptr, nullptr, &moved) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+    }
+
+    clay_mesh_sculptor_destroy(sc);
+    clay_mesh_destroy(mesh);
+}
+
+TEST_CASE("c abi: a deform descriptor from before a field was appended still works") {
+    clay_mesh* mesh = grid_mesh(12, 1.0f);
+    clay_mesh_sculptor* sc = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(mesh, 0.0f, &sc) == CLAY_OK);
+
+    clay_mesh_deform_desc d{};
+    d.struct_size = sizeof(d);
+    REQUIRE(clay_mesh_deform_defaults(&d) == CLAY_OK);
+    d.verb = CLAY_MESH_DEFORM_TWIST;
+    d.origin[0] = -1.0f;
+    d.axis[0] = 1.0f;
+    d.axis[1] = 0.0f;
+    d.span = 2.0f;
+    d.angle = 0.8f;
+    // Declaring the original layout is what a host compiled against this
+    // release will do for as long as the struct has not grown.
+    d.struct_size = offsetof(clay_mesh_deform_desc, ease) + sizeof(std::int32_t);
+    std::size_t moved = 0;
+    REQUIRE(clay_mesh_sculptor_deform(sc, &d, nullptr, nullptr, &moved) == CLAY_OK);
+    CHECK(moved > 0);
+
+    clay_mesh_sculptor_destroy(sc);
+    clay_mesh_destroy(mesh);
+}

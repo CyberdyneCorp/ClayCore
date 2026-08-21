@@ -36,6 +36,7 @@
 #include "clay/mesh/lattice.h"
 #include "clay/mesh/marching.h"
 #include "clay/mesh/quad_mesh.h"
+#include "clay/mesh/deform.h"
 #include "clay/mesh/sculpt.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/to_field.h"
@@ -3553,6 +3554,67 @@ NB_MODULE(pyclay, m) {
             "'everything under this disc'.\n\n"
             "`mask` freezes: each vertex's weight is scaled by (1 - mask) at its\n"
             "world position, for every verb, with no per-verb code.")
+        .def(
+            "deform",
+            [](PyMeshSculptor& s, const std::string& verb, nb::handle origin, nb::handle axis,
+               float span, float scale_start, float scale_end, float angle, int ease,
+               nb::handle mask, nb::handle deltas) {
+                mesh::MeshDeformSettings d;
+                if (verb == "taper") {
+                    d.verb = mesh::MeshDeform::Taper;
+                } else if (verb == "twist") {
+                    d.verb = mesh::MeshDeform::Twist;
+                } else {
+                    // `bend` is named in the message on purpose: it is the one
+                    // a caller will reach for next, and "unknown verb" would
+                    // not tell them it is absent by measurement rather than by
+                    // oversight.
+                    throw std::invalid_argument(
+                        "verb must be 'taper' or 'twist', got '" + verb +
+                        "'. There is no 'bend': the SDF bend takes its angle from a "
+                        "coordinate it then moves, so it has no forward map, and past a "
+                        "gentle angle it folds distinct points onto the same place");
+                }
+                if (!(span > 0.0f))
+                    throw std::invalid_argument(
+                        "span must be > 0: there is nothing to ramp across");
+                if (!origin.is_none()) d.origin = to_f3(origin, "origin");
+                if (!axis.is_none()) d.axis = to_f3(axis, "axis");
+                if (!(kernel::clength(d.axis) > 0.0f))
+                    throw std::invalid_argument("axis has no length");
+                d.span = span;
+                d.scale_start = scale_start;
+                d.scale_end = scale_end;
+                d.angle = angle;
+                if (ease < 0 || ease >= kernel::ease_count)
+                    throw std::invalid_argument("ease index out of range");
+                d.ease = ease;
+
+                mesh::VertexDeltas* record =
+                    deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
+                field::MaskGate gate = mask_gate_of(mask);
+                mesh::MeshSculptor& live = s.live(true);
+                nb::gil_scoped_release release;
+                return live.apply_deformer(d, gate, record);
+            },
+            "verb"_a, "origin"_a = nb::none(), "axis"_a = nb::none(), "span"_a = 1.0f,
+            "scale_start"_a = 1.0f, "scale_end"_a = 1.0f, "angle"_a = 0.0f, "ease"_a = 0,
+            "mask"_a = nb::none(), "deltas"_a = nb::none(),
+            "A whole-form deformer over every vertex; returns how many moved.\n\n"
+            "`verb` is 'taper' (cross-section scale ramps across the span) or\n"
+            "'twist' (rotation about the axis ramps across it).\n\n"
+            "NOT a brush: it acts on the whole mesh, because a deformer states\n"
+            "something about the FORM and a brush states something about a dab.\n"
+            "`mask` is what holds part of the form still, and a fully masked\n"
+            "vertex is bit-identical to where it started.\n\n"
+            "`origin` and `axis` are the gizmo: the span starts at `origin` and\n"
+            "runs `span` units along `axis`. Material before the span is\n"
+            "untouched and material past it travels rigidly with the end.\n\n"
+            "An identity deformer moves nothing and adds nothing to `deltas`.\n\n"
+            "There is no 'bend'. The SDF bend takes its angle from a coordinate\n"
+            "it then moves, so it has no closed-form forward map, and past a\n"
+            "gentle angle it has none at all: the deformation folds distinct\n"
+            "points onto the same place.")
         .def(
             "lattice",
             [](PyMeshSculptor& s, const PyLattice& cage, nb::handle deltas) {

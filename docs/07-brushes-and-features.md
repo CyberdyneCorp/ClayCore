@@ -728,6 +728,46 @@ still never evaluated, never blends with a field, and exports exactly as its
 | `Paint` | Blend each vertex's **colour** toward the target by the brush's own weight. Blender's Paint. Moves no vertex |
 | `Smear` | Push existing colour along the drag, taking each vertex's new colour from the one-ring neighbour most nearly **opposite** it, weighted by alignment. Blender's Smear. A zero drag direction is no smear rather than a smooth. Moves no vertex |
 
+**Deformers are not brushes.** `taper` and `twist` reach a mesh layer through
+`MeshSculptor::deform`, and they are a different kind of thing from the sixteen
+verbs above: no centre, no radius, no falloff, because a deformer states
+something about the FORM and a brush states something about a dab. They act on
+every vertex, scaled by the mask — which is what holds part of a form still —
+and a fully masked vertex is bit-identical to where it started.
+
+They carry a FRAME, which the SDF versions do not need: the canonical taper and
+twist are maps about one axis, an SDF item supplies that axis from its own
+transform, and a mesh layer has none to supply. `origin` is where the span
+starts, `axis` is the direction it runs, and material past the span travels
+rigidly with the end rather than winding on for ever.
+
+They are applied FORWARDS, once per vertex, where an SDF deformer must run
+backwards to answer "where did the material at p come from". Forwards is the
+easier direction and the exact one — a point round trips through the mesh's
+forward map and the kernel's inverse map to within float epsilon — so a tapered
+mesh and a tapered field are the same shape rather than two plausible ones.
+
+**`bend` is deliberately absent, and that is a measurement.** `cbend_point`
+takes its angle from `p.x` and then moves `p.x`, so negating the parameter is
+not its inverse (worst error 1.73, against 1.2e-07 for taper). Worse, it is not
+injective: at `k = 0.9`, rest points at `x = -1.74` and `x = +1.75` land 0.0101
+apart. The bend folds over, so past a gentle angle there is no forward map to
+write. Deciding what a mesh bend should be is a decision about the SDF bend's
+convention, and it is recorded in the roadmap rather than guessed at here.
+
+**Nothing re-tessellates, and `Relax` does not rescue a deformation.** That is
+worth stating precisely, because the obvious guess is wrong and `examples/57`
+measures it: a taper leaves the top of a column with the SAME vertex count
+around a SMALLER circumference, so the damage is *anisotropy*, not uneven
+spacing. Relax slides vertices along the surface — it can even out uneven
+spacing, and it cannot change how many vertices a ring has. Measured, six relax
+passes move edge-length variation from 0.2929 to 0.3050 after a taper: slightly
+*worse*, since sliding along a tangent plane is not shape-preserving.
+
+Relax is the recovery for a large `Grab`, where the damage genuinely is uneven
+spacing. Recovering a deformation needs re-tessellation, which this engine
+deliberately does not do.
+
 **The colour pair moves nothing.** `Paint` and `Smear` are the only two verbs
 that leave `positions` and `normals` byte-identical — the exact mirror of the
 guarantee the other fourteen make about `colors` — so a colour pass over a

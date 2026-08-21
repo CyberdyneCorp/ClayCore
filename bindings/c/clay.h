@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 37
+#define CLAY_ABI_MINOR 38
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -3217,6 +3217,68 @@ clay_result clay_mesh_lattice_is_identity(const clay_mesh_lattice* lattice, int3
  * cage. Exposed so a host can preview the warp without applying it. */
 clay_result clay_mesh_lattice_displacement(const clay_mesh_lattice* lattice, const float p[3],
                                            float out_displacement[3]);
+
+/* -- whole-form deformers (add-mesh-deformers) ------------------------------
+ *
+ * The Deformation-palette transforms on a mesh layer's own vertices. They act
+ * on the WHOLE mesh scaled by a mask, not on a brush region: a deformer states
+ * something about the form and a brush states something about a dab.
+ *
+ * They are applied as FORWARD point maps, once per vertex — the opposite
+ * direction to the SDF deformers of the same name, which must run backwards to
+ * answer "where did the material at p come from". Forwards is both the easier
+ * direction and the exact one, so a tapered mesh and a tapered field are the
+ * same shape rather than two plausible ones.
+ *
+ * BEND IS ABSENT, and that is a measurement rather than an omission: the SDF
+ * bend takes its angle from a coordinate it then moves, so it has no
+ * closed-form forward map — and past a gentle angle it has none at all, since
+ * the deformation folds distinct points onto the same place. */
+typedef enum clay_mesh_deform {
+    CLAY_MESH_DEFORM_TAPER = 0, /* cross-section scale ramps across the span */
+    CLAY_MESH_DEFORM_TWIST = 1  /* rotation about the axis ramps across it */
+} clay_mesh_deform;
+
+/* A deformer and the frame it acts in — the gizmo, in effect. The canonical
+ * taper and twist are maps about one axis; an SDF item supplies that axis from
+ * its own transform and a mesh layer has none, so the frame is carried here.
+ *
+ * `origin` is where the span starts and `axis` is the direction it runs in;
+ * `axis` is normalised on use. Material before the span is untouched and
+ * material past it travels rigidly with the end, which is what makes a gizmo
+ * box's ends mean something. */
+typedef struct clay_mesh_deform_desc {
+    uint32_t struct_size; /* = sizeof(clay_mesh_deform_desc); required */
+    int32_t verb;         /* clay_mesh_deform */
+    float origin[3];
+    float axis[3];
+    float span; /* > 0; how far along `axis` the ramp runs */
+    /* TAPER: the cross-section scale at the start and end of the span. 1 and 1
+     * is the identity. */
+    float scale_start;
+    float scale_end;
+    /* TWIST: total rotation across the span, in radians. 0 is the identity. */
+    float angle;
+    int32_t ease; /* clay_ease */
+} clay_mesh_deform_desc;
+
+/* Fills a descriptor with the engine's defaults: a unit-Y axis, a span of 1,
+ * an identity taper. SET struct_size BEFORE CALLING, as every descriptor
+ * requires since ABI 0.35.0. */
+clay_result clay_mesh_deform_defaults(clay_mesh_deform_desc* out_desc);
+
+/* Where a point goes, without applying anything — so a host can draw its gizmo
+ * and preview the warp, exactly as clay_mesh_lattice_displacement does. */
+clay_result clay_mesh_deform_point(const clay_mesh_deform_desc* desc, const float p[3],
+                                   float out_p[3]);
+
+/* Apply the deformer to every vertex, scaled by `mask` where one is given.
+ * `mask` and `deltas` may be NULL. *out_moved receives how many vertices moved
+ * — zero for an identity deformer, which is skipped rather than written back
+ * over itself, and zero for a fully masked mesh. */
+clay_result clay_mesh_sculptor_deform(clay_mesh_sculptor* sculptor,
+                                      const clay_mesh_deform_desc* desc, const clay_mask* mask,
+                                      clay_mesh_deltas* deltas, size_t* out_moved);
 
 /* Apply the cage to every vertex. `deltas` may be NULL. *out_moved receives how
  * many vertices moved — zero for an untouched cage, which is skipped rather
