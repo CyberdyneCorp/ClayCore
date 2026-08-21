@@ -668,6 +668,16 @@ needs them, and listed so they are not mistaken for oversights:
   two of three. What remains genuinely absent is PBR channels, which is a
   declared non-goal rather than a gap — see `docs/sculpt_comparison.md`.
 
+- **Deformers on a mesh layer.** `Deformer` has twenty-one entries and every
+  one applies to an SDF item; a mesh layer takes a lattice cage and nothing
+  else, so ZBrush's Deformation palette — Taper, Twist, Bend — is unreachable
+  on the representation an artist holds after a retopo pass or an import.
+  Scoped by `add-mesh-deformers`. Worth recording why it is cheaper than it
+  looks: an SDF deformer must run BACKWARDS, which for free-form deformation
+  has no closed-form inverse (the SDF lattice accepts ~1.5% error and a 4³ cap
+  for it), while a mesh deformer runs FORWARDS once per vertex and inherits
+  neither. It is the same math in the easier direction.
+
 - **Procedural noise as a tape opcode.** `displace` is by-callable today, which
   is not portable across backends. A tape-expressible 3D noise field is the
   answer if node-style procedural detail ever becomes a goal.
