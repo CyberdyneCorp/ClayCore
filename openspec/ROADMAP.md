@@ -684,6 +684,12 @@ needs them, and listed so they are not mistaken for oversights:
 - **Voxel layers beyond 256³.** The spec guarantees ≥256³ per layer, with a
   memory budget and typed errors past it. There is no streaming story for
   scenes larger than that; per-layer grids have been sufficient so far.
+  **Sharpened 2026-08-21:** "at least 256³" reads as a floor and is also the
+  ceiling — a grid's `dims` product must be ≤ `CLAY_MAX_BATCH`, which is
+  16,777,216, which is 256³ exactly. So the guarantee and the limit are the
+  same number, and a host asking for 512³ is refused rather than served slowly.
+  Worth stating that way, because a floor and a ceiling read very differently
+  to someone sizing a project against it.
 - ~~**glTF/GLB import.**~~ Closed by `add-glb-import` (ABI 0.37.0).
   `clay_mesh_load` and `clay.load_mesh` gained `.glb` through the existing
   extension dispatch, so no new entry point was needed. It reads every mesh and
@@ -697,6 +703,146 @@ needs them, and listed so they are not mistaken for oversights:
   `VOXL` and `MASK` do neither, so a removed voxel layer's grid is still
   written and read back. Harmless today because layer ids are never reused, and
   now visibly inconsistent.
+## An outside review of the specs, audited — 2026-08-21
+
+An external review of `openspec/specs` and this file argued, in thirty points,
+that ClayCore has a sculpting **vocabulary** and not yet a sculpting **workflow
+engine**, and proposed splitting the 14 capabilities into roughly 35.
+
+**The thesis is right and this file said it first** — "the brush vocabulary
+landed and the workflow tier did not". What follows is every point checked
+against the tree rather than accepted, because a review of a specification can
+only see what the specification says, and the interesting failures are where
+those two disagree.
+
+They disagreed once, badly, and in the direction nobody looks.
+
+### What the audit found that the review could not
+
+**`scene-model` requires a command that does not exist.** The undo vocabulary
+requirement lists "add/remove item, set parameter, **voxel-span edit**, layer
+add/remove/…". `Command` is a `std::variant` of nineteen alternatives and not
+one of them edits a voxel grid; `include/clay/scene/commands.h` contains the
+word "voxel" exactly once, in a comment about a serialization minor. The
+requirement has been false for as long as voxel layers have existed.
+
+A spec sentence has no test, so nothing caught it, and the review could not
+have: it read the sentence and reasonably believed it. What is actually true is
+that there are **three unrelated history mechanisms, one per representation** —
+the command vocabulary for the SDF edit list and layer state, sculpt layers for
+voxel grids, sparse vertex deltas for mesh layers — and **no single undo step
+spans two of them**. Corrected in `correct-the-undo-scope`.
+
+That is the argument for this kind of review, and also its limit.
+
+### Already shipped, including three of the review's P0s
+
+Ranked by how much the review would have changed if it had known.
+
+| Review's item | What exists | Evidence |
+|---|---|---|
+| **P0 "Adaptive local resolution"** — refine the face without refining the back | `clay_voxel_add_level_region` refines a level over a REGION in world units. Outside it the level has no storage and reads its parent's value, so the lattice stays uniform and complete — **watertight transitions are a construction, not a tolerance**, which is the review's second requirement satisfied structurally. Writing outside the region refines what the write touched, so a brush straddling the boundary works | `bindings/c/clay.h`, multi-resolution block |
+| **P0 "Persistent symmetry"** — "symmetry centre must be explicit, persistent and gizmo-editable" | A layer mirror on any of x/y/z reflects through the plane where that **layer-local** coordinate is zero, so the layer transform moves the plane, and it persists in the document. Plus a Mirror Blend seam and per-item opt-out. Measured: lumps at x=±0.5 both read −0.2; translating the layer by +1 moves the pair to +0.5 and +1.5 and x=−0.5 reads +0.8 | `SetLayerMirrorCmd`; `scene-model` requirement with four scenarios |
+| **P0 "Sculpt layers"** | Landed on voxel layers — record a pass, dial its strength, reorder, merge down. The SDF side is one open DECIDE in `add-sculpt-layers`, and it was gated on scene groups, which have now landed | `clay_voxel_*_sculpt_layer*` |
+| **#26 "Boolean groups / live modifier hierarchy"** | Landed. `expose-scene-groups`; `examples/37_groups.py` builds plates as INTERSECT groups under a SUBTRACT group with a chamfer blend | |
+| **#7 alphas, #29 polypaint** | Both landed — alphas on SDF layers, and colour editable on all three representations since `add-mesh-colour-brushes` | `docs/sculpt_comparison.md` |
+| **#12 "hidden is not deleted"** | Guaranteed for a LAYER. Measured: 0.5 at the hidden sphere's centre, still 0.5 after save and reload, −0.5 once shown. **Not** available for a region — see below | |
+| **#1 spatial index** | **Partially, and the review's framing is the more useful one.** `CullIndex`/`CullPlan` already exist: per-revision bound caching plus a coarse cull of every chain against a batch's union region, emitting byte-identical tapes. That removed a large constant. It is still **linear in document size per batch**, so the slope the review is asking about is exactly what remains | `include/clay/scene/cull_index.h` |
+
+The last row is the one to keep. `add-item-spatial-index` task 1.10 already
+says it: *"a 2× constant improvement passing as a fix for this is the failure
+mode"*. Half of that constant has now been taken, which makes the remaining
+work harder to justify by benchmark and no less necessary.
+
+### Real gaps, verified absent
+
+Each was checked by searching the public surface, not inferred.
+
+| Gap | What is actually there | Severity |
+|---|---|---|
+| **Surface groups / PolyGroups / Face Sets** | Nothing, on any representation. Visibility is per LAYER; a layer holds exactly ONE mask (`clay_document_add_mask` "replaces any mask the layer already had"), so N named regions cannot even be emulated with N masks; scene groups group edit-list NODES, not surface | **Highest.** It is the substrate procedural masks, extract, and per-region anything all attach to. Scoped: `add-surface-groups` |
+| **Partial visibility** | Layer-only. "Hide the armour" requires the armour to have been authored as its own layer, decided before the artist knew | Same change — it is the same primitive |
+| **Unbounded undo history** | `std::vector<Entry> undo_` with **no cap, no byte accounting, no eviction, no query**. The only control is `enable_undo`, which is a light switch. And the expensive entries are counter-intuitive: the stack stores INVERSES, so removing an item records a whole `Node` (440 bytes plus its deformer chain) while adding one records 8 bytes | **High, and now urgent** — an iPad at 120 Hz for hours, on an OS that does not warn twice. Scoped: `add-history-budget` |
+| **Procedural masks** — cavity, curvature, normal, thickness, AO | Mask verbs are paint, fill, expand, contract, smooth, invert, `to_field`. Nothing derives a mask from the surface | High, and cheap on a field representation — curvature is a gradient the engine already computes. Next to scope |
+| **Morph target** | Absent. The word appears only in `mesh_io.h`, as a glTF feature deliberately not imported | Medium; pairs naturally with sculpt layers |
+| **Stroke input completeness** | `clay_stroke_sample` is position, pressure, tilt. No **azimuth**, no velocity, no timestamp | Medium — azimuth is what makes a directional or rake brush possible at all, and it is five floats to add before hosts depend on the current layout |
+| **Radial symmetry** | Three mirror planes, no radial | Medium |
+| **Instancing / scatter** | Absent. Phase 4 already names `add-surface-scatter`; the review is right that scatter without instancing duplicates geometry | Medium |
+| **Generic named attributes** | `colors`, `uvs`, `normals` and nothing else. A host cannot carry `material_id` or a custom channel through the engine | Medium. The review is right to separate this from PBR: allowing an app to carry channels is not the same as rendering them, and only the second is a declared non-goal |
+| **Voxel beyond 256³** | Real: a grid's `dims` product must be ≤ `CLAY_MAX_BATCH`, which is 256³ exactly. The spec's "at least 256³" reads as a floor and is also the ceiling | Medium — already recorded under "Deferred, but recorded", now with the number that makes it concrete |
+| **Local remesh** | Absent, and topology-changing sculpting is a declared non-goal. **The review's half-agreement is the right one**: the non-goal is about not building dyntopo, and it does not answer what happens when a mesh-layer snakehook stretches triangles past usefulness. That is a recovery operation, not a sculpting mode | Medium; needs a decision before a proposal |
+| **Surface conform / shrinkwrap** | Absent | Low-medium |
+
+### Misframed, or a decision before an implementation
+
+- **#15, automatic background consolidation.** The engine deliberately never
+  bakes on its own: `clay_layer_field_report` reports the step scale and what
+  costs it, and the host decides. The review wants that automatic, and it is
+  the right instinct — *the sculptor cannot be expected to know what
+  "consolidate" means*. But consolidation is destructive and undoable, so an
+  engine that fires it on a background thread is mutating a document behind a
+  host that may be mid-undo-group or mid-save. **The answer is probably a
+  recommendation the host can act on with one call, not an autonomous action**,
+  and the difference is a design decision worth writing down rather than a
+  feature to build.
+
+- **#14, a general Preview → Commit protocol.** Preview exists per operation —
+  `move_surface_preview`, `lattice_gizmo_preview`,
+  `mesh_lattice_displacement` — rather than as a protocol. Generalising it is
+  attractive and would touch every destructive verb at once. Note the ROADMAP
+  requirement it would finally satisfy: *"every destructive operation is
+  preview-committed and undoable, including hide"*, which is currently the one
+  competitor-bug requirement that is **not** met.
+
+- **#16, a representation manager that picks SDF / voxel / mesh per stroke.**
+  The most interesting idea in the review and the one to be most careful with.
+  The representations are not interchangeable — they differ in what they
+  GUARANTEE, not only in speed. An SDF layer is exact and non-destructive; a
+  voxel grid is quantised; a mesh layer has fixed topology. An engine that
+  silently moved a stroke from one to another would silently change what the
+  document promises, and the host would have no way to explain the result to
+  the user. A **policy the host can ask for a recommendation from** is
+  buildable. A policy that acts on its own is a correctness hazard wearing a
+  convenience label.
+
+- **The 14 → 35 capability split.** Not adopted. Capability count is not a
+  measure of coverage, and a split is churn unless a requirement has nowhere to
+  live. The audit above found exactly one requirement in the wrong place and
+  one requirement that was false — a reorganisation would have fixed neither.
+  New capabilities are worth creating when a change needs one, which is how
+  `surface-groups` may yet become the fifteenth.
+
+### Revised priorities
+
+Replacing the review's P0 list with what the audit supports. The two rows it
+moves are the ones already shipped.
+
+| | Item | Why here |
+|---|---|---|
+| **P0** | `add-mobile-thread-scheduling` | The handoff is now, and the pool declares no QoS class on the one platform where that decides whether the UI thread wins |
+| **P0** | `add-history-budget` | Unbounded allocation in a multi-hour session on an OS that kills for memory |
+| **P0** | `add-surface-groups` | The largest genuinely-absent workflow primitive, and the substrate for four more |
+| **P0** | A version tag | The device gate is green on main at ABI 0.39.0 (#190, the first stamp under the median-of-three statistic). What is still missing is the TAG: without one the team's reports cannot be pinned to a build |
+| **P1** | Procedural masks | Cheap on a field representation, high artist value |
+| **P1** | `add-item-spatial-index` | Still the slope. Re-measure first: `CullIndex` already took the constant |
+| **P1** | SDF sculpt layers (`add-sculpt-layers` 1.9) | Unblocked by scene groups landing |
+| **P1** | Stroke input: azimuth, velocity, timestamp | Five floats, and cheapest before hosts depend on the current sample layout |
+| **P1** | `add-field-stamps` | The review is right that this is a differentiator rather than parity, and right that a captured field can carry more than displacement |
+| **P2** | Morph targets · generic attributes · instancing · radial symmetry · conform | Real, none blocking |
+| **Decide, do not build** | auto-consolidation · preview/commit protocol · representation policy · local remesh · >256³ voxels | Each needs a written decision before it needs a proposal |
+
+The review's closing criterion is worth adopting verbatim, because it is
+testable and nothing here currently tests it end to end:
+
+> A host using only ClayCore's public APIs must be able to load or create a
+> character, work for hours across thousands of strokes, move between SDF,
+> voxel and mesh, use masks, layers, symmetry and alphas, stay inside a frame,
+> and save and reopen the document without semantic loss.
+
+`reference/host_loop.py` is the beginning of that test. It covers the sequence.
+It does not yet cover the **hours**, and `add-history-budget` is the first
+reason to believe the hours are where it would fail.
+
 ## Deliberately not doing
 
 Recorded so they are decisions rather than oversights:
@@ -796,14 +942,23 @@ Recorded so they are decisions rather than oversights:
 Worth writing into the specs they touch, because a competitor's known failure is
 a free test case:
 
-- masks survive resolution changes and representation bridges
-- hidden is not deleted, and hidden state survives resampling
-- import density is decoupled from object scale
-- brushes never touch ghosted or locked layers
-- symmetry centre is explicit, persistent and gizmo-edited, never implicit
-- presets survive engine versioning (versioned schema)
-- every destructive operation is preview-committed and undoable, including hide
+**Audited 2026-08-21**, because "worth writing into the specs" had been true
+for months and nothing had been written. Each row now says whether it holds,
+checked against the built library rather than against intent:
 
-Two of these the architecture already gives us for free and should be stated
-rather than assumed: smoothing cannot act across a gap, because blends are rigid
-and local; and boolean results are watertight by construction.
+| Requirement | State |
+|---|---|
+| masks survive resolution changes and representation bridges | **Holds, structurally.** The mask lattice is addressed in WORLD units and sampleable at an arbitrary position, so a consumer at any resolution reads the same mask. Wants a scenario in `voxel-engine` |
+| hidden is not deleted, and hidden state survives resampling | **Holds for a LAYER** — measured across a save and reload. Unreachable for a REGION, which is the case the competitor's users hit. `add-surface-groups` |
+| import density is decoupled from object scale | Belongs in `file-io`; not audited here |
+| brushes never touch ghosted or locked layers | **Holds, and further than expected**: protection refuses REORDERING too, checked before the operation rather than by it. Now pinned |
+| symmetry centre is explicit, persistent and gizmo-edited, never implicit | **Holds.** The mirror plane is the layer's local zero, so the layer transform moves it, and it persists in the document. Now pinned |
+| presets survive engine versioning (versioned schema) | `brush-engine` already requires it |
+| every destructive operation is preview-committed and undoable, including hide | **DOES NOT HOLD, and is the only one that does not.** Preview exists per operation rather than as a protocol, and voxel and mesh edits are outside the undo vocabulary entirely |
+
+Three are now written into `scene-model` by `correct-the-undo-scope`, with the
+scenarios that make them testable rather than aspirational.
+
+Two more the architecture gives us for free and should be stated rather than
+assumed: smoothing cannot act across a gap, because blends are rigid and local;
+and boolean results are watertight by construction.
