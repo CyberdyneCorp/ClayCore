@@ -18,10 +18,12 @@ order once it finishes.
 """
 
 import argparse
+import ast
 import contextlib
 import importlib
 import io
 import os
+import pathlib
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -107,12 +109,11 @@ CAPABILITY_EXAMPLES = {
     # and 45-47 for the fixed-topology mesh brushes
     "meshing": "08_meshing_and_io",
     "picking": "10_editing",  # plus 45_mesh_brushes for raycasting a mesh layer
+    # plus 36_mesh_layers for the mesh chunk
     "file-io": "08_meshing_and_io",
     # plus 11_masks, 33_mask_extrude, 39_multi_resolution for the level stack,
     # and 48_mesh_to_voxels for the triangles-to-cells bridge
     "voxel-engine": "15_voxel_verbs_and_repair",
-    "file-io": "08_meshing_and_io",  # plus 36_mesh_layers for the mesh chunk
-    "voxel-engine": "15_voxel_verbs_and_repair",  # plus 11_masks and 33_mask_extrude
     # plus 26_move_brush and 11_masks for the mask brush, and 45_mesh_brushes
     # for apply_to_mesh, the fourth consumer
     "brush-engine": "12_strokes",
@@ -122,6 +123,38 @@ CAPABILITY_EXAMPLES = {
     "build-packaging": None,      # a build concern; nothing to render
     "examples": None,             # this file
 }
+
+
+def check_duplicate_capability_keys():
+    """No capability is listed twice in CAPABILITY_EXAMPLES.
+
+    A dict literal keeps the LAST of a repeated key and discards the rest
+    silently, so a duplicate is invisible at runtime — the map reads correct,
+    the coverage count is right, and an entry with its comment has simply
+    stopped existing. `file-io` and `voxel-engine` were each listed twice for
+    long enough that the losing entries had accumulated notes nobody could see.
+    Both happened to name the same example, so nothing was ever wrong; that is
+    what made it survive, and is the reason this is a gate rather than a tidy-up.
+
+    Read from the SOURCE rather than the dict, because by the time it is a dict
+    the evidence is gone.
+    """
+    tree = ast.parse(pathlib.Path(__file__).read_text())
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if getattr(node.targets[0], "id", None) != "CAPABILITY_EXAMPLES":
+            continue
+        seen, dupes = {}, []
+        for key in node.value.keys:
+            name = key.value
+            if name in seen:
+                dupes.append(f"{name!r} at lines {seen[name]} and {key.lineno}")
+            seen.setdefault(name, key.lineno)
+        if dupes:
+            return [f"CAPABILITY_EXAMPLES lists a capability twice, and the "
+                    f"earlier entry is silently discarded: {'; '.join(dupes)}"]
+    return []
 
 
 def check_capability_coverage():
@@ -223,7 +256,8 @@ def main():
               file=sys.stderr)
         return 1
 
-    coverage = check_capability_coverage() + check_fast_scaling()
+    coverage = (check_duplicate_capability_keys()
+                + check_capability_coverage() + check_fast_scaling())
     if coverage:
         for problem in coverage:
             print(f"  {problem}", file=sys.stderr)

@@ -446,7 +446,11 @@ Two gates already enforce this, in opposite directions:
 - `examples/run_all.py` checks `CAPABILITY_EXAMPLES` against
   `openspec/specs/`, so a living capability with no example is an error. That
   gate is capability-level: it catches a capability with no page at all, not a
-  verb on a page that covers the rest of its surface.
+  verb on a page that covers the rest of its surface. It also refuses a map
+  that lists a capability twice — a dict literal keeps the last of a repeated
+  key and drops the rest in silence, which had quietly deleted two entries and
+  their notes — and reads that from the source, because by the time it is a
+  dict the evidence is gone.
 - `15_voxel_verbs_and_repair.py` closes that second gap for the voxel surface,
   reading verbs from `dir(clay.VoxelGrid)` and requiring each to appear on the
   page or in `SHOWN_ELSEWHERE` — which is re-checked against the page it names,
