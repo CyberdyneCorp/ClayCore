@@ -85,6 +85,13 @@ struct TransferReport {
 // reach a palette.
 //
 // Out of range, or an attribute the mesh does not carry, gives `fallback`.
+//
+// A query landing on a CORNER returns that corner's attribute bit for bit, so
+// giving a mesh its own attributes back reproduces them exactly and a transfer
+// can be chained without drifting. That is a guarantee this makes, not one the
+// arithmetic provides: the barycentrics come back exactly (1, 0, 0) on x86 and
+// a hair off it on Apple silicon, so the corner is snapped to rather than
+// summed to. The snap is confined to within 1e-5 of a corner.
 kernel::cfloat3 sample_color(const Mesh& m, std::uint32_t triangle, float u, float v,
                              kernel::cfloat3 fallback);
 kernel::cfloat2 sample_uv(const Mesh& m, std::uint32_t triangle, float u, float v,

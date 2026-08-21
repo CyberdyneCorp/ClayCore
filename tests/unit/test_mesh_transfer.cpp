@@ -101,6 +101,36 @@ TEST_CASE("mesh transfer: an identity transfer is bit-exact") {
     }
 }
 
+TEST_CASE("mesh transfer: a corner query is exact even when the barycentrics are not") {
+    // The regression for the only platform split this change had. `Bvh::closest`
+    // returns an EXACT corner — w == 1, u == v == 0 — for a query landing on a
+    // vertex on x86, and a hair off it on Apple silicon, where the dot products
+    // behind it contract to fma. The weighted sum is bit-exact only in the first
+    // case, so "an identity transfer is bit-exact" passed on one platform and
+    // failed on the other. Feeding the off-corner barycentrics in directly
+    // reproduces the macOS failure anywhere.
+    const Mesh src = grid();
+
+    const kernel::cfloat3 c0 = sample_color(src, 0, 1e-7f, 1e-7f, cf3(0, 0, 0));
+    CHECK(same(c0, src.colors[src.indices[0]]));
+
+    const kernel::cfloat3 c1 = sample_color(src, 0, 1.0f - 2e-7f, 1e-7f, cf3(0, 0, 0));
+    CHECK(same(c1, src.colors[src.indices[1]]));
+
+    const kernel::cfloat3 c2 = sample_color(src, 0, 1e-7f, 1.0f - 2e-7f, cf3(0, 0, 0));
+    CHECK(same(c2, src.colors[src.indices[2]]));
+
+    const kernel::cfloat2 t0 = sample_uv(src, 0, 1e-7f, 1e-7f, cf2(0, 0));
+    CHECK(same(t0, src.uvs[src.indices[0]]));
+
+    // Snapping is confined to the corners: a query anywhere else still blends,
+    // so the fix cannot be hiding a mesh that returns nothing but vertex values.
+    const kernel::cfloat3 mid = sample_color(src, 0, 0.5f, 0.25f, cf3(0, 0, 0));
+    CHECK_FALSE(same(mid, src.colors[src.indices[0]]));
+    CHECK_FALSE(same(mid, src.colors[src.indices[1]]));
+    CHECK_FALSE(same(mid, src.colors[src.indices[2]]));
+}
+
 TEST_CASE("mesh transfer: nothing moves") {
     const Mesh src = grid();
     Mesh tgt = src;

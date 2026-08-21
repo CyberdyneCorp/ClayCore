@@ -352,6 +352,7 @@ def render_mesh_array(mesh, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
     mesh reaches a document through `Volume.from_mesh`, which carries one colour
     for the whole item. A picture of per-vertex colour has to come from the
     vertices. Used by the mesh colour and attribute-transfer examples."""
+    width, height = _fast_pixels(width), _fast_pixels(height)
     p = np.asarray(mesh.positions, dtype=np.float64)
     idx = np.asarray(mesh.indices, dtype=np.int64).reshape(-1, 3)
     col = np.asarray(mesh.colors, dtype=np.float64)

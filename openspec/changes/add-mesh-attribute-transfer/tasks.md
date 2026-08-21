@@ -63,3 +63,25 @@
       MOSTLY keeps the uvs, which is a different sentence
 - [x] 5.4 `examples/58_attribute_transfer.py` — median colour error 0.0018 against the nearest source vertex, and 0 of 400 target vertices coinciding with a source one, which is the topology loss stated as a number. It also moved the vertex-colour rasteriser out of example 56 into `_render.render_mesh_array`: the ordinary preview traces a DOCUMENT, and a mesh reaches one through `Volume.from_mesh`, which carries a single colour per item — so a picture of per-vertex colour cannot come from it — the colour
       recovery and the topology that is still gone
+
+## Found by CI, on the platforms this machine is not
+
+Two defects that green Linux checks could not have caught. Both fixed on this
+branch, both with the fix verified by reproducing the failure first.
+
+- [x] 6.1 **The identity transfer was exact by luck, and only on x86.**
+      `test_mesh_transfer.cpp:99` failed on all three macOS jobs. The weighted
+      sum returns a corner bit-exactly only when that corner's weight is
+      exactly 1, and `Bvh::closest` gives exactly `(1, 0, 0)` at a vertex on
+      x86 but a hair off it on Apple silicon, where the dot products behind it
+      contract to fma. Measured on this machine: 0 of 24 corner queries are
+      inexact, which is why it passed here. `interpolate` now snaps to a corner
+      within 1e-5 instead of hoping the arithmetic lands there, so the
+      exactness is a guarantee the code makes rather than a property of the
+      host. The regression feeds the off-corner barycentrics in directly and so
+      reproduces the macOS failure anywhere — 4 of its 7 assertions fail
+      without the snap on Linux.
+- [x] 6.2 **`render_mesh_array` ignored `CLAY_EXAMPLES_FAST`.** The gallery job
+      has a gate for exactly this — `run_all.check_fast_scaling` — and the new
+      rasteriser was the first render entry point to trip it. Scaled through
+      `_fast_pixels` like every other. 59/59 examples.

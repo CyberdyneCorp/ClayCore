@@ -21,9 +21,22 @@ T interpolate(const std::vector<T>& attr, const std::vector<std::uint32_t>& indi
     const std::uint32_t i1 = indices[triangle * 3 + 1];
     const std::uint32_t i2 = indices[triangle * 3 + 2];
     const float w = 1.0f - u - v;
-    // Written as a weighted sum rather than a lerp chain so that a query
-    // landing exactly on a corner — w == 1, u == v == 0 — returns that corner's
-    // value bit-identically. That is what makes an identity transfer exact.
+    // A query that lands on a corner has to return THAT corner's value, bit for
+    // bit — it is what makes an identity transfer exact, and a transfer that
+    // reproduces a vertex ALMOST exactly is not a transfer anyone can chain.
+    //
+    // The weighted sum below delivers that only when the corner's weight is
+    // exactly 1, and `Bvh::closest` gives exactly 1 on x86 but not on Apple
+    // silicon, where the dot products behind it contract to fma and leave ~1e-8
+    // on the other two corners. So the corner is taken, not hoped for. The
+    // threshold is ~100 ulps at magnitude 1: far above the rounding it absorbs,
+    // far below 8-bit colour quantisation (4e-3), so nothing visible snaps.
+    constexpr float kCorner = 1.0f - 1e-5f;
+    if (w >= kCorner) return attr[i0];
+    if (u >= kCorner) return attr[i1];
+    if (v >= kCorner) return attr[i2];
+    // A weighted sum rather than a lerp chain, so the three attributes cannot
+    // pick up different rounding from each other.
     return attr[i0] * w + attr[i1] * u + attr[i2] * v;
 }
 
