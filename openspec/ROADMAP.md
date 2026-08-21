@@ -630,16 +630,33 @@ analog, and a differentiator rather than a parity item).
 Not scheduled, and not rejected either — small enough to slot in when something
 needs them, and listed so they are not mistaken for oversights:
 
-- **Output descriptors are filled unbounded.** Seven `clay_*` OUT structs are
-  filled with `*out = clay_thing{}` and then assigned field by field, which
-  writes `sizeof` as THIS build defines it rather than the size the caller
-  declared. Every one is correct today because none of those structs has grown
-  since its callers' header — and every one becomes a buffer overrun the moment
-  somebody appends a field, silently, only on hosts built against the older
-  layout. `clay_brick_stats` was the first to grow and it segfaulted the ctypes
-  ABI check; `write_desc` in `bindings/c/clay_c.cpp` is the bounded fill that
-  fixed it. The other seven should adopt it, as one mechanical change rather
-  than as a rider on whichever feature next grows a struct.
+- ~~**Output descriptors are filled unbounded.**~~ — **and the reasoning that
+  deferred it was wrong.** This entry claimed all seven remaining sites were
+  latent because "none of those structs has grown since its callers' header".
+  Measured instead of assumed: `clay_brick_config` (24 → 32),
+  `clay_consolidation_cost` (76 → 80), `clay_quad_report` (36 → 40) and
+  `clay_repair_report` (36 → 40) had **already** grown, so all four were live
+  overruns for any host built against the older layout. `clay_brick_stats` was
+  not the first to grow, only the first to grow while `tools/check_c_abi.py`
+  was watching — it reads that one back at its original layout and segfaulted;
+  it does not read the other four back. Fixed by
+  `bound-output-descriptor-fills`, which adopts `write_desc` at all six sites
+  that already probe `struct_size`.
+
+- **The two `_defaults` entry points still fill unbounded, and cannot be fixed
+  without an ABI decision.** `clay_brick_config_defaults` and
+  `clay_stroke_preset_defaults` never probe: their documented contract is that
+  they SET `struct_size` ("struct_size included"), so the caller declares
+  nothing and there is no size to bound against. `clay_brick_config_defaults`
+  is live — 8 bytes past a 24-byte buffer, today. The options are (a) require
+  `struct_size` on input, which turns silent corruption into a clean
+  `CLAY_ERROR_INVALID_ARGUMENT` but is a caller-visible break of two published
+  entry points (~25 in-repo call sites, all tests and tools, one line each);
+  (b) add sized variants and leave the unsafe pair shipping; or (c) accept it
+  and document that these two are unsafe across a version boundary. Worth
+  noting that no fix helps an ALREADY-COMPILED old host under (a) — it would
+  get a rejection rather than corruption, which is better but not compatible.
+  Pre-1.0 argues for (a).
 
 - **Colour on a mesh layer's brushes.** `MeshSculptor` has fourteen verbs and
   every one of them moves vertices; nothing writes `Mesh::colors`. Blender's

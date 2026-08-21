@@ -2318,14 +2318,14 @@ clay_result clay_document_layer_info(const clay_document* doc, clay_layer_id lay
         clay_result r = read_desc(out_info, kLayerInfoOriginal, &probe);
         if (r != CLAY_OK) return r;
         const std::uint32_t declared = out_info->struct_size;
-        *out_info = clay_layer_info{};
-        out_info->struct_size = declared;
-        out_info->id = l.id;
-        out_info->representation = static_cast<std::int32_t>(l.kind);
-        out_info->stack_index = static_cast<std::int32_t>(i);
-        out_info->visible = l.visible ? 1 : 0;
-        out_info->ghost = l.ghost ? 1 : 0;
-        out_info->locked = l.locked ? 1 : 0;
+        clay_layer_info filled{};
+        filled.id = l.id;
+        filled.representation = static_cast<std::int32_t>(l.kind);
+        filled.stack_index = static_cast<std::int32_t>(i);
+        filled.visible = l.visible ? 1 : 0;
+        filled.ghost = l.ghost ? 1 : 0;
+        filled.locked = l.locked ? 1 : 0;
+        write_desc(out_info, declared, filled);
         return CLAY_OK;
     }
     return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
@@ -3492,27 +3492,29 @@ clay_result begin_out_cost(clay_consolidation_cost* out) {
     clay_consolidation_cost probe;
     clay_result r = read_desc(out, kConsolidationCostOriginal, &probe);
     if (r != CLAY_OK) return r;
-    const std::uint32_t declared = out->struct_size;
-    *out = clay_consolidation_cost{};
-    out->struct_size = declared;
+    write_desc(out, out->struct_size, clay_consolidation_cost{});
     return CLAY_OK;
 }
 
+// Callable only after begin_out_cost, which is what leaves struct_size holding
+// the size the caller declared rather than whatever was in their buffer.
 void write_cost(const scene::ConsolidationCost& src, clay_consolidation_cost* out) {
-    out->cell_size = src.cell_size;
-    out->band = src.band;
-    out->brick_count = static_cast<std::uint64_t>(src.brick_count);
-    out->sample_count = static_cast<std::uint64_t>(src.sample_count);
-    out->bytes = static_cast<std::uint64_t>(src.bytes);
-    out->sample_lipschitz = src.sample_lipschitz;
-    out->lipschitz = src.lipschitz;
-    out->safe_step_scale = src.safe_step_scale;
+    clay_consolidation_cost filled{};
+    filled.cell_size = src.cell_size;
+    filled.band = src.band;
+    filled.brick_count = static_cast<std::uint64_t>(src.brick_count);
+    filled.sample_count = static_cast<std::uint64_t>(src.sample_count);
+    filled.bytes = static_cast<std::uint64_t>(src.bytes);
+    filled.sample_lipschitz = src.sample_lipschitz;
+    filled.lipschitz = src.lipschitz;
+    filled.safe_step_scale = src.safe_step_scale;
     const math::Aabb b = src.bounds.empty() ? math::Aabb{kernel::cf3(0, 0, 0), kernel::cf3(0, 0, 0)}
                                             : src.bounds;
     for (int a = 0; a < 3; ++a) {
-        out->bounds_min[a] = (&b.min.x)[a];
-        out->bounds_max[a] = (&b.max.x)[a];
+        filled.bounds_min[a] = (&b.min.x)[a];
+        filled.bounds_max[a] = (&b.max.x)[a];
     }
+    write_desc(out, out->struct_size, filled);
 }
 
 clay_result read_consolidation(const clay_consolidation_params* params, const float region_min[3],
@@ -3550,14 +3552,14 @@ clay_result clay_layer_field_report(const clay_document* doc, clay_layer_id laye
 
     const scene::FieldReport report = scene::report_layer(*layer, advise_below_step_scale);
     const std::uint32_t declared = out_report->struct_size;
-    *out_report = clay_field_report{};
-    out_report->struct_size = declared;
-    out_report->lipschitz = report.lipschitz;
-    out_report->safe_step_scale = report.safe_step_scale;
-    out_report->steepest_volume = report.steepest_volume;
-    out_report->longest_deformer_chain = report.longest_deformer_chain;
-    out_report->item_count = report.item_count;
-    out_report->advises_consolidation = report.advises_consolidation ? 1 : 0;
+    clay_field_report filled{};
+    filled.lipschitz = report.lipschitz;
+    filled.safe_step_scale = report.safe_step_scale;
+    filled.steepest_volume = report.steepest_volume;
+    filled.longest_deformer_chain = report.longest_deformer_chain;
+    filled.item_count = report.item_count;
+    filled.advises_consolidation = report.advises_consolidation ? 1 : 0;
+    write_desc(out_report, declared, filled);
     return CLAY_OK;
 }
 
@@ -4013,16 +4015,16 @@ clay_result clay_mesh_quad_report(const clay_mesh* mesh, clay_quad_report* out_r
     r = read_desc(out_report, kQuadReportOriginal, &probe);
     if (r != CLAY_OK) return r;
     const std::uint32_t declared = out_report->struct_size;
-    *out_report = clay_quad_report{};
-    out_report->struct_size = declared;
 
     const clay_mesh::QuadProvenance& p = *mesh->quad_provenance;
-    out_report->cell_size = p.fit.cell_size;
-    out_report->target_quads = p.target;
-    out_report->quad_count = static_cast<std::uint64_t>(p.fit.quad_count);
-    out_report->iterations = p.fit.iterations;
-    out_report->within_tolerance = p.fit.within_tolerance ? 1 : 0;
-    out_report->clamped = p.fit.clamped ? 1 : 0;
+    clay_quad_report filled{};
+    filled.cell_size = p.fit.cell_size;
+    filled.target_quads = p.target;
+    filled.quad_count = static_cast<std::uint64_t>(p.fit.quad_count);
+    filled.iterations = p.fit.iterations;
+    filled.within_tolerance = p.fit.within_tolerance ? 1 : 0;
+    filled.clamped = p.fit.clamped ? 1 : 0;
+    write_desc(out_report, declared, filled);
     return CLAY_OK;
 }
 
@@ -6095,13 +6097,13 @@ clay_result clay_voxel_repair_report(const clay_voxel_grid* grid,
     if (r != CLAY_OK) return r;
 
     voxel::VoxelGrid::RepairReport report = g->repair_report();
-    std::uint32_t declared = out_report->struct_size;
-    *out_report = clay_repair_report{};
-    out_report->struct_size = declared;
-    out_report->enclosed_voids = report.enclosed_voids;
-    out_report->void_cells = report.void_cells;
-    out_report->largest_void = report.largest_void;
-    out_report->airtight = report.airtight ? 1 : 0;
+    const std::uint32_t declared = out_report->struct_size;
+    clay_repair_report filled{};
+    filled.enclosed_voids = report.enclosed_voids;
+    filled.void_cells = report.void_cells;
+    filled.largest_void = report.largest_void;
+    filled.airtight = report.airtight ? 1 : 0;
+    write_desc(out_report, declared, filled);
     return CLAY_OK;
 }
 
@@ -6927,13 +6929,13 @@ clay_result clay_brick_cache_config(const clay_brick_cache* cache,
     if (r != CLAY_OK) return r;
     const brick::BrickConfig& c = cache->cache.config();
     const std::uint32_t declared = out_config->struct_size;
-    *out_config = clay_brick_config{};
-    out_config->struct_size = declared;
-    out_config->dim = c.dim;
-    out_config->voxel_size = c.voxel_size;
-    out_config->band_voxels = c.band_voxels;
-    out_config->memory_budget = c.memory_budget;
-    out_config->colors = c.colors ? 1 : 0;
+    clay_brick_config filled{};
+    filled.dim = c.dim;
+    filled.voxel_size = c.voxel_size;
+    filled.band_voxels = c.band_voxels;
+    filled.memory_budget = c.memory_budget;
+    filled.colors = c.colors ? 1 : 0;
+    write_desc(out_config, declared, filled);
     return CLAY_OK;
 }
 
@@ -6945,17 +6947,16 @@ clay_result clay_brick_cache_stats(const clay_brick_cache* cache, clay_brick_sta
     if (r != CLAY_OK) return r;
     const std::uint32_t declared = out_stats->struct_size;
     clay_brick_stats filled{};
-    clay_brick_stats* const out_stats_v = &filled;
-    out_stats_v->tracked_bricks = cache->cache.tracked_count();
-    out_stats_v->surface_bricks = cache->cache.surface_bricks().size();
+    filled.tracked_bricks = cache->cache.tracked_count();
+    filled.surface_bricks = cache->cache.surface_bricks().size();
     // What is still queued INSIDE the engine plus what this binding drained
     // into staging and has not handed out yet: both are bricks the host still
     // owes an evaluation.
-    out_stats_v->dirty_bricks = cache->cache.dirty_count() + cache->staged_remaining();
-    out_stats_v->memory_usage = cache->cache.memory_usage();
-    out_stats_v->memory_budget = cache->cache.config().memory_budget;
-    out_stats_v->bookkeeping_bytes = cache->cache.bookkeeping_bytes();
-    out_stats_v->brick_bytes = cache->cache.config().brick_bytes();
+    filled.dirty_bricks = cache->cache.dirty_count() + cache->staged_remaining();
+    filled.memory_usage = cache->cache.memory_usage();
+    filled.memory_budget = cache->cache.config().memory_budget;
+    filled.bookkeeping_bytes = cache->cache.bookkeeping_bytes();
+    filled.brick_bytes = cache->cache.config().brick_bytes();
     // Bounded by what the caller declared: a host compiled against the layout
     // before these two fields existed gets exactly the struct it allocated.
     write_desc(out_stats, declared, filled);
