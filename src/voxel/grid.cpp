@@ -1192,7 +1192,7 @@ std::optional<VoxelGrid> VoxelGrid::deserialize(const std::uint8_t* data, std::s
 // which is what every tail here is an addition to. False means a tail WAS
 // recognised and then failed to decode, which is a corrupt file.
 bool VoxelGrid::read_tails(const std::uint8_t* data, std::size_t size, std::size_t* pos,
-                           std::size_t palette_count) {
+                           std::uint32_t palette_count) {
     auto tag_at = [&](std::uint32_t* out) {
         if (*pos + 4 > size) return false;
         *out = 0;

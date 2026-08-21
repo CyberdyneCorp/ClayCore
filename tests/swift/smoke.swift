@@ -596,6 +596,10 @@ var presetCapacity = presetBytes
 check(clay_stroke_preset_serialize(&preset, &presetBuffer, &presetCapacity) == CLAY_OK,
       "wrote the preset")
 var presetBack = clay_stroke_preset()
+// Required since ABI 0.35.0: deserialize fills a descriptor bounded by the size
+// the CALLER declares, and refuses rather than writing past a struct it cannot
+// measure. A zeroed clay_stroke_preset declares nothing.
+presetBack.struct_size = UInt32(MemoryLayout<clay_stroke_preset>.size)
 check(clay_stroke_preset_deserialize(&presetBuffer, presetBytes, &presetBack) == CLAY_OK
       && presetBack.radius == preset.radius, "preset round trip")
 presetBuffer[0] = UInt8(clay_stroke_preset_version() + 1)
