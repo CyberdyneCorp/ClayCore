@@ -57,15 +57,36 @@
       `testVoxelSessionsAndGallery` killed by signal on device, no results
       collected. The retry completed. Not reproduced, not diagnosed, and not
       counted as a pass for anything.
-- [ ] 3.3 Commit `tests/device/last-gate.json` from the passing run. BLOCKED:
-      the gate does not pass, so no stamp was written and there is nothing to
-      commit. Two cases still fail — `mask_extrude` above, and
-      `sdf_stamp_cpu` at 6.43 ms against a 4.32 ms baseline (x1.49). The
-      second is very likely device noise rather than this change: nothing on
-      the stamp path went through consolidation, and `sdf_stamp_bricks` moved
-      the OTHER way over the same two runs (5.68 -> 5.40 ms). "Very likely" is
-      not measured, and is the reason this box is not ticked.
-      `check_device_bench.py --update` is still not run.
+- [ ] 3.3 Commit `tests/device/last-gate.json` from the passing run. The run
+      exists and passed; the stamp is not committable yet. Both halves below.
+
+      **The gate passed.** Reference iPad (`iPad15,5`), clean tree, thermal
+      `nominal` at both ends: 59 of 59 cases, no regression and no budget
+      exceeded. `sdf_consolidate` **524.3 -> 397.9 ms**, below the v0.30.0
+      baseline rather than merely back inside its 786 ms budget.
+      `mask_extrude` 1.09x, `voxel_add_level` 1.03x, `sdf_stamp_cpu` 1.03x.
+      `check_device_bench.py --update` was not run at any point, so the
+      budgets in `baseline.json` are untouched.
+
+      Both blockers this box used to name are accounted for. `mask_extrude`
+      was the tape out-parameter, bisected in 3b and fixed on
+      `perf/distance-only-tape-eval`. `sdf_stamp_cpu` was NOT device noise:
+      the text here called it "very likely" noise, and `4e1b53e` recorded
+      that as a wrong call — the scatter was real and the level under it was
+      the same defect. Kept visible rather than deleted, because "looks like
+      noise" going unwritten is why it stayed open.
+
+      **The stamp is stale, so it is not committed.** That run was taken at
+      `229976b`; main has since moved 77 commits. 42 engine-relevant paths
+      changed and the ABI went 0.30.0 -> 0.37.0 including one deliberate
+      break, so `release_check.py:check_device_gate` rejects a stamp naming
+      `229976b` — correctly, and committing it would put a green stamp on an
+      engine it never measured. `baseline.json` is byte-identical and still
+      budgets the same 59 cases, so the experiment is the same shape; only
+      the engine under it moved. Re-run `tools/run_device_bench.sh` against
+      current main and commit THAT stamp. The parallel meshing/EDT/rasterize
+      work, the CPU SIMD path and the gate-bake memo (#168) all landed since,
+      so the numbers should come back at or better than the run above.
 
 ## 3b. Where mask_extrude's regression actually is
 
