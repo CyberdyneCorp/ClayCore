@@ -779,7 +779,7 @@ class VoxelGrid {
     };
 
     bool read_tails(const std::uint8_t* data, std::size_t size, std::size_t* pos,
-                    std::size_t palette_count);
+                    std::uint32_t palette_count);
     void write_sculpt_tail(std::vector<std::uint8_t>* out) const;
     bool read_sculpt_tail(const std::uint8_t* data, std::size_t size, std::size_t* pos);
     void revert_from(std::size_t first);

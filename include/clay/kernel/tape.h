@@ -758,7 +758,6 @@ CLAY_FN float ctape_volume_dist(CLAY_FPTR q, CLAY_FPTR blob, cfloat3 lp,
         }
     }
     return ctape_volume_outside(cmix(cmix(c00, c10, fy), cmix(c01, c11, fy), fz), outside);
-    return CLAY_TAPE_FAR;
 }
 
 CLAY_FN float ctape_prim_dist(CLAY_UINT_T op, CLAY_FPTR q,
