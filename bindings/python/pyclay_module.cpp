@@ -3157,9 +3157,11 @@ NB_MODULE(pyclay, m) {
               return out;
           },
           "path"_a, "max_vertices"_a = 0, "max_triangles"_a = 0,
-          "Load a mesh by extension: .obj, .ply, .fbx, matched case-insensitively.\n"
-          "The counterpart to Mesh.save, and what gives Volume.from_mesh\n"
-          "something to sample. (.glb is written but not read.)\n\n"
+          "Load a mesh by extension: .obj, .ply, .fbx or .glb, matched\n"
+          "case-insensitively. The counterpart to Mesh.save, and what gives\n"
+          "Volume.from_mesh something to sample. (.gltf is not read: its\n"
+          "buffers live in separate files beside it, which would mean\n"
+          "reading files the caller never handed us.)\n\n"
           "The budget is checked against the file's DECLARED counts before\n"
           "anything is allocated, which is the point: a malformed or hostile\n"
           "file can claim a billion triangles. 0 means the library's default.");

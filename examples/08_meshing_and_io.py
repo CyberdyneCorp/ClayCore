@@ -52,10 +52,19 @@ def main():
 
     R.export_model(doc, "08_meshed.ply", resolution=64)
 
-    # --- export formats ---------------------------------------------------
+    # --- export formats, and reading each one back ------------------------
+    # Written AND read, in one loop. Exporting alone proves only that bytes
+    # were produced: a writer that emits a file no reader accepts passes an
+    # export-only check and fails the user. .glb is here because it is the
+    # newest of the four to gain an importer, and was write-only before that.
     mesh = doc.mesh(resolution=48, decimate=0.1)
-    for ext in ("obj", "ply", "glb"):
-        R.save_model(mesh, f"08_export.{ext}")
+    for ext in ("obj", "ply", "fbx", "glb"):
+        path = R.save_model(mesh, f"08_export.{ext}")
+        back = clay.load_mesh(path)
+        if back.triangle_count != mesh.triangle_count:
+            raise SystemExit(f".{ext} round trip changed the triangle count: "
+                             f"{mesh.triangle_count} out, {back.triangle_count} back")
+        print(f"    .{ext:<4} read back: {back.triangle_count} triangles, unchanged")
 
     # --- document round trip ---------------------------------------------
     path = R.output_path("08_scene.clayspace")

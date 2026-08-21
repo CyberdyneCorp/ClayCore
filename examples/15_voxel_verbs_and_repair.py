@@ -89,14 +89,32 @@ SHOWN_ELSEWHERE = {
     "sculpt_layer_visible": "52_sculpt_layers",
     "sculpt_layer_bytes": "52_sculpt_layers",
     "sculpt_layers_bytes": "52_sculpt_layers",
+    "begin_sculpt_layer": "52_sculpt_layers",
+    "end_sculpt_layer": "52_sculpt_layers",
+    "recording_sculpt_layer": "52_sculpt_layers",
+    "move_sculpt_layer": "52_sculpt_layers",
+    "remove_sculpt_layer": "52_sculpt_layers",
+    "merge_sculpt_layer_down": "52_sculpt_layers",
+    "set_sculpt_layer_strength": "52_sculpt_layers",
+    "set_sculpt_layer_visible": "52_sculpt_layers",
 }
 
 
 def sculpt_verbs():
     """Every verb the binding exposes, read from it rather than listed here, so
-    a new one shows up as a gap instead of being forgotten."""
+    a new one shows up as a gap instead of being forgotten.
+
+    Matched on `"sculpt" in m` rather than a `sculpt_` PREFIX, because a prefix
+    is what the sculpt-layer API is named around instead of with:
+    `move_sculpt_layer`, `remove_sculpt_layer` and `recording_sculpt_layer` all
+    carry the word in the middle, and all three sat with no example at all while
+    this scan reported full coverage. A gate that reads a name has to match the
+    way names are actually built, or it certifies the subset it happens to spell.
+    """
     return {m for m in dir(clay.VoxelGrid)
-            if m.startswith(("sculpt_", "repair_")) and m not in SHOWN_ELSEWHERE}
+            if (m.startswith("repair_") or "sculpt" in m)
+            and not m.startswith("_")
+            and m not in SHOWN_ELSEWHERE}
 
 
 def check_coverage():
