@@ -442,6 +442,11 @@ jobs:
         run: |
           cmake --preset cpu-only -DCLAY_BUILD_PYTHON=ON
           cmake --build --preset cpu-only
+      - name: Run the reference host session
+        # Same bare wheel environment as the gallery, and deliberately BEFORE
+        # it: the session takes about a second and the gallery takes half an
+        # hour, so a broken binding surfaces here rather than 27 minutes in.
+        run: PYTHONPATH=build/cpu-only/bindings/python python reference/host_loop.py
       - name: Run every example
         # CLAY_EXAMPLES_FAST renders at half resolution per axis and caps
         # occlusion rays. This job's gate is that every example RUNS and

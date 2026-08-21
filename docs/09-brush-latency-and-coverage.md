@@ -451,6 +451,15 @@ Two gates already enforce this, in opposite directions:
   key and drops the rest in silence, which had quietly deleted two entries and
   their notes — and reads that from the source, because by the time it is a
   dict the evidence is gone.
+- `reference/host_loop.py` closes a gap neither of the above can reach. Both
+  are per-CALL: they ask whether an entry point is exercised somewhere. Two
+  dozen entry points mean nothing per call and everything in SEQUENCE —
+  `undo_enabled` after a group, `redo_depth` after an undo, `trim_stroke` on a
+  stroke still being dragged — so a gallery page, which is a straight line,
+  cannot reach them however many pages there are. The reference host is one
+  session that puts them in the order a host is forced into, and asserts at
+  each step. It carries the same self-check shape: the 24 names are listed in
+  the file and each must appear as a call in it.
 - `15_voxel_verbs_and_repair.py` closes that second gap for the voxel surface,
   reading verbs from `dir(clay.VoxelGrid)` and requiring each to appear on the
   page or in `SHOWN_ELSEWHERE` — which is re-checked against the page it names,
