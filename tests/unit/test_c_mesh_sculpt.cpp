@@ -60,6 +60,7 @@ clay_mesh* grid_mesh(int n = 12, float half = 1.0f) {
 
 clay_mesh_brush_desc brush(int32_t verb, float radius, float strength) {
     clay_mesh_brush_desc d;
+    d.struct_size = sizeof(d);
     REQUIRE(clay_mesh_brush_defaults(&d) == CLAY_OK);
     d.verb = verb;
     d.radius = radius;
@@ -179,6 +180,7 @@ TEST_CASE("c abi: a stroke reaches a mesh, and one record undoes it bit-exactly"
     REQUIRE(clay_mesh_sculptor_create(m, -1.0f, &s) == CLAY_OK);
 
     clay_stroke_preset preset;
+    preset.struct_size = sizeof(preset);
     REQUIRE(clay_stroke_preset_defaults(&preset) == CLAY_OK);
     preset.radius = 0.25f;
     preset.strength = 0.8f;
@@ -242,6 +244,7 @@ TEST_CASE("c abi: a mask gates a mesh stroke") {
     REQUIRE(clay_mask_paint(mask, centre, &bp, 1.0f) == CLAY_OK);
 
     clay_stroke_preset preset;
+    preset.struct_size = sizeof(preset);
     REQUIRE(clay_stroke_preset_defaults(&preset) == CLAY_OK);
     preset.radius = 0.25f;
     preset.strength = 1.0f;

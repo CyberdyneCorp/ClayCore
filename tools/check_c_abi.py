@@ -82,6 +82,80 @@ def hygiene() -> list[str]:
     return errors
 
 
+# Entry points whose output descriptor is filled through a shared helper rather
+# than in the function body, so the body-scan below cannot see the bounded
+# write. Each is checked by tests/unit/test_c_out_descriptors.cpp instead.
+BOUNDED_VIA_HELPER = {
+    "clay_layer_consolidation_cost",
+    "clay_layer_consolidate",
+    "clay_layer_consolidation_state",
+}
+
+# The bounded-fill helpers. Any of them appearing in a body means the function
+# writes through the size the caller declared rather than this build's sizeof.
+BOUNDED_FILLS = ("write_desc", "write_preset", "write_cost", "begin_out_cost")
+
+
+def output_descriptor_fills() -> list[str]:
+    """Every OUT descriptor must be filled bounded by the caller's struct_size.
+
+    The prefix rule binds in both directions and only the reading half was ever
+    enforced. Writing a whole struct through an out pointer emits sizeof as THIS
+    build defines it, so the day a descriptor grows a field, every host compiled
+    against the older header has its buffer overwritten past the end — silently,
+    and only on the hosts the rule exists to serve, since anything rebuilt is the
+    same size we are.
+
+    A grep is not enough, and this gate is the proof of it. Three separate
+    spellings of the same bug shipped: `*out = clay_thing{}`, assigning fields
+    through `out->`, and `*out = local` — the last of which hid the largest
+    overrun of the lot (56 bytes, clay_mesh_brush_defaults) and matched neither
+    of the first two patterns. So this walks the public header for entry points
+    that take a descriptor by MUTABLE pointer and requires each one's body to
+    reach a bounded fill, whatever spelling it would otherwise have used.
+    """
+    header = (REPO / "bindings" / "c" / "clay.h").read_text()
+    source = (REPO / "bindings" / "c" / "clay_c.cpp").read_text()
+
+    # Bounded to each struct's own body. A `.*?` across the whole header spans
+    # struct boundaries and calls every later struct a descriptor — which named
+    # the array-element types, whose whole point is that they carry NO
+    # struct_size, and would have failed the gate on correct code.
+    descriptors = {
+        name
+        for name, body in re.findall(r"typedef struct (\w+)\s*\{([^}]*)\}", header)
+        if name not in ARRAY_ELEMENT_STRUCTS
+        and re.match(r"\s*uint32_t\s+struct_size\s*;", body)
+    }
+
+    errors = []
+    for name, args in re.findall(r"clay_result\s+(clay_\w+)\s*\(([^;]*?)\);", header, re.S):
+        if name in BOUNDED_VIA_HELPER:
+            continue
+        flat = " ".join(args.split())
+        for desc in sorted(descriptors):
+            if not re.search(r"(?<!const )\b%s\s*\*" % desc, flat):
+                continue
+            found = re.search(r"\bclay_result\s+%s\s*\([^)]*\)\s*\{" % name, source)
+            if not found:
+                continue
+            tail = source[found.end():]
+            tail = tail[: tail.find("\n}\n")]
+            if any(fill in tail for fill in BOUNDED_FILLS):
+                continue
+            # An array out-parameter is a different contract — the caller sizes
+            # the array, and `out[i].field = ...` is how it is filled — so only
+            # a write to the descriptor ITSELF counts here.
+            if re.search(r"\*\s*%s\w*\s*=|\*\s*out\w*\s*=" % "out", tail):
+                errors.append(f"{name} assigns a whole {desc} through the out pointer, which "
+                              f"writes this build's sizeof rather than the size the caller "
+                              f"declared; use write_desc")
+            elif re.search(r"\bout\w*->\w+\s*=", tail):
+                errors.append(f"{name} writes {desc} fields without a bounded fill; "
+                              f"use write_desc so an older caller's buffer is not overrun")
+    return errors
+
+
 class ItemDesc(ctypes.Structure):
     """clay_item_desc as a bindings generator would emit it."""
 
@@ -812,13 +886,24 @@ def brick_cache_exercise(lib) -> list[str]:
         lib.clay_document_destroy(doc)
         return ["clay_add_item failed for the brick exercise"]
 
+    # A defaults call is an output descriptor, so the caller declares its size
+    # going IN (ABI 0.35.0). Before that it set struct_size itself, which left
+    # nothing to bound the fill against: clay_brick_config had already grown a
+    # field, so a host built against the older layout got 8 bytes written past
+    # the end of its struct.
+    undeclared = BrickConfig()  # struct_size 0, as a caller predating the rule leaves it
+    if lib.clay_brick_config_defaults(ctypes.byref(undeclared)) == 0:
+        errors.append("clay_brick_config_defaults accepted a descriptor declaring no "
+                      "struct_size — it cannot bound its fill without one")
+
     config = BrickConfig()
+    config.struct_size = ctypes.sizeof(BrickConfig)
     if lib.clay_brick_config_defaults(ctypes.byref(config)) != 0:
         lib.clay_document_destroy(doc)
         return ["clay_brick_config_defaults failed"]
     if config.struct_size != ctypes.sizeof(BrickConfig):
-        errors.append(f"clay_brick_config_defaults declared struct_size {config.struct_size}, "
-                      f"not {ctypes.sizeof(BrickConfig)} — the layouts disagree")
+        errors.append(f"clay_brick_config_defaults returned struct_size {config.struct_size}, "
+                      f"not the {ctypes.sizeof(BrickConfig)} the caller declared")
     zeroed = BrickConfig()  # setting struct_size is mandatory here too
     if lib.clay_brick_cache_create(ctypes.byref(zeroed)):
         errors.append("clay_brick_cache_create accepted a zeroed descriptor")
@@ -1124,6 +1209,7 @@ def ffi_exercise(lib_path: str) -> list[str]:
 
 def main() -> int:
     errors = hygiene()
+    errors += output_descriptor_fills()
     if len(sys.argv) > 1:
         errors += ffi_exercise(sys.argv[1])
     else:

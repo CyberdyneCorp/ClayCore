@@ -219,6 +219,7 @@ TEST_CASE("metal interop: the C ABI device refill agrees with the host-memory re
     }
 
     clay_brick_config cfg;
+    cfg.struct_size = sizeof(cfg);
     REQUIRE(clay_brick_config_defaults(&cfg) == CLAY_OK);
     cfg.dim = 8;
     cfg.voxel_size = 0.05f;

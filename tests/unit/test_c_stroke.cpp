@@ -42,6 +42,7 @@ std::vector<brush::StrokeSample> line(float length, float step) {
 
 clay_stroke_preset defaults() {
     clay_stroke_preset p;
+    p.struct_size = sizeof(p);
     REQUIRE(clay_stroke_preset_defaults(&p) == CLAY_OK);
     return p;
 }
@@ -138,6 +139,7 @@ TEST_CASE("c stroke: presets round trip and refuse a newer schema") {
     CHECK(capacity == size);
 
     clay_stroke_preset back;
+    back.struct_size = sizeof(back);
     REQUIRE(clay_stroke_preset_deserialize(bytes.data(), bytes.size(), &back) == CLAY_OK);
     CHECK(back.struct_size == sizeof(clay_stroke_preset));
     CHECK(back.radius == doctest::Approx(p.radius));

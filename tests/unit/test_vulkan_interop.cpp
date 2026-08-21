@@ -456,6 +456,7 @@ TEST_CASE("device interop: a host adopts its device through the C ABI") {
         // The call ClaySpaceDesktop actually wants: every dirty brick
         // evaluated straight into the allocation the host will draw from.
         clay_brick_config cfg;
+        cfg.struct_size = sizeof(cfg);
         REQUIRE(clay_brick_config_defaults(&cfg) == CLAY_OK);
         clay_brick_cache* cache = clay_brick_cache_create(&cfg);
         REQUIRE(cache != nullptr);

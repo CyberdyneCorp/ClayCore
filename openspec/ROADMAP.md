@@ -643,20 +643,20 @@ needs them, and listed so they are not mistaken for oversights:
   `bound-output-descriptor-fills`, which adopts `write_desc` at all six sites
   that already probe `struct_size`.
 
-- **The two `_defaults` entry points still fill unbounded, and cannot be fixed
-  without an ABI decision.** `clay_brick_config_defaults` and
-  `clay_stroke_preset_defaults` never probe: their documented contract is that
-  they SET `struct_size` ("struct_size included"), so the caller declares
-  nothing and there is no size to bound against. `clay_brick_config_defaults`
-  is live — 8 bytes past a 24-byte buffer, today. The options are (a) require
-  `struct_size` on input, which turns silent corruption into a clean
-  `CLAY_ERROR_INVALID_ARGUMENT` but is a caller-visible break of two published
-  entry points (~25 in-repo call sites, all tests and tools, one line each);
-  (b) add sized variants and leave the unsafe pair shipping; or (c) accept it
-  and document that these two are unsafe across a version boundary. Worth
-  noting that no fix helps an ALREADY-COMPILED old host under (a) — it would
-  get a rejection rather than corruption, which is better but not compatible.
-  Pre-1.0 argues for (a).
+- ~~**The two `_defaults` entry points still fill unbounded.**~~ Decided and
+  done in `require-struct-size-on-defaults` (ABI 0.35.0): they now require
+  `struct_size` on input like every other descriptor, which turns a silent
+  8-byte overrun into a clean `CLAY_ERROR_INVALID_ARGUMENT`. Breaking on a
+  minor, which 0.x allows and `docs/RELEASE.md` now records. Worth keeping
+  visible that this does NOT rescue an already-compiled old host — it declares
+  nothing, so refusing it is the whole of the improvement.
+
+  The sweep before it was also incomplete, and instructively so:
+  `clay_stroke_preset_deserialize` filled its output descriptor by DELEGATING
+  to the defaults call, so it matched no grep for `*out = clay_thing{}` and was
+  invisible to a search that felt exhaustive. `tools/check_c_abi.py` now walks
+  the header for every entry point taking a descriptor by mutable pointer and
+  requires a bounded fill, so the next one is caught by construction.
 
 - **Colour on a mesh layer's brushes.** `MeshSculptor` has fourteen verbs and
   every one of them moves vertices; nothing writes `Mesh::colors`. Blender's

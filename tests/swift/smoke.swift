@@ -567,6 +567,7 @@ check(clay_mask_painted_count(mask, &painted) == CLAY_OK, "read the mask back")
 // -- brush strokes -----------------------------------------------------------
 
 var preset = clay_stroke_preset()
+preset.struct_size = UInt32(MemoryLayout<clay_stroke_preset>.size)
 check(clay_stroke_preset_defaults(&preset) == CLAY_OK, "preset defaults")
 preset.radius = 0.15
 preset.spacing = 0.5

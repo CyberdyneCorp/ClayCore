@@ -1019,6 +1019,7 @@ struct CRaycastScene {
         add_sphere(0.25f, 0.5f, 0.2f, -0.1f);
         add_sphere(0.3f, -0.4f, -0.3f, 0.2f);
         clay_brick_config cfg;
+        cfg.struct_size = sizeof(cfg);
         clay_brick_config_defaults(&cfg);
         cfg.dim = 8;
         cfg.voxel_size = 0.05f;

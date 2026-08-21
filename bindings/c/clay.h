@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 34
+#define CLAY_ABI_MINOR 35
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -2724,9 +2724,16 @@ typedef struct clay_stroke_preset {
     int32_t accumulation; /* clay_accumulation */
 } clay_stroke_preset;
 
-/* Fill a descriptor with the engine's defaults, struct_size included. The one
- * way to get a valid preset without knowing every field, and what a caller
- * should start from before overriding what it cares about. */
+/* Fill a descriptor with the engine's defaults: the one way to get a valid
+ * preset without knowing every field, and what a caller should start from
+ * before overriding what it cares about.
+ *
+ * SET struct_size BEFORE CALLING. Changed in ABI 0.35.0: this used to set it
+ * for you, which left nothing to bound the fill against, so it wrote sizeof as
+ * the LIBRARY defines it into whatever the caller had allocated. A descriptor
+ * that has not grown yet makes that harmless; clay_brick_config had grown, and
+ * it was not. Not setting it is now refused with CLAY_ERROR_INVALID_ARGUMENT
+ * rather than overwriting past the end of your struct. */
 clay_result clay_stroke_preset_defaults(clay_stroke_preset* out_preset);
 
 /* Preset <-> bytes, tagged with the schema version. Serialization uses the
@@ -4114,8 +4121,13 @@ typedef struct clay_brick_config {
     int32_t colors;
 } clay_brick_config;
 
-/* Fills a descriptor with the engine's defaults, struct_size included: 8^3
- * bricks, 0.05 world units per voxel, a 3-voxel band, no budget, no colour. */
+/* Fills a descriptor with the engine's defaults: 8^3 bricks, 0.05 world units
+ * per voxel, a 3-voxel band, no budget, no colour.
+ *
+ * SET struct_size BEFORE CALLING. Changed in ABI 0.35.0 — see
+ * clay_stroke_preset_defaults. This is the entry point that made the change
+ * necessary: `colors` was appended to clay_brick_config, so every host built
+ * against the 24-byte layout had 8 bytes written past the end of its struct. */
 clay_result clay_brick_config_defaults(clay_brick_config* out_config);
 
 /* Everything a host needs to draw a progress bar or decide whether to raise

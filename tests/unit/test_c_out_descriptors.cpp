@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <vector>
 
 #include "clay.h"
 
@@ -155,6 +156,7 @@ TEST_CASE("c abi: an output descriptor is never filled past the size the caller 
 
     SUBCASE("clay_brick_cache_config and clay_brick_cache_stats") {
         clay_brick_config cfg{};
+        cfg.struct_size = sizeof(cfg);
         REQUIRE(clay_brick_config_defaults(&cfg) == CLAY_OK);
         clay_brick_cache* cache = clay_brick_cache_create(&cfg);
         REQUIRE(cache != nullptr);
@@ -180,6 +182,7 @@ TEST_CASE("c abi: a caller declaring the current layout still gets every field")
     // host is asking for, and silently leaving them zero would be the same bug
     // wearing the opposite sign.
     clay_brick_config cfg{};
+    cfg.struct_size = sizeof(cfg);
     REQUIRE(clay_brick_config_defaults(&cfg) == CLAY_OK);
     cfg.colors = 1;
     clay_brick_cache* cache = clay_brick_cache_create(&cfg);
@@ -200,4 +203,157 @@ TEST_CASE("c abi: a caller declaring the current layout still gets every field")
     CHECK(stats.brick_bytes > 0);  // also appended after the original layout
 
     clay_brick_cache_destroy(cache);
+}
+
+TEST_CASE("c abi: a defaults call declares its size like every other descriptor") {
+    // These two used to SET struct_size rather than read it, which reads as a
+    // convenience and is the one case the prefix rule cannot cover: with
+    // nothing declared there is no size to bound the fill against, so it wrote
+    // sizeof as the library defines it into whatever the caller allocated.
+    // clay_brick_config had already grown a field, so that was 8 real bytes
+    // past the end of an older host's struct.
+    //
+    // Requiring struct_size does not rescue an already-compiled old host — it
+    // declares nothing, so it now gets a refusal instead of corruption. That
+    // is the whole of the improvement, and it is worth having.
+    SUBCASE("a descriptor declaring no size is refused, not filled") {
+        clay_brick_config cfg{};  // struct_size 0, as a caller predating the rule leaves it
+        CHECK(clay_brick_config_defaults(&cfg) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(cfg.dim == 0);  // and nothing was written
+
+        clay_stroke_preset preset{};
+        CHECK(clay_stroke_preset_defaults(&preset) == CLAY_ERROR_INVALID_ARGUMENT);
+        CHECK(preset.radius == 0.0f);
+    }
+
+    SUBCASE("a size below the original layout is refused") {
+        clay_brick_config cfg{};
+        cfg.struct_size = 4;
+        CHECK(clay_brick_config_defaults(&cfg) == CLAY_ERROR_INVALID_ARGUMENT);
+    }
+
+    SUBCASE("an old host's declared layout is filled and not exceeded") {
+        OldHostBuffer<clay_brick_config> buf(ORIGINAL_OF(clay_brick_config, memory_budget));
+        REQUIRE(clay_brick_config_defaults(buf.ptr()) == CLAY_OK);
+        CHECK(buf.overrun() == 0);
+        CHECK(buf.reported_size() == buf.declared);
+        CHECK(buf.was_filled());
+
+        OldHostBuffer<clay_stroke_preset> preset(ORIGINAL_OF(clay_stroke_preset, accumulation));
+        REQUIRE(clay_stroke_preset_defaults(preset.ptr()) == CLAY_OK);
+        CHECK(preset.overrun() == 0);
+        CHECK(preset.reported_size() == preset.declared);
+        CHECK(preset.was_filled());
+    }
+
+    SUBCASE("a current host still gets the appended fields") {
+        clay_brick_config cfg{};
+        cfg.struct_size = sizeof(cfg);
+        REQUIRE(clay_brick_config_defaults(&cfg) == CLAY_OK);
+        CHECK(cfg.struct_size == sizeof(cfg));
+        CHECK(cfg.dim > 0);
+        CHECK(cfg.voxel_size > 0.0f);
+        // `colors` is the field that was appended; its default is off, so the
+        // check that matters is that the cache accepts what defaults produced.
+        clay_brick_cache* cache = clay_brick_cache_create(&cfg);
+        CHECK(cache != nullptr);
+        clay_brick_cache_destroy(cache);
+    }
+}
+
+TEST_CASE("c abi: deserializing a preset is an output descriptor too") {
+    // This site filled its descriptor by delegating to the defaults call, so
+    // it matched no `*out = clay_thing{}` grep and was missed by the first
+    // sweep. The header walk in tools/check_c_abi.py is what found it.
+    clay_stroke_preset p{};
+    p.struct_size = sizeof(p);
+    REQUIRE(clay_stroke_preset_defaults(&p) == CLAY_OK);
+    p.radius = 0.42f;
+    p.seed = 77;
+
+    std::size_t size = 0;
+    REQUIRE(clay_stroke_preset_serialize(&p, nullptr, &size) == CLAY_OK);
+    std::vector<std::uint8_t> bytes(size);
+    std::size_t capacity = size;
+    REQUIRE(clay_stroke_preset_serialize(&p, bytes.data(), &capacity) == CLAY_OK);
+
+    SUBCASE("an old host's buffer is not overrun") {
+        OldHostBuffer<clay_stroke_preset> buf(ORIGINAL_OF(clay_stroke_preset, accumulation));
+        REQUIRE(clay_stroke_preset_deserialize(bytes.data(), bytes.size(), buf.ptr()) == CLAY_OK);
+        CHECK(buf.overrun() == 0);
+        CHECK(buf.reported_size() == buf.declared);
+        CHECK(buf.was_filled());
+    }
+
+    SUBCASE("a current host round-trips every field") {
+        clay_stroke_preset back{};
+        back.struct_size = sizeof(back);
+        REQUIRE(clay_stroke_preset_deserialize(bytes.data(), bytes.size(), &back) == CLAY_OK);
+        CHECK(back.struct_size == sizeof(back));
+        CHECK(back.radius == doctest::Approx(0.42f));
+        CHECK(back.seed == 77);
+    }
+
+    SUBCASE("a descriptor declaring no size is refused") {
+        clay_stroke_preset back{};
+        CHECK(clay_stroke_preset_deserialize(bytes.data(), bytes.size(), &back) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+    }
+}
+
+TEST_CASE("c abi: the descriptor-defaults and raycast fills are bounded too") {
+    // Both were found by the header walk in tools/check_c_abi.py AFTER the
+    // grep-based sweep had declared itself complete, because both spell the
+    // write as `*out = local` — a third spelling that matched neither pattern
+    // the first gate looked for.
+    //
+    // clay_mesh_brush_desc is the worst case in the ABI: its original layout
+    // ends at smooth_iterations, and layer_height plus the whole alpha block
+    // came after it, so the unbounded fill wrote 56 bytes past an older host's
+    // 104-byte buffer.
+    SUBCASE("clay_mesh_brush_defaults") {
+        OldHostBuffer<clay_mesh_brush_desc> buf(
+            ORIGINAL_OF(clay_mesh_brush_desc, smooth_iterations));
+        REQUIRE(clay_mesh_brush_defaults(buf.ptr()) == CLAY_OK);
+        CHECK(buf.overrun() == 0);
+        CHECK(buf.reported_size() == buf.declared);
+        CHECK(buf.was_filled());
+    }
+
+    SUBCASE("a defaults descriptor declaring no size is refused") {
+        clay_mesh_brush_desc d{};
+        CHECK(clay_mesh_brush_defaults(&d) == CLAY_ERROR_INVALID_ARGUMENT);
+    }
+
+    SUBCASE("a current caller still gets the fields appended after the original") {
+        clay_mesh_brush_desc d{};
+        d.struct_size = sizeof(d);
+        REQUIRE(clay_mesh_brush_defaults(&d) == CLAY_OK);
+        CHECK(d.struct_size == sizeof(d));
+        CHECK(d.radius > 0.0f);
+        CHECK(d.layer_height != 0.0f);   // appended after the original layout
+        CHECK(d.alpha == nullptr);       // and the alpha block was zeroed, not left dirty
+        CHECK(d.alpha_width == 0);
+    }
+
+    SUBCASE("clay_mesh_sculptor_raycast") {
+        Doc doc;
+        clay_mesh_params p{};
+        p.struct_size = sizeof(p);
+        p.resolution = 24;
+        clay_mesh* mesh = nullptr;
+        REQUIRE(clay_document_mesh(doc, &p, &mesh) == CLAY_OK);
+        clay_mesh_sculptor* sc = nullptr;
+        REQUIRE(clay_mesh_sculptor_create(mesh, 0.0f, &sc) == CLAY_OK);
+
+        const float origin[3] = {0.0f, 3.0f, 0.0f};
+        const float dir[3] = {0.0f, -1.0f, 0.0f};
+        OldHostBuffer<clay_mesh_hit> buf(ORIGINAL_OF(clay_mesh_hit, seed_class));
+        REQUIRE(clay_mesh_sculptor_raycast(sc, origin, dir, nullptr, buf.ptr()) == CLAY_OK);
+        CHECK(buf.overrun() == 0);
+        CHECK(buf.reported_size() == buf.declared);
+
+        clay_mesh_sculptor_destroy(sc);
+        clay_mesh_destroy(mesh);
+    }
 }

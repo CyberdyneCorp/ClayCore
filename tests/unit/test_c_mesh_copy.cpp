@@ -53,6 +53,7 @@ struct Cache {
     clay_brick_cache* c = nullptr;
     Cache() {
         clay_brick_config cfg;
+        cfg.struct_size = sizeof(cfg);
         REQUIRE(clay_brick_config_defaults(&cfg) == CLAY_OK);
         c = clay_brick_cache_create(&cfg);
         REQUIRE(c != nullptr);

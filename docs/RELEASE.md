@@ -34,6 +34,23 @@ forward-refuse).
    between its path and its out-parameter, so a caller compiled against 0.21.0
    gets a compile error rather than a misread — the arity changed, so there is
    no way for old code to link and behave differently.
+   **0.35.0 is a third**, and the subtlest of them, because nothing about it
+   is visible at compile time: `clay_brick_config_defaults`,
+   `clay_stroke_preset_defaults` and `clay_stroke_preset_deserialize` now
+   REQUIRE the caller to set `struct_size` before the call, where they used to
+   set it themselves. Same signatures, same arity — a caller that does not set
+   it still compiles and links, and now gets `CLAY_ERROR_INVALID_ARGUMENT`
+   instead of a filled struct. Callers must add one line each:
+   `cfg.struct_size = sizeof(cfg);`.
+
+   The reason is that a descriptor a caller does not measure is one the library
+   cannot bound: those three filled to `sizeof` as the LIBRARY defines it, and
+   `clay_brick_config` had already grown a `colors` field, so every host built
+   against the 24-byte layout had 8 bytes written past the end of its struct.
+   Refusing the call is the only honest answer available — it does not rescue
+   an already-compiled old host, which declares nothing and so cannot be
+   served, but it turns silent corruption into a loud refusal. Rebuilding
+   against 0.35.0's header is the fix for those hosts.
    **Neither is 0.24.1**: it changes no signatures at all. It corrects the
    swept guide's segment tie-break, so a scene containing a sweep can evaluate
    marginally differently at a guide corner — a behaviour change, not an ABI

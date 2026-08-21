@@ -203,6 +203,7 @@ final class LatencyTests: XCTestCase {
             defer { clay_document_destroy(doc) }
 
             var config = clay_brick_config()
+            config.struct_size = UInt32(MemoryLayout<clay_brick_config>.size)
             guard clay_brick_config_defaults(&config) == CLAY_OK else {
                 XCTFail("no brick defaults"); continue
             }

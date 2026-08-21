@@ -75,6 +75,7 @@ float probe(const clay_document* doc, float side) {
 // The same probe against a brick cache filled from scratch over the model.
 float probe_cache(const clay_document* doc, float side) {
     clay_brick_config cfg;
+    cfg.struct_size = sizeof(cfg);
     REQUIRE(clay_brick_config_defaults(&cfg) == CLAY_OK);
     clay_brick_cache* cache = clay_brick_cache_create(&cfg);
     REQUIRE(cache != nullptr);
@@ -172,6 +173,7 @@ TEST_CASE("a stroke on a mirrored layer lands on both sides, in both raycast pat
     REQUIRE(clay_item_set_blend(item, CLAY_BLEND_QUADRATIC, 0.08f) == CLAY_OK);
     REQUIRE(clay_item_set_rounding(item, 0.09f) == CLAY_OK);
     clay_stroke_preset preset;
+    preset.struct_size = sizeof(preset);
     REQUIRE(clay_stroke_preset_defaults(&preset) == CLAY_OK);
     preset.radius = 0.18f;
     const float sample[5] = {kP[0], kP[1], kP[2], 1.0f, 0.0f};
