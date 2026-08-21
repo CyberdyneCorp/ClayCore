@@ -4957,27 +4957,48 @@ clay_result clay_cut_polygon_from_curve(const float* points_xyzr, size_t count,
 
 // -- brush strokes (c-abi spec: the stroke engine) ---------------------------
 
-clay_result clay_stroke_preset_defaults(clay_stroke_preset* out_preset) {
-    if (!out_preset) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null preset");
-    brush::StrokePreset d;
-    *out_preset = clay_stroke_preset{};
-    out_preset->struct_size = static_cast<std::uint32_t>(sizeof(clay_stroke_preset));
-    out_preset->radius = d.radius;
-    out_preset->spacing = d.spacing;
-    out_preset->strength = d.strength;
-    out_preset->pressure_size = d.pressure.size;
-    out_preset->pressure_strength = d.pressure.strength;
-    out_preset->pressure_curve = d.pressure.curve;
-    out_preset->jitter_position = d.jitter_position;
-    out_preset->jitter_size = d.jitter_size;
-    out_preset->jitter_rotation = d.jitter_rotation;
-    out_preset->seed = d.seed;
-    out_preset->rotate_along_stroke = d.rotate_along_stroke ? 1 : 0;
-    out_preset->taper_start = d.taper_start;
-    out_preset->taper_end = d.taper_end;
-    out_preset->steady = d.steady;
-    out_preset->accumulation = static_cast<std::int32_t>(d.accumulation);
+namespace {
+
+clay_stroke_preset preset_fields(const brush::StrokePreset& d) {
+    clay_stroke_preset filled{};
+    filled.radius = d.radius;
+    filled.spacing = d.spacing;
+    filled.strength = d.strength;
+    filled.pressure_size = d.pressure.size;
+    filled.pressure_strength = d.pressure.strength;
+    filled.pressure_curve = d.pressure.curve;
+    filled.jitter_position = d.jitter_position;
+    filled.jitter_size = d.jitter_size;
+    filled.jitter_rotation = d.jitter_rotation;
+    filled.seed = d.seed;
+    filled.rotate_along_stroke = d.rotate_along_stroke ? 1 : 0;
+    filled.taper_start = d.taper_start;
+    filled.taper_end = d.taper_end;
+    filled.steady = d.steady;
+    filled.accumulation = static_cast<std::int32_t>(d.accumulation);
+    return filled;
+}
+
+// Both entry points that hand a caller a whole preset: probe the size the
+// caller declared, fill a local, write back bounded.
+clay_result write_preset(clay_stroke_preset* out, const brush::StrokePreset& src) {
+    if (!out) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null preset");
+    clay_stroke_preset probe;
+    clay_result r = read_desc(out, kStrokePresetOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    write_desc(out, out->struct_size, preset_fields(src));
     return CLAY_OK;
+}
+
+}  // namespace
+
+// A defaults call is an OUTPUT descriptor like any other, so the caller
+// declares its size going IN. It used to set struct_size itself, which reads
+// as a convenience and is really the one case the prefix rule cannot cover:
+// with nothing declared there is no size to bound against, so the fill was
+// always sizeof as THIS build defines it. See clay_brick_config_defaults.
+clay_result clay_stroke_preset_defaults(clay_stroke_preset* out_preset) {
+    return write_preset(out_preset, brush::StrokePreset{});
 }
 
 uint32_t clay_stroke_preset_version(void) { return brush::kPresetVersion; }
@@ -5000,24 +5021,10 @@ clay_result clay_stroke_preset_deserialize(const uint8_t* data, size_t size,
                     "not a preset this build can read: malformed, or written by a schema "
                     "version newer than " +
                         std::to_string(brush::kPresetVersion));
-    clay_result r = clay_stroke_preset_defaults(out_preset);
-    if (r != CLAY_OK) return r;
-    out_preset->radius = p->radius;
-    out_preset->spacing = p->spacing;
-    out_preset->strength = p->strength;
-    out_preset->pressure_size = p->pressure.size;
-    out_preset->pressure_strength = p->pressure.strength;
-    out_preset->pressure_curve = p->pressure.curve;
-    out_preset->jitter_position = p->jitter_position;
-    out_preset->jitter_size = p->jitter_size;
-    out_preset->jitter_rotation = p->jitter_rotation;
-    out_preset->seed = p->seed;
-    out_preset->rotate_along_stroke = p->rotate_along_stroke ? 1 : 0;
-    out_preset->taper_start = p->taper_start;
-    out_preset->taper_end = p->taper_end;
-    out_preset->steady = p->steady;
-    out_preset->accumulation = static_cast<std::int32_t>(p->accumulation);
-    return CLAY_OK;
+    // Also an output descriptor, and one the earlier sweep missed because it
+    // delegated its fill to the defaults call rather than spelling out
+    // `*out = clay_stroke_preset{}` the way the other sites did.
+    return write_preset(out_preset, *p);
 }
 
 clay_result clay_stroke_resolve(const float* samples_xyzpt, size_t sample_count,
@@ -6897,16 +6904,29 @@ clay_result clay_tape_info(const clay_tape* tape, int32_t* out_is_exact, float* 
 
 // -- the brick cache (brick-cache spec, through the C boundary) --------------
 
+// The caller declares struct_size going IN, as it does for every other
+// descriptor. This one was the live case: clay_brick_config grew a `colors`
+// field, so a host built against the 24-byte layout had 8 bytes of its stack
+// written past the end — silently, and only on the hosts the prefix rule
+// exists to serve, since anything rebuilt from this header is the same size we
+// are. There is no version of this that helps an ALREADY-compiled old host:
+// it declares nothing, so the best available answer is to refuse it loudly
+// rather than corrupt it quietly.
 clay_result clay_brick_config_defaults(clay_brick_config* out_config) {
     if (!out_config) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null config");
+    clay_brick_config probe;
+    clay_result r = read_desc(out_config, kBrickConfigOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_config->struct_size;
+
     const brick::BrickConfig d;
-    *out_config = clay_brick_config{};
-    out_config->struct_size = static_cast<std::uint32_t>(sizeof(clay_brick_config));
-    out_config->dim = d.dim;
-    out_config->voxel_size = d.voxel_size;
-    out_config->band_voxels = d.band_voxels;
-    out_config->memory_budget = d.memory_budget;
-    out_config->colors = d.colors ? 1 : 0;
+    clay_brick_config filled{};
+    filled.dim = d.dim;
+    filled.voxel_size = d.voxel_size;
+    filled.band_voxels = d.band_voxels;
+    filled.memory_budget = d.memory_budget;
+    filled.colors = d.colors ? 1 : 0;
+    write_desc(out_config, declared, filled);
     return CLAY_OK;
 }
 

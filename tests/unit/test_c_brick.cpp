@@ -61,6 +61,7 @@ struct Cache {
 
 clay_brick_config config_of(int dim, float voxel, int band, std::uint64_t budget) {
     clay_brick_config c;
+    c.struct_size = sizeof(c);
     REQUIRE(clay_brick_config_defaults(&c) == CLAY_OK);
     c.dim = dim;
     c.voxel_size = voxel;
@@ -172,6 +173,7 @@ bool boxes_overlap(const float amin[3], const float amax[3], const float bmin[3]
 
 TEST_CASE("brick config: defaults, round trip and every refusal") {
     clay_brick_config d;
+    d.struct_size = sizeof(d);
     REQUIRE(clay_brick_config_defaults(&d) == CLAY_OK);
     CHECK(d.struct_size == sizeof(clay_brick_config));
     CHECK(d.dim == 8);

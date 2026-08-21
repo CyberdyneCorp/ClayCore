@@ -56,6 +56,7 @@ struct Cache {
 
 clay_brick_cache* make_cache(bool colors, std::uint64_t budget = 0) {
     clay_brick_config c;
+    c.struct_size = sizeof(c);
     REQUIRE(clay_brick_config_defaults(&c) == CLAY_OK);
     c.dim = kDim;
     c.voxel_size = kVoxel;
@@ -697,6 +698,7 @@ constexpr float kFineVoxel = 0.02f;
 
 clay_brick_cache* make_fine_cache() {
     clay_brick_config c;
+    c.struct_size = sizeof(c);
     REQUIRE(clay_brick_config_defaults(&c) == CLAY_OK);
     c.dim = kDim;
     c.voxel_size = kFineVoxel;

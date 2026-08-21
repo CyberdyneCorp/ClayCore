@@ -329,6 +329,7 @@ This route was proposed by ClaySpaceDesktop in issue #43, which found the path
 
 ```c
 clay_brick_config cfg;
+cfg.struct_size = sizeof(cfg);        /* required since ABI 0.35.0 */
 clay_brick_config_defaults(&cfg);
 cfg.colors = 1;                       /* an RGBA8 lattice beside the distances */
 clay_brick_cache* cache = clay_brick_cache_create(&cfg);

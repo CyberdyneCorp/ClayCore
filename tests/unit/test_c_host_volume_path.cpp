@@ -156,6 +156,7 @@ TEST_CASE("host paths: a volume item is in the brick atlas, colour included") {
     add_volume(doc, 0.25f, centre);
 
     clay_brick_config cfg;
+    cfg.struct_size = sizeof(cfg);
     REQUIRE(clay_brick_config_defaults(&cfg) == CLAY_OK);
     cfg.dim = kDim;
     cfg.voxel_size = kVoxel;

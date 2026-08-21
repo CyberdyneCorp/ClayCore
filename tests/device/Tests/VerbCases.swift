@@ -74,6 +74,7 @@ enum Fixture {
 
     static func strokePreset(radius: Float = 0.15) -> clay_stroke_preset {
         var preset = clay_stroke_preset()
+        preset.struct_size = UInt32(MemoryLayout<clay_stroke_preset>.size)
         _ = clay_stroke_preset_defaults(&preset)
         preset.radius = radius
         return preset

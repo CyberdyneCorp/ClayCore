@@ -41,6 +41,7 @@ struct CGrid {
 
 clay_stroke_preset preset(float radius, float spacing) {
     clay_stroke_preset p;
+    p.struct_size = sizeof(p);
     REQUIRE(clay_stroke_preset_defaults(&p) == CLAY_OK);
     p.radius = radius;
     p.spacing = spacing;
