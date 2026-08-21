@@ -1233,11 +1233,13 @@ TEST_CASE("the new verbs keep the standing mesh contract") {
     }
 }
 
-TEST_CASE("a mesh brush leaves vertex colours untouched") {
-    // Stated as a test rather than left implicit (decide-surface-colour): it is
-    // currently true by OMISSION — no verb writes colour — and a future colour
-    // brush must add colour writing deliberately rather than by accident. It is
-    // also what lets an imported model keep its colours through a sculpt.
+TEST_CASE("a DISPLACEMENT brush leaves vertex colours untouched") {
+    // Stated as a test rather than left implicit (decide-surface-colour). It
+    // used to be true by OMISSION — no verb wrote colour — and the point of
+    // writing it down was that a colour brush would have to add colour writing
+    // deliberately rather than by accident. Paint and Smear are that deliberate
+    // act, so the claim is now about the verbs that MOVE vertices, which is
+    // what lets an imported model keep its colours through a sculpt.
     Mesh base = dome_grid(24, 1.0f);
     base.colors.assign(base.positions.size(), cf3(0.2f, 0.6f, 0.9f));
     for (std::size_t i = 0; i < base.colors.size(); i += 3) base.colors[i] = cf3(0.9f, 0.1f, 0.1f);
@@ -1255,5 +1257,184 @@ TEST_CASE("a mesh brush leaves vertex colours untouched") {
         CAPTURE(static_cast<int>(verb));
         REQUIRE(sc.stamp(verb, s, {}, &record) > 0);  // it really did move something
         REQUIRE(same_bytes(m.colors, base.colors));
+    }
+}
+
+// -- the colour pair (add-mesh-colour-brushes) --------------------------------
+//
+// Paint and Smear are the only verbs that do not move a vertex, and that is the
+// property most worth pinning: a colour pass over a finished sculpt must not
+// show up as a diff on the geometry.
+
+namespace {
+
+// A dome whose colour splits cleanly down the x = 0 line, so a smear across
+// that line has something unambiguous to drag.
+Mesh two_tone_dome(int n = 24, float half = 1.0f) {
+    Mesh m = dome_grid(n, half);
+    m.colors.resize(m.positions.size());
+    for (std::size_t i = 0; i < m.positions.size(); ++i)
+        m.colors[i] = m.positions[i].x < 0.0f ? cf3(1, 0, 0) : cf3(0, 0, 1);
+    return m;
+}
+
+}  // namespace
+
+TEST_CASE("a colour brush moves no vertex") {
+    for (MeshBrush verb : {MeshBrush::Paint, MeshBrush::Smear}) {
+        Mesh base = two_tone_dome();
+        Mesh m = base;
+        MeshSculptor sc(m);
+        VertexDeltas record;
+        MeshBrushSettings s = centred(cf3(0, 0.6f, 0), 0.5f, 0.8f);
+        s.color = cf3(0, 1, 0);
+        s.direction = cf3(0.15f, 0, 0);
+        CAPTURE(static_cast<int>(verb));
+        REQUIRE(sc.stamp(verb, s, {}, &record) > 0);  // it really did paint something
+        CHECK(same_bytes(m.positions, base.positions));
+        CHECK(same_bytes(m.normals, base.normals));
+        CHECK_FALSE(same_bytes(m.colors, base.colors));
+    }
+}
+
+TEST_CASE("a colour brush refuses a mesh with no colour attribute") {
+    // Rather than allocating one: twelve bytes per vertex is a real cost to
+    // hide behind a brush stroke, and a silent creation would make "I painted
+    // and nothing happened" indistinguishable from "this mesh had no colours".
+    Mesh m = dome_grid(16, 1.0f);
+    REQUIRE(m.colors.empty());
+    MeshSculptor sc(m);
+    MeshBrushSettings s = centred(cf3(0, 0.6f, 0), 0.5f, 1.0f);
+    s.color = cf3(1, 0, 0);
+    CHECK(sc.stamp(MeshBrush::Paint, s, {}, nullptr) == 0);
+    CHECK(m.colors.empty());  // and it did not quietly create one
+
+    SUBCASE("and paints once the host asks for one") {
+        CHECK(sc.ensure_colors(cf3(1, 1, 1)));
+        CHECK(m.colors.size() == m.positions.size());
+        CHECK_FALSE(sc.ensure_colors(cf3(0, 0, 0)));  // already there, left alone
+        CHECK(m.colors[0].x == 1.0f);
+        CHECK(sc.stamp(MeshBrush::Paint, s, {}, nullptr) > 0);
+    }
+}
+
+TEST_CASE("paint reaches its target exactly at full weight") {
+    // The ends of a blend have to be EXACT. mix(a, b, 1) is a + (b - a) * 1,
+    // which is not b in floating point, so a fully-weighted dab would leave a
+    // one-ULP seam along the rim of every stroke.
+    Mesh m = two_tone_dome();
+    MeshSculptor sc(m);
+    MeshBrushSettings s = centred(cf3(0, 0.6f, 0), 0.6f, 1.0f);
+    s.falloff = mesh::MeshFalloff::Constant;  // weight 1 everywhere it reaches
+    s.color = cf3(0.25f, 0.5f, 0.75f);
+    REQUIRE(sc.stamp(MeshBrush::Paint, s, {}, nullptr) > 0);
+
+    std::size_t exact = 0;
+    for (std::size_t i = 0; i < m.colors.size(); ++i)
+        if (std::memcmp(&m.colors[i], &s.color, sizeof(cfloat3)) == 0) ++exact;
+    CHECK(exact > 0);  // bit-identical to the target, not merely close
+}
+
+TEST_CASE("paint falls off from the centre and leaves the rim alone") {
+    Mesh base = two_tone_dome();
+    Mesh m = base;
+    MeshSculptor sc(m);
+    MeshBrushSettings s = centred(cf3(0, 0.6f, 0), 0.4f, 0.9f);
+    s.color = cf3(0, 1, 0);
+    REQUIRE(sc.stamp(MeshBrush::Paint, s, {}, nullptr) > 0);
+
+    // Somewhere well outside the brush is untouched, and the vertex nearest the
+    // centre moved further toward the target than one near the edge.
+    float near_green = 0.0f, far_green = 1.0f;
+    float best_near = 1e9f, best_far = 1e9f;
+    for (std::size_t i = 0; i < m.positions.size(); ++i) {
+        const cfloat3 p = m.positions[i];
+        const float d = std::sqrt((p.x - s.center.x) * (p.x - s.center.x) +
+                                  (p.z - s.center.z) * (p.z - s.center.z));
+        if (d < best_near) { best_near = d; near_green = m.colors[i].y; }
+        if (std::abs(d - 0.38f) < best_far) { best_far = std::abs(d - 0.38f); far_green = m.colors[i].y; }
+        if (d > 0.8f) CHECK(std::memcmp(&m.colors[i], &base.colors[i], sizeof(cfloat3)) == 0);
+    }
+    CHECK(near_green > far_green);
+}
+
+TEST_CASE("a paint stroke reverts bit-identically") {
+    Mesh base = two_tone_dome();
+    Mesh m = base;
+    MeshSculptor sc(m);
+    VertexDeltas record;
+    MeshBrushSettings s = centred(cf3(0, 0.6f, 0), 0.5f, 0.7f);
+    s.color = cf3(0, 1, 0);
+    for (int i = 0; i < 5; ++i) {
+        s.center = cf3(-0.2f + 0.1f * static_cast<float>(i), 0.6f, 0);
+        REQUIRE(sc.stamp(MeshBrush::Paint, s, {}, &record) > 0);
+    }
+    REQUIRE_FALSE(same_bytes(m.colors, base.colors));
+
+    Mesh painted = m;
+    REQUIRE(record.revert(m));
+    CHECK(same_bytes(m.colors, base.colors));
+    CHECK(same_bytes(m.positions, base.positions));
+    REQUIRE(record.apply(m));
+    CHECK(same_bytes(m.colors, painted.colors));
+}
+
+TEST_CASE("smear drags colour in the drag direction and is not a smooth") {
+    // The boundary sits at x = 0. Dragging +x has to carry red across it; a
+    // symmetric blur would move the boundary nowhere.
+    // The red CENTROID rather than red mass past a line: one stamp carries
+    // colour about one edge length, and the boundary column sits at exactly
+    // x == 0, so a strict `x > 0` test measures the one place the first stamp
+    // cannot reach.
+    auto red_centroid_x = [](const Mesh& m) {
+        float mass = 0.0f, moment = 0.0f;
+        for (std::size_t i = 0; i < m.positions.size(); ++i) {
+            mass += m.colors[i].x;
+            moment += m.colors[i].x * m.positions[i].x;
+        }
+        return mass > 0.0f ? moment / mass : 0.0f;
+    };
+
+    Mesh base = two_tone_dome();
+    const float before = red_centroid_x(base);
+
+    Mesh m = base;
+    MeshSculptor sc(m);
+    MeshBrushSettings s = centred(cf3(0, 0.75f, 0), 0.5f, 1.0f);
+    s.direction = cf3(0.2f, 0, 0);
+    REQUIRE(sc.stamp(MeshBrush::Smear, s, {}, nullptr) > 0);
+    CHECK(red_centroid_x(m) > before);
+
+    SUBCASE("dragging the other way carries blue the other way") {
+        Mesh back = base;
+        MeshSculptor sc2(back);
+        MeshBrushSettings t = s;
+        t.direction = cf3(-0.2f, 0, 0);
+        REQUIRE(sc2.stamp(MeshBrush::Smear, t, {}, nullptr) > 0);
+        CHECK(red_centroid_x(back) < before);
+    }
+
+    SUBCASE("no direction is no smear, rather than a smooth") {
+        Mesh still = base;
+        MeshSculptor sc3(still);
+        MeshBrushSettings t = s;
+        t.direction = cf3(0, 0, 0);
+        CHECK(sc3.stamp(MeshBrush::Smear, t, {}, nullptr) == 0);
+        CHECK(same_bytes(still.colors, base.colors));
+    }
+}
+
+TEST_CASE("a colour brush is deterministic") {
+    Mesh a = two_tone_dome(), b = two_tone_dome();
+    for (MeshBrush verb : {MeshBrush::Paint, MeshBrush::Smear}) {
+        Mesh ma = a, mb = b;
+        MeshSculptor sa(ma), sb(mb);
+        MeshBrushSettings s = centred(cf3(0.05f, 0.7f, -0.02f), 0.45f, 0.65f);
+        s.color = cf3(0.1f, 0.9f, 0.3f);
+        s.direction = cf3(0.13f, 0.02f, -0.07f);
+        CAPTURE(static_cast<int>(verb));
+        REQUIRE(sa.stamp(verb, s, {}, nullptr) > 0);
+        REQUIRE(sb.stamp(verb, s, {}, nullptr) > 0);
+        CHECK(same_bytes(ma.colors, mb.colors));
     }
 }

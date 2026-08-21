@@ -662,12 +662,11 @@ however hard the brush edge that painted the mask happened to be.
 
 ## Notes
 
-- **This page documents 00-17 and the two showcase examples.** The gallery
-  text has drifted behind the scripts; 18-33 and 36 run in CI and regenerate
-  their output, they just have no section here yet.
-- **This page documents 00-17, the two showcase examples, 36, 44-53.** The
-  gallery text has drifted behind the scripts; 18-33 run in CI and regenerate
-  their output, they just have no section here yet.
+- **This page documents 00-17, the two showcase examples, 36 and 44-53.** The
+  gallery text has drifted behind the scripts; 18-33 and 54-56 run in CI and
+  regenerate their output, they just have no section here yet. (Two copies of
+  this note had accumulated, disagreeing about the range; this is the merged
+  and current one.)
 - **Committed models are budgeted.** `_render.save_model` fails above 400 KiB
   so the repository does not accumulate large binaries; `export_model` is the
   one place meshing settings are tuned. Binary PLY is much smaller than ASCII

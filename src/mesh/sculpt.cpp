@@ -209,6 +209,10 @@ kernel::cfloat3 plane_offset(kernel::cfloat3 p, kernel::cfloat3 point, kernel::c
 
 }  // namespace
 
+bool writes_color(MeshBrush verb) {
+    return verb == MeshBrush::Paint || verb == MeshBrush::Smear;
+}
+
 bool default_geodesic(MeshBrush verb) {
     // Flatten and Scrape mean "everything under this disc". A surface walk
     // would refuse to flatten across a groove, which is where a flatten is
@@ -224,8 +228,11 @@ void VertexDeltas::clear() {
     after_position_.clear();
     before_normal_.clear();
     after_normal_.clear();
+    before_color_.clear();
+    after_color_.clear();
     slot_.clear();
     normals_ = false;
+    colors_ = false;
 }
 
 std::optional<kernel::cfloat3> VertexDeltas::origin_of(std::uint32_t v) const {
@@ -237,7 +244,11 @@ std::optional<kernel::cfloat3> VertexDeltas::origin_of(std::uint32_t v) const {
 void VertexDeltas::note(std::uint32_t v, const Mesh& m) {
     if (slot_.find(v) != slot_.end()) return;
     const bool has_normals = m.normals.size() == m.positions.size();
-    if (vertices_.empty()) normals_ = has_normals;
+    const bool has_colors = m.colors.size() == m.positions.size();
+    if (vertices_.empty()) {
+        normals_ = has_normals;
+        colors_ = has_colors;
+    }
     slot_.emplace(v, static_cast<std::uint32_t>(vertices_.size()));
     vertices_.push_back(v);
     before_position_.push_back(m.positions[v]);
@@ -245,6 +256,10 @@ void VertexDeltas::note(std::uint32_t v, const Mesh& m) {
     if (normals_ && has_normals) {
         before_normal_.push_back(m.normals[v]);
         after_normal_.push_back(m.normals[v]);
+    }
+    if (colors_ && has_colors) {
+        before_color_.push_back(m.colors[v]);
+        after_color_.push_back(m.colors[v]);
     }
 }
 
@@ -254,11 +269,14 @@ void VertexDeltas::sync_after(std::uint32_t v, const Mesh& m) {
     after_position_[it->second] = m.positions[v];
     if (!after_normal_.empty() && m.normals.size() == m.positions.size())
         after_normal_[it->second] = m.normals[v];
+    if (!after_color_.empty() && m.colors.size() == m.positions.size())
+        after_color_[it->second] = m.colors[v];
 }
 
 bool VertexDeltas::revert(Mesh& m) const {
     if (vertices_.empty()) return true;
     const bool normals = !before_normal_.empty() && m.normals.size() == m.positions.size();
+    const bool colors = !before_color_.empty() && m.colors.size() == m.positions.size();
     for (std::size_t i = 0; i < vertices_.size(); ++i) {
         const std::uint32_t v = vertices_[i];
         if (v >= m.positions.size()) return false;
@@ -266,6 +284,7 @@ bool VertexDeltas::revert(Mesh& m) const {
     for (std::size_t i = 0; i < vertices_.size(); ++i) {
         m.positions[vertices_[i]] = before_position_[i];
         if (normals) m.normals[vertices_[i]] = before_normal_[i];
+        if (colors) m.colors[vertices_[i]] = before_color_[i];
     }
     return true;
 }
@@ -273,11 +292,13 @@ bool VertexDeltas::revert(Mesh& m) const {
 bool VertexDeltas::apply(Mesh& m) const {
     if (vertices_.empty()) return true;
     const bool normals = !after_normal_.empty() && m.normals.size() == m.positions.size();
+    const bool colors = !after_color_.empty() && m.colors.size() == m.positions.size();
     for (std::size_t i = 0; i < vertices_.size(); ++i)
         if (vertices_[i] >= m.positions.size()) return false;
     for (std::size_t i = 0; i < vertices_.size(); ++i) {
         m.positions[vertices_[i]] = after_position_[i];
         if (normals) m.normals[vertices_[i]] = after_normal_[i];
+        if (colors) m.colors[vertices_[i]] = after_color_[i];
     }
     return true;
 }
@@ -580,6 +601,84 @@ void verb_nudge(const StampContext& ctx, std::vector<kernel::cfloat3>* d) {
         (*d)[i] = tangential(ctx.settings.direction, r.normals[i]) * r.weights[i];
 }
 
+// -- the colour pair ----------------------------------------------------------
+//
+// Neither verb writes a position. That is the mirror of the property the
+// displacement verbs guarantee about `colors`, and it is what lets a host run a
+// colour pass over a finished sculpt without a diff on the geometry.
+
+// A blend that is EXACT at both ends. mix(a, b, 1) is a + (b - a) * 1, which is
+// not b in floating point, so a fully-weighted dab would leave a one-ULP seam
+// along the rim of every stroke — the same trap the gated ops hit.
+kernel::cfloat3 blend_color(kernel::cfloat3 a, kernel::cfloat3 b, float t) {
+    if (t <= 0.0f) return a;
+    if (t >= 1.0f) return b;
+    return a + (b - a) * t;
+}
+
+// PAINT — blend toward the target by the brush's own weight.
+//
+// `weights` already carries the falloff, the mask gate and the alpha stamp, so
+// this composes with all three without a line of code about any of them.
+void verb_paint(const StampContext& ctx, const std::vector<kernel::cfloat3>& current,
+                std::vector<kernel::cfloat3>* target) {
+    const BrushRegion& r = ctx.region;
+    const float s = std::clamp(ctx.settings.strength, 0.0f, 1.0f);
+    for (std::size_t i = 0; i < r.size(); ++i)
+        (*target)[i] = blend_color(current[i], ctx.settings.color, r.weights[i] * s);
+}
+
+// SMEAR — drag colour across the surface.
+//
+// For each vertex, blend toward the one-ring neighbour lying most nearly
+// OPPOSITE the drag: that is where the colour under the cursor just came from.
+// The weight is scaled by how well that neighbour lines up, so a neighbour at
+// right angles to the drag contributes nothing and the smear has a direction
+// rather than being a smooth.
+//
+// The one-ring rather than a spatial query, because topology is fixed by
+// contract: the ring IS the neighbourhood, it costs nothing to walk, and it
+// cannot drift away from what the rest of the library thinks adjacency means.
+// Neighbours OUTSIDE the region are read too — the colour being dragged in at
+// the leading edge has to come from somewhere, and clamping to the region would
+// make the stroke's rim smear against itself.
+void verb_smear(const StampContext& ctx, const std::vector<kernel::cfloat3>& current,
+                std::vector<kernel::cfloat3>* target) {
+    const BrushRegion& r = ctx.region;
+    const Mesh& m = ctx.mesh;
+    const float s = std::clamp(ctx.settings.strength, 0.0f, 1.0f);
+    const kernel::cfloat3 drag = ctx.settings.direction;
+    if (is_zero(drag)) return;  // no direction, no smear — not a smooth
+    const kernel::cfloat3 from = safe_normalize(drag, kernel::cf3(0, 0, 0)) * -1.0f;
+
+    for (std::size_t i = 0; i < r.size(); ++i) {
+        if (r.weights[i] <= 0.0f) continue;
+        const std::uint32_t c = r.classes[i];
+        std::size_t rc = 0;
+        const std::uint32_t* ring = ctx.adj.ring(c, &rc);
+
+        float best = 0.0f;
+        kernel::cfloat3 source = current[i];
+        for (std::size_t k = 0; k < rc; ++k) {
+            std::size_t nc = 0;
+            const std::uint32_t nv = ctx.adj.members(ring[k], &nc)[0];
+            const kernel::cfloat3 step = m.positions[nv] - r.positions[i];
+            const kernel::cfloat3 dir = safe_normalize(step, kernel::cf3(0, 0, 0));
+            if (is_zero(dir)) continue;
+            const float align = kernel::cdot(dir, from);
+            if (align <= best) continue;
+            best = align;
+            // A neighbour inside the region is read at its PRE-STAMP colour,
+            // so the smear is simultaneous rather than a sweep whose result
+            // depends on the order the classes happen to sit in.
+            const std::uint32_t slot = r.slot[ring[k]];
+            source = slot != kNoClass ? current[slot] : m.colors[nv];
+        }
+        if (best <= 0.0f) continue;  // nothing upwind of this vertex
+        (*target)[i] = blend_color(current[i], source, r.weights[i] * s * best);
+    }
+}
+
 // RELAX — even the vertex spacing without reshaping the surface.
 //
 // Smooth moves toward the Laplacian average, which is INWARD on a convex region
@@ -674,8 +773,29 @@ std::size_t MeshSculptor::stamp(MeshBrush verb, const MeshBrushSettings& setting
     gather(settings, gate);
     if (region_.empty()) return 0;
 
-    displacement_.assign(region_.size(), kernel::cf3(0, 0, 0));
     const StampContext ctx{mesh_, adjacency_, region_, settings};
+
+    // The colour verbs take a different path end to end: they fill a colour
+    // target rather than a displacement, and they write through write_colors.
+    // Sharing `displacement_` would have made "moved nothing" and "painted
+    // nothing" the same number.
+    if (writes_color(verb)) {
+        if (!has_colors()) return 0;  // an explicit ensure_colors is the fix
+        color_target_.resize(region_.size());
+        for (std::size_t i = 0; i < region_.size(); ++i) {
+            std::size_t mc = 0;
+            const std::uint32_t v = adjacency_.members(region_.classes[i], &mc)[0];
+            color_target_[i] = mesh_.colors[v];
+        }
+        const std::vector<kernel::cfloat3> current = color_target_;
+        if (verb == MeshBrush::Paint)
+            verb_paint(ctx, current, &color_target_);
+        else
+            verb_smear(ctx, current, &color_target_);
+        return write_colors(record);
+    }
+
+    displacement_.assign(region_.size(), kernel::cf3(0, 0, 0));
 
     switch (verb) {
         case MeshBrush::Grab:
@@ -728,6 +848,11 @@ std::size_t MeshSculptor::stamp(MeshBrush verb, const MeshBrushSettings& setting
             gather_stroke_origin(*record);
             verb_layer(ctx, origin_, &displacement_);
             break;
+        case MeshBrush::Paint:
+        case MeshBrush::Smear:
+            // Returned above, through write_colors. Named here rather than
+            // left to a default so that adding a verb still fails the switch.
+            break;
     }
     return write(record);
 }
@@ -745,6 +870,38 @@ void MeshSculptor::gather_stroke_origin(const VertexDeltas& record) {
         // Not yet touched by this stroke: it starts here.
         origin_[i] = seen ? *seen : region_.positions[i];
     }
+}
+
+bool MeshSculptor::has_colors() const {
+    return mesh_.colors.size() == mesh_.positions.size() && !mesh_.positions.empty();
+}
+
+bool MeshSculptor::ensure_colors(kernel::cfloat3 fill) {
+    if (has_colors()) return false;
+    mesh_.colors.assign(mesh_.positions.size(), fill);
+    return true;
+}
+
+// The colour counterpart of `write`. No normals to recompute and no ring to
+// mark: a colour is a per-vertex value that changes nothing about the surface,
+// which is why this is twenty lines and `write` is fifty.
+std::size_t MeshSculptor::write_colors(VertexDeltas* record) {
+    std::size_t painted = 0;
+    for (std::size_t i = 0; i < region_.size(); ++i) {
+        const std::uint32_t c = region_.classes[i];
+        std::size_t mc = 0;
+        const std::uint32_t* members = adjacency_.members(c, &mc);
+        // Unchanged means unwritten, so a zero-weight rim costs nothing and a
+        // record does not grow entries whose before and after are equal.
+        if (is_zero(color_target_[i] - mesh_.colors[members[0]])) continue;
+        ++painted;
+        for (std::size_t k = 0; k < mc; ++k) {
+            if (record) record->note(members[k], mesh_);
+            mesh_.colors[members[k]] = color_target_[i];
+            if (record) record->sync_after(members[k], mesh_);
+        }
+    }
+    return painted;
 }
 
 std::size_t MeshSculptor::write(VertexDeltas* record) {

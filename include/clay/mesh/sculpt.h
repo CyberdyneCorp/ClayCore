@@ -89,7 +89,24 @@ enum class MeshBrush : std::uint8_t {
     // Push material along the surface in the drag direction. Grab carries the
     // region rigidly; this slides it.
     Nudge = 13,
+    // -- the colour pair, and the only verbs that do not move a vertex --------
+    // Blend each vertex's colour toward `MeshBrushSettings::color` by the
+    // brush's own per-vertex weight, so falloff, strength, the geodesic walk,
+    // the mask gate and the alpha stamp all compose with it for free.
+    Paint = 14,
+    // Push existing colour along `direction`, by blending each vertex toward
+    // the one-ring neighbour lying most nearly OPPOSITE the drag. Topology is
+    // fixed here, so the one-ring is a complete and cheap account of where the
+    // colour just came from — no spatial query, and no interpolation scheme to
+    // disagree with the rest of the library about.
+    Smear = 15,
 };
+
+// Whether a verb writes `Mesh::colors` instead of moving vertices. The two are
+// exclusive on purpose: a colour pass over a finished sculpt must not show up
+// as a diff on the geometry, and a displacement verb must not disturb an
+// imported model's colours.
+bool writes_color(MeshBrush verb);
 
 inline constexpr std::uint32_t kNoClass = 0xffffffffu;
 
@@ -194,6 +211,15 @@ struct MeshBrushSettings {
     kernel::cfloat3 alpha_tangent = kernel::cf3(0, 0, 0);    // 0 = derived
     float alpha_extent = 0.0f;                               // 0 = 2 * radius
 
+    // -- colour ---------------------------------------------------------------
+    // Paint's target. Whatever space the caller keeps `Mesh::colors` in: this
+    // is blended toward componentwise and never converted, so a linear buffer
+    // stays linear and an sRGB one stays sRGB.
+    //
+    // Smear ignores it — its colour comes from the surface it is dragging
+    // across, which is the whole difference between the two verbs.
+    kernel::cfloat3 color = kernel::cf3(1, 1, 1);
+
     bool has_alpha() const { return alpha != nullptr && alpha_width >= 2 && alpha_height >= 2; }
 };
 
@@ -269,9 +295,14 @@ class VertexDeltas {
     // keeping exactly that, so the verb needs no per-stroke state of its own.
     std::optional<kernel::cfloat3> origin_of(std::uint32_t v) const;
 
-    // Capture `v`'s current position and normal, the FIRST time it is seen.
-    // Called by the verbs before they write; public because
+    // Capture `v`'s current position, normal and colour, the FIRST time it is
+    // seen. Called by the verbs before they write; public because
     // `brush::apply_to_mesh` drives the same record across a whole stroke.
+    //
+    // Colour is recorded exactly the way normals are — stored rather than
+    // recomputed, so an imported model's colours come back byte for byte —
+    // and is present only when the mesh carried a colour attribute when the
+    // record started following it.
     void note(std::uint32_t v, const Mesh& m);
     // Rewrite `v`'s "after" from the mesh as it now is. Called after a stamp
     // and after a deferred normal recomputation, so the last word wins.
@@ -281,8 +312,10 @@ class VertexDeltas {
     std::vector<std::uint32_t> vertices_;
     std::vector<kernel::cfloat3> before_position_, after_position_;
     std::vector<kernel::cfloat3> before_normal_, after_normal_;
+    std::vector<kernel::cfloat3> before_color_, after_color_;
     std::unordered_map<std::uint32_t, std::uint32_t> slot_;
     bool normals_ = false;
+    bool colors_ = false;
 };
 
 // A sculpting session over one mesh: the adjacency, the ray-query tree and the
@@ -337,6 +370,18 @@ class MeshSculptor {
     // A mesh carrying NO normals still carries none afterwards: they are
     // optional on `mesh::Mesh` and manufacturing them would change what the
     // layer exports.
+    // -- the colour attribute -------------------------------------------------
+    // Paint and Smear REFUSE a mesh with no colours rather than creating one:
+    // allocating twelve bytes per vertex on the first dab hides a real cost
+    // behind a brush stroke, and makes "I painted and nothing happened"
+    // indistinguishable from "this mesh had no colour attribute". Creating it
+    // is therefore something a host does on purpose.
+    bool has_colors() const;
+    // Give every vertex `fill` if the mesh has no colour attribute. Returns
+    // whether it created one; a mesh that already has colours is left exactly
+    // as it is, so this is safe to call before every stroke.
+    bool ensure_colors(kernel::cfloat3 fill = kernel::cf3(1, 1, 1));
+
     void set_defer_normals(bool defer) { defer_normals_ = defer; }
     bool defer_normals() const { return defer_normals_; }
     // Recompute the deferred region and clear it. A no-op when nothing is
@@ -362,6 +407,9 @@ class MeshSculptor {
     void gather(const MeshBrushSettings& settings, const field::MaskGate& gate);
     std::size_t write(VertexDeltas* record);
     void gather_stroke_origin(const VertexDeltas& record);
+    // The colour counterpart of `write`: applies `color_target_` where it
+    // differs from what the mesh holds, and returns how many classes changed.
+    std::size_t write_colors(VertexDeltas* record);
     void recompute_normals(const std::vector<std::uint32_t>& classes, VertexDeltas* record);
 
     // Layer's per-entry stroke origin, kept as a member so a stroke does not
@@ -374,6 +422,10 @@ class MeshSculptor {
     WalkScratch walk_;
     std::vector<float> distance_;
     std::vector<kernel::cfloat3> displacement_;
+    // Where each class's colour should END UP, seeded from what it holds now,
+    // so a verb that leaves an entry alone writes nothing rather than
+    // rewriting a colour with itself.
+    std::vector<kernel::cfloat3> color_target_;
     std::vector<kernel::cfloat3> smoothed_, smooth_tmp_;
     std::vector<float> gate_, gate_tmp_;
     std::vector<std::uint32_t> pending_normals_, deferred_normals_;

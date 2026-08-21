@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 35
+#define CLAY_ABI_MINOR 36
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -2986,7 +2986,23 @@ typedef enum clay_mesh_brush {
     /* Push material along the surface in the drag direction. Grab carries the
      * region rigidly, so a drag with a component off the surface lifts material
      * off it; this projects into each vertex's own tangent plane. */
-    CLAY_MESH_BRUSH_NUDGE = 13
+    CLAY_MESH_BRUSH_NUDGE = 13,
+    /* The colour pair, and the only verbs that do not move a vertex.
+     *
+     * PAINT blends each vertex toward clay_mesh_brush_desc.color by the
+     * brush's own per-vertex weight, so falloff, strength, the geodesic walk,
+     * the mask gate and the alpha stamp all compose with it for free.
+     *
+     * SMEAR pushes existing colour along `direction`, by blending each vertex
+     * toward the one-ring neighbour lying most nearly OPPOSITE the drag. A
+     * zero direction is no smear rather than a smooth.
+     *
+     * Both REFUSE a mesh with no colour attribute rather than creating one —
+     * see clay_mesh_sculptor_ensure_colors. Both leave `positions` and
+     * `normals` byte-identical, which is the mirror of the guarantee the
+     * displacement verbs make about colours. */
+    CLAY_MESH_BRUSH_PAINT = 14,
+    CLAY_MESH_BRUSH_SMEAR = 15
 } clay_mesh_brush;
 
 /* The same four curves, the same values and the same weights as
@@ -3070,6 +3086,16 @@ typedef struct clay_mesh_brush_desc {
     float alpha_direction[3];
     float alpha_tangent[3];
     float alpha_extent;
+    /* PAINT's target colour. Whatever space the caller keeps the mesh's
+     * colours in: it is blended toward componentwise and never converted, so a
+     * linear buffer stays linear and an sRGB one stays sRGB. SMEAR ignores it
+     * — its colour comes from the surface it is dragging across, which is the
+     * whole difference between the two verbs.
+     *
+     * Appended after the alpha block, so a caller compiled against the older
+     * layout passes the shorter descriptor and gets exactly the fourteen verbs
+     * it had. */
+    float color[3];
 } clay_mesh_brush_desc;
 
 /* The engine's defaults, so a host fills in what it means and takes the rest.
@@ -3243,6 +3269,22 @@ typedef struct clay_mesh_hit {
  *
  * Back faces are NOT culled: a sculptor working on the inside of a shell means
  * it. A miss sets out_hit->hit to 0 and leaves the rest untouched. */
+/* Whether the mesh carries a vertex colour attribute, which PAINT and SMEAR
+ * require. */
+clay_result clay_mesh_sculptor_has_colors(const clay_mesh_sculptor* sculptor,
+                                          int32_t* out_has);
+
+/* Give every vertex `color` if the mesh has no colour attribute, and report
+ * whether one was created. A mesh that already has colours is left exactly as
+ * it is, so this is safe to call before every stroke.
+ *
+ * The colour verbs refuse a mesh with no colours rather than creating one
+ * here: twelve bytes per vertex is a real cost to hide behind a brush stroke,
+ * and a silent creation would make "I painted and nothing happened"
+ * indistinguishable from "this mesh had no colour attribute". */
+clay_result clay_mesh_sculptor_ensure_colors(clay_mesh_sculptor* sculptor, const float color[3],
+                                             int32_t* out_created);
+
 clay_result clay_mesh_sculptor_raycast(clay_mesh_sculptor* sculptor, const float origin[3],
                                        const float direction[3], const clay_mesh_frame* xform,
                                        clay_mesh_hit* out_hit);

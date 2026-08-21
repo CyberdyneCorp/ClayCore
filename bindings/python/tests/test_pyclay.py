@@ -5385,3 +5385,77 @@ def test_the_new_verbs_keep_the_mesh_contract():
 def test_a_bad_mesh_verb_names_the_new_ones():
     with pytest.raises(ValueError, match="relax"):
         clay.MeshSculptor(dome_mesh(8)).stamp("bogus", center=(0, 0, 0), radius=0.5)
+
+
+# -- the colour pair (add-mesh-colour-brushes) --------------------------------
+
+
+def test_a_colour_brush_needs_a_colour_attribute_and_will_not_invent_one():
+    """Twelve bytes per vertex is a real cost to hide behind a brush stroke, and
+    a silent creation makes "nothing happened" indistinguishable from "this mesh
+    had no colours"."""
+    m = dome_mesh(16)
+    sculptor = clay.MeshSculptor(m)
+    assert not sculptor.has_colors
+    assert sculptor.stamp("paint", center=(0, 0.5, 0), radius=0.5, color=(1, 0, 0)) == 0
+    assert not sculptor.has_colors
+
+    assert sculptor.ensure_colors((1, 1, 1)) is True
+    assert sculptor.has_colors
+    assert sculptor.ensure_colors((0, 0, 0)) is False  # already there, left alone
+    assert np.allclose(np.asarray(m.colors), 1.0)
+
+
+def test_a_colour_brush_moves_no_vertex():
+    """The mirror of the guarantee the displacement verbs make about colours:
+    a colour pass over a finished sculpt is no diff on the geometry."""
+    for verb, extra in (("paint", {"color": (1, 0, 0)}), ("smear", {"direction": (0.2, 0, 0)})):
+        m = dome_mesh(24)
+        sculptor = clay.MeshSculptor(m)
+        sculptor.ensure_colors((1, 1, 1))
+        # Something for smear to drag. Painted rather than assigned, because
+        # Mesh.colors is read-only from Python — and painting it first is the
+        # workflow anyway.
+        sculptor.stamp("paint", center=(-0.3, 0.4, 0), radius=0.45, strength=1.0,
+                       color=(1, 0, 0))
+
+        before_pos = np.asarray(m.positions).copy()
+        before_nrm = np.asarray(m.normals).copy()
+        before_col = np.asarray(m.colors).copy()
+
+        assert sculptor.stamp(verb, center=(0, 0.5, 0), radius=0.5, strength=0.9, **extra) > 0
+        assert np.array_equal(np.asarray(m.positions), before_pos), verb
+        assert np.array_equal(np.asarray(m.normals), before_nrm), verb
+        assert not np.array_equal(np.asarray(m.colors), before_col), verb
+
+
+def test_a_zero_drag_is_no_smear_rather_than_a_smooth():
+    m = dome_mesh(16)
+    sculptor = clay.MeshSculptor(m)
+    sculptor.ensure_colors((1, 1, 1))
+    before = np.asarray(m.colors).copy()
+    assert sculptor.stamp("smear", center=(0, 0.5, 0), radius=0.5, direction=(0, 0, 0)) == 0
+    assert np.array_equal(np.asarray(m.colors), before)
+
+
+def test_a_paint_stroke_reverts_bit_identically():
+    m = dome_mesh(16)
+    sculptor = clay.MeshSculptor(m)
+    sculptor.ensure_colors((1, 1, 1))
+    before = np.asarray(m.colors).copy()
+
+    record = clay.VertexDeltas()
+    assert sculptor.stamp("paint", center=(0, 0.5, 0), radius=0.5, strength=0.8,
+                          color=(0.2, 0.4, 0.9), deltas=record) > 0
+    painted = np.asarray(m.colors).copy()
+    assert not np.array_equal(painted, before)
+
+    record.revert(sculptor)
+    assert np.array_equal(np.asarray(m.colors), before)
+    record.apply(sculptor)
+    assert np.array_equal(np.asarray(m.colors), painted)
+
+
+def test_a_bad_mesh_verb_names_the_colour_pair_too():
+    with pytest.raises(ValueError, match="paint"):
+        clay.MeshSculptor(dome_mesh(8)).stamp("bogus", center=(0, 0, 0), radius=0.5)
