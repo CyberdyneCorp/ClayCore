@@ -708,6 +708,47 @@ Recorded so they are decisions rather than oversights:
   surface-mode sculpting", which was wider than the decision behind it. Moving
   the vertices that already exist is a different claim, and
   `mesh-fixed-topology-brushes` makes it; tessellating new ones stays out.
+- **Mesh-level booleans (composition on a mesh layer).** Decided 2026-08-21,
+  against. Composition here means being an operand in the SDF edit list —
+  `compile_document` chains visible SDF layers, and a voxel or mesh layer is
+  not in the tape at all — so "compose a mesh" means a destructive
+  triangle-level boolean producing a new mesh.
+
+  The NON-destructive version is already here and is better: parts kept, the
+  relationship re-editable, watertight by construction, exactness tracked per
+  node, cheap to re-evaluate. A mesh modifier stack re-runs a fragile boolean
+  on every edit; there is no version of it that beats the edit list.
+
+  The real advantage a mesh boolean WOULD have is worth stating precisely,
+  because the intuitive answer is wrong. It is not attribute preservation: a
+  boolean has to interpolate uvs onto the geometry it creates along the cut,
+  which is the same barycentric interpolation `Bvh::closest` already does, and
+  no boolean can invent uvs for faces that did not exist. It is that
+  **geometry away from the cut stays bit-identical**. `Volume.from_mesh`
+  resamples the whole model, so a 2 cm hole in a 2 m character costs the
+  retopology everywhere; a mesh boolean only disturbs the neighbourhood of the
+  intersection curve.
+
+  Against that: it breaks the mesh layer's defining, test-enforced invariant
+  (`indices` and `quads` byte-identical), so it could not be a verb; robustness
+  — coplanar faces, degenerate triangles, near-coincident vertices — is where
+  mesh tools lose users' trust; and it would spend the differentiator, since
+  `docs/sculpt_comparison.md` positions ours as "watertight by construction"
+  against Blender's "fragile on bad input" and this roadmap states that as an
+  architectural guarantee. A second boolean path that is not watertight
+  undercuts the first.
+
+  **What would reverse this**, named so the decision can be re-examined rather
+  than merely cited: the primary workflow shifting from sculpting to
+  hard-surface kit-bashing on imported retopo assets. Then topology
+  preservation away from the cut is the product and nothing substitutes. The
+  tell is users importing meshes to COMBINE rather than to REFINE. The
+  realistic route then is a dependency (Manifold, Apache-2.0, would pass the
+  licence gate) rather than an implementation.
+
+  `add-mesh-attribute-transfer` is the cheaper answer to most of what this was
+  asked for — it gives back polypaint and uvs, and explicitly not topology.
+
 - **Subdivision multires.** Resolution is an evaluation parameter here, so the
   whole Res+/Resample/multires apparatus has nothing to attach to.
 - **Node-graph texturing UI.** The edit list already *is* non-destructive
