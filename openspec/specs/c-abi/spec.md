@@ -65,9 +65,21 @@ The existing flat `clay_item_desc` entry point SHALL keep working, defined as su
 ### Requirement: Versioned descriptor structs
 Every descriptor struct crossing the ABI SHALL carry a leading `uint32_t struct_size` set by the caller. The library SHALL read only the prefix the caller declares, so fields may be appended without a major version bump. Setting it SHALL be mandatory: a declared size below the struct's original layout — zero included — SHALL be rejected with `CLAY_ERROR_INVALID_ARGUMENT`, and so SHALL a value too large to be any descriptor, because both are what a caller that predates the convention leaves in that word. A declared size larger than the library knows SHALL be clamped, so an unknown tail is ignored rather than misread, and the library SHALL never copy more than the caller declared. The ABI hygiene gate SHALL fail if a public descriptor struct lacks the field.
 
+The rule SHALL bind in BOTH directions. Where a descriptor is an OUTPUT, `struct_size` is the caller declaring how much of the struct exists rather than how much it filled in, and the library SHALL write no more than that many bytes — however many the struct has grown to in the build being called. Validating an incoming size and then filling the struct to the current `sizeof` is not compliance: it is a buffer overrun on exactly the caller the rule exists to serve, since a host that recompiles is never the one at risk. The declared size SHALL be returned unchanged, because it describes the caller's buffer; returning the library's own size would advertise fields that were never written.
+
+Bounding the write SHALL NOT become a truncation for a current caller: a caller declaring the layout it was compiled against SHALL receive every field that layout contains, including fields appended after the original.
+
 #### Scenario: Older caller against newer library
 - **WHEN** a caller sets `struct_size` to the size it was compiled against and the library has since appended fields
 - **THEN** the call succeeds, only the declared prefix is read, and the appended fields take their documented defaults
+
+#### Scenario: An output descriptor from an older header
+- **WHEN** a host compiled against an older layout passes an output descriptor declaring that layout's size, and the library has since appended fields to it
+- **THEN** the library fills only the bytes the host declared, leaves everything past them untouched, and returns the size the host declared
+
+#### Scenario: An output descriptor from the current header
+- **WHEN** a caller declares the current layout of an output descriptor
+- **THEN** every field is filled, including those appended after the original layout
 
 #### Scenario: Gate rejects an unversioned struct
 - **WHEN** a public descriptor struct is added without `struct_size`
@@ -1311,4 +1323,30 @@ Statistics SHALL make visible the growth the budget does not bound, so a host ca
 #### Scenario: Statistics show what the budget does not
 - **WHEN** a host reads the cache statistics
 - **THEN** it can see both the payload usage the budget bounds and the tracked-key growth it does not
+
+### Requirement: A defaults call is an output descriptor
+An entry point that fills a descriptor with engine defaults SHALL be treated as an output descriptor like any other: the caller SHALL set `struct_size` before the call, and the library SHALL bound its fill to that size. Setting `struct_size` on the caller's behalf SHALL NOT be offered as a convenience, because a descriptor the caller does not measure is one the library cannot bound — the fill then uses the library's own `sizeof`, which overruns any host built against a layout that has since grown.
+
+A call whose descriptor declares no size, or a size below the descriptor's original layout, SHALL be refused with `CLAY_ERROR_INVALID_ARGUMENT` and SHALL leave the caller's memory untouched. Refusal SHALL be understood as the best available outcome rather than a complete one: a host compiled before the requirement declares nothing, so it cannot be served correctly, and the choice is only between refusing it and corrupting it.
+
+This SHALL apply however the descriptor is filled, including where an entry point fills it by delegating to another entry point rather than assigning it directly.
+
+#### Scenario: A defaults call without a declared size
+- **WHEN** a caller passes a descriptor whose `struct_size` is zero, or below the descriptor's original layout, to a defaults-style call
+- **THEN** the call is refused with `CLAY_ERROR_INVALID_ARGUMENT` and no field of the caller's struct is written
+
+#### Scenario: A defaults call from an older header
+- **WHEN** a host declares the layout it was compiled against and that layout is shorter than the current one
+- **THEN** the defaults are filled into exactly the bytes declared, nothing past them is touched, and the declared size is returned
+
+#### Scenario: A defaults call from the current header
+- **WHEN** a caller declares the current layout
+- **THEN** every field is filled, including those appended after the original layout
+
+### Requirement: The output-fill rule is enforced mechanically
+The ABI hygiene gate SHALL verify that every entry point taking a versioned descriptor by mutable pointer fills it through a bounded write, rather than relying on review to notice. Searching the implementation for a single spelling SHALL NOT be considered sufficient: one site filled its output descriptor by delegating to another entry point, matched no such search, and was missed by a sweep that believed itself complete.
+
+#### Scenario: An unbounded output fill is added
+- **WHEN** an entry point writes a versioned output descriptor without a bounded fill
+- **THEN** the C ABI hygiene check fails naming the entry point and the descriptor
 
