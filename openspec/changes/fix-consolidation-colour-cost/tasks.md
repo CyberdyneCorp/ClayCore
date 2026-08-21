@@ -98,6 +98,36 @@ device case's fixture, medians of three at 1000 stamps on the Mac:
       five dialects, and bundling it behind a scene-module fix would put a
       cross-backend change in a PR nobody would review as one.
 
+      **MEASURED, and the premise does not hold on CPU.** Removing the colour
+      arithmetic from the combine path — the two `cmix` calls, leaving the
+      distance arithmetic byte-identical — and re-running against an unpatched
+      build, five repetitions each, medians:
+
+      | | colour blend removed | baseline |
+      |---|---|---|
+      | `BM_MeshBricksGradGrownDoc` | 4.40 ms | 4.45 ms |
+      | `BM_ConsolidateGrownDoc` | 83.6 ms | 83.0 ms |
+
+      Inside noise, and the direction flips between the two benchmarks. A
+      first reading looked like a 2.4x win on meshing (12.8 ms -> 5.31 ms) and
+      was an artifact of `--benchmark_min_time=1x`: one cold iteration, which
+      is not a measurement. Recorded because it is exactly the number somebody
+      would quote to justify the change.
+
+      **What this does NOT measure**, and what the premise would have to rest
+      on instead: the experiment removed the colour *arithmetic*, not the
+      colour *footprint*. `CTapeValue` is still 16 bytes and `CLAY_TAPE_MAX_STACK`
+      is still 16, so the interpreter still moves 256 bytes of stack per
+      evaluation either way. On a CPU that lives in L1 and costs nothing
+      measurable, which is what the table above shows. On a GPU it is register
+      pressure and therefore occupancy, which is a different quantity entirely
+      and cannot be measured on this machine — lavapipe is a CPU implementation,
+      so it would report the CPU's answer again.
+
+      So the case for this change is a GPU case, and it needs a GPU
+      measurement. Doing it for the CPU win would be doing it for a win that
+      is not there.
+
 ## 4. What the gate could not see
 
 - [x] 4.1 `BM_ConsolidateColoredGrownDoc` — the same 193-node layer with two
