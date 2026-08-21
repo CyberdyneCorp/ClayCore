@@ -19,7 +19,7 @@ A deformer whose parameters describe no deformation — a zero angle, a unit sca
 
 Deforming a mesh SHALL be DETERMINISTIC: the same mesh, frame and parameters SHALL produce bit-identical positions on every run and every platform.
 
-The library SHALL NOT re-tessellate to recover from a deformation. Stretching the triangles a mesh already has is the accepted cost of fixed topology, `relax` is the verb that redistributes them, and remeshing remains outside this engine's scope.
+The library SHALL NOT re-tessellate to recover from a deformation. Stretching the triangles a mesh already has is the accepted cost of fixed topology, and remeshing remains outside this engine's scope. `relax` SHALL NOT be documented as the recovery for a deformation: a taper leaves a cross-section with the same vertex count around a smaller circumference, which is anisotropy rather than uneven spacing, and a verb that slides vertices along the surface cannot change how many of them a cross-section has.
 
 #### Scenario: A taper on a mesh and on a field agree
 - **WHEN** the same shape is tapered as a mesh layer and as an SDF item, and both are meshed

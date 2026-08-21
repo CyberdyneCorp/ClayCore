@@ -5564,3 +5564,114 @@ def test_a_truncated_glb_is_refused_rather_than_read(tmp_path):
     cut.write_bytes(whole.read_bytes()[: 40])
     with pytest.raises(Exception):
         clay.load_mesh(str(cut))
+
+
+# -- whole-form deformers on a mesh layer (add-mesh-deformers) ---------------
+
+
+def column_mesh(rings=24, segments=20, radius=0.35, height=2.0):
+    """A closed column along Y, so a taper and a twist both have a span."""
+    positions, indices = [], []
+    for r in range(rings + 1):
+        y = height * (r / rings) - height * 0.5
+        for s in range(segments):
+            a = 2.0 * np.pi * s / segments
+            positions.append((radius * np.cos(a), y, radius * np.sin(a)))
+    for r in range(rings):
+        for s in range(segments):
+            a = r * segments + s
+            b = r * segments + (s + 1) % segments
+            c, d = a + segments, b + segments
+            indices += [a, c, b, b, c, d]
+    return clay.Mesh.from_triangles(np.array(positions, dtype=np.float32),
+                                    np.array(indices, dtype=np.uint32))
+
+
+def _radius_at(positions, y, tol=0.06):
+    sel = np.abs(positions[:, 1] - y) < tol
+    return float(np.hypot(positions[sel, 0], positions[sel, 2]).max()) if sel.any() else 0.0
+
+
+def test_a_taper_narrows_the_far_end_and_leaves_the_near_one():
+    m = column_mesh()
+    sc = clay.MeshSculptor(m)
+    before = np.asarray(m.positions).copy()
+    assert sc.deform("taper", origin=(0, -1, 0), axis=(0, 1, 0), span=2.0,
+                     scale_start=1.0, scale_end=0.4) > 0
+    after = np.asarray(m.positions)
+    assert _radius_at(after, -1.0) == pytest.approx(_radius_at(before, -1.0), rel=0.02)
+    assert _radius_at(after, 1.0) == pytest.approx(_radius_at(before, 1.0) * 0.4, rel=0.05)
+
+
+def test_a_deformer_is_not_a_brush_and_takes_the_whole_form():
+    """It has no centre, no radius and no falloff: a deformer states something
+    about the form, a brush about a dab.
+
+    Not "every vertex moves" — the ring sitting exactly at the span's start has
+    a zero angle and correctly stays put, which is the same rule that makes an
+    identity deformer free. What is checked is that the reach is the FORM: a
+    vertex at each end of the model is affected, which no brush radius here
+    would cover."""
+    m = column_mesh()
+    sc = clay.MeshSculptor(m)
+    before = np.asarray(m.positions).copy()
+    moved = sc.deform("twist", origin=(0, -1, 0), axis=(0, 1, 0), span=2.0, angle=1.0)
+
+    after = np.asarray(m.positions)
+    changed = np.any(after != before, axis=1)
+    assert moved == int(changed.sum())
+    # The far end turned; the span's start did not.
+    assert changed[before[:, 1] > 0.9].all()
+    assert not changed[before[:, 1] < -0.99].any()
+    # And the reach is most of the form, not a disc.
+    assert changed.mean() > 0.9
+
+
+def test_a_mask_holds_part_of_the_form_still():
+    m = column_mesh()
+    sc = clay.MeshSculptor(m)
+    before = np.asarray(m.positions).copy()
+
+    mask = clay.MaskField(0.08)
+    mask.paint((0, -0.7, 0), size=14, target=1.0)
+    assert sc.deform("taper", origin=(0, -1, 0), axis=(0, 1, 0), span=2.0,
+                     scale_end=0.3, mask=mask) > 0
+
+    after = np.asarray(m.positions)
+    held = np.all(after == before, axis=1)
+    assert held.any(), "the masked end should be bit-identical"
+    assert (~held).any(), "the unmasked end should have moved"
+
+
+def test_an_identity_deformer_moves_nothing():
+    m = column_mesh()
+    sc = clay.MeshSculptor(m)
+    before = np.asarray(m.positions).copy()
+    record = clay.VertexDeltas()
+    assert sc.deform("taper", span=2.0, deltas=record) == 0
+    assert sc.deform("twist", span=2.0, angle=0.0, deltas=record) == 0
+    assert np.array_equal(np.asarray(m.positions), before)
+
+
+def test_a_deformation_reverts_bit_identically():
+    m = column_mesh()
+    sc = clay.MeshSculptor(m)
+    before = np.asarray(m.positions).copy()
+    record = clay.VertexDeltas()
+    assert sc.deform("twist", origin=(0, -1, 0), axis=(0, 1, 0), span=2.0,
+                     angle=1.1, deltas=record) > 0
+    deformed = np.asarray(m.positions).copy()
+    assert not np.array_equal(deformed, before)
+
+    record.revert(sc)
+    assert np.array_equal(np.asarray(m.positions), before)
+    record.apply(sc)
+    assert np.array_equal(np.asarray(m.positions), deformed)
+
+
+def test_bend_is_refused_and_the_message_says_why():
+    """Absent by measurement, not by oversight: the SDF bend takes its angle
+    from a coordinate it then moves, so it has no forward map."""
+    sc = clay.MeshSculptor(column_mesh(8, 8))
+    with pytest.raises(ValueError, match="no 'bend'"):
+        sc.deform("bend", span=1.0, angle=1.0)

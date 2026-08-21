@@ -86,6 +86,7 @@ EXAMPLES = [
     "54_masked_operations",
     "55_mesh_brush_vocabulary",
     "56_mesh_colour_brushes",
+    "57_mesh_deformers",
 ]
 
 

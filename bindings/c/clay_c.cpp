@@ -36,6 +36,7 @@
 #include "clay/mesh/marching.h"
 #include "clay/mesh/quad_mesh.h"
 #include "clay/mesh/lattice.h"
+#include "clay/mesh/deform.h"
 #include "clay/mesh/sculpt.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/to_field.h"
@@ -7836,6 +7837,89 @@ clay_result clay_mesh_lattice_displacement(const clay_mesh_lattice* lattice, con
     out_displacement[0] = d.x;
     out_displacement[1] = d.y;
     out_displacement[2] = d.z;
+    return CLAY_OK;
+}
+
+namespace {
+constexpr std::size_t kMeshDeformDescOriginal =
+    offsetof(clay_mesh_deform_desc, ease) + sizeof(std::int32_t);
+
+clay_result read_mesh_deform(const clay_mesh_deform_desc* src, mesh::MeshDeformSettings* out) {
+    if (!src) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null deform descriptor");
+    clay_mesh_deform_desc d;
+    clay_result r = read_desc(src, kMeshDeformDescOriginal, &d);
+    if (r != CLAY_OK) return r;
+    if (d.verb != CLAY_MESH_DEFORM_TAPER && d.verb != CLAY_MESH_DEFORM_TWIST)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "unknown mesh deformer: " + std::to_string(d.verb));
+    if (d.ease < 0 || d.ease >= CLAY_EASE_COUNT)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "ease index out of range");
+    if (!(d.span > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "a deformer's span must be positive: there is nothing to ramp across");
+    const kernel::cfloat3 axis = kernel::cf3(d.axis[0], d.axis[1], d.axis[2]);
+    if (!(kernel::clength(axis) > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "a deformer's axis has no length");
+    out->verb = static_cast<mesh::MeshDeform>(d.verb);
+    out->origin = kernel::cf3(d.origin[0], d.origin[1], d.origin[2]);
+    out->axis = axis;
+    out->span = d.span;
+    out->scale_start = d.scale_start;
+    out->scale_end = d.scale_end;
+    out->angle = d.angle;
+    out->ease = d.ease;
+    return CLAY_OK;
+}
+}  // namespace
+
+clay_result clay_mesh_deform_defaults(clay_mesh_deform_desc* out_desc) {
+    if (!out_desc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null descriptor");
+    clay_mesh_deform_desc probe;
+    clay_result r = read_desc(out_desc, kMeshDeformDescOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_desc->struct_size;
+    const mesh::MeshDeformSettings d;
+    clay_mesh_deform_desc out{};
+    out.verb = CLAY_MESH_DEFORM_TAPER;
+    write_f3(out.origin, d.origin);
+    write_f3(out.axis, d.axis);
+    out.span = d.span;
+    out.scale_start = d.scale_start;
+    out.scale_end = d.scale_end;
+    out.angle = d.angle;
+    out.ease = d.ease;
+    write_desc(out_desc, declared, out);
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_deform_point(const clay_mesh_deform_desc* desc, const float p[3],
+                                   float out_p[3]) {
+    if (!p || !out_p) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null point");
+    mesh::MeshDeformSettings settings;
+    clay_result r = read_mesh_deform(desc, &settings);
+    if (r != CLAY_OK) return r;
+    write_f3(out_p, mesh::deform_point(settings, kernel::cf3(p[0], p[1], p[2])));
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_deform(clay_mesh_sculptor* sculptor,
+                                      const clay_mesh_deform_desc* desc, const clay_mask* mask,
+                                      clay_mesh_deltas* deltas, size_t* out_moved) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/true);
+    if (r != CLAY_OK) return r;
+    mesh::MeshDeformSettings settings;
+    r = read_mesh_deform(desc, &settings);
+    if (r != CLAY_OK) return r;
+    voxel::MaskField* m = nullptr;
+    if (mask) {
+        r = resolve_mask(mask, &m);
+        if (r != CLAY_OK) return r;
+    }
+    field::MaskGate gate;
+    if (m) gate = [m](kernel::cfloat3 p) { return m->sample(p); };
+    const std::size_t moved = sculptor->sculptor->apply_deformer(
+        settings, gate, deltas ? &deltas->deltas : nullptr);
+    if (out_moved) *out_moved = moved;
     return CLAY_OK;
 }
 

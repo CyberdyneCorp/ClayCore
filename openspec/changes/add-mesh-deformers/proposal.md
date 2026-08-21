@@ -42,12 +42,39 @@ SDF side accepts.
 
 `MeshSculptor::apply_deformer` — one forward-map walk over weld classes,
 modelled directly on `apply_lattice`, which already does exactly this for the
-cage. Three deformers to start, which are ZBrush's Deformation trio:
+cage. **Two deformers**, both of which have an EXACT forward map:
 
 - **taper** — scale across a span, along the frame's axis
-- **twist** — rotate about the axis, proportionally to distance along it,
+- **twist** — rotate about the axis proportionally to distance along it,
   including the ranged form that holds beyond a span
-- **bend** — the same, bending rather than twisting, including the ranged form
+
+### Why bend is not in this change
+
+Bend was in the first draft of this proposal and the precondition check
+removed it, which is what the precondition was for.
+
+`taper` and `twist` compute their scale and angle from the coordinate ALONG the
+axis, and neither map moves that coordinate — so the forward map is the same
+function with the scale reciprocated or the angle negated, and a point round
+trips to within float epsilon (measured: 1.2e-07 and 2.4e-07).
+
+`cbend_point` computes its angle from `p.x` and then MOVES `p.x`. Negating `k`
+is not its inverse — measured worst error **1.73**, not 1e-7. Worse, the map is
+not injective: swept along `y = 0`, rest points at `x = -1.74` and `x = +1.75`
+land **0.0101 apart** at `k = 0.9`, and `x = ±0.63` land 0.0053 apart at
+`k = 2.5`. **The bend folds over, so no forward map exists** past gentle angles,
+and a fixed-point inversion diverges exactly where the fold begins (converges
+at k = 0.3, diverges from k = 0.9).
+
+Where the inverse does exist, the closest cheap candidate — `cbend_point(q, -k)`
+— is still 0.05 off at k = 0.2 and 0.11 at k = 0.3.
+
+So a mesh bend has three possible shapes, and choosing between them is a
+decision about the SDF bend's convention rather than about this change:
+iterate and refuse past the fold (a verb that stops working at 50° is a bad
+verb), use the standard DCC bend and accept that a bent mesh and a bent field
+differ, or change the SDF bend to be authored forwards. Recorded in the roadmap
+with these numbers; not decided here.
 
 ### Five decisions the implementation has to make
 
@@ -92,8 +119,15 @@ line; a remesher is not.
 
 The honest cost of that, stated rather than discovered later: a heavy deform
 stretches the triangles it has and there is no re-tessellation to recover.
-`Relax` is the engine's existing answer — *"what lets an artist recover without
-a round trip through a retopo tool"* — and it is the recovery this pairs with.
+
+**And `Relax` does not rescue it**, which the first draft of this proposal
+assumed it would. Measured in `examples/57`: after a taper to 0.18, six relax
+passes move edge-length variation from 0.2929 to 0.3050 — slightly *worse*. The
+reason is that a taper leaves the top ring with the same vertex count around a
+smaller circumference, so the damage is ANISOTROPY rather than uneven spacing,
+and relax slides vertices without changing how many a ring has. Relax is the
+recovery for a large `grab`, where the damage really is uneven spacing. There
+is no recovery for this one short of re-tessellation.
 
 `grab`, `pose`, `pose_line` and `magnify` are excluded: each already has a mesh
 brush that is the same gesture with a brush's falloff (`Grab`, `Pinch`), and
