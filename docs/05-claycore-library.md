@@ -464,7 +464,7 @@ doc.remove_layer(layer.id)
 A **group** is a node whose children compile as one sub-expression, so an op
 inside it reaches its own subtree and nothing else — which is what makes
 "intersect A with B, then union that into C" sayable at all. Without it a plate
-needs a layer of its own; see `examples/36_groups.py`.
+needs a layer of its own; see `examples/37_groups.py`.
 
 ```python
 plate = layer.add_group(op=clay.Op.ADD)             # a node id, like any other

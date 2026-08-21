@@ -13,7 +13,7 @@ everything already there, so a cut meant for one panel would saw through the
 whole helmet. Plates therefore get carved in isolation and assembled by the
 document, which is how the real object is made too.
 
-That is the LAYER technique, and it is not the only one: `36_groups.py` builds
+That is the LAYER technique, and it is not the only one: `37_groups.py` builds
 the same plate as a **group** on one shared layer. A group is the sharper tool
 of the two — it rejoins the assembly with any op and any blend, where layers
 only ever union hard — and it leaves a layer meaning what it means everywhere

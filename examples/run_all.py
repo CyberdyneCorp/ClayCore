@@ -218,6 +218,49 @@ def check_fast_scaling():
             f"dimensions through _fast_pixels/_fast_ao, or delegate to one that does"]
 
 
+def check_example_references():
+    """Every `NN_name.py` named in the docs or in another example must exist.
+
+    A gate rather than a convention because the omission has already shipped:
+    `docs/05-claycore-library.md` and `35_hard_surface_helmet.py`'s own
+    docstring both pointed a reader at `36_groups.py`, which stopped existing
+    when `36` became `36_mesh_layers.py` and the groups example moved to `37`.
+    Nothing failed. The example ran, the docs built, and the two links sat
+    there long enough that a later reader concluded the example had never been
+    written and wrote a second one.
+
+    That is the failure worth catching: a dangling link does not read as
+    broken, it reads as a file somebody forgot to add.
+
+    Scope is the SHIPPED surface — README, docs, and the examples themselves.
+    Archived openspec changes are a record of what was true when they were
+    written and are deliberately not rewritten to match later renames.
+    """
+    import re
+
+    root = pathlib.Path(HERE).parent
+    have = {p.name for p in pathlib.Path(HERE).glob("[0-9][0-9]_*.py")}
+    pattern = re.compile(r"\b(\d\d_[a-z0-9_]+\.py)\b")
+
+    files = [root / "README.md"]
+    files += sorted((root / "docs").glob("*.md"))
+    # This file is excluded: it names the dead example above, and the EXAMPLES
+    # list it does hold is checked by importing every entry rather than by
+    # matching text.
+    files += [p for p in sorted(pathlib.Path(HERE).glob("*.py")) if p.name != "run_all.py"]
+    files += [pathlib.Path(HERE) / "README.md"]
+
+    problems = []
+    for path in files:
+        if not path.exists():
+            continue
+        for name in sorted(set(pattern.findall(path.read_text(encoding="utf-8")))):
+            if name not in have:
+                problems.append(f"{path.relative_to(root)} points at examples/{name}, "
+                                f"which does not exist — renamed, or never written")
+    return problems
+
+
 def run_one(name):
     """Run one example in this process, returning (name, output, error).
 
@@ -256,8 +299,8 @@ def main():
               file=sys.stderr)
         return 1
 
-    coverage = (check_duplicate_capability_keys()
-                + check_capability_coverage() + check_fast_scaling())
+    coverage = (check_duplicate_capability_keys() + check_capability_coverage()
+                + check_fast_scaling() + check_example_references())
     if coverage:
         for problem in coverage:
             print(f"  {problem}", file=sys.stderr)
