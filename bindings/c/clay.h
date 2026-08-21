@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 36
+#define CLAY_ABI_MINOR 37
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -1581,9 +1581,17 @@ typedef struct clay_import_budget {
     uint64_t max_triangles;
 } clay_import_budget;
 
-/* Load by extension: .obj, .ply, .fbx, matched case-insensitively. The
+/* Load by extension: .obj, .ply, .fbx, .glb, matched case-insensitively. The
  * counterpart to clay_mesh_save, and what gives clay_item_volume_from_mesh
  * something to sample.
+ *
+ * .glb reads every mesh in the file, applying each node's world transform, so
+ * an exported scene arrives as the shape its author saw. Materials, animation
+ * and skinning are ignored — the mesh type has nowhere to put them — but a
+ * non-triangle primitive is REFUSED rather than dropped, since importing a
+ * line set as an empty mesh looks like a broken reader. `.gltf` is not
+ * accepted: its buffers live in separate files, and reading whatever the JSON
+ * names would mean reading files the caller never handed us.
  *
  * `budget` may be NULL for the library's defaults. Exceeding it returns
  * CLAY_ERROR_BUDGET_EXCEEDED rather than allocating. */

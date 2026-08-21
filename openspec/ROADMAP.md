@@ -674,9 +674,14 @@ needs them, and listed so they are not mistaken for oversights:
 - **Voxel layers beyond 256³.** The spec guarantees ≥256³ per layer, with a
   memory budget and typed errors past it. There is no streaming story for
   scenes larger than that; per-layer grids have been sufficient so far.
-- **glTF/GLB import.** `save_glb` exists and no `load_glb` does, which makes it
-  the only real gap in the importer — OBJ, PLY and FBX all load. Recorded by
-  `add-mesh-layers`, which does not need it.
+- ~~**glTF/GLB import.**~~ Closed by `add-glb-import` (ABI 0.37.0).
+  `clay_mesh_load` and `clay.load_mesh` gained `.glb` through the existing
+  extension dispatch, so no new entry point was needed. It reads every mesh and
+  every TRIANGLES primitive with the node hierarchy's world transforms applied,
+  and accepts the accessor forms real exporters emit rather than only the ones
+  this library writes. `.gltf` is still refused on purpose — its buffers are
+  separate files, and resolving them means reading files the caller never
+  handed us.
 - **The voxel and mask chunks' orphan behaviour.** A mesh chunk is written only
   for a layer that still exists and dropped on load when it names none;
   `VOXL` and `MASK` do neither, so a removed voxel layer's grid is still

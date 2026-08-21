@@ -5510,3 +5510,57 @@ def test_an_empty_mask_still_refuses_to_gate():
         item.gate(mask, width=0.1)
     with pytest.raises(ValueError, match="protect nothing"):
         item.gate(mask, width=0.1)
+
+
+# -- GLB import (add-glb-import) ---------------------------------------------
+
+
+def test_a_glb_round_trips_through_a_file(tmp_path):
+    """GLB was the only format pyclay could save and not load."""
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Sphere(r=0.6))
+    src = doc.mesh(resolution=24)
+
+    path = tmp_path / "model.glb"
+    src.save(str(path))
+    back = clay.load_mesh(str(path))
+
+    assert len(back.positions) == len(src.positions)
+    assert len(back.indices) == len(src.indices)
+    assert np.array_equal(np.asarray(back.positions), np.asarray(src.positions))
+    assert np.array_equal(np.asarray(back.indices), np.asarray(src.indices))
+
+
+def test_a_loaded_glb_can_be_sculpted_and_resampled(tmp_path):
+    """The point of an importer: what comes back is a mesh you can WORK on."""
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Sphere(r=0.6))
+    path = tmp_path / "base.glb"
+    doc.mesh(resolution=28).save(str(path))
+
+    loaded = clay.load_mesh(str(path))
+    sculptor = clay.MeshSculptor(loaded)
+    before = np.asarray(loaded.positions).copy()
+    assert sculptor.stamp("draw", center=(0, 0.6, 0), radius=0.3, strength=0.4) > 0
+    assert not np.array_equal(np.asarray(loaded.positions), before)
+
+
+def test_gltf_is_refused_with_a_reason(tmp_path):
+    """.gltf keeps its buffers in separate files, so a loader handed one path
+    would be reading files the caller never gave it."""
+    path = tmp_path / "model.gltf"
+    path.write_text("{}")
+    with pytest.raises(ValueError, match=r"\.glb"):
+        clay.load_mesh(str(path))
+
+
+def test_a_truncated_glb_is_refused_rather_than_read(tmp_path):
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Sphere(r=0.5))
+    whole = tmp_path / "whole.glb"
+    doc.mesh(resolution=16).save(str(whole))
+
+    cut = tmp_path / "cut.glb"
+    cut.write_bytes(whole.read_bytes()[: 40])
+    with pytest.raises(Exception):
+        clay.load_mesh(str(cut))

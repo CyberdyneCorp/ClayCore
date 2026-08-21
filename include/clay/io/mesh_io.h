@@ -82,6 +82,28 @@ IoStatus load_fbx_file(const std::string& path, mesh::Mesh* out, const ImportBud
 std::vector<std::uint8_t> save_glb(const mesh::Mesh& m);
 IoStatus save_glb_file(const mesh::Mesh& m, const std::string& path);
 
+// The reader. GLB was the only format this library could WRITE and not read,
+// which made it the one gap in the importer — OBJ, PLY and FBX all round trip.
+//
+// It reads the whole file: every mesh, every TRIANGLES primitive, concatenated
+// into one mesh with each node's world transform applied, which is what makes
+// an exported scene arrive as the shape the author saw rather than as a pile of
+// pieces at the origin. Normals are transformed by the inverse-transpose, so a
+// non-uniform scale does not tilt them.
+//
+// What it does NOT do, deliberately, because the mesh type has nowhere to put
+// it: materials, textures, animation, skinning, cameras and morph targets are
+// ignored rather than refused — an asset carrying them still imports its
+// geometry. Non-triangle primitive modes ARE refused: silently dropping a line
+// or point set would import a file as empty and look like a broken reader.
+//
+// COLOR_0 is read as vec3 or vec4 (alpha dropped: the mesh has no alpha) and
+// from float, u8 or u16, normalized per the spec.
+IoStatus load_glb(const std::uint8_t* data, std::size_t size, mesh::Mesh* out,
+                  const ImportBudget& budget = {});
+IoStatus load_glb_file(const std::string& path, mesh::Mesh* out,
+                       const ImportBudget& budget = {});
+
 // -- .clayspace mesh stream ---------------------------------------------------
 // The payload a document's MESH chunk carries: u32 vertex count, u32 index
 // count, u8 attribute mask (1 normals, 2 colors, 4 uvs), then the float arrays

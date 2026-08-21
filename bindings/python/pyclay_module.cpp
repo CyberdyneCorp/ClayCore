@@ -461,10 +461,14 @@ mesh::Mesh load_mesh_any(const std::string& path, const io::ImportBudget& limits
         check_io(io::load_ply_file(path, &out, limits));
     } else if (ext == "fbx") {
         check_io(io::load_fbx_file(path, &out, limits));
+    } else if (ext == "glb") {
+        check_io(io::load_glb_file(path, &out, limits));
     } else {
-        // .glb is saved but not loaded; saying so beats a generic failure.
+        // .gltf lands here on purpose: its buffers live in separate files
+        // beside it, and reading whatever the JSON names would mean reading
+        // files the caller never handed us.
         throw std::invalid_argument("unsupported mesh extension '." + ext +
-                                    "' for loading (supported: .obj, .ply, .fbx)");
+                                    "' for loading (supported: .obj, .ply, .fbx, .glb)");
     }
     return out;
 }

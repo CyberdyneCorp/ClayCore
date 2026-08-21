@@ -1,5 +1,8 @@
 #include <doctest/doctest.h>
 
+#include <filesystem>
+#include <string>
+
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -229,4 +232,51 @@ TEST_CASE("mesh copy: every refusal") {
         CHECK(clay_mesh_copy_vertices(plain.m, &stunted, buf.data(), vertices * 12) ==
               CLAY_ERROR_INVALID_ARGUMENT);
     }
+}
+
+// -- GLB import across the boundary (add-glb-import) --------------------------
+
+TEST_CASE("c abi: clay_mesh_load reads a .glb it wrote") {
+    // GLB was the only format clay_mesh_save could write that clay_mesh_load
+    // could not read, which made a save/load pair fail on exactly the format a
+    // host is most likely to hand it.
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "l", &layer) == CLAY_OK);
+    const float r = 0.5f;
+    clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+    REQUIRE(it != nullptr);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, it, &node) == CLAY_OK);
+    clay_item_destroy(it);
+
+    clay_mesh_params p{};
+    p.struct_size = sizeof(p);
+    p.resolution = 20;
+    clay_mesh* mesh = nullptr;
+    REQUIRE(clay_document_mesh(doc, &p, &mesh) == CLAY_OK);
+
+    const std::string path =
+        (std::filesystem::temp_directory_path() / "c_abi_glb_roundtrip.glb").string();
+    REQUIRE(clay_mesh_save(mesh, path.c_str()) == CLAY_OK);
+
+    clay_mesh* back = nullptr;
+    REQUIRE(clay_mesh_load(path.c_str(), nullptr, &back) == CLAY_OK);
+    REQUIRE(back != nullptr);
+    CHECK(clay_mesh_vertex_count(back) == clay_mesh_vertex_count(mesh));
+    CHECK(clay_mesh_index_count(back) == clay_mesh_index_count(mesh));
+
+    SUBCASE("and the budget is enforced across the boundary") {
+        clay_mesh* refused = nullptr;
+        clay_import_budget budget{};
+        budget.struct_size = sizeof(budget);
+        budget.max_vertices = 2;
+        CHECK(clay_mesh_load(path.c_str(), &budget, &refused) == CLAY_ERROR_BUDGET_EXCEEDED);
+        CHECK(refused == nullptr);
+    }
+
+    clay_mesh_destroy(back);
+    clay_mesh_destroy(mesh);
+    clay_document_destroy(doc);
 }
