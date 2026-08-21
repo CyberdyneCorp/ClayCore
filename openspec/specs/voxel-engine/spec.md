@@ -847,3 +847,12 @@ A falloff brush resolves sub-unit strength by hashing the cell coordinate, and t
 - **WHEN** the same soft stroke is applied twice to the same level on any platform or backend
 - **THEN** exactly the same cells are set
 
+### Requirement: A painted mask can gate an SDF operation
+A painted `MaskField` SHALL be convertible into the form an SDF item's gate consumes, so the mask an artist paints protects both representations rather than only the voxel one.
+
+The two SHALL agree: a region protected from a voxel edit SHALL be protected from the equivalent SDF operation.
+
+#### Scenario: The same painted mask protects both representations
+- **WHEN** the same mask gates a voxel edit and the equivalent SDF operation
+- **THEN** the protected region is unchanged in both
+
