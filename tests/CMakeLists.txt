@@ -37,6 +37,7 @@ add_executable(clay_unit_tests
   unit/test_mesh_sculpt.cpp
   unit/test_mesh_deform.cpp
   unit/test_mesh_transfer.cpp
+  unit/test_bench_spread.cpp
   unit/test_meshers.cpp
   unit/test_pick.cpp
   unit/test_io.cpp
@@ -132,6 +133,9 @@ endif()
 target_link_libraries(clay_unit_tests PRIVATE clay::core doctest::doctest)
 # the C ABI tests consume the public header as a C consumer would
 target_include_directories(clay_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../bindings/c)
+# The benchmark spread is shared with tests/unit/test_bench_spread.cpp, which
+# gates the property the scattered-material benchmarks depend on (#196).
+target_include_directories(clay_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../benchmarks)
 clay_apply_warnings(clay_unit_tests)
 clay_apply_sanitizers(clay_unit_tests)
 

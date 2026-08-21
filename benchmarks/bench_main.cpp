@@ -24,6 +24,7 @@
 #include "clay/scene/cull_index.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
+#include "scatter_spread.h"
 
 using namespace clay;
 using kernel::cf3;
@@ -771,11 +772,9 @@ void BM_VoxelAddLevelWhole(benchmark::State& state) {
     // it — measured at 1.14x there against 2.47x here, which would have let the
     // regression back in. This is the device case's own spread: the same
     // low-discrepancy walk over a 40-cell scale, a small blob at each stop.
-    const double golden = 0.6180339887;
     for (int i = 0; i < 400; ++i) {
-        const int bx = int((std::fmod(double(i) * golden, 1.0) * 1.6 - 0.8) * 40);
-        const int by = int((std::fmod(double(i) * golden * golden, 1.0) * 1.6 - 0.8) * 40);
-        const int bz = int((std::fmod(double(i) * golden * golden * golden, 1.0) * 1.6 - 0.8) * 40);
+        int bx = 0, by = 0, bz = 0;
+        clay_bench::scatter_cell(i, 40, &bx, &by, &bz);
         for (int z = 0; z < 4; ++z)
             for (int y = 0; y < 4; ++y)
                 for (int x = 0; x < 4; ++x) g.set({bx + x, by + y, bz + z}, c);
@@ -812,11 +811,9 @@ BENCHMARK(BM_VoxelAddLevelWhole)->Unit(benchmark::kMillisecond);
 void BM_VoxelWriteUnderLevels(benchmark::State& state) {
     voxel::VoxelGrid g(0.02f);
     std::uint8_t c = g.palette_add(cf3(0.8f, 0.4f, 0.2f));
-    const double golden = 0.6180339887;
     for (int i = 0; i < 200; ++i) {
-        const int bx = int((std::fmod(double(i) * golden, 1.0) * 1.6 - 0.8) * 40);
-        const int by = int((std::fmod(double(i) * golden * golden, 1.0) * 1.6 - 0.8) * 40);
-        const int bz = int((std::fmod(double(i) * golden * golden * golden, 1.0) * 1.6 - 0.8) * 40);
+        int bx = 0, by = 0, bz = 0;
+        clay_bench::scatter_cell(i, 40, &bx, &by, &bz);
         for (int z = 0; z < 4; ++z)
             for (int y = 0; y < 4; ++y)
                 for (int x = 0; x < 4; ++x) g.set({bx + x, by + y, bz + z}, c);
@@ -831,9 +828,8 @@ void BM_VoxelWriteUnderLevels(benchmark::State& state) {
     for (auto _ : state) {
         // A moving brush, so the writes do not all land in one chunk and the
         // key is recomputed the way a stroke recomputes it.
-        const int bx = int((std::fmod(double(n) * golden, 1.0) * 1.6 - 0.8) * 60);
-        const int by = int((std::fmod(double(n) * golden * golden, 1.0) * 1.6 - 0.8) * 60);
-        const int bz = int((std::fmod(double(n) * golden * golden * golden, 1.0) * 1.6 - 0.8) * 60);
+        int bx = 0, by = 0, bz = 0;
+        clay_bench::scatter_cell(n, 60, &bx, &by, &bz);
         for (int z = 0; z < 6; ++z)
             for (int y = 0; y < 6; ++y)
                 for (int x = 0; x < 6; ++x) g.set({bx + x, by + y, bz + z}, c);
