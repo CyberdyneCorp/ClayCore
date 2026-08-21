@@ -14,9 +14,16 @@
 - [x] 2.1 A gate in `tools/check_c_abi.py` that walks the public header for
       entry points taking a versioned descriptor by mutable pointer and
       requires a bounded fill in each body
-- [x] 2.2 Verify the gate reports all eight sites against `main` and none here
-      — a gate that has never fired is not known to work
-- [x] 2.3 Update the ctypes exercise, which called defaults with a zeroed
+- [x] 2.2 Verify the gate reports every site against `main` and none here — a
+      gate that has never fired is not known to work
+- [x] 2.3 Use the gate before trusting it, and fix what that turned up: a third
+      write spelling (`*out = local`) it did not catch, hiding the ABI's
+      largest overrun (`clay_mesh_brush_defaults`, 56 bytes) and a tenth site
+      (`clay_mesh_sculptor_raycast`)
+- [x] 2.4 Bound the descriptor scan to each struct's own body — a match across
+      the whole header called the array-element types descriptors, which would
+      have failed the gate on correct code
+- [x] 2.5 Update the ctypes exercise, which called defaults with a zeroed
       descriptor, and add the case that omitting `struct_size` is refused
 
 ## 3. Move the callers

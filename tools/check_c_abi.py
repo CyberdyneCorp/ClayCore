@@ -100,25 +100,32 @@ def output_descriptor_fills() -> list[str]:
     """Every OUT descriptor must be filled bounded by the caller's struct_size.
 
     The prefix rule binds in both directions and only the reading half was ever
-    enforced. `*out = clay_thing{}` writes sizeof as THIS build defines it, so
-    the day a descriptor grows a field, every host compiled against the older
-    header has its buffer overwritten past the end — silently, and only on the
-    hosts the rule exists to serve, since anything rebuilt is the same size we
-    are. Four descriptors had already grown that way before anyone noticed.
+    enforced. Writing a whole struct through an out pointer emits sizeof as THIS
+    build defines it, so the day a descriptor grows a field, every host compiled
+    against the older header has its buffer overwritten past the end — silently,
+    and only on the hosts the rule exists to serve, since anything rebuilt is the
+    same size we are.
 
-    A grep for `*out = clay_thing{}` is not enough on its own: one site filled
-    its descriptor by delegating to another entry point and matched no such
-    pattern. So this walks the public header for entry points that take a
-    descriptor by MUTABLE pointer, and requires each one's body to reach a
-    bounded fill.
+    A grep is not enough, and this gate is the proof of it. Three separate
+    spellings of the same bug shipped: `*out = clay_thing{}`, assigning fields
+    through `out->`, and `*out = local` — the last of which hid the largest
+    overrun of the lot (56 bytes, clay_mesh_brush_defaults) and matched neither
+    of the first two patterns. So this walks the public header for entry points
+    that take a descriptor by MUTABLE pointer and requires each one's body to
+    reach a bounded fill, whatever spelling it would otherwise have used.
     """
     header = (REPO / "bindings" / "c" / "clay.h").read_text()
     source = (REPO / "bindings" / "c" / "clay_c.cpp").read_text()
 
+    # Bounded to each struct's own body. A `.*?` across the whole header spans
+    # struct boundaries and calls every later struct a descriptor — which named
+    # the array-element types, whose whole point is that they carry NO
+    # struct_size, and would have failed the gate on correct code.
     descriptors = {
         name
-        for name in set(re.findall(r"}\s*(clay_\w+);", header))
-        if re.search(r"typedef struct %s \{.*?uint32_t struct_size" % name, header, re.S)
+        for name, body in re.findall(r"typedef struct (\w+)\s*\{([^}]*)\}", header)
+        if name not in ARRAY_ELEMENT_STRUCTS
+        and re.match(r"\s*uint32_t\s+struct_size\s*;", body)
     }
 
     errors = []
@@ -126,21 +133,24 @@ def output_descriptor_fills() -> list[str]:
         if name in BOUNDED_VIA_HELPER:
             continue
         flat = " ".join(args.split())
-        for desc in descriptors:
+        for desc in sorted(descriptors):
             if not re.search(r"(?<!const )\b%s\s*\*" % desc, flat):
                 continue
-            body = re.search(r"\bclay_result\s+%s\s*\([^)]*\)\s*\{" % name, source)
-            if not body:
+            found = re.search(r"\bclay_result\s+%s\s*\([^)]*\)\s*\{" % name, source)
+            if not found:
                 continue
-            tail = source[body.end():]
+            tail = source[found.end():]
             tail = tail[: tail.find("\n}\n")]
             if any(fill in tail for fill in BOUNDED_FILLS):
                 continue
-            if re.search(r"\*\s*out\w*\s*=\s*%s\{\}" % desc, tail):
-                errors.append(f"{name} fills {desc} with `*out = {desc}{{}}`, which writes "
-                              f"this build's sizeof rather than the size the caller declared; "
-                              f"use write_desc")
-            elif re.search(r"out\w*->\w+\s*=", tail):
+            # An array out-parameter is a different contract — the caller sizes
+            # the array, and `out[i].field = ...` is how it is filled — so only
+            # a write to the descriptor ITSELF counts here.
+            if re.search(r"\*\s*%s\w*\s*=|\*\s*out\w*\s*=" % "out", tail):
+                errors.append(f"{name} assigns a whole {desc} through the out pointer, which "
+                              f"writes this build's sizeof rather than the size the caller "
+                              f"declared; use write_desc")
+            elif re.search(r"\bout\w*->\w+\s*=", tail):
                 errors.append(f"{name} writes {desc} fields without a bounded fill; "
                               f"use write_desc so an older caller's buffer is not overrun")
     return errors

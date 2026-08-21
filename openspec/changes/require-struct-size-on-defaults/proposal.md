@@ -41,8 +41,27 @@ pattern and was invisible to the first pass. It is a ninth site.
 That miss is the argument for the gate this change adds. `tools/check_c_abi.py`
 now walks `clay.h` for every entry point taking a versioned descriptor by
 MUTABLE pointer and requires each one's body to reach a bounded fill — so the
-next site is caught by construction rather than by whoever greps well. Run
-against `main` it reports all eight; against this change, none.
+next site is caught by construction rather than by whoever greps well.
+
+**The gate immediately earned itself, twice over.** A first draft of it looked
+for the two spellings that were in the tree, and using it turned up a third:
+`*out = local`, which matched neither. That spelling was hiding
+`clay_mesh_brush_defaults`, whose original layout ends at `smooth_iterations`
+while `layer_height` and the entire alpha block came after it — **56 bytes past
+a 104-byte buffer, the largest overrun in the ABI**, sitting in a function two
+sweeps had already walked past. `clay_mesh_sculptor_raycast` was a tenth site
+with the same spelling.
+
+The same exercise found the gate's other end was wrong too. Its descriptor scan
+used a non-greedy match across the whole header, which spans struct boundaries
+and so called every later struct a descriptor — including the array-element
+types, whose defining property is that they carry NO `struct_size`. It would
+have failed the gate on correct code the first time somebody touched
+`clay_brick_cache_take_dirty`. The scan is now bounded to each struct's own
+body and honours `ARRAY_ELEMENT_STRUCTS`.
+
+Run against `main` the finished gate reports ten sites; against this change,
+none.
 
 ## Impact
 

@@ -300,3 +300,60 @@ TEST_CASE("c abi: deserializing a preset is an output descriptor too") {
               CLAY_ERROR_INVALID_ARGUMENT);
     }
 }
+
+TEST_CASE("c abi: the descriptor-defaults and raycast fills are bounded too") {
+    // Both were found by the header walk in tools/check_c_abi.py AFTER the
+    // grep-based sweep had declared itself complete, because both spell the
+    // write as `*out = local` — a third spelling that matched neither pattern
+    // the first gate looked for.
+    //
+    // clay_mesh_brush_desc is the worst case in the ABI: its original layout
+    // ends at smooth_iterations, and layer_height plus the whole alpha block
+    // came after it, so the unbounded fill wrote 56 bytes past an older host's
+    // 104-byte buffer.
+    SUBCASE("clay_mesh_brush_defaults") {
+        OldHostBuffer<clay_mesh_brush_desc> buf(
+            ORIGINAL_OF(clay_mesh_brush_desc, smooth_iterations));
+        REQUIRE(clay_mesh_brush_defaults(buf.ptr()) == CLAY_OK);
+        CHECK(buf.overrun() == 0);
+        CHECK(buf.reported_size() == buf.declared);
+        CHECK(buf.was_filled());
+    }
+
+    SUBCASE("a defaults descriptor declaring no size is refused") {
+        clay_mesh_brush_desc d{};
+        CHECK(clay_mesh_brush_defaults(&d) == CLAY_ERROR_INVALID_ARGUMENT);
+    }
+
+    SUBCASE("a current caller still gets the fields appended after the original") {
+        clay_mesh_brush_desc d{};
+        d.struct_size = sizeof(d);
+        REQUIRE(clay_mesh_brush_defaults(&d) == CLAY_OK);
+        CHECK(d.struct_size == sizeof(d));
+        CHECK(d.radius > 0.0f);
+        CHECK(d.layer_height != 0.0f);   // appended after the original layout
+        CHECK(d.alpha == nullptr);       // and the alpha block was zeroed, not left dirty
+        CHECK(d.alpha_width == 0);
+    }
+
+    SUBCASE("clay_mesh_sculptor_raycast") {
+        Doc doc;
+        clay_mesh_params p{};
+        p.struct_size = sizeof(p);
+        p.resolution = 24;
+        clay_mesh* mesh = nullptr;
+        REQUIRE(clay_document_mesh(doc, &p, &mesh) == CLAY_OK);
+        clay_mesh_sculptor* sc = nullptr;
+        REQUIRE(clay_mesh_sculptor_create(mesh, 0.0f, &sc) == CLAY_OK);
+
+        const float origin[3] = {0.0f, 3.0f, 0.0f};
+        const float dir[3] = {0.0f, -1.0f, 0.0f};
+        OldHostBuffer<clay_mesh_hit> buf(ORIGINAL_OF(clay_mesh_hit, seed_class));
+        REQUIRE(clay_mesh_sculptor_raycast(sc, origin, dir, nullptr, buf.ptr()) == CLAY_OK);
+        CHECK(buf.overrun() == 0);
+        CHECK(buf.reported_size() == buf.declared);
+
+        clay_mesh_sculptor_destroy(sc);
+        clay_mesh_destroy(mesh);
+    }
+}

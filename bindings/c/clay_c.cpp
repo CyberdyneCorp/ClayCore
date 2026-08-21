@@ -7661,8 +7661,11 @@ extern "C" {
 clay_result clay_mesh_brush_defaults(clay_mesh_brush_desc* out_desc) {
     if (!out_desc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null descriptor");
     const mesh::MeshBrushSettings d;
+    clay_mesh_brush_desc probe;
+    clay_result r = read_desc(out_desc, kMeshBrushDescOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_desc->struct_size;
     clay_mesh_brush_desc out{};
-    out.struct_size = static_cast<std::uint32_t>(sizeof(clay_mesh_brush_desc));
     out.verb = CLAY_MESH_BRUSH_DRAW;
     write_f3(out.center, d.center);
     out.radius = d.radius;
@@ -7681,7 +7684,7 @@ clay_result clay_mesh_brush_defaults(clay_mesh_brush_desc* out_desc) {
     out.layer_height = d.layer_height;
     // The alpha stays null in the defaults: a stamp without one is the common
     // case, and a default pointing at nothing a caller owns would be a trap.
-    *out_desc = out;
+    write_desc(out_desc, declared, out);
     return CLAY_OK;
 }
 
@@ -7894,8 +7897,8 @@ clay_result clay_mesh_sculptor_raycast(clay_mesh_sculptor* sculptor, const float
 
     const mesh::Mesh& m = sculptor->sculptor->mesh();
     const pick::MeshHit hit = pick::raycast_mesh(m, sculptor->sculptor->bvh(), ray, frame);
+    const std::uint32_t declared = out_hit->struct_size;
     clay_mesh_hit out{};
-    out.struct_size = out_hit->struct_size;
     out.hit = hit.hit ? 1 : 0;
     if (hit.hit) {
         out.t = hit.t;
@@ -7908,7 +7911,7 @@ clay_result clay_mesh_sculptor_raycast(clay_mesh_sculptor* sculptor, const float
     } else {
         out.seed_class = CLAY_MESH_NO_CLASS;
     }
-    *out_hit = out;
+    write_desc(out_hit, declared, out);
     return CLAY_OK;
 }
 

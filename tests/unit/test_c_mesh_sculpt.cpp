@@ -60,6 +60,7 @@ clay_mesh* grid_mesh(int n = 12, float half = 1.0f) {
 
 clay_mesh_brush_desc brush(int32_t verb, float radius, float strength) {
     clay_mesh_brush_desc d;
+    d.struct_size = sizeof(d);
     REQUIRE(clay_mesh_brush_defaults(&d) == CLAY_OK);
     d.verb = verb;
     d.radius = radius;
