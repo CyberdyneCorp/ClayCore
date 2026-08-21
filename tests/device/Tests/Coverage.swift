@@ -203,6 +203,18 @@ enum Coverage {
                        + "measuring first when the fixture exists: it is what "
                        + "a drag actually drives, and it amortises the "
                        + "adjacency the stamp path pays for separately."),
+        .exempt("mesh_sculptor_deform",
+                because: "unmeasured, for the same missing mesh-layer fixture "
+                       + "as mesh_sculptor_stamp — but it is a DIFFERENT cost "
+                       + "shape and should not inherit that case's number when "
+                       + "one exists. A stamp is O(the vertices a falloff "
+                       + "reached) after an adjacency build the session pays "
+                       + "once; a taper or a twist is O(every vertex in the "
+                       + "mesh), every time, because a deformer acts on the "
+                       + "whole form rather than under a cursor. That makes it "
+                       + "the mesh case most likely to breach an interaction "
+                       + "budget, and the one worth measuring first after the "
+                       + "stroke path."),
         .exempt("cut_polygon_from_curve",
                 because: "the CLOSED tessellation of the same control points the "
                        + "open variant measured by trim_curve tessellates. The "
