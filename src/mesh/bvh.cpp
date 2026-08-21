@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace clay {
 namespace mesh {
@@ -112,14 +113,15 @@ Bvh Bvh::build(const Mesh& m) {
         bvh.tris_.push_back(
             Tri{m.positions[i0], m.positions[i1], m.positions[i2], static_cast<std::uint32_t>(t)});
     }
-    if (!bvh.tris_.empty()) bvh.build_node(0, static_cast<std::int32_t>(bvh.tris_.size()));
+    if (!bvh.tris_.empty()) bvh.build_node(0, static_cast<std::int32_t>(bvh.tris_.size()), -1);
+    bvh.index_for_refit(count);
     return bvh;
 }
 
 // The winding-number summary of one node: the sum of its triangles'
 // area-weighted normals, standing in for all of them when the node is far
 // enough away to be treated as a single dipole.
-void Bvh::summarize(Node& n) {
+void Bvh::summarize_span(Node& n) {
     cfloat3 normal_sum = cf3(0, 0, 0);
     cfloat3 weighted = cf3(0, 0, 0);
     float total_area = 0.0f;
@@ -134,10 +136,46 @@ void Bvh::summarize(Node& n) {
         total_area += area;
     }
     n.normal_sum = normal_sum;
+    // Kept rather than discarded, so a refit can rebuild a parent from its two
+    // children instead of from its span. Everything below reads them; nothing
+    // in the BUILD does, which is what keeps a built tree bit-identical.
+    n.weighted_centroid = weighted;
+    n.area = total_area;
     n.centroid = total_area > 0.0f ? weighted * (1.0f / total_area)
                                    : (n.box.min + n.box.max) * 0.5f;
-    // The radius of the node's box about that centroid, which is what the
-    // far-field test compares the query distance against.
+    set_radius(n);
+}
+
+// The parent of two summarised children, in constant time.
+//
+// The box is the union of the two, which is EXACT — a union of unions is the
+// same union, and min and max do not round. The dipole is not: floating-point
+// addition is not associative, so `left + right` differs in the last bits from
+// summing the span. That is the whole of the difference between a refitted tree
+// and a rebuilt one, and the tests say so rather than asserting bit-identity
+// they cannot have.
+void Bvh::combine(Node& n, const Node& l, const Node& r) {
+    n.box = math::Aabb();
+    n.box.expand(l.box.min);
+    n.box.expand(l.box.max);
+    n.box.expand(r.box.min);
+    n.box.expand(r.box.max);
+    n.normal_sum = l.normal_sum + r.normal_sum;
+    n.weighted_centroid = l.weighted_centroid + r.weighted_centroid;
+    n.area = l.area + r.area;
+    // The degenerate branch has to be taken explicitly rather than inherited: a
+    // subtree of zero-area triangles has no weighted centroid to divide, and
+    // `summarize_span` answers with the box centre. A parent combining one such
+    // child with a normal one is fine — the zero child contributes nothing to
+    // either sum — but a parent whose whole subtree is degenerate is not.
+    n.centroid = n.area > 0.0f ? n.weighted_centroid * (1.0f / n.area)
+                               : (n.box.min + n.box.max) * 0.5f;
+    set_radius(n);
+}
+
+// The radius of the node's box about its own centroid, which is what the
+// far-field test compares the query distance against.
+void Bvh::set_radius(Node& n) {
     cfloat3 corners[2] = {n.box.min, n.box.max};
     float furthest = 0.0f;
     for (int i = 0; i < 8; ++i) {
@@ -165,9 +203,14 @@ std::int32_t Bvh::partition(std::int32_t first, std::int32_t count, const math::
     return count / 2;
 }
 
-std::int32_t Bvh::build_node(std::int32_t first, std::int32_t count) {
+// Nodes are appended in DFS PRE-ORDER — self, then left, then right — so a
+// parent's index is always lower than either child's. `refit` leans on that:
+// walking the node array from the end backwards visits every child before its
+// parent, which is the whole of the ordering problem, with no queue and no sort.
+std::int32_t Bvh::build_node(std::int32_t first, std::int32_t count, std::int32_t parent) {
     const std::int32_t self = static_cast<std::int32_t>(nodes_.size());
     nodes_.push_back(Node{});
+    nodes_[static_cast<std::size_t>(self)].parent = parent;
     math::Aabb box;
     for (std::int32_t i = 0; i < count; ++i) {
         const Tri& t = tris_[static_cast<std::size_t>(first + i)];
@@ -181,15 +224,186 @@ std::int32_t Bvh::build_node(std::int32_t first, std::int32_t count) {
 
     if (count > kLeafSize) {
         const std::int32_t half = partition(first, count, box);
-        build_node(first, half);
-        std::int32_t right = build_node(first + half, count - half);
+        build_node(first, half, self);
+        std::int32_t right = build_node(first + half, count - half, self);
         nodes_[static_cast<std::size_t>(self)].right = right;
         nodes_[static_cast<std::size_t>(self)].count = 0;
     } else {
         nodes_[static_cast<std::size_t>(self)].count = count;
     }
-    summarize(nodes_[static_cast<std::size_t>(self)]);
+    summarize_span(nodes_[static_cast<std::size_t>(self)]);
     return self;
+}
+
+// The two maps a refit needs, filled once here because both are byproducts of a
+// build that would otherwise be thrown away.
+//
+// `source_slot_` exists because `partition` reorders `tris_` with nth_element,
+// so the triangle a caller names by its mesh index is not at that index here.
+// `slot_leaf_` exists because a changed triangle has to reach the node holding
+// it, and a leaf owns a contiguous span, so one pass over the leaves fills it.
+void Bvh::index_for_refit(std::size_t source_triangles) {
+    source_slot_.assign(source_triangles, kNoSlot);
+    slot_leaf_.assign(tris_.size(), -1);
+    for (std::size_t s = 0; s < tris_.size(); ++s) {
+        const std::uint32_t src = tris_[s].source;
+        if (src < source_slot_.size()) source_slot_[src] = static_cast<std::uint32_t>(s);
+    }
+    for (std::size_t i = 0; i < nodes_.size(); ++i) {
+        const Node& n = nodes_[i];
+        if (n.count <= 0) continue;  // internal
+        for (std::int32_t k = 0; k < n.count; ++k)
+            slot_leaf_[static_cast<std::size_t>(n.first + k)] = static_cast<std::int32_t>(i);
+    }
+    dirty_.assign(nodes_.size(), 0);
+    dirty_list_.clear();
+}
+
+// Copy the named triangles' positions in from the mesh and mark the leaves that
+// hold them. Returns false when the mesh is not the one this tree was built
+// over, before touching anything.
+bool Bvh::refit_slots(const Mesh& m, const std::uint32_t* changed, std::size_t count) {
+    if (m.triangle_count() != source_slot_.size()) return false;
+    if (nodes_.empty()) return true;  // an empty tree is already fitted
+    // Reset through the LIST rather than by clearing the array. Clearing costs
+    // O(nodes), which is O(mesh) — the exact shape of defect issue #192 is
+    // about, and it would sit on the per-stamp path this whole change exists to
+    // make proportional to the brush. The list holds precisely what the last
+    // refit marked, so the reset costs what was touched. Same discipline as
+    // `WalkScratch` in adjacency.h, for the same reason.
+    if (dirty_.size() != nodes_.size()) {
+        dirty_.assign(nodes_.size(), 0);
+        dirty_list_.clear();
+    } else {
+        for (std::int32_t n : dirty_list_) dirty_[static_cast<std::size_t>(n)] = 0;
+        dirty_list_.clear();
+    }
+    const std::size_t verts = m.positions.size();
+    for (std::size_t k = 0; k < count; ++k) {
+        const std::uint32_t src = changed ? changed[k] : static_cast<std::uint32_t>(k);
+        if (src >= source_slot_.size()) continue;
+        const std::uint32_t slot = source_slot_[src];
+        if (slot == kNoSlot) continue;  // dropped at build time, by a bad index
+        const std::uint32_t i0 = m.indices[static_cast<std::size_t>(src) * 3];
+        const std::uint32_t i1 = m.indices[static_cast<std::size_t>(src) * 3 + 1];
+        const std::uint32_t i2 = m.indices[static_cast<std::size_t>(src) * 3 + 2];
+        if (i0 >= verts || i1 >= verts || i2 >= verts) continue;
+        Tri& t = tris_[slot];
+        t.a = m.positions[i0];
+        t.b = m.positions[i1];
+        t.c = m.positions[i2];
+        // Mark the leaf and every ancestor. The walk stops at the first node
+        // already marked, because everything above it was marked by whoever
+        // marked it — which is what keeps the marking proportional to the
+        // distinct paths touched rather than to (triangles x depth).
+        std::int32_t node = slot_leaf_[slot];
+        while (node >= 0 && !dirty_[static_cast<std::size_t>(node)]) {
+            dirty_[static_cast<std::size_t>(node)] = 1;
+            dirty_list_.push_back(node);
+            node = nodes_[static_cast<std::size_t>(node)].parent;
+        }
+    }
+    return true;
+}
+
+bool Bvh::refit(const Mesh& m, const std::uint32_t* changed, std::size_t count) {
+    if (!refit_slots(m, changed, count)) return false;
+    if (dirty_list_.empty()) return true;
+    // Descending node index visits every child before its parent — see the note
+    // on build_node. Sorting the dirty list is what makes that true for a set
+    // marked in arbitrary order; it is over the nodes TOUCHED, not over the
+    // tree.
+    std::sort(dirty_list_.begin(), dirty_list_.end());
+    for (std::size_t i = dirty_list_.size(); i-- > 0;) {
+        Node& n = nodes_[static_cast<std::size_t>(dirty_list_[i])];
+        if (n.count > 0) {
+            // A leaf: its own triangles are the only source of truth, and there
+            // are at most kLeafSize of them.
+            n.box = math::Aabb();
+            for (std::int32_t k = 0; k < n.count; ++k) {
+                const Tri& t = tris_[static_cast<std::size_t>(n.first + k)];
+                n.box.expand(t.a);
+                n.box.expand(t.b);
+                n.box.expand(t.c);
+            }
+            summarize_span(n);
+        } else {
+            const std::int32_t self = dirty_list_[i];
+            combine(n, nodes_[static_cast<std::size_t>(self + 1)],
+                    nodes_[static_cast<std::size_t>(n.right)]);
+        }
+    }
+    return true;
+}
+
+bool Bvh::refit(const Mesh& m) {
+    return refit(m, nullptr, m.triangle_count());
+}
+
+float Bvh::quality() const {
+    // The surface-area heuristic's own cost estimate, read rather than
+    // optimised: the expected number of triangle tests a random ray through
+    // the root box has to make, being the sum over LEAVES of their surface area
+    // times how many triangles they hold, divided by the root's area.
+    //
+    // Accumulated in DOUBLE. In float the products overflow on a large model —
+    // a million leaves of a few square units each is already past 1e38 — and
+    // the answer comes back inf or, worse, a finite number that has lost its
+    // low bits. The inputs are float and the ratio is float; only the sum needs
+    // the width.
+    //
+    // The obvious alternative — the mean over internal nodes of (child area sum
+    // / own area) — was tried and rejected by measurement: it averages the few
+    // nodes a brush stretched against the thousands it did not, so a pull of
+    // twenty units moved it from 1.153 to 1.170, and at one unit it scored the
+    // stretched tree BETTER than a rebuild. Nothing a host could threshold.
+    auto area_of = [](const math::Aabb& b) {
+        const double x = std::max(static_cast<double>(b.max.x) - static_cast<double>(b.min.x), 0.0);
+        const double y = std::max(static_cast<double>(b.max.y) - static_cast<double>(b.min.y), 0.0);
+        const double z = std::max(static_cast<double>(b.max.z) - static_cast<double>(b.min.z), 0.0);
+        return 2.0 * (x * y + y * z + z * x);
+    };
+    if (nodes_.empty()) return 0.0f;
+    const double root = area_of(nodes_[0].box);
+    // A root with no surface area — every triangle in one plane, or a single
+    // degenerate one — has nothing to normalise by. NaN rather than 0, because
+    // 0 is the BEST end of this scale and would read as "queries got cheaper"
+    // for a tree nothing has been measured about. Every comparison against a
+    // NaN is false, which is the honest answer to a question with no answer.
+    if (!(root > 0.0)) return std::numeric_limits<float>::quiet_NaN();
+    double cost = 0.0;
+    for (const Node& n : nodes_) {
+        if (n.count <= 0) continue;  // internal nodes carry no triangle tests
+        cost += area_of(n.box) * static_cast<double>(n.count);
+    }
+    return static_cast<float>(cost / root);
+}
+
+bool Bvh::bounds_contain_their_triangles(const Mesh* m) const {
+    auto holds = [](const math::Aabb& b, cfloat3 p) {
+        return p.x >= b.min.x && p.x <= b.max.x && p.y >= b.min.y && p.y <= b.max.y &&
+               p.z >= b.min.z && p.z <= b.max.z;
+    };
+    auto same = [](cfloat3 a, cfloat3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; };
+    for (const Node& n : nodes_)
+        for (std::int32_t i = 0; i < n.span; ++i) {
+            const Tri& t = tris_[static_cast<std::size_t>(n.first + i)];
+            if (!holds(n.box, t.a) || !holds(n.box, t.b) || !holds(n.box, t.c)) return false;
+            if (!m) continue;
+            // The half that self-consistency cannot see: does the tree still
+            // hold the mesh's CURRENT geometry? A refit given a subset leaves
+            // this false and everything above it true.
+            const std::size_t base = static_cast<std::size_t>(t.source) * 3;
+            if (base + 2 >= m->indices.size()) return false;
+            const std::uint32_t i0 = m->indices[base], i1 = m->indices[base + 1];
+            const std::uint32_t i2 = m->indices[base + 2];
+            const std::size_t verts = m->positions.size();
+            if (i0 >= verts || i1 >= verts || i2 >= verts) return false;
+            if (!same(t.a, m->positions[i0]) || !same(t.b, m->positions[i1]) ||
+                !same(t.c, m->positions[i2]))
+                return false;
+        }
+    return true;
 }
 
 math::Aabb Bvh::bounds() const {
