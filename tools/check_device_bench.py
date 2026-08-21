@@ -62,6 +62,36 @@ def worst_p95(case: dict) -> float:
     return max((m["p95Ms"] for m in case.get("measurements", [])), default=float("nan"))
 
 
+def case_repeats(case: dict) -> int:
+    """Most repeats any of this case's points needed."""
+    return max((m.get("repeats", 1) for m in case.get("measurements", [])), default=1)
+
+
+def single_observation(case: dict) -> bool:
+    """True when every point of this case is ONE timing, not a percentile.
+
+    The gallery sessions time each stroke of a progressive sculpt once, so
+    their reported p95 is the slowest single stroke rather than a percentile
+    over repeats — and a stroke cannot be repeated without changing the sculpt
+    it is building. Those cases cannot be stabilised the way a benchmark point
+    can, so the gate says which kind it is failing on rather than implying a
+    measurement that was never taken.
+    """
+    ms = case.get("measurements", [])
+    return bool(ms) and all(m.get("samples", 0) <= 1 for m in ms)
+
+
+def worst_spread(case: dict) -> float:
+    """Widest per-pass p95 spread over this case's measurement points.
+
+    Zero for a case measured in one pass, which is every case whose points
+    earned enough samples for an honest percentile. Non-zero says the harness
+    had to repeat the point, and how far the answer moved when it did.
+    """
+    return max((m.get("p95SpreadMs", 0.0) for m in case.get("measurements", [])),
+               default=0.0)
+
+
 def load(path: pathlib.Path) -> dict:
     if not path.exists():
         raise SystemExit(f"device-bench: no such file: {path}")
@@ -183,10 +213,25 @@ def main() -> int:
             base_p95 = worst_p95(base)
             grew = measured - base_p95
             if base_p95 > 0 and measured > base_p95 * tolerance and grew > NOISE_FLOOR_MS:
+                # Say what this case's own repeats measured, when it had any.
+                # A regression smaller than the spread the harness just saw on
+                # THIS run is not evidence of anything, and reporting the
+                # failure without that number is how a scheduling hiccup got
+                # investigated as a 1.6x consolidation regression for a day.
+                spread = worst_spread(case)
+                caveat = ""
+                if single_observation(case):
+                    caveat = ("; NOTE every point of this case is a SINGLE "
+                              "timing, so this is one observation against "
+                              "another, not a measured regression")
+                elif spread > 0 and grew < spread:
+                    caveat = (f"; NOTE the {case_repeats(case)} repeats of this "
+                              f"case spread {spread:.3f} ms, wider than the "
+                              f"{grew:.3f} ms growth — treat as unproven")
                 failures.append(
                     f"{name}: REGRESSION {measured:.3f} ms p95 vs baseline "
                     f"{base_p95:.3f} ms (x{measured / base_p95:.2f}, "
-                    f"tolerance x{tolerance}, +{grew:.3f} ms)")
+                    f"tolerance x{tolerance}, +{grew:.3f} ms){caveat}")
 
         # GROWTH — the shape, not the level.
         growth = case.get("growthExponent")
@@ -203,6 +248,20 @@ def main() -> int:
 
     print(f"device-bench: {len(run['cases'])} case(s) on {run['deviceModel']}, "
           f"{run['osVersion']}")
+
+    # Which cases could not be measured in one pass, and how far they moved
+    # when repeated. Printed every run rather than only on failure: the point
+    # is to know a case's noise BEFORE it fails, not to explain it afterwards.
+    repeated = sorted(((case_repeats(c), worst_spread(c), c["name"])
+                       for c in run["cases"] if case_repeats(c) > 1),
+                      key=lambda t: -t[1])
+    if repeated:
+        print(f"  {len(repeated)} case(s) needed repeats for an honest p95:")
+        for reps, spread, name in repeated[:5]:
+            print(f"    {name}: median of {reps} passes, spread {spread:.3f} ms")
+        if len(repeated) > 5:
+            print(f"    ... and {len(repeated) - 5} more")
+
     for note in notes:
         print(f"  note: {note}")
     for f in failures:

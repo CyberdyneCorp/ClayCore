@@ -173,10 +173,12 @@ final class VerbLatencyTests: XCTestCase {
                 XCTFail("\(name): could not build a fixture at \(stamps) stamps")
                 continue
             }
-            let r = Timing.measure(reset: fixture.reset, fixture.body)
+            let r = Timing.measureStable(reset: fixture.reset, fixture.body)
             fixture.cleanup()
             measurements.append(Measurement(stamps: stamps, p50Ms: r.p50,
-                                            p95Ms: r.p95, samples: r.n))
+                                            p95Ms: r.p95, samples: r.n,
+                                            repeats: r.repeats,
+                                            p95SpreadMs: r.spread))
         }
         collector.add(CaseResult(
             name: name, verb: verb, budgetClass: cls,
