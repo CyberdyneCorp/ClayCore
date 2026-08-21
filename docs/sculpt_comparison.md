@@ -59,7 +59,7 @@ SDF layers and the asset-finishing pipeline have not.
 | **Masking** | **Protects the surface from any op**, on either representation — a gated item does not act where the mask protects | First class, protects the surface from *any* op | First class | First class |
 | **Sculpt layers** | **On voxel layers.** A pass is bracketed and its changed cells recorded, so its strength stays adjustable long after the strokes are finished; SDF layers do not have them yet | Headline feature | Present | Present |
 | **Alphas / stamps** | **Both representations**, scalar stamps only — no vector displacement maps | Deep, VDM support | Deep | Present |
-| **Surface colour** | **Polypaint**: per-item colour, freehand `Paint` strokes, per-sample colour in sampled volumes, a 256-entry voxel palette, vertex colours at mesh time. No PBR channels — a declared non-goal for painting | Polypaint | **PBR texture painting — its moat** | Vertex paint + texture paint |
+| **Surface colour** | **Polypaint on all three representations**: per-item colour and freehand `Paint` strokes on SDF layers, per-sample colour in sampled volumes, a 256-entry voxel palette, and — since `add-mesh-colour-brushes` — `paint` and `smear` on a mesh layer's own vertices. No PBR channels — a declared non-goal for painting | Polypaint | **PBR texture painting — its moat** | Vertex paint + texture paint |
 | **Scale** | ≥256³ per voxel layer, no streaming; SDF edit lists degrade step scale as they grow | Tens of millions of polys | Very large voxel scenes | Large, memory-bound |
 | **Embeddable** | **Yes — C ABI, SwiftPM, Python, headless** | No | No | No (as a library) |
 | **GPU portability** | **One kernel source → CPU / Metal / CUDA / OpenCL, parity-gated** | Proprietary CPU-centric | GPU-assisted | GPU sculpt, single path |
@@ -234,6 +234,13 @@ drag: it reaches as far as the drag goes and the field stays exact (step scale
   reads on every backend, and consolidating a painted layer preserves that
   colour exactly, which is how colour resolution moves from ITEM-bound to
   TEXEL-bound without repainting.
+
+  The one representation that could only CARRY colour was the mesh layer, and
+  that closed with `add-mesh-colour-brushes`: `paint` and `smear` are Blender's
+  pair, they are the only verbs in the vocabulary that move no vertex, and they
+  refuse a mesh with no colour attribute rather than creating one behind a
+  brush stroke. So colour is now editable on every representation the library
+  has, rather than on two of three.
 
   What is genuinely absent is **PBR channels** — roughness, metallic, normal —
   and that is now a declared non-goal for painting rather than a gap: material

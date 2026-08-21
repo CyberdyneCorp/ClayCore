@@ -658,14 +658,15 @@ needs them, and listed so they are not mistaken for oversights:
   the header for every entry point taking a descriptor by mutable pointer and
   requires a bounded fill, so the next one is caught by construction.
 
-- **Colour on a mesh layer's brushes.** `MeshSculptor` has fourteen verbs and
-  every one of them moves vertices; nothing writes `Mesh::colors`. Blender's
-  Paint and Smear are the missing pair. A mesh layer can CARRY imported vertex
-  colours and export them, but cannot have them edited — the odd one out now
-  that the SDF side paints through `Op::Paint` strokes and the voxel side
-  through its palette. Named by `decide-surface-colour` and pinned by a test
-  that every verb leaves `colors` byte-identical, so adding one is a deliberate
-  act rather than an accident.
+- ~~**Colour on a mesh layer's brushes.**~~ Closed by
+  `add-mesh-colour-brushes` (ABI 0.36.0). `paint` and `smear` are Blender's
+  pair, and they are the only two verbs in the vocabulary that move no vertex —
+  `positions` and `normals` come out byte-identical, the exact mirror of what
+  the other fourteen guarantee about `colors`. The test that pinned the
+  omission was narrowed to the verbs it is still about rather than deleted.
+  Colour is now editable on every representation the library has rather than on
+  two of three. What remains genuinely absent is PBR channels, which is a
+  declared non-goal rather than a gap — see `docs/sculpt_comparison.md`.
 
 - **Procedural noise as a tape opcode.** `displace` is by-callable today, which
   is not portable across backends. A tape-expressible 3D noise field is the

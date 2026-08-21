@@ -498,3 +498,83 @@ TEST_CASE("c abi: a lattice refuses null arguments and clamps its divisions") {
     // Destroying null is a no-op, as everywhere else in this ABI.
     clay_mesh_lattice_destroy(nullptr);
 }
+
+// -- the colour pair across the boundary (add-mesh-colour-brushes) ------------
+
+TEST_CASE("c abi: the colour verbs paint, refuse a colourless mesh, and move nothing") {
+    clay_mesh* mesh = grid_mesh(16, 1.0f);
+    clay_mesh_sculptor* sc = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(mesh, 0.0f, &sc) == CLAY_OK);
+
+    // A mesh built from bare triangles has no colour attribute, which is the
+    // case the verbs refuse rather than quietly allocating for.
+    std::int32_t has = -1;
+    REQUIRE(clay_mesh_sculptor_has_colors(sc, &has) == CLAY_OK);
+    CHECK(has == 0);
+
+    clay_mesh_brush_desc d = brush(CLAY_MESH_BRUSH_PAINT, 0.5f, 0.9f);
+    // Red, in full: the defaults hand back WHITE, and ensure_colors fills
+    // white, so setting only the red channel would paint white onto white and
+    // correctly report that nothing changed.
+    d.color[0] = 1.0f;
+    d.color[1] = 0.0f;
+    d.color[2] = 0.0f;
+    std::size_t touched = 1;
+    REQUIRE(clay_mesh_sculptor_stamp(sc, &d, nullptr, nullptr, &touched) == CLAY_OK);
+    CHECK(touched == 0);
+    REQUIRE(clay_mesh_sculptor_has_colors(sc, &has) == CLAY_OK);
+    CHECK(has == 0);  // and it did not create one behind the stroke
+
+    const float white[3] = {1, 1, 1};
+    std::int32_t created = 0;
+    REQUIRE(clay_mesh_sculptor_ensure_colors(sc, white, &created) == CLAY_OK);
+    CHECK(created == 1);
+    const float black[3] = {0, 0, 0};
+    std::int32_t again = 1;
+    REQUIRE(clay_mesh_sculptor_ensure_colors(sc, black, &again) == CLAY_OK);
+    CHECK(again == 0);  // already there, left exactly as it is
+
+    const std::size_t n = clay_mesh_vertex_count(mesh);
+    std::vector<float> before_pos(n * 3), before_col(n * 3);
+    std::memcpy(before_pos.data(), clay_mesh_positions(mesh), n * 3 * sizeof(float));
+    std::memcpy(before_col.data(), clay_mesh_colors(mesh), n * 3 * sizeof(float));
+
+    REQUIRE(clay_mesh_sculptor_stamp(sc, &d, nullptr, nullptr, &touched) == CLAY_OK);
+    CHECK(touched > 0);
+    CHECK(std::memcmp(before_col.data(), clay_mesh_colors(mesh), n * 3 * sizeof(float)) != 0);
+    CHECK(std::memcmp(before_pos.data(), clay_mesh_positions(mesh), n * 3 * sizeof(float)) == 0);
+
+    SUBCASE("smear is reachable and a zero drag does nothing") {
+        clay_mesh_brush_desc sm = brush(CLAY_MESH_BRUSH_SMEAR, 0.5f, 1.0f);
+        sm.direction[0] = 0.15f;
+        std::size_t moved = 0;
+        REQUIRE(clay_mesh_sculptor_stamp(sc, &sm, nullptr, nullptr, &moved) == CLAY_OK);
+        CHECK(moved > 0);
+
+        sm.direction[0] = 0.0f;
+        std::size_t none = 1;
+        REQUIRE(clay_mesh_sculptor_stamp(sc, &sm, nullptr, nullptr, &none) == CLAY_OK);
+        CHECK(none == 0);
+    }
+
+    clay_mesh_sculptor_destroy(sc);
+    clay_mesh_destroy(mesh);
+}
+
+TEST_CASE("c abi: a descriptor from before the colour field still stamps the old verbs") {
+    // The versioned-descriptor pattern doing its job: `color` was appended
+    // after the alpha block, so a caller compiled against the older layout
+    // passes the shorter descriptor and gets exactly the verbs it had.
+    clay_mesh* mesh = grid_mesh(16, 1.0f);
+    clay_mesh_sculptor* sc = nullptr;
+    REQUIRE(clay_mesh_sculptor_create(mesh, 0.0f, &sc) == CLAY_OK);
+
+    clay_mesh_brush_desc d = brush(CLAY_MESH_BRUSH_DRAW, 0.5f, 0.3f);
+    d.struct_size = offsetof(clay_mesh_brush_desc, alpha_extent) + sizeof(float);
+    std::size_t moved = 0;
+    REQUIRE(clay_mesh_sculptor_stamp(sc, &d, nullptr, nullptr, &moved) == CLAY_OK);
+    CHECK(moved > 0);
+
+    clay_mesh_sculptor_destroy(sc);
+    clay_mesh_destroy(mesh);
+}

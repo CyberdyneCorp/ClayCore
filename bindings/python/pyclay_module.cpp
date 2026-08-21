@@ -147,9 +147,12 @@ mesh::MeshBrush parse_mesh_brush(const std::string& verb) {
     if (verb == "relax") return mesh::MeshBrush::Relax;
     if (verb == "layer") return mesh::MeshBrush::Layer;
     if (verb == "nudge") return mesh::MeshBrush::Nudge;
+    if (verb == "paint") return mesh::MeshBrush::Paint;
+    if (verb == "smear") return mesh::MeshBrush::Smear;
     throw std::invalid_argument(
         "verb must be one of 'grab', 'draw', 'inflate', 'smooth', 'pinch', 'flatten', 'clay', "
-        "'crease', 'scrape', 'polish', 'snakehook', 'relax', 'layer', 'nudge', got '" +
+        "'crease', 'scrape', 'polish', 'snakehook', 'relax', 'layer', 'nudge', 'paint', "
+        "'smear', got '" +
         verb + "'");
 }
 
@@ -482,7 +485,7 @@ mesh::MeshBrushSettings mesh_brush_settings(
     nb::handle geodesic, nb::handle seed_class, const std::string& flatten_mode,
     nb::handle plane_point, nb::handle plane_normal, float polish_angle, int smooth_iterations,
     float layer_height, nb::handle alpha, nb::handle alpha_direction, nb::handle alpha_tangent,
-    float alpha_extent, mesh::MeshBrush* out_verb) {
+    float alpha_extent, nb::handle color, mesh::MeshBrush* out_verb) {
     *out_verb = parse_mesh_brush(verb);
     if (!(radius > 0.0f)) throw std::invalid_argument("radius must be > 0");
     if (smooth_iterations < 1 || smooth_iterations > mesh::kMaxSmoothIterations)
@@ -496,6 +499,11 @@ mesh::MeshBrushSettings mesh_brush_settings(
     if (!direction.is_none()) settings.direction = to_f3(direction, "direction");
     if (!deposit_normal.is_none())
         settings.deposit_normal = to_f3(deposit_normal, "deposit_normal");
+    // PAINT's target. None keeps the engine default rather than meaning black,
+    // because here — unlike across the C boundary, where an absent field is
+    // indistinguishable from a zeroed one — None and (0, 0, 0) are different
+    // things a caller can say.
+    if (!color.is_none()) settings.color = to_f3(color, "color");
     // None means "whatever this verb should do", which is off for the two whose
     // meaning is "everything under this disc".
     settings.geodesic =
@@ -3467,13 +3475,13 @@ NB_MODULE(pyclay, m) {
                const std::string& flatten_mode, nb::handle plane_point, nb::handle plane_normal,
                float polish_angle, int smooth_iterations, float layer_height, nb::handle alpha,
                nb::handle alpha_direction, nb::handle alpha_tangent, float alpha_extent,
-               nb::handle mask, nb::handle deltas) {
+               nb::handle color, nb::handle mask, nb::handle deltas) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 mesh::MeshBrushSettings settings = mesh_brush_settings(
                     verb, center, radius, strength, falloff, direction, deposit_normal, geodesic,
                     seed_class, flatten_mode, plane_point, plane_normal, polish_angle,
                     smooth_iterations, layer_height, alpha, alpha_direction, alpha_tangent,
-                    alpha_extent, &chosen);
+                    alpha_extent, color, &chosen);
                 mesh::VertexDeltas* record =
                     deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
                 field::MaskGate gate = mask_gate_of(mask);
@@ -3487,7 +3495,8 @@ NB_MODULE(pyclay, m) {
             "plane_point"_a = nb::none(), "plane_normal"_a = nb::none(), "polish_angle"_a = 0.20f,
             "smooth_iterations"_a = 1, "layer_height"_a = 0.05f, "alpha"_a = nb::none(),
             "alpha_direction"_a = nb::none(), "alpha_tangent"_a = nb::none(),
-            "alpha_extent"_a = 0.0f, "mask"_a = nb::none(), "deltas"_a = nb::none(),
+            "alpha_extent"_a = 0.0f, "color"_a = nb::none(), "mask"_a = nb::none(),
+            "deltas"_a = nb::none(),
             "One stamp; returns how many welded classes moved.\n\n"
             "`verb` is one of:\n"
             "  'grab'      drag the region by `direction`\n"
@@ -3508,7 +3517,15 @@ NB_MODULE(pyclay, m) {
             "  'layer'     deposit to a CEILING `layer_height` above the surface\n"
             "              as the STROKE found it, so a slow stroke and a fast\n"
             "              one over the same path agree. Needs `deltas`\n"
-            "  'nudge'     push material along the surface; grab carries it off\n\n"
+            "  'nudge'     push material along the surface; grab carries it off\n"
+            "  'paint'     blend vertex COLOUR toward `color`; moves no vertex\n"
+            "  'smear'     drag existing colour along `direction`; moves no vertex.\n"
+            "              A zero direction is no smear rather than a smooth\n\n"
+            "The colour pair needs the mesh to HAVE colours: they refuse rather\n"
+            "than creating the attribute, because twelve bytes per vertex is a\n"
+            "real cost to hide behind a brush stroke, and a silent creation makes\n"
+            "'I painted and nothing happened' indistinguishable from 'this mesh\n"
+            "had no colours'. Call `ensure_colors()` first.\n\n"
             "`alpha` is a 2D (height, width) float array in [0, 1] scaling the\n"
             "brush's weight — how detail work is done on voxels and SDF items,\n"
             "now here. **The engine decodes no images.** It multiplies the\n"
@@ -3543,8 +3560,8 @@ NB_MODULE(pyclay, m) {
                const std::string& verb, const std::string& falloff, nb::handle deposit_normal,
                nb::handle geodesic, nb::handle seed_class, const std::string& flatten_mode,
                nb::handle plane_point, nb::handle plane_normal, float polish_angle,
-               int smooth_iterations, float layer_height, float strength, nb::handle mask,
-               nb::handle deltas, bool defer_normals) {
+               int smooth_iterations, float layer_height, float strength, nb::handle color,
+               nb::handle mask, nb::handle deltas, bool defer_normals) {
                 mesh::MeshBrush chosen = mesh::MeshBrush::Draw;
                 // The radius is the STAMP's, so a placeholder goes in here.
                 // No alpha on the stroke path: a stamp-oriented alpha along a
@@ -3554,7 +3571,7 @@ NB_MODULE(pyclay, m) {
                     verb, nb::none(), 1.0f, strength, falloff, nb::none(), deposit_normal, geodesic,
                     seed_class, flatten_mode, plane_point, plane_normal, polish_angle,
                     smooth_iterations, layer_height, nb::none(), nb::none(), nb::none(), 0.0f,
-                    &chosen);
+                    color, &chosen);
                 std::vector<brush::StrokeSample> in = to_stroke_samples(samples);
                 mesh::VertexDeltas* record =
                     deltas.is_none() ? nullptr : nb::cast<PyVertexDeltas*>(deltas)->deltas.get();
@@ -3570,8 +3587,8 @@ NB_MODULE(pyclay, m) {
             "deposit_normal"_a = nb::none(), "geodesic"_a = nb::none(), "seed_class"_a = nb::none(),
             "flatten_mode"_a = "two_sided", "plane_point"_a = nb::none(),
             "plane_normal"_a = nb::none(), "polish_angle"_a = 0.20f, "smooth_iterations"_a = 1,
-            "layer_height"_a = 0.05f, "strength"_a = 1.0f, "mask"_a = nb::none(),
-            "deltas"_a = nb::none(), "defer_normals"_a = false,
+            "layer_height"_a = 0.05f, "strength"_a = 1.0f, "color"_a = nb::none(),
+            "mask"_a = nb::none(), "deltas"_a = nb::none(), "defer_normals"_a = false,
             "Resolve a stroke and apply it — the stroke engine's FOURTH consumer,\n"
             "after the voxel grid, the mask and the edit list. Spacing, pressure\n"
             "response, deterministic jitter, taper, steady stroke and\n"
@@ -3626,6 +3643,21 @@ NB_MODULE(pyclay, m) {
             "The dict carries `seed_class`, which is what `stamp`'s `seed_class`\n"
             "wants: it starts the surface walk where the finger did, instead of\n"
             "scanning the whole mesh for the nearest vertex.")
+        .def_prop_ro(
+            "has_colors", [](PyMeshSculptor& s) { return s.live(false).has_colors(); },
+            "Whether the mesh carries a vertex colour attribute, which 'paint'\n"
+            "and 'smear' require.")
+        .def(
+            "ensure_colors",
+            [](PyMeshSculptor& s, nb::handle color) {
+                const kernel::cfloat3 fill =
+                    color.is_none() ? kernel::cf3(1, 1, 1) : to_f3(color, "color");
+                return s.live(true).ensure_colors(fill);
+            },
+            "color"_a = nb::none(),
+            "Give every vertex `color` if the mesh has no colour attribute, and\n"
+            "return whether one was created. A mesh that already has colours is\n"
+            "left exactly as it is, so this is safe to call before every stroke.")
         .def(
             "refresh", [](PyMeshSculptor& s) { s.live(false).refresh_bvh(); },
             "Rebuild the ray tree over the vertices as they now are. Until you\n"

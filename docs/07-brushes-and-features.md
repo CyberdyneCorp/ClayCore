@@ -722,6 +722,20 @@ still never evaluated, never blends with a field, and exports exactly as its
 | `Scrape` | Flatten cut-only **and** smooth from one snapshot, mirroring the `sculpt_scrape` rule that calling the two in sequence is not the same thing |
 | `Polish` | Smooth **gated by how much the surface bends**: full strength where the normals around a vertex agree, fading to zero at twice the threshold angle. Noise goes, hard edges stay, and `polish_angle` is the whole brush |
 | `Snakehook` | Grab re-anchored on the class it is dragging, so the region walks with the pull. On fixed topology it stretches triangles to the extreme — **stated behaviour, not a defect**: that stretch is the artist's signal the mesh wants retopo, exactly as Blender behaves with Dyntopo off. `brush::snakehook` remains the verb for GROWING new volume |
+| `Relax` | Slide vertices **along** the surface to even their spacing, rather than toward the Laplacian average. Smooth reshapes; this redistributes. It matters more here than in a tool that can subdivide: topology is fixed, so a large grab stretches the triangles it has and this is what recovers them without a retopo round trip |
+| `Layer` | Deposit up to a **ceiling** `layer_height` above the surface as the STROKE found it, and no further. Every other deposit verb accumulates, so a slow stroke digs deeper than a fast one over the same path; this one does not. Needs the stroke's `VertexDeltas` to know where it started |
+| `Nudge` | Push material along the surface in the drag direction. Grab carries the region rigidly; this slides it. Per-vertex tangent planes rather than the region's average normal, so a curved region's rim is not pushed off the surface |
+| `Paint` | Blend each vertex's **colour** toward the target by the brush's own weight. Blender's Paint. Moves no vertex |
+| `Smear` | Push existing colour along the drag, taking each vertex's new colour from the one-ring neighbour most nearly **opposite** it, weighted by alignment. Blender's Smear. A zero drag direction is no smear rather than a smooth. Moves no vertex |
+
+**The colour pair moves nothing.** `Paint` and `Smear` are the only two verbs
+that leave `positions` and `normals` byte-identical — the exact mirror of the
+guarantee the other fourteen make about `colors` — so a colour pass over a
+finished sculpt shows up as no diff on the geometry at all. Both REFUSE a mesh
+with no colour attribute rather than creating one: twelve bytes per vertex is a
+real cost to hide behind a brush stroke, and a silent creation would make "I
+painted and nothing happened" indistinguishable from "this mesh had no
+colours". `MeshSculptor::ensure_colors` is the deliberate act.
 
 **One stamp is one operation.** Every verb reads a *pre-stamp snapshot* of the
 region — positions, normals, the region's averaged normal, its centroid and its
@@ -745,8 +759,9 @@ so a seam cannot open into a crack.
 
 **Masks reach every verb for free.** Each vertex's weight is scaled by
 `1 − mask` at its world position, the rule every voxel verb already follows, so
-a painted mask protects polygons from all eleven verbs — `Grab` and `Snakehook`
-included — with no per-verb code.
+a painted mask protects polygons from all sixteen verbs — `Grab` and
+`Snakehook` included, and the colour pair too, since their weight is the same
+weight — with no per-verb code.
 
 **The stroke engine gained its fourth consumer.** `resolve_stroke` already fed
 `apply_to_grid`, `stamps_to_nodes` and `apply_to_mask`; `apply_to_mesh` inherits

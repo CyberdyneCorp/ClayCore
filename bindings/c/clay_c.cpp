@@ -7562,7 +7562,7 @@ clay_result resolve_sculptor(clay_mesh_sculptor* s, bool for_edit) {
 }
 
 bool mesh_brush_is_known(std::int32_t verb) {
-    return verb >= 0 && verb <= static_cast<std::int32_t>(mesh::MeshBrush::Snakehook);
+    return verb >= 0 && verb <= static_cast<std::int32_t>(mesh::MeshBrush::Smear);
 }
 
 bool mesh_falloff_is_known(std::int32_t curve) {
@@ -7634,6 +7634,12 @@ clay_result read_mesh_brush(const clay_mesh_brush_desc* src, mesh::MeshBrush* ou
             kernel::cf3(d.alpha_tangent[0], d.alpha_tangent[1], d.alpha_tangent[2]);
         out->alpha_extent = d.alpha_extent;
     }
+    // PAINT's target. Zero is BLACK rather than a default: black is a colour a
+    // host may legitimately want, and there is no reading of the appended-field
+    // rule that lets a caller mean it if we treat it as "unset". A caller that
+    // declared only an older layout cannot reach this anyway — the colour verbs
+    // did not exist then.
+    out->color = kernel::cf3(d.color[0], d.color[1], d.color[2]);
     return CLAY_OK;
 }
 
@@ -7682,6 +7688,7 @@ clay_result clay_mesh_brush_defaults(clay_mesh_brush_desc* out_desc) {
     out.polish_angle = d.polish_angle;
     out.smooth_iterations = d.smooth_iterations;
     out.layer_height = d.layer_height;
+    write_f3(out.color, d.color);
     // The alpha stays null in the defaults: a stamp without one is the common
     // case, and a default pointing at nothing a caller owns would be a trap.
     write_desc(out_desc, declared, out);
@@ -7871,6 +7878,24 @@ clay_result clay_mesh_sculptor_refresh(clay_mesh_sculptor* sculptor) {
     clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
     if (r != CLAY_OK) return r;
     sculptor->sculptor->refresh_bvh();
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_has_colors(const clay_mesh_sculptor* sculptor, int32_t* out_has) {
+    if (!sculptor || !out_has)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null sculptor or out_has");
+    *out_has = sculptor->sculptor->has_colors() ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_ensure_colors(clay_mesh_sculptor* sculptor, const float color[3],
+                                             int32_t* out_created) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/true);
+    if (r != CLAY_OK) return r;
+    if (!color) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null color");
+    const bool created =
+        sculptor->sculptor->ensure_colors(kernel::cf3(color[0], color[1], color[2]));
+    if (out_created) *out_created = created ? 1 : 0;
     return CLAY_OK;
 }
 

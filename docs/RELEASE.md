@@ -51,6 +51,19 @@ forward-refuse).
    an already-compiled old host, which declares nothing and so cannot be
    served, but it turns silent corruption into a loud refusal. Rebuilding
    against 0.35.0's header is the fix for those hosts.
+
+   **0.36.0 is not such a release**: it is additive. It adds the two mesh
+   colour verbs (`CLAY_MESH_BRUSH_PAINT`, `CLAY_MESH_BRUSH_SMEAR`) and two
+   entry points (`clay_mesh_sculptor_has_colors`,
+   `clay_mesh_sculptor_ensure_colors`), and grows `clay_mesh_brush_desc` by a
+   trailing `float color[3]`. That growth is the versioned-descriptor pattern
+   doing its job — a caller compiled against the older layout passes the
+   shorter descriptor and gets exactly the fourteen verbs it had — and it is
+   worth noting that appending to a descriptor only became a routine act in
+   0.35.0. Before `bound-output-descriptor-fills` and
+   `require-struct-size-on-defaults`, this same append would have widened
+   `clay_mesh_brush_defaults`'s unbounded fill from 56 bytes to 68 on every
+   host built against an older header.
    **Neither is 0.24.1**: it changes no signatures at all. It corrects the
    swept guide's segment tie-break, so a scene containing a sweep can evaluate
    marginally differently at a guide corner — a behaviour change, not an ABI
