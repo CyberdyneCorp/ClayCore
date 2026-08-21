@@ -279,12 +279,12 @@ TEST_CASE("a coloured volume survives a document save and load") {
     const std::optional<scene::Document> back = scene::deserialize_document(bytes.data(), bytes.size());
     REQUIRE(back.has_value());
     REQUIRE(!back->layers.empty());
-    REQUIRE(back->layers.front().sdf);
+    REQUIRE(static_cast<bool>(back->layers.front().sdf));
     const scene::Node* restored = nullptr;
     for (const scene::NodeId id : back->layers.front().sdf->roots)
         restored = back->layers.front().sdf->find(id);
     REQUIRE(restored != nullptr);
-    REQUIRE(restored->volume);
+    REQUIRE(static_cast<bool>(restored->volume));
     REQUIRE(restored->volume->has_color());
     CHECK(restored->volume->eval_color(kernel::cf3(0, -0.3f, 0)).x > 0.7f);
     CHECK(restored->volume->eval_color(kernel::cf3(0, 0.3f, 0)).z > 0.7f);
@@ -319,7 +319,7 @@ TEST_CASE("writing at minor 8 drops only the colour") {
     for (const scene::NodeId id : back->layers.front().sdf->roots)
         restored = back->layers.front().sdf->find(id);
     REQUIRE(restored != nullptr);
-    REQUIRE(restored->volume);
+    REQUIRE(static_cast<bool>(restored->volume));
     CHECK_FALSE(restored->volume->has_color());
     // The shape is untouched: same samples, same distances.
     CHECK(restored->volume->brick_count() == n.volume->brick_count());
