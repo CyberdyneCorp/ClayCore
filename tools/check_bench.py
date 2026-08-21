@@ -33,7 +33,17 @@ FLOORS = {
     # would flake on CI instead. It is set for the order-of-magnitude case, per
     # this file's own docstring, and the DEVICE GATE is what holds the tighter
     # line — it is what found this one.
-    "BM_VoxelAddLevelWhole": {"max_ms": 2.5},
+    #
+    # RAISED 2.5 -> 16.0 when the spread was fixed (#196), and the reason is
+    # worth keeping: the ceiling was not too tight, the WORKLOAD was too small.
+    # The case scatters 400 blobs of 64 cells and should occupy ~25,600 cells;
+    # the old golden-ratio walk collapsed them onto the plane x+y=0, where they
+    # landed on top of each other and occupied 3,492. It measured a seventh of
+    # the work it claimed. Corrected, the same case is 0.85 -> 5.31 ms on this
+    # machine, which is the cost it always should have had, so the ceiling moves
+    # with it rather than the workload shrinking to fit the old number. The
+    # headroom ratio is unchanged: ~3x measured, as before.
+    "BM_VoxelAddLevelWhole": {"max_ms": 16.0},
     # Writing INTO a whole level stack — the same defect #137 hoisted out of
     # subdivide_into, in the two places propagation reaches it: record_detail
     # (via refresh_detail, per child of every downward step) and propagate_up

@@ -34,13 +34,33 @@ enum SceneBuilder {
     /// Deterministic positions spread through the working volume, so a
     /// document of N stamps is the same document on every run and on every
     /// device. A random spread would make two runs incomparable.
+    /// The three multipliers are the fractional parts of sqrt(2), sqrt(3) and
+    /// sqrt(5), and the choice is load-bearing rather than decorative.
+    ///
+    /// This used to walk `g`, `g*g`, `g*g*g` for the golden ratio, described as
+    /// "a low-discrepancy-ish walk". It was not one. `g` satisfies `g^2 = 1-g`,
+    /// so `frac(i*g^2) == 1 - frac(i*g)` and therefore **y was exactly -x for
+    /// every stamp**: the whole cloud lay on the plane x+y=0. `g^3 = 2g-1` tied
+    /// z to x as well. The document was a curve in a plane, not a volume, and
+    /// since culling cost is entirely a question of how many item bounds
+    /// overlap a region, a sheet measures a density no sculpt produces —
+    /// ~5,300 survivors per brick against ~200 for a real spread at 50k items.
+    ///
+    /// The powers of ANY algebraic number of low degree carry a relation like
+    /// that; the plastic number's own powers fail the same way (`a^2 + a^3 = 1`
+    /// exactly, so z would be -y). Distinct square-free radicands cannot: 1,
+    /// sqrt(2), sqrt(3) and sqrt(5) are linearly independent over the
+    /// rationals, so no relation of that shape exists to be tripped over.
+    ///
+    /// `testStampSpreadFillsTheVolume` holds this, and is the only reason the
+    /// property is not one comment away from regressing again.
+    static let stampMultipliers = (0.4142135624, 0.7320508076, 0.2360679775)
+
     static func stampPosition(_ index: Int) -> (Float, Float, Float) {
-        // A low-discrepancy-ish walk: cheap, deterministic, and it does not
-        // pile every stamp on one spot the way a modulo grid would.
-        let g = 0.6180339887
-        let x = Float((Double(index) * g).truncatingRemainder(dividingBy: 1.0)) * 1.6 - 0.8
-        let y = Float((Double(index) * g * g).truncatingRemainder(dividingBy: 1.0)) * 1.6 - 0.8
-        let z = Float((Double(index) * g * g * g).truncatingRemainder(dividingBy: 1.0)) * 1.6 - 0.8
+        let (mx, my, mz) = stampMultipliers
+        let x = Float((Double(index) * mx).truncatingRemainder(dividingBy: 1.0)) * 1.6 - 0.8
+        let y = Float((Double(index) * my).truncatingRemainder(dividingBy: 1.0)) * 1.6 - 0.8
+        let z = Float((Double(index) * mz).truncatingRemainder(dividingBy: 1.0)) * 1.6 - 0.8
         return (x, y, z)
     }
 
@@ -102,6 +122,51 @@ final class LatencyTests: XCTestCase {
         var buffer = [CChar](repeating: 0, count: size)
         guard clay_list_backends(&buffer, &size) == CLAY_OK else { return [] }
         return String(cString: buffer).split(separator: ",").map(String.init)
+    }
+
+    /// The benchmark document must be a VOLUME, not a surface.
+    ///
+    /// Every latency figure this file records is measured against
+    /// `SceneBuilder.stampPosition`, and culling cost is entirely a question of
+    /// how many item bounds overlap a region. A spread that collapses onto a
+    /// plane has an order of magnitude more neighbours per brick than a real
+    /// sculpt, so the budgets would be calibrated against a workload nobody
+    /// runs. The previous golden-ratio walk did exactly that — see the note on
+    /// `stampMultipliers`.
+    ///
+    /// Two independent checks, because either alone is cheap to satisfy by
+    /// accident: every cell of a 4x4x4 partition of the working volume must be
+    /// reached, and no pair of axes may be correlated. The old walk scored
+    /// 9 cells of 64 and a correlation of -0.9985 between x and y.
+    func testStampSpreadFillsTheVolume() throws {
+        let n = 4000, bins = 4
+        var seen = Set<Int>()
+        var xs = [[Double]](repeating: [], count: 3)
+        for i in 0..<n {
+            let (x, y, z) = SceneBuilder.stampPosition(i)
+            let c = [Double(x), Double(y), Double(z)]
+            for a in 0..<3 { xs[a].append(c[a]) }
+            // (p + 0.8) / 1.6 maps the working volume back to [0,1).
+            let cell = c.map { min(bins - 1, max(0, Int(($0 + 0.8) / 1.6 * Double(bins)))) }
+            seen.insert((cell[0] * bins + cell[1]) * bins + cell[2])
+        }
+        XCTAssertEqual(seen.count, bins * bins * bins,
+                       "the stamp spread reached \(seen.count) of \(bins * bins * bins) cells; "
+                       + "a spread that misses cells is lying about how dense a brick is")
+
+        for (a, b) in [(0, 1), (0, 2), (1, 2)] {
+            let ma = xs[a].reduce(0, +) / Double(n), mb = xs[b].reduce(0, +) / Double(n)
+            var num = 0.0, da = 0.0, db = 0.0
+            for i in 0..<n {
+                num += (xs[a][i] - ma) * (xs[b][i] - mb)
+                da += (xs[a][i] - ma) * (xs[a][i] - ma)
+                db += (xs[b][i] - mb) * (xs[b][i] - mb)
+            }
+            let r = num / (da.squareRoot() * db.squareRoot())
+            XCTAssertLessThan(abs(r), 0.05,
+                              "axes \(a) and \(b) correlate at \(r); the multipliers are "
+                              + "algebraically related and the cloud is not three-dimensional")
+        }
     }
 
     /// One SDF brush stamp, edit-then-evaluate, on both backends.

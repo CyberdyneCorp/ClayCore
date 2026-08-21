@@ -744,6 +744,18 @@ the numbers are not commensurable, and scoring them against this baseline
 would produce a figure that means nothing. Moving to a different reference
 device means re-taking the baseline on it, deliberately, as its own commit.
 
+**A change to the benchmark's own workload means the same thing.** The
+committed figures are only comparable with each other while the document under
+test is the same document. `#196` changed it: `SceneBuilder.stampPosition` had
+been laying every stamp on the plane x+y=0, so the `sdf_stamp_*` cases were
+measured against a sheet rather than a volume, and a sheet has far more
+neighbours per brick than a real sculpt. The corrected spread is **faster** —
+measured on desktop at 1,000 items, 7.27 ms against 4.35 ms — so the cases
+still pass their budgets, but those budgets now carry roughly 1.7x more
+headroom than they were set with. **Re-record on the reference device before
+treating an `sdf_stamp_*` budget as a real line.** Until then it is a ceiling
+that will not catch what it was drawn to catch.
+
 ### Running it
 
 ```sh
