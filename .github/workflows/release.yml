@@ -26,8 +26,13 @@ jobs:
         with:
           python-version: '3.12'
       - name: Tooling
+        # Pinned, and pinned to the SAME version ci.yml uses. Floating on
+        # @latest here meant a green CI run did not predict a green release:
+        # openspec 1.10.0 added a task-numbering check that 1.8.0 does not
+        # have, so v0.39.0's tag build failed a gate no pull request had ever
+        # run. A release is the worst place to discover a new lint.
         run: |
-          npm install -g @fission-ai/openspec@latest
+          npm install -g @fission-ai/openspec@1.8.0
           python -m pip install --upgrade pip pytest numpy
       - name: Run the release checklist
         run: python3 tools/release_check.py
