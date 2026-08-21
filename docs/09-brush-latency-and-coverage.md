@@ -444,7 +444,21 @@ Two gates already enforce this, in opposite directions:
   that happened, so neither a verb added without a case nor a table entry naming
   a case that never ran survives.
 - `examples/run_all.py` checks `CAPABILITY_EXAMPLES` against
-  `openspec/specs/`, so a living capability with no example is an error.
+  `openspec/specs/`, so a living capability with no example is an error. That
+  gate is capability-level: it catches a capability with no page at all, not a
+  verb on a page that covers the rest of its surface.
+- `15_voxel_verbs_and_repair.py` closes that second gap for the voxel surface,
+  reading verbs from `dir(clay.VoxelGrid)` and requiring each to appear on the
+  page or in `SHOWN_ELSEWHERE` — which is re-checked against the page it names,
+  so an exemption pointing at a page that stopped covering it fails too.
+
+  It matched a `sculpt_` PREFIX until 0.37.0, and that is the same defect
+  `VERB_PATTERNS` had below: the sculpt-layer API is named AROUND the word
+  rather than with it, so `move_sculpt_layer`, `remove_sculpt_layer` and
+  `recording_sculpt_layer` were invisible to the scan and had no example on any
+  page, while the gate printed full coverage. It now matches `"sculpt" in m`,
+  which caught eight more entry points. A gate that reads a name has to match
+  the way names are actually built, or it certifies the subset it can spell.
 
 Audited at 0.29.0, per brush:
 

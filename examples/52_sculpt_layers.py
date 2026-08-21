@@ -200,6 +200,88 @@ def main():
     print(f"  merged into one layer '{grid.sculpt_layer_name(0)}' "
           f"({grid.sculpt_layer_cell_count(0)} cells) that still dials to nothing")
 
+    # --- the stack is ordered, and a pass can leave it -----------------------
+    # Three passes, each on its own cell region, so the count and the order are
+    # both observable. They are recorded bottom-up, and each one sees the ones
+    # below it already applied — which is why a removal is checked against the
+    # state before that pass existed, not against passes re-recorded in a new
+    # order. Those are different things, and only the first one is a round trip.
+    stack = base_form()
+    for name, dx in (("low", -3), ("mid", 0)):
+        with stack.sculpt_layer(name):
+            stack.sculpt_inflate((dx, 4, 14), size=9, amount=3, falloff="linear")
+    before_high = cells_of(stack)
+
+    with stack.sculpt_layer("high"):
+        stack.sculpt_inflate((3, 4, 14), size=9, amount=3, falloff="linear")
+    if stack.sculpt_layer_count != 3:
+        raise SystemExit("three passes must make a stack of three")
+    order = [stack.sculpt_layer_name(i) for i in range(3)]
+    if order != ["low", "mid", "high"]:
+        raise SystemExit(f"passes stack in the order recorded, got {order}")
+    if cells_of(stack) == before_high:
+        raise SystemExit("the third pass must actually change something")
+    print(f"\n  a stack of three passes, bottom to top: {order}")
+
+    # Removing the top one puts the grid back exactly where it was before that
+    # pass was recorded. An exact cell-set comparison, not a count: counts match
+    # for the wrong reasons often enough to be worth not trusting.
+    stack.remove_sculpt_layer(2)
+    if stack.sculpt_layer_count != 2:
+        raise SystemExit("removing a pass must leave two")
+    left = [stack.sculpt_layer_name(i) for i in range(2)]
+    if left != ["low", "mid"]:
+        raise SystemExit(f"the wrong pass was removed: {left}")
+    if cells_of(stack) != before_high:
+        raise SystemExit("removing a pass must restore the grid exactly as it "
+                         "was before that pass was recorded")
+    print(f"  removed 'high': {left} left, and every cell is back exactly where")
+    print("  it stood before that pass was recorded")
+
+    # Moving one changes the ORDER, not the count and not what each pass holds.
+    # These two passes touch disjoint regions, so the visible result is the same
+    # either way — order decides only who wins where passes OVERLAP, and the
+    # point being made here is that a move is bookkeeping, not a re-sculpt.
+    kept = cells_of(stack)
+    stack.move_sculpt_layer(0, 1)
+    moved = [stack.sculpt_layer_name(i) for i in range(2)]
+    if moved != ["mid", "low"]:
+        raise SystemExit(f"moving 0 -> 1 must reorder the stack, got {moved}")
+    if stack.sculpt_layer_count != 2:
+        raise SystemExit("moving a pass must not change how many there are")
+    if cells_of(stack) != kept:
+        raise SystemExit("these passes are disjoint, so reordering must not "
+                         "change the result")
+    print(f"  moved the bottom pass up: {moved}, same cells — a move reorders,")
+    print("  it does not re-sculpt")
+
+    # --- begin/end, and the flag the context manager exists to protect -------
+    # `with` is the form to use; this is what it does underneath, and the only
+    # place `recording_sculpt_layer` can be seen going both ways. An edit made
+    # while recording joins the pass; one made after it does not.
+    manual = base_form()
+    if manual.recording_sculpt_layer:
+        raise SystemExit("a fresh grid records nothing")
+    manual.begin_sculpt_layer("manual")
+    if not manual.recording_sculpt_layer:
+        raise SystemExit("begin_sculpt_layer must start recording")
+    manual.sculpt_inflate((0, 4, 14), size=9, amount=3, falloff="linear")
+    manual.end_sculpt_layer()
+    if manual.recording_sculpt_layer:
+        raise SystemExit("end_sculpt_layer must stop recording")
+    joined = manual.sculpt_layer_cell_count(0)
+
+    # The edit AFTER end belongs to no pass, so dialling the layer to zero
+    # leaves it standing. That is what "later edits belong to no pass" means.
+    manual.sculpt_inflate((6, 4, 14), size=9, amount=3, falloff="linear")
+    if manual.sculpt_layer_cell_count(0) != joined:
+        raise SystemExit("an edit after end_sculpt_layer must not join the pass")
+    manual.set_sculpt_layer_strength(0, 0.0)
+    if cells_of(manual) == cells_of(base_form()):
+        raise SystemExit("the unrecorded edit must survive dialling the pass off")
+    print(f"\n  begin/end by hand: {joined} cells joined the pass, and the edit")
+    print("  made after end_sculpt_layer survives dialling that pass to zero")
+
     # --- and it survives the file -------------------------------------------
     doc = clay.Document()
     saved = doc.add_voxel_layer("form", voxel_size=VOXEL)
