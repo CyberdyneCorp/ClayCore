@@ -16,6 +16,7 @@
 
 #include "clay/parallel/thread_pool.h"
 #include "clay.h"
+#include "clay/brush/gate_bake.h"
 #include "clay/brush/mask_extrude.h"
 #include "clay/brush/lattice_gizmo.h"
 #include "clay/brush/move.h"
@@ -866,6 +867,13 @@ struct clay_mask {
     voxel::MaskField* owned = nullptr;  // non-null: the caller destroys it
     clay_document* doc = nullptr;       // non-null: borrowed from a layer
     clay_layer_id layer = 0;
+    // One memoised gate bake per handle, so gating N items by one painted mask
+    // pays for one measurement rather than N. Lives HERE rather than in a
+    // table keyed by mask address: an address is reused after a free, and a
+    // handle's memo dies with the handle.
+    // `mutable` because gating takes the mask as const: a memo does not change
+    // what the mask MEANS, only what it has already cost.
+    mutable brush::GateBake gate_bake;
 };
 
 // The same discriminator, one shape different: a standalone mesh is held by
@@ -2570,19 +2578,17 @@ clay_result clay_item_set_gate(clay_item* item, const clay_mask* mask, float thr
                     "a gate's width must be positive; a step in the field has no finite "
                     "Lipschitz bound and nothing could march it");
 
-    // The measured band has to reach at least as far as the gate fades, or full
-    // protection is never reachable: the distance saturates at the band and the
-    // smoothstep never gets to 1. Twice the width leaves margin, and the pad
-    // matches so the sampled region actually contains it.
-    const float band = 2.0f * width;
-    std::optional<field::FieldVolume> measured =
-        brush::mask_to_field(*m, threshold > 0.0f ? threshold : 0.5f, band, band);
-    if (!measured || measured->empty())
+    // Memoised against the mask's own change token: repainting rebakes, and
+    // gating another item by the same unchanged mask does not. The band rule
+    // lives in GateBake so the two bindings cannot drift on it.
+    std::shared_ptr<const field::FieldVolume> measured =
+        mask->gate_bake.gate_for(*m, threshold > 0.0f ? threshold : 0.5f, width);
+    if (!measured)
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "the mask is empty or nothing reaches the threshold, so the gate would "
                     "protect nothing");
 
-    item->node.gate = std::make_shared<const field::FieldVolume>(std::move(*measured));
+    item->node.gate = std::move(measured);
     item->node.gate_width = width;
     return CLAY_OK;
 }

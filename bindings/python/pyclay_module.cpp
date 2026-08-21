@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "clay/brush/gate_bake.h"
 #include "clay/brush/mask_extrude.h"
 #include "clay/brush/lattice_gizmo.h"
 #include "clay/brush/move.h"
@@ -610,6 +611,10 @@ struct PyMaskField {
     std::shared_ptr<io::ClaySpaceDoc> doc;  // null for standalone masks
     scene::LayerId layer = 0;
     std::shared_ptr<voxel::MaskField> owned;
+    // One memoised gate bake per mask OBJECT, so gating N items by one painted
+    // mask pays for one measurement rather than N. Held by shared_ptr so a
+    // copied handle shares the memo rather than starting a cold one.
+    std::shared_ptr<brush::GateBake> gate_bake = std::make_shared<brush::GateBake>();
 
     voxel::MaskField& field() const {
         if (owned) return *owned;
@@ -637,6 +642,14 @@ const voxel::MaskField* borrow_mask(nb::handle mask) {
     // Borrowed for the duration of the call only, which is all a BrushParams
     // built at the call site needs.
     return &nb::cast<PyMaskField&>(mask).field();
+}
+
+// The gate memo belonging to this mask OBJECT. A caller that writes
+// `m = doc.mask(id)` once and gates fifty items off `m` pays for one bake; one
+// that rebuilds the handle inside the loop gets today's behaviour, correct but
+// uncached, because there is no object for the memo to live on.
+const std::shared_ptr<brush::GateBake>& gate_bake_of(nb::handle mask) {
+    return nb::cast<PyMaskField&>(mask).gate_bake;
 }
 
 // -- document / layer wrappers ------------------------------------------------
@@ -1545,19 +1558,17 @@ NB_MODULE(pyclay, m) {
                     throw std::invalid_argument(
                         "a gate's width must be positive: a step in the field has no finite "
                         "Lipschitz bound and nothing could march it");
-                // The measured band has to reach at least as far as the gate
-                // fades, or full protection is never reachable: the distance
-                // saturates at the band and the smoothstep never gets to 1.
-                // Twice the width leaves margin, and the pad matches so the
-                // sampled region actually contains it.
-                const float band = 2.0f * width;
-                std::optional<field::FieldVolume> measured =
-                    brush::mask_to_field(*m, threshold > 0.0f ? threshold : 0.5f, band, band);
-                if (!measured || measured->empty())
+                // Memoised against the mask's own change token: repainting
+                // rebakes, gating another item by the same unchanged mask does
+                // not. The band rule lives in GateBake so the two bindings
+                // cannot drift on it.
+                std::shared_ptr<const field::FieldVolume> measured =
+                    gate_bake_of(mask)->gate_for(*m, threshold > 0.0f ? threshold : 0.5f, width);
+                if (!measured)
                     throw std::invalid_argument(
                         "the mask is empty or nothing reaches the threshold, so the gate "
                         "would protect nothing");
-                p.gate = std::make_shared<const field::FieldVolume>(std::move(*measured));
+                p.gate = std::move(measured);
                 p.gate_width = width;
                 return self;
             },
