@@ -594,6 +594,7 @@ already changed.
 | `sculpt_grab` | Translate occupancy through the same inverse map the SDF `grab` deformer uses, so both representations mean the same thing. Resampling is nearest-cell and rounds **per axis**, so a displacement under half a cell on every axis moves nothing — a drag fed raw pointer deltas is dead until the host accumulates them past `voxel_size` |
 | `sculpt_fill_cavities` | Fill pockets: an empty cell with ≥4 of its 6 face neighbours occupied is inside a cavity. The rule is local, so it fills what is **narrow**, not what is enclosed — a through-hole wider than one cell does not qualify, a one-cell perforation does. Its everyday input is a **dithered soft stamp**, which leaves single-cell holes through its own deposit; closing them cut a test stroke's greedy mesh by 27%. `repair_fill_voids` is the one for sealed voids, and neither substitutes for the other |
 | `sculpt_carve_alpha` | A caller-supplied scalar stamp modulating per-cell strength. **The engine decodes no images** — a host with an alpha has already loaded a PNG |
+| `sculpt_crease` | **Does not exist, deliberately** — DamStandard on a lattice is a recipe rather than a verb. See below |
 | `repair_report` | What a pre-bake check wants to know, without performing the fix |
 | `repair_close_holes` | Seal perforations by the same pocket rule. Only ever adds cells |
 | `repair_fill_voids` | Fill every empty cell the outside cannot reach — enclosure is *decided*, not guessed locally |
@@ -613,6 +614,49 @@ there, so a grid with a single level behaves exactly as it did and serialises to
 the bytes it always did.
 
 **Any verb here can be a valid call that changes nothing** — a sub-cell grab or
+### DamStandard on a voxel layer: a recipe, not a verb
+
+The V-groove is `Op::Incise` on an SDF layer and `MeshBrush::Crease` on a mesh
+layer. On a voxel layer it is a stroked erode with a **constant** falloff at a
+small size:
+
+```cpp
+BrushParams p;
+p.size = 3;                          // small: the groove is as wide as the brush
+p.shape = BrushShape::Sphere;
+p.falloff = BrushFalloff::Constant;  // NOT smooth — see below
+grid.sculpt_inflate(cell, p, -2);    // negative carves; positive raises the ridge
+```
+
+stamped along the stroke by the brush engine as any other verb is. `amount > 0`
+raises the crisp ridge instead, which is the Alt behaviour.
+
+**Constant, not smooth, and that is the surprising part.** Occupancy is binary,
+so a fractional weight is resolved by dithering against a hash of the cell
+coordinate — and a three-cell brush has too few cells for a smooth taper to
+average out. Measured on a stroked groove, surface height along the line
+(6 is untouched, depth 2 requested):
+
+| falloff | profile along the stroke |
+|---|---|
+| `Constant` | `4 4 4 4 4 4 4 4 4 4 4 4 4` |
+| `Linear` | `4 4 5 4 5 5 5 4 5 5 4 4 5` |
+| `Smooth` | `5 5 5 5 5 5 5 4 5 5 4 4 5` |
+| `Gaussian` | `5 5 5 5 5 5 5 5 5 5 4 4 5` |
+
+A soft falloff on a tight brush does not give a soft crevice; it gives a
+speckled one.
+
+**Why there is no verb.** A `sculpt_crease` was scoped, implemented and
+measured, and stroked along a line it produced a profile **identical** to the
+plain erode above; on a single dab it was *shallower*, because its squeeze
+filled the groove back in. The reason is structural: on a mesh the pinch moves
+*vertices* tangentially and steepens the walls of a surface sheet, while on a
+lattice moving material toward the groove centre puts material **into** the
+groove. The operation that sharpens a mesh crease fills a voxel one, so what is
+left of DamStandard here is the depth profile — which is the falloff.
+`openspec/ROADMAP.md` records the decision and the numbers.
+
 smudge, a flatten on an already-flat region, a dithered stamp that misses every
 cell it was offered, a footprint over empty space. None of that is an error and
 none of it is reported as one. To tell a live edit from a dead one, read
