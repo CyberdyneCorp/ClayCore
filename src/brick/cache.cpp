@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <tuple>
 
 namespace clay {
 namespace brick {
@@ -147,6 +148,144 @@ SubmitResult BrickCache::submit(const BrickRequest& request, const float* values
     t.brick.generation = request.generation;
     t.evaluated = true;
     return SubmitResult::Accepted;
+}
+
+// -- eviction -----------------------------------------------------------------
+
+bool BrickCache::evict(BrickKey key) {
+    auto it = bricks_.find(key);
+    if (it == bricks_.end()) return false;
+    Tracked& t = it->second;
+    if (!t.evaluated) return false;
+    // A dirty brick is already scheduled to be rewritten, so dropping it trades
+    // memory for the one thing the host is actively waiting on.
+    if (t.queued) return false;
+
+    if (t.brick.state == BrickState::Surface) surface_bytes_ -= config_.brick_bytes();
+    t.brick.values.clear();
+    t.brick.values.shrink_to_fit();
+    t.brick.colors.clear();
+    t.brick.colors.shrink_to_fit();
+    // Back to never-evaluated, which is a state the cache already has: an
+    // evicted brick is one that must be re-evaluated if it is looked at again,
+    // and that is exactly what the dirty/request/submit cycle does.
+    t.brick.state = BrickState::Outside;
+    t.evaluated = false;
+    // The generation is NOT reset. A request already in flight for this key
+    // carries the old generation and must still be refused as stale — eviction
+    // is not a licence to accept work that was scheduled against a different
+    // document revision.
+    //
+    // The MIP is deliberately kept. Dirtying a child invalidates it because the
+    // shape changed; eviction does not change the shape, it drops a cached copy
+    // of it. Keeping the coarse stand-in is the whole value of a memory-warning
+    // response: the silhouette survives at an eighth of the memory, and a host
+    // that has already built level 1 keeps something to draw.
+    return true;
+}
+
+namespace {
+
+// Squared distance from a point to a brick's own bounds — the ordering key for
+// the spatial policy. Squared because only the comparison matters and a sqrt
+// per brick is pure cost.
+float focus_distance_sq(const math::Aabb& b, kernel::cfloat3 p) {
+    const kernel::cfloat3 d =
+        kernel::cmax(kernel::cmax(b.min - p, p - b.max), kernel::cf3(0, 0, 0));
+    return kernel::cdot(d, d);
+}
+
+}  // namespace
+
+std::size_t BrickCache::trim_to(std::size_t target_bytes, kernel::cfloat3 focus) {
+    if (surface_bytes_ <= target_bytes) return 0;
+
+    // Only surface bricks hold a payload, so only they are worth ordering.
+    std::vector<std::pair<float, BrickKey>> ranked;
+    ranked.reserve(bricks_.size());
+    for (const auto& [key, t] : bricks_) {
+        if (!t.evaluated || t.queued || t.brick.state != BrickState::Surface) continue;
+        ranked.emplace_back(focus_distance_sq(brick_bounds(key), focus), key);
+    }
+    // Furthest first. Ties broken by key so the order is deterministic — two
+    // runs of the same trim must drop the same bricks, or a cache is not
+    // reproducible.
+    std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) {
+        if (a.first != b.first) return a.first > b.first;
+        return std::tie(a.second.x, a.second.y, a.second.z) >
+               std::tie(b.second.x, b.second.y, b.second.z);
+    });
+
+    std::size_t dropped = 0;
+    for (const auto& [dist, key] : ranked) {
+        if (surface_bytes_ <= target_bytes) break;
+        if (evict(key)) ++dropped;
+    }
+    return dropped;
+}
+
+std::size_t BrickCache::trim_to(std::size_t target_bytes) {
+    if (surface_bytes_ <= target_bytes) return 0;
+    // No focus: take them in a deterministic key order rather than the hash
+    // map's, so an untargeted trim is still reproducible.
+    std::vector<BrickKey> keys;
+    keys.reserve(bricks_.size());
+    for (const auto& [key, t] : bricks_)
+        if (t.evaluated && !t.queued && t.brick.state == BrickState::Surface) keys.push_back(key);
+    std::sort(keys.begin(), keys.end(), [](BrickKey a, BrickKey b) {
+        return std::tie(a.x, a.y, a.z) < std::tie(b.x, b.y, b.z);
+    });
+
+    std::size_t dropped = 0;
+    for (BrickKey key : keys) {
+        if (surface_bytes_ <= target_bytes) break;
+        if (evict(key)) ++dropped;
+    }
+    return dropped;
+}
+
+std::size_t BrickCache::forget_empty() {
+    std::size_t forgotten = 0;
+    for (auto it = bricks_.begin(); it != bricks_.end();) {
+        const Tracked& t = it->second;
+        // A key is forgettable only when an UNTRACKED key would answer the same
+        // thing, and that is a narrower set than "holds no payload".
+        //
+        // A missing brick reads as +band — outside — everywhere. So a
+        // never-evaluated key (including one eviction returned to that state)
+        // and an evaluated-OUTSIDE key are both observationally identical to
+        // not being there.
+        //
+        // An INSIDE brick is not. It holds real information — this region is
+        // solid — and forgetting it would report the interior as empty. That is
+        // data loss wearing memory reclamation's clothes, and it is the reason
+        // this is not simply "erase what has no payload".
+        //
+        // Queued keys stay: the host is waiting on them. A key with a request
+        // already IN FLIGHT is safe to forget, because submit() answers Stale
+        // for a key it does not track — the late work is discarded rather than
+        // landing in a slot it no longer owns.
+        const bool reads_as_absent =
+            !t.evaluated || (t.brick.state == BrickState::Outside && t.brick.values.empty());
+        if (reads_as_absent && !t.queued) {
+            it = bricks_.erase(it);
+            ++forgotten;
+        } else {
+            ++it;
+        }
+    }
+    return forgotten;
+}
+
+std::size_t BrickCache::bookkeeping_bytes() const {
+    // The map's own per-entry cost: the key, the Tracked record, and a node
+    // pointer. An unordered_map's real allocator overhead is not observable
+    // from here, so this counts what is knowable and says so rather than
+    // guessing at a bucket array.
+    const std::size_t per_entry = sizeof(BrickKey) + sizeof(Tracked) + sizeof(void*);
+    return bricks_.size() * per_entry +
+           mips_.size() * (sizeof(BrickKey) + sizeof(Brick) + sizeof(void*)) +
+           dirty_.size() * sizeof(BrickKey);
 }
 
 const Brick* BrickCache::find(BrickKey key) const {

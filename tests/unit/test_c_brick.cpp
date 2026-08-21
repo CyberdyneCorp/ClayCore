@@ -1265,3 +1265,66 @@ TEST_CASE("raycast_many: the parallel batch matches the single-ray call slot for
     CHECK(hit_count > 0);
     CHECK(hit_count < n);
 }
+
+TEST_CASE("c abi: a host can give memory back on a warning") {
+    // The sequence a host runs on a platform memory warning, end to end. Before
+    // eviction existed the only recourse was to destroy the cache and rebuild
+    // from nothing, at the moment the device could least afford it.
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "s", &layer) == CLAY_OK);
+    const float r[1] = {1.0f};
+    clay_item* ball = clay_item_create(CLAY_PRIM_SPHERE, r, 1);
+    REQUIRE(clay_layer_add_item(doc, layer, ball, nullptr) == CLAY_OK);
+    clay_item_destroy(ball);
+
+    clay_brick_config cfg{};
+    cfg.struct_size = sizeof(cfg);
+    cfg.dim = 8;
+    cfg.voxel_size = 0.05f;
+    cfg.band_voxels = 3;
+    clay_brick_cache* cache = clay_brick_cache_create(&cfg);
+    REQUIRE(cache != nullptr);
+
+    const float lo[3] = {-1.2f, -1.2f, -1.2f}, hi[3] = {1.2f, 1.2f, 1.2f};
+    REQUIRE(clay_brick_cache_mark_dirty(cache, lo, hi) == CLAY_OK);
+    refill(cache, doc);
+
+    clay_brick_stats stats{};
+    stats.struct_size = sizeof(stats);
+    REQUIRE(clay_brick_cache_stats(cache, &stats) == CLAY_OK);
+    const uint64_t full = stats.memory_usage;
+    REQUIRE(full > 0);
+    // The bookkeeping is now a reported number rather than invisible growth.
+    CHECK(stats.bookkeeping_bytes > 0);
+
+    // The warning arrives: get down to half, keeping what is near the work.
+    const float focus[3] = {1.0f, 0.0f, 0.0f};
+    uint64_t dropped = 0;
+    REQUIRE(clay_brick_cache_trim(cache, full / 2, focus, &dropped) == CLAY_OK);
+    CHECK(dropped > 0);
+    REQUIRE(clay_brick_cache_stats(cache, &stats) == CLAY_OK);
+    CHECK(stats.memory_usage <= full / 2);
+
+    // ...and the second pool, which trim does not touch.
+    const uint64_t tracked_before = stats.tracked_bricks;
+    uint64_t forgotten = 0;
+    REQUIRE(clay_brick_cache_forget_empty(cache, &forgotten) == CLAY_OK);
+    CHECK(forgotten > 0);
+    REQUIRE(clay_brick_cache_stats(cache, &stats) == CLAY_OK);
+    CHECK(stats.tracked_bricks < tracked_before);
+
+    // A NULL focus is a valid statement of "no preference", not an error.
+    REQUIRE(clay_brick_cache_trim(cache, 0, nullptr, &dropped) == CLAY_OK);
+
+    // Refusals are typed, and a null cache is one.
+    CHECK(clay_brick_cache_trim(nullptr, 0, focus, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_brick_cache_forget_empty(nullptr, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    const int32_t key[3] = {0, 0, 0};
+    CHECK(clay_brick_cache_evict(nullptr, key, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_brick_cache_evict(cache, nullptr, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+
+    clay_brick_cache_destroy(cache);
+    clay_document_destroy(doc);
+}

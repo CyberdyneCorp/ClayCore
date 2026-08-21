@@ -279,6 +279,70 @@ CPU-side, latency-critical, called every Pencil event:
 - Build-plane and grid cell resolution for voxel mode; face picking on voxel grids.
 - Bounds/frustum utilities for zoom-to-selection and culling.
 
+### Answering a platform memory warning
+
+The brick cache is likely the largest single allocation in a sculpting app's
+process, and iOS does not ask politely: a memory warning ignored is how an app
+gets killed. Until v0.34.0 the cache had a budget and no way to give anything
+back — a submit past it was **refused**, the surface stopped updating exactly
+where the artist was working, and the only recourse was to destroy the cache and
+rebuild from nothing, which is the most expensive operation available taken at
+the moment the device can least afford it.
+
+The sequence a host runs on a warning, end to end:
+
+```c
+/* 1. What is actually held, in both pools. memory_usage bounds the fp16
+      payloads; bookkeeping_bytes is the per-key map, which grows with how much
+      space has ever been dirtied and is OUTSIDE the configured budget. */
+clay_brick_stats s = { .struct_size = sizeof s };
+clay_brick_cache_stats(cache, &s);
+
+/* 2. Reclaim payloads first — the big pool. `focus` is where the artist is
+      working, or where the camera points; the cache cannot know either. */
+uint64_t dropped = 0;
+clay_brick_cache_trim(cache, s.memory_usage / 2, focus_xyz, &dropped);
+
+/* 3. Then the bookkeeping, which trim does not touch. */
+uint64_t forgotten = 0;
+clay_brick_cache_forget_empty(cache, &forgotten);
+```
+
+Nothing is lost. An evicted brick is one that must be re-evaluated if it is
+looked at again, which is exactly what the mark-dirty / take-dirty / submit
+cycle already does — so a host that trims and later pans back simply pays for
+those bricks again, and gets **bit-identical** data for them.
+
+Three properties worth relying on:
+
+- **Dirty bricks are never dropped.** They are already scheduled to be
+  rewritten, so evicting one would trade memory for the thing the host is
+  waiting on. The target may therefore be unreachable; the stats say where it
+  got to.
+- **The level-1 mip survives eviction.** *Dirtying* a child invalidates it,
+  because the shape changed; eviction does not change the shape, it drops a
+  cached copy. So a host that has built level 1 keeps a coarse silhouette to
+  draw at an eighth of the memory — which is most of the value of responding to
+  a warning at all.
+- **Work in flight stays safe.** Eviction does not reset generations, so a
+  request issued before the trim is still refused as `Stale`, and a key removed
+  by `forget_empty` answers `Stale` too. Late work is discarded rather than
+  landing in a slot it no longer owns.
+
+**Which bricks go is a spatial decision, not a temporal one.** "Least recently
+used" is the reflex answer and the wrong shape: a sculptor works in a
+neighbourhood, so what they return to is near where they are working rather than
+what they touched last. Measured on a walking-stroke fixture that trims to 60%
+after every dab, dropping furthest-from-focus re-requested **21%** of what it
+evicted against **53%** for dropping arbitrarily — and reached the same target
+having evicted **40% fewer bricks**, because it was not dropping things that
+came straight back. Pass `NULL` for the focus only when there genuinely is none:
+an offline bake, or a document that is not on screen.
+
+**There is no automatic eviction loop**, and there will not be. The cache
+publishes no refill loop, thread pool or timer for the same reason: the consumer
+owns scheduling. Eviction is something a host asks for.
+
 ### What "latency-critical" costs, measured
 
 "Latency-critical" was an adjective here until v0.25.0; it is now a number.

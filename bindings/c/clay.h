@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 33
+#define CLAY_ABI_MINOR 34
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -4131,6 +4131,27 @@ typedef struct clay_brick_stats {
                               * not yet taken by clay_brick_cache_take_dirty */
     uint64_t memory_usage;   /* bytes of surface-brick payload held */
     uint64_t memory_budget;  /* what the cache was created with; 0 = unlimited */
+    /* What the per-key bookkeeping costs — the growth memory_usage does NOT
+     * count, because it bounds only the fp16 payloads. Reported as its own
+     * number rather than folded into memory_usage: that one is compared against
+     * a budget a host already configured, and making it grow by a term it never
+     * included would change the meaning of a number in the field rather than
+     * report a new fact. Reclaim it with clay_brick_cache_forget_empty. */
+    uint64_t bookkeeping_bytes;
+    /* What ONE surface brick's payload costs, so a host can answer "will the
+     * batch I am about to evaluate fit" with arithmetic it owns:
+     *
+     *     memory_usage + pending * brick_bytes <= memory_budget
+     *
+     * A NUMBER rather than a would_it_fit() predicate, deliberately. A
+     * predicate's answer is true only until the next submit, which in a
+     * threaded host is immediately — so it would imply a guarantee the cache
+     * cannot make. The arithmetic is honest about being a snapshot.
+     *
+     * Worth having because the expensive part of a refusal is not the refusal:
+     * it is the evaluation already spent on a brick that gets dropped. A host
+     * that checks first trims BEFORE evaluating rather than after. */
+    uint64_t brick_bytes;
 } clay_brick_stats;
 
 /* One evaluation request, and the only thing that crosses between the cache
@@ -4198,6 +4219,65 @@ clay_result clay_brick_cache_stats(const clay_brick_cache* cache, clay_brick_sta
  * of 0.4 is 1e19 of them — and each one costs a tracked entry, so the span is
  * computed in 64-bit and checked BEFORE anything is inserted. A refused call
  * leaves the cache exactly as it was. */
+/* -- eviction --------------------------------------------------------------
+ *
+ * The budget was a wall and is now a ceiling. Before this, a submit past the
+ * budget was REFUSED and the only recourse was to destroy the cache and rebuild
+ * from nothing — the most expensive thing available, taken when the device can
+ * least afford it. On iOS a memory warning ignored is how an app gets killed,
+ * and this cache is likely the largest allocation in the process.
+ *
+ * Eviction loses no information: a dropped brick is one that must be
+ * re-evaluated if it is looked at again, which is what the
+ * mark_dirty/take_dirty/submit cycle already does.
+ *
+ * NO AUTOMATIC LOOP. The cache publishes no refill loop, thread pool or timer,
+ * and this is the same rule: eviction is something a host ASKS for, on a memory
+ * warning, on a view change, or on its own clock. */
+
+/* Get down to `target_bytes`, dropping the bricks FURTHEST from `focus` first,
+ * and report how many went in *out_dropped (optional).
+ *
+ * The policy is spatial rather than temporal, and that is the decision this
+ * call had to make. "Least recently used" is the reflex answer and the wrong
+ * shape: a sculptor works in a NEIGHBOURHOOD, so what they come back to is near
+ * where they are working, not what they touched most recently. Measured on a
+ * walking-stroke fixture, dropping furthest-first re-requested 21% of what it
+ * evicted against 52% for dropping arbitrarily — and reached the same target
+ * having evicted 40% fewer bricks, because it was not dropping things that came
+ * straight back.
+ *
+ * `focus` is a parameter because the cache cannot know it — only the host knows
+ * where the camera points and where the last edit landed. One point rather than
+ * an ordering, because a memory warning wants an answer now.
+ *
+ * NULL `focus` means no spatial preference, for a host that genuinely has none
+ * (an offline bake, a background document); it takes keys in a deterministic
+ * order so an untargeted trim is still reproducible.
+ *
+ * Never drops a brick that is dirty — that one is already scheduled to be
+ * rewritten, so dropping it would trade memory for the thing the host is
+ * actively waiting on. So the target may not be reachable; read
+ * clay_brick_cache_stats to see where it got to. */
+clay_result clay_brick_cache_trim(clay_brick_cache* cache, uint64_t target_bytes,
+                                  const float focus[3], uint64_t* out_dropped);
+
+/* Drop one brick's payload and return it to never-evaluated. *out_dropped
+ * (optional) is 1 when a brick was reclaimed and 0 when the key held none, so a
+ * caller can tell a miss from a reclaim. */
+clay_result clay_brick_cache_evict(clay_brick_cache* cache, const int32_t key[3],
+                                   uint64_t* out_dropped);
+
+/* Forget keys that an untracked key would answer identically for — never
+ * evaluated, or evaluated as OUTSIDE. This reclaims the per-key bookkeeping,
+ * which is a different pool from the payloads clay_brick_cache_trim frees; a
+ * host under memory pressure wants both, in that order.
+ *
+ * An INSIDE brick is never forgotten. It holds no lattice but carries real
+ * information — this region is solid — and an untracked key reads as OUTSIDE,
+ * so dropping one would report the interior as empty. */
+clay_result clay_brick_cache_forget_empty(clay_brick_cache* cache, uint64_t* out_forgotten);
+
 clay_result clay_brick_cache_mark_dirty(clay_brick_cache* cache, const float region_min[3],
                                         const float region_max[3]);
 

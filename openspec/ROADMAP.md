@@ -630,6 +630,17 @@ analog, and a differentiator rather than a parity item).
 Not scheduled, and not rejected either — small enough to slot in when something
 needs them, and listed so they are not mistaken for oversights:
 
+- **Output descriptors are filled unbounded.** Seven `clay_*` OUT structs are
+  filled with `*out = clay_thing{}` and then assigned field by field, which
+  writes `sizeof` as THIS build defines it rather than the size the caller
+  declared. Every one is correct today because none of those structs has grown
+  since its callers' header — and every one becomes a buffer overrun the moment
+  somebody appends a field, silently, only on hosts built against the older
+  layout. `clay_brick_stats` was the first to grow and it segfaulted the ctypes
+  ABI check; `write_desc` in `bindings/c/clay_c.cpp` is the bounded fill that
+  fixed it. The other seven should adopt it, as one mechanical change rather
+  than as a rider on whichever feature next grows a struct.
+
 - **Colour on a mesh layer's brushes.** `MeshSculptor` has fourteen verbs and
   every one of them moves vertices; nothing writes `Mesh::colors`. Blender's
   Paint and Smear are the missing pair. A mesh layer can CARRY imported vertex

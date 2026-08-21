@@ -14,6 +14,7 @@
 
 #include "clay/brick/half.h"
 #include "clay/eval/backend.h"
+#include "clay/kernel/shim.h"
 #include "clay/math/geom.h"
 
 namespace clay {
@@ -184,6 +185,77 @@ class BrickCache {
     // makes visible that the per-key bookkeeping grows with how much space has
     // ever been marked dirty, OUTSIDE the memory budget.
     std::size_t tracked_count() const { return bricks_.size(); }
+
+    // -- eviction ------------------------------------------------------------
+    //
+    // The budget was a wall and is now a ceiling. Before this, a submit past
+    // the budget was REFUSED and the only recourse was to destroy the cache and
+    // rebuild from nothing — the most expensive thing available, taken when the
+    // device can least afford it. On iOS a memory warning ignored is how an app
+    // gets killed, and this cache is likely the largest allocation in the
+    // process.
+    //
+    // Eviction loses no information. A dropped brick is one that has to be
+    // re-evaluated if it is looked at again, which is exactly what the
+    // dirty/request/submit cycle already does — so it is expressible as
+    // "return it to never-evaluated", a state the cache already has.
+    //
+    // NO AUTOMATIC LOOP, for the reason the cache publishes no refill loop,
+    // thread pool or timer: the consumer owns scheduling. A host evicts on a
+    // memory warning, on a view change, or on its own clock.
+
+    // Drop this brick's payload and return it to never-evaluated. False when
+    // the key holds no evaluated brick, so a caller can tell a miss from a
+    // reclaim. A brick that is currently dirty is NOT evicted: it is already
+    // scheduled to be rewritten, so dropping it would trade memory for the one
+    // thing the host is actively waiting on.
+    bool evict(BrickKey key);
+
+    // Get down to `target_bytes`, dropping the bricks FURTHEST from `focus`
+    // first, and report how many went.
+    //
+    // The policy is spatial rather than temporal, and that is the decision this
+    // change had to make. "Least recently used" is the reflex answer and is the
+    // wrong shape here: a sculptor works in a NEIGHBOURHOOD, so the bricks they
+    // come back to are the ones near where they are working, not the ones they
+    // touched most recently. Evicting near the focus is the worst available
+    // choice — it is re-requested on the next dab — while a distant brick may
+    // never be looked at again. Measured on a walking-stroke fixture, that is
+    // worth a large factor in re-request rate over dropping arbitrarily; see
+    // the change's design note.
+    //
+    // The cache cannot know where the focus is — only the host knows where the
+    // camera points and where the last edit landed — so it is a parameter. One
+    // point rather than a full ordering, because a memory warning wants an
+    // answer now and building an ordering per eviction is the wrong cost.
+    //
+    // Never drops dirty bricks, so the target may not be reachable; the return
+    // says what actually happened and `memory_usage()` says where it got to.
+    std::size_t trim_to(std::size_t target_bytes, kernel::cfloat3 focus);
+    // The same, with no spatial preference — for a host that has no meaningful
+    // focus (an offline bake, a background document). Kept separate rather than
+    // defaulted so that "I have no focus" is a statement rather than an
+    // accident of leaving an argument off.
+    std::size_t trim_to(std::size_t target_bytes);
+
+    // Forget keys that hold nothing: not evaluated, not dirty, no mip. This is
+    // the growth `tracked_count()` exists to make visible — the per-key
+    // bookkeeping grows with how much space has ever been dirtied and is
+    // OUTSIDE the memory budget. Returns how many were forgotten.
+    //
+    // Separate from trim_to because it frees a different pool: trim_to reclaims
+    // fp16 payloads, this reclaims map entries. A host under pressure wants
+    // both, in that order.
+    std::size_t forget_empty();
+
+    // What the per-key bookkeeping costs, which `memory_usage()` deliberately
+    // does not count.
+    //
+    // A SEPARATE number rather than folded into memory_usage(), because that
+    // one is compared against a budget a host already configured: making it
+    // grow by a term it never included would change the meaning of a number in
+    // the field rather than report a new fact.
+    std::size_t bookkeeping_bytes() const;
 
     // -- LOD mips ------------------------------------------------------------
     // A level-1 mip brick covers 2x2x2 full-res bricks by subsampling every
