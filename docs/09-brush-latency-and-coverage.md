@@ -435,6 +435,30 @@ both remain useful: **meshing a coarser level** (~90× between level 0 at cell
 level stays in sync for free) and **not meshing at all** —
 `clay_voxel_raycast` does a grid DDA, so a host can trace the voxels directly.
 
+## What only the release used to build
+
+Two gates ran for the first time at TAG time rather than on a pull request, and
+both cost a release cycle to discover:
+
+- **The Windows wheel.** MSVC is the only toolchain that reports C4267 (size_t
+  narrowing) and C4702 (unreachable code), and `CLAY_WERROR` is ON, so `/WX`
+  makes both build failures. Nothing built on Windows before a tag did.
+  v0.39.0 hit it three times — `src/voxel/grid.cpp`, `include/clay/kernel/tape.h`,
+  then `src/mesh/sculpt.cpp` — each a whole tag-and-rebuild cycle apart, because
+  a compile stops at its first errors and only reveals what it reached.
+  `ci.yml` now builds and tests on `windows-latest` with the same preset, which
+  reproduces `/WX` exactly; the wheel itself stays release-only.
+- **The Swift smoke.** CI type-checks it and the release RUNS it. That split is
+  deliberate and documented, but the 0.35.0 `struct_size` break is invisible at
+  compile time by construction, so no type-check could have caught it. It broke
+  v0.24.0 and v0.39.0.
+
+The pattern in both: a gate that only a tag runs is a gate nobody has run. When
+a local reproduction is impossible, the substitute is to find the whole class
+rather than the instance — clang's `-Wshorten-64-to-32` is the analogue of
+C4267 and clears the library in one pass, and it is worth verifying such a scan
+BITES (remove one fix, confirm one warning) before trusting a clean result.
+
 ## What a device case's number is worth
 
 A p95 over fewer than 20 samples IS the maximum: nearest rank is
