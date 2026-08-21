@@ -42,6 +42,14 @@ struct Measurement: Codable {
     let p50Ms: Double
     let p95Ms: Double
     let samples: Int
+    /// How many independent passes `p50Ms`/`p95Ms` are the MEDIAN of. 1 means
+    /// a single pass, which is what a point with enough samples for an honest
+    /// percentile gets. See `Timing.measureStable`.
+    var repeats: Int = 1
+    /// Spread of the per-pass p95 across those repeats, max - min. Zero at one
+    /// repeat. This is the number that says whether a case is worth trusting
+    /// at the tolerance the gate uses, and it is recorded rather than acted on.
+    var p95SpreadMs: Double = 0
 }
 
 struct CaseResult: Codable {
@@ -125,7 +133,8 @@ enum Timing {
     ///    re-consolidated an already-consolidated layer — a different and much
     ///    cheaper operation (measured: 4975 ms became 514 ms purely by
     ///    changing the sample count, which is the tell).
-    static func measure(warmups: Int = 3, reset: (() -> Void)? = nil,
+    static func measure(warmups: Int = 3, samples fixedSamples: Int? = nil,
+                        reset: (() -> Void)? = nil,
                         _ body: () -> Void)
         -> (p50: Double, p95: Double, n: Int) {
         for _ in 0..<warmups { body(); reset?() }
@@ -148,7 +157,12 @@ enum Timing {
         _ = bodyEnd  // only the full iteration decides how many we can afford
         let iterationMs = Double(resetEnd - probeStart) / 1_000_000.0
         let wanted = iterationMs > 0 ? Int(targetMeasureMs / iterationMs) : maxSamples
-        let samples = min(max(wanted, minSamples), maxSamples)
+        // An explicit count overrides the sizing, and is allowed BELOW
+        // minSamples: `measureStable` splits one point's sample budget across
+        // several passes rather than multiplying it, so each pass is smaller
+        // than the floor a single pass would take.
+        let samples = fixedSamples.map { max($0, 1) }
+            ?? min(max(wanted, minSamples), maxSamples)
 
         var times: [Double] = []
         times.reserveCapacity(samples)
@@ -161,6 +175,67 @@ enum Timing {
         }
         times.sort()
         return (percentile(times, 50), percentile(times, 95), samples)
+    }
+
+    /// A p95 over fewer than this many samples IS the maximum.
+    ///
+    /// Nearest rank is `ceil(0.95 n) - 1`, which lands on the last element for
+    /// every n below 20 — so a ten-sample point reports its slowest iteration
+    /// and calls it a percentile. That is not a subtle bias, it is a different
+    /// statistic, and it is what made `sdf_consolidate` read 423 ms one morning
+    /// and 621 ms the same afternoon on IDENTICAL code. `mask_extrude` showed
+    /// it most clearly: its p50 agreed across those two sessions to 1.000x
+    /// while its p95 differed by 1.09x, so the entire apparent regression was
+    /// one slow iteration out of ten.
+    static let p95NeedsSamples = 20
+
+    /// Three passes: a median of two is an average, and the point of a median
+    /// here is to DROP a bad pass rather than average it in. More than three
+    /// buys little and these are the slowest points in the suite.
+    static let minRepeats = 3
+
+    /// `measure`, repeated until its p95 means something.
+    ///
+    /// A point that earned enough samples for an honest percentile is measured
+    /// ONCE and costs exactly what it did before. A point that did not is
+    /// measured again, and the reported p50 and p95 are the MEDIANS across
+    /// passes — which drops a pass that landed in a bad scheduling epoch
+    /// instead of letting it be the answer.
+    ///
+    /// The extra passes SPLIT the point's sample budget rather than
+    /// multiplying it. Multiplying was tried first and timed the verb test out
+    /// on device: `mask_extrude` at 1000 stamps costs ~3.1 s an iteration, so
+    /// three full passes of ten samples is 93 s for one point. Three passes of
+    /// three or four samples cost about what one pass of ten did, and a median
+    /// of three small maxima is a far better estimator than one larger maximum
+    /// — which is all a sub-20-sample p95 ever was.
+    ///
+    /// Passes are separate rather than one longer run on purpose: back-to-back
+    /// samples share a scheduling epoch, and the variance being defended
+    /// against moved BETWEEN sessions while consecutive runs agreed.
+    static func measureStable(warmups: Int = 3, reset: (() -> Void)? = nil,
+                              _ body: () -> Void)
+        -> (p50: Double, p95: Double, n: Int, repeats: Int, spread: Double) {
+        // Pass one also sizes the point: `measure` picks its own sample count.
+        let first = measure(warmups: warmups, reset: reset, body)
+        if first.n >= p95NeedsSamples {
+            return (first.p50, first.p95, first.n, 1, 0)
+        }
+
+        // Split what a single pass would have cost across the remaining ones.
+        // Three samples is the floor: below that a pass has no interior at all.
+        let perPass = max(first.n / minRepeats, 3)
+        var p50s = [first.p50], p95s = [first.p95], samples = first.n
+        for _ in 1..<minRepeats {
+            let r = measure(warmups: 1, samples: perPass, reset: reset, body)
+            p50s.append(r.p50)
+            p95s.append(r.p95)
+            samples += r.n
+        }
+
+        let sorted95 = p95s.sorted()
+        return (percentile(p50s.sorted(), 50), percentile(sorted95, 50), samples,
+                p95s.count, (sorted95.last ?? 0) - (sorted95.first ?? 0))
     }
 
     /// Fitted exponent of cost against document size: log-log slope between

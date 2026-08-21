@@ -142,7 +142,7 @@ final class LatencyTests: XCTestCase {
                 var evalFailures = 0
                 var lastNode: clay_node_id?
 
-                let r = Timing.measure(reset: {
+                let r = Timing.measureStable(reset: {
                     // Undo the stamp OUTSIDE the timing, so the document stays
                     // the size the axis says it is. Without this the document
                     // grows by one per iteration and the smallest axis point
@@ -160,7 +160,9 @@ final class LatencyTests: XCTestCase {
                 XCTAssertEqual(evalFailures, 0,
                                "\(backend) failed to evaluate at \(stamps) stamps")
                 measurements.append(Measurement(stamps: stamps, p50Ms: r.p50,
-                                                p95Ms: r.p95, samples: r.n))
+                                                p95Ms: r.p95, samples: r.n,
+                                                repeats: r.repeats,
+                                                p95SpreadMs: r.spread))
             }
 
             collector.add(CaseResult(
@@ -258,7 +260,7 @@ final class LatencyTests: XCTestCase {
             var refreshedTotal = 0
             var refreshCalls = 0
             var lastNode: clay_node_id?
-            let r = Timing.measure(reset: {
+            let r = Timing.measureStable(reset: {
                 // Same reason as the global case: keep the document the size
                 // the axis claims.
                 //
@@ -305,7 +307,9 @@ final class LatencyTests: XCTestCase {
                               + "\(stamps) stamps — this is measuring an empty loop")
 
             measurements.append(Measurement(stamps: stamps, p50Ms: r.p50,
-                                            p95Ms: r.p95, samples: r.n))
+                                            p95Ms: r.p95, samples: r.n,
+                                            repeats: r.repeats,
+                                            p95SpreadMs: r.spread))
         }
 
         collector.add(CaseResult(

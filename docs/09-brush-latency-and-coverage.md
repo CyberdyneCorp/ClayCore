@@ -435,6 +435,49 @@ both remain useful: **meshing a coarser level** (~90× between level 0 at cell
 level stays in sync for free) and **not meshing at all** —
 `clay_voxel_raycast` does a grid DDA, so a host can trace the voxels directly.
 
+## What a device case's number is worth
+
+A p95 over fewer than 20 samples IS the maximum: nearest rank is
+`ceil(0.95 n) - 1`, which lands on the last element for every n below 20. Eight
+measurement points in the suite are sized below that — the slow ones, where the
+harness can only afford ten iterations — so their "p95" was the slowest single
+iteration and one scheduling hiccup was the result.
+
+That is not theoretical. `sdf_consolidate` read **423 ms one morning and 621 ms
+the same afternoon on identical code**, and a day went into bisecting a
+regression that did not exist. `mask_extrude` showed the mechanism most
+clearly: across those two sessions its p50 agreed to **1.000x** while its p95
+differed by **1.09x**, so the entire apparent change was one slow iteration out
+of ten.
+
+Those points are now measured in three passes and reported as the MEDIAN of the
+per-pass p95, with the spread recorded beside it. The passes SPLIT the point's
+sample budget rather than multiplying it — multiplying was tried first and timed
+the verb test out on device, because `mask_extrude` at 1000 stamps costs ~3.1 s
+an iteration and three full passes is 93 s for one point.
+
+Measured over two sessions, same device:
+
+| case | single pass, across sessions | median of 3 |
+|---|---|---|
+| `sdf_consolidate` | x1.466 | **x1.007** |
+| `mask_extrude` | x1.074 | x1.069 |
+
+It fixes the case it was aimed at and does **not** fix `mask_extrude`, whose
+~7% variance moves on a timescale longer than one run and so survives repeating
+within one. That is worth knowing rather than hiding: the spread is now printed
+every run (214-243 ms for `mask_extrude`, 7-12 ms for `sdf_consolidate`), and a
+REGRESSION smaller than the spread the harness just measured is reported as
+unproven rather than as a finding.
+
+The verb test costs 217 s instead of 136 s for this.
+
+Cases whose every point is a single timing — the gallery sessions, which time
+each stroke of a progressive sculpt once — cannot be stabilised this way at all,
+because a stroke cannot be repeated without changing the sculpt it is building.
+The gate now says so when one of them fails, rather than implying a measurement
+that was never taken.
+
 ## Coverage: every brush has a test and a picture
 
 Two gates already enforce this, in opposite directions:
