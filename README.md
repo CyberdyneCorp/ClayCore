@@ -132,11 +132,8 @@ sixteen fixed-topology brushes, taper and twist, a lattice cage, masks, the
 stroke engine and a bit-exact undo record all reach a mesh layer's own
 vertices.
 
-**But three ways to sculpt is still two ways to compose**, and that is the
-distinction worth keeping rather than flattening. A mesh layer is never
-evaluated — no tape, no blend, no influence bound — so it cannot be a boolean
-operand or blend with a field without being converted first. You can sculpt it;
-you cannot subtract it from something.
+**But three ways to sculpt is still two ways to compose**, and that distinction
+is worth keeping rather than flattening — see below for what it actually means.
 
 An **SDF layer** is an ordered list of parametric edits — primitives, booleans,
 blends, deformers, strokes — compiled into a flat tape and evaluated as a
@@ -152,7 +149,7 @@ verbatim, whose vertices move and whose polygons never do.
 | **Precision** | Exactness and Lipschitz bounds tracked per node; booleans are watertight by construction, raymarching provably correct | Occupancy, not distance — a bound, not a metric | Exact vertices, and no field at all — so nothing to track and nothing to steepen |
 | **Free-form sculpting** | Smooth/flatten **bake** into volumes, and chained bakes steepen the field until consolidation redistances it | Smooth, inflate, pinch, smudge chain forever at no cost — each verb is a local cell operation | Sixteen verbs chain at no field cost, but a large pull **stretches** the triangles it has, which is the signal the mesh wants retopo |
 | **Colour** | Per item, plus `Paint` regions | Per cell, via the palette | Per vertex, via `paint` and `smear` |
-| **Composability** | Any item is an operand: boolean it, blend it, deform it | Converts into an operand (`Volume.from_voxels`), non-destructively | **Not an operand.** Never evaluated; needs `Volume.from_mesh` first, which resamples |
+| **Composability** | Already an operand: boolean it, blend it, deform it, reorder it | Becomes one via `Volume.from_voxels` — non-destructive, and loses nothing the grid had not already quantised | Becomes one via `Volume.from_mesh` — but that quantises exact vertices and drops UVs and edge loops, which is what it was imported for |
 | **Scaling cost** | Deep edit lists degrade the safe step scale (grab/relief/noise items each cost some) | Flat per-cell cost however many edits landed | O(the vertices a falloff reached), after an O(vertices) adjacency build the session pays once |
 
 The short version: **block out and hard-surface on SDF, free-form sculpt on
@@ -162,6 +159,61 @@ ago, mirror a layer, cut with an exact prism. The voxel side is where you push
 material around like clay without the field steepening underneath you. The mesh
 side is where a retopologized model gets detailed without spending the
 retopology.
+
+### Sculpting and composing are not the same operation
+
+The two words get used interchangeably and they are different things here, so
+it is worth being precise about which one a representation can do.
+
+**Sculpting changes one shape.** You take a surface and a gesture — a dab, a
+drag, a smooth pass — and the surface comes out different. Afterwards the
+gesture is spent: what you have is the new shape (plus, on the SDF side, a
+record of how you got there).
+
+**Composing defines a new shape in terms of others.** `A ∪ B`, `A − B`, a smooth
+union with a blend radius. The parts do not disappear into the result — they
+stay separately editable, and so does the *relationship*. That is what lets you
+change a blend radius from an hour ago, swap the sphere for a box, or reorder
+two booleans and have the model reassemble itself.
+
+#### Why composing needs a distance field
+
+To evaluate `A ∪ B` at a point you need `d_A(p)` and `d_B(p)` — a **signed
+distance from any point in space** to each operand, not just a surface you can
+look at. That is what a boolean takes the min or max of, what a smooth union
+blends between, and what the raymarcher steps along to find the surface at all.
+
+So an operand has to answer one question everywhere: *"how far are you, and
+which side am I on?"*
+
+- An **SDF item** answers by construction. That is what it is.
+- A **voxel grid** does not: occupancy is a yes/no per cell with no distance in
+  it. But a grid is *already a lattice*, so reading it trilinearly and
+  **redistancing** produces a field that does answer — and loses nothing the
+  grid had not already discarded when it was rasterized.
+- A **mesh** does not either. Triangles carry no inside/outside and no
+  distance without a query structure, and answering per sample would mean a
+  closest-point search plus a winding-number test **inside the raymarcher's
+  inner loop**.
+
+#### One composition model, three prices of admission
+
+Everything composes in exactly one place: the SDF edit list. `compile_document`
+chains *visible SDF layers* — a voxel layer and a mesh layer are not in the tape
+at all. So "compose" means "become an SDF item", and the three representations
+differ only in what that costs:
+
+| | Price of admission |
+|---|---|
+| **SDF item** | Free — it already is one |
+| **Voxel grid** | `Volume.from_voxels`. Non-destructive: the grid is untouched, and the result loses nothing the grid had not already quantised |
+| **Mesh** | `Volume.from_mesh`. Quantises exact vertices onto a lattice and drops the UVs and edge loops — **precisely what made it worth keeping as a mesh** |
+
+That is why the shorthand is *two*: two representations round-trip into
+composition as an ordinary workflow, and the third can but in practice does not,
+because paying the price costs the retopology the mesh was imported for. You can
+sculpt a mesh all day; subtracting a cylinder from it spends the thing you were
+protecting.
 
 ### What each representation has
 
