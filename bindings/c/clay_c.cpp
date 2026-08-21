@@ -38,6 +38,7 @@
 #include "clay/mesh/lattice.h"
 #include "clay/mesh/deform.h"
 #include "clay/mesh/sculpt.h"
+#include "clay/mesh/transfer.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/to_field.h"
 #include "clay/mesh/validate.h"
@@ -7705,6 +7706,72 @@ clay_result clay_mesh_brush_defaults(clay_mesh_brush_desc* out_desc) {
     // The alpha stays null in the defaults: a stamp without one is the common
     // case, and a default pointing at nothing a caller owns would be a trap.
     write_desc(out_desc, declared, out);
+    return CLAY_OK;
+}
+
+namespace {
+constexpr std::size_t kTransferDescOriginal =
+    offsetof(clay_transfer_desc, max_distance) + sizeof(float);
+constexpr std::size_t kTransferReportOriginal =
+    offsetof(clay_transfer_report, max_distance) + sizeof(float);
+}  // namespace
+
+clay_result clay_mesh_transfer_defaults(clay_transfer_desc* out_desc) {
+    if (!out_desc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null descriptor");
+    clay_transfer_desc probe;
+    clay_result r = read_desc(out_desc, kTransferDescOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_desc->struct_size;
+    const mesh::TransferOptions d;
+    clay_transfer_desc out{};
+    out.colors = d.colors ? 1 : 0;
+    out.uvs = d.uvs ? 1 : 0;
+    out.normals = d.normals ? 1 : 0;
+    out.max_distance = d.max_distance;
+    write_desc(out_desc, declared, out);
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_transfer_attributes(const clay_mesh* source, clay_mesh* target,
+                                          const clay_transfer_desc* desc,
+                                          clay_transfer_report* out_report) {
+    const mesh::Mesh* src = nullptr;
+    clay_result r = resolve_mesh(source, &src);
+    if (r != CLAY_OK) return r;
+    if (!target) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null target mesh");
+    mesh::Mesh* dst = mesh_data_mut(target);
+    if (!dst) return fail(CLAY_ERROR_NOT_FOUND, "the mesh layer is no longer in its document");
+
+    mesh::TransferOptions options;
+    if (desc) {
+        clay_transfer_desc d;
+        r = read_desc(desc, kTransferDescOriginal, &d);
+        if (r != CLAY_OK) return r;
+        if (d.max_distance < 0.0f)
+            return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                        "max_distance must be >= 0; zero derives it from the source's size");
+        options.colors = d.colors != 0;
+        options.uvs = d.uvs != 0;
+        options.normals = d.normals != 0;
+        options.max_distance = d.max_distance;
+    }
+
+    const mesh::TransferReport report = mesh::transfer_attributes(*src, dst, options);
+
+    if (out_report) {
+        clay_transfer_report probe;
+        r = read_desc(out_report, kTransferReportOriginal, &probe);
+        if (r != CLAY_OK) return r;
+        const std::uint32_t declared = out_report->struct_size;
+        clay_transfer_report filled{};
+        filled.transferred = report.transferred;
+        filled.fell_back = report.fell_back;
+        filled.colors = report.colors ? 1 : 0;
+        filled.uvs = report.uvs ? 1 : 0;
+        filled.normals = report.normals ? 1 : 0;
+        filled.max_distance = report.max_distance;
+        write_desc(out_report, declared, filled);
+    }
     return CLAY_OK;
 }
 

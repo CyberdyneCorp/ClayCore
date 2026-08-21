@@ -9,6 +9,7 @@
 #include <map>
 #include <utility>
 
+#include "clay/mesh/transfer.h"
 #include "clay/parallel/thread_pool.h"
 #include "dither.h"
 
@@ -1815,14 +1816,13 @@ namespace {
 // interior from taking one corner's colour.
 kernel::cfloat3 mesh_colour_at(const mesh::Mesh& m, const mesh::Bvh& bvh, kernel::cfloat3 p,
                                kernel::cfloat3 fallback) {
-    if (m.colors.size() != m.positions.size()) return fallback;
     const mesh::Bvh::ClosestPoint hit = bvh.closest(p);
-    if (!hit.found || hit.triangle * 3 + 2 >= m.indices.size()) return fallback;
-    const std::uint32_t i0 = m.indices[hit.triangle * 3];
-    const std::uint32_t i1 = m.indices[hit.triangle * 3 + 1];
-    const std::uint32_t i2 = m.indices[hit.triangle * 3 + 2];
-    const float w = 1.0f - hit.u - hit.v;
-    return m.colors[i0] * w + m.colors[i1] * hit.u + m.colors[i2] * hit.v;
+    if (!hit.found) return fallback;
+    // The same barycentric read attribute transfer uses. Shared rather than
+    // duplicated so the two cannot drift apart — this one is how an imported
+    // model's vertex colours reach a palette, and that one is how they survive
+    // a trip through the field.
+    return mesh::sample_color(m, hit.triangle, hit.u, hit.v, fallback);
 }
 
 }  // namespace

@@ -65,6 +65,18 @@ across the whole layout. Colour has no such problem, because colour is
 continuous across a seam. This is a property of per-vertex uvs and not a bug to
 be fixed later, so it belongs in the requirement.
 
+### Measured while building it
+
+The identity claim needed narrowing, and the test is what narrowed it. On a
+mesh whose vertex positions are distinct, an identity transfer is **exact**:
+0 of 169 colours and uvs differed by a single bit. On a sphere with sixteen
+coincident vertices at each pole carrying different attributes, 27 of 272
+differed — which is not an exactness failure but the seam limitation arriving
+early, since a coincident set has one position and several right answers.
+
+So the requirement says "every vertex whose position is unique", and the seam
+case is documented rather than counted as a defect.
+
 ## What this does NOT give back
 
 **Topology.** The target is still the mesher's geometry: new vertices, new edge

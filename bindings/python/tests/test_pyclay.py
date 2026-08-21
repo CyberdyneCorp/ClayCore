@@ -5675,3 +5675,70 @@ def test_bend_is_refused_and_the_message_says_why():
     sc = clay.MeshSculptor(column_mesh(8, 8))
     with pytest.raises(ValueError, match="no 'bend'"):
         sc.deform("bend", span=1.0, angle=1.0)
+
+
+# -- attribute transfer (add-mesh-attribute-transfer) ------------------------
+
+
+def test_colour_survives_a_round_trip_through_the_field():
+    """The case this exists for: sampling a mesh into a field and meshing it
+    back keeps the shape and loses the colours. The nearest point on the
+    original knows what belonged there."""
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Sphere(r=0.6), color="#c04030")
+    src = doc.mesh(resolution=32)
+    source_mean = np.asarray(src.colors).mean(axis=0)
+
+    vol = clay.Volume.from_mesh(src, cell=0.04)
+    d2 = clay.Document()
+    d2.add_sdf_layer("v").add(vol)
+    back = d2.mesh(resolution=32)
+    assert not np.allclose(np.asarray(back.colors).mean(axis=0), source_mean, atol=0.05)
+
+    report = back.transfer_attributes(src)
+    assert report["colors"] is True
+    assert report["transferred"] > 0
+    assert np.allclose(np.asarray(back.colors).mean(axis=0), source_mean, atol=0.02)
+
+
+def test_transfer_moves_no_vertex():
+    """A transfer, not a projection. A verb that moved the target's vertices
+    toward the source would be a different operation."""
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Sphere(r=0.5), color="#40a060")
+    src = doc.mesh(resolution=24)
+    tgt = doc.mesh(resolution=18)
+
+    before_p = np.asarray(tgt.positions).copy()
+    before_i = np.asarray(tgt.indices).copy()
+    tgt.transfer_attributes(src)
+    assert np.array_equal(np.asarray(tgt.positions), before_p)
+    assert np.array_equal(np.asarray(tgt.indices), before_i)
+
+
+def test_geometry_the_source_never_occupied_falls_back_and_says_so():
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Sphere(r=0.4))
+    src = doc.mesh(resolution=20)
+
+    far = clay.Document()
+    far.add_sdf_layer("f").add(clay.Sphere(r=0.4, position=(9, 0, 0)))
+    tgt = far.mesh(resolution=20)
+
+    report = tgt.transfer_attributes(src)
+    assert report["fell_back"] == len(np.asarray(tgt.positions))
+    assert report["transferred"] == 0
+    assert report["max_distance"] > 0.0
+
+
+def test_normals_are_off_by_default():
+    """A resampled mesh should shade like itself, not like the old shape."""
+    doc = clay.Document()
+    doc.add_sdf_layer("l").add(clay.Sphere(r=0.5))
+    src = doc.mesh(resolution=20)
+    tgt = doc.mesh(resolution=16)
+
+    off = tgt.transfer_attributes(src)
+    assert off["normals"] is False
+    on = tgt.transfer_attributes(src, normals=True)
+    assert on["normals"] is True

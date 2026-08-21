@@ -31,10 +31,11 @@ measures all three:
 - **a zero drag is no smear**, rather than degenerating into a smooth. A verb
   that silently becomes a different verb is worse than one that refuses.
 
-The pictures are rasterised HERE rather than through `_render`, and that is the
-point rather than an oversight: the preview path resamples a mesh into a field
-through `Volume.from_mesh`, which carries one colour for the whole item. A
-picture of vertex colour has to come from the vertices.
+The pictures come from `_render.render_mesh_array`, which rasterises a mesh's
+own vertices — and that is the point rather than an implementation detail. The
+ordinary preview path traces a DOCUMENT, and a mesh reaches one through
+`Volume.from_mesh`, which carries a single colour for the whole item. A picture
+of vertex colour has to come from the vertices.
 """
 
 import numpy as np
@@ -76,70 +77,6 @@ def painted_ball(passes):
     for verb, kwargs in passes:
         sculptor.stamp(verb, **kwargs)
     return mesh
-
-
-def rasterize(mesh, width=260, height=260, eye=EYE, target=TARGET):
-    """A painter's-algorithm rasteriser with a z-buffer, so vertex colour is
-    actually visible. Barycentric interpolation across each triangle, and a
-    single lambert term so the sphere reads as a sphere."""
-    p = np.asarray(mesh.positions, dtype=np.float64)
-    idx = np.asarray(mesh.indices, dtype=np.int64).reshape(-1, 3)
-    col = np.asarray(mesh.colors, dtype=np.float64)
-
-    forward = np.array(target, dtype=np.float64) - np.array(eye, dtype=np.float64)
-    forward /= np.linalg.norm(forward)
-    right = np.cross(forward, (0.0, 1.0, 0.0))
-    right /= np.linalg.norm(right)
-    up = np.cross(right, forward)
-
-    rel = p - np.array(eye, dtype=np.float64)
-    cam = np.stack([rel @ right, rel @ up, rel @ forward], axis=1)
-    depth = np.maximum(cam[:, 2], 1e-6)
-    focal = 1.0 / np.tan(np.radians(35.0) * 0.5)
-    sx = (cam[:, 0] / depth * focal * 0.5 + 0.5) * width
-    sy = (0.5 - cam[:, 1] / depth * focal * 0.5) * height
-
-    image = np.zeros((height, width, 3))
-    image[:] = np.linspace(0.10, 0.16, height)[:, None, None]
-    zbuf = np.full((height, width), np.inf)
-
-    # Backface cull in screen space, then draw. Front faces only means the far
-    # side of the ball never overwrites the near side, whatever the order.
-    a, b, c = idx[:, 0], idx[:, 1], idx[:, 2]
-    area = (sx[b] - sx[a]) * (sy[c] - sy[a]) - (sx[c] - sx[a]) * (sy[b] - sy[a])
-    front = np.where((area < 0) & (depth[a] > 0) & (depth[b] > 0) & (depth[c] > 0))[0]
-
-    light = np.array([0.4, 0.8, 0.5])
-    light /= np.linalg.norm(light)
-    normals = p / np.linalg.norm(p, axis=1, keepdims=True)
-    shade = np.clip(normals @ light, 0.0, 1.0) * 0.75 + 0.25
-
-    for t in front:
-        i, j, k = idx[t]
-        xs, ys = np.array([sx[i], sx[j], sx[k]]), np.array([sy[i], sy[j], sy[k]])
-        x0, x1 = int(max(0, np.floor(xs.min()))), int(min(width - 1, np.ceil(xs.max())))
-        y0, y1 = int(max(0, np.floor(ys.min()))), int(min(height - 1, np.ceil(ys.max())))
-        if x1 < x0 or y1 < y0:
-            continue
-        gx, gy = np.meshgrid(np.arange(x0, x1 + 1) + 0.5, np.arange(y0, y1 + 1) + 0.5)
-        det = area[t]
-        w0 = ((xs[1] - gx) * (ys[2] - gy) - (xs[2] - gx) * (ys[1] - gy)) / det
-        w1 = ((xs[2] - gx) * (ys[0] - gy) - (xs[0] - gx) * (ys[2] - gy)) / det
-        w2 = 1.0 - w0 - w1
-        inside = (w0 >= 0) & (w1 >= 0) & (w2 >= 0)
-        if not inside.any():
-            continue
-        z = w0 * depth[i] + w1 * depth[j] + w2 * depth[k]
-        tile = zbuf[y0:y1 + 1, x0:x1 + 1]
-        hit = inside & (z < tile)
-        if not hit.any():
-            continue
-        rgb = (w0[..., None] * col[i] + w1[..., None] * col[j] + w2[..., None] * col[k])
-        lit = (w0 * shade[i] + w1 * shade[j] + w2 * shade[k])[..., None]
-        patch = image[y0:y1 + 1, x0:x1 + 1]
-        patch[hit] = np.clip(rgb * lit, 0.0, 1.0)[hit]
-        tile[hit] = z[hit]
-    return np.clip(image, 0.0, 1.0)
 
 
 def main():
@@ -244,12 +181,15 @@ def main():
     dab = dict(center=(-0.3, 0.95, 0.0), radius=0.5, strength=1.0, color=(0.85, 0.15, 0.12))
     blue = dict(center=(0.35, 0.9, 0.15), radius=0.42, strength=0.9, color=(0.15, 0.35, 0.85))
     tiles = [
-        rasterize(painted_ball([])),
-        rasterize(painted_ball([("paint", dab)])),
-        rasterize(painted_ball([("paint", dab), ("paint", blue)])),
-        rasterize(painted_ball([("paint", dab), ("paint", blue)]
+        R.render_mesh_array(painted_ball([]), eye=EYE, target=TARGET, width=250, height=250),
+        R.render_mesh_array(painted_ball([("paint", dab)]), eye=EYE, target=TARGET,
+                            width=250, height=250),
+        R.render_mesh_array(painted_ball([("paint", dab), ("paint", blue)]),
+                            eye=EYE, target=TARGET, width=250, height=250),
+        R.render_mesh_array(painted_ball([("paint", dab), ("paint", blue)]
                                + [("smear", dict(center=crown, radius=0.75, strength=1.0,
-                                                 direction=(0.25, 0.0, 0.0)))] * 14)),
+                                                 direction=(0.25, 0.0, 0.0)))] * 14),
+                            eye=EYE, target=TARGET, width=250, height=250),
     ]
     R.contact_sheet(tiles, "56_mesh_colour_brushes.png", columns=4,
                     caption="white, one paint dab, a second colour, "
