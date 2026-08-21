@@ -3791,11 +3791,39 @@ NB_MODULE(pyclay, m) {
             "return whether one was created. A mesh that already has colours is\n"
             "left exactly as it is, so this is safe to call before every stroke.")
         .def(
+            "refit", [](PyMeshSculptor& s) { s.live(false).refit_bvh(); },
+            "Update the ray tree for the triangles the last stamp moved.\n\n"
+            "THE PER-STAMP CALL. A mesh layer's topology is fixed, so a stamp\n"
+            "leaves the tree's shape a valid partition of the same triangles and\n"
+            "only its bounds stale. Refitting what the brush touched, and its\n"
+            "ancestors, is proportional to the BRUSH: 0.021 ms on 130k triangles\n"
+            "with an 800-triangle dab, against 34.9 ms to rebuild.")
+        .def(
             "refresh", [](PyMeshSculptor& s) { s.live(false).refresh_bvh(); },
-            "Rebuild the ray tree over the vertices as they now are. Until you\n"
-            "call this, `raycast` reports the surface as it was when the tree was\n"
-            "built — which is usually what a stroke wants, since a brush that\n"
-            "keeps its depth from the first pick is how sculpting feels right.");
+            "REBUILD the ray tree, which is proportional to the MESH — 1.3 s on a\n"
+            "2M-vertex model against 0.25 ms for the stamp that dirtied it. Use it\n"
+            "after something that moved most of the mesh, and `refit` per stamp.\n\n"
+            "What a stale tree reports is worth stating, because the obvious guess\n"
+            "is wrong and this docstring used to make it: it does NOT report the\n"
+            "surface as it was when the tree was built. The hit follows the moved\n"
+            "triangle but is found through stale bounds, so the reported position\n"
+            "drifts OFF the ray — 4.4e-2 before an update, 1.5e-8 after. Invisible\n"
+            "to a brush, which wants a depth; the whole error budget of a gizmo.")
+        .def_prop_ro(
+            "quality",
+            [](PyMeshSculptor& s) {
+                // Never builds. A property that silently paid for a full tree
+                // build — 1.3 s on a 2M-vertex mesh, with the GIL held — would
+                // be a trap dressed as a getter. No tree reads as 0.0.
+                auto& sc = s.live(false);
+                return sc.has_bvh() ? sc.bvh().quality() : 0.0f;
+            },
+            "What the ray tree's queries cost: the expected number of triangle\n"
+            "tests a random ray must make. Lower is better, and it is normalised\n"
+            "by the root box so it is comparable across meshes.\n\n"
+            "A rise means queries are getting slower. It does NOT mean rebuild:\n"
+            "measured over five deformations, a rebuild produced a better tree in\n"
+            "exactly one of them, and was dramatically worse in two.");
 
     // -- layer -----------------------------------------------------------------------
     nb::class_<PyLayer>(m, "Layer", "SDF layer: an ordered edit list inside a Document")

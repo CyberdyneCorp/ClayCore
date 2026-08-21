@@ -8037,6 +8037,28 @@ clay_result clay_mesh_sculptor_apply_stroke(clay_mesh_sculptor* sculptor,
     return CLAY_OK;
 }
 
+clay_result clay_mesh_sculptor_refit(clay_mesh_sculptor* sculptor) {
+    // for_edit=false: refitting reads the mesh and writes only the tree, so it
+    // is a READ of the layer in the sense the protection flags care about —
+    // the same footing as raycast, and a ghosted layer stays queryable.
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
+    if (r != CLAY_OK) return r;
+    sculptor->sculptor->refit_bvh();
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_sculptor_quality(clay_mesh_sculptor* sculptor, float* out_quality) {
+    clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
+    if (r != CLAY_OK) return r;
+    if (!out_quality) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_quality");
+    // Deliberately does NOT build a tree that does not exist. A quality reading
+    // is a diagnostic, and a diagnostic that costs 1.3 s on a 2M-vertex mesh
+    // because it silently built the thing it was asked to measure is a trap.
+    // No tree means no queries to cost, which reads as zero.
+    *out_quality = sculptor->sculptor->has_bvh() ? sculptor->sculptor->bvh().quality() : 0.0f;
+    return CLAY_OK;
+}
+
 clay_result clay_mesh_sculptor_refresh(clay_mesh_sculptor* sculptor) {
     clay_result r = resolve_sculptor(sculptor, /*for_edit=*/false);
     if (r != CLAY_OK) return r;

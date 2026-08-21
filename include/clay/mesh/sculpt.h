@@ -410,13 +410,54 @@ class MeshSculptor {
     std::uint32_t nearest_class(kernel::cfloat3 p) const;
 
     // -- picking -------------------------------------------------------------
-    // Built lazily on the first query. Positions move under it: a sculpted
-    // mesh reports the surface as it was until `refresh_bvh` runs. That is the
-    // caller's call to make — refitting per stamp is the expensive half of a
-    // stroke, and a brush that keeps its depth from the stroke's first pick is
-    // usually what an artist wants anyway.
+    // Built lazily on the first query. Positions move under it, and what a
+    // stale tree reports is worth stating precisely, because the obvious guess
+    // is wrong: it does NOT report the surface as it was when the tree was
+    // built. The hit follows the moved triangle, but it is found through stale
+    // bounds, so it drifts OFF the ray — measured by
+    // `tests/unit/test_bvh_refit.cpp` at 4.4e-2 from the ray before an update
+    // and 1.5e-8 after (reference/host_loop.py reports 6.9e-4 and 3.1e-9 for its
+    // own smaller stamp — the ratio is the point, not the absolute). Invisible to a brush, which only wants a
+    // depth; the entire error budget of a gizmo, which wants a point.
+    //
+    // `refit_bvh` is the per-stamp call. It updates the bounds of the triangles
+    // the last stamp's region touched and of their ancestors, which is
+    // proportional to the brush. `refresh_bvh` rebuilds, which is proportional
+    // to the MESH — 1.3 s on a 2M-vertex model against 0.25 ms for the stamp
+    // that dirtied it — and is the right call after something moved the mesh
+    // BEHIND the sculptor, which a refit cannot know about: a
+    // `VertexDeltas::revert` or `::apply` for an undo, or a caller writing
+    // positions directly.
+    //
+    // It is NOT the answer to a rising `bvh().quality()`, however natural that
+    // reading is. Measured over five deformations, a rebuild produced a better
+    // tree in exactly one of them and was dramatically worse in two — see
+    // `Bvh::quality`. Nothing here rebuilds on its own behalf.
     const Bvh& bvh();
+    // Whether a tree exists, so a diagnostic can ask what queries cost without
+    // BUILDING one behind the caller — `bvh()` is lazy and a first call on a 2M
+    // vertex mesh costs 1.3 s.
+    bool has_bvh() const { return bvh_ != nullptr; }
     void refresh_bvh();
+    // Refits everything moved SINCE THE LAST refit or rebuild, not since the
+    // last stamp. That distinction is the whole correctness of the call: a
+    // stroke is many stamps, `apply_stroke` consumes them internally, and a
+    // set covering only the final dab would leave every earlier dab's
+    // ancestors holding pre-stroke bounds — the subset failure `Bvh::refit`
+    // forbids, reached through the API this one is meant to pair with. So the
+    // sculptor accumulates what it touched and this drains it.
+    //
+    // A whole-mesh operation (`apply_lattice`, `apply_deformer`) marks
+    // everything instead, and a refit after one of those refits the whole tree.
+    //
+    // A no-op when no tree has been built yet: there is nothing to refit, and
+    // the next `bvh()` builds one that is already correct.
+    //
+    // WHAT IT CANNOT SEE: edits made to the mesh BEHIND the sculptor —
+    // `VertexDeltas::revert` and `::apply` take the `Mesh&` directly, so
+    // nothing tells the sculptor those vertices moved. Call `refresh_bvh` after
+    // an undo or a redo.
+    void refit_bvh();
 
    private:
     void gather(const MeshBrushSettings& settings, const field::MaskGate& gate);
@@ -426,6 +467,8 @@ class MeshSculptor {
     // differs from what the mesh holds, and returns how many classes changed.
     std::size_t write_colors(VertexDeltas* record);
     void recompute_normals(const std::vector<std::uint32_t>& classes, VertexDeltas* record);
+    void mark_bvh_dirty(std::uint32_t cls);
+    void clear_bvh_dirty();
 
     // Layer's per-entry stroke origin, kept as a member so a stroke does not
     // reallocate it per stamp.
@@ -445,6 +488,18 @@ class MeshSculptor {
     std::vector<float> gate_, gate_tmp_;
     std::vector<std::uint32_t> pending_normals_, deferred_normals_;
     std::vector<char> normal_mark_;
+    // The triangles handed to `Bvh::refit`, kept as a member so a per-stamp
+    // refit does not allocate. Duplicates are harmless: the second sighting of
+    // a triangle finds its leaf already marked and walks no further.
+    std::vector<std::uint32_t> refit_tris_;
+    // Classes moved since the last refit or rebuild, as a compact list plus a
+    // membership mark. The mark is reset through the LIST rather than cleared,
+    // so the cost is what a stroke touched and not what the mesh holds — the
+    // same discipline `WalkScratch` uses in adjacency.h.
+    std::vector<std::uint32_t> dirty_classes_;
+    std::vector<char> class_dirty_;
+    // Set by the whole-mesh operations, which have no small dirty set to name.
+    bool bvh_all_dirty_ = false;
     std::unique_ptr<Bvh> bvh_;
     bool defer_normals_ = false;
 };

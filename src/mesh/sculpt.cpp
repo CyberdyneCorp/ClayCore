@@ -316,7 +316,66 @@ const Bvh& MeshSculptor::bvh() {
     return *bvh_;
 }
 
-void MeshSculptor::refresh_bvh() { bvh_ = std::make_unique<Bvh>(Bvh::build(mesh_)); }
+void MeshSculptor::refresh_bvh() {
+    bvh_ = std::make_unique<Bvh>(Bvh::build(mesh_));
+    clear_bvh_dirty();  // a rebuild covers everything, so nothing is owed
+}
+
+// Record that `cls` moved, for the next refit. Marked through `class_dirty_` so
+// a stroke that stamps the same classes hundreds of times keeps ONE entry each.
+void MeshSculptor::mark_bvh_dirty(std::uint32_t cls) {
+    if (bvh_all_dirty_) return;  // already owed everything
+    if (class_dirty_.size() != adjacency_.class_count()) {
+        class_dirty_.assign(adjacency_.class_count(), 0);
+        dirty_classes_.clear();
+    }
+    if (cls >= class_dirty_.size() || class_dirty_[cls]) return;
+    class_dirty_[cls] = 1;
+    dirty_classes_.push_back(cls);
+}
+
+void MeshSculptor::clear_bvh_dirty() {
+    // Through the list, so the reset costs what was touched. Clearing the mark
+    // array would be O(classes), which is O(mesh) on the per-stamp path this
+    // whole change exists to keep proportional to the brush.
+    for (std::uint32_t c : dirty_classes_)
+        if (c < class_dirty_.size()) class_dirty_[c] = 0;
+    dirty_classes_.clear();
+    bvh_all_dirty_ = false;
+}
+
+void MeshSculptor::refit_bvh() {
+    if (!bvh_) return;  // nothing built yet; the next bvh() builds a correct one
+
+    // EVERYTHING moved since the last fit, not everything the last stamp moved.
+    // `apply_stroke` runs many stamps and `region_` holds only the final one,
+    // so deriving the set from it would name a SUBSET — and a subset leaves the
+    // unnamed triangles' ancestors holding pre-stroke bounds, which is a query
+    // that quietly answers for geometry that has moved.
+    if (bvh_all_dirty_) {
+        if (!bvh_->refit(mesh_)) refresh_bvh();
+        clear_bvh_dirty();
+        return;
+    }
+    if (dirty_classes_.empty()) return;
+
+    // A triangle changes when any of its corners does, so the triangles of the
+    // moved classes are exactly the changed set — not merely a superset.
+    refit_tris_.clear();
+    for (std::uint32_t c : dirty_classes_) {
+        std::size_t n = 0;
+        const std::uint32_t* tris = adjacency_.triangles_of(c, &n);
+        for (std::size_t k = 0; k < n; ++k) refit_tris_.push_back(tris[k]);
+    }
+    if (refit_tris_.empty()) {
+        clear_bvh_dirty();
+        return;
+    }
+    if (!bvh_->refit(mesh_, refit_tris_.data(), refit_tris_.size()))
+        refresh_bvh();
+    else
+        clear_bvh_dirty();
+}
 
 kernel::cfloat3 MeshSculptor::class_position(std::uint32_t cls) const {
     std::size_t n = 0;
@@ -912,6 +971,7 @@ std::size_t MeshSculptor::write(VertexDeltas* record) {
         if (is_zero(displacement_[i])) continue;
         ++moved;
         const std::uint32_t c = region_.classes[i];
+        mark_bvh_dirty(c);  // for the next refit_bvh, which drains the whole set
         const kernel::cfloat3 target = region_.positions[i] + displacement_[i];
         std::size_t mc = 0;
         const std::uint32_t* members = adjacency_.members(c, &mc);
@@ -958,6 +1018,10 @@ std::size_t MeshSculptor::apply_lattice(const Lattice& cage, VertexDeltas* recor
     // rather than run to write every vertex back to itself — which would also
     // fill an undo record with entries that changed nothing.
     if (cage.is_identity()) return 0;
+    // A whole-mesh operation has no small dirty set to name, so the next refit
+    // refits everything. Cheaper than a rebuild and correct, where a refit of
+    // the last stamp's region would be neither.
+    bvh_all_dirty_ = true;
 
     std::size_t moved = 0;
     // By WELD CLASS rather than by raw vertex, so that position-coincident
@@ -1014,6 +1078,7 @@ std::size_t MeshSculptor::apply_deformer(const MeshDeformSettings& settings,
     // position-coincident vertices holding a hard edge or a UV seam must stay
     // coincident, and evaluating each copy separately agrees only up to float
     // rounding — a seam that opens by an ulp is a visible crack.
+    bvh_all_dirty_ = true;  // whole-mesh, as apply_lattice
     const std::uint32_t classes = adjacency_.class_count();
     std::vector<std::uint32_t> touched;
     touched.reserve(classes);

@@ -190,6 +190,28 @@ FASTER_THAN = [
 # grown document pays only the per-brick cull tests. 3x is the same generous
 # style as the floors: it catches the O(document) path coming back, not noise.
 MAX_RATIO = [
+    # BVH refit against rebuild (add-bvh-refit, #194). A mesh layer's topology
+    # is fixed, so a stamp leaves the tree's shape valid and only its bounds
+    # stale: the rebuild is proportional to the MESH and the refit to the
+    # BRUSH. This is the whole claim of that change, held as a ratio so it is
+    # machine-independent — both sides move together on a slower runner.
+    #
+    # The ceiling is deliberately far above what it measures (~0.0006x here:
+    # 0.027 ms against 45.7 ms on ~130k triangles), because the failure this
+    # catches is CATEGORICAL: a refit that started walking the mesh — most
+    # easily by summarising an ancestor from its span instead of from its two
+    # children — lands at ~1x, not at 0.0006x.
+    #
+    # ONE MESH SIZE, so this gate holds the RATIO and not the slope. The slope
+    # is what the change is actually about, and it is held by the pair of sizes
+    # below instead.
+    ("BM_BvhRefitDab", "BM_BvhRebuild", 0.05),
+    # THE SLOPE, which the ratio above cannot show. The same brush-sized dab on
+    # a mesh four times the size must cost about the same, because a refit is
+    # proportional to the BRUSH. 2.5x leaves room for the deeper tree (one more
+    # level of ancestors to walk) and for cache effects on the larger arrays,
+    # and still fails loudly at the 4x a mesh-proportional refit would show.
+    ("BM_BvhRefitDabBig", "BM_BvhRefitDab", 2.5),
     ("BM_MeshBricksGradGrownDoc", "BM_MeshBricksGradFreshDoc", 3.0),
     # Cull index (accel/cull-index): refilling a fixed dab's bricks against a
     # grown document is gated against the fresh one. Before the per-revision

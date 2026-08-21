@@ -24,6 +24,7 @@
 #include "clay/scene/cull_index.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
+#include "clay/mesh/bvh.h"
 #include "scatter_spread.h"
 
 using namespace clay;
@@ -763,6 +764,109 @@ BENCHMARK(BM_VoxelMeshSparseChunk)->Unit(benchmark::kMillisecond);
 // header describes, and THE DEVICE GATE is what catches this size of change —
 // which is how it was found. The benchmark still earns its place by putting the
 // number in CI output where a 5x would be obvious.
+
+// -- BVH refit against rebuild (add-bvh-refit, issue #194) -------------------
+//
+// A mesh layer's topology is fixed, so a brush that moves vertices leaves the
+// tree's SHAPE valid and only its bounds stale. The pair below is the whole
+// claim of that change: the rebuild is proportional to the MESH and the refit
+// to the BRUSH, and the ratio gate in tools/check_bench.py is what holds it.
+//
+// The rebuild here is the operation a host pays today whenever it wants an
+// honest pick during a stroke — measured at 1.3 s on a 2M-vertex model, against
+// 0.25 ms for the stamp that dirtied it.
+namespace {
+
+mesh::Mesh bvh_bench_mesh(int n) {
+    mesh::Mesh m;
+    for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i) {
+            const float x = 2.0f * i / (n - 1) - 1.0f, z = 2.0f * j / (n - 1) - 1.0f;
+            m.positions.push_back(
+                cf3(x, 0.1f * std::sin(i * 0.3f) * std::cos(j * 0.2f), z));
+        }
+    for (int j = 0; j < n - 1; ++j)
+        for (int i = 0; i < n - 1; ++i) {
+            const std::uint32_t a = static_cast<std::uint32_t>(j * n + i), b = a + 1;
+            const std::uint32_t c = a + static_cast<std::uint32_t>(n), d = c + 1;
+            for (std::uint32_t k : {a, c, b, b, c, d}) m.indices.push_back(k);
+        }
+    return m;
+}
+
+// The triangles a brush-sized dab at the centre would touch: a fixed fraction
+// of the mesh, so the refit's work is constant while the mesh grows.
+std::vector<std::uint32_t> bvh_bench_dab(const mesh::Mesh& m, float radius) {
+    std::vector<std::uint32_t> out;
+    for (std::size_t t = 0; t < m.triangle_count(); ++t) {
+        const kernel::cfloat3 p = m.positions[m.indices[t * 3]];
+        if (std::fabs(p.x) < radius && std::fabs(p.z) < radius)
+            out.push_back(static_cast<std::uint32_t>(t));
+    }
+    return out;
+}
+
+constexpr int kBvhBenchGrid = 256;   // ~130k triangles
+constexpr int kBvhBenchBig = 512;    // ~522k triangles, 4x the above
+
+// A brush-sized patch, scaled with the grid so it holds the SAME number of
+// triangles at every mesh size. That is what makes the pair below a statement
+// about the slope rather than about one machine: the refit's work is constant
+// and the rebuild's is not.
+std::vector<std::uint32_t> bvh_bench_fixed_dab(const mesh::Mesh& m, int grid) {
+    return bvh_bench_dab(m, 20.0f / static_cast<float>(grid));
+}
+
+}  // namespace
+
+void BM_BvhRebuild(benchmark::State& state) {
+    const mesh::Mesh m = bvh_bench_mesh(kBvhBenchGrid);
+    for (auto _ : state) {
+        mesh::Bvh tree = mesh::Bvh::build(m);
+        benchmark::DoNotOptimize(tree.triangle_count());
+    }
+    state.counters["triangles"] = static_cast<double>(m.triangle_count());
+}
+BENCHMARK(BM_BvhRebuild)->Unit(benchmark::kMillisecond);
+
+void BM_BvhRefitDab(benchmark::State& state) {
+    mesh::Mesh m = bvh_bench_mesh(kBvhBenchGrid);
+    mesh::Bvh tree = mesh::Bvh::build(m);
+    const std::vector<std::uint32_t> dab = bvh_bench_fixed_dab(m, kBvhBenchGrid);
+    float phase = 0.0f;
+    for (auto _ : state) {
+        // Move the dab's vertices a little each iteration, so the refit is
+        // doing real work rather than re-fitting bounds that did not change.
+        phase += 0.001f;
+        for (std::uint32_t t : dab) m.positions[m.indices[t * 3]].y = phase;
+        tree.refit(m, dab.data(), dab.size());
+        benchmark::DoNotOptimize(tree.bounds().max.y);
+    }
+    state.counters["triangles"] = static_cast<double>(m.triangle_count());
+    state.counters["dab"] = static_cast<double>(dab.size());
+}
+BENCHMARK(BM_BvhRefitDab)->Unit(benchmark::kMillisecond);
+
+// The SAME dab on a mesh four times the size. The claim this change rests on is
+// that a refit is proportional to the BRUSH, so these two must cost about the
+// same while the rebuild beside them does not — which is a slope, and a single
+// size cannot show one.
+void BM_BvhRefitDabBig(benchmark::State& state) {
+    mesh::Mesh m = bvh_bench_mesh(kBvhBenchBig);
+    mesh::Bvh tree = mesh::Bvh::build(m);
+    const std::vector<std::uint32_t> dab = bvh_bench_fixed_dab(m, kBvhBenchBig);
+    float phase = 0.0f;
+    for (auto _ : state) {
+        phase += 0.001f;
+        for (std::uint32_t t : dab) m.positions[m.indices[t * 3]].y = phase;
+        tree.refit(m, dab.data(), dab.size());
+        benchmark::DoNotOptimize(tree.bounds().max.y);
+    }
+    state.counters["triangles"] = static_cast<double>(m.triangle_count());
+    state.counters["dab"] = static_cast<double>(dab.size());
+}
+BENCHMARK(BM_BvhRefitDabBig)->Unit(benchmark::kMillisecond);
+
 void BM_VoxelAddLevelWhole(benchmark::State& state) {
     voxel::VoxelGrid g(0.02f);
     std::uint8_t c = g.palette_add(cf3(0.8f, 0.4f, 0.2f));

@@ -99,6 +99,86 @@ class Bvh {
     };
     RayHit raycast(const math::Ray& ray, float tmin = 0.0f, float tmax = 1e30f) const;
 
+    // -- refitting -----------------------------------------------------------
+    //
+    // A mesh layer's TOPOLOGY is fixed, which is the representation's defining
+    // property and the one these two spend. When a brush moves vertices the
+    // tree's shape is still a valid partition of the same triangles; only the
+    // bounds are stale. Recomputing the bounds of the triangles that moved and
+    // of the ancestors above them is proportional to the brush, where a rebuild
+    // is proportional to the mesh — 1.3 s on a 2M-vertex model, against 0.25 ms
+    // for the stamp that dirtied it.
+    //
+    // `changed` names triangles by their index in the SOURCE mesh, the same
+    // numbering `RayHit::triangle` and `ClosestPoint::triangle` report.
+    //
+    // Naming a triangle that did not move is merely wasteful. FAILING to name
+    // one that did leaves its ancestors too small, and a bound that is too
+    // small is a query that misses geometry — so the caller's obligation is to
+    // name a superset, never a subset.
+    //
+    // Returns false, changing nothing, when `m` does not have the triangle
+    // count this tree was built over: that is a caller pairing a tree with the
+    // wrong mesh, and topology change is the one thing a refit cannot absorb.
+    bool refit(const Mesh& m, const std::uint32_t* changed, std::size_t count);
+    // Every triangle, for a global deformation where naming the changed ones
+    // would name all of them.
+    bool refit(const Mesh& m);
+
+    // How far the tree has drifted from one built for the current positions.
+    //
+    // A refit keeps a tree CORRECT indefinitely and does not keep it FAST: pull
+    // a long arm out of a sphere and the boxes along it swell and overlap, so a
+    // query descends both children where it used to descend one.
+    //
+    // This is the surface-area heuristic's own cost estimate, read rather than
+    // optimised — the expected number of triangle tests a random ray through
+    // the root has to make. LOWER IS BETTER.
+    //
+    // COMPARE A TREE AGAINST ITSELF, not against another mesh. It is normalised
+    // by the root box, which makes it invariant to a uniform scale, but not to
+    // shape or to triangle distribution: a flat grid and a sphere of the same
+    // triangle count do not score alike, so there is no absolute threshold to
+    // publish and this deliberately does not publish one. What it is for is the
+    // reading now against the reading when the tree was built — a rise means
+    // that tree's queries are getting slower.
+    //
+    // NaN when the root box has no surface area (every triangle in one plane).
+    // Zero is the BEST end of the scale, so returning it for a tree nothing can
+    // be measured about would read as "queries got cheaper"; every comparison
+    // against NaN is false instead, which is the honest answer.
+    //
+    // WHAT IT DOES NOT MEAN IS "REBUILD", and that is worth stating because it
+    // is the obvious reading. Measured over five deformations of a sphere — a
+    // long thin pull, alternating rings pushed apart, a uniform scale, a shear
+    // and a partial collapse — a rebuild beat the refit in exactly one, the
+    // shear, by four per cent. In two it was far worse: 32.2 against 20.0 for
+    // the pull, 778.5 against 98.8 for the interleaved case. Median split
+    // partitions on triangle CENTROIDS, and a deformation that makes triangles
+    // large or elongated defeats that as thoroughly as it defeats an existing
+    // partition — often more, because a refit at least keeps a clustering
+    // chosen while the geometry was still compact.
+    //
+    // So nothing here rebuilds on its own behalf, and nothing here advises it
+    // on the strength of this number alone. It says what queries cost. What to
+    // do about that is the caller's judgement.
+    float quality() const;
+
+    // Every node's box contains the three vertices of every triangle beneath
+    // it. The INVARIANT a refit exists to preserve, and the one whose violation
+    // is silent: a box left too small does not make a query slow, it makes it
+    // wrong, by pruning a subtree that should have been descended.
+    //
+    // WITHOUT `m` this checks the tree against ITS OWN stored triangles, so it
+    // is blind to the caller error that matters most — a refit that named a
+    // SUBSET leaves the tree perfectly self-consistent about geometry that has
+    // moved, and this returns true throughout. Pass the mesh to close that: it
+    // then also requires every stored triangle to match the mesh's current
+    // positions, which is the check that catches an under-named refit.
+    //
+    // For tests and asserts over a real mesh; not something a query path needs.
+    bool bounds_contain_their_triangles(const Mesh* m = nullptr) const;
+
   private:
     struct Tri {
         kernel::cfloat3 a, b, c;
@@ -114,19 +194,56 @@ class Bvh {
         // centroid. One dipole standing in for the lot.
         kernel::cfloat3 normal_sum = kernel::cf3(0, 0, 0);
         kernel::cfloat3 centroid = kernel::cf3(0, 0, 0);
+        // The two quantities `centroid` is the quotient of, kept rather than
+        // discarded so that a REFIT can combine a parent from its children in
+        // constant time. Summarising a parent from its span instead is O(span),
+        // which at the root is the whole mesh — that would make a bottom-up
+        // refit cost exactly what the rebuild it replaces costs.
+        kernel::cfloat3 weighted_centroid = kernel::cf3(0, 0, 0);
+        float area = 0.0f;
         float radius = 0.0f;  // of `box` about `centroid`
         std::int32_t first = 0;
         std::int32_t span = 0;    // triangles beneath this node, leaf or not
         std::int32_t count = 0;   // > 0 only for a leaf: triangles held here
         std::int32_t right = -1;  // left child is this + 1
+        std::int32_t parent = -1;  // -1 at the root; the refit walks up it
     };
 
     std::int32_t partition(std::int32_t first, std::int32_t count, const math::Aabb& box);
-    std::int32_t build_node(std::int32_t first, std::int32_t count);
-    void summarize(Node& n);
+    std::int32_t build_node(std::int32_t first, std::int32_t count, std::int32_t parent);
+    // From the node's own span of triangles. This is what the BUILD uses for
+    // every node, leaf and internal alike, and it is deliberately not replaced
+    // by `combine` below: a build has to stay bit-identical to what it produced
+    // before this change, because `to_field` reads the winding number and there
+    // are golden hashes downstream of it. `combine` is used only where the tree
+    // is being refitted, where the spec already says the answer is equal to
+    // tolerance rather than to the bit.
+    void summarize_span(Node& n);
+    // From two children, in constant time. The whole point of `area` and
+    // `weighted_centroid` living on the node.
+    void combine(Node& n, const Node& l, const Node& r);
+    // `radius` from the node's box about its own centroid, which both of the
+    // above finish with.
+    void set_radius(Node& n);
+    // The maps a refit needs, filled once at build. `slot_leaf_` is indexed by
+    // position in `tris_`; `source_slot_` by the SOURCE triangle index, which
+    // the build reorders away from.
+    void index_for_refit(std::size_t source_triangles);
+    bool refit_slots(const Mesh& m, const std::uint32_t* changed, std::size_t count);
 
     std::vector<Tri> tris_;
     std::vector<Node> nodes_;
+    // Source triangle -> index in `tris_`, or kNoSlot for one the build dropped
+    // (an out-of-range index) and for the padding up to the mesh's count.
+    static constexpr std::uint32_t kNoSlot = 0xFFFFFFFFu;
+    std::vector<std::uint32_t> source_slot_;
+    std::vector<std::int32_t> slot_leaf_;
+    // Scratch for `refit`, kept so a per-stamp refit does not allocate. Sized
+    // to the node count and reset through `dirty_list_` rather than cleared,
+    // which is the same discipline `WalkScratch` uses in adjacency.h and for
+    // the same reason: the reset must cost what was touched, not what exists.
+    mutable std::vector<char> dirty_;
+    mutable std::vector<std::int32_t> dirty_list_;
 };
 
 }  // namespace mesh
