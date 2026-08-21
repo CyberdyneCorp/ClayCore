@@ -219,6 +219,14 @@ jobs:
     env:
       # lavapipe is a software device; the loader otherwise warns per dispatch.
       MESA_VK_DEVICE_SELECT_FORCE_DEFAULT_DEVICE: "1"
+      # Force the Khronos validation layer on. The backend creates its instance
+      # with enabledLayerCount = 0 — it is a library and does not get to decide
+      # its host's debug policy — so the layer is injected by the LOADER here.
+      # Both spellings are set: VK_LOADER_LAYERS_ENABLE is the current one and
+      # VK_INSTANCE_LAYERS is what older loaders read, and which of the two a
+      # runner image ships is not something to leave to chance.
+      VK_LOADER_LAYERS_ENABLE: "VK_LAYER_KHRONOS_validation"
+      VK_INSTANCE_LAYERS: "VK_LAYER_KHRONOS_validation"
     steps:
       - uses: actions/checkout@v4
       - name: Install the Vulkan loader, headers, glslang and lavapipe
@@ -244,6 +252,41 @@ jobs:
           echo "using $icd"
           echo "VK_ICD_FILENAMES=$icd" >> "$GITHUB_ENV"
           echo "VK_DRIVER_FILES=$icd" >> "$GITHUB_ENV"
+      # Object-lifetime tracking is what makes this job evidence about the
+      # device-adoption ownership rule: an adopted device the library wrongly
+      # destroys, or one it wrongly keeps, shows up here and nowhere else.
+      # Core validation covers it, but naming it means a future default change
+      # cannot quietly drop it.
+      - name: Turn on validation, with object lifetimes
+        run: |
+          cat > "$GITHUB_WORKSPACE/vk_layer_settings.txt" <<'SETTINGS'
+          khronos_validation.validate_core = true
+          khronos_validation.object_lifetime = true
+          khronos_validation.stateless_param = true
+          khronos_validation.thread_safety = true
+          khronos_validation.report_flags = error,warn
+          khronos_validation.log_filename = stdout
+          SETTINGS
+          echo "VK_LAYER_SETTINGS_PATH=$GITHUB_WORKSPACE/vk_layer_settings.txt" >> "$GITHUB_ENV"
+      # A job that passes because the LAYER never loaded proves exactly as much
+      # as one that passes because the backend never built — which is to say
+      # nothing, and it is the failure mode this whole step exists to prevent.
+      # So the layer's presence is asserted rather than hoped for.
+      - name: The validation layer is actually there
+        run: |
+          manifest=$(ls /usr/share/vulkan/explicit_layer.d/VkLayer_khronos_validation.json 2>/dev/null || true)
+          if [ -z "$manifest" ]; then
+            echo "::error::vulkan-validationlayers is installed but its manifest was not found"
+            ls -la /usr/share/vulkan/explicit_layer.d/ || true
+            exit 1
+          fi
+          vulkaninfo --summary > vkinfo.log 2>&1 || true
+          if ! grep -q "VK_LAYER_KHRONOS_validation" vkinfo.log; then
+            echo "::error::the loader does not report the validation layer as enabled"
+            sed -n '1,80p' vkinfo.log
+            exit 1
+          fi
+          echo "validation layer enabled"
       # `|| true`: the step is informational, and the runner's shell is
       # `bash -eo pipefail`, so a SIGPIPE from truncating the output would fail
       # the job for no reason.
@@ -286,8 +329,22 @@ jobs:
       # they are not evidence about a real GPU's arithmetic — see the block
       # above. What they are evidence about is that the whole path from tape to
       # buffer to dispatch to readback works.
+      # The layer REPORTS; it does not fail a process. So the run is captured
+      # and searched afterwards: a validation error that only printed would be
+      # a finding nobody reads, which is the state this job was in while the
+      # package was installed and the layer was never switched on.
       - name: Test
-        run: ctest --preset vulkan
+        run: |
+          set -o pipefail
+          ctest --preset vulkan 2>&1 | tee vulkan-tests.log
+      - name: No validation errors
+        run: |
+          if grep -nE "Validation Error|VUID-[A-Za-z0-9_-]+" vulkan-tests.log > violations.log; then
+            echo "::error::the Vulkan validation layer reported problems"
+            sed -n '1,60p' violations.log
+            exit 1
+          fi
+          echo "no validation errors or warnings"
 
   deps-pins:
     name: dependency pins resolve

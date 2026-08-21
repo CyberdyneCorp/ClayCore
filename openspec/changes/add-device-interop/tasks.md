@@ -35,7 +35,9 @@
 - [x] 5.3 A whole drain evaluated into one device buffer at fixed stride through `clay_brick_cache_eval_requests_device`; every brick matches the host-memory path, and an undersized batch buffer is refused with the buffer's contents unchanged
 - [x] 5.4 Adoption refused: an unbuilt API, an incomplete handle set, a queue family without compute — each refused at adopt with nothing retained
 - [x] 5.5 Undersized device buffer refused with nothing written
-- [ ] 5.6 **NOT DONE.** The ownership rule is enforced structurally (an `owns_device_` flag the destructor honours) and is stated in the interface header, but nothing asserts it. It wants a run under `vulkan-validationlayers` with object-lifetime checks on; the CI job installs the package but does not enable the layer. Worth doing before anyone ships on this
+- [x] 5.6 The ownership rule is now ASSERTED rather than only enforced. The `vulkan-plumbing` job had installed `vulkan-validationlayers` and never switched the layer on, so the package was doing nothing; it is now force-enabled through the loader (the backend creates its instance with `enabledLayerCount = 0`, since a library does not get to decide its host's debug policy), with object-lifetime, stateless-parameter and thread-safety checks named explicitly so a future default change cannot quietly drop them.
+
+      Two things make the job evidence rather than decoration. The layer's presence is ASSERTED — a run that passes because the layer never loaded proves exactly as much as one that passes because the backend never built. And the layer only REPORTS, so the test output is captured and searched for `Validation Error` / `VUID-...` afterwards; a violation that merely printed would be a finding nobody reads, which is the state this job was in the whole time the package was installed
 - [x] 5.7 Covered by the `vulkan-plumbing` job added with `add-vulkan-backend`: it runs `ctest --preset vulkan`, which includes these cases, and its name and documentation already carry the plumbing-not-arithmetic distinction
 
 ## 6. Documentation
