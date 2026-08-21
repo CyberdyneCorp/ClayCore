@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-08-21
+goal: Give other-language implementors a readable reference for sequencing, and
+  close the 24-entry-point coverage gap examples cannot reach
