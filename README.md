@@ -119,37 +119,51 @@ write PNGs with the standard library.
 | ![masked operations](examples/output/54_masked_operations.png) | ![lattice gizmo](examples/output/51_lattice_gizmo.png) |
 | A painted mask gating a boolean — masking protects from *any* op | The lattice gizmo: drag control points, the whole form follows |
 
-## Two ways to sculpt: SDF and voxel
+## Three ways to sculpt: SDF, voxel and mesh
 
-claycore carries two representations side by side, and a document can hold
-layers of both. They are not two APIs for one thing — each is good at what the
-other is structurally bad at, and the intended workflow uses both. (A layer can
-also hold a **mesh**, which is a carrier rather than a third way to sculpt — but
-one whose vertices are now editable in place; see
-[below](#the-third-thing-a-layer-can-hold-a-mesh-and-now-an-editable-one).)
+claycore carries three representations side by side, and a document can hold
+layers of all three. They are not three APIs for one thing — each is good at
+what the others are structurally bad at, and the intended workflow uses more
+than one.
+
+A **mesh layer** used to be listed here as a carrier rather than a way to
+sculpt, and that was true when its triangles were read-only. It no longer is:
+sixteen fixed-topology brushes, taper and twist, a lattice cage, masks, the
+stroke engine and a bit-exact undo record all reach a mesh layer's own
+vertices.
+
+**But three ways to sculpt is still two ways to compose**, and that is the
+distinction worth keeping rather than flattening. A mesh layer is never
+evaluated — no tape, no blend, no influence bound — so it cannot be a boolean
+operand or blend with a field without being converted first. You can sculpt it;
+you cannot subtract it from something.
 
 An **SDF layer** is an ordered list of parametric edits — primitives, booleans,
 blends, deformers, strokes — compiled into a flat tape and evaluated as a
 continuous distance field. A **voxel layer** is a sparse palette-indexed grid of
-occupied cells, edited in place.
+occupied cells, edited in place. A **mesh layer** is imported triangles held
+verbatim, whose vertices move and whose polygons never do.
 
-| | SDF layers | Voxel layers |
-|---|---|---|
-| **What an edit is** | A node in an edit list — re-editable forever: retransform, re-blend, reorder, remove | An in-place cell write — immediate, but not replayable |
-| **History** | The document *is* the history; undo/redo, coalescing and serialization come for free | No history; a host snapshots if it wants undo |
-| **Resolution** | An evaluation parameter — the field is continuous, so there is no "too coarse" | Real storage, chosen up front — with a stack of levels to refine only where the detail goes |
-| **Precision** | Exactness and Lipschitz bounds tracked per node; booleans are watertight by construction, raymarching provably correct | Occupancy, not distance — a bound, not a metric |
-| **Free-form sculpting** | Smooth/flatten **bake** into volumes, and chained bakes steepen the field until consolidation redistances it | Smooth, inflate, pinch, smudge chain forever at no cost — each verb is a local cell operation |
-| **Colour** | Per item, plus `Paint` regions | Per cell, via the palette |
-| **Scaling cost** | Deep edit lists degrade the safe step scale (grab/relief/noise items each cost some) | Flat per-cell cost however many edits landed |
+| | SDF layers | Voxel layers | Mesh layers |
+|---|---|---|---|
+| **What an edit is** | A node in an edit list — re-editable forever: retransform, re-blend, reorder, remove | An in-place cell write — immediate, but not replayable | A vertex move. **Topology never changes** — `indices` and `quads` come out byte for byte |
+| **History** | The document *is* the history; undo/redo, coalescing and serialization come for free | No history; a host snapshots if it wants undo | A sparse per-gesture record that reverts bit-exactly — undo, but not an edit list |
+| **Resolution** | An evaluation parameter — the field is continuous, so there is no "too coarse" | Real storage, chosen up front — with a stack of levels to refine only where the detail goes | Fixed by the import. Nothing re-tessellates, so detail is bounded by the triangles you already have |
+| **Precision** | Exactness and Lipschitz bounds tracked per node; booleans are watertight by construction, raymarching provably correct | Occupancy, not distance — a bound, not a metric | Exact vertices, and no field at all — so nothing to track and nothing to steepen |
+| **Free-form sculpting** | Smooth/flatten **bake** into volumes, and chained bakes steepen the field until consolidation redistances it | Smooth, inflate, pinch, smudge chain forever at no cost — each verb is a local cell operation | Sixteen verbs chain at no field cost, but a large pull **stretches** the triangles it has, which is the signal the mesh wants retopo |
+| **Colour** | Per item, plus `Paint` regions | Per cell, via the palette | Per vertex, via `paint` and `smear` |
+| **Composability** | Any item is an operand: boolean it, blend it, deform it | Converts into an operand (`Volume.from_voxels`), non-destructively | **Not an operand.** Never evaluated; needs `Volume.from_mesh` first, which resamples |
+| **Scaling cost** | Deep edit lists degrade the safe step scale (grab/relief/noise items each cost some) | Flat per-cell cost however many edits landed | O(the vertices a falloff reached), after an O(vertices) adjacency build the session pays once |
 
 The short version: **block out and hard-surface on SDF, free-form sculpt on
-voxels.** The SDF side is where a model stays parametric — change a blend
-radius from an hour ago, mirror a layer, cut with an exact prism. The voxel
-side is where you push material around like clay without the field steepening
-underneath you.
+voxels, and refine on a mesh when the topology is one you want to keep.** The
+SDF side is where a model stays parametric — change a blend radius from an hour
+ago, mirror a layer, cut with an exact prism. The voxel side is where you push
+material around like clay without the field steepening underneath you. The mesh
+side is where a retopologized model gets detailed without spending the
+retopology.
 
-### What each side has
+### What each representation has
 
 **SDF layers** (per-verb detail in
 [`docs/07-brushes-and-features.md`](docs/07-brushes-and-features.md)):
@@ -214,10 +228,13 @@ underneath you.
 | ![resolution levels](examples/output/39_levels.png) | ![smooth display](examples/output/41_voxel_smooth_display.png) |
 | The resolution level stack: the same sculpt at level 0, 1 and 2 ([`39_multi_resolution.py`](examples/39_multi_resolution.py)) | The same grid meshed blocky, smoothed, and for display ([`41_voxel_smooth_display.py`](examples/41_voxel_smooth_display.py)) |
 
-The **stroke engine and masks span both sides**: the same resolved stroke
-writes SDF nodes (`stamps_to_nodes`), voxels (`apply_to_grid`) or a mask
-(`apply_to_mask`), and a painted mask freezes a region against every verb on
-either representation.
+The **stroke engine and masks span all three**: one resolved stroke writes SDF
+nodes (`stamps_to_nodes`), voxels (`apply_to_grid`), a mask (`apply_to_mask`)
+or a mesh layer's own vertices (`apply_to_mesh`) — four consumers, one set of
+spacing, pressure, jitter and taper semantics. A painted mask freezes a region
+against every verb on every representation, and against any *operation* on the
+SDF side: the gate rides the combine record, so it protects from a boolean the
+same way it protects from a brush.
 
 ### Converting between them
 
@@ -264,14 +281,15 @@ not — once rasterized, the parametric items behind the sculpt are no longer
 reachable from the voxel side, which is why the return trip hands back a new
 layer instead of touching the original.
 
-### The third thing a layer can hold: a mesh, and now an editable one
+### The mesh layer, in detail
 
 ![A quad export before and after a stroke — examples/45_mesh_brushes.py](examples/output/45_quads_survive.png)
 
-A **mesh layer** is neither of the two above: it carries imported triangles
-*verbatim* and is never evaluated — no tape, no blend, no influence bound. That
-is what a scan, a kit part or a piece of retopology needs, and it is enforced by
-the module layering rather than by a promise.
+A **mesh layer** carries imported triangles *verbatim* and is never evaluated —
+no tape, no blend, no influence bound. That is what a scan, a kit part or a
+piece of retopology needs, and it is enforced by the module layering rather
+than by a promise. It is also the whole of the difference from the other two:
+you can sculpt it, and you cannot compose with it.
 
 It used to be read-only in every sense that mattered. The only way to *edit* one
 was `Volume.from_mesh`, which resamples the model onto a lattice: the sculpt
