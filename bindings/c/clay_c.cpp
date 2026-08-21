@@ -4105,6 +4105,12 @@ clay_result clay_mesh_load(const char* path, const clay_import_budget* budget,
         status = io::load_ply_file(p, &loaded->data, limits);
     } else if (ext == "fbx") {
         status = io::load_fbx_file(p, &loaded->data, limits);
+    } else if (ext == "glb") {
+        // .glb only, not .gltf: the JSON-only variant keeps its buffers in
+        // separate files beside it, and a loader that took a path and silently
+        // read whatever the JSON named would be reading files the caller never
+        // handed it.
+        status = io::load_glb_file(p, &loaded->data, limits);
     } else {
         return fail(CLAY_ERROR_UNSUPPORTED, "unknown extension: " + ext);
     }

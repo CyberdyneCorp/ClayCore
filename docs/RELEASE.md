@@ -64,6 +64,12 @@ forward-refuse).
    `require-struct-size-on-defaults`, this same append would have widened
    `clay_mesh_brush_defaults`'s unbounded fill from 56 bytes to 68 on every
    host built against an older header.
+   **0.37.0 is not such a release either**: also additive, and with no new
+   symbols at all. `clay_mesh_load` gained `.glb`, which SemVer makes a minor
+   because the function accepts a format it did not before. Nothing that
+   compiled against 0.36.0 changes behaviour — a caller that never passed a
+   `.glb` path cannot tell the difference.
+
    **Neither is 0.24.1**: it changes no signatures at all. It corrects the
    swept guide's segment tie-break, so a scene containing a sweep can evaluate
    marginally differently at a guide corner — a behaviour change, not an ABI
