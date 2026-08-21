@@ -38,6 +38,7 @@
 #include "clay/mesh/quad_mesh.h"
 #include "clay/mesh/deform.h"
 #include "clay/mesh/sculpt.h"
+#include "clay/mesh/transfer.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/to_field.h"
 #include "clay/mesh/validate.h"
@@ -3221,6 +3222,58 @@ NB_MODULE(pyclay, m) {
              "points"_a, "beta"_a = 2.0f, "1 where inside, 0 where outside -> (N,)");
 
     nb::class_<PyMesh>(m, "Mesh", "Triangle mesh with numpy buffer views")
+        .def(
+            "transfer_attributes",
+            [](PyMesh& self, const PyMesh& source, bool colors, bool uvs, bool normals,
+               float max_distance) {
+                if (max_distance < 0.0f)
+                    throw std::invalid_argument(
+                        "max_distance must be >= 0; zero derives it from the source's size");
+                mesh::TransferOptions o;
+                o.colors = colors;
+                o.uvs = uvs;
+                o.normals = normals;
+                o.max_distance = max_distance;
+                const mesh::Mesh& src = source.data();
+                mesh::Mesh& dst = self.editable();
+                mesh::TransferReport r;
+                {
+                    nb::gil_scoped_release release;
+                    r = mesh::transfer_attributes(src, &dst, o);
+                }
+                nb::dict out;
+                out["transferred"] = r.transferred;
+                out["fell_back"] = r.fell_back;
+                out["colors"] = r.colors;
+                out["uvs"] = r.uvs;
+                out["normals"] = r.normals;
+                out["max_distance"] = r.max_distance;
+                return out;
+            },
+            "source"_a, "colors"_a = true, "uvs"_a = true, "normals"_a = false,
+            "max_distance"_a = 0.0f,
+            "Take `source`'s per-vertex attributes by closest point; returns what\n"
+            "happened as a dict.\n\n"
+            "Everything that leaves a mesh layer loses what the layer was holding:\n"
+            "sampling a model into a field and meshing it back gives new geometry\n"
+            "with no colours and no uvs. The nearest point on the ORIGINAL surface\n"
+            "knows what belonged there, and this reads it.\n\n"
+            "IT DOES NOT GIVE BACK TOPOLOGY. The target is still the mesher's\n"
+            "geometry. This refunds the paint and most of the uvs, not the mesh.\n\n"
+            "`normals` is OFF by default and the default is the point: a resampled\n"
+            "mesh should shade like ITSELF, and taking the source's normals makes\n"
+            "new geometry shade like the old shape.\n\n"
+            "Positions and indices are never modified — this is a transfer, not a\n"
+            "projection.\n\n"
+            "`max_distance` 0 derives a threshold from the source's size. Past it a\n"
+            "vertex takes the fallback instead of the attribute of whatever was\n"
+            "nearest, because geometry can exist where the source never was; the\n"
+            "returned `fell_back` count is how you tell a good result from one that\n"
+            "fell back everywhere.\n\n"
+            "UV SEAMS: uvs are per VERTEX, which is how a seam exists — the source\n"
+            "duplicates a position into two vertices with different uvs. A target\n"
+            "vertex on a seam has one slot and two right answers. Colour is\n"
+            "unaffected, being continuous across a seam.")
         .def_static(
             "from_triangles",
             [](nb::handle positions, nb::handle indices) {

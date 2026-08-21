@@ -280,3 +280,67 @@ TEST_CASE("c abi: clay_mesh_load reads a .glb it wrote") {
     clay_mesh_destroy(mesh);
     clay_document_destroy(doc);
 }
+
+// -- attribute transfer across the boundary (add-mesh-attribute-transfer) -----
+
+TEST_CASE("c abi: attributes transfer between meshes, and the report is honest") {
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "l", &layer) == CLAY_OK);
+    const float r = 0.5f;
+    clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+    REQUIRE(it != nullptr);
+    clay_node_id node = 0;
+    REQUIRE(clay_layer_add_item(doc, layer, it, &node) == CLAY_OK);
+    clay_item_destroy(it);
+
+    clay_mesh_params p{};
+    p.struct_size = sizeof(p);
+    p.resolution = 24;
+    clay_mesh* source = nullptr;
+    REQUIRE(clay_document_mesh(doc, &p, &source) == CLAY_OK);
+    p.resolution = 18;
+    clay_mesh* target = nullptr;
+    REQUIRE(clay_document_mesh(doc, &p, &target) == CLAY_OK);
+
+    clay_transfer_desc d{};
+    d.struct_size = sizeof(d);
+    REQUIRE(clay_mesh_transfer_defaults(&d) == CLAY_OK);
+    CHECK(d.colors == 1);
+    CHECK(d.normals == 0);  // off by default, and the default is the point
+
+    const std::size_t n = clay_mesh_vertex_count(target);
+    std::vector<float> before(n * 3);
+    std::memcpy(before.data(), clay_mesh_positions(target), n * 3 * sizeof(float));
+
+    clay_transfer_report report{};
+    report.struct_size = sizeof(report);
+    REQUIRE(clay_mesh_transfer_attributes(source, target, &d, &report) == CLAY_OK);
+    CHECK(report.transferred > 0);
+    CHECK(report.transferred + report.fell_back == n);
+    CHECK(report.colors == 1);
+    CHECK(report.max_distance > 0.0f);
+
+    // A transfer, not a projection.
+    CHECK(std::memcmp(before.data(), clay_mesh_positions(target), n * 3 * sizeof(float)) == 0);
+
+    SUBCASE("a negative threshold is refused rather than defaulted") {
+        clay_transfer_desc bad = d;
+        bad.max_distance = -1.0f;
+        CHECK(clay_mesh_transfer_attributes(source, target, &bad, nullptr) ==
+              CLAY_ERROR_INVALID_ARGUMENT);
+    }
+
+    SUBCASE("the report descriptor is bounded like every other output") {
+        clay_transfer_report old_layout{};
+        old_layout.struct_size = offsetof(clay_transfer_report, max_distance) + sizeof(float);
+        CHECK(clay_mesh_transfer_attributes(source, target, &d, &old_layout) == CLAY_OK);
+        CHECK(old_layout.struct_size == offsetof(clay_transfer_report, max_distance) +
+                                            sizeof(float));
+    }
+
+    clay_mesh_destroy(target);
+    clay_mesh_destroy(source);
+    clay_document_destroy(doc);
+}

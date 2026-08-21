@@ -507,3 +507,56 @@ discards the topology, which is exactly the difference between the two.
 | `examples/45_mesh_brushes.py` | moving a carried mesh's vertices without touching its topology |
 | `tests/unit/test_c_mesh_copy.cpp` | `clay_vertex_layout` including every refused layout |
 | `tests/c_api/smoke.c` | a pure-C consumer end to end |
+
+## Getting the colours back after a round trip
+
+Anything that leaves a mesh layer loses what the layer was holding. Sampling a
+model into a field and meshing it back keeps the shape; the colours and uvs are
+gone, because a distance field carries neither.
+
+`Mesh.transfer_attributes` refunds them, by asking the nearest point on the
+ORIGINAL surface what belonged there:
+
+```python
+src = doc.mesh(resolution=32)              # the coloured original
+vol = clay.Volume.from_mesh(src, cell=0.04)
+back = other.mesh(resolution=32)           # new geometry, no colours
+
+report = back.transfer_attributes(src)
+# {'transferred': 15638, 'fell_back': 0, 'colors': True, 'uvs': False,
+#  'normals': False, 'max_distance': 0.1039}
+```
+
+In C:
+
+```c
+clay_transfer_desc d; d.struct_size = sizeof d;
+clay_mesh_transfer_defaults(&d);
+clay_transfer_report r; r.struct_size = sizeof r;
+clay_mesh_transfer_attributes(source, target, &d, &r);
+```
+
+**Read the report.** A transfer that fell back across most of the mesh is
+otherwise indistinguishable from a good one — `fell_back` counts the vertices
+that were farther from the source than the threshold, which happens where
+geometry exists that the source never occupied.
+
+**Normals are off by default**, and the default is the point: a resampled mesh
+has its own geometry and its normals should describe *it*. Taking the source's
+would make new geometry shade like the old shape. Turn it on only when the two
+meshes are near-identical and the source's normals were authored.
+
+**What it does not give back is the topology.** The target is still the
+mesher's geometry — new vertices, no edge loops, no relationship to the
+retopology that went in. This refunds the paint and most of the uvs; it does
+not refund the mesh. If a workflow needs the topology preserved, attribute
+transfer is not a partial answer to that, and `openspec/ROADMAP.md` records why
+mesh-level booleans are not the answer either.
+
+**UV seams.** Uvs are per *vertex*, which is how a seam exists at all: the
+source duplicates a position into two vertices carrying different uvs. A target
+vertex sitting on that seam has one slot and two correct answers, and takes
+whichever triangle the closest-point query returned — which can stretch a
+triangle across the layout. Colour has no such problem, being continuous across
+a seam. This follows from per-vertex uvs rather than from a defect, so it is
+stated rather than left to be discovered.

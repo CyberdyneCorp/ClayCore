@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 38
+#define CLAY_ABI_MINOR 39
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -1597,6 +1597,61 @@ typedef struct clay_import_budget {
  * CLAY_ERROR_BUDGET_EXCEEDED rather than allocating. */
 clay_result clay_mesh_load(const char* path, const clay_import_budget* budget,
                            clay_mesh** out_mesh);
+
+/* -- attribute transfer (add-mesh-attribute-transfer) ----------------------- */
+
+/* Give one mesh the per-vertex attributes of another, by closest point.
+ *
+ * Everything that leaves a mesh layer loses what a mesh layer was holding:
+ * clay_item_volume_from_mesh samples the model onto a lattice, and what a
+ * mesher hands back is new geometry with new vertices — the shape survives and
+ * the colours and uvs are gone. The nearest point on the ORIGINAL surface knows
+ * what belonged there, and this reads it.
+ *
+ * IT DOES NOT GIVE BACK TOPOLOGY. The target is still the mesher's geometry.
+ * This refunds the paint and most of the uvs; it does not refund the mesh.
+ *
+ * Positions and indices are never modified: this is a transfer, not a
+ * projection. A verb that moved the target's vertices toward the source would
+ * be a different operation. */
+typedef struct clay_transfer_desc {
+    uint32_t struct_size; /* = sizeof(clay_transfer_desc); required */
+    int32_t colors;       /* 0/1 */
+    int32_t uvs;          /* 0/1 */
+    /* OFF unless you mean it. A resampled mesh has its own geometry and its
+     * normals should describe IT; taking the source's makes new geometry shade
+     * like the old shape. */
+    int32_t normals;
+    /* How far a target vertex may be from the source before it takes the
+     * fallback. Geometry can exist where the source never was — after a
+     * boolean, or where a mesher bridged a gap — and the closest point to it
+     * carries no meaning. 0 derives it: 5% of the source's bounding diagonal. */
+    float max_distance;
+} clay_transfer_desc;
+
+/* What happened. A transfer that fell back across most of the mesh is
+ * otherwise indistinguishable from a good one, which is why this is reported
+ * rather than returned as a bool. */
+typedef struct clay_transfer_report {
+    uint32_t struct_size; /* = sizeof(clay_transfer_report); required */
+    uint64_t transferred;
+    uint64_t fell_back;
+    int32_t colors; /* whether each channel actually moved; a channel the */
+    int32_t uvs;    /* SOURCE lacks is left alone on the target, not cleared */
+    int32_t normals;
+    float max_distance; /* the threshold used, derived or given */
+} clay_transfer_report;
+
+clay_result clay_mesh_transfer_defaults(clay_transfer_desc* out_desc);
+
+/* THE UV SEAM LIMITATION, stated because it follows from the representation:
+ * uvs are per VERTEX, which is how a seam exists at all — the source
+ * duplicates a position into two vertices with different uvs. A target vertex
+ * on such a seam has one slot and two correct answers. Colour is unaffected,
+ * being continuous across a seam. */
+clay_result clay_mesh_transfer_attributes(const clay_mesh* source, clay_mesh* target,
+                                          const clay_transfer_desc* desc,
+                                          clay_transfer_report* out_report);
 
 /* Build a mesh from caller-owned triangles: positions is count*3 floats and
  * indices is triangle_count*3 vertex indices. Copied, so the caller's buffers

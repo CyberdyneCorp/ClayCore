@@ -13,7 +13,7 @@ Positions and topology SHALL NOT be modified. This is an attribute transfer and 
 
 A target vertex farther from the source than a caller-supplied threshold SHALL take a documented fallback rather than the attribute of whatever was nearest. Geometry can exist where the source never was — after a boolean, or where a mesher bridged a gap — and the closest point to it carries no meaning. The call SHALL report how many vertices transferred and how many fell back, because a result that fell back across most of the mesh is otherwise indistinguishable from a good one.
 
-Transferring a mesh's attributes onto ITSELF SHALL return them bit-identically.
+Transferring a mesh's attributes onto ITSELF SHALL return them bit-identically for every vertex whose position is UNIQUE in the source. Where the source carries coincident vertices with differing attributes — a uv seam, which is what a seam IS — one position has several correct answers and the vertex takes one of them; that case is the seam limitation below rather than an exception to exactness.
 
 Transfer SHALL be DETERMINISTIC: the same pair of meshes SHALL produce the same attributes on every run and every platform.
 

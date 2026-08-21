@@ -343,6 +343,83 @@ def render_voxels(grid, name, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
     return path
 
 
+def render_mesh_array(mesh, eye=(2.6, 2.0, 3.2), target=(0.0, 0.0, 0.0),
+                      width=260, height=260):
+    """Rasterise a mesh's own VERTEX COLOURS — a painter's algorithm with a
+    z-buffer, barycentric interpolation per triangle, and one lambert term.
+
+    `render_array` cannot do this and never will: it traces a DOCUMENT, and a
+    mesh reaches a document through `Volume.from_mesh`, which carries one colour
+    for the whole item. A picture of per-vertex colour has to come from the
+    vertices. Used by the mesh colour and attribute-transfer examples."""
+    p = np.asarray(mesh.positions, dtype=np.float64)
+    idx = np.asarray(mesh.indices, dtype=np.int64).reshape(-1, 3)
+    col = np.asarray(mesh.colors, dtype=np.float64)
+
+    forward = np.array(target, dtype=np.float64) - np.array(eye, dtype=np.float64)
+    forward /= np.linalg.norm(forward)
+    right = np.cross(forward, (0.0, 1.0, 0.0))
+    right /= np.linalg.norm(right)
+    up = np.cross(right, forward)
+
+    rel = p - np.array(eye, dtype=np.float64)
+    cam = np.stack([rel @ right, rel @ up, rel @ forward], axis=1)
+    depth = np.maximum(cam[:, 2], 1e-6)
+    focal = 1.0 / np.tan(np.radians(35.0) * 0.5)
+    sx = (cam[:, 0] / depth * focal * 0.5 + 0.5) * width
+    sy = (0.5 - cam[:, 1] / depth * focal * 0.5) * height
+
+    image = np.zeros((height, width, 3))
+    image[:] = np.linspace(0.10, 0.16, height)[:, None, None]
+    zbuf = np.full((height, width), np.inf)
+
+    # Backface cull in screen space, then draw. Front faces only means the far
+    # side of the ball never overwrites the near side, whatever the order.
+    a, b, c = idx[:, 0], idx[:, 1], idx[:, 2]
+    area = (sx[b] - sx[a]) * (sy[c] - sy[a]) - (sx[c] - sx[a]) * (sy[b] - sy[a])
+    front = np.where((area < 0) & (depth[a] > 0) & (depth[b] > 0) & (depth[c] > 0))[0]
+
+    light = np.array([0.4, 0.8, 0.5])
+    light /= np.linalg.norm(light)
+    # Vertex normals from the geometry itself, area-weighted, so this works on
+    # any mesh rather than only on something centred at the origin.
+    normals = np.zeros_like(p)
+    tri = p[idx]
+    fn = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    for k in range(3):
+        np.add.at(normals, idx[:, k], fn)
+    lens = np.linalg.norm(normals, axis=1, keepdims=True)
+    normals = np.divide(normals, lens, out=np.zeros_like(normals), where=lens > 1e-20)
+    shade = np.clip(np.abs(normals @ light), 0.0, 1.0) * 0.75 + 0.25
+
+    for t in front:
+        i, j, k = idx[t]
+        xs, ys = np.array([sx[i], sx[j], sx[k]]), np.array([sy[i], sy[j], sy[k]])
+        x0, x1 = int(max(0, np.floor(xs.min()))), int(min(width - 1, np.ceil(xs.max())))
+        y0, y1 = int(max(0, np.floor(ys.min()))), int(min(height - 1, np.ceil(ys.max())))
+        if x1 < x0 or y1 < y0:
+            continue
+        gx, gy = np.meshgrid(np.arange(x0, x1 + 1) + 0.5, np.arange(y0, y1 + 1) + 0.5)
+        det = area[t]
+        w0 = ((xs[1] - gx) * (ys[2] - gy) - (xs[2] - gx) * (ys[1] - gy)) / det
+        w1 = ((xs[2] - gx) * (ys[0] - gy) - (xs[0] - gx) * (ys[2] - gy)) / det
+        w2 = 1.0 - w0 - w1
+        inside = (w0 >= 0) & (w1 >= 0) & (w2 >= 0)
+        if not inside.any():
+            continue
+        z = w0 * depth[i] + w1 * depth[j] + w2 * depth[k]
+        tile = zbuf[y0:y1 + 1, x0:x1 + 1]
+        hit = inside & (z < tile)
+        if not hit.any():
+            continue
+        rgb = (w0[..., None] * col[i] + w1[..., None] * col[j] + w2[..., None] * col[k])
+        lit = (w0 * shade[i] + w1 * shade[j] + w2 * shade[k])[..., None]
+        patch = image[y0:y1 + 1, x0:x1 + 1]
+        patch[hit] = np.clip(rgb * lit, 0.0, 1.0)[hit]
+        tile[hit] = z[hit]
+    return np.clip(image, 0.0, 1.0)
+
+
 def side_by_side(left, right, name, gap=12, caption=None):
     """Join two equal-height images with a thin divider between them."""
     if left.shape[0] != right.shape[0]:
