@@ -57,10 +57,10 @@
       `testVoxelSessionsAndGallery` killed by signal on device, no results
       collected. The retry completed. Not reproduced, not diagnosed, and not
       counted as a pass for anything.
-- [ ] 3.3 Commit `tests/device/last-gate.json` from the passing run. The run
-      exists and passed; the stamp is not committable yet. Both halves below.
+- [x] 3.3 Commit `tests/device/last-gate.json` from the passing run. Done,
+      re-run against current main — see the third block.
 
-      **The gate passed.** Reference iPad (`iPad15,5`), clean tree, thermal
+      **The gate passed at `229976b`.** Reference iPad (`iPad15,5`), clean tree, thermal
       `nominal` at both ends: 59 of 59 cases, no regression and no budget
       exceeded. `sdf_consolidate` **524.3 -> 397.9 ms**, below the v0.30.0
       baseline rather than merely back inside its 786 ms budget.
@@ -76,17 +76,43 @@
       the same defect. Kept visible rather than deleted, because "looks like
       noise" going unwritten is why it stayed open.
 
-      **The stamp is stale, so it is not committed.** That run was taken at
-      `229976b`; main has since moved 77 commits. 42 engine-relevant paths
-      changed and the ABI went 0.30.0 -> 0.37.0 including one deliberate
-      break, so `release_check.py:check_device_gate` rejects a stamp naming
-      `229976b` — correctly, and committing it would put a green stamp on an
-      engine it never measured. `baseline.json` is byte-identical and still
-      budgets the same 59 cases, so the experiment is the same shape; only
-      the engine under it moved. Re-run `tools/run_device_bench.sh` against
-      current main and commit THAT stamp. The parallel meshing/EDT/rasterize
-      work, the CPU SIMD path and the gate-bake memo (#168) all landed since,
-      so the numbers should come back at or better than the run above.
+      **That stamp was never committed; this one is.** The `229976b` run
+      went stale before it landed — main moved 77 commits under it, 42
+      engine-relevant paths and the ABI 0.30.0 -> 0.37.0 including one
+      deliberate break, so `check_device_gate` rejected it. Correctly:
+      committing it would have put a green stamp on an engine it never
+      measured.
+
+      **Re-run on current main.** Reference iPad, clean tree, thermal
+      `nominal` at both ends, ABI 0.37.0: **59 of 59 inside budget, none
+      over.** `check_device_bench.py --update` was NOT run, so
+      `baseline.json` is byte-identical and every figure below is against
+      the same v0.30.0 budgets.
+
+      | case | v0.30.0 | budget | this run | x base |
+      |---|---|---|---|---|
+      | `sdf_consolidate` | 524.3 | 786.4 | **423.5** | 0.81x |
+      | `mask_extrude` | 2500.9 | 3751.3 | 3110.0 | 1.24x |
+      | `sdf_stamp_cpu` | 4.32 | 6.49 | 4.93 | 1.14x |
+      | `sdf_stamp_bricks` | 4.86 | 7.29 | 4.83 | 0.99x |
+      | `voxel_add_level` | 0.51 | 0.77 | 0.53 | 1.03x |
+
+      This change's own result holds and improved: `sdf_consolidate` is
+      **0.81x** the pre-colour baseline, against 397.9 ms / 0.76x at
+      `229976b`.
+
+      The prediction attached to the old text — that the parallel and SIMD
+      work would bring everything back "at or better" — was right for
+      consolidation and **wrong for two cases**. `mask_extrude` moved 1.09x
+      -> 1.24x and `sdf_stamp_cpu` 1.03x -> 1.14x across the 77 commits.
+      Both are inside budget, neither is this change's path, and one run
+      does not separate drift from scatter — but it is written down rather
+      than left as a green tick, which is the mistake 3.3 made the first
+      time.
+
+      Two notes the gate raised, both inside budget and neither a failure:
+      `sdf_stamp_cpu` at 4.93 ms p95 and `sdf_stamp_bricks` at 4.83 ms are
+      outside a 120 Hz frame share (4.17 ms).
 
 ## 3b. Where mask_extrude's regression actually is
 
