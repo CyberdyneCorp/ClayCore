@@ -678,16 +678,6 @@ needs them, and listed so they are not mistaken for oversights:
   for it), while a mesh deformer runs FORWARDS once per vertex and inherits
   neither. It is the same math in the easier direction.
 
-- **DamStandard on a voxel layer.** The V-groove that cuts wrinkles, seams and
-  folds is on the SDF side (`Op::Incise`, labelled for it in the kernel) and on
-  a mesh layer (`MeshBrush::Crease`, a cut plus a tangential pull in one
-  stamp). A voxel layer has ten verbs and no crease — and it is the
-  representation the docs point at for exactly the free-form organic work a
-  crease is for. Scoped by `add-voxel-crease`. Cheap: `brush_pass` already
-  carries the footprint, falloff, mask gate, dither and parallel split, and
-  `radial_step` is the squeeze; the verb is a `decide` lambda over one
-  snapshot.
-
 - **Procedural noise as a tape opcode.** `displace` is by-callable today, which
   is not portable across backends. A tape-expressible 3D noise field is the
   answer if node-style procedural detail ever becomes a goal.
@@ -758,6 +748,34 @@ Recorded so they are decisions rather than oversights:
 
   `add-mesh-attribute-transfer` is the cheaper answer to most of what this was
   asked for — it gives back polypaint and uvs, and explicitly not topology.
+
+- **A crease VERB on a voxel layer.** Scoped as `add-voxel-crease`, implemented,
+  measured, and **removed 2026-08-21** — which is what its own task 1.1 was
+  written to make possible: *"If they do not differ, the verb has no reason to
+  exist and the answer is a documented recipe instead."* They did not differ.
+
+  Stroked along a line, `sculpt_crease` and a plain `sculpt_inflate(-depth)`
+  produced **identical** surface profiles. On a single dab the crease was
+  measurably *shallower* than the plain erode — the squeeze was filling the
+  groove back in.
+
+  The reason is structural and does not go away with a better implementation.
+  On a MESH the pinch moves *vertices* tangentially: it deforms a surface sheet,
+  steepening the walls without adding material. On a voxel grid, moving material
+  toward the groove centre puts material INTO the groove, because a lattice
+  holds a volume rather than a sheet. Measured directly: cut a groove, then
+  pinch, and the surface at the centre rises. **The operation that sharpens a
+  mesh crease fills a voxel one.**
+
+  What is left of DamStandard on a lattice is the depth profile, and that is the
+  falloff — so the whole content of the verb is "erode with the right falloff",
+  which `sculpt_inflate` already does. The recipe is in
+  `docs/07-brushes-and-features.md`; the surprise in it is that a CONSTANT
+  falloff is the right one, because a fractional weight is dithered per cell and
+  a three-cell brush has too few cells for a smooth taper to average out.
+
+  DamStandard remains available where it is meaningful: `Op::Incise` on an SDF
+  layer, and `MeshBrush::Crease` on a mesh layer.
 
 - **Subdivision multires.** Resolution is an evaluation parameter here, so the
   whole Res+/Resample/multires apparatus has nothing to attach to.

@@ -76,7 +76,7 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 | Standard | `Op::Relief` | ✅ |
 | ClayBuildup | `Op::Relief` along a stroke | ✅ buildup accumulation scales each stamp's amplitude |
 | Smooth (as a pair with the above) | `field::relax` | ✅ the blockout pair — see `examples/29_claybuildup_smooth.py` |
-| Crease, DamStandard | `Op::Incise` | ✅ |
+| Crease, DamStandard | `Op::Incise` (SDF), `MeshBrush::Crease` (mesh), and on voxels a stroked erode with a CONSTANT falloff | ✅ on all three. The voxel form is a recipe rather than a verb, and that is a measured decision: a crease verb was built and produced a profile identical to the plain erode, because the pinch that sharpens a mesh crease FILLS a voxel one — a lattice holds a volume, not a sheet |
 | Inflate | `Op::Relief`, `sculpt_inflate` | ✅ |
 | Move | `brush::move_brush` | 🟡 drags the assembled surface, but **buds rather than stretches** on a large pull, and a stroke's drags compound the step scale — see below |
 | Move Topological | `field::move_topological` | ✅ geodesic falloff; bakes, so single-gesture |
