@@ -51,6 +51,7 @@ add_library(claycore
   src/voxel/repair.cpp
   src/brush/stroke.cpp
   src/brush/mask_extrude.cpp
+  src/brush/gate_bake.cpp
   src/brush/tube.cpp
   src/brush/alpha_stamp.cpp
   src/brush/lattice_gizmo.cpp

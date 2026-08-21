@@ -4,6 +4,8 @@
 
 #include <doctest/doctest.h>
 
+#include "clay/brush/gate_bake.h"
+#include "clay/brush/mask_extrude.h"
 #include "clay/eval/backend.h"
 #include "clay/io/clayspace.h"
 #include "clay/scene/tape.h"
@@ -388,4 +390,155 @@ TEST_CASE("mask: evaluation is untouched by a mask") {
     doc.masks.emplace(layer.id, std::move(m));
 
     CHECK(evaluate() == before);  // bit-identical, not merely close
+}
+
+// -- the change token (add-masking-that-gates-any-op, 1.2b) -------------------
+
+TEST_CASE("mask: every mutator moves the revision") {
+    // A mutator that forgets to bump leaves a consumer holding a stale
+    // derivation, and the expensive one — brush::mask_to_field, which a gated
+    // item bakes — would then be WRONG rather than merely slow. So this walks
+    // every mutating method on the class rather than the few a cache happens
+    // to exercise today. Adding a mutator without a case here is the mistake
+    // this is here to make loud.
+    const auto moved = [](const char* what, MaskField& m, auto&& mutate) {
+        const std::uint64_t before = m.revision();
+        mutate(m);
+        CAPTURE(what);
+        CHECK(m.revision() != before);
+    };
+
+    BrushParams p;
+    p.size = 3;
+
+    MaskField m(0.1f);
+    moved("set", m, [](MaskField& f) { f.set({0, 0, 0}, 1.0f); });
+    moved("paint(cell)", m, [&](MaskField& f) { f.paint(VoxelCoord{2, 0, 0}, p, 1.0f); });
+    moved("paint(world)", m, [&](MaskField& f) { f.paint(cf3(0.5f, 0, 0), p, 1.0f); });
+    moved("invert", m, [](MaskField& f) { f.invert(); });
+    moved("expand", m, [](MaskField& f) { f.expand(1); });
+    moved("contract", m, [](MaskField& f) { f.contract(1); });
+    moved("smooth", m, [](MaskField& f) { f.smooth(1); });
+    moved("fill", m, [](MaskField& f) {
+        f.fill(math::Aabb{cf3(0, 0, 0), cf3(0.3f, 0.3f, 0.3f)}, 0.5f);
+    });
+    moved("invert_within", m, [](MaskField& f) {
+        f.invert_within(math::Aabb{cf3(0, 0, 0), cf3(0.3f, 0.3f, 0.3f)});
+    });
+    moved("clear", m, [](MaskField& f) { f.clear(); });
+}
+
+TEST_CASE("mask: the revision is a change token, not a version") {
+    // Two masks built the same way are not required to agree, and nothing may
+    // read an ORDER into it. Stated because the obvious misuse — treating a
+    // higher number as "newer content" — would be wrong the moment two masks
+    // are compared, and the type gives no hint.
+    MaskField a(0.1f), b(0.1f);
+    a.set({0, 0, 0}, 1.0f);
+    b.set({0, 0, 0}, 1.0f);
+    CHECK(a.get({0, 0, 0}) == b.get({0, 0, 0}));  // same content...
+
+    // ...and a reader may only compare a stored token against the SAME mask.
+    const std::uint64_t token = a.revision();
+    CHECK(a.revision() == token);   // unchanged: a derivation is still good
+    a.set({1, 0, 0}, 1.0f);
+    CHECK(a.revision() != token);   // changed: it is not
+}
+
+TEST_CASE("mask: a copy carries its own token forward") {
+    // A copy is a different object, so a consumer memoising against one must
+    // not accept the other's token. The copy keeps the counter it was copied
+    // from — what matters is that mutating either moves only that one.
+    MaskField a(0.1f);
+    a.set({0, 0, 0}, 1.0f);
+    MaskField b = a;
+    const std::uint64_t at = a.revision(), bt = b.revision();
+    b.set({5, 0, 0}, 1.0f);
+    CHECK(a.revision() == at);
+    CHECK(b.revision() != bt);
+}
+
+// -- the memoised gate bake (add-masking-that-gates-any-op, 1.2b) -------------
+
+TEST_CASE("mask: a gate bake is reused until the mask changes") {
+    // Measured through the Python binding before this existed: one gate call
+    // cost 21 ms at four thousand painted cells and 145 ms at thirty thousand,
+    // and gating fifty items by one mask paid it fifty times. What matters
+    // here is not the speed but that the memo can never hand back a gate for
+    // a mask that has since changed.
+    MaskField mask(0.05f);
+    BrushParams p;
+    p.size = 6;
+    mask.paint(cf3(0, 0, 0), p, 1.0f);
+    REQUIRE_FALSE(mask.empty());
+
+    brush::GateBake bake;
+    std::shared_ptr<const field::FieldVolume> first = bake.gate_for(mask, 0.5f, 0.1f);
+    REQUIRE(first != nullptr);
+    CHECK_FALSE(bake.last_was_cached());
+
+    SUBCASE("an unchanged mask returns the SAME volume, not an equal one") {
+        std::shared_ptr<const field::FieldVolume> again = bake.gate_for(mask, 0.5f, 0.1f);
+        CHECK(bake.last_was_cached());
+        CHECK(again.get() == first.get());  // shared, so N items cost one volume
+    }
+
+    SUBCASE("painting invalidates it, and the new gate measures the new region") {
+        // The stale-cache failure would be silent: an item gated by a repainted
+        // mask would protect where the mask USED to be. So this checks the
+        // field, not just the pointer.
+        const kernel::cfloat3 far_away = cf3(1.5f, 0, 0);
+        const float before = first->eval(far_away);
+        CHECK(before > 0.0f);  // outside the painted region
+
+        mask.paint(far_away, p, 1.0f);
+        std::shared_ptr<const field::FieldVolume> after = bake.gate_for(mask, 0.5f, 0.1f);
+        CHECK_FALSE(bake.last_was_cached());
+        REQUIRE(after != nullptr);
+        CHECK(after.get() != first.get());
+        CHECK(after->eval(far_away) < 0.0f);  // now inside it
+    }
+
+    SUBCASE("a different threshold or width rebakes") {
+        bake.gate_for(mask, 0.5f, 0.1f);
+        REQUIRE(bake.last_was_cached());
+        bake.gate_for(mask, 0.25f, 0.1f);
+        CHECK_FALSE(bake.last_was_cached());
+        bake.gate_for(mask, 0.25f, 0.1f);
+        REQUIRE(bake.last_was_cached());
+        bake.gate_for(mask, 0.25f, 0.2f);
+        CHECK_FALSE(bake.last_was_cached());
+    }
+
+    SUBCASE("clearing the mask gives no gate, and that answer is memoised too") {
+        mask.clear();
+        CHECK(bake.gate_for(mask, 0.5f, 0.1f) == nullptr);
+        CHECK_FALSE(bake.last_was_cached());
+        CHECK(bake.gate_for(mask, 0.5f, 0.1f) == nullptr);
+        CHECK(bake.last_was_cached());  // a failed measurement is not paid twice
+    }
+}
+
+TEST_CASE("mask: a memoised gate is bit-identical to an unmemoised one") {
+    // The memo must be a pure saving. If the cached path differed from a fresh
+    // bake by even a ULP, a document would evaluate differently depending on
+    // whether a gate happened to be a cache hit.
+    MaskField mask(0.05f);
+    BrushParams p;
+    p.size = 5;
+    mask.paint(cf3(0, 0, 0), p, 1.0f);
+
+    brush::GateBake bake;
+    std::shared_ptr<const field::FieldVolume> memoised = bake.gate_for(mask, 0.5f, 0.1f);
+    REQUIRE(memoised != nullptr);
+    // The same call the binding used to make, spelled out — including the band
+    // rule, which now lives in GateBake.
+    std::optional<field::FieldVolume> direct = brush::mask_to_field(mask, 0.5f, 0.2f, 0.2f);
+    REQUIRE(direct.has_value());
+
+    for (float x = -0.5f; x <= 0.5f; x += 0.05f)
+        for (float y = -0.3f; y <= 0.3f; y += 0.1f) {
+            const kernel::cfloat3 at = cf3(x, y, 0.02f);
+            CHECK(memoised->eval(at) == direct->eval(at));
+        }
 }

@@ -104,6 +104,7 @@ float MaskField::get(VoxelCoord c) const {
 }
 
 void MaskField::set(VoxelCoord c, float value) {
+    touch();
     std::uint8_t q = quantize(value);
     VoxelCoord key = chunk_key(c);
     auto it = chunks_.find(key);
@@ -142,9 +143,13 @@ void MaskField::paint(VoxelCoord c, const BrushParams& p, float target) {
 
 // -- region operations -------------------------------------------------------
 
-void MaskField::clear() { chunks_.clear(); }
+void MaskField::clear() {
+    touch();
+    chunks_.clear();
+}
 
 void MaskField::invert() {
+    touch();
     // Defined over the painted region: a sparse field has no finite complement
     // to invert into, so inverting is "flip what has been touched".
     for (auto it = chunks_.begin(); it != chunks_.end();) {

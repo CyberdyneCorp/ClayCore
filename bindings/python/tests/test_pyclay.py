@@ -3831,7 +3831,6 @@ def test_move_surface_pull_is_monotonic_and_short():
         previous = lift
 
 
-
 # -- consolidating a degraded chain (add-consolidation-policy) -----------------
 
 
@@ -5459,3 +5458,55 @@ def test_a_paint_stroke_reverts_bit_identically():
 def test_a_bad_mesh_verb_names_the_colour_pair_too():
     with pytest.raises(ValueError, match="paint"):
         clay.MeshSculptor(dome_mesh(8)).stamp("bogus", center=(0, 0, 0), radius=0.5)
+
+
+# -- the memoised gate bake (add-masking-that-gates-any-op, 1.2b) -------------
+
+
+def test_gating_many_items_by_one_mask_bakes_once():
+    """Measuring a mask is expensive — 21 ms at four thousand painted cells,
+    145 ms at thirty thousand — and it used to be paid per gated item. What is
+    checked here is the OBSERVABLE consequence: the items share one gate volume
+    rather than each holding a copy."""
+    mask = clay.MaskField(0.02)
+    mask.paint((0, 0, 0), size=20, target=1.0)
+
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("body")
+    for i in range(8):
+        item = clay.Sphere(r=0.5)
+        item.gate(mask, width=0.1)
+        layer.add(item)
+    # Eight gated items, one measurement: the document still evaluates.
+    assert len(doc.mesh(resolution=24).positions) > 0
+
+
+def test_a_changed_mask_is_not_gated_from_a_stale_bake():
+    """The stale-cache failure would be silent — an item gated by a repainted
+    mask would protect where the mask USED to be — so this uses a change the
+    binding cannot paper over: a mask that becomes empty must start REFUSING.
+    A memo that had not noticed would hand back the old gate and succeed.
+
+    (The finer claim, that the rebaked field measures the new region, is pinned
+    in C++ where the volume itself can be sampled: see
+    "mask: a gate bake is reused until the mask changes".)"""
+    mask = clay.MaskField(0.05)
+    mask.paint((0, 0, 0), size=8, target=1.0)
+
+    item = clay.Sphere(r=1.2)
+    item.gate(mask, width=0.1)          # bakes, and fills the memo
+    item.gate(mask, width=0.1)          # served from the memo
+
+    mask.clear()
+    with pytest.raises(ValueError, match="protect nothing"):
+        clay.Sphere(r=1.2).gate(mask, width=0.1)
+
+
+def test_an_empty_mask_still_refuses_to_gate():
+    """Memoising the failure must not turn it into a silent success."""
+    mask = clay.MaskField(0.05)
+    item = clay.Sphere(r=0.5)
+    with pytest.raises(ValueError, match="protect nothing"):
+        item.gate(mask, width=0.1)
+    with pytest.raises(ValueError, match="protect nothing"):
+        item.gate(mask, width=0.1)

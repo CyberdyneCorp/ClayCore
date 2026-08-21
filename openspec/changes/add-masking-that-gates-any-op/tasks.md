@@ -12,10 +12,22 @@
       leans on were untested and now are: the threshold decides what counts as masked, two
       disjoint painted regions both measure as inside with the gap between them outside, and
       the same mask measures identically after a round trip.
-- [ ] 1.2b Caching against the mask's revision, so painting does not rebake per edit —
-      still open. The bindings measure on the `gate()` call rather than per compile, so a
-      static gate already costs nothing per frame; caching matters when a host repaints a
-      mask live.
+- [x] 1.2b Caching against the mask's revision, so painting does not rebake per edit
+      — DONE, and the note above undersold it. It said a static gate "already costs
+      nothing per frame", which is true of EVALUATION and not of the bake: `gate()`
+      measures the mask on every call, and measured through the binding that is 21 ms at
+      four thousand painted cells and 145 ms at thirty thousand. Gating fifty items by one
+      painted mask paid it fifty times — 1.0 s and 7.2 s.
+
+      `voxel::MaskField` now carries a change token bumped by every mutator, and
+      `brush::GateBake` memoises one bake beside a mask handle. Fifty gates on an
+      unchanged mask: 1050 ms -> 22 ms and 7250 ms -> 149 ms, about 48x, and the fifty
+      items now SHARE one volume instead of holding fifty. A repaint still pays the full
+      bake, which is the point rather than a shortfall.
+
+      The band rule (`band = 2 * width`) moved into `GateBake` on the way: it had been
+      spelled out identically in both bindings, and an arithmetic invariant the gate's
+      correctness depends on should not exist twice.
 - [x] 1.2c DECIDE the protected-region threshold: fixed at 0.5, or exposed
       — DECIDED by what already exists: `mask_to_field` takes it as a parameter defaulting
       to 0.5, and a mask painted at partial strength everywhere has no clean boundary

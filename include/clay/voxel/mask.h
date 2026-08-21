@@ -100,6 +100,17 @@ class MaskField {
     bool region_is_walkable(const math::Aabb& region) const;
 
     // -- queries -------------------------------------------------------------
+    // A counter bumped by every mutation, so a consumer that derives something
+    // EXPENSIVE from this mask can tell whether its derivation is still good.
+    //
+    // It exists for one measured reason: `brush::mask_to_field` — the bake a
+    // gated item needs — costs 21 ms at four thousand painted cells and 145 ms
+    // at thirty thousand, and gating N items by one mask used to pay that N
+    // times. It is a CHANGE TOKEN, not a version: compare it for equality
+    // against a value you stored, never order two of them, and never compare
+    // across two different MaskFields.
+    std::uint64_t revision() const { return revision_; }
+
     std::size_t painted_count() const;  // cells with a nonzero value
     bool empty() const { return chunks_.empty(); }
     std::optional<VoxelCoord> bounds_min() const;
@@ -121,7 +132,12 @@ class MaskField {
     template <typename Fn>
     void neighbourhood_op(int pad, Fn&& reduce);
 
+    // Every mutator calls this. A mutator that forgets to leaves a consumer
+    // holding a stale derivation, which is why a test walks all of them.
+    void touch() { ++revision_; }
+
     float cell_size_;
+    std::uint64_t revision_ = 0;
     std::unordered_map<VoxelCoord, Chunk, VoxelCoordHash> chunks_;
 };
 
