@@ -71,6 +71,7 @@ def merge(records: list[dict]) -> dict:
 
     merged = dict(records[0])
     merged["cases"] = []
+    merged["canary"] = []
     for record in records:
         for field in ("deviceModel", "osVersion", "abiVersion"):
             if record.get(field) != merged.get(field):
@@ -79,6 +80,14 @@ def merge(records: list[dict]) -> dict:
                     f"({record.get(field)!r} vs {merged.get(field)!r}); "
                     "they cannot be from one run")
         merged["cases"].extend(record.get("cases", []))
+        # Canary samples concatenate like cases. Each bundle times from its own
+        # start, so the offsets are within-bundle rather than across the whole
+        # run — which is the honest thing they can say now that a run spans
+        # three processes. The bundle is recorded so a reader can tell samples
+        # from different processes apart rather than reading one timeline.
+        for sample in record.get("canary", []):
+            merged.setdefault("canary", []).append(
+                {**sample, "bundle": record.get("bundle", "unknown")})
 
     # A run is valid only if EVERY part of it was: one test that started
     # nominal and ended fair invalidates the run it belongs to, because the

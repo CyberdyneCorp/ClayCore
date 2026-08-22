@@ -57,6 +57,46 @@ MAX_GROWTH_EXPONENT = 1.25
 # 120 Hz frame.
 NOISE_FLOOR_MS = 0.05
 
+# How far the canary may spread across a run before the run is called one where
+# position mattered.
+#
+# DELIBERATELY LOOSE, and deliberately not derived from anything yet. The point
+# of the first release of this check is to COLLECT what a steady device looks
+# like: a handful of runs will say, and the number can be set from that. Setting
+# it tight now would report drift on every run, which is how a check gets
+# ignored. What it is defending against is large — moving one bundle from third
+# to first moved a case 2.7x — so a loose threshold still catches it.
+CANARY_DRIFT_TOLERANCE = 1.30
+
+
+def canary_drift(run: dict) -> tuple[float, dict, dict] | None:
+    """Widest ratio between two canary samples, with the samples themselves.
+
+    The canary touches nothing under test, so a spread here is the machine
+    moving rather than the engine changing. It answers what thermalState
+    cannot: that signal has four coarse levels and an M3 iPad throttles well
+    inside `nominal` — the two runs that differed 2.7x on sdf_stamp_cpu both
+    read nominal at every point.
+
+    Samples are compared WITHIN a bundle. A run spans three processes and each
+    times from its own start, so a ratio across bundles would be comparing two
+    clocks as if they were one.
+    """
+    worst = None
+    by_bundle: dict[str, list[dict]] = {}
+    for sample in run.get("canary", []):
+        by_bundle.setdefault(sample.get("bundle", "unknown"), []).append(sample)
+    for samples in by_bundle.values():
+        usable = [s for s in samples if s.get("ms", 0) > 0]
+        if len(usable) < 2:
+            continue
+        lo = min(usable, key=lambda s: s["ms"])
+        hi = max(usable, key=lambda s: s["ms"])
+        ratio = hi["ms"] / lo["ms"]
+        if worst is None or ratio > worst[0]:
+            worst = (ratio, lo, hi)
+    return worst
+
 
 def worst_p95(case: dict) -> float:
     return max((m["p95Ms"] for m in case.get("measurements", [])), default=float("nan"))
@@ -220,6 +260,10 @@ def main() -> int:
                 # investigated as a 1.6x consolidation regression for a day.
                 spread = worst_spread(case)
                 caveat = ""
+                drift_note = canary_drift(run)
+                if drift_note and drift_note[0] > CANARY_DRIFT_TOLERANCE:
+                    caveat = (f"; NOTE the canary moved x{drift_note[0]:.2f} across "
+                              f"this run, so position may account for some of this")
                 if single_observation(case):
                     caveat = ("; NOTE every point of this case is a SINGLE "
                               "timing, so this is one observation against "
@@ -248,6 +292,28 @@ def main() -> int:
 
     print(f"device-bench: {len(run['cases'])} case(s) on {run['deviceModel']}, "
           f"{run['osVersion']}")
+
+    # Did the machine underneath the run change while it ran? Printed every
+    # time, not only on failure: knowing a case's conditions BEFORE it fails is
+    # the whole point, and a number that only appears in a postmortem teaches
+    # nobody what a steady device looks like.
+    drift = canary_drift(run)
+    if drift is None:
+        print("  canary: no samples — this run cannot say whether position mattered")
+    else:
+        ratio, lo, hi = drift
+        verdict = ("CONDITIONS CHANGED while this run ran"
+                   if ratio > CANARY_DRIFT_TOLERANCE else "steady")
+        print(f"  canary: {verdict} — x{ratio:.2f} across the run "
+              f"({lo['ms']:.2f} ms at {lo['atMs'] / 1000:.0f}s -> "
+              f"{hi['ms']:.2f} ms at {hi['atMs'] / 1000:.0f}s, "
+              f"tolerance x{CANARY_DRIFT_TOLERANCE})")
+        if ratio > CANARY_DRIFT_TOLERANCE:
+            states = {lo.get("thermalState"), hi.get("thermalState")}
+            if states == {"nominal"}:
+                print("    ...and thermalState read `nominal` at both, which is "
+                      "the case this check exists for: the OS signal has four "
+                      "levels and the device throttles inside the first.")
 
     # Which cases could not be measured in one pass, and how far they moved
     # when repeated. Printed every run rather than only on failure: the point

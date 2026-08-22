@@ -104,6 +104,9 @@ final class LatencyTests: XCTestCase {
             // a fact rather than a restatement of the request.
 
             var measurements: [Measurement] = []
+            collector.sampleCanaryIfDue()
+            let caseStartedAtMs = collector.elapsedMs
+            let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
             for stamps in Self.axis {
                 guard let (doc, layer) = SceneBuilder.sdfDocument(stamps: stamps) else {
                     XCTFail("could not build a \(stamps)-stamp document"); continue
@@ -146,7 +149,11 @@ final class LatencyTests: XCTestCase {
                 backend: backend,
                 servedBy: backend,
                 measurements: measurements,
-                growthExponent: Timing.growthExponent(measurements)))
+                growthExponent: Timing.growthExponent(measurements),
+                startedAtMs: caseStartedAtMs,
+                thermalStateStart: caseThermalStart,
+                thermalStateEnd: DeviceInfo.thermalName(
+                    ProcessInfo.processInfo.thermalState)))
         }
 
         let record = collector.finish(abiVersion: abiVersion(), attachTo: self)
@@ -172,6 +179,9 @@ final class LatencyTests: XCTestCase {
         let collector = RunCollector()
 
         var measurements: [Measurement] = []
+        collector.sampleCanaryIfDue()
+        let caseStartedAtMs = collector.elapsedMs
+        let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
         for stamps in Self.axis {
             guard let (doc, layer) = SceneBuilder.sdfDocument(stamps: stamps) else {
                 XCTFail("could not build a \(stamps)-stamp document"); continue
@@ -293,7 +303,10 @@ final class LatencyTests: XCTestCase {
             backend: "cpu",
             servedBy: "cpu",
             measurements: measurements,
-            growthExponent: Timing.growthExponent(measurements)))
+            growthExponent: Timing.growthExponent(measurements),
+            startedAtMs: caseStartedAtMs,
+            thermalStateStart: caseThermalStart,
+            thermalStateEnd: DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)))
 
         _ = collector.finish(abiVersion: abiVersion(), attachTo: self)
     }

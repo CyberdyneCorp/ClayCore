@@ -40,6 +40,9 @@ final class VerbLatencyTests: XCTestCase {
                            cleanup: () -> Void)?
     ) {
         var measurements: [Measurement] = []
+        collector.sampleCanaryIfDue()
+        let caseStartedAtMs = collector.elapsedMs
+        let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
         for stamps in axis {
             guard let fixture = prepare(stamps) else {
                 XCTFail("\(name): could not build a fixture at \(stamps) stamps")
@@ -56,7 +59,10 @@ final class VerbLatencyTests: XCTestCase {
             name: name, verb: verb, budgetClass: cls,
             backend: backend, servedBy: backend,
             measurements: measurements,
-            growthExponent: Timing.growthExponent(measurements)))
+            growthExponent: Timing.growthExponent(measurements),
+            startedAtMs: caseStartedAtMs,
+            thermalStateStart: caseThermalStart,
+            thermalStateEnd: DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)))
     }
 
     /// Every voxel verb and every mask/SDF verb, in one run so they share a
