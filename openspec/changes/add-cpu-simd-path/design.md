@@ -221,3 +221,107 @@ packet path and a much smaller change, and it belongs in whatever replaces this.
 The three measurements above are the reason to believe any of that rather than
 the reason to doubt it, and they took an afternoon. The implementation would
 have taken a fortnight and returned four per cent.
+
+# Retargeted 2026-08-22: the prototype, and what it reorders
+
+Section 2 said the per-instruction overhead was the target and named four
+suspects. Issue #207 listed them in the order it would test them, colour first.
+**Prototyped, and that order is wrong.**
+
+`benchmarks/tape_block_prototype.cpp` runs four evaluators over the same tape and
+the same points, changing only the shape of the loop — the primitive and combine
+maths are the shipping kernel functions (`ctape_prim_dist`,
+`ctape_combine_values`, `ctape_smin_m`), so what is measured is bookkeeping. Run
+it to re-derive this table rather than trusting it:
+
+    tape_block_prototype 2500 20480 512
+
+| | ns / instruction | vs `ctape_eval` |
+|---|---:|---:|
+| V0 `ctape_eval` | ~15.0 | 1.00x |
+| V1 per point, colour carried | ~9.4 | 1.6x |
+| V2 per point, distance only | ~6.9 | 2.2x |
+| V3 **blocked**, colour carried | ~2.65 | 5.7x |
+| V4 **blocked**, distance only | **~1.88** | **8.0x** |
+
+Every variant is **bit-identical** to `ctape_eval` — the harness exits non-zero
+if that ever stops being true, which is the guard that these are the same maths
+and not a cheaper approximation of it. x86-64 desktop, single-threaded, and the
+ratios hold at both 401 instructions (200 items, a culled brick tape) and 4,999
+(2,500 items), so this is not a cache effect.
+
+## What is robust, and what is not
+
+The first version of this table was measured in a scratch harness built with
+plain `-O3`. Rebuilt under the project's own flags the numbers MOVED, and the
+discipline that matters here is separating the findings that survived that from
+the ones that did not.
+
+**Robust — reproduced in both builds:**
+
+- **Blocking is the dominant structural win.** V1 → V3 is 3.5x and V2 → V4 is
+  3.7x, in both builds. The 17-float header load and the 18-flop transform really
+  are the cost, and paying them once per block is what removes them.
+- **Colour is worth ~1.4x once blocked.** V3 → V4 measured 1.37x and 1.41x. In a
+  blocked evaluator the stack is an array across the block, so a 4-float value
+  moves four times the bytes a 1-float value does — a memory-traffic win, which
+  is why it appears only in the blocked shape.
+- **Bit-identity**, in every configuration tried.
+
+**Not robust — do not plan against these:**
+
+- **Colour BEFORE blocking measured 1.02x in one build and 1.36x in the other.**
+  The colour-carrying scalar variant is simply compiled differently by the two,
+  and no claim about per-point colour survives that spread. This is the number
+  #207 ranked first and #174 once claimed 2.4x for; it is not measurable here at
+  all. **The only place colour has a stable value is after blocking, which is
+  where the task list now puts it.**
+- **A sharp block-size knee.** The scratch build showed 2.2x between block 64 and
+  128, which looked like a finding. The project build shows no knee — it improves
+  monotonically and saturates by about 64:
+
+  | block | 8 | 16 | 32 | 64 | 128 | 256 | 512 | 1024 |
+  |---|---:|---:|---:|---:|---:|---:|---:|---:|
+  | V4 ns / instruction | 2.58 | 2.16 | 2.32 | 1.92 | 1.89 | 1.87 | 1.86 | 1.85 |
+
+  What survives is the useful half: **block size is not a tuning constant to
+  agonise over.** Anything from 64 up is within 4% of the best, a brick's
+  8³ = 512 points sits in the flat region, and even 8 gets most of it. It is
+  still evidence against lane width being the story — 4 and 8 are the worst
+  entries in the row — but the argument is "blocking saturates early", not "there
+  is a cliff at 128".
+
+## The cost #207 did not list
+
+V1 differs from V0 only in that it does not check for features the instruction
+does not use: the deformer chain and its cursor, the repeat block, the combine
+gate, the transition test, the volume branch. Nothing but absent-feature checks,
+and they are **1.6x**.
+
+This is the most fragile number in the file and is flagged as such. It is
+measured on a tape of spheres and hard unions, so it is exactly the price of
+asking questions whose answer is always no. A tape that USES deformers and gates
+pays for them legitimately and the margin shrinks. Task 1.10 re-measures it on
+the golden corpus before any of it is claimed; it is recorded here as a lead, not
+a result.
+
+## What to predict, so it can be checked rather than celebrated
+
+Section 2's warning applies to this change as much as to the one it replaced.
+The prototype is a harness over a subset — spheres and hard unions, no
+deformers, repeats, gates or volumes, single-threaded, x86-64. What it supports
+is a **headroom** claim, not a delivery:
+
+- The full evaluator must land the blocked path on the golden corpus and report
+  what it actually gets there, per opcode family, including where it gets less.
+- **arm64 is unmeasured**, and it is the device that matters. Task 1.3's second
+  half is still outstanding and blocks any published figure.
+- 8x on evaluation is not 8x on a stamp. Evaluation is 98% of a 170 ms stamp, so
+  the ceiling is roughly 4-5x end-to-end and only if the whole of the 8x survives
+  a real corpus. Anything published should be measured end-to-end, because a
+  per-instruction figure is exactly the kind of number that reads as a
+  user-visible win and is not one — which is the mistake #193 made and this
+  change already made once.
+- And one from this session: **quote the artifact anyone can run, not the
+  scratch build.** Two `-O3` builds of identical source disagreed by 1.4x on one
+  of the five variants here.

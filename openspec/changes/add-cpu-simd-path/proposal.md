@@ -1,5 +1,25 @@
 # Proposal: the CPU SIMD path the spec already promises does not exist
 
+> **RETARGETED — read `design.md` sections 2 and 3 before this document.** The
+> "Why" below is still the reason to open the change: the spec has promised a CPU
+> batch path since v1 and there is none. Everything below about SIMD, lanes,
+> packet width and `xsimd` is **superseded**. Measured, the arithmetic a lane
+> would widen is 5% of a tape evaluation, and the block size at which the real win
+> appears saturates at a block of about 64 points, where a packet width of 4 or 8
+> is the worst part of the curve.
+>
+> **What is being built instead:** a BLOCKED evaluator that walks the tape once per
+> block of points, loading each instruction's 17-float parameter header and
+> applying its transform once per block rather than once per point. Prototyped at
+> **8x per instruction and bit-identical to `ctape_eval`**, with a brick's 512
+> points in the flat part of the block-size curve. Colour removal follows it and is
+> worth ~1.4x THERE, while before blocking it is not reliably measurable at all —
+> the reverse of the order #207 proposed.
+>
+> The superseded text is kept rather than deleted: it is the argument the
+> measurements had to beat, and `design.md` is a reply to it. Issue #207 carries
+> the measurements that started it.
+
 ## Why
 
 `evaluation-backends` has said this since v1:
@@ -112,6 +132,10 @@ a fallback must be a stated result rather than a silent one.
 ## Impact
 
 `evaluation-backends` keeps the requirement it already has and gains the
-scenarios that make it real. No public signature changes and no output value
+scenarios that make it real. It also loses the instruction set from the
+requirement text: the spec named Apple `simd` and SSE/NEON via `xsimd`, and the
+measurement says the mechanism is not where the win is, so the requirement now
+states the SHAPE of the walk — one pass over the tape per block of points — and
+leaves the instruction set to the implementation. No public signature changes and no output value
 changes: the parity gate is that this path agrees with scalar, so if it lands
 correctly nothing above the backend can tell it happened except by timing.
