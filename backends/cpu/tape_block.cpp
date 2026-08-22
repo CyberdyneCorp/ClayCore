@@ -49,10 +49,18 @@ struct PrimHeader {
     const float* repeat;
     bool repeat_active;
     bool repeat_radial;
+    // Whether this instruction uses the features `ctape_prim_local` tests for
+    // on every call. Both are properties of the INSTRUCTION, not of the point,
+    // so a blocked walk decides them once per block — which is the whole reason
+    // blocking helps beyond the header load. The prototype measured these
+    // absent-feature checks at 1.6x on a tape that uses none of them.
+    bool has_deformers;
+    bool is_volume;
 };
 
-PrimHeader decode_prim(const float* pr) {
+PrimHeader decode_prim(const float* pr, CLAY_UINT_T op) {
     PrimHeader h;
+    h.is_volume = (op == kernel::ctape_volume);
     h.inv.c0 = cf4(pr[0], pr[1], pr[2], 0.0f);
     h.inv.c1 = cf4(pr[3], pr[4], pr[5], 0.0f);
     h.inv.c2 = cf4(pr[6], pr[7], pr[8], 0.0f);
@@ -63,6 +71,9 @@ PrimHeader decode_prim(const float* pr) {
     h.repeat = pr + CLAY_TAPE_PRIM_HEADER + CLAY_TAPE_PRIM_PARAMS;
     h.repeat_active = kernel::ctape_repeat_active(h.repeat);
     h.repeat_radial = kernel::ctape_repeat_is_radial(h.repeat);
+    const float* deform = pr + CLAY_TAPE_PRIM_HEADER + CLAY_TAPE_PRIM_PARAMS +
+                          CLAY_TAPE_REPEAT_FLOATS;
+    h.has_deformers = CLAY_INT(deform[0]) != 0;
     return h;
 }
 
@@ -80,7 +91,16 @@ CTapeValue prim_at(CLAY_UINT_T op, const float* pr, const float* blob,
     // be the colour of the instance that won.
     cfloat3 repeat_color = v.color;
     if (!h.repeat_active) {
-        value = kernel::ctape_prim_local(op, pr, blob, lp, CLAY_OUTARG(v.color));
+        // The common instruction: no repeat, no deformer chain, not a sampled
+        // volume. `ctape_prim_local` would re-derive all three per point. The
+        // `+ 0.0f` is the deformer offset it would have added and is KEPT
+        // rather than folded away: dropping it turns a -0.0f result into +0.0f,
+        // which is a different bit pattern and the identity test says so.
+        if (!h.has_deformers && !h.is_volume) {
+            value = kernel::ctape_prim_dist(op, pr + CLAY_TAPE_PRIM_HEADER, blob, lp) + 0.0f;
+        } else {
+            value = kernel::ctape_prim_local(op, pr, blob, lp, CLAY_OUTARG(v.color));
+        }
     } else if (h.repeat_radial) {
         const float d0 = kernel::ctape_prim_local(op, pr, blob,
                                                   kernel::ctape_repeat_point(h.repeat, lp, 0),
@@ -223,11 +243,21 @@ void eval_points_blocked(const scene::Tape& tape, const PointQuery& q, const Poi
                 if (top >= 2) {
                     --top;
                     CTapeValue* a = &stack[(top - 1) * block];
-                    for (std::size_t j = 0; j < n; ++j) {
-                        const std::size_t i = base + j;
-                        a[j] = combine_at(c, blob, a[j], b[j],
-                                          cf3(q.points_xyz[i * 3], q.points_xyz[i * 3 + 1],
-                                              q.points_xyz[i * 3 + 2]));
+                    // As above: the plain combine — no spatial transition, no
+                    // feathered replace, no gate — gets its own loop chosen once
+                    // per block rather than three tests per point.
+                    if (!c.transition && c.mode != kernel::ccombine_replace_feather &&
+                        c.gate_off < 0) {
+                        for (std::size_t j = 0; j < n; ++j)
+                            a[j] = kernel::ctape_combine_values(a[j], b[j], c.mode, c.profile,
+                                                                c.k, c.rb);
+                    } else {
+                        for (std::size_t j = 0; j < n; ++j) {
+                            const std::size_t i = base + j;
+                            a[j] = combine_at(c, blob, a[j], b[j],
+                                              cf3(q.points_xyz[i * 3], q.points_xyz[i * 3 + 1],
+                                                  q.points_xyz[i * 3 + 2]));
+                        }
                     }
                 } else {
                     // A combine with an empty accumulator applies against empty
@@ -244,13 +274,38 @@ void eval_points_blocked(const scene::Tape& tape, const PointQuery& q, const Poi
                 }
             } else {
                 if (top >= static_cast<std::size_t>(CLAY_TAPE_MAX_STACK)) continue;
-                const PrimHeader h = decode_prim(pr);  // once per block
+                const PrimHeader h = decode_prim(pr, instr.op);  // once per block
                 CTapeValue* s = &stack[top * block];
-                for (std::size_t j = 0; j < n; ++j) {
-                    const std::size_t i = base + j;
-                    s[j] = prim_at(instr.op, pr, blob, h,
-                                   cf3(q.points_xyz[i * 3], q.points_xyz[i * 3 + 1],
+                // The branch is taken ONCE PER BLOCK, not once per point. That
+                // is what hoisting a per-instruction property means: deciding
+                // the value early still leaves a test and a generic call in the
+                // inner loop, and measured, that was most of the win. The
+                // specialised loop below is the common instruction — no repeat,
+                // no deformer chain, not a sampled volume — written out so the
+                // compiler sees a loop with no branches in it.
+                if (!h.repeat_active && !h.has_deformers && !h.is_volume) {
+                    for (std::size_t j = 0; j < n; ++j) {
+                        const std::size_t i = base + j;
+                        const cfloat3 lp = kernel::cmul_point(
+                            h.inv, cf3(q.points_xyz[i * 3], q.points_xyz[i * 3 + 1],
                                        q.points_xyz[i * 3 + 2]));
+                        s[j].color = h.color;
+                        // `+ 0.0f` is the deformer offset the general path adds.
+                        // Kept, not folded: dropping it turns a -0.0f into +0.0f,
+                        // a different bit pattern, and the identity test says so.
+                        s[j].d = (kernel::ctape_prim_dist(instr.op, pr + CLAY_TAPE_PRIM_HEADER,
+                                                          blob, lp) +
+                                  0.0f) *
+                                     h.scale -
+                                 h.round;
+                    }
+                } else {
+                    for (std::size_t j = 0; j < n; ++j) {
+                        const std::size_t i = base + j;
+                        s[j] = prim_at(instr.op, pr, blob, h,
+                                       cf3(q.points_xyz[i * 3], q.points_xyz[i * 3 + 1],
+                                           q.points_xyz[i * 3 + 2]));
+                    }
                 }
                 ++top;
             }

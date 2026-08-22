@@ -25,30 +25,23 @@
       hundred. **This settles the fallback grain: block EVERY instruction and let
       the ones that gather win less.** A per-tape bail would drop 201 instructions
       to scalar to accommodate one of them
-- [~] 1.4 IMPLEMENTED and bit-identical; the SPEEDUP IS NOT YET CONFIRMED, and
-      the gap is the open item. `backends/cpu/tape_block.cpp` walks the tape once
-      per block and every backend path but the gradient one goes through it.
-      Correctness is settled: identical to the scalar walk over the parity corpus
-      plus gated, coloured-volume and radial-array documents the corpus does not
-      contain, and four deliberate mutations each fail the suite.
-      **What the prototype promised has not appeared end to end.** Preliminary,
-      on a machine too loaded to trust for a published figure: `BM_EvalPoints`
-      ~1.2x, `BM_BrickFill` ~parity, against a prototype that measured 5-6x on the
-      same document shape. Two candidate reasons, neither confirmed: the grid
-      paths dispatch chunks of ONE LATTICE ROW — 8 points, the worst end of the
-      block curve — and the real paths are already threaded across every core,
-      where the limit may be bandwidth rather than the per-instruction work the
-      prototype measured single-threaded. **Do not publish a figure or close this
-      task until it is re-measured on a quiet machine and the gap is explained.**
-- [ ] 1.4b Explain the prototype-to-backend gap, then decide whether the grid
-      paths should dispatch coarser row runs. Raising `min_chunk` would put each
-      blocked walk in the flat part of the curve and costs load balance on a
-      single brick, which is a trade to measure rather than assume
-- [ ] 1.4 Blocked evaluator: one walk of the tape per block of points. The prim
-      instruction's 17-float header, the assembled `cfloat4x4`, the scale and the
-      round are loaded ONCE per block; the point loop applies the transform and the
-      primitive. `eval_points_reference` and `ctape_eval` are not modified — the
-      scalar evaluator remains the definition of correctness
+- [x] 1.4 DONE. `backends/cpu/tape_block.cpp` walks the tape once per block;
+      `eval_points` and both grid paths go through it. Bit-identical to the scalar
+      walk over the parity corpus plus gated, coloured-volume and radial-array
+      documents the corpus does not contain, with four mutations verified failing.
+      Measured against `main` on a quiet machine: **`BM_EvalPoints` 1.93x,
+      `BM_BrickFill` 1.22x**, and 1.02x on `BM_DeepDocRefillPlanned10000`, which
+      is culling-dominated and has little evaluation in it to take. Single-threaded
+      the same evaluator is 5.3x on a sphere document and 2.5x on the benchmark
+      document — see `design.md` for why one change has three honest numbers
+- [x] 1.4b The prototype-to-backend gap, EXPLAINED and closed. Two causes, both
+      recorded in `design.md`: hoisting a per-instruction property's VALUE while
+      leaving the test inside the point loop gave 1.96x where selecting the LOOP
+      once per block gave 6.44x on the same document; and the primitive becomes
+      visible again once bookkeeping is removed, so a document of expensive prims
+      wins less than one of spheres. The grid paths were NOT changed to dispatch
+      coarser row runs — it was not needed once the loop selection was right, and
+      raising `min_chunk` would have cost load balance on a single brick
 - [ ] 1.5 Block size is not a new tuning constant, and the sweep says it does not
       need to be: everything from 64 up is within 4% of the best. Default to the
       caller's natural unit (a brick is 8^3 = 512 points) and handle a short final
@@ -62,11 +55,11 @@
       sequenced AFTER 1.4 and measured on top of it, never on its own. #174 claimed
       2.4x for colour alone and withdrew it; this is the same claim and needs the
       blocked baseline under it
-- [ ] 1.8 Parity test wired into the existing suite: every kernel, blocked path vs
+- [x] 1.8 Parity test wired into the existing suite: every kernel, blocked path vs
       scalar, on the standard corpus. The prototype was BIT-IDENTICAL on its subset,
       so assert identity and let the 1e-6 relative bound catch only opcodes that
       genuinely cannot be — each of which 1.11 must name
-- [ ] 1.9 Ragged-block test: a batch of `block*k + r` points for every r in
+- [x] 1.9 Ragged-block test: a batch of `block*k + r` points for every r in
       [1, block) matches an aligned batch element for element
 - [ ] 1.10 Re-measure the absent-feature checks on the GOLDEN CORPUS before claiming
       them. The prototype's 2.2x for skipping the deformer, repeat, gate, transition
