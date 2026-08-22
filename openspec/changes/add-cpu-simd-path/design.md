@@ -125,3 +125,99 @@ something else on the table and is worth investigating rather than accepting.
 
 Evaluation is ~100% of an interactive stamp after `batch-brick-eval`, so that
 would take a 50,000-item stamp from 77 ms to roughly 20–25 ms.
+
+---
+
+# Revised 2026-08-21, before writing any of it
+
+Two findings, taken in the order they were found. The second is the one that
+matters.
+
+## 1. The decision above does not survive contact with the headers
+
+"Compile the same headers a second time through a wide mapping in `shim.h`"
+assumed the dialect names its scalar through an abstraction. It does not:
+
+```cpp
+CLAY_FN float sd_sphere(cfloat3 p, float r) { return clength(p) - r; }
+struct cfloat3 { float x, y, z; };
+```
+
+Every signature, every local, and every vector member says `float` — **929
+occurrences across the fifteen kernel headers**. There is nothing to remap. The
+option becomes "sweep 929 sites in code that four toolchains compile", which is
+a different and much larger change than the one that was chosen, and it would
+make every future kernel author write `cfloat` for a width they do not use.
+
+That alone would send this back to the drawing board. What was found next means
+it should not go back at all.
+
+## 2. SIMD is the wrong target: the maths is 5% of the cost
+
+The packet path exists to widen arithmetic. So: how much of a tape evaluation
+IS arithmetic?
+
+**Measurement one — the same maths, with and without the interpreter.** A
+2,500-sphere document, 4,999 instructions, against a plain loop doing the
+translate, the sphere and the min inline:
+
+| | ns/point | per unit |
+|---|---:|---:|
+| `ctape_eval` | 49,695 | **9.94 ns / instruction** |
+| the same maths written inline | 2,474 | **0.99 ns / prim** |
+
+**A factor of 20.**
+
+**Measurement two — does the primitive matter at all?** If the arithmetic were
+the cost, an expensive primitive would cost more than a cheap one:
+
+| primitive | ns/instruction |
+|---|---:|
+| sphere (a length and a subtract) | 10.37 |
+| box | 9.84 |
+| torus | 9.87 |
+| round box | 9.89 |
+
+**It does not.** A torus is two and a half times the flops of a sphere and costs
+the same. The cost is FIXED PER INSTRUCTION and the primitive is invisible in it.
+
+**Measurement three — what the fixed cost is made of**, by reading the prim
+branch of `ctape_eval`. Before any primitive maths runs, every prim instruction:
+
+- loads **17 floats** of parameter header — a 4x4 inverse matrix, a scale, a
+  rounding radius and an RGB colour (`CLAY_TAPE_PRIM_HEADER == 17`)
+- assembles a `cfloat4x4` on the stack and applies it to the point:
+  9 multiplies and 9 adds
+- pushes a `CTapeValue` — **4 floats, because colour rides through every
+  instruction whether or not the caller asked for one**
+- tests the repeat block, computes the deformer cursor
+- and dispatches through a **switch over some thirty-five opcodes**
+
+around roughly six flops of sphere.
+
+So widening the arithmetic eight ways would widen five per cent of the work.
+Even perfectly, that is about four per cent overall — against a change that
+touches thirty primitives, twenty branch conversions and a second type mapping
+in a dialect four toolchains compile.
+
+## What this changes
+
+**This change should not be implemented as scoped.** Not deferred for lack of
+time — retargeted, because the thing it optimises is not where the time goes.
+
+The measurements point somewhere specific instead, and it is cheaper: the
+per-instruction overhead. Colour threaded through a distance-only query, a
+matrix re-loaded and re-applied per point rather than per block, a stack machine
+over a `CLAY_TAPE_MAX_STACK` array, and a thirty-five-way indirect branch.
+Recorded as its own issue rather than folded in here.
+
+**The one thing SIMD would still buy** is worth keeping visible, because the
+argument survives in a narrower form: those 17 loads and the 18 flops of
+transform are per POINT today. A blocked evaluator that walked one instruction
+across a block of points would pay them once per block — and that is a win about
+LOADS AND BOOKKEEPING, not about arithmetic width. It is the same shape as a
+packet path and a much smaller change, and it belongs in whatever replaces this.
+
+The three measurements above are the reason to believe any of that rather than
+the reason to doubt it, and they took an afternoon. The implementation would
+have taken a fortnight and returned four per cent.
