@@ -159,13 +159,13 @@ std::vector<std::pair<std::string, scene::Tape>> extra_documents() {
 // mutating that comparison left every assertion passing.
 std::vector<float> lattice_points() {
     std::vector<float> xyz;
-    const int n = 17;
+    constexpr int n = 17;
+    const auto c = [](int i) {
+        return -1.1f + 2.2f * (static_cast<float>(i) / static_cast<float>(n - 1));
+    };
     for (int z = 0; z < n; ++z)
         for (int y = 0; y < n; ++y)
             for (int x = 0; x < n; ++x) {
-                const auto c = [n](int i) {
-                    return -1.1f + 2.2f * (static_cast<float>(i) / static_cast<float>(n - 1));
-                };
                 xyz.push_back(c(x));
                 xyz.push_back(c(y));
                 xyz.push_back(c(z));
