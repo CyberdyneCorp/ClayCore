@@ -21,12 +21,25 @@ batch path is `eval_points_reference` — the scalar loop — sliced across thre
 
 ```cpp
 // backends/cpu/cpu_backend.cpp — the "batch" path
-backends_cpu::ThreadPool::instance().parallel_for(
-    q.count, 256, [&](std::size_t b, std::size_t e) {
+parallel::ThreadPool::instance().parallel_for(
+    q.offsets[q.count] - first, 64, [&](std::size_t b, std::size_t e) {
         ...
         eval_points_reference(tape, sub, sub_out);   // scalar, one point at a time
     });
 ```
+
+**Restated 2026-08-21**, because the quotation above had gone stale twice over
+and the argument reads as weaker when its evidence is wrong. The pool moved out
+of the backend into `clay/parallel` (`harden-core-boundaries`), and the batch
+dispatch was rewritten by `batch-brick-eval` — which took the same evaluation
+term from 6.7 cores of 16 to 17.9, and from 167.5 ms to 77.4 ms on a
+50,000-item stamp.
+
+That change makes this one MORE worth doing rather than less, and the ordering
+was deliberate: SIMD on a path that reached 6.7 cores would have won a third of
+what it will win now. What has not changed is the sentence at the centre of it —
+every one of those threads still runs `eval_points_reference`, one point at a
+time.
 
 An unimplemented optimisation is normally a roadmap row, not a proposal. This
 one is a proposal for three reasons.
