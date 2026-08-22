@@ -162,13 +162,17 @@ final class VerbLatencyTests: XCTestCase {
     /// `prepare` builds the fixture for a document size and returns the timed
     /// body plus its teardown. Returning nil skips that size, which is a
     /// failure rather than a silent gap.
+    /// `axis` overrides the shared growth axis for a case whose smallest point
+    /// its fixture cannot feed. Only `voxel_mesh_dirty` uses it; the reason is
+    /// recorded there.
     private func measureAxis(
         name: String, verb: String, _ cls: BudgetClass, backend: String = "cpu",
+        axis: [Int] = LatencyTests.axis,
         prepare: (Int) -> (body: () -> Void, reset: (() -> Void)?,
                            cleanup: () -> Void)?
     ) {
         var measurements: [Measurement] = []
-        for stamps in LatencyTests.axis {
+        for stamps in axis {
             guard let fixture = prepare(stamps) else {
                 XCTFail("\(name): could not build a fixture at \(stamps) stamps")
                 continue
@@ -384,7 +388,26 @@ final class VerbLatencyTests: XCTestCase {
         // iteration is what keeps the unit one dab. Without it the set would
         // accumulate and iteration N would mesh what N-1 also dirtied, which
         // reads as a display path that grows with the session.
-        measureAxis(name: "voxel_mesh_dirty", verb: "voxel_mesh_chunks", .interactive) { stamps in
+        // A SHIFTED AXIS. The shared one starts at 10, and this fixture cannot
+        // feed that point: the dab index walks 0...199 over up to 200 timed
+        // iterations while a 10-stamp fixture holds ten spots of material, so
+        // most dabs land in empty space, dirty nothing and mesh nothing.
+        // Measured: 0.1 chunks per dab there, which is 10/200.
+        //
+        // That mattered because growthExponent divides the largest point by
+        // the smallest, so the near-zero p95 at 10 stamps WAS the N^1.28 this
+        // case reported — 0.0060 -> 2.1235 ms is N^1.27 whatever the engine
+        // does. Starting at 100 gives every point material to work on and the
+        // same measurement reads N^0.68.
+        //
+        // There is no scaling defect underneath it. Verified on the Mac
+        // through the C ABI: meshing a fixed chunk count costs the same on a
+        // grid of 30 chunks and one of 51, the dab and the drain are flat
+        // across the axis, and all of the growth is in the mesh call, which is
+        // O(keys). What remains is density — this fixture holds the volume
+        // fixed, so more stamps means a denser solid — and that is N^0.33.
+        measureAxis(name: "voxel_mesh_dirty", verb: "voxel_mesh_chunks", .interactive,
+                    axis: [100, 1000]) { stamps in
             guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
             var b = Fixture.brush()
             var i = 0

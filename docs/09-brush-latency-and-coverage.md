@@ -459,6 +459,35 @@ rather than the instance — clang's `-Wshorten-64-to-32` is the analogue of
 C4267 and clears the library in one pass, and it is worth verifying such a scan
 BITES (remove one fix, confirm one warning) before trusting a clean result.
 
+## What the corrected stamp spread revealed
+
+`#199` found the scattered-stamp fixture put every point on the plane `x+y=0`,
+so the device budgets derived before it were derived against a workload no
+sculpt produces. Re-deriving them moved **38 of 59 cases by more than 15%**, in
+both directions: the voxel verbs got cheaper because a brush on a spread solid
+touches fewer cells than one on a pile, and `voxel_add_level` got **9.3x** dearer
+because 400 blob origins had been collapsing to 129.
+
+Two things the re-derivation exposed that a budget cannot fix:
+
+- **`voxel_mesh_dirty`'s growth was never measured.** It read N^0.289 on the old
+  fixture, because 10 collapsed stamps were already dense and 1000 added little.
+  On a real spread it is **N^1.28**, reproduced across two runs (1.276, 1.278),
+  against a N^1.25 ceiling. That is a shape, so no budget re-derivation touches
+  it, and the ceiling is NOT moved to accommodate it: either the incremental
+  mesh path scales worse than the spec allows or the ceiling was never a real
+  constraint, and deciding that belongs to whoever owns the path.
+- **`voxel_fill_cavities` no longer measures cavity filling.** Its old numbers
+  were non-monotonic — 10:0.256, 100:0.482, 1000:0.019 ms — which is a pile
+  making pockets at small counts and a solid mass at large. Spread blobs form no
+  enclosed cavities at all, so it now reads 0.012 / 0.014 / 0.024 ms at the same
+  sizes. The case needs a fixture that builds a cavity, not a budget; a derived
+  budget here records that it measures nothing.
+
+The re-derived levels themselves are trustworthy: two runs taken 20 minutes
+apart, both thermally nominal, disagree on **no case** by more than the 1.5x
+headroom the budgets carry, and the largest swing above the noise floor is 1.18x.
+
 ## What a device case's number is worth
 
 A p95 over fewer than 20 samples IS the maximum: nearest rank is
