@@ -1,5 +1,16 @@
 # Tasks: add-cpu-simd-path
 
+> **RETARGETED 2026-08-21, before 1.4.** The scoping pass measured what a tape
+> evaluation is made of and the arithmetic this change widens is 5% of it — see
+> `design.md` and issue #207. Tasks 1.4 onward are NOT to be implemented as
+> written. They are left here rather than deleted because the audit and the
+> baseline under them are the evidence for retargeting, and because one part of
+> the idea survives: a BLOCKED evaluator that walks one instruction across many
+> points pays the 17-float parameter load and the 18-flop transform once per
+> block instead of once per point. That is the same shape and a much smaller
+> change, and it wins on loads rather than on lanes.
+
+
 - [x] 1.1 DECIDE and record in `design.md`: xsimd only, or Apple `simd` on Apple platforms as well; and packet width — fixed 4 or the architecture's native batch. Decide on a measurement on arm64, not on the desktop
 - [x] 1.2 Audit every tape opcode for lane-evaluability BEFORE writing the evaluator. Produce the list: lane-evaluated, or per-lane scalar fallback with the reason. Data-dependent early-outs and the sampled-volume lookup are the suspected awkward ones
 - [~] 1.3 Baseline on `main`: `BM_EvalPoints`, `BM_BrickFill`, and a single-brick 8³ fill, on x86-64 and on arm64. These are the numbers the change is for
