@@ -1,6 +1,31 @@
 # Tasks: add-item-spatial-index
 
 - [ ] 1.1 DECIDE and record in `design.md`: flat BVH over item bounds vs uniform grid keyed like the brick lattice. Decide against a real sculpt's scale distribution (a blockout sphere and a detail stamp coexist), and record the build-vs-query measurement that settled it
+
+      — MEASUREMENT TAKEN, from #193. Documents of N spheres, one layer, no groups.
+      `plan()` is the mean of 200 calls over a dab-sized region; `build` is one
+      `CullIndex` construction.
+
+      | items | `CullIndex` build | `plan()` |
+      |---:|---:|---:|
+      | 1 000 | 0.102 ms | 0.0029 ms |
+      | 10 000 | 1.074 | 0.0335 |
+      | 50 000 | 3.642 | 0.136 |
+
+      Both terms are linear. The rebuild is **27x the query it accelerates** at
+      50 000 items and runs just as often: the index is cached on the document
+      revision (`bindings/c/clay_c.cpp:952`) and every stamp in a stroke bumps it.
+      So a structure that only makes `plan()` sublinear addresses the smaller term
+      of the index's own cost, and this DECIDE has to weigh incremental insertion
+      ALONGSIDE the BVH-vs-grid question rather than after it. The rebuild is
+      expensive for a reason worth carrying into the decision: `build_chain` calls
+      `item_geometry_bound` per node, which re-tessellates spline strokes and
+      sweeps.
+
+      Scope it honestly, though. At 50 000 items the whole rebuild is 1.7% of a
+      realistic stamp, not the interactive cost — #193's own correction, after its
+      first harness measured a dab over empty space. An O(N) rebuild per edit is
+      still wrong, but it buys ~1.02x end-to-end and must not be sold as more.
 - [x] 1.2 Baseline the numbers this change exists to move, on a build of `main`: culling
       time per brick at 100 / 2 400 / 10 000 items, and a dab's total. Committed as
       `BM_DeepDocCullPlanned10000` and `BM_DeepDocRefillPlanned10000`, with gates.
@@ -19,6 +44,14 @@
 - [ ] 1.8 Regression test for the non-local case: a document containing an unbounded item and a distant brick still emits that item
 - [ ] 1.9 Regression test for staleness: add / move / remove an item, cull immediately, assert the culled tape reflects the edit
 - [ ] 1.10 Benchmark: culling time per brick against document size, asserting the slope is flat rather than the constant small. A 2× constant improvement passing as a fix for this is the failure mode to guard against
+
+      — A SECOND FAILURE MODE, from #193: the dab has to land on geometry. That
+      issue's first end-to-end harness placed the dab in empty space, so the cull
+      dropped every item and the tape emitted **0 instructions**. It measured the
+      cost of finding nothing, and reported the rebuild as 90% of a stamp where a
+      dab on real geometry makes it 1.7%. Assert the benchmark's culled tape is
+      non-empty and that its instruction count grows with document size — otherwise
+      the flat slope it reports is the slope of doing no work.
 - [ ] 1.11 Order-independence test on the batch path: the same batch evaluated twice is bit-identical
 - [x] 1.12 Update `docs/RELEASE.md`'s "a brush dab's brick COUNT is flat, but its cost is
       not" entry with what actually landed, including whatever slope remains.
