@@ -262,6 +262,87 @@ void Bvh::index_for_refit(std::size_t source_triangles) {
 // Copy the named triangles' positions in from the mesh and mark the leaves that
 // hold them. Returns false when the mesh is not the one this tree was built
 // over, before touching anything.
+void Bvh::triangles_in_ball(cfloat3 centre, float radius, std::vector<std::uint32_t>* out) const {
+    out->clear();
+    if (nodes_.empty() || !(radius > 0.0f)) return;
+    const float r2 = radius * radius;
+    std::int32_t stack[64];
+    int top = 0;
+    stack[top++] = 0;
+    while (top > 0) {
+        const std::int32_t self = stack[--top];
+        const Node& n = nodes_[static_cast<std::size_t>(self)];
+        // The test is against the BOX, so a node survives when any part of it
+        // is within the radius. That over-admits and never under-admits, which
+        // is the direction a region query has to err in.
+        if (squared_distance_to_box(n.box, centre) > r2) continue;
+        if (n.count > 0) {
+            for (std::int32_t i = 0; i < n.count; ++i) {
+                const Tri& t = tris_[static_cast<std::size_t>(n.first + i)];
+                if (kernel::cdot2(t.a - centre) <= r2 || kernel::cdot2(t.b - centre) <= r2 ||
+                    kernel::cdot2(t.c - centre) <= r2)
+                    out->push_back(t.source);
+            }
+            continue;
+        }
+        // Bounded exactly as `raycast` bounds itself, and for the same reason:
+        // two pushes per pop means the stack holds the tree's DEPTH, the build
+        // halves the count at every level, and 64 levels covers more triangles
+        // than a machine can hold. The guard is a bound on a corrupted tree,
+        // not a case that happens.
+        if (top + 2 <= static_cast<int>(sizeof(stack) / sizeof(stack[0]))) {
+            stack[top++] = self + 1;
+            stack[top++] = n.right;
+        }
+    }
+}
+
+Bvh::NearestVertex Bvh::nearest_vertex(cfloat3 p) const {
+    NearestVertex best;
+    if (nodes_.empty()) return best;
+    float nearest2 = std::numeric_limits<float>::max();
+    std::int32_t stack[64];
+    int top = 0;
+    stack[top++] = 0;
+    while (top > 0) {
+        const std::int32_t self = stack[--top];
+        const Node& n = nodes_[static_cast<std::size_t>(self)];
+        // A node whose BOX is already further than the best corner found cannot
+        // hold a nearer corner, because a corner is inside the box.
+        if (squared_distance_to_box(n.box, p) > nearest2) continue;
+        if (n.count > 0) {
+            for (std::int32_t i = 0; i < n.count; ++i) {
+                const Tri& t = tris_[static_cast<std::size_t>(n.first + i)];
+                const cfloat3 corners[3] = {t.a, t.b, t.c};
+                for (int k = 0; k < 3; ++k) {
+                    const float d2 = kernel::cdot2(corners[k] - p);
+                    if (d2 >= nearest2) continue;
+                    nearest2 = d2;
+                    best.found = true;
+                    best.triangle = t.source;
+                    best.corner = k;
+                }
+            }
+            continue;
+        }
+        // Nearer child first, so the far one is pruned by a real bound rather
+        // than by whatever order the tree was built in.
+        const std::int32_t l = self + 1, r = n.right;
+        const float dl = squared_distance_to_box(nodes_[static_cast<std::size_t>(l)].box, p);
+        const float dr = squared_distance_to_box(nodes_[static_cast<std::size_t>(r)].box, p);
+        if (top + 2 > static_cast<int>(sizeof(stack) / sizeof(stack[0]))) continue;
+        if (dl <= dr) {
+            stack[top++] = r;
+            stack[top++] = l;
+        } else {
+            stack[top++] = l;
+            stack[top++] = r;
+        }
+    }
+    if (best.found) best.distance = std::sqrt(nearest2);
+    return best;
+}
+
 bool Bvh::refit_slots(const Mesh& m, const std::uint32_t* changed, std::size_t count) {
     if (m.triangle_count() != source_slot_.size()) return false;
     if (nodes_.empty()) return true;  // an empty tree is already fitted

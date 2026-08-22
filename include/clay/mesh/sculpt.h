@@ -403,11 +403,17 @@ class MeshSculptor {
     // pending. `record` is updated so a deferred stroke's undo is still exact.
     void flush_normals(VertexDeltas* record = nullptr);
 
-    // Where a weld class sits, and which one is nearest a point. The second is
-    // a LINEAR SCAN — fine once per stroke to find an anchor, wrong per stamp
-    // on a large mesh, which is what `MeshBrushSettings::seed_class` is for.
+    // Where a weld class sits, and which one is nearest a point.
+    //
+    // The second goes through the ray tree when the sculptor has one, which is
+    // O(log N); it falls back to a linear scan over every class when it does
+    // not. It used to be the scan always, which is why
+    // `MeshBrushSettings::seed_class` exists — a caller could hand the walk its
+    // own anchor and skip it. That is no longer necessary: the walk seeds
+    // itself from this. Passing `seed_class` is still faster by one query and
+    // still the right thing when the host already knows where the finger is.
     kernel::cfloat3 class_position(std::uint32_t cls) const;
-    std::uint32_t nearest_class(kernel::cfloat3 p) const;
+    std::uint32_t nearest_class(kernel::cfloat3 p);
 
     // -- picking -------------------------------------------------------------
     // Built lazily on the first query. Positions move under it, and what a
@@ -467,6 +473,10 @@ class MeshSculptor {
     // differs from what the mesh holds, and returns how many classes changed.
     std::size_t write_colors(VertexDeltas* record);
     void recompute_normals(const std::vector<std::uint32_t>& classes, VertexDeltas* record);
+    // The ray tree, refitted — or null when the host has never built one, in
+    // which case every caller below falls back to the scan it replaced.
+    const Bvh* surface_index();
+    bool classes_in_ball(kernel::cfloat3 centre, float radius, std::vector<std::uint32_t>* out);
     void mark_bvh_dirty(std::uint32_t cls);
     void clear_bvh_dirty();
 
@@ -492,6 +502,10 @@ class MeshSculptor {
     // refit does not allocate. Duplicates are harmless: the second sighting of
     // a triangle finds its leaf already marked and walks no further.
     std::vector<std::uint32_t> refit_tris_;
+    // Scratch for the ball query, kept so a stamp does not allocate. `ball_mark_`
+    // is retired through the result list, never cleared wholesale.
+    std::vector<std::uint32_t> ball_tris_;
+    std::vector<char> ball_mark_;
     // Classes moved since the last refit or rebuild, as a compact list plus a
     // membership mark. The mark is reset through the LIST rather than cleared,
     // so the cost is what a stroke touched and not what the mesh holds — the
