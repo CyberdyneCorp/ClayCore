@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-08-22
+goal: Record per-case timing and thermal context, and detect drift with a
+  canary, so a 2.7x position effect cannot be priced into a budget unseen
