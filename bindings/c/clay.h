@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 39
+#define CLAY_ABI_MINOR 40
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -390,6 +390,41 @@ clay_result clay_remove_node(clay_document* doc, clay_layer_id layer, clay_node_
 clay_result clay_document_enable_undo(clay_document* doc);
 clay_result clay_document_undo(clay_document* doc, int32_t* out_undone);
 clay_result clay_document_redo(clay_document* doc, int32_t* out_redone);
+/* The same two calls, plus the world-space INFLUENCE bound of what they
+ * applied — the region to hand clay_brick_cache_mark_dirty.
+ *
+ * A host keeping a brick cache cannot work this out, and every way it might
+ * try is worse than not knowing. The narrowest bound it can name from the
+ * outside is clay_brick_cache_mark_dirty_layer's, so undoing one dab refills
+ * the model; diffing the layer's nodes across the call (clay_layer_node_count
+ * / clay_layer_node_at) catches adds and removes but NOT an in-place change —
+ * an undone move, resize or colour edit keeps its node id — and under-dirtying
+ * is the failure that leaves visibly stale bricks at a blend seam. The engine
+ * holds the list of commands it applied; nothing outside it does.
+ *
+ * The bound is the union, over every command in the step, of what that command
+ * targets before it is applied and after — which is what covers a move (two
+ * ends), a removal (the node that is gone) and an add (the node that was not
+ * there) without the caller knowing which it was. It may be LOOSER than what
+ * changed and never tighter: a node inside a group reports its root ancestor's
+ * bound, because the group's blend reaches past the child's own box, and an
+ * edit to content shared by instanced layers reports the union over every
+ * layer sharing it. A step that cannot change the field — a rename — reports
+ * no bounds rather than the layer.
+ *
+ * The three states are clay_layer_node_influence_bound's, and they line up
+ * with what mark_dirty takes:
+ *   *out_has_bounds 0            nothing to dirty; out_min/out_max untouched
+ *   1, *out_infinite 0           the finite box, ready for mark_dirty
+ *   1, *out_infinite 1           unbounded — mark_dirty with both regions NULL
+ * Any of the four bound out-pointers may be NULL. Nothing to undo reports
+ * *out_undone 0 and no bounds, and is still CLAY_OK. */
+clay_result clay_document_undo_bound(clay_document* doc, int32_t* out_undone, float out_min[3],
+                                     float out_max[3], int32_t* out_has_bounds,
+                                     int32_t* out_infinite);
+clay_result clay_document_redo_bound(clay_document* doc, int32_t* out_redone, float out_min[3],
+                                     float out_max[3], int32_t* out_has_bounds,
+                                     int32_t* out_infinite);
 /* One query for everything a UI needs to label its buttons. Any out pointer
  * may be NULL. The depths read 0 when undo is not enabled, which *out_enabled
  * distinguishes from an enabled-but-empty history. */

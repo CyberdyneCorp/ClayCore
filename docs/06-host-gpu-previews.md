@@ -378,6 +378,16 @@ clay_brick_cache_read_bricks(cache, /*lod*/ 0, keys, key_count, /*apron*/ 1,
   2×2×2 fine ones for far-view LOD. Mips carry no colour: averaging colour over
   the block is a filtering policy, and the call refuses rather than picking one
   for you.
+- **Undo is an edit too, and it says so.** `clay_document_undo_bound` /
+  `clay_document_redo_bound` (ABI 0.40.0) are `clay_document_undo` /
+  `clay_document_redo` plus the world-space influence bound of what they
+  applied — feed it straight to `clay_brick_cache_mark_dirty`, with both
+  regions `NULL` for the unbounded flag. Without it the narrowest region you
+  can name after an undo is `mark_dirty_layer`'s, so taking back one dab costs
+  a full fill (measured in #210: 27 keys and 5 ms for the dab, 2940 keys and
+  207 ms to undo it). Do NOT try to work it out by diffing the layer's nodes
+  across the call: an undone move, resize or colour edit keeps its node id, the
+  diff sees nothing, and under-dirtying leaves stale bricks at a blend seam.
 
 **Formats.** `r16float` for distance, `rgba8unorm` for colour. Both are
 hardware-filterable in WebGPU, so the trilinear step is free and the shader is a

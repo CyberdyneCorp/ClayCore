@@ -86,6 +86,7 @@ add_executable(clay_unit_tests
   unit/test_c_pick_eval.cpp
   unit/test_c_tape_cache.cpp
   unit/test_c_brick.cpp
+  unit/test_c_undo_bound.cpp
   unit/test_c_out_descriptors.cpp
   unit/test_c_brick_atlas.cpp
   unit/test_c_brick_lod_mesh.cpp

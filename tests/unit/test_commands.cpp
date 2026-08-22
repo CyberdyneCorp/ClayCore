@@ -331,3 +331,55 @@ TEST_CASE("locate stays exact through structural churn and index bypasses") {
     check_locate_matches_reference(c);
     check_locate_matches_reference(c);  // again, through the repaired entries
 }
+
+TEST_CASE("the undo bound covers every layer sharing the content") {
+    // Layer instancing shares SdfContent by reference, so ONE command lands
+    // once per instance, each through that layer's own transform. A bound
+    // taken against the layer the command names would leave the other
+    // instance's copy of the edit stale — and nothing at the boundary could
+    // detect it, because both instances hold the same node id.
+    Document doc;
+    Layer& src = doc.add_sdf_layer("body");
+    LayerId lid = src.id;
+    Layer* copy = doc.instance_layer(lid, "body copy");
+    REQUIRE(copy != nullptr);
+    copy->xform.position = cf3(10, 0, 0);
+
+    UndoStack stack;
+    Node n;
+    n.id = doc.layers[0].sdf->reserve_id();
+    n.prim = Prim::sphere(0.5f);
+    REQUIRE(stack.perform(doc, AddNodeCmd{lid, kNoNode, -1, {n}}));
+
+    math::Aabb bound;
+    REQUIRE(stack.undo(doc, &bound));
+    REQUIRE_FALSE(bound.empty());
+    CHECK_FALSE(bound.is_infinite());
+    CHECK(bound.contains(cf3(0, 0, 0)));   // where the source layer draws it
+    CHECK(bound.contains(cf3(10, 0, 0)));  // and where the instance does
+}
+
+TEST_CASE("the undo bound is opt-in and changes nothing when it is not asked for") {
+    // The bound is extra information on the same call: passing no bound must
+    // leave the document exactly where passing one leaves it.
+    Document quiet = base_document();
+    Document loud = base_document();
+    UndoStack quiet_stack;
+    UndoStack loud_stack;
+    LayerId lid = quiet.layers[0].id;
+
+    auto edit = [&](Document& doc, UndoStack& stack) {
+        REQUIRE(stack.perform(doc, SetTransformCmd{lid, nth_root(doc, 0), math::Transform{}}));
+        REQUIRE(stack.perform(doc, RemoveNodeCmd{lid, nth_root(doc, 2)}));
+    };
+    edit(quiet, quiet_stack);
+    edit(loud, loud_stack);
+
+    math::Aabb bound;
+    for (int i = 0; i < 2; ++i) {
+        REQUIRE(quiet_stack.undo(quiet));
+        REQUIRE(loud_stack.undo(loud, &bound));
+    }
+    CHECK(serialize_document(quiet) == serialize_document(loud));
+    CHECK_FALSE(bound.empty());
+}
