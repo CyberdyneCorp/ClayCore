@@ -1978,23 +1978,38 @@ clay_result clay_document_enable_undo(clay_document* doc) {
 }
 
 clay_result clay_document_undo(clay_document* doc, int32_t* out_undone) {
-    if (!doc || !out_undone) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
-    if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
-    // An empty stack is reported, not failed: a UI drives this without having
-    // to track whether anything is left.
-    *out_undone = doc->undo->undo(doc->doc.document) ? 1 : 0;
-    // Undo and redo replay commands straight onto the document rather than
-    // through apply_edit, so they invalidate here.
-    if (*out_undone) doc->touch();
-    return CLAY_OK;
+    return clay_document_undo_bound(doc, out_undone, nullptr, nullptr, nullptr, nullptr);
 }
 
 clay_result clay_document_redo(clay_document* doc, int32_t* out_redone) {
+    return clay_document_redo_bound(doc, out_redone, nullptr, nullptr, nullptr, nullptr);
+}
+
+clay_result clay_document_undo_bound(clay_document* doc, int32_t* out_undone, float out_min[3],
+                                     float out_max[3], int32_t* out_has_bounds,
+                                     int32_t* out_infinite) {
+    if (!doc || !out_undone) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
+    // An empty stack is reported, not failed: a UI drives this without having
+    // to track whether anything is left. It leaves the bound empty, which
+    // write_influence spells as no bounds — nothing to dirty.
+    math::Aabb bound;
+    *out_undone = doc->undo->undo(doc->doc.document, &bound) ? 1 : 0;
+    // Undo and redo replay commands straight onto the document rather than
+    // through apply_edit, so they invalidate here.
+    if (*out_undone) doc->touch();
+    return write_influence(bound, out_min, out_max, out_has_bounds, out_infinite);
+}
+
+clay_result clay_document_redo_bound(clay_document* doc, int32_t* out_redone, float out_min[3],
+                                     float out_max[3], int32_t* out_has_bounds,
+                                     int32_t* out_infinite) {
     if (!doc || !out_redone) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
     if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
-    *out_redone = doc->undo->redo(doc->doc.document) ? 1 : 0;
+    math::Aabb bound;
+    *out_redone = doc->undo->redo(doc->doc.document, &bound) ? 1 : 0;
     if (*out_redone) doc->touch();
-    return CLAY_OK;
+    return write_influence(bound, out_min, out_max, out_has_bounds, out_infinite);
 }
 
 clay_result clay_document_undo_state(const clay_document* doc, int32_t* out_enabled,

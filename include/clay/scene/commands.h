@@ -11,6 +11,7 @@
 #include <variant>
 #include <vector>
 
+#include "clay/math/geom.h"
 #include "clay/scene/document.h"
 
 namespace clay {
@@ -167,6 +168,28 @@ using Command =
 // caller which of the two it hit.
 LayerId edited_layer(const Command& cmd);
 
+// The world-space INFLUENCE bound of what `cmd` targets in the document AS IT
+// IS NOW — the box outside which applying (or having applied) it cannot change
+// the field. Empty means nothing to dirty; math::Aabb::infinite() means the
+// target's influence has no finite extent.
+//
+// Called on ONE side of an apply it is not an answer: an add's node is not
+// there before, a removal's is not there after, and a move has two ends. The
+// undo stack calls it before and after and unions the two, which is what makes
+// all three come out right without a case per command.
+//
+// It is deliberately loose in two places, because being tight there would cost
+// correctness rather than buy it:
+//   - a node inside a GROUP reports its root ancestor's bound. A group's blend
+//     spreads a child's influence past the child's own box, and the amount is
+//     the ancestors' business, not the child's.
+//   - a node command reports the union over every layer sharing the content.
+//     Layer instancing shares SdfContent by reference, so one edit lands once
+//     per instance, each through that layer's own transform.
+// A command that cannot change what the document evaluates to — a rename, a
+// protection flag — reports an empty box rather than the layer's.
+math::Aabb command_influence_bound(const Document& doc, const Command& cmd);
+
 // The scene payload layout this build writes. It tracks the .clayspace
 // container's minor version, which is what a reader is told; io asserts they
 // agree so the two cannot drift.
@@ -209,8 +232,13 @@ std::optional<Document> deserialize_document(const std::uint8_t* data, std::size
 class UndoStack {
   public:
     bool perform(Document& doc, const Command& cmd);
-    bool undo(Document& doc);
-    bool redo(Document& doc);
+    // `out_bound` (optional) receives the union of command_influence_bound
+    // taken before and after every command in the step — the region a consumer
+    // holding a cache has to invalidate, which is otherwise unknowable from
+    // outside: an in-place edit keeps its node id, so no diff of the document
+    // across the call can see it. Null costs nothing; no bound is computed.
+    bool undo(Document& doc, math::Aabb* out_bound = nullptr);
+    bool redo(Document& doc, math::Aabb* out_bound = nullptr);
     void begin_group();
     void end_group();
     std::size_t undo_depth() const { return undo_.size(); }
@@ -221,6 +249,10 @@ class UndoStack {
         std::vector<Command> inverses;  // applied in reverse order on undo
     };
     static bool try_coalesce(Entry& top, const Command& cmd, const Command& inverse);
+    // The half undo() and redo() share: apply an entry's commands in reverse,
+    // return the entry the opposite stack keeps, and widen `bound` (optional)
+    // by what each command targeted on both sides of its apply.
+    static Entry replay(Document& doc, const Entry& entry, math::Aabb* bound);
     std::vector<Entry> undo_;
     std::vector<Entry> redo_;
     bool grouping_ = false;

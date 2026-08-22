@@ -1,4 +1,5 @@
 #include "clay/scene/armature.h"
+#include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
 
 #include <cstring>
@@ -245,6 +246,77 @@ std::optional<Command> apply(Document& doc, const Command& cmd) {
         if (l && l->protected_from_edits()) return std::nullopt;
     }
     return std::visit([&](const auto& c) { return apply_one(doc, c); }, cmd);
+}
+
+// ---------------------------------------------------------------------------
+// what a command targets
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// The root of the tree `id` hangs off, or kNoNode when the content does not
+// hold it. Bounded by the node count rather than trusting the tree to be
+// acyclic: SdfContent::move refuses to close a cycle, but `roots` is a public
+// member and this walk must terminate whatever a caller wrote there.
+NodeId root_ancestor(const SdfContent& content, NodeId id) {
+    NodeId cur = id;
+    for (std::size_t step = 0; step <= content.nodes().size(); ++step) {
+        NodeId parent = kNoNode;
+        int index = -1;
+        if (!content.locate(cur, &parent, &index)) return kNoNode;
+        if (parent == kNoNode) return cur;
+        cur = parent;
+    }
+    return kNoNode;
+}
+
+// The bound of a node command's target: the root ancestor's influence bound,
+// unioned over every layer sharing the content. Empty when the layer, the
+// content or the node is not there — which is the honest answer on the side of
+// an apply where the node does not exist yet, or no longer does.
+math::Aabb node_command_bound(const Document& doc, LayerId layer_id, NodeId node) {
+    const Layer* target = doc.find_layer(layer_id);
+    if (!target || !target->sdf) return math::Aabb{};
+    NodeId root = root_ancestor(*target->sdf, node);
+    if (root == kNoNode) return math::Aabb{};
+    math::Aabb bound;
+    for (const Layer& l : doc.layers) {
+        if (l.sdf != target->sdf) continue;
+        bound.expand(node_influence_bound(*l.sdf, root, l));
+    }
+    return bound;
+}
+
+math::Aabb layer_command_bound(const Document& doc, LayerId layer_id) {
+    const Layer* l = doc.find_layer(layer_id);
+    return l ? layer_influence_bound(*l) : math::Aabb{};
+}
+
+}  // namespace
+
+math::Aabb command_influence_bound(const Document& doc, const Command& cmd) {
+    return std::visit(
+        [&](const auto& c) -> math::Aabb {
+            using C = std::decay_t<decltype(c)>;
+            // Neither changes what the layer evaluates to (see Layer), so
+            // neither has a region to dirty.
+            if constexpr (std::is_same_v<C, SetLayerNameCmd> ||
+                          std::is_same_v<C, SetLayerProtectionCmd>)
+                return math::Aabb{};
+            else if constexpr (std::is_same_v<C, AddLayerCmd>)
+                return layer_command_bound(doc, c.layer.id);
+            else if constexpr (std::is_same_v<C, RemoveLayerCmd> ||
+                               std::is_same_v<C, SetLayerVisibleCmd> ||
+                               std::is_same_v<C, SetLayerTransformCmd> ||
+                               std::is_same_v<C, SetLayerMirrorCmd>)
+                return layer_command_bound(doc, c.id);
+            else if constexpr (std::is_same_v<C, AddNodeCmd>)
+                return c.subtree.empty() ? math::Aabb{}
+                                         : node_command_bound(doc, c.layer, c.subtree.front().id);
+            else
+                return node_command_bound(doc, c.layer, c.node);
+        },
+        cmd);
 }
 
 // ---------------------------------------------------------------------------
@@ -1203,29 +1275,45 @@ bool UndoStack::perform(Document& doc, const Command& cmd) {
     return true;
 }
 
-bool UndoStack::undo(Document& doc) {
+namespace {
+
+// Both sides of one command, unioned into the step's bound. Unioning with
+// math::Aabb::infinite() yields it back — it is maximal on every axis — so
+// "one command was unbounded" needs no case of its own. A null bound is a
+// caller that did not ask, and costs nothing.
+void widen(math::Aabb* bound, const Document& doc, const Command& cmd) {
+    if (bound) bound->expand(command_influence_bound(doc, cmd));
+}
+
+}  // namespace
+
+// Replay one stack entry onto the document, collecting the inverses for the
+// opposite stack and the region the whole step touched. Undo and redo differ
+// only in which stack they came from, so they share this.
+UndoStack::Entry UndoStack::replay(Document& doc, const Entry& entry, math::Aabb* bound) {
+    Entry opposite;
+    for (auto it = entry.inverses.rbegin(); it != entry.inverses.rend(); ++it) {
+        widen(bound, doc, *it);
+        std::optional<Command> inverse = scene::apply(doc, *it);
+        widen(bound, doc, *it);
+        if (inverse) opposite.inverses.push_back(std::move(*inverse));
+    }
+    return opposite;
+}
+
+bool UndoStack::undo(Document& doc, math::Aabb* out_bound) {
     if (undo_.empty()) return false;
     Entry entry = std::move(undo_.back());
     undo_.pop_back();
-    Entry redo_entry;
-    for (auto it = entry.inverses.rbegin(); it != entry.inverses.rend(); ++it) {
-        std::optional<Command> original = scene::apply(doc, *it);
-        if (original) redo_entry.inverses.push_back(std::move(*original));
-    }
-    redo_.push_back(std::move(redo_entry));
+    redo_.push_back(replay(doc, entry, out_bound));
     return true;
 }
 
-bool UndoStack::redo(Document& doc) {
+bool UndoStack::redo(Document& doc, math::Aabb* out_bound) {
     if (redo_.empty()) return false;
     Entry entry = std::move(redo_.back());
     redo_.pop_back();
-    Entry undo_entry;
-    for (auto it = entry.inverses.rbegin(); it != entry.inverses.rend(); ++it) {
-        std::optional<Command> inverse = scene::apply(doc, *it);
-        if (inverse) undo_entry.inverses.push_back(std::move(*inverse));
-    }
-    undo_.push_back(std::move(undo_entry));
+    undo_.push_back(replay(doc, entry, out_bound));
     return true;
 }
 
