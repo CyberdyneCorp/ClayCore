@@ -12,138 +12,6 @@ import claycore
 
 // MARK: - Shared fixtures
 
-enum Fixture {
-
-    static func brush(size: Int32 = 8,
-                      falloff: clay_brush_falloff = CLAY_BRUSH_FALLOFF_SMOOTH)
-        -> clay_brush_params {
-        var b = clay_brush_params()
-        b.struct_size = UInt32(MemoryLayout<clay_brush_params>.size)
-        b.size = size
-        b.shape = Int32(CLAY_BRUSH_SHAPE_SPHERE.rawValue)
-        b.falloff = Int32(falloff.rawValue)
-        b.strength = 1.0
-        b.seed = 1
-        return b
-    }
-
-    /// Cell coordinates for stamp `i`, matching SceneBuilder's world spread so
-    /// the voxel and SDF cases traverse the same shape.
-    static func cell(_ i: Int, scale: Float = 40) -> [Int32] {
-        let (x, y, z) = SceneBuilder.stampPosition(i)
-        return [Int32(x * scale), Int32(y * scale), Int32(z * scale)]
-    }
-
-    /// A document with a voxel layer carrying `stamps` stamps of material, so
-    /// the sculpt verbs have something to reshape. Returns the borrowed grid;
-    /// destroying the document frees it.
-    static func voxelGrid(stamps: Int, voxelSize: Float = 0.02)
-        -> (doc: OpaquePointer, grid: OpaquePointer)? {
-        guard let doc = clay_document_create() else { return nil }
-        var layer: clay_layer_id = 0
-        var grid: OpaquePointer?
-        guard clay_document_add_voxel_layer(doc, "bench", voxelSize, &layer, &grid) == CLAY_OK,
-              let grid else {
-            clay_document_destroy(doc); return nil
-        }
-        var b = brush()
-        for i in 0..<max(stamps, 1) {
-            var c = cell(i)
-            _ = clay_voxel_set_brush(grid, &c, &b, 1)
-        }
-        return (doc, grid)
-    }
-
-    /// A volume item baked from a document of `stamps` stamps — what relax and
-    /// flatten act on. Free with clay_item_destroy.
-    static func volumeItem(stamps: Int, cellSize: Float = 0.05) -> OpaquePointer? {
-        guard let (doc, _) = SceneBuilder.sdfDocument(stamps: stamps) else { return nil }
-        defer { clay_document_destroy(doc) }
-        var params = clay_volume_params()
-        params.struct_size = UInt32(MemoryLayout<clay_volume_params>.size)
-        params.cell_size = cellSize
-        params.band = 0
-        params.padding = 0
-        params.beta = 0
-        var item: OpaquePointer?
-        guard clay_item_volume_from_document(doc, &params, nil, nil, &item) == CLAY_OK else {
-            return nil
-        }
-        return item
-    }
-
-    static func strokePreset(radius: Float = 0.15) -> clay_stroke_preset {
-        var preset = clay_stroke_preset()
-        preset.struct_size = UInt32(MemoryLayout<clay_stroke_preset>.size)
-        _ = clay_stroke_preset_defaults(&preset)
-        preset.radius = radius
-        return preset
-    }
-
-    /// A short open path, as x y z r control points — what a Trim Curve drag
-    /// leaves and what a tube is swept along. Deterministic, so two runs
-    /// tessellate the same curve.
-    static func curvePoints(count: Int = 12) -> [Float] {
-        var points: [Float] = []
-        points.reserveCapacity(count * 4)
-        for i in 0..<count {
-            let t = Float(i) / Float(max(count - 1, 1))
-            points.append(contentsOf: [t * 1.6 - 0.8, sin(t * 4) * 0.3, 0, 0.1])
-        }
-        return points
-    }
-
-    /// The same path as x y z triples, which is what clay_tube_create takes.
-    static func tubePath(count: Int = 12) -> [Float] {
-        let xyzr = curvePoints(count: count)
-        var path: [Float] = []
-        path.reserveCapacity(count * 3)
-        for i in 0..<count {
-            path.append(contentsOf: [xyzr[i * 4], xyzr[i * 4 + 1], xyzr[i * 4 + 2]])
-        }
-        return path
-    }
-
-    /// A document of `stamps` stamps carrying a placed armature, plus the node
-    /// it became and a target inside it to drag. The rig is the four-node tree
-    /// tests/unit/test_c_armature.cpp uses: node 3 hangs off node 1, not off
-    /// node 2, so a subtree move actually moves a subtree.
-    static func armatureLayer(stamps: Int)
-        -> (doc: OpaquePointer, layer: clay_layer_id, node: clay_node_id, target: UInt32)? {
-        guard let (doc, layer) = SceneBuilder.sdfDocument(stamps: stamps) else { return nil }
-        var rig: [Float] = [
-            0.0, 0.0, 0.0, 0.30,   // 0, the root
-            0.5, 0.0, 0.0, 0.20,   // 1, off the root
-            1.0, 0.0, 0.0, 0.15,   // 2, off 1
-            0.5, 0.6, 0.0, 0.15,   // 3, off 1 as well
-        ]
-        var parents: [UInt32] = [0, 0, 1, 1]
-        guard let item = clay_item_create(Int32(CLAY_PRIM_ARMATURE.rawValue), nil, 0) else {
-            clay_document_destroy(doc); return nil
-        }
-        defer { clay_item_destroy(item) }
-        var node: clay_node_id = 0
-        guard clay_item_set_stroke_points(item, &rig, 4) == CLAY_OK,
-              clay_item_set_armature_parents(item, &parents, 4) == CLAY_OK,
-              clay_layer_add_item(doc, layer, item, &node) == CLAY_OK else {
-            clay_document_destroy(doc); return nil
-        }
-        // Node 1 — the one carrying a subtree, so the move is not a leaf move.
-        return (doc, layer, node, 1)
-    }
-
-    /// Pointer-pressure-time samples along a short drag.
-    static func strokeSamples(count: Int = 32) -> [Float] {
-        var samples: [Float] = []
-        samples.reserveCapacity(count * 5)
-        for i in 0..<count {
-            let t = Float(i) / Float(max(count - 1, 1))
-            // x y z pressure time
-            samples.append(contentsOf: [t * 1.2 - 0.6, sin(t * 3) * 0.2, 0, 1.0, t])
-        }
-        return samples
-    }
-}
 
 // MARK: - The cases
 
@@ -167,7 +35,7 @@ final class VerbLatencyTests: XCTestCase {
     /// recorded there.
     private func measureAxis(
         name: String, verb: String, _ cls: BudgetClass, backend: String = "cpu",
-        axis: [Int] = LatencyTests.axis,
+        axis: [Int] = GrowthAxis.standard,
         prepare: (Int) -> (body: () -> Void, reset: (() -> Void)?,
                            cleanup: () -> Void)?
     ) {
@@ -316,15 +184,41 @@ final class VerbLatencyTests: XCTestCase {
             }, nil, { clay_document_destroy(f.doc) })
         }
 
+        // On a PERFORATED BLOCK rather than the scattered spheres every other
+        // voxel case uses, because this verb only acts on a narrow pocket and
+        // a sphere's surface has none. See Fixture.perforatedBlock: on the old
+        // fixture this case measured 0 of 200 dabs changing a single cell.
+        //
+        // The reset re-opens the holes. The verb FILLS them, so without it the
+        // first pass would close the block and every later iteration would time
+        // an empty search — which is exactly the failure the fixture change is
+        // fixing, reintroduced one level down.
         measureAxis(name: "voxel_fill_cavities", verb: "voxel_sculpt_fill_cavities",
-                    .operation) { stamps in
-            guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
+                    .operation) { holes in
+            guard let f = Fixture.perforatedBlock(holes: holes) else { return nil }
             var b = Fixture.brush()
             var i = 0
+            var landed = 0
+            var did = 0
             return ({
-                var c = Fixture.cell(i); i += 1
+                var c = Fixture.holeCell(i % max(holes, 1)); i += 1
+                var before: UInt64 = 0, after: UInt64 = 0
+                clay_voxel_change_count(f.grid, &before)
                 _ = clay_voxel_sculpt_fill_cavities(f.grid, &c, &b, 1)
-            }, nil, { clay_document_destroy(f.doc) })
+                clay_voxel_change_count(f.grid, &after)
+                landed += 1
+                if after != before { did += 1 }
+            }, {
+                Fixture.punch(f.grid, holes: holes)
+            }, {
+                // The guard that would have caught this case being empty for as
+                // long as it has been. change_count answers it exactly, which
+                // the header says is the only way to know.
+                XCTAssertGreaterThan(did, landed / 2,
+                                     "over half the dabs at \(holes) holes filled nothing — "
+                                     + "this case is timing a search rather than a fill")
+                clay_document_destroy(f.doc)
+            })
         }
 
         measureAxis(name: "voxel_carve_alpha", verb: "voxel_sculpt_carve_alpha",

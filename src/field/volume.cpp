@@ -315,6 +315,22 @@ FieldVolume FieldVolume::sample_blocks(const BrickBlockFill& fill, const math::A
     // the declared bound exists to prevent. A field that IS 1-Lipschitz still
     // measures 1, so nothing that was honest before pays for this.
     v.sample_lipschitz_ = v.measure_sample_lipschitz();
+    // Hand back what the growth overshot. `data_` is built by repeated insert
+    // with no reserve, because the count is not known until every brick has
+    // been scanned, so vector doubling leaves it holding as much as twice what
+    // it needs. A baked volume is immutable and long-lived — it becomes the
+    // layer's one item and stays for the session — so that overshoot is not
+    // headroom for later growth, it is a permanent cost.
+    //
+    // It measured: a 0.015-cell bake with a 0.12 band cost +75 MB against
+    // sdf_consolidate's +6, and on a tablet that peak is what the next
+    // allocation has to fit above, because the allocator keeps a process's
+    // high-water mark rather than returning it. BrickCache::trim_to already
+    // shrinks its own buffers for the same reason.
+    v.data_.shrink_to_fit();
+    v.colors_.shrink_to_fit();
+    v.index_.shrink_to_fit();
+    v.far_.shrink_to_fit();
     return v;
 }
 

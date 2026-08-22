@@ -11,6 +11,20 @@
 # The host app is deliberately empty. The test bundle links the xcframework
 # itself rather than inheriting it from the host, so there is exactly one copy
 # of the static library in the graph and no duplicate-symbol question.
+#
+# TWO test bundles, because a bundle is the process boundary and memory does
+# not come back. The gallery's volume bake at cell_size 0.015 with a 0.12 band
+# costs +75 MB against sdf_consolidate's +6 MB, measured, and the allocator
+# does not return it to the OS when the document is destroyed — RSS plateaus
+# rather than falling. So the gallery's high-water mark became the floor every
+# later test ran above, and testEveryVerbOnDevice was killed by jetsam at
+# case 46-53 while passing on its own. Splitting the bundles gives the gallery
+# its own process, and its peak dies with it.
+#
+# Shared/ holds what both bundles need. A type cannot live in one bundle and be
+# referenced from the other, and compiling a test class into both would run it
+# twice — which is why SceneBuilder and Fixture live there rather than beside
+# the cases that used to own them.
 
 name: ClayCoreDevice
 
@@ -50,6 +64,7 @@ targets:
     platform: iOS
     sources:
       - path: Tests
+      - path: Shared
     dependencies:
       # Builds the host before the bundle that loads into it.
       - target: ClayCoreDeviceHost
@@ -72,12 +87,84 @@ targets:
         BUNDLE_LOADER: "$(TEST_HOST)"
         OTHER_LDFLAGS: -lc++
 
+  # Every case the gate budgets, alone in a process and FIRST in the run.
+  #
+  # ALONE, because a process keeps its high-water mark. testEveryVerbOnDevice
+  # passed by itself and was killed by jetsam whenever anything ran ahead of
+  # it: each earlier test's peak became its floor. Splitting only the gallery
+  # out was not enough — the parity and latency classes set a floor too.
+  #
+  # FIRST, because splitting the run into bundles serialises it and the tail is
+  # measured on a hotter device. Measured rather than assumed: moving the
+  # parity bundle from third to first took sdf_stamp_cpu from 14.988 ms back to
+  # 5.618, and sdf_stamp_bricks from 6.506 to 3.065, against 5.829 and 3.099
+  # before the split. Same commit, same fixtures — only the position moved.
+  #
+  # That swing is 2.7x on a gate whose regression tolerance is 1.4x, and BOTH
+  # runs recorded thermalState nominal at each end, so the harness's own
+  # throttle guard cannot see it. ProcessInfo.thermalState is four coarse
+  # levels and the device throttles well inside `nominal`. Ordering makes the
+  # numbers CONSISTENT; it does not make them thermally neutral, and anything
+  # that later changes the run's length or order moves them again.
+  #
+  # So LatencyTests lives here rather than beside the parity checks: it is a
+  # latency case, and everything the gate budgets has to sit in the cold part
+  # of the window. What stays in ClayCoreDeviceTests is parity and API checks,
+  # which no budget reads, and the gallery makes pictures.
+  ClayCoreDeviceMeasureTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Measure
+      - path: Shared
+    dependencies:
+      - target: ClayCoreDeviceHost
+      - framework: ../../dist/claycore.xcframework
+        embed: false
+      - sdk: Metal.framework
+      - sdk: Foundation.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cyberdyne.claycore.devicemeasure
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ClayCoreDeviceHost.app/ClayCoreDeviceHost"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        OTHER_LDFLAGS: -lc++
+
+  ClayCoreDeviceGalleryTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Gallery
+      - path: Shared
+    dependencies:
+      - target: ClayCoreDeviceHost
+      - framework: ../../dist/claycore.xcframework
+        embed: false
+      - sdk: Metal.framework
+      - sdk: Foundation.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.cyberdyne.claycore.devicegallery
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/ClayCoreDeviceHost.app/ClayCoreDeviceHost"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+        OTHER_LDFLAGS: -lc++
+
 schemes:
   ClayCoreDevice:
     build:
       targets:
         ClayCoreDeviceHost: all
         ClayCoreDeviceTests: [test]
+        ClayCoreDeviceMeasureTests: [test]
+        ClayCoreDeviceGalleryTests: [test]
     test:
       targets:
+        # The measurement bundle runs FIRST and in its own process, so the
+        # numbers the gate reads are taken on a clean heap. The others follow
+        # in whatever order; each is its own process, so none inherits another's
+        # high-water mark.
+        - ClayCoreDeviceMeasureTests
+        - ClayCoreDeviceGalleryTests
         - ClayCoreDeviceTests
