@@ -227,10 +227,29 @@ MAX_RATIO = [
     # evaluate similar point counts against the same long culled tapes
     # through the CPU backend's pool, so the healthy ratio is a few x (5.3x
     # on an M2 Max) and stays put; the attribute taps falling back to one
-    # vertex at a time on one core measured 14x there. 10x catches the
+    # vertex at a time on one core measured 14x there. The ceiling catches the
     # serial path coming back on capable machines without flaking on small
     # runners, where both sides lose the pool together.
-    ("BM_MeshBricksGradDenseDoc", "BM_DabRefillDenseDoc", 10.0),
+    #
+    # RAISED 10.0 -> 14.0 by the blocked tape evaluator (add-cpu-simd-path task
+    # 1.4), and the reason matters because NOTHING REGRESSED — both sides got
+    # faster and the ratio still grew. One Linux desktop, medians of 7:
+    #
+    #   main      6.80 ms / 0.993 ms = 6.85x
+    #   blocked   5.48 ms / 0.546 ms = 10.0x
+    #
+    # The denominator gained more (1.84x against 1.25x) because a dab refill is
+    # distance-only evaluation, which is exactly what walking the tape once per
+    # block helps most, while the gradient pass pays four tetrahedron taps and
+    # their buffer traffic per point and so keeps less of it. The gate's premise
+    # — that both sides move together — holds against RUNNERS, which is what it
+    # was written for, and not against a change that speeds one side more.
+    #
+    # The failure it exists to catch is not weakened by the new ceiling, it is
+    # easier to see: serial taps measured 14x against the OLD denominator, and
+    # against the faster one the same fallback lands near 26x. 14.0 sits well
+    # above the healthy 10 and well below that.
+    ("BM_MeshBricksGradDenseDoc", "BM_DabRefillDenseDoc", 14.0),
     # Undo of a stamp stroke (accel/undo-removal): undoing 100 stamps on a
     # 10k-stamp document is gated against the same stroke on a 100-stamp one.
     # Before the location index in SdfContent every removed stamp's locate()

@@ -63,13 +63,7 @@ class CpuBackend final : public Backend {
                 sub_out.distances = out.distances + b;
                 sub_out.gradients_xyz = out.gradients_xyz ? out.gradients_xyz + b * 3 : nullptr;
                 sub_out.colors_rgb = out.colors_rgb ? out.colors_rgb + b * 3 : nullptr;
-                // Gradients are four extra taps per point and have their own
-                // blocking question (task 1.11); until that is measured they
-                // stay on the scalar walk rather than being half-converted.
-                if (sub_out.gradients_xyz)
-                    eval_points_reference(tape, sub, sub_out);
-                else
-                    eval_points_blocked(tape, sub, sub_out);
+                eval_points_blocked(tape, sub, sub_out);
             });
         return Status::Ok;
     }
@@ -108,7 +102,7 @@ class CpuBackend final : public Backend {
                     slice.gradients_xyz =
                         out.gradients_xyz ? out.gradients_xyz + at * 3 : nullptr;
                     slice.colors_rgb = out.colors_rgb ? out.colors_rgb + at * 3 : nullptr;
-                    eval_points_reference(*q.tapes[run], sub, slice);
+                    eval_points_blocked(*q.tapes[run], sub, slice);
                     at = stop;
                 }
             });

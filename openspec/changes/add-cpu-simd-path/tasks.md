@@ -68,9 +68,18 @@
       asking questions whose answer is always no, and a corpus that uses those
       features pays for them legitimately. Report what it is there, including if it
       is small
-- [ ] 1.11 Gradient path in blocks (four tetrahedron taps as four blocks of the same
-      points), measured separately — the Metal backend falls back to the CPU for
-      gradients, so this is on that path too
+- [x] 1.11 Gradient path in blocks — four tetrahedron taps as four blocked walks
+      of the same points, bit-identical to `kernel::cnormal`'s per-point form.
+      Done EARLY, not because it was next but because leaving it out was caught:
+      speeding the distance paths while gradients stayed scalar pushed the
+      `BM_MeshBricksGradDenseDoc` / `BM_DabRefillDenseDoc` ratio gate from 6.85x
+      to 11.02x and failed CI. Nothing had regressed — the denominator had simply
+      improved alone — and the honest fix was to stop leaving the numerator
+      behind rather than to raise the ceiling over an asymmetry I had introduced.
+      With both sides blocked the gate still needed 10.0 -> 14.0, for a reason
+      recorded in `tools/check_bench.py`: the refill gains 1.84x and the gradient
+      pass 1.25x, because four taps and their buffer traffic keep less of what
+      blocking gives
 - [ ] 1.12 Brick-fill benchmark, and an END-TO-END stamp figure beside it. A
       per-instruction number is exactly the kind that reads as a user-visible win and
       is not one: evaluation is 98% of a stamp, so 8x per instruction is at most ~4-5x

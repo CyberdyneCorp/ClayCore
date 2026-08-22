@@ -37,22 +37,23 @@ std::vector<float> flatten(const std::vector<kernel::cfloat3>& pts) {
 struct Run {
     std::vector<float> distances;
     std::vector<float> colors;
+    std::vector<float> gradients;
 };
 
 Run scalar(const scene::Tape& tape, const std::vector<float>& xyz) {
     const std::size_t n = xyz.size() / 3;
-    Run r{std::vector<float>(n), std::vector<float>(n * 3)};
+    Run r{std::vector<float>(n), std::vector<float>(n * 3), std::vector<float>(n * 3)};
     eval::PointQuery q{xyz.data(), n, 1e-4f};
-    eval::PointResults out{r.distances.data(), nullptr, r.colors.data()};
+    eval::PointResults out{r.distances.data(), r.gradients.data(), r.colors.data()};
     eval::eval_points_reference(tape, q, out);
     return r;
 }
 
 Run blocked(const scene::Tape& tape, const std::vector<float>& xyz, std::size_t block) {
     const std::size_t n = xyz.size() / 3;
-    Run r{std::vector<float>(n), std::vector<float>(n * 3)};
+    Run r{std::vector<float>(n), std::vector<float>(n * 3), std::vector<float>(n * 3)};
     eval::PointQuery q{xyz.data(), n, 1e-4f};
-    eval::PointResults out{r.distances.data(), nullptr, r.colors.data()};
+    eval::PointResults out{r.distances.data(), r.gradients.data(), r.colors.data()};
     eval::eval_points_blocked(tape, q, out, block);
     return r;
 }
@@ -184,6 +185,7 @@ TEST_CASE("tape block: bit-identical on the paths the parity corpus does not rea
             const Run got = blocked(doc.second, xyz, block);
             CHECK(identical(want.distances, got.distances));
             CHECK(identical(want.colors, got.colors));
+            CHECK(identical(want.gradients, got.gradients));
         }
     }
 }
@@ -198,6 +200,7 @@ TEST_CASE("tape block: bit-identical to the scalar walk on the parity corpus") {
         const Run got = blocked(c.tape, xyz, 0);
         CHECK(identical(want.distances, got.distances));
         CHECK(identical(want.colors, got.colors));
+        CHECK(identical(want.gradients, got.gradients));
     }
 }
 
@@ -215,6 +218,7 @@ TEST_CASE("tape block: block size is not observable") {
             const Run got = blocked(c.tape, xyz, block);
             CHECK(identical(want.distances, got.distances));
             CHECK(identical(want.colors, got.colors));
+            CHECK(identical(want.gradients, got.gradients));
         }
     }
 }
@@ -237,6 +241,7 @@ TEST_CASE("tape block: a ragged batch matches an aligned one, for every remainde
         const Run got = blocked(c.tape, xyz, block);
         CHECK(identical(want.distances, got.distances));
         CHECK(identical(want.colors, got.colors));
+        CHECK(identical(want.gradients, got.gradients));
     }
 }
 

@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "clay/eval/backend.h"
+#include "clay/kernel/field.h"
 #include "clay/kernel/tape.h"
 
 namespace clay {
@@ -193,6 +194,60 @@ std::size_t tape_stack_depth(const scene::Tape& tape) {
 void eval_points_blocked(const scene::Tape& tape, const PointQuery& q, const PointResults& out,
                          std::size_t block) {
     if (block == 0) block = kDefaultBlock;
+
+    // GRADIENTS: four tetrahedron taps, each of which is the same block of
+    // points displaced by a constant. So a gradient is four more BLOCKED walks
+    // rather than four more per-point ones — the same count of evaluations the
+    // scalar path does, through the path that walks the tape once per block.
+    //
+    // The taps, the weighted sum and the normalize are `kernel::cnormal`'s,
+    // written out here because it takes a callable per point and this needs the
+    // four taps as four arrays. Same expressions in the same order, so the
+    // result is bit-identical — which is what lets `eval_points_reference` stay
+    // the definition of correctness for the gradient path too.
+    if (out.gradients_xyz) {
+        PointResults base = out;
+        base.gradients_xyz = nullptr;
+        eval_points_blocked(tape, q, base, block);
+
+        const cfloat3 e[4] = {cf3(1.0f, -1.0f, -1.0f), cf3(-1.0f, -1.0f, 1.0f),
+                              cf3(-1.0f, 1.0f, -1.0f), cf3(1.0f, 1.0f, 1.0f)};
+        static thread_local std::vector<float> taps;
+        static thread_local std::vector<float> dist;
+        for (std::size_t start = 0; start < q.count; start += block) {
+            const std::size_t n = std::min(block, q.count - start);
+            if (taps.size() < n * 3) taps.resize(n * 3);
+            if (dist.size() < n * 4) dist.resize(n * 4);
+            for (int k = 0; k < 4; ++k) {
+                for (std::size_t j = 0; j < n; ++j) {
+                    const std::size_t i = start + j;
+                    const cfloat3 p = cf3(q.points_xyz[i * 3], q.points_xyz[i * 3 + 1],
+                                          q.points_xyz[i * 3 + 2]);
+                    const cfloat3 t = p + e[k] * q.gradient_eps;
+                    taps[j * 3] = t.x;
+                    taps[j * 3 + 1] = t.y;
+                    taps[j * 3 + 2] = t.z;
+                }
+                PointQuery tq{taps.data(), n, q.gradient_eps};
+                PointResults tr;
+                tr.distances = dist.data() + static_cast<std::size_t>(k) * n;
+                tr.gradients_xyz = nullptr;
+                tr.colors_rgb = nullptr;
+                eval_points_blocked(tape, tq, tr, block);
+            }
+            for (std::size_t j = 0; j < n; ++j) {
+                const cfloat3 nn = e[0] * dist[j] + e[1] * dist[n + j] +
+                                   e[2] * dist[2 * n + j] + e[3] * dist[3 * n + j];
+                const cfloat3 g = kernel::cnormalize(nn);
+                const std::size_t i = start + j;
+                out.gradients_xyz[i * 3] = g.x;
+                out.gradients_xyz[i * 3 + 1] = g.y;
+                out.gradients_xyz[i * 3 + 2] = g.z;
+            }
+        }
+        return;
+    }
+
     const std::size_t ni = tape.instrs.size();
     const std::size_t depth = tape_stack_depth(tape);
 
