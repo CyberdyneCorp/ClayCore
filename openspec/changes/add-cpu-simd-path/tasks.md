@@ -1,27 +1,67 @@
 # Tasks: add-cpu-simd-path
 
-> **RETARGETED 2026-08-21, before 1.4.** The scoping pass measured what a tape
-> evaluation is made of and the arithmetic this change widens is 5% of it — see
-> `design.md` and issue #207. Tasks 1.4 onward are NOT to be implemented as
-> written. They are left here rather than deleted because the audit and the
-> baseline under them are the evidence for retargeting, and because one part of
-> the idea survives: a BLOCKED evaluator that walks one instruction across many
-> points pays the 17-float parameter load and the 18-flop transform once per
-> block instead of once per point. That is the same shape and a much smaller
-> change, and it wins on loads rather than on lanes.
-
+> **RETARGETED.** 2026-08-21 the scoping pass measured what a tape evaluation is
+> made of: the arithmetic this change was scoped to widen is 5% of it. 2026-08-22
+> a prototype settled what to build instead — a BLOCKED evaluator that walks one
+> instruction across a block of points, paying the 17-float parameter load and the
+> 18-flop transform once per block rather than once per point. Measured at
+> **8x per instruction, bit-identical to `ctape_eval`**, saturating at a block of
+> about 64 points — so block size is not a constant to agonise over, and a brick's
+> 512 sits in the flat region. See `design.md` and #207.
+>
+> Tasks 1.1-1.3 stand: the audit and the baseline under them are the evidence for
+> the retarget, and 1.2's per-opcode finding is what makes 1.4 tractable. Tasks
+> 1.4 onward are REWRITTEN — the originals widened lanes, and lane width is on the
+> wrong side of the knee.
 
 - [x] 1.1 DECIDE and record in `design.md`: xsimd only, or Apple `simd` on Apple platforms as well; and packet width — fixed 4 or the architecture's native batch. Decide on a measurement on arm64, not on the desktop
 - [x] 1.2 Audit every tape opcode for lane-evaluability BEFORE writing the evaluator. Produce the list: lane-evaluated, or per-lane scalar fallback with the reason. Data-dependent early-outs and the sampled-volume lookup are the suspected awkward ones
 - [~] 1.3 Baseline on `main`: `BM_EvalPoints`, `BM_BrickFill`, and a single-brick 8³ fill, on x86-64 and on arm64. These are the numbers the change is for
-- [ ] 1.4 Packet evaluator: one walk of the tape per packet of N points, over the same kernel maths. `eval_points_reference` is not modified
-- [ ] 1.5 Batch entry points feed packets and handle the remainder, so lane width is invisible above the backend
-- [ ] 1.6 Parity test wired into the existing suite: every kernel, packet path vs scalar, 1e-6 relative on distances, exact on colors. This is the scenario the spec has claimed since v1 and has never had
-- [ ] 1.7 Ragged-batch test: a batch of `width*k + r` points for every r in [1, width) matches an aligned batch element for element
-- [ ] 1.8 Gradient path in packets (four tetrahedron taps as four packets of the same points), measured separately — the Metal backend falls back to the CPU for gradients, so this is on that path too
-- [ ] 1.9 Brick-fill benchmark: the 8³ single-brick fill is the workload the sculpting path actually runs. Report speedup on arm64 and x86-64 separately; the arm64 number is the one that matters
-- [ ] 1.10 Record which opcodes fell back to per-lane scalar, in `design.md` and in the delta spec, so a later reader knows what is left rather than assuming full coverage
-- [ ] 1.11 Confirm `xsimd` is actually linked and its headers reachable from `backends/cpu` — `cmake/Dependencies.cmake` fetches it and nothing has ever included it
+- [ ] 1.4 Blocked evaluator: one walk of the tape per block of points. The prim
+      instruction's 17-float header, the assembled `cfloat4x4`, the scale and the
+      round are loaded ONCE per block; the point loop applies the transform and the
+      primitive. `eval_points_reference` and `ctape_eval` are not modified — the
+      scalar evaluator remains the definition of correctness
+- [ ] 1.5 Block size is not a new tuning constant, and the sweep says it does not
+      need to be: everything from 64 up is within 4% of the best. Default to the
+      caller's natural unit (a brick is 8^3 = 512 points) and handle a short final
+      block
+- [ ] 1.6 Batch and grid entry points feed blocks and handle the remainder, so block
+      size is invisible above the backend
+- [ ] 1.7 THEN, and only then, the distance-only value. Colour is worth ~1.4x ONCE
+      BLOCKED — the blocked stack is an array across the block, so a 4-float value
+      moves four times the bytes — and is not reliably measurable before that: two
+      -O3 builds of the prototype put per-point colour at 1.02x and 1.36x. So this is
+      sequenced AFTER 1.4 and measured on top of it, never on its own. #174 claimed
+      2.4x for colour alone and withdrew it; this is the same claim and needs the
+      blocked baseline under it
+- [ ] 1.8 Parity test wired into the existing suite: every kernel, blocked path vs
+      scalar, on the standard corpus. The prototype was BIT-IDENTICAL on its subset,
+      so assert identity and let the 1e-6 relative bound catch only opcodes that
+      genuinely cannot be — each of which 1.11 must name
+- [ ] 1.9 Ragged-block test: a batch of `block*k + r` points for every r in
+      [1, block) matches an aligned batch element for element
+- [ ] 1.10 Re-measure the absent-feature checks on the GOLDEN CORPUS before claiming
+      them. The prototype's 2.2x for skipping the deformer, repeat, gate, transition
+      and volume tests, worth 1.6x, is measured on spheres and hard unions — it is
+      the price of
+      asking questions whose answer is always no, and a corpus that uses those
+      features pays for them legitimately. Report what it is there, including if it
+      is small
+- [ ] 1.11 Gradient path in blocks (four tetrahedron taps as four blocks of the same
+      points), measured separately — the Metal backend falls back to the CPU for
+      gradients, so this is on that path too
+- [ ] 1.12 Brick-fill benchmark, and an END-TO-END stamp figure beside it. A
+      per-instruction number is exactly the kind that reads as a user-visible win and
+      is not one: evaluation is 98% of a stamp, so 8x per instruction is at most ~4-5x
+      on a stamp and only if the whole of it survives a real corpus. Report both, and
+      report arm64 and x86-64 separately
+- [ ] 1.13 Record which opcodes fell back to per-point scalar, in `design.md` and in
+      the delta spec, so a later reader knows what is left rather than assuming full
+      coverage
+- [ ] 1.14 Drop `xsimd` from `cmake/Dependencies.cmake`, or say in the design why it
+      is still fetched. It has been fetched and included by nothing since the CPU
+      path was first scoped, and this change no longer needs it
 
 ## Notes from the scoping pass
 

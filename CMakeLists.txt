@@ -377,4 +377,11 @@ if(CLAY_BUILD_BENCHMARKS)
   # The batched-raycast pair drives the C ABI, where its fan-out lives.
   target_include_directories(clay_bench PRIVATE bindings/c)
   clay_apply_warnings(clay_bench)
+
+  # Not a gated benchmark: the evidence behind add-cpu-simd-path's retarget,
+  # kept so its design.md table can be re-derived. Exits non-zero if any variant
+  # stops being bit-identical to ctape_eval.
+  add_executable(tape_block_prototype benchmarks/tape_block_prototype.cpp)
+  target_link_libraries(tape_block_prototype PRIVATE claycore)
+  clay_apply_warnings(tape_block_prototype)
 endif()
