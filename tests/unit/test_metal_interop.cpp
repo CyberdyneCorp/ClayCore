@@ -90,7 +90,7 @@ TEST_CASE("metal interop: the batched device form is the host-memory batch, bit 
         return;
     }
     std::unique_ptr<eval::Backend> adopted = eval::make_backend("metal", host.handles());
-    REQUIRE(adopted != nullptr);
+    REQUIRE(static_cast<bool>(adopted));
 
     const scene::Document doc = scene_doc();
     // Per-brick culled tapes, the refill shape — including one culled to a

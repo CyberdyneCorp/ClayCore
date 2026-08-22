@@ -315,26 +315,26 @@ TEST_CASE("device interop: what cannot adopt says so") {
 
     // A backend with no adoption path. The caller falls back to the registry
     // and gets identical values, so this is a capability report, not a failure.
-    CHECK(eval::make_backend("cpu", good) == nullptr);
-    CHECK(eval::make_backend("no-such-backend", good) == nullptr);
+    CHECK(!eval::make_backend("cpu", good));
+    CHECK(!eval::make_backend("no-such-backend", good));
 
     // A name and an API that do not agree.
     eval::DeviceHandles wrong_api = good;
     wrong_api.api = eval::DeviceApi::Metal;
-    CHECK(eval::make_backend("vulkan", wrong_api) == nullptr);
+    CHECK(!eval::make_backend("vulkan", wrong_api));
 
     // Incomplete handle sets, one missing handle at a time.
     for (int missing = 0; missing < 4; ++missing) {
         eval::DeviceHandles partial = good;
         partial.handles[missing] = nullptr;
         CAPTURE(missing);
-        CHECK(eval::make_backend("vulkan", partial) == nullptr);
+        CHECK(!eval::make_backend("vulkan", partial));
     }
 
     // A queue family that does not exist, and so certainly does not compute.
     eval::DeviceHandles bad_family = good;
     bad_family.queue_family = 9999;
-    CHECK(eval::make_backend("vulkan", bad_family) == nullptr);
+    CHECK(!eval::make_backend("vulkan", bad_family));
 
     // The registered backend is untouched by any of that.
     if (eval::Backend* registered = eval::Registry::instance().find("vulkan")) {

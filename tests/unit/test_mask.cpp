@@ -474,7 +474,7 @@ TEST_CASE("mask: a gate bake is reused until the mask changes") {
 
     brush::GateBake bake;
     std::shared_ptr<const field::FieldVolume> first = bake.gate_for(mask, 0.5f, 0.1f);
-    REQUIRE(first != nullptr);
+    REQUIRE(static_cast<bool>(first));
     CHECK_FALSE(bake.last_was_cached());
 
     SUBCASE("an unchanged mask returns the SAME volume, not an equal one") {
@@ -494,7 +494,7 @@ TEST_CASE("mask: a gate bake is reused until the mask changes") {
         mask.paint(far_away, p, 1.0f);
         std::shared_ptr<const field::FieldVolume> after = bake.gate_for(mask, 0.5f, 0.1f);
         CHECK_FALSE(bake.last_was_cached());
-        REQUIRE(after != nullptr);
+        REQUIRE(static_cast<bool>(after));
         CHECK(after.get() != first.get());
         CHECK(after->eval(far_away) < 0.0f);  // now inside it
     }
@@ -512,9 +512,9 @@ TEST_CASE("mask: a gate bake is reused until the mask changes") {
 
     SUBCASE("clearing the mask gives no gate, and that answer is memoised too") {
         mask.clear();
-        CHECK(bake.gate_for(mask, 0.5f, 0.1f) == nullptr);
+        CHECK(!bake.gate_for(mask, 0.5f, 0.1f));
         CHECK_FALSE(bake.last_was_cached());
-        CHECK(bake.gate_for(mask, 0.5f, 0.1f) == nullptr);
+        CHECK(!bake.gate_for(mask, 0.5f, 0.1f));
         CHECK(bake.last_was_cached());  // a failed measurement is not paid twice
     }
 }
@@ -530,7 +530,7 @@ TEST_CASE("mask: a memoised gate is bit-identical to an unmemoised one") {
 
     brush::GateBake bake;
     std::shared_ptr<const field::FieldVolume> memoised = bake.gate_for(mask, 0.5f, 0.1f);
-    REQUIRE(memoised != nullptr);
+    REQUIRE(static_cast<bool>(memoised));
     // The same call the binding used to make, spelled out — including the band
     // rule, which now lives in GateBake.
     std::optional<field::FieldVolume> direct = brush::mask_to_field(mask, 0.5f, 0.2f, 0.2f);

@@ -138,6 +138,31 @@ jobs:
   # whose clang (LLVM 17 based) ACCEPTS P0960 — selecting an old Xcode there
   # is not a replacement gate. The replacement is whatever oldest toolchain
   # consumers still build with at that time.
+  # MSVC is the only toolchain in the matrix that reports C4267 (size_t
+  # narrowing) and C4702 (unreachable code), and CLAY_WERROR is ON by default,
+  # so /WX turns both into build failures. Until this job existed nothing built
+  # on Windows before a TAG did — the wheels are release-only — so an MSVC-only
+  # break passed every pull request and failed the release. v0.39.0 hit that
+  # twice in a row, in src/voxel/grid.cpp and include/clay/kernel/tape.h, then
+  # again in src/mesh/sculpt.cpp, each discovered a whole tag-and-rebuild cycle
+  # apart because a compile stops at its first errors and only reveals what it
+  # reached.
+  #
+  # Deliberately cmake rather than cibuildwheel: the failures are COMPILE
+  # failures, and the preset reproduces /WX exactly at a fraction of the cost.
+  # The wheel itself stays release-only.
+  windows:
+    name: build+test (windows-latest, MSVC /WX)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset cpu-only
+      - name: Build (the gate — every TU must compile clean under /W4 /WX)
+        run: cmake --build --preset cpu-only --config Release
+      - name: Test
+        run: ctest --preset cpu-only -C Release
+
   appleclang15:
     name: build+test (macos-14, AppleClang 15 — oldest gated toolchain)
     runs-on: macos-14

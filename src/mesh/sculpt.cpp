@@ -1158,7 +1158,7 @@ std::size_t MeshSculptor::apply_lattice(const Lattice& cage, VertexDeltas* recor
     // `positions` directly would give each copy its own evaluation; they agree
     // mathematically, but only up to float rounding, and a seam that opens by
     // an ulp is a visible crack.
-    const std::uint32_t classes = adjacency_.class_count();
+    const std::uint32_t classes = static_cast<std::uint32_t>(adjacency_.class_count());
     std::vector<std::uint32_t> touched;
     touched.reserve(classes);
     for (std::uint32_t c = 0; c < classes; ++c) {
@@ -1208,7 +1208,7 @@ std::size_t MeshSculptor::apply_deformer(const MeshDeformSettings& settings,
     // coincident, and evaluating each copy separately agrees only up to float
     // rounding — a seam that opens by an ulp is a visible crack.
     bvh_all_dirty_ = true;  // whole-mesh, as apply_lattice
-    const std::uint32_t classes = adjacency_.class_count();
+    const std::uint32_t classes = static_cast<std::uint32_t>(adjacency_.class_count());
     std::vector<std::uint32_t> touched;
     touched.reserve(classes);
     for (std::uint32_t c = 0; c < classes; ++c) {

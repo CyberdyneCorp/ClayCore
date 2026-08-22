@@ -7,6 +7,7 @@
 // buffer with are the engine's own.
 #include <doctest/doctest.h>
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <set>
