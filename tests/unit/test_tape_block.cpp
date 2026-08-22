@@ -79,7 +79,7 @@ std::vector<std::pair<std::string, scene::Tape>> extra_documents() {
             return std::sqrt(d.x * d.x + d.y * d.y + d.z * d.z) - r;
         };
     };
-    const math::Aabb region(kernel::cf3(-1.2f, -1.2f, -1.2f), kernel::cf3(1.2f, 1.2f, 1.2f));
+    const math::Aabb region{kernel::cf3(-1.2f, -1.2f, -1.2f), kernel::cf3(1.2f, 1.2f, 1.2f)};
 
     // 1. A GATED item. The gate composes with every combine mode, and its
     // fully-protected end is a branch rather than a mix — the one place the
