@@ -93,6 +93,16 @@ struct RunRecord: Codable {
     let coverage: [CoverageEntry]
 }
 
+/// The growth axis every case is measured over unless it says otherwise.
+///
+/// Shared rather than owned by a test class, because the classes now live in
+/// separate BUNDLES — the gate's cases, the gallery and the parity checks each
+/// run in their own process so none inherits another's high-water mark — and a
+/// symbol cannot cross that boundary.
+enum GrowthAxis {
+    static let standard = [10, 100, 1000]
+}
+
 // MARK: - Timing
 
 enum Timing {
