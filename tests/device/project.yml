@@ -87,12 +87,30 @@ targets:
         BUNDLE_LOADER: "$(TEST_HOST)"
         OTHER_LDFLAGS: -lc++
 
-  # The gate's own cases, alone in a process. testEveryVerbOnDevice passes by
-  # itself and was killed by jetsam when anything ran ahead of it, because the
-  # allocator keeps a process's high-water mark: every earlier test's peak
-  # became this one's floor. Splitting the gallery out was not enough on its
-  # own — the parity and latency classes set a floor too — so the cases the
-  # gate actually reads get their own bundle.
+  # Every case the gate budgets, alone in a process and FIRST in the run.
+  #
+  # ALONE, because a process keeps its high-water mark. testEveryVerbOnDevice
+  # passed by itself and was killed by jetsam whenever anything ran ahead of
+  # it: each earlier test's peak became its floor. Splitting only the gallery
+  # out was not enough — the parity and latency classes set a floor too.
+  #
+  # FIRST, because splitting the run into bundles serialises it and the tail is
+  # measured on a hotter device. Measured rather than assumed: moving the
+  # parity bundle from third to first took sdf_stamp_cpu from 14.988 ms back to
+  # 5.618, and sdf_stamp_bricks from 6.506 to 3.065, against 5.829 and 3.099
+  # before the split. Same commit, same fixtures — only the position moved.
+  #
+  # That swing is 2.7x on a gate whose regression tolerance is 1.4x, and BOTH
+  # runs recorded thermalState nominal at each end, so the harness's own
+  # throttle guard cannot see it. ProcessInfo.thermalState is four coarse
+  # levels and the device throttles well inside `nominal`. Ordering makes the
+  # numbers CONSISTENT; it does not make them thermally neutral, and anything
+  # that later changes the run's length or order moves them again.
+  #
+  # So LatencyTests lives here rather than beside the parity checks: it is a
+  # latency case, and everything the gate budgets has to sit in the cold part
+  # of the window. What stays in ClayCoreDeviceTests is parity and API checks,
+  # which no budget reads, and the gallery makes pictures.
   ClayCoreDeviceMeasureTests:
     type: bundle.unit-test
     platform: iOS
