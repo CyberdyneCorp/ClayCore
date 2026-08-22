@@ -783,3 +783,72 @@ TEST_CASE("culling never drops an item whose influence is not local") {
         }
     }
 }
+
+// The batched brick path and the single-grid path must be the SAME NUMBERS,
+// not merely close ones (accel/batch-brick-eval).
+//
+// The CPU backend overrides `eval_grid_batch` for threading: the base class
+// default loops `eval_grid` per brick, which on a 13-brick refill paid thirteen
+// dispatch-and-join barriers and could only ever split a brick's eight
+// z-slices, so at most eight threads had work however many the machine had.
+// Measured 6.73 cores of 16 before the override and 17.7 after.
+//
+// The override is a different DECOMPOSITION and must not be a different
+// computation. A brick refill and a one-off grid evaluation of the same region
+// are the same question, and a host that meshes from one and picks against the
+// other would see a seam if they disagreed by an ulp. Bit-identity is the
+// assertion because it is available: every point is `tape.eval(p)` for the same
+// p either way, and nothing sums across points.
+TEST_CASE("cpu batch grids are bit-identical to the same grids one at a time") {
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("batch");
+    for (int i = 0; i < 6; ++i) {
+        scene::Node n;
+        n.prim = scene::Prim::sphere(0.35f);
+        const float t = static_cast<float>(i);
+        n.xform.position = cf3(0.3f * t - 0.6f, 0.2f * std::sin(t), 0.15f * t - 0.3f);
+        n.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.08f};
+        layer.sdf->insert(n);
+    }
+    const scene::Tape tape = scene::compile_document(doc);
+
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    REQUIRE(cpu != nullptr);
+
+    const int dim = 8;
+    const float spacing = 0.05f;
+    const std::size_t per = static_cast<std::size_t>(dim) * dim * dim;
+    std::vector<cfloat3> origins;
+    std::vector<const scene::Tape*> tapes;
+    for (int i = 0; i < 13; ++i) {  // a dab's worth, which is what a refill is
+        origins.push_back(cf3(-0.8f + 0.3f * i, -0.2f, 0.1f * i));
+        tapes.push_back(&tape);
+    }
+
+    eval::GridBatchQuery batch;
+    batch.tapes = tapes.data();
+    batch.origins = origins.data();
+    batch.spacing = spacing;
+    batch.nx = batch.ny = batch.nz = dim;
+    batch.count = origins.size();
+
+    std::vector<float> batched(origins.size() * per, 0.0f);
+    std::vector<float> batched_colors(origins.size() * per * 3, 0.0f);
+    REQUIRE(cpu->eval_grid_batch(batch, batched.data(), batched_colors.data()) ==
+            eval::Status::Ok);
+
+    for (std::size_t g = 0; g < origins.size(); ++g) {
+        eval::GridQuery grid;
+        grid.origin = origins[g];
+        grid.spacing = spacing;
+        grid.nx = grid.ny = grid.nz = dim;
+        std::vector<float> one(per, 0.0f);
+        std::vector<float> one_colors(per * 3, 0.0f);
+        REQUIRE(cpu->eval_grid(tape, grid, one.data(), one_colors.data()) == eval::Status::Ok);
+        for (std::size_t s = 0; s < per; ++s) {
+            REQUIRE(batched[g * per + s] == one[s]);
+            for (int c = 0; c < 3; ++c)
+                REQUIRE(batched_colors[(g * per + s) * 3 + c] == one_colors[s * 3 + c]);
+        }
+    }
+}

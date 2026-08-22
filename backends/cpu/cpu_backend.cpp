@@ -108,30 +108,89 @@ class CpuBackend final : public Backend {
         return Status::Ok;
     }
 
+    // One lattice row — the unit both the single-grid and the batched path
+    // dispatch in, so the arithmetic and the order of writes are the same
+    // whichever one a caller reaches. Rows rather than z-slices because a
+    // BRICK is 8 cells across: eight slices cannot occupy more than eight
+    // threads, and that was the whole of the batch path's scaling.
+    static void eval_row(const scene::Tape& tape, const GridQuery& q, std::size_t row_index,
+                         float* out_values, float* out_colors_rgb) {
+        const std::size_t nx = static_cast<std::size_t>(q.nx);
+        const std::size_t ny = static_cast<std::size_t>(q.ny);
+        const std::size_t z = row_index / ny;
+        const std::size_t y = row_index % ny;
+        const std::size_t row = (z * ny + y) * nx;
+        for (std::size_t x = 0; x < nx; ++x) {
+            cfloat3 p = q.origin + cf3(static_cast<float>(x), static_cast<float>(y),
+                                       static_cast<float>(z)) *
+                                       q.spacing;
+            CTapeValue v = tape.eval(p);
+            out_values[row + x] = v.d;
+            if (out_colors_rgb) {
+                std::size_t c = (row + x) * 3;
+                out_colors_rgb[c] = v.color.x;
+                out_colors_rgb[c + 1] = v.color.y;
+                out_colors_rgb[c + 2] = v.color.z;
+            }
+        }
+    }
+
     Status eval_grid(const scene::Tape& tape, const GridQuery& q, float* out_values,
                      float* out_colors_rgb) override {
         if (!out_values || q.nx <= 0 || q.ny <= 0 || q.nz <= 0) return Status::InvalidInput;
-        std::size_t nxy = static_cast<std::size_t>(q.nx) * static_cast<std::size_t>(q.ny);
+        const std::size_t rows =
+            static_cast<std::size_t>(q.nz) * static_cast<std::size_t>(q.ny);
         parallel::ThreadPool::instance().parallel_for(
-            static_cast<std::size_t>(q.nz), 1, [&](std::size_t z0, std::size_t z1) {
-                for (std::size_t z = z0; z < z1; ++z) {
-                    for (int y = 0; y < q.ny; ++y) {
-                        std::size_t row = z * nxy + static_cast<std::size_t>(y) * q.nx;
-                        for (int x = 0; x < q.nx; ++x) {
-                            cfloat3 p = q.origin +
-                                        cf3(static_cast<float>(x), static_cast<float>(y),
-                                            static_cast<float>(z)) *
-                                            q.spacing;
-                            CTapeValue v = tape.eval(p);
-                            out_values[row + x] = v.d;
-                            if (out_colors_rgb) {
-                                std::size_t c = (row + x) * 3;
-                                out_colors_rgb[c] = v.color.x;
-                                out_colors_rgb[c + 1] = v.color.y;
-                                out_colors_rgb[c + 2] = v.color.z;
-                            }
-                        }
-                    }
+            rows, 1, [&](std::size_t r0, std::size_t r1) {
+                for (std::size_t r = r0; r < r1; ++r)
+                    eval_row(tape, q, r, out_values, out_colors_rgb);
+            });
+        return Status::Ok;
+    }
+
+    // MANY SMALL GRIDS IN ONE DISPATCH, which is what a brick refill is.
+    //
+    // The base class default loops `eval_grid` per brick, and that is what a
+    // CPU refill used to do. Two things went wrong with it, and they compound:
+    // each brick is its own `parallel_for`, so a 13-brick refill paid thirteen
+    // dispatch-and-join barriers; and each of those could only split a brick's
+    // 8 z-slices, so at most eight threads had anything to do however many the
+    // machine has.
+    //
+    // Measured on a 24-thread desktop before this override: a stamp on a
+    // 50,000-item document spent 165.8 ms in evaluation at 6.73 cores of 16
+    // physical, and the share FELL as the document grew — 8.92 at a hundred
+    // items down to 6.73 at fifty thousand. Evaluation is 98% of that stamp.
+    //
+    // One `parallel_for` over every ROW of every brick fixes both: one barrier,
+    // and 13 x 8 x 8 = 832 units for the pool to balance instead of 8. The
+    // reference arithmetic is untouched — `eval_row` is the same code the
+    // single-grid path runs — so results are bit-identical either way, which
+    // the batch/grid parity test checks.
+    Status eval_grid_batch(const GridBatchQuery& q, float* out_values,
+                           float* out_colors_rgb) override {
+        if (q.count == 0) return Status::Ok;
+        if (!q.tapes || !q.origins || !out_values || q.nx <= 0 || q.ny <= 0 || q.nz <= 0)
+            return Status::InvalidInput;
+        for (std::size_t i = 0; i < q.count; ++i)
+            if (!q.tapes[i]) return Status::InvalidInput;
+        const std::size_t per = static_cast<std::size_t>(q.nx) *
+                                static_cast<std::size_t>(q.ny) *
+                                static_cast<std::size_t>(q.nz);
+        const std::size_t rows_per =
+            static_cast<std::size_t>(q.nz) * static_cast<std::size_t>(q.ny);
+        parallel::ThreadPool::instance().parallel_for(
+            q.count * rows_per, 1, [&](std::size_t b, std::size_t e) {
+                for (std::size_t i = b; i < e; ++i) {
+                    const std::size_t brick = i / rows_per;
+                    GridQuery g;
+                    g.origin = q.origins[brick];
+                    g.spacing = q.spacing;
+                    g.nx = q.nx;
+                    g.ny = q.ny;
+                    g.nz = q.nz;
+                    eval_row(*q.tapes[brick], g, i % rows_per, out_values + brick * per,
+                             out_colors_rgb ? out_colors_rgb + brick * per * 3 : nullptr);
                 }
             });
         return Status::Ok;
