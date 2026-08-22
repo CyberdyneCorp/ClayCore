@@ -68,6 +68,36 @@ struct CaseResult: Codable {
     /// document size, 2 is quadratic. Reported even when it passes, so the
     /// curve is inspectable without re-running.
     let growthExponent: Double?
+    /// Milliseconds from the start of this bundle's run to the moment this
+    /// case began measuring.
+    ///
+    /// A case's number depends on WHERE IN THE RUN it was taken. Moving one
+    /// bundle from third to first took sdf_stamp_cpu from 14.988 ms to 5.618
+    /// and sdf_stamp_bricks from 6.506 to 3.065 — same commit, same fixtures,
+    /// 2.7x against a regression tolerance of 1.4x. Without this field the
+    /// record cannot even express the question.
+    var startedAtMs: Double = 0
+    /// The thermal state read at this case's own start and end, rather than
+    /// only the run's. The run-level pair stays, because the existing refusal
+    /// is written against it; these say which CASE was running when the state
+    /// moved.
+    var thermalStateStart: String = "unknown"
+    var thermalStateEnd: String = "unknown"
+}
+
+/// One sample of a fixed workload that touches nothing under test.
+///
+/// The canary answers a question thermalState cannot: did the machine
+/// underneath the suite change while the suite ran? ProcessInfo.thermalState
+/// has four coarse levels and an M3 iPad throttles measurably inside
+/// `nominal` — both runs of the ordering experiment read nominal at every
+/// point while a case moved 2.7x.
+struct CanarySample: Codable {
+    /// Milliseconds from the start of this bundle's run.
+    let atMs: Double
+    /// What the fixed workload cost, in milliseconds.
+    let ms: Double
+    let thermalState: String
 }
 
 struct RunRecord: Codable {
@@ -91,6 +121,13 @@ struct RunRecord: Codable {
     /// The coverage table as the harness declared it, so the checker can hold
     /// it against the entry points clay.h actually exposes.
     let coverage: [CoverageEntry]
+    /// Samples of a fixed workload taken across the run. Their spread is what
+    /// says whether position mattered on this run; see `Canary`.
+    var canary: [CanarySample] = []
+    /// Which test bundle produced this record. A run spans three processes
+    /// since the suite was split, and each times from its own start, so an
+    /// offset only means something alongside the bundle it was taken in.
+    var bundle: String = "unknown"
 }
 
 /// The growth axis every case is measured over unless it says otherwise.
@@ -307,9 +344,36 @@ enum DeviceInfo {
 final class RunCollector {
     private var cases: [CaseResult] = []
     private let thermalStart: ProcessInfo.ThermalState
+    private let startedAt: UInt64
+    private var canary: [CanarySample] = []
 
     init() {
         thermalStart = ProcessInfo.processInfo.thermalState
+        startedAt = DispatchTime.now().uptimeNanoseconds
+        // The first sample is taken before any case runs, so the run has a
+        // reading from a machine nothing in this bundle has warmed yet.
+        sampleCanary()
+    }
+
+    /// Milliseconds since this bundle's run began.
+    var elapsedMs: Double {
+        Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000.0
+    }
+
+    /// Take one canary reading. Called at the ends of the run by the collector
+    /// and from the middle by the case loop, so the samples span it.
+    func sampleCanary() {
+        canary.append(CanarySample(
+            atMs: elapsedMs,
+            ms: Canary.sampleMs(),
+            thermalState: DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)))
+    }
+
+    /// Sample if the run has moved on since the last one, so a bundle with many
+    /// cases spreads its readings instead of taking them all at the start.
+    func sampleCanaryIfDue(everyMs: Double = 30_000) {
+        if let last = canary.last, elapsedMs - last.atMs < everyMs { return }
+        sampleCanary()
     }
 
     func add(_ result: CaseResult) {
@@ -326,6 +390,8 @@ final class RunCollector {
 
     /// Builds the record and attaches it to the running test.
     func finish(abiVersion: String, attachTo testCase: XCTestCase) -> RunRecord {
+        // The last sample is taken after every case, so the run is bracketed.
+        sampleCanary()
         let thermalEnd = ProcessInfo.processInfo.thermalState
         let record = RunRecord(
             deviceModel: DeviceInfo.model,
@@ -336,7 +402,9 @@ final class RunCollector {
             thermalStateEnd: DeviceInfo.thermalName(thermalEnd),
             valid: thermalStart == .nominal && thermalEnd == .nominal,
             cases: cases,
-            coverage: Coverage.table)
+            coverage: Coverage.table,
+            canary: canary,
+            bundle: Bundle(for: type(of: testCase)).bundleIdentifier ?? "unknown")
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
