@@ -25,6 +25,25 @@
       hundred. **This settles the fallback grain: block EVERY instruction and let
       the ones that gather win less.** A per-tape bail would drop 201 instructions
       to scalar to accommodate one of them
+- [~] 1.4 IMPLEMENTED and bit-identical; the SPEEDUP IS NOT YET CONFIRMED, and
+      the gap is the open item. `backends/cpu/tape_block.cpp` walks the tape once
+      per block and every backend path but the gradient one goes through it.
+      Correctness is settled: identical to the scalar walk over the parity corpus
+      plus gated, coloured-volume and radial-array documents the corpus does not
+      contain, and four deliberate mutations each fail the suite.
+      **What the prototype promised has not appeared end to end.** Preliminary,
+      on a machine too loaded to trust for a published figure: `BM_EvalPoints`
+      ~1.2x, `BM_BrickFill` ~parity, against a prototype that measured 5-6x on the
+      same document shape. Two candidate reasons, neither confirmed: the grid
+      paths dispatch chunks of ONE LATTICE ROW — 8 points, the worst end of the
+      block curve — and the real paths are already threaded across every core,
+      where the limit may be bandwidth rather than the per-instruction work the
+      prototype measured single-threaded. **Do not publish a figure or close this
+      task until it is re-measured on a quiet machine and the gap is explained.**
+- [ ] 1.4b Explain the prototype-to-backend gap, then decide whether the grid
+      paths should dispatch coarser row runs. Raising `min_chunk` would put each
+      blocked walk in the flat part of the curve and costs load balance on a
+      single brick, which is a trade to measure rather than assume
 - [ ] 1.4 Blocked evaluator: one walk of the tape per block of points. The prim
       instruction's 17-float header, the assembled `cfloat4x4`, the scale and the
       round are loaded ONCE per block; the point loop applies the transform and the

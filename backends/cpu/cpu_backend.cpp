@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
+#include <vector>
 #include <string>
 
 #include "clay/eval/backend.h"
@@ -62,7 +63,13 @@ class CpuBackend final : public Backend {
                 sub_out.distances = out.distances + b;
                 sub_out.gradients_xyz = out.gradients_xyz ? out.gradients_xyz + b * 3 : nullptr;
                 sub_out.colors_rgb = out.colors_rgb ? out.colors_rgb + b * 3 : nullptr;
-                eval_points_reference(tape, sub, sub_out);
+                // Gradients are four extra taps per point and have their own
+                // blocking question (task 1.11); until that is measured they
+                // stay on the scalar walk rather than being half-converted.
+                if (sub_out.gradients_xyz)
+                    eval_points_reference(tape, sub, sub_out);
+                else
+                    eval_points_blocked(tape, sub, sub_out);
             });
         return Status::Ok;
     }
@@ -108,31 +115,50 @@ class CpuBackend final : public Backend {
         return Status::Ok;
     }
 
-    // One lattice row — the unit both the single-grid and the batched path
-    // dispatch in, so the arithmetic and the order of writes are the same
-    // whichever one a caller reaches. Rows rather than z-slices because a
-    // BRICK is 8 cells across: eight slices cannot occupy more than eight
-    // threads, and that was the whole of the batch path's scaling.
-    static void eval_row(const scene::Tape& tape, const GridQuery& q, std::size_t row_index,
-                         float* out_values, float* out_colors_rgb) {
+    // A RUN OF LATTICE ROWS — the unit both the single-grid and the batched
+    // path dispatch in, so the arithmetic and the order of writes are the same
+    // whichever one a caller reaches. Rows rather than z-slices because a BRICK
+    // is 8 cells across: eight slices cannot occupy more than eight threads,
+    // and that was the whole of the batch path's scaling.
+    //
+    // A RUN of them rather than one, because the tape is now walked once per
+    // block of points: a single row is 8 points, which is the worst end of the
+    // block-size curve, while a run gathered across rows reaches the flat part.
+    // Row `r` writes to `out_values[r * nx ...]`, so a run's outputs are
+    // contiguous and no scatter is needed.
+    //
+    // The point positions are computed by the same expression the scalar walk
+    // used, in the same order, so the values are bit-identical to what
+    // `tape.eval(p)` per point produced — which the grid/batch parity test and
+    // `test_tape_block.cpp` both assert rather than assume.
+    static void eval_rows(const scene::Tape& tape, const GridQuery& q, std::size_t r0,
+                          std::size_t r1, float* out_values, float* out_colors_rgb) {
+        // Thread-local for the same reason the blocked stack is: chunks are as
+        // small as one row, and a malloc per row costs more than the row.
+        static thread_local std::vector<float> scratch;
         const std::size_t nx = static_cast<std::size_t>(q.nx);
         const std::size_t ny = static_cast<std::size_t>(q.ny);
-        const std::size_t z = row_index / ny;
-        const std::size_t y = row_index % ny;
-        const std::size_t row = (z * ny + y) * nx;
-        for (std::size_t x = 0; x < nx; ++x) {
-            cfloat3 p = q.origin + cf3(static_cast<float>(x), static_cast<float>(y),
-                                       static_cast<float>(z)) *
-                                       q.spacing;
-            CTapeValue v = tape.eval(p);
-            out_values[row + x] = v.d;
-            if (out_colors_rgb) {
-                std::size_t c = (row + x) * 3;
-                out_colors_rgb[c] = v.color.x;
-                out_colors_rgb[c + 1] = v.color.y;
-                out_colors_rgb[c + 2] = v.color.z;
+        const std::size_t count = (r1 - r0) * nx;
+        scratch.resize(count * 3);
+        for (std::size_t r = r0; r < r1; ++r) {
+            const std::size_t z = r / ny;
+            const std::size_t y = r % ny;
+            for (std::size_t x = 0; x < nx; ++x) {
+                const cfloat3 p = q.origin + cf3(static_cast<float>(x), static_cast<float>(y),
+                                                 static_cast<float>(z)) *
+                                                 q.spacing;
+                const std::size_t o = ((r - r0) * nx + x) * 3;
+                scratch[o] = p.x;
+                scratch[o + 1] = p.y;
+                scratch[o + 2] = p.z;
             }
         }
+        PointQuery pq{scratch.data(), count, 0.0f};
+        PointResults pr;
+        pr.distances = out_values + r0 * nx;
+        pr.gradients_xyz = nullptr;
+        pr.colors_rgb = out_colors_rgb ? out_colors_rgb + r0 * nx * 3 : nullptr;
+        eval_points_blocked(tape, pq, pr);
     }
 
     Status eval_grid(const scene::Tape& tape, const GridQuery& q, float* out_values,
@@ -142,8 +168,7 @@ class CpuBackend final : public Backend {
             static_cast<std::size_t>(q.nz) * static_cast<std::size_t>(q.ny);
         parallel::ThreadPool::instance().parallel_for(
             rows, 1, [&](std::size_t r0, std::size_t r1) {
-                for (std::size_t r = r0; r < r1; ++r)
-                    eval_row(tape, q, r, out_values, out_colors_rgb);
+                eval_rows(tape, q, r0, r1, out_values, out_colors_rgb);
             });
         return Status::Ok;
     }
@@ -181,16 +206,23 @@ class CpuBackend final : public Backend {
             static_cast<std::size_t>(q.nz) * static_cast<std::size_t>(q.ny);
         parallel::ThreadPool::instance().parallel_for(
             q.count * rows_per, 1, [&](std::size_t b, std::size_t e) {
-                for (std::size_t i = b; i < e; ++i) {
+                // A chunk can span bricks, and each brick has its own tape, so
+                // the chunk is walked as runs of rows that share one — which is
+                // also what lets each run be a single blocked walk.
+                std::size_t i = b;
+                while (i < e) {
                     const std::size_t brick = i / rows_per;
+                    const std::size_t stop = std::min(e, (brick + 1) * rows_per);
                     GridQuery g;
                     g.origin = q.origins[brick];
                     g.spacing = q.spacing;
                     g.nx = q.nx;
                     g.ny = q.ny;
                     g.nz = q.nz;
-                    eval_row(*q.tapes[brick], g, i % rows_per, out_values + brick * per,
-                             out_colors_rgb ? out_colors_rgb + brick * per * 3 : nullptr);
+                    eval_rows(*q.tapes[brick], g, i - brick * rows_per, stop - brick * rows_per,
+                              out_values + brick * per,
+                              out_colors_rgb ? out_colors_rgb + brick * per * 3 : nullptr);
+                    i = stop;
                 }
             });
         return Status::Ok;
