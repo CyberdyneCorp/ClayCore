@@ -490,3 +490,94 @@ TEST_CASE("bvh refit: quality says nothing rather than saying zero") {
     CHECK(std::isnan(q));
     CHECK_FALSE(q > 0.0f);  // the comparison a host would make, and it is false
 }
+
+// -- the tree as a spatial index (issue #192) ---------------------------------
+//
+// The brush region and the walk's seed used to be linear scans over every weld
+// class. They ask the tree now, so the tree's answers have to be EXACT: a
+// region query that misses a vertex is a brush that does not move it, and no
+// tolerance makes that acceptable. Both cases below check against brute force.
+
+TEST_CASE("bvh index: triangles_in_ball misses nothing") {
+    Mesh m = sphere(20, 28);
+    const Bvh tree = Bvh::build(m);
+    std::vector<std::uint32_t> got;
+
+    for (float radius : {0.05f, 0.2f, 0.7f, 3.0f}) {
+        for (cfloat3 centre : probe_points(25, 1.3f, 31)) {
+            tree.triangles_in_ball(centre, radius, &got);
+            std::vector<char> reported(m.triangle_count(), 0);
+            for (std::uint32_t t : got) {
+                REQUIRE(t < m.triangle_count());
+                CHECK_FALSE(reported[t]);  // and no duplicates
+                reported[t] = 1;
+            }
+            // Every triangle with a VERTEX in the ball must be reported. The
+            // query may also report triangles that merely reach it, which a
+            // caller filters — over-admitting is the safe direction.
+            const float r2 = radius * radius;
+            for (std::size_t t = 0; t < m.triangle_count(); ++t) {
+                bool inside = false;
+                for (int k = 0; k < 3; ++k)
+                    if (kernel::cdot2(m.positions[m.indices[t * 3 + k]] - centre) <= r2)
+                        inside = true;
+                if (inside) REQUIRE(reported[t]);
+            }
+        }
+    }
+}
+
+TEST_CASE("bvh index: nearest_vertex agrees with a brute-force scan") {
+    Mesh m = sphere(16, 20);
+    const Bvh tree = Bvh::build(m);
+    for (cfloat3 p : probe_points(200, 2.0f, 37)) {
+        const Bvh::NearestVertex hit = tree.nearest_vertex(p);
+        REQUIRE(hit.found);
+        float brute = std::numeric_limits<float>::max();
+        for (std::size_t t = 0; t < m.triangle_count(); ++t)
+            for (int k = 0; k < 3; ++k)
+                brute = std::min(brute, kernel::cdot2(m.positions[m.indices[t * 3 + k]] - p));
+        // The DISTANCE must match exactly; which of several coincident vertices
+        // is named may differ, and a weld class makes those interchangeable.
+        CHECK(hit.distance * hit.distance == doctest::Approx(brute).epsilon(1e-6));
+        const std::uint32_t v =
+            m.indices[static_cast<std::size_t>(hit.triangle) * 3 + hit.corner];
+        CHECK(kernel::cdot2(m.positions[v] - p) == doctest::Approx(brute).epsilon(1e-6));
+    }
+}
+
+TEST_CASE("bvh index: an empty tree answers rather than crashing") {
+    Mesh empty;
+    const Bvh tree = Bvh::build(empty);
+    std::vector<std::uint32_t> got{7, 7, 7};
+    tree.triangles_in_ball(cf3(0, 0, 0), 1.0f, &got);
+    CHECK(got.empty());
+    CHECK_FALSE(tree.nearest_vertex(cf3(0, 0, 0)).found);
+}
+
+TEST_CASE("sculptor index: the region is the same set with and without a tree") {
+    // The fallback and the indexed path must agree exactly. They are the same
+    // question asked two ways, and if they ever diverge a brush would behave
+    // differently depending on whether the host happened to have picked.
+    for (bool geodesic : {false, true}) {
+        Mesh a = sphere(18, 24);
+        Mesh b = a;
+        MeshSculptor scanned(a, Adjacency::build(a));   // never picks: no tree
+        MeshSculptor indexed(b, Adjacency::build(b));
+        (void)indexed.bvh();                            // a host that picks
+
+        MeshBrushSettings settings;
+        settings.center = cf3(0.3f, 0.9f, 0.1f);
+        settings.radius = 0.45f;
+        settings.strength = 0.4f;
+        settings.geodesic = geodesic;
+        const std::size_t moved_scanned = scanned.stamp(MeshBrush::Draw, settings);
+        const std::size_t moved_indexed = indexed.stamp(MeshBrush::Draw, settings);
+        CHECK(moved_scanned == moved_indexed);
+        REQUIRE(a.positions.size() == b.positions.size());
+        float worst = 0.0f;
+        for (std::size_t v = 0; v < a.positions.size(); ++v)
+            worst = std::max(worst, kernel::clength(a.positions[v] - b.positions[v]));
+        CHECK(worst == 0.0f);
+    }
+}

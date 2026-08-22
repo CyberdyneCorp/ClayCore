@@ -377,33 +377,153 @@ void MeshSculptor::refit_bvh() {
         clear_bvh_dirty();
 }
 
+// The BVH, refitted to the mesh as it is now.
+//
+// The brushes needed a spatial index over the surface and this is already one,
+// built over the same triangles and — since `refit` — cheap to keep current
+// under a stroke. A second structure would be a second thing to keep in step
+// with the vertices, and the two would disagree the first time one was missed.
+//
+// The first call on a large mesh pays a build, exactly as a host's first pick
+// does today. Every call after that pays a refit of what moved.
+const Bvh* MeshSculptor::surface_index() {
+    // NEVER BUILDS ONE. Measured on a million-vertex grid: a build is 689 ms
+    // and it saves 1.24 ms per stamp, so building it here would need ~550
+    // stamps to break even and every shorter session would be worse off. A
+    // brush is not the right caller to decide a host should own a ray tree.
+    //
+    // Any host that places a brush by picking already has one, because
+    // `raycast` builds it on the first pick — and since `refit` it is cheap to
+    // keep current. So the common case gets the index for free, and a host that
+    // never picks keeps exactly the behaviour it had, by the scans below.
+    if (!bvh_) return nullptr;
+    refit_bvh();
+    return bvh_.get();
+}
+
+// Every class with a vertex inside the ball. Exact: a class sits on a vertex,
+// a vertex is a corner of every triangle that references it, and the tree
+// returns every triangle reaching the ball — so no class inside it is missed.
+bool MeshSculptor::classes_in_ball(kernel::cfloat3 centre, float radius,
+                                   std::vector<std::uint32_t>* out) {
+    const Bvh* tree = surface_index();
+    if (!tree) return false;  // no index; the caller scans
+    out->clear();
+    tree->triangles_in_ball(centre, radius, &ball_tris_);
+    const float r2 = radius * radius;
+    if (ball_mark_.size() != adjacency_.class_count()) ball_mark_.assign(adjacency_.class_count(), 0);
+    for (std::uint32_t t : ball_tris_) {
+        const std::size_t base = static_cast<std::size_t>(t) * 3;
+        if (base + 2 >= mesh_.indices.size()) continue;
+        for (int k = 0; k < 3; ++k) {
+            const std::uint32_t v = mesh_.indices[base + k];
+            if (v >= mesh_.positions.size()) continue;
+            const std::uint32_t c = adjacency_.class_of(v);
+            if (c >= ball_mark_.size() || ball_mark_[c]) continue;
+            // The tree admits a triangle that merely REACHES the ball, so the
+            // corner still has to be tested. Over-admitting there is what makes
+            // this exact here.
+            if (kernel::cdot2(mesh_.positions[v] - centre) > r2) continue;
+            ball_mark_[c] = 1;
+            out->push_back(c);
+        }
+    }
+    for (std::uint32_t c : *out) ball_mark_[c] = 0;  // retire what we set
+    return true;
+}
+
 kernel::cfloat3 MeshSculptor::class_position(std::uint32_t cls) const {
     std::size_t n = 0;
     return mesh_.positions[adjacency_.members(cls, &n)[0]];
 }
 
-std::uint32_t MeshSculptor::nearest_class(kernel::cfloat3 p) const {
-    const std::uint32_t classes = static_cast<std::uint32_t>(adjacency_.class_count());
-    std::uint32_t best = kNoClass;
-    float best_d2 = 0.0f;
-    for (std::uint32_t c = 0; c < classes; ++c) {
-        const float d2 = kernel::cdot2(class_position(c) - p);
-        if (best == kNoClass || d2 < best_d2) {
-            best = c;
-            best_d2 = d2;
+std::uint32_t MeshSculptor::nearest_class(kernel::cfloat3 p) {
+    // Through the tree, which finds the nearest triangle CORNER — and a class
+    // sits on a vertex, so the nearest corner names the nearest class. O(log N)
+    // where the scan this replaced was O(classes) and, being on the seed path
+    // of every unseeded stroke, was the largest single term in a dab on a big
+    // mesh (measured 1.34 ms of a 1.34 ms stamp at a million vertices).
+    //
+    // A class NO TRIANGLE REFERENCES cannot be found this way. Such a vertex is
+    // unreachable by a brush anyway — a region is a walk over triangles — so
+    // the two answers differ only where the old one was useless.
+    const Bvh* tree = surface_index();
+    if (!tree) {
+        // No ray tree to ask, so the scan this replaced is still the answer.
+        const std::uint32_t classes = static_cast<std::uint32_t>(adjacency_.class_count());
+        std::uint32_t best = kNoClass;
+        float best_d2 = 0.0f;
+        for (std::uint32_t c = 0; c < classes; ++c) {
+            const float d2 = kernel::cdot2(class_position(c) - p);
+            if (best == kNoClass || d2 < best_d2) {
+                best = c;
+                best_d2 = d2;
+            }
         }
+        return best;
     }
-    return best;
+    const Bvh::NearestVertex hit = tree->nearest_vertex(p);
+    if (!hit.found) return kNoClass;
+    const std::size_t base = static_cast<std::size_t>(hit.triangle) * 3 +
+                             static_cast<std::size_t>(hit.corner);
+    if (base >= mesh_.indices.size()) return kNoClass;
+    const std::uint32_t v = mesh_.indices[base];
+    if (v >= mesh_.positions.size()) return kNoClass;
+    return adjacency_.class_of(v);
 }
 
 void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGate& gate) {
     BrushRegion& r = region_;
-    if (settings.geodesic)
+    // Retire the LAST stamp's slots before `r.classes` is overwritten, so the
+    // reset costs what that stamp touched. `adjacency.h` states the rule this
+    // follows and the reason: "allocating a per-class array per stamp is the
+    // entire cost of the stroke". `slot` has to stay a full per-class array
+    // because the verbs index it by arbitrary ring neighbours — what changes is
+    // that it is sized ONCE and never cleared wholesale again.
+    if (r.slot.size() != adjacency_.class_count()) {
+        r.slot.assign(adjacency_.class_count(), kNoClass);
+        r.classes.clear();
+    } else {
+        for (std::uint32_t c : r.classes)
+            if (c < r.slot.size()) r.slot[c] = kNoClass;
+    }
+    if (settings.geodesic) {
+        // Seeded from the index when there is one. `geodesic_region` scans
+        // every class for a seed when it is given none, which put an O(mesh)
+        // term on the DEFAULT path — `seed_class` was the only way out and few
+        // callers have one.
+        //
+        // Without an index the seed is left unset, so that scan still happens
+        // — inside `geodesic_region`, exactly as before. Doing it here instead
+        // measured 1.30 -> 1.98 ms at a million classes, and the cause was one
+        // extra branch per iteration in a differently-shaped copy of the same
+        // loop. Two copies of a hot scan is a defect whichever is faster.
+        std::uint32_t seed = settings.seed_class;
+        if (seed >= adjacency_.class_count() && surface_index() != nullptr)
+            seed = nearest_class(settings.center);
         geodesic_region(mesh_, adjacency_, settings.center, settings.radius, walk_, &r.classes,
-                        &distance_, settings.seed_class);
-    else
-        euclidean_region(mesh_, adjacency_, settings.center, settings.radius, &r.classes,
-                         &distance_);
+                        &distance_, seed);
+    } else {
+        // The euclidean region IS a ball query, and used to be written as a
+        // scan over every class. Flatten and Scrape are the two verbs that take
+        // this path (`default_geodesic`), and they are the two that most want a
+        // large radius.
+        if (classes_in_ball(settings.center, settings.radius, &r.classes)) {
+            // SORTED, so the region is the same list whether it came from the
+            // tree or from the scan below — and so it does not depend on the
+            // tree's shape, which a rebuild changes. The verbs accumulate a
+            // weighted normal and a plane over this list, and float addition is
+            // not associative, so an order that varied would make a brush's
+            // result depend on whether the host happened to have picked.
+            std::sort(r.classes.begin(), r.classes.end());
+            distance_.resize(r.classes.size());
+            for (std::size_t i = 0; i < r.classes.size(); ++i)
+                distance_[i] = kernel::clength(class_position(r.classes[i]) - settings.center);
+        } else {
+            euclidean_region(mesh_, adjacency_, settings.center, settings.radius, &r.classes,
+                             &distance_);
+        }
+    }
 
     r.weights.resize(r.classes.size());
     r.positions.resize(r.classes.size());
@@ -483,7 +603,8 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
     r.positions.resize(kept);
     r.normals.resize(kept);
 
-    r.slot.assign(adjacency_.class_count(), kNoClass);
+    // Already cleared at the top of this call, for exactly the entries the last
+    // stamp set; only the new region's entries are written here.
     for (std::size_t i = 0; i < r.classes.size(); ++i)
         r.slot[r.classes[i]] = static_cast<std::uint32_t>(i);
 
@@ -964,7 +1085,15 @@ std::size_t MeshSculptor::write_colors(VertexDeltas* record) {
 }
 
 std::size_t MeshSculptor::write(VertexDeltas* record) {
-    normal_mark_.assign(adjacency_.class_count(), 0);
+    // Retire the marks the LAST write set, which `pending_normals_` names
+    // exactly, rather than clearing an array the size of the mesh. Same rule as
+    // `gather`'s slot reset above.
+    if (normal_mark_.size() != adjacency_.class_count()) {
+        normal_mark_.assign(adjacency_.class_count(), 0);
+    } else {
+        for (std::uint32_t c : pending_normals_)
+            if (c < normal_mark_.size()) normal_mark_[c] = 0;
+    }
     pending_normals_.clear();
     std::size_t moved = 0;
     for (std::size_t i = 0; i < region_.size(); ++i) {

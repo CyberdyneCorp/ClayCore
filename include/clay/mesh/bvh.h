@@ -99,6 +99,35 @@ class Bvh {
     };
     RayHit raycast(const math::Ray& ray, float tmin = 0.0f, float tmax = 1e30f) const;
 
+    // -- as a spatial index over the surface ---------------------------------
+    //
+    // These exist because the mesh brushes needed a spatial index and this is
+    // already one: it is built over the same triangles, and since `refit` it is
+    // cheap to keep current under a stroke. A second structure would be a
+    // second thing to keep in step with the vertices.
+    //
+    // Both are EXACT, not approximate. `triangles_in_ball` returns every
+    // triangle with a vertex inside the ball, so a caller wanting the vertices
+    // in a ball gets all of them: a vertex is a corner of every triangle it
+    // belongs to. It may also return triangles that merely reach into the ball
+    // without having a vertex there, which a caller filters.
+    //
+    // THE TREE MUST BE CURRENT. A stale tree answers for where the surface was,
+    // and unlike a raycast — where that is a tolerable drift — a region query
+    // would silently return the wrong set of vertices. Refit before asking.
+    void triangles_in_ball(kernel::cfloat3 centre, float radius,
+                           std::vector<std::uint32_t>* out) const;
+
+    // The nearest triangle CORNER to `p`, which is the nearest mesh vertex that
+    // any triangle references. `corner` is 0, 1 or 2 into the triangle.
+    struct NearestVertex {
+        bool found = false;
+        std::uint32_t triangle = 0;
+        int corner = 0;
+        float distance = 0.0f;
+    };
+    NearestVertex nearest_vertex(kernel::cfloat3 p) const;
+
     // -- refitting -----------------------------------------------------------
     //
     // A mesh layer's TOPOLOGY is fixed, which is the representation's defining
