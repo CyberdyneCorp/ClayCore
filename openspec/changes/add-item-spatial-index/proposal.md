@@ -130,9 +130,16 @@ keeping one definition of the local test.
   index answers for everything else. This must be derived from
   `item_influence_is_local` rather than re-tested.
 - **Whether the index survives a partial edit.** A stamp adds one item and
-  invalidates the whole index today. Whether a rebuild-per-revision is fast
-  enough at 10 000 items, or whether the index needs incremental insertion, is a
-  measurement to take before choosing.
+  invalidates the whole index today. *Measured in #193, so this is no longer
+  open:* the rebuild costs 0.102 ms at 1 000 items, 1.074 ms at 10 000 and
+  3.642 ms at 50 000 — linear, and **27x the `plan()` it feeds** at the top of
+  that range, since both run once per stamp. A rebuild-per-revision is therefore
+  fast enough at 10 000 items and stops being so somewhere past it, and
+  incremental insertion is a real candidate rather than a hypothetical one. Task
+  1.1 weighs it alongside the structure choice rather than after it, because the
+  answer changes which structure is worth building. What this is NOT is an
+  interactive win: at 50 000 items the entire rebuild is 1.7% of a stamp that
+  costs 170 ms, and the other 98% is evaluation (#207).
 - **Where it lives.** `scene::` owns compilation and is the honest home. The
   brick cache never sees a `Document` and must not start.
 
