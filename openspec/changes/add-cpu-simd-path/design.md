@@ -698,8 +698,35 @@ this was scoped as "stop distance-only queries paying for colour", and the
 mechanism that delivers it — one small hot function instead of one large mixed
 one — helps the coloured queries too.
 
-## What is still to be taken
+## End to end, on a quiet box
 
-The gated benchmarks were measured while this shared box was busy and several
-returned cv of 20-26%. They are not quoted here; the single-threaded figures
-above had their own control and non-overlapping ranges, and are.
+Medians of 11, cv under 3.5% on every row of both runs. A first attempt at this
+table was taken while the box was busy and returned cv of 20-26%; those numbers
+were discarded rather than published.
+
+| benchmark | main | this change | |
+|---|---:|---:|---:|
+| `BM_EvalPoints` | 3.32 ms | 2.62 ms | **1.27x** |
+| `BM_DabRefillDenseDoc` | 0.553 ms | 0.475 ms | **1.16x** |
+| `BM_BrickFill` | 24.0 ms | 22.4 ms | **1.07x** |
+| `BM_MeshBricksGradDenseDoc` | 5.65 ms | 5.43 ms | **1.04x** |
+
+Smaller than the 1.89x the single-threaded measurement shows, and the gap is the
+usual one this change keeps meeting: these paths are already threaded, and they
+contain work — culling, compilation, dispatch — that this does not touch. The
+ordering is the informative part. `BM_EvalPoints` is nearly pure evaluation and
+gains most; `BM_MeshBricksGradDenseDoc` gains least because a gradient is four
+taps plus buffer traffic around them.
+
+The `BM_MeshBricksGradDenseDoc` / `BM_DabRefillDenseDoc` ratio gate reads
+**11.4x** against its 14.0 ceiling — it moved again, for the same benign reason
+as last time (the denominator gains more), and it still clears.
+
+## `BM_BrickFillCores`, for the arm64 question
+
+Added here rather than in its own change because it exists to answer #207's open
+question and should travel with the work that raised it. It reads **15.6 cores of
+24** on this box. Against 12 threads on an M2 Max, a similar fraction means brick
+fill is simply narrower there; materially less means a real second bound, and
+`add-mobile-thread-scheduling` — 12/19, no QoS set anywhere, efficiency cores
+counted as equal workers — is where to look first.
