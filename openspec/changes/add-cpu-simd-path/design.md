@@ -1375,11 +1375,28 @@ So the interpreter has gone from about 95% of a distance-only evaluation to abou
 be the exception and land LARGER there — 1.67x against 2.2x here, while blocking
 was 1.14x against 3.5x.
 
-**The iPad evidence covers #218 only** and is still not publishable: 1.64x on
+**The iPad evidence covers #218 only** and is not publishable: 1.64x on
 `sdf_stamp_cpu`, 1.71x on `stroke_carve`, 1.55x on `sdf_consolidate`, with
 `sdf_stamp_metal` and the voxel cases at 0.99-1.00x as controls — but run 1 was
 drift-flagged at x1.49 and run 2 was thermally invalid. 1.39x is the floor and
 1.64x the better estimate. Task 1.12 stays open.
+
+**Both of the caveats above were overtaken before this was merged.** The device
+A/B recorded further down this document answers task 1.12 and disposes of the
+arm64 prediction, and since the prediction is the kind that is only useful if it
+is checked, it is left standing above rather than edited away:
+
+- **#223 did NOT land larger on arm64.** It measured 1.26-1.33x on the reference
+  iPad against 1.67x projected — smaller than the projection, not larger. The
+  reasoning behind the projection was not merely optimistic, it pointed the wrong
+  way: on arm64 #223 also made the COLOURED combine 1.63x slower, because
+  AppleClang does not eliminate the duplicated `ctape_smin_m` the split
+  introduced. That is #225, fixed in #230.
+- **Task 1.12 is answered.** A valid run on the reference iPad, against the commit
+  before #223, with controls at 0.95-1.03x.
+
+What survives unchanged is the shape argument below, and it survives on device
+too: a little over 2x where evaluation dominates, tapering where it does not.
 
 **Nothing here touches the Metal path.** `sdf_stamp_metal` sits at 0.99x by
 design, and that control is what makes the CPU movement credible rather than a
