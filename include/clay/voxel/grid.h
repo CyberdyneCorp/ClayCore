@@ -142,6 +142,43 @@ class VoxelGrid {
     // passes everything and the layer is exactly the pass applied directly; at
     // 0.0 it passes nothing and the layer is exactly absent. Both are EXACT,
     // not approximate.
+    // One cell write, as the difference it made. The element of both recording
+    // channels below.
+    struct SculptChange {
+        VoxelCoord cell;
+        std::uint8_t before = 0;
+        std::uint8_t after = 0;
+    };
+
+    // -- the second recording channel (unify-the-undo-history) ---------------
+    //
+    // `set` is the one choke point every verb funnels through, and its sculpt
+    // layer hook records only while a sculpt layer is OPEN. That hook cannot
+    // serve undo, and not because it is hard to reach: a sculpt layer is an
+    // ARTIST-FACING object — named, reorderable, its strength dialable long
+    // afterwards, merged down — and an undo step is not. A host forced to open
+    // one per brush dab would fill the artist's stack with a layer per dab.
+    //
+    // So a caller may install a SINK: a vector the choke point appends every
+    // change to, in the order it made them, which is the order a replay must
+    // unwind. Null is off and costs one predictable branch. The grid stores
+    // nothing and interprets nothing — it does not know what a history step is,
+    // which is what keeps undo semantics out of the voxel engine.
+    //
+    // A dab made while BOTH channels are live is recorded twice, once per
+    // channel. That is the memory cost of having an artist's layer and an undo
+    // step describe the same dab, and it is stated rather than hidden.
+    void set_change_sink(std::vector<SculptChange>* sink) { change_sink_ = sink; }
+    std::vector<SculptChange>* change_sink() const { return change_sink_; }
+
+    // Replay a recorded run backwards (restoring `before`) or forwards
+    // (restoring `after`). Neither records: a replay is not an edit, exactly as
+    // a sculpt-layer recompose is not a pass. Cells are visited in reverse for
+    // a revert, because a run that wrote one cell twice must unwind in the
+    // order it laid the writes down.
+    void revert_changes(const std::vector<SculptChange>& changes);
+    void reapply_changes(const std::vector<SculptChange>& changes);
+
     std::size_t sculpt_layer_count() const { return sculpt_layers_.size(); }
     // Start recording. Writes from here on are attributed to the new layer,
     // which begins at full strength and visible. Returns its index.
@@ -759,13 +796,6 @@ class VoxelGrid {
     // cells from its new parent EXCEPT where a detail entry overrides it, so a
     // broad stroke and the fine detail already sculpted both survive. Empty for
     // level 0, which has nothing coarser to differ from.
-    // One pass, as the difference it made. Cells in the order the pass touched
-    // them, which is the order a replay must use.
-    struct SculptChange {
-        VoxelCoord cell;
-        std::uint8_t before = 0;
-        std::uint8_t after = 0;
-    };
     struct SculptLayerRecord {
         std::string name;
         std::vector<SculptChange> changes;
@@ -786,6 +816,8 @@ class VoxelGrid {
     void apply_from(std::size_t first);
 
     std::vector<SculptLayerRecord> sculpt_layers_;
+    // Not owned. Null is off; see set_change_sink.
+    std::vector<SculptChange>* change_sink_ = nullptr;
     bool recording_ = false;
     std::uint32_t next_sculpt_seed_ = 1;
 

@@ -28,6 +28,7 @@ include(Dependencies)
 
 add_library(claycore
   src/version.cpp
+  src/session/history.cpp
   src/scene/bounds.cpp
   src/scene/cull_index.cpp
   src/scene/curve.cpp
