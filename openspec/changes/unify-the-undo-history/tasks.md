@@ -5,7 +5,15 @@
 - [x] 1.1 Confirm the three mechanisms and that no step spans two:
       `UndoStack` over `Command` for the edit list and layer state, sculpt
       layers for voxel grids, `mesh::VertexDeltas` for mesh layers
-- [x] 1.2 Confirm every inverse already exists — `SculptLayerRecord::changes`
+- [x] 1.2 Confirm the CAVEAT that corrects 1.2's first draft: `VoxelGrid::set`
+      is the one choke point every verb funnels through, but its recording hook
+      is guarded by `recording_`, true only between `begin_sculpt_layer` and
+      `end_sculpt_layer`. An ordinary voxel edit therefore leaves NO record, so
+      the replay machinery exists and the recording does not happen. Sculpt
+      layers are the wrong lifetime for undo — they are artist-facing, named and
+      reorderable — so this needs a second recording channel at the same choke
+      point
+- [x] 1.2b Confirm the inverse machinery itself exists — `SculptLayerRecord::changes`
       holds `{cell, before, after}` in pass order and `VoxelGrid::revert_from` /
       `apply_from` already replay it (privately); `VertexDeltas::revert` is
       public and already refuses a mesh of the wrong vertex count
@@ -41,8 +49,10 @@
 ## 3. Build
 
 - [ ] 3.0 A `session` module, and its line in `tools/check_layering.py`
-- [ ] 3.1 A pass-scoped revert/reapply on `VoxelGrid`, beside the private
-      `revert_from` / `apply_from` that already do the replay
+- [ ] 3.1 A second recording channel on `VoxelGrid::set`, independent of the
+      sculpt-layer stack and written only when the history is enabled — plus a
+      step-scoped revert/reapply beside the private `revert_from` / `apply_from`
+      that already do the replay for sculpt layers
 - [ ] 3.2 The session history: an ordered log of steps, each naming its owner
       and carrying the token that reverses it
 - [ ] 3.3 Two voxel step kinds — the pass, and a change to a pass (strength,

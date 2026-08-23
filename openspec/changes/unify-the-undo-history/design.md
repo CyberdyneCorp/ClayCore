@@ -62,14 +62,43 @@ chunks carry payloads that are not document state.
 Each mechanism chose its representation for a reason that has not changed. The
 gap was never the inverse. It was the **order**.
 
-## Every inverse already exists
+## An ordinary voxel edit is not recorded at all
 
-This is the finding that turns a subsystem into an index.
+**Correcting the claim below, which was too optimistic when first written.**
+
+`VoxelGrid::set` is the single choke point every verb funnels through, and its
+recording hook is guarded by `recording_` — which is true only between
+`begin_sculpt_layer` and `end_sculpt_layer`. Its own comment says so: "one
+recording hook attributes all of them to the open sculpt layer."
+
+So a voxel edit made outside an explicitly opened sculpt layer leaves **no
+record**, and there is nothing to invert. The replay machinery exists; the
+recording does not happen.
+
+That distinction matters, because sculpt layers are the wrong lifetime for
+undo. A sculpt layer is an ARTIST-FACING object — named, reorderable, its
+strength dialable long afterwards, merged down. An undo step is not. A host
+must not have to open a sculpt layer per brush dab to get one Ctrl+Z, and if it
+did, the artist's layer stack would fill with one entry per dab.
+
+So this change adds a **second recording channel at the same choke point**: an
+undo journal independent of the sculpt-layer stack, written when the history is
+enabled. A dab made inside a sculpt layer is recorded twice — once as part of
+the artist's layer, once as an undo step — and that doubling is the memory cost
+to state plainly, because `add-history-budget` will have to account for it.
+
+The choke point being single is what keeps this small: one hook, not one per
+verb, and the eleven voxel verbs need no changes.
+
+## Every inverse's MACHINERY already exists
+
+This is the finding that turns a subsystem into an index — with the recording
+caveat above.
 
 | representation | the inverse, today | reachable? |
 |---|---|---|
 | SDF / layer | `UndoStack` stores `Command` inverses | public |
-| voxel | `SculptLayerRecord::changes` holds `{cell, before, after}` in the order the pass touched them; `VoxelGrid::revert_from` / `apply_from` replay it | **private** — they serve sculpt-layer strength and visibility |
+| voxel | `SculptLayerRecord::changes` holds `{cell, before, after}` in the order the pass touched them; `VoxelGrid::revert_from` / `apply_from` replay it | **private**, and only ever populated while a sculpt layer is open — see above |
 | mesh | `mesh::VertexDeltas::revert(Mesh&)` / `apply(Mesh&)`, both idempotent and refused against a mesh of the wrong vertex count | public |
 
 So the build is: expose a pass-scoped revert on `VoxelGrid` beside the private
