@@ -1115,3 +1115,89 @@ the distance-only wins were expected to survive, and they did.
 Giving it a distance-only source is #207 candidate 1 applied one level up, and it
 should take this case WELL BELOW its pre-#223 figure rather than merely back to
 it. That is the change worth making next; tuning the combine further is not.
+# Sized 2026-08-23: the opcode dispatch (#207 candidate 3)
+
+Candidate 3 was "a ~35-way indirect branch per instruction. Well predicted for a
+uniform tape, less so for a mixed one — worth measuring on a real document rather
+than a sphere farm." It was the last of #207's four suspects with no number
+against it. `benchmarks/prim_dispatch_probe.cpp` puts one there. **The conclusion
+is that it should not be changed**, and the interesting part is why not.
+
+On arm64 the description is literally accurate: AppleClang compiles
+`ctape_prim_dist`'s if-chain to a real jump table — `ldrh` out of an `lJTI`
+block, then `br` — emitted out of line behind a prologue that spills `d8`-`d15`
+and `x19`-`x28` on every prim instruction, sphere's six flops included. So chain
+POSITION costs nothing and only the branch itself is in question.
+
+## The design, and the control that makes it readable
+
+Four tapes at matched instruction count over the same points, with the same
+transforms, the same positions and the same hard-add combines. Only the opcode
+sequence differs: **uniform** (K tapes, one per primitive), **cyclic**
+(round-robin), **blocked** (all of one kind, then all of the next), **random** (a
+fixed shuffle). `mean(uniform)` charges each primitive its own uniform cost in
+exactly the proportion the mixed tapes use it, so it is the arithmetic-matched
+prediction and `random / cyclic` is the opcode ORDER alone.
+
+It is only readable because of **blocked**. `ctape_smin_m`'s hard arm is a
+data-dependent select, so a mixed tape changes the `(a < b)` outcome sequence as
+well as the opcode sequence. Blocked pairs shapes to positions as differently
+from cyclic as random does, while keeping dispatch maximally predictable — and it
+reads at or below cyclic at every size and every K. The data is not the
+mechanism. Without that arm the headline number is unattributable.
+
+M2 Max, single-threaded, AppleClang `-O3`, 20,480 points, medians of 9
+interleaved rounds, cv under 1.5% on every row below. 22 primitives.
+
+| instrs | mean(uniform) | cyclic | blocked | random | cyc/mean | blk/cyc | **rnd/cyc** |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 127 | 7.60 | 7.95 | 7.26 | 7.76 | 1.046 | 0.913 | **0.976** |
+| 511 | 7.67 | 8.14 | 7.46 | 8.06 | 1.062 | 0.916 | **0.990** |
+| 2047 | 7.74 | 8.21 | 7.69 | 9.03 | 1.060 | 0.937 | **1.101** |
+| 4999 | 7.76 | 8.18 | 7.78 | 9.60 | 1.054 | 0.951 | **1.174** |
+
+ns/instruction through the shipping `ctape_eval`. The 4999 row reproduces to
+three decimals on an independent shuffle (1.175x).
+
+**Misprediction is real and it is not icache.** At 4,999 instructions over K=2
+opcodes — a two-arm footprint, trivially resident — cyclic reads **1.001x** of
+mean(uniform) while random reads **1.136x**. The footprint costs nothing and the
+order costs everything. Sweeping K at 4,999 instructions, `random / cyclic` is
+1.136 (K=2), 1.170 (K=4), 1.189 (K=8), 1.174 (K=22): **saturated at two
+opcodes.** In the stripped distance-only loop the same ratios are 1.51, 1.44,
+1.44, 1.30 — larger because the denominator is smaller; the absolute cost is
+0.9-1.4 ns/instruction either way.
+
+## Why it is still not worth a change
+
+**It needs a tape that is both LONG and APERIODIC, and those are in tension in
+every way ClayCore actually builds one.** Below ~511 instructions the effect is
+absent at any opcode mix (0.976-0.990x). Length comes from stroke dabs, and dabs
+arrive in runs of one brush primitive — the blocked shape, which costs
+**1.00x** of mean(uniform) at every size and every K measured. A document with
+genuinely mixed opcodes is an assembly of distinct modelling items, and those
+number in the tens. Getting the worst case needs thousands of items whose
+primitive changes unpredictably item to item.
+
+**And the corpus to check that against does not exist here.** Every gated
+document benchmark in `bench_main.cpp` is a sphere farm: `sculpted_sphere` and
+`pole_dense_sphere` both emit `Prim::sphere` and nothing else, so K=1 and
+dispatch is perfectly predicted in all of them. #207 asked for this to be
+measured "on a real document rather than a sphere farm" and the finding is that
+**there is no such document in the repo to measure on.** That gap is worth more
+than the dispatch is: it is the same shape of hole as #225's, where the defect
+sat on a path no gated CPU benchmark exercised. Filed separately rather than
+folded in.
+
+**The denominator is also going away.** 1.24x worst case is 1.24x of the SCALAR
+interpreter, against blocking's already-banked 3.5x structural win.
+
+## A correction to #207 measurement two
+
+"Does the primitive matter at all?" answered no, from sphere/box/torus/round box
+at 9.84-10.37 ns/instruction. Those four reproduce on arm64 — 6.31, 6.45, 6.36,
+6.70, a 6% spread — but they do not generalise. Over 22 primitives the uniform
+spread at 4,999 instructions is **2.9x**: `tri_prism` 6.24, `octahedron` 10.71,
+`pyramid` 9.64, `lnorm_sphere` 18.21 (it evaluates a `pow`). The fixed
+per-instruction cost is real and it is most of a cheap primitive, but "the
+primitive is invisible" holds only across the cheap ones.

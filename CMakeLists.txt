@@ -385,4 +385,12 @@ if(CLAY_BUILD_BENCHMARKS)
   add_executable(tape_block_prototype benchmarks/tape_block_prototype.cpp)
   target_link_libraries(tape_block_prototype PRIVATE claycore)
   clay_apply_warnings(tape_block_prototype)
+
+  # Also not gated: issue #207 candidate 3, the opcode dispatch. Compares a
+  # uniform tape against cyclic, blocked and shuffled tapes at matched
+  # instruction counts. Exits non-zero if its dispatch-free control stops being
+  # bit-identical to ctape_eval.
+  add_executable(prim_dispatch_probe benchmarks/prim_dispatch_probe.cpp)
+  target_link_libraries(prim_dispatch_probe PRIVATE claycore)
+  clay_apply_warnings(prim_dispatch_probe)
 endif()
