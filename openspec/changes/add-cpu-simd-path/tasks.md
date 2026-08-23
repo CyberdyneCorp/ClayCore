@@ -60,8 +60,10 @@
       There is no distance-only combine in the kernel to call: `speed-the-tape-prim-path`
       split colour out of the PRIM path and the COMBINE path never got the same
       treatment. That is a five-dialect kernel change with its own parity
-      obligations, so it is filed separately rather than smuggled into a backend
-      task. Details, including which modes actually entangle colour with
+      obligations, so it is **#220** rather than something smuggled into a backend
+      task. **PROMOTED TO NEXT by the arm64 data**: colour is 2.33x standalone
+      there, the largest single effect in #207, and it no longer needs a blocked
+      baseline under it — that requirement was an x86-64 measurement artifact. Details, including which modes actually entangle colour with
       distance, in `design.md`. Coverage kept from the attempt: the identity
       tests now assert a distance-only query returns identical distances, which
       nothing exercised before
@@ -125,12 +127,15 @@
       `ctape_volume` is the one genuinely different case: a per-point GATHER
       rather than a branch, always correct via per-lane scalar, and whether a
       hardware gather beats eight loads is a measurement.
-- [~] 1.3 x86-64 baseline taken and recorded in `design.md`: `BM_EvalPoints`
+- [x] 1.3 x86-64 baseline taken and recorded in `design.md`: `BM_EvalPoints`
       6.08 ms / 17.62 M points/s, `BM_BrickFill` 30.6 ms, and — the figure this
       change exists to move — **10.8 ns per tape instruction per point**,
       single-threaded, FLAT from a 160 KiB tape to a 4 MB one. That flatness was
       not the expectation: the walk was assumed to fall off a cache cliff and
       does not, so the packet path must not be sold on "one tape walk per eight
       points". The arithmetic width is the whole of the win.
-      **arm64 half outstanding** — it needs the `macos-14` runner, not this
-      machine.
+      **arm64 half DONE** (#207): `ctape_eval` is 6.28 ns/instruction on an M2 Max
+      against ~15.0 ns on the i9, and the three effects do not scale together —
+      colour crosses (2.33x vs 2.2x), the absent-feature checks cross (1.48x vs
+      1.6x), and BLOCKING DOES NOT (1.14x vs 3.5x). The sequencing in `design.md`
+      was an x86-64 property and is retracted there.

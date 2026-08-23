@@ -533,8 +533,7 @@ colour"* — and the COMBINE path never did.
 
 Getting this needs the same split one level up: a `ctape_combine_dist` in the
 shared kernel header, which is a five-dialect change with its own parity
-obligations, not a backend task. **Filed as its own change rather than smuggled
-in here.**
+obligations, not a backend task. **Filed as #220** rather than smuggled in here.
 
 The entanglement is smaller than it looks and is worth recording for whoever
 scopes it: only `ccombine_add` genuinely couples, because its colour needs the
@@ -567,3 +566,82 @@ It is the loop-selection lesson one level down. This evaluator is unusually
 sensitive to abstraction between the loop and the store, so whatever implements
 the distance-only path should specialise the loops rather than the values — the
 same mistake is available twice.
+
+# arm64, 2026-08-23: the sequencing in this file was an x86-64 property
+
+Every measurement above is one x86-64 desktop, and this file said repeatedly that
+arm64 gated any published figure. Measured on an M2 Max (#207), and it changes
+the plan rather than confirming it.
+
+`ctape_eval` costs **6.28 ns per instruction on the M2 Max against ~15.0 ns on
+the i9**. Most of the per-instruction bookkeeping this change is about is already
+absorbed by that machine's out-of-order engine, which predicts the rest.
+
+| | arm64 | x86-64 |
+|---|---:|---:|
+| V1 per point, colour carried — absent-feature checks | 1.48x | 1.6x |
+| V2 per point, distance only — colour | **2.33x** | 2.2x |
+| V3 blocked, colour carried | 1.69x | 5.7x |
+| V4 blocked, distance only | 2.83x | 8.0x |
+| **V3/V1 — blocking alone, colour held constant** | **1.14x** | **3.5x** |
+
+Two of the three effects cross architectures nearly unchanged. **Blocking is the
+one that does not**: 3.5x here, 1.14x there.
+
+## What that retracts
+
+**The sequencing.** This file put colour last on the grounds that it was not
+measurable without a blocked baseline — 1.02x in one `-O3` build against 1.36x in
+another. That instability was a property of one machine and one compiler, and it
+was generalised into a rule about the work. On arm64 colour is 2.33x standalone
+and reproduces to three decimal places. **Colour is the lever on the architecture
+that ships; blocking is the follow-up.**
+
+**"The primitive becomes visible again"** as a general consequence of removing
+bookkeeping. It was right about x86-64, where the sphere document won most and
+the mixed one least. On arm64 that ordering reverses and the spread nearly
+vanishes: there is not enough bookkeeping left for its removal to dominate.
+
+## What it does not retract
+
+The blocked evaluator is **1.12x to 1.55x on arm64** and bit-identical — a
+smaller win than x86-64 got, not a wrong one.
+
+## Two constraints on the distance-only work, verified in the kernel
+
+Recorded here rather than only in #220, because this is the file that will be
+read when someone scopes it.
+
+**A distance-only `add` still has to call `ctape_smin_m`.** Substituting the
+plain `ctape_smin` looks free and is not bit-identical:
+
+    csmin_quadratic     h = max(s - |a-b|, 0) / s,  early `return cmin(a,b)` when s <= 0
+    csmin_quadratic_m   h = 1 - min(|a-b| / s, 1),  clamps s to 1e-20f instead
+
+Same value, different last bit, different zero-support behaviour. This path's
+whole defence is identity rather than tolerance. **Droppable: the `cmix` and the
+four-times-wider stack. Not the smin.**
+
+**`ccombine_paint` is a pure no-op for distance** — `r.d` is never assigned in
+that branch, and the source says so: "color-only, field untouched". Skip it.
+
+And one step further than #207 took it: in a paint combine `b.d` is read ONLY to
+build the colour weight, so in a distance-only query **the prim that produced `b`
+is dead as well**, not just the combine. That makes a tape-level dead-instruction
+pre-pass the natural extension — mark instructions whose results only reach
+colour, skip them — which lands hardest on the painted documents where colour
+costs most. Its own measurement, not a reason to delay the straightforward
+version.
+
+## A confound to remove before it becomes a lead
+
+#207 reports `BM_BrickFill` at 47.5 ms on the M2 Max against 30.6 ms on the i9
+and concludes brick fill is bound by something evaluation work does not touch.
+The conclusion may hold, but that comparison cannot support it: **`BM_BrickFill`
+is threaded, and the machines are not the same width** — 24 hardware threads
+against 12. Blocked on both, 42.6 ms against 24.4 ms is 1.74x, which is *less*
+than pure thread-count scaling would predict.
+
+What settles it is the measurement `batch-brick-eval` already used: CPU time over
+wall time inside the evaluate call, i.e. cores actually used. That found 6.7-8.9
+of 24 on x86-64 and is how the per-brick dispatch barrier was diagnosed.
