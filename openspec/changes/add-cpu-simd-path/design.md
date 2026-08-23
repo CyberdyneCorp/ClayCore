@@ -974,3 +974,144 @@ two runs, `sdf_consolidate` 337.93 and 338.21 ms. The gallery cases do not:
 `move_drags` moved 0.149 -> 0.434 ms between two runs of identical code, and
 `stroke_build` spans 16.6-21.9 ms across four. Nothing from that bundle should be
 read as a result until the suite is split.
+# The guard, 2026-08-23: what could have caught #225, and what could not
+
+The section above says splitting the combine made the coloured path 1.24x faster
+and that the second `ctape_smin_m` was more than paid for. That was measured on
+x86-64 and it is false on arm64, which is the architecture that ships: AppleClang
+does not eliminate the second call. 1.63x on the combine, 1.23x end-to-end on the
+device's `mask_extrude` (#225). The fix computes add's smin once.
+
+Every bug fix here ships a regression test, and this one is a PERFORMANCE
+regression, so the first question is which instrument could have seen it. The
+honest answer for each of the existing ones is *none of them*, and the reasons
+are specific enough to say what a new one has to be.
+
+**The gated benchmarks in this file got FASTER across #223.** They are threaded
+document workloads whose evaluation is distance-only, so they take the blocked
+evaluator's specialisation and never call the coloured combine at all. The
+coloured scalar walk is not on any gated CPU path.
+
+**The device gate saw the regression and passed it.** `mask_extrude` read 1.13x
+against its committed baseline — inside a 1.40 tolerance, under its budget —
+while being 23% slower than the code that shipped the week before. A tighter
+device baseline is worth having and is the obvious reading of that number, but it
+is a SEPARATE change and it would not have made this visible from the CPU side,
+which is where the defect is and where a developer can iterate on it in seconds
+rather than in a half-hour thermal cycle. Filed as its own thing rather than
+folded in here.
+
+**An absolute ns/call threshold is rejected outright.** The combine measures
+~2.8 ns/call on an M-series Mac and CI runners are about 3x slower — the spread
+this file's own ceilings are built around. A number loose enough not to flake
+there cannot see 1.6x here. It is the same argument every ceiling note above
+makes, and it applies with more force at this scale, not less.
+
+## What landed: `BM_TapeCombineAddColored` / `BM_TapeCombineAddColoredRef`
+
+A ratio, for the reason ratios are used above: two things measured in the same
+process on the same box move together when the machine changes.
+
+The first shape tried was the obvious one — the coloured combine against the same
+combine asked for a DISTANCE only. It works here (1.19x fixed, 1.88x post-#223)
+and it should not ship, because the two sides are not the same work. The
+distance-only side does no `cmix` and two loads instead of eight, so its healthy
+ratio is whatever the machine charges for that difference. On a box with a
+cheaper divide the extra ALU work stops hiding in the divide's shadow and the
+healthy ratio climbs — plausibly past any ceiling that still fails on the defect.
+No single number over that pair is defensible on a machine nobody has measured.
+
+The reference that shipped does exactly the work a correct coloured add does:
+one `ctape_combine_dist` — which for add IS one `ctape_smin_m` — one `cmix` of
+the two colours, the same eight loads, the same four accumulator adds, the same
+L1-resident operands, the same loop. The two differ only in where the mix weight
+comes from. **The healthy ratio is ~1.0 by construction rather than by
+measurement**, so runner speed cannot move it and nothing but the kernel doing
+extra work can.
+
+M-series Mac, medians of three at CI settings (`--benchmark_min_time=0.2s`):
+
+| | coloured | reference | ratio |
+|---|---:|---:|---:|
+| fixed | 2.81 ns/call | 2.89 ns/call | **0.96 - 0.98x** |
+| post-#223 | 4.55 ns/call | 2.92 ns/call | **1.55 - 1.56x** |
+
+The reference does not move between the two builds — 2.86 to 2.93 ns/call either
+way — which is the control the pair needs: the whole of the defect lands in the
+ratio. `check_bench.py` holds it at **1.25x**, roughly 25% clear on both sides.
+That is far tighter than anything else in that file and the ceiling's note says
+why: the generosity elsewhere buys tolerance for a slow runner, which those pairs
+do not absorb equally because they are different work. These two are the same
+work.
+
+## Two things this guard does NOT do, stated so nobody has to rediscover them
+
+**It is blind on a toolchain that eliminates the second call.** On x86-64 both
+sides are unchanged and it reads its healthy value. That is the gate working
+rather than failing — it charges for the duplication on the machine that pays
+for it — but it does mean the ubuntu CI job would not have caught #223. The job
+that would is `release_check.py` on a developer's arm64 Mac, which is the machine
+the product ships from.
+
+**It measures THROUGHPUT, and the first version measured latency and saw
+nothing.** Chained as an accumulator — each call's `a` carrying the previous
+call's distance — both sides read 9.96 ns/call and the ratio was 1.02x with the
+duplicate still in place. The chain runs through a divide, and a second smin
+computed from the same two operands is independent of it and hides in its shadow
+completely. The scalar evaluator is not in that regime: `ctape_eval` is called
+once per point and the points are independent, so the machine keeps as many
+combines in flight as it has room for. That is why the device saw 1.23x and a
+serial probe sees nothing, and it is the trap to avoid in any future kernel
+microbenchmark here.
+
+# The fix on the device, 2026-08-23: most of it back, and where the rest is
+
+The section above measured the `add` fix on an M2 Max. This is the same fix on
+the reference iPad, and it is the run that decides whether #225 can land.
+
+`valid: true`, thermal `nominal -> nominal`, 59 cases, `treeDirty: false`,
+canary spread x1.55 against run A's x1.50 — the two valid runs of the day, taken
+four hours apart, so this is the cleanest pair available.
+
+## `mask_extrude`, per growth point
+
+| point | pre-#223 (A) | post-#223 (B) | fix | |
+|---|---:|---:|---:|---|
+| small | 58.1 ms | 62.8 ms | **57.9 ms** | recovered |
+| medium | 419.0 ms | 466.1 ms | **416.9 ms** | recovered |
+| large | 4055.9 ms | 4992.3 ms | **4358.8 ms** | +7.5% remains |
+
+The two smaller points come back marginally BELOW pre-#223, so at those sizes the
+regression is gone rather than reduced. The largest point recovers 68% of it and
+keeps +303 ms, which is above run A's own spread for that point (232 ms) but is
+also the most thermally exposed measurement in the suite.
+
+**Two independent estimates agree on the residual.** The host probe, with call
+structure pinned across all three trees, put it at 5-7%; the device puts it at
+7.5%. That consistency is the reason to believe it is real rather than thermal.
+
+The duplicated `ctape_smin_m` was therefore the bulk of #225 but not the whole of
+it. What is left is most likely #223's split dispatch — `ctape_combine_dist`'s
+mode chain followed by the colour chain — which this fix deliberately does not
+touch, because folding those back together would cost the twelve other modes
+their single definition.
+
+## The wins #223 bought are intact
+
+| case | pre-#223 | fix | |
+|---|---:|---:|---:|
+| `sdf_stamp_cpu` | 3.846 ms | 2.654 ms | 1.45x |
+| `stroke_carve` | 0.918 ms | 0.632 ms | 1.45x |
+| `sdf_stamp_bricks` | 2.253 ms | 1.702 ms | 1.32x |
+| `sdf_consolidate` | 435.6 ms | 332.6 ms | 1.31x |
+
+Controls 0.965-1.000x against run A. The fix touches only the coloured path, so
+the distance-only wins were expected to survive, and they did.
+
+## The residual is not worth chasing in the combine
+
+`mask_extrude` computes a colour at every point and discards it —
+`bindings/c/clay_c.cpp` drives it as `[&tape](cfloat3 p) { return tape.eval(p).d; }`.
+Giving it a distance-only source is #207 candidate 1 applied one level up, and it
+should take this case WELL BELOW its pre-#223 figure rather than merely back to
+it. That is the change worth making next; tuning the combine further is not.

@@ -257,6 +257,30 @@ MAX_RATIO = [
     # (33x between these sizes); after, both sides pay the same per-stamp
     # hash work. 3x catches the O(document) walk coming back, not noise.
     ("BM_UndoStampsGrownDoc", "BM_UndoStampsFreshDoc", 3.0),
+    # The coloured add combine against a reference that computes it ONCE (#225).
+    # `split-the-combine` let ctape_combine_values obtain the add case's blend
+    # weight from a SECOND ctape_smin_m, on the reasoning that CSE would make it
+    # free. AppleClang on arm64 does not eliminate it: 1.63x on the combine and
+    # 1.23x end-to-end on the device's one scalar coloured tape case. Nothing
+    # here saw it — the gated benchmarks are distance-only and got faster — and
+    # the device gate passed it at 1.13x against a 1.40 tolerance.
+    #
+    # A MUCH TIGHTER CEILING THAN ANYTHING ABOVE, and deliberately so. The
+    # generosity in the rest of this file buys tolerance for a runner that is ~3x
+    # slower, which the two sides of those pairs do not absorb equally because
+    # they are different work. These two are the same work: the reference does
+    # one ctape_combine_dist, one cmix, the same eight loads and the same four
+    # accumulator adds, over the same L1-resident operands in the same process.
+    # The healthy ratio is ~1.0 by CONSTRUCTION rather than by measurement, so
+    # runner speed cannot move it and nothing but the kernel doing extra work
+    # can. Measured on an M-series Mac at these settings: 0.96-0.98x fixed,
+    # 1.55-1.56x post-#223, with the reference itself identical in both builds
+    # (2.86-2.93 ns/call). 1.25 sits between them with ~25% on either side.
+    #
+    # On a toolchain that DOES eliminate the second call there is no regression
+    # to catch and this reads its healthy value. That is the gate working: it
+    # charges for the duplication on the machine that actually pays for it.
+    ("BM_TapeCombineAddColored", "BM_TapeCombineAddColoredRef", 1.25),
 ]
 
 

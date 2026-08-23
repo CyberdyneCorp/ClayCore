@@ -1312,6 +1312,188 @@ BENCHMARK(BM_UndoStampsGrownDoc)->Unit(benchmark::kMillisecond);
 
 }  // namespace
 
+// The coloured add combine against a reference that computes it ONCE (#225).
+//
+// This pair exists because of a regression that nothing in the tree could see.
+// `split-the-combine` (#223) routed every mode's distance through
+// `ctape_combine_dist` and let `ctape_combine_values` obtain the add case's
+// blend weight from a SECOND `ctape_smin_m`, on the reasoning that both calls
+// are pure with identical arguments so common-subexpression elimination makes
+// the second one free. That holds on x86-64 and does NOT hold on AppleClang for
+// arm64, which does not eliminate it: 3.40 -> 5.54 ns/call on an add-only mix,
+// and 4055.9 -> 4992.3 ms end-to-end on the device gate's `mask_extrude`, the
+// one device case that is a pure scalar coloured tape walk.
+//
+// Every existing instrument missed it, and for reasons worth writing down
+// because they say what this guard has to be:
+//
+//   - the gated benchmarks here are threaded document workloads whose evaluation
+//     is distance-only, so they take the blocked evaluator's specialisation and
+//     never call the coloured combine at all. They got FASTER across #223.
+//   - the device gate saw the 1.23x and passed it: `mask_extrude` read 1.13x
+//     against its committed baseline, inside a 1.40 tolerance and under budget.
+//     A tighter device baseline is worth having and is its own change; it would
+//     not have made this visible from the CPU side, which is where the defect is.
+//   - and an absolute ns/call threshold is not portable. This workload measures
+//     ~2.8 ns/call here and CI runners are ~3x slower, so a number loose enough
+//     not to flake there is far too loose to see 1.6x here.
+//
+// THE REFERENCE IS THE WHOLE DESIGN. The obvious control — the same combine
+// asked for a distance only — is the wrong shape: it does structurally less
+// work (no cmix, two loads instead of eight), so its healthy ratio is whatever
+// the machine happens to charge for that difference. It reads 1.19x here and
+// there is no way to know what it reads on a runner with a cheaper divide, so no
+// single ceiling over it is defensible.
+//
+// `BM_TapeCombineAddColoredRef` instead does exactly the work a correct coloured
+// add does — one `ctape_combine_dist` (which for add IS one `ctape_smin_m`), one
+// `cmix` of the two colours, the same eight loads and the same four accumulator
+// adds — differing only in where the mix weight comes from. So the healthy ratio
+// is ~1.0 BY CONSTRUCTION rather than by measurement, on any machine, and the
+// only thing that can move it is the kernel doing more work than the reference.
+// Measured on an M-series Mac, medians of three at CI settings:
+//
+//   fixed     0.96 - 0.98x   (2.81 ns/call against 2.89)
+//   post-#223 1.55 - 1.56x   (4.55 ns/call against 2.92)
+//
+// The reference does not move between those two builds (2.86-2.93 ns either
+// way), which is the control this needs: the defect lands entirely in the ratio.
+// On a toolchain that DOES eliminate the second call, both sides are unchanged
+// and this reads its healthy value — the gate charges for the duplication where
+// the duplication is actually paid, which is the machine it runs on.
+//
+// WHY ADD, AND WHY QUADRATIC. Add is the only mode whose colour couples to its
+// distance — the weight that mixes the colours is the same smin that produces
+// the distance — so it is the only mode where a duplicated evaluation is even
+// possible, and it is most of what a sculpting tape is made of. The profile is
+// quadratic because `cblend_hard`'s smin is a compare and a select: under it the
+// duplicate costs almost nothing and this would go blind.
+//
+// THROUGHPUT, NOT LATENCY, and the first version of this got that wrong. Chained
+// as an accumulator — each call's `a` carrying the previous call's distance —
+// both sides read 9.96 ns/call and the ratio was 1.02x with the duplicate still
+// in place: the chain runs through a divide, and a second smin computed from the
+// same two operands is independent of it and hides in its shadow completely.
+// The scalar evaluator is not in that regime. `ctape_eval` is called once per
+// point and the points are independent, so the machine keeps as many combines in
+// flight as it has room for and the duplicate costs real throughput — which is
+// why the device saw 1.23x and a serial probe sees nothing. The loops below keep
+// the calls INDEPENDENT, exactly as the per-point loop does.
+//
+// The operand set is small enough to stay in L1, so this measures the combine
+// and not the memory system; the per-pass offset is what stops the compiler
+// hoisting a repeated pass over an unchanging set.
+namespace {
+
+constexpr std::size_t kCombineOperands = 512;
+constexpr int kCombinePasses = 1024;
+constexpr std::size_t kCombineCalls = kCombineOperands * kCombinePasses;
+
+struct CombineOperands {
+    std::vector<kernel::CTapeValue> a;
+    std::vector<kernel::CTapeValue> b;
+    std::vector<float> k;
+    std::vector<int> mode;
+    std::vector<int> profile;
+};
+
+CombineOperands combine_operands() {
+    CombineOperands ops;
+    std::vector<float> r = random_points(kCombineOperands * 3, 1.0f);
+    for (std::size_t i = 0; i < kCombineOperands; ++i) {
+        const float* v = &r[i * 9];
+        kernel::CTapeValue a;
+        a.d = v[0] * 0.4f;
+        a.color = cf3(v[1] * 0.5f + 0.5f, v[2] * 0.5f + 0.5f, v[3] * 0.5f + 0.5f);
+        kernel::CTapeValue b;
+        b.d = v[4] * 0.4f;
+        b.color = cf3(v[5] * 0.5f + 0.5f, v[6] * 0.5f + 0.5f, v[7] * 0.5f + 0.5f);
+        ops.a.push_back(a);
+        ops.b.push_back(b);
+        // Blend radii spanning the band, wide enough that most pairs land inside
+        // the smin's support, which is where the mix weight is live.
+        ops.k.push_back(0.05f + std::fabs(v[8]) * 0.25f);
+        ops.mode.push_back(kernel::ccombine_add);
+        ops.profile.push_back(kernel::cblend_quadratic);
+    }
+    return ops;
+}
+
+// The mode and the profile are read from memory rather than passed as literals,
+// because the tape reads them from an instruction and the dispatch chain is part
+// of what is being compared. The clobbers stop the compiler tracing the vectors'
+// contents back to the loop that filled them and specialising the chain away on
+// one side of the pair but not the other.
+void clobber_operands(CombineOperands& ops) {
+    benchmark::DoNotOptimize(ops.a.data());
+    benchmark::DoNotOptimize(ops.b.data());
+    benchmark::DoNotOptimize(ops.k.data());
+    benchmark::DoNotOptimize(ops.mode.data());
+    benchmark::DoNotOptimize(ops.profile.data());
+}
+
+void BM_TapeCombineAddColored(benchmark::State& state) {
+    CombineOperands ops = combine_operands();
+    clobber_operands(ops);
+    float dsum = 0.0f;
+    kernel::cfloat3 csum = cf3(0, 0, 0);
+    for (auto _ : state) {
+        for (int pass = 0; pass < kCombinePasses; ++pass) {
+            const float po = 1e-7f * static_cast<float>(pass);
+            for (std::size_t i = 0; i < kCombineOperands; ++i) {
+                kernel::CTapeValue a = ops.a[i];
+                a.d += po;
+                kernel::CTapeValue r = kernel::ctape_combine_values(
+                    a, ops.b[i], ops.mode[i], ops.profile[i], ops.k[i], 0.0f);
+                // Both halves have to be CONSUMED. Drop the colour and the cmix
+                // is dead and this stops being the coloured path at all.
+                dsum += r.d;
+                csum.x += r.color.x;
+                csum.y += r.color.y;
+                csum.z += r.color.z;
+            }
+        }
+    }
+    benchmark::DoNotOptimize(dsum);
+    benchmark::DoNotOptimize(csum);
+    state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations()) *
+                            static_cast<std::int64_t>(kCombineCalls));
+}
+BENCHMARK(BM_TapeCombineAddColored)->Unit(benchmark::kMillisecond);
+
+// One smin and one cmix, in the same loop, over the same operands, consuming the
+// same two results. The mix weight is taken from the distance rather than from
+// the smin's second half — a correct coloured add gets it for free out of the
+// call it already made, so this is if anything the SLOWER of the two ways to
+// spend it, and the gate is the safer for that.
+void BM_TapeCombineAddColoredRef(benchmark::State& state) {
+    CombineOperands ops = combine_operands();
+    clobber_operands(ops);
+    float dsum = 0.0f;
+    kernel::cfloat3 csum = cf3(0, 0, 0);
+    for (auto _ : state) {
+        for (int pass = 0; pass < kCombinePasses; ++pass) {
+            const float po = 1e-7f * static_cast<float>(pass);
+            for (std::size_t i = 0; i < kCombineOperands; ++i) {
+                float d = kernel::ctape_combine_dist(ops.a[i].d + po, ops.b[i].d, ops.mode[i],
+                                                     ops.profile[i], ops.k[i], 0.0f);
+                kernel::cfloat3 c = kernel::cmix(ops.a[i].color, ops.b[i].color, d);
+                dsum += d;
+                csum.x += c.x;
+                csum.y += c.y;
+                csum.z += c.z;
+            }
+        }
+    }
+    benchmark::DoNotOptimize(dsum);
+    benchmark::DoNotOptimize(csum);
+    state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations()) *
+                            static_cast<std::int64_t>(kCombineCalls));
+}
+BENCHMARK(BM_TapeCombineAddColoredRef)->Unit(benchmark::kMillisecond);
+
+}  // namespace
+
 // Resident uploaded tapes (accel/metal-persistent): the Metal backend keeps
 // the uploaded form of recent tapes resident, keyed on the process-unique
 // Tape::compile_id the compiler stamps, so re-evaluating an unchanged
