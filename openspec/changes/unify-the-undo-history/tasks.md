@@ -86,7 +86,7 @@
 
 - [x] 5.1 C ABI — the existing undo entry points, now spanning three
       representations, plus whatever 2.2 decides
-- [ ] 5.2 pyclay, so `check_binding_parity` stays clean
+- [x] 5.2 pyclay, so `check_binding_parity` stays clean
 - [ ] 5.3 Swift smoke
 - [x] 5.4 ABI minor bump and `docs/RELEASE.md`, stating plainly that undo now
       reverses more than it did — a behaviour change and a fix
@@ -126,6 +126,15 @@
       forgetting — which moving ownership does not fix. An RAII bracket in each
       binding does, and that is what was built
 
+- [x] 6.5 A finding the pyclay wiring surfaced, in favour of the position 6.4
+      argued against: `PyVoxelGrid` carries the `ClaySpaceDoc`, not the
+      `PyDocument` that owns the history, so the handle had to be given a
+      reference to the history explicitly. Had the history lived on
+      `ClaySpaceDoc` — task 3.7 — no plumbing would have been needed in either
+      binding. 6.4 is still right that ownership does not fix CALL-SITE drift;
+      it was wrong that ownership buys nothing. Not worth reworking the C side
+      for, and recorded so the next person does not have to rediscover it
+
 ## 7. Still open after this slice
 
 - [ ] 5.8 Sculpt-layer PROPERTY changes (strength, visibility, order) are not
@@ -133,7 +142,4 @@
       is not, so an undo would restore the pixels and not the setting — a
       partial undo, which is worse than none. Needs the second voxel step kind
       (3.3) and the merge-down record retention (3.4)
-- [ ] 5.9 pyclay is NOT yet wired: its undo still spans the edit list alone.
-      No regression for a Python host — that is today's behaviour — but the
-      bindings now disagree about what undo means, which is the drift 6.4 names.
-      Next change, immediately
+- [x] 5.9 pyclay wired. The bindings agree about what undo means again
