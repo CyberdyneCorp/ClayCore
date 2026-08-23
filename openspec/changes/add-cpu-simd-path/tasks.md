@@ -16,7 +16,11 @@
 
 - [x] 1.1 DECIDE and record in `design.md`: xsimd only, or Apple `simd` on Apple platforms as well; and packet width — fixed 4 or the architecture's native batch. Decide on a measurement on arm64, not on the desktop
 - [x] 1.2 Audit every tape opcode for lane-evaluability BEFORE writing the evaluator. Produce the list: lane-evaluated, or per-lane scalar fallback with the reason. Data-dependent early-outs and the sampled-volume lookup are the suspected awkward ones
-- [~] 1.3 Baseline on `main`: `BM_EvalPoints`, `BM_BrickFill`, and a single-brick 8³ fill, on x86-64 and on arm64. These are the numbers the change is for
+- [x] 1.3 DONE, both halves — the arm64 one on an Apple M2 Max, 2026-08-22. The
+      tables, the method and the commits they were taken at are in `design.md`
+      under "The measurements behind the section above"; what they mean for the
+      plan is in the section above that, and it is a retraction rather than a
+      confirmation
 - [x] 1.4a MEASURED, in `design.md`: the volume opcode, the one the audit called
       genuinely different. A gather instruction costs ~3x an analytic one and
       blocking buys **2x on it rather than 8x** — but it block-evaluates

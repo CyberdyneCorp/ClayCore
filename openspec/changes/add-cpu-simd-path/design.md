@@ -645,3 +645,115 @@ than pure thread-count scaling would predict.
 What settles it is the measurement `batch-brick-eval` already used: CPU time over
 wall time inside the evaluate call, i.e. cores actually used. That found 6.7-8.9
 of 24 on x86-64 and is how the per-brick dispatch barrier was diagnosed.
+
+## The measurements behind the section above, so they can be re-run
+
+The section above is the conclusion; this is the artifact. Recorded because a
+ratio with no method under it cannot be checked, and this change has twice had a
+figure fail to reproduce.
+
+**Provenance.** Apple M2 Max, 12 cores (8 performance + 4 efficiency), macOS 26,
+AppleClang, `cpu-only` preset, Release. `pre-218` is **`fd70cf4`**, the commit
+immediately before the blocked evaluator merged; `blocked` is **`fc6d96a`**. Both
+configured and built identically, and the machine was quiet — an earlier attempt
+at these was taken while ZBrush held five cores and is not what is reported here.
+
+**The four variants.** `tape_block_prototype 2500 20480 512 sphere`, three runs,
+spread under 1%, every variant asserted bit-identical to V0:
+
+| | ns/instruction | vs V0 |
+|---|---:|---:|
+| V0 `ctape_eval` | 6.28 | 1.00x |
+| V1 per point, colour carried | 4.23 | 1.48x |
+| V2 per point, distance only | 2.69 | 2.33x |
+| V3 blocked, colour carried | 3.71 | 1.69x |
+| V4 blocked, distance only | 2.22 | 2.83x |
+
+The same harness on the consolidated-volume document gives 1.41x for V4, and on
+`mixed` — the volume with stamps accumulating over it — 2.83x.
+
+**The shipped evaluator, single-threaded.** `eval_points_reference` against
+`eval_points_blocked` over the same points, identity asserted before any timing
+is printed, best of 9, four runs:
+
+| document | instrs | arm64 | x86-64 |
+|---|---:|---:|---:|
+| the benchmark document | 47 | 1.53-1.58x | 2.5x |
+| 12 spheres, hard unions | 23 | 1.42-1.51x | 4.7x |
+| 200 spheres, hard unions | 399 | 1.41-1.49x | 5.3x |
+
+**The gated benchmarks.** Medians of 11, coefficient of variation at or under
+1.2% on both sides:
+
+| benchmark | pre-218 | blocked | arm64 | x86-64 |
+|---|---:|---:|---:|---:|
+| `BM_EvalPoints` | 5.129 ms | 3.321 ms | 1.54x | 1.93x |
+| `BM_DabRefillDenseDoc` | 1.166 ms | 0.946 ms | 1.23x | 1.84x |
+| `BM_BrickFill` | 47.502 ms | 42.555 ms | 1.12x | 1.22x |
+| `BM_MeshBricksGradDenseDoc` | 5.760 ms | 5.121 ms | 1.12x | 1.25x |
+| `BM_DeepDocRefillPlanned10000` | 0.689 ms | 0.698 ms | 0.99x | 1.02x |
+
+Cross-machine readings of the absolute milliseconds are confounded by thread
+count — see "A confound to remove before it becomes a lead" above, which is about
+exactly this table.
+
+The `BM_MeshBricksGradDenseDoc` / `BM_DabRefillDenseDoc` ratio gate, raised to
+14.0 for the x86-64 figure, sits at **5.37x** here. Left alone: the ceiling has to
+hold on both architectures and the tighter side is what sets it. `ctest` is 5/5
+on arm64, including the distance-only identity assertions added by the task 1.7
+attempt.
+
+## The distance-only prize, in the same two columns
+
+The task 1.7 attempt puts the distance-only win at **2.2x on top of the blocked
+path** on x86-64. Its arm64 counterpart is V3 -> V4 in the table above, which is
+the same comparison — a blocked walk carrying colour against one that does not:
+
+| | blocking, as shipped in #218 | distance-only, on top of it |
+|---|---:|---:|
+| x86-64 | 3.5x | **2.2x** |
+| arm64 | **1.14x** | **1.67x** |
+
+**On x86-64 the distance-only prize is the smaller of the two effects. On arm64
+it is the larger one — bigger than everything #218 bought.** So the filed kernel
+change is worth more on the architecture that ships than its own x86-64
+measurement suggests, and should be scoped with both columns.
+
+One prediction, recorded so it can be checked rather than assumed: the **0.57x**
+measured for the rebuild-a-`CTapeValue` route should be *worse* on arm64, not
+better. That route adds bookkeeping, and the finding above is that this machine
+was already absorbing the bookkeeping the x86 box was paying for — the regime
+where adding some costs relatively more. Not measured.
+
+## The iPad, which is task 1.12 and is NOT answered
+
+Two runs on the reference iPad (iPad15,5, iPadOS 26.5.2) against the committed
+pre-#218 baseline, and **neither can carry a published number**:
+
+- **Run 1** passed, but the canary reported `CONDITIONS CHANGED — x1.49 across
+  the run` while `thermalState` read `nominal` at both ends.
+- **Run 2**, after a 7-minute cooldown, is explicitly `INVALID: thermal nominal
+  -> serious`. A gallery test crashed under the heat and `xcodebuild` exited 65,
+  so the collect step never wrote a record — the salvage path
+  (`collect_device_bench.py` against the result bundle) is what recovered it.
+
+| case | pre-#218 | run 1 (valid, drift-flagged) | run 2 (INVALID, hot) |
+|---|---:|---:|---:|
+| `sdf_stamp_cpu` | 5.79 ms | 3.52 ms — 1.64x | 4.15 ms — 1.39x |
+| `sdf_stamp_bricks` | 3.11 ms | 2.29 ms — 1.36x | 2.29 ms — 1.35x |
+| `stroke_carve` | 1.49 ms | 0.87 ms — 1.71x | 0.93 ms — 1.60x |
+| `sdf_consolidate` | 661.0 ms | 427.0 ms — 1.55x | 447.0 ms — 1.48x |
+| `sdf_stamp_metal` — **control** | 2.00 ms | 2.03 ms — 0.99x | 2.02 ms — 0.99x |
+| `voxel_mesh_dirty` — **control** | 2.11 ms | 2.14 ms — 0.99x | 2.12 ms — 1.00x |
+
+The controls are the only reason this is worth recording. `sdf_stamp_metal` and
+the `voxel_*` cases go through no part of what #218 changed, and they sit at
+0.99-1.00x on **both** runs including the thermally invalid one. Heat moved every
+CPU case and neither control, which is what distinguishes the CPU movement from
+the thermals — and since throttling compresses the win, 1.39x is a floor and
+1.64x the better estimate.
+
+**Task 1.12 stays open.** What it needs is a properly rested device: a full run is
+four to five minutes of sustained load on a passively cooled tablet, the OS
+thermal signal lags it badly, and seven minutes between runs was not close to
+enough. Budget half an hour.
