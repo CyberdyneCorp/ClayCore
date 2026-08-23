@@ -70,6 +70,20 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.41.0 is not such a release**: additive, two new entry points
+   (`clay_mesh_validation_report`, `clay_mesh_measure`) and one new descriptor
+   (`clay_validation_report`). `clay_mesh_validate` is unchanged in signature
+   and in result — it is now sugar over the report, so there is one validation
+   path instead of two that could drift. Two things about it are worth the
+   note. It introduces the **first `double`s in the header**, deliberately:
+   signed volume and surface area are computed in double because a signed
+   volume is a sum of triple products that cancels heavily, and narrowing at
+   the boundary would have discarded exactly the precision the engine chose.
+   And it makes the sampled self-intersection pass reachable from a binding
+   **for the first time** — the engine has always accepted a cap, neither
+   binding ever passed one, so outside `tests/unit/test_mesh.cpp` that pass
+   had never run.
+
    **Neither is 0.24.1**: it changes no signatures at all. It corrects the
    swept guide's segment tie-break, so a scene containing a sweep can evaluate
    marginally differently at a guide corner — a behaviour change, not an ABI

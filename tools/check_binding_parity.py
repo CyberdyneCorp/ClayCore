@@ -121,6 +121,9 @@ ALIASES = {
     "Mesh.triangle_count": "clay_mesh_index_count",
     "Mesh.is_watertight": "clay_mesh_validate",
     "Mesh.is_manifold": "clay_mesh_validate",
+    "Mesh.validation_report": "clay_mesh_validation_report",
+    "Mesh.signed_volume": "clay_mesh_measure",
+    "Mesh.surface_area": "clay_mesh_measure",   # one C query reports both
     "Prim.at": "clay_item_set_position",
     "Stroke.add_point": "clay_item_add_stroke_point",
     "VoxelGrid.voxel_size": "clay_voxel_size",

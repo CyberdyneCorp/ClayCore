@@ -602,6 +602,8 @@ static int check_error_paths(void) {
             CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_document_mesh(NULL, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_mesh_validate(NULL, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_mesh_validation_report(NULL, 0, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_mesh_measure(NULL, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_mesh_save(NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_document_save(NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(strlen(clay_last_error()) > 0);
@@ -1519,6 +1521,17 @@ static int check_meshing(clay_document* doc) {
     int32_t watertight = 0, manifold = 0;
     REQUIRE(clay_mesh_validate(mesh, &watertight, &manifold) == CLAY_OK);
     REQUIRE(watertight == 1 && manifold == 1);
+    /* the full report, which is what a host needs when the answer is no */
+    clay_validation_report report;
+    report.struct_size = sizeof(report);
+    REQUIRE(clay_mesh_validation_report(mesh, 0, &report) == CLAY_OK);
+    REQUIRE(report.watertight == watertight && report.manifold == manifold);
+    REQUIRE(report.boundary_edges == 0 && report.non_manifold_edges == 0);
+    REQUIRE(report.triangles * 3 == clay_mesh_index_count(mesh));
+    REQUIRE(report.intersection_budget == 0); /* skipped, not clean */
+    double volume = 0, area = 0;
+    REQUIRE(clay_mesh_measure(mesh, &volume, &area) == CLAY_OK);
+    REQUIRE(volume > 0 && area > 0); /* positive volume = outward normals */
     REQUIRE(clay_mesh_save(mesh, "c_api_smoke.obj") == CLAY_OK);
     REQUIRE(clay_mesh_save(mesh, "c_api_smoke.xyz") == CLAY_ERROR_UNSUPPORTED);
     clay_mesh_destroy(mesh);

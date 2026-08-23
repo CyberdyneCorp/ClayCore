@@ -3362,10 +3362,58 @@ NB_MODULE(pyclay, m) {
         .def_prop_ro("triangle_count", [](const PyMesh& pm) { return pm.data().triangle_count(); })
         .def("is_watertight",
              [](const PyMesh& pm) { return mesh::validate(pm.data()).watertight; },
-             "True when every edge is shared by exactly two triangles")
+             "True when every edge is shared by exactly two triangles.\n\n"
+             "Runs a full validation. Asking this AND is_manifold runs two of\n"
+             "them — validation_report() answers both from one pass, and nine\n"
+             "more things besides.")
         .def("is_manifold",
              [](const PyMesh& pm) { return mesh::validate(pm.data()).manifold; },
-             "True when no edge has more than two incident triangles")
+             "True when no edge has more than two incident triangles.\n\n"
+             "See is_watertight on running one validation instead of two.")
+        .def(
+            "validation_report",
+            [](const PyMesh& pm, std::size_t max_intersection_pairs) {
+                const mesh::ValidationReport r =
+                    mesh::validate(pm.data(), max_intersection_pairs);
+                nb::dict out;
+                out["vertices"] = r.vertices;
+                out["triangles"] = r.triangles;
+                out["watertight"] = r.watertight;
+                out["manifold"] = r.manifold;
+                out["oriented"] = r.oriented;
+                out["clean"] = r.clean();
+                out["boundary_edges"] = r.boundary_edges;
+                out["non_manifold_edges"] = r.non_manifold_edges;
+                out["degenerate_triangles"] = r.degenerate_triangles;
+                out["sliver_triangles"] = r.sliver_triangles;
+                out["intersecting_pairs"] = r.intersecting_pairs;
+                out["intersection_budget"] = max_intersection_pairs;
+                out["euler_characteristic"] = r.euler_characteristic;
+                return out;
+            },
+            "max_intersection_pairs"_a = 0,
+            "Everything the validator measures, in one pass: vertices,\n"
+            "triangles, watertight, manifold, oriented, clean, boundary_edges,\n"
+            "non_manifold_edges, degenerate_triangles, sliver_triangles,\n"
+            "intersecting_pairs, intersection_budget, euler_characteristic.\n\n"
+            "`max_intersection_pairs` caps the SAMPLED self-intersection check\n"
+            "and is reported back as `intersection_budget`, because that is the\n"
+            "only thing separating 'nothing intersects' from 'nothing looked':\n"
+            "both leave intersecting_pairs at 0, and `clean` requires it to be\n"
+            "0. The default of 0 skips the pass, which is the engine's own\n"
+            "default — so a `clean` from a default call has not been checked\n"
+            "for self-intersection.\n\n"
+            "`sliver_triangles` is informational and is not one of `clean`'s\n"
+            "terms: a near-zero-area triangle is legal geometry.")
+        .def_prop_ro(
+            "signed_volume", [](const PyMesh& pm) { return mesh::signed_volume(pm.data()); },
+            "Signed volume by the divergence theorem, POSITIVE when triangle\n"
+            "normals point outward — so its sign is an orientation check.\n"
+            "Answered for any mesh, watertight or not: an open mesh still has\n"
+            "the sum, and it is the number that tells you the mesh is open.")
+        .def_prop_ro("surface_area",
+                     [](const PyMesh& pm) { return mesh::surface_area(pm.data()); },
+                     "Total area of the triangles.")
         .def_prop_ro("layer",
                      [](const PyMesh& pm) -> nb::object {
                          if (!pm.doc) return nb::none();
