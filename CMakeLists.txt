@@ -393,4 +393,11 @@ if(CLAY_BUILD_BENCHMARKS)
   add_executable(prim_dispatch_probe benchmarks/prim_dispatch_probe.cpp)
   target_link_libraries(prim_dispatch_probe PRIVATE claycore)
   clay_apply_warnings(prim_dispatch_probe)
+
+  # Also not gated: issue #207 candidate 4, the stack machine. Times the scalar
+  # and blocked stacks against alternatives that differ only in where a slot
+  # lives. Exits non-zero if any arm stops being bit-identical to ctape_eval.
+  add_executable(tape_stack_probe benchmarks/tape_stack_probe.cpp)
+  target_link_libraries(tape_stack_probe PRIVATE claycore)
+  clay_apply_warnings(tape_stack_probe)
 endif()
