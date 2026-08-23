@@ -7,7 +7,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <cstdint>
+#include <ctime>
+#include <thread>
 #include <vector>
 
 #include "clay.h"
@@ -564,6 +567,71 @@ void BM_DabRefillDenseDoc(benchmark::State& state) {
     state.counters["bricks"] = static_cast<double>(reqs.size());
 }
 BENCHMARK(BM_DabRefillDenseDoc)->Unit(benchmark::kMillisecond);
+
+// CORES ACTUALLY USED by a brick fill's evaluation, which is a different
+// question from how long it takes and the one a cross-machine comparison needs.
+//
+// #207 reports `BM_BrickFill` at 47.5 ms on an M2 Max against 30.6 ms on an i9
+// and reads the gap as evidence that brick fill is bound by something evaluation
+// work does not touch. It might be — or the machines are 12 hardware threads
+// against 24 and the benchmark is threaded. Wall clock alone cannot tell those
+// apart, and `benchmark`'s own CPU column does not answer it either: it is the
+// main thread's time, not the process's.
+//
+// So this times ONLY the `eval_grid` calls, with the tapes compiled outside the
+// timed region, and reports process CPU time over wall time. That is the same
+// measurement `batch-brick-eval` used to find the per-brick dispatch barrier,
+// where it read 6.7-8.9 cores of 24.
+//
+// Not a gated benchmark — a diagnostic. Read `cores` against the machine's
+// thread count, not against a threshold.
+#if defined(_WIN32)
+double process_cpu_seconds() { return static_cast<double>(std::clock()) / CLOCKS_PER_SEC; }
+#else
+double process_cpu_seconds() {
+    timespec ts;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts);
+    return static_cast<double>(ts.tv_sec) + static_cast<double>(ts.tv_nsec) * 1e-9;
+}
+#endif
+
+void BM_BrickFillCores(benchmark::State& state) {
+    scene::Document doc = bench_document();
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    brick::BrickCache cache(brick::BrickConfig{8, 0.05f, 3, 0});
+    cache.mark_dirty(scene::layer_influence_bound(doc.layers[0]));
+    const std::vector<brick::BrickRequest> reqs = cache.take_dirty();
+
+    // Compiled once, outside the measurement: the question is what EVALUATION
+    // does with the cores, not what compiling does.
+    std::vector<scene::Tape> tapes;
+    tapes.reserve(reqs.size());
+    for (const brick::BrickRequest& req : reqs) {
+        scene::CullRegion cull{cache.cull_region(req.key)};
+        tapes.push_back(scene::compile_document(doc, &cull));
+    }
+    std::vector<std::vector<float>> values(reqs.size());
+    for (std::size_t i = 0; i < reqs.size(); ++i)
+        values[i].resize(static_cast<std::size_t>(reqs[i].grid.nx) * reqs[i].grid.ny *
+                         reqs[i].grid.nz);
+
+    double cpu_seconds = 0.0;
+    double wall_seconds = 0.0;
+    for (auto _ : state) {
+        const double c0 = process_cpu_seconds();
+        const auto w0 = std::chrono::steady_clock::now();
+        for (std::size_t i = 0; i < reqs.size(); ++i)
+            cpu->eval_grid(tapes[i], reqs[i].grid, values[i].data());
+        const auto w1 = std::chrono::steady_clock::now();
+        cpu_seconds += process_cpu_seconds() - c0;
+        wall_seconds += std::chrono::duration<double>(w1 - w0).count();
+        benchmark::DoNotOptimize(values[0].data());
+    }
+    state.counters["cores"] = wall_seconds > 0.0 ? cpu_seconds / wall_seconds : 0.0;
+    state.counters["bricks"] = static_cast<double>(reqs.size());
+    state.counters["threads"] = static_cast<double>(std::thread::hardware_concurrency());
+}
+BENCHMARK(BM_BrickFillCores)->Unit(benchmark::kMillisecond);
 
 void BM_MeshTape(benchmark::State& state) {
     scene::Document doc = bench_document();

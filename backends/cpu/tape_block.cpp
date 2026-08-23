@@ -191,6 +191,177 @@ std::size_t tape_stack_depth(const scene::Tape& tape) {
     return depth;
 }
 
+namespace {
+
+// What a stack slot holds. A distance-only query keeps ONE float per slot where
+// a `CTapeValue` is four, and in a blocked walk the stack is an array across the
+// block, so those bytes are the working set rather than a register.
+template <bool WithColour>
+struct SlotOf {
+    using type = CTapeValue;
+};
+template <>
+struct SlotOf<false> {
+    using type = float;
+};
+
+// The walk, once, over whichever slot the caller's request selects.
+//
+// The specialisation is `if constexpr` INSIDE the loops rather than a policy
+// object wrapping the values, and that is deliberate rather than stylistic. An
+// earlier attempt routed every store through a policy's `store()` and cost 1.30x
+// on the coloured path for no change in what it computed (#219). The rule this
+// evaluator keeps teaching: specialise the loop, never the value.
+template <bool WithColour>
+void walk_blocked(const kernel::CTapeInstr* in, std::size_t ni, const float* params,
+                  const float* blob, const PointQuery& q, const PointResults& out,
+                  std::size_t block, std::size_t depth) {
+    using Slot = typename SlotOf<WithColour>::type;
+    // Thread-local so the allocation happens once per thread rather than once
+    // per call, and sized to the work present rather than to `block`: the grid
+    // paths dispatch chunks as small as one lattice ROW — 8 points for a brick —
+    // and allocating a full block for those was 16 KB of malloc and zero-fill
+    // per 8 points of evaluation, which made the blocked path slower end to end
+    // than the scalar one it replaced.
+    static thread_local std::vector<Slot> stack;
+    if (stack.size() < block * depth) stack.resize(block * depth);
+
+    for (std::size_t base = 0; base < q.count; base += block) {
+        const std::size_t n = std::min(block, q.count - base);
+        const auto point = [&](std::size_t j) {
+            const std::size_t i = base + j;
+            return cf3(q.points_xyz[i * 3], q.points_xyz[i * 3 + 1], q.points_xyz[i * 3 + 2]);
+        };
+        std::size_t top = 0;
+        for (std::size_t k = 0; k < ni; ++k) {
+            const kernel::CTapeInstr& instr = in[k];
+            const float* pr = params + instr.param_offset;
+            if (instr.op == kernel::ctape_combine) {
+                if (top < 1) continue;
+                const CombineHeader c = decode_combine(pr);
+                Slot* b = &stack[(top - 1) * block];
+                const bool plain = !c.transition &&
+                                   c.mode != kernel::ccombine_replace_feather && c.gate_off < 0;
+                if (top >= 2) {
+                    --top;
+                    Slot* a = &stack[(top - 1) * block];
+                    if (plain) {
+                        // The common combine, chosen once per block rather than
+                        // three tests per point.
+                        for (std::size_t j = 0; j < n; ++j) {
+                            if constexpr (WithColour)
+                                a[j] = kernel::ctape_combine_values(a[j], b[j], c.mode, c.profile,
+                                                                    c.k, c.rb);
+                            else
+                                a[j] = kernel::ctape_combine_dist(a[j], b[j], c.mode, c.profile,
+                                                                  c.k, c.rb);
+                        }
+                    } else {
+                        // Gated, transitional or feathered: rare, and it goes
+                        // through the CTapeValue form even for a distance-only
+                        // query. Correct because no distance expression reads a
+                        // colour, and affordable because these are the
+                        // instructions a document has few of.
+                        for (std::size_t j = 0; j < n; ++j) {
+                            CTapeValue av;
+                            CTapeValue bv;
+                            if constexpr (WithColour) {
+                                av = a[j];
+                                bv = b[j];
+                            } else {
+                                av.d = a[j];
+                                av.color = cf3(0.0f, 0.0f, 0.0f);
+                                bv.d = b[j];
+                                bv.color = cf3(0.0f, 0.0f, 0.0f);
+                            }
+                            const CTapeValue rv = combine_at(c, blob, av, bv, point(j));
+                            if constexpr (WithColour)
+                                a[j] = rv;
+                            else
+                                a[j] = rv.d;
+                        }
+                    }
+                } else {
+                    // A combine with an empty accumulator applies against empty
+                    // space, seeding a chain whose earlier items were culled.
+                    for (std::size_t j = 0; j < n; ++j) {
+                        if constexpr (!WithColour) {
+                            if (plain) {
+                                b[j] = kernel::ctape_combine_dist(CLAY_TAPE_FAR, b[j], c.mode,
+                                                                  c.profile, c.k, c.rb);
+                                continue;
+                            }
+                        }
+                        CTapeValue bv;
+                        if constexpr (WithColour) {
+                            bv = b[j];
+                        } else {
+                            bv.d = b[j];
+                            bv.color = cf3(0.0f, 0.0f, 0.0f);
+                        }
+                        CTapeValue a;
+                        a.d = CLAY_TAPE_FAR;
+                        a.color = bv.color;
+                        const CTapeValue rv = combine_at(c, blob, a, bv, point(j));
+                        if constexpr (WithColour)
+                            b[j] = rv;
+                        else
+                            b[j] = rv.d;
+                    }
+                }
+            } else {
+                if (top >= static_cast<std::size_t>(CLAY_TAPE_MAX_STACK)) continue;
+                const PrimHeader h = decode_prim(pr, instr.op);  // once per block
+                Slot* s = &stack[top * block];
+                if (!h.repeat_active && !h.has_deformers && !h.is_volume) {
+                    for (std::size_t j = 0; j < n; ++j) {
+                        const cfloat3 lp = kernel::cmul_point(h.inv, point(j));
+                        // `+ 0.0f` is the deformer offset the general path adds.
+                        // Kept, not folded: dropping it turns a -0.0f into +0.0f,
+                        // a different bit pattern, and the identity test says so.
+                        const float d = (kernel::ctape_prim_dist(
+                                             instr.op, pr + CLAY_TAPE_PRIM_HEADER, blob, lp) +
+                                         0.0f) *
+                                            h.scale -
+                                        h.round;
+                        if constexpr (WithColour) {
+                            s[j].color = h.color;
+                            s[j].d = d;
+                        } else {
+                            s[j] = d;
+                        }
+                    }
+                } else {
+                    for (std::size_t j = 0; j < n; ++j) {
+                        const CTapeValue v = prim_at(instr.op, pr, blob, h, point(j));
+                        if constexpr (WithColour)
+                            s[j] = v;
+                        else
+                            s[j] = v.d;
+                    }
+                }
+                ++top;
+            }
+        }
+        const Slot* result = &stack[(top - 1) * block];
+        for (std::size_t j = 0; j < n; ++j) {
+            const std::size_t i = base + j;
+            if constexpr (WithColour) {
+                if (out.distances) out.distances[i] = result[j].d;
+                if (out.colors_rgb) {
+                    out.colors_rgb[i * 3] = result[j].color.x;
+                    out.colors_rgb[i * 3 + 1] = result[j].color.y;
+                    out.colors_rgb[i * 3 + 2] = result[j].color.z;
+                }
+            } else {
+                if (out.distances) out.distances[i] = result[j];
+            }
+        }
+    }
+}
+
+}  // namespace
+
 void eval_points_blocked(const scene::Tape& tape, const PointQuery& q, const PointResults& out,
                          std::size_t block) {
     if (block == 0) block = kDefaultBlock;
@@ -281,101 +452,10 @@ void eval_points_blocked(const scene::Tape& tape, const PointQuery& q, const Poi
     // instruction that pushes it before anything reads it, so the growth path's
     // zero-fill is incidental rather than required.
     const std::size_t span = std::min(block, q.count);
-    static thread_local std::vector<CTapeValue> stack;
-    if (stack.size() < span * depth) stack.resize(span * depth);
-    block = span;
-
-    for (std::size_t base = 0; base < q.count; base += block) {
-        const std::size_t n = std::min(block, q.count - base);
-        std::size_t top = 0;
-        for (std::size_t k = 0; k < ni; ++k) {
-            const kernel::CTapeInstr& instr = in[k];
-            const float* pr = params + instr.param_offset;
-            if (instr.op == kernel::ctape_combine) {
-                if (top < 1) continue;
-                const CombineHeader c = decode_combine(pr);
-                CTapeValue* b = &stack[(top - 1) * block];
-                if (top >= 2) {
-                    --top;
-                    CTapeValue* a = &stack[(top - 1) * block];
-                    // As above: the plain combine — no spatial transition, no
-                    // feathered replace, no gate — gets its own loop chosen once
-                    // per block rather than three tests per point.
-                    if (!c.transition && c.mode != kernel::ccombine_replace_feather &&
-                        c.gate_off < 0) {
-                        for (std::size_t j = 0; j < n; ++j)
-                            a[j] = kernel::ctape_combine_values(a[j], b[j], c.mode, c.profile,
-                                                                c.k, c.rb);
-                    } else {
-                        for (std::size_t j = 0; j < n; ++j) {
-                            const std::size_t i = base + j;
-                            a[j] = combine_at(c, blob, a[j], b[j],
-                                              cf3(q.points_xyz[i * 3], q.points_xyz[i * 3 + 1],
-                                                  q.points_xyz[i * 3 + 2]));
-                        }
-                    }
-                } else {
-                    // A combine with an empty accumulator applies against empty
-                    // space, seeding a chain whose earlier items were culled.
-                    for (std::size_t j = 0; j < n; ++j) {
-                        const std::size_t i = base + j;
-                        CTapeValue a;
-                        a.d = CLAY_TAPE_FAR;
-                        a.color = b[j].color;
-                        b[j] = combine_at(c, blob, a, b[j],
-                                          cf3(q.points_xyz[i * 3], q.points_xyz[i * 3 + 1],
-                                              q.points_xyz[i * 3 + 2]));
-                    }
-                }
-            } else {
-                if (top >= static_cast<std::size_t>(CLAY_TAPE_MAX_STACK)) continue;
-                const PrimHeader h = decode_prim(pr, instr.op);  // once per block
-                CTapeValue* s = &stack[top * block];
-                // The branch is taken ONCE PER BLOCK, not once per point. That
-                // is what hoisting a per-instruction property means: deciding
-                // the value early still leaves a test and a generic call in the
-                // inner loop, and measured, that was most of the win. The
-                // specialised loop below is the common instruction — no repeat,
-                // no deformer chain, not a sampled volume — written out so the
-                // compiler sees a loop with no branches in it.
-                if (!h.repeat_active && !h.has_deformers && !h.is_volume) {
-                    for (std::size_t j = 0; j < n; ++j) {
-                        const std::size_t i = base + j;
-                        const cfloat3 lp = kernel::cmul_point(
-                            h.inv, cf3(q.points_xyz[i * 3], q.points_xyz[i * 3 + 1],
-                                       q.points_xyz[i * 3 + 2]));
-                        s[j].color = h.color;
-                        // `+ 0.0f` is the deformer offset the general path adds.
-                        // Kept, not folded: dropping it turns a -0.0f into +0.0f,
-                        // a different bit pattern, and the identity test says so.
-                        s[j].d = (kernel::ctape_prim_dist(instr.op, pr + CLAY_TAPE_PRIM_HEADER,
-                                                          blob, lp) +
-                                  0.0f) *
-                                     h.scale -
-                                 h.round;
-                    }
-                } else {
-                    for (std::size_t j = 0; j < n; ++j) {
-                        const std::size_t i = base + j;
-                        s[j] = prim_at(instr.op, pr, blob, h,
-                                       cf3(q.points_xyz[i * 3], q.points_xyz[i * 3 + 1],
-                                           q.points_xyz[i * 3 + 2]));
-                    }
-                }
-                ++top;
-            }
-        }
-        const CTapeValue* result = &stack[(top - 1) * block];
-        for (std::size_t j = 0; j < n; ++j) {
-            const std::size_t i = base + j;
-            if (out.distances) out.distances[i] = result[j].d;
-            if (out.colors_rgb) {
-                out.colors_rgb[i * 3] = result[j].color.x;
-                out.colors_rgb[i * 3 + 1] = result[j].color.y;
-                out.colors_rgb[i * 3 + 2] = result[j].color.z;
-            }
-        }
-    }
+    if (out.colors_rgb)
+        walk_blocked<true>(in, ni, params, blob, q, out, span, depth);
+    else
+        walk_blocked<false>(in, ni, params, blob, q, out, span, depth);
 }
 
 }  // namespace eval

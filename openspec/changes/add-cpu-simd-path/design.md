@@ -757,3 +757,99 @@ the thermals — and since throttling compresses the win, 1.39x is a floor and
 four to five minutes of sustained load on a passively cooled tablet, the OS
 thermal signal lags it badly, and seven minutes between runs was not close to
 enough. Budget half an hour.
+
+# Task 1.7 built, 2026-08-23: the combine splits, and the coloured path got faster too
+
+#220's `ctape_combine_dist` is in, and the CPU blocked evaluator uses it whenever
+`out.colors_rgb == nullptr`. Two results, one of them not predicted by anything
+above.
+
+Read it against the arm64 column recorded above: distance-only is **1.67x on top
+of blocking there against 2.2x here**, while blocking itself is 1.14x there
+against 3.5x. So on the architecture that ships this is the LARGER of the two
+effects — bigger than everything #218 bought — and the x86-64 figures below
+understate what it is worth.
+
+The prediction recorded alongside that column, that the rebuild-a-`CTapeValue`
+route measured at 0.57x here would be *worse* on arm64, is now moot for shipping:
+that route is not what landed. It stands as an unmeasured prediction about a road
+not taken.
+
+## One definition, not two
+
+`ctape_combine_values` CALLS `ctape_combine_dist` for its distance and keeps only
+the colour logic. So each mode's distance has exactly one definition and the two
+cannot drift — the hazard that made this look like a bigger change than it is.
+The `add` case evaluates `ctape_smin_m` a second time for the blend weight its
+colour needs; both calls are pure with identical arguments, so a compiler that
+does common-subexpression elimination costs the coloured path nothing.
+
+Both constraints from #207 are honoured: the `add` distance calls `ctape_smin_m`
+rather than the plain `ctape_smin` (different `h` formulation, different
+zero-support guard, different last bit), and `ccombine_paint` returns the
+accumulator untouched.
+
+## The measurement, with its own control
+
+`st_main` has no distance-only path, so ITS coloured-vs-distance-only ratio must
+read 1.00x. It reads **1.000**, which is what makes the rest trustworthy.
+Interleaved, five rounds, 12 spheres, 100k points, single-threaded:
+
+| | main | this change | |
+|---|---:|---:|---:|
+| coloured | 7.22 ms | **5.83 ms** | **1.24x faster** |
+| distance only | 7.22 ms | **3.82 ms** | **1.89x faster** |
+
+Ranges do not overlap on either row (main 7.22-7.26, coloured 5.79-6.16,
+distance-only 3.82-3.99). At 200 spheres the same shape: 104.95 -> 82.7 coloured,
+-> 65.6 distance-only.
+
+## The unpredicted half: splitting made the COLOURED path 1.24x faster
+
+Nothing above expected this, and the honest reading is that the prediction was
+about the wrong thing. Extracting the distance leaves `ctape_combine_values` as a
+chain of mostly EMPTY branches — six of its thirteen modes now do nothing but
+fall through — and a tight distance function beside it. The compiler lays that
+out better than the interleaved original, and it more than pays for the second
+`ctape_smin_m`.
+
+So the change is not a trade of colour cost against distance cost. It is faster
+on both paths, and the coloured half of that was free.
+
+Worth stating because the reasoning that led here was wrong in a useful way:
+this was scoped as "stop distance-only queries paying for colour", and the
+mechanism that delivers it — one small hot function instead of one large mixed
+one — helps the coloured queries too.
+
+## End to end, on a quiet box
+
+Medians of 11, cv under 3.5% on every row of both runs. A first attempt at this
+table was taken while the box was busy and returned cv of 20-26%; those numbers
+were discarded rather than published.
+
+| benchmark | main | this change | |
+|---|---:|---:|---:|
+| `BM_EvalPoints` | 3.32 ms | 2.62 ms | **1.27x** |
+| `BM_DabRefillDenseDoc` | 0.553 ms | 0.475 ms | **1.16x** |
+| `BM_BrickFill` | 24.0 ms | 22.4 ms | **1.07x** |
+| `BM_MeshBricksGradDenseDoc` | 5.65 ms | 5.43 ms | **1.04x** |
+
+Smaller than the 1.89x the single-threaded measurement shows, and the gap is the
+usual one this change keeps meeting: these paths are already threaded, and they
+contain work — culling, compilation, dispatch — that this does not touch. The
+ordering is the informative part. `BM_EvalPoints` is nearly pure evaluation and
+gains most; `BM_MeshBricksGradDenseDoc` gains least because a gradient is four
+taps plus buffer traffic around them.
+
+The `BM_MeshBricksGradDenseDoc` / `BM_DabRefillDenseDoc` ratio gate reads
+**11.4x** against its 14.0 ceiling — it moved again, for the same benign reason
+as last time (the denominator gains more), and it still clears.
+
+## `BM_BrickFillCores`, for the arm64 question
+
+Added here rather than in its own change because it exists to answer #207's open
+question and should travel with the work that raised it. It reads **15.6 cores of
+24** on this box. Against 12 threads on an M2 Max, a similar fraction means brick
+fill is simply narrower there; materially less means a real second bound, and
+`add-mobile-thread-scheduling` — 12/19, no QoS set anywhere, efficiency cores
+counted as equal workers — is where to look first.
