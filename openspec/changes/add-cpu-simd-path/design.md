@@ -305,6 +305,57 @@ pays for them legitimately and the margin shrinks. Task 1.10 re-measures it on
 the golden corpus before any of it is claimed; it is recorded here as a lead, not
 a result.
 
+## The volume opcode, which is the case with the least evidence and the most weight
+
+The table above is analytic prims. `clay_layer_consolidate` collapses a layer
+into a single VOLUME item (`src/scene/consolidate.cpp:58`), so a consolidated
+tape is one `ctape_volume` instruction whose cost is a per-point GATHER — brick
+index lookup then trilinear sample — and task 1.2's audit already called that the
+one genuinely different opcode. Blocking cannot hoist a gather. Measured rather
+than assumed:
+
+    tape_block_prototype 2500 20480 512 volume
+
+| | ns / instruction | vs `ctape_eval` |
+|---|---:|---:|
+| V0 `ctape_eval` | ~47 | 1.00x |
+| V1 per point, colour | ~41 | 1.14x |
+| V2 per point, distance only | ~37 | 1.28x |
+| V3 blocked, colour | ~24.4 | 1.92x |
+| V4 blocked, distance only | ~23.9 | **1.96x** |
+
+**A gather instruction costs about 3x an analytic one (47 vs 15 ns), and blocking
+buys 2x on it rather than 8x.** Bit-identical, stable, and insensitive to the
+volume's resolution (a 0.04 cell gives 1.82x against 0.02's 1.96x). Colour is
+worth nothing here — V3 to V4 is 1.02x — because the gather dominates everything
+around it.
+
+**Two things follow, and both are good news.**
+
+**The volume needs no fallback.** It block-evaluates correctly and bit-identically
+today; it simply wins less. The spec's provision for naming opcodes that cannot be
+block-evaluated stands, but the opcode most likely to have needed it does not.
+
+**Per-tape bail would be the wrong design, and this is the measurement that says
+so.** The interactive state after a consolidation is the volume with stamps
+accumulating on top of it — an artist consolidates and carries on:
+
+    tape_block_prototype <stamps> 20480 512 mixed
+
+| stamps over the volume | 1 | 5 | 20 | 100 |
+|---|---:|---:|---:|---:|
+| V4 vs `ctape_eval` | 2.84x | 4.98x | 7.56x | **9.42x** |
+
+A per-tape bail on one un-blockable instruction would drop all 201 instructions of
+the 100-stamp case to scalar to accommodate one of them. **Block every
+instruction, and let the ones that gather win less.**
+
+The shape of that row is the part worth carrying: the win GROWS with the stamps
+accumulating over the volume, which is precisely the accumulation that makes
+sculpting slow in the first place. It is weakest immediately after a
+consolidation, when the document is already cheap, and strongest as the artist
+works — the right way round.
+
 ## What to predict, so it can be checked rather than celebrated
 
 Section 2's warning applies to this change as much as to the one it replaced.
@@ -325,3 +376,7 @@ is a **headroom** claim, not a delivery:
 - And one from this session: **quote the artifact anyone can run, not the
   scratch build.** Two `-O3` builds of identical source disagreed by 1.4x on one
   of the five variants here.
+- The headline 8x is the analytic figure. A document's real multiple sits
+  somewhere on the mixed row above, between 2x and 9x depending on how much has
+  accumulated since its last consolidation, and any published number should say
+  which document it describes.

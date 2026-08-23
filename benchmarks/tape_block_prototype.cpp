@@ -22,7 +22,20 @@
 // questions whose answer is always no, and a corpus that USES those features
 // pays for them legitimately. Re-measure there before quoting V1 (task 1.10).
 //
-//   ./tape_block_prototype [items] [points] [block]
+// A second document shape is available and is the one that matters after
+// consolidation: `clay_layer_consolidate` collapses a layer into a single VOLUME
+// item, so a consolidated tape is one `ctape_volume` instruction whose cost is a
+// per-point GATHER — brick index lookup then trilinear sample — rather than a
+// transform and a primitive. Task 1.2's audit called that the one genuinely
+// different opcode, and blocking cannot hoist a gather. Measure it rather than
+// assuming the analytic figure carries over.
+//
+// `mixed` is the interactive state that follows a consolidation: the volume with
+// analytic stamps accumulating on top of it, which is what an artist produces by
+// consolidating and then carrying on. It is the case that decides whether one
+// un-blockable instruction should drop a whole tape to scalar.
+//
+//   ./tape_block_prototype [items] [points] [block] [sphere|volume|mixed]
 
 #include <algorithm>
 #include <chrono>
@@ -30,8 +43,11 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <functional>
 #include <vector>
 
+#include "clay/field/volume.h"
 #include "clay/scene/commands.h"
 #include "clay/scene/tape.h"
 
@@ -55,6 +71,41 @@ std::vector<float> make_points(std::size_t count) {
     std::uint64_t s = 99991;
     for (float& v : p) v = unit(s);
     return p;
+}
+
+// A consolidated layer: one volume item, sampled the way consolidate produces
+// one. `items` scales the sampled resolution rather than the item count, because
+// consolidation yields exactly one.
+scene::Document make_volume_document(std::size_t items) {
+    const float cell = items >= 2000 ? 0.02f : 0.04f;
+    const auto sphere = [](cfloat3 p) { return std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z) - 0.7f; };
+    auto vol = std::make_shared<const field::FieldVolume>(field::FieldVolume::sample(
+        sphere, math::Aabb(cf3(-1.0f, -1.0f, -1.0f), cf3(1.0f, 1.0f, 1.0f)), cell, 6.0f * cell));
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("consolidated");
+    scene::Node n;
+    n.prim = scene::Prim::volume();
+    n.volume = vol;
+    n.op = scene::Op::Add;
+    n.blend = scene::Blend{scene::BlendProfile::Hard, 0.0f};
+    l.sdf->insert(n);
+    return doc;
+}
+
+// The volume, then `stamps` analytic spheres over it.
+scene::Document make_mixed_document(std::size_t stamps) {
+    scene::Document doc = make_volume_document(100);
+    scene::Layer& l = doc.layers[0];
+    std::uint64_t s = 4242;
+    for (std::size_t i = 0; i < stamps; ++i) {
+        scene::Node n;
+        n.prim = scene::Prim::sphere(0.12f);
+        n.xform.position = cf3(unit(s) * 0.8f, unit(s) * 0.8f, unit(s) * 0.8f);
+        n.op = scene::Op::Add;
+        n.blend = scene::Blend{scene::BlendProfile::Hard, 0.0f};
+        l.sdf->insert(n);
+    }
+    return doc;
 }
 
 scene::Document make_document(std::size_t items) {
@@ -93,6 +144,16 @@ PrimHeader load_header(const float* pr) {
     return h;
 }
 
+// The prim branch shared by all four variants: the volume opcode gathers and
+// writes a colour, everything else is analytic. Mirrors ctape_prim_local minus
+// the deformer chain and repeat block, which this harness's documents do not use.
+float prim_value(CLAY_UINT_T op, const float* pr, const float* blob, cfloat3 lp,
+                 cfloat3& color) {
+    if (op == ctape_volume)
+        return ctape_volume_dist(pr + CLAY_TAPE_PRIM_HEADER, blob, lp, CLAY_OUTARG(color));
+    return ctape_prim_dist(op, pr + CLAY_TAPE_PRIM_HEADER, blob, lp);
+}
+
 template <class F>
 double best_ms(F&& f) {
     double best = 1e30;
@@ -111,9 +172,14 @@ int main(int argc, char** argv) {
     const std::size_t items = argc > 1 ? std::strtoul(argv[1], nullptr, 10) : 2500;
     const std::size_t count = argc > 2 ? std::strtoul(argv[2], nullptr, 10) : 20480;
     const std::size_t block = argc > 3 ? std::strtoul(argv[3], nullptr, 10) : 512;
+    const char* kind = argc > 4 ? argv[4] : "sphere";
+    const bool volume_case = std::strcmp(kind, "volume") == 0;
+    const bool mixed_case = std::strcmp(kind, "mixed") == 0;
 
     const std::vector<float> pts = make_points(count);
-    const scene::Document doc = make_document(items);
+    const scene::Document doc = volume_case  ? make_volume_document(items)
+                                : mixed_case ? make_mixed_document(items)
+                                             : make_document(items);
     const scene::Tape tape = scene::compile_document(doc);
     const CTapeInstr* in = tape.instrs.data();
     const std::size_t ni = tape.instrs.size();
@@ -147,8 +213,8 @@ int main(int argc, char** argv) {
                     const PrimHeader h = load_header(pr);
                     CTapeValue v;
                     v.color = h.color;
-                    v.d = ctape_prim_dist(in[k].op, pr + CLAY_TAPE_PRIM_HEADER, bl,
-                                          cmul_point(h.inv, p)) * h.scale - h.round;
+                    v.d = prim_value(in[k].op, pr, bl, cmul_point(h.inv, p), v.color) *
+                              h.scale - h.round;
                     st[top++] = v;
                 }
             }
@@ -170,8 +236,9 @@ int main(int argc, char** argv) {
                     st[top - 1] = ctape_smin_m(CLAY_INT(pr[1]), a, b, pr[2]).x;
                 } else {
                     const PrimHeader h = load_header(pr);
-                    st[top++] = ctape_prim_dist(in[k].op, pr + CLAY_TAPE_PRIM_HEADER, bl,
-                                                cmul_point(h.inv, p)) * h.scale - h.round;
+                    cfloat3 ignored = h.color;
+                    st[top++] = prim_value(in[k].op, pr, bl, cmul_point(h.inv, p), ignored) *
+                                    h.scale - h.round;
                 }
             }
             r2[i] = st[top - 1];
@@ -198,8 +265,8 @@ int main(int argc, char** argv) {
                     CTapeValue* s = &stack3[top * block];
                     for (std::size_t j = 0; j < n; ++j) {
                         s[j].color = h.color;
-                        s[j].d = ctape_prim_dist(in[k].op, pr + CLAY_TAPE_PRIM_HEADER, bl,
-                                                 cmul_point(h.inv, point_at(base + j))) *
+                        s[j].d = prim_value(in[k].op, pr, bl,
+                                            cmul_point(h.inv, point_at(base + j)), s[j].color) *
                                      h.scale - h.round;
                     }
                     ++top;
@@ -226,10 +293,12 @@ int main(int argc, char** argv) {
                 } else {
                     const PrimHeader h = load_header(pr);  // once per block
                     float* s = &stack4[top * block];
-                    for (std::size_t j = 0; j < n; ++j)
-                        s[j] = ctape_prim_dist(in[k].op, pr + CLAY_TAPE_PRIM_HEADER, bl,
-                                               cmul_point(h.inv, point_at(base + j))) *
+                    for (std::size_t j = 0; j < n; ++j) {
+                        cfloat3 ignored = h.color;
+                        s[j] = prim_value(in[k].op, pr, bl,
+                                          cmul_point(h.inv, point_at(base + j)), ignored) *
                                    h.scale - h.round;
+                    }
                     ++top;
                 }
             }
@@ -246,7 +315,11 @@ int main(int argc, char** argv) {
     const double worst = std::max(std::max(deviation(r1), deviation(r2)),
                                   std::max(deviation(r3), deviation(r4)));
 
-    std::printf("items=%zu instrs=%zu points=%zu block=%zu\n", items, ni, count, block);
+    std::printf("%s: items=%zu instrs=%zu points=%zu block=%zu\n",
+                volume_case  ? "consolidated volume"
+                : mixed_case ? "consolidated volume + stamps"
+                             : "analytic prims",
+                items, ni, count, block);
     std::printf("max deviation from ctape_eval: %.3g%s\n\n", worst,
                 worst == 0.0 ? "  (bit-identical)" : "  <-- NOT the same maths");
 
