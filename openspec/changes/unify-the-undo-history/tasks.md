@@ -31,7 +31,17 @@
       holds a `unique_ptr<UndoStack>` and `PyDocument` holds its own — so two
       implementations already exist to drift, and a wider history is a wider
       surface to drift in
-- [ ] 1.7 MEASURE what a mixed session holds, per representation per step. This
+- [x] 1.7 MEASURED on Linux (x86_64, ratios only — the absolutes do not
+      transfer to the device, per `docs/RELEASE.md`). **16 bytes per changed
+      cell**; a size-9 sphere smooth on a corner journals 13 changes = 208 B.
+      Write-path cost with the sink installed: **1.005x on `sculpt_smooth`**
+      (the verb's own work dominates) and **1.77x on a bare loop of 64 raw
+      `set` calls** — where the baseline is 21 ns per write, so the journal
+      append is ~16 ns and the absolute stays at 0.001 ms. The first draft
+      measured 1.26x on the verb because it probed `get(c)` for the previous
+      value; `write_cell` already had it. See 7.1
+- [ ] 1.8 The same measurement ON THE DEVICE, which is what the budgets are
+      set against. Filed as an issue for the team that has the iPad, per representation per step. This
       is the input `add-history-budget` needs and that row assumes one mechanism
 
 ## 2. Decide
@@ -134,6 +144,11 @@
       binding. 6.4 is still right that ownership does not fix CALL-SITE drift;
       it was wrong that ownership buys nothing. Not worth reworking the C side
       for, and recorded so the next person does not have to rediscover it
+
+- [x] 7.1 The undo journal read the previous cell value with a second `get(c)`
+      hash probe on the write path. `write_cell` already reads it — it is the
+      one place that has it — so it hands it back through an out-parameter now.
+      Measured 1.26x -> 1.005x on `sculpt_smooth`
 
 ## 7. Still open after this slice
 
