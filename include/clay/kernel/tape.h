@@ -1010,20 +1010,65 @@ CLAY_FN CTapeValue ctape_replace_feather(CTapeValue a, CTapeValue b, CLAY_FPTR r
     return r;
 }
 
+// The DISTANCE half of a combine, on its own.
+//
+// Most queries never ask for a colour — a brick fill for the distance field, a
+// raycast, and each of the four gradient taps are all distance-only — and until
+// this existed every one of them computed and moved a colour anyway.
+// `ctape_combine_values` is the only combine in the kernel and it is CTapeValue
+// in, CTapeValue out. This is the same split `speed-the-tape-prim-path` made one
+// level down, where forty prims were paying for one prim's colour.
+//
+// `ctape_combine_values` CALLS this, so each mode's distance has exactly one
+// definition and the two cannot drift. The `add` case needs the blend weight for
+// its colour and so evaluates `ctape_smin_m` a second time; both calls are pure
+// with identical arguments, so a compiler that eliminates the common
+// subexpression costs the coloured path nothing, and one that does not costs it
+// one smin.
+//
+// NOT `ctape_smin` for the add case, however free that looks. `csmin_quadratic`
+// computes `h = max(s - |a-b|, 0) / s` and returns `cmin(a,b)` outright when the
+// support is non-positive; `csmin_quadratic_m` computes `h = 1 - min(|a-b|/s, 1)`
+// and clamps the support to 1e-20f instead. The same value, a different last
+// bit, and a different answer at zero support — and the callers of this function
+// are gated on IDENTITY with the scalar walk rather than on a tolerance.
+CLAY_FN float ctape_combine_dist(float a, float b, int mode, int profile, float k, float r2) {
+    if (mode == ccombine_add) return ctape_smin_m(profile, a, b, k).x;
+    // b carves out of a: -smin(-a, b)
+    if (mode == ccombine_subtract) return -ctape_smin(profile, -a, b, k);
+    if (mode == ccombine_intersect) return -ctape_smin(profile, -a, -b, k);
+    // Paint is colour-only, field untouched — so for a distance query it is a
+    // pure no-op, and the operand it combines is not read at all.
+    if (mode == ccombine_paint) return a;
+    if (mode == ccombine_relief || mode == ccombine_incise) {
+        float width = cmax(r2, 1e-6f);
+        float w = 1.0f - cclamp(b / width, 0.0f, 1.0f);
+        w = w * w * (3.0f - 2.0f * w);
+        return a - (mode == ccombine_relief ? k : -k) * w;
+    }
+    if (mode == ccombine_groove) return op_groove(a, b, k, r2);
+    if (mode == ccombine_tongue) return op_tongue(a, b, k, r2);
+    if (mode == ccombine_pipe) return op_pipe(a, b, k);
+    if (mode == ccombine_engrave) return op_engrave(a, b, k);
+    if (mode == ccombine_emboss) return op_emboss(a, b, k);
+    if (mode == ccombine_inset) return op_inset(a, b, k);
+    if (mode == ccombine_shell) return op_shell_union(a, b, k);
+    if (mode == ccombine_replace) return op_replace(a, b);
+    // unknown modes fall through as identity (forward compatibility)
+    return a;
+}
+
 CLAY_FN CTapeValue ctape_combine_values(CTapeValue a, CTapeValue b, int mode, int profile,
                                         float k, float r2) {
     CTapeValue r;
-    r.d = a.d;
+    // One definition of each mode's distance, shared with the distance-only
+    // callers. Everything below decides COLOUR.
+    r.d = ctape_combine_dist(a.d, b.d, mode, profile, k, r2);
     r.color = a.color;
     if (mode == ccombine_add) {
-        cfloat2 dm = ctape_smin_m(profile, a.d, b.d, k);
-        r.d = dm.x;
-        r.color = cmix(a.color, b.color, dm.y);
+        r.color = cmix(a.color, b.color, ctape_smin_m(profile, a.d, b.d, k).y);
     } else if (mode == ccombine_subtract) {
-        // b carves out of a: -smin(-a, b)
-        r.d = -ctape_smin(profile, -a.d, b.d, k);
     } else if (mode == ccombine_intersect) {
-        r.d = -ctape_smin(profile, -a.d, -b.d, k);
     } else if (mode == ccombine_paint) {
         // color-only, field untouched
         float support = cmax(ctape_blend_support(profile, k), k);
@@ -1037,36 +1082,19 @@ CLAY_FN CTapeValue ctape_combine_values(CTapeValue a, CTapeValue b, int mode, in
         // Offsetting the accumulated distance moves its isosurface along that
         // field's own gradient, which IS the surface normal. So this displaces
         // the existing surface along its normal rather than approximating it.
-        float width = cmax(r2, 1e-6f);
-        float w = 1.0f - cclamp(b.d / width, 0.0f, 1.0f);
-        // Smoothstep rather than linear: a linear taper leaves a visible crease
-        // at the region's rim, where the weight's slope jumps from 1/width to 0.
-        w = w * w * (3.0f - 2.0f * w);
-        // One branch, two directions: relief lifts the surface out along its
-        // normal, incise pushes it in. Sharing the body is how they stay each
-        // other's inverse as either changes.
-        r.d = a.d - (mode == ccombine_relief ? k : -k) * w;
         // The colour follows the material the relief moved, not the region's.
     } else if (mode == ccombine_groove) {
-        r.d = op_groove(a.d, b.d, k, r2);
     } else if (mode == ccombine_tongue) {
-        r.d = op_tongue(a.d, b.d, k, r2);
         if (r.d < a.d) r.color = b.color;
     } else if (mode == ccombine_pipe) {
-        r.d = op_pipe(a.d, b.d, k);
         if (r.d < a.d) r.color = b.color;
     } else if (mode == ccombine_engrave) {
-        r.d = op_engrave(a.d, b.d, k);
     } else if (mode == ccombine_emboss) {
-        r.d = op_emboss(a.d, b.d, k);
         if (r.d < a.d) r.color = b.color;
     } else if (mode == ccombine_inset) {
-        r.d = op_inset(a.d, b.d, k);
     } else if (mode == ccombine_shell) {
-        r.d = op_shell_union(a.d, b.d, k);
         if (r.d < a.d) r.color = b.color;
     } else if (mode == ccombine_replace) {
-        r.d = op_replace(a.d, b.d);
         if (b.d < 0.0f) r.color = b.color;
     }
     // unknown modes fall through as identity (forward compatibility)

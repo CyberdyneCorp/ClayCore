@@ -645,3 +645,61 @@ than pure thread-count scaling would predict.
 What settles it is the measurement `batch-brick-eval` already used: CPU time over
 wall time inside the evaluate call, i.e. cores actually used. That found 6.7-8.9
 of 24 on x86-64 and is how the per-brick dispatch barrier was diagnosed.
+
+# Task 1.7 built, 2026-08-23: the combine splits, and the coloured path got faster too
+
+#220's `ctape_combine_dist` is in, and the CPU blocked evaluator uses it whenever
+`out.colors_rgb == nullptr`. Two results, one of them not predicted by anything
+above.
+
+## One definition, not two
+
+`ctape_combine_values` CALLS `ctape_combine_dist` for its distance and keeps only
+the colour logic. So each mode's distance has exactly one definition and the two
+cannot drift — the hazard that made this look like a bigger change than it is.
+The `add` case evaluates `ctape_smin_m` a second time for the blend weight its
+colour needs; both calls are pure with identical arguments, so a compiler that
+does common-subexpression elimination costs the coloured path nothing.
+
+Both constraints from #207 are honoured: the `add` distance calls `ctape_smin_m`
+rather than the plain `ctape_smin` (different `h` formulation, different
+zero-support guard, different last bit), and `ccombine_paint` returns the
+accumulator untouched.
+
+## The measurement, with its own control
+
+`st_main` has no distance-only path, so ITS coloured-vs-distance-only ratio must
+read 1.00x. It reads **1.000**, which is what makes the rest trustworthy.
+Interleaved, five rounds, 12 spheres, 100k points, single-threaded:
+
+| | main | this change | |
+|---|---:|---:|---:|
+| coloured | 7.22 ms | **5.83 ms** | **1.24x faster** |
+| distance only | 7.22 ms | **3.82 ms** | **1.89x faster** |
+
+Ranges do not overlap on either row (main 7.22-7.26, coloured 5.79-6.16,
+distance-only 3.82-3.99). At 200 spheres the same shape: 104.95 -> 82.7 coloured,
+-> 65.6 distance-only.
+
+## The unpredicted half: splitting made the COLOURED path 1.24x faster
+
+Nothing above expected this, and the honest reading is that the prediction was
+about the wrong thing. Extracting the distance leaves `ctape_combine_values` as a
+chain of mostly EMPTY branches — six of its thirteen modes now do nothing but
+fall through — and a tight distance function beside it. The compiler lays that
+out better than the interleaved original, and it more than pays for the second
+`ctape_smin_m`.
+
+So the change is not a trade of colour cost against distance cost. It is faster
+on both paths, and the coloured half of that was free.
+
+Worth stating because the reasoning that led here was wrong in a useful way:
+this was scoped as "stop distance-only queries paying for colour", and the
+mechanism that delivers it — one small hot function instead of one large mixed
+one — helps the coloured queries too.
+
+## What is still to be taken
+
+The gated benchmarks were measured while this shared box was busy and several
+returned cv of 20-26%. They are not quoted here; the single-threaded figures
+above had their own control and non-overlapping ranges, and are.

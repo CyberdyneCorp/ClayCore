@@ -48,25 +48,19 @@
       block
 - [ ] 1.6 Batch and grid entry points feed blocks and handle the remainder, so block
       size is invisible above the backend
-- [~] 1.7 ATTEMPTED, and it does not live here. A distance-only stack that reuses
-      `ctape_combine_values` by rebuilding a `CTapeValue` per operand is **0.57x —
-      slower**, because the round-trip costs more than the colour it removes.
-      Bypassing the combine instead measures **2.2x on top of the blocked path we
-      ship and ~10x against the scalar reference** — re-taken on a quiet machine
-      with a same-code control at 1.020x (0.98-1.04), so +/-4% and both findings
-      clear it by a wide margin. So the prize is roughly twice
-      what this task predicted and the hot paths are exactly the ones that want
-      it — brick fills, raycasts and all four gradient taps are distance-only.
-      There is no distance-only combine in the kernel to call: `speed-the-tape-prim-path`
-      split colour out of the PRIM path and the COMBINE path never got the same
-      treatment. That is a five-dialect kernel change with its own parity
-      obligations, so it is **#220** rather than something smuggled into a backend
-      task. **PROMOTED TO NEXT by the arm64 data**: colour is 2.33x standalone
-      there, the largest single effect in #207, and it no longer needs a blocked
-      baseline under it — that requirement was an x86-64 measurement artifact. Details, including which modes actually entangle colour with
-      distance, in `design.md`. Coverage kept from the attempt: the identity
-      tests now assert a distance-only query returns identical distances, which
-      nothing exercised before
+- [x] 1.7 DONE, via #220's kernel split. `ctape_combine_dist` holds the distance
+      half of every combine mode and `ctape_combine_values` CALLS it, so there is
+      one definition rather than two that can drift. The blocked evaluator keeps
+      one float per stack slot when `out.colors_rgb == nullptr`, and the rare
+      gated/transitional/feathered combines still go through the CTapeValue form,
+      which is correct because no distance expression reads a colour.
+      Single-threaded, interleaved, with a control that reads 1.000: **distance
+      only 1.89x faster than main, and the COLOURED path 1.24x faster too** —
+      the second was not predicted and is the more interesting half. Extracting
+      the distance leaves the colour chain as mostly empty branches, which the
+      compiler lays out better than the interleaved original.
+      Both #207 constraints honoured: `add` keeps calling `ctape_smin_m`, and
+      `ccombine_paint` returns the accumulator untouched.
 - [x] 1.8 Parity test wired into the existing suite: every kernel, blocked path vs
       scalar, on the standard corpus. The prototype was BIT-IDENTICAL on its subset,
       so assert identity and let the 1e-6 relative bound catch only opcodes that
