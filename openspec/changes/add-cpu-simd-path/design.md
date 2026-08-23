@@ -1342,3 +1342,49 @@ worth nothing on the coloured walk, and it is 1.02x once the primitive is dear.
 The blocked path is also already threaded, so it would dilute again end to end
 the way every ratio in this file does. Recorded here and filed separately;
 sizing candidate 4 was the task, and candidate 4's own answer is no.
+# What this change has bought, end to end, 2026-08-23
+
+Measured against **`fd70cf4`** — the commit immediately before #218, and so before
+any of this work — rather than chained from the per-PR ratios, which were taken on
+different days under different conditions and do not multiply honestly. Both
+builds configured identically, medians of 11, cv under 5.5% on every row of both
+runs. x86-64, 24 hardware threads.
+
+| benchmark | before | after | | time removed |
+|---|---:|---:|---:|---:|
+| `BM_EvalPoints` — raw point evaluation | 6.28 ms | 2.68 ms | **2.34x** | **57%** |
+| `BM_DabRefillDenseDoc` — a dab's brick refill | 1.01 ms | 0.466 ms | **2.17x** | **54%** |
+| `BM_MeshBricksGradDenseDoc` — brick mesh gradients | 7.32 ms | 5.48 ms | **1.34x** | **25%** |
+| `BM_BrickFill` — whole-grid fill | 28.6 ms | 23.5 ms | **1.22x** | **18%** |
+
+And the figure #207 actually opened on — the interpreter against the same maths
+written inline, bit-identical to it:
+
+| | vs inline maths |
+|---|---:|
+| when #207 was filed (`ctape_eval`, still the reference) | **23.5x** |
+| what ships now (blocked, distance-only) | **3.30x** |
+
+So the interpreter has gone from about 95% of a distance-only evaluation to about
+70%, and the arithmetic from 5% of the work to roughly 30%.
+
+## Read these with three caveats
+
+**They are x86-64.** arm64 got 1.12x-1.55x from #218 where this machine got
+1.22x-1.93x, so the combined figure will be smaller on Apple silicon. #223 should
+be the exception and land LARGER there — 1.67x against 2.2x here, while blocking
+was 1.14x against 3.5x.
+
+**The iPad evidence covers #218 only** and is still not publishable: 1.64x on
+`sdf_stamp_cpu`, 1.71x on `stroke_carve`, 1.55x on `sdf_consolidate`, with
+`sdf_stamp_metal` and the voxel cases at 0.99-1.00x as controls — but run 1 was
+drift-flagged at x1.49 and run 2 was thermally invalid. 1.39x is the floor and
+1.64x the better estimate. Task 1.12 stays open.
+
+**Nothing here touches the Metal path.** `sdf_stamp_metal` sits at 0.99x by
+design, and that control is what makes the CPU movement credible rather than a
+thermal artifact.
+
+The shape across the four rows is the honest summary: **a little over 2x where
+evaluation dominates, tapering to 1.2x where it does not.** No single multiple
+describes this change, and any figure quoted from it should name its benchmark.
