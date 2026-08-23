@@ -882,6 +882,13 @@ struct clay_mask {
 
 // The same discriminator, one shape different: a standalone mesh is held by
 // value because every producer in this file builds one in place, and `data` is
+// Bytes the library owns, handed out and released. One type for every
+// serialized payload, so a host learns the lifetime once rather than per
+// format. Nothing here interprets the bytes.
+struct clay_blob {
+    std::vector<std::uint8_t> bytes;
+};
+
 // simply unused by a borrow. Declared above clay_document because the document
 // keeps a map of these by value.
 struct clay_mesh {
@@ -1905,9 +1912,37 @@ clay_document* clay_document_create(void) { return new clay_document(); }
 
 void clay_document_destroy(clay_document* doc) { delete doc; }
 
+const uint8_t* clay_blob_data(const clay_blob* blob) {
+    if (!blob || blob->bytes.empty()) return nullptr;
+    return blob->bytes.data();
+}
+
+size_t clay_blob_size(const clay_blob* blob) { return blob ? blob->bytes.size() : 0; }
+
+void clay_blob_destroy(clay_blob* blob) { delete blob; }
+
 clay_result clay_document_save(const clay_document* doc, const char* path) {
     if (!doc || !path) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or path");
     return from_io(io::save_clayspace_file(doc->doc, path));
+}
+
+clay_result clay_document_save_memory(const clay_document* doc, clay_blob** out_blob) {
+    if (!doc || !out_blob) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out_blob");
+    *out_blob = nullptr;
+    *out_blob = new clay_blob{io::save_clayspace(doc->doc)};
+    return CLAY_OK;
+}
+
+clay_result clay_document_load_memory(const uint8_t* data, size_t size,
+                                      clay_document** out_doc) {
+    if (!out_doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out pointer");
+    *out_doc = nullptr;
+    if (!data || size == 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null or empty buffer");
+    auto doc = std::make_unique<clay_document>();
+    io::IoStatus s = io::load_clayspace(data, size, &doc->doc);
+    if (!s.ok()) return from_io(s);
+    *out_doc = doc.release();
+    return CLAY_OK;
 }
 
 clay_result clay_document_load(const char* path, clay_document** out_doc) {
@@ -4129,19 +4164,108 @@ clay_result clay_mesh_measure(const clay_mesh* mesh, double* out_signed_volume,
     return CLAY_OK;
 }
 
+namespace {
+
+// One normaliser for every format name that crosses, so the reader and the
+// writer cannot disagree about what "OBJ" means. They did: the loader
+// lowercased and the writer did not, so a host could load MODEL.OBJ and then
+// be refused when it saved back to the path it had just read.
+std::string lower_ascii(std::string text) {
+    for (char& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return text;
+}
+
+std::string extension_of(const std::string& path) {
+    const std::size_t dot = path.find_last_of('.');
+    return dot == std::string::npos ? std::string{} : lower_ascii(path.substr(dot + 1));
+}
+
+// A caller's budget, or the library's defaults. Zero means "the default"
+// rather than "allow nothing", which is what a zeroed struct would say.
+clay_result import_limits(const clay_import_budget* budget, io::ImportBudget* out) {
+    if (!budget) return CLAY_OK;
+    clay_import_budget b;
+    clay_result r = read_desc(budget, kImportBudgetOriginal, &b);
+    if (r != CLAY_OK) return r;
+    if (b.max_vertices) out->max_vertices = static_cast<std::size_t>(b.max_vertices);
+    if (b.max_triangles) out->max_triangles = static_cast<std::size_t>(b.max_triangles);
+    return CLAY_OK;
+}
+
+}  // namespace
+
 clay_result clay_mesh_save(const clay_mesh* mesh, const char* path) {
     const mesh::Mesh* m = nullptr;
     clay_result r = resolve_mesh(mesh, &m);
     if (r != CLAY_OK) return r;
     if (!path) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null path");
     std::string p(path);
-    std::size_t dot = p.find_last_of('.');
-    std::string ext = dot == std::string::npos ? "" : p.substr(dot + 1);
+    const std::string ext = extension_of(p);
     if (ext == "obj") return from_io(io::save_obj_file(*m, p));
     if (ext == "ply") return from_io(io::save_ply_file(*m, p));
     if (ext == "fbx") return from_io(io::save_fbx_file(*m, p));
     if (ext == "glb") return from_io(io::save_glb_file(*m, p));
     return fail(CLAY_ERROR_UNSUPPORTED, "unknown extension: " + ext);
+}
+
+clay_result clay_mesh_save_memory(const clay_mesh* mesh, const char* format,
+                                  clay_blob** out_blob) {
+    if (!out_blob) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_blob");
+    *out_blob = nullptr;
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh, &m);
+    if (r != CLAY_OK) return r;
+    if (!format) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null format");
+    const std::string name = lower_ascii(format);
+
+    std::vector<std::uint8_t> bytes;
+    if (name == "obj") {
+        // No mtl NAME, so no mtllib line: a buffer has no companion file, and
+        // naming one that was never written is worse than naming none.
+        const std::string text = io::save_obj(*m, "claycore", {});
+        bytes.assign(text.begin(), text.end());
+    } else if (name == "ply") {
+        bytes = io::save_ply(*m);
+    } else if (name == "fbx") {
+        bytes = io::save_fbx(*m);
+    } else if (name == "glb") {
+        bytes = io::save_glb(*m);
+    } else {
+        return fail(CLAY_ERROR_UNSUPPORTED, "unknown format: " + name);
+    }
+    *out_blob = new clay_blob{std::move(bytes)};
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_load_memory(const uint8_t* data, size_t size, const char* format,
+                                  const clay_import_budget* budget, clay_mesh** out_mesh) {
+    if (!out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_mesh");
+    *out_mesh = nullptr;
+    if (!data || size == 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null or empty buffer");
+    if (!format) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null format");
+    const std::string name = lower_ascii(format);
+
+    io::ImportBudget limits;
+    clay_result r = import_limits(budget, &limits);
+    if (r != CLAY_OK) return r;
+
+    auto loaded = std::make_unique<clay_mesh>();
+    io::IoStatus status;
+    if (name == "obj") {
+        status = io::load_obj(std::string(reinterpret_cast<const char*>(data), size),
+                              &loaded->data, limits);
+    } else if (name == "ply") {
+        status = io::load_ply(data, size, &loaded->data, limits);
+    } else if (name == "fbx") {
+        status = io::load_fbx(data, size, &loaded->data, limits);
+    } else if (name == "glb") {
+        status = io::load_glb(data, size, &loaded->data, limits);
+    } else {
+        return fail(CLAY_ERROR_UNSUPPORTED, "unknown format: " + name);
+    }
+    if (!status.ok()) return from_io(status);
+    *out_mesh = loaded.release();
+    return CLAY_OK;
 }
 
 clay_result clay_mesh_load(const char* path, const clay_import_budget* budget,
@@ -4150,22 +4274,13 @@ clay_result clay_mesh_load(const char* path, const clay_import_budget* budget,
     *out_mesh = nullptr;
 
     io::ImportBudget limits;
-    if (budget) {
-        clay_import_budget b;
-        clay_result r = read_desc(budget, kImportBudgetOriginal, &b);
-        if (r != CLAY_OK) return r;
-        // Zero means "the library's default" rather than "allow nothing",
-        // which is what a zeroed struct would otherwise say.
-        if (b.max_vertices) limits.max_vertices = static_cast<std::size_t>(b.max_vertices);
-        if (b.max_triangles) limits.max_triangles = static_cast<std::size_t>(b.max_triangles);
-    }
+    clay_result r = import_limits(budget, &limits);
+    if (r != CLAY_OK) return r;
 
     std::string p(path);
-    std::size_t dot = p.find_last_of('.');
-    std::string ext = dot == std::string::npos ? "" : p.substr(dot + 1);
     // Case-insensitive: a file called MODEL.OBJ is an OBJ file, and the Python
     // loader has always accepted one. The C ABI refusing it was a plain bug.
-    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    const std::string ext = extension_of(p);
 
     auto loaded = std::make_unique<clay_mesh>();
     io::IoStatus status;

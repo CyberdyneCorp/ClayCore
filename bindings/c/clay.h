@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 41
+#define CLAY_ABI_MINOR 42
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -349,6 +349,51 @@ void clay_document_destroy(clay_document* doc);
 
 clay_result clay_document_save(const clay_document* doc, const char* path);
 clay_result clay_document_load(const char* path, clay_document** out_doc);
+
+/* -- serializing without a file -------------------------------------------- */
+
+/* Bytes the library owns, for a host that has nowhere to put a path.
+ *
+ * Every format here has always been implemented against buffers — the *_file
+ * entry points are wrappers over them — and only the wrappers crossed. That is
+ * a problem where this library is pointed: documents on iPadOS arrive from a
+ * document provider or a share sheet behind a security-scoped URL whose
+ * lifetime the host does not own, a host syncing to a server needs bytes to
+ * send, a host keeping projects in its own container needs bytes to store, and
+ * a WASM build has no filesystem at all. All of them were paying for a
+ * temporary file: a second copy of the document, a path to create and clean up
+ * (twice, if the process died), and a full disk as a failure mode for an
+ * operation that never asked to touch a disk.
+ *
+ * An OWNER HANDLE rather than the size-query pattern, because answering "how
+ * big" would mean serializing the whole document to find out and serializing
+ * it again to fill the buffer. Same shape as clay_mesh and clay_tape: take it,
+ * borrow from it, release it. */
+typedef struct clay_blob clay_blob; /* opaque */
+
+/* Borrowed, valid until clay_blob_destroy, and unaffected by any later edit to
+ * whatever produced it — the bytes were serialized when the handle was made,
+ * so a host may hand them to an asynchronous writer without copying first.
+ * clay_blob_data may return NULL only for a zero-length blob. */
+const uint8_t* clay_blob_data(const clay_blob* blob);
+size_t clay_blob_size(const clay_blob* blob);
+void clay_blob_destroy(clay_blob* blob);
+
+/* The same bytes clay_document_save writes, byte for byte. Free the result
+ * with clay_blob_destroy. */
+clay_result clay_document_save_memory(const clay_document* doc, clay_blob** out_blob);
+
+/* And back. Accepts exactly what clay_document_load accepts, and refuses a
+ * truncated or corrupt buffer without reading past `size`.
+ *
+ * NO BUDGET, deliberately. The only thing clay_import_budget bounds on the
+ * path loader is max_file_bytes, which is a ceiling on the bytes a loader will
+ * read into memory BEFORE it sizes a buffer — and a caller holding a buffer
+ * has already done that read. The engine's own load_clayspace takes no budget
+ * for the same reason. A parameter that cannot act is worse than an absent
+ * one, so this says why instead of accepting one and ignoring it. */
+clay_result clay_document_load_memory(const uint8_t* data, size_t size,
+                                      clay_document** out_doc);
 
 clay_result clay_add_sdf_layer(clay_document* doc, const char* name,
                                clay_layer_id* out_layer);
@@ -1688,6 +1733,31 @@ typedef struct clay_import_budget {
  * CLAY_ERROR_BUDGET_EXCEEDED rather than allocating. */
 clay_result clay_mesh_load(const char* path, const clay_import_budget* budget,
                            clay_mesh** out_mesh);
+
+/* The same two, without a path. See clay_blob above for why this exists and
+ * why it is an owner handle.
+ *
+ * FORMAT BY NAME, because a buffer has no extension: "obj", "ply", "fbx",
+ * "glb" — the extensions without the dot, matched case-insensitively like the
+ * path forms, so a host that already parsed an extension can pass it through.
+ * An unknown name is CLAY_ERROR_UNSUPPORTED, never a silent default: writing
+ * OBJ because the caller asked for something unrecognised produces a file the
+ * host will hand to a user under the wrong name.
+ *
+ * The bytes are identical to what clay_mesh_save writes for the same mesh and
+ * format, with ONE stated difference: an in-memory OBJ carries no `mtllib`
+ * line. The path form writes a companion .mtl beside the object file and names
+ * it; a buffer has no companion, and naming a file that was never written is
+ * worse than naming none.
+ *
+ * `budget` may be NULL for the library's defaults and is enforced exactly as
+ * the path loader enforces it — a buffer from a network or a pasteboard is the
+ * untrusted input the guardrails exist for. Free a produced mesh with
+ * clay_mesh_destroy and a produced blob with clay_blob_destroy. */
+clay_result clay_mesh_save_memory(const clay_mesh* mesh, const char* format,
+                                  clay_blob** out_blob);
+clay_result clay_mesh_load_memory(const uint8_t* data, size_t size, const char* format,
+                                  const clay_import_budget* budget, clay_mesh** out_mesh);
 
 /* -- attribute transfer (add-mesh-attribute-transfer) ----------------------- */
 

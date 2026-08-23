@@ -452,6 +452,45 @@ void save_mesh_any(const mesh::Mesh& m, const std::string& path) {
                                 "' (supported: .obj, .ply, .fbx, .glb)");
 }
 
+// The same two dispatches against BYTES rather than a path. A buffer has no
+// extension, so the format is named — the extension without the dot, matched
+// the same way.
+std::vector<std::uint8_t> save_mesh_bytes_any(const mesh::Mesh& m, const std::string& format) {
+    std::string name = format;
+    for (char& c : name) c = static_cast<char>(std::tolower(c));
+    if (name == "obj") {
+        // No mtl NAME, so no mtllib line: a buffer has no companion file.
+        const std::string text = io::save_obj(m, "claycore", {});
+        return std::vector<std::uint8_t>(text.begin(), text.end());
+    }
+    if (name == "ply") return io::save_ply(m);
+    if (name == "fbx") return io::save_fbx(m);
+    if (name == "glb") return io::save_glb(m);
+    throw std::invalid_argument("unsupported mesh format '" + name +
+                                "' (supported: obj, ply, fbx, glb)");
+}
+
+mesh::Mesh load_mesh_bytes_any(const std::uint8_t* data, std::size_t size,
+                               const std::string& format, const io::ImportBudget& limits) {
+    std::string name = format;
+    for (char& c : name) c = static_cast<char>(std::tolower(c));
+    mesh::Mesh out;
+    if (name == "obj") {
+        check_io(io::load_obj(std::string(reinterpret_cast<const char*>(data), size), &out,
+                              limits));
+    } else if (name == "ply") {
+        check_io(io::load_ply(data, size, &out, limits));
+    } else if (name == "fbx") {
+        check_io(io::load_fbx(data, size, &out, limits));
+    } else if (name == "glb") {
+        check_io(io::load_glb(data, size, &out, limits));
+    } else {
+        throw std::invalid_argument("unsupported mesh format '" + name +
+                                    "' for loading (supported: obj, ply, fbx, glb)");
+    }
+    return out;
+}
+
 mesh::Mesh load_mesh_any(const std::string& path, const io::ImportBudget& limits) {
     std::size_t dot = path.find_last_of('.');
     std::string ext = dot == std::string::npos ? "" : path.substr(dot + 1);
@@ -3436,7 +3475,20 @@ NB_MODULE(pyclay, m) {
                      "nothing for a mesh layer, which is why this lives here.")
         .def("save",
              [](const PyMesh& pm, const std::string& path) { save_mesh_any(pm.data(), path); },
-             "path"_a, "Save by extension: .obj, .ply, .fbx or .glb");
+             "path"_a, "Save by extension: .obj, .ply, .fbx or .glb")
+        .def(
+            "to_bytes",
+            [](const PyMesh& pm, const std::string& format) {
+                const std::vector<std::uint8_t> bytes = save_mesh_bytes_any(pm.data(), format);
+                return nb::bytes(bytes.data(), bytes.size());
+            },
+            "format"_a,
+            "The same bytes `save` would write, without a path: 'obj', 'ply',\n"
+            "'fbx' or 'glb', matched case-insensitively.\n\n"
+            "ONE stated difference from `save`: an in-memory OBJ carries no\n"
+            "`mtllib` line. The path form writes a companion .mtl beside the\n"
+            "object file and names it; a buffer has no companion, and naming a\n"
+            "file that was never written is worse than naming none.");
 
     // -- fixed-topology mesh brushes -------------------------------------------------
     nb::class_<PyVertexDeltas>(
@@ -4866,6 +4918,16 @@ NB_MODULE(pyclay, m) {
                  check_io(io::save_clayspace_file(*d.doc, path));
              },
              "path"_a, "Save the document as .clayspace")
+        .def(
+            "to_bytes",
+            [](const PyDocument& d) {
+                const std::vector<std::uint8_t> bytes = io::save_clayspace(*d.doc);
+                return nb::bytes(bytes.data(), bytes.size());
+            },
+            "The same bytes `save` would write, without a path — for a host\n"
+            "whose documents live in a container, a database or a network\n"
+            "request rather than on a filesystem. Read them back with\n"
+            "clay.load_bytes.")
         .def("remove_layer",
              [](PyDocument& d, scene::LayerId layer) {
                  apply_or_throw(d.doc->document,
@@ -6055,6 +6117,38 @@ NB_MODULE(pyclay, m) {
               return d;
           },
           "path"_a, "Load a .clayspace document");
+    m.def(
+        "load_bytes",
+        [](nb::bytes data) {
+            PyDocument d;
+            check_io(io::load_clayspace(reinterpret_cast<const std::uint8_t*>(data.c_str()),
+                                        data.size(), d.doc.get()));
+            return d;
+        },
+        "data"_a,
+        "Load a .clayspace document from BYTES — the counterpart to\n"
+        "Document.to_bytes, and what a host uses when its documents arrive\n"
+        "from a container, a database or a network request rather than from a\n"
+        "path. Accepts exactly what `load` accepts and refuses a truncated or\n"
+        "corrupt buffer without reading past its length.");
+    m.def(
+        "load_mesh_bytes",
+        [](nb::bytes data, const std::string& format, std::size_t max_vertices,
+           std::size_t max_triangles) {
+            io::ImportBudget limits;
+            if (max_vertices) limits.max_vertices = max_vertices;
+            if (max_triangles) limits.max_triangles = max_triangles;
+            PyMesh out;
+            out.m = load_mesh_bytes_any(reinterpret_cast<const std::uint8_t*>(data.c_str()),
+                                        data.size(), format, limits);
+            return out;
+        },
+        "data"_a, "format"_a, "max_vertices"_a = 0, "max_triangles"_a = 0,
+        "Load a mesh from BYTES, naming the format — 'obj', 'ply', 'fbx' or\n"
+        "'glb', matched case-insensitively, because a buffer has no extension.\n\n"
+        "The budget is enforced exactly as load_mesh enforces it: a buffer\n"
+        "from a network or a pasteboard is the untrusted input it exists for.\n"
+        "0 means the library's default.");
     m.def("backends",
           []() {
               std::vector<std::string> names;

@@ -5815,3 +5815,73 @@ def test_volume_and_area_and_the_sign_of_the_volume():
     flipped = TETRA_INDICES.reshape(-1, 3)[:, [0, 2, 1]].reshape(-1).astype(np.uint32)
     inverted = clay.Mesh.from_triangles(TETRA_POSITIONS, flipped)
     assert inverted.signed_volume == pytest.approx(-1 / 6, rel=1e-5)
+
+
+# -- serializing without a file (serialize-without-a-file) --------------------
+#
+# Every format was implemented against buffers and only the path wrappers
+# crossed, so a host whose documents arrive from a container, a network or a
+# document provider had to round-trip through a temporary file.
+
+def test_document_round_trips_through_bytes(tmp_path):
+    doc, _ = build_body()
+    data = doc.to_bytes()
+    assert isinstance(data, bytes) and len(data) > 0
+
+    # The whole argument: one serializer, reached two ways.
+    path = tmp_path / "same.clayspace"
+    doc.save(str(path))
+    assert data == path.read_bytes()
+
+    back = clay.load_bytes(data)
+    probes = np.array([[0, 0, 0], [0.3, 0.1, -0.2], [2, 2, 2]], dtype=np.float32)
+    assert np.allclose(back.eval(probes), doc.eval(probes))
+
+
+def test_every_mesh_format_round_trips_through_bytes(tmp_path):
+    doc, _ = build_body()
+    mesh = doc.mesh(resolution=24)
+
+    for fmt in ("obj", "ply", "fbx", "glb"):
+        data = mesh.to_bytes(fmt)
+        assert len(data) > 0, fmt
+        back = clay.load_mesh_bytes(data, fmt)
+        assert back.triangle_count > 0, fmt
+
+        # OBJ is the one stated difference — see the mtllib test below.
+        if fmt != "obj":
+            path = tmp_path / f"same.{fmt}"
+            mesh.save(str(path))
+            assert data == path.read_bytes(), fmt
+
+
+def test_in_memory_obj_names_no_material_file():
+    doc, _ = build_body()
+    text = doc.mesh(resolution=16).to_bytes("obj").decode()
+    assert "mtllib" not in text  # a buffer has no companion .mtl to name
+    assert "\nv " in text        # and it is still an OBJ
+
+
+def test_bytes_loaders_refuse_what_they_should():
+    doc, _ = build_body()
+    mesh = doc.mesh(resolution=16)
+
+    with pytest.raises(ValueError):
+        mesh.to_bytes("stl")               # not a default, a refusal
+    with pytest.raises(ValueError):
+        clay.load_mesh_bytes(b"whatever", "stl")
+    with pytest.raises(Exception):
+        clay.load_bytes(b"not a clayspace document at all")
+
+    # A budget guards a buffer exactly as it guards a file.
+    data = mesh.to_bytes("ply")
+    with pytest.raises(Exception):
+        clay.load_mesh_bytes(data, "ply", max_vertices=2)
+    assert clay.load_mesh_bytes(data, "ply", max_vertices=10_000_000).triangle_count > 0
+
+
+def test_format_name_is_case_insensitive():
+    doc, _ = build_body()
+    mesh = doc.mesh(resolution=16)
+    assert mesh.to_bytes("PLY") == mesh.to_bytes("ply")
+    assert clay.load_mesh_bytes(mesh.to_bytes("ply"), "Ply").triangle_count > 0

@@ -962,6 +962,7 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Mesh vertex adjacency | `mesh::Adjacency` | `MeshSculptor.class_count` | `clay_mesh_sculptor_class_count` |
 | Mesh stroke undo | `mesh::VertexDeltas` | `clay.VertexDeltas` | `clay_mesh_deltas_*` |
 | Picking a mesh layer | `pick::raycast_mesh`, `mesh::Bvh::raycast` | `MeshSculptor.raycast(...)` | `clay_mesh_sculptor_raycast` |
+| Serializing without a path | `io::save_clayspace`, `save_obj/ply/fbx/glb` | `Document.to_bytes()`, `Mesh.to_bytes(fmt)`, `clay.load_bytes`, `clay.load_mesh_bytes` | `clay_document_save_memory`, `clay_mesh_save_memory`, `clay_*_load_memory`, `clay_blob_*` |
 | What a mesh's quality actually is | `mesh::validate`, `signed_volume`, `surface_area` | `Mesh.validation_report(...)`, `.signed_volume`, `.surface_area` | `clay_mesh_validation_report`, `clay_mesh_measure` |
 
 Snakehook has no dedicated C entry point on purpose: it is a **resolver** that
