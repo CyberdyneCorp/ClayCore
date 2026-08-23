@@ -60,7 +60,7 @@
       There is no distance-only combine in the kernel to call: `speed-the-tape-prim-path`
       split colour out of the PRIM path and the COMBINE path never got the same
       treatment. That is a five-dialect kernel change with its own parity
-      obligations, so it is filed separately rather than smuggled into a backend
+      obligations, so it is **#220** rather than something smuggled into a backend
       task. Details, including which modes actually entangle colour with
       distance, in `design.md`. Coverage kept from the attempt: the identity
       tests now assert a distance-only query returns identical distances, which

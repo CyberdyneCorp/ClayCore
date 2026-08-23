@@ -533,8 +533,7 @@ colour"* — and the COMBINE path never did.
 
 Getting this needs the same split one level up: a `ctape_combine_dist` in the
 shared kernel header, which is a five-dialect change with its own parity
-obligations, not a backend task. **Filed as its own change rather than smuggled
-in here.**
+obligations, not a backend task. **Filed as #220** rather than smuggled in here.
 
 The entanglement is smaller than it looks and is worth recording for whoever
 scopes it: only `ccombine_add` genuinely couples, because its colour needs the
