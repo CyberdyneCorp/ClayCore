@@ -1019,12 +1019,10 @@ CLAY_FN CTapeValue ctape_replace_feather(CTapeValue a, CTapeValue b, CLAY_FPTR r
 // in, CTapeValue out. This is the same split `speed-the-tape-prim-path` made one
 // level down, where forty prims were paying for one prim's colour.
 //
-// `ctape_combine_values` CALLS this, so each mode's distance has exactly one
-// definition and the two cannot drift. The `add` case needs the blend weight for
-// its colour and so evaluates `ctape_smin_m` a second time; both calls are pure
-// with identical arguments, so a compiler that eliminates the common
-// subexpression costs the coloured path nothing, and one that does not costs it
-// one smin.
+// `ctape_combine_values` CALLS this for twelve of the thirteen modes, so each of
+// their distances has exactly one definition and the two cannot drift. `add` is
+// the exception, and see the note on it there: it is the one mode whose colour
+// genuinely couples to its distance, and the coupling is not free.
 //
 // NOT `ctape_smin` for the add case, however free that looks. `csmin_quadratic`
 // computes `h = max(s - |a-b|, 0) / s` and returns `cmin(a,b)` outright when the
@@ -1061,12 +1059,39 @@ CLAY_FN float ctape_combine_dist(float a, float b, int mode, int profile, float 
 CLAY_FN CTapeValue ctape_combine_values(CTapeValue a, CTapeValue b, int mode, int profile,
                                         float k, float r2) {
     CTapeValue r;
+    // ADD IS SPECIAL-CASED ON PURPOSE. DO NOT FOLD IT BACK INTO THE SHARED
+    // DISTANCE BELOW.
+    //
+    // It is the one mode whose colour genuinely couples to its distance: the
+    // blend weight that mixes the two colours is the SAME smin that produces the
+    // distance, and `ctape_smin_m` hands back both halves in one call. Routing
+    // add through `ctape_combine_dist` and then asking for the weight separately
+    // evaluates that smin twice.
+    //
+    // #223 did exactly that, on the reasoning that both calls are pure with
+    // identical arguments so common-subexpression elimination would make the
+    // second one free. That is true of the x86-64 toolchains and FALSE of
+    // AppleClang on arm64, which does not eliminate it: 3.40 -> 5.54 ns/call on
+    // an add-only mix, and 4055.9 -> 4992.3 ms end-to-end on `mask_extrude`, the
+    // one device case that is a pure scalar tape workload (#225). Computing it
+    // once here reads 3.71 ns/call. "The compiler will eliminate this" is a
+    // prediction about a toolchain, not a property of the code.
+    //
+    // Add only. Every other mode still goes through `ctape_combine_dist`, so
+    // twelve of thirteen distances keep their single definition.
+    if (mode == ccombine_add) {
+        cfloat2 dm = ctape_smin_m(profile, a.d, b.d, k);
+        r.d = dm.x;
+        r.color = cmix(a.color, b.color, dm.y);
+        return r;
+    }
     // One definition of each mode's distance, shared with the distance-only
     // callers. Everything below decides COLOUR.
     r.d = ctape_combine_dist(a.d, b.d, mode, profile, k, r2);
     r.color = a.color;
     if (mode == ccombine_add) {
-        r.color = cmix(a.color, b.color, ctape_smin_m(profile, a.d, b.d, k).y);
+        // handled above, and kept here so the mode chain still reads as the
+        // full table of modes
     } else if (mode == ccombine_subtract) {
     } else if (mode == ccombine_intersect) {
     } else if (mode == ccombine_paint) {
