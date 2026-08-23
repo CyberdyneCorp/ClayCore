@@ -284,14 +284,26 @@ void VoxelGrid::set(VoxelCoord c, std::uint8_t index) {
             rec.changes[it->second].after = index;
         }
     }
-    // The undo journal, if one is installed. Deliberately NOT coalesced by cell
-    // the way the sculpt layer above is: a sculpt layer is a pass whose net
-    // effect per cell is what a strength dial re-picks, while a replay must
-    // unwind the writes in the order they were made. Coalescing here would be
-    // correct only for a run that never wrote a cell twice, and the verbs that
-    // propagate through levels do exactly that.
-    if (change_sink_) change_sink_->push_back({c, get(c), index});
-    if (write_cell(active_, c, index)) ++change_count_;
+    // The undo journal, if one is installed. Two differences from the sculpt
+    // layer hook above, both deliberate.
+    //
+    // NOT COALESCED BY CELL. A sculpt layer is a pass whose NET effect per cell
+    // is what a strength dial re-picks; a replay must unwind the writes in the
+    // order they were made, and the verbs that propagate through levels write a
+    // cell more than once.
+    //
+    // ONLY WRITES THAT CHANGED SOMETHING. write_cell says whether it did, and
+    // journaling the ones that did not would build undo steps that undo
+    // nothing — erasing an already-empty cell, a flatten meeting a flat
+    // region, a dab landing on empty space. All of those are ordinary here,
+    // and an undo that does nothing is the exact defect this channel exists to
+    // avoid. The sculpt-layer hook above keeps recording them, because a pass's
+    // membership is not the same question.
+    const std::uint8_t before = change_sink_ ? get(c) : std::uint8_t{0};
+    if (write_cell(active_, c, index)) {
+        ++change_count_;
+        if (change_sink_) change_sink_->push_back({c, before, index});
+    }
     if (levels_.size() == 1) return;  // the single-level grid: nothing to carry
     // Down first: it restates this cell's own offset against the parent it just
     // recomputed, which is what the walk back up then replays.

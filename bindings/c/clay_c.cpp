@@ -46,6 +46,7 @@
 #include "clay/scene/armature.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
+#include "clay/session/history.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/cull_index.h"
 #include "clay/scene/curve.h"
@@ -913,7 +914,27 @@ struct clay_document {
     io::ClaySpaceDoc doc;
     // Opt-in undo. Null means off, and a document that never enables it
     // behaves exactly as it did before the feature existed.
-    std::unique_ptr<scene::UndoStack> undo;
+    //
+    // A session::History rather than a scene::UndoStack since
+    // unify-the-undo-history: the same opt-in, the same entry points, and now
+    // spanning voxel grids and mesh layers as well as the edit list. It WRAPS
+    // an UndoStack, so every command path below is unchanged.
+    std::unique_ptr<session::History> undo;
+
+    // The resolvers the history takes, because session sits BELOW io and
+    // cannot name the document that owns the three representations.
+    session::History::GridFor grid_for() {
+        return [this](scene::LayerId id) -> voxel::VoxelGrid* {
+            auto it = doc.voxel_layers.find(id);
+            return it == doc.voxel_layers.end() ? nullptr : &it->second;
+        };
+    }
+    session::History::MeshFor mesh_for() {
+        return [this](scene::LayerId id) -> mesh::Mesh* {
+            auto it = doc.mesh_layers.find(id);
+            return it == doc.mesh_layers.end() ? nullptr : &it->second;
+        };
+    }
     // Borrowed handles are the document's, one per layer, handed back by
     // address: repeated lookups return the same handle, nothing leaks, and
     // std::map keeps the addresses stable as more layers arrive.
@@ -1086,6 +1107,26 @@ clay_result validate_item(const clay_item& item) {
 // -- voxel handle resolution, below the handles it touches -------------------
 
 voxel::VoxelCoord to_coord(const std::int32_t c[3]) { return {c[0], c[1], c[2]}; }
+
+// Bracket a voxel edit so it becomes ONE undo step (unify-the-undo-history).
+//
+// A standalone grid has no document and therefore no history: undo is a
+// document concept, and a grid made with clay_voxel_grid_create is not in one.
+// A borrowed handle names its document and layer, which is exactly what the
+// history needs, so the bracket costs a null check on the common path.
+//
+// RAII because the verbs below have many early returns, and a step left open
+// would install a sink on a grid nobody is recording — which would attribute
+// the NEXT edit to this one.
+struct VoxelStep {
+    clay_document* doc = nullptr;
+    voxel::VoxelGrid* grid = nullptr;
+
+    VoxelStep(const clay_voxel_grid* handle, voxel::VoxelGrid* g);
+    ~VoxelStep();
+    VoxelStep(const VoxelStep&) = delete;
+    VoxelStep& operator=(const VoxelStep&) = delete;
+};
 
 clay_result resolve(const clay_voxel_grid* grid, voxel::VoxelGrid** out) {
     if (!grid) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null voxel grid");
@@ -1896,6 +1937,17 @@ clay_result eval_requests_in_chunks(const clay_document* doc,
     return CLAY_OK;
 }
 
+VoxelStep::VoxelStep(const clay_voxel_grid* handle, voxel::VoxelGrid* g) {
+    if (!handle || !handle->doc || !handle->doc->undo || !g) return;
+    if (!handle->doc->undo->begin_voxel_step(handle->layer, *g)) return;
+    doc = handle->doc;
+    grid = g;
+}
+
+VoxelStep::~VoxelStep() {
+    if (doc) doc->undo->end_voxel_step(*grid);
+}
+
 // One normaliser for every format name that crosses, so the reader and the
 // writer cannot disagree about what "OBJ" means. They did: the loader
 // lowercased and the writer did not, so a host could load MODEL.OBJ and then
@@ -2036,7 +2088,10 @@ clay_result clay_remove_node(clay_document* doc, clay_layer_id layer_id, clay_no
 
 clay_result clay_document_enable_undo(clay_document* doc) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
-    if (!doc->undo) doc->undo = std::make_unique<scene::UndoStack>();
+    if (!doc->undo) {
+        doc->undo = std::make_unique<session::History>();
+        doc->undo->set_enabled(true);
+    }
     return CLAY_OK;
 }
 
@@ -2057,7 +2112,10 @@ clay_result clay_document_undo_bound(clay_document* doc, int32_t* out_undone, fl
     // to track whether anything is left. It leaves the bound empty, which
     // write_influence spells as no bounds — nothing to dirty.
     math::Aabb bound;
-    *out_undone = doc->undo->undo(doc->doc.document, &bound) ? 1 : 0;
+    *out_undone = doc->undo->undo(doc->doc.document, doc->grid_for(), doc->mesh_for(),
+                                  &bound)
+                      ? 1
+                      : 0;
     // Undo and redo replay commands straight onto the document rather than
     // through apply_edit, so they invalidate here.
     if (*out_undone) doc->touch();
@@ -2070,7 +2128,10 @@ clay_result clay_document_redo_bound(clay_document* doc, int32_t* out_redone, fl
     if (!doc || !out_redone) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
     if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
     math::Aabb bound;
-    *out_redone = doc->undo->redo(doc->doc.document, &bound) ? 1 : 0;
+    *out_redone = doc->undo->redo(doc->doc.document, doc->grid_for(), doc->mesh_for(),
+                                  &bound)
+                      ? 1
+                      : 0;
     if (*out_redone) doc->touch();
     return write_influence(bound, out_min, out_max, out_has_bounds, out_infinite);
 }
@@ -3690,11 +3751,16 @@ clay_result clay_layer_consolidate(clay_document* doc, clay_layer_id layer_id,
     }
 
     scene::ConsolidationCost cost;
-    if (!scene::consolidate_layer(doc->doc.document, layer_id, p, doc->undo.get(), &cost,
+    // Consolidate performs commands through the stack directly, so the session
+    // is told afterwards how many entries appeared. It IS undoable — worth
+    // saying, because it is the operation most often assumed not to be.
+    scene::UndoStack* stack = doc->undo ? doc->undo->commands() : nullptr;
+    if (!scene::consolidate_layer(doc->doc.document, layer_id, p, stack, &cost,
                                   eval::pooled_bake_eval()))
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "nothing to consolidate: the layer is empty, unbounded, or the region "
                     "contains no surface");
+    if (doc->undo) doc->undo->sync_scene_steps();
     doc->touch();
     if (out_cost) write_cost(cost, out_cost);
     return CLAY_OK;
@@ -5251,6 +5317,7 @@ clay_result clay_voxel_apply_stroke(clay_voxel_grid* grid, const float* samples_
     voxel::VoxelGrid* g = nullptr;
     clay_result r = resolve(grid, &g);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     std::uint8_t slot = 0;
     r = check_palette_index(index, &slot);
     if (r != CLAY_OK) return r;
@@ -5653,6 +5720,7 @@ clay_result clay_voxel_mask_extrude(const clay_voxel_grid* grid, const clay_mask
     voxel::VoxelGrid* g = nullptr;
     clay_result r = resolve(grid, &g);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     voxel::MaskField* m = nullptr;
     r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
@@ -5724,6 +5792,7 @@ clay_result clay_voxel_add_level_region(clay_voxel_grid* grid, const float min[3
     voxel::VoxelGrid* g = nullptr;
     clay_result r = resolve(grid, &g);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     if (!min || !max) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null region");
     math::Aabb region{kernel::cf3(min[0], min[1], min[2]), kernel::cf3(max[0], max[1], max[2])};
     if (region.empty())
@@ -5857,6 +5926,7 @@ clay_result clay_voxel_set(clay_voxel_grid* grid, const int32_t cell[3], int32_t
     std::uint8_t slot = 0;
     clay_result r = resolve_at_index(grid, cell, index, &g, &slot);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     g->set(to_coord(cell), slot);
     return CLAY_OK;
 }
@@ -5865,6 +5935,7 @@ clay_result clay_voxel_erase(clay_voxel_grid* grid, const int32_t cell[3]) {
     voxel::VoxelGrid* g = nullptr;
     clay_result r = resolve_at(grid, cell, &g);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     g->erase(to_coord(cell));
     return CLAY_OK;
 }
@@ -5874,6 +5945,7 @@ clay_result clay_voxel_paint(clay_voxel_grid* grid, const int32_t cell[3], int32
     std::uint8_t slot = 0;
     clay_result r = resolve_at_index(grid, cell, index, &g, &slot);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     g->paint(to_coord(cell), slot);
     return CLAY_OK;
 }
@@ -5884,6 +5956,7 @@ clay_result clay_voxel_set_many(clay_voxel_grid* grid, const int32_t* cells_xyz,
     std::uint8_t slot = 0;
     clay_result r = resolve_batch(grid, cells_xyz, count, &g);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     r = check_palette_index(index, &slot);
     if (r != CLAY_OK) return r;
     for (size_t i = 0; i < count; ++i) g->set(to_coord(cells_xyz + i * 3), slot);
@@ -5894,6 +5967,7 @@ clay_result clay_voxel_erase_many(clay_voxel_grid* grid, const int32_t* cells_xy
     voxel::VoxelGrid* g = nullptr;
     clay_result r = resolve_batch(grid, cells_xyz, count, &g);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     for (size_t i = 0; i < count; ++i) g->erase(to_coord(cells_xyz + i * 3));
     return CLAY_OK;
 }
@@ -5904,6 +5978,7 @@ clay_result clay_voxel_fill_box(clay_voxel_grid* grid, const int32_t a[3], const
     std::uint8_t slot = 0;
     clay_result r = resolve_at_index(grid, a, index, &g, &slot);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     if (!b) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cell");
     g->fill_box(to_coord(a), to_coord(b), slot);
     return CLAY_OK;
@@ -5915,6 +5990,7 @@ clay_result clay_voxel_fill_line(clay_voxel_grid* grid, const int32_t a[3], cons
     std::uint8_t slot = 0;
     clay_result r = resolve_at_index(grid, a, index, &g, &slot);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     if (!b) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cell");
     g->fill_line(to_coord(a), to_coord(b), slot);
     return CLAY_OK;
@@ -5927,6 +6003,7 @@ clay_result clay_voxel_set_mirrored(clay_voxel_grid* grid, const int32_t cell[3]
     std::uint8_t mask = 0;
     clay_result r = resolve_at_index(grid, cell, index, &g, &slot);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     r = check_mirror_axes(axes, &mask);
     if (r != CLAY_OK) return r;
     g->set_mirrored(to_coord(cell), slot, mask);
@@ -5940,6 +6017,7 @@ clay_result clay_voxel_paint_mirrored(clay_voxel_grid* grid, const int32_t cell[
     std::uint8_t mask = 0;
     clay_result r = resolve_at_index(grid, cell, index, &g, &slot);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     r = check_mirror_axes(axes, &mask);
     if (r != CLAY_OK) return r;
     g->paint_mirrored(to_coord(cell), slot, mask);
@@ -5953,6 +6031,7 @@ clay_result clay_voxel_set_brush(clay_voxel_grid* grid, const int32_t cell[3],
     std::uint8_t slot = 0;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     r = check_palette_index(index, &slot);
     if (r != CLAY_OK) return r;
     g->set_brush(to_coord(cell), p, slot);
@@ -5965,6 +6044,7 @@ clay_result clay_voxel_erase_brush(clay_voxel_grid* grid, const int32_t cell[3],
     voxel::BrushParams p;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     g->erase_brush(to_coord(cell), p);
     return CLAY_OK;
 }
@@ -5976,6 +6056,7 @@ clay_result clay_voxel_paint_brush(clay_voxel_grid* grid, const int32_t cell[3],
     std::uint8_t slot = 0;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     r = check_palette_index(index, &slot);
     if (r != CLAY_OK) return r;
     g->paint_brush(to_coord(cell), p, slot);
@@ -6159,6 +6240,7 @@ clay_result clay_voxel_sculpt_smooth(clay_voxel_grid* grid, const int32_t cell[3
     voxel::BrushParams p;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     g->sculpt_smooth(to_coord(cell), p);
     return CLAY_OK;
 }
@@ -6169,6 +6251,7 @@ clay_result clay_voxel_sculpt_inflate(clay_voxel_grid* grid, const int32_t cell[
     voxel::BrushParams p;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     g->sculpt_inflate(to_coord(cell), p, amount);
     return CLAY_OK;
 }
@@ -6180,6 +6263,7 @@ clay_result clay_voxel_sculpt_flatten(clay_voxel_grid* grid, const int32_t cell[
     voxel::BrushParams p;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     if (!normal) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null normal");
     kernel::cfloat3 n = kernel::cf3(normal[0], normal[1], normal[2]);
     // The engine normalizes without checking, as the Python bindings do; a
@@ -6197,6 +6281,7 @@ clay_result clay_voxel_sculpt_pinch(clay_voxel_grid* grid, const int32_t cell[3]
     voxel::BrushParams p;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     g->sculpt_pinch(to_coord(cell), p);
     return CLAY_OK;
 }
@@ -6207,6 +6292,7 @@ clay_result clay_voxel_sculpt_magnify(clay_voxel_grid* grid, const int32_t cell[
     voxel::BrushParams p;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     g->sculpt_magnify(to_coord(cell), p);
     return CLAY_OK;
 }
@@ -6219,6 +6305,7 @@ clay_result clay_voxel_sculpt_grab(clay_voxel_grid* grid, const int32_t cell[3],
     voxel::BrushParams p;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     g->sculpt_grab(to_coord(cell), p,
                    kernel::cf3(displacement[0], displacement[1], displacement[2]),
                    front_only != 0);
@@ -6231,6 +6318,7 @@ clay_result clay_voxel_sculpt_fill_cavities(clay_voxel_grid* grid, const int32_t
     voxel::BrushParams p;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     if (passes <= 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "passes must be > 0");
     g->sculpt_fill_cavities(to_coord(cell), p, passes);
     return CLAY_OK;
@@ -6243,6 +6331,7 @@ clay_result clay_voxel_sculpt_scrape(clay_voxel_grid* grid, const int32_t cell[3
     voxel::BrushParams p;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     if (!normal) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null normal");
     kernel::cfloat3 n = kernel::cf3(normal[0], normal[1], normal[2]);
     if (!(kernel::clength(n) >= 1e-12f))  // also rejects NaN
@@ -6258,6 +6347,7 @@ clay_result clay_voxel_sculpt_smudge(clay_voxel_grid* grid, const int32_t cell[3
     voxel::BrushParams p;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     if (!displacement) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null displacement");
     g->sculpt_smudge(to_coord(cell), p,
                      kernel::cf3(displacement[0], displacement[1], displacement[2]));
@@ -6272,6 +6362,7 @@ clay_result clay_voxel_sculpt_carve_alpha(clay_voxel_grid* grid, const int32_t c
     voxel::BrushParams p;
     clay_result r = resolve_brush(grid, cell, brush, &g, &p);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     if (!direction) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null direction");
     std::uint8_t slot = 0;
     r = check_palette_index(index, &slot);
@@ -6312,6 +6403,7 @@ clay_result clay_voxel_repair_close_holes(clay_voxel_grid* grid, int32_t passes,
     voxel::VoxelGrid* g = nullptr;
     clay_result r = resolve(grid, &g);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     if (passes <= 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "passes must be > 0");
     voxel::MaskField* m = nullptr;
     if (mask) {
@@ -6326,6 +6418,7 @@ clay_result clay_voxel_repair_fill_voids(clay_voxel_grid* grid, const clay_mask*
     voxel::VoxelGrid* g = nullptr;
     clay_result r = resolve(grid, &g);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     voxel::MaskField* m = nullptr;
     if (mask) {
         r = resolve_mask(mask, &m);
@@ -6607,6 +6700,7 @@ clay_result clay_voxel_rasterize_mesh(clay_voxel_grid* grid, const clay_mesh* me
     voxel::VoxelGrid* g = nullptr;
     clay_result r = resolve(grid, &g);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     const mesh::Mesh* m = nullptr;
     r = resolve_mesh(mesh, &m);
     if (r != CLAY_OK) return r;
@@ -6636,6 +6730,7 @@ clay_result clay_voxel_rasterize(clay_voxel_grid* grid, const clay_document* doc
     voxel::VoxelGrid* g = nullptr;
     clay_result r = resolve(grid, &g);
     if (r != CLAY_OK) return r;
+    VoxelStep step(grid, g);
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     if ((region_min == nullptr) != (region_max == nullptr))
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "a region needs both a min and a max");
