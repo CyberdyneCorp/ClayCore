@@ -48,13 +48,23 @@
       block
 - [ ] 1.6 Batch and grid entry points feed blocks and handle the remainder, so block
       size is invisible above the backend
-- [ ] 1.7 THEN, and only then, the distance-only value. Colour is worth ~1.4x ONCE
-      BLOCKED — the blocked stack is an array across the block, so a 4-float value
-      moves four times the bytes — and is not reliably measurable before that: two
-      -O3 builds of the prototype put per-point colour at 1.02x and 1.36x. So this is
-      sequenced AFTER 1.4 and measured on top of it, never on its own. #174 claimed
-      2.4x for colour alone and withdrew it; this is the same claim and needs the
-      blocked baseline under it
+- [~] 1.7 ATTEMPTED, and it does not live here. A distance-only stack that reuses
+      `ctape_combine_values` by rebuilding a `CTapeValue` per operand is **0.57x —
+      slower**, because the round-trip costs more than the colour it removes.
+      Bypassing the combine instead measures **2.2x on top of the blocked path we
+      ship and ~10x against the scalar reference** — re-taken on a quiet machine
+      with a same-code control at 1.020x (0.98-1.04), so +/-4% and both findings
+      clear it by a wide margin. So the prize is roughly twice
+      what this task predicted and the hot paths are exactly the ones that want
+      it — brick fills, raycasts and all four gradient taps are distance-only.
+      There is no distance-only combine in the kernel to call: `speed-the-tape-prim-path`
+      split colour out of the PRIM path and the COMBINE path never got the same
+      treatment. That is a five-dialect kernel change with its own parity
+      obligations, so it is filed separately rather than smuggled into a backend
+      task. Details, including which modes actually entangle colour with
+      distance, in `design.md`. Coverage kept from the attempt: the identity
+      tests now assert a distance-only query returns identical distances, which
+      nothing exercised before
 - [x] 1.8 Parity test wired into the existing suite: every kernel, blocked path vs
       scalar, on the standard corpus. The prototype was BIT-IDENTICAL on its subset,
       so assert identity and let the 1e-6 relative bound catch only opcodes that
