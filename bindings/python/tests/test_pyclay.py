@@ -3,6 +3,8 @@
 # gates, .clayspace round trip, mesh export, backend errors, and vectorized
 # property tests (conservative stepping, gradient normalization).
 
+import math
+
 import numpy as np
 import pytest
 
@@ -5742,3 +5744,74 @@ def test_normals_are_off_by_default():
     assert off["normals"] is False
     on = tgt.transfer_attributes(src, normals=True)
     assert on["normals"] is True
+
+
+# -- the full validation report (report-mesh-quality) -------------------------
+#
+# `is_watertight()` and `is_manifold()` were the only two of eleven measured
+# quantities that reached Python, so a script could be told an export was bad
+# and never told why. And the sampled self-intersection pass, which the meshing
+# spec names as a validation primitive, had never been reachable from a binding
+# at all: neither pyclay nor the C ABI passed a cap, so both always took the
+# default of 0, which skips it.
+
+TETRA_POSITIONS = np.array(
+    [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32
+)
+# Wound so every face normal points OUTWARD, which is what makes the signed
+# volume positive and the orientation check mean something.
+TETRA_INDICES = np.array([0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3], dtype=np.uint32)
+
+
+def test_validation_report_carries_every_quantity():
+    mesh = clay.Mesh.from_triangles(TETRA_POSITIONS, TETRA_INDICES)
+    r = mesh.validation_report()
+    assert r["vertices"] == 4 and r["triangles"] == 4
+    assert r["watertight"] and r["manifold"] and r["oriented"] and r["clean"]
+    assert r["boundary_edges"] == 0
+    assert r["non_manifold_edges"] == 0
+    assert r["degenerate_triangles"] == 0
+    assert r["euler_characteristic"] == 2  # closed surface of genus 0
+
+
+def test_a_hole_is_reported_not_merely_detected():
+    """The number the meshing spec has always said the validator reports."""
+    holed = clay.Mesh.from_triangles(TETRA_POSITIONS, TETRA_INDICES[:9])
+    r = holed.validation_report()
+    assert not r["watertight"] and not r["clean"]
+    assert r["boundary_edges"] == 3  # the three edges of the face that was dropped
+    # Still edge-manifold. An open mesh is not a broken one, and one "is it bad"
+    # bit forces a caller to conflate them.
+    assert r["manifold"] and r["non_manifold_edges"] == 0
+
+
+def test_self_intersection_is_reachable_and_says_whether_it_ran():
+    # Two triangles crossing through each other, sharing no vertex so the
+    # adjacency skip does not swallow the pair.
+    positions = np.array(
+        [[-1, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0.2, -1], [0, 0.2, 1], [0, 0.9, 0]],
+        dtype=np.float32,
+    )
+    mesh = clay.Mesh.from_triangles(positions, np.arange(6, dtype=np.uint32))
+
+    skipped = mesh.validation_report()
+    assert skipped["intersecting_pairs"] == 0
+    # The echoed budget is the ONLY thing separating "none found" from
+    # "none looked for" — both leave the count at zero, and `clean` reads it.
+    assert skipped["intersection_budget"] == 0
+
+    tested = mesh.validation_report(max_intersection_pairs=1000)
+    assert tested["intersecting_pairs"] == 1
+    assert tested["intersection_budget"] == 1000
+    assert not tested["clean"]
+
+
+def test_volume_and_area_and_the_sign_of_the_volume():
+    mesh = clay.Mesh.from_triangles(TETRA_POSITIONS, TETRA_INDICES)
+    assert mesh.signed_volume == pytest.approx(1 / 6, rel=1e-5)
+    # three unit right triangles at 0.5, plus the slanted face at sqrt(3)/2
+    assert mesh.surface_area == pytest.approx(1.5 + math.sqrt(3) / 2, rel=1e-5)
+
+    flipped = TETRA_INDICES.reshape(-1, 3)[:, [0, 2, 1]].reshape(-1).astype(np.uint32)
+    inverted = clay.Mesh.from_triangles(TETRA_POSITIONS, flipped)
+    assert inverted.signed_volume == pytest.approx(-1 / 6, rel=1e-5)

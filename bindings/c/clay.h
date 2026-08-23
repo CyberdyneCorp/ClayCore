@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 40
+#define CLAY_ABI_MINOR 41
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -1584,9 +1584,65 @@ clay_result clay_mesh_quad_report(const clay_mesh* mesh, clay_quad_report* out_r
  * inverted box. */
 clay_result clay_mesh_bounds(const clay_mesh* mesh, float out_min[3], float out_max[3]);
 
-/* watertight/manifold checks (mesh validation module). */
+/* Everything the validator measures, rather than two bits of it.
+ *
+ * `clay_mesh_validate` below answers watertight and manifold and drops the
+ * other nine quantities the same pass already computed, so a host could be
+ * told an export was bad and never told WHY. This is that pass, reported.
+ *
+ * `intersection_budget` is the cap on the SAMPLED self-intersection check and
+ * is echoed back, which is the point of carrying it: `intersecting_pairs` is
+ * zero both when nothing intersects and when nothing looked, and `clean`
+ * requires it to be zero. A report that could not tell those apart would let
+ * "clean" mean two different things. Zero skips the pass, matching the
+ * engine's own default; a larger cap tests that many spatially-close,
+ * non-adjacent triangle pairs exactly, and costs accordingly.
+ *
+ * `sliver_triangles` is informational and is NOT one of `clean`'s terms: a
+ * near-zero-area triangle is legal geometry that some exporters produce and
+ * most consumers tolerate. `clean` is
+ * watertight && manifold && oriented && degenerate == 0 && intersecting == 0. */
+typedef struct clay_validation_report {
+    uint32_t struct_size; /* = sizeof(clay_validation_report); required */
+    size_t vertices;
+    size_t triangles;
+    int32_t watertight; /* every edge shared by exactly two triangles */
+    int32_t manifold;   /* no edge with more than two incident triangles */
+    int32_t oriented;   /* the two triangles of every edge disagree in direction */
+    int32_t clean;      /* the conjunction above, derived */
+    size_t boundary_edges;
+    size_t non_manifold_edges;
+    size_t degenerate_triangles; /* repeated indices within a triangle */
+    size_t sliver_triangles;     /* near-zero area; informational */
+    size_t intersecting_pairs;   /* hits found, within the budget below */
+    size_t intersection_budget;  /* the cap this report was produced with; 0 = pass skipped */
+    int64_t euler_characteristic; /* V - E + F */
+} clay_validation_report;
+
+clay_result clay_mesh_validation_report(const clay_mesh* mesh, size_t max_intersection_pairs,
+                                        clay_validation_report* out_report);
+
+/* watertight/manifold checks (mesh validation module). Sugar over
+ * clay_mesh_validation_report with no self-intersection pass, kept because
+ * hosts call it; anything more than two bits wants the report. */
 clay_result clay_mesh_validate(const clay_mesh* mesh, int32_t* out_watertight,
                                int32_t* out_manifold);
+
+/* Signed volume by the divergence theorem, and surface area.
+ *
+ * DOUBLE, and the only doubles in this header, because that is the precision
+ * the engine computes them at and narrowing here would discard it: a signed
+ * volume is a sum of triple products that cancels heavily, and a large model
+ * far from the origin cancels worst.
+ *
+ * The sign is an orientation check — positive for outward-facing normals — so
+ * this is answered for ANY mesh rather than refused for one that is not
+ * watertight. An open mesh still has a divergence-theorem sum, and refusing to
+ * state it would hide the number a caller uses to notice the mesh is open.
+ *
+ * Either output pointer may be NULL to skip that quantity. */
+clay_result clay_mesh_measure(const clay_mesh* mesh, double* out_signed_volume,
+                              double* out_surface_area);
 
 /* Save by extension: .obj, .ply, .fbx, .glb
  *

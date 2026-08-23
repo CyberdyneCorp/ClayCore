@@ -751,6 +751,21 @@ if let mesh = mesh {
     check(vertices > 0 && indices > 0, "mesh has \(vertices) verts / \(indices) indices")
     var watertight: Int32 = 0, manifold: Int32 = 0
     check(clay_mesh_validate(mesh, &watertight, &manifold) == CLAY_OK, "validated the mesh")
+
+    // The full report, not two bits of it: a host that is told an export is bad
+    // needs the counts that say why.
+    var report = clay_validation_report()
+    report.struct_size = UInt32(MemoryLayout<clay_validation_report>.size)
+    check(clay_mesh_validation_report(mesh, 0, &report) == CLAY_OK, "read the validation report")
+    check(report.watertight == watertight && report.manifold == manifold,
+          "the report agrees with the two-boolean call")
+    check(report.triangles * 3 == indices, "the report counts \(report.triangles) triangles")
+    // The pass did not run, so the zero above means "not looked for".
+    check(report.intersection_budget == 0, "the self-intersection pass was skipped")
+
+    var volume: Double = 0, area: Double = 0
+    check(clay_mesh_measure(mesh, &volume, &area) == CLAY_OK, "measured the mesh")
+    check(volume > 0 && area > 0, "volume \(volume), area \(area) — positive means outward")
     clay_mesh_destroy(mesh)
 }
 

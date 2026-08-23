@@ -668,6 +668,26 @@ needs them, and listed so they are not mistaken for oversights:
   two of three. What remains genuinely absent is PBR channels, which is a
   declared non-goal rather than a gap — see `docs/sculpt_comparison.md`.
 
+- ~~**The mesh validation report was two bits of eleven.**~~ Closed by
+  `report-mesh-quality` (ABI 0.41.0). `mesh::ValidationReport` computes eleven
+  quantities and `clay_mesh_validate` returned `watertight` and `manifold`, so
+  a host could be told an export was bad and never told why — while the
+  `meshing` spec's own scenario has always said the validator "reports the open
+  edge loop". Sibling to the output-descriptor family above and found the same
+  way: this one was bounded correctly and simply never carried its fields.
+
+  The sharper half is that the **sampled self-intersection pass had never run
+  outside this repository**. The engine has always taken a cap; neither binding
+  ever passed one, so both took the default of 0, which skips it — and
+  `ValidationReport::clean()` requires `intersecting_pairs == 0`, which is what
+  an unrun pass leaves behind. So `clean` read as clean on a self-intersecting
+  mesh. The report now echoes the cap it was given, which is the only thing
+  separating "none found" from "none looked for". `mesh::signed_volume` and
+  `mesh::surface_area` crossed with it as `clay_mesh_measure`; they were
+  declared in the same header and reached neither binding, and they are the
+  first `double`s in `clay.h`, because a signed volume cancels heavily and
+  narrowing it at the boundary would discard the precision the engine chose.
+
 - **Deformers on a mesh layer.** `Deformer` has twenty-one entries and every
   one applies to an SDF item; a mesh layer takes a lattice cage and nothing
   else, so ZBrush's Deformation palette — Taper, Twist, Bend — is unreachable

@@ -403,6 +403,62 @@ refuses it with `CLAY_ERROR_INVALID_ARGUMENT`; `mesh_tape` returns an empty
 mesh for an empty or infinite region. Either way, add something bounded or pass
 a finite region of your own.
 
+## What the validator measures
+
+`is_watertight()` / `clay_mesh_validate` answer two questions. The validator
+answers eleven, in the same pass, and the report is how you get the other nine
+— which are the ones that matter when the answer to the first two is *no*.
+
+```python
+r = mesh.validation_report()
+# {'vertices': 57650, 'triangles': 115296, 'watertight': True, 'manifold': True,
+#  'oriented': True, 'clean': True, 'boundary_edges': 0, 'non_manifold_edges': 0,
+#  'degenerate_triangles': 0, 'sliver_triangles': 0, 'intersecting_pairs': 0,
+#  'intersection_budget': 0, 'euler_characteristic': 2}
+```
+
+```c
+clay_validation_report r;
+r.struct_size = sizeof(r);
+clay_mesh_validation_report(mesh, 0, &r);   /* 0 = skip the intersection pass */
+```
+
+`clean` is `watertight && manifold && oriented && degenerate_triangles == 0 &&
+intersecting_pairs == 0`. `sliver_triangles` is **not** one of its terms: a
+near-zero-area triangle is legal geometry that plenty of exporters produce.
+
+**`intersection_budget` is the field to read before you trust `clean`.** The
+sampled self-intersection pass is off by default, and when it does not run
+`intersecting_pairs` is zero because nothing looked — which `clean` then reads
+as evidence. The echoed budget is the only thing separating the two:
+
+```python
+mesh.validation_report()["clean"]                            # not checked for self-intersection
+mesh.validation_report(max_intersection_pairs=20000)["clean"] # checked, up to 20000 pairs
+```
+
+The cap bounds the work: pairs are tested exactly, but only spatially-close,
+non-adjacent ones, and only that many of them. It is a check you ask for on an
+export, not one you run every frame.
+
+**Volume and area** come from the same module and are the only `double`s in
+the C header, because a signed-volume sum cancels heavily and narrowing it
+would discard the precision the engine computes it at:
+
+```python
+mesh.signed_volume      # positive when normals point OUTWARD — an orientation check
+mesh.surface_area
+```
+
+```c
+double volume = 0, area = 0;
+clay_mesh_measure(mesh, &volume, &area);   /* either output may be NULL */
+```
+
+Both are answered for any mesh, watertight or not. An open mesh still has a
+divergence-theorem sum, and refusing to state it would hide the number you use
+to notice the mesh is open.
+
 ## Ownership and lifetime
 
 Three cases, and the middle one is the trap.

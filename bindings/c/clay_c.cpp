@@ -486,6 +486,8 @@ constexpr std::size_t kQuadParamsOriginal =
     offsetof(clay_quad_params, level) + sizeof(std::uint32_t);
 constexpr std::size_t kQuadReportOriginal =
     offsetof(clay_quad_report, clamped) + sizeof(std::int32_t);
+constexpr std::size_t kValidationReportOriginal =
+    offsetof(clay_validation_report, euler_characteristic) + sizeof(std::int64_t);
 constexpr std::size_t kDeviceDescOriginal =
     offsetof(clay_device_desc, queue_family) + sizeof(std::uint32_t);
 constexpr std::size_t kDeviceBufferOriginal =
@@ -4065,14 +4067,65 @@ clay_result clay_mesh_bounds(const clay_mesh* mesh, float out_min[3], float out_
     return CLAY_OK;
 }
 
-clay_result clay_mesh_validate(const clay_mesh* mesh, int32_t* out_watertight,
-                               int32_t* out_manifold) {
+clay_result clay_mesh_validation_report(const clay_mesh* mesh, size_t max_intersection_pairs,
+                                       clay_validation_report* out_report) {
     const mesh::Mesh* m = nullptr;
     clay_result r = resolve_mesh(mesh, &m);
     if (r != CLAY_OK) return r;
-    mesh::ValidationReport report = mesh::validate(*m);
-    if (out_watertight) *out_watertight = report.watertight ? 1 : 0;
-    if (out_manifold) *out_manifold = report.manifold ? 1 : 0;
+    if (!out_report) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null report");
+    // The descriptor is an OUTPUT, so struct_size is the caller telling us how
+    // much of it exists rather than what it filled in.
+    clay_validation_report probe;
+    r = read_desc(out_report, kValidationReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    if (max_intersection_pairs > CLAY_MAX_BATCH)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "max_intersection_pairs above CLAY_MAX_BATCH");
+
+    const mesh::ValidationReport report = mesh::validate(*m, max_intersection_pairs);
+    const std::uint32_t declared = out_report->struct_size;
+    clay_validation_report filled{};
+    filled.vertices = report.vertices;
+    filled.triangles = report.triangles;
+    filled.watertight = report.watertight ? 1 : 0;
+    filled.manifold = report.manifold ? 1 : 0;
+    filled.oriented = report.oriented ? 1 : 0;
+    filled.clean = report.clean() ? 1 : 0;
+    filled.boundary_edges = report.boundary_edges;
+    filled.non_manifold_edges = report.non_manifold_edges;
+    filled.degenerate_triangles = report.degenerate_triangles;
+    filled.sliver_triangles = report.sliver_triangles;
+    filled.intersecting_pairs = report.intersecting_pairs;
+    // Echoed rather than recomputed: it is what tells a caller whether the
+    // zero above means "none found" or "none looked for".
+    filled.intersection_budget = max_intersection_pairs;
+    filled.euler_characteristic = report.euler_characteristic;
+    write_desc(out_report, declared, filled);
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_validate(const clay_mesh* mesh, int32_t* out_watertight,
+                               int32_t* out_manifold) {
+    // Sugar over the report, so there is one validation path rather than two
+    // that could drift. No self-intersection pass, which is what this entry
+    // point has always done.
+    clay_validation_report report{};
+    report.struct_size = static_cast<std::uint32_t>(sizeof(report));
+    clay_result r = clay_mesh_validation_report(mesh, 0, &report);
+    if (r != CLAY_OK) return r;
+    if (out_watertight) *out_watertight = report.watertight;
+    if (out_manifold) *out_manifold = report.manifold;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_measure(const clay_mesh* mesh, double* out_signed_volume,
+                              double* out_surface_area) {
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh, &m);
+    if (r != CLAY_OK) return r;
+    if (!out_signed_volume && !out_surface_area)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "both outputs are null");
+    if (out_signed_volume) *out_signed_volume = mesh::signed_volume(*m);
+    if (out_surface_area) *out_surface_area = mesh::surface_area(*m);
     return CLAY_OK;
 }
 
