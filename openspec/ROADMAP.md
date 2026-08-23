@@ -843,6 +843,7 @@ moves are the ones already shipped.
 | **P0** | `add-history-budget` | Unbounded allocation in a multi-hour session on an OS that kills for memory |
 | **P0** | `add-surface-groups` | The largest genuinely-absent workflow primitive, and the substrate for four more |
 | **P0** | A version tag | The device gate is green on main at ABI 0.39.0 (#190, the first stamp under the median-of-three statistic). What is still missing is the TAG: without one the team's reports cannot be pinned to a build |
+| **P1** | `add-operation-cancellation` | The third budget class has no exit. `mask_extrude` measures 4403 ms and `sdf_consolidate` 661 ms on the reference iPad, and a host can neither cancel one nor draw a progress bar for it — the threading rule forbids reading the document from another thread while it runs. Proposed 2026-08-23 after an audit found `cancel`, `progress` and `interrupt` in neither `clay.h` nor this file |
 | **P1** | Procedural masks | Cheap on a field representation, high artist value |
 | **P1** | `add-item-spatial-index` | Still the slope. Re-measure first: `CullIndex` already took the constant |
 | **P1** | SDF sculpt layers (`add-sculpt-layers` 1.9) | Unblocked by scene groups landing |
