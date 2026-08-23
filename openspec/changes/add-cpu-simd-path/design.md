@@ -853,3 +853,124 @@ question and should travel with the work that raised it. It reads **15.6 cores o
 fill is simply narrower there; materially less means a real second bound, and
 `add-mobile-thread-scheduling` — 12/19, no QoS set anywhere, efficiency cores
 counted as equal workers — is where to look first.
+
+# Task 1.12 answered, 2026-08-23: #223 on the reference iPad, A against B
+
+The section above ("The iPad, which is task 1.12 and is NOT answered") left this
+open for one reason: no run had been thermally trustworthy, and seven minutes of
+cooldown was not close to enough. This is the run it asked for, and it is an A/B
+rather than a comparison against the committed baseline — both sides measured on
+the same device about an hour apart, so nothing rests on a record taken on
+another day.
+
+`tests/device/` and `tools/` are **byte-identical** between the two commits, so
+the only thing that differs is `libclaycore.a`.
+
+- **A** — `32b8c4c`, pre-#223. `valid: true`, thermal `nominal -> nominal`, 59 cases.
+- **B** — `444efea`, post-#223. `nominal -> serious`; `testVolumeVerbsAndMaskingGallery`
+  crashed and `xcodebuild` exited 65, so the record is the salvage path
+  (`collect_device_bench.py` against the bundle). 54 cases.
+
+B ran the hotter of the two. Every figure below is therefore a floor on the wins
+and, if anything, generous to the regression.
+
+## The controls, which are why the rest can be read
+
+| control | pre | post | A/B |
+|---|---:|---:|---:|
+| `voxel_fill_cavities` | 0.218 ms | 0.211 ms | 1.03x |
+| `voxel_mesh_dirty` | 2.126 ms | 2.121 ms | 1.00x |
+| `voxel_add_level` | 4.791 ms | 4.779 ms | 1.00x |
+| `voxel_mesh_whole` | 13.151 ms | 13.264 ms | 0.99x |
+| `sdf_stamp_metal` | 2.009 ms | 2.105 ms | 0.95x |
+
+Centred on 1.00x. Heat moves these; what follows moved without them.
+
+## The end-to-end arm64 figure task 1.12 asked for
+
+| case | pre-#223 | post-#223 | |
+|---|---:|---:|---:|
+| `sdf_stamp_cpu` | 3.846 ms | 2.889 ms | **1.33x** |
+| `sdf_stamp_bricks` | 2.253 ms | 1.692 ms | **1.33x** |
+| `sdf_consolidate` | 435.6 ms | 338.2 ms | **1.29x** |
+| `stroke_carve` | 0.918 ms | 0.729 ms | **1.26x** |
+
+**1.26-1.33x on the hardware that ships**, against the **1.67x** the arm64
+microbenchmark above projected for distance-only on top of blocking. The gap is
+the one this change keeps meeting: a device case is a whole verb, and the parts
+of it that are not tape evaluation do not move. `sdf_consolidate` was measured
+27 s later in B than in A, which makes its 1.29x the firmest floor of the four.
+
+One measurement caveat worth carrying, because it cost a wrong number first
+time: `sdf_stamp_cpu` read 2.446 ms in a run where it landed 9 s into the bundle
+and 2.889 ms where it landed first, off the same binary. Position matters at the
+size #212 says it does. The table above is cold-against-cold.
+
+## And a regression, filed as #225
+
+| record | commit | `mask_extrude` |
+|---|---|---:|
+| baseline (pre-#218) | `8d13b47` | 4403.3 ms |
+| #218 run, 2026-08-22 | `fc6d96a` | 4054.6 ms |
+| **run A** | `32b8c4c` | **4055.9 ms** |
+| run 1 | `444efea` | 4878.1 ms |
+| **run B** | `444efea` | **4992.3 ms** |
+
+Two pre-#223 records off different builds on different days agree to **0.03%**.
+Both post records sit 20-23% above, at the same position in the run, in the cool
+part of the window, while the controls beside them held. It regresses across the
+whole growth axis — 58.1 -> 62.8 ms, 419.0 -> 466.1 ms, 4055.9 -> 4992.3 ms.
+
+`mask_extrude` is the one case in the suite that is a pure **scalar** tape
+workload: `clay_c.cpp:5476` drives it as `[&tape](cfloat3 p) { return
+tape.eval(p).d; }` — a colour computed per point and discarded, which is #220's
+own complaint one level up. The distance-only specialisation is in the blocked
+evaluator only, gated on `colors_rgb == nullptr`, so this caller collects none of
+the win and pays the whole of the cost.
+
+## What this corrects above
+
+The section "The unpredicted half: splitting made the COLOURED path 1.24x
+faster" is true on x86-64 and **false on arm64**. Same source compiled against
+each commit's `tape.h`, interleaved, medians of 9 rounds, M-series host:
+
+| mode mix | pre-#223 | post-#223 | |
+|---|---:|---:|---:|
+| `add` only | 3.40 ns/call | 5.54 ns/call | **1.63x SLOWER** |
+| mixed | 3.27 ns/call | 4.98 ns/call | 1.52x slower |
+
+The claim that carried the design — *"both calls are pure with identical
+arguments, so a compiler that does common-subexpression elimination costs the
+coloured path nothing"* — does not hold for AppleClang on arm64. It does not
+eliminate the second `ctape_smin_m`. Restoring one `smin` for `add` while leaving
+the other twelve modes on `ctape_combine_dist` recovers nearly all of it: 5.56 ->
+3.71 ns against a 3.34 ns pre-#223 baseline.
+
+`add`-only is the worse of the two mixes even though it dispatches on the first
+branch either way, which rules out the split dispatch as the main cost and points
+at the duplicated `smin` specifically.
+
+**The lesson to carry forward is narrower than "measure on arm64".** It is that
+"the compiler will eliminate this" is a *prediction about a toolchain*, not a
+property of the code, and this evaluator has now punished an unmeasured
+compiler-behaviour assumption three times — the value policy (#219), the
+per-point branch hoist (#218), and this.
+
+## What the gate would have said
+
+Nothing. `mask_extrude` is 1.13x against the committed baseline, inside the 1.40
+tolerance and well under its ~6.6 s budget. `tests/device/baseline.json` is still
+pre-#218 and is now roughly 2x stale on the stamp cases, so it carries enough
+absorbed slack to hide a 23% regression on a neighbouring case. Re-seeding it is
+worth doing on its own account, separately from #225.
+
+## The device is the constraint on all of this
+
+Four full runs on 2026-08-22/23: one drift-flagged, two thermally invalid, two
+with `testVolumeVerbsAndMaskingGallery` crashing under the heat. **45 minutes of
+cooldown let a run START nominal but not finish that way.** The measure-bundle
+cases survive this reliably — `sdf_stamp_bricks` read 1.699 and 1.692 ms across
+two runs, `sdf_consolidate` 337.93 and 338.21 ms. The gallery cases do not:
+`move_drags` moved 0.149 -> 0.434 ms between two runs of identical code, and
+`stroke_build` spans 16.6-21.9 ms across four. Nothing from that bundle should be
+read as a result until the suite is split.
