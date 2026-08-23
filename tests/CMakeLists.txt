@@ -3,6 +3,7 @@ add_executable(clay_unit_tests
   unit/test_prim3d.cpp
   unit/test_prim2d.cpp
   unit/test_ops.cpp
+  unit/test_tape_block.cpp
   unit/test_xform_repeat.cpp
   unit/test_lift_ease.cpp
   unit/test_deform_exactness.cpp

@@ -80,7 +80,7 @@ scene::Document make_volume_document(std::size_t items) {
     const float cell = items >= 2000 ? 0.02f : 0.04f;
     const auto sphere = [](cfloat3 p) { return std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z) - 0.7f; };
     auto vol = std::make_shared<const field::FieldVolume>(field::FieldVolume::sample(
-        sphere, math::Aabb(cf3(-1.0f, -1.0f, -1.0f), cf3(1.0f, 1.0f, 1.0f)), cell, 6.0f * cell));
+        sphere, math::Aabb{cf3(-1.0f, -1.0f, -1.0f), cf3(1.0f, 1.0f, 1.0f)}, cell, 6.0f * cell));
     scene::Document doc;
     scene::Layer& l = doc.add_sdf_layer("consolidated");
     scene::Node n;

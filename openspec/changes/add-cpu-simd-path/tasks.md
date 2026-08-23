@@ -25,11 +25,23 @@
       hundred. **This settles the fallback grain: block EVERY instruction and let
       the ones that gather win less.** A per-tape bail would drop 201 instructions
       to scalar to accommodate one of them
-- [ ] 1.4 Blocked evaluator: one walk of the tape per block of points. The prim
-      instruction's 17-float header, the assembled `cfloat4x4`, the scale and the
-      round are loaded ONCE per block; the point loop applies the transform and the
-      primitive. `eval_points_reference` and `ctape_eval` are not modified — the
-      scalar evaluator remains the definition of correctness
+- [x] 1.4 DONE. `backends/cpu/tape_block.cpp` walks the tape once per block;
+      `eval_points` and both grid paths go through it. Bit-identical to the scalar
+      walk over the parity corpus plus gated, coloured-volume and radial-array
+      documents the corpus does not contain, with four mutations verified failing.
+      Measured against `main` on a quiet machine: **`BM_EvalPoints` 1.93x,
+      `BM_BrickFill` 1.22x**, and 1.02x on `BM_DeepDocRefillPlanned10000`, which
+      is culling-dominated and has little evaluation in it to take. Single-threaded
+      the same evaluator is 5.3x on a sphere document and 2.5x on the benchmark
+      document — see `design.md` for why one change has three honest numbers
+- [x] 1.4b The prototype-to-backend gap, EXPLAINED and closed. Two causes, both
+      recorded in `design.md`: hoisting a per-instruction property's VALUE while
+      leaving the test inside the point loop gave 1.96x where selecting the LOOP
+      once per block gave 6.44x on the same document; and the primitive becomes
+      visible again once bookkeeping is removed, so a document of expensive prims
+      wins less than one of spheres. The grid paths were NOT changed to dispatch
+      coarser row runs — it was not needed once the loop selection was right, and
+      raising `min_chunk` would have cost load balance on a single brick
 - [ ] 1.5 Block size is not a new tuning constant, and the sweep says it does not
       need to be: everything from 64 up is within 4% of the best. Default to the
       caller's natural unit (a brick is 8^3 = 512 points) and handle a short final
@@ -43,11 +55,11 @@
       sequenced AFTER 1.4 and measured on top of it, never on its own. #174 claimed
       2.4x for colour alone and withdrew it; this is the same claim and needs the
       blocked baseline under it
-- [ ] 1.8 Parity test wired into the existing suite: every kernel, blocked path vs
+- [x] 1.8 Parity test wired into the existing suite: every kernel, blocked path vs
       scalar, on the standard corpus. The prototype was BIT-IDENTICAL on its subset,
       so assert identity and let the 1e-6 relative bound catch only opcodes that
       genuinely cannot be — each of which 1.11 must name
-- [ ] 1.9 Ragged-block test: a batch of `block*k + r` points for every r in
+- [x] 1.9 Ragged-block test: a batch of `block*k + r` points for every r in
       [1, block) matches an aligned batch element for element
 - [ ] 1.10 Re-measure the absent-feature checks on the GOLDEN CORPUS before claiming
       them. The prototype's 2.2x for skipping the deformer, repeat, gate, transition
@@ -56,9 +68,18 @@
       asking questions whose answer is always no, and a corpus that uses those
       features pays for them legitimately. Report what it is there, including if it
       is small
-- [ ] 1.11 Gradient path in blocks (four tetrahedron taps as four blocks of the same
-      points), measured separately — the Metal backend falls back to the CPU for
-      gradients, so this is on that path too
+- [x] 1.11 Gradient path in blocks — four tetrahedron taps as four blocked walks
+      of the same points, bit-identical to `kernel::cnormal`'s per-point form.
+      Done EARLY, not because it was next but because leaving it out was caught:
+      speeding the distance paths while gradients stayed scalar pushed the
+      `BM_MeshBricksGradDenseDoc` / `BM_DabRefillDenseDoc` ratio gate from 6.85x
+      to 11.02x and failed CI. Nothing had regressed — the denominator had simply
+      improved alone — and the honest fix was to stop leaving the numerator
+      behind rather than to raise the ceiling over an asymmetry I had introduced.
+      With both sides blocked the gate still needed 10.0 -> 14.0, for a reason
+      recorded in `tools/check_bench.py`: the refill gains 1.84x and the gradient
+      pass 1.25x, because four taps and their buffer traffic keep less of what
+      blocking gives
 - [ ] 1.12 Brick-fill benchmark, and an END-TO-END stamp figure beside it. A
       per-instruction number is exactly the kind that reads as a user-visible win and
       is not one: evaluation is 98% of a stamp, so 8x per instruction is at most ~4-5x

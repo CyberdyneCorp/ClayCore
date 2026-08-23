@@ -352,5 +352,37 @@ std::unique_ptr<Backend> make_backend(std::string_view name, const DeviceHandles
 void eval_points_reference(const scene::Tape& tape, const PointQuery& q,
                            const PointResults& out);
 
+// The same evaluation, one walk of the tape per BLOCK of points rather than one
+// per point. An instruction's parameter header — the inverse transform, the
+// scale, the rounding radius, a combine's mode and gate — is decoded once per
+// block instead of once per point, which is where a tape evaluation's time
+// actually goes: the arithmetic is around 5% of it and the primitive is
+// invisible in the cost (`add-cpu-simd-path/design.md`).
+//
+// Results are BIT-IDENTICAL to `eval_points_reference`, not merely within
+// tolerance, and the test suite asserts identity rather than a bound. This is a
+// second implementation of the same walk, so identity is the only thing standing
+// between it and a slow divergence from the scalar evaluator that defines
+// correctness for every backend in the tree.
+//
+// Control flow is uniform across a block: every branch in `ctape_eval` selects
+// on the OPCODE or on the stack depth, never on a point's value, so all points
+// in a block take the same path and the stack depth is shared. Instructions that
+// cannot hoist anything — a sampled volume gathers per point — still evaluate
+// correctly here, they simply win less, so there is no per-tape fallback and no
+// opcode this path declines.
+//
+// `block` is the number of points walked per pass; 0 selects the default. It is
+// not a tuning constant to agonise over — everything from 64 up measured within
+// 4% — and a brick's 8^3 = 512 points already sits in the flat region.
+void eval_points_blocked(const scene::Tape& tape, const PointQuery& q, const PointResults& out,
+                         std::size_t block = 0);
+
+// The stack depth a tape actually reaches, which is a property of its
+// instruction sequence rather than of any point. The blocked path allocates
+// `block * depth` values, so a tape of depth 2 — which a flat chain of stamps is
+// — costs a fraction of what CLAY_TAPE_MAX_STACK would.
+std::size_t tape_stack_depth(const scene::Tape& tape);
+
 }  // namespace eval
 }  // namespace clay

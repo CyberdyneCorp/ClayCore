@@ -380,3 +380,78 @@ is a **headroom** claim, not a delivery:
   somewhere on the mixed row above, between 2x and 9x depending on how much has
   accumulated since its last consolidation, and any published number should say
   which document it describes.
+
+# What landed, 2026-08-22: the evaluator, and the two things the prototype hid
+
+Task 1.4 is implemented in `backends/cpu/tape_block.cpp` and measured against
+`main`, on a quiet machine, medians of 7-11 with the coefficient of variation
+under 2% on both sides unless noted.
+
+| benchmark | main | blocked | |
+|---|---:|---:|---:|
+| `BM_EvalPoints` | 6.01 ms | 3.12 ms | **1.93x** |
+| `BM_BrickFill` | 29.85 ms | 24.4 ms | **1.22x** |
+| `BM_DeepDocRefillPlanned10000` | 0.810 ms | 0.794 ms | 1.02x |
+
+Single-threaded, calling the two real functions directly so the thread pool is
+out of the picture:
+
+| document | ratio |
+|---|---:|
+| the benchmark document (torus, capped cone, octahedron, smooth blends) | 2.5x |
+| 12 spheres, hard unions | 4.7x |
+| 200 spheres, hard unions | 5.3x |
+
+## 1. Hoisting the VALUE is not hoisting the BRANCH, and that was most of the win
+
+The first working version decoded each instruction's per-block properties —
+whether it has a deformer chain, a repeat block, a sampled volume — once per
+block, exactly as this design said to, and then still tested them inside the
+point loop and called one generic helper. It measured **1.96x** on a document the
+prototype had put at 5.7x.
+
+Selecting the LOOP once per block instead — writing out the common instruction as
+its own branch-free loop, with the general path beside it — took the same
+document to **6.44x**. Same hoisted values, same arithmetic, bit-identical
+output; the difference was entirely whether the branch was inside the inner loop
+or outside it.
+
+Worth stating plainly because the earlier version looked like the design working.
+It was 1.96x, it was correct, and it would have shipped as "blocking helps a
+bit" if the prototype had not already said what the number should have been. **A
+prototype's value here was as a floor to be held to, not as a prediction.**
+
+## 2. The end-to-end figure is smaller than any of the microbenchmarks, and why
+
+1.93x on point evaluation, 1.22x on a brick fill, and nothing measurable on the
+planned refill. The three numbers disagree for three separate reasons, all of
+which are the honest answer rather than a shortfall to be explained away:
+
+**The primitive became visible again.** #207 measured a torus costing the same as
+a sphere and concluded the primitive was invisible in the cost. That was true
+*while bookkeeping dominated*. Blocking removes the bookkeeping, and what is left
+is the arithmetic — so the win now depends on how cheap the primitives are. A
+document of spheres gets 5.3x; the benchmark document's torus, capped cone,
+octahedron and smooth blends get 2.5x. **This is the model confirming itself, not
+contradicting itself**, but it means no single multiple describes the change and
+any published figure has to name its document.
+
+**Threading takes a cut.** The same benchmark document is 2.5x single-threaded
+and 1.93x through the pool.
+
+**`BM_DeepDocRefillPlanned10000` is not an evaluation benchmark.** Its refill is
+0.810 ms against 0.841 ms for the cull alone — the culled tape is small and the
+time is in planning, not evaluating. It shows 1.02x because there is almost
+nothing there for this change to take. That is worth keeping in the record: the
+sculpting path's remaining cost at that document size is not where this change
+works.
+
+## What is still open
+
+- **arm64 is still unmeasured**, and it is the device that matters. Task 1.3's
+  second half continues to gate any published figure.
+- **Gradients are still on the scalar walk** (task 1.11).
+- Task 1.10's absent-feature-check figure has now been partly answered by
+  construction rather than by measurement: those checks are hoisted, and what the
+  hoist is worth is inside the numbers above rather than isolated. Measuring them
+  separately on the golden corpus is still worth doing.

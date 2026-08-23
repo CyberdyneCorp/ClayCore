@@ -81,6 +81,7 @@ add_library(claycore
   src/io/mesh_stream.cpp
   ${ufbx_SOURCE_DIR}/ufbx.c
   backends/cpu/cpu_backend.cpp
+  backends/cpu/tape_block.cpp
   bindings/c/clay_c.cpp)
 
 set_source_files_properties(${ufbx_SOURCE_DIR}/ufbx.c PROPERTIES COMPILE_OPTIONS "-w")
