@@ -70,6 +70,15 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.43.0 is the closest so far to being such a release, and is not one**: no
+   signature changes and no new symbols, but `clay_document_undo` and
+   `clay_document_redo` REVERSE MORE THAN THEY DID. They acted on the command
+   stack alone; they now act on a session history spanning the SDF edit list,
+   voxel grids and mesh layers. A host that already calls them gets the edits it
+   was silently missing, through the same entry points — a fix, and why this is
+   a minor rather than a patch. A host that only ever edited SDF sees behaviour
+   bit-identical to before, and the golden corpus pins that.
+
    **0.42.0 is not such a release either**: additive, and it closes an
    asymmetry rather than adding a capability. Every format has always been
    implemented against buffers — `save_obj_file` is

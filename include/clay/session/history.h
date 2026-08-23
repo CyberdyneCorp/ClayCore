@@ -109,11 +109,34 @@ class History {
     // are dropped, for the reason above.
     void record_mesh_step(scene::LayerId layer, mesh::VertexDeltas deltas);
 
-    // An operation NO mechanism records — a consolidate, a rasterize, a
-    // conversion between representations. Recorded so a host can draw a
-    // boundary rather than let a user undo through it and be surprised by what
-    // survives. Never reversible, never counted in the depths.
+    // An operation NO mechanism records. The examples matter, because the
+    // obvious ones are wrong: consolidate IS undoable (it takes an UndoStack
+    // and records through the command vocabulary), and rasterizing into a grid
+    // IS recorded once a sink is installed, since it writes through `set`.
+    //
+    // What genuinely is not recorded:
+    //
+    //  - EVERY MASK EDIT. voxel::MaskField is a FOURTH representation with no
+    //    history mechanism at all — twenty mutating entry points across the
+    //    ABI and not one command variant. `correct-the-undo-scope` counted
+    //    three mechanisms and did not count the thing that has none.
+    //  - Operations that destroy history itself: dropping a resolution level,
+    //    removing a sculpt layer, merging one down.
+    //  - Anything a HOST does that the engine never sees.
+    //
+    // Recorded so a host can draw a boundary rather than let a user undo
+    // through it and be surprised by what survives. Never reversible, never
+    // counted in the depths.
     void record_barrier(std::string what);
+
+    // Some engine entry points take a scene::UndoStack* directly and perform
+    // commands through it — scene::consolidate_layer is the one today. Hand
+    // them this, then call sync_scene_steps() so the session learns how many
+    // entries appeared and the step ORDER stays true. Skipping the sync loses
+    // the ordering, which is the one way to use this wrongly, so it is named
+    // here rather than left to a reader to infer.
+    scene::UndoStack* commands() { return &commands_; }
+    void sync_scene_steps();
 
     // -- replay --------------------------------------------------------------
 
@@ -154,6 +177,7 @@ class History {
     std::vector<voxel::VoxelGrid::SculptChange> open_cells_;
     scene::LayerId open_layer_ = 0;
     bool voxel_open_ = false;
+    bool grouping_ = false;
     bool enabled_ = false;
 };
 

@@ -32,15 +32,52 @@ bool History::perform(scene::Document& doc, const scene::Command& cmd) {
     return ok;
 }
 
-void History::begin_group() { commands_.begin_group(); }
+// UndoStack::begin_group pushes its entry IMMEDIATELY, so the stack's depth
+// grows here rather than at end_group, and the commands inside append to that
+// entry without growing it further. So neither the group's own commands nor
+// end_group can be detected by "did the depth grow across this call" — which is
+// what perform() uses, and what made a grouped edit record no step at all.
+//
+// The reconciliation below is the fix: after the group closes, the stack is the
+// truth and the step list learns what it missed. A group that stayed empty is
+// popped by end_group, so it correctly yields no step.
+void History::begin_group() {
+    grouping_ = true;
+    commands_.begin_group();
+}
 
 void History::end_group() {
-    const std::size_t before = commands_.undo_depth();
     commands_.end_group();
-    if (commands_.undo_depth() > before) {
+    grouping_ = false;
+    sync_scene_steps();
+}
+
+// Reconcile after an engine call that performed commands through commands().
+// The stack is the truth; the step list learns what it missed.
+void History::sync_scene_steps() {
+    if (!enabled_) return;
+    // An OPEN group already occupies an entry on the stack and is not a step
+    // until it closes. Reconciling here would record it early.
+    if (grouping_) return;
+    std::size_t counted = 0;
+    for (const Step& s : steps_)
+        if (s.kind == Step::Kind::Scene) ++counted;
+    const std::size_t actual = commands_.undo_depth();
+    for (; counted < actual; ++counted) {
         Step step;
         step.kind = Step::Kind::Scene;
         push(std::move(step));
+    }
+    // Fewer entries than steps means the last command COALESCED into the one
+    // before it, so the newest Scene step no longer names an entry of its own.
+    // Removing the newest is correct because coalescing merges backwards.
+    for (; counted > actual; --counted) {
+        for (std::size_t i = steps_.size(); i > 0; --i) {
+            if (steps_[i - 1].kind == Step::Kind::Scene) {
+                steps_.erase(steps_.begin() + static_cast<std::ptrdiff_t>(i - 1));
+                break;
+            }
+        }
     }
 }
 

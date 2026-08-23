@@ -148,14 +148,16 @@ TEST_CASE("session: a voxel step that changed nothing is not a step") {
     CHECK(h.step_count() == 0);
     CHECK(h.undo_depth() == 0);
 
-    // And a write that sets a cell to what it already held still RECORDS,
-    // because the sink sees the write; reverting it is a no-op that is
-    // nonetheless honest about having happened.
+    // And a write that sets a cell to what it ALREADY HELD records nothing, so
+    // it is not a step either. This assertion said the opposite when first
+    // written, and the C-level test caught it: journaling a write that changed
+    // nothing builds an undo step that undoes nothing, which is the exact
+    // defect this channel exists to avoid.
     w.grid.set({0, 0, 0}, 1);
     REQUIRE(h.begin_voxel_step(w.voxel_layer, w.grid));
     w.grid.set({0, 0, 0}, 1);
     h.end_voxel_step(w.grid);
-    CHECK(h.step_count() == 1);
+    CHECK(h.step_count() == 0);
 }
 
 TEST_CASE("session: a stroke that coalesces is still one step") {
@@ -187,7 +189,7 @@ TEST_CASE("session: a barrier is a horizon, not a silent gap") {
     h.set_enabled(true);
 
     REQUIRE(h.perform(w.doc, add_sphere(w.sdf_layer, 0.5f, kernel::cf3(0, 0, 0))));
-    h.record_barrier("consolidate");
+    h.record_barrier("mask edit");
     REQUIRE(h.begin_voxel_step(w.voxel_layer, w.grid));
     w.grid.set({0, 0, 0}, 1);
     h.end_voxel_step(w.grid);
@@ -196,7 +198,7 @@ TEST_CASE("session: a barrier is a horizon, not a silent gap") {
     // depth that counted further would promise an undo the host cannot do.
     CHECK(h.step_count() == 3);
     CHECK(h.undo_depth() == 1);
-    CHECK(h.next_barrier() == "consolidate");
+    CHECK(h.next_barrier() == "mask edit");
 
     REQUIRE(h.undo(w.doc, w.grid_for(), w.mesh_for()));
     CHECK(h.undo_depth() == 0);
@@ -252,7 +254,7 @@ TEST_CASE("session: disabled records nothing and behaves as before") {
     CHECK(h.step_count() == 0);
     CHECK_FALSE(h.begin_voxel_step(w.voxel_layer, w.grid));
     CHECK(w.grid.change_sink() == nullptr);
-    h.record_barrier("consolidate");
+    h.record_barrier("mask edit");
     CHECK(h.step_count() == 0);
     CHECK_FALSE(h.undo(w.doc, w.grid_for(), w.mesh_for()));
 }
@@ -276,6 +278,7 @@ TEST_CASE("voxel: the sink records every write in order, and does not coalesce")
     grid.set_change_sink(&sink);
     grid.set({0, 0, 0}, 1);
     grid.set({0, 0, 0}, 2);
+    grid.set({0, 0, 0}, 2);  // changes nothing: not journaled
     grid.set({1, 0, 0}, 3);
     grid.set_change_sink(nullptr);
 
@@ -305,4 +308,53 @@ TEST_CASE("voxel: a replay is not a pass and records into neither channel") {
     grid.revert_changes(recorded);
     CHECK(sink.size() == recorded.size());
     grid.set_change_sink(nullptr);
+}
+
+TEST_CASE("session: a group is one step, and an empty group is none") {
+    // Regression. UndoStack::begin_group pushes its entry IMMEDIATELY, so the
+    // stack's depth grows at BEGIN and the commands inside append without
+    // growing it further. The first draft detected steps with "did the depth
+    // grow across this call", which is true for an ordinary command and false
+    // for every part of a group — so a grouped edit recorded no step at all and
+    // four existing tests went red. The reconciliation at end_group is the fix.
+    World w;
+    session::History h;
+    h.set_enabled(true);
+
+    h.begin_group();
+    REQUIRE(h.perform(w.doc, add_sphere(w.sdf_layer, 0.5f, kernel::cf3(0, 0, 0))));
+    REQUIRE(h.perform(w.doc, add_sphere(w.sdf_layer, 0.3f, kernel::cf3(1, 0, 0))));
+    h.end_group();
+
+    CHECK(h.undo_depth() == 1);  // two commands, one step
+    REQUIRE(h.undo(w.doc, w.grid_for(), w.mesh_for()));
+    CHECK(w.doc.layers[0].sdf->roots.empty());  // both came back
+
+    // A group nothing was done in is not a step.
+    const std::size_t before = h.step_count();
+    h.begin_group();
+    h.end_group();
+    CHECK(h.step_count() == before);
+}
+
+TEST_CASE("session: a group interleaves with the other representations") {
+    World w;
+    session::History h;
+    h.set_enabled(true);
+
+    h.begin_group();
+    REQUIRE(h.perform(w.doc, add_sphere(w.sdf_layer, 0.5f, kernel::cf3(0, 0, 0))));
+    REQUIRE(h.perform(w.doc, add_sphere(w.sdf_layer, 0.3f, kernel::cf3(1, 0, 0))));
+    h.end_group();
+
+    REQUIRE(h.begin_voxel_step(w.voxel_layer, w.grid));
+    w.grid.set({0, 0, 0}, 1);
+    h.end_voxel_step(w.grid);
+
+    CHECK(h.undo_depth() == 2);
+    REQUIRE(h.undo(w.doc, w.grid_for(), w.mesh_for()));  // the voxel step
+    CHECK(w.grid.occupied_count() == 0);
+    CHECK(w.doc.layers[0].sdf->roots.size() == 2);       // the group is intact
+    REQUIRE(h.undo(w.doc, w.grid_for(), w.mesh_for()));  // the whole group
+    CHECK(w.doc.layers[0].sdf->roots.empty());
 }

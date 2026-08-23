@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 42
+#define CLAY_ABI_MINOR 43
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -432,6 +432,24 @@ clay_result clay_remove_node(clay_document* doc, clay_layer_id layer, clay_node_
  * every editing entry point records its own inverse, so no reachable edit
  * escapes undo. Nothing to undo is reported through *out_undone, not returned
  * as a failure, so a UI can drive the buttons without tracking state. */
+/* Opt-in history. Unchanged in shape, and since ABI 0.43.0 it spans the SDF
+ * edit list, VOXEL grids and MESH layers rather than the edit list alone.
+ *
+ * That is a behaviour change and a fix. Before it, a host that sculpted a voxel
+ * layer and called clay_document_undo reversed an unrelated SDF edit, or was
+ * told there was nothing to undo — because voxel edits and mesh displacements
+ * are recorded by mechanisms the command stack never saw. One undo now takes
+ * off the most recent edit whatever made it.
+ *
+ * WHAT IS STILL NOT A STEP, because nothing records it: every MASK edit — a
+ * mask is a fourth representation with no history mechanism at all — and the
+ * operations that destroy history itself (dropping a resolution level,
+ * removing a sculpt layer, merging one down). Consolidate IS undoable and is
+ * worth naming because it is the one most often assumed otherwise.
+ *
+ * The depths reported by clay_document_undo_state count steps that will
+ * actually reverse something, so a host greying a menu item from one never
+ * offers an undo that does nothing. */
 clay_result clay_document_enable_undo(clay_document* doc);
 clay_result clay_document_undo(clay_document* doc, int32_t* out_undone);
 clay_result clay_document_redo(clay_document* doc, int32_t* out_redone);
