@@ -90,9 +90,9 @@
 - [ ] 5.3 Swift smoke
 - [x] 5.4 ABI minor bump and `docs/RELEASE.md`, stating plainly that undo now
       reverses more than it did — a behaviour change and a fix
-- [ ] 5.5 `docs/05-claycore-library.md`: the history section, which does not
+- [x] 5.5 `docs/05-claycore-library.md`: the history section, which did not
       exist, and which `correct-the-undo-scope` is the reason to write
-- [ ] 5.6 A numbered example that crosses representations and undoes back
+- [x] 5.6 A numbered example that crosses representations and undoes back
 - [ ] 5.7 `openspec/ROADMAP.md`, and `correct-the-undo-scope` updated — it names
       this gap and will no longer be describing the tree
 

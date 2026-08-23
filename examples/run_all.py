@@ -90,6 +90,7 @@ EXAMPLES = [
     "56_mesh_colour_brushes",
     "57_mesh_deformers",
     "58_attribute_transfer",
+    "59_undo_across_representations",
 ]
 
 
