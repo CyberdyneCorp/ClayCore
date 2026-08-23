@@ -242,6 +242,77 @@ The document tree the app and specs already define, owned here so every consumer
 
 `clay::brick`: sparse virtual grid of 8³/16³ bricks, fp16 narrow band (±3 voxels), dirty-set tracking, async-friendly (evaluation requests are plain data; the app owns threading/queues via the backend), LOD mip bricks for far view.
 
+### History: one undo, and exactly what it covers
+
+`correct-the-undo-scope` found that the library had **three unrelated history
+mechanisms and no single step spanning two of them**, and that nothing said so
+— a host learned by shipping. `unify-the-undo-history` closed that. This
+section is the thing that was missing.
+
+**One order across three representations.** `clay_document_undo` /
+`Document.undo()` reverse the most recent edit *whatever made it*. An SDF stamp,
+then a voxel smooth, then a mesh grab undo as mesh, voxel, SDF. The entry points
+did not change shape; since ABI 0.43.0 they reverse more than they did.
+
+| representation | what a step holds | where the inverse comes from |
+|---|---|---|
+| SDF edit list, layer state | one `UndoStack` entry | the command's inverse |
+| voxel grid | the cell writes the edit made, in order | replayed backwards to their `before` |
+| mesh layer | sparse vertex deltas | `VertexDeltas::revert` |
+
+It is an **index over** the three, not a merge of them. Each stores what it
+always stored, for the reasons it always had: a voxel edit has no compact
+inverse — the inverse of "carve here" is the cells that were there — and a
+vertex displacement is not an edit item.
+
+**A verb is one step, not one per cell.** A `sculpt_smooth` that touches four
+hundred cells is a single undo. So is a `fill_box`.
+
+**An edit that changed nothing is not a step.** A dab that misses every cell, a
+flatten meeting a flat region, erasing an already-empty cell — all ordinary
+here, and none of them produce an undo that does nothing. `undo_depth` counts
+steps that will actually reverse something, so a menu built from it is honest.
+
+**Undo is a DOCUMENT concept.** A grid made with `clay_voxel_grid_create` /
+`clay.VoxelGrid(...)` is not in a document, records nothing, and still edits.
+
+#### What is NOT covered, stated plainly
+
+The obvious guesses are wrong, so they are worth naming:
+
+- **Consolidate IS undoable.** It takes an `UndoStack` and records through the
+  command vocabulary. It is the operation most often assumed otherwise.
+- **Rasterizing into a grid IS undoable.** It writes through the same cell
+  choke point every verb uses.
+
+What genuinely is not:
+
+- **Every mask edit.** `voxel::MaskField` is a **fourth** representation with
+  twenty mutating entry points across the ABI and not one command variant. The
+  audit that counted three mechanisms did not count the thing that has none.
+- **Sculpt-layer property changes** — strength, visibility, order, merge-down.
+  Their effect on cells replays, but the property value does not, so an undo
+  would restore the pixels and not the setting. A partial undo is worse than
+  none, so they are not steps yet.
+- **Operations that destroy history itself** — dropping a resolution level,
+  removing a sculpt layer.
+- Anything a **host** does that the engine never sees.
+
+A host that needs a boundary can read it: the history records unreversible
+operations as barriers, `undo_depth` stops counting at the nearest one, and the
+barrier names what is in the way. That is how a UI says "you cannot go further
+back than this" instead of silently skipping it.
+
+#### Memory
+
+The history is **unbounded**. There is no cap, no byte accounting and no
+eviction — `add-history-budget` is the open change for that, and it is a P0.
+Widening the history to three representations makes it more urgent, not less: a
+voxel step holds one record per cell it changed, and a mesh step holds its
+deltas by value.
+
+Runnable: [`examples/59_undo_across_representations.py`](../examples/59_undo_across_representations.py).
+
 ## 7. Meshing & mesh processing (`clay::mesh`)
 
 - **Marching cubes** (default): consistent ambiguity resolution (asymptotic decider) → watertight, 2-manifold guarantee; runs over surface-crossing bricks only; CPU version is the golden reference, GPU versions (Metal/CUDA) must match topology-invariants (not bit-identical vertices).
