@@ -1201,3 +1201,144 @@ spread at 4,999 instructions is **2.9x**: `tri_prism` 6.24, `octahedron` 10.71,
 `pyramid` 9.64, `lnorm_sphere` 18.21 (it evaluates a `pow`). The fixed
 per-instruction cost is real and it is most of a cheap primitive, but "the
 primitive is invisible" holds only across the cheap ones.
+
+# Sized 2026-08-23: the stack machine (#207 candidate 4)
+
+Candidate 4 was "`CTapeValue stack[CLAY_TAPE_MAX_STACK]` per call, pushed and
+popped per instruction" — the last of #207's four suspects with no number
+against it. `benchmarks/tape_stack_probe.cpp` puts one there. **The conclusion
+is that it should not be changed**, and as with candidate 3 the reasons are
+worth more than the verdict.
+
+## Two stacks, and the claim only describes one of them
+
+The description has not been accurate since #218. There are now two:
+
+- **SCALAR** `ctape_eval`: a 16-slot `CTapeValue` array in the frame indexed by
+  a runtime `top`. This is the path `mask_extrude` drives (#225), and it is the
+  one the claim describes.
+- **BLOCKED** `walk_blocked`: `block * depth` slots in a thread-local vector, so
+  a slot is an ARRAY across the block rather than a spill. #223 already narrowed
+  it to one float per slot for a distance-only query, and it has always
+  allocated `tape_stack_depth(tape)` slots rather than sixteen.
+
+`CLAY_TAPE_MAX_STACK` is 16 but a flat chain of stamps reaches depth **2**, and
+only group nesting adds slots — one per level. So the live working set the claim
+calls 256 bytes is 32.
+
+## The design
+
+One tape, one set of points, and arms that differ ONLY in where a slot lives.
+The prim body, the combine body, the opcode dispatch, the header loads and the
+whole branch set are shared functions every arm calls, so a difference between
+two arms is storage and nothing else. Every arm is asserted **bit-identical** to
+`ctape_eval`, and the shipping `ctape_eval` and `eval_points_blocked` are timed
+alongside as the control that says each transcription is faithful rather than a
+strawman — the first blocked transcription read 2.3x off that control because it
+had not hoisted the per-block decode, which is what the control is for.
+
+    arr    the shipping shape: a slot array, runtime `top`
+    sel    two named locals + `top` selects. A tape whose depth the compiler
+           already computes could emit this. Isolates MEMORY TRAFFIC.
+    pair   the tape pre-scanned into (prim, combine) pairs and walked as an
+           accumulator: no array, no opcode dispatch. A ceiling for candidates
+           3 and 4 TOGETHER, not an estimate of the stack alone.
+
+M2 Max, single-threaded, AppleClang `-O3`, 20,480 points, 256 spheres = 511
+instructions, medians of 11 interleaved rounds. **cv is at or under 2.4% on
+every row of every run below**, and no arm deviates from `ctape_eval` by a bit.
+
+| scalar shape | coloured ns/instr | distance-only ns/instr |
+|---|---:|---:|
+| `arr` (ships) | **6.26** | **2.78** |
+| `sel` | 6.31 | 4.00 |
+| `pair` | 6.44 | 3.51 |
+
+`ctape_eval` itself reads 5.96 against the `arr` transcription's 6.26 (0.95x),
+which is the tolerance of the whole scalar half.
+
+**Every alternative is slower.** Not marginally on the distance-only shape: the
+register machine costs **1.44x** and the dispatch-free accumulator **1.26x**. On
+the coloured shape — the one that ships — the array is within 1% of the best
+alternative and 3% ahead of the ceiling arm. There is no fraction of
+per-instruction cost to attribute to scalar stack traffic, because removing it
+does not make anything faster.
+
+## Why: the array is not a spill, it is where a value has to live anyway
+
+AppleClang emits `ctape_prim_dist` out of line (candidate 3 established that),
+so **every push is separated from its pop by a `bl`**. A value kept in a
+register across a call has to be callee-saved, and the `sel` arm's disassembly
+shows exactly what that costs: `s0`/`s1` land in `s8`/`s10`, and each prim ends
+
+    cmp   w24, #0
+    fcsel s10, s10, s0, eq
+    fcsel s8,  s0,  s8, eq
+
+Two conditional writes that make the accumulator depend on the primitive that
+has not been combined into it yet. The array has no such edge: a push is a store
+that retires and a pop is a load that issues early, and the machine runs ahead.
+
+Removing the call proves it. Two further arms run the same `arr`/`pair` pair
+with the primitive INLINED — `sd_sphere` directly, no opcode read, and the
+disassembly confirms the loops contain no `bl` at all:
+
+| scalar, primitive inlined | ns/instr |
+|---|---:|
+| `arr` | 1.895 |
+| `pair` | 1.204 |
+
+**1.57x, and 0.69 ns/instr of it is the stack — 36% of per-instruction cost.**
+So the traffic is real and it is large. It is simply not reachable while the
+primitive is out of line, and candidate 3 is the reason it is out of line and
+was itself ruled not worth changing. Candidate 4 is downstream of candidate 3,
+and neither is worth doing alone.
+
+## The blocked stack, where the answer is different and still not candidate 4
+
+A blocked slot cannot go in a register, so the only alternative is FUSING the
+prim into the combine that follows it: the prim's value stays in a register and
+slot `top` is never written. That saves the traffic AND a pass over the block, so
+a third arm does one pass but still writes the value to the slot and reads it
+straight back — which separates them.
+
+| blocked, distance-only | ns/instr | |
+|---|---:|---|
+| `arr` two passes (ships) | 2.79 | |
+| one pass, still via the slot | 2.25 | **1.24x — the PASS** |
+| one pass, register | 2.20 | **1.03x — the TRAFFIC** |
+
+**Nine tenths of the win is the second pass and one tenth is the stack.** Slot
+traffic is 0.055 of 2.79 ns/instr: **2% of blocked distance-only per-instruction
+cost.** That is the number candidate 4 asked for on this path, and nothing is
+worth doing for 2%.
+
+The coloured blocked path is worse still for the candidate. `arr` 2.43 against
+fused 2.24 is 1.08x on spheres and it does not survive the primitive sweep —
+0.98x on boxes, 1.02x on tori. And the one-pass-via-slot arm reads **3.83**,
+slower than either: a 16-byte store immediately followed by a 16-byte load of
+the same address stalls forwarding, which is its own small lesson about
+`CTapeValue`.
+
+## The sweeps, because a fixed per-instruction cost dilutes
+
+`blocked dist arr / pair`, which is the largest ratio anywhere in this probe:
+
+| | 127 instrs | 511 | 2047 | box | torus | octahedron | lnorm_sphere | block 64 | block 4096 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| ratio | 1.272 | 1.273 | 1.286 | 1.199 | 1.260 | 1.077 | 1.017 | 1.294 | 1.307 |
+
+Flat in tape length and flat in block size — it is not icache and it is not the
+working set. It dilutes with the primitive exactly as a fixed per-instruction
+cost must: 1.27x on a sphere at 2.8 ns/instr, 1.02x on `lnorm_sphere` at 13.3,
+where the `pow` swallows it.
+
+## What this actually found, filed rather than folded in
+
+The 1.24x above is a LOOP FUSION in `walk_blocked`, not a stack change, and it
+is the only thing in candidate 4 with a number worth acting on. It also has real
+conditions: it needs the tape to be a flat prim-then-plain-combine chain, it is
+worth nothing on the coloured walk, and it is 1.02x once the primitive is dear.
+The blocked path is also already threaded, so it would dilute again end to end
+the way every ratio in this file does. Recorded here and filed separately;
+sizing candidate 4 was the task, and candidate 4's own answer is no.
