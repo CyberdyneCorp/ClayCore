@@ -5885,3 +5885,91 @@ def test_format_name_is_case_insensitive():
     mesh = doc.mesh(resolution=16)
     assert mesh.to_bytes("PLY") == mesh.to_bytes("ply")
     assert clay.load_mesh_bytes(mesh.to_bytes("ply"), "Ply").triangle_count > 0
+
+
+# -- one undo across three representations (unify-the-undo-history) ----------
+#
+# Document.undo() acted on the command stack alone, so a script that sculpted
+# a voxel layer and called undo() reversed an unrelated SDF edit or returned
+# False. It now reverses the most recent edit whatever made it.
+
+def test_undo_reverses_a_voxel_edit():
+    doc = clay.Document()
+    blocks = doc.add_voxel_layer("blocks", voxel_size=0.1)
+    doc.enable_undo()
+    blocks.set((0, 0, 0), 1)
+    assert blocks.occupied_count == 1
+    assert doc.undo_depth == 1
+
+    assert doc.undo()
+    assert blocks.occupied_count == 0
+    assert doc.redo()
+    assert blocks.occupied_count == 1
+
+
+def test_one_undo_order_spans_sdf_and_voxels():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("body")
+    blocks = doc.add_voxel_layer("blocks", voxel_size=0.1)
+    doc.enable_undo()
+
+    layer.add(clay.Sphere(r=0.5))
+    blocks.set((0, 0, 0), 1)
+    blocks.set((1, 0, 0), 1)
+    assert doc.undo_depth == 3
+
+    # Newest first: the two voxel writes, then the SDF item.
+    assert doc.undo() and blocks.occupied_count == 1
+    assert doc.undo() and blocks.occupied_count == 0
+    probes = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
+    inside_before = doc.eval(probes)[0]
+    assert doc.undo()
+    assert doc.eval(probes)[0] != pytest.approx(inside_before)
+    assert not doc.undo()
+
+
+def test_a_sculpt_verb_is_one_undo_step():
+    doc = clay.Document()
+    blocks = doc.add_voxel_layer("blocks", voxel_size=0.1)
+    doc.enable_undo()
+    blocks.fill_box((0, 0, 0), (4, 4, 4), 1)
+    filled = blocks.occupied_count
+    assert filled > 1
+    assert doc.undo_depth == 1  # one fill, one step, however many cells
+
+    blocks.sculpt_smooth((0, 0, 0), size=5)
+    assert blocks.occupied_count != filled
+    assert doc.undo_depth == 2
+
+    assert doc.undo()
+    assert blocks.occupied_count == filled  # the whole verb, one step
+
+
+def test_a_voxel_edit_that_changed_nothing_is_not_a_step():
+    doc = clay.Document()
+    blocks = doc.add_voxel_layer("blocks", voxel_size=0.1)
+    doc.enable_undo()
+    blocks.set((0, 0, 0), 1)
+    before = doc.undo_depth
+    blocks.erase((50, 50, 50))  # already empty: writes nothing
+    assert doc.undo_depth == before
+
+
+def test_a_standalone_grid_has_no_history_and_still_edits():
+    # Undo is a DOCUMENT concept; a grid made outside one is not in a document.
+    grid = clay.VoxelGrid(voxel_size=0.1)
+    grid.set((0, 0, 0), 1)
+    assert grid.occupied_count == 1
+
+
+def test_a_grid_taken_before_enable_undo_still_records():
+    # The handle holds a reference TO the document's history rather than a copy
+    # of it, so switching undo on afterwards reaches a handle already taken —
+    # which is the order a host does these two things in.
+    doc = clay.Document()
+    blocks = doc.add_voxel_layer("blocks", voxel_size=0.1)
+    doc.enable_undo()
+    blocks.set((0, 0, 0), 1)
+    assert doc.undo_depth == 1
+    assert doc.undo()
+    assert blocks.occupied_count == 0

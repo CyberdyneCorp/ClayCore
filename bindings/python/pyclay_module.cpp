@@ -46,6 +46,7 @@
 #include "clay/scene/armature.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
+#include "clay/session/history.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/curve.h"
 #include "clay/scene/tape.h"
@@ -622,8 +623,18 @@ std::vector<brush::StrokeSample> to_stroke_samples(nb::handle obj) {
 
 // Owns a grid, or borrows the one stored in a document's voxel layer so edits
 // are visible to save()/mesh() without a copy.
+// A session::History since unify-the-undo-history: the same opt-in and the
+// same methods, now spanning voxel grids and mesh layers as well as the edit
+// list. It WRAPS an UndoStack, so every command path below is unchanged.
+using UndoRef = std::shared_ptr<session::History>;
+
 struct PyVoxelGrid {
     std::shared_ptr<io::ClaySpaceDoc> doc;  // null for standalone grids
+    // The document's history, shared. A shared_ptr TO the document's UndoRef
+    // rather than a copy of it, so a grid handle taken BEFORE enable_undo still
+    // sees the history once it is switched on — which is the ordinary order a
+    // host does those two things in.
+    std::shared_ptr<UndoRef> undo;
     scene::LayerId layer = 0;
     std::shared_ptr<voxel::VoxelGrid> owned;
 
@@ -703,7 +714,6 @@ const std::shared_ptr<brush::GateBake>& gate_bake_of(nb::handle mask) {
 // onto it, so an edit made through a layer records into the same history as
 // one made through the document. Null means undo is off, and a document with
 // no stack behaves exactly as it did before the feature existed.
-using UndoRef = std::shared_ptr<scene::UndoStack>;
 
 // Every editing entry point goes through the command vocabulary rather than
 // mutating the document, so a binding edit means exactly what the document
@@ -734,6 +744,43 @@ void apply_or_throw(scene::Document& doc, const scene::Command& cmd, const char*
 struct PyDocument {
     std::shared_ptr<io::ClaySpaceDoc> doc = std::make_shared<io::ClaySpaceDoc>();
     std::shared_ptr<UndoRef> undo = std::make_shared<UndoRef>();
+};
+
+session::History::GridFor grid_for(const PyDocument& d) {
+    std::shared_ptr<io::ClaySpaceDoc> doc = d.doc;
+    return [doc](scene::LayerId id) -> voxel::VoxelGrid* {
+        auto it = doc->voxel_layers.find(id);
+        return it == doc->voxel_layers.end() ? nullptr : &it->second;
+    };
+}
+
+session::History::MeshFor mesh_for(const PyDocument& d) {
+    std::shared_ptr<io::ClaySpaceDoc> doc = d.doc;
+    return [doc](scene::LayerId id) -> mesh::Mesh* {
+        auto it = doc->mesh_layers.find(id);
+        return it == doc->mesh_layers.end() ? nullptr : &it->second;
+    };
+}
+
+// Bracket a voxel edit so it becomes ONE undo step, matching the C binding's
+// VoxelStep. A standalone grid has no document and therefore no history: undo
+// is a document concept. RAII because the verbs below throw.
+struct PyVoxelStep {
+    session::History* history = nullptr;
+    voxel::VoxelGrid* grid = nullptr;
+
+    PyVoxelStep(const PyVoxelGrid& handle, voxel::VoxelGrid& g) {
+        if (!handle.doc || !handle.undo || !*handle.undo) return;
+        session::History* h = handle.undo->get();
+        if (!h || !h->begin_voxel_step(handle.layer, g)) return;
+        history = h;
+        grid = &g;
+    }
+    ~PyVoxelStep() {
+        if (history) history->end_voxel_step(*grid);
+    }
+    PyVoxelStep(const PyVoxelStep&) = delete;
+    PyVoxelStep& operator=(const PyVoxelStep&) = delete;
 };
 
 math::Aabb to_aabb(nb::handle obj) {
@@ -4539,12 +4586,18 @@ NB_MODULE(pyclay, m) {
                      to_consolidation(cell, band, padding, region, redistance);
                  if (l.layer().protected_from_edits())
                      throw std::invalid_argument("layer is protected (ghosted or locked)");
+                 // Consolidate performs commands through the stack directly, so the
+                 // session is told afterwards how many entries appeared. It IS
+                 // undoable — worth saying, because it is the operation most
+                 // often assumed not to be.
+                 session::History* hist = (l.undo && *l.undo) ? l.undo->get() : nullptr;
                  if (!scene::consolidate_layer(l.doc->document, l.id, p,
-                                               l.undo ? l.undo->get() : nullptr, &cost,
+                                               hist ? hist->commands() : nullptr, &cost,
                                                eval::pooled_bake_eval()))
                      throw std::invalid_argument(
                          "nothing to consolidate: the layer is empty, unbounded, or the region "
                          "contains no surface");
+                 if (hist) hist->sync_scene_steps();
                  return cost_dict(cost);
              },
              "cell"_a, "band"_a = nb::none(), "padding"_a = nb::none(), "region"_a = nb::none(),
@@ -4659,6 +4712,7 @@ NB_MODULE(pyclay, m) {
                  d.doc->voxel_layers.emplace(l.id, voxel::VoxelGrid(voxel_size));
                  PyVoxelGrid g;
                  g.doc = d.doc;
+                 g.undo = d.undo;
                  g.layer = l.id;
                  return g;
              },
@@ -4800,6 +4854,7 @@ NB_MODULE(pyclay, m) {
                      if (!d.doc->voxel_layers.count(l.id)) continue;
                      PyVoxelGrid g;
                      g.doc = d.doc;
+                 g.undo = d.undo;
                      g.layer = l.id;
                      return nb::cast(g);
                  }
@@ -4994,7 +5049,10 @@ NB_MODULE(pyclay, m) {
              "Retransform a whole layer; omitted arguments keep their current value")
         .def("enable_undo",
              [](PyDocument& d) {
-                 if (!*d.undo) *d.undo = std::make_shared<scene::UndoStack>();
+                 if (!*d.undo) {
+                     *d.undo = std::make_shared<session::History>();
+                     (*d.undo)->set_enabled(true);
+                 }
              },
              "Start recording edits. Off by default, so a document that never "
              "calls this pays nothing; edits made before it are not undoable.")
@@ -5002,13 +5060,13 @@ NB_MODULE(pyclay, m) {
         .def("undo",
              [](PyDocument& d) {
                  if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
-                 return (*d.undo)->undo(d.doc->document);
+                 return (*d.undo)->undo(d.doc->document, grid_for(d), mesh_for(d));
              },
              "Reverse the last recorded step; returns False when there is nothing to undo")
         .def("redo",
              [](PyDocument& d) {
                  if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
-                 return (*d.undo)->redo(d.doc->document);
+                 return (*d.undo)->redo(d.doc->document, grid_for(d), mesh_for(d));
              },
              "Reapply the last undone step; returns False when there is nothing to redo")
         .def_prop_ro("undo_depth",
@@ -5473,7 +5531,11 @@ NB_MODULE(pyclay, m) {
         .def(
             "set",
             [](PyVoxelGrid& g, nb::handle cell, std::uint8_t index) {
-                g.grid().set(to_coord(cell), index);
+                {
+                    voxel::VoxelGrid& gr_ = g.grid();
+                    PyVoxelStep step_(g, gr_);
+                    gr_.set(to_coord(cell), index);
+                }
             },
             "cell"_a, "index"_a)
         .def(
@@ -5486,7 +5548,12 @@ NB_MODULE(pyclay, m) {
             },
             "cells"_a, "index"_a, "Set every cell of an (N, 3) int32 array in one call")
         .def(
-            "erase", [](PyVoxelGrid& g, nb::handle cell) { g.grid().erase(to_coord(cell)); },
+            "erase",
+            [](PyVoxelGrid& g, nb::handle cell) {
+                voxel::VoxelGrid& gr_ = g.grid();
+                PyVoxelStep step_(g, gr_);
+                gr_.erase(to_coord(cell));
+            },
             "cell"_a)
         .def(
             "erase_many",
@@ -5500,7 +5567,11 @@ NB_MODULE(pyclay, m) {
         .def(
             "paint",
             [](PyVoxelGrid& g, nb::handle cell, std::uint8_t index) {
-                g.grid().paint(to_coord(cell), index);
+                {
+                    voxel::VoxelGrid& gr_ = g.grid();
+                    PyVoxelStep step_(g, gr_);
+                    gr_.paint(to_coord(cell), index);
+                }
             },
             "cell"_a, "index"_a, "Recolor an occupied cell (no-op on empty cells)")
         .def(
@@ -5652,8 +5723,12 @@ NB_MODULE(pyclay, m) {
             "sculpt_smooth",
             [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
                const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
-                g.grid().sculpt_smooth(to_coord(cell),
+                {
+                    voxel::VoxelGrid& gr_ = g.grid();
+                    PyVoxelStep step_(g, gr_);
+                    gr_.sculpt_smooth(to_coord(cell),
                                        make_brush(n, shape, falloff, strength, seed, mask));
+                }
             },
             "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant", "strength"_a = 1.0f,
             "seed"_a = 0u, "mask"_a = nb::none(),
@@ -5662,8 +5737,12 @@ NB_MODULE(pyclay, m) {
             "sculpt_inflate",
             [](PyVoxelGrid& g, nb::handle cell, int n, int amount, const std::string& shape,
                const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
-                g.grid().sculpt_inflate(
+                {
+                    voxel::VoxelGrid& gr_ = g.grid();
+                    PyVoxelStep step_(g, gr_);
+                    gr_.sculpt_inflate(
                     to_coord(cell), make_brush(n, shape, falloff, strength, seed, mask), amount);
+                }
             },
             "cell"_a, "size"_a, "amount"_a = 1, "shape"_a = "sphere", "falloff"_a = "constant",
             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
@@ -5673,9 +5752,13 @@ NB_MODULE(pyclay, m) {
             [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle normal, float offset,
                const std::string& shape, const std::string& falloff, float strength,
                std::uint32_t seed, nb::handle mask) {
-                g.grid().sculpt_flatten(to_coord(cell),
+                {
+                    voxel::VoxelGrid& gr_ = g.grid();
+                    PyVoxelStep step_(g, gr_);
+                    gr_.sculpt_flatten(to_coord(cell),
                                         make_brush(n, shape, falloff, strength, seed, mask),
                                         to_f3(normal, "normal"), offset);
+                }
             },
             "cell"_a, "size"_a, "normal"_a, "offset"_a = 0.0f, "shape"_a = "sphere",
             "falloff"_a = "constant", "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
@@ -5685,9 +5768,13 @@ NB_MODULE(pyclay, m) {
             [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle displacement,
                const std::string& shape, const std::string& falloff, float strength,
                std::uint32_t seed, bool front_only, nb::handle mask) {
-                g.grid().sculpt_grab(to_coord(cell),
+                {
+                    voxel::VoxelGrid& gr_ = g.grid();
+                    PyVoxelStep step_(g, gr_);
+                    gr_.sculpt_grab(to_coord(cell),
                                      make_brush(n, shape, falloff, strength, seed, mask),
                                      to_f3(displacement, "displacement"), front_only);
+                }
             },
             "cell"_a, "size"_a, "displacement"_a, "shape"_a = "sphere", "falloff"_a = "smooth",
             "strength"_a = 1.0f, "seed"_a = 0u, "front_only"_a = false, "mask"_a = nb::none(),
@@ -5698,8 +5785,12 @@ NB_MODULE(pyclay, m) {
             "sculpt_pinch",
             [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
                const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
-                g.grid().sculpt_pinch(to_coord(cell),
+                {
+                    voxel::VoxelGrid& gr_ = g.grid();
+                    PyVoxelStep step_(g, gr_);
+                    gr_.sculpt_pinch(to_coord(cell),
                                       make_brush(n, shape, falloff, strength, seed, mask));
+                }
             },
             "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant", "strength"_a = 1.0f,
             "seed"_a = 0u, "mask"_a = nb::none(),
@@ -5708,8 +5799,12 @@ NB_MODULE(pyclay, m) {
             "sculpt_magnify",
             [](PyVoxelGrid& g, nb::handle cell, int n, const std::string& shape,
                const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
-                g.grid().sculpt_magnify(to_coord(cell),
+                {
+                    voxel::VoxelGrid& gr_ = g.grid();
+                    PyVoxelStep step_(g, gr_);
+                    gr_.sculpt_magnify(to_coord(cell),
                                         make_brush(n, shape, falloff, strength, seed, mask));
+                }
             },
             "cell"_a, "size"_a, "shape"_a = "sphere", "falloff"_a = "constant", "strength"_a = 1.0f,
             "seed"_a = 0u, "mask"_a = nb::none(),
@@ -5719,8 +5814,12 @@ NB_MODULE(pyclay, m) {
             "sculpt_fill_cavities",
             [](PyVoxelGrid& g, nb::handle cell, int n, int passes, const std::string& shape,
                const std::string& falloff, float strength, std::uint32_t seed, nb::handle mask) {
-                g.grid().sculpt_fill_cavities(
+                {
+                    voxel::VoxelGrid& gr_ = g.grid();
+                    PyVoxelStep step_(g, gr_);
+                    gr_.sculpt_fill_cavities(
                     to_coord(cell), make_brush(n, shape, falloff, strength, seed, mask), passes);
+                }
             },
             "cell"_a, "size"_a, "passes"_a = 1, "shape"_a = "sphere", "falloff"_a = "constant",
             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
@@ -5733,9 +5832,13 @@ NB_MODULE(pyclay, m) {
             [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle normal, float offset,
                const std::string& shape, const std::string& falloff, float strength,
                std::uint32_t seed, nb::handle mask) {
-                g.grid().sculpt_scrape(to_coord(cell),
+                {
+                    voxel::VoxelGrid& gr_ = g.grid();
+                    PyVoxelStep step_(g, gr_);
+                    gr_.sculpt_scrape(to_coord(cell),
                                        make_brush(n, shape, falloff, strength, seed, mask),
                                        to_f3(normal, "normal"), offset);
+                }
             },
             "cell"_a, "size"_a, "normal"_a, "offset"_a = 0.0f, "shape"_a = "sphere",
             "falloff"_a = "constant", "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
@@ -5747,9 +5850,13 @@ NB_MODULE(pyclay, m) {
             [](PyVoxelGrid& g, nb::handle cell, int n, nb::handle displacement,
                const std::string& shape, const std::string& falloff, float strength,
                std::uint32_t seed, nb::handle mask) {
-                g.grid().sculpt_smudge(to_coord(cell),
+                {
+                    voxel::VoxelGrid& gr_ = g.grid();
+                    PyVoxelStep step_(g, gr_);
+                    gr_.sculpt_smudge(to_coord(cell),
                                        make_brush(n, shape, falloff, strength, seed, mask),
                                        to_f3(displacement, "displacement"));
+                }
             },
             "cell"_a, "size"_a, "displacement"_a, "shape"_a = "sphere", "falloff"_a = "smooth",
             "strength"_a = 1.0f, "seed"_a = 0u, "mask"_a = nb::none(),
@@ -5769,7 +5876,9 @@ NB_MODULE(pyclay, m) {
                 } catch (const std::exception&) {
                     throw std::invalid_argument("alpha must be an (H, W) float array");
                 }
-                if (!g.grid().sculpt_carve_alpha(
+                voxel::VoxelGrid& gr_ = g.grid();
+                PyVoxelStep step_(g, gr_);
+                if (!gr_.sculpt_carve_alpha(
                         to_coord(cell), make_brush(n, shape, falloff, strength, seed, mask),
                         view.data(), static_cast<int>(view.shape(1)),
                         static_cast<int>(view.shape(0)), to_f3(direction, "direction"), index))
@@ -5800,14 +5909,22 @@ NB_MODULE(pyclay, m) {
         .def(
             "repair_close_holes",
             [](PyVoxelGrid& g, int passes, nb::handle mask) {
-                g.grid().repair_close_holes(passes, borrow_mask(mask));
+                {
+                    voxel::VoxelGrid& gr_ = g.grid();
+                    PyVoxelStep step_(g, gr_);
+                    gr_.repair_close_holes(passes, borrow_mask(mask));
+                }
             },
             "passes"_a = 1, "mask"_a = nb::none(),
             "Seal perforations over the whole grid by the pocket rule. Only ever "
             "adds cells, so no material is lost.")
         .def(
             "repair_fill_voids",
-            [](PyVoxelGrid& g, nb::handle mask) { g.grid().repair_fill_voids(borrow_mask(mask)); },
+            [](PyVoxelGrid& g, nb::handle mask) {
+                voxel::VoxelGrid& gr_ = g.grid();
+                PyVoxelStep step_(g, gr_);
+                gr_.repair_fill_voids(borrow_mask(mask));
+            },
             "mask"_a = nb::none(),
             "Fill every empty cell the outside cannot reach, coloured from the shell "
             "that encloses it. Enclosure is decided by a flood from outside the "
@@ -5867,13 +5984,21 @@ NB_MODULE(pyclay, m) {
         .def(
             "fill_box",
             [](PyVoxelGrid& g, nb::handle a, nb::handle b, std::uint8_t index) {
-                g.grid().fill_box(to_coord(a), to_coord(b), index);
+                {
+                    voxel::VoxelGrid& gr_ = g.grid();
+                    PyVoxelStep step_(g, gr_);
+                    gr_.fill_box(to_coord(a), to_coord(b), index);
+                }
             },
             "a"_a, "b"_a, "index"_a, "Inclusive-corner box fill")
         .def(
             "fill_line",
             [](PyVoxelGrid& g, nb::handle a, nb::handle b, std::uint8_t index) {
-                g.grid().fill_line(to_coord(a), to_coord(b), index);
+                {
+                    voxel::VoxelGrid& gr_ = g.grid();
+                    PyVoxelStep step_(g, gr_);
+                    gr_.fill_line(to_coord(a), to_coord(b), index);
+                }
             },
             "a"_a, "b"_a, "index"_a)
         .def(
@@ -5881,7 +6006,11 @@ NB_MODULE(pyclay, m) {
             [](PyVoxelGrid& g, nb::handle cell, std::uint8_t index, const std::string& axes) {
                 std::uint8_t mask = 0;
                 for (char c : axes) mask |= static_cast<std::uint8_t>(1u << parse_axis({c}));
-                g.grid().set_mirrored(to_coord(cell), index, mask);
+                {
+                    voxel::VoxelGrid& gr_ = g.grid();
+                    PyVoxelStep step_(g, gr_);
+                    gr_.set_mirrored(to_coord(cell), index, mask);
+                }
             },
             "cell"_a, "index"_a, "axes"_a = "x",
             "Set the cell and every mirror combination of the given axes ('x', 'xz', ...)")
@@ -5890,7 +6019,11 @@ NB_MODULE(pyclay, m) {
             [](PyVoxelGrid& g, nb::handle cell, std::uint8_t index, const std::string& axes) {
                 std::uint8_t mask = 0;
                 for (char c : axes) mask |= static_cast<std::uint8_t>(1u << parse_axis({c}));
-                g.grid().paint_mirrored(to_coord(cell), index, mask);
+                {
+                    voxel::VoxelGrid& gr_ = g.grid();
+                    PyVoxelStep step_(g, gr_);
+                    gr_.paint_mirrored(to_coord(cell), index, mask);
+                }
             },
             "cell"_a, "index"_a, "axes"_a = "x",
             "Recolor the cell and every mirror combination (occupied cells only)")
