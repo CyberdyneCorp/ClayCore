@@ -403,6 +403,52 @@ refuses it with `CLAY_ERROR_INVALID_ARGUMENT`; `mesh_tape` returns an empty
 mesh for an empty or infinite region. Either way, add something bounded or pass
 a finite region of your own.
 
+## Bytes, when you have nowhere to put a path
+
+`save` and `load` take paths. Every format is also reachable as bytes, which is
+what a host uses when its documents do not live on a filesystem it controls —
+an iPadOS document provider behind a security-scoped URL, a sync request, a
+project stored in the host's own container, or a WASM build with no filesystem
+at all.
+
+```python
+data = mesh.to_bytes("ply")            # 'obj', 'ply', 'fbx' or 'glb'
+back = clay.load_mesh_bytes(data, "ply", max_vertices=10_000_000)
+
+blob = doc.to_bytes()                  # a whole .clayspace
+doc2 = clay.load_bytes(blob)
+```
+
+```c
+clay_blob* blob = NULL;
+clay_mesh_save_memory(mesh, "ply", &blob);
+const uint8_t* p = clay_blob_data(blob);
+size_t n = clay_blob_size(blob);
+/* ... hand p/n to your writer ... */
+clay_blob_destroy(blob);
+```
+
+**The format is named, not derived**, because a buffer has no extension. The
+names are the extensions without the dot, matched case-insensitively, and an
+unknown one is refused rather than served as a default.
+
+**The bytes are identical to what the path form writes** — that is a test, not a
+promise. One exception, stated: an **in-memory OBJ carries no `mtllib` line**.
+The path form writes a companion `.mtl` beside the object file and names it; a
+buffer has no companion, and naming a file that was never written is worse than
+naming none.
+
+**`clay_blob` borrows.** `clay_blob_data` is valid until `clay_blob_destroy` and
+is unaffected by later edits to whatever produced it — the bytes were
+serialized when the handle was made — so a host can hand them to an
+asynchronous writer without copying first.
+
+**The import budget guards a buffer exactly as it guards a file.** A buffer from
+a network or a pasteboard is the untrusted input those ceilings exist for. The
+one exception is the file-byte ceiling, which is not offered: it bounds what a
+loader reads into memory before sizing a buffer, and a caller holding a buffer
+has already done that read.
+
 ## What the validator measures
 
 `is_watertight()` / `clay_mesh_validate` answer two questions. The validator

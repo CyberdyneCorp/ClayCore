@@ -70,6 +70,21 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.42.0 is not such a release either**: additive, and it closes an
+   asymmetry rather than adding a capability. Every format has always been
+   implemented against buffers — `save_obj_file` is
+   `write_whole_file(path, save_obj(...))` — and only the path wrappers
+   crossed the ABI, so a host whose documents arrive from a document provider,
+   a network or its own container had to round-trip through a temporary file.
+   `clay_blob` plus `clay_document_save_memory` / `_load_memory` and
+   `clay_mesh_save_memory` / `_load_memory` expose the forms that were already
+   there. The bytes are byte-identical to the file forms and there is a test
+   that says so. **One behaviour fix rides with it**: `clay_mesh_save` compared
+   a path's extension as given while `clay_mesh_load` lowercased it, so a host
+   could load `MODEL.OBJ` and be refused when it saved back to the same path.
+   Both now use one normalisation, which is a widening rather than a break —
+   what used to be `CLAY_ERROR_UNSUPPORTED` now succeeds.
+
    **0.41.0 is not such a release**: additive, two new entry points
    (`clay_mesh_validation_report`, `clay_mesh_measure`) and one new descriptor
    (`clay_validation_report`). `clay_mesh_validate` is unchanged in signature

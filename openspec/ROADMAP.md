@@ -668,6 +668,19 @@ needs them, and listed so they are not mistaken for oversights:
   two of three. What remains genuinely absent is PBR channels, which is a
   declared non-goal rather than a gap — see `docs/sculpt_comparison.md`.
 
+- ~~**Every format was buffer-shaped in the engine and path-only at the
+  boundary.**~~ Closed by `serialize-without-a-file` (ABI 0.42.0). `clayspace`,
+  `obj`, `ply`, `fbx` and `glb` all have byte forms in `include/clay/io/` and
+  the file entry points are wrappers over them; only the wrappers crossed. That
+  is a host-seam gap rather than a feature one, and it is where this library is
+  pointed: an iPadOS host receives documents from a document provider behind a
+  security-scoped URL whose lifetime it does not own, a syncing host needs bytes
+  to send, a host with its own container needs bytes to store, and a WASM build
+  has no filesystem. All were paying for a temporary file. Sibling to
+  `report-mesh-quality` and found the same way — the engine had it and the
+  boundary discarded it. It also unblocks crash recovery, which wants to append
+  serialized commands to a journal and so needs bytes rather than a path.
+
 - ~~**The mesh validation report was two bits of eleven.**~~ Closed by
   `report-mesh-quality` (ABI 0.41.0). `mesh::ValidationReport` computes eleven
   quantities and `clay_mesh_validate` returned `watertight` and `manifold`, so

@@ -122,6 +122,10 @@ ALIASES = {
     "Mesh.is_watertight": "clay_mesh_validate",
     "Mesh.is_manifold": "clay_mesh_validate",
     "Mesh.validation_report": "clay_mesh_validation_report",
+    "Mesh.to_bytes": "clay_mesh_save_memory",
+    "Document.to_bytes": "clay_document_save_memory",
+    "module.load_bytes": "clay_document_load_memory",
+    "module.load_mesh_bytes": "clay_mesh_load_memory",
     "Mesh.signed_volume": "clay_mesh_measure",
     "Mesh.surface_area": "clay_mesh_measure",   # one C query reports both
     "Prim.at": "clay_item_set_position",

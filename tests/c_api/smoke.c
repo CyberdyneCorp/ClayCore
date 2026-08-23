@@ -603,6 +603,9 @@ static int check_error_paths(void) {
     REQUIRE(clay_document_mesh(NULL, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_mesh_validate(NULL, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_mesh_validation_report(NULL, 0, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_document_load_memory(NULL, 4, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_mesh_save_memory(NULL, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_mesh_load_memory(NULL, 0, NULL, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_mesh_measure(NULL, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_mesh_save(NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_document_save(NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
@@ -1533,6 +1536,18 @@ static int check_meshing(clay_document* doc) {
     REQUIRE(clay_mesh_measure(mesh, &volume, &area) == CLAY_OK);
     REQUIRE(volume > 0 && area > 0); /* positive volume = outward normals */
     REQUIRE(clay_mesh_save(mesh, "c_api_smoke.obj") == CLAY_OK);
+    /* the same bytes, with nowhere to put a path */
+    {
+        clay_blob* blob = NULL;
+        clay_mesh* reloaded = NULL;
+        REQUIRE(clay_mesh_save_memory(mesh, "ply", &blob) == CLAY_OK);
+        REQUIRE(clay_blob_size(blob) > 0 && clay_blob_data(blob) != NULL);
+        REQUIRE(clay_mesh_load_memory(clay_blob_data(blob), clay_blob_size(blob), "ply", NULL,
+                                      &reloaded) == CLAY_OK);
+        REQUIRE(clay_mesh_index_count(reloaded) == clay_mesh_index_count(mesh));
+        clay_mesh_destroy(reloaded);
+        clay_blob_destroy(blob);
+    }
     REQUIRE(clay_mesh_save(mesh, "c_api_smoke.xyz") == CLAY_ERROR_UNSUPPORTED);
     clay_mesh_destroy(mesh);
     return 0;

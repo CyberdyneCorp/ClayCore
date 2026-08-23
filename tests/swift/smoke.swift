@@ -766,6 +766,21 @@ if let mesh = mesh {
     var volume: Double = 0, area: Double = 0
     check(clay_mesh_measure(mesh, &volume, &area) == CLAY_OK, "measured the mesh")
     check(volume > 0 && area > 0, "volume \(volume), area \(area) — positive means outward")
+
+    // Bytes rather than a path: an iOS host receives documents from a document
+    // provider behind a security-scoped URL, not as a stable path it owns.
+    var blob: OpaquePointer? = nil
+    check(clay_mesh_save_memory(mesh, "ply", &blob) == CLAY_OK, "serialized the mesh to memory")
+    if let blob = blob {
+        let size = clay_blob_size(blob)
+        check(size > 0 && clay_blob_data(blob) != nil, "the blob holds \(size) bytes")
+        var reloaded: OpaquePointer? = nil
+        check(clay_mesh_load_memory(clay_blob_data(blob), size, "ply", nil, &reloaded) == CLAY_OK,
+              "loaded the mesh back from those bytes")
+        check(clay_mesh_index_count(reloaded) == indices, "the round trip kept every index")
+        clay_mesh_destroy(reloaded)
+        clay_blob_destroy(blob)
+    }
     clay_mesh_destroy(mesh)
 }
 
