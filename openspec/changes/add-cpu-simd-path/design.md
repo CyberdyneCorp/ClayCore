@@ -1063,3 +1063,55 @@ once per point and the points are independent, so the machine keeps as many
 combines in flight as it has room for. That is why the device saw 1.23x and a
 serial probe sees nothing, and it is the trap to avoid in any future kernel
 microbenchmark here.
+
+# The fix on the device, 2026-08-23: most of it back, and where the rest is
+
+The section above measured the `add` fix on an M2 Max. This is the same fix on
+the reference iPad, and it is the run that decides whether #225 can land.
+
+`valid: true`, thermal `nominal -> nominal`, 59 cases, `treeDirty: false`,
+canary spread x1.55 against run A's x1.50 — the two valid runs of the day, taken
+four hours apart, so this is the cleanest pair available.
+
+## `mask_extrude`, per growth point
+
+| point | pre-#223 (A) | post-#223 (B) | fix | |
+|---|---:|---:|---:|---|
+| small | 58.1 ms | 62.8 ms | **57.9 ms** | recovered |
+| medium | 419.0 ms | 466.1 ms | **416.9 ms** | recovered |
+| large | 4055.9 ms | 4992.3 ms | **4358.8 ms** | +7.5% remains |
+
+The two smaller points come back marginally BELOW pre-#223, so at those sizes the
+regression is gone rather than reduced. The largest point recovers 68% of it and
+keeps +303 ms, which is above run A's own spread for that point (232 ms) but is
+also the most thermally exposed measurement in the suite.
+
+**Two independent estimates agree on the residual.** The host probe, with call
+structure pinned across all three trees, put it at 5-7%; the device puts it at
+7.5%. That consistency is the reason to believe it is real rather than thermal.
+
+The duplicated `ctape_smin_m` was therefore the bulk of #225 but not the whole of
+it. What is left is most likely #223's split dispatch — `ctape_combine_dist`'s
+mode chain followed by the colour chain — which this fix deliberately does not
+touch, because folding those back together would cost the twelve other modes
+their single definition.
+
+## The wins #223 bought are intact
+
+| case | pre-#223 | fix | |
+|---|---:|---:|---:|
+| `sdf_stamp_cpu` | 3.846 ms | 2.654 ms | 1.45x |
+| `stroke_carve` | 0.918 ms | 0.632 ms | 1.45x |
+| `sdf_stamp_bricks` | 2.253 ms | 1.702 ms | 1.32x |
+| `sdf_consolidate` | 435.6 ms | 332.6 ms | 1.31x |
+
+Controls 0.965-1.000x against run A. The fix touches only the coloured path, so
+the distance-only wins were expected to survive, and they did.
+
+## The residual is not worth chasing in the combine
+
+`mask_extrude` computes a colour at every point and discards it —
+`bindings/c/clay_c.cpp` drives it as `[&tape](cfloat3 p) { return tape.eval(p).d; }`.
+Giving it a distance-only source is #207 candidate 1 applied one level up, and it
+should take this case WELL BELOW its pre-#223 figure rather than merely back to
+it. That is the change worth making next; tuning the combine further is not.
