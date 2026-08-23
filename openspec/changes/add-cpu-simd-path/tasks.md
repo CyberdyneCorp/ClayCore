@@ -95,11 +95,16 @@
       recorded in `tools/check_bench.py`: the refill gains 1.84x and the gradient
       pass 1.25x, because four taps and their buffer traffic keep less of what
       blocking gives
-- [ ] 1.12 Brick-fill benchmark, and an END-TO-END stamp figure beside it. A
-      per-instruction number is exactly the kind that reads as a user-visible win and
-      is not one: evaluation is 98% of a stamp, so 8x per instruction is at most ~4-5x
-      on a stamp and only if the whole of it survives a real corpus. Report both, and
-      report arm64 and x86-64 separately
+- [x] 1.12 DONE. x86-64 end-to-end is the "End to end, on a quiet box" table;
+      arm64 end-to-end is now a DEVICE A/B rather than a host figure — #223 against
+      `32b8c4c` on the reference iPad, both sides an hour apart, controls flat:
+      `sdf_stamp_cpu` and `sdf_stamp_bricks` 1.33x, `sdf_consolidate` 1.29x,
+      `stroke_carve` 1.26x. Against 1.67x projected, and the prediction that a
+      per-instruction win would not survive as a verb-level one is what happened.
+      Brick fill is `BM_BrickFill` plus `BM_BrickFillCores` for the #207 question.
+      The run also found a regression the gate cannot see — `mask_extrude` 1.23x
+      slower on the scalar path, filed as #225 with the arm64 combine measurement
+      that explains it
 - [ ] 1.13 Record which opcodes fell back to per-point scalar, in `design.md` and in
       the delta spec, so a later reader knows what is left rather than assuming full
       coverage
