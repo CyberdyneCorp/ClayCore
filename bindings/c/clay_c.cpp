@@ -1896,6 +1896,32 @@ clay_result eval_requests_in_chunks(const clay_document* doc,
     return CLAY_OK;
 }
 
+// One normaliser for every format name that crosses, so the reader and the
+// writer cannot disagree about what "OBJ" means. They did: the loader
+// lowercased and the writer did not, so a host could load MODEL.OBJ and then
+// be refused when it saved back to the path it had just read.
+std::string lower_ascii(std::string text) {
+    for (char& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return text;
+}
+
+std::string extension_of(const std::string& path) {
+    const std::size_t dot = path.find_last_of('.');
+    return dot == std::string::npos ? std::string{} : lower_ascii(path.substr(dot + 1));
+}
+
+// A caller's budget, or the library's defaults. Zero means "the default"
+// rather than "allow nothing", which is what a zeroed struct would say.
+clay_result import_limits(const clay_import_budget* budget, io::ImportBudget* out) {
+    if (!budget) return CLAY_OK;
+    clay_import_budget b;
+    clay_result r = read_desc(budget, kImportBudgetOriginal, &b);
+    if (r != CLAY_OK) return r;
+    if (b.max_vertices) out->max_vertices = static_cast<std::size_t>(b.max_vertices);
+    if (b.max_triangles) out->max_triangles = static_cast<std::size_t>(b.max_triangles);
+    return CLAY_OK;
+}
+
 }  // namespace
 
 extern "C" {
@@ -4163,36 +4189,6 @@ clay_result clay_mesh_measure(const clay_mesh* mesh, double* out_signed_volume,
     if (out_surface_area) *out_surface_area = mesh::surface_area(*m);
     return CLAY_OK;
 }
-
-namespace {
-
-// One normaliser for every format name that crosses, so the reader and the
-// writer cannot disagree about what "OBJ" means. They did: the loader
-// lowercased and the writer did not, so a host could load MODEL.OBJ and then
-// be refused when it saved back to the path it had just read.
-std::string lower_ascii(std::string text) {
-    for (char& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return text;
-}
-
-std::string extension_of(const std::string& path) {
-    const std::size_t dot = path.find_last_of('.');
-    return dot == std::string::npos ? std::string{} : lower_ascii(path.substr(dot + 1));
-}
-
-// A caller's budget, or the library's defaults. Zero means "the default"
-// rather than "allow nothing", which is what a zeroed struct would say.
-clay_result import_limits(const clay_import_budget* budget, io::ImportBudget* out) {
-    if (!budget) return CLAY_OK;
-    clay_import_budget b;
-    clay_result r = read_desc(budget, kImportBudgetOriginal, &b);
-    if (r != CLAY_OK) return r;
-    if (b.max_vertices) out->max_vertices = static_cast<std::size_t>(b.max_vertices);
-    if (b.max_triangles) out->max_triangles = static_cast<std::size_t>(b.max_triangles);
-    return CLAY_OK;
-}
-
-}  // namespace
 
 clay_result clay_mesh_save(const clay_mesh* mesh, const char* path) {
     const mesh::Mesh* m = nullptr;
