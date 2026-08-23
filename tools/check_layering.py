@@ -57,7 +57,17 @@ ALLOWED = {
     # raycast_scene cannot see one and never will; picking one means asking its
     # BVH directly. Nothing in mesh knows about pick.
     "pick": {"parallel", "kernel", "math", "scene", "eval", "brick", "voxel", "mesh"},
-    "io": {"parallel", "kernel", "math", "scene", "eval", "brick", "voxel", "mesh", "field"},
+    # session -> scene + voxel + mesh is the ONE undo history (unify-the-undo-
+    # history). scene may not include voxel or mesh, so the history that
+    # reverses a voxel pass AND a vertex delta cannot live beside UndoStack;
+    # brush is the only module that already sees all three and is the stroke
+    # engine, not a history. So it gets its own module above the three, the way
+    # `parallel` got one when the layering rule put the thread pool out of
+    # reach. It depends on nothing above it: the object that OWNS the three
+    # (io::ClaySpaceDoc) sits above, so the resolvers are passed IN.
+    "session": {"parallel", "kernel", "math", "scene", "voxel", "mesh", "field"},
+    "io": {"parallel", "kernel", "math", "scene", "eval", "brick", "voxel", "mesh", "field",
+           "session"},
 }
 CORE_MODULES = set(ALLOWED)
 INCLUDE_RE = re.compile(r'#\s*include\s*[<"]clay/(\w+)/')

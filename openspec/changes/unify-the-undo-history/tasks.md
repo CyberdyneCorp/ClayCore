@@ -39,28 +39,33 @@
 - [x] 2.1 DECIDED by the layering rule, not by taste: the session history
       WRAPS `UndoStack`. `UndoStack` needs only `scene` and stays there with its
       coalescing and grouping; the session history sits above and dispatches
-- [ ] 2.2 DECIDE and record: how a host learns an unreversible operation lies in
-      the history — a flag, a step kind, or a horizon query
-- [ ] 2.3 DECIDE and record: mesh steps hold their `VertexDeltas` by value or by
-      borrow. By value is self-contained and doubles a mesh stroke's memory
+- [x] 2.2 DECIDED: a distinct step KIND (Barrier) plus a horizon query.
+      `undo_depth` counts only as far back as the nearest barrier, so a menu
+      built from it never offers an undo that does nothing, and `next_barrier`
+      names what is in the way. A flag on the depth would have made the depth
+      mean two things at once
+- [x] 2.3 DECIDED: by value. A step that borrows is a step whose validity
+      depends on something it does not own, and the history outlives the
+      sculptor that produced the deltas. The doubling is real and is what 1.7
+      must measure
 - [ ] 2.4 DECIDE and record: what enabling the history mid-session does, without
       changing what `enable_undo` means for the SDF path
 
 ## 3. Build
 
-- [ ] 3.0 A `session` module, and its line in `tools/check_layering.py`
-- [ ] 3.1 A second recording channel on `VoxelGrid::set`, independent of the
+- [x] 3.0 A `session` module, and its line in `tools/check_layering.py`
+- [x] 3.1 A second recording channel on `VoxelGrid::set`, independent of the
       sculpt-layer stack and written only when the history is enabled — plus a
       step-scoped revert/reapply beside the private `revert_from` / `apply_from`
       that already do the replay for sculpt layers
-- [ ] 3.2 The session history: an ordered log of steps, each naming its owner
+- [x] 3.2 The session history: an ordered log of steps, each naming its owner
       and carrying the token that reverses it
 - [ ] 3.3 Two voxel step kinds — the pass, and a change to a pass (strength,
       visibility, order, merge-down) — so undoing a strength tweak does not
       remove the pass
 - [ ] 3.4 Merge-down holds the folded record, since undoing it means restoring
       one. The only voxel step whose memory scales with the pass
-- [ ] 3.5 Redo discarded on the next edit, across representations
+- [x] 3.5 Redo discarded on the next edit, across representations
 - [ ] 3.7 Move history ownership onto `io::ClaySpaceDoc`, so the two bindings
       share one implementation instead of instantiating one each
 - [ ] 3.6 Mesh steps refused rather than failed when a layer's vertex count has
@@ -69,13 +74,13 @@
 ## 4. Prove it
 
 - [ ] 4.1 The scenarios in both spec deltas
-- [ ] 4.2 The regression this whole change is for: SDF stamp, voxel smooth, mesh
+- [x] 4.2 The regression this whole change is for: SDF stamp, voxel smooth, mesh
       grab, then three undos and three redos, asserting the document, the grid
       and the mesh each return to their starting and ending states
-- [ ] 4.3 Coalescing and grouping unchanged: a stroke of many stamps is still
+- [x] 4.3 Coalescing and grouping unchanged: a stroke of many stamps is still
       one step, over the golden corpus
 - [ ] 4.4 A voxel strength change undoes without removing its pass
-- [ ] 4.5 A host that only ever edits SDF sees behaviour bit-identical to today
+- [x] 4.5 A host that only ever edits SDF sees behaviour bit-identical to today
 
 ## 5. Reach it and say it
 

@@ -284,6 +284,13 @@ void VoxelGrid::set(VoxelCoord c, std::uint8_t index) {
             rec.changes[it->second].after = index;
         }
     }
+    // The undo journal, if one is installed. Deliberately NOT coalesced by cell
+    // the way the sculpt layer above is: a sculpt layer is a pass whose net
+    // effect per cell is what a strength dial re-picks, while a replay must
+    // unwind the writes in the order they were made. Coalescing here would be
+    // correct only for a run that never wrote a cell twice, and the verbs that
+    // propagate through levels do exactly that.
+    if (change_sink_) change_sink_->push_back({c, get(c), index});
     if (write_cell(active_, c, index)) ++change_count_;
     if (levels_.size() == 1) return;  // the single-level grid: nothing to carry
     // Down first: it restates this cell's own offset against the parent it just
@@ -330,6 +337,30 @@ bool VoxelGrid::sculpt_layer_visible(std::size_t layer) const {
 // layer below it — so restoring them in reverse order walks that history
 // backwards exactly. Reverting bottom-up would restore a value that a later
 // layer had already overwritten.
+// Backwards, restoring each write's `before`. Not a pass: the recording hooks
+// are both suspended, exactly as a sculpt-layer recompose suspends its own.
+void VoxelGrid::revert_changes(const std::vector<SculptChange>& changes) {
+    const bool was_recording = recording_;
+    std::vector<SculptChange>* was_sink = change_sink_;
+    recording_ = false;
+    change_sink_ = nullptr;
+    for (std::size_t i = changes.size(); i > 0; --i)
+        set(changes[i - 1].cell, changes[i - 1].before);
+    recording_ = was_recording;
+    change_sink_ = was_sink;
+}
+
+// Forwards, restoring each write's `after`.
+void VoxelGrid::reapply_changes(const std::vector<SculptChange>& changes) {
+    const bool was_recording = recording_;
+    std::vector<SculptChange>* was_sink = change_sink_;
+    recording_ = false;
+    change_sink_ = nullptr;
+    for (const SculptChange& ch : changes) set(ch.cell, ch.after);
+    recording_ = was_recording;
+    change_sink_ = was_sink;
+}
+
 void VoxelGrid::revert_from(std::size_t first) {
     const bool was_recording = recording_;
     recording_ = false;  // a recompose is not a pass
