@@ -455,3 +455,115 @@ works.
   construction rather than by measurement: those checks are hoisted, and what the
   hoist is worth is inside the numbers above rather than isolated. Measuring them
   separately on the golden corpus is still worth doing.
+
+# Task 1.7 attempted, 2026-08-23: the win is real, larger than predicted, and not reachable from the backend
+
+Task 1.7 says colour is worth ~1.4x once blocked, so a distance-only query should
+hold one float per stack slot instead of a four-float `CTapeValue`. Both halves
+of that turned out to be wrong: the multiple is bigger, and the obvious way to
+get it makes things slower.
+
+## What was tried
+
+Template the walk on a slot policy — `Coloured` stores `CTapeValue`, `DistanceOnly`
+stores `float` — so one body serves both. The attraction was that it needs no
+second copy of the combine semantics: `DistanceOnly` rebuilds a `CTapeValue` with
+a placeholder colour, calls the SAME `ctape_combine_values`, and keeps the
+distance, leaving the compiler to drop the colour arithmetic whose result is
+unused.
+
+That premise was checked first and is sound: across every combine mode, including
+`replace_feather` and the gate, **no distance expression reads a colour**.
+Colours are written from colours and never feed a distance. So the answers are
+identical — and they were, over the whole corpus.
+
+**It is 0.57x. Slower, not 1.4x faster.** Measured within one build, 12 spheres,
+100k points, single-threaded.
+
+These were first taken while the shared box was picking up unrelated jobs — load
+average went 0.50 to 20 mid-session, one job holding eight cores — and were then
+**re-taken on a quiet machine**, which is the only reason to trust them. Method,
+because the first attempt got this wrong: three builds, each timing every variant
+back to back in ONE process, medians of 9, and a CONTROL that runs two paths which
+are the same code and must therefore return 1.00x. Under load the control returned
+0.93x-1.19x; quiet it returns **1.020x, range 0.98-1.04** — so the band below is
+about +/-4% and every figure here clears it by a wide margin.
+
+| | vs coloured | range over 9 runs |
+|---|---:|---|
+| control — shipped, same code both ways | 1.020x | 0.98-1.04 |
+| blocked, distance only, via `ctape_combine_values` | **0.560x** | 0.56-0.59 |
+
+Rebuilding a `CTapeValue` per operand costs more than the colour it removes. The
+compiler does not eliminate what the round-trip re-creates.
+
+## What the win actually is
+
+Replacing that one loop with a distance-only combine — `ctape_smin_m(...).x`
+directly, for `ccombine_add` only, as a throwaway experiment — in the same build:
+
+| | ms (median of 7) | |
+|---|---:|---:|
+| scalar reference | 34.72 | 1.00x |
+| blocked, colour carried — **as shipped** | 7.79 | 4.46x |
+| blocked, distance only, bypassing the combine | **3.49** | **9.95x** |
+
+**The prize is ~2.2x on top of the blocked path we ship** (7.79 -> 3.49), and
+about **10x against the scalar reference** on a distance-only query — not the
+1.4x this task predicted.
+
+Quote it against the SHIPPED coloured path, not against the experiment's own
+coloured path: that build carries the templating penalty below, which would
+inflate the same result to 2.8x. And 2.2x is a floor rather than a ceiling, since
+the distance-only side of that build plausibly carries the penalty too. That matters more
+than the multiple suggests, because the hot paths are distance-only: a brick fill
+for the distance field, a raycast, and each of the four gradient taps.
+
+Why the prototype said 1.4x: its V4 already bypassed, calling `ctape_smin_m`
+directly, because its tape was hard unions. 1.4x was V3 against V4 on a tape
+where the coloured path was already close to optimal — never a ceiling.
+
+## Why it cannot be done in the backend, and what it needs instead
+
+There is no distance-only combine in the kernel. `ctape_combine_values` is
+`CTapeValue` in, `CTapeValue` out, and it is the only one. The PRIM path already
+had this treatment — `speed-the-tape-prim-path` split `ctape_prim_dist` from
+`ctape_volume_dist` under the heading *"forty prims are paying for one prim's
+colour"* — and the COMBINE path never did.
+
+Getting this needs the same split one level up: a `ctape_combine_dist` in the
+shared kernel header, which is a five-dialect change with its own parity
+obligations, not a backend task. **Filed as its own change rather than smuggled
+in here.**
+
+The entanglement is smaller than it looks and is worth recording for whoever
+scopes it: only `ccombine_add` genuinely couples, because its colour needs the
+`dm.y` that the same `ctape_smin_m` call produced. Every other mode's colour is
+either decided by comparisons on distances the caller already has, or by a weight
+derived from `b.d` and parameters. So one distance function plus one extra
+`ctape_smin_m` in the coloured path for `add` is the likely shape.
+
+## The templating cost the coloured path 1.3x, and that is now measured
+
+Routing the prim loop's writes through a policy's `store()` instead of assigning
+`s[j].color` and `s[j].d` directly costs **1.30x** on the coloured path.
+Interleaved shipped/templated, seven rounds, quiet machine:
+
+| build | coloured path, ms | median |
+|---|---|---:|
+| shipped | 7.46 - 8.92 | 7.79 |
+| templated | 9.71 - 11.09 | 10.14 |
+
+**The ranges do not overlap** — the slowest shipped round is faster than the
+fastest templated one — which is what makes this a result rather than a drift.
+
+It was first recorded as a lead and explicitly NOT a finding, because the initial
+version compared two builds run at different times on a box whose load was
+changing, and that comparison could not support it. Re-run interleaved on a quiet
+machine, it holds. Worth keeping both facts: the number was right and the method
+was not, and only one of those was visible at the time.
+
+It is the loop-selection lesson one level down. This evaluator is unusually
+sensitive to abstraction between the loop and the store, so whatever implements
+the distance-only path should specialise the loops rather than the values — the
+same mistake is available twice.

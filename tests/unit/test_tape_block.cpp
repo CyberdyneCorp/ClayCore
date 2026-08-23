@@ -58,6 +58,21 @@ Run blocked(const scene::Tape& tape, const std::vector<float>& xyz, std::size_t 
     return r;
 }
 
+// Distances with NO colour requested — the other slot type. The blocked walk
+// keeps one float per stack slot instead of a four-float CTapeValue when the
+// caller asks only for distances, and that is a different instantiation of the
+// walk. Without this it is never executed by any test: every helper above asks
+// for colours, so the whole distance-only path would have gone in unexercised.
+std::vector<float> blocked_distances(const scene::Tape& tape, const std::vector<float>& xyz,
+                                     std::size_t block) {
+    const std::size_t n = xyz.size() / 3;
+    std::vector<float> d(n);
+    eval::PointQuery q{xyz.data(), n, 1e-4f};
+    eval::PointResults out{d.data(), nullptr, nullptr};
+    eval::eval_points_blocked(tape, q, out, block);
+    return d;
+}
+
 // Bit-for-bit, through the object representation: `==` on floats would call
 // two NaNs different and -0.0 equal to 0.0, and neither is what "identical
 // bytes" means. A tape can legitimately produce either.
@@ -186,6 +201,7 @@ TEST_CASE("tape block: bit-identical on the paths the parity corpus does not rea
             CHECK(identical(want.distances, got.distances));
             CHECK(identical(want.colors, got.colors));
             CHECK(identical(want.gradients, got.gradients));
+            CHECK(identical(want.distances, blocked_distances(doc.second, xyz, block)));
         }
     }
 }
@@ -201,6 +217,10 @@ TEST_CASE("tape block: bit-identical to the scalar walk on the parity corpus") {
         CHECK(identical(want.distances, got.distances));
         CHECK(identical(want.colors, got.colors));
         CHECK(identical(want.gradients, got.gradients));
+        // Dropping colour must not move a distance by one bit. It cannot in
+        // principle — no distance expression in any combine mode reads a colour
+        // — and this is what holds that in practice.
+        CHECK(identical(want.distances, blocked_distances(c.tape, xyz, 0)));
     }
 }
 
@@ -219,6 +239,7 @@ TEST_CASE("tape block: block size is not observable") {
             CHECK(identical(want.distances, got.distances));
             CHECK(identical(want.colors, got.colors));
             CHECK(identical(want.gradients, got.gradients));
+            CHECK(identical(want.distances, blocked_distances(c.tape, xyz, block)));
         }
     }
 }
