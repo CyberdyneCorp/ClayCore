@@ -244,6 +244,13 @@ struct Layer {
     int resolution = 256;
     std::uint8_t mirror_axes = 0;  // kMirrorX|Y|Z — item-level mirror flag folds here
     float mirror_k = 0.0f;         // Mirror Blend seam smoothing
+    // Radial symmetry about the layer-local axis. 0 or 1 is off and costs
+    // nothing. Participation reuses the item-level mirror flag rather than
+    // adding a second one: an asymmetric detail is excluded from a layer's
+    // symmetry once, not once per mode.
+    std::uint16_t radial_count = 0;  // 0/1 = off, else copies INCLUDING the original
+    std::uint8_t radial_axis = 1;    // 0/1/2 — Y by default, as Repeat::radial arrays
+    float radial_k = 0.0f;           // seam smoothing between neighbouring copies
     std::shared_ptr<SdfContent> sdf;  // shared between instances
     // Voxel and mesh content live beside the document, keyed by layer id (see
     // io::ClaySpaceDoc): the layering table withholds both modules from

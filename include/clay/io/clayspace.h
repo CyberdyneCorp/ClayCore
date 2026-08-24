@@ -121,7 +121,7 @@ inline constexpr std::uint16_t kClaySpaceMajor = 1;
 //
 // Minor 11 adds an item's gate to the scene payload, which IS a layout change
 // there — see scene::kSceneMinor.
-inline constexpr std::uint16_t kClaySpaceMinor = 11;
+inline constexpr std::uint16_t kClaySpaceMinor = 12;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).

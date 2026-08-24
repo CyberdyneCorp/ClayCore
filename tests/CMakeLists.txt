@@ -53,6 +53,7 @@ add_executable(clay_unit_tests
   unit/test_c_layer_nodes.cpp
   unit/test_c_layer_rename.cpp
   unit/test_c_layer_mirror.cpp
+  unit/test_c_layer_radial.cpp
   unit/test_c_voxel.cpp
   unit/test_c_voxel_incremental.cpp
   unit/test_c_mask.cpp

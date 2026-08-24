@@ -816,7 +816,7 @@ Each was checked by searching the public surface, not inferred.
 | **Procedural masks** — cavity, curvature, normal, thickness, AO | Mask verbs are paint, fill, expand, contract, smooth, invert, `to_field`. Nothing derives a mask from the surface | High, and cheap on a field representation — curvature is a gradient the engine already computes. Next to scope |
 | **Morph target** | Absent. The word appears only in `mesh_io.h`, as a glTF feature deliberately not imported | Medium; pairs naturally with sculpt layers |
 | **Stroke input completeness** | `clay_stroke_sample` is position, pressure, tilt. No **azimuth**, no velocity, no timestamp | Medium — azimuth is what makes a directional or rake brush possible at all, and it is five floats to add before hosts depend on the current layout |
-| **Radial symmetry** | Three mirror planes, no radial | Medium |
+| ~~**Radial symmetry**~~ | Three mirror planes, no radial — and the two were asymmetric in DESIGN, not just in coverage: the mirror is a layer mode with a seam blend and a per-item opt-out, while radial existed only as `Repeat::radial`, a per-item modifier a stroke cannot reach. Scoped and built: `add-radial-symmetry`, issue #256 | Medium |
 | **Instancing / scatter** | Absent. Phase 4 already names `add-surface-scatter`; the review is right that scatter without instancing duplicates geometry | Medium |
 | **Generic named attributes** | `colors`, `uvs`, `normals` and nothing else. A host cannot carry `material_id` or a custom channel through the engine | Medium. The review is right to separate this from PBR: allowing an app to carry channels is not the same as rendering them, and only the second is a declared non-goal |
 | **Voxel beyond 256³** | Real: a grid's `dims` product must be ≤ `CLAY_MAX_BATCH`, which is 256³ exactly. The spec's "at least 256³" reads as a floor and is also the ceiling | Medium — already recorded under "Deferred, but recorded", now with the number that makes it concrete |
@@ -880,7 +880,7 @@ moves are the ones already shipped.
 | **P1** | SDF sculpt layers (`add-sculpt-layers` 1.9) | Unblocked by scene groups landing |
 | **P1** | Stroke input: azimuth, velocity, timestamp | Five floats, and cheapest before hosts depend on the current sample layout |
 | **P1** | `add-field-stamps` | The review is right that this is a differentiator rather than parity, and right that a captured field can carry more than displacement |
-| **P2** | Morph targets · generic attributes · instancing · radial symmetry · conform | Real, none blocking |
+| **P2** | Morph targets · generic attributes · instancing · ~~radial symmetry~~ (`add-radial-symmetry`, landed) · conform | Real, none blocking |
 | **Decide, do not build** | auto-consolidation · preview/commit protocol · representation policy · local remesh · >256³ voxels | Each needs a written decision before it needs a proposal |
 
 The review's closing criterion is worth adopting verbatim, because it is

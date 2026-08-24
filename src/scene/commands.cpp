@@ -208,6 +208,16 @@ std::optional<Command> apply_one(Document& doc, const SetLayerMirrorCmd& c) {
     return Command{inverse};
 }
 
+std::optional<Command> apply_one(Document& doc, const SetLayerRadialCmd& c) {
+    Layer* l = doc.find_layer(c.id);
+    if (!l) return std::nullopt;
+    SetLayerRadialCmd inverse{c.id, l->radial_count, l->radial_axis, l->radial_k};
+    l->radial_count = c.count;
+    l->radial_axis = c.axis;
+    l->radial_k = c.k;
+    return Command{inverse};
+}
+
 }  // namespace
 
 namespace {
@@ -227,6 +237,7 @@ LayerId edited_layer(const Command& cmd) {
                                std::is_same_v<C, SetLayerVisibleCmd> ||
                                std::is_same_v<C, SetLayerTransformCmd> ||
                                std::is_same_v<C, SetLayerMirrorCmd> ||
+                               std::is_same_v<C, SetLayerRadialCmd> ||
                                std::is_same_v<C, SetLayerNameCmd>)
                 return c.id;
             else
@@ -308,7 +319,8 @@ math::Aabb command_influence_bound(const Document& doc, const Command& cmd) {
             else if constexpr (std::is_same_v<C, RemoveLayerCmd> ||
                                std::is_same_v<C, SetLayerVisibleCmd> ||
                                std::is_same_v<C, SetLayerTransformCmd> ||
-                               std::is_same_v<C, SetLayerMirrorCmd>)
+                               std::is_same_v<C, SetLayerMirrorCmd> ||
+                               std::is_same_v<C, SetLayerRadialCmd>)
                 return layer_command_bound(doc, c.id);
             else if constexpr (std::is_same_v<C, AddNodeCmd>)
                 return c.subtree.empty() ? math::Aabb{}
@@ -858,6 +870,15 @@ void write_layer(Writer& w, const Layer& l) {
     w.pod(l.resolution);
     w.pod(l.mirror_axes);
     w.pod(l.mirror_k);
+    // From minor 12, and GATED on the writer's minor exactly as the armature
+    // topology and signs are: a stream written at an older minor must not carry
+    // fields that minor's reader will not consume, or the two desynchronise for
+    // every record after this one.
+    if (w.minor >= 12) {
+        w.pod(l.radial_count);
+        w.pod(l.radial_axis);
+        w.pod(l.radial_k);
+    }
     bool has_sdf = l.sdf != nullptr;
     w.pod(has_sdf);
     if (has_sdf) write_content(w, *l.sdf);
@@ -882,6 +903,14 @@ Layer read_layer(Reader& r) {
     l.resolution = r.pod<int>();
     l.mirror_axes = r.pod<std::uint8_t>();
     l.mirror_k = r.pod<float>();
+    // Appended at minor 12. An older stream stops before them and keeps the
+    // defaults, which is the mode off — the same "loads with it off rather
+    // than failing" the protection flags established.
+    if (r.minor >= 12) {
+        l.radial_count = r.pod<std::uint16_t>();
+        l.radial_axis = r.pod<std::uint8_t>();
+        l.radial_k = r.pod<float>();
+    }
     if (r.pod<bool>()) l.sdf = read_content(r);
     return l;
 }
@@ -906,6 +935,9 @@ enum class Tag : std::uint8_t {
     SetLayerMirror,
     SetArmature,
     SetLayerName,
+    // Appended rather than slotted beside SetLayerMirror: a tag is a wire
+    // value, and inserting one would renumber every tag after it.
+    SetLayerRadial,
 };
 
 struct SerializeVisitor {
@@ -1027,6 +1059,13 @@ struct SerializeVisitor {
         w.pod(Tag::SetLayerMirror);
         w.pod(c.id);
         w.pod(c.axes);
+        w.pod(c.k);
+    }
+    void operator()(const SetLayerRadialCmd& c) {
+        w.pod(Tag::SetLayerRadial);
+        w.pod(c.id);
+        w.pod(c.count);
+        w.pod(c.axis);
         w.pod(c.k);
     }
     void operator()(const SetLayerNameCmd& c) {
@@ -1200,6 +1239,15 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
             SetLayerMirrorCmd c;
             c.id = r.pod<LayerId>();
             c.axes = r.pod<std::uint8_t>();
+            c.k = r.pod<float>();
+            cmd = c;
+            break;
+        }
+        case Tag::SetLayerRadial: {
+            SetLayerRadialCmd c;
+            c.id = r.pod<LayerId>();
+            c.count = r.pod<std::uint16_t>();
+            c.axis = r.pod<std::uint8_t>();
             c.k = r.pod<float>();
             cmd = c;
             break;

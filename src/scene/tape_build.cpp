@@ -676,6 +676,37 @@ struct Compiler {
             if (layer.mirror_k > 0.0f)
                 tape.info = kernel::cfi_smooth_blend(tape.info, kernel::cfi_exact());
         }
+        // The layer's RADIAL symmetry, emitted the same way and for the same
+        // reasons: copies have to be real items so the cull sees them, the seam
+        // is an ordinary combine, and a stroke arrays because its stamps are
+        // ordinary items. The feathered-replace exclusion above applies here
+        // unchanged — a world-space patch cannot be rotated into a sector it
+        // was not baked in.
+        //
+        // The two modes compose ADDITIVELY: each contributes its own copies of
+        // the base item and the products are not emitted, which is what the
+        // mirror already does across its own axes (x|y gives two reflections,
+        // not four quadrants).
+        if (item.mirror && layer.radial_count > 1 && !is_feathered_replace(item)) {
+            Blend radial_blend{layer.radial_k > 0.0f ? BlendProfile::Quadratic
+                                                     : BlendProfile::Hard,
+                               layer.radial_k};
+            const int axis = layer.radial_axis < 3 ? layer.radial_axis : 1;
+            const int count = static_cast<int>(layer.radial_count);
+            for (int k = 1; k < count; ++k) {
+                const float angle = 6.2831853071795864769f * static_cast<float>(k) /
+                                    static_cast<float>(count);
+                // inv of (layer * R * item) = item^-1 * R^-1 * layer^-1, and a
+                // rotation's inverse is the negative angle.
+                cfloat4x4 inv = math::mul(
+                    item.xform.inverse_matrix(),
+                    math::mul(math::rotation_matrix(axis, -angle), layer.xform.inverse_matrix()));
+                emit_item_instance(item, inv, world.scale);
+                emit_combine(Op::Add, radial_blend, 0.0f);
+            }
+            if (layer.radial_k > 0.0f)
+                tape.info = kernel::cfi_smooth_blend(tape.info, kernel::cfi_exact());
+        }
     }
 
     // -- chains --------------------------------------------------------------

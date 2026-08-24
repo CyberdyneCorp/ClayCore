@@ -655,6 +655,23 @@ Aabb item_geometry_bound(const Node& item, const Layer& layer) {
         }
         bound = bound.dilated(kernel::csmin_quadratic_support(layer.mirror_k));
     }
+    // Every copy the radial mode emits, for the same reason: a bound that
+    // misses a copy lets the cull drop an item that is on screen. A rotated box
+    // is not axis-aligned, so each copy contributes the AABB OF the rotated box
+    // — it over-covers, which costs cull precision and never correctness.
+    if (item.mirror && layer.radial_count > 1) {
+        const int axis = layer.radial_axis < 3 ? layer.radial_axis : 1;
+        const int count = static_cast<int>(layer.radial_count);
+        for (int k = 1; k < count; ++k) {
+            const float angle =
+                6.2831853071795864769f * static_cast<float>(k) / static_cast<float>(count);
+            math::cfloat4x4 m = math::mul(
+                layer.xform.matrix(),
+                math::mul(math::rotation_matrix(axis, angle), item.xform.matrix()));
+            bound.expand(local.transformed(m));
+        }
+        bound = bound.dilated(kernel::csmin_quadratic_support(layer.radial_k));
+    }
     // Rounding is authored in item-local units (tape emits round*scale);
     // erosion (negative rounding) shrinks the surface, never the bound.
     // Paint fades over max(profile support, k). Extended modes deviate

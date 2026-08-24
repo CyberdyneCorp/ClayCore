@@ -244,6 +244,12 @@ protecting.
 - **Masking that gates any operation**, a boolean included: an item carries the
   measured distance to a painted mask's region and does not act where it
   protects, so the gate rides the combine record rather than being a mode
+- **Symmetry as a layer mode**: a mirror on any of x/y/z with a blended
+  seam, and a radial array of any count about a layer-local axis. Both are
+  applied at evaluation, so one node exists and the copies cannot drift;
+  both use one per-item opt-out; and because strokes are items, a stroke on
+  a symmetric layer repeats without the caller touching what it resolved
+  into. `Repeat::radial` remains the per-item modifier for large arrays
 - Armatures (see the next section) and layer mirrors
 
 | | |

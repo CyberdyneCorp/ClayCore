@@ -118,6 +118,7 @@ ALIASES = {
     "Document.undo_depth": "clay_document_undo_state",   # one C query reports both
     "Document.redo_depth": "clay_document_undo_state",
     "Layer.mirror": "clay_set_layer_mirror",
+    "Layer.radial": "clay_set_layer_radial",
     "Layer.remove": "clay_remove_node",  # named for the node, not the layer
     "Mesh.triangle_count": "clay_mesh_index_count",
     "Mesh.is_watertight": "clay_mesh_validate",
