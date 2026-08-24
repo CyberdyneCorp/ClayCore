@@ -9,6 +9,7 @@
 #include <map>
 #include <utility>
 
+#include "clay/bytes.h"
 #include "clay/mesh/transfer.h"
 #include "clay/parallel/thread_pool.h"
 #include "dither.h"
@@ -481,11 +482,34 @@ bool VoxelGrid::move_sculpt_layer(std::size_t from, std::size_t to) {
 std::size_t VoxelGrid::sculpt_layer_bytes(std::size_t layer) const {
     if (layer >= sculpt_layers_.size()) return 0;
     const SculptLayerRecord& rec = sculpt_layers_[layer];
-    // The changes, plus the lookup that keeps recording O(1) per write. The
-    // node overhead of an unordered_map is not observable from here, so this
-    // counts key and value and says so rather than guessing at an allocator.
-    return rec.changes.size() * sizeof(SculptChange) +
-           rec.index.size() * (sizeof(VoxelCoord) + sizeof(std::size_t)) + rec.name.capacity();
+    // The changes, plus the lookup that keeps recording O(1) per write.
+    //
+    // This counted key and value alone until roll-up-document-memory, because
+    // an unordered_map's bucket array was not observable from here. It is now
+    // (clay/bytes.h), and it matters: the index holds one small entry per
+    // changed cell, so its buckets can outweigh its values. The figure
+    // therefore GREW without the memory changing, which is a host-visible jump
+    // and the reason it is called out here.
+    return vector_bytes(rec.changes) + map_bytes(rec.index) + rec.name.capacity();
+}
+
+std::size_t VoxelGrid::content_bytes() const {
+    std::size_t b = sizeof(VoxelGrid);
+    b += vector_bytes(palette_);
+    b += vector_bytes(levels_);
+    for (const Level& lv : levels_) {
+        // A chunk is a flat kChunkDim^3 array whether it holds one cell or all
+        // of them, which is why a sparsely-touched grid is far larger live than
+        // it is on disk.
+        b += map_bytes(lv.chunks);
+        for (const auto& [key, chunk] : lv.chunks) b += vector_bytes(chunk.data);
+        b += map_bytes(lv.detail);
+        b += map_bytes(lv.refined);
+        // The dirty set is transient in the sense that a drain empties it, but
+        // a host that never drains keeps it forever, so it is content here.
+        b += map_bytes(lv.dirty);
+    }
+    return b;
 }
 
 std::size_t VoxelGrid::sculpt_layer_total_bytes() const {

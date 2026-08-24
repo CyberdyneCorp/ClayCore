@@ -30,6 +30,7 @@
 #include "clay/field/relax.h"
 #include "clay/io/clayspace.h"
 #include "clay/io/mesh_io.h"
+#include "clay/io/memory.h"
 #include "clay/io/parity_fixture.h"
 #include "clay/mesh/decimate.h"
 #include "clay/mesh/dual_contouring.h"
@@ -490,6 +491,30 @@ constexpr std::size_t kQuadReportOriginal =
     offsetof(clay_quad_report, clamped) + sizeof(std::int32_t);
 constexpr std::size_t kHistoryBytesOriginal =
     offsetof(clay_history_bytes, dropped_steps) + sizeof(std::uint64_t);
+constexpr std::size_t kMemoryReportOriginal =
+    offsetof(clay_memory_report, mask_count) + sizeof(std::uint64_t);
+
+// One conversion, so the document-wide and per-layer paths cannot fill the
+// struct differently — which is the kind of divergence a total-only test would
+// never see. FILE SCOPE, above the first extern "C": a helper defined inside
+// that block is what broke the macOS and Windows builds in #235, and GCC does
+// not warn about it, so a green local build proves nothing.
+inline clay_memory_report to_c_report(const io::MemoryReport& r) {
+    clay_memory_report out{};
+    out.edit_list = r.edit_list;
+    out.voxel_content = r.voxel_content;
+    out.mesh_layers = r.mesh_layers;
+    out.masks = r.masks;
+    out.voxel_sculpt_layers = r.voxel_sculpt_layers;
+    out.history = r.history;
+    out.passthrough = r.passthrough;
+    out.transient = r.transient;
+    out.total = r.total;
+    out.voxel_layers = r.voxel_layers;
+    out.mesh_layer_count = r.mesh_layer_count;
+    out.mask_count = r.mask_count;
+    return out;
+}
 constexpr std::size_t kProgressOriginal = offsetof(clay_progress, total) + sizeof(std::uint64_t);
 constexpr std::size_t kValidationReportOriginal =
     offsetof(clay_validation_report, euler_characteristic) + sizeof(std::int64_t);
@@ -2140,6 +2165,30 @@ clay_result clay_document_history_bytes(const clay_document* doc,
     }
     // Undo off is not an error: it costs nothing, which is the honest answer.
     write_desc(out_bytes, declared, filled);
+    return CLAY_OK;
+}
+
+clay_result clay_document_memory(const clay_document* doc, clay_memory_report* out_report) {
+    if (!doc || !out_report) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    clay_memory_report probe;
+    clay_result r = read_desc(out_report, kMemoryReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_report->struct_size;
+    write_desc(out_report, declared, to_c_report(io::document_memory(doc->doc, doc->undo.get())));
+    return CLAY_OK;
+}
+
+clay_result clay_layer_memory(const clay_document* doc, clay_layer_id layer,
+                              clay_memory_report* out_report) {
+    if (!doc || !out_report) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    clay_memory_report probe;
+    clay_result r = read_desc(out_report, kMemoryReportOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_report->struct_size;
+    io::MemoryReport rep;
+    if (!io::layer_memory(doc->doc, layer, &rep))
+        return fail(CLAY_ERROR_NOT_FOUND, "no such layer");
+    write_desc(out_report, declared, to_c_report(rep));
     return CLAY_OK;
 }
 

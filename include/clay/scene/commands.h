@@ -13,6 +13,7 @@
 
 #include "clay/math/geom.h"
 #include "clay/scene/document.h"
+#include "clay/scene/memory.h"
 
 namespace clay {
 namespace scene {
@@ -221,7 +222,11 @@ std::optional<Command> apply(Document& doc, const Command& cmd);
 // 128 bytes inline whatever it holds, and the entries that matter are the ones
 // carrying heap payloads: the inverse of REMOVING an item is an AddNodeCmd
 // carrying a whole subtree, while the inverse of adding one is an id.
-std::size_t command_bytes(const Command& cmd);
+//
+// `seen` charges a shared payload — a sampled volume — once across a whole
+// walk. The undo and redo stacks pass one, so a volume held by ten inverses is
+// one allocation and is reported as one.
+std::size_t command_bytes(const Command& cmd, SharedSeen* seen = nullptr);
 
 std::vector<std::uint8_t> serialize(const Command& cmd);
 std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size);

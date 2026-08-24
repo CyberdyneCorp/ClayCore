@@ -112,6 +112,20 @@ class MaskField {
     std::uint64_t revision() const { return revision_; }
 
     std::size_t painted_count() const;  // cells with a nonzero value
+
+    // What this mask holds (roll-up-document-memory). Chunk storage, counting
+    // what the containers ALLOCATED rather than what they logically hold.
+    std::size_t content_bytes() const;
+
+    // The step snapshot, which is TRANSIENT and roughly doubles a mask for the
+    // duration of a stroke: a recorded step copies the painted chunks on the
+    // first touch and releases them when the step closes.
+    //
+    // Reported apart from content_bytes rather than folded into it, because a
+    // host sampling memory mid-gesture would otherwise act on a figure that is
+    // about to halve on its own — and releasing something else to make room for
+    // memory that was already going away is the wrong move made confidently.
+    std::size_t step_snapshot_bytes() const;
     bool empty() const { return chunks_.empty(); }
     std::optional<VoxelCoord> bounds_min() const;
     std::optional<VoxelCoord> bounds_max() const;
@@ -196,10 +210,13 @@ class MaskField {
 
     float cell_size_;
     std::uint64_t revision_ = 0;
-    std::unordered_map<VoxelCoord, Chunk, VoxelCoordHash> chunks_;
+    using ChunkMap = std::unordered_map<VoxelCoord, Chunk, VoxelCoordHash>;
+    static std::size_t chunk_map_bytes(const ChunkMap& m);
+
+    ChunkMap chunks_;
     // The step recorder. `snapshot_` is the painted chunks as they were when
     // the step first touched anything.
-    std::unordered_map<VoxelCoord, Chunk, VoxelCoordHash> snapshot_;
+    ChunkMap snapshot_;
     bool step_armed_ = false;
     bool snapshot_taken_ = false;
 };

@@ -70,6 +70,22 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.49.0 is not such a release**: additive, one new descriptor
+   (`clay_memory_report`) and two new entry points (`clay_document_memory`,
+   `clay_layer_memory`). Nothing that compiled against 0.48.0 changes
+   behaviour — the report is a pure query.
+
+   One EXISTING figure moves, and a host reading it should know why:
+   `clay_document_history_bytes` reports MORE for the same history. Its walk of
+   a recorded node had fallen six members behind the type — it missed the
+   armature binding, three profile arrays, a lattice deformer's cage, and both
+   `shared_ptr<FieldVolume>` members, which are typically the largest thing a
+   node owns by two orders of magnitude. The history was measuring low, and
+   lowest on exactly the documents where a budget matters, so a host that set a
+   budget against the old figure was holding more than it thought. Sculpt-layer
+   bytes rose for a smaller reason: an `unordered_map`'s bucket array is now
+   counted. No memory changed; only the honesty of the number did.
+
    **0.48.0 is not such a release**: additive, one new struct
    (`clay_stroke_sample_full`), one new entry point
    (`clay_stroke_resolve_full`), and the stroke preset schema moves 1 -> 2. The

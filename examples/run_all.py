@@ -93,6 +93,7 @@ EXAMPLES = [
     "59_undo_across_representations",
     "60_surviving_a_crash",
     "61_stopping_a_long_operation",
+    "62_what_this_document_costs",
 ]
 
 

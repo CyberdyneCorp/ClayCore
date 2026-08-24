@@ -6324,3 +6324,125 @@ def test_history_bytes_reads_zero_when_undo_is_off():
     assert doc.history_bytes["total"] == 0     # honest, not an error
     with pytest.raises(Exception):
         doc.set_history_budget(1024)
+
+
+# -- what does this document cost? (roll-up-document-memory) ------------------
+#
+# Every assertion here is a ratio, a sum, or a direction of change. Absolute
+# byte counts are not assertable: sizeof moves when a member is added and
+# bucket_count() is implementation-defined, so "an empty document is 343 bytes"
+# would fail on macOS for a reason that is not a defect.
+
+_MEMORY_PARTS = (
+    "edit_list",
+    "voxel_content",
+    "mesh_layers",
+    "masks",
+    "voxel_sculpt_layers",
+    "history",
+    "passthrough",
+    "transient",
+)
+
+
+def _parts(report):
+    # Summed from OUTSIDE the library, field by field, so a field added to the
+    # report and summed only inside it still fails this.
+    return sum(report[k] for k in _MEMORY_PARTS)
+
+
+def test_memory_parts_account_for_the_whole():
+    doc = clay.Document()
+    sdf = doc.add_sdf_layer("body")
+    sdf.add(clay.Sphere(r=0.5))
+    grid = doc.add_voxel_layer("blocks", voxel_size=0.05)
+    grid.fill_box((-20, -20, -20), (20, 20, 20), 1)
+    assert grid.occupied_count > 10000          # non-degenerate first
+
+    report = doc.memory
+    assert report["voxel_content"] > 0
+    assert _parts(report) == report["total"]
+
+
+def test_memory_moves_with_the_content():
+    doc = clay.Document()
+    doc.add_sdf_layer("body")
+    empty = doc.memory["total"]
+
+    grid = doc.add_voxel_layer("blocks", voxel_size=0.05)
+    grid.fill_box((-20, -20, -20), (20, 20, 20), 1)
+    assert grid.occupied_count > 10000
+    # A ratio, never a byte count.
+    assert doc.memory["total"] > empty * 10
+
+
+def test_memory_attributes_a_mask_to_masks_and_nothing_else():
+    # The assertion a total-only check cannot make: it catches a rollup that
+    # sums into the wrong bucket.
+    doc = clay.Document()
+    grid = doc.add_voxel_layer("blocks", voxel_size=0.05)
+    grid.fill_box((-8, -8, -8), (8, 8, 8), 1)
+    before = doc.memory
+
+    mask = doc.add_mask("blocks", cell_size=0.05)
+    mask.fill(((-0.4, -0.4, -0.4), (0.4, 0.4, 0.4)), 1.0)
+    assert mask.painted_count > 1000            # non-degenerate first
+
+    after = doc.memory
+    assert after["masks"] > before["masks"]
+    assert after["voxel_content"] == before["voxel_content"]
+    assert after["edit_list"] == before["edit_list"]
+    assert after["mask_count"] == 1
+
+
+def test_memory_content_sums_exactly_across_layers():
+    doc = clay.Document()
+    # The layers must differ in CHUNK SPAN, not merely in cell count: a chunk is
+    # 32^3 cells allocated whole, so two blocks straddling the origin touch the
+    # same eight chunks and cost the same however differently they are filled.
+    heavy = doc.add_voxel_layer("heavy", voxel_size=0.05)
+    light = doc.add_voxel_layer("light", voxel_size=0.05)
+    heavy.fill_box((-100, -100, -100), (100, 100, 100), 1)
+    light.fill_box((-3, -3, -3), (3, 3, 3), 1)
+
+    whole = doc.memory
+    a = doc.layer_memory("heavy")
+    b = doc.layer_memory("light")
+
+    assert a["voxel_content"] > b["voxel_content"]
+    # Content partitions exactly: every chunk belongs to one layer id.
+    assert a["voxel_content"] + b["voxel_content"] == whole["voxel_content"]
+    # Document-wide lines are zero per layer, which is what makes that a
+    # partition rather than a coincidence.
+    assert a["history"] == 0 and a["passthrough"] == 0
+    assert _parts(a) == a["total"]
+
+
+def test_memory_follows_chunks_not_cells():
+    # The property most likely to surprise, and the one that made the first
+    # version of the test above pass vacuously.
+    doc = clay.Document()
+    sparse = doc.add_voxel_layer("one cell", voxel_size=0.05)
+    dense = doc.add_voxel_layer("packed", voxel_size=0.05)
+    sparse.set((0, 0, 0), 1)
+    dense.fill_box((1, 1, 1), (30, 30, 30), 1)   # the same single chunk, packed
+    assert dense.occupied_count > sparse.occupied_count * 1000
+
+    assert (doc.layer_memory("packed")["voxel_content"]
+            == doc.layer_memory("one cell")["voxel_content"])
+
+
+def test_memory_unknown_layer_raises_rather_than_reporting_zeros():
+    # Zeros read as an empty layer, and a host would show that confidently.
+    doc = clay.Document()
+    doc.add_sdf_layer("body")
+    with pytest.raises(Exception):
+        doc.layer_memory("no such layer")
+
+
+def test_memory_without_undo_reports_no_history():
+    doc = clay.Document()
+    doc.add_sdf_layer("body")
+    report = doc.memory
+    assert report["history"] == 0               # honest, not an error
+    assert _parts(report) == report["total"]
