@@ -30,7 +30,14 @@ HEADER = pathlib.Path(__file__).resolve().parent.parent / "bindings" / "c" / "cl
 # and most are accessors, lifetime or I/O. Adding a pattern here is how a new
 # family of verbs becomes covered-or-exempt rather than invisible.
 VERB_PATTERNS = [
-    r"clay_voxel_sculpt_\w+",
+    # The voxel sculpt brushes. The negative lookahead is load-bearing: the
+    # sculpt-LAYER stack spells its accessors clay_voxel_sculpt_layer{,s}_*, so
+    # a bare \w+ swept seven `const clay_voxel_grid*` getters — count, name,
+    # cell_count, strength, visible, bytes and the stack total — in among the
+    # ten brushes and demanded a latency case for each. This list is verbs a
+    # sculptor drives; an O(1) read of a layer's name is not one, and the
+    # docstring above says so.
+    r"clay_voxel_sculpt_(?!layers?_)\w+",
     r"clay_voxel_(set|erase|paint)_brush",
     r"clay_voxel_apply_stroke",
     r"clay_voxel_mask_extrude",

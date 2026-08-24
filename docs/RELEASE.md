@@ -166,6 +166,16 @@ forward-refuse).
    binding ever passed one, so outside `tests/unit/test_mesh.cpp` that pass
    had never run.
 
+   **0.40.0 is not such a release**: additive, two new entry points
+   (`clay_document_undo_bound`, `clay_document_redo_bound`) and no signature
+   changes. `clay_document_undo` and `clay_document_redo` keep their signatures
+   and their behaviour; the new pair is the same call plus the world-space
+   influence bound of what it applied, in the three-state shape
+   `clay_layer_node_influence_bound` already uses. The bound exists because the
+   narrowest region a host could honestly name from outside was the whole
+   layer: measured on 1043 surface bricks, a dab dirtied 27 keys and 5 ms while
+   taking it back dirtied 2940 keys and 207 ms.
+
    **Neither is 0.24.1**: it changes no signatures at all. It corrects the
    swept guide's segment tie-break, so a scene containing a sweep can evaluate
    marginally differently at a guide corner — a behaviour change, not an ABI

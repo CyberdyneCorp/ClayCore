@@ -80,6 +80,18 @@ enum Coverage {
             "the inverse of voxel_add_level, which is measured; it frees the "
             + "detail map of one level and writes no cells, so it cannot be the "
             + "expensive half of a subdivide/undo pair"),
+        // The regional form of a verb whose whole-lattice form is measured.
+        // Reported as a gap since it landed, because the pattern in
+        // check_device_coverage.py names the _region suffix deliberately — the
+        // level stack went missing from that list once by being covered by a
+        // prefix, and this is the check working rather than a false alarm.
+        .exempt("voxel_add_level_region", because:
+            "voxel_add_level is the same refinement over the whole lattice and "
+            + "is measured; the region form rounds OUT to whole chunks and "
+            + "allocates a subset of what the whole-lattice form allocates, so "
+            + "the measured case is its ceiling. A region smaller than one "
+            + "32-cell chunk still costs one chunk, so there is no cheaper "
+            + "regime below the measured one either"),
 
         // -- the stroke engine ----------------------------------------------
         .measured("stroke_resolve", by: "stroke_resolve"),
