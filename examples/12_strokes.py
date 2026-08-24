@@ -237,6 +237,49 @@ def main():
         raise SystemExit("rotate_along_stroke turned stamps on a straight path")
     print("  rotate_along_stroke: turns stamps along an arc, leaves a straight path alone")
 
+    # --- the three channels a tablet reports -------------------------------
+    # Tilt says HOW FAR the stylus leans; azimuth says WHICH WAY. Without it a
+    # stamp can follow the PATH but not the BARREL, so a rake or chisel brush —
+    # the tool held at an angle, the direction of travel beside the point — was
+    # not expressible at all. This is the case that shows it: one straight path,
+    # where rotate_along_stroke is dead by construction, and two barrels.
+    straight = np.array([[i * 0.05, 0.0, 0.0, 1.0, 0.5, 0.0] for i in range(16)], np.float32)
+    turned = np.array([[i * 0.05, 0.0, 0.0, 1.0, 0.5, 1.5708] for i in range(16)], np.float32)
+    barrel = clay.StrokePreset(radius=0.14, spacing=0.35)
+    barrel.rotate_to_azimuth = True
+    if np.allclose(stroked(barrel, straight, box), stroked(barrel, turned, box), atol=1e-6):
+        raise SystemExit(
+            "rotate_to_azimuth did nothing on a straight path — which is exactly the case "
+            "rotate_along_stroke cannot serve, and the reason azimuth exists")
+    print("  rotate_to_azimuth:   turns stamps by the BARREL, on a path where the "
+          "tangent never changes")
+
+    # Velocity, SIGNED on purpose: a fast stroke is wider for a dry brush and
+    # thinner for an ink pen, and picking one for the artist would be wrong half
+    # the time.
+    slow = np.array([[i * 0.05, 0.0, 0.0, 1.0, 0.5, 0.0, 0.0] for i in range(16)], np.float32)
+    fast = np.array([[i * 0.05, 0.0, 0.0, 1.0, 0.5, 0.0, 1.0] for i in range(16)], np.float32)
+
+    dry = clay.StrokePreset(radius=0.1, spacing=0.35)
+    dry.velocity_size = 1.0
+    dry.velocity_reference = 1.0
+    ink = clay.StrokePreset(radius=0.1, spacing=0.35)
+    ink.velocity_size = -0.5
+    ink.velocity_strength = -0.5
+    ink.velocity_reference = 1.0
+
+    dry_slow = dry.resolve(slow)["radii"][0]
+    dry_fast = dry.resolve(fast)["radii"][0]
+    ink_fast = ink.resolve(fast)["radii"][0]
+    if not (dry_fast > dry_slow > ink_fast):
+        raise SystemExit(
+            f"velocity_size should be signed: dry {dry_fast:.3f} > slow {dry_slow:.3f} > "
+            f"ink {ink_fast:.3f}")
+    print(f"  velocity_size:       fast widens a dry brush ({dry_slow:.3f} -> {dry_fast:.3f}) "
+          f"and thins an ink pen ({ink_fast:.3f})")
+    print(f"  velocity_strength:   the same signed scale on flow; "
+          f"velocity_reference is the speed that reads as 'fast'")
+
     # accumulation: BUILDUP lets overlapping stamps deposit twice, CLAMPED
     # reaches the stroke's strength once however many overlap. A dense stroke
     # is the case that separates them — at wide spacing nothing overlaps and
