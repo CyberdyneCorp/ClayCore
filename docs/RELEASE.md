@@ -912,6 +912,20 @@ Three failures mean three different things:
 | `BUDGET` | slower than the interaction class allows, regressed or not |
 | `GROWTH` | cost is scaling faster than the document (over `N^1.25`) |
 
+The checker also names **which cases were measured while the machine had
+drifted**, not merely that it drifted. The canary is sampled every 30 s and each
+case records its own start offset, so a case is scored against the canary
+reading nearest it: a bundle that plateaus at x1.07 for four minutes and spikes
+on its last sample is not a run where every case is suspect, it is a run where
+the last few are. v0.49.0's two runs both reported `CONDITIONS CHANGED x1.59`
+and both had 54 of 59 cases measured inside tolerance; the five that were not
+(`cut_create`, `trim_curve`, `tube_create`, `pose_region`, `armature_edit`) sit
+at the end of the measure bundle and pay for everything ahead of them. This is a
+note on what the numbers mean rather than a failure — their budgets hold — and
+attribution needs a run collected by a `collect_device_bench.py` that stamps
+cases with their bundle, since `startedAtMs` is a within-bundle offset. An older
+record says it cannot attribute rather than guessing.
+
 And two refusals, which are not scores at all: a run from **different
 hardware**, and a run that was **thermally throttled**. `ProcessInfo`'s
 thermal state is sampled at both ends and anything but `nominal` invalidates
