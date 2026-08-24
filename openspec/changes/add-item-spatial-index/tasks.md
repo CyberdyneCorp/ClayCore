@@ -1,6 +1,10 @@
 # Tasks: add-item-spatial-index
 
-- [ ] 1.1 DECIDE and record in `design.md`: flat BVH over item bounds vs uniform grid keyed like the brick lattice. Decide against a real sculpt's scale distribution (a blockout sphere and a detail stamp coexist), and record the build-vs-query measurement that settled it
+- [x] 1.1 DECIDED, by building the BVH and measuring it: **a per-revision tree
+      cannot pay for itself, and BVH-vs-grid is the wrong question to answer
+      first.** The warning already in this task turned out to be exactly right,
+      and is now a measured fact rather than a prediction — see 1.1b.
+      Original question: Decide against a real sculpt's scale distribution (a blockout sphere and a detail stamp coexist), and record the build-vs-query measurement that settled it
 
       — MEASUREMENT TAKEN, from #193. Documents of N spheres, one layer, no groups.
       `plan()` is the mean of 200 calls over a dab-sized region; `build` is one
@@ -26,6 +30,43 @@
       realistic stamp, not the interactive cost — #193's own correction, after its
       first harness measured a dab over empty space. An O(N) rebuild per edit is
       still wrong, but it buys ~1.02x end-to-end and must not be sold as more.
+
+- [x] 1.1b MEASURED, on one Linux box, ratios only. A median-split BVH over each
+      chain's cullable entries was built, made correct (equivalence tested
+      against `item_geometry_bound` / `item_influence_is_local` directly), and
+      measured against the same build with it disabled:
+
+      | items | build, scan | build, BVH | plan, scan | plan, BVH |
+      |---:|---:|---:|---:|---:|
+      | 1 000 | 0.091 ms | 0.113 ms | 0.0030 ms | 0.00006 ms |
+      | 10 000 | 0.506 | 1.730 | 0.030 | 0.00017 |
+      | 50 000 | 2.584 | 9.228 | 0.136 | 0.00023 |
+
+      **The query got 590x faster and the whole thing got 2.4x slower.** `plan()`
+      became genuinely sublinear — per-item cost falls from a flat 2.8 ns to
+      near zero across a 300x range, which is the shape a search gives and a
+      constant-factor fix cannot. It is also the SMALLER TERM, exactly as this
+      task said, and the tree costs more to build than the scan it replaces
+      saves: +6.6 ms of build against -0.14 ms of query at 50 000 items.
+
+      The ratio that decides it is BUILD-TO-PLAN, and it is 1:1. The index is
+      cached on the document revision and every stamp bumps it, while `CullPlan`
+      exists precisely so one cull serves every brick in the dab. One build, one
+      query. No tree amortises against that.
+
+      **So the BVH was reverted rather than shipped.** What survives is the
+      equivalence and shape tests, which are written against the public
+      definition rather than against any implementation and will guard whichever
+      index does land.
+
+- [ ] 1.1c The remaining direction, now the only one the measurement leaves:
+      make the index SURVIVE a revision and update incrementally, so the build
+      is paid per EDIT rather than per document. Only then is a sublinear query
+      worth having — and only then does BVH-vs-grid become answerable, because
+      the structure has to support insertion and removal rather than just
+      queries. `build_chain` calling `item_geometry_bound` per node, which
+      re-tessellates spline strokes and sweeps, is what makes the rebuild
+      expensive and what an incremental form would stop repeating.
 - [x] 1.2 Baseline the numbers this change exists to move, on a build of `main`: culling
       time per brick at 100 / 2 400 / 10 000 items, and a dab's total. Committed as
       `BM_DeepDocCullPlanned10000` and `BM_DeepDocRefillPlanned10000`, with gates.
