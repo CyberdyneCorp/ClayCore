@@ -789,6 +789,24 @@ clay_result clay_document_set_layer_transform(clay_document* doc, clay_layer_id 
  * no mirror axes evaluate exactly as before, whatever the items' flags. */
 clay_result clay_set_layer_mirror(clay_document* doc, clay_layer_id layer, int32_t axis_x,
                                   int32_t axis_y, int32_t axis_z, float mirror_k);
+/* The layer's RADIAL symmetry: `count` copies of every participating item,
+ * evenly spaced about the layer-local axis 0/1/2, with `radial_k` smoothing the
+ * seam between neighbours exactly as mirror_k smooths the mirror seam.
+ *
+ * A count of 0 or 1 turns it off and restores the un-arrayed field. Like the
+ * mirror this is a property of the layer that evaluation reads, not an edit to
+ * the items: one node exists and the copies cannot drift from it. Participation
+ * follows the SAME per-item flag as the mirror (clay_item_set_mirror), so an
+ * asymmetric detail is excluded from a layer's symmetry once rather than once
+ * per mode.
+ *
+ * An axis outside 0..2 or a negative blend is rejected rather than clamped.
+ *
+ * This is the MODE. clay_item_set_repeat_radial is the per-item MODIFIER, and
+ * it stays the right tool for a large decorative array: this emits `count`
+ * instances per item where the modifier folds the query point in O(2). */
+clay_result clay_set_layer_radial(clay_document* doc, clay_layer_id layer, int32_t axis,
+                                  int32_t count, float radial_k);
 
 /* -- discovering layers ----------------------------------------------------
  *

@@ -2723,6 +2723,25 @@ clay_result clay_set_layer_mirror(clay_document* doc, clay_layer_id layer_id, in
                       "layer not found");
 }
 
+clay_result clay_set_layer_radial(clay_document* doc, clay_layer_id layer_id, int32_t axis,
+                                  int32_t count, float radial_k) {
+    // Rejected rather than clamped: a caller who passed axis 3 meant something,
+    // and silently arraying about Y would be a wrong picture rather than an
+    // error they could see.
+    if (axis < 0 || axis > 2) return fail(CLAY_ERROR_INVALID_ARGUMENT, "radial axis must be 0..2");
+    if (!(radial_k >= 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "radial blend must be >= 0");
+    if (count < 0 || count > 65535)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "radial count out of range");
+    // 0 and 1 both mean off, and both are stored as the caller sent them: a
+    // host that steps a slider down to 1 gets the same field as 0 without the
+    // ABI deciding which of the two it "really" meant.
+    return apply_edit(doc,
+                      scene::Command{scene::SetLayerRadialCmd{
+                          layer_id, static_cast<std::uint16_t>(count),
+                          static_cast<std::uint8_t>(axis), radial_k}},
+                      "layer not found");
+}
+
 // -- item builder (c-abi spec: item builder for composed edits) --------------
 
 clay_item* clay_item_create(int32_t prim, const float* params, size_t param_count) {

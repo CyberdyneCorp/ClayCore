@@ -145,6 +145,15 @@ struct SetLayerMirrorCmd {
     std::uint8_t axes = 0;  // kMirrorX|Y|Z
     float k = 0.0f;
 };
+// The layer's radial symmetry, set as a whole. A command for the same reason
+// the mirror is one: it is a property of the layer that evaluation reads, so
+// writing it directly would neither respect the lock nor reach the undo stack.
+struct SetLayerRadialCmd {
+    LayerId id = 0;
+    std::uint16_t count = 0;  // 0/1 = off
+    std::uint8_t axis = 1;    // 0/1/2
+    float k = 0.0f;
+};
 // A layer's name, replaced. A command rather than a field write for the reason
 // the mirror became one: the name was set once at creation and never after, so
 // a host kept its own display name beside the document and the rename was lost
@@ -159,7 +168,7 @@ using Command =
                  SetColorCmd, SetOpBlendCmd, AppendStrokeCmd, TrimStrokeCmd, AddLayerCmd,
                  RemoveLayerCmd, SetLayerVisibleCmd, SetLayerTransformCmd,
                  SetLayerProtectionCmd, SetStrokePointsCmd, SetDeformersCmd,
-                 SetLayerMirrorCmd, SetArmatureCmd, SetLayerNameCmd>;
+                 SetLayerMirrorCmd, SetLayerRadialCmd, SetArmatureCmd, SetLayerNameCmd>;
 
 // The layer a command would edit, or 0 for one that edits no existing layer
 // (adding a layer creates its target; changing protection is how a protected
@@ -199,7 +208,7 @@ math::Aabb command_influence_bound(const Document& doc, const Command& cmd);
 //
 // Minor 11 adds an item's GATE — the mask that protects a surface from any
 // operation.
-inline constexpr std::uint16_t kSceneMinor = 11;
+inline constexpr std::uint16_t kSceneMinor = 12;
 
 // Apply a command; returns its inverse, or nullopt if the target does not
 // exist or is protected (ghosted or locked). The document is unchanged in

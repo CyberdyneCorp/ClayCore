@@ -4580,6 +4580,25 @@ NB_MODULE(pyclay, m) {
              "axis"_a = "x", "blend"_a = 0.0f,
              "Enable the layer mirror across an axis: every item reflects, before or "
              "after it was added, except those added with mirror=False")
+        .def("radial",
+             [](PyLayer& l, int count, const std::string& axis, float blend) {
+                 if (blend < 0.0f) throw std::invalid_argument("blend must be >= 0");
+                 if (count < 0 || count > 65535)
+                     throw std::invalid_argument("radial count out of range");
+                 // Through the command vocabulary, so it respects the lock and
+                 // lands on the undo stack. `mirror` above still writes the
+                 // fields directly, which is the defect clay_set_layer_mirror
+                 // was changed to fix on the C side.
+                 apply_or_throw(l.doc->document,
+                                scene::Command{scene::SetLayerRadialCmd{
+                                    l.id, static_cast<std::uint16_t>(count),
+                                    static_cast<std::uint8_t>(parse_axis(axis)), blend}},
+                                "radial", l.undo.get());
+             },
+             "count"_a, "axis"_a = "y", "blend"_a = 0.0f,
+             "Array every participating item `count` times about the layer-local axis. "
+             "0 or 1 turns it off. Participation follows the same per-item flag as the "
+             "mirror, so a stroke arrays and an item added with mirror=False does not.")
         .def("eval",
              [](const PyLayer& l, nb::handle points, const std::string& backend) {
                  return eval_field(scene::compile_layer(l.layer()), points, backend,

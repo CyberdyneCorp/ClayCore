@@ -4,6 +4,8 @@
 // scene item and layer carries; tape compilation pre-inverts it into a
 // cfloat4x4 for the kernels (scene-model spec).
 
+#include <cmath>
+
 #include "clay/kernel/shim.h"
 
 namespace clay {
@@ -115,6 +117,29 @@ inline cfloat4x4 mul(const cfloat4x4& a, const cfloat4x4& b) {
         return a.c0 * c.x + a.c1 * c.y + a.c2 * c.z + a.c3 * c.w;
     };
     return cfloat4x4{mulc(b.c0), mulc(b.c1), mulc(b.c2), mulc(b.c3)};
+}
+
+// Rotation about the local axis 0/1/2, by `radians`.
+//
+// Built as a matrix rather than a Transform even though a rotation, unlike a
+// reflection, has determinant +1 and would express as one. The layer's radial
+// symmetry composes it exactly where the mirror composes a reflection —
+// `item^-1 * R * layer^-1` — so keeping the two the same shape is what lets a
+// reader see one pattern instead of noticing that one of them is special.
+inline cfloat4x4 rotation_matrix(int axis, float radians) {
+    const float c = std::cos(radians), s = std::sin(radians);
+    cfloat4x4 m{cf4(1, 0, 0, 0), cf4(0, 1, 0, 0), cf4(0, 0, 1, 0), cf4(0, 0, 0, 1)};
+    if (axis == 0) {
+        m.c1.y = c;  m.c1.z = s;
+        m.c2.y = -s; m.c2.z = c;
+    } else if (axis == 1) {
+        m.c0.x = c;  m.c0.z = -s;
+        m.c2.x = s;  m.c2.z = c;
+    } else {
+        m.c0.x = c;  m.c0.y = s;
+        m.c1.x = -s; m.c1.y = c;
+    }
+    return m;
 }
 
 // Reflection across the local plane whose normal is axis 0/1/2.

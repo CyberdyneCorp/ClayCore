@@ -127,6 +127,42 @@ nothing at all (#60). Layers with no mirror axes cost nothing either way.
 For symmetry at **authoring** time instead — build one arm, get the node list
 of two — see `add_child` mirrored under Armatures (§6).
 
+### Symmetry: the layer radial array
+
+`Layer::radial_count` arrays every participating item `count` times about the
+layer-local axis `Layer::radial_axis`, with `Layer::radial_k` smoothing the seam
+between neighbouring copies exactly as `mirror_k` smooths the mirror seam. 0 or
+1 is off and costs nothing. `clay_set_layer_radial`, `Layer.radial(count,
+axis="y", blend=0.0)`.
+
+**Participation is the mirror's flag, not a second one.** An item added with
+`mirror=False` is excluded from the layer's symmetry — both modes — because an
+asymmetric detail is asymmetric once. Strokes are items, so a stroke on a radial
+layer arrays without the caller touching the nodes it resolved into, which is
+the property that makes this a sculpting mode.
+
+**Radial and mirror compose additively.** Each contributes its own copies of the
+base item and the products are not emitted: a 3-fold radial plus an X mirror
+gives 3 rotations and 1 reflection, not the 6 of a combined group. That matches
+the mirror's own convention across its axes — x|y emits two reflections, not
+four quadrants.
+
+**This is the MODE. `Repeat::radial` is the MODIFIER**, and the difference is
+not stylistic:
+
+| | `Layer::radial_count` | `Repeat::radial` |
+|---|---|---|
+| set on | the layer | one item |
+| reaches a stroke | **yes** — stamps are items on the layer | no — the caller would set it per resolved node |
+| per-item opt-out | yes, the mirror flag | n/a |
+| seam blend | yes | no |
+| cost | `count` emitted instances per item | **O(2)** per evaluation, whatever the count |
+
+So a 6-fold sculpting symmetry is the mode; a 24-fold decorative array is the
+modifier. The mode has to emit real copies because the cull, the bounds, the
+seam blend and the opt-out all need real items to act on — which is exactly what
+buys it the properties the modifier cannot have.
+
 ---
 
 ## 2. Deformers
