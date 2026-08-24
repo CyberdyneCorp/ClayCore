@@ -309,6 +309,27 @@ class VertexDeltas {
     // and after a deferred normal recomputation, so the last word wins.
     void sync_after(std::uint32_t v, const Mesh& m);
 
+    // -- encoding (survive-a-crash) -------------------------------------------
+    //
+    // A mesh step is the only one of the three the session history records that
+    // had no byte form: an edit-list step is a scene::Command, which the
+    // document format already encodes, and a voxel step is a run of PODs. This
+    // is the third, and without it a journal would carry two kinds out of three
+    // and say nothing about the missing one.
+    //
+    // A MEMBER rather than a free function in `session`, because the record's
+    // "after" values and its normal/colour flags have no public accessors — and
+    // widening the class's read surface just to serialize it from outside would
+    // be a worse trade than owning the encoding here, which is also where
+    // VoxelGrid keeps its own stream methods.
+    //
+    // The `slot_` index is NOT encoded: it is derivable from `vertices_`, and
+    // storing a hash map's contents would be storing a rebuildable thing.
+    std::vector<std::uint8_t> encode() const;
+    // Refuses a truncated or inconsistent buffer rather than returning a record
+    // that reverts a mesh to garbage. Returns false and leaves `out` untouched.
+    static bool decode(const std::uint8_t* data, std::size_t size, VertexDeltas* out);
+
    private:
     std::vector<std::uint32_t> vertices_;
     std::vector<kernel::cfloat3> before_position_, after_position_;
