@@ -27,6 +27,45 @@ scene::Tape pickable_tape(const scene::Document& doc, const scene::CullRegion* c
     return scene::compile_document(without_ghosts, cull);
 }
 
+float next_visible_crossing(const std::function<float(cfloat3)>& field, const math::Ray& ray,
+                            float t_start, float tmax, float step,
+                            const voxel::GroupField& groups) {
+    if (!(step > 0.0f)) return -1.0f;
+    constexpr int kMaxSteps = 8192;
+    float t_prev = t_start;
+    float f_prev = field(ray.at(t_prev));
+    for (int i = 0; i < kMaxSteps; ++i) {
+        const float t = t_prev + step;
+        if (t > tmax) return -1.0f;
+        const float f = field(ray.at(t));
+        // A sign change in EITHER direction is a surface: entering a solid and
+        // leaving it are both crossings, and the far wall of a hidden shell is
+        // reached by the second kind.
+        if ((f_prev < 0.0f) != (f < 0.0f)) {
+            // Bisect. Ten halvings take a cell-sized bracket to about a
+            // thousandth of a cell, which is far below what the group lattice
+            // can distinguish anyway.
+            float lo = t_prev, hi = t, f_lo = f_prev;
+            for (int b = 0; b < 10; ++b) {
+                const float mid = (lo + hi) * 0.5f;
+                const float f_mid = field(ray.at(mid));
+                if ((f_lo < 0.0f) != (f_mid < 0.0f)) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                    f_lo = f_mid;
+                }
+            }
+            const float t_hit = (lo + hi) * 0.5f;
+            if (!groups.point_hidden(ray.at(t_hit))) return t_hit;
+            // Hidden: keep scanning from just past it.
+        }
+        t_prev = t;
+        f_prev = f;
+    }
+    return -1.0f;
+}
+
 SceneHit raycast_scene(const scene::Document& doc, const math::Ray& ray,
                        const RaycastOptions& options) {
     SceneHit hit;
@@ -41,14 +80,43 @@ SceneHit raycast_scene(const scene::Document& doc, const math::Ray& ray,
         tmax = kernel::cmin(tmax, t1);
     }
     auto field = [&](cfloat3 p) { return tape.eval(p).d; };
-    kernel::CRayHit r = kernel::craycast(field, ray.origin, ray.dir, tmin, tmax, options.eps,
-                                         tape.safe_step_scale(), 1.4f, options.max_steps);
-    if (!r.hit) return hit;
-    hit.hit = true;
-    hit.t = r.t;
-    hit.position = ray.at(r.t);
-    hit.normal = kernel::cnormal(field, hit.position, 1e-4f);
-    attribute(doc, hit.position, &hit.layer, &hit.item);
+
+    // Marched in segments so a hit on hidden surface can be stepped over rather
+    // than becoming a miss: hiding the front of a head is how an artist reaches
+    // the inside of it, and a ray that stopped there would defeat the feature.
+    //
+    // The bound is on SEGMENTS, not on total steps — each restart carries the
+    // caller's own max_steps — so a ray crossing several hidden shells is
+    // bounded without a hidden region silently shortening the visible march.
+    constexpr int kMaxHiddenSkips = 16;
+    for (int skip = 0; skip <= kMaxHiddenSkips; ++skip) {
+        kernel::CRayHit r = kernel::craycast(field, ray.origin, ray.dir, tmin, tmax, options.eps,
+                                             tape.safe_step_scale(), 1.4f, options.max_steps);
+        if (!r.hit) return hit;
+        const cfloat3 p = ray.at(r.t);
+        if (options.groups && options.groups->point_hidden(p)) {
+            // Hand off to the scan: a sphere-march cannot resume from inside
+            // the solid it just hit, and walking out of that solid overshoots
+            // the far wall, which is the surface being looked for. See
+            // next_visible_crossing.
+            const float step = kernel::cmax(options.groups->cell_size(), options.eps * 4.0f);
+            const float t_vis = next_visible_crossing(field, ray, r.t + step * 0.5f, tmax, step,
+                                                      *options.groups);
+            if (t_vis < 0.0f) return hit;  // nothing visible behind it
+            hit.hit = true;
+            hit.t = t_vis;
+            hit.position = ray.at(t_vis);
+            hit.normal = kernel::cnormal(field, hit.position, 1e-4f);
+            attribute(doc, hit.position, &hit.layer, &hit.item);
+            return hit;
+        }
+        hit.hit = true;
+        hit.t = r.t;
+        hit.position = p;
+        hit.normal = kernel::cnormal(field, hit.position, 1e-4f);
+        attribute(doc, hit.position, &hit.layer, &hit.item);
+        return hit;
+    }
     return hit;
 }
 

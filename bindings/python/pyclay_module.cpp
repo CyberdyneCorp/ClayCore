@@ -28,6 +28,7 @@
 #include "clay/field/move_topological.h"
 #include "clay/field/relax.h"
 #include "clay/field/volume.h"
+#include "clay/kernel/field.h"
 #include "clay/io/clayspace.h"
 #include "clay/io/memory.h"
 #include "clay/io/mesh_io.h"
@@ -53,6 +54,7 @@
 #include "clay/scene/tape.h"
 #include "clay/version.h"
 #include "clay/voxel/grid.h"
+#include "clay/voxel/hide.h"
 #include "clay/voxel/mask.h"
 
 namespace nb = nanobind;
@@ -718,6 +720,41 @@ struct PyMaskField {
     }
 };
 
+// The document's surface groups. Always a BORROW — there is no standalone
+// form, unlike a mask, because a group names a region of a MODEL and a
+// standalone lattice would name a region of nothing.
+struct PyGroupField {
+    std::shared_ptr<io::ClaySpaceDoc> doc;
+    std::shared_ptr<UndoRef> undo;
+
+    voxel::GroupField& field() const {
+        if (!doc->groups) throw std::runtime_error("this document has no surface groups");
+        return *doc->groups;
+    }
+};
+
+// Brackets a group edit so it becomes one undo step, on the same RAII shape the
+// C binding's GroupStep uses. Every mutator below takes one, which is what
+// keeps eleven call sites from each having to remember.
+struct PyGroupStep {
+    session::History* history = nullptr;
+    voxel::GroupField* field = nullptr;
+
+    explicit PyGroupStep(const PyGroupField& g) {
+        session::History* h = g.undo ? g.undo->get() : nullptr;
+        if (!h) return;
+        voxel::GroupField& f = g.field();
+        if (!h->begin_group_step(f)) return;
+        history = h;
+        field = &f;
+    }
+    ~PyGroupStep() {
+        if (history) history->end_group_step(*field);
+    }
+    PyGroupStep(const PyGroupStep&) = delete;
+    PyGroupStep& operator=(const PyGroupStep&) = delete;
+};
+
 struct PySculptLayerScope {
     PyVoxelGrid grid;
     std::string name;
@@ -1264,6 +1301,11 @@ PyMesh mesh_document(const PyDocument& d, int resolution, nb::handle voxel_size,
         } else {
             out.m = mesh::mesh_tape(tape, tape.bounds, voxel);
         }
+        // What the artist put away does not come back in the export. BEFORE
+        // decimation, so the decimator spends its triangle budget on surface
+        // that will actually be seen rather than on surface about to be
+        // dropped. A no-op when nothing is hidden.
+        if (d.doc->groups) voxel::drop_hidden(out.m, *d.doc->groups);
         if (ratio > 0.0f) {
             mesh::DecimateOptions opts;
             opts.target_ratio = ratio;
@@ -1376,6 +1418,9 @@ PyMesh mesh_document_quads(const PyDocument& d, nb::handle cell_size, nb::handle
     {
         nb::gil_scoped_release release;
         out.m = mesh::mesh_tape_quads_fit(tape, tape.bounds, cell, want, {}, &fit);
+        // Filtered BY QUAD, so the export keeps its quads — see
+        // voxel::drop_hidden, which exists in that shape for this path.
+        if (d.doc->groups) voxel::drop_hidden(out.m, *d.doc->groups);
     }
     out.fit = fit;
     out.fit_target = want.target;
@@ -4888,6 +4933,40 @@ NB_MODULE(pyclay, m) {
              "resolved once at import rather than approximated by a layer\n"
              "transform. The layer's own transform is applied by whatever exports\n"
              "it, and moving the layer does not move the stored vertices.")
+        .def(
+            "groups",
+            [](PyDocument& d, float cell_size) {
+                if (!d.doc->groups) {
+                    if (cell_size <= 0.0f) cell_size = 0.05f;
+                    d.doc->groups.emplace(cell_size);
+                }
+                // An EXISTING lattice is not re-scaled whatever cell_size says:
+                // re-scaling would move every boundary the artist placed, and
+                // silently.
+                PyGroupField g;
+                g.doc = d.doc;
+                g.undo = d.undo;
+                return g;
+            },
+            "cell_size"_a = 0.05f,
+            "The document's surface groups — ZBrush's PolyGroups, Blender's\n"
+            "Face Sets. Creates the lattice on first call and returns the same\n"
+            "one after; `cell_size` is used only when creating, since\n"
+            "re-scaling would move every boundary you placed.\n\n"
+            "ONE WORLD-SPACE LATTICE, asked 'which group is this surface point\n"
+            "in' identically whatever the surface is made of — so groups\n"
+            "survive rasterizing, meshing and converting BY CONSTRUCTION: they\n"
+            "were never in the SDF, the voxels or the mesh.\n\n"
+            "PER DOCUMENT, not per layer: a mask gates edits to its layer,\n"
+            "while a group names a region of the MODEL, and 'isolate the head'\n"
+            "when the head spans two layers is what per-layer storage makes\n"
+            "impossible.\n\n"
+            "The cost: a boundary is quantised to this lattice rather than to\n"
+            "the representation, so a mesh that could have carried an exact\n"
+            "per-face boundary does not.")
+        .def_prop_ro(
+            "has_groups", [](const PyDocument& d) { return d.doc->groups && !d.doc->groups->empty(); },
+            "Whether any region has been named, without creating a lattice.")
         .def("add_mask",
              [](PyDocument& d, const std::string& name, float cell_size) {
                  if (cell_size <= 0.0f) throw std::invalid_argument("cell_size must be > 0");
@@ -5024,9 +5103,13 @@ NB_MODULE(pyclay, m) {
                  math::Ray ray{to_f3(origin, "origin"),
                                kernel::cnormalize(to_f3(direction, "direction"))};
                  pick::SceneHit hit;
+                 pick::RaycastOptions opts;
+                 // Hidden surface is stepped over, not turned into a miss:
+                 // hiding the front of a head is how you reach the inside.
+                 if (d.doc->groups) opts.groups = &*d.doc->groups;
                  {
                      nb::gil_scoped_release release;
-                     hit = pick::raycast_scene(d.doc->document, ray);
+                     hit = pick::raycast_scene(d.doc->document, ray, opts);
                  }
                  if (!hit.hit) return nb::none();
                  nb::dict out;
@@ -5047,10 +5130,49 @@ NB_MODULE(pyclay, m) {
                  eval::Backend* cpu = find_backend("cpu");
                  std::vector<eval::RayHit> hits(rays.count ? rays.count : 1);
                  eval::RayQuery q{rays.data.data(), rays.count, 0.0f, 1e6f, 1e-4f, 256};
+                 const voxel::GroupField* groups =
+                     d.doc->groups ? &*d.doc->groups : nullptr;
                  {
                      nb::gil_scoped_release release;
                      if (cpu->raycast(tape, q, hits.data()) != eval::Status::Ok)
                          throw std::runtime_error("batch raycast failed");
+                     // The batch stays a batch: only rays that actually landed
+                     // on hidden surface are re-resolved, so a document with
+                     // nothing hidden pays exactly what it always did. This is
+                     // the path _render.py draws through, so without it a
+                     // rendered isolate looks identical to the whole model —
+                     // which is how the omission was found.
+                     if (groups && groups->any_hidden()) {
+                         auto field = [&](kernel::cfloat3 p) { return tape.eval(p).d; };
+                         for (std::size_t i = 0; i < rays.count; ++i) {
+                             if (!hits[i].hit) continue;
+                             const kernel::cfloat3 p = kernel::cf3(
+                                 hits[i].pos[0], hits[i].pos[1], hits[i].pos[2]);
+                             if (!groups->point_hidden(p)) continue;
+                             const math::Ray r{
+                                 kernel::cf3(rays.data[i * 6], rays.data[i * 6 + 1],
+                                             rays.data[i * 6 + 2]),
+                                 kernel::cf3(rays.data[i * 6 + 3], rays.data[i * 6 + 4],
+                                             rays.data[i * 6 + 5])};
+                             const float step =
+                                 kernel::cmax(groups->cell_size(), q.eps * 4.0f);
+                             const float t = pick::next_visible_crossing(
+                                 field, r, hits[i].t + step * 0.5f, q.tmax, step, *groups);
+                             if (t < 0.0f) {
+                                 hits[i].hit = 0;
+                                 continue;
+                             }
+                             const kernel::cfloat3 hp = r.at(t);
+                             hits[i].t = t;
+                             hits[i].pos[0] = hp.x;
+                             hits[i].pos[1] = hp.y;
+                             hits[i].pos[2] = hp.z;
+                             const kernel::cfloat3 nn = kernel::cnormal(field, hp, 1e-4f);
+                             hits[i].normal[0] = nn.x;
+                             hits[i].normal[1] = nn.y;
+                             hits[i].normal[2] = nn.z;
+                         }
+                     }
                  }
                  const std::size_t n = rays.count;
                  nb::module_ np = nb::module_::import_("numpy");
@@ -5197,6 +5319,16 @@ NB_MODULE(pyclay, m) {
                  if (!*d.undo) {
                      *d.undo = std::make_shared<session::History>();
                      (*d.undo)->set_enabled(true);
+                     // Set once rather than passed to undo/redo like the three
+                     // per-layer resolvers: the group lattice is per DOCUMENT,
+                     // so there is no map lookup that can miss. Captures the
+                     // ClaySpaceDoc by shared_ptr and is consulted at the
+                     // moment of use, so a lattice created LATER is still
+                     // found.
+                     std::shared_ptr<io::ClaySpaceDoc> doc = d.doc;
+                     (*d.undo)->set_groups_resolver([doc]() -> voxel::GroupField* {
+                         return doc->groups ? &*doc->groups : nullptr;
+                     });
                  }
              },
              "Start recording edits. Off by default, so a document that never "
@@ -5554,6 +5686,131 @@ NB_MODULE(pyclay, m) {
              "Resolve stroke samples into stamps. Pure: no document is read or "
              "touched. samples is (N, 3), (N, 4) with pressure, or (N, 5) with "
              "pressure and tilt. Returns positions/radii/strengths/along arrays.");
+
+    nb::class_<PyGroupField>(
+        m, "GroupField",
+        "Named regions of the model — PolyGroups / Face Sets, on one\n"
+        "world-space lattice shared by every representation.\n\n"
+        "Group 0 is NO_GROUP and means 'not in a group'. It is never hidden,\n"
+        "and isolate() leaves it visible: ungrouped surface is not something\n"
+        "you put away, and isolating a group must not make the rest of the\n"
+        "model vanish because it was never named.")
+        .def_prop_ro("cell_size", [](const PyGroupField& g) { return g.field().cell_size(); })
+        .def_prop_ro("empty", [](const PyGroupField& g) { return g.field().empty(); })
+        .def("at",
+             [](const PyGroupField& g, nb::handle p) {
+                 return g.field().at(to_f3(p, "point"));
+             },
+             "point"_a,
+             "Which group a surface POINT is in — the one query every\n"
+             "representation asks, and the reason this is not three mechanisms.")
+        .def("fill",
+             [](PyGroupField& g, nb::handle region, voxel::GroupId id) {
+                 PyGroupStep step(g);
+                 g.field().fill(to_aabb(region), id);
+             },
+             "region"_a, "group"_a,
+             "Name a box-shaped region. Membership is decided at the cell\n"
+             "CENTRE, so two adjacent fills do not overlap by a cell.")
+        .def("fill_from_mask",
+             [](PyGroupField& g, nb::handle mask, voxel::GroupId id, float threshold) {
+                 const voxel::MaskField* mf = borrow_mask(mask);
+                 if (!mf) throw std::invalid_argument("expected a Mask");
+                 PyGroupStep step(g);
+                 return g.field().fill_from_mask(*mf, id, threshold);
+             },
+             "mask"_a, "group"_a, "threshold"_a = 0.5f,
+             "Name the region a MASK covers — how 'addressed by group or by\n"
+             "mask' becomes one mechanism rather than two. Paint a mask any\n"
+             "way you like (a brush, a cavity measure, an extrude) and name\n"
+             "the result. The two lattices need not share a cell size.")
+        .def("reassign",
+             [](PyGroupField& g, voxel::GroupId from, voxel::GroupId to) {
+                 PyGroupStep step(g);
+                 return g.field().reassign(from, to);
+             },
+             "from_group"_a, "to_group"_a,
+             "Everything in `from_group` becomes `to_group`. Merging into 0\n"
+             "deletes a group without walking the lattice, and takes its\n"
+             "hidden flag with it.")
+        .def("grow",
+             [](PyGroupField& g, voxel::GroupId id, int steps) {
+                 PyGroupStep step(g);
+                 return g.field().grow(id, steps);
+             },
+             "group"_a, "steps"_a = 1,
+             "Dilate the region. VOLUMETRIC, NOT GEODESIC, and this is where\n"
+             "it differs from a mesh tool: ZBrush grows a face set ALONG the\n"
+             "surface, this dilates in 3D. Where a surface folds back within\n"
+             "`steps` cells of itself — a tight crease, a thin wall — growth\n"
+             "crosses the gap and claims the other side.\n\n"
+             "Claims only UNGROUPED cells: growing one group into another\n"
+             "would silently destroy a region you named, and 'grow' is not a\n"
+             "verb anyone expects to delete.")
+        .def("shrink",
+             [](PyGroupField& g, voxel::GroupId id, int steps) {
+                 PyGroupStep step(g);
+                 return g.field().shrink(id, steps);
+             },
+             "group"_a, "steps"_a = 1, "Erode the region from its boundary.")
+        .def("border",
+             [](const PyGroupField& g, voxel::GroupId id) {
+                 std::vector<voxel::VoxelCoord> rim = g.field().border(id);
+                 nb::list out;
+                 for (const voxel::VoxelCoord& c : rim)
+                     out.append(nb::make_tuple(c.x, c.y, c.z));
+                 return out;
+             },
+             "group"_a,
+             "The cells of `group` that touch a cell not in it — the seam to\n"
+             "mask, crease or polish.")
+        .def("set_visible",
+             [](PyGroupField& g, voxel::GroupId id, bool visible) {
+                 PyGroupStep step(g);
+                 g.field().set_visible(id, visible);
+             },
+             "group"_a, "visible"_a)
+        .def("visible",
+             [](const PyGroupField& g, voxel::GroupId id) { return g.field().visible(id); },
+             "group"_a)
+        .def("isolate",
+             [](PyGroupField& g, voxel::GroupId id) {
+                 PyGroupStep step(g);
+                 g.field().isolate(id);
+             },
+             "group"_a,
+             "Show this one, hide every other group that exists. Identical to\n"
+             "hiding everything not in it — group 0 stays visible.")
+        .def("show_all",
+             [](PyGroupField& g) {
+                 PyGroupStep step(g);
+                 g.field().show_all();
+             })
+        .def("invert_visibility",
+             [](PyGroupField& g) {
+                 PyGroupStep step(g);
+                 g.field().invert_visibility();
+             },
+             "Every hidden group shows, every shown group hides.")
+        .def_prop_ro("any_hidden", [](const PyGroupField& g) { return g.field().any_hidden(); })
+        .def("point_hidden",
+             [](const PyGroupField& g, nb::handle p) {
+                 return g.field().point_hidden(to_f3(p, "point"));
+             },
+             "point"_a, "Whether a surface point is hidden by the group it is in.")
+        .def_prop_ro("ids",
+                     [](const PyGroupField& g) {
+                         nb::list out;
+                         for (voxel::GroupId id : g.field().ids()) out.append(id);
+                         return out;
+                     },
+                     "Present groups, ascending, never including 0.")
+        .def("cell_count",
+             [](const PyGroupField& g, voxel::GroupId id) {
+                 return id == voxel::kNoGroup ? g.field().cell_count() : g.field().cell_count(id);
+             },
+             "group"_a = voxel::kNoGroup,
+             "Cells carrying this group, or every grouped cell for 0.");
 
     nb::class_<PyMaskField>(
         m, "MaskField",

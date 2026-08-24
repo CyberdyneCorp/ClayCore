@@ -5,6 +5,7 @@
 // brick cache, whichever the caller says is fresher), surface snapping by
 // gradient descent, voxel cell/face picking, and selection-bounds utilities.
 
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -13,6 +14,7 @@
 #include "clay/scene/document.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
+#include "clay/voxel/groups.h"
 
 namespace clay {
 namespace pick {
@@ -22,6 +24,19 @@ struct RaycastOptions {
     float tmax = 1e6f;
     float eps = 1e-4f;
     int max_steps = 256;
+
+    // Surface groups the artist has put away (add-surface-groups). Null means
+    // the document has none, which is every document that never named a region.
+    //
+    // A hidden hit is SKIPPED AND THE MARCH CONTINUES, rather than being turned
+    // into a miss. Hiding the front of a head is how an artist reaches the
+    // inside of it, so a ray that stopped at hidden surface would make the
+    // feature useless for the thing it exists to do — the point is to pick what
+    // is BEHIND what was hidden.
+    //
+    // The field is not modified, so the ray still marches the true surface and
+    // simply refuses to stop on the parts that are hidden.
+    const voxel::GroupField* groups = nullptr;
 };
 
 struct SceneHit {
@@ -46,6 +61,28 @@ struct SceneHit {
 // or snapping needs the same tape, and picking that disagreed with itself
 // depending on which entry point ran would be worse than no ghosting at all.
 scene::Tape pickable_tape(const scene::Document& doc, const scene::CullRegion* cull = nullptr);
+
+// The next surface crossing along a ray that is NOT hidden, or a negative t if
+// there is none before `tmax`.
+//
+// WHY A SCAN AND NOT ANOTHER SPHERE-MARCH, which is the obvious thing and does
+// not work. Skipping a hidden hit leaves the ray INSIDE the shape it just hit,
+// where the distance field is negative and a sphere-march cannot take a step —
+// so a re-march simply misses. Stepping forward until the field goes positive
+// again does not work either, for a subtler reason: the point where it goes
+// positive IS the far surface, the very thing being looked for, so that walk
+// overshoots the answer by construction.
+//
+// What is actually wanted is the next SIGN CHANGE whose point is visible, so
+// this scans for one and bisects it. The step should be the group lattice's
+// cell size: a feature thinner than the lattice cannot be group-addressed
+// anyway, so a scan finer than that resolves detail the hidden set cannot
+// describe.
+//
+// `field` is the signed distance along the ray's own parameterisation.
+float next_visible_crossing(const std::function<float(kernel::cfloat3)>& field,
+                            const math::Ray& ray, float t_start, float tmax, float step,
+                            const voxel::GroupField& groups);
 
 SceneHit raycast_scene(const scene::Document& doc, const math::Ray& ray,
                        const RaycastOptions& options = {});

@@ -40,6 +40,7 @@ CLASS_PREFIX = {
     "Mesh": ("clay_mesh_",),
     "VoxelGrid": ("clay_voxel_", "clay_voxel_grid_"),
     "MaskField": ("clay_mask_",),
+    "GroupField": ("clay_groups_",),
     "MeshSculptor": ("clay_mesh_sculptor_",),
     "VertexDeltas": ("clay_mesh_deltas_",),
     "Lattice": ("clay_mesh_lattice_",),
@@ -174,6 +175,11 @@ CLASS_CTOR = {
     "Mesh": "clay_document_mesh",
     "VoxelGrid": "clay_voxel_grid_create",
     "MaskField": "clay_mask_create",
+    # No _create: a group lattice is always the DOCUMENT's, so it is asked for
+    # rather than constructed — there is no standalone form, because a group
+    # names a region of a model and a standalone lattice would name a region of
+    # nothing.
+    "GroupField": "clay_document_groups",
     "MeshSculptor": "clay_mesh_sculptor_create",
     "VertexDeltas": "clay_mesh_deltas_create",
     "CancelToken": "clay_cancel_token_create",

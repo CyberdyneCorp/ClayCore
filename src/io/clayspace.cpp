@@ -28,6 +28,7 @@ constexpr std::uint32_t kScene = fourcc("SCNE");
 constexpr std::uint32_t kVoxel = fourcc("VOXL");
 constexpr std::uint32_t kMask = fourcc("MASK");
 constexpr std::uint32_t kMesh = fourcc("MESH");
+constexpr std::uint32_t kGroups = fourcc("GRUP");
 constexpr std::uint32_t kThumb = fourcc("THMB");
 constexpr std::uint32_t kCamera = fourcc("CAMB");
 
@@ -150,6 +151,13 @@ std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc) {
         payload.insert(payload.end(), mesh_bytes.begin(), mesh_bytes.end());
         put_chunk(out, kMesh, payload);
     }
+    // Surface groups: ONE chunk for the document, not one per layer, because
+    // the lattice is per document. Skipped entirely when nothing is named, so a
+    // document that never used the feature is byte-identical to what it was.
+    //
+    // A field with no ids but a hidden entry cannot occur — reassigning a group
+    // away takes its visibility with it — so `empty()` is the whole test.
+    if (doc.groups && !doc.groups->empty()) put_chunk(out, kGroups, doc.groups->serialize());
     if (!doc.thumbnail_png.empty()) put_chunk(out, kThumb, doc.thumbnail_png);
     if (!doc.camera_bookmarks.empty()) put_chunk(out, kCamera, doc.camera_bookmarks);
     return out;
@@ -209,6 +217,10 @@ IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc
         } else if (cc == kMesh) {
             IoStatus s = read_mesh_chunk(payload, static_cast<std::size_t>(len), &result);
             if (!s.ok()) return s;
+        } else if (cc == kGroups) {
+            auto groups = voxel::GroupField::deserialize(payload, static_cast<std::size_t>(len));
+            if (!groups) return IoStatus::fail(IoError::Malformed, "group chunk parse failed");
+            result.groups = std::move(*groups);
         } else if (cc == kThumb) {
             result.thumbnail_png.assign(payload, payload + len);
         } else if (cc == kCamera) {

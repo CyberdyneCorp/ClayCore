@@ -106,6 +106,7 @@
 #include "clay/mesh/mesh_data.h"
 #include "clay/scene/document.h"
 #include "clay/voxel/grid.h"
+#include "clay/voxel/groups.h"
 #include "clay/voxel/mask.h"
 
 namespace clay {
@@ -121,7 +122,20 @@ inline constexpr std::uint16_t kClaySpaceMajor = 1;
 //
 // Minor 11 adds an item's gate to the scene payload, which IS a layout change
 // there — see scene::kSceneMinor.
-inline constexpr std::uint16_t kClaySpaceMinor = 12;
+//
+// Minor 13 adds a 'GRUP' chunk: the document's surface groups, ids and hidden
+// set together in one blob. A NEW CHUNK, so this is the mild kind — length
+// prefixed, and a build that predates 13 skips it and opens the document with
+// no groups, exactly as it already skips a mesh layer it does not know. The
+// scene payload is untouched: a document that names no region serialises to the
+// bytes it always did.
+//
+// The one-directional loss is the same one minor 5 carries and is worth naming
+// because it is louder here: such a build SAVING the document back drops every
+// group AND every hidden flag, so a region an artist had put away comes back
+// visible. That is the safe direction — geometry reappearing is recoverable and
+// obvious, geometry silently staying hidden is neither.
+inline constexpr std::uint16_t kClaySpaceMinor = 13;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).
@@ -144,6 +158,18 @@ struct ClaySpaceDoc {
     // and load_clayspace drops a chunk that names none, which is what keeps an
     // orphan harmless without breaking undo within a session.
     std::map<scene::LayerId, mesh::Mesh> mesh_layers;
+    // Surface groups: named regions of the MODEL, on one world-space lattice
+    // (add-surface-groups). PER DOCUMENT rather than per layer, and that is the
+    // decision rather than an accident — a mask is per layer because it gates
+    // edits to that layer, while a group names a region an artist recognises,
+    // and "isolate the head" when the head spans two layers is precisely the
+    // case per-layer storage makes impossible.
+    //
+    // Optional, and absent on every document that has never named a region, so
+    // the cost of the feature to a document that does not use it is one empty
+    // optional and no chunk in the file.
+    std::optional<voxel::GroupField> groups;
+
     std::vector<std::uint8_t> thumbnail_png;      // optional passthrough
     std::vector<std::uint8_t> camera_bookmarks;   // optional passthrough
 };

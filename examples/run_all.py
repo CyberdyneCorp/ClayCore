@@ -94,6 +94,7 @@ EXAMPLES = [
     "60_surviving_a_crash",
     "61_stopping_a_long_operation",
     "62_what_this_document_costs",
+    "63_surface_groups",
 ]
 
 

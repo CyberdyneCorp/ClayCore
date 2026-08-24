@@ -70,6 +70,22 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.50.0 is not such a release**: additive — one opaque handle
+   (`clay_groups`) and the surface-group entry points, plus a `'GRUP'` chunk at
+   `.clayspace` minor 13. Nothing that compiled against 0.49.0 changes
+   behaviour: a document that never names a region writes no chunk, and
+   `voxel::drop_hidden` is a no-op when nothing is hidden, so meshing and
+   picking return exactly what they did.
+
+   The FORMAT note is the one that matters. Minor 13 adds a new CHUNK, so it is
+   the mild kind: a build that predates it skips the chunk and opens the
+   document with no groups, exactly as it already skips a mesh layer it does not
+   know. The one-directional loss is louder here than for minor 5 and is worth
+   naming — such a build SAVING the document back drops every group AND every
+   hidden flag, so a region an artist had put away comes back visible. That is
+   the safe direction: geometry reappearing is obvious and recoverable, geometry
+   silently staying hidden is neither.
+
    **0.49.0 is not such a release**: additive, one new descriptor
    (`clay_memory_report`) and two new entry points (`clay_document_memory`,
    `clay_layer_memory`). Nothing that compiled against 0.48.0 changes
