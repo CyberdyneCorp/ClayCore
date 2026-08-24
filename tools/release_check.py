@@ -97,6 +97,34 @@ DEVICE_RELEVANT = ("src/", "include/", "backends/", "bindings/", "CMakeLists.txt
 # that cannot be satisfied is one people learn to ignore.
 DEVICE_GATE_OUTPUTS = ("tests/device/baseline.json", "tests/device/last-gate.json")
 
+# ...and pyclay's own tests, which are under bindings/ by location and are not
+# the engine by any reading. The device harness is Swift against the
+# xcframework: it never imports pyclay, so nothing in this directory can change
+# what a verb costs on a tablet. Everything else under bindings/ stays in —
+# bindings/c/clay.h is the surface the harness's own smoke test compiles
+# against, and bindings/python/pyclay_module.cpp is excluded from this carve-out
+# deliberately, because "it only builds a separate module" is an argument about
+# the build graph rather than a fact about the file.
+#
+# The alternative is a ten-minute hardware run to re-certify a .py file, and a
+# gate that expensive to satisfy for a change that cannot affect it is one
+# people route around.
+DEVICE_IRRELEVANT_PREFIXES = ("bindings/python/tests/",)
+
+
+def device_relevant_changes(paths: list[str]) -> list[str]:
+    """Of these changed paths, the ones that could change what a device measures.
+
+    Split out of check_device_gate so the three-way rule — relevant prefix, minus
+    the gate's own outputs, minus pyclay's tests — is one statement that can be
+    read and tested, rather than a filter nobody can exercise without a git
+    history to diff.
+    """
+    return [p for p in paths
+            if any(p.startswith(prefix) for prefix in DEVICE_RELEVANT)
+            and not any(p.startswith(skip) for skip in DEVICE_IRRELEVANT_PREFIXES)
+            and p not in DEVICE_GATE_OUTPUTS]
+
 
 def check_device_gate(cl: "Checklist") -> None:
     """The device gate ran, and it ran against this engine.
@@ -149,9 +177,7 @@ def check_device_gate(cl: "Checklist") -> None:
                f"cannot diff against the gated commit {commit[:9]} "
                f"(shallow clone?): {out.splitlines()[-1] if out else ''}")
         return
-    changed = [p for p in out.splitlines()
-               if any(p.startswith(prefix) for prefix in DEVICE_RELEVANT)
-               and p not in DEVICE_GATE_OUTPUTS]
+    changed = device_relevant_changes(out.splitlines())
     if changed:
         cl.add("device", False,
                f"engine changed since the gate ran at {commit[:9]}: "
@@ -194,8 +220,17 @@ def main() -> int:
 
     check_versions(cl)
 
+    # CLAY_BUILD_PYTHON is ON here and nowhere else in this script's history,
+    # because the "bindings" gate below is only a gate when a module exists to
+    # import: check_binding_parity.py falls back to comparing the PARSED
+    # pyclay_module.cpp against itself, which cannot catch a source/binary
+    # disagreement and cannot fail. The release build produced no pyclay, so
+    # that row had been passing on the fallback — a gate that reads as
+    # "the bindings match the ABI" and was checking that the source matches
+    # itself. CI's pyclay job covers this through pytest; the tag path did not.
     ok, out = run(["cmake", "-S", str(REPO), "-B", str(build_dir),
-                   "-DCMAKE_BUILD_TYPE=Release", "-DCLAY_BUILD_BENCHMARKS=ON"])
+                   "-DCMAKE_BUILD_TYPE=Release", "-DCLAY_BUILD_BENCHMARKS=ON",
+                   "-DCLAY_BUILD_PYTHON=ON"])
     cl.add("configure", ok, "" if ok else out[-400:])
     if not ok:
         return 1
@@ -216,11 +251,19 @@ def main() -> int:
     cl.add("parity", ok_parity, cases.group(0) if cases else out_parity[-200:])
 
     # "bindings" rather than "parity", which already names the backend row
-    for name, script in (("layering", "check_layering.py"),
-                         ("dialect", "check_kernel_dialect.py"),
-                         ("licenses", "check_licenses.py"),
-                         ("bindings", "check_binding_parity.py")):
-        ok, out = run([sys.executable, str(REPO / "tools" / script)])
+    # --pyclay names THIS build's module and --require-import refuses the
+    # source-against-source fallback, so the row fails rather than passes when
+    # the module is missing. Both are needed: the flag alone would let another
+    # build tree answer, which is how the same gate went false-RED on v0.49.0
+    # against a module built before the commit under test.
+    parity_args = ["--pyclay", str(build_dir / "bindings" / "python"),
+                   "--require-import"]
+    for name, script, extra in (("layering", "check_layering.py", []),
+                                ("dialect", "check_kernel_dialect.py", []),
+                                ("licenses", "check_licenses.py", []),
+                                ("bindings", "check_binding_parity.py",
+                                 parity_args)):
+        ok, out = run([sys.executable, str(REPO / "tools" / script)] + extra)
         cl.add(name, ok, out.splitlines()[-1] if out else "")
 
     # the kernels artifact hosts build their GPU previews from: it must still

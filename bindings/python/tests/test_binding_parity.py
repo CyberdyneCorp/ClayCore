@@ -128,3 +128,63 @@ def test_mesh_exposes_only_mesh_capabilities():
     assert not leaked, f"pyclay.Mesh exposes document methods: {sorted(leaked)}"
     for name in sorted(document_only & {"raycast", "snap_to_surface", "voxel_layer"}):
         assert hasattr(clay.Document, name), f"Document lost {name}"
+
+
+# -- the gate must not pass when it checked nothing ----------------------------
+#
+# These run the tool in a SUBPROCESS on purpose. In-process, `import pyclay` at
+# the top of this file puts the module in sys.modules, so importlib hands it
+# back whatever sys.path says and the no-module path cannot be reached at all —
+# which is exactly the kind of "test that cannot fail" this pair exists to
+# prevent elsewhere.
+
+
+def _run_gate(*extra, cwd=REPO):
+    import subprocess
+    return subprocess.run(
+        [sys.executable, str(REPO / "tools" / "check_binding_parity.py"), *extra],
+        capture_output=True, text=True, cwd=str(cwd))
+
+
+def test_require_import_fails_when_the_named_directory_holds_no_module(tmp_path):
+    """The release checklist's `bindings` row was passing on the fallback.
+
+    Without a module the gate compares the parsed pyclay_module.cpp against
+    itself, which cannot catch a source/binary disagreement and cannot fail.
+    --require-import must turn that into a failure rather than a pass.
+    """
+    result = _run_gate("--pyclay", str(tmp_path), "--require-import")
+    assert result.returncode == 1, (
+        "the gate passed with no module to import, so it compared the parsed "
+        f"source against itself:\n{result.stdout}")
+    assert "could not be imported" in result.stderr, result.stderr
+    # and it must say what to do, not merely that it failed
+    assert "CLAY_BUILD_PYTHON" in result.stderr, result.stderr
+
+
+def test_pyclay_is_authoritative_and_does_not_fall_back_to_another_build(tmp_path):
+    """--pyclay names WHICH module, not merely the first to try.
+
+    v0.49.0's checklist failed against a pyclay built hours before the commit
+    under test, because the release build produces none and "newest mtime wins"
+    picked a stale tree. A caller that names a directory is asserting which
+    module it means.
+    """
+    result = _run_gate("--pyclay", str(tmp_path), "--require-import")
+    assert result.returncode == 1, (
+        "an empty --pyclay directory still found a module, so another build "
+        f"tree answered for it:\n{result.stdout}")
+    assert str(tmp_path) in result.stderr, (
+        f"the failure does not name the directory it was told to use: {result.stderr}")
+
+
+def test_the_gate_still_passes_against_a_real_module():
+    """The control. Without it the two cases above are satisfied by a gate that
+    fails on everything."""
+    built = sorted((REPO / "build").glob("*/bindings/python/pyclay*"),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    if not built:
+        pytest.skip("no built pyclay on disk to point at")
+    result = _run_gate("--pyclay", str(built[0].parent), "--require-import")
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "parity: OK" in result.stdout and "imported" in result.stdout, result.stdout

@@ -22,6 +22,7 @@ scoring them against the baseline produces a number that means nothing.
 import argparse
 import json
 import pathlib
+import statistics
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -67,6 +68,77 @@ NOISE_FLOOR_MS = 0.05
 # ignored. What it is defending against is large — moving one bundle from third
 # to first moved a case 2.7x — so a loose threshold still catches it.
 CANARY_DRIFT_TOLERANCE = 1.30
+
+
+# How long a bundle is given to settle before its canary readings count as the
+# level it started from. The harness takes three samples at 0.0s, before the
+# process has touched anything, and a run's first seconds are the only part
+# guaranteed not to be paying for an earlier case.
+CANARY_SETTLE_MS = 10_000
+
+
+def _by_bundle(run: dict) -> dict[str, list[dict]]:
+    """Canary samples grouped by the process that took them.
+
+    atMs is a WITHIN-bundle offset — a run spans three processes and each times
+    from its own start — so every comparison below is inside one group.
+    """
+    grouped: dict[str, list[dict]] = {}
+    for sample in run.get("canary", []):
+        if sample.get("ms", 0) > 0:
+            grouped.setdefault(sample.get("bundle", "unknown"), []).append(sample)
+    return grouped
+
+
+def canary_baselines(run: dict) -> dict[str, float]:
+    """The settled reading each bundle started from.
+
+    The MEDIAN of the settling window rather than the single lowest sample: the
+    harness takes three samples at 0.0s and one of them reading quick should not
+    become the denominator every later case is judged against. That is the
+    difference between "this case ran on a machine 1.6x slower than the one the
+    run started on" and "one early sample was lucky".
+    """
+    settled = {}
+    for bundle, samples in _by_bundle(run).items():
+        early = [s["ms"] for s in samples if s.get("atMs", 0) <= CANARY_SETTLE_MS]
+        pool = early or [s["ms"] for s in samples]
+        if pool:
+            settled[bundle] = statistics.median(pool)
+    return settled
+
+
+def canary_factor(run: dict, case: dict) -> float | None:
+    """How much slower the machine was when THIS case ran, or None.
+
+    This is the question the run-level spread cannot answer. A bundle that
+    plateaus at x1.07 for four minutes and spikes at the very end reports the
+    same headline as one that degraded steadily throughout, and only one of
+    them puts a measured case on the bad end of it.
+
+    None when the record cannot say: a case recorded before collect_device_bench
+    stamped cases with their bundle has an offset that no canary sample can be
+    lined up against, and guessing which process it came from would invent the
+    attribution this function exists to make honest.
+    """
+    bundle = case.get("bundle")
+    samples = _by_bundle(run).get(bundle) if bundle else None
+    base = canary_baselines(run).get(bundle) if bundle else None
+    if not samples or not base:
+        return None
+    started = case.get("startedAtMs", 0)
+    nearest = min(samples, key=lambda s: abs(s.get("atMs", 0) - started))
+    return nearest["ms"] / base
+
+
+def cases_measured_under_drift(run: dict) -> list[tuple[str, float]]:
+    """Every case whose own canary factor is past tolerance, worst first."""
+    drifted = []
+    for case in run.get("cases", []):
+        factor = canary_factor(run, case)
+        if factor is not None and factor > CANARY_DRIFT_TOLERANCE:
+            drifted.append((case["name"], factor))
+    return sorted(drifted, key=lambda pair: pair[1], reverse=True)
 
 
 def canary_drift(run: dict) -> tuple[float, dict, dict] | None:
@@ -260,10 +332,16 @@ def main() -> int:
                 # investigated as a 1.6x consolidation regression for a day.
                 spread = worst_spread(case)
                 caveat = ""
-                drift_note = canary_drift(run)
-                if drift_note and drift_note[0] > CANARY_DRIFT_TOLERANCE:
-                    caveat = (f"; NOTE the canary moved x{drift_note[0]:.2f} across "
-                              f"this run, so position may account for some of this")
+                # THIS case's conditions, not the run's widest spread. The
+                # run-level number said "position may account for some of this"
+                # on every case in a run whose last sample spiked, including the
+                # ones measured in the first ten seconds — which is a caveat
+                # attached to the wrong cases and absent from the right ones.
+                factor = canary_factor(run, case)
+                if factor is not None and factor > CANARY_DRIFT_TOLERANCE:
+                    caveat = (f"; NOTE the canary read x{factor:.2f} of its settled "
+                              f"value when this case ran, so the machine was "
+                              f"slower here than where the baseline was taken")
                 if single_observation(case):
                     caveat = ("; NOTE every point of this case is a SINGLE "
                               "timing, so this is one observation against "
@@ -314,6 +392,26 @@ def main() -> int:
                 print("    ...and thermalState read `nominal` at both, which is "
                       "the case this check exists for: the OS signal has four "
                       "levels and the device throttles inside the first.")
+
+    # WHICH CASES actually paid for it. A run-level ratio says the machine
+    # moved; it does not say whether anything was measured while it had. These
+    # are the numbers in this run that are not comparable with a baseline taken
+    # on a settled device, named rather than left for a reader to infer from
+    # offsets.
+    drifted = cases_measured_under_drift(run)
+    if drifted:
+        print(f"  {len(drifted)} case(s) measured while the canary was past "
+              f"x{CANARY_DRIFT_TOLERANCE} of its settled value:")
+        for name, factor in drifted:
+            print(f"    {name}: x{factor:.2f}")
+        print("    These sit at the end of their bundle and pay for every case "
+              "ahead of them. Their budgets still hold, so this is a note on "
+              "what the numbers mean, not a failure.")
+    elif any(c.get("bundle") for c in run.get("cases", [])):
+        print("  every case was measured with the canary inside tolerance")
+    else:
+        print("  cases carry no bundle, so this run cannot attribute drift to "
+              "them — re-collect with tools/collect_device_bench.py")
 
     # Which cases could not be measured in one pass, and how far they moved
     # when repeated. Printed every run rather than only on failure: the point

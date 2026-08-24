@@ -19,9 +19,22 @@ forward-refuse).
    It gates: version agreement, configure/build, the whole ctest suite,
    backend parity for every backend registered in that build, module
    layering, kernel dialect (CPU + CUDA profiles), the license manifest, C
-   ABI hygiene + declared-symbol resolution + ctypes FFI, `openspec validate
-   --all --strict`, benchmark floors, the **device gate** (see below), and a
-   real `pip install .` quickstart in a throwaway venv.
+   ABI hygiene + declared-symbol resolution + ctypes FFI, binding parity
+   against a **built** pyclay, `openspec validate --all --strict`, benchmark
+   floors, the **device gate** (see below), and a real `pip install .`
+   quickstart in a throwaway venv.
+
+   It configures with `-DCLAY_BUILD_PYTHON=ON`, which is not an incidental
+   extra: `check_binding_parity.py` falls back to comparing the parsed
+   `pyclay_module.cpp` against ITSELF when no module can be imported, and that
+   comparison cannot fail. The release build produced no pyclay, so the
+   `bindings` row had been passing on the fallback through v0.49.0 — a row that
+   reads as "the bindings match the ABI" while checking that the source matches
+   itself. The checklist now passes `--pyclay <build>/bindings/python
+   --require-import`, so a missing module fails the release instead of being
+   waved through. `--pyclay` is authoritative: no other build tree, virtualenv
+   or installed wheel may answer for it, because the same gate went false-RED on
+   v0.49.0 against a stale module a different tree happened to hold.
 3. On a minor/patch release, read the `clay.h` diff for symbol and
    struct-layout breaks (the ABI gate checks that every declared symbol
    resolves and that the header is bindgen-clean, not history). Below 1.0
@@ -896,7 +909,13 @@ it had been passing against an old one while the tree moved underneath it
 `check_device_bench.py` writes `tests/device/last-gate.json` on success,
 recording the commit it passed against. `tools/release_check.py` reads that
 file and **fails the release when anything under `src/`, `include/`,
-`backends/`, `bindings/` or `CMakeLists.txt` has changed since** — so the
+`backends/`, `bindings/` or `CMakeLists.txt` has changed since** — except
+`bindings/python/tests/`, which is under that prefix by location and is not the
+engine by any reading: the harness is Swift against the xcframework and never
+imports pyclay, so nothing there can change what a verb costs on a tablet.
+`bindings/python/pyclay_module.cpp` is deliberately NOT carved out, because
+"it only builds a separate module" is an argument about the build graph rather
+than a fact about the file — so the
 release can require the gate without an iPad being attached to CI. A docs or
 spec commit does not invalidate it.
 
@@ -914,6 +933,20 @@ Three failures mean three different things:
 | `REGRESSION` | slower than the committed baseline by more than tolerance |
 | `BUDGET` | slower than the interaction class allows, regressed or not |
 | `GROWTH` | cost is scaling faster than the document (over `N^1.25`) |
+
+The checker also names **which cases were measured while the machine had
+drifted**, not merely that it drifted. The canary is sampled every 30 s and each
+case records its own start offset, so a case is scored against the canary
+reading nearest it: a bundle that plateaus at x1.07 for four minutes and spikes
+on its last sample is not a run where every case is suspect, it is a run where
+the last few are. v0.49.0's two runs both reported `CONDITIONS CHANGED x1.59`
+and both had 54 of 59 cases measured inside tolerance; the five that were not
+(`cut_create`, `trim_curve`, `tube_create`, `pose_region`, `armature_edit`) sit
+at the end of the measure bundle and pay for everything ahead of them. This is a
+note on what the numbers mean rather than a failure — their budgets hold — and
+attribution needs a run collected by a `collect_device_bench.py` that stamps
+cases with their bundle, since `startedAtMs` is a within-bundle offset. An older
+record says it cannot attribute rather than guessing.
 
 And two refusals, which are not scores at all: a run from **different
 hardware**, and a run that was **thermally throttled**. `ProcessInfo`'s

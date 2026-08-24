@@ -79,7 +79,15 @@ def merge(records: list[dict]) -> dict:
                     f"device-bench: attachments disagree on {field} "
                     f"({record.get(field)!r} vs {merged.get(field)!r}); "
                     "they cannot be from one run")
-        merged["cases"].extend(record.get("cases", []))
+        # Cases carry their bundle for the same reason the canary samples below
+        # do: startedAtMs is a WITHIN-bundle offset, so a case's position can
+        # only be compared against canary samples from the same process. Without
+        # this the two halves of the record could not be lined up at all, and a
+        # case measured while the machine was 1.6x slower was indistinguishable
+        # from one measured cold.
+        for case in record.get("cases", []):
+            merged["cases"].append(
+                {**case, "bundle": record.get("bundle", "unknown")})
         # Canary samples concatenate like cases. Each bundle times from its own
         # start, so the offsets are within-bundle rather than across the whole
         # run — which is the honest thing they can say now that a run spans
