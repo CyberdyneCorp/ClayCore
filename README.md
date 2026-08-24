@@ -31,7 +31,8 @@ alone for tools, pipelines, CI, and research.
   kernels into your own shaders instead of copying them, and gate the result
   with the parity fixture.
 - Brushes and features: `docs/07-brushes-and-features.md` — every sculpting
-  verb, what it does, how it is parameterised, and its ZBrush equivalent.
+  verb, what it does, how it is parameterised, its ZBrush equivalent, and
+  §11: the same verb across SDF, voxel and mesh, and which one to reach for.
 - Reading a mesh back: `docs/08-mesh-readback.md` — getting faces, vertices,
   normals, colours and UVs out of the library, in Python, C and C++.
 - Brush latency and coverage: `docs/09-brush-latency-and-coverage.md` — every
@@ -259,8 +260,7 @@ protecting.
 **Voxel layers**:
 
 - 10 sculpting verbs: smooth, inflate/erode, flatten, pinch, magnify, grab,
-  fill-cavities, scrape, smudge, and carve-with-alpha (alphas are voxel-only
-  today)
+  fill-cavities, scrape, smudge, and carve-with-alpha
 - Cube/sphere paint and erase brushes with falloff curves and strength, box
   and line fills, flood select, mirrored edits
 - Pre-bake repair: report, close holes, fill voids
@@ -287,6 +287,49 @@ spacing, pressure, jitter and taper semantics. A painted mask freezes a region
 against every verb on every representation, and against any *operation* on the
 SDF side: the gate rides the combine record, so it protects from a boolean the
 same way it protects from a brush.
+
+### The same verb on three representations
+
+Most of the sculpting vocabulary exists on more than one representation, and the
+versions are not interchangeable — they differ in what they cost, what they
+preserve, and whether the gesture stays editable afterwards. This is the table
+for "where should I do *this*"; the complete one, with every verb and its API
+names, is in
+[`docs/07-brushes-and-features.md` §11](docs/07-brushes-and-features.md).
+
+| Verb | SDF | Voxel | Mesh | Which to reach for |
+|---|---|---|---|---|
+| **Smooth** | `field::relax` — **bakes** | `sculpt_smooth` | `Smooth` | **Voxel.** The only side where passes chain at no cost; each SDF bake steepens the field until `consolidate` redistances it |
+| **Flatten** | `field::flatten` — two-sided / cut-only / fill-only | `sculpt_flatten` — two-sided | `Flatten` — the same three modes | **SDF or mesh** when you want hPolish, which is cut-only; voxel when you want to repeat it |
+| **Inflate** | `Op::Relief` | `sculpt_inflate` (dilates, or erodes when negative) | `Inflate` — each vertex's own normal | **SDF** while it must stay re-editable, voxel for free repetition |
+| **Pinch / Magnify** | `magnify`, one signed strength | `sculpt_pinch` / `sculpt_magnify` | `Pinch` — tangential, signed | Same shape everywhere. Pick by which layer already holds the form |
+| **Grab** | `grab` deformer — one item's own field | `sculpt_grab` — the same inverse map | `Grab` — vertices, polygons stretch | **SDF** for a nudge you can revisit. On voxels a drag under half a cell **on every axis moves nothing** |
+| **Move** (the assembled surface) | `brush::move_brush`, `field::move_topological` | — | `Grab` | **SDF only.** It is the one side that drags the *assembled* surface, and the only Move Topological |
+| **Scrape** | — | `sculpt_scrape` | `Scrape` | Either. Both are flatten **and** smooth from *one* snapshot, which calling the two in sequence does not reproduce |
+| **Smudge / Nudge** | — | `sculpt_smudge` — smears the skin | `Nudge` — slides the region | Voxel to drag a surface without its interior, mesh to slide material along the form |
+| **Snakehook** | `brush::snakehook` — **adds** material | — | `Snakehook` — stretches what is there | **SDF** to grow a tendril. On a mesh it is the quickest way to discover the model wants retopo |
+| **Crease / DamStandard** | `Op::Incise` | deliberately absent — a recipe, not a verb | `Crease` — a negative draw *and* a pinch in one stamp | SDF for an exact cut line, mesh for a stamped one |
+| **Clay / ClayBuildup** | `Op::Relief` along a stroke | — | `Clay` — deposit clamped to a floating plane | SDF while blocking out, mesh for a bounded deposit |
+| **Polish** | `field::flatten` cut-only (hPolish) | — | `Polish` — smoothing gated by how much the surface bends | **Mesh** when the corners must survive the pass |
+| **Colour** | per item, plus `Paint` regions | per cell, via the palette | `Paint` / `Smear` | All three |
+| **Alphas** | `Deformer::alpha` — a *deformer*, not a primitive | `sculpt_carve_alpha` | — | Both non-mesh sides; SDF keeps it non-destructive |
+| **Mask extrude** | `brush::mask_extrude` | `clay_voxel_mask_extrude` | — | SDF when the extracted patch should stay an operand |
+
+**Only on one side, and structurally so:** booleans, blends, the cut/trim tools
+and armatures are **SDF** — that is composition, not sculpting, and it needs a
+field (see above). Cavity fill and pre-bake repair are **voxel** — they are
+questions about occupancy. `Draw`, `Layer`, `Relax` and the lattice cage over a
+mesh's own vertices are **mesh**, and `Relax` is worth singling out: it recovers
+a stretched *grab* by evening vertex spacing, and it does **not** recover a
+deformation — after a taper, six passes move edge-length variation from 0.2929
+to 0.3050, slightly worse, because a taper leaves the same vertex count around a
+smaller circumference and no verb that slides vertices can change how many a ring
+has.
+
+**What it costs** on the reference iPad, per verb and per tier, is in
+[`docs/09-brush-latency-and-coverage.md`](docs/09-brush-latency-and-coverage.md)
+— the voxel verbs are per-dab interactive, the baked SDF operations are
+gesture- or operation-scale, and that difference is often the deciding one.
 
 ### Converting between them
 

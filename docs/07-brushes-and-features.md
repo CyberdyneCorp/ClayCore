@@ -973,6 +973,91 @@ counterpart **and** on an exemption that has gone stale.
 
 ---
 
+## 11. The same verb on three representations
+
+§ 10 answers "which binding reaches this". This one answers a different
+question: **the same verb often exists on more than one representation, and the
+versions are not the same operation.** They differ in what they cost, what they
+preserve, and whether the gesture survives as something you can revisit.
+
+The README carries a shortened form of this table. This is the complete one.
+
+### Why a verb differs across representations at all
+
+Three structural facts drive every row below, and none of them is a quality
+difference:
+
+1. **An SDF edit is a node in a list; a voxel edit is a cell write; a mesh edit
+   is a vertex move.** So an SDF gesture stays editable, a voxel gesture does
+   not, and a mesh gesture is undoable but is not an edit list.
+2. **The baked field operations bake.** `field::relax`, `field::flatten` and
+   `field::move_topological` sample the assembled field into a volume. Chained
+   bakes steepen the field — each one's output is a slightly worse distance
+   estimate than its input — until `consolidate_layer` redistances it. Voxel and
+   mesh verbs have no equivalent decay: a cell write is a cell write and a vertex
+   move is a vertex move, however many you do.
+3. **Only the SDF side composes.** `compile_document` chains visible SDF layers;
+   a voxel layer and a mesh layer are not in the tape. So any verb whose result
+   must be booleaned, blended or reordered afterwards wants to be on the SDF
+   side, whatever it costs there.
+
+### Verbs that exist on more than one representation
+
+| Verb | SDF | Voxel | Mesh | The difference that matters |
+|---|---|---|---|---|
+| **Smooth** | `field::relax` | `VoxelGrid::sculpt_smooth` | `MeshBrush::Smooth` | SDF **bakes and steepens**; voxel is a majority filter over the 26-neighbourhood; mesh is a one-ring Laplacian weighted by falloff. Only the SDF version has a cost that accumulates across passes |
+| **Flatten** | `field::flatten` — `TwoSided` / `CutOnly` / `FillOnly` | `sculpt_flatten` — two-sided only | `MeshBrush::Flatten` — the same three modes | Cut-only *is* hPolish, and the voxel side does not have it. The SDF version **requires a region**; the brush versions take the plane from the stamp |
+| **Inflate** | `Op::Relief` | `sculpt_inflate` | `MeshBrush::Inflate` | Relief displaces the accumulated surface along its own normal; the voxel verb dilates or erodes occupancy `\|amount\|` times; the mesh verb moves each vertex along **its own** normal — which is exactly what distinguishes it from `Draw`, whose direction is shared per stamp |
+| **Pinch** | `magnify` with negative strength | `sculpt_pinch` | `MeshBrush::Pinch` | One signed strength on the SDF and mesh sides rather than two verbs. The voxel pair are separate entry points but share one walk so they cannot drift. Mesh pinch is **tangential** — it gathers within the surface rather than moving it along a normal |
+| **Magnify** | `magnify`, positive | `sculpt_magnify` | — (use `Pinch` negative) | Maxon's own documentation calls pinch and magnify inverses, which is why they are one signed parameter here |
+| **Grab** | `Deformer::grab` | `sculpt_grab` | `MeshBrush::Grab` | The voxel verb uses **the same inverse map** as the SDF deformer, deliberately, so both mean the same thing. But voxel resampling is nearest-cell and rounds **per axis**: a drag under half a cell on every axis moves nothing, so raw pointer deltas are dead until a host accumulates them past `voxel_size`. The SDF deformer acts on **one item's own field**, not the assembled surface |
+| **Move** | `brush::move_brush`; `field::move_topological` | — | `MeshBrush::Grab` | `move_brush` drags the **assembled** surface, which no other representation offers, and `move_topological` weights by distance *along the material* so a part close in space but far across the surface does not follow. There is no voxel or mesh Move Topological |
+| **Scrape** | — | `sculpt_scrape` | `MeshBrush::Scrape` | Both are flatten **and** smooth taken from *one* snapshot. Calling the two in sequence is a different result, which is why it is a verb rather than a recipe |
+| **Smudge / Nudge** | — | `sculpt_smudge` | `MeshBrush::Nudge` | `sculpt_smudge` drags **surface** material and leaves the interior — grab moves a lump, smudge smears a skin. `Nudge` slides the region along per-vertex tangent planes, where `Grab` carries it rigidly |
+| **Snakehook** | `brush::snakehook` | — | `MeshBrush::Snakehook` | The SDF resolver **adds material** — it produces an ordinary stroke item. The mesh brush re-anchors grab on the class it drags and stretches the triangles it already has, to the extreme. Same gesture, opposite relationship to topology |
+| **Crease / DamStandard** | `Op::Incise` | **deliberately absent** — see § 7 | `MeshBrush::Crease` | On a lattice it is a recipe rather than a verb. The mesh version is a tight negative draw **and** a pinch in one stamp; sequenced separately they leave a rounded ditch |
+| **Clay / ClayBuildup** | `Op::Relief` along a stroke, with buildup accumulation | — | `MeshBrush::Clay` | Buildup scales each stamp's amplitude so overlapping stamps accumulate. The mesh `Clay` clamps draw's deposit to a plane floating at the stamp height |
+| **Polish** | `field::flatten` in cut-only mode | — | `MeshBrush::Polish` | The mesh version is smoothing **gated by the dihedral angle** — full strength where normals agree, fading out where the surface bends — which is what keeps corners up. The SDF version planes down without filling |
+| **Colour** | per item, plus `Op::Paint` regions | per cell, via the palette | `MeshBrush::Paint` / `Smear` | The mesh verbs are the only two brushes in the set that move no vertex. Both refuse a mesh with no colour attribute rather than creating one |
+| **Alphas** | `Deformer::alpha` | `sculpt_carve_alpha` | — | On an SDF item an alpha is a **deformer**, not a primitive: an item shaped like the stamp would add material in the stamp's shape, where an alpha modulates a surface already there. The engine decodes no images on either side — a host hands over samples |
+| **Mask extrude** | `brush::mask_extrude` | `VoxelGrid::mask_extrude` | — | The mask is the region, so there is no radius. The SDF result is an ordinary item and stays an operand |
+| **Taper / twist** | `Deformer::taper`, `twist`, and the ranged forms | — | `MeshSculptor::deform` | The SDF deformers run **backwards** — they answer "where did the material at this point come from". The mesh versions are **forward** point maps, which is both easier and exact, so a tapered mesh and a tapered field are the same shape. There is deliberately no mesh `bend`: its map folds distinct points together past a gentle angle, so no forward map exists |
+| **Lattice / FFD** | `Deformer::lattice` on an item; `brush::lattice_gizmo` over a layer | — | `mesh::Lattice` | The only ZBrush gizmo deformer that is a mesh operation rather than an SDF one, because ZBrush and Blender both apply FFD *forward* to vertices — which a mesh allows and an implicit field does not |
+| **Masking** | gates any **operation**, a boolean included | freezes cells against every verb | gates every brush | The SDF gate rides the combine record rather than being a mode, which is why it protects from a boolean the same way it protects from a brush |
+| **Strokes** | `stamps_to_nodes` | `apply_to_grid` | `apply_to_mesh` | One resolved stroke, four consumers (the fourth is `apply_to_mask`). Spacing, pressure, jitter and taper mean the same thing on all of them |
+
+### Verbs that exist on exactly one, and why
+
+| Verb | Only on | Why it cannot be elsewhere |
+|---|---|---|
+| Booleans, blends, the 17 combine ops under 5 profiles | **SDF** | Composition needs a signed distance from any point to each operand. A grid has occupancy and a mesh has neither — see the README's "Why composing needs a distance field" |
+| Cut / trim (rect, circle, polygon, lasso, trim-curve) | **SDF** | Each is an exact prism combined into the edit list. On a grid it would be a cell write and on a mesh it would change topology |
+| Armatures (ZSpheres) | **SDF** | A tree of spheres whose links are swept cones and whose skin is the blend. It is a *primitive*, not a gesture |
+| `Draw` | **Mesh** | Displacement along the region's **averaged** normal — one shared direction per stamp. `Op::Relief` is the SDF analogue but is per-point along the accumulated normal, not per-stamp |
+| `Layer` | **Mesh** | Deposits up to a ceiling above the surface **as the stroke found it**. Every other deposit verb acts on the surface as it is now, so this one needs the stroke's starting snapshot |
+| `Relax` | **Mesh** | Slides vertices *along* the surface to even their spacing. There is nothing to even on a grid, and an SDF has no vertices. **It recovers a stretched grab and not a deformation** — after a taper, six passes move edge-length variation 0.2929 → 0.3050, slightly worse, because the damage is anisotropy and no slide changes how many vertices a ring has |
+| `sculpt_fill_cavities`, `repair_close_holes`, `repair_fill_voids`, `repair_report` | **Voxel** | Questions about occupancy and enclosure. `fill_voids` *decides* enclosure rather than guessing locally |
+| Sculpt layers | **Voxel** | The grid records what a bracketed run of strokes changed, so its strength stays adjustable afterwards. The SDF side does not need it — the document already is the history |
+| Resolution levels (`add_level`) | **Voxel** | An SDF has no resolution to add, and a mesh's is fixed by its import |
+
+### Choosing, in one paragraph
+
+Block out and hard-surface on **SDF**, because that is the only side that
+composes and the only side where an edit stays editable. Move to **voxels** the
+moment the work becomes free-form — smooth, inflate, pinch and smudge chain
+there at flat per-cell cost, where the SDF equivalents bake and steepen. Come
+back to SDF as an operand via `Volume.from_voxels`, which is non-destructive and
+loses nothing the grid had not already quantised. Use a **mesh layer** when the
+topology is one you want to keep: sixteen verbs, colour, taper and twist and a
+lattice all reach it without changing a polygon — and if a pull stretches the
+triangles badly enough to notice, that is the model asking for retopo rather
+than the engine failing.
+
+What each of these costs on the reference iPad, and which tier it lands in, is
+in [`docs/09-brush-latency-and-coverage.md`](09-brush-latency-and-coverage.md).
+
+---
+
 ## See also
 
 - [`docs/01-sdf-math-foundations.md`](01-sdf-math-foundations.md) — exactness,
