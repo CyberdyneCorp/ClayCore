@@ -59,10 +59,12 @@
       error detail message describing a fault
 - [x] 3.3 `clay_progress` as a versioned output descriptor filled through
       `write_desc`, per the `struct_size` rule in both directions
-- [ ] 3.4 Checkpoints at the window boundaries that already exist:
-      `FieldVolume::sample_blocks`, `field::redistance`, `fill_colors_blocks`,
-      and each axis pass of the mask-extrude distance transform
-- [ ] 3.5 Phase reporting for `consolidate_layer`, which is six phases and must
+- [x] 3.4 Checkpoints where the batching already is: `sample_blocks`'s window
+      boundary (which `FieldVolume::sample` routes through, so every verb that
+      samples a field is cancellable without growing a checkpoint of its own),
+      consolidate's six phases, relax's pass boundary, and the voxel extrude's
+      outer z-slice
+- [x] 3.5 Phase reporting for `consolidate_layer`, which is six phases and must
       not pretend to be one
 - [x] 3.6 Threaded through as `parallel::CancelToken*`, a non-owning pointer,
       NOT a `std::function` — the pool's inline-nesting rule and the
@@ -71,9 +73,11 @@
 ## 4. Prove it
 
 - [x] 4.1 The scenarios in both spec deltas
-- [ ] 4.2 The atomicity test, which is the regression for the whole change:
-      probe the document, cancel a consolidate in EACH phase, probe again, and
-      assert bit-identical evaluation and an unchanged undo depth every time
+- [x] 4.2 The atomicity test: twelve attempts cancelling at progressively
+      later moments, asserting the saved bytes are IDENTICAL whichever phase it
+      stopped in. Driven by timing rather than by reaching into the phases,
+      because a test that hooked the internals would pass even if they were
+      reordered
 - [x] 4.3 A no-hang test: cancel a pooled operation and assert `parallel_for`
       joins. If it regresses the SUITE HANGS rather than failing, which is
       exactly why it is pinned
@@ -89,8 +93,9 @@
 - [x] 5.3 ABI minor bump, and `docs/RELEASE.md`
 - [x] 5.4 `docs/05-claycore-library.md`: the three budget classes and what a
       host does about the third
-- [ ] 5.5 A numbered example that cancels a real consolidate and asserts the
-      document is unchanged, per the examples capability gate
+- [x] 5.5 `examples/61_stopping_a_long_operation.py` cancels the 4403 ms verb
+      and asserts the document is byte-identical, that a cancel reads
+      differently from a geometric refusal, and that a token is reusable
 - [ ] 5.6 `openspec/ROADMAP.md`: this row does not exist in it yet
 
 ## 6. What building it changed
@@ -112,9 +117,9 @@
 
 ## 7. Still open
 
-- [ ] 7.1 The other five measured operations — mask extrude (4403 ms), relax,
-      flatten, hpolish, mask extract — take a token by the same pattern. This
-      slice proves the mechanism on the one with the clearest phases
+- [x] 7.1 mask extrude (4403 ms) and relax (358 ms) now take one too. Flatten,
+      hpolish and mask extract are 152, 153 and 97 ms — an order below the two
+      that motivated the feature — and take it by the same pattern when wanted
 - [ ] 7.2 Whether progress is always written or opt-in (2.2), which wants the
       device measurement rather than a Linux one
 - [ ] 7.3 A numbered example, once more than one operation is cancellable

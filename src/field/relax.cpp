@@ -70,7 +70,8 @@ float mask_gate(const MaskGate& mask, cfloat3 p) {
 
 }  // namespace
 
-FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings) {
+FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings,
+                  parallel::CancelToken* token) {
     if (v.empty()) return v;
 
     const float cell = v.cell_size();
@@ -85,7 +86,14 @@ FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings) {
     tuned.falloff = std::max(settings.falloff, cell * static_cast<float>(radius) * 2.0f);
 
     FieldVolume current = v;
+    // The checkpoint is the pass boundary, which is the granularity that
+    // already exists: relax is `iterations` sweeps of the whole band, so a
+    // check per pass costs one relaxed load per sweep. A partially-relaxed
+    // volume is discarded by the caller, not returned.
+    parallel::ProgressScope progress(token, static_cast<std::uint32_t>(iterations));
     for (int pass = 0; pass < iterations; ++pass) {
+        if (parallel::cancelled(token)) return v;  // unchanged: the input copy
+        progress.phase(static_cast<std::uint32_t>(pass));
         const FieldVolume previous = current;
         current.rewrite([&previous, &stencil, &tuned, strength](int gx, int gy, int gz,
                                                                 float old) {

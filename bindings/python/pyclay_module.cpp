@@ -4874,7 +4874,8 @@ NB_MODULE(pyclay, m) {
         .def("mask_extrude",
              [](const PyDocument& d, nb::handle mask, float thickness, const std::string& side,
                 float threshold, float border_round, int border_smooth, nb::handle cell_size,
-                nb::handle band, nb::handle layer) {
+                nb::handle band, nb::handle layer,
+                parallel::CancelToken* token) {
                  const voxel::MaskField* m = borrow_mask(mask);
                  if (!m) throw std::invalid_argument("mask must be a MaskField");
                  brush::MaskExtrudeSettings settings = extrude_settings(
@@ -4902,12 +4903,20 @@ NB_MODULE(pyclay, m) {
                  {
                      nb::gil_scoped_release release;
                      volume = brush::mask_extrude(
-                         [&tape](kernel::cfloat3 p) { return tape.eval(p).d; }, *m, settings);
+                         [&tape](kernel::cfloat3 p) { return tape.eval(p).d; }, *m, settings,
+                         token);
                  }
-                 if (!volume)
+                 if (!volume) {
+                     // A cancel and "the mask never reached the surface" both
+                     // come back as nullopt. A caller must not be shown the
+                     // geometric message when they pressed Stop — the same
+                     // distinction the C entry point makes.
+                     if (token && token->cancelled())
+                         throw std::runtime_error("the mask extrude was cancelled");
                      throw std::invalid_argument(
                          "nothing to extrude: the mask is empty, does not reach the surface, or "
                          "the wall is thinner than a cell");
+                 }
                  PyVolume out;
                  out.prim = scene::Prim::volume();
                  out.volume = std::make_shared<const field::FieldVolume>(std::move(*volume));
@@ -4915,7 +4924,7 @@ NB_MODULE(pyclay, m) {
              },
              "mask"_a, "thickness"_a, "side"_a = "outward", "threshold"_a = 0.5f,
              "border_round"_a = 0.0f, "border_smooth"_a = 0, "cell_size"_a = nb::none(),
-             "band"_a = nb::none(), "layer"_a = nb::none(),
+             "band"_a = nb::none(), "layer"_a = nb::none(), "token"_a = nb::none(),
              "Mask a patch of the surface and pull it off as a solid — ZBrush's\n"
              "Extract, 3DCoat's extrude from a frozen area. Returns a Volume you\n"
              "add to a layer like any other item.\n\n"

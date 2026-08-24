@@ -93,7 +93,8 @@ math::Aabb FieldVolume::BrickGrid::brick_box(std::size_t slot) const {
 }
 
 FieldVolume FieldVolume::sample(const std::function<float(cfloat3)>& f, const math::Aabb& region,
-                                float cell_size, float band) {
+                                float cell_size, float band, parallel::CancelToken* token,
+                                bool* out_cancelled) {
     // The serial fill: every sample through `f`, at exactly the positions the
     // grid describes. The three axes are walked as ONE index rather than three
     // nested loops — sample_index(x, y, z) is exactly that linear index, so
@@ -104,7 +105,7 @@ FieldVolume FieldVolume::sample(const std::function<float(cfloat3)>& f, const ma
                 for (int i = 0; i < kBrickSamples; ++i)
                     out[s * kBrickSamples + i] = f(grid.sample_position(first + s, i));
         },
-        region, cell_size, band);
+        region, cell_size, band, token, out_cancelled);
 }
 
 FieldVolume FieldVolume::sample_parallel(const std::function<float(cfloat3)>& f,

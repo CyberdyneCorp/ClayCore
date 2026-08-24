@@ -256,7 +256,8 @@ std::optional<field::FieldVolume> mask_to_field(const voxel::MaskField& mask, fl
 
 std::optional<field::FieldVolume> mask_extrude(const std::function<float(cfloat3)>& source,
                                         const voxel::MaskField& mask,
-                                        const MaskExtrudeSettings& settings) {
+                                        const MaskExtrudeSettings& settings,
+                                              parallel::CancelToken* token) {
     if (!(settings.thickness > 0.0f) || mask.empty() || !source) return std::nullopt;
     const float cell = settings.cell_size > 0.0f ? settings.cell_size : mask.cell_size();
     if (!(cell > 0.0f)) return std::nullopt;
@@ -279,6 +280,7 @@ std::optional<field::FieldVolume> mask_extrude(const std::function<float(cfloat3
     if (!md) return std::nullopt;
 
     float deepest = kInf;
+    bool cancelled = false;
     field::FieldVolume out = field::FieldVolume::sample(
         [&](cfloat3 p) {
             const float shell = shell_of(source(p), settings.side, settings.thickness);
@@ -288,7 +290,13 @@ std::optional<field::FieldVolume> mask_extrude(const std::function<float(cfloat3
             deepest = std::min(deepest, v);
             return v;
         },
-        md->bounds(), cell, band);
+        md->bounds(), cell, band, token, &cancelled);
+
+    // A cancel and "the mask never reached the surface" both return nullopt,
+    // and a host must not be shown the second when the user did the first —
+    // the token is how they are told apart, so it is checked before the
+    // geometric refusal below.
+    if (cancelled) return std::nullopt;
 
     // No sample landed inside: the masked region never reached the source's
     // surface. That is the common mistake, and an empty volume handed back would
@@ -306,7 +314,8 @@ std::optional<field::FieldVolume> mask_extrude(const std::function<float(cfloat3
 
 std::optional<voxel::VoxelGrid> mask_extrude(const voxel::VoxelGrid& grid,
                                              const voxel::MaskField& mask,
-                                             const MaskExtrudeSettings& settings) {
+                                             const MaskExtrudeSettings& settings,
+                                             parallel::CancelToken* token) {
     if (!(settings.thickness > 0.0f) || mask.empty() || grid.occupied_count() == 0)
         return std::nullopt;
     const float vs = grid.voxel_size();
@@ -362,7 +371,11 @@ std::optional<voxel::VoxelGrid> mask_extrude(const voxel::VoxelGrid& grid,
     // Seeds: masked, occupied, and on the surface. A cell buried in the interior
     // is not where an extract starts, whichever side it grows toward.
     std::vector<std::pair<VoxelCoord, std::uint8_t>> seeds;
-    for (std::int32_t z = lo.z; z <= hi.z; ++z)
+    for (std::int32_t z = lo.z; z <= hi.z; ++z) {
+        // The checkpoint is the outer slice: one relaxed load per z-plane
+        // rather than one per cell. A cancelled extract returns nullopt and the
+        // caller installs nothing, so nothing partial escapes.
+        if (parallel::cancelled(token)) return std::nullopt;
         for (std::int32_t y = lo.y; y <= hi.y; ++y)
             for (std::int32_t x = lo.x; x <= hi.x; ++x) {
                 const VoxelCoord c{x, y, z};
@@ -372,6 +385,7 @@ std::optional<voxel::VoxelGrid> mask_extrude(const voxel::VoxelGrid& grid,
                 for (VoxelCoord f : kFaces) surface = surface || grid.get(step(c, f)) == 0;
                 if (surface) seeds.emplace_back(c, idx);
             }
+    }
     if (seeds.empty()) return std::nullopt;
 
     voxel::VoxelGrid out(vs);

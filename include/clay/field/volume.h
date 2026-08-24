@@ -45,8 +45,14 @@ class FieldVolume {
     // of the surface. `band` should be at least a couple of cells: it is the
     // distance over which the field stays a real distance rather than a bound,
     // and a band thinner than the marcher's step is no use to it.
+    // `token` and `out_cancelled` behave exactly as on sample_blocks below,
+    // which this routes through — so every verb that samples a field is
+    // cancellable at the same window boundary, without each one growing a
+    // checkpoint of its own.
     static FieldVolume sample(const std::function<float(kernel::cfloat3)>& f,
-                              const math::Aabb& region, float cell_size, float band);
+                              const math::Aabb& region, float cell_size, float band,
+                              parallel::CancelToken* token = nullptr,
+                              bool* out_cancelled = nullptr);
 
     // The same, on the thread pool — for an `f` that is SAFE TO CALL
     // CONCURRENTLY.

@@ -70,6 +70,12 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.47.0 is not such a release**: additive, one new entry point
+   (`clay_document_mask_extrude_cancellable`). It matters more than its size:
+   mask extrude is 4403 ms on the reference iPad — the most expensive verb in
+   the library and the measurement that motivated the cancellation token — and
+   it was the one still uncancellable after 0.45.0 shipped the mechanism.
+
    **0.46.0 is not such a release**: additive. Three new entry points and one
    new descriptor for the history budget. Zero means unbounded, which is what a
    host that never calls it gets, so nothing changes for anyone who ignores it.

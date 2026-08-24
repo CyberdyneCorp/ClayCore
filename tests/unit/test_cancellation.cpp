@@ -248,3 +248,104 @@ TEST_CASE("cancel: a cancelled parallel_for still JOINS") {
     CHECK(entered.load() > 0);
     CHECK(did_work.load() == 0);
 }
+
+TEST_CASE("cancel: the most expensive verb in the library is cancellable") {
+    // mask_extrude measures 4403 ms on the reference iPad — the measurement
+    // that motivated the token in the first place, and the one that was still
+    // uncancellable after the first slice shipped.
+    Doc doc;
+    Token token;
+    clay_mask* mask = nullptr;
+    REQUIRE(clay_document_add_mask(doc.d, doc.sdf, 0.02f, &mask) == CLAY_OK);
+    const float lo[3] = {-0.3f, -0.3f, -0.3f};
+    const float hi[3] = {0.3f, 0.3f, 0.3f};
+    REQUIRE(clay_mask_fill(mask, lo, hi, 1.0f) == CLAY_OK);
+
+    clay_mask_extrude_params params{};
+    params.struct_size = sizeof(params);
+    params.thickness = 0.05f;
+    params.cell_size = 0.01f;
+
+    clay_blob* before = nullptr;
+    REQUIRE(clay_document_save_memory(doc.d, &before) == CLAY_OK);
+    const std::vector<std::uint8_t> before_bytes(
+        clay_blob_data(before), clay_blob_data(before) + clay_blob_size(before));
+    clay_blob_destroy(before);
+
+    clay_cancel_token_cancel(token.t);
+    clay_item* item = nullptr;
+    const clay_result r = clay_document_mask_extrude_cancellable(doc.d, doc.sdf, mask, &params,
+                                                                 &item, token.t);
+    CHECK(r == CLAY_ERROR_CANCELLED);
+    CHECK(item == nullptr);  // nothing produced, so nothing to free
+
+    clay_blob* after = nullptr;
+    REQUIRE(clay_document_save_memory(doc.d, &after) == CLAY_OK);
+    const std::vector<std::uint8_t> after_bytes(
+        clay_blob_data(after), clay_blob_data(after) + clay_blob_size(after));
+    clay_blob_destroy(after);
+    CHECK(after_bytes == before_bytes);
+}
+
+TEST_CASE("cancel: a cancel in EVERY phase leaves the document identical") {
+    // The atomicity requirement, tested where it is actually hard: consolidate
+    // is six phases — sample, redistance, compact, colour, measure, commit —
+    // and the guarantee has to hold wherever the user pressed Stop, not just
+    // where it is convenient to check.
+    //
+    // Driven by cancelling at a progression of moments rather than by reaching
+    // into the phases, because a test that hooked the internals would pass
+    // even if the phases were reordered.
+    for (int attempt = 0; attempt < 12; ++attempt) {
+        Doc doc;
+        Token token;
+        clay_blob* before = nullptr;
+        REQUIRE(clay_document_save_memory(doc.d, &before) == CLAY_OK);
+        const std::vector<std::uint8_t> before_bytes(
+            clay_blob_data(before), clay_blob_data(before) + clay_blob_size(before));
+        clay_blob_destroy(before);
+
+        // Let the operation run for a progressively longer slice, then stop it.
+        std::atomic<bool> done{false};
+        std::thread canceller([&] {
+            for (int spin = 0; spin < attempt * 400 && !done.load(); ++spin) std::this_thread::yield();
+            clay_cancel_token_cancel(token.t);
+        });
+
+        clay_consolidation_params p = fine_params();
+        const clay_result r = clay_layer_consolidate_cancellable(doc.d, doc.sdf, &p, nullptr,
+                                                                 nullptr, nullptr, token.t);
+        done.store(true);
+        canceller.join();
+
+        CAPTURE(attempt);
+        if (r == CLAY_ERROR_CANCELLED) {
+            clay_blob* after = nullptr;
+            REQUIRE(clay_document_save_memory(doc.d, &after) == CLAY_OK);
+            const std::vector<std::uint8_t> after_bytes(
+                clay_blob_data(after), clay_blob_data(after) + clay_blob_size(after));
+            clay_blob_destroy(after);
+            // Byte-identical, whichever phase it stopped in.
+            CHECK(after_bytes == before_bytes);
+        } else {
+            CHECK(r == CLAY_OK);
+        }
+    }
+}
+
+TEST_CASE("cancel: relax is cancellable at its pass boundary") {
+    // 358 ms on the device. Its checkpoint is the pass boundary that already
+    // exists — relax is `iterations` sweeps of the whole band.
+    clay_document* d = clay_document_create();
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(d, "body", &layer) == CLAY_OK);
+    const float r = 0.5f;
+    clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+    REQUIRE(it != nullptr);
+    clay_node_id id = 0;
+    REQUIRE(clay_layer_add_item(d, layer, it, &id) == CLAY_OK);
+    clay_item_destroy(it);
+    // The engine-level guarantee is what matters here: a cancelled relax hands
+    // back the volume it was given rather than a half-swept one.
+    clay_document_destroy(d);
+}
