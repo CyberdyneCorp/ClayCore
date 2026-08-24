@@ -665,6 +665,9 @@ void check_sculpt_layer(const PyVoxelGrid& g, std::size_t layer) {
 // PyVoxelGrid so a mask edited through a document is the one that gets saved.
 struct PyMaskField {
     std::shared_ptr<io::ClaySpaceDoc> doc;  // null for standalone masks
+    // The document's history, shared — see PyVoxelGrid. A mask edit is a
+    // BARRIER, and this is how the handle reaches the history to record one.
+    std::shared_ptr<UndoRef> undo;
     scene::LayerId layer = 0;
     std::shared_ptr<voxel::MaskField> owned;
     // One memoised gate bake per mask OBJECT, so gating N items by one painted
@@ -760,6 +763,15 @@ session::History::MeshFor mesh_for(const PyDocument& d) {
         auto it = doc->mesh_layers.find(id);
         return it == doc->mesh_layers.end() ? nullptr : &it->second;
     };
+}
+
+// A mask edit is a BARRIER in the session history, matching the C binding's
+// note_mask_edit. voxel::MaskField is a fourth representation with no history
+// mechanism, so nothing can reverse or replay a mask edit — recording a barrier
+// is how a host finds that out rather than by pressing undo.
+void note_mask_edit(const PyMaskField& m) {
+    if (!m.doc || !m.undo || !*m.undo) return;
+    (*m.undo)->record_barrier("mask edit");
 }
 
 // Bracket a voxel edit so it becomes ONE undo step, matching the C binding's
@@ -4764,6 +4776,7 @@ NB_MODULE(pyclay, m) {
                  d.doc->masks.insert_or_assign(target->id, voxel::MaskField(cell_size));
                  PyMaskField m;
                  m.doc = d.doc;
+                 m.undo = d.undo;
                  m.layer = target->id;
                  return m;
              },
@@ -4775,6 +4788,7 @@ NB_MODULE(pyclay, m) {
                      if (l.name != name || !d.doc->masks.count(l.id)) continue;
                      PyMaskField m;
                      m.doc = d.doc;
+                     m.undo = d.undo;
                      m.layer = l.id;
                      return nb::cast(m);
                  }
@@ -5069,6 +5083,70 @@ NB_MODULE(pyclay, m) {
                  return (*d.undo)->redo(d.doc->document, grid_for(d), mesh_for(d));
              },
              "Reapply the last undone step; returns False when there is nothing to redo")
+        .def(
+            "journal_since",
+            [](const PyDocument& d, std::size_t from) {
+                if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
+                std::size_t now_at = 0;
+                const std::vector<std::uint8_t> bytes = (*d.undo)->journal_since(from, &now_at);
+                return nb::make_tuple(nb::bytes(bytes.data(), bytes.size()), now_at);
+            },
+            "from"_a = 0,
+            "Everything recorded since `from`, as (bytes, now_at) — append the\n"
+            "bytes wherever you keep them and pass `now_at` next time.\n\n"
+            "A recovery is a SNAPSHOT plus the steps since it: pair this with\n"
+            "Document.to_bytes(). Why not just autosave the document — saving is\n"
+            "whole-document and synchronous, so a timer-driven autosave stalls\n"
+            "for however long the whole sculpt takes, and that grows. A journal\n"
+            "is proportional to what changed.\n\n"
+            "PEEK, not drain: the log is untouched, so a failed write is retried\n"
+            "by asking again. Indices are absolute and do not shift on trim.")
+        .def(
+            "journal_range",
+            [](const PyDocument& d) {
+                if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
+                return nb::make_tuple((*d.undo)->journal_first(), (*d.undo)->journal_next());
+            },
+            "The window the log still holds, as (first, next). Asking\n"
+            "journal_since for something below `first` yields nothing — this is\n"
+            "how you find out, rather than by replaying a short history.")
+        .def(
+            "journal_trim",
+            [](PyDocument& d, std::size_t upto) {
+                if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
+                (*d.undo)->trim_journal(upto);
+            },
+            "upto"_a, "Drop events below `upto`, once those bytes are durable.")
+        .def(
+            "replay_journal",
+            [](PyDocument& d, nb::bytes data) {
+                if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
+                session::History::ReplayResult r;
+                const bool ok = (*d.undo)->replay(
+                    reinterpret_cast<const std::uint8_t*>(data.c_str()), data.size(),
+                    d.doc->document, grid_for(d), mesh_for(d), &r);
+                if (!ok)
+                    throw std::invalid_argument(
+                        "the journal could not be replayed: a version this build does not "
+                        "understand, a truncated buffer, or a step naming a layer that is gone");
+                nb::dict out;
+                out["applied"] = r.applied;
+                out["stopped_at_barrier"] = r.stopped_at_barrier;
+                out["barrier"] = r.barrier;
+                return out;
+            },
+            "data"_a,
+            "Replay a journal onto a document that IS the snapshot it was taken\n"
+            "against. Returns applied / stopped_at_barrier / barrier.\n\n"
+            "Replay STOPS at a barrier rather than skipping it — every mask edit\n"
+            "is one today, because a mask is a fourth representation with no\n"
+            "history mechanism. A recovery that silently skipped would hand back\n"
+            "a document quietly missing that operation's effect, and you could\n"
+            "not see the loss. Seeing the flag means you need a fresher\n"
+            "snapshot, not a longer journal.\n\n"
+            "A journal this build does not understand, or a truncated one, is\n"
+            "REFUSED. Events applied before the bad one stand, so replay onto a\n"
+            "copy if you want all-or-nothing.")
         .def_prop_ro("undo_depth",
                      [](const PyDocument& d) {
                          return *d.undo ? (*d.undo)->undo_depth() : std::size_t{0};
@@ -5245,6 +5323,7 @@ NB_MODULE(pyclay, m) {
                        nb::handle cell) { return m.field().get(to_coord(cell)); }, "cell"_a)
         .def("set",
              [](PyMaskField& m, nb::handle cell, float value) {
+                 note_mask_edit(m);
                  m.field().set(to_coord(cell), value);
              },
              "cell"_a, "value"_a)
@@ -5272,6 +5351,7 @@ NB_MODULE(pyclay, m) {
         .def("paint",
              [](PyMaskField& m, nb::handle point, int n, float target, const std::string& shape,
                 const std::string& falloff, float strength) {
+                 note_mask_edit(m);
                  m.field().paint(to_f3(point, "point"),
                                  make_brush(n, shape, falloff, strength, 0u), target);
              },
@@ -5282,20 +5362,28 @@ NB_MODULE(pyclay, m) {
         .def("paint_cell",
              [](PyMaskField& m, nb::handle cell, int n, float target, const std::string& shape,
                 const std::string& falloff, float strength) {
+                 note_mask_edit(m);
                  m.field().paint(to_coord(cell), make_brush(n, shape, falloff, strength, 0u),
                                  target);
              },
              "cell"_a, "size"_a, "target"_a = 1.0f, "shape"_a = "sphere",
              "falloff"_a = "smooth", "strength"_a = 1.0f,
              "As paint(), centred on a mask cell rather than a world position")
-        .def("invert", [](PyMaskField& m) { m.field().invert(); },
+        .def("invert", [](PyMaskField& m) { note_mask_edit(m); m.field().invert(); },
              "Flip the painted region (a sparse field has no finite complement)")
-        .def("clear", [](PyMaskField& m) { m.field().clear(); })
-        .def("expand", [](PyMaskField& m, int steps) { m.field().expand(steps); }, "steps"_a = 1,
+        .def("clear", [](PyMaskField& m) { note_mask_edit(m); m.field().clear(); })
+        .def("expand",
+             [](PyMaskField& m, int steps) { note_mask_edit(m); m.field().expand(steps); },
+             "steps"_a = 1,
              "Grow the mask by grey dilation")
-        .def("contract", [](PyMaskField& m, int steps) { m.field().contract(steps); },
+        .def("contract",
+             [](PyMaskField& m, int steps) { note_mask_edit(m); m.field().contract(steps); },
              "steps"_a = 1, "Shrink the mask by grey erosion")
-        .def("smooth", [](PyMaskField& m, int iterations) { m.field().smooth(iterations); },
+        .def("smooth",
+             [](PyMaskField& m, int iterations) {
+                 note_mask_edit(m);
+                 m.field().smooth(iterations);
+             },
              "iterations"_a = 1, "Blur the mask, softening its boundary")
         .def("bounds",
              [](const PyMaskField& m) -> nb::object {
@@ -5308,13 +5396,17 @@ NB_MODULE(pyclay, m) {
              "Inclusive cell bounds of the painted region, or None")
         .def("fill",
              [](PyMaskField& m, nb::handle region, float value) {
+                 note_mask_edit(m);
                  m.field().fill(to_aabb(region), value);
              },
              "region"_a, "value"_a = 1.0f,
              "Set every cell whose centre lies in a ((lo), (hi)) world box. "
              "Filling with 0 releases the region.")
         .def("invert_within",
-             [](PyMaskField& m, nb::handle region) { m.field().invert_within(to_aabb(region)); },
+             [](PyMaskField& m, nb::handle region) {
+                 note_mask_edit(m);
+                 m.field().invert_within(to_aabb(region));
+             },
              "region"_a,
              "Take the complement over a ((lo), (hi)) world box — the bounded\n"
              "form invert() cannot be, and the one 'mask a limb, invert, sculpt\n"

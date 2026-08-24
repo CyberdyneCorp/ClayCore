@@ -70,6 +70,16 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.44.0 is not such a release**: additive, four new entry points
+   (`clay_document_journal_since`, `_range`, `_trim`,
+   `clay_document_replay_journal`) and no signature changes. One behaviour
+   change rides with it and is worth naming: **every mask edit now records a
+   barrier** in the session history, so `clay_document_undo_state` reports a
+   depth of 0 after one where it previously reported whatever the SDF history
+   held. That is a correction rather than a regression — nothing could ever
+   undo a mask edit, and the depth was promising an undo that would have
+   reversed an unrelated edit instead.
+
    **0.43.0 is the closest so far to being such a release, and is not one**: no
    signature changes and no new symbols, but `clay_document_undo` and
    `clay_document_redo` REVERSE MORE THAN THEY DID. They acted on the command

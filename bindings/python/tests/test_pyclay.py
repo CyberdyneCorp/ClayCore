@@ -5973,3 +5973,91 @@ def test_a_grid_taken_before_enable_undo_still_records():
     assert doc.undo_depth == 1
     assert doc.undo()
     assert blocks.occupied_count == 0
+
+
+# -- surviving a crash (survive-a-crash) -------------------------------------
+#
+# A recovery is a snapshot plus the steps since it. Saving is whole-document and
+# synchronous, so a timer-driven autosave stalls for however long the sculpt
+# takes; a journal is proportional to what changed.
+
+def _session_with_edits():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("body")
+    blocks = doc.add_voxel_layer("blocks", voxel_size=0.1)
+    doc.enable_undo()
+    snapshot = doc.to_bytes()
+    layer.add(clay.Sphere(r=0.5))
+    blocks.set((0, 0, 0), 1)
+    blocks.set((1, 0, 0), 2)
+    return doc, layer, blocks, snapshot
+
+
+def test_a_session_is_rebuilt_from_a_snapshot_and_a_journal():
+    doc, _, blocks, snapshot = _session_with_edits()
+    journal, now_at = doc.journal_since(0)
+    assert now_at == 3 and len(journal) > 0
+
+    probes = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
+    before, cells = doc.eval(probes)[0], blocks.occupied_count
+
+    recovered = clay.load_bytes(snapshot)   # the crash
+    recovered.enable_undo()
+    result = recovered.replay_journal(journal)
+    assert result["applied"] == 3
+    assert not result["stopped_at_barrier"]
+
+    rblocks = recovered.voxel_layer("blocks")
+    assert recovered.eval(probes)[0] == pytest.approx(before)
+    assert rblocks.occupied_count == cells
+    assert rblocks.get((1, 0, 0)) == 2      # palette index survived too
+
+
+def test_the_journal_is_incremental():
+    doc, layer, _, snapshot = _session_with_edits()
+    first, at = doc.journal_since(0)
+    layer.add(clay.Sphere(r=0.2, position=(2, 0, 0)))
+    second, at2 = doc.journal_since(at)
+    assert at2 > at
+    assert len(second) < len(first)          # only what is new
+
+    recovered = clay.load_bytes(snapshot)
+    recovered.enable_undo()
+    recovered.replay_journal(first)
+    recovered.replay_journal(second)
+    probes = np.array([[2.0, 0.0, 0.0]], dtype=np.float32)
+    assert recovered.eval(probes)[0] < 0     # the later sphere is there
+
+
+def test_trimming_moves_the_floor_and_says_so():
+    doc, _, _, _ = _session_with_edits()
+    _, at = doc.journal_since(0)
+    doc.journal_trim(at)
+    first, nxt = doc.journal_range()
+    assert first == at and nxt == at
+    # Asking below the floor yields nothing rather than a silently short history.
+    stale, _ = doc.journal_since(0)
+    fresh = clay.Document()
+    fresh.enable_undo()
+    assert fresh.replay_journal(stale)["applied"] == 0
+
+
+def test_an_unreadable_journal_is_refused():
+    doc, _, _, snapshot = _session_with_edits()
+    journal, _ = doc.journal_since(0)
+
+    recovered = clay.load_bytes(snapshot)
+    recovered.enable_undo()
+    with pytest.raises(Exception):
+        recovered.replay_journal(b"not a journal at all")
+    newer = bytearray(journal)
+    newer[4] = 99                            # a version this build predates
+    with pytest.raises(Exception):
+        recovered.replay_journal(bytes(newer))
+
+
+def test_the_journal_needs_undo_enabled():
+    doc = clay.Document()
+    doc.add_sdf_layer("body")
+    with pytest.raises(Exception):
+        doc.journal_since(0)
