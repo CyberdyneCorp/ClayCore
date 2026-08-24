@@ -6590,3 +6590,159 @@ def test_groups_merging_away_takes_the_hidden_flag():
     assert groups.any_hidden
     assert groups.reassign(2, 0) > 0
     assert not groups.any_hidden
+
+
+# -- measuring the surface, and projecting onto it (add-claycore-bridge) ------
+#
+# The measures existed only as a MaskField and only in C++ — reachable from no
+# host at all, the same gap surface groups had. These cover the per-point form,
+# the two measures that need rays, and cage projection.
+
+
+def _sphere_only(r=0.5):
+    doc = clay.Document()
+    doc.add_sdf_layer("body").add(clay.Sphere(r=r))
+    return doc
+
+
+def test_measure_a_sphere_is_convex_and_never_concave():
+    # The sign convention the whole family rests on: for f = |p| - R the
+    # Laplacian at the surface is 2/R, POSITIVE for convex.
+    doc = _sphere_only(0.5)
+    pts = np.array([[0.5, 0, 0], [0, 0.5, 0]], dtype=np.float32)
+    convex = doc.measure("convexity", pts, {"scale": 0.5})
+    cavity = doc.measure("cavity", pts, {"scale": 0.5})
+    assert (convex > 0.5).all()
+    assert (cavity == 0.0).all()
+
+
+def test_measure_a_crease_is_concave():
+    # Two overlapping spheres. A TORUS is the obvious cavity fixture and is
+    # wrong for it: mean curvature at the inner ring is 1/r - 1/(R-r), so the
+    # tube wins and the ring reads convex unless R < 2r.
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("body")
+    layer.add(clay.Sphere(r=0.5, position=(0.3, 0, 0)))
+    layer.add(clay.Sphere(r=0.5, position=(-0.3, 0, 0)))
+
+    y = float(np.sqrt(0.5**2 - 0.3**2))
+    crease = np.array([[0.0, y, 0.0]], dtype=np.float32)
+    # Non-degenerate: the probe really is on the surface.
+    assert abs(float(doc.eval(crease)[0])) < 1e-2
+    assert doc.measure("cavity", crease, {"scale": 0.2})[0] > 0.0
+
+
+def test_measure_a_crevice_is_more_occluded_than_open_surface():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("body")
+    layer.add(clay.Sphere(r=0.5, position=(0.3, 0, 0)))
+    layer.add(clay.Sphere(r=0.5, position=(-0.3, 0, 0)))
+
+    y = float(np.sqrt(0.5**2 - 0.3**2))
+    pts = np.array([[0.0, y, 0.0], [0.8, 0.0, 0.0]], dtype=np.float32)
+    # Both on the surface: an occlusion probe in open space reads 0 whatever
+    # the implementation does.
+    assert (np.abs(doc.eval(pts)) < 1e-2).all()
+
+    ao = doc.measure("occlusion", pts, {"ray_length": 0.5, "ray_count": 32})
+    assert ao[0] > ao[1]        # the crease sees less sky
+    assert ao[1] < 0.2          # and the open side sees most of it
+
+
+def test_measure_occlusion_is_reproducible():
+    # Every other query returns the same bits on every backend and every run. A
+    # hemisphere sample is the first thing that could quietly break that.
+    doc = _sphere_only(0.5)
+    pts = np.array([[0.5, 0, 0]], dtype=np.float32)
+    params = {"ray_length": 0.5, "ray_count": 16, "seed": 4242}
+    a = doc.measure("occlusion", pts, params)
+    b = doc.measure("occlusion", pts, params)
+    assert a[0] == b[0]         # exactly, not approximately
+
+
+def test_measure_thickness_reads_the_actual_thickness():
+    # clay.Box takes the FULL size, so this slab is 0.2 thick in Y and its top
+    # face is at y = 0.1. Probing y = 0.2 measures a point 0.1 OUTSIDE the
+    # surface, which is how the first version of this got a wrong answer from a
+    # correct implementation — hence the on-surface guard below, which every
+    # other measure test here already had.
+    doc = clay.Document()
+    doc.add_sdf_layer("body").add(clay.Box(size=(1.0, 0.2, 1.0)))
+    top = np.array([[0.0, 0.1, 0.0]], dtype=np.float32)
+    assert abs(float(doc.eval(top)[0])) < 1e-3      # on the surface, not near it
+
+    t = doc.measure("thickness", top, {"ray_length": 1.0})[0]
+    assert 0.18 < t < 0.23                           # the slab's real 0.2
+
+    # And a thicker slab reads thicker, which is the direction that matters.
+    thick = clay.Document()
+    thick.add_sdf_layer("body").add(clay.Box(size=(1.0, 0.6, 1.0)))
+    t2 = thick.measure("thickness", np.array([[0.0, 0.3, 0.0]], dtype=np.float32),
+                       {"ray_length": 1.0})[0]
+    assert t2 > t
+
+
+def test_measure_rejects_an_unknown_measure():
+    doc = _sphere_only()
+    with pytest.raises(Exception):
+        doc.measure("shininess", np.array([[0.5, 0, 0]], dtype=np.float32))
+
+
+def test_mask_from_surface_is_reachable_at_last():
+    # brush::mask_from_surface existed with tests and was reachable from no host
+    # at all. This is the regression for that gap.
+    doc = _sphere_only(0.5)
+    mask = doc.mask_from_surface("convexity", ((-0.7, -0.7, -0.7), (0.7, 0.7, 0.7)),
+                                 cell_size=0.03, params={"scale": 0.5})
+    assert mask.painted_count > 100
+    # An ordinary mask, usable everywhere a painted one is.
+    assert mask.sample((0.5, 0.0, 0.0)) > 0.0
+
+
+def test_mask_and_point_agree_about_the_same_surface():
+    # One implementation behind both, which is what this would catch losing.
+    doc = _sphere_only(0.5)
+    cell = 0.02
+    mask = doc.mask_from_surface("convexity", ((-0.7, -0.7, -0.7), (0.7, 0.7, 0.7)),
+                                 cell_size=cell, band=0.05, params={"scale": 0.5})
+    assert mask.painted_count > 100
+
+    angles = np.arange(0.0, 6.28, 0.35)
+    pts = np.stack([0.5 * np.cos(angles), 0.5 * np.sin(angles),
+                    np.zeros_like(angles)], axis=1).astype(np.float32)
+    # The lattice fills in its own default stencil step, so the point form is
+    # asked with the same one — otherwise this measures the defaulting.
+    at_points = doc.measure("convexity", pts, {"scale": 0.5, "h": cell})
+    for p, v in zip(pts, at_points):
+        assert abs(mask.sample(tuple(float(c) for c in p)) - float(v)) < 0.05
+
+
+def test_project_finds_the_surface_in_both_directions():
+    doc = _sphere_only(0.5)
+    # From outside, pointing at it: 1.0 away, positive.
+    forward = doc.project((1.5, 0, 0), (-1, 0, 0), 2.0)
+    assert forward is not None
+    assert abs(forward["distance"] - 1.0) < 0.01
+    assert abs(forward["position"][0] - 0.5) < 0.01
+
+    # Pointing AWAY: the surface is behind, and the distance is negative. This
+    # is the case a one-directional implementation silently misses, and it is
+    # where a low-poly cage pinches inward.
+    backward = doc.project((1.5, 0, 0), (1, 0, 0), 2.0)
+    assert backward is not None
+    assert abs(backward["distance"] + 1.0) < 0.01
+
+
+def test_project_from_inside_the_surface():
+    # A cage point sits inside the high-poly wherever the low-poly pinches, so
+    # this is half the cage rather than an edge case.
+    doc = _sphere_only(0.5)
+    r = doc.project((0.1, 0, 0), (1, 0, 0), 2.0)
+    assert r is not None
+    assert abs(r["position"][0] - 0.5) < 0.02
+
+
+def test_project_reports_a_miss_rather_than_a_distant_hit():
+    # Conflating the two is what puts garbage in the seams of a bake.
+    doc = _sphere_only(0.5)
+    assert doc.project((10.0, 0, 0), (-1, 0, 0), 1.0) is None

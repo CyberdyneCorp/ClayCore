@@ -505,6 +505,78 @@ CPU-side, latency-critical, called every Pencil event:
 - Build-plane and grid cell resolution for voxel mode; face picking on voxel grids.
 - Bounds/frustum utilities for zoom-to-selection and culling.
 
+### Asking the shape what it is: surface measures
+
+Curvature, cavity, convexity, "facing up", ambient occlusion and thickness — at
+a point, or over a region as a mask.
+
+**Why this is cheap on a field and expensive in a mesh engine.** Curvature here
+is the field's **Laplacian**, and its sign is unambiguous: for `f = |p| - R` the
+Laplacian at the surface is `2/R`, *positive* for convex. So cavity and
+convexity are one subtraction apart. A mesh has to estimate curvature from a
+vertex ring, which is a discrete approximation with a valence-dependent error.
+
+The same argument runs for occlusion. A mesh traces rays against triangles
+through an acceleration structure that must be rebuilt when the mesh changes; a
+field is marched directly, at any resolution, with nothing to build and nothing
+to invalidate — and it measures the **actual** surface rather than a
+tessellation of it.
+
+```c
+clay_measure_params p = { .struct_size = sizeof p };
+clay_measure_defaults(&p);
+p.ray_length = 0.02f;              /* what "occluded" means here */
+clay_measure_points(doc, CLAY_MEASURE_OCCLUSION, points, n, &p, out, NULL);
+```
+
+**One implementation, two shapes.** `clay_mask_from_surface` walks the same
+measure over a region and bands it to the surface. Until v0.51.0 the lattice
+form was the *only* form and carried its own copy of the stencil; there is one
+now, which is what makes "a cavity mask and a baked map agree about this
+surface" a construction rather than a claim.
+
+**`ray_length` is the parameter that decides what the number means.** Occlusion
+measured over 1 cm and over 1 m describe different things about the same point,
+and neither is more correct. There is no good default; leaving it at 0 takes
+20× `scale`, and that is a guess.
+
+**Occlusion is occlusion, not lighting** — 0 is open sky, 1 is fully enclosed.
+Tools disagree about which way this runs, so the name says which.
+
+**Determinism is not negotiable.** Every other query here returns the same bits
+on every backend and every run, and a hemisphere sample is the first thing that
+could quietly break that. The pattern is a fixed low-discrepancy sequence
+rotated by a hash of the *point* and an explicit `seed` — not a random number
+generator, not thread-dependent, not order-dependent. Same seed, same bits.
+
+### Bounded rays, and projecting onto the surface
+
+`clay_raycast` searches to infinity, which cannot express *"look 5 mm along this
+normal"* — the query a bake cage and a snap tool both are. Worse, it makes a
+miss indistinguishable from a hit on the far side of the model, which is exactly
+what puts garbage in the seams of a baked texture. `clay_raycast_bounded` takes
+`tmin`/`tmax`; a second entry point, because the original's signature has
+shipped.
+
+`clay_project_to_surface` is the cage query: from a point and a direction, find
+the nearest surface within a distance and report **how far it was, signed**.
+
+**Both ways, and both sides.** A cage point built from a low-polygon mesh may
+sit *outside* the high-polygon surface or *inside* it, depending on whether the
+low-poly bulges or pinches there, and the caller cannot know which. Two things
+follow, and a first implementation usually misses both: the search runs in both
+directions along the axis, and the march steps by `|f|` while detecting the
+crossing by **sign change** — because started inside, the signed distance is
+negative and an ordinary sphere-march cannot take a step at all.
+
+The signed distance comes back from the call that found the point rather than
+being recomputed from it, because it *is* the height-map value and deriving it
+again is a second chance to disagree about the sign.
+
+Runnable: [`examples/64_measuring_the_surface.py`](../examples/64_measuring_the_surface.py),
+which projects 2000 points onto a creased surface, measures all six, and checks
+that the mask and the per-point form agree.
+
 ### Naming a region: surface groups
 
 ZBrush's PolyGroups, Blender's Face Sets. Until v0.50.0 this library had no such

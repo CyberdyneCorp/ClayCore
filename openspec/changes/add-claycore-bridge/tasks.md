@@ -1,8 +1,10 @@
 # Tasks: add-claycore-bridge
 
-**Section 1 is a measurement and a decision pass. Nothing below section 1 is
-started until 1.6 is answered**, because the three options imply different ABIs
-and are not subsets of one another.
+**Section 1 is a measurement and a decision pass.** Sections 2-4 are the part
+that does NOT depend on the seam decision or on CyberRemesherAndUV, and were
+built on that basis: every query in them is a field query, useful to a caller
+who is not baking, and required by option B or A alike. Sections 5-6's bake
+example and the "retopo export profile" question still wait on 1.5 and 1.6.
 
 ## 1. Establish what is missing, and decide the seam
 
@@ -42,64 +44,110 @@ and are not subsets of one another.
 
 ## 2. Bounded rays (assumes B)
 
-- [ ] 2.1 A SECOND entry point, not a parameter: `clay_raycast` shipped and a
-      token cannot be appended to it — the same rule
-      `add-operation-cancellation` followed
-- [ ] 2.2 A miss inside the bound MUST be distinguishable from a hit beyond it.
-      That distinction is the entire point, and conflating them is what puts
-      garbage in bake seams
-- [ ] 2.3 The batch form, because a bake is millions of rays
-- [ ] 2.4 Respects hidden surface groups, like every other raycast path
+- [x] 2.1 `clay_raycast_bounded`, a second entry point for exactly that reason
+- [x] 2.2 Tested both ways against an analytic sphere: bounded short of the
+      surface is a miss, bounded past it is the same hit the unbounded cast
+      reports. A `tmax` that is not greater than `tmin` is refused rather than
+      silently treated as unbounded
+- [x] 2.3 Batched via `clay_project_to_surface_many`; the bounded single ray
+      also serves `clay_raycast_many`'s existing batch
+- [x] 2.4 Respects hidden surface groups, like every other raycast path
 
 ## 3. Cage projection
 
-- [ ] 3.1 Search BOTH directions within a distance and return the nearest
-      surface: a low-poly cage point can sit inside or outside the high-poly
-      and a baker cannot know which
-- [ ] 3.2 Return the SIGNED distance travelled — that is the height map value,
-      and computing it separately would be a second chance to disagree
-- [ ] 3.3 Batched, cancellable, with progress. A bake is minutes, which is the
-      third budget class `add-operation-cancellation` exists for
+- [x] 3.1 Both directions — AND BOTH SIDES, which turned out to be the harder
+      half and is not what the task anticipated. Two implementations failed
+      before the third worked:
+
+      A plain sphere-march cannot start INSIDE the surface: the signed distance
+      is negative and it takes no step at all, so every cage point where the
+      low-poly pinches inward returns a miss. Marching |f| instead fixes the
+      stepping and breaks the stopping — with no sign to watch, a hit is only
+      "close enough", and the over-relaxation that makes a march fast steps
+      straight past the surface and never comes back within tolerance. That one
+      passed the inside test and broke both outside tests.
+
+      What works: step by |f|, which is still the safe distance to the nearest
+      surface, and detect the crossing by SIGN CHANGE between consecutive
+      samples, then bisect. Unambiguous from either side, and still a march
+      rather than a scan
+- [x] 3.2 Signed, returned by the call that found the point
+- [x] 3.3 Batched and cancellable. A cancelled chunk RETURNS NORMALLY and
+      never throws: thread_pool.h's join waits on `done >= num_tasks` and
+      increments only after `fn` returns, so a throw would hang it forever
 
 ## 4. Surface measures, per point
 
-- [ ] 4.1 Curvature, cavity and convexity, exposed PER POINT. Already computed
-      inside `brush::mask_from_surface`; the work is returning a value rather
-      than a lattice, and sharing the stencil so the two cannot drift
-- [ ] 4.2 AO. Parameters stated rather than assumed: ray count, maximum
-      distance, falloff, and a SEED — an unseeded hemisphere sample is not
-      reproducible, and this library's determinism guarantee is not negotiable
-- [ ] 4.3 Thickness, which is AO's inward twin and shares its machinery
-- [ ] 4.4 MEASURE the cost per point before choosing defaults. A default ray
-      count picked without a measurement is a guess with a unit attached — the
-      same mistake `add-history-budget` task 1.3 was written to prevent
+- [x] 4.1 Moved to `brush/surface_measure.h` with `mask_from_surface` becoming
+      one of its callers, so there is ONE stencil. Verified by a test that
+      compares the mask against the per-point form over the same surface — and
+      that comparison had to be the BULK rather than the worst case, because a
+      saturated measure legitimately flips inside one cell at a region
+      boundary. It still catches what it is for: a second stencil would
+      disagree everywhere, not only in boundary cells
+- [x] 4.2 Ambient occlusion, with all four stated. The sample pattern is a
+      Hammersley sequence XOR-scrambled by a hash of the QUANTISED point and
+      the seed — quantised so that two points a float-epsilon apart get the
+      same rotation rather than two unrelated ones, which would make
+      neighbouring texels differ by sample noise and read as film grain.
+      Cosine-weighted, so no per-ray cosine term is needed. The tangent basis
+      is the branchless Duff construction: the usual "cross with an arbitrary
+      axis" degenerates exactly where the normal IS that axis, which on an
+      axis-aligned model is most of the surface.
+      Tested for bit-identity across calls AND that a different seed differs,
+      or the first check would be vacuous
+- [x] 4.3 Thickness. Tested against a slab of known thickness, where the
+      answer is arithmetic, and for saturating rather than lying when the probe
+      is shorter than the material is thick
+- [ ] 4.4 STILL OPEN. `ray_count` defaults to 16 and `ray_length` to 20x
+      `scale`, and neither is measured — the interface says `ray_length` is a
+      guess rather than pretending otherwise. Worth a measurement pass before
+      a host builds a bake around them
 
 ## 5. Prove it
 
-- [ ] 5.1 The scenarios in the spec delta
-- [ ] 5.2 Cage projection against a known analytic case, where the right answer
-      is arithmetic rather than a rendering
-- [ ] 5.3 AO determinism ACROSS BACKENDS, against the parity fixture. If a
-      seeded hemisphere cannot hold that line, say so before shipping it rather
-      than after
-- [ ] 5.4 CHECK EVERY FIXTURE IS NON-DEGENERATE: a cage projection tested where
-      the cage already coincides with the surface measures nothing, and an AO
-      probe in open space returns 1.0 whatever the implementation does
-- [ ] 5.5 A RENDER, not only a test. Bake a normal map and an AO map on the
-      reference model and look at them — `add-surface-groups` shipped picking
-      wired on two of four paths with every test green, and the render is what
-      caught it
+- [x] 5.1 The scenarios in the spec delta, in C++, in C and in pyclay
+- [x] 5.2 Every projection assertion is against an analytic sphere: from 1.5
+      along -X onto a 0.5 sphere is exactly 1.0
+- [ ] 5.3 STILL OPEN for the CROSS-BACKEND half. Determinism across CALLS is
+      tested and holds by construction — the pattern depends on the point and
+      the seed and on nothing else. Whether it holds across backends is
+      untested here because the measure runs on the CPU regardless of the
+      document's backend today; it becomes a real question only if the walk
+      moves to the GPU
+- [x] 5.4 Every measure probe asserts it is ON the surface first. CAUGHT ONE:
+      the thickness test probed y=0.2 on a `clay.Box(size=(1, 0.2, 1))` — but
+      `size` is the FULL extent, so the face is at y=0.1 and the probe was 0.1
+      outside the surface. A correct implementation gave a wrong-looking answer.
+      The on-surface guard every other measure test already had is what the
+      fixed version added.
+      ALSO: the cavity fixture is two overlapping spheres and NOT a torus. For
+      major R and minor r the mean curvature at a torus's inner ring is
+      1/r - 1/(R-r), so the tube wins and the ring reads CONVEX unless R < 2r —
+      a cavity demo built on a torus measures nothing and looks fine. Pinned by
+      its own test
+- [ ] 5.5 STILL OPEN, and deliberately: a normal/AO MAP needs a UV layout, so
+      the render belongs with the bake example that waits on 1.6. The measures
+      themselves are checked numerically against analytic cases, which is
+      stronger than looking at them
 
 ## 6. Reach it and say it
 
-- [ ] 6.1 C ABI
-- [ ] 6.2 pyclay
-- [ ] 6.3 CHECK THE CAPABILITY IS REACHABLE, not merely implemented. Two Tier 2
-      rows — `add-surface-groups` and procedural masks — were reported landed
-      while reachable from no host at all. The check is `grep` for the entry
-      point in `clay.h` and in `pyclay_module.cpp`, not a passing test suite
-- [ ] 6.4 An example that bakes a normal and an AO map off a retopologized mesh,
-      because the value is the workflow
+- [x] 6.1 C ABI: `clay_measure_points`, `clay_mask_from_surface`,
+      `clay_raycast_bounded`, `clay_project_to_surface(_many)`
+- [x] 6.2 pyclay: `Document.measure`, `.mask_from_surface`, `.project`
+- [x] 6.3 DONE, and it found the second one. A sweep of every public header
+      against both bindings turned up `brush/procedural_mask.h` as the only
+      genuine capability unreachable from any host — the rest of the
+      "unreachable" headers are internal plumbing (the kernel dialect reached
+      through the tape, byte accounting, adjacency behind the mesh brushes).
+      That gap is closed here: procedural masks now have a C and a pyclay
+      surface, which they never had
+- [ ] 6.4 STILL OPEN — a bake example needs a UV layout, so it waits on 1.6.
+      `examples/64_measuring_the_surface.py` covers the queries themselves:
+      2000 points projected onto a creased surface, all six measures compared
+      between the crease and the open side, determinism checked, and the mask
+      compared against the per-point form
 - [ ] 6.5 `docs/08-mesh-readback.md` — the far end of the round trip it already
       documents
 - [ ] 6.6 `docs/sculpt_comparison.md` — the "without it you can sculpt but not

@@ -90,6 +90,10 @@ ALIASES = {
     "Document.eval": "clay_eval_points",
     "Document.colors": "clay_eval_points",  # the colors ride the same call
     "Document.gradients": "clay_eval_gradients",
+    # The C names say more than the Python ones can: "_points" marks the
+    # batched form, and "_to_surface" says what a projection projects onto.
+    "Document.measure": "clay_measure_points",
+    "Document.project": "clay_project_to_surface",
     "Document.raycast": "clay_raycast_attributed",  # pyclay's reports layer+item too
     "Volume.from_mesh": "clay_item_volume_from_mesh",
     "Volume.from_voxels": "clay_item_volume_from_voxels",

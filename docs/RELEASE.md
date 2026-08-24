@@ -70,6 +70,23 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.51.0 is not such a release**: additive — surface measures
+   (`clay_measure_points`, `clay_mask_from_surface`, `clay_measure_params`),
+   bounded rays (`clay_raycast_bounded`) and cage projection
+   (`clay_project_to_surface`, `_many`, `clay_projection`). No format change,
+   and nothing that compiled against 0.50.0 behaves differently.
+
+   The C++ HEADER changed shape even though the ABI only grew, and an embedder
+   compiling against the headers will see it: `SurfaceMeasure` moved from
+   `brush/procedural_mask.h` to `brush/surface_measure.h`, and
+   `ProceduralMaskSettings`'s measure fields (`scale`, `direction`,
+   `threshold`) moved into a nested `measure` member shared with the per-point
+   form. That is the point of the change rather than a side effect — one
+   implementation behind the mask and the point, so the two cannot drift — but
+   it is a source break for a C++ caller and it is why it is called out here.
+   No C or Python caller is affected: neither could reach the feature at all
+   before this release.
+
    **0.50.0 is not such a release**: additive — one opaque handle
    (`clay_groups`) and the surface-group entry points, plus a `'GRUP'` chunk at
    `.clayspace` minor 13. Nothing that compiled against 0.49.0 changes

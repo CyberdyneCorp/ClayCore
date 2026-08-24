@@ -51,7 +51,7 @@ ProceduralMaskSettings around(float extent, float cell, float scale = 0.05f) {
     s.region = math::Aabb{kernel::cf3(-extent, -extent, -extent),
                           kernel::cf3(extent, extent, extent)};
     s.cell_size = cell;
-    s.scale = scale;
+    s.measure.scale = scale;
     return s;
 }
 
@@ -138,7 +138,7 @@ TEST_CASE("procedural mask: a tighter feature masks more strongly than a gentle 
 TEST_CASE("procedural mask: normal direction masks a hemisphere, and the threshold narrows it") {
     const auto f = sphere(0.5f);
     ProceduralMaskSettings s = around(0.7f, 0.02f);
-    s.direction = kernel::cf3(0, 1, 0);
+    s.measure.direction = kernel::cf3(0, 1, 0);
 
     const voxel::MaskField up = mask_from_surface(f, SurfaceMeasure::NormalDirection, s);
     REQUIRE(up.painted_count() > 0);
@@ -147,7 +147,7 @@ TEST_CASE("procedural mask: normal direction masks a hemisphere, and the thresho
 
     // Raising the threshold NARROWS the cone rather than dimming everything,
     // which is what a caller means by a threshold.
-    s.threshold = 0.8f;
+    s.measure.threshold = 0.8f;
     const voxel::MaskField cone = mask_from_surface(f, SurfaceMeasure::NormalDirection, s);
     CHECK(cone.painted_count() < up.painted_count());
     CHECK(cone.sample(kernel::cf3(0, 0.5f, 0)) > 0.9f);  // the pole is still full

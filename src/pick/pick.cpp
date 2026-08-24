@@ -27,6 +27,90 @@ scene::Tape pickable_tape(const scene::Document& doc, const scene::CullRegion* c
     return scene::compile_document(without_ghosts, cull);
 }
 
+namespace {
+
+// The first surface crossing along a ray, within `tmax`, or a negative t.
+//
+// STEPS BY |f| AND DETECTS BY SIGN CHANGE, which is what makes it work from
+// either side of the surface. Two things a plain sphere-march gets wrong here:
+//
+//  - Started INSIDE, the signed distance is negative and the march cannot take
+//    a step at all. A cage point sits inside the high-polygon surface wherever
+//    the low-polygon pinches inward, so this is not an edge case, it is half
+//    the cage.
+//  - Marching |f| instead fixes the stepping and breaks the stopping: with no
+//    sign to watch, a hit can only be "close enough", and the over-relaxation
+//    that makes a march fast can step straight past the surface and never come
+//    back within tolerance.
+//
+// Stepping by the magnitude keeps the speed of a march — it is still the safe
+// distance to the nearest surface — while a sign change between consecutive
+// samples is an unambiguous crossing, whichever side it came from. Bisection
+// then places it exactly.
+float first_crossing(const std::function<float(cfloat3)>& field, const math::Ray& ray,
+                     float tmax) {
+    float t = 0.0f;
+    float f_prev = field(ray.origin);
+    if (f_prev == 0.0f) return 0.0f;
+    // A floor on the step, or a ray running parallel to a surface takes
+    // vanishing steps and never reaches tmax.
+    const float min_step = tmax * 1e-3f;
+    for (int i = 0; i < 512; ++i) {
+        const float step = kernel::cmax(std::fabs(f_prev), min_step);
+        const float t_next = t + step;
+        if (t_next > tmax) return -1.0f;
+        const float f = field(ray.at(t_next));
+        if ((f_prev < 0.0f) != (f < 0.0f)) {
+            float lo = t, hi = t_next, f_lo = f_prev;
+            for (int b = 0; b < 24; ++b) {
+                const float mid = (lo + hi) * 0.5f;
+                const float f_mid = field(ray.at(mid));
+                if ((f_lo < 0.0f) != (f_mid < 0.0f)) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                    f_lo = f_mid;
+                }
+            }
+            return (lo + hi) * 0.5f;
+        }
+        t = t_next;
+        f_prev = f;
+    }
+    return -1.0f;
+}
+
+}  // namespace
+
+Projection project_to_surface(const scene::Tape& tape, cfloat3 point, cfloat3 direction,
+                             float max_distance) {
+    Projection out;
+    if (!(max_distance > 0.0f)) return out;
+    const float len = kernel::clength(direction);
+    if (!(len > 0.0f)) return out;
+    const cfloat3 dir = kernel::cf3(direction.x / len, direction.y / len, direction.z / len);
+    auto field = [&](cfloat3 p) { return tape.eval(p).d; };
+
+    // Both ways, nearest wins.
+    const math::Ray forward{point, dir};
+    const math::Ray backward{point, kernel::cf3(-dir.x, -dir.y, -dir.z)};
+    const float tf = first_crossing(field, forward, max_distance);
+    const float tb = first_crossing(field, backward, max_distance);
+    if (tf < 0.0f && tb < 0.0f) return out;
+
+    // A point sitting exactly ON the surface crosses at t ~ 0 both ways; either
+    // answer is correct and the forward one is chosen so the sign is stable
+    // rather than decided by a float comparison of two zeros.
+    const bool take_forward = tf >= 0.0f && (tb < 0.0f || tf <= tb);
+    out.hit = true;
+    out.distance = take_forward ? tf : -tb;
+    out.position = take_forward ? forward.at(tf) : backward.at(tb);
+    // The NORMAL comes from the signed field, which is what has a meaningful
+    // gradient at the surface.
+    out.normal = kernel::cnormal(field, out.position, 1e-4f);
+    return out;
+}
+
 float next_visible_crossing(const std::function<float(cfloat3)>& field, const math::Ray& ray,
                             float t_start, float tmax, float step,
                             const voxel::GroupField& groups) {

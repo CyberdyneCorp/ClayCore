@@ -95,6 +95,7 @@ EXAMPLES = [
     "61_stopping_a_long_operation",
     "62_what_this_document_costs",
     "63_surface_groups",
+    "64_measuring_the_surface",
 ]
 
 

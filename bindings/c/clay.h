@@ -3064,6 +3064,156 @@ clay_result clay_item_set_gate(clay_item* item, const clay_mask* mask, float thr
 clay_result clay_mask_to_field(const clay_mask* mask, float threshold, float band, float pad,
                                float cell_size, clay_item** out_item);
 
+/* -- measuring the surface (ABI 0.51.0) -------------------------------------
+ *
+ * What the shape IS at a point: how it bends, how enclosed it is, how much
+ * material is behind it. The measures a cavity mask, a wear mask and a baked
+ * texture all want, and none of which this ABI could ask for.
+ *
+ * WHY THIS IS CHEAP ON A FIELD and expensive in a mesh engine. Curvature here
+ * is the field's LAPLACIAN, and its sign is unambiguous: for f = |p| - R the
+ * Laplacian at the surface is 2/R, POSITIVE for a convex surface. So cavity and
+ * convexity are one subtraction apart. A mesh has to estimate curvature from a
+ * vertex ring, which is a discrete approximation with a valence-dependent error.
+ *
+ * The same argument runs for occlusion. A mesh traces rays against triangles
+ * through an acceleration structure that must be rebuilt when the mesh changes;
+ * a field is marched directly, at any resolution, with nothing to build and
+ * nothing to invalidate — and it measures the ACTUAL surface rather than a
+ * tessellation of it.
+ *
+ * DETERMINISM. Every query in this library returns the same bits on every
+ * backend and every run. A hemisphere sample is the first thing that could
+ * quietly break that, so the pattern is a fixed low-discrepancy sequence
+ * rotated by a hash of the POINT and an explicit seed — not a random number
+ * generator, not thread-dependent, and not order-dependent. Same seed, same
+ * bits, every backend. */
+typedef enum clay_surface_measure {
+    CLAY_MEASURE_CURVATURE = 0,   /* |Laplacian|: anywhere the surface bends */
+    CLAY_MEASURE_CAVITY = 1,      /* concave only — crevices, folds, seams */
+    CLAY_MEASURE_CONVEXITY = 2,   /* convex only — hard edges, ridges */
+    CLAY_MEASURE_NORMAL_DIR = 3,  /* agreement with a direction: "facing up" */
+    /* How enclosed a point is: the blocked fraction of a hemisphere around the
+     * normal, within ray_length. 0 is open sky, 1 is fully enclosed.
+     * OCCLUSION, not lighting — the greater number is the darker place, since
+     * tools disagree about which way this runs. */
+    CLAY_MEASURE_OCCLUSION = 4,
+    /* Material behind the surface: the distance INWARD to where the field turns
+     * positive again, over ray_length. 1 is thicker than the probe could see. */
+    CLAY_MEASURE_THICKNESS = 5
+} clay_surface_measure;
+
+typedef struct clay_measure_params {
+    uint32_t struct_size; /* = sizeof(clay_measure_params); required */
+    /* Finite-difference step for the Laplacian and the normal, in world units.
+     * 0 derives one from `scale`. Smaller measures noise; larger blurs the
+     * feature being measured. */
+    float h;
+    /* Curvature/cavity/convexity: the RADIUS that reads as fully saturated.
+     * Curvature is 1/radius, so 0.05 means a 5 cm fillet reads 1.0. */
+    float scale;
+    float direction[3];  /* NORMAL_DIR only; need not be unit */
+    float threshold;     /* NORMAL_DIR only: dot product below which it reads 0 */
+    /* OCCLUSION and THICKNESS: how far a probe looks.
+     * THIS IS THE PARAMETER THAT DECIDES WHAT THE NUMBER MEANS — occlusion over
+     * 1 cm and over 1 m describe different things about the same point and
+     * neither is more correct. 0 takes 20x `scale`, and that is a guess. */
+    float ray_length;
+    /* Rays per hemisphere. Cost is linear in this and noise falls as its square
+     * root, so doubling quality costs four times. Thickness ignores it. */
+    int32_t ray_count;
+    /* Occlusion weight is 1/(1 + falloff * t), so a near blocker counts for
+     * more than a far one. 0 makes every hit count the same. */
+    float falloff;
+    uint32_t seed;  /* same seed, same bits — see the note above */
+} clay_measure_params;
+
+clay_result clay_measure_defaults(clay_measure_params* out_params);
+
+/* Measure at many points. points_xyz is count*3 floats, out_values is count.
+ *
+ * The points are taken AS GIVEN and are not projected onto the surface first: a
+ * caller sampling a mesh's vertices already has surface points, and one
+ * sampling a lattice wants the value where it asked. Use clay_project_to_surface
+ * when you have a cage rather than a surface.
+ *
+ * Cancellable, since a bake is millions of points and an occlusion sample is a
+ * march per ray. Progress is read FROM THE TOKEN with
+ * clay_cancel_token_progress, as it is for every other cancellable call here —
+ * one mechanism, not a second out-parameter that could disagree with it. A CANCELLED CALL LEAVES out_values UNSPECIFIED and says so —
+ * a half-written buffer read as complete is a texture with a band of garbage
+ * in it, which is worse than no texture. */
+clay_result clay_measure_points(const clay_document* doc, clay_surface_measure measure,
+                                const float* points_xyz, size_t count,
+                                const clay_measure_params* params, float* out_values,
+                                clay_cancel_token* token);
+
+/* Build a MASK from one of the same measures, over a region — the lattice form
+ * of the identical numbers, banded to the surface.
+ *
+ * ONE implementation behind both, so a mask and a measured point cannot
+ * disagree about the same surface. `cell_size` 0 derives one from the region
+ * (a guess); `band` 0 derives two cells. Cells outside the band stay at zero,
+ * because a measure taken deep inside a solid describes nothing an artist can
+ * see — the banding is this call's job and not clay_measure_points'.
+ *
+ * OCCLUSION and THICKNESS work here too and are far more expensive than the
+ * stencil measures: a lattice of a million cells is a million hemisphere
+ * samples. Prefer a coarse cell_size, and pass a token. */
+clay_result clay_mask_from_surface(const clay_document* doc, clay_surface_measure measure,
+                                   const float region_min[3], const float region_max[3],
+                                   float cell_size, float band,
+                                   const clay_measure_params* params, clay_mask** out_mask,
+                                   clay_cancel_token* token);
+
+/* -- bounded rays and cage projection (ABI 0.51.0) --------------------------
+ *
+ * clay_raycast searches to infinity, which cannot express "look 5 mm along this
+ * normal" — the query a bake cage and a snap tool both are. Worse, it makes a
+ * miss indistinguishable from a hit on the far side of the model, which is
+ * precisely what puts garbage in the seams of a baked texture.
+ *
+ * A second entry point rather than a parameter, because clay_raycast has
+ * shipped and its signature cannot grow. */
+clay_result clay_raycast_bounded(const clay_document* doc, const float origin[3],
+                                 const float dir[3], float tmin, float tmax, int32_t* out_hit,
+                                 float* out_t, float out_position[3], float out_normal[3]);
+
+typedef struct clay_projection {
+    uint32_t struct_size; /* = sizeof(clay_projection); required */
+    int32_t hit;
+    /* SIGNED, along `direction`: positive means the surface was found along it,
+     * negative against it. Returned by this call rather than recomputed from
+     * the position, because it IS the height-map value and deriving it again is
+     * a second chance to disagree about the sign. */
+    float distance;
+    float position[3];
+    float normal[3];
+} clay_projection;
+
+/* Project a point onto the surface, searching BOTH ways within max_distance.
+ *
+ * BOTH WAYS is the part a first implementation gets wrong. A cage point built
+ * from a low-polygon mesh may sit inside the high-polygon surface or outside
+ * it, depending on whether the low-poly bulges or pinches there, and the caller
+ * cannot know which. Searching only outward silently misses every point where
+ * the low-poly sits inside — most of a concave region, and exactly where a bake
+ * looks wrong.
+ *
+ * A miss within the bound is a miss, not a distant hit. */
+clay_result clay_project_to_surface(const clay_document* doc, const float point[3],
+                                    const float direction[3], float max_distance,
+                                    clay_projection* out_projection);
+
+/* The batched form, since a bake is millions of points. points_xyz and
+ * directions_xyz are each count*3 floats; the four outputs are count,
+ * count, count*3 and count*3, and any but the first may be NULL. */
+clay_result clay_project_to_surface_many(const clay_document* doc, const float* points_xyz,
+                                         const float* directions_xyz, size_t count,
+                                         float max_distance, int32_t* out_hits,
+                                         float* out_distances, float* out_positions_xyz,
+                                         float* out_normals_xyz, clay_cancel_token* token);
+
 /* -- surface groups: naming a region of the model (ABI 0.50.0) ---------------
  *
  * ZBrush's PolyGroups, Blender's Face Sets. This library had no such concept on
