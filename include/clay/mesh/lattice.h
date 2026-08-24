@@ -7,13 +7,21 @@
 // as an SDF deformer. A claycore SDF deformer is an INVERSE point map: it
 // answers "where did the material at p come from", because evaluating an
 // implicit field means asking about an arbitrary query point. Forward FFD has
-// no closed-form inverse, so a lattice on an SDF item needs one of three
-// compromises (see #116) and remains open.
+// no closed-form inverse, so a lattice on an SDF item needed one of three
+// compromises (see #116, now closed — and see below).
 //
 // A mesh has no such problem: it already knows where its vertices are. So the
 // cage is applied the way Blender and ZBrush apply theirs — find a vertex's
 // parameters in the cage, evaluate, move it — with no inversion, no iteration
 // and no approximation.
+//
+// #116 has since closed and an SDF lattice DOES exist: `cdeform_lattice` took
+// the third compromise, authoring the cage's offsets as the inverse warp
+// (`clattice_point`, clay/kernel/deform.h). The two remain different deformers
+// rather than one shared with two front ends, and deliberately: that one is not
+// the exact inverse of this one — they differ by under 1.5% of the drag — and
+// it is capped at CLAY_LATTICE_MAX_DIV divisions an axis against this one's 32,
+// because it runs per raymarch sample where this runs once per vertex.
 //
 // OFFSETS, NOT POSITIONS. The cage stores how far each control point has been
 // dragged from where it started, so a cage nobody has touched is EXACTLY the
