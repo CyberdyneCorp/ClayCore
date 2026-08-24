@@ -156,8 +156,13 @@ def main():
 
     # --- and it all survives a save ---------------------------------------
     groups.set_visible(BODY, False)
-    doc.save("output/63_groups.clayspace")
-    back = clay.load("output/63_groups.clayspace")
+    # R.output_path, not a relative string: it creates the directory and
+    # returns an ABSOLUTE path, so the example works whatever directory the
+    # gallery runner invokes it from. A relative "output/..." only works when
+    # the cwd happens to be examples/, which is how this failed in CI.
+    path = R.output_path("63_groups.clayspace")
+    doc.save(path)
+    back = clay.load(path)
     if not back.has_groups:
         raise SystemExit("the groups should have been written")
     reloaded = back.groups()
