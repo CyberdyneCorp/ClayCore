@@ -659,6 +659,31 @@ clay_result read_stroke(const float* samples_xyzpt, std::size_t sample_count,
     return CLAY_OK;
 }
 
+// The same, from the struct array that carries the channels a tablet reports.
+clay_result read_stroke_full(const clay_stroke_sample_full* samples, std::size_t sample_count,
+                             const clay_stroke_preset* preset,
+                             std::vector<brush::StrokeSample>* out_samples,
+                             brush::StrokePreset* out_preset) {
+    if (sample_count > 0 && !samples)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null stroke samples");
+    clay_result r = check_batch("stroke samples", sample_count);
+    if (r != CLAY_OK) return r;
+    r = read_preset(preset, out_preset);
+    if (r != CLAY_OK) return r;
+    out_samples->resize(sample_count);
+    for (std::size_t i = 0; i < sample_count; ++i) {
+        const clay_stroke_sample_full& in = samples[i];
+        brush::StrokeSample& out = (*out_samples)[i];
+        out.position = kernel::cf3(in.position[0], in.position[1], in.position[2]);
+        out.pressure = in.pressure;
+        out.tilt = in.tilt;
+        out.azimuth = in.azimuth;
+        out.velocity = in.velocity;
+        out.timestamp = in.timestamp;
+    }
+    return CLAY_OK;
+}
+
 clay_stamp to_c_stamp(const brush::Stamp& s) {
     clay_stamp out{};
     out.position[0] = s.position.x;
@@ -5481,9 +5506,35 @@ clay_result clay_stroke_preset_deserialize(const uint8_t* data, size_t size,
 clay_result clay_stroke_resolve(const float* samples_xyzpt, size_t sample_count,
                                 const clay_stroke_preset* preset, clay_stamp* out_stamps,
                                 size_t* count) {
+    // Sugar over the wider form: the flat count*5 packing widened in place
+    // would change the stride under every host already compiled against it.
+    // The three new channels default to zero, which is exactly the stroke this
+    // resolved before — a preset asking for neither the barrel nor a speed
+    // response ignores all three.
+    if (sample_count > 0 && !samples_xyzpt)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null stroke samples");
+    clay_result r = check_batch("stroke samples", sample_count);
+    if (r != CLAY_OK) return r;
+    std::vector<clay_stroke_sample_full> wide(sample_count);
+    for (std::size_t i = 0; i < sample_count; ++i) {
+        const float* row = samples_xyzpt + i * 5;
+        wide[i] = clay_stroke_sample_full{};
+        wide[i].position[0] = row[0];
+        wide[i].position[1] = row[1];
+        wide[i].position[2] = row[2];
+        wide[i].pressure = row[3];
+        wide[i].tilt = row[4];
+    }
+    return clay_stroke_resolve_full(wide.empty() ? nullptr : wide.data(), sample_count, preset,
+                                    out_stamps, count);
+}
+
+clay_result clay_stroke_resolve_full(const clay_stroke_sample_full* samples_in,
+                                     size_t sample_count, const clay_stroke_preset* preset,
+                                     clay_stamp* out_stamps, size_t* count) {
     std::vector<brush::StrokeSample> samples;
     brush::StrokePreset p;
-    clay_result r = read_stroke(samples_xyzpt, sample_count, preset, &samples, &p);
+    clay_result r = read_stroke_full(samples_in, sample_count, preset, &samples, &p);
     if (r != CLAY_OK) return r;
     std::vector<brush::Stamp> stamps = brush::resolve_stroke(samples, p);
 

@@ -93,11 +93,26 @@ struct PathPoint {
     cfloat3 position;
     cfloat3 direction;
     float pressure;
+    float azimuth = 0.0f;
+    float velocity = 0.0f;
 };
+
+// Interpolating an ANGLE by lerp is wrong across the wrap: 350 degrees and 10
+// degrees average to 180, which points the stamp backwards. Lerp the unit
+// vector instead and take the angle back, which takes the short way round by
+// construction.
+float lerp_angle(float a, float b, float t) {
+    const float x = std::cos(a) + (std::cos(b) - std::cos(a)) * t;
+    const float y = std::sin(a) + (std::sin(b) - std::sin(a)) * t;
+    if (std::fabs(x) < 1e-12f && std::fabs(y) < 1e-12f) return a;  // exactly opposed
+    return std::atan2(y, x);
+}
 
 PathPoint sample_path(const std::vector<StrokeSample>& path, const std::vector<float>& cumulative,
                       float d) {
-    if (path.size() == 1) return {path[0].position, kernel::cf3(1, 0, 0), path[0].pressure};
+    if (path.size() == 1)
+        return {path[0].position, kernel::cf3(1, 0, 0), path[0].pressure, path[0].azimuth,
+                path[0].velocity};
     std::size_t i = 1;
     while (i + 1 < path.size() && cumulative[i] < d) ++i;
     float span = cumulative[i] - cumulative[i - 1];
@@ -105,8 +120,11 @@ PathPoint sample_path(const std::vector<StrokeSample>& path, const std::vector<f
     cfloat3 a = path[i - 1].position, b = path[i].position;
     cfloat3 dir = b - a;
     float len = kernel::clength(dir);
-    return {a + (b - a) * t, len > 1e-9f ? dir * (1.0f / len) : kernel::cf3(1, 0, 0),
-            path[i - 1].pressure + (path[i].pressure - path[i - 1].pressure) * t};
+    return {a + (b - a) * t,
+            len > 1e-9f ? dir * (1.0f / len) : kernel::cf3(1, 0, 0),
+            path[i - 1].pressure + (path[i].pressure - path[i - 1].pressure) * t,
+            lerp_angle(path[i - 1].azimuth, path[i].azimuth, t),
+            path[i - 1].velocity + (path[i].velocity - path[i - 1].velocity) * t};
 }
 
 // Rotation taking +X onto `dir`, so a stamp can follow the path.
@@ -194,6 +212,11 @@ std::vector<std::uint8_t> StrokePreset::serialize() const {
     out.push_back(static_cast<std::uint8_t>(accumulation));
     put_f32(out, radius);
     put_f32(out, strength);
+    // -- version 2 ----------------------------------------------------------
+    out.push_back(rotate_to_azimuth ? 1 : 0);
+    put_f32(out, velocity_response.size);
+    put_f32(out, velocity_response.strength);
+    put_f32(out, velocity_response.reference);
     return out;
 }
 
@@ -232,6 +255,22 @@ std::optional<StrokePreset> StrokePreset::deserialize(const std::uint8_t* data, 
     p.radius = r.f32();
     p.strength = r.f32();
     if (!r.ok) return std::nullopt;
+
+    // -- version 2 ----------------------------------------------------------
+    // A version-1 preset stops here and keeps the defaults, which are exactly
+    // "speed changes nothing and the stamp follows the path" — the behaviour it
+    // had when it was written. That is the whole point of reading the version
+    // rather than the length.
+    if (version >= 2) {
+        if (r.remaining < 1) return std::nullopt;
+        p.rotate_to_azimuth = *r.p++ != 0;
+        --r.remaining;
+        p.velocity_response.size = r.f32();
+        p.velocity_response.strength = r.f32();
+        p.velocity_response.reference = r.f32();
+        if (!r.ok) return std::nullopt;
+    }
+
     if (!(p.spacing > 0.0f) || !(p.radius > 0.0f)) return std::nullopt;
     return p;
 }
@@ -276,7 +315,27 @@ std::vector<Stamp> resolve_stroke(const std::vector<StrokeSample>& samples,
         s.radius = stamp_radius(preset, at.pressure, along);
         s.strength = stamp_strength(preset, at.pressure);
         s.deposit = std::clamp(shaped_strength(preset, at.pressure), 0.0f, 1.0f);
-        if (preset.rotate_along_stroke) s.rotation = align_x_to(at.direction);
+
+        // Speed, in the same shape pressure already modulates. Signed on
+        // purpose: a fast stroke is WIDER for a dry brush and THINNER for an
+        // ink pen, and both are things artists ask for.
+        const VelocityResponse& vr = preset.velocity_response;
+        if (vr.reference > 0.0f && (vr.size != 0.0f || vr.strength != 0.0f)) {
+            const float speed = std::clamp(at.velocity / vr.reference, 0.0f, 1.0f);
+            if (vr.size != 0.0f) s.radius = std::max(s.radius * (1.0f + vr.size * speed), 0.0f);
+            if (vr.strength != 0.0f) {
+                s.strength = std::clamp(s.strength * (1.0f + vr.strength * speed), 0.0f, 1.0f);
+                s.deposit = std::clamp(s.deposit * (1.0f + vr.strength * speed), 0.0f, 1.0f);
+            }
+        }
+
+        // The barrel wins over the path where both are asked for: a caller that
+        // set rotate_to_azimuth meant the barrel, and a stamp cannot face two
+        // ways.
+        if (preset.rotate_to_azimuth)
+            s.rotation = align_x_to(kernel::cf3(std::cos(at.azimuth), 0.0f, std::sin(at.azimuth)));
+        else if (preset.rotate_along_stroke)
+            s.rotation = align_x_to(at.direction);
 
         auto index = static_cast<std::uint32_t>(i);
         if (preset.jitter_position > 0.0f) {

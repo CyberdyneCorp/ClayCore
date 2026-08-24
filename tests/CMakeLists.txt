@@ -100,6 +100,7 @@ add_executable(clay_unit_tests
   unit/test_mask_history.cpp
   unit/test_history_budget.cpp
   unit/test_surface_groups.cpp
+  unit/test_stroke_input.cpp
   unit/test_c_undo_spans.cpp
   unit/test_c_tape_export.cpp
   unit/test_c_host_volume_path.cpp

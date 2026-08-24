@@ -39,6 +39,27 @@ struct StrokeSample {
     kernel::cfloat3 position = kernel::cf3(0, 0, 0);
     float pressure = 1.0f;  // [0,1]
     float tilt = 0.0f;      // radians from the surface normal; 0 is upright
+
+    // -- the three a tablet reports and this could not carry -----------------
+    //
+    // AZIMUTH is the one that unlocks a capability rather than refining one.
+    // Tilt says HOW FAR the stylus is leaning; azimuth says WHICH WAY. Without
+    // it a stamp can follow the path (rotate_along_stroke) but cannot follow
+    // the BARREL, so a directional or rake brush — a chisel held at an angle,
+    // a comb dragged sideways — is not expressible at all. Radians, measured
+    // in the surface plane; 0 is +x. Ignored when tilt is 0, because a stylus
+    // held upright has no direction to lean in.
+    float azimuth = 0.0f;
+    // VELOCITY in world units per second. What speed-driven size and flow read
+    // — the difference between a confident sweep and a slow deliberate line —
+    // and what a host cannot derive here because it, not the engine, knows the
+    // wall-clock gap between two events.
+    float velocity = 0.0f;
+    // TIMESTAMP in seconds on the host's clock. Kept even though velocity is
+    // given, because a resolver that wants to re-derive speed across a
+    // COALESCED run of samples needs the interval and cannot recover it from
+    // per-sample velocities. Zero means the host did not supply one.
+    double timestamp = 0.0;
 };
 
 // How pressure drives a stamp. Each is an exponent on the normalized
@@ -49,6 +70,23 @@ struct PressureResponse {
     float size = 0.0f;      // 0 = pressure does not change the radius
     float strength = 1.0f;  // 0 = pressure does not change the strength
     float curve = 1.0f;     // exponent applied to pressure before either
+};
+
+// How SPEED drives a stamp, in the same shape PressureResponse has so a host
+// that learned one has learned the other.
+//
+// The reference speed is what reads as "fast": at it the response is fully
+// applied, and below it proportionally less. Zero on both channels — the
+// default — means speed changes nothing, so a host that never sets it gets
+// exactly the strokes it got before.
+struct VelocityResponse {
+    // Signed, and that is the point. POSITIVE size means a fast stroke is
+    // WIDER (a dry-brush sweep); NEGATIVE means a fast stroke is thinner (an
+    // ink pen). Both are things artists ask for, and picking one for them
+    // would be wrong half the time.
+    float size = 0.0f;
+    float strength = 0.0f;
+    float reference = 1.0f;  // world units per second that reads as "fast"
 };
 
 // How overlapping stamps combine.
@@ -65,7 +103,11 @@ enum class Accumulation : std::uint8_t {
 // release rather than being retrofitted: presets outlive engine versions, and
 // a library of them silently reinterpreted by a later build is the failure
 // this number is here to prevent.
-inline constexpr std::uint16_t kPresetVersion = 1;
+// Version 2 adds rotate_to_azimuth and the velocity response. A version-1
+// preset still deserializes and takes the defaults for both, which is exactly
+// "speed changes nothing and the stamp follows the path" — the behaviour it had
+// when it was written.
+inline constexpr std::uint16_t kPresetVersion = 2;
 
 struct StrokePreset {
     // Distance between stamps as a fraction of the brush DIAMETER. 0.25 is a
@@ -85,6 +127,18 @@ struct StrokePreset {
     // Turn each stamp to follow the path. Off by default: it only matters for
     // stamps that are not rotationally symmetric.
     bool rotate_along_stroke = false;
+
+    // Turn each stamp to follow the STYLUS BARREL instead of the path — the
+    // rake and chisel brushes, where the tool's own angle is the point and the
+    // direction of travel is not.
+    //
+    // Mutually exclusive with rotate_along_stroke by construction rather than
+    // by validation: they are two answers to one question, and a stamp cannot
+    // face two ways. This one wins where both are set, because a caller that
+    // asked for the barrel meant the barrel.
+    bool rotate_to_azimuth = false;
+
+    VelocityResponse velocity_response;
 
     // Fraction of the stroke's length over which the radius ramps in at the
     // start and out at the end. 0 disables. Their sum is clamped to 1.
