@@ -28,6 +28,8 @@
 #include "clay/field/flatten.h"
 #include "clay/field/move_topological.h"
 #include "clay/field/relax.h"
+#include "clay/brush/procedural_mask.h"
+#include "clay/brush/surface_measure.h"
 #include "clay/kernel/field.h"
 #include "clay/io/clayspace.h"
 #include "clay/io/mesh_io.h"
@@ -518,6 +520,10 @@ inline clay_memory_report to_c_report(const io::MemoryReport& r) {
     out.mask_count = r.mask_count;
     return out;
 }
+constexpr std::size_t kMeasureParamsOriginal =
+    offsetof(clay_measure_params, seed) + sizeof(std::uint32_t);
+constexpr std::size_t kProjectionOriginal =
+    offsetof(clay_projection, normal) + sizeof(float) * 3;
 constexpr std::size_t kProgressOriginal = offsetof(clay_progress, total) + sizeof(std::uint64_t);
 constexpr std::size_t kValidationReportOriginal =
     offsetof(clay_validation_report, euler_characteristic) + sizeof(std::int64_t);
@@ -1293,6 +1299,41 @@ eval::Status raycast_visible(eval::Backend* b, const scene::Tape& tape, const fl
     out->normal[1] = n.y;
     out->normal[2] = n.z;
     return eval::Status::Ok;
+}
+
+// Surface measures. FILE SCOPE, above the first extern "C" — a helper defined
+// inside that block is what broke the macOS and Windows builds in #235, and GCC
+// does not warn about it.
+clay_result to_measure(clay_surface_measure in, brush::SurfaceMeasure* out) {
+    switch (in) {
+        case CLAY_MEASURE_CURVATURE: *out = brush::SurfaceMeasure::Curvature; return CLAY_OK;
+        case CLAY_MEASURE_CAVITY: *out = brush::SurfaceMeasure::Cavity; return CLAY_OK;
+        case CLAY_MEASURE_CONVEXITY: *out = brush::SurfaceMeasure::Convexity; return CLAY_OK;
+        case CLAY_MEASURE_NORMAL_DIR: *out = brush::SurfaceMeasure::NormalDirection; return CLAY_OK;
+        case CLAY_MEASURE_OCCLUSION: *out = brush::SurfaceMeasure::AmbientOcclusion; return CLAY_OK;
+        case CLAY_MEASURE_THICKNESS: *out = brush::SurfaceMeasure::Thickness; return CLAY_OK;
+    }
+    return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown surface measure");
+}
+
+// Null params means "the defaults", which is what a caller measuring curvature
+// with no opinion about the stencil wants — and is why every field has a
+// meaningful zero-derived value rather than requiring the struct.
+clay_result read_measure_params(const clay_measure_params* params,
+                                brush::MeasureSettings* out) {
+    if (!params) return CLAY_OK;  // *out is already default-constructed
+    clay_measure_params p;
+    clay_result r = read_desc(params, kMeasureParamsOriginal, &p);
+    if (r != CLAY_OK) return r;
+    out->h = p.h;
+    out->scale = p.scale;
+    out->direction = kernel::cf3(p.direction[0], p.direction[1], p.direction[2]);
+    out->threshold = p.threshold;
+    out->ray_length = p.ray_length;
+    out->ray_count = p.ray_count;
+    out->falloff = p.falloff;
+    out->seed = p.seed;
+    return CLAY_OK;
 }
 
 // Surface groups. FILE SCOPE, above the first extern "C" — a helper defined
@@ -6135,6 +6176,221 @@ clay_result clay_mask_to_field(const clay_mask* mask, float threshold, float ban
     item->node.prim = scene::Prim::volume();
     item->node.volume = std::make_shared<field::FieldVolume>(std::move(*volume));
     *out_item = item;
+    return CLAY_OK;
+}
+
+// -- measuring the surface, bounded rays, cage projection (add-claycore-bridge)
+
+clay_result clay_measure_defaults(clay_measure_params* out_params) {
+    if (!out_params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_params");
+    clay_measure_params probe;
+    clay_result r = read_desc(out_params, kMeasureParamsOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_params->struct_size;
+    const brush::MeasureSettings d;
+    clay_measure_params filled{};
+    filled.h = d.h;
+    filled.scale = d.scale;
+    filled.direction[0] = d.direction.x;
+    filled.direction[1] = d.direction.y;
+    filled.direction[2] = d.direction.z;
+    filled.threshold = d.threshold;
+    filled.ray_length = d.ray_length;
+    filled.ray_count = d.ray_count;
+    filled.falloff = d.falloff;
+    filled.seed = d.seed;
+    write_desc(out_params, declared, filled);
+    return CLAY_OK;
+}
+
+clay_result clay_measure_points(const clay_document* doc, clay_surface_measure measure,
+                                const float* points_xyz, size_t count,
+                                const clay_measure_params* params, float* out_values,
+                                clay_cancel_token* token) {
+    if (!doc || (count > 0 && (!points_xyz || !out_values)))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    if (count == 0) return CLAY_OK;  // no points is no work, not a rejected query
+    brush::MeasureSettings settings;
+    clay_result r = read_measure_params(params, &settings);
+    if (r != CLAY_OK) return r;
+    brush::SurfaceMeasure m;
+    r = to_measure(measure, &m);
+    if (r != CLAY_OK) return r;
+
+    std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
+    const scene::Tape& tape = *tape_ref;
+    if (tape.empty()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty document");
+    auto field = [&tape](kernel::cfloat3 p) { return tape.eval(p).d; };
+
+    std::vector<kernel::cfloat3> pts(count);
+    for (std::size_t i = 0; i < count; ++i)
+        pts[i] = kernel::cf3(points_xyz[i * 3], points_xyz[i * 3 + 1], points_xyz[i * 3 + 2]);
+
+    bool cancelled = false;
+    brush::measure_points(field, m, pts.data(), count, settings, out_values,
+                          token ? &token->token : nullptr, &cancelled);
+    if (cancelled) return fail(CLAY_ERROR_CANCELLED, "measurement cancelled");
+    return CLAY_OK;
+}
+
+clay_result clay_mask_from_surface(const clay_document* doc, clay_surface_measure measure,
+                                   const float region_min[3], const float region_max[3],
+                                   float cell_size, float band,
+                                   const clay_measure_params* params, clay_mask** out_mask,
+                                   clay_cancel_token* token) {
+    if (!doc || !region_min || !region_max || !out_mask)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_mask = nullptr;
+    brush::MeasureSettings settings;
+    clay_result r = read_measure_params(params, &settings);
+    if (r != CLAY_OK) return r;
+    brush::SurfaceMeasure m;
+    r = to_measure(measure, &m);
+    if (r != CLAY_OK) return r;
+
+    std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
+    const scene::Tape& tape = *tape_ref;
+    if (tape.empty()) return fail(CLAY_ERROR_INVALID_ARGUMENT, "empty document");
+    auto field = [&tape](kernel::cfloat3 p) { return tape.eval(p).d; };
+
+    brush::ProceduralMaskSettings ps;
+    ps.cell_size = cell_size;
+    ps.band = band;
+    ps.region = math::Aabb{kernel::cf3(region_min[0], region_min[1], region_min[2]),
+                           kernel::cf3(region_max[0], region_max[1], region_max[2])};
+    ps.measure = settings;
+    if (ps.region.empty() || ps.region.is_infinite())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "region must be bounded and non-empty");
+
+    bool cancelled = false;
+    voxel::MaskField built =
+        brush::mask_from_surface(field, m, ps, token ? &token->token : nullptr, &cancelled);
+    if (cancelled) return fail(CLAY_ERROR_CANCELLED, "measurement cancelled");
+    // An EMPTY mask is returned rather than refused: "the region contained no
+    // surface" is an answer, and a caller can ask painted_count. A cancel is
+    // the error, which is how the two are told apart — both come back empty.
+    auto* handle = new clay_mask();
+    handle->owned = new voxel::MaskField(std::move(built));
+    *out_mask = handle;
+    return CLAY_OK;
+}
+
+clay_result clay_raycast_bounded(const clay_document* doc, const float origin[3],
+                                 const float dir[3], float tmin, float tmax, int32_t* out_hit,
+                                 float* out_t, float out_position[3], float out_normal[3]) {
+    if (!doc || !origin || !dir || !out_hit)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    if (!(tmax > tmin)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "tmax must exceed tmin");
+    *out_hit = 0;
+    std::shared_ptr<const scene::Tape> tape_ref = doc->pickable_tape();
+    const scene::Tape& tape = *tape_ref;
+    if (tape.empty()) return CLAY_OK;  // nothing to hit is not an error
+
+    pick::RaycastOptions opts;
+    opts.tmin = tmin;
+    opts.tmax = tmax;
+    if (doc->doc.groups) opts.groups = &*doc->doc.groups;
+    const math::Ray ray{kernel::cf3(origin[0], origin[1], origin[2]),
+                        kernel::cnormalize(kernel::cf3(dir[0], dir[1], dir[2]))};
+    const pick::SceneHit hit = pick::raycast_scene(doc->doc.document, ray, opts);
+    *out_hit = hit.hit ? 1 : 0;
+    if (out_t) *out_t = hit.t;
+    if (out_position) {
+        out_position[0] = hit.position.x;
+        out_position[1] = hit.position.y;
+        out_position[2] = hit.position.z;
+    }
+    if (out_normal) {
+        out_normal[0] = hit.normal.x;
+        out_normal[1] = hit.normal.y;
+        out_normal[2] = hit.normal.z;
+    }
+    return CLAY_OK;
+}
+
+clay_result clay_project_to_surface(const clay_document* doc, const float point[3],
+                                    const float direction[3], float max_distance,
+                                    clay_projection* out_projection) {
+    if (!doc || !point || !direction || !out_projection)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    clay_projection probe;
+    clay_result r = read_desc(out_projection, kProjectionOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_projection->struct_size;
+    if (!(max_distance > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "max_distance must be positive");
+
+    std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
+    const pick::Projection p = pick::project_to_surface(
+        *tape_ref, kernel::cf3(point[0], point[1], point[2]),
+        kernel::cf3(direction[0], direction[1], direction[2]), max_distance);
+
+    clay_projection filled{};
+    filled.hit = p.hit ? 1 : 0;
+    filled.distance = p.distance;
+    filled.position[0] = p.position.x;
+    filled.position[1] = p.position.y;
+    filled.position[2] = p.position.z;
+    filled.normal[0] = p.normal.x;
+    filled.normal[1] = p.normal.y;
+    filled.normal[2] = p.normal.z;
+    write_desc(out_projection, declared, filled);
+    return CLAY_OK;
+}
+
+clay_result clay_project_to_surface_many(const clay_document* doc, const float* points_xyz,
+                                         const float* directions_xyz, size_t count,
+                                         float max_distance, int32_t* out_hits,
+                                         float* out_distances, float* out_positions_xyz,
+                                         float* out_normals_xyz, clay_cancel_token* token) {
+    if (!doc || (count > 0 && (!points_xyz || !directions_xyz || !out_hits)))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    if (count == 0) return CLAY_OK;
+    if (!(max_distance > 0.0f))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "max_distance must be positive");
+
+    std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
+    const scene::Tape& tape = *tape_ref;
+    parallel::CancelToken* tok = token ? &token->token : nullptr;
+    // ONE PHASE, not one per point. The second argument is a PHASE COUNT —
+    // passing the work count both narrows size_t to uint32_t (which MSVC /WX
+    // rejects and GCC accepts silently) and means the wrong thing: the
+    // per-item figure is what advance() carries.
+    parallel::ProgressScope progress(tok, 1);
+    std::atomic<bool> stop{false};
+
+    // A cancelled chunk RETURNS NORMALLY and never throws: thread_pool.h's join
+    // waits for `done >= num_tasks` and increments only after fn returns, so a
+    // throw here would hang the join forever.
+    parallel::for_range(count, 64, [&](std::size_t first, std::size_t last) {
+        if (stop.load(std::memory_order_relaxed)) return;
+        if (parallel::cancelled(tok)) {
+            stop.store(true, std::memory_order_relaxed);
+            return;
+        }
+        for (std::size_t i = first; i < last; ++i) {
+            const pick::Projection p = pick::project_to_surface(
+                tape, kernel::cf3(points_xyz[i * 3], points_xyz[i * 3 + 1], points_xyz[i * 3 + 2]),
+                kernel::cf3(directions_xyz[i * 3], directions_xyz[i * 3 + 1],
+                            directions_xyz[i * 3 + 2]),
+                max_distance);
+            out_hits[i] = p.hit ? 1 : 0;
+            if (out_distances) out_distances[i] = p.distance;
+            if (out_positions_xyz) {
+                out_positions_xyz[i * 3] = p.position.x;
+                out_positions_xyz[i * 3 + 1] = p.position.y;
+                out_positions_xyz[i * 3 + 2] = p.position.z;
+            }
+            if (out_normals_xyz) {
+                out_normals_xyz[i * 3] = p.normal.x;
+                out_normals_xyz[i * 3 + 1] = p.normal.y;
+                out_normals_xyz[i * 3 + 2] = p.normal.z;
+            }
+        }
+        progress.advance(last, static_cast<float>(last) / static_cast<float>(count));
+    });
+    if (stop.load(std::memory_order_relaxed))
+        return fail(CLAY_ERROR_CANCELLED, "projection cancelled");
     return CLAY_OK;
 }
 

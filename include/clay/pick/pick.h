@@ -62,6 +62,39 @@ struct SceneHit {
 // depending on which entry point ran would be worse than no ghosting at all.
 scene::Tape pickable_tape(const scene::Document& doc, const scene::CullRegion* cull = nullptr);
 
+// PROJECT A POINT ONTO THE SURFACE, searching BOTH ways within a distance
+// (add-claycore-bridge).
+//
+// The query a bake cage is, and a snap tool too. Given a point and a direction
+// — usually a low-polygon vertex and its normal — find the nearest surface
+// within `max_distance`, and report how far it was.
+//
+// BOTH DIRECTIONS, and that is the part a first implementation gets wrong. A
+// cage point produced from a low-polygon mesh may sit INSIDE the high-polygon
+// surface or outside it, depending on whether the low-poly bulges or pinches
+// there, and the caller cannot know which. Searching only outward silently
+// misses every point where the low-poly sits inside — which is most of a
+// concave region, and exactly where a bake looks wrong.
+//
+// THE SIGNED DISTANCE IS RETURNED BY THIS CALL and not computed by the caller,
+// because it IS the height-map value and recomputing it from the returned point
+// is a second chance to disagree about the sign. Positive means the surface was
+// found along `direction`, negative against it.
+//
+// BOUNDED BY CONSTRUCTION: an unbounded search is not a cage, it is a nearest-
+// surface query, and it will happily return a point on the other side of the
+// model. A miss within the bound is reported as a miss rather than as a distant
+// hit — that distinction is what keeps garbage out of the seams of a bake.
+struct Projection {
+    bool hit = false;
+    float distance = 0.0f;  // SIGNED, along `direction`
+    kernel::cfloat3 position = kernel::cf3(0, 0, 0);
+    kernel::cfloat3 normal = kernel::cf3(0, 1, 0);
+};
+
+Projection project_to_surface(const scene::Tape& tape, kernel::cfloat3 point,
+                              kernel::cfloat3 direction, float max_distance);
+
 // The next surface crossing along a ray that is NOT hidden, or a negative t if
 // there is none before `tmax`.
 //

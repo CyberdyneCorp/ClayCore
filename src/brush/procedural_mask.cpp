@@ -1,5 +1,7 @@
 #include "clay/brush/procedural_mask.h"
 
+#include "clay/brush/surface_measure.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -11,26 +13,6 @@ namespace brush {
 using kernel::cfloat3;
 using voxel::MaskField;
 using voxel::VoxelCoord;
-
-namespace {
-
-// The Laplacian of a distance field, by the six-point stencil.
-//
-// For f = |p| - R, a sphere of radius R, this is 2/R at the surface — POSITIVE
-// for a convex surface, and the magnitude is the curvature. That unambiguous
-// sign is why cavity and convexity are one subtraction apart here and an
-// error-prone vertex-ring estimate in a mesh engine.
-float laplacian(const std::function<float(cfloat3)>& f, cfloat3 p, float h) {
-    const float c = f(p);
-    const float sum = f(kernel::cf3(p.x + h, p.y, p.z)) + f(kernel::cf3(p.x - h, p.y, p.z)) +
-                      f(kernel::cf3(p.x, p.y + h, p.z)) + f(kernel::cf3(p.x, p.y - h, p.z)) +
-                      f(kernel::cf3(p.x, p.y, p.z + h)) + f(kernel::cf3(p.x, p.y, p.z - h));
-    return (sum - 6.0f * c) / (h * h);
-}
-
-float saturate(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
-
-}  // namespace
 
 MaskField mask_from_surface(const std::function<float(cfloat3)>& source, SurfaceMeasure measure,
                             const ProceduralMaskSettings& settings, parallel::CancelToken* token,
@@ -49,18 +31,20 @@ MaskField mask_from_surface(const std::function<float(cfloat3)>& source, Surface
         if (!(cell > 0.0f)) return MaskField(0.05f);
     }
     const float band = settings.band > 0.0f ? settings.band : cell * 2.0f;
-    // The stencil step. A cell is the natural scale: smaller measures noise the
-    // lattice cannot represent, larger blurs the feature being measured.
-    const float h = cell;
-    const float scale = settings.scale > 0.0f ? settings.scale : cell;
+
+    // The shared measure settings, with the lattice's own defaults filled in
+    // where the caller left them at zero. A CELL is the natural stencil step
+    // here: smaller measures noise the lattice cannot represent, larger blurs
+    // the feature being measured. The per-point form has no lattice and
+    // derives its step from `scale` instead, which is the one place the two
+    // legitimately differ — and it is a default, not a formula.
+    MeasureSettings m = settings.measure;
+    if (!(m.h > 0.0f)) m.h = cell;
+    if (!(m.scale > 0.0f)) m.scale = cell;
 
     MaskField out(cell);
     const VoxelCoord lo = out.cell_at(region.min);
     const VoxelCoord hi = out.cell_at(region.max);
-
-    const cfloat3 dir = kernel::clength(settings.direction) > 0.0f
-                            ? kernel::cnormalize(settings.direction)
-                            : kernel::cf3(0.0f, 1.0f, 0.0f);
 
     parallel::ProgressScope progress(token, 1);
     const std::int64_t planes = static_cast<std::int64_t>(hi.z) - lo.z + 1;
@@ -87,29 +71,11 @@ MaskField mask_from_surface(const std::function<float(cfloat3)>& source, Surface
                 // nothing an artist can see.
                 if (std::fabs(d) > band) continue;
 
-                float value = 0.0f;
-                if (measure == SurfaceMeasure::NormalDirection) {
-                    const cfloat3 n = kernel::cnormal(source, p, h);
-                    const float agreement = kernel::cdot(n, dir);
-                    if (agreement <= settings.threshold) continue;
-                    // Remap [threshold, 1] onto [0, 1], so raising the
-                    // threshold narrows the cone rather than dimming the whole
-                    // mask — which is what a caller means by a threshold.
-                    const float span = 1.0f - settings.threshold;
-                    value = span > 0.0f ? (agreement - settings.threshold) / span : 1.0f;
-                } else {
-                    const float lap = laplacian(source, p, h);
-                    // scale is the RADIUS that reads as fully masked, and
-                    // curvature is 1/radius, so the product is the fraction.
-                    const float k = lap * scale;
-                    switch (measure) {
-                        case SurfaceMeasure::Curvature: value = std::fabs(k); break;
-                        case SurfaceMeasure::Cavity: value = -k; break;      // concave
-                        case SurfaceMeasure::Convexity: value = k; break;    // convex
-                        case SurfaceMeasure::NormalDirection: break;         // handled above
-                    }
-                }
-                value = saturate(value);
+                // ONE implementation of the measure, shared with the
+                // per-point form. A second stencil here would be a second
+                // chance for a mask and a baked map to disagree about the
+                // same surface.
+                const float value = measure_at(source, measure, p, m);
                 if (value > 0.0f) out.set(c, value);
             }
     }

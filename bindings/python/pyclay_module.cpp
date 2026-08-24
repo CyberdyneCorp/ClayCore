@@ -28,6 +28,8 @@
 #include "clay/field/move_topological.h"
 #include "clay/field/relax.h"
 #include "clay/field/volume.h"
+#include "clay/brush/surface_measure.h"
+#include "clay/brush/procedural_mask.h"
 #include "clay/kernel/field.h"
 #include "clay/io/clayspace.h"
 #include "clay/io/memory.h"
@@ -780,6 +782,39 @@ const voxel::MaskField* borrow_mask(nb::handle mask) {
 // uncached, because there is no object for the memo to live on.
 const std::shared_ptr<brush::GateBake>& gate_bake_of(nb::handle mask) {
     return nb::cast<PyMaskField&>(mask).gate_bake;
+}
+
+
+brush::SurfaceMeasure measure_from_name(const std::string& name) {
+    if (name == "curvature") return brush::SurfaceMeasure::Curvature;
+    if (name == "cavity") return brush::SurfaceMeasure::Cavity;
+    if (name == "convexity") return brush::SurfaceMeasure::Convexity;
+    if (name == "normal_direction") return brush::SurfaceMeasure::NormalDirection;
+    if (name == "occlusion") return brush::SurfaceMeasure::AmbientOcclusion;
+    if (name == "thickness") return brush::SurfaceMeasure::Thickness;
+    throw std::invalid_argument(
+        "measure must be curvature/cavity/convexity/normal_direction/occlusion/thickness, got '" +
+        name + "'");
+}
+
+// None means "the defaults", which is what a caller measuring curvature with no
+// opinion about the stencil wants.
+brush::MeasureSettings measure_settings_from(nb::handle params) {
+    brush::MeasureSettings s;
+    if (!params.is_valid() || params.is_none()) return s;
+    nb::dict d = nb::cast<nb::dict>(params);
+    auto get = [&](const char* k, float& into) {
+        if (d.contains(k)) into = nb::cast<float>(d[k]);
+    };
+    get("h", s.h);
+    get("scale", s.scale);
+    get("threshold", s.threshold);
+    get("ray_length", s.ray_length);
+    get("falloff", s.falloff);
+    if (d.contains("direction")) s.direction = to_f3(d["direction"], "direction");
+    if (d.contains("ray_count")) s.ray_count = nb::cast<int>(d["ray_count"]);
+    if (d.contains("seed")) s.seed = nb::cast<std::uint32_t>(d["seed"]);
+    return s;
 }
 
 // -- document / layer wrappers ------------------------------------------------
@@ -4933,6 +4968,110 @@ NB_MODULE(pyclay, m) {
              "resolved once at import rather than approximated by a layer\n"
              "transform. The layer's own transform is applied by whatever exports\n"
              "it, and moving the layer does not move the stored vertices.")
+        .def(
+            "measure",
+            [](const PyDocument& d, const std::string& measure, nb::handle points,
+               nb::handle params) {
+                brush::SurfaceMeasure m = measure_from_name(measure);
+                brush::MeasureSettings s = measure_settings_from(params);
+                auto arr = nb::cast<nb::ndarray<const float, nb::ndim<2>, nb::c_contig>>(points);
+                if (arr.shape(1) != 3) throw std::invalid_argument("points must be (N, 3)");
+                const std::size_t n = arr.shape(0);
+                std::shared_ptr<const scene::Tape> tape_ref =
+                    std::make_shared<scene::Tape>(scene::compile_document(d.doc->document));
+                if (tape_ref->empty()) throw std::runtime_error("the document is empty");
+                std::vector<kernel::cfloat3> pts(n);
+                for (std::size_t i = 0; i < n; ++i)
+                    pts[i] = kernel::cf3(arr.data()[i * 3], arr.data()[i * 3 + 1],
+                                         arr.data()[i * 3 + 2]);
+                nb::module_ np = nb::module_::import_("numpy");
+                nb::object out = np.attr("empty")(nb::make_tuple(n), "dtype"_a = "float32");
+                auto ov = nb::cast<nb::ndarray<float, nb::ndim<1>, nb::c_contig>>(out);
+                {
+                    nb::gil_scoped_release release;
+                    auto field = [&](kernel::cfloat3 p) { return tape_ref->eval(p).d; };
+                    brush::measure_points(field, m, pts.data(), n, s, ov.data());
+                }
+                return out;
+            },
+            "measure"_a, "points"_a, "params"_a = nb::none(),
+            "Measure the surface at points: 'curvature', 'cavity', 'convexity',\n"
+            "'normal_direction', 'occlusion' or 'thickness'.\n\n"
+            "WHY THIS IS CHEAP ON A FIELD. Curvature is the LAPLACIAN and its\n"
+            "sign is unambiguous — for f = |p| - R it is 2/R at the surface,\n"
+            "POSITIVE for convex — so cavity and convexity are one subtraction\n"
+            "apart. A mesh has to estimate curvature from a vertex ring, which\n"
+            "is a discrete approximation with a valence-dependent error. The\n"
+            "same runs for occlusion: a field is marched directly with nothing\n"
+            "to build and nothing to invalidate, and it measures the ACTUAL\n"
+            "surface rather than a tessellation of it.\n\n"
+            "OCCLUSION is occlusion, not lighting: 0 is open sky and 1 is fully\n"
+            "enclosed. THICKNESS is how much material is behind the point.\n\n"
+            "Points are taken AS GIVEN and not projected onto the surface —\n"
+            "use project() when you have a cage rather than surface points.\n\n"
+            "DETERMINISTIC: the hemisphere pattern is a fixed low-discrepancy\n"
+            "sequence rotated by a hash of the point and `seed`, so the same\n"
+            "seed gives the same bits on every backend and every run.")
+        .def(
+            "mask_from_surface",
+            [](const PyDocument& d, const std::string& measure, nb::handle region,
+               float cell_size, float band, nb::handle params) {
+                brush::ProceduralMaskSettings ps;
+                ps.cell_size = cell_size;
+                ps.band = band;
+                ps.region = to_aabb(region);
+                ps.measure = measure_settings_from(params);
+                if (ps.region.empty() || ps.region.is_infinite())
+                    throw std::invalid_argument("region must be bounded and non-empty");
+                const brush::SurfaceMeasure m = measure_from_name(measure);
+                scene::Tape tape = scene::compile_document(d.doc->document);
+                if (tape.empty()) throw std::runtime_error("the document is empty");
+                PyMaskField out;
+                {
+                    nb::gil_scoped_release release;
+                    auto field = [&](kernel::cfloat3 p) { return tape.eval(p).d; };
+                    out.owned = std::make_shared<voxel::MaskField>(
+                        brush::mask_from_surface(field, m, ps));
+                }
+                return out;
+            },
+            "measure"_a, "region"_a, "cell_size"_a = 0.0f, "band"_a = 0.0f,
+            "params"_a = nb::none(),
+            "The LATTICE form of the same measures — a mask, banded to the\n"
+            "surface. One implementation behind both, so a mask and a measured\n"
+            "point cannot disagree about the same surface.\n\n"
+            "Cells outside the band stay at zero: a measure taken deep inside a\n"
+            "solid describes nothing an artist can see. The banding is this\n"
+            "call's job and not measure()'s.\n\n"
+            "'occlusion' and 'thickness' work here and are far more expensive\n"
+            "than the stencil measures — a million cells is a million\n"
+            "hemisphere samples. Prefer a coarse cell_size.")
+        .def(
+            "project",
+            [](const PyDocument& d, nb::handle point, nb::handle direction,
+               float max_distance) -> nb::object {
+                scene::Tape tape = scene::compile_document(d.doc->document);
+                const pick::Projection p = pick::project_to_surface(
+                    tape, to_f3(point, "point"), to_f3(direction, "direction"), max_distance);
+                if (!p.hit) return nb::none();
+                nb::dict out;
+                out["distance"] = p.distance;
+                out["position"] = nb::make_tuple(p.position.x, p.position.y, p.position.z);
+                out["normal"] = nb::make_tuple(p.normal.x, p.normal.y, p.normal.z);
+                return out;
+            },
+            "point"_a, "direction"_a, "max_distance"_a,
+            "Project a point onto the surface, searching BOTH ways within\n"
+            "max_distance. Returns None if nothing is within the bound.\n\n"
+            "BOTH WAYS is the part a first implementation gets wrong: a cage\n"
+            "point built from a low-poly mesh may sit inside the high-poly\n"
+            "surface or outside it, and you cannot know which. Searching only\n"
+            "outward silently misses every point where the low-poly sits\n"
+            "inside — most of a concave region.\n\n"
+            "`distance` is SIGNED along `direction`, and it is the height-map\n"
+            "value; it comes back from this call rather than being recomputed\n"
+            "from the position, which would be a second chance to disagree\n"
+            "about the sign.")
         .def(
             "groups",
             [](PyDocument& d, float cell_size) {

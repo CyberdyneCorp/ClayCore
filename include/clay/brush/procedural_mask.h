@@ -26,25 +26,18 @@
 
 #include "clay/math/geom.h"
 #include "clay/parallel/cancel.h"
+#include "clay/brush/surface_measure.h"
 #include "clay/voxel/mask.h"
 
 namespace clay {
 namespace brush {
 
-enum class SurfaceMeasure {
-    // |Laplacian|: anywhere the surface bends, in either direction. The one to
-    // reach for when the intent is "the detail", not "the crevices".
-    Curvature,
-    // Concave only — crevices, the inside of a fold, the seam where two forms
-    // meet. ZBrush's cavity masking.
-    Cavity,
-    // Convex only — hard edges, ridges, the outside of a fold. The mask a
-    // polish or a trim wants.
-    Convexity,
-    // How closely the surface normal agrees with a direction. "Everything
-    // facing up", for wear, dust and gravity-driven effects.
-    NormalDirection,
-};
+// SurfaceMeasure and MeasureSettings now live in surface_measure.h, with the
+// per-point form of the same measures. This file keeps only the LATTICE form:
+// the same numbers, walked over a region and banded to the surface.
+//
+// One implementation, two shapes — which is what makes "the mask and a baked
+// map agree about this surface" a construction rather than a claim.
 
 struct ProceduralMaskSettings {
     // The lattice the mask is built on. 0 derives one from the region, which is
@@ -58,20 +51,16 @@ struct ProceduralMaskSettings {
     // world units. 0 derives two cells. Cells outside the band are left at
     // zero: a mask is about the SURFACE, and a measure taken deep inside a
     // solid describes nothing an artist can see.
+    //
+    // THE BANDING IS THIS FILE'S JOB and not measure_at's — a caller sampling a
+    // mesh's vertices already has surface points and wants no band at all.
     float band = 0.0f;
 
-    // What saturates the mask. Curvature is 1/radius, so `scale` is the radius
-    // at which a feature reads as fully masked: 0.05 means a 5 cm fillet is
-    // fully in, and a gentler one is partly in. Ignored by NormalDirection.
-    float scale = 0.05f;
-
-    // NormalDirection only. Need not be normalized.
-    kernel::cfloat3 direction = kernel::cf3(0.0f, 1.0f, 0.0f);
-    // NormalDirection only: the dot product below which a cell reads zero.
-    // 0 masks the whole hemisphere; 0.7 masks roughly a 45-degree cone.
-    float threshold = 0.0f;
+    // Everything about the measure itself. Shared with the per-point form, so
+    // the two cannot drift: `scale`, the normal direction and its threshold,
+    // and the ray parameters ambient occlusion and thickness need.
+    MeasureSettings measure;
 };
-
 // Build a mask from a field.
 //
 // The source is a CALLABLE rather than a document or a layer, for the reason
