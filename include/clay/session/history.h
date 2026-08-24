@@ -148,6 +148,61 @@ class History {
     bool redo(scene::Document& doc, const GridFor& grid_for, const MeshFor& mesh_for,
               math::Aabb* out_bound = nullptr);
 
+    // -- the journal (survive-a-crash) ---------------------------------------
+    //
+    // An APPEND-ONLY log of events, not a view of the step list, and the
+    // difference is the whole correctness argument. A host persists steps 0..4,
+    // the user undoes step 4, and a journal read off the step list would no
+    // longer contain it — but the host's file still does, so a recovery would
+    // replay work the user took back. So an undo is an EVENT, recorded like an
+    // edit, and replay reproduces the session including the taking-back.
+    //
+    // Peek rather than drain: the host names the index it has already
+    // persisted and the log is untouched, so a failed write can simply be
+    // retried. `trim` is the explicit drop, called once the bytes are safe.
+    // Events are recorded at the grain the SESSION was driven at, not at the
+    // grain the step list ended up with. That is deliberate and it is what
+    // makes replay simple: a Scene event is one COMMAND, and replaying it goes
+    // back through perform(), so coalescing and grouping reproduce themselves
+    // rather than having to be re-derived from a step.
+    //
+    // The alternative — one event per step, carrying whatever the step holds —
+    // does not work for Scene steps at all: a step names an entry on the
+    // wrapped UndoStack and does not carry the command, and one entry can be a
+    // coalesced stroke or a whole group. Recording commands sidesteps that.
+    struct JournalEvent {
+        enum class Kind { Command, GroupBegin, GroupEnd, Voxel, Mesh, Barrier, Undo, Redo };
+        Kind kind = Kind::Command;
+        scene::Command command;                   // Kind::Command
+        scene::LayerId layer = 0;                 // Voxel, Mesh
+        std::vector<voxel::VoxelGrid::SculptChange> cells;  // Voxel
+        mesh::VertexDeltas deltas;                // Mesh
+        std::string barrier;                      // Barrier
+    };
+
+    // Events from `from` onward. `out_now_at` receives the index to pass next
+    // time. An index past the end yields nothing and is not an error — that is
+    // a host that is already up to date.
+    std::vector<std::uint8_t> journal_since(std::size_t from, std::size_t* out_now_at) const;
+    // Drop events below `upto`, which the host calls once they are durable.
+    // Indices do NOT shift: they are absolute for the life of the session, so a
+    // host that trimmed and then asked for an older index is told it is gone
+    // rather than handed the wrong events.
+    void trim_journal(std::size_t upto);
+    std::size_t journal_first() const { return journal_base_; }
+    std::size_t journal_next() const { return journal_base_ + journal_.size(); }
+
+    // Apply a journal onto a document that IS the snapshot it was taken
+    // against. Stops at the first barrier and says so, rather than continuing
+    // and producing a document quietly missing that operation's effect.
+    struct ReplayResult {
+        std::size_t applied = 0;
+        bool stopped_at_barrier = false;
+        std::string barrier;
+    };
+    bool replay(const std::uint8_t* data, std::size_t size, scene::Document& doc,
+                const GridFor& grid_for, const MeshFor& mesh_for, ReplayResult* out);
+
     // Steps that will actually reverse something. Barriers are excluded, so a
     // host greying a menu item from this never offers an undo that does
     // nothing.
@@ -174,6 +229,10 @@ class History {
     scene::UndoStack commands_;
     std::vector<Step> steps_;
     std::vector<Step> redo_;
+    std::vector<JournalEvent> journal_;
+    // The absolute index of journal_[0]. Absolute so a trimmed host asking for
+    // an old index is refused rather than served the wrong events.
+    std::size_t journal_base_ = 0;
     std::vector<voxel::VoxelGrid::SculptChange> open_cells_;
     scene::LayerId open_layer_ = 0;
     bool voxel_open_ = false;

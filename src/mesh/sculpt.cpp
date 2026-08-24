@@ -1,6 +1,7 @@
 #include "clay/mesh/sculpt.h"
 
 #include <algorithm>
+#include <cstring>
 #include <cmath>
 
 #include "clay/kernel/deform.h"  // calpha_sample, calpha_frame
@@ -1291,6 +1292,160 @@ void MeshSculptor::recompute_normals(const std::vector<std::uint32_t>& classes,
             if (record) record->sync_after(members[k], mesh_);
         }
     }
+}
+
+// -- VertexDeltas encoding (survive-a-crash) ---------------------------------
+//
+// Layout, little-endian throughout:
+//
+//   u32 magic 'CVDL'   u16 version   u8 has_normals   u8 has_colors
+//   u32 count
+//   u32 vertices[count]
+//   f32 before_position[count][3]   f32 after_position[count][3]
+//   f32 before_normal[count][3]     f32 after_normal[count][3]     (if has_normals)
+//   f32 before_color[count][3]      f32 after_color[count][3]      (if has_colors)
+//
+// Fixed-width and positional rather than tagged: this is a crash artifact
+// paired with one snapshot, not a document, so it needs to be cheap to write on
+// every step rather than forgiving to read years later. The version is there so
+// a build that does not understand it REFUSES, which is the whole point — a
+// recovery that silently drops what it could not read is the failure the
+// feature exists to prevent.
+namespace {
+
+constexpr std::uint32_t kDeltaMagic = 0x4C445643u;  // 'CVDL'
+constexpr std::uint16_t kDeltaVersion = 1;
+
+void put_u32(std::vector<std::uint8_t>& out, std::uint32_t v) {
+    out.push_back(static_cast<std::uint8_t>(v));
+    out.push_back(static_cast<std::uint8_t>(v >> 8));
+    out.push_back(static_cast<std::uint8_t>(v >> 16));
+    out.push_back(static_cast<std::uint8_t>(v >> 24));
+}
+
+void put_f32(std::vector<std::uint8_t>& out, float f) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &f, 4);
+    put_u32(out, bits);
+}
+
+void put_vec3(std::vector<std::uint8_t>& out, const std::vector<kernel::cfloat3>& v) {
+    for (const kernel::cfloat3& p : v) {
+        put_f32(out, p.x);
+        put_f32(out, p.y);
+        put_f32(out, p.z);
+    }
+}
+
+struct Reader {
+    const std::uint8_t* data;
+    std::size_t size;
+    std::size_t at = 0;
+    bool ok = true;
+
+    std::uint32_t u32() {
+        if (at + 4 > size) {
+            ok = false;
+            return 0;
+        }
+        const std::uint32_t v = static_cast<std::uint32_t>(data[at]) |
+                                (static_cast<std::uint32_t>(data[at + 1]) << 8) |
+                                (static_cast<std::uint32_t>(data[at + 2]) << 16) |
+                                (static_cast<std::uint32_t>(data[at + 3]) << 24);
+        at += 4;
+        return v;
+    }
+    std::uint8_t u8() {
+        if (at + 1 > size) {
+            ok = false;
+            return 0;
+        }
+        return data[at++];
+    }
+    float f32() {
+        const std::uint32_t bits = u32();
+        float f = 0.0f;
+        std::memcpy(&f, &bits, 4);
+        return f;
+    }
+    void vec3(std::vector<kernel::cfloat3>& out, std::size_t count) {
+        out.resize(count);
+        for (std::size_t i = 0; i < count && ok; ++i) {
+            const float x = f32();
+            const float y = f32();
+            const float z = f32();
+            out[i] = kernel::cf3(x, y, z);
+        }
+    }
+};
+
+}  // namespace
+
+std::vector<std::uint8_t> VertexDeltas::encode() const {
+    std::vector<std::uint8_t> out;
+    const std::size_t n = vertices_.size();
+    out.reserve(16 + n * (4 + 24 + (normals_ ? 24u : 0u) + (colors_ ? 24u : 0u)));
+    put_u32(out, kDeltaMagic);
+    out.push_back(static_cast<std::uint8_t>(kDeltaVersion));
+    out.push_back(static_cast<std::uint8_t>(kDeltaVersion >> 8));
+    out.push_back(normals_ ? 1 : 0);
+    out.push_back(colors_ ? 1 : 0);
+    put_u32(out, static_cast<std::uint32_t>(n));
+    for (std::uint32_t v : vertices_) put_u32(out, v);
+    put_vec3(out, before_position_);
+    put_vec3(out, after_position_);
+    if (normals_) {
+        put_vec3(out, before_normal_);
+        put_vec3(out, after_normal_);
+    }
+    if (colors_) {
+        put_vec3(out, before_color_);
+        put_vec3(out, after_color_);
+    }
+    return out;
+}
+
+bool VertexDeltas::decode(const std::uint8_t* data, std::size_t size, VertexDeltas* out) {
+    if (!data || !out) return false;
+    Reader r{data, size};
+    if (r.u32() != kDeltaMagic) return false;
+    const std::uint16_t version =
+        static_cast<std::uint16_t>(r.u8() | (static_cast<std::uint16_t>(r.u8()) << 8));
+    // Refused rather than reinterpreted. A newer layout read as this one would
+    // revert a mesh to values that were never in it.
+    if (!r.ok || version != kDeltaVersion) return false;
+    const bool has_normals = r.u8() != 0;
+    const bool has_colors = r.u8() != 0;
+    const std::uint32_t count = r.u32();
+    if (!r.ok) return false;
+    // A count larger than the buffer could hold is a malformed or hostile
+    // record, and sizing from it is how a reader gets asked to allocate a
+    // gigabyte. The smallest a vertex can be is its id plus two positions.
+    const std::size_t least_per_vertex = 4 + 24;
+    if (static_cast<std::size_t>(count) > (size - r.at) / least_per_vertex + 1) return false;
+
+    VertexDeltas built;
+    built.normals_ = has_normals;
+    built.colors_ = has_colors;
+    built.vertices_.resize(count);
+    for (std::uint32_t i = 0; i < count && r.ok; ++i) built.vertices_[i] = r.u32();
+    r.vec3(built.before_position_, count);
+    r.vec3(built.after_position_, count);
+    if (has_normals) {
+        r.vec3(built.before_normal_, count);
+        r.vec3(built.after_normal_, count);
+    }
+    if (has_colors) {
+        r.vec3(built.before_color_, count);
+        r.vec3(built.after_color_, count);
+    }
+    if (!r.ok) return false;
+    // The slot index is rebuilt rather than stored: it is derivable, and a
+    // stored hash map would be a second source of truth for the same thing.
+    built.slot_.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) built.slot_.emplace(built.vertices_[i], i);
+    *out = std::move(built);
+    return true;
 }
 
 }  // namespace mesh

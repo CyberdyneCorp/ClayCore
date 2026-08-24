@@ -24,37 +24,41 @@
 - [ ] 2.1 DECIDE and record: does the journal carry the snapshot's identity so a
       replay can refuse a mismatched pair? A hash turns a silently-wrong
       recovery into a refusal
-- [ ] 2.2 DECIDE and record: peek with an explicit index, or drain? Peek is
-      stateless and lets a host retry a failed write
-- [ ] 2.3 DECIDE and record: what an UNDO does to the journal. Either the undo
-      is its own entry, or replay reconstructs work the user took back
+- [x] 2.2 DECIDED: peek, with absolute indices and an explicit `trim`. A
+      failed write is retried by asking again; indices do NOT shift on trim, so
+      a host that asks below the floor is told it is gone rather than handed
+      the wrong events
+- [x] 2.3 DECIDED: an undo is its own EVENT. The journal is an append-only
+      log, not a view of the step list — a host persists a step, the user undoes
+      it, and a journal read off the step list would no longer contain it while
+      the host's file still does. Pinned by a test
 - [ ] 2.4 DECIDE and record: pyclay's shape, since the parity gate wants an
       answer either way
 
 ## 3. Build
 
-- [ ] 3.1 An encoding for `mesh::VertexDeltas` — touched vertices, before/after
+- [x] 3.1 An encoding for `mesh::VertexDeltas` — touched vertices, before/after
       positions, and normals and colours where the record carries them
-- [ ] 3.2 An encoding for a voxel step: a run of `{cell, before, after}`
-- [ ] 3.3 The journal: versioned, refused rather than partially interpreted when
+- [x] 3.2 An encoding for a voxel step: a run of `{cell, before, after}`
+- [x] 3.3 The journal: versioned, refused rather than partially interpreted when
       a build does not understand it
 - [ ] 3.4 `clay_document_journal_since` and `clay_document_replay_journal`,
       returning bytes through `clay_blob` like every other serialized payload
-- [ ] 3.5 Barriers in the journal: reported on the way out, and stopping replay
+- [x] 3.5 Barriers in the journal: reported on the way out, and stopping replay
       on the way in
 - [ ] 3.6 pyclay, per 2.4
 
 ## 4. Prove it
 
 - [ ] 4.1 The scenarios in both spec deltas
-- [ ] 4.2 The test this change is for: snapshot, edit across all three
+- [x] 4.2 The test this change is for: snapshot, edit across all three
       representations, journal, replay onto a fresh document, and assert it
       evaluates identically and holds the same cells and vertices
-- [ ] 4.3 Incremental: journal, edit, journal again from the reported index, and
+- [x] 4.3 Incremental: journal, edit, journal again from the reported index, and
       replay both in order
-- [ ] 4.4 A truncated journal and one from a newer version are REFUSED, leaving
+- [x] 4.4 A truncated journal and one from a newer version are REFUSED, leaving
       the document as it was
-- [ ] 4.5 A barrier stops replay and is reported, rather than being skipped
+- [x] 4.5 A barrier stops replay and is reported, rather than being skipped
 
 ## 5. Reach it and say it
 
@@ -64,3 +68,15 @@
       interval, and what to do with a leftover recovery file
 - [ ] 5.3 A numbered example that kills and recovers a session
 - [ ] 5.4 `openspec/ROADMAP.md`
+
+## 6. What building it changed
+
+- [x] 6.1 The journal is at COMMAND grain, not step grain, and the first draft
+      was not. A `Step::Kind::Scene` names an entry on the wrapped `UndoStack`
+      and does not carry the command, and one entry can be a coalesced stroke
+      or a whole group — so a step-grain journal could encode voxel and mesh
+      steps and had *nothing to write* for an SDF edit. That is the
+      two-of-three trap this change was ordered after `unify-the-undo-history`
+      to avoid, met from a different direction. Recording commands and replaying
+      them through `perform()` also makes coalescing and grouping reproduce
+      themselves instead of having to be re-derived
