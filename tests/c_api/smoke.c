@@ -605,6 +605,9 @@ static int check_error_paths(void) {
     REQUIRE(clay_mesh_validation_report(NULL, 0, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_document_load_memory(NULL, 4, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_document_journal_since(NULL, 0, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_document_history_bytes(NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_document_set_history_budget(NULL, 0) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_document_trim_history(NULL, 0) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_document_replay_journal(NULL, NULL, 0, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_document_journal_trim(NULL, 0) == CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_mesh_save_memory(NULL, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);

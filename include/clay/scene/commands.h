@@ -208,6 +208,12 @@ std::optional<Command> apply(Document& doc, const Command& cmd);
 
 // Binary serialization (the same encoding the document format's command
 // chunks use).
+// What a command OWNS beyond its variant, for a memory budget. The variant is
+// 128 bytes inline whatever it holds, and the entries that matter are the ones
+// carrying heap payloads: the inverse of REMOVING an item is an AddNodeCmd
+// carrying a whole subtree, while the inverse of adding one is an id.
+std::size_t command_bytes(const Command& cmd);
+
 std::vector<std::uint8_t> serialize(const Command& cmd);
 std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size);
 
@@ -242,6 +248,9 @@ class UndoStack {
     void begin_group();
     void end_group();
     std::size_t undo_depth() const { return undo_.size(); }
+    // What the stacks OWN, for a memory budget. See command_bytes.
+    std::size_t undo_bytes() const;
+    std::size_t redo_bytes() const;
     std::size_t redo_depth() const { return redo_.size(); }
 
   private:

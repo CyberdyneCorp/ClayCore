@@ -325,6 +325,11 @@ class VertexDeltas {
     //
     // The `slot_` index is NOT encoded: it is derivable from `vertices_`, and
     // storing a hash map's contents would be storing a rebuildable thing.
+    // What this record OWNS, for a memory budget. Not sizeof: the arrays are
+    // the payload, and a record following one vertex costs nothing like one
+    // following a stroke.
+    std::size_t bytes() const;
+
     std::vector<std::uint8_t> encode() const;
     // Refuses a truncated or inconsistent buffer rather than returning a record
     // that reverts a mesh to garbage. Returns false and leaves `out` untouched.
