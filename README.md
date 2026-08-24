@@ -416,9 +416,15 @@ shape. There is deliberately no `bend`: its map folds distinct points onto the
 same place past a gentle angle, so no forward map exists.
 
 A **lattice cage** works on the same layer: drag a few control points and the
-whole form follows. It is the one ZBrush gizmo deformer that is not an SDF
-deformer here, and deliberately — ZBrush and Blender both apply FFD *forward* to
-vertices, which a mesh allows and an implicit field does not.
+whole form follows. Both representations have one, and they are not the same
+deformer — ZBrush and Blender apply FFD *forward* to vertices, which is exactly
+what a mesh allows, so `mesh::Lattice` does that and is exact. An SDF deformer
+must run backwards, and forward FFD has no closed-form inverse, so the SDF cage
+authors its offsets AS the inverse warp instead; the difference from the forward
+cage measures under 1.5% of the drag. The mesh cage also affords 32 divisions
+per axis against the SDF cage's 4, because one runs per vertex and the other
+runs inside the raymarcher. See
+[`docs/07-brushes-and-features.md` §11](docs/07-brushes-and-features.md).
 
 That is the whole point rather than a limitation. It closes the **return trip**:
 sculpt on SDF or voxels → quad-export → retopo and UV elsewhere → bring the mesh
