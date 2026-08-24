@@ -258,9 +258,13 @@ did not change shape; since ABI 0.43.0 they reverse more than they did.
 |---|---|---|
 | SDF edit list, layer state | one `UndoStack` entry | the command's inverse |
 | voxel grid | the cell writes the edit made, in order | replayed backwards to their `before` |
+| mask | the cells the edit changed | snapshot on the first `touch()`, diffed when the step closes |
 | mesh layer | sparse vertex deltas | `VertexDeltas::revert` |
 
-It is an **index over** the three, not a merge of them. Each stores what it
+It is an **index over** them, not a merge. **Masks were the fourth
+representation with no mechanism at all** — twenty mutating entry points and
+zero command variants, which the audit that counted three did not count — and
+they record now, so `undo` no longer stops at one. Each stores what it
 always stored, for the reasons it always had: a voxel edit has no compact
 inverse — the inverse of "carve here" is the cells that were there — and a
 vertex displacement is not an edit item.
@@ -287,9 +291,6 @@ The obvious guesses are wrong, so they are worth naming:
 
 What genuinely is not:
 
-- **Every mask edit.** `voxel::MaskField` is a **fourth** representation with
-  twenty mutating entry points across the ABI and not one command variant. The
-  audit that counted three mechanisms did not count the thing that has none.
 - **Sculpt-layer property changes** — strength, visibility, order, merge-down.
   Their effect on cells replays, but the property value does not, so an undo
   would restore the pixels and not the setting. A partial undo is worse than
@@ -420,15 +421,14 @@ the user cannot see the gap. Events applied before a bad one stand — replay is
 not a transaction — so replay onto a copy if you want all-or-nothing.
 
 **Replay stops at a barrier rather than skipping it.** A barrier is an operation
-nothing can reproduce; **every mask edit is one today**, because a mask is a
-fourth representation with no history mechanism. Replay returns success with the
-flag set, and a host that sees it needs a *fresher snapshot*, not a longer
-journal. Continuing past it would hand back a document quietly missing that
+nothing can reproduce — dropping a resolution level, removing a sculpt layer,
+or anything a host does that the engine never sees. (Mask edits *were* one, and
+are not any more.) Replay returns success with the flag set, and a host that
+sees it needs a *fresher snapshot*, not a longer journal. Continuing past it would hand back a document quietly missing that
 operation's effect.
 
-That last one is the current limitation worth planning around: painting a mask
-means the journal can no longer recover the session on its own until you
-re-snapshot.
+A journal therefore carries an ordinary sculpting session end to end, mask
+edits included.
 
 #### What a journal is not
 

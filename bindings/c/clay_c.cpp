@@ -937,6 +937,12 @@ struct clay_document {
             return it == doc.voxel_layers.end() ? nullptr : &it->second;
         };
     }
+    session::History::MaskFor mask_for() {
+        return [this](scene::LayerId id) -> voxel::MaskField* {
+            auto it = doc.masks.find(id);
+            return it == doc.masks.end() ? nullptr : &it->second;
+        };
+    }
     session::History::MeshFor mesh_for() {
         return [this](scene::LayerId id) -> mesh::Mesh* {
             auto it = doc.mesh_layers.find(id);
@@ -1945,21 +1951,37 @@ clay_result eval_requests_in_chunks(const clay_document* doc,
     return CLAY_OK;
 }
 
-// A mask edit is a BARRIER in the session history, and this is what makes that
-// true rather than merely claimed.
+// Bracket a mask edit so it becomes ONE undo step (masks-in-the-history).
 //
-// voxel::MaskField is a FOURTH representation with no history mechanism at all
-// — twenty mutating entry points across this ABI and not one command variant —
-// so nothing can reverse a mask edit and nothing can replay one. Recording a
-// barrier is how a host finds that out: undo_depth stops counting at it, and a
-// journal replay stops there and asks for a fresher snapshot.
+// This used to record a BARRIER, because voxel::MaskField was the fourth
+// representation with no history mechanism at all. It has one now, so a mask
+// edit is an ordinary step and the two features that documented around the
+// barrier — undo, and journal replay — no longer have to.
+//
+// The mechanism differs from VoxelStep and the difference is not cosmetic:
+// VoxelGrid::set is the one choke point every voxel verb funnels through, so a
+// sink there sees everything. A mask's invert, clear, expand, contract and
+// smooth write chunk data directly, so the mask snapshots on its first touch()
+// and diffs when the step closes.
 //
 // A standalone mask is not in a document and records nothing, exactly as a
 // standalone voxel grid does not.
-void note_mask_edit(const clay_mask* handle) {
-    if (!handle || !handle->doc || !handle->doc->undo) return;
-    handle->doc->undo->record_barrier("mask edit");
-}
+struct MaskStep {
+    clay_document* doc = nullptr;
+    voxel::MaskField* mask = nullptr;
+
+    MaskStep(const clay_mask* handle, voxel::MaskField* m) {
+        if (!handle || !handle->doc || !handle->doc->undo || !m) return;
+        if (!handle->doc->undo->begin_mask_step(handle->layer, *m)) return;
+        doc = handle->doc;
+        mask = m;
+    }
+    ~MaskStep() {
+        if (doc) doc->undo->end_mask_step(*mask);
+    }
+    MaskStep(const MaskStep&) = delete;
+    MaskStep& operator=(const MaskStep&) = delete;
+};
 
 VoxelStep::VoxelStep(const clay_voxel_grid* handle, voxel::VoxelGrid* g) {
     if (!handle || !handle->doc || !handle->doc->undo || !g) return;
@@ -2109,7 +2131,7 @@ clay_result clay_document_replay_journal(clay_document* doc, const uint8_t* data
 
     session::History::ReplayResult result;
     const bool ok = doc->undo->replay(data, size, doc->doc.document, doc->grid_for(),
-                                      doc->mesh_for(), &result);
+                                      doc->mesh_for(), &result, doc->mask_for());
     if (out_applied) *out_applied = result.applied;
     if (out_stopped_at_barrier) *out_stopped_at_barrier = result.stopped_at_barrier ? 1 : 0;
     // Replay writes straight onto the document rather than through apply_edit,
@@ -2225,7 +2247,7 @@ clay_result clay_document_undo_bound(clay_document* doc, int32_t* out_undone, fl
     // write_influence spells as no bounds — nothing to dirty.
     math::Aabb bound;
     *out_undone = doc->undo->undo(doc->doc.document, doc->grid_for(), doc->mesh_for(),
-                                  &bound)
+                                  &bound, doc->mask_for())
                       ? 1
                       : 0;
     // Undo and redo replay commands straight onto the document rather than
@@ -2241,7 +2263,7 @@ clay_result clay_document_redo_bound(clay_document* doc, int32_t* out_redone, fl
     if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
     math::Aabb bound;
     *out_redone = doc->undo->redo(doc->doc.document, doc->grid_for(), doc->mesh_for(),
-                                  &bound)
+                                  &bound, doc->mask_for())
                       ? 1
                       : 0;
     if (*out_redone) doc->touch();
@@ -5560,7 +5582,7 @@ clay_result clay_mask_set(clay_mask* mask, const int32_t cell[3], float value) {
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
-    note_mask_edit(mask);
+    MaskStep mask_step(mask, m);
     if (!cell) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cell");
     m->set({cell[0], cell[1], cell[2]}, value);
     return CLAY_OK;
@@ -5595,7 +5617,7 @@ clay_result clay_mask_paint(clay_mask* mask, const float point[3],
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
-    note_mask_edit(mask);
+    MaskStep mask_step(mask, m);
     if (!point) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null point");
     if (!brush) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brush parameters");
     voxel::BrushParams p;
@@ -5611,7 +5633,7 @@ clay_result clay_mask_paint_cell(clay_mask* mask, const int32_t cell[3],
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
-    note_mask_edit(mask);
+    MaskStep mask_step(mask, m);
     if (!cell) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cell");
     if (!brush) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brush parameters");
     voxel::BrushParams p;
@@ -5626,7 +5648,7 @@ clay_result clay_mask_invert(clay_mask* mask) {
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
-    note_mask_edit(mask);
+    MaskStep mask_step(mask, m);
     m->invert();
     return CLAY_OK;
 }
@@ -5635,7 +5657,7 @@ clay_result clay_mask_clear(clay_mask* mask) {
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
-    note_mask_edit(mask);
+    MaskStep mask_step(mask, m);
     m->clear();
     return CLAY_OK;
 }
@@ -5647,7 +5669,7 @@ clay_result clay_mask_expand(clay_mask* mask, int32_t steps) {
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
-    note_mask_edit(mask);
+    MaskStep mask_step(mask, m);
     if (steps <= 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "steps must be > 0");
     m->expand(steps);
     return CLAY_OK;
@@ -5657,7 +5679,7 @@ clay_result clay_mask_contract(clay_mask* mask, int32_t steps) {
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
-    note_mask_edit(mask);
+    MaskStep mask_step(mask, m);
     if (steps <= 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "steps must be > 0");
     m->contract(steps);
     return CLAY_OK;
@@ -5667,7 +5689,7 @@ clay_result clay_mask_smooth(clay_mask* mask, int32_t iterations) {
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
-    note_mask_edit(mask);
+    MaskStep mask_step(mask, m);
     if (iterations <= 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "iterations must be > 0");
     m->smooth(iterations);
     return CLAY_OK;
@@ -5724,7 +5746,7 @@ clay_result clay_mask_fill(clay_mask* mask, const float box_min[3], const float 
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
-    note_mask_edit(mask);
+    MaskStep mask_step(mask, m);
     math::Aabb box;
     r = read_box(*m, box_min, box_max, &box);
     if (r != CLAY_OK) return r;
@@ -5737,7 +5759,7 @@ clay_result clay_mask_invert_within(clay_mask* mask, const float box_min[3],
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
-    note_mask_edit(mask);
+    MaskStep mask_step(mask, m);
     math::Aabb box;
     r = read_box(*m, box_min, box_max, &box);
     if (r != CLAY_OK) return r;
@@ -5752,7 +5774,7 @@ clay_result clay_mask_apply_stroke(clay_mask* mask, const float* samples_xyzpt,
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
-    note_mask_edit(mask);
+    MaskStep mask_step(mask, m);
     if (!brush_shape_is_known(shape))
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown brush shape: " + std::to_string(shape));
     if (!brush_falloff_is_known(falloff))

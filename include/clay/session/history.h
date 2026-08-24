@@ -48,6 +48,7 @@
 #include "clay/mesh/sculpt.h"
 #include "clay/scene/commands.h"
 #include "clay/voxel/grid.h"
+#include "clay/voxel/mask.h"
 
 namespace clay {
 namespace session {
@@ -59,12 +60,14 @@ struct Step {
         Scene,   // one entry on the wrapped UndoStack
         Voxel,   // a recorded run of cell writes on one layer's grid
         Mesh,    // sparse vertex deltas on one layer's mesh
+        Mask,    // the cells one mask edit changed, on one layer's mask
         Barrier  // an operation nothing records; not reversible, not silent
     };
 
     Kind kind = Kind::Scene;
-    scene::LayerId layer = 0;                 // Voxel, Mesh
+    scene::LayerId layer = 0;                 // Voxel, Mesh, Mask
     std::vector<voxel::VoxelGrid::SculptChange> cells;   // Voxel
+    std::vector<voxel::MaskField::MaskChange> mask_cells;  // Mask
     mesh::VertexDeltas deltas;                // Mesh
     std::string barrier;                      // Barrier: what happened, for a host to show
 
@@ -77,6 +80,7 @@ class History {
     // exists. Supplied by the caller because the owner sits above this module.
     using GridFor = std::function<voxel::VoxelGrid*(scene::LayerId)>;
     using MeshFor = std::function<mesh::Mesh*(scene::LayerId)>;
+    using MaskFor = std::function<voxel::MaskField*(scene::LayerId)>;
 
     // Off by default, exactly as the command stack has always been opt-in. A
     // document that never enables it behaves as it did before this existed.
@@ -104,6 +108,19 @@ class History {
     // does nothing is exactly what this change exists to remove.
     void end_voxel_step(voxel::VoxelGrid& grid);
     bool recording_voxel_step() const { return voxel_open_; }
+
+    // A mask edit, bracketed. Between these the mask records what it changes,
+    // and closing the bracket turns that into a step.
+    //
+    // A DIFFERENT MECHANISM from the voxel bracket above, and deliberately so:
+    // `VoxelGrid::set` is the one choke point every voxel verb funnels through,
+    // while a mask's `invert`, `clear`, `expand`, `contract` and `smooth` write
+    // chunk data directly and only `fill` and `invert_within` go through
+    // `set`. The mask snapshots on its first `touch()` and diffs when the step
+    // closes; see MaskField::begin_step.
+    bool begin_mask_step(scene::LayerId layer, voxel::MaskField& mask);
+    void end_mask_step(voxel::MaskField& mask);
+    bool recording_mask_step() const { return mask_open_; }
 
     // A mesh edit, as the deltas the sculptor already produced. Empty deltas
     // are dropped, for the reason above.
@@ -144,9 +161,9 @@ class History {
     // (optional) receives the region a consumer holding a cache must
     // invalidate, for the scene steps that can report one.
     bool undo(scene::Document& doc, const GridFor& grid_for, const MeshFor& mesh_for,
-              math::Aabb* out_bound = nullptr);
+              math::Aabb* out_bound = nullptr, const MaskFor& mask_for = {});
     bool redo(scene::Document& doc, const GridFor& grid_for, const MeshFor& mesh_for,
-              math::Aabb* out_bound = nullptr);
+              math::Aabb* out_bound = nullptr, const MaskFor& mask_for = {});
 
     // -- the journal (survive-a-crash) ---------------------------------------
     //
@@ -171,11 +188,12 @@ class History {
     // wrapped UndoStack and does not carry the command, and one entry can be a
     // coalesced stroke or a whole group. Recording commands sidesteps that.
     struct JournalEvent {
-        enum class Kind { Command, GroupBegin, GroupEnd, Voxel, Mesh, Barrier, Undo, Redo };
+        enum class Kind { Command, GroupBegin, GroupEnd, Voxel, Mesh, Mask, Barrier, Undo, Redo };
         Kind kind = Kind::Command;
         scene::Command command;                   // Kind::Command
         scene::LayerId layer = 0;                 // Voxel, Mesh
-        std::vector<voxel::VoxelGrid::SculptChange> cells;  // Voxel
+        std::vector<voxel::VoxelGrid::SculptChange> cells;
+        std::vector<voxel::MaskField::MaskChange> mask_cells;  // Kind::Mask  // Voxel
         mesh::VertexDeltas deltas;                // Mesh
         std::string barrier;                      // Barrier
     };
@@ -201,7 +219,8 @@ class History {
         std::string barrier;
     };
     bool replay(const std::uint8_t* data, std::size_t size, scene::Document& doc,
-                const GridFor& grid_for, const MeshFor& mesh_for, ReplayResult* out);
+                const GridFor& grid_for, const MeshFor& mesh_for, ReplayResult* out,
+                const MaskFor& mask_for = {});
 
     // Steps that will actually reverse something. Barriers are excluded, so a
     // host greying a menu item from this never offers an undo that does
@@ -224,7 +243,8 @@ class History {
     // Push a step and discard the redo side, which is what any new edit does.
     void push(Step step);
     bool apply_step(const Step& step, bool forward, scene::Document& doc,
-                    const GridFor& grid_for, const MeshFor& mesh_for, math::Aabb* out_bound);
+                    const GridFor& grid_for, const MeshFor& mesh_for, math::Aabb* out_bound,
+                    const MaskFor& mask_for);
 
     scene::UndoStack commands_;
     std::vector<Step> steps_;
@@ -236,6 +256,8 @@ class History {
     std::vector<voxel::VoxelGrid::SculptChange> open_cells_;
     scene::LayerId open_layer_ = 0;
     bool voxel_open_ = false;
+    bool mask_open_ = false;
+    scene::LayerId open_mask_layer_ = 0;
     bool grouping_ = false;
     bool enabled_ = false;
 };

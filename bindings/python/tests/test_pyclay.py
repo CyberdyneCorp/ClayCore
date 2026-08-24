@@ -6130,3 +6130,80 @@ def test_cancelling_is_safe_before_during_and_twice():
     token.reset()
     token.reset()
     assert not token.cancelled
+
+
+# -- masks are undoable (masks-in-the-history, #245) -------------------------
+#
+# A mask was the fourth representation with no history mechanism, so a mask edit
+# was a barrier: undo stopped counting at one and a journal could not recover
+# past one. Both of those caveats are gone.
+
+def test_a_mask_edit_is_an_undo_step():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("body")
+    doc.enable_undo()
+    layer.add(clay.Sphere(r=0.5))
+    freeze = doc.add_mask("body", cell_size=0.05)
+
+    before = doc.undo_depth
+    freeze.fill(((-0.2, -0.2, -0.2), (0.2, 0.2, 0.2)), 1.0)
+    painted = freeze.painted_count
+    assert painted > 0
+    assert doc.undo_depth == before + 1      # a step, where it used to be a barrier
+
+    assert doc.undo()
+    assert freeze.painted_count == 0
+    assert doc.redo()
+    assert freeze.painted_count == painted
+
+
+def test_every_mask_mutator_is_undoable_not_just_the_two_through_set():
+    # invert, clear, expand, contract and smooth write chunk data directly and
+    # do NOT go through set(); only fill and invert_within do. A sink on set()
+    # would have covered two of seven.
+    region = ((-0.2, -0.2, -0.2), (0.2, 0.2, 0.2))
+
+    def fresh():
+        doc = clay.Document()
+        doc.add_sdf_layer("body")
+        doc.enable_undo()
+        m = doc.add_mask("body", cell_size=0.05)
+        m.fill(region, 1.0)
+        return doc, m
+
+    for name, mutate in [
+        ("invert", lambda m: m.invert()),
+        ("clear", lambda m: m.clear()),
+        ("expand", lambda m: m.expand(1)),
+        ("contract", lambda m: m.contract(1)),
+        ("smooth", lambda m: m.smooth(1)),
+        ("fill", lambda m: m.fill(region, 0.5)),
+        ("invert_within", lambda m: m.invert_within(region)),
+    ]:
+        doc, mask = fresh()
+        before_count = mask.painted_count
+        before_depth = doc.undo_depth
+        mutate(mask)
+        assert doc.undo_depth == before_depth + 1, f"{name} did not record a step"
+        assert doc.undo(), name
+        assert mask.painted_count == before_count, f"undoing {name} did not restore the mask"
+
+
+def test_a_journal_replays_straight_through_a_mask_edit():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("body")
+    doc.enable_undo()
+    snapshot = doc.to_bytes()
+
+    layer.add(clay.Sphere(r=0.4))
+    mask = doc.add_mask("body", cell_size=0.05)
+    mask.fill(((-0.2, -0.2, -0.2), (0.2, 0.2, 0.2)), 1.0)
+    layer.add(clay.Sphere(r=0.2, position=(1, 0, 0)))
+    journal, _ = doc.journal_since(0)
+
+    recovered = clay.load_bytes(snapshot)
+    recovered.enable_undo()
+    recovered.add_mask("body", cell_size=0.05)
+    result = recovered.replay_journal(journal)
+    assert not result["stopped_at_barrier"]   # it used to stop here
+    assert recovered.mask("body").painted_count == mask.painted_count

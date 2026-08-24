@@ -668,6 +668,23 @@ needs them, and listed so they are not mistaken for oversights:
   two of three. What remains genuinely absent is PBR channels, which is a
   declared non-goal rather than a gap — see `docs/sculpt_comparison.md`.
 
+- ~~**A mask was a FOURTH representation with no history mechanism.**~~ Closed
+  by `masks-in-the-history` (#245). Twenty mutating ABI entry points, zero
+  command variants — the audit behind `correct-the-undo-scope` counted three
+  mechanisms and did not count the thing that has none. It surfaced while
+  building `unify-the-undo-history`, forced a caveat into TWO shipped features
+  (undo stopped counting at a mask edit; a journal could not recover past one),
+  and both caveats are now deleted rather than reworded.
+
+  Worth keeping: **it needed a different mechanism from voxels, and assuming
+  otherwise is what made it look small.** `VoxelGrid::set` is the one choke
+  point every voxel verb funnels through; a mask's `invert`, `clear`, `expand`,
+  `contract` and `smooth` write chunk data directly, and only `fill` and
+  `invert_within` go through `set`. A sink there would have recorded two
+  mutators and silently missed five. The choke point that holds is `touch()`,
+  which the header documents and an existing test already walks every mutator
+  for — so a step snapshots on the first touch and diffs when it closes.
+
 - ~~**Every format was buffer-shaped in the engine and path-only at the
   boundary.**~~ Closed by `serialize-without-a-file` (ABI 0.42.0). `clayspace`,
   `obj`, `ply`, `fbx` and `glb` all have byte forms in `include/clay/io/` and
