@@ -91,6 +91,7 @@ EXAMPLES = [
     "57_mesh_deformers",
     "58_attribute_transfer",
     "59_undo_across_representations",
+    "60_surviving_a_crash",
 ]
 
 

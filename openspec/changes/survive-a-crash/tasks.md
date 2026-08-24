@@ -15,9 +15,14 @@
 - [x] 1.4 Confirm why this had to follow `unify-the-undo-history`: a journal of
       commands alone would recover an SDF sculpt and silently drop every voxel
       and mesh edit
-- [ ] 1.5 MEASURE the journal's byte rate on a realistic sculpt, so a host can
-      size its re-snapshot interval from a number rather than a guess. 16 bytes
-      per changed cell is the input; a stroke's worth is the figure
+- [x] 1.5 MEASURED, and it corrected the proposal's headline. Three ordinary
+      edits journal **507 bytes against a 3595-byte re-save — 7.1x cheaper**.
+      But "always cheaper" is FALSE: a journal entry is raw (14 bytes per
+      changed cell) while the document stores voxels palette- and
+      RLE-compressed, so one big `fill_box` journals **7189 bytes against a
+      590-byte document**. The rule a host needs is *re-snapshot when the
+      journal grows past the snapshot*, which is a comparison it already has
+      both sides of. Both figures are asserted in `examples/60`
 
 ## 2. Decide
 
@@ -32,8 +37,9 @@
       log, not a view of the step list — a host persists a step, the user undoes
       it, and a journal read off the step list would no longer contain it while
       the host's file still does. Pinned by a test
-- [ ] 2.4 DECIDE and record: pyclay's shape, since the parity gate wants an
-      answer either way
+- [x] 2.4 DECIDED: bytes in and out, matching `Document.to_bytes`.
+      `journal_since` returns `(bytes, now_at)` and `replay_journal` a dict, so
+      the two out-parameters each side needs stay named rather than positional
 
 ## 3. Build
 
@@ -42,11 +48,11 @@
 - [x] 3.2 An encoding for a voxel step: a run of `{cell, before, after}`
 - [x] 3.3 The journal: versioned, refused rather than partially interpreted when
       a build does not understand it
-- [ ] 3.4 `clay_document_journal_since` and `clay_document_replay_journal`,
-      returning bytes through `clay_blob` like every other serialized payload
+- [x] 3.4 `clay_document_journal_since`, `_range`, `_trim` and
+      `clay_document_replay_journal`, returning bytes through `clay_blob`
 - [x] 3.5 Barriers in the journal: reported on the way out, and stopping replay
       on the way in
-- [ ] 3.6 pyclay, per 2.4
+- [x] 3.6 pyclay: journal_since / journal_range / journal_trim / replay_journal
 
 ## 4. Prove it
 
@@ -62,11 +68,11 @@
 
 ## 5. Reach it and say it
 
-- [ ] 5.1 ABI minor bump and `docs/RELEASE.md`
-- [ ] 5.2 A section in `docs/05-claycore-library.md` beside the history one,
+- [x] 5.1 ABI minor bump and `docs/RELEASE.md`
+- [x] 5.2 A section in `docs/05-claycore-library.md` beside the history one,
       saying plainly what a host owns: the file, the flush, the re-snapshot
       interval, and what to do with a leftover recovery file
-- [ ] 5.3 A numbered example that kills and recovers a session
+- [x] 5.3 A numbered example that kills and recovers a session
 - [ ] 5.4 `openspec/ROADMAP.md`
 
 ## 6. What building it changed
@@ -80,3 +86,10 @@
       to avoid, met from a different direction. Recording commands and replaying
       them through `perform()` also makes coalescing and grouping reproduce
       themselves instead of having to be re-derived
+
+- [x] 6.2 The barrier claim was ASPIRATIONAL until this slice. `record_barrier`
+      existed and **nothing ever called it**, so "a mask edit is a barrier" was
+      documented, asserted in an example, and false. Every mask mutator in both
+      bindings records one now — 11 entry points in C, 11 in pyclay — and
+      `PyMaskField` gained the history reference `PyVoxelGrid` already had,
+      which is the same binding asymmetry twice

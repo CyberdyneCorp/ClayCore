@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 43
+#define CLAY_ABI_MINOR 44
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -394,6 +394,66 @@ clay_result clay_document_save_memory(const clay_document* doc, clay_blob** out_
  * one, so this says why instead of accepting one and ignoring it. */
 clay_result clay_document_load_memory(const uint8_t* data, size_t size,
                                       clay_document** out_doc);
+
+/* -- surviving a crash ------------------------------------------------------
+ *
+ * A recovery is a SNAPSHOT plus the steps since it. The snapshot is
+ * clay_document_save_memory above; this is the steps.
+ *
+ * Why not just autosave. clay_document_save is whole-document and synchronous,
+ * and the device gate prices that class of work at hundreds of milliseconds to
+ * seconds. A host autosaving on a timer therefore stalls its UI for however
+ * long the whole document takes, and the cost grows with the sculpt — so the
+ * safer it tries to be, the worse the stall gets. A journal is proportional to
+ * what changed.
+ *
+ * WHAT THE LIBRARY OWNS: producing the bytes and replaying them.
+ * WHAT THE HOST OWNS: where the file lives, when it is flushed, how often to
+ * re-snapshot, and what to do with a leftover recovery file on the next launch.
+ * Those differ between iOS, a desktop filesystem and a database, and a library
+ * that decided them would be wrong on two of the three. fsync and atomic
+ * rename are yours.
+ *
+ * Requires undo to be enabled: the journal IS the history's record. */
+
+/* Everything recorded since `from`, as bytes to append wherever you keep them.
+ * `out_now_at` receives the index to pass next time.
+ *
+ * PEEK, not drain: the log is untouched, so a failed write is retried by
+ * asking again. Indices are ABSOLUTE for the life of the session and do not
+ * shift when you trim, so a host that asks below the floor is told it is gone
+ * (an empty journal) rather than handed the wrong events — compare
+ * clay_document_journal_range. Free the blob with clay_blob_destroy. */
+clay_result clay_document_journal_since(const clay_document* doc, size_t from,
+                                        clay_blob** out_blob, size_t* out_now_at);
+
+/* The window the log still holds: [*out_first, *out_next). A host that trimmed
+ * and later asks for something below *out_first gets nothing, and this is how
+ * it finds out rather than by replaying a short history. */
+clay_result clay_document_journal_range(const clay_document* doc, size_t* out_first,
+                                        size_t* out_next);
+
+/* Drop events below `upto`, once those bytes are durable. Indices do not
+ * shift. */
+clay_result clay_document_journal_trim(clay_document* doc, size_t upto);
+
+/* Replay a journal onto a document that IS the snapshot it was taken against.
+ *
+ * `out_applied` receives how many events were applied. `out_stopped_at_barrier`
+ * is set when replay reached an operation nothing can reproduce — every MASK
+ * edit is one today, because a mask is a fourth representation with no history
+ * mechanism. Replay STOPS there and returns CLAY_OK with the flag set, rather
+ * than continuing and handing back a document quietly missing that operation's
+ * effect: a recovery that silently skips is worse than one that refuses,
+ * because the user cannot see what is missing. A host that sees the flag needs
+ * a fresher snapshot, not a longer journal.
+ *
+ * A journal this build does not understand, or a truncated one, is REFUSED. The
+ * events applied before the bad one stand — replay is not a transaction — so a
+ * host that wants all-or-nothing replays onto a copy and keeps it on success. */
+clay_result clay_document_replay_journal(clay_document* doc, const uint8_t* data, size_t size,
+                                         size_t* out_applied,
+                                         int32_t* out_stopped_at_barrier);
 
 clay_result clay_add_sdf_layer(clay_document* doc, const char* name,
                                clay_layer_id* out_layer);

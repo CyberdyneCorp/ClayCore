@@ -313,6 +313,79 @@ deltas by value.
 
 Runnable: [`examples/59_undo_across_representations.py`](../examples/59_undo_across_representations.py).
 
+### Surviving a crash
+
+A recovery is **a snapshot plus the steps since it**. The library owns the
+bytes; the host owns the file.
+
+```python
+snapshot = doc.to_bytes()                    # write once
+...edits...
+journal, now_at = doc.journal_since(0)       # append; remember now_at
+doc.journal_trim(now_at)                     # once those bytes are durable
+
+# after the crash
+recovered = clay.load_bytes(snapshot)
+recovered.enable_undo()
+result = recovered.replay_journal(journal)
+```
+
+**Why not just autosave the document.** `clay_document_save` is whole-document
+and synchronous, and the device gate prices that class of work at hundreds of
+milliseconds to seconds. A host autosaving on a timer stalls its UI for however
+long the whole sculpt takes — and the cost grows with the sculpt, so the safer
+it tries to be, the worse the stall. A journal costs what CHANGED: measured in
+`examples/60_surviving_a_crash.py`, three ordinary edits journal 507 bytes
+against a 3595-byte re-save — **7.1× cheaper per autosave**.
+
+**And the crossover, because "always cheaper" is false.** A journal entry is
+raw — a voxel step is 14 bytes per changed cell — while the document stores
+that grid palette- and RLE-compressed. So a single edit that rewrites a large
+fraction of the model journals *larger than the whole document*: the same
+example measures one big `fill_box` at 7189 journal bytes against a 590-byte
+document. The rule is not "journal instead of saving", it is:
+
+> **Re-snapshot when the journal grows past the snapshot.**
+
+which is a size comparison a host already has both sides of.
+
+**What the host owns**, because the right answer differs between iOS, a desktop
+filesystem and a database: where the file lives, when it is flushed (`fsync`,
+atomic rename), how often to re-snapshot, and what to do with a leftover
+recovery file on the next launch.
+
+**Peek, not drain.** Indices are absolute for the life of the session and do not
+shift when you trim, so a failed write is retried by asking again, and a host
+that asks below the trimmed floor gets nothing rather than a silently shorter
+history — `journal_range()` is how it finds out.
+
+#### The two rules that keep a recovery honest
+
+**A journal this build does not understand is refused**, not partly read. A
+recovery that silently drops what it could not parse is worse than none, because
+the user cannot see the gap. Events applied before a bad one stand — replay is
+not a transaction — so replay onto a copy if you want all-or-nothing.
+
+**Replay stops at a barrier rather than skipping it.** A barrier is an operation
+nothing can reproduce; **every mask edit is one today**, because a mask is a
+fourth representation with no history mechanism. Replay returns success with the
+flag set, and a host that sees it needs a *fresher snapshot*, not a longer
+journal. Continuing past it would hand back a document quietly missing that
+operation's effect.
+
+That last one is the current limitation worth planning around: painting a mask
+means the journal can no longer recover the session on its own until you
+re-snapshot.
+
+#### What a journal is not
+
+Not a document. It is a crash artifact paired with **one** snapshot, versioned
+separately from `.clayspace` precisely so nobody mistakes it for a portable
+format. Not durability, not multi-process, and not a way to survive a crash
+*during* a long operation — that work simply will not be in the journal.
+
+Runnable: [`examples/60_surviving_a_crash.py`](../examples/60_surviving_a_crash.py).
+
 ## 7. Meshing & mesh processing (`clay::mesh`)
 
 - **Marching cubes** (default): consistent ambiguity resolution (asymptotic decider) → watertight, 2-manifold guarantee; runs over surface-crossing bricks only; CPU version is the golden reference, GPU versions (Metal/CUDA) must match topology-invariants (not bit-identical vertices).

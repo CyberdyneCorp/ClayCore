@@ -784,6 +784,51 @@ if let mesh = mesh {
     clay_mesh_destroy(mesh)
 }
 
+// -- surviving a crash -------------------------------------------------------
+// A recovery is a snapshot plus the steps since it. The host owns the file; the
+// library owns the bytes.
+do {
+    let session = clay_document_create()
+    var sdf: clay_layer_id = 0
+    check(clay_add_sdf_layer(session, "body", &sdf) == CLAY_OK, "session layer")
+    check(clay_document_enable_undo(session) == CLAY_OK, "undo on")
+
+    var snapshot: OpaquePointer? = nil
+    check(clay_document_save_memory(session, &snapshot) == CLAY_OK, "snapshot taken")
+
+    var radius: Float = 0.5
+    if let item = clay_item_create(Int32(CLAY_PRIM_SPHERE.rawValue), &radius, 1) {
+        var node: clay_node_id = 0
+        check(clay_layer_add_item(session, sdf, item, &node) == CLAY_OK, "an edit to recover")
+        clay_item_destroy(item)
+    }
+
+    var journal: OpaquePointer? = nil
+    var nowAt: Int = 0
+    check(clay_document_journal_since(session, 0, &journal, &nowAt) == CLAY_OK, "journal taken")
+    check(nowAt > 0, "the journal advanced to \(nowAt)")
+
+    if let snapshot = snapshot, let journal = journal {
+        var recovered: OpaquePointer? = nil
+        check(clay_document_load_memory(clay_blob_data(snapshot), clay_blob_size(snapshot),
+                                        &recovered) == CLAY_OK, "snapshot reloaded")
+        check(clay_document_enable_undo(recovered) == CLAY_OK, "undo on the recovered document")
+        var applied: Int = 0
+        var stopped: Int32 = 0
+        check(clay_document_replay_journal(recovered, clay_blob_data(journal),
+                                           clay_blob_size(journal), &applied, &stopped) == CLAY_OK,
+              "journal replayed: \(applied) events")
+        check(stopped == 0, "no barrier in the way")
+        var nodes: Int = 0
+        check(clay_layer_node_count(recovered, sdf, &nodes) == CLAY_OK && nodes == 1,
+              "the edit came back")
+        clay_document_destroy(recovered)
+        clay_blob_destroy(journal)
+        clay_blob_destroy(snapshot)
+    }
+    clay_document_destroy(session)
+}
+
 // -- picking and I/O ---------------------------------------------------------
 
 var origin: [Float] = [0, 0, 3]

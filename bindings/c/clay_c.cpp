@@ -1937,6 +1937,22 @@ clay_result eval_requests_in_chunks(const clay_document* doc,
     return CLAY_OK;
 }
 
+// A mask edit is a BARRIER in the session history, and this is what makes that
+// true rather than merely claimed.
+//
+// voxel::MaskField is a FOURTH representation with no history mechanism at all
+// — twenty mutating entry points across this ABI and not one command variant —
+// so nothing can reverse a mask edit and nothing can replay one. Recording a
+// barrier is how a host finds that out: undo_depth stops counting at it, and a
+// journal replay stops there and asks for a fresher snapshot.
+//
+// A standalone mask is not in a document and records nothing, exactly as a
+// standalone voxel grid does not.
+void note_mask_edit(const clay_mask* handle) {
+    if (!handle || !handle->doc || !handle->doc->undo) return;
+    handle->doc->undo->record_barrier("mask edit");
+}
+
 VoxelStep::VoxelStep(const clay_voxel_grid* handle, voxel::VoxelGrid* g) {
     if (!handle || !handle->doc || !handle->doc->undo || !g) return;
     if (!handle->doc->undo->begin_voxel_step(handle->layer, *g)) return;
@@ -2008,6 +2024,59 @@ clay_result clay_document_save_memory(const clay_document* doc, clay_blob** out_
     if (!doc || !out_blob) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out_blob");
     *out_blob = nullptr;
     *out_blob = new clay_blob{io::save_clayspace(doc->doc)};
+    return CLAY_OK;
+}
+
+clay_result clay_document_journal_since(const clay_document* doc, size_t from,
+                                        clay_blob** out_blob, size_t* out_now_at) {
+    if (!doc || !out_blob) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out_blob");
+    *out_blob = nullptr;
+    if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
+    std::size_t now_at = 0;
+    std::vector<std::uint8_t> bytes = doc->undo->journal_since(from, &now_at);
+    if (out_now_at) *out_now_at = now_at;
+    *out_blob = new clay_blob{std::move(bytes)};
+    return CLAY_OK;
+}
+
+clay_result clay_document_journal_range(const clay_document* doc, size_t* out_first,
+                                        size_t* out_next) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
+    if (out_first) *out_first = doc->undo->journal_first();
+    if (out_next) *out_next = doc->undo->journal_next();
+    return CLAY_OK;
+}
+
+clay_result clay_document_journal_trim(clay_document* doc, size_t upto) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
+    doc->undo->trim_journal(upto);
+    return CLAY_OK;
+}
+
+clay_result clay_document_replay_journal(clay_document* doc, const uint8_t* data, size_t size,
+                                         size_t* out_applied,
+                                         int32_t* out_stopped_at_barrier) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (!data || size == 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null or empty journal");
+    if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
+    if (out_applied) *out_applied = 0;
+    if (out_stopped_at_barrier) *out_stopped_at_barrier = 0;
+
+    session::History::ReplayResult result;
+    const bool ok = doc->undo->replay(data, size, doc->doc.document, doc->grid_for(),
+                                      doc->mesh_for(), &result);
+    if (out_applied) *out_applied = result.applied;
+    if (out_stopped_at_barrier) *out_stopped_at_barrier = result.stopped_at_barrier ? 1 : 0;
+    // Replay writes straight onto the document rather than through apply_edit,
+    // so it invalidates here — and it does so even on a refusal, because the
+    // events before the bad one were applied.
+    doc->touch();
+    if (!ok)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the journal could not be replayed: a version this build does not "
+                    "understand, a truncated buffer, or a step naming a layer that is gone");
     return CLAY_OK;
 }
 
@@ -5430,6 +5499,7 @@ clay_result clay_mask_set(clay_mask* mask, const int32_t cell[3], float value) {
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
+    note_mask_edit(mask);
     if (!cell) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cell");
     m->set({cell[0], cell[1], cell[2]}, value);
     return CLAY_OK;
@@ -5464,6 +5534,7 @@ clay_result clay_mask_paint(clay_mask* mask, const float point[3],
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
+    note_mask_edit(mask);
     if (!point) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null point");
     if (!brush) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brush parameters");
     voxel::BrushParams p;
@@ -5479,6 +5550,7 @@ clay_result clay_mask_paint_cell(clay_mask* mask, const int32_t cell[3],
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
+    note_mask_edit(mask);
     if (!cell) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null cell");
     if (!brush) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brush parameters");
     voxel::BrushParams p;
@@ -5493,6 +5565,7 @@ clay_result clay_mask_invert(clay_mask* mask) {
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
+    note_mask_edit(mask);
     m->invert();
     return CLAY_OK;
 }
@@ -5501,6 +5574,7 @@ clay_result clay_mask_clear(clay_mask* mask) {
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
+    note_mask_edit(mask);
     m->clear();
     return CLAY_OK;
 }
@@ -5512,6 +5586,7 @@ clay_result clay_mask_expand(clay_mask* mask, int32_t steps) {
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
+    note_mask_edit(mask);
     if (steps <= 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "steps must be > 0");
     m->expand(steps);
     return CLAY_OK;
@@ -5521,6 +5596,7 @@ clay_result clay_mask_contract(clay_mask* mask, int32_t steps) {
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
+    note_mask_edit(mask);
     if (steps <= 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "steps must be > 0");
     m->contract(steps);
     return CLAY_OK;
@@ -5530,6 +5606,7 @@ clay_result clay_mask_smooth(clay_mask* mask, int32_t iterations) {
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
+    note_mask_edit(mask);
     if (iterations <= 0) return fail(CLAY_ERROR_INVALID_ARGUMENT, "iterations must be > 0");
     m->smooth(iterations);
     return CLAY_OK;
@@ -5586,6 +5663,7 @@ clay_result clay_mask_fill(clay_mask* mask, const float box_min[3], const float 
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
+    note_mask_edit(mask);
     math::Aabb box;
     r = read_box(*m, box_min, box_max, &box);
     if (r != CLAY_OK) return r;
@@ -5598,6 +5676,7 @@ clay_result clay_mask_invert_within(clay_mask* mask, const float box_min[3],
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
+    note_mask_edit(mask);
     math::Aabb box;
     r = read_box(*m, box_min, box_max, &box);
     if (r != CLAY_OK) return r;
@@ -5612,6 +5691,7 @@ clay_result clay_mask_apply_stroke(clay_mask* mask, const float* samples_xyzpt,
     voxel::MaskField* m = nullptr;
     clay_result r = resolve_mask(mask, &m);
     if (r != CLAY_OK) return r;
+    note_mask_edit(mask);
     if (!brush_shape_is_known(shape))
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "unknown brush shape: " + std::to_string(shape));
     if (!brush_falloff_is_known(falloff))
