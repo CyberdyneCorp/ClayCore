@@ -44,6 +44,7 @@ CLASS_PREFIX = {
     "VertexDeltas": ("clay_mesh_deltas_",),
     "Lattice": ("clay_mesh_lattice_",),
     "StrokePreset": ("clay_stroke_preset_",),
+    "CancelToken": ("clay_cancel_token_",),
     # A Python-idiom wrapper over clay_voxel_begin/end_sculpt_layer. See
     # CLASS_CTOR['SculptLayerScope'].
     "SculptLayerScope": ("clay_voxel_",),
@@ -125,6 +126,10 @@ ALIASES = {
     "Mesh.to_bytes": "clay_mesh_save_memory",
     "Document.to_bytes": "clay_document_save_memory",
     "Document.journal_since": "clay_document_journal_since",
+    "CancelToken.cancel": "clay_cancel_token_cancel",
+    "CancelToken.cancelled": "clay_cancel_token_cancelled",
+    "CancelToken.reset": "clay_cancel_token_reset",
+    "CancelToken.progress": "clay_cancel_token_progress",
     "Document.journal_range": "clay_document_journal_range",
     "Document.journal_trim": "clay_document_journal_trim",
     "Document.replay_journal": "clay_document_replay_journal",
@@ -163,6 +168,7 @@ CLASS_CTOR = {
     "MaskField": "clay_mask_create",
     "MeshSculptor": "clay_mesh_sculptor_create",
     "VertexDeltas": "clay_mesh_deltas_create",
+    "CancelToken": "clay_cancel_token_create",
     "Lattice": "clay_mesh_lattice_create",
     "Accumulation": None,
     "StrokePreset": "clay_stroke_preset_defaults",

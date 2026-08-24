@@ -64,6 +64,7 @@
 
 #include "clay/field/volume.h"
 #include "clay/scene/commands.h"
+#include "clay/parallel/cancel.h"
 #include "clay/scene/document.h"
 
 namespace clay {
@@ -161,7 +162,8 @@ bool layer_colors_vary(const Layer& layer);
 std::optional<field::FieldVolume> bake_layer(const Layer& layer,
                                              const ConsolidationParams& params,
                                              ConsolidationCost* out_cost = nullptr,
-                                             const BakePointEval& point_eval = {});
+                                             const BakePointEval& point_eval = {},
+                                             parallel::CancelToken* token = nullptr);
 
 // Collapse a layer's edit list into one volume item, as ONE undo step.
 //
@@ -179,7 +181,15 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
 // is recorded — the same choice every other editing entry point offers.
 bool consolidate_layer(Document& doc, LayerId layer, const ConsolidationParams& params,
                        UndoStack* undo = nullptr, ConsolidationCost* out_cost = nullptr,
-                       const BakePointEval& point_eval = {});
+                       const BakePointEval& point_eval = {},
+                       // Cancellable (add-operation-cancellation). Returns
+                       // false with the document UNCHANGED when the token is
+                       // set: the bake builds a volume and installs it at the
+                       // end, so a cancel is a discard rather than a partial
+                       // commit. `out_cancelled` tells that apart from "there
+                       // was nothing to consolidate", which also returns false.
+                       parallel::CancelToken* token = nullptr,
+                       bool* out_cancelled = nullptr);
 
 // What a host may still promise about a layer: whether its edit list is a
 // single item carrying samples, and at what resolution. False for anything

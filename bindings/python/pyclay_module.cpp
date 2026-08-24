@@ -3550,6 +3550,49 @@ NB_MODULE(pyclay, m) {
             "file that was never written is worse than naming none.");
 
     // -- fixed-topology mesh brushes -------------------------------------------------
+    nb::class_<parallel::CancelToken>(
+        m, "CancelToken",
+        "Stop a long operation, and see how far it got.\n\n"
+        "This library has three budget classes and the third had no exit: on\n"
+        "the reference iPad mask_extrude measures 4403 ms and consolidate\n"
+        "661 ms, and every one was a call you entered and could not leave.\n\n"
+        "`cancel()` is the ONE thing that is safe to call on a running\n"
+        "operation from another thread — everything else in this library\n"
+        "requires you to serialize. A cancelled operation leaves everything it\n"
+        "was given exactly as it found it, so you never have to undo one.\n\n"
+        "Reusable: reset() clears the flag, so one token per document does not\n"
+        "mean an allocation per cancel.")
+        .def(nb::init<>())
+        .def("cancel", [](parallel::CancelToken& t) { t.cancel(); },
+             "Stop the operation using this token. Safe before it starts,\n"
+             "during it, after it, and twice.")
+        .def_prop_ro("cancelled",
+                     [](const parallel::CancelToken& t) { return t.cancelled(); })
+        .def("reset", [](parallel::CancelToken& t) { t.reset(); },
+             "Clear the cancelled flag and the progress, so the token can be\n"
+             "used again.")
+        .def_prop_ro(
+            "progress",
+            [](const parallel::CancelToken& t) {
+                const parallel::Progress p = t.progress();
+                nb::dict out;
+                out["running"] = p.running;
+                out["phase"] = p.phase;
+                out["phase_count"] = p.phase_count;
+                out["fraction"] = p.fraction;
+                out["done"] = p.done;
+                out["total"] = p.total;
+                return out;
+            },
+            "What the operation is doing: running, phase, phase_count,\n"
+            "fraction, done, total.\n\n"
+            "NO TIME ESTIMATE, deliberately — a multi-phase operation's phases\n"
+            "differ in per-unit cost by more than an order, so a figure derived\n"
+            "from the fraction would be wrong in the direction that annoys\n"
+            "users most, and you have the wall clock.\n\n"
+            "Safe to read from another thread, and when nothing is running it\n"
+            "says so rather than reporting a stale fraction.");
+
     nb::class_<PyVertexDeltas>(
         m, "VertexDeltas",
         "What one sculpting gesture moved, and how to put it back.\n\n"
@@ -4592,7 +4635,7 @@ NB_MODULE(pyclay, m) {
              "paying for two bakes.")
         .def("consolidate",
              [](PyLayer& l, float cell, nb::handle band, nb::handle padding, nb::handle region,
-                bool redistance) {
+                bool redistance, parallel::CancelToken* token) {
                  scene::ConsolidationCost cost;
                  scene::ConsolidationParams p =
                      to_consolidation(cell, band, padding, region, redistance);
@@ -4603,17 +4646,23 @@ NB_MODULE(pyclay, m) {
                  // undoable — worth saying, because it is the operation most
                  // often assumed not to be.
                  session::History* hist = (l.undo && *l.undo) ? l.undo->get() : nullptr;
+                 bool cancelled = false;
                  if (!scene::consolidate_layer(l.doc->document, l.id, p,
                                                hist ? hist->commands() : nullptr, &cost,
-                                               eval::pooled_bake_eval()))
+                                               eval::pooled_bake_eval(), token, &cancelled)) {
+                     // A cancel and "nothing to consolidate" both fail, and a
+                     // caller must not be shown the second when they did the
+                     // first — so they are different exceptions.
+                     if (cancelled) throw std::runtime_error("the consolidate was cancelled");
                      throw std::invalid_argument(
                          "nothing to consolidate: the layer is empty, unbounded, or the region "
                          "contains no surface");
+                 }
                  if (hist) hist->sync_scene_steps();
                  return cost_dict(cost);
              },
              "cell"_a, "band"_a = nb::none(), "padding"_a = nb::none(), "region"_a = nb::none(),
-             "redistance"_a = true,
+             "redistance"_a = true, "token"_a = nb::none(),
              "Collapse this layer's edit list into one item carrying samples,\n"
              "and report what it cost.\n\n"
              "ONE undo step, whose inverse restores what it absorbed with ids,\n"

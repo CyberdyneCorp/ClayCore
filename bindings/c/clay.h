@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 44
+#define CLAY_ABI_MINOR 45
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -46,7 +46,13 @@ typedef enum clay_result {
     CLAY_ERROR_FORWARD_VERSION = 5,
     CLAY_ERROR_BUDGET_EXCEEDED = 6,
     CLAY_ERROR_UNSUPPORTED = 7,
-    CLAY_ERROR_BACKEND = 8
+    CLAY_ERROR_BACKEND = 8,
+    /* The user stopped it. An ordinary outcome of an interactive session, not a
+     * failure: distinct from CLAY_ERROR_BUDGET_EXCEEDED, which means a limit
+     * the HOST declared before the call, and distinct from every fault code.
+     * A cancelled operation leaves everything it was given exactly as it found
+     * it — see clay_cancel_token. */
+    CLAY_ERROR_CANCELLED = 9
 } clay_result;
 
 /* Library/ABI version (see c-abi spec). Compare majors at init — and while
@@ -349,6 +355,56 @@ void clay_document_destroy(clay_document* doc);
 
 clay_result clay_document_save(const clay_document* doc, const char* path);
 clay_result clay_document_load(const char* path, clay_document** out_doc);
+
+/* -- cancelling a long operation -------------------------------------------
+ *
+ * This library has three budget classes and the third had no exit. From the
+ * device gate: mask_extrude measures 4403 ms and consolidate 661 ms on the
+ * reference iPad, and every one of those was a synchronous call a host entered
+ * and could not leave. The threading contract closed the obvious workaround —
+ * calls on one handle must be serialized, const readers included — so a host
+ * could not even read the document from another thread to drive a progress bar.
+ *
+ * A TOKEN, NOT A CALLBACK. This header contains no function pointers, and a
+ * progress callback would be the first one every FFI consumer has to marshal.
+ * It would also fire on a worker thread, so the header would need a rule about
+ * what it may touch and the honest answer is "almost nothing". Here the engine
+ * writes and the host reads, both sides plain atomics. */
+typedef struct clay_cancel_token clay_cancel_token; /* opaque */
+
+clay_cancel_token* clay_cancel_token_create(void);
+void clay_cancel_token_destroy(clay_cancel_token* token);
+
+/* Cancelling is the ONE call in this ABI that is safe to make from a thread
+ * other than the one running the operation. Everything else requires the host
+ * to serialize. Safe before an operation starts, during one, and after one has
+ * returned. */
+void clay_cancel_token_cancel(clay_cancel_token* token);
+int32_t clay_cancel_token_cancelled(const clay_cancel_token* token);
+
+/* Reusable: clears the cancelled flag and the progress. A host holding one
+ * token per document must not pay an allocation per cancel. */
+void clay_cancel_token_reset(clay_cancel_token* token);
+
+/* What the operation is doing. NO TIME ESTIMATE, deliberately: a multi-phase
+ * operation's phases differ in per-unit cost by more than an order, so a figure
+ * derived from a fraction would be wrong in the direction that annoys users
+ * most, and the host has the wall clock.
+ *
+ * Safe to read from another thread, and safe when nothing is running — in which
+ * case `running` is 0 and the rest is zeroed rather than left stale. */
+typedef struct clay_progress {
+    uint32_t struct_size; /* = sizeof(clay_progress); required */
+    uint32_t phase;       /* 0-based */
+    uint32_t phase_count;
+    int32_t running;
+    float fraction; /* within the current phase, monotonic */
+    uint64_t done;  /* honest units where the operation has any */
+    uint64_t total; /* 0 when it does not */
+} clay_progress;
+
+clay_result clay_cancel_token_progress(const clay_cancel_token* token,
+                                       clay_progress* out_progress);
 
 /* -- serializing without a file -------------------------------------------- */
 
@@ -1372,6 +1428,26 @@ clay_result clay_layer_consolidate(clay_document* doc, clay_layer_id layer,
                                    const clay_consolidation_params* params,
                                    const float region_min[3], const float region_max[3],
                                    clay_consolidation_cost* out_cost);
+
+/* The same, cancellable (add-operation-cancellation, ABI 0.45.0).
+ *
+ * A SECOND ENTRY POINT rather than a parameter on the first, because adding a
+ * parameter would break every host already compiled against it — and the whole
+ * point of a token is that a host who does not want one is unaffected. Same
+ * shape clay_mesh_validation_report has to clay_mesh_validate: the older call
+ * is sugar over this one with a null token, so there is one implementation
+ * rather than two that could drift.
+ *
+ * `token` may be NULL, which is exactly the older call. A cancelled consolidate
+ * returns CLAY_ERROR_CANCELLED and leaves the document BYTE-IDENTICAL: the bake
+ * builds a volume and installs it at the end, so a cancel is a discard rather
+ * than a partial commit, and a host never has to undo one. */
+clay_result clay_layer_consolidate_cancellable(clay_document* doc, clay_layer_id layer,
+                                               const clay_consolidation_params* params,
+                                               const float region_min[3],
+                                               const float region_max[3],
+                                               clay_consolidation_cost* out_cost,
+                                               clay_cancel_token* token);
 
 /* Whether a layer is consolidated — its edit list is a single item carrying
  * samples — and at what resolution, so a host can stop offering parameter

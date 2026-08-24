@@ -6061,3 +6061,72 @@ def test_the_journal_needs_undo_enabled():
     doc.add_sdf_layer("body")
     with pytest.raises(Exception):
         doc.journal_since(0)
+
+
+# -- cancelling a long operation (add-operation-cancellation) ----------------
+#
+# Three budget classes, and the third had no exit: on the reference iPad
+# mask_extrude measures 4403 ms and consolidate 661 ms, and every one was a
+# call you entered and could not leave.
+
+def _heavy_layer():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("body")
+    for i in range(20):
+        layer.add(clay.Sphere(r=0.30 + 0.01 * i, position=(0.05 * i, 0, 0)))
+    return doc, layer
+
+
+def test_a_cancelled_consolidate_changes_nothing():
+    doc, layer = _heavy_layer()
+    probes = np.array([[0.0, 0.0, 0.0], [0.3, 0.1, 0.0], [5.0, 5.0, 5.0]], dtype=np.float32)
+    before = doc.eval(probes)
+    saved = doc.to_bytes()
+
+    token = clay.CancelToken()
+    token.cancel()
+    with pytest.raises(RuntimeError):
+        layer.consolidate(cell=0.01, token=token)
+
+    # Byte-identical, not merely equivalent: the bake builds a volume and
+    # installs it at the end, so a cancel is a discard.
+    assert doc.to_bytes() == saved
+    assert np.allclose(doc.eval(probes), before)
+
+
+def test_no_token_is_exactly_the_call_that_was_there_before():
+    doc, layer = _heavy_layer()
+    report = layer.consolidate(cell=0.06)          # no token at all
+    assert report["cell_size"] == pytest.approx(0.06)
+
+
+def test_a_token_is_reusable_after_a_cancel():
+    doc, layer = _heavy_layer()
+    token = clay.CancelToken()
+    token.cancel()
+    with pytest.raises(RuntimeError):
+        layer.consolidate(cell=0.01, token=token)
+
+    token.reset()
+    assert not token.cancelled
+    assert layer.consolidate(cell=0.06, token=token)["cell_size"] == pytest.approx(0.06)
+
+
+def test_progress_reports_idle_rather_than_a_stale_fraction():
+    token = clay.CancelToken()
+    assert token.progress["running"] is False
+    assert token.progress["fraction"] == pytest.approx(0.0)
+
+    doc, layer = _heavy_layer()
+    layer.consolidate(cell=0.06, token=token)
+    # Finished: idle, not a stale 100%.
+    assert token.progress["running"] is False
+
+
+def test_cancelling_is_safe_before_during_and_twice():
+    token = clay.CancelToken()
+    token.cancel()
+    token.cancel()          # twice is not an error
+    token.reset()
+    token.reset()
+    assert not token.cancelled

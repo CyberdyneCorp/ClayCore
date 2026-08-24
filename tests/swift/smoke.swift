@@ -784,6 +784,40 @@ if let mesh = mesh {
     clay_mesh_destroy(mesh)
 }
 
+// -- cancelling a long operation ---------------------------------------------
+// Cancel is the one call in this ABI that is safe from another thread.
+do {
+    let token = clay_cancel_token_create()
+    clay_cancel_token_cancel(token)
+    check(clay_cancel_token_cancelled(token) == 1, "the token is set")
+
+    var progress = clay_progress()
+    progress.struct_size = UInt32(MemoryLayout<clay_progress>.size)
+    check(clay_cancel_token_progress(token, &progress) == CLAY_OK, "progress readable")
+    check(progress.running == 0, "idle reports idle rather than a stale fraction")
+
+    let cancelDoc = clay_document_create()
+    var cancelLayer: clay_layer_id = 0
+    check(clay_add_sdf_layer(cancelDoc, "body", &cancelLayer) == CLAY_OK, "cancel layer")
+    var r: Float = 0.5
+    if let item = clay_item_create(Int32(CLAY_PRIM_SPHERE.rawValue), &r, 1) {
+        var node: clay_node_id = 0
+        check(clay_layer_add_item(cancelDoc, cancelLayer, item, &node) == CLAY_OK, "something to bake")
+        clay_item_destroy(item)
+    }
+    var params = clay_consolidation_params()
+    params.struct_size = UInt32(MemoryLayout<clay_consolidation_params>.size)
+    params.cell_size = 0.02
+    check(clay_layer_consolidate_cancellable(cancelDoc, cancelLayer, &params, nil, nil, nil,
+                                             token) == CLAY_ERROR_CANCELLED,
+          "a cancelled consolidate says so")
+
+    clay_cancel_token_reset(token)
+    check(clay_cancel_token_cancelled(token) == 0, "and the token is reusable")
+    clay_document_destroy(cancelDoc)
+    clay_cancel_token_destroy(token)
+}
+
 // -- surviving a crash -------------------------------------------------------
 // A recovery is a snapshot plus the steps since it. The host owns the file; the
 // library owns the bytes.

@@ -313,6 +313,59 @@ deltas by value.
 
 Runnable: [`examples/59_undo_across_representations.py`](../examples/59_undo_across_representations.py).
 
+### Cancelling a long operation
+
+Three budget classes, and until ABI 0.45.0 the third had no exit. From the
+device gate: `mask_extrude` measures 4403 ms and `sdf_consolidate` 661 ms on the
+reference iPad, and every one of those was a synchronous call a host entered and
+could not leave. The threading contract closed the obvious workaround — calls on
+one handle must be serialized, *const readers included* — so a host could not
+even read the document from another thread to drive a progress bar.
+
+```python
+token = clay.CancelToken()
+# on another thread, when the user presses Stop:
+token.cancel()
+# and meanwhile, to draw a bar:
+p = token.progress   # running, phase, phase_count, fraction, done, total
+```
+
+```c
+clay_cancel_token* token = clay_cancel_token_create();
+clay_layer_consolidate_cancellable(doc, layer, &params, NULL, NULL, NULL, token);
+/* ... from the UI thread ... */
+clay_cancel_token_cancel(token);
+```
+
+**A token, not a callback.** `clay.h` contains no function pointers. A progress
+callback would be the first one every FFI consumer has to marshal, and it would
+fire on a *pool worker* rather than the caller's thread — so the header would
+need a rule about what it may touch, and the honest answer is "almost nothing".
+
+**`cancel()` is the one call in this ABI that is safe from another thread.**
+Everything else requires the host to serialize. It is safe before an operation
+starts, during one, after one has returned, and twice.
+
+**A cancelled operation leaves everything exactly as it found it.** These
+operations build a result and install it at the end, so a cancel is a discard —
+the document comes back byte-identical and the undo stack gains no entry. You
+never have to undo a cancellation.
+
+**A cancellable entry point is a second one**, not a parameter added to the
+first: `clay_layer_consolidate_cancellable` beside `clay_layer_consolidate`,
+the same shape `clay_mesh_validation_report` has to `clay_mesh_validate`. The
+older call is sugar with a null token, so a host that does not want one is
+unaffected — which is the whole point.
+
+**No time estimate.** A multi-phase operation's phases differ in per-unit cost
+by more than an order — redistancing and a colour fill are not the same work per
+brick — so a figure derived from the fraction would be wrong in the direction
+that annoys users most. You have the wall clock.
+
+**`CLAY_ERROR_CANCELLED` is not a failure.** It is distinct from every fault
+code and from `CLAY_ERROR_BUDGET_EXCEEDED`, which means a limit the *host*
+declared before the call. One means "too big"; the other means "stopped".
+
 ### Surviving a crash
 
 A recovery is **a snapshot plus the steps since it**. The library owns the

@@ -45,6 +45,7 @@
 #include "clay/pick/pick.h"
 #include "clay/scene/armature.h"
 #include "clay/scene/bounds.h"
+#include "clay/parallel/cancel.h"
 #include "clay/scene/commands.h"
 #include "clay/session/history.h"
 #include "clay/scene/consolidate.h"
@@ -487,6 +488,7 @@ constexpr std::size_t kQuadParamsOriginal =
     offsetof(clay_quad_params, level) + sizeof(std::uint32_t);
 constexpr std::size_t kQuadReportOriginal =
     offsetof(clay_quad_report, clamped) + sizeof(std::int32_t);
+constexpr std::size_t kProgressOriginal = offsetof(clay_progress, total) + sizeof(std::uint64_t);
 constexpr std::size_t kValidationReportOriginal =
     offsetof(clay_validation_report, euler_characteristic) + sizeof(std::int64_t);
 constexpr std::size_t kDeviceDescOriginal =
@@ -888,6 +890,12 @@ struct clay_mask {
 // format. Nothing here interprets the bytes.
 struct clay_blob {
     std::vector<std::uint8_t> bytes;
+};
+
+// The token a host cancels an operation with. A thin owner around the engine
+// type so the C handle has a stable identity of its own.
+struct clay_cancel_token {
+    parallel::CancelToken token;
 };
 
 // simply unused by a borrow. Declared above clay_document because the document
@@ -2005,6 +2013,41 @@ const char* clay_last_error(void) { return g_last_error.c_str(); }
 clay_document* clay_document_create(void) { return new clay_document(); }
 
 void clay_document_destroy(clay_document* doc) { delete doc; }
+
+clay_cancel_token* clay_cancel_token_create(void) { return new clay_cancel_token(); }
+
+void clay_cancel_token_destroy(clay_cancel_token* token) { delete token; }
+
+void clay_cancel_token_cancel(clay_cancel_token* token) {
+    if (token) token->token.cancel();
+}
+
+int32_t clay_cancel_token_cancelled(const clay_cancel_token* token) {
+    return token && token->token.cancelled() ? 1 : 0;
+}
+
+void clay_cancel_token_reset(clay_cancel_token* token) {
+    if (token) token->token.reset();
+}
+
+clay_result clay_cancel_token_progress(const clay_cancel_token* token,
+                                       clay_progress* out_progress) {
+    if (!token || !out_progress) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    clay_progress probe;
+    clay_result r = read_desc(out_progress, kProgressOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_progress->struct_size;
+    const parallel::Progress p = token->token.progress();
+    clay_progress filled{};
+    filled.phase = p.phase;
+    filled.phase_count = p.phase_count;
+    filled.running = p.running ? 1 : 0;
+    filled.fraction = p.fraction;
+    filled.done = p.done;
+    filled.total = p.total;
+    write_desc(out_progress, declared, filled);
+    return CLAY_OK;
+}
 
 const uint8_t* clay_blob_data(const clay_blob* blob) {
     if (!blob || blob->bytes.empty()) return nullptr;
@@ -3806,6 +3849,17 @@ clay_result clay_layer_consolidate(clay_document* doc, clay_layer_id layer_id,
                                    const clay_consolidation_params* params,
                                    const float region_min[3], const float region_max[3],
                                    clay_consolidation_cost* out_cost) {
+    // Sugar over the cancellable form with no token, so there is one
+    // implementation rather than two that could drift.
+    return clay_layer_consolidate_cancellable(doc, layer_id, params, region_min, region_max,
+                                              out_cost, nullptr);
+}
+
+clay_result clay_layer_consolidate_cancellable(clay_document* doc, clay_layer_id layer_id,
+                                   const clay_consolidation_params* params,
+                                   const float region_min[3], const float region_max[3],
+                                   clay_consolidation_cost* out_cost,
+                                               clay_cancel_token* token) {
     if (!doc || !params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or params");
     const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
     if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
@@ -3824,11 +3878,18 @@ clay_result clay_layer_consolidate(clay_document* doc, clay_layer_id layer_id,
     // is told afterwards how many entries appeared. It IS undoable — worth
     // saying, because it is the operation most often assumed not to be.
     scene::UndoStack* stack = doc->undo ? doc->undo->commands() : nullptr;
+    bool cancelled = false;
     if (!scene::consolidate_layer(doc->doc.document, layer_id, p, stack, &cost,
-                                  eval::pooled_bake_eval()))
+                                  eval::pooled_bake_eval(), token ? &token->token : nullptr,
+                                  &cancelled)) {
+        // A cancel and "nothing to consolidate" both fail, and a host must not
+        // show the second when the user did the first.
+        if (cancelled)
+            return fail(CLAY_ERROR_CANCELLED, "the consolidate was cancelled");
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "nothing to consolidate: the layer is empty, unbounded, or the region "
                     "contains no surface");
+    }
     if (doc->undo) doc->undo->sync_scene_steps();
     doc->touch();
     if (out_cost) write_cost(cost, out_cost);

@@ -188,7 +188,12 @@ FieldReport report_layer(const Layer& layer, float advise_below_step_scale) {
 std::optional<field::FieldVolume> bake_layer(const Layer& layer,
                                              const ConsolidationParams& params,
                                              ConsolidationCost* out_cost,
-                                             const BakePointEval& point_eval) {
+                                             const BakePointEval& point_eval,
+                                             parallel::CancelToken* token) {
+    // Six phases, and a host drawing a bar needs to know which: sample,
+    // redistance, compact, colour, measure, done. A single fraction would be a
+    // lie, because their per-unit costs differ by more than an order.
+    parallel::ProgressScope progress(token, 5);
     if (!(params.cell_size > 0.0f)) return std::nullopt;
     const float band = params.band > 0.0f ? params.band : params.cell_size * 3.0f;
     const float padding = params.padding > 0.0f ? params.padding : band;
@@ -205,11 +210,14 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
         region = math::Aabb{tape.bounds.min - pad, tape.bounds.max + pad};
     }
 
+    progress.phase(0);
+    bool cancelled = false;
     field::FieldVolume volume = field::FieldVolume::sample_blocks(
         [&tape, &point_eval](const field::FieldVolume::BrickGrid& grid, std::size_t first,
                              std::size_t count,
                              float* out) { fill_window(tape, point_eval, grid, first, count, out); },
-        region, params.cell_size, band);
+        region, params.cell_size, band, token, &cancelled);
+    if (cancelled) return std::nullopt;
     // brick_count rather than empty(): a volume covering only empty space
     // still has a full brick index, it just stores no samples, and handing one
     // back from a bake would replace the layer with something that silently
@@ -221,7 +229,11 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
     // which a steep field does not entitle anyone to conclude. Redistancing is
     // what earns it, and it is what stops a repeatedly consolidated chain from
     // growing a brick of stored shell per bake.
+    progress.phase(1);
+    if (parallel::cancelled(token)) return std::nullopt;
     if (!params.skip_redistance && field::redistance(volume)) volume.compact();
+    progress.phase(2);
+    if (parallel::cancelled(token)) return std::nullopt;
 
     // The colours the bake used to discard. Consolidation is advertised as
     // changing what a layer COSTS rather than what it looks like, and
@@ -245,6 +257,7 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
     // paying it to recover a constant. Measured on the reference iPad at 916 ms
     // against a 786 ms budget, where the release before colour landed took
     // 524 ms.
+    progress.phase(3);
     if (layer_colors_vary(layer)) {
         volume.fill_colors_blocks([&tape, &point_eval](const float* points_xyz, std::size_t count,
                                                       float* out_rgb) {
@@ -263,6 +276,10 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
     // since sample() measured them. Declaring anything smaller than this would
     // be the overstep the bound exists to prevent, so it is measured rather
     // than reasoned about at every step that could have moved it.
+    progress.phase(4);
+    // The last checkpoint before the caller commits. Past here the operation is
+    // cheap and a cancel would only delay the same result.
+    if (parallel::cancelled(token)) return std::nullopt;
     volume.set_sample_lipschitz(volume.measure_sample_lipschitz());
 
     if (out_cost) fill_cost(volume, *out_cost);
@@ -271,7 +288,9 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
 
 bool consolidate_layer(Document& doc, LayerId layer_id, const ConsolidationParams& params,
                        UndoStack* undo, ConsolidationCost* out_cost,
-                       const BakePointEval& point_eval) {
+                       const BakePointEval& point_eval, parallel::CancelToken* token,
+                       bool* out_cancelled) {
+    if (out_cancelled) *out_cancelled = false;
     const Layer* layer = doc.find_layer(layer_id);
     if (!layer || layer->kind != LayerKind::Sdf || !layer->sdf) return false;
     // Checked before the bake, not after: a locked layer should not cost a
@@ -290,7 +309,14 @@ bool consolidate_layer(Document& doc, LayerId layer_id, const ConsolidationParam
     }
     if (absorb.empty()) return false;
 
-    std::optional<field::FieldVolume> volume = bake_layer(*layer, params, out_cost, point_eval);
+    std::optional<field::FieldVolume> volume =
+        bake_layer(*layer, params, out_cost, point_eval, token);
+    // A cancel and "there was nothing to consolidate" both come back as
+    // nullopt, and a host must not show the second when the user did the first.
+    if (!volume && parallel::cancelled(token)) {
+        if (out_cancelled) *out_cancelled = true;
+        return false;  // the document is untouched: the bake had not been installed
+    }
     if (!volume) return false;
 
     Node baked;
