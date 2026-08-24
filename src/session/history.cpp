@@ -136,6 +136,35 @@ void History::end_voxel_step(voxel::VoxelGrid& grid) {
     push(std::move(step));
 }
 
+bool History::begin_mask_step(scene::LayerId layer, voxel::MaskField& mask) {
+    if (!enabled_) return false;
+    if (mask_open_) return false;  // a step is one edit
+    if (!mask.begin_step()) return false;
+    open_mask_layer_ = layer;
+    mask_open_ = true;
+    return true;
+}
+
+void History::end_mask_step(voxel::MaskField& mask) {
+    if (!mask_open_) return;
+    mask_open_ = false;
+    std::vector<voxel::MaskField::MaskChange> cells = mask.end_step();
+    // A step that changed no cell is dropped, exactly as a voxel one is: a
+    // paint that landed on cells already at that value is ordinary, and an
+    // undo that does nothing is what this mechanism exists to remove.
+    if (cells.empty()) return;
+    Step step;
+    step.kind = Step::Kind::Mask;
+    step.layer = open_mask_layer_;
+    step.mask_cells = std::move(cells);
+    JournalEvent e;
+    e.kind = JournalEvent::Kind::Mask;
+    e.layer = step.layer;
+    e.mask_cells = step.mask_cells;
+    journal_.push_back(std::move(e));
+    push(std::move(step));
+}
+
 void History::record_mesh_step(scene::LayerId layer, mesh::VertexDeltas deltas) {
     if (!enabled_ || deltas.empty()) return;
     Step step;
@@ -164,7 +193,7 @@ void History::record_barrier(std::string what) {
 
 bool History::apply_step(const Step& step, bool forward, scene::Document& doc,
                          const GridFor& grid_for, const MeshFor& mesh_for,
-                         math::Aabb* out_bound) {
+                         math::Aabb* out_bound, const MaskFor& mask_for) {
     switch (step.kind) {
         case Step::Kind::Scene:
             return forward ? commands_.redo(doc, out_bound) : commands_.undo(doc, out_bound);
@@ -188,6 +217,18 @@ bool History::apply_step(const Step& step, bool forward, scene::Document& doc,
             // ignored: the step stays on the stack and the caller is told.
             return forward ? step.deltas.apply(*m) : step.deltas.revert(*m);
         }
+        case Step::Kind::Mask: {
+            voxel::MaskField* mask = mask_for ? mask_for(step.layer) : nullptr;
+            // Refused rather than skipped, for the same reason a missing grid
+            // is: skipping would take the step off the stack and leave the
+            // next undo reversing something older than the user asked for.
+            if (!mask) return false;
+            if (forward)
+                mask->reapply_changes(step.mask_cells);
+            else
+                mask->revert_changes(step.mask_cells);
+            return true;
+        }
         case Step::Kind::Barrier:
             return false;
     }
@@ -195,13 +236,13 @@ bool History::apply_step(const Step& step, bool forward, scene::Document& doc,
 }
 
 bool History::undo(scene::Document& doc, const GridFor& grid_for, const MeshFor& mesh_for,
-                   math::Aabb* out_bound) {
+                   math::Aabb* out_bound, const MaskFor& mask_for) {
     if (!enabled_ || steps_.empty()) return false;
     // A barrier is not reversible and must not be silently consumed: it is the
     // horizon a host draws. Report nothing to undo and leave it in place.
     if (!steps_.back().reversible()) return false;
     Step step = std::move(steps_.back());
-    if (!apply_step(step, /*forward=*/false, doc, grid_for, mesh_for, out_bound)) {
+    if (!apply_step(step, /*forward=*/false, doc, grid_for, mesh_for, out_bound, mask_for)) {
         steps_.back() = std::move(step);  // unchanged; the caller is told
         return false;
     }
@@ -216,10 +257,10 @@ bool History::undo(scene::Document& doc, const GridFor& grid_for, const MeshFor&
 }
 
 bool History::redo(scene::Document& doc, const GridFor& grid_for, const MeshFor& mesh_for,
-                   math::Aabb* out_bound) {
+                   math::Aabb* out_bound, const MaskFor& mask_for) {
     if (!enabled_ || redo_.empty()) return false;
     Step step = std::move(redo_.back());
-    if (!apply_step(step, /*forward=*/true, doc, grid_for, mesh_for, out_bound)) {
+    if (!apply_step(step, /*forward=*/true, doc, grid_for, mesh_for, out_bound, mask_for)) {
         redo_.back() = std::move(step);
         return false;
     }
@@ -315,6 +356,39 @@ struct Reader {
     }
 };
 
+// A mask step is a run of PODs too, with the value already quantized.
+std::vector<std::uint8_t> encode_mask_cells(
+    const std::vector<voxel::MaskField::MaskChange>& cells) {
+    std::vector<std::uint8_t> out;
+    out.reserve(cells.size() * 14);
+    for (const voxel::MaskField::MaskChange& c : cells) {
+        put_u32(out, static_cast<std::uint32_t>(c.cell.x));
+        put_u32(out, static_cast<std::uint32_t>(c.cell.y));
+        put_u32(out, static_cast<std::uint32_t>(c.cell.z));
+        out.push_back(c.before);
+        out.push_back(c.after);
+    }
+    return out;
+}
+
+bool decode_mask_cells(const std::uint8_t* data, std::size_t size,
+                       std::vector<voxel::MaskField::MaskChange>* out) {
+    if (size % 14 != 0) return false;
+    out->clear();
+    out->reserve(size / 14);
+    Reader r{data, size};
+    while (r.at < size && r.ok) {
+        voxel::MaskField::MaskChange c;
+        c.cell.x = static_cast<std::int32_t>(r.u32());
+        c.cell.y = static_cast<std::int32_t>(r.u32());
+        c.cell.z = static_cast<std::int32_t>(r.u32());
+        c.before = r.u8();
+        c.after = r.u8();
+        out->push_back(c);
+    }
+    return r.ok;
+}
+
 // A voxel step is a run of PODs, so its encoding is the run.
 std::vector<std::uint8_t> encode_cells(const std::vector<voxel::VoxelGrid::SculptChange>& cells) {
     std::vector<std::uint8_t> out;
@@ -384,6 +458,9 @@ std::vector<std::uint8_t> History::journal_since(std::size_t from, std::size_t* 
             case JournalEvent::Kind::Mesh:
                 put_bytes(out, e.deltas.encode());
                 break;
+            case JournalEvent::Kind::Mask:
+                put_bytes(out, encode_mask_cells(e.mask_cells));
+                break;
             case JournalEvent::Kind::Barrier:
                 put_bytes(out, std::vector<std::uint8_t>(e.barrier.begin(), e.barrier.end()));
                 break;
@@ -406,7 +483,8 @@ void History::trim_journal(std::size_t upto) {
 }
 
 bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document& doc,
-                     const GridFor& grid_for, const MeshFor& mesh_for, ReplayResult* out) {
+                     const GridFor& grid_for, const MeshFor& mesh_for, ReplayResult* out,
+                     const MaskFor& mask_for) {
     ReplayResult result;
     if (out) *out = result;
     if (!data || size == 0) return false;
@@ -489,6 +567,26 @@ bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document
                 push(std::move(step));
                 break;
             }
+            case JournalEvent::Kind::Mask: {
+                voxel::MaskField* mask = mask_for ? mask_for(layer) : nullptr;
+                std::vector<voxel::MaskField::MaskChange> cells;
+                if (!mask || !decode_mask_cells(body, payload, &cells)) {
+                    if (out) *out = result;
+                    return false;
+                }
+                mask->reapply_changes(cells);
+                Step step;
+                step.kind = Step::Kind::Mask;
+                step.layer = layer;
+                step.mask_cells = std::move(cells);
+                JournalEvent e;
+                e.kind = JournalEvent::Kind::Mask;
+                e.layer = layer;
+                e.mask_cells = step.mask_cells;
+                journal_.push_back(std::move(e));
+                push(std::move(step));
+                break;
+            }
             case JournalEvent::Kind::Barrier:
                 // STOPS rather than skips. Continuing past an operation it
                 // cannot reproduce would hand back a document quietly missing
@@ -498,13 +596,13 @@ bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document
                 if (out) *out = result;
                 return true;
             case JournalEvent::Kind::Undo:
-                if (!undo(doc, grid_for, mesh_for)) {
+                if (!undo(doc, grid_for, mesh_for, nullptr, mask_for)) {
                     if (out) *out = result;
                     return false;
                 }
                 break;
             case JournalEvent::Kind::Redo:
-                if (!redo(doc, grid_for, mesh_for)) {
+                if (!redo(doc, grid_for, mesh_for, nullptr, mask_for)) {
                     if (out) *out = result;
                     return false;
                 }
@@ -523,7 +621,9 @@ void History::clear() {
     journal_base_ = 0;
     open_cells_.clear();
     voxel_open_ = false;
+    mask_open_ = false;
     open_layer_ = 0;
+    open_mask_layer_ = 0;
 }
 
 }  // namespace session

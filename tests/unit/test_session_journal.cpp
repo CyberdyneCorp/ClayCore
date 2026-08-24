@@ -149,7 +149,7 @@ TEST_CASE("journal: replay stops at a barrier rather than skipping it") {
     session::History h;
     h.set_enabled(true);
     REQUIRE(h.perform(w.doc, add_sphere(w.sdf, 0.5f, kernel::cf3(0, 0, 0))));
-    h.record_barrier("mask edit");
+    h.record_barrier("dropped a resolution level");
     REQUIRE(h.perform(w.doc, add_sphere(w.sdf, 0.3f, kernel::cf3(1, 0, 0))));
 
     std::size_t at = 0;
@@ -162,7 +162,7 @@ TEST_CASE("journal: replay stops at a barrier rather than skipping it") {
     REQUIRE(replayer.replay(journal.data(), journal.size(), fresh.doc, fresh.grid_for(),
                             fresh.mesh_for(), &res));
     CHECK(res.stopped_at_barrier);
-    CHECK(res.barrier == "mask edit");
+    CHECK(res.barrier == "dropped a resolution level");
     // The item before the barrier is there; the one after is not.
     CHECK(fresh.doc.layers[0].sdf->roots.size() == 1);
 }

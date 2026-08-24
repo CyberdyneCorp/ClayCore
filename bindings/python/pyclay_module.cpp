@@ -757,6 +757,14 @@ session::History::GridFor grid_for(const PyDocument& d) {
     };
 }
 
+session::History::MaskFor mask_for(const PyDocument& d) {
+    std::shared_ptr<io::ClaySpaceDoc> doc = d.doc;
+    return [doc](scene::LayerId id) -> voxel::MaskField* {
+        auto it = doc->masks.find(id);
+        return it == doc->masks.end() ? nullptr : &it->second;
+    };
+}
+
 session::History::MeshFor mesh_for(const PyDocument& d) {
     std::shared_ptr<io::ClaySpaceDoc> doc = d.doc;
     return [doc](scene::LayerId id) -> mesh::Mesh* {
@@ -765,14 +773,26 @@ session::History::MeshFor mesh_for(const PyDocument& d) {
     };
 }
 
-// A mask edit is a BARRIER in the session history, matching the C binding's
-// note_mask_edit. voxel::MaskField is a fourth representation with no history
-// mechanism, so nothing can reverse or replay a mask edit — recording a barrier
-// is how a host finds that out rather than by pressing undo.
-void note_mask_edit(const PyMaskField& m) {
-    if (!m.doc || !m.undo || !*m.undo) return;
-    (*m.undo)->record_barrier("mask edit");
-}
+// Bracket a mask edit so it becomes ONE undo step, matching the C binding's
+// MaskStep. This used to record a BARRIER, because a mask had no history
+// mechanism at all; it has one now, so a mask edit is an ordinary step.
+struct PyMaskStep {
+    session::History* history = nullptr;
+    voxel::MaskField* mask = nullptr;
+
+    PyMaskStep(const PyMaskField& handle, voxel::MaskField& m) {
+        if (!handle.doc || !handle.undo || !*handle.undo) return;
+        session::History* h = handle.undo->get();
+        if (!h || !h->begin_mask_step(handle.layer, m)) return;
+        history = h;
+        mask = &m;
+    }
+    ~PyMaskStep() {
+        if (history) history->end_mask_step(*mask);
+    }
+    PyMaskStep(const PyMaskStep&) = delete;
+    PyMaskStep& operator=(const PyMaskStep&) = delete;
+};
 
 // Bracket a voxel edit so it becomes ONE undo step, matching the C binding's
 // VoxelStep. A standalone grid has no document and therefore no history: undo
@@ -5123,13 +5143,13 @@ NB_MODULE(pyclay, m) {
         .def("undo",
              [](PyDocument& d) {
                  if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
-                 return (*d.undo)->undo(d.doc->document, grid_for(d), mesh_for(d));
+                 return (*d.undo)->undo(d.doc->document, grid_for(d), mesh_for(d), nullptr, mask_for(d));
              },
              "Reverse the last recorded step; returns False when there is nothing to undo")
         .def("redo",
              [](PyDocument& d) {
                  if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
-                 return (*d.undo)->redo(d.doc->document, grid_for(d), mesh_for(d));
+                 return (*d.undo)->redo(d.doc->document, grid_for(d), mesh_for(d), nullptr, mask_for(d));
              },
              "Reapply the last undone step; returns False when there is nothing to redo")
         .def(
@@ -5173,7 +5193,7 @@ NB_MODULE(pyclay, m) {
                 session::History::ReplayResult r;
                 const bool ok = (*d.undo)->replay(
                     reinterpret_cast<const std::uint8_t*>(data.c_str()), data.size(),
-                    d.doc->document, grid_for(d), mesh_for(d), &r);
+                    d.doc->document, grid_for(d), mesh_for(d), &r, mask_for(d));
                 if (!ok)
                     throw std::invalid_argument(
                         "the journal could not be replayed: a version this build does not "
@@ -5372,8 +5392,9 @@ NB_MODULE(pyclay, m) {
                        nb::handle cell) { return m.field().get(to_coord(cell)); }, "cell"_a)
         .def("set",
              [](PyMaskField& m, nb::handle cell, float value) {
-                 note_mask_edit(m);
-                 m.field().set(to_coord(cell), value);
+                 voxel::MaskField& mf_ = m.field();
+                 PyMaskStep step_(m, mf_);
+                 mf_.set(to_coord(cell), value);
              },
              "cell"_a, "value"_a)
         .def("sample",
@@ -5400,8 +5421,9 @@ NB_MODULE(pyclay, m) {
         .def("paint",
              [](PyMaskField& m, nb::handle point, int n, float target, const std::string& shape,
                 const std::string& falloff, float strength) {
-                 note_mask_edit(m);
-                 m.field().paint(to_f3(point, "point"),
+                 voxel::MaskField& mf_ = m.field();
+                 PyMaskStep step_(m, mf_);
+                 mf_.paint(to_f3(point, "point"),
                                  make_brush(n, shape, falloff, strength, 0u), target);
              },
              "point"_a, "size"_a, "target"_a = 1.0f, "shape"_a = "sphere",
@@ -5411,27 +5433,29 @@ NB_MODULE(pyclay, m) {
         .def("paint_cell",
              [](PyMaskField& m, nb::handle cell, int n, float target, const std::string& shape,
                 const std::string& falloff, float strength) {
-                 note_mask_edit(m);
-                 m.field().paint(to_coord(cell), make_brush(n, shape, falloff, strength, 0u),
+                 voxel::MaskField& mf_ = m.field();
+                 PyMaskStep step_(m, mf_);
+                 mf_.paint(to_coord(cell), make_brush(n, shape, falloff, strength, 0u),
                                  target);
              },
              "cell"_a, "size"_a, "target"_a = 1.0f, "shape"_a = "sphere",
              "falloff"_a = "smooth", "strength"_a = 1.0f,
              "As paint(), centred on a mask cell rather than a world position")
-        .def("invert", [](PyMaskField& m) { note_mask_edit(m); m.field().invert(); },
+        .def("invert", [](PyMaskField& m) { voxel::MaskField& mf_ = m.field(); PyMaskStep step_(m, mf_); mf_.invert(); },
              "Flip the painted region (a sparse field has no finite complement)")
-        .def("clear", [](PyMaskField& m) { note_mask_edit(m); m.field().clear(); })
+        .def("clear", [](PyMaskField& m) { voxel::MaskField& mf_ = m.field(); PyMaskStep step_(m, mf_); mf_.clear(); })
         .def("expand",
-             [](PyMaskField& m, int steps) { note_mask_edit(m); m.field().expand(steps); },
+             [](PyMaskField& m, int steps) { voxel::MaskField& mf_ = m.field(); PyMaskStep step_(m, mf_); mf_.expand(steps); },
              "steps"_a = 1,
              "Grow the mask by grey dilation")
         .def("contract",
-             [](PyMaskField& m, int steps) { note_mask_edit(m); m.field().contract(steps); },
+             [](PyMaskField& m, int steps) { voxel::MaskField& mf_ = m.field(); PyMaskStep step_(m, mf_); mf_.contract(steps); },
              "steps"_a = 1, "Shrink the mask by grey erosion")
         .def("smooth",
              [](PyMaskField& m, int iterations) {
-                 note_mask_edit(m);
-                 m.field().smooth(iterations);
+                 voxel::MaskField& mf_ = m.field();
+                 PyMaskStep step_(m, mf_);
+                 mf_.smooth(iterations);
              },
              "iterations"_a = 1, "Blur the mask, softening its boundary")
         .def("bounds",
@@ -5445,16 +5469,18 @@ NB_MODULE(pyclay, m) {
              "Inclusive cell bounds of the painted region, or None")
         .def("fill",
              [](PyMaskField& m, nb::handle region, float value) {
-                 note_mask_edit(m);
-                 m.field().fill(to_aabb(region), value);
+                 voxel::MaskField& mf_ = m.field();
+                 PyMaskStep step_(m, mf_);
+                 mf_.fill(to_aabb(region), value);
              },
              "region"_a, "value"_a = 1.0f,
              "Set every cell whose centre lies in a ((lo), (hi)) world box. "
              "Filling with 0 releases the region.")
         .def("invert_within",
              [](PyMaskField& m, nb::handle region) {
-                 note_mask_edit(m);
-                 m.field().invert_within(to_aabb(region));
+                 voxel::MaskField& mf_ = m.field();
+                 PyMaskStep step_(m, mf_);
+                 mf_.invert_within(to_aabb(region));
              },
              "region"_a,
              "Take the complement over a ((lo), (hi)) world box — the bounded\n"

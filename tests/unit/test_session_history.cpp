@@ -189,7 +189,7 @@ TEST_CASE("session: a barrier is a horizon, not a silent gap") {
     h.set_enabled(true);
 
     REQUIRE(h.perform(w.doc, add_sphere(w.sdf_layer, 0.5f, kernel::cf3(0, 0, 0))));
-    h.record_barrier("mask edit");
+    h.record_barrier("dropped a resolution level");
     REQUIRE(h.begin_voxel_step(w.voxel_layer, w.grid));
     w.grid.set({0, 0, 0}, 1);
     h.end_voxel_step(w.grid);
@@ -198,7 +198,7 @@ TEST_CASE("session: a barrier is a horizon, not a silent gap") {
     // depth that counted further would promise an undo the host cannot do.
     CHECK(h.step_count() == 3);
     CHECK(h.undo_depth() == 1);
-    CHECK(h.next_barrier() == "mask edit");
+    CHECK(h.next_barrier() == "dropped a resolution level");
 
     REQUIRE(h.undo(w.doc, w.grid_for(), w.mesh_for()));
     CHECK(h.undo_depth() == 0);
@@ -254,7 +254,7 @@ TEST_CASE("session: disabled records nothing and behaves as before") {
     CHECK(h.step_count() == 0);
     CHECK_FALSE(h.begin_voxel_step(w.voxel_layer, w.grid));
     CHECK(w.grid.change_sink() == nullptr);
-    h.record_barrier("mask edit");
+    h.record_barrier("dropped a resolution level");
     CHECK(h.step_count() == 0);
     CHECK_FALSE(h.undo(w.doc, w.grid_for(), w.mesh_for()));
 }

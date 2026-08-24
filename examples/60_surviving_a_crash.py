@@ -16,9 +16,11 @@ the journal is proportional to what changed. This script writes both, throws the
 session away, rebuilds it, and checks that what came back is what was there —
 across the SDF edit list and a voxel layer at once.
 
-It also demonstrates the limit rather than describing it: painting a mask is a
-BARRIER, replay stops there and says so, and the honest response is a fresher
-snapshot rather than a longer journal.
+It also demonstrates the limit rather than describing it. Painting a mask used
+to be a BARRIER — replay stopped there and the honest response was a fresher
+snapshot — because a mask was a fourth representation with no history. Masks
+record now, so the journal carries them; what remains a barrier is narrower,
+and the script shows replay stopping at one of those instead.
 """
 
 import numpy as np
@@ -136,19 +138,22 @@ def main():
     doc2, sdf2, _ = build_session()
     base = doc2.to_bytes()
     sdf2.add(clay.Sphere(r=0.4))
+    # A mask edit used to end the journal here. It is an ordinary step now.
     freeze = doc2.add_mask("blockout", cell_size=CELL)
-    freeze.fill(((-0.2, -0.2, -0.2), (0.2, 0.2, 0.2)), 1.0)   # the barrier
+    freeze.fill(((-0.2, -0.2, -0.2), (0.2, 0.2, 0.2)), 1.0)
     sdf2.add(clay.Sphere(r=0.2, position=(1, 0, 0)))
     j2, _ = doc2.journal_since(0)
 
     back = clay.load_bytes(base)
     back.enable_undo()
+    back.add_mask("blockout", cell_size=CELL)   # the layer the journal names
     r2 = back.replay_journal(j2)
     if r2["stopped_at_barrier"]:
-        print(f"  barrier          replay stopped at {r2['barrier']!r} after "
-              f"{r2['applied']} events — re-snapshot, do not lengthen the journal")
-    else:
-        print(f"  barrier          none in this journal ({r2['applied']} events replayed)")
+        raise SystemExit(
+            "a mask edit is no longer a barrier; if replay stopped at one, something "
+            "else did and this note needs updating")
+    print(f"  mask in a journal  {r2['applied']} events replayed straight through a mask "
+          "edit — which used to end the recovery")
 
     print("\n  a snapshot plus the steps since it, and the steps cost what changed.")
 

@@ -21,9 +21,11 @@ present:
   - an edit that changed nothing is not a step at all, so a menu built from
     `undo_depth` never offers an undo that does nothing.
 
-And it states the boundary honestly. Mask edits are still outside the history:
-a mask is a fourth representation with no history mechanism, which the audit
-that counted three did not count.
+Masks used to be the boundary here — a fourth representation with no history
+mechanism, which the audit that counted three did not count. They are steps
+now, so this script paints one and undoes it like anything else. What remains
+outside is narrower: operations that destroy history itself, and anything a
+host does that the engine never sees.
 """
 
 import numpy as np
@@ -132,18 +134,26 @@ def main():
     R.render(doc, "59_after_redo.png", eye=EYE, target=TARGET,
              caption="three undos and three redos later: byte for byte the same")
 
-    # --- the boundary, stated ---------------------------------------------
-    # A mask is a FOURTH representation with no history mechanism at all —
-    # twenty mutating entry points across the ABI and not one command variant.
-    # Painting one is not a step, and the honest thing is to say so rather than
-    # let a user discover it by pressing undo.
-    mask = clay.MaskField(cell_size=CELL)
+    # --- the fourth representation, which used to be the boundary ----------
+    # A mask WAS a fourth representation with no history mechanism: twenty
+    # mutating entry points and not one command variant, so painting one ended
+    # the undoable run. It records now, and this is the assertion that used to
+    # say the opposite — it was written to fail the day this changed.
+    freeze = doc.add_mask("blockout", cell_size=CELL)
     depth_before_mask = doc.undo_depth
-    mask.fill(((-0.2, -0.2, -0.2), (0.2, 0.2, 0.2)), 1.0)
-    print(f"  !  mask painted    -> undo_depth still {doc.undo_depth} — masks are "
-          "outside the history, and that is recorded rather than hidden")
-    if doc.undo_depth != depth_before_mask:
-        raise SystemExit("a mask edit is not a step yet; if it became one, update this note")
+    freeze.fill(((-0.2, -0.2, -0.2), (0.2, 0.2, 0.2)), 1.0)
+    painted = freeze.painted_count
+    if doc.undo_depth != depth_before_mask + 1:
+        raise SystemExit("a mask edit should be one undo step")
+    print(f"  4. mask painted    -> {painted} cells, undo_depth {doc.undo_depth}")
+
+    if not doc.undo():
+        raise SystemExit("undo should have reversed the mask edit")
+    if freeze.painted_count != 0:
+        raise SystemExit("the painted cells should be gone")
+    print(f"  <- undo 4          -> {freeze.painted_count} mask cells — a mask undoes "
+          "like anything else now")
+    doc.redo()
 
     print("\n  one Ctrl+Z, whichever half of the engine made the edit.")
 
