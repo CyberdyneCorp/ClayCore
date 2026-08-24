@@ -194,8 +194,17 @@ def main() -> int:
 
     check_versions(cl)
 
+    # CLAY_BUILD_PYTHON is ON here and nowhere else in this script's history,
+    # because the "bindings" gate below is only a gate when a module exists to
+    # import: check_binding_parity.py falls back to comparing the PARSED
+    # pyclay_module.cpp against itself, which cannot catch a source/binary
+    # disagreement and cannot fail. The release build produced no pyclay, so
+    # that row had been passing on the fallback — a gate that reads as
+    # "the bindings match the ABI" and was checking that the source matches
+    # itself. CI's pyclay job covers this through pytest; the tag path did not.
     ok, out = run(["cmake", "-S", str(REPO), "-B", str(build_dir),
-                   "-DCMAKE_BUILD_TYPE=Release", "-DCLAY_BUILD_BENCHMARKS=ON"])
+                   "-DCMAKE_BUILD_TYPE=Release", "-DCLAY_BUILD_BENCHMARKS=ON",
+                   "-DCLAY_BUILD_PYTHON=ON"])
     cl.add("configure", ok, "" if ok else out[-400:])
     if not ok:
         return 1
@@ -216,11 +225,19 @@ def main() -> int:
     cl.add("parity", ok_parity, cases.group(0) if cases else out_parity[-200:])
 
     # "bindings" rather than "parity", which already names the backend row
-    for name, script in (("layering", "check_layering.py"),
-                         ("dialect", "check_kernel_dialect.py"),
-                         ("licenses", "check_licenses.py"),
-                         ("bindings", "check_binding_parity.py")):
-        ok, out = run([sys.executable, str(REPO / "tools" / script)])
+    # --pyclay names THIS build's module and --require-import refuses the
+    # source-against-source fallback, so the row fails rather than passes when
+    # the module is missing. Both are needed: the flag alone would let another
+    # build tree answer, which is how the same gate went false-RED on v0.49.0
+    # against a module built before the commit under test.
+    parity_args = ["--pyclay", str(build_dir / "bindings" / "python"),
+                   "--require-import"]
+    for name, script, extra in (("layering", "check_layering.py", []),
+                                ("dialect", "check_kernel_dialect.py", []),
+                                ("licenses", "check_licenses.py", []),
+                                ("bindings", "check_binding_parity.py",
+                                 parity_args)):
+        ok, out = run([sys.executable, str(REPO / "tools" / script)] + extra)
         cl.add(name, ok, out.splitlines()[-1] if out else "")
 
     # the kernels artifact hosts build their GPU previews from: it must still

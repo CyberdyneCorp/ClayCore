@@ -24,6 +24,7 @@ Run: python3 tools/check_binding_parity.py [--pyclay DIR] [--require-import]
 
 import argparse
 import importlib
+import importlib.util
 import re
 import sys
 from pathlib import Path
@@ -418,10 +419,41 @@ def load_module(explicit: Path | None):
     Several build trees can hold a pyclay, and an older one answering first
     would compare the C ABI against a surface nobody ships; the newest
     artifact wins.
+
+    --pyclay is AUTHORITATIVE rather than merely first: when a caller names a
+    directory, no other build tree is searched. "Newest mtime wins" is a decent
+    guess when nobody said, and a bad one when somebody did — v0.49.0's
+    checklist failed against a pyclay built hours before the commit under test,
+    because the release build does not produce one and a stale tree was the only
+    candidate. A caller that names a directory is asserting which module it
+    means; falling back past it turns a missing build into a comparison against
+    a different one.
     """
+    if explicit:
+        # Loaded BY FILE, not by putting the directory on sys.path and asking
+        # for "pyclay". An import satisfied from PYTHONPATH, a virtualenv or an
+        # installed wheel would answer for a directory that holds no module at
+        # all, so the gate would report a surface the caller did not name and
+        # believe it had honoured --pyclay.
+        candidates = sorted(explicit.glob("pyclay*.so")) + \
+            sorted(explicit.glob("pyclay*.pyd")) + \
+            sorted(explicit.glob("pyclay*.dylib"))
+        if not candidates:
+            return None
+        spec = importlib.util.spec_from_file_location("pyclay", candidates[0])
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except ImportError:
+            return None
+        sys.modules["pyclay"] = module
+        return module
+
     found = sorted((REPO / "build").glob("*/bindings/python/pyclay*"),
                    key=lambda p: p.stat().st_mtime, reverse=True)
-    ordered = ([explicit] if explicit else []) + [p.parent for p in found]
+    ordered = [p.parent for p in found]
     for path in reversed(ordered):  # inserting at 0 reverses, so undo that here
         if path and path.is_dir():
             sys.path.insert(0, str(path))
@@ -567,7 +599,11 @@ def main() -> int:
         surface, source = imported_surface(module), f"imported {module.__file__}"
         errors += compare_surfaces(surface, parsed)
     elif args.require_import:
-        print("parity: pyclay could not be imported and --require-import was given",
+        where = f" from {args.pyclay}" if args.pyclay else ""
+        print(f"parity: pyclay could not be imported{where} and --require-import "
+              f"was given. Without a module this gate compares the parsed source "
+              f"against itself, which cannot fail — build pyclay "
+              f"(-DCLAY_BUILD_PYTHON=ON) rather than dropping the flag",
               file=sys.stderr)
         return 1
     else:

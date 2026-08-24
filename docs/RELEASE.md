@@ -19,9 +19,22 @@ forward-refuse).
    It gates: version agreement, configure/build, the whole ctest suite,
    backend parity for every backend registered in that build, module
    layering, kernel dialect (CPU + CUDA profiles), the license manifest, C
-   ABI hygiene + declared-symbol resolution + ctypes FFI, `openspec validate
-   --all --strict`, benchmark floors, the **device gate** (see below), and a
-   real `pip install .` quickstart in a throwaway venv.
+   ABI hygiene + declared-symbol resolution + ctypes FFI, binding parity
+   against a **built** pyclay, `openspec validate --all --strict`, benchmark
+   floors, the **device gate** (see below), and a real `pip install .`
+   quickstart in a throwaway venv.
+
+   It configures with `-DCLAY_BUILD_PYTHON=ON`, which is not an incidental
+   extra: `check_binding_parity.py` falls back to comparing the parsed
+   `pyclay_module.cpp` against ITSELF when no module can be imported, and that
+   comparison cannot fail. The release build produced no pyclay, so the
+   `bindings` row had been passing on the fallback through v0.49.0 — a row that
+   reads as "the bindings match the ABI" while checking that the source matches
+   itself. The checklist now passes `--pyclay <build>/bindings/python
+   --require-import`, so a missing module fails the release instead of being
+   waved through. `--pyclay` is authoritative: no other build tree, virtualenv
+   or installed wheel may answer for it, because the same gate went false-RED on
+   v0.49.0 against a stale module a different tree happened to hold.
 3. On a minor/patch release, read the `clay.h` diff for symbol and
    struct-layout breaks (the ABI gate checks that every declared symbol
    resolves and that the header is bindgen-clean, not history). Below 1.0
