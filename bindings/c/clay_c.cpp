@@ -6352,7 +6352,11 @@ clay_result clay_project_to_surface_many(const clay_document* doc, const float* 
     std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
     const scene::Tape& tape = *tape_ref;
     parallel::CancelToken* tok = token ? &token->token : nullptr;
-    parallel::ProgressScope progress(tok, count);
+    // ONE PHASE, not one per point. The second argument is a PHASE COUNT —
+    // passing the work count both narrows size_t to uint32_t (which MSVC /WX
+    // rejects and GCC accepts silently) and means the wrong thing: the
+    // per-item figure is what advance() carries.
+    parallel::ProgressScope progress(tok, 1);
     std::atomic<bool> stop{false};
 
     // A cancelled chunk RETURNS NORMALLY and never throws: thread_pool.h's join

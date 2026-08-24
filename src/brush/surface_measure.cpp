@@ -196,7 +196,11 @@ void measure_points(const std::function<float(cfloat3)>& f, SurfaceMeasure measu
     if (out_cancelled) *out_cancelled = false;
     if (!f || !points || !out_values || count == 0) return;
 
-    parallel::ProgressScope progress(token, count);
+    // ONE PHASE, not one per point. The second argument is a PHASE COUNT —
+    // passing the work count both narrows size_t to uint32_t (which MSVC /WX
+    // rejects and GCC accepts silently) and means the wrong thing: the
+    // per-item figure is what advance() carries.
+    parallel::ProgressScope progress(token, 1);
     // Chunked rather than per-point, so the cancel check is one relaxed load
     // per chunk instead of one per point — the same granularity every other
     // cancellable walk in the tree uses.
