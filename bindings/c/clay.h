@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 47
+#define CLAY_ABI_MINOR 48
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -3124,6 +3124,44 @@ typedef struct clay_stroke_sample {
     float tilt;
 } clay_stroke_sample;
 
+/* The three channels a tablet reports and the struct above could not carry.
+ *
+ * A SECOND STRUCT AND A SECOND ENTRY POINT rather than three appended fields.
+ * clay_stroke_resolve takes samples as a FLAT array of count*5 floats, and
+ * clay_stroke_sample above exists to document that packing. Widening the
+ * packing in place would mean a host compiled against the old stride handing
+ * over an array the library reads at the wrong offsets — silent corruption
+ * rather than a clean refusal, which is the failure mode this ABI works hardest
+ * to avoid. Array elements are also exempt from the struct_size rule by design
+ * ("a struct_size per element would be absurd", tools/check_c_abi.py), so there
+ * is no negotiation to fall back on.
+ *
+ * The wider form takes a real struct array rather than a flat one: it is
+ * self-documenting, and it lets the timestamp be a double, which a float array
+ * could not carry usefully.
+ *
+ * AZIMUTH is the one that unlocks a capability rather than refining one. Tilt
+ * says how far the stylus is leaning; azimuth says WHICH WAY. Without it a
+ * stamp can follow the path but not the BARREL, so a directional or rake brush
+ * — a chisel held at an angle, a comb dragged sideways — is not expressible at
+ * all. Radians in the surface plane, 0 is +x, ignored when tilt is 0.
+ *
+ * VELOCITY in world units per second, for speed-driven size and flow. The host
+ * computes it because the host, not the library, knows the wall-clock gap
+ * between two events.
+ *
+ * TIMESTAMP in seconds on the host's clock, kept even though velocity is given:
+ * a resolver re-deriving speed across a COALESCED run of samples needs the
+ * interval and cannot recover it from per-sample velocities. 0 means none. */
+typedef struct clay_stroke_sample_full {
+    float position[3];
+    float pressure;
+    float tilt;
+    float azimuth;
+    float velocity;
+    double timestamp;
+} clay_stroke_sample_full;
+
 /* One resolved stamp: where an edit goes and how strong it is. */
 typedef struct clay_stamp {
     float position[3];
@@ -3201,6 +3239,16 @@ uint32_t clay_stroke_preset_version(void);
 clay_result clay_stroke_resolve(const float* samples_xyzpt, size_t sample_count,
                                 const clay_stroke_preset* preset, clay_stamp* out_stamps,
                                 size_t* count);
+
+/* The same, taking the channels a tablet actually reports (ABI 0.48.0).
+ *
+ * The older call is sugar over this one with azimuth, velocity and timestamp
+ * left at zero — which is exactly the stroke it resolved before, because a
+ * preset that asks for neither the barrel nor a speed response ignores all
+ * three. So a host that never adopts this is unaffected. */
+clay_result clay_stroke_resolve_full(const clay_stroke_sample_full* samples, size_t sample_count,
+                                     const clay_stroke_preset* preset, clay_stamp* out_stamps,
+                                     size_t* count);
 
 /* Resolve a stroke and stamp it into a grid. `index` is the palette entry to
  * set, or 0 to erase; `mask` may be NULL. *out_applied receives how many

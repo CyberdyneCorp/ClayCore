@@ -70,6 +70,19 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.48.0 is not such a release**: additive, one new struct
+   (`clay_stroke_sample_full`), one new entry point
+   (`clay_stroke_resolve_full`), and the stroke preset schema moves 1 -> 2. The
+   shape of the addition is the point: `clay_stroke_resolve` takes samples as a
+   FLAT array of count*5 floats, so widening the packing in place would have
+   changed the stride under every host already compiled against it — silent
+   corruption rather than a refusal, and array elements are exempt from the
+   `struct_size` rule by design so there is no negotiation to fall back on. The
+   older call is sugar over the wider one with the three new channels at zero,
+   which is exactly the stroke it resolved before. A version-1 preset still
+   deserializes and takes the new defaults, which are "speed changes nothing
+   and the stamp follows the path".
+
    **0.47.0 is not such a release**: additive, one new entry point
    (`clay_document_mask_extrude_cancellable`). It matters more than its size:
    mask extrude is 4403 ms on the reference iPad — the most expensive verb in

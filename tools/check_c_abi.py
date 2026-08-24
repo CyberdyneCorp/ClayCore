@@ -30,6 +30,15 @@ REPO = Path(__file__).resolve().parent.parent
 # them here keeps that a decision rather than an oversight.
 ARRAY_ELEMENT_STRUCTS = {
     "clay_stroke_sample",  # packed float[5] per sample, passed as a bare float*
+    # The same, wider: the channels a tablet reports (azimuth, velocity,
+    # timestamp) beside the five that were already there. An element for the
+    # same reason its narrower sibling is — a caller passes thousands of them
+    # and the layout is the contract — which is also precisely why it is a
+    # SECOND struct rather than three fields appended to the first: appending
+    # would move every element after the first under every host already
+    # compiled against it, and an element type has no struct_size to negotiate
+    # that with. Widening this one later is a break in exactly the same way.
+    "clay_stroke_sample_full",
     "clay_stamp",          # packed float[10] per stamp, an output buffer
     # 44 bytes that ARE brick::BrickRequest, asserted field by field with
     # offsetof in bindings/c/clay_c.cpp. A refill hands out thousands at once

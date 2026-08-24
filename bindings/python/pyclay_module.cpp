@@ -606,15 +606,29 @@ std::vector<brush::StrokeSample> to_stroke_samples(nb::handle obj) {
         throw std::invalid_argument("samples must be an (N, 3), (N, 4) or (N, 5) array");
     }
     std::size_t width = view.shape(1);
-    if (width < 3 || width > 5)
-        throw std::invalid_argument("samples must be an (N, 3), (N, 4) or (N, 5) array "
-                                    "(position, optional pressure, optional tilt)");
+    // 3 to 8: position, pressure, tilt, azimuth, velocity, timestamp.
+    //
+    // Widening this is free where the C ABI's flat count*5 packing could not
+    // be: a numpy array carries its own shape, so an (N, 5) array keeps
+    // meaning exactly what it did and an (N, 8) one gains the channels. That
+    // is the interface negotiating a layout, which is what the C side needed a
+    // second entry point to do.
+    if (width < 3 || width > 8)
+        throw std::invalid_argument(
+            "samples must be an (N, K) array with K from 3 to 8: position, then optional "
+            "pressure, tilt, azimuth, velocity, timestamp");
     std::vector<brush::StrokeSample> out(view.shape(0));
     for (std::size_t i = 0; i < out.size(); ++i) {
         const float* row = view.data() + i * width;
         out[i].position = kernel::cf3(row[0], row[1], row[2]);
         if (width > 3) out[i].pressure = row[3];
         if (width > 4) out[i].tilt = row[4];
+        if (width > 5) out[i].azimuth = row[5];
+        if (width > 6) out[i].velocity = row[6];
+        // float32 here, so pass seconds since the STROKE began rather than an
+        // epoch time — a float carries about seven digits, which an absolute
+        // timestamp exhausts before the fractional part a stroke needs.
+        if (width > 7) out[i].timestamp = static_cast<double>(row[7]);
     }
     return out;
 }
@@ -5366,6 +5380,30 @@ NB_MODULE(pyclay, m) {
         .def_rw("seed", &brush::StrokePreset::seed,
                 "jitter is a hash of the stamp index and this, never a random source")
         .def_rw("rotate_along_stroke", &brush::StrokePreset::rotate_along_stroke)
+        .def_rw("rotate_to_azimuth", &brush::StrokePreset::rotate_to_azimuth,
+                "Turn each stamp to follow the STYLUS BARREL rather than the\n"
+                "path — the rake and chisel brushes, where the tool's own angle\n"
+                "is the point and the direction of travel is not.\n\n"
+                "Wins over rotate_along_stroke where both are set: they are two\n"
+                "answers to one question and a stamp cannot face two ways.")
+        .def_prop_rw(
+            "velocity_size",
+            [](const brush::StrokePreset& p) { return p.velocity_response.size; },
+            [](brush::StrokePreset& p, float v) { p.velocity_response.size = v; },
+            "How speed changes the radius. SIGNED on purpose: positive means a\n"
+            "fast stroke is WIDER (a dry-brush sweep), negative means thinner\n"
+            "(an ink pen). 0 means speed changes nothing.")
+        .def_prop_rw(
+            "velocity_strength",
+            [](const brush::StrokePreset& p) { return p.velocity_response.strength; },
+            [](brush::StrokePreset& p, float v) { p.velocity_response.strength = v; },
+            "How speed changes the strength, on the same signed scale.")
+        .def_prop_rw(
+            "velocity_reference",
+            [](const brush::StrokePreset& p) { return p.velocity_response.reference; },
+            [](brush::StrokePreset& p, float v) { p.velocity_response.reference = v; },
+            "The speed, in world units per second, that reads as \"fast\" — at it\n"
+            "the response is fully applied, below it proportionally less.")
         .def_rw("taper_start", &brush::StrokePreset::taper_start)
         .def_rw("taper_end", &brush::StrokePreset::taper_end)
         .def_rw("steady", &brush::StrokePreset::steady,

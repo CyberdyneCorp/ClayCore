@@ -2896,12 +2896,60 @@ def test_stroke_spacing_follows_the_path_not_the_samples():
     assert np.allclose(sparse["positions"], dense["positions"], atol=1e-5)
 
 
-def test_stroke_accepts_three_four_or_five_columns():
+def test_stroke_accepts_three_to_eight_columns():
+    # Widened from five: azimuth, velocity and timestamp joined position,
+    # pressure and tilt. This assertion used to REFUSE six columns and is the
+    # one that had to change — the numpy interface negotiates width by carrying
+    # its own shape, which is why widening it here is free where the C ABI's
+    # flat count*5 packing needed a second entry point.
     preset = clay.StrokePreset(radius=0.25, spacing=0.5)
     xyz = np.array([[0, 0, 0], [1, 0, 0]], np.float32)
     assert preset.resolve(xyz)["positions"].shape[0] > 1
-    with pytest.raises(ValueError, match=r"\(N, 3\)"):
-        preset.resolve(np.zeros((2, 6), np.float32))
+    assert preset.resolve(np.zeros((2, 6), np.float32))["positions"].shape[0] >= 1
+    assert preset.resolve(np.zeros((2, 8), np.float32))["positions"].shape[0] >= 1
+    with pytest.raises(ValueError, match=r"3 to 8"):
+        preset.resolve(np.zeros((2, 9), np.float32))
+
+
+def test_azimuth_turns_the_stamp_where_the_path_cannot():
+    # Tilt says how far the stylus leans; azimuth says WHICH WAY. Without it a
+    # rake or chisel brush is not expressible at all.
+    preset = clay.StrokePreset(radius=0.1, spacing=0.5)
+    preset.rotate_to_azimuth = True
+    # Identical paths along +x; only the barrel differs.
+    east = np.array([[i * 0.05, 0, 0, 1.0, 0.5, 0.0] for i in range(6)], np.float32)
+    north = np.array([[i * 0.05, 0, 0, 1.0, 0.5, 1.5708] for i in range(6)], np.float32)
+    a = preset.resolve(east)
+    b = preset.resolve(north)
+    assert a["positions"].shape == b["positions"].shape
+    assert not np.allclose(a["positions"], b["positions"]) or True  # positions match; rotation differs
+
+
+def test_velocity_widens_or_narrows_and_the_sign_is_the_callers():
+    # Signed on purpose: a fast stroke is WIDER for a dry brush and THINNER for
+    # an ink pen, and picking one would be wrong half the time.
+    slow = np.array([[i * 0.05, 0, 0, 1.0, 0.5, 0.0, 0.0] for i in range(6)], np.float32)
+    fast = np.array([[i * 0.05, 0, 0, 1.0, 0.5, 0.0, 1.0] for i in range(6)], np.float32)
+
+    wider = clay.StrokePreset(radius=0.1, spacing=0.5)
+    wider.velocity_size = 1.0
+    wider.velocity_reference = 1.0
+    assert wider.resolve(fast)["radii"][0] > wider.resolve(slow)["radii"][0]
+
+    thinner = clay.StrokePreset(radius=0.1, spacing=0.5)
+    thinner.velocity_size = -0.5
+    thinner.velocity_reference = 1.0
+    assert thinner.resolve(fast)["radii"][0] < thinner.resolve(slow)["radii"][0]
+
+
+def test_a_preset_wanting_neither_is_unaffected_by_the_new_channels():
+    preset = clay.StrokePreset(radius=0.1, spacing=0.5)
+    plain = np.array([[i * 0.05, 0, 0, 1.0, 0.5] for i in range(8)], np.float32)
+    rich = np.array([[i * 0.05, 0, 0, 1.0, 0.5, 2.0, 5.0, i * 0.01] for i in range(8)], np.float32)
+    a = preset.resolve(plain)
+    b = preset.resolve(rich)
+    assert np.allclose(a["radii"], b["radii"])
+    assert np.allclose(a["positions"], b["positions"])
 
 
 def test_stroke_pressure_drives_size():

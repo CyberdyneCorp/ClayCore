@@ -878,7 +878,7 @@ moves are the ones already shipped.
 | **P1** | Procedural masks | Cheap on a field representation, high artist value |
 | **P1** | `add-item-spatial-index` | Still the slope. Re-measure first: `CullIndex` already took the constant |
 | **P1** | SDF sculpt layers (`add-sculpt-layers` 1.9) | Unblocked by scene groups landing |
-| **P1** | Stroke input: azimuth, velocity, timestamp | Five floats, and cheapest before hosts depend on the current sample layout |
+| ~~**P1**~~ | ~~Stroke input: azimuth, velocity, timestamp~~ **landed 2026-08-24** | And the row was right that it was cheapest now: `clay_stroke_resolve` takes a FLAT count*5 float array, so widening the packing in place would have changed the stride under every compiled host — a second entry point taking a real struct array instead, with the older call as sugar. pyclay needed neither, because a numpy array carries its own shape. **Azimuth is the one that unlocks a capability rather than refining one**: tilt says how far the stylus leans, azimuth says which way, and without it a rake or chisel brush is not expressible at all |
 | **P1** | `add-field-stamps` | The review is right that this is a differentiator rather than parity, and right that a captured field can carry more than displacement |
 | **P2** | Morph targets · generic attributes · instancing · radial symmetry · conform | Real, none blocking |
 | **Decide, do not build** | auto-consolidation · preview/commit protocol · representation policy · local remesh · >256³ voxels | Each needs a written decision before it needs a proposal |
