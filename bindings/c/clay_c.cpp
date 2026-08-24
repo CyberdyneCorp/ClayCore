@@ -488,6 +488,8 @@ constexpr std::size_t kQuadParamsOriginal =
     offsetof(clay_quad_params, level) + sizeof(std::uint32_t);
 constexpr std::size_t kQuadReportOriginal =
     offsetof(clay_quad_report, clamped) + sizeof(std::int32_t);
+constexpr std::size_t kHistoryBytesOriginal =
+    offsetof(clay_history_bytes, dropped_steps) + sizeof(std::uint64_t);
 constexpr std::size_t kProgressOriginal = offsetof(clay_progress, total) + sizeof(std::uint64_t);
 constexpr std::size_t kValidationReportOriginal =
     offsetof(clay_validation_report, euler_characteristic) + sizeof(std::int64_t);
@@ -2089,6 +2091,44 @@ clay_result clay_document_save_memory(const clay_document* doc, clay_blob** out_
     if (!doc || !out_blob) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out_blob");
     *out_blob = nullptr;
     *out_blob = new clay_blob{io::save_clayspace(doc->doc)};
+    return CLAY_OK;
+}
+
+clay_result clay_document_history_bytes(const clay_document* doc,
+                                        clay_history_bytes* out_bytes) {
+    if (!doc || !out_bytes) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    clay_history_bytes probe;
+    clay_result r = read_desc(out_bytes, kHistoryBytesOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_bytes->struct_size;
+    clay_history_bytes filled{};
+    if (doc->undo) {
+        const session::History::Bytes b = doc->undo->bytes();
+        filled.undo = b.undo;
+        filled.redo = b.redo;
+        filled.journal = b.journal;
+        filled.total = b.total;
+        filled.undo_steps = b.undo_steps;
+        filled.redo_steps = b.redo_steps;
+        filled.journal_events = b.journal_events;
+        filled.dropped_steps = b.dropped_steps;
+    }
+    // Undo off is not an error: it costs nothing, which is the honest answer.
+    write_desc(out_bytes, declared, filled);
+    return CLAY_OK;
+}
+
+clay_result clay_document_set_history_budget(clay_document* doc, uint64_t bytes) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
+    doc->undo->set_budget(static_cast<std::size_t>(bytes));
+    return CLAY_OK;
+}
+
+clay_result clay_document_trim_history(clay_document* doc, uint64_t bytes) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    if (!doc->undo) return fail(CLAY_ERROR_INVALID_ARGUMENT, "undo is not enabled");
+    doc->undo->trim_to(static_cast<std::size_t>(bytes));
     return CLAY_OK;
 }
 

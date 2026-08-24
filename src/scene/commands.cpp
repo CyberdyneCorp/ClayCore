@@ -1317,6 +1317,62 @@ bool UndoStack::redo(Document& doc, math::Aabb* out_bound) {
     return true;
 }
 
+// -- what the history costs (add-history-budget) ------------------------------
+
+namespace {
+
+std::size_t node_bytes(const Node& n) {
+    std::size_t b = sizeof(Node);
+    b += n.stroke.capacity() * sizeof(StrokePoint);
+    b += n.deformers.capacity() * sizeof(Deformer);
+    // A bend_curve deformer carries a guide of its own, which is the one
+    // deformer whose cost is not sizeof.
+    for (const Deformer& d : n.deformers) b += d.guide.capacity() * sizeof(StrokePoint);
+    b += n.children.capacity() * sizeof(NodeId);
+    return b;
+}
+
+}  // namespace
+
+std::size_t command_bytes(const Command& cmd) {
+    std::size_t b = sizeof(Command);
+    // Only the alternatives that own heap memory. This is the whole point: the
+    // inverse of a REMOVAL carries a subtree, the inverse of an add carries an
+    // id, and sizeof reports them identically.
+    if (const auto* add = std::get_if<AddNodeCmd>(&cmd)) {
+        b += add->subtree.capacity() * sizeof(Node);
+        for (const Node& n : add->subtree) b += node_bytes(n) - sizeof(Node);
+    } else if (const auto* stroke = std::get_if<AppendStrokeCmd>(&cmd)) {
+        b += stroke->points.capacity() * sizeof(StrokePoint);
+    } else if (const auto* points = std::get_if<SetStrokePointsCmd>(&cmd)) {
+        b += points->points.capacity() * sizeof(StrokePoint);
+    } else if (const auto* deform = std::get_if<SetDeformersCmd>(&cmd)) {
+        b += deform->deformers.capacity() * sizeof(Deformer);
+        for (const Deformer& d : deform->deformers) b += d.guide.capacity() * sizeof(StrokePoint);
+    } else if (const auto* name = std::get_if<SetLayerNameCmd>(&cmd)) {
+        b += name->name.capacity();
+    }
+    return b;
+}
+
+std::size_t UndoStack::undo_bytes() const {
+    std::size_t b = 0;
+    for (const Entry& e : undo_) {
+        b += sizeof(Entry) + e.inverses.capacity() * sizeof(Command);
+        for (const Command& c : e.inverses) b += command_bytes(c) - sizeof(Command);
+    }
+    return b;
+}
+
+std::size_t UndoStack::redo_bytes() const {
+    std::size_t b = 0;
+    for (const Entry& e : redo_) {
+        b += sizeof(Entry) + e.inverses.capacity() * sizeof(Command);
+        for (const Command& c : e.inverses) b += command_bytes(c) - sizeof(Command);
+    }
+    return b;
+}
+
 void UndoStack::begin_group() {
     grouping_ = true;
     undo_.push_back(Entry{});

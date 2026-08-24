@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 45
+#define CLAY_ABI_MINOR 46
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -355,6 +355,58 @@ void clay_document_destroy(clay_document* doc);
 
 clay_result clay_document_save(const clay_document* doc, const char* path);
 clay_result clay_document_load(const char* path, clay_document** out_doc);
+
+/* -- what the history costs, and bounding it (add-history-budget) -----------
+ *
+ * The history had no cap of any kind: no depth limit, no byte accounting, no
+ * eviction, no query. The only lever was clay_document_enable_undo, which is
+ * not a lever, it is a light switch. Survivable while the history held SDF
+ * edits alone; it now holds four step kinds and a journal, on a platform that
+ * reclaims memory by killing processes and does not warn twice.
+ *
+ * WHAT IS EXPENSIVE IS NOT WHAT YOU EXPECT. The command stack stores INVERSES,
+ * so REMOVING an item records a whole node — 440 bytes plus its deformer chain
+ * and stroke points — while ADDING one records an id: a session of deletes and
+ * a session of adds cost very differently, and nothing told you which you were
+ * in. A voxel or mask step is proportional to the cells it CHANGED, so one big
+ * fill can outweigh a thousand dabs. And the journal keeps its own copy, so a
+ * session with crash recovery on holds roughly twice what one without does. */
+typedef struct clay_history_bytes {
+    uint32_t struct_size; /* = sizeof(clay_history_bytes); required */
+    uint64_t undo;        /* the step list and the command stack under it */
+    uint64_t redo;
+    uint64_t journal;     /* the crash-recovery log; see the budget note below */
+    uint64_t total;
+    uint64_t undo_steps;
+    uint64_t redo_steps;
+    uint64_t journal_events;
+    /* Steps evicted to stay inside the budget, ever. Show a horizon from this
+     * rather than letting a user hunt for a step that is gone. */
+    uint64_t dropped_steps;
+} clay_history_bytes;
+
+clay_result clay_document_history_bytes(const clay_document* doc,
+                                        clay_history_bytes* out_bytes);
+
+/* Zero means UNBOUNDED, which is what a host that never calls this gets — so
+ * this cannot change behaviour under a host that ignores it.
+ *
+ * The budget bounds UNDO AND REDO ONLY, and deliberately does not evict from
+ * the journal: those bytes are your crash recovery, and dropping them silently
+ * would lose exactly what that feature exists to keep. The journal is reported
+ * instead, and you trim it with clay_document_journal_trim once its bytes are
+ * durable.
+ *
+ * Redo is spent before undo, because redo is transient — the next edit
+ * discards it anyway — and the newest undo step is NEVER dropped: a budget
+ * that could make the next undo fail would be worse than no budget, because a
+ * host cannot tell that from a bug. */
+clay_result clay_document_set_history_budget(clay_document* doc, uint64_t bytes);
+
+/* Drop the oldest steps until the history fits, for a platform that has just
+ * reported memory pressure and expects an immediate response rather than
+ * waiting for the next edit. Does not set a budget. */
+clay_result clay_document_trim_history(clay_document* doc, uint64_t bytes);
 
 /* -- cancelling a long operation -------------------------------------------
  *

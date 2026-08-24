@@ -70,6 +70,10 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.46.0 is not such a release**: additive. Three new entry points and one
+   new descriptor for the history budget. Zero means unbounded, which is what a
+   host that never calls it gets, so nothing changes for anyone who ignores it.
+
    **0.45.0 is not such a release**: additive. Six new entry points for the
    cancellation token, one new descriptor (`clay_progress`), one appended result
    code (`CLAY_ERROR_CANCELLED = 9`), and `clay_layer_consolidate_cancellable`

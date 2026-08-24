@@ -1381,6 +1381,19 @@ struct Reader {
 
 }  // namespace
 
+std::size_t VertexDeltas::bytes() const {
+    std::size_t n = sizeof(VertexDeltas);
+    n += vertices_.capacity() * sizeof(std::uint32_t);
+    const std::size_t vec3 = sizeof(kernel::cfloat3);
+    n += (before_position_.capacity() + after_position_.capacity()) * vec3;
+    n += (before_normal_.capacity() + after_normal_.capacity()) * vec3;
+    n += (before_color_.capacity() + after_color_.capacity()) * vec3;
+    // The slot index is rebuildable but it is really allocated, so a budget
+    // that ignored it would under-report a record following many vertices.
+    n += slot_.size() * (sizeof(std::uint32_t) * 2 + sizeof(void*));
+    return n;
+}
+
 std::vector<std::uint8_t> VertexDeltas::encode() const {
     std::vector<std::uint8_t> out;
     const std::size_t n = vertices_.size();

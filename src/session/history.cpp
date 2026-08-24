@@ -13,6 +13,7 @@ const std::string kNoBarrier;
 
 void History::push(Step step) {
     steps_.push_back(std::move(step));
+    enforce_budget();
     // Any new edit invalidates redo, across representations. Keeping it would
     // let a redo replay a voxel run onto cells a later SDF edit has moved.
     redo_.clear();
@@ -614,11 +615,92 @@ bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document
     return true;
 }
 
+// -- what it costs (add-history-budget) --------------------------------------
+
+std::size_t History::step_bytes(const Step& s) {
+    // What the step OWNS, not sizeof — the entries that matter are the ones
+    // holding heap payloads, and sizeof would report them all the same.
+    std::size_t n = sizeof(Step);
+    n += s.cells.capacity() * sizeof(voxel::VoxelGrid::SculptChange);
+    n += s.mask_cells.capacity() * sizeof(voxel::MaskField::MaskChange);
+    n += s.barrier.capacity();
+    n += s.deltas.bytes();
+    return n;
+}
+
+std::size_t History::event_bytes(const JournalEvent& e) {
+    std::size_t n = sizeof(JournalEvent);
+    n += e.cells.capacity() * sizeof(voxel::VoxelGrid::SculptChange);
+    n += e.mask_cells.capacity() * sizeof(voxel::MaskField::MaskChange);
+    n += e.barrier.capacity();
+    n += e.deltas.bytes();
+    n += scene::command_bytes(e.command);
+    return n;
+}
+
+History::Bytes History::bytes() const {
+    Bytes out;
+    out.undo_steps = steps_.size();
+    out.redo_steps = redo_.size();
+    out.journal_events = journal_.size();
+    out.dropped_steps = dropped_steps_;
+    for (const Step& s : steps_) out.undo += step_bytes(s);
+    for (const Step& s : redo_) out.redo += step_bytes(s);
+    for (const JournalEvent& e : journal_) out.journal += event_bytes(e);
+    // The command stack under the Scene steps, which the steps themselves do
+    // not carry — and which is where a session of DELETES hides its cost.
+    out.undo += commands_.undo_bytes();
+    out.redo += commands_.redo_bytes();
+    out.total = out.undo + out.redo + out.journal;
+    return out;
+}
+
+void History::set_budget(std::size_t bytes) {
+    budget_ = bytes;
+    enforce_budget();
+}
+
+void History::enforce_budget() {
+    if (budget_ == 0) return;  // unbounded: exactly today's behaviour
+    // Redo goes first. It is transient — the next edit discards it anyway — so
+    // spending the budget on it before the undo the user can actually reach
+    // would be the wrong trade.
+    while (!redo_.empty()) {
+        Bytes b = bytes();
+        if (b.undo + b.redo <= budget_) return;
+        redo_.erase(redo_.begin());
+    }
+    // Then the oldest undo steps. NEVER the newest: a budget that could make
+    // the next undo fail would be worse than no budget, because a host cannot
+    // tell that from a bug.
+    while (steps_.size() > 1) {
+        Bytes b = bytes();
+        if (b.undo + b.redo <= budget_) return;
+        steps_.erase(steps_.begin());
+        ++dropped_steps_;
+    }
+}
+
+void History::trim_to(std::size_t bytes_limit) {
+    while (!redo_.empty()) {
+        const Bytes b = bytes();
+        if (b.undo + b.redo <= bytes_limit) return;
+        redo_.erase(redo_.begin());
+    }
+    while (steps_.size() > 1) {
+        const Bytes b = bytes();
+        if (b.undo + b.redo <= bytes_limit) return;
+        steps_.erase(steps_.begin());
+        ++dropped_steps_;
+    }
+}
+
 void History::clear() {
     steps_.clear();
     redo_.clear();
     journal_.clear();
     journal_base_ = 0;
+    dropped_steps_ = 0;
     open_cells_.clear();
     voxel_open_ = false;
     mask_open_ = false;

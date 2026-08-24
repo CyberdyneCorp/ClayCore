@@ -306,11 +306,40 @@ back than this" instead of silently skipping it.
 
 #### Memory
 
-The history is **unbounded**. There is no cap, no byte accounting and no
-eviction — `add-history-budget` is the open change for that, and it is a P0.
-Widening the history to three representations makes it more urgent, not less: a
-voxel step holds one record per cell it changed, and a mesh step holds its
-deltas by value.
+```python
+b = doc.history_bytes            # undo, redo, journal, total, steps, dropped_steps
+doc.set_history_budget(64 << 20) # 0 = unbounded, which is the default
+doc.trim_history(16 << 20)       # on demand, e.g. on a memory warning
+```
+
+**What is expensive is not what you expect**, which is why measuring it beats
+guessing:
+
+- The command stack stores **inverses**, so *removing* an item records a whole
+  node — 440 bytes plus its deformer chain and stroke points — while *adding*
+  one records an id. A session of deletes and a session of adds cost very
+  differently.
+- A voxel or mask step is proportional to the cells it **changed**, so one big
+  fill can outweigh a thousand dabs.
+- A mesh step holds its deltas **by value**, which is what makes it
+  self-contained and also doubles a mesh stroke.
+- The **journal keeps its own copy** of every payload, so a session with crash
+  recovery on holds roughly twice what one without it does.
+
+**The budget bounds undo and redo only.** It deliberately does *not* evict from
+the journal: those bytes are the host's crash recovery, and dropping them
+silently would lose exactly what that feature exists to keep. The journal is
+reported instead, and the host trims it with `journal_trim` once its bytes are
+durable.
+
+**Redo is spent before undo**, because redo is transient — the next edit
+discards it anyway. **The newest undo step is never dropped**: a budget that
+could make the next undo fail would be worse than no budget, because a host
+cannot tell that from a bug.
+
+**Truncation is observable, not an error.** `dropped_steps` is how far the
+horizon has moved, so a host presents it rather than letting a user hunt for a
+step that is gone.
 
 Runnable: [`examples/59_undo_across_representations.py`](../examples/59_undo_across_representations.py).
 

@@ -233,6 +233,56 @@ class History {
     // instead of silently skipping it. Empty when there is none.
     const std::string& next_barrier() const;
 
+    // -- what it costs, and bounding it (add-history-budget) -----------------
+    //
+    // The history had no cap of any kind: no depth limit, no byte accounting,
+    // no eviction, no query. The only lever was enable_undo, which is not a
+    // lever, it is a light switch. That was survivable while the history held
+    // SDF edits alone. It now holds four step kinds and a journal, so it is
+    // both larger and harder to predict.
+    //
+    // WHAT IS EXPENSIVE IS NOT WHAT YOU EXPECT, in both directions:
+    //
+    //  - The command stack stores INVERSES, so REMOVING an item records a whole
+    //    Node — 440 bytes plus its deformer chain and stroke points — while
+    //    ADDING one records an id. A session of deletes and a session of adds
+    //    cost very differently and nothing told the host which it was in.
+    //  - A voxel or mask step is proportional to the cells it CHANGED, so one
+    //    big fill can outweigh a thousand dabs.
+    //  - A mesh step holds its deltas BY VALUE, which is what makes the step
+    //    self-contained and also doubles a mesh stroke.
+    //  - The JOURNAL keeps its own copy of every payload, so a session with
+    //    crash recovery on holds roughly twice what one without it does.
+    struct Bytes {
+        std::size_t undo = 0;     // the step list and the command stack under it
+        std::size_t redo = 0;
+        std::size_t journal = 0;  // the crash-recovery log, which duplicates payloads
+        std::size_t total = 0;
+        std::size_t undo_steps = 0;
+        std::size_t redo_steps = 0;
+        std::size_t journal_events = 0;
+        // Steps evicted to stay inside the budget, ever. A host shows a horizon
+        // from this rather than letting a user hunt for a step that is gone.
+        std::size_t dropped_steps = 0;
+    };
+    Bytes bytes() const;
+
+    // Zero means UNBOUNDED, which is what a host that never sets one gets — so
+    // this change cannot alter behaviour under a host that ignores it.
+    //
+    // The budget bounds UNDO AND REDO ONLY. It deliberately does NOT evict from
+    // the journal: those bytes are the host's crash recovery, and dropping them
+    // silently would lose exactly what the feature exists to keep. The journal
+    // is reported instead, and the host trims it once its bytes are durable —
+    // see trim_journal.
+    void set_budget(std::size_t bytes);
+    std::size_t budget() const { return budget_; }
+
+    // Drop the oldest steps until the history fits in `bytes`, for a host that
+    // has just been told by the OS that memory is short and cannot wait for the
+    // next edit to trigger eviction. Zero drops everything but the newest step.
+    void trim_to(std::size_t bytes);
+
     // Total recorded steps including barriers, which is what a memory budget
     // counts and what a test asserting "nothing was recorded" reads.
     std::size_t step_count() const { return steps_.size(); }
@@ -253,6 +303,14 @@ class History {
     // The absolute index of journal_[0]. Absolute so a trimmed host asking for
     // an old index is refused rather than served the wrong events.
     std::size_t journal_base_ = 0;
+    std::size_t budget_ = 0;  // 0 = unbounded
+    std::size_t dropped_steps_ = 0;
+
+    // Evict from the oldest end until the budget is met. Never drops the most
+    // recent step: a budget must not be able to make the next undo fail.
+    void enforce_budget();
+    static std::size_t step_bytes(const Step& s);
+    static std::size_t event_bytes(const JournalEvent& e);
     std::vector<voxel::VoxelGrid::SculptChange> open_cells_;
     scene::LayerId open_layer_ = 0;
     bool voxel_open_ = false;

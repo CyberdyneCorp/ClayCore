@@ -5152,6 +5152,58 @@ NB_MODULE(pyclay, m) {
                  return (*d.undo)->redo(d.doc->document, grid_for(d), mesh_for(d), nullptr, mask_for(d));
              },
              "Reapply the last undone step; returns False when there is nothing to redo")
+        .def_prop_ro(
+            "history_bytes",
+            [](const PyDocument& d) {
+                nb::dict out;
+                session::History::Bytes b;
+                if (*d.undo) b = (*d.undo)->bytes();
+                out["undo"] = b.undo;
+                out["redo"] = b.redo;
+                out["journal"] = b.journal;
+                out["total"] = b.total;
+                out["undo_steps"] = b.undo_steps;
+                out["redo_steps"] = b.redo_steps;
+                out["journal_events"] = b.journal_events;
+                out["dropped_steps"] = b.dropped_steps;
+                return out;
+            },
+            "What the history costs, in bytes and steps.\n\n"
+            "What is expensive is not what you expect. The command stack stores\n"
+            "INVERSES, so REMOVING an item records a whole node while ADDING one\n"
+            "records an id — a session of deletes and a session of adds cost\n"
+            "very differently. A voxel or mask step is proportional to the cells\n"
+            "it CHANGED, so one big fill can outweigh a thousand dabs. And the\n"
+            "journal keeps its own copy, so crash recovery roughly doubles it.\n\n"
+            "`dropped_steps` is how far the horizon has moved: show it rather\n"
+            "than letting a user hunt for a step that is gone.")
+        .def(
+            "set_history_budget",
+            [](PyDocument& d, std::size_t bytes) {
+                if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
+                (*d.undo)->set_budget(bytes);
+            },
+            "bytes"_a,
+            "Bound the history. 0 is UNBOUNDED, which is what you get without\n"
+            "calling this.\n\n"
+            "Bounds undo and redo ONLY. It deliberately does not evict from the\n"
+            "journal: those bytes are your crash recovery, and dropping them\n"
+            "silently would lose exactly what that feature exists to keep — use\n"
+            "journal_trim once they are durable.\n\n"
+            "Redo is spent first, because the next edit discards it anyway. The\n"
+            "newest undo step is never dropped: a budget that could make the\n"
+            "next undo fail would be worse than none, because you could not tell\n"
+            "it from a bug.")
+        .def(
+            "trim_history",
+            [](PyDocument& d, std::size_t bytes) {
+                if (!*d.undo) throw std::runtime_error("undo is not enabled on this document");
+                (*d.undo)->trim_to(bytes);
+            },
+            "bytes"_a,
+            "Drop the oldest steps until the history fits, for a platform that\n"
+            "just reported memory pressure and wants an answer now rather than\n"
+            "at the next edit. Does not set a budget.")
         .def(
             "journal_since",
             [](const PyDocument& d, std::size_t from) {

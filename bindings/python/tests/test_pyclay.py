@@ -6207,3 +6207,72 @@ def test_a_journal_replays_straight_through_a_mask_edit():
     result = recovered.replay_journal(journal)
     assert not result["stopped_at_barrier"]   # it used to stop here
     assert recovered.mask("body").painted_count == mask.painted_count
+
+
+# -- bounding the history (add-history-budget) ------------------------------
+#
+# It had no cap of any kind: no depth limit, no byte accounting, no eviction,
+# no query — on a platform that reclaims memory by killing processes.
+
+def _busy_history(edits=40):
+    doc = clay.Document()
+    doc.add_sdf_layer("body")
+    grid = doc.add_voxel_layer("blocks", voxel_size=0.1)
+    doc.enable_undo()
+    for i in range(edits):
+        grid.fill_box((i * 20, 0, 0), (i * 20 + 8, 4, 4), 1)
+    return doc, grid
+
+
+def test_the_history_reports_what_it_holds():
+    doc, _ = _busy_history()
+    b = doc.history_bytes
+    assert b["undo"] > 0
+    assert b["undo_steps"] == 40
+    # The journal keeps its own copy, so crash recovery roughly doubles it.
+    assert b["journal"] > 0
+    assert b["total"] == b["undo"] + b["redo"] + b["journal"]
+    assert b["dropped_steps"] == 0
+
+
+def test_a_budget_evicts_the_oldest_and_spares_the_journal():
+    doc, _ = _busy_history()
+    before = doc.history_bytes
+    doc.set_history_budget(before["undo"] // 4)
+    after = doc.history_bytes
+
+    assert after["undo"] < before["undo"]
+    assert after["undo_steps"] < before["undo_steps"]
+    assert after["dropped_steps"] > 0
+    # The budget must NOT touch the journal: those bytes are crash recovery,
+    # and dropping them silently would lose what that feature exists to keep.
+    assert after["journal"] == before["journal"]
+
+
+def test_the_newest_step_survives_any_budget():
+    doc, grid = _busy_history()
+    doc.set_history_budget(1)
+    assert doc.history_bytes["undo_steps"] == 1
+    assert doc.undo()          # and it still works
+
+
+def test_an_unset_budget_is_todays_behaviour():
+    doc, _ = _busy_history(edits=60)
+    assert doc.history_bytes["undo_steps"] == 60
+    assert doc.history_bytes["dropped_steps"] == 0
+
+
+def test_trimming_needs_no_budget():
+    doc, _ = _busy_history()
+    before = doc.history_bytes["undo"]
+    doc.trim_history(before // 4)
+    assert doc.history_bytes["undo"] < before
+    assert doc.history_bytes["undo_steps"] >= 1
+
+
+def test_history_bytes_reads_zero_when_undo_is_off():
+    doc = clay.Document()
+    doc.add_sdf_layer("body")
+    assert doc.history_bytes["total"] == 0     # honest, not an error
+    with pytest.raises(Exception):
+        doc.set_history_budget(1024)
