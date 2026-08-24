@@ -48,6 +48,7 @@
 #include "clay/mesh/sculpt.h"
 #include "clay/scene/commands.h"
 #include "clay/voxel/grid.h"
+#include "clay/voxel/groups.h"
 #include "clay/voxel/mask.h"
 
 namespace clay {
@@ -61,6 +62,11 @@ struct Step {
         Voxel,   // a recorded run of cell writes on one layer's grid
         Mesh,    // sparse vertex deltas on one layer's mesh
         Mask,    // the cells one mask edit changed, on one layer's mask
+        // The document's surface groups, before and after one edit. Named
+        // SurfaceGroup and not Group because JournalEvent::Kind already spends
+        // GroupBegin/GroupEnd on COMMAND grouping, which is an unrelated idea —
+        // one bundles edits into a step, the other names a region of the model.
+        SurfaceGroup,
         Barrier  // an operation nothing records; not reversible, not silent
     };
 
@@ -69,6 +75,19 @@ struct Step {
     std::vector<voxel::VoxelGrid::SculptChange> cells;   // Voxel
     std::vector<voxel::MaskField::MaskChange> mask_cells;  // Mask
     mesh::VertexDeltas deltas;                // Mesh
+    // SurfaceGroup: the whole field, serialised, on each side of the edit.
+    //
+    // A WHOLE SNAPSHOT where every other kind stores a DIFF, and deliberately.
+    // A voxel step diffs because a stroke is hundreds of steps a second and a
+    // grid is megabytes. Group edits are the opposite on both counts: naming a
+    // region, hiding one, isolating one — a handful in a session — against an
+    // RLE-compressed field of a few kilobytes. Diffing here would buy nothing
+    // measurable and would need a second changed-cell mechanism to maintain.
+    //
+    // It also gets something a cell diff would not: one edit can change ids AND
+    // the hidden set (isolate does both), and a snapshot reverses both without
+    // two payloads that have to stay in step.
+    std::vector<std::uint8_t> group_before, group_after;
     std::string barrier;                      // Barrier: what happened, for a host to show
 
     bool reversible() const { return kind != Kind::Barrier; }
@@ -81,6 +100,14 @@ class History {
     using GridFor = std::function<voxel::VoxelGrid*(scene::LayerId)>;
     using MeshFor = std::function<mesh::Mesh*(scene::LayerId)>;
     using MaskFor = std::function<voxel::MaskField*(scene::LayerId)>;
+    // The document's surface groups. NOT keyed by layer, because the lattice is
+    // per document — which is also why this is set once rather than passed to
+    // undo, redo and replay like the three above: those resolve a MAP lookup
+    // that can miss, and there is no map here. Still a callable rather than a
+    // pointer, so the owner is consulted at the moment of use and this cannot
+    // outlive what it names.
+    using GroupsFor = std::function<voxel::GroupField*()>;
+    void set_groups_resolver(GroupsFor resolver) { groups_for_ = std::move(resolver); }
 
     // Off by default, exactly as the command stack has always been opt-in. A
     // document that never enables it behaves as it did before this existed.
@@ -121,6 +148,21 @@ class History {
     bool begin_mask_step(scene::LayerId layer, voxel::MaskField& mask);
     void end_mask_step(voxel::MaskField& mask);
     bool recording_mask_step() const { return mask_open_; }
+
+    // A surface-group edit, bracketed. A THIRD mechanism, and the reason is the
+    // same one that made the mask a second: GroupField has no single write
+    // choke point either — `set` is one, and `reassign`, `grow`, `shrink`,
+    // `set_visible`, `isolate`, `show_all` and `invert_visibility` all write
+    // their own state, two of them touching only the hidden set and no cell at
+    // all. Bracketing the whole edit and comparing serialised fields catches
+    // every one of them without eleven call sites having to remember.
+    //
+    // An edit that changed nothing is dropped, as every other kind is: a host
+    // that isolates the group already isolated must not add an undo that does
+    // nothing to the menu.
+    bool begin_group_step(voxel::GroupField& groups);
+    void end_group_step(voxel::GroupField& groups);
+    bool recording_group_step() const { return group_open_; }
 
     // A mesh edit, as the deltas the sculptor already produced. Empty deltas
     // are dropped, for the reason above.
@@ -188,13 +230,24 @@ class History {
     // wrapped UndoStack and does not carry the command, and one entry can be a
     // coalesced stroke or a whole group. Recording commands sidesteps that.
     struct JournalEvent {
-        enum class Kind { Command, GroupBegin, GroupEnd, Voxel, Mesh, Mask, Barrier, Undo, Redo };
+        // GroupBegin/GroupEnd bracket a COMMAND group; SurfaceGroup is an edit
+        // to the document's named regions. Two unrelated meanings of "group"
+        // that this enum now has to hold at once — spelled apart rather than
+        // left to context.
+        enum class Kind {
+            Command, GroupBegin, GroupEnd, Voxel, Mesh, Mask, SurfaceGroup, Barrier, Undo, Redo
+        };
         Kind kind = Kind::Command;
         scene::Command command;                   // Kind::Command
         scene::LayerId layer = 0;                 // Voxel, Mesh
         std::vector<voxel::VoxelGrid::SculptChange> cells;
         std::vector<voxel::MaskField::MaskChange> mask_cells;  // Kind::Mask  // Voxel
         mesh::VertexDeltas deltas;                // Mesh
+        // SurfaceGroup: the field AFTER the edit. Only the after side, unlike
+        // the step — a journal replays forward onto the snapshot it was taken
+        // against and never runs backwards, so the before side would be bytes
+        // nothing reads.
+        std::vector<std::uint8_t> group_after;
         std::string barrier;                      // Barrier
     };
 
@@ -315,6 +368,9 @@ class History {
     scene::LayerId open_layer_ = 0;
     bool voxel_open_ = false;
     bool mask_open_ = false;
+    GroupsFor groups_for_;
+    bool group_open_ = false;
+    std::vector<std::uint8_t> group_snapshot_;
     scene::LayerId open_mask_layer_ = 0;
     bool grouping_ = false;
     bool enabled_ = false;

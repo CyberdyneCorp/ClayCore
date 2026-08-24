@@ -209,7 +209,7 @@ math::Aabb command_influence_bound(const Document& doc, const Command& cmd);
 //
 // Minor 11 adds an item's GATE — the mask that protects a surface from any
 // operation.
-inline constexpr std::uint16_t kSceneMinor = 12;
+inline constexpr std::uint16_t kSceneMinor = 13;
 
 // Apply a command; returns its inverse, or nullopt if the target does not
 // exist or is protected (ghosted or locked). The document is unchanged in

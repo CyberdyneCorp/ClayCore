@@ -505,6 +505,74 @@ CPU-side, latency-critical, called every Pencil event:
 - Build-plane and grid cell resolution for voxel mode; face picking on voxel grids.
 - Bounds/frustum utilities for zoom-to-selection and culling.
 
+### Naming a region: surface groups
+
+ZBrush's PolyGroups, Blender's Face Sets. Until v0.50.0 this library had no such
+concept on any representation. Visibility was per **layer**, so "isolate the
+head" meant the head had been authored as its own layer — a decision taken
+before the artist knew they would want it. A layer holds exactly one mask, so N
+named regions could not be faked with N masks. And scene groups group
+*edit-list nodes*, which says how three items combine and nothing about which
+part of the resulting surface is the head.
+
+**One world-space lattice**, asked "which group is this surface point in"
+identically whatever the surface is made of. The obvious alternative — a
+per-face id on a mesh, a palette channel on a grid, something else for SDF — is
+three mechanisms, three sets of semantics for hide/isolate/grow/border, and they
+will disagree.
+
+The free answer for SDF, mapping a surface point to the **item** that produced
+it, fails the two cases that matter and fails them for one reason: *an artist's
+groups do not respect the edit list*, because the edit list is how the shape was
+**built** and a group is about what it **is**. An armour panel spanning two
+items is not an item. A face that is part of one sphere is not one either.
+
+```c
+clay_groups* g = NULL;
+clay_document_groups(doc, 0.05f, &g);      /* created on first ask */
+clay_groups_fill(g, head_min, head_max, HEAD);
+clay_groups_isolate(g, HEAD);              /* show one, hide the rest */
+```
+
+**Hiding is not deleting**, and the implementation is what makes that true
+rather than a promise. Nothing is cut and no hole is closed: the field is
+untouched and the *produced mesh* is filtered, so showing a group again brings
+back the same triangles rather than a re-meshed approximation of them. Making
+hidden regions evaluate as empty would have been the obvious implementation and
+is wrong twice — it would change what the document **means** (the invariant
+`tools/check_layering.py` protects by withholding `clay/voxel` from
+`clay::scene`), and it would carve a boundary into the surface that showing
+could not undo.
+
+Both the ids and what was hidden survive a save, in a `'GRUP'` chunk at
+`.clayspace` minor 13.
+
+**What respects the hidden set, and what does not** — listed rather than left to
+be discovered, because a brush that silently reaches hidden surface is worse
+than one that refuses:
+
+| | |
+|---|---|
+| `clay_document_mesh`, `_mesh_quads` | **respects it** — hidden faces dropped; a quad export is filtered *by quad*, so it keeps its quads |
+| `clay_raycast`, `_many`, `_attributed` | **respects it** — the march steps *over* hidden surface and picks what is behind, since hiding the front of a head is how you reach the inside of it |
+| `clay_document_eval`, every field query | **does not** — the field is what the document *means*, and a group must not change it |
+| every brush and voxel verb | **does not** — a brush is bounded by its footprint and by a **mask**, which is the existing mechanism for "do not edit here". Gating on visibility too would be two mechanisms for one intent that can disagree. Isolate to see; mask to protect |
+| `clay_document_save` | **does not** — the whole document is written, hidden included. Anything else would make hiding a form of deleting |
+| `clay_mesh_save` and the exporters | **does not** — they take a mesh you already have; mesh the document first and the filter has already run |
+
+Two limits worth knowing before you build on it. The group boundary is quantised
+to the lattice rather than to the representation, so a mesh that could have
+carried an exact per-face border does not — that is a visible edge at the group
+border and it is the price of one mechanism instead of three. And **grow is
+volumetric, not geodesic**: ZBrush grows a face set *along* the surface, this
+dilates in 3D, so where a surface folds back within `steps` cells of itself the
+growth crosses the gap and claims the other side.
+
+Runnable: [`examples/63_surface_groups.py`](../examples/63_surface_groups.py),
+which names a band spanning two items — the case no item-derived rule could
+express — isolates a region, sculpts on what is left, and shows that hide-then-
+show restores the triangle count exactly.
+
 ### Answering a platform memory warning
 
 The brick cache is likely the largest single allocation in a sculpting app's

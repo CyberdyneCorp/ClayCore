@@ -2289,7 +2289,8 @@ clay_result clay_document_mesh_combined(const clay_document* doc,
 
 /* Declared here rather than with the mask entry points below, because the
  * relax and flatten parameter blocks freeze against one. See -- masks --. */
-typedef struct clay_mask clay_mask; /* opaque */
+typedef struct clay_mask clay_mask;
+typedef struct clay_groups clay_groups; /* opaque */
 
 typedef struct clay_volume_params {
     uint32_t struct_size; /* = sizeof(clay_volume_params); required */
@@ -3062,6 +3063,171 @@ clay_result clay_item_set_gate(clay_item* item, const clay_mask* mask, float thr
  * mask is refused. */
 clay_result clay_mask_to_field(const clay_mask* mask, float threshold, float band, float pad,
                                float cell_size, clay_item** out_item);
+
+/* -- surface groups: naming a region of the model (ABI 0.50.0) ---------------
+ *
+ * ZBrush's PolyGroups, Blender's Face Sets. This library had no such concept on
+ * any representation: visibility was per LAYER, so "isolate the head" meant the
+ * head had been authored as its own layer — a decision taken before the artist
+ * knew they would want it. A layer holds exactly ONE mask, so N named regions
+ * could not be emulated with N masks. And clay_layer_group_items groups
+ * EDIT-LIST NODES, which says how three items combine and nothing about which
+ * part of the resulting surface is the head.
+ *
+ * ONE WORLD-SPACE LATTICE, asked "which group is this surface point in"
+ * identically whatever the surface is made of. The obvious alternative — a
+ * per-face id on a mesh, a palette channel on a grid, something else for SDF —
+ * is three mechanisms, three sets of semantics for hide/isolate/grow/border,
+ * and they will disagree.
+ *
+ * The free answer for SDF, mapping a surface point to the ITEM that produced
+ * it, fails the two cases that matter and fails them for one reason: an
+ * artist's groups do not respect the edit list, because the edit list is how
+ * the shape was BUILT and a group is about what it IS. An armour panel spanning
+ * two items is not an item. A face that is part of one sphere is not one
+ * either.
+ *
+ * WHAT IT COSTS: a group boundary is quantised to this lattice rather than to
+ * the representation, so a mesh that could have carried an exact per-face
+ * boundary does not. That is a visible edge at the group border.
+ *
+ * WHAT IT BUYS: groups survive a representation bridge BY CONSTRUCTION. They
+ * were never in the SDF, the voxels or the mesh, so rasterizing, meshing or
+ * converting cannot lose them — and a voxel grid's 256^3 memory guarantee is
+ * untouched, because there is no second palette channel.
+ *
+ * PER DOCUMENT, not per layer: a mask gates edits to its layer, while a group
+ * names a region of the MODEL, and "isolate the head" when the head spans two
+ * layers is exactly what per-layer storage makes impossible.
+ *
+ * Group id 0 is CLAY_NO_GROUP and means "not in a group". A document that never
+ * names a region carries nothing and writes no chunk. */
+#define CLAY_NO_GROUP 0
+
+/* Create the document's group lattice, or return the one it has. `cell_size`
+ * is used only when creating: an existing lattice is not re-scaled, because
+ * that would move every boundary an artist placed. Pass <= 0 for a default. */
+clay_result clay_document_groups(clay_document* doc, float cell_size, clay_groups** out_groups);
+/* Whether the document has one at all, without creating it. */
+clay_result clay_document_has_groups(const clay_document* doc, int32_t* out_has);
+/* Release a group handle. The LATTICE belongs to the document and is untouched;
+ * this frees only the handle, exactly as clay_mask_destroy does for a borrowed
+ * mask. Destroying a handle does not un-name a single cell. */
+void clay_groups_destroy(clay_groups* groups);
+
+/* Which group a surface point is in — the one query every representation asks,
+ * and the reason this is not three mechanisms. */
+clay_result clay_groups_at(const clay_groups* groups, const float world_p[3],
+                           uint16_t* out_group);
+/* Name a box-shaped region. Membership is decided at the cell CENTRE, so two
+ * adjacent fills do not overlap by a cell — the rule clay_mask_fill uses. */
+clay_result clay_groups_fill(clay_groups* groups, const float box_min[3],
+                             const float box_max[3], uint16_t group);
+/* Name the region a MASK covers, which is how "addressed by group or by mask"
+ * becomes one mechanism rather than two. Paint a mask however you like — a
+ * brush, a cavity measure, an extrude — and name the result. Cells at or above
+ * `threshold` take the id. The two lattices need not share a cell size. */
+clay_result clay_groups_fill_from_mask(clay_groups* groups, const clay_mask* mask,
+                                       uint16_t group, float threshold, uint64_t* out_cells);
+/* Everything in `from` becomes `to`. Merging into CLAY_NO_GROUP deletes a group
+ * without walking the lattice for it, and takes its hidden flag with it. */
+clay_result clay_groups_reassign(clay_groups* groups, uint16_t from, uint16_t to,
+                                 uint64_t* out_moved);
+
+/* Grow, shrink, border — the set operations an artist expects of a selection,
+ * defined on the REGION rather than on any storage, which is what makes them
+ * mean the same thing on a mesh and on a voxel grid.
+ *
+ * VOLUMETRIC, NOT GEODESIC, and this is where it differs from a mesh tool.
+ * ZBrush grows a face set ALONG the surface; this dilates in 3D. Where a
+ * surface folds back within `steps` cells of itself — the inside of a tight
+ * crease, the two sides of a thin wall — growth crosses the gap and claims the
+ * other side. The lattice knows regions, not surfaces.
+ *
+ * Growth claims only ungrouped cells: growing one group into another would
+ * silently destroy a region the artist named, and "grow" is not a verb anyone
+ * expects to delete. */
+clay_result clay_groups_grow(clay_groups* groups, uint16_t group, int32_t steps,
+                             uint64_t* out_claimed);
+clay_result clay_groups_shrink(clay_groups* groups, uint16_t group, int32_t steps,
+                               uint64_t* out_released);
+/* The cells of `group` that touch a cell not in it — the seam to mask, crease
+ * or polish. Capacity in, count out; pass a null buffer to ask the count. */
+clay_result clay_groups_border(const clay_groups* groups, uint16_t group,
+                               int32_t* out_cells_xyz, size_t capacity, size_t* out_count);
+
+/* -- partial visibility -----------------------------------------------------
+ *
+ * A property of the ID, not of the cells: hiding a group is one flag rather
+ * than a rewrite of every cell carrying it, which is also what makes isolate
+ * cheap — show one, hide the rest.
+ *
+ * HIDING IS NOT DELETING. Hidden geometry persists through save and load and is
+ * restored exactly when shown, matching the guarantee a hidden LAYER already
+ * carries. Nothing is cut and no hole is closed: the field is untouched and the
+ * produced mesh is filtered, so showing a group again brings back the same
+ * triangles rather than a re-meshed approximation of them.
+ *
+ * CLAY_NO_GROUP is never hidden and isolate leaves it visible — ungrouped
+ * surface is not something an artist put away, and isolating a group must not
+ * make the rest of the model vanish because it was never named. */
+clay_result clay_groups_set_visible(clay_groups* groups, uint16_t group, int32_t visible);
+clay_result clay_groups_visible(const clay_groups* groups, uint16_t group, int32_t* out_visible);
+/* Show this one, hide every other group that exists. */
+clay_result clay_groups_isolate(clay_groups* groups, uint16_t group);
+clay_result clay_groups_show_all(clay_groups* groups);
+/* Every hidden group shows and every shown group hides. */
+clay_result clay_groups_invert_visibility(clay_groups* groups);
+clay_result clay_groups_any_hidden(const clay_groups* groups, int32_t* out_any);
+/* Whether a surface POINT is hidden by the group it is in. */
+clay_result clay_groups_point_hidden(const clay_groups* groups, const float world_p[3],
+                                     int32_t* out_hidden);
+
+/* What is here, for building a group list in a UI. `out_ids` is capacity in,
+ * count out; a null buffer asks the count. Ids come back ascending and never
+ * include CLAY_NO_GROUP. */
+clay_result clay_groups_ids(const clay_groups* groups, uint16_t* out_ids, size_t capacity,
+                            size_t* out_count);
+clay_result clay_groups_cell_count(const clay_groups* groups, uint16_t group, uint64_t* out_cells);
+/* The lattice this document's groups are addressed on. Fixed when the lattice
+ * was created: re-scaling would move every boundary an artist placed. Also the
+ * scale a group border is quantised to, which is what a host showing that edge
+ * needs to know. */
+clay_result clay_groups_cell_size(const clay_groups* groups, float* out_cell_size);
+/* Whether no region is named at all. A created-but-empty lattice is empty, and
+ * a host building a group list must not show one. */
+clay_result clay_groups_empty(const clay_groups* groups, int32_t* out_empty);
+
+/* -- WHAT RESPECTS THE HIDDEN SET, AND WHAT DOES NOT -------------------------
+ *
+ * Listed rather than left to be discovered, because a brush that silently
+ * reaches hidden surface is worse than one that refuses.
+ *
+ * RESPECTS IT:
+ *   clay_document_mesh, clay_document_mesh_quads  - hidden triangles dropped
+ *   clay_raycast, clay_raycast_many,
+ *   clay_raycast_attributed                       - march steps over hidden
+ *                                                   surface and picks what is
+ *                                                   behind it, which is the
+ *                                                   whole point of hiding
+ *
+ * DOES NOT, and each for a stated reason:
+ *   clay_document_eval and every field query  - the field is what the document
+ *       MEANS, and a group must not change it. That invariant is why
+ *       tools/check_layering.py withholds clay/voxel from clay::scene. Making
+ *       hidden regions evaluate as empty would also carve a hard boundary into
+ *       the surface, so showing a group again would not restore the original
+ *       geometry and "hiding is not deleting" would be false.
+ *   every brush and voxel verb  - a brush is bounded by its own footprint and
+ *       by a MASK, which is the mechanism that already exists for "do not edit
+ *       here" and the one an artist reaches for. Gating brushes on visibility
+ *       too would give two mechanisms for one intent that can disagree. Isolate
+ *       a group and the geometry is still there to be edited; mask it to
+ *       protect it.
+ *   clay_document_save  - the whole document is written, hidden included.
+ *       Anything else would make hiding a form of deleting.
+ *   clay_mesh_save and the exporters  - they take a mesh you already have. Mesh
+ *       the document first and the filter has already run. */
 
 /* Extrude the masked patch of a layer's surface into a new item carrying a
  * volume. The layer is sampled, so what comes back is a snapshot rather than

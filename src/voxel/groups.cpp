@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <map>
+#include <tuple>
 
 namespace clay {
 namespace voxel {
@@ -119,6 +122,93 @@ std::size_t GroupField::reassign(GroupId from, GroupId to) {
     return moved;
 }
 
+namespace {
+
+// The 6-neighbourhood. Face-adjacency rather than 26, because a diagonal step
+// grows a region by sqrt(3) cells per step along the diagonal and 1 along an
+// axis — so "grow by two" would mean two different distances depending on
+// which way the surface happened to run, and an artist reads a grow as a
+// uniform offset.
+constexpr int kFaceOffsets[6][3] = {{1, 0, 0},  {-1, 0, 0}, {0, 1, 0},
+                                    {0, -1, 0}, {0, 0, 1},  {0, 0, -1}};
+
+}  // namespace
+
+std::vector<VoxelCoord> GroupField::cells_of(GroupId id) const {
+    std::vector<VoxelCoord> out;
+    if (id == kNoGroup) return out;
+    for (const auto& [key, chunk] : chunks_)
+        for (std::size_t i = 0; i < kCells; ++i) {
+            if (chunk.data[i] != id) continue;
+            out.push_back({key.x * kChunkDim + static_cast<std::int32_t>(i % kChunkDim),
+                           key.y * kChunkDim +
+                               static_cast<std::int32_t>((i / kChunkDim) % kChunkDim),
+                           key.z * kChunkDim +
+                               static_cast<std::int32_t>(
+                                   i / (static_cast<std::size_t>(kChunkDim) * kChunkDim))});
+        }
+    return out;
+}
+
+std::size_t GroupField::grow(GroupId id, int steps) {
+    if (id == kNoGroup || steps <= 0) return 0;
+    std::size_t claimed = 0;
+    for (int s = 0; s < steps; ++s) {
+        // Collected before any is written: growing in place would let a cell
+        // claimed this step seed the next one, which turns one step into
+        // `steps` and makes grow(1) unpredictable.
+        std::vector<VoxelCoord> frontier;
+        for (VoxelCoord c : cells_of(id))
+            for (const auto& d : kFaceOffsets) {
+                const VoxelCoord n{c.x + d[0], c.y + d[1], c.z + d[2]};
+                if (get(n) == kNoGroup) frontier.push_back(n);
+            }
+        if (frontier.empty()) break;
+        for (VoxelCoord c : frontier) {
+            // Re-checked: two cells of the group can name the same neighbour,
+            // and only one of them claims it.
+            if (get(c) != kNoGroup) continue;
+            set(c, id);
+            ++claimed;
+        }
+    }
+    return claimed;
+}
+
+std::size_t GroupField::shrink(GroupId id, int steps) {
+    if (id == kNoGroup || steps <= 0) return 0;
+    std::size_t released = 0;
+    for (int s = 0; s < steps; ++s) {
+        const std::vector<VoxelCoord> rim = border(id);
+        if (rim.empty()) break;
+        for (VoxelCoord c : rim) {
+            set(c, kNoGroup);
+            ++released;
+        }
+    }
+    return released;
+}
+
+std::vector<VoxelCoord> GroupField::border(GroupId id) const {
+    std::vector<VoxelCoord> out;
+    if (id == kNoGroup) return out;
+    for (VoxelCoord c : cells_of(id))
+        for (const auto& d : kFaceOffsets)
+            if (get({c.x + d[0], c.y + d[1], c.z + d[2]}) != id) {
+                out.push_back(c);
+                break;  // one entry per cell, however many neighbours differ
+            }
+    return out;
+}
+
+void GroupField::invert_visibility() {
+    touch();
+    std::unordered_set<GroupId> now_hidden;
+    for (GroupId g : ids())
+        if (hidden_.find(g) == hidden_.end()) now_hidden.insert(g);
+    hidden_ = std::move(now_hidden);
+}
+
 void GroupField::set_visible(GroupId id, bool is_visible) {
     if (id == kNoGroup) return;  // ungrouped surface is not something to hide
     touch();
@@ -171,6 +261,139 @@ std::vector<GroupId> GroupField::ids() const {
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
     return out;
+}
+
+std::size_t GroupField::fill_from_mask(const MaskField& mask, GroupId id, float threshold) {
+    if (id == kNoGroup) return 0;
+    std::size_t claimed = 0;
+    // Driven by the MASK's painted extent rather than by a region the caller
+    // supplies: a mask already knows where it is, and asking for bounds a
+    // caller must compute is how the two lattices get to disagree.
+    const std::optional<VoxelCoord> lo = mask.bounds_min();
+    const std::optional<VoxelCoord> hi = mask.bounds_max();
+    if (!lo || !hi) return 0;
+    const kernel::cfloat3 world_lo = mask.cell_centre(*lo);
+    const kernel::cfloat3 world_hi = mask.cell_centre(*hi);
+    const VoxelCoord c0 = cell_at(world_lo);
+    const VoxelCoord c1 = cell_at(world_hi);
+    for (std::int32_t z = c0.z; z <= c1.z; ++z)
+        for (std::int32_t y = c0.y; y <= c1.y; ++y)
+            for (std::int32_t x = c0.x; x <= c1.x; ++x) {
+                const VoxelCoord c{x, y, z};
+                // Sampled at THIS field's cell centre, so a coarse group over a
+                // fine mask quantises rather than misaligns.
+                if (mask.sample(cell_centre(c)) < threshold) continue;
+                if (get(c) == id) continue;
+                set(c, id);
+                ++claimed;
+            }
+    return claimed;
+}
+
+std::vector<std::uint8_t> GroupField::serialize() const {
+    std::vector<std::uint8_t> out;
+    auto put32 = [&](std::uint32_t v) {
+        for (int i = 0; i < 4; ++i) out.push_back(static_cast<std::uint8_t>(v >> (i * 8)));
+    };
+    std::uint32_t bits;
+    std::memcpy(&bits, &cell_size_, 4);
+    put32(bits);
+
+    std::map<std::tuple<int, int, int>, const Chunk*> ordered;  // deterministic
+    for (const auto& [key, chunk] : chunks_) ordered[{key.x, key.y, key.z}] = &chunk;
+    put32(static_cast<std::uint32_t>(ordered.size()));
+    for (const auto& [key, chunk] : ordered) {
+        put32(static_cast<std::uint32_t>(std::get<0>(key)));
+        put32(static_cast<std::uint32_t>(std::get<1>(key)));
+        put32(static_cast<std::uint32_t>(std::get<2>(key)));
+        // RLE over 16-bit ids, run-length capped at 65535. A group field is
+        // overwhelmingly long runs of one id or of kNoGroup, which is what
+        // makes this worth doing on a 32^3 chunk of u16.
+        std::vector<std::uint8_t> runs;
+        std::size_t i = 0;
+        while (i < chunk->data.size()) {
+            const GroupId v = chunk->data[i];
+            std::size_t run = 1;
+            while (i + run < chunk->data.size() && chunk->data[i + run] == v && run < 65535) ++run;
+            runs.push_back(static_cast<std::uint8_t>(v & 0xff));
+            runs.push_back(static_cast<std::uint8_t>(v >> 8));
+            runs.push_back(static_cast<std::uint8_t>(run & 0xff));
+            runs.push_back(static_cast<std::uint8_t>(run >> 8));
+            i += run;
+        }
+        put32(static_cast<std::uint32_t>(runs.size()));
+        out.insert(out.end(), runs.begin(), runs.end());
+    }
+
+    // The hidden set, sorted so the blob is deterministic. Written after the
+    // cells so a reader that stops early still has a coherent field — it would
+    // show everything, which is the safe direction to fail in.
+    std::vector<GroupId> hidden(hidden_.begin(), hidden_.end());
+    std::sort(hidden.begin(), hidden.end());
+    put32(static_cast<std::uint32_t>(hidden.size()));
+    for (GroupId g : hidden) {
+        out.push_back(static_cast<std::uint8_t>(g & 0xff));
+        out.push_back(static_cast<std::uint8_t>(g >> 8));
+    }
+    return out;
+}
+
+std::optional<GroupField> GroupField::deserialize(const std::uint8_t* data, std::size_t size) {
+    std::size_t pos = 0;
+    auto get32 = [&](std::uint32_t* v) {
+        if (pos + 4 > size) return false;
+        *v = static_cast<std::uint32_t>(data[pos]) | (static_cast<std::uint32_t>(data[pos + 1]) << 8) |
+             (static_cast<std::uint32_t>(data[pos + 2]) << 16) |
+             (static_cast<std::uint32_t>(data[pos + 3]) << 24);
+        pos += 4;
+        return true;
+    };
+    std::uint32_t bits = 0;
+    if (!get32(&bits)) return std::nullopt;
+    float cell_size = 0.0f;
+    std::memcpy(&cell_size, &bits, 4);
+    if (!(cell_size > 0.0f)) return std::nullopt;
+
+    GroupField field(cell_size);
+    std::uint32_t chunk_count = 0;
+    if (!get32(&chunk_count)) return std::nullopt;
+    for (std::uint32_t i = 0; i < chunk_count; ++i) {
+        std::uint32_t kx = 0, ky = 0, kz = 0, run_bytes = 0;
+        if (!get32(&kx) || !get32(&ky) || !get32(&kz) || !get32(&run_bytes)) return std::nullopt;
+        if (run_bytes % 4 != 0 || pos + run_bytes > size) return std::nullopt;
+        Chunk chunk;
+        chunk.data.assign(kCells, kNoGroup);
+        std::size_t at = 0;
+        for (std::uint32_t r = 0; r < run_bytes; r += 4) {
+            const GroupId v = static_cast<GroupId>(data[pos + r] |
+                                                   (static_cast<GroupId>(data[pos + r + 1]) << 8));
+            const std::size_t run = static_cast<std::size_t>(data[pos + r + 2]) |
+                                    (static_cast<std::size_t>(data[pos + r + 3]) << 8);
+            if (run == 0 || at + run > kCells) return std::nullopt;
+            for (std::size_t k = 0; k < run; ++k) chunk.data[at + k] = v;
+            if (v != kNoGroup) chunk.assigned += static_cast<int>(run);
+            at += run;
+        }
+        if (at != kCells) return std::nullopt;
+        pos += run_bytes;
+        // An all-empty chunk is not stored: a missing chunk is how this lattice
+        // spells "nothing here", and keeping one would make a round trip differ
+        // from the field it came from.
+        if (chunk.assigned == 0) continue;
+        field.chunks_.emplace(VoxelCoord{static_cast<std::int32_t>(kx), static_cast<std::int32_t>(ky),
+                                         static_cast<std::int32_t>(kz)},
+                              std::move(chunk));
+    }
+
+    std::uint32_t hidden_count = 0;
+    if (!get32(&hidden_count)) return std::nullopt;
+    if (pos + static_cast<std::size_t>(hidden_count) * 2 > size) return std::nullopt;
+    for (std::uint32_t i = 0; i < hidden_count; ++i) {
+        field.hidden_.insert(
+            static_cast<GroupId>(data[pos] | (static_cast<GroupId>(data[pos + 1]) << 8)));
+        pos += 2;
+    }
+    return field;
 }
 
 std::optional<VoxelCoord> GroupField::bounds_min() const {

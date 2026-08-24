@@ -137,6 +137,41 @@ void History::end_voxel_step(voxel::VoxelGrid& grid) {
     push(std::move(step));
 }
 
+bool History::begin_group_step(voxel::GroupField& groups) {
+    if (!enabled_) return false;
+    if (group_open_) return false;  // a step is one edit
+    group_open_ = true;
+    // EAGER, unlike the mask's lazy snapshot: a group field has no touch() hook
+    // to hang a first-write snapshot on — that is the whole reason this is a
+    // third mechanism — and it is kilobytes rather than megabytes, so taking it
+    // up front costs nothing worth a hook.
+    group_snapshot_ = groups.serialize();
+    return true;
+}
+
+void History::end_group_step(voxel::GroupField& groups) {
+    if (!group_open_) return;
+    group_open_ = false;
+    std::vector<std::uint8_t> after = groups.serialize();
+    // An edit that changed nothing is not a step. Isolating the group already
+    // isolated is an ordinary thing to do, and it must not put an undo that
+    // does nothing into the menu.
+    if (after == group_snapshot_) {
+        group_snapshot_.clear();
+        return;
+    }
+    Step step;
+    step.kind = Step::Kind::SurfaceGroup;
+    step.group_before = std::move(group_snapshot_);
+    step.group_after = after;
+    group_snapshot_.clear();
+    JournalEvent e;
+    e.kind = JournalEvent::Kind::SurfaceGroup;
+    e.group_after = std::move(after);
+    journal_.push_back(std::move(e));
+    push(std::move(step));
+}
+
 bool History::begin_mask_step(scene::LayerId layer, voxel::MaskField& mask) {
     if (!enabled_) return false;
     if (mask_open_) return false;  // a step is one edit
@@ -228,6 +263,17 @@ bool History::apply_step(const Step& step, bool forward, scene::Document& doc,
                 mask->reapply_changes(step.mask_cells);
             else
                 mask->revert_changes(step.mask_cells);
+            return true;
+        }
+        case Step::Kind::SurfaceGroup: {
+            voxel::GroupField* groups = groups_for_ ? groups_for_() : nullptr;
+            // Refused rather than skipped, for the reason a missing grid is.
+            if (!groups) return false;
+            const std::vector<std::uint8_t>& want = forward ? step.group_after : step.group_before;
+            std::optional<voxel::GroupField> restored =
+                voxel::GroupField::deserialize(want.data(), want.size());
+            if (!restored) return false;
+            *groups = std::move(*restored);
             return true;
         }
         case Step::Kind::Barrier:
@@ -462,6 +508,11 @@ std::vector<std::uint8_t> History::journal_since(std::size_t from, std::size_t* 
             case JournalEvent::Kind::Mask:
                 put_bytes(out, encode_mask_cells(e.mask_cells));
                 break;
+            case JournalEvent::Kind::SurfaceGroup:
+                // The serialised field itself: it is already a compact,
+                // deterministic blob, so a second encoding would buy nothing.
+                put_bytes(out, e.group_after);
+                break;
             case JournalEvent::Kind::Barrier:
                 put_bytes(out, std::vector<std::uint8_t>(e.barrier.begin(), e.barrier.end()));
                 break;
@@ -588,6 +639,31 @@ bool History::replay(const std::uint8_t* data, std::size_t size, scene::Document
                 push(std::move(step));
                 break;
             }
+            case JournalEvent::Kind::SurfaceGroup: {
+                voxel::GroupField* groups = groups_for_ ? groups_for_() : nullptr;
+                std::optional<voxel::GroupField> restored =
+                    voxel::GroupField::deserialize(body, payload);
+                if (!groups || !restored) {
+                    if (out) *out = result;
+                    return false;
+                }
+                // The step's BEFORE side is the field as it stands right now,
+                // captured before overwriting it: a replay walks forward from a
+                // snapshot, so "before" is whatever the previous event left,
+                // and taking it here is what keeps the reconstructed step list
+                // undoable rather than one-way.
+                Step step;
+                step.kind = Step::Kind::SurfaceGroup;
+                step.group_before = groups->serialize();
+                step.group_after.assign(body, body + payload);
+                *groups = std::move(*restored);
+                JournalEvent e;
+                e.kind = JournalEvent::Kind::SurfaceGroup;
+                e.group_after = step.group_after;
+                journal_.push_back(std::move(e));
+                push(std::move(step));
+                break;
+            }
             case JournalEvent::Kind::Barrier:
                 // STOPS rather than skips. Continuing past an operation it
                 // cannot reproduce would hand back a document quietly missing
@@ -625,6 +701,10 @@ std::size_t History::step_bytes(const Step& s) {
     n += s.mask_cells.capacity() * sizeof(voxel::MaskField::MaskChange);
     n += s.barrier.capacity();
     n += s.deltas.bytes();
+    // A SurfaceGroup step holds two whole serialised fields, which makes this
+    // the term that matters for it rather than a rounding error — the same
+    // omission roll-up-document-memory found six of in node_bytes.
+    n += s.group_before.capacity() + s.group_after.capacity();
     return n;
 }
 
@@ -634,6 +714,7 @@ std::size_t History::event_bytes(const JournalEvent& e) {
     n += e.mask_cells.capacity() * sizeof(voxel::MaskField::MaskChange);
     n += e.barrier.capacity();
     n += e.deltas.bytes();
+    n += e.group_after.capacity();
     n += scene::command_bytes(e.command);
     return n;
 }

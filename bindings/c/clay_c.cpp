@@ -28,6 +28,7 @@
 #include "clay/field/flatten.h"
 #include "clay/field/move_topological.h"
 #include "clay/field/relax.h"
+#include "clay/kernel/field.h"
 #include "clay/io/clayspace.h"
 #include "clay/io/mesh_io.h"
 #include "clay/io/memory.h"
@@ -55,6 +56,8 @@
 #include "clay/scene/tape.h"
 #include "clay/version.h"
 #include "clay/voxel/grid.h"
+#include "clay/voxel/groups.h"
+#include "clay/voxel/hide.h"
 #include "clay/voxel/mask.h"
 #include "desc_version.h"
 
@@ -935,6 +938,15 @@ struct clay_mask {
     mutable brush::GateBake gate_bake;
 };
 
+// A group handle is always a BORROW of the document's one lattice — there is no
+// standalone form, unlike a mask or a grid. Deliberate: groups are per document
+// by design, so a standalone one would name a region of nothing. The handle
+// carries no id because the document has exactly one, and the lookup is redone
+// on every call so nothing caches a pointer into the document.
+struct clay_groups {
+    clay_document* doc = nullptr;
+};
+
 // The same discriminator, one shape different: a standalone mesh is held by
 // value because every producer in this file builds one in place, and `data` is
 // Bytes the library owns, handed out and released. One type for every
@@ -1236,6 +1248,95 @@ clay_result resolve_mask(const clay_mask* mask, voxel::MaskField** out) {
     *out = &it->second;
     return CLAY_OK;
 }
+
+// One backend raycast, re-issued past any hit that lands on hidden surface.
+//
+// The BACKEND path, which is a different one from pick::raycast_scene: eval
+// cannot see clay/voxel by the layering table, so a backend can never consult a
+// group field and the skip has to happen here, at the boundary that can see
+// both. clay_raycast and clay_raycast_many go through here;
+// clay_raycast_attributed takes RaycastOptions::groups instead and does the
+// same thing one layer down.
+//
+// SKIPPED, NOT MISSED: hiding the front of a head is how an artist reaches the
+// inside of it, so a ray that stopped at hidden surface would defeat the
+// feature it implements.
+eval::Status raycast_visible(eval::Backend* b, const scene::Tape& tape, const float ray[6],
+                             const voxel::GroupField* groups, eval::RayHit* out) {
+    eval::RayQuery q{ray, 1, 0.0f, 1e6f, 1e-4f, 256};
+    eval::Status st = b->raycast(tape, q, out);
+    if (st != eval::Status::Ok || !out->hit || !groups) return st;
+    const kernel::cfloat3 hit_p = kernel::cf3(out->pos[0], out->pos[1], out->pos[2]);
+    if (!groups->point_hidden(hit_p)) return st;
+
+    // Hidden. Hand off to the same scan pick::raycast_scene uses rather than
+    // re-issuing the march: the ray is now INSIDE the shape it just hit, where
+    // the field is negative and a sphere-march cannot step, and walking out of
+    // that solid overshoots the far wall — which is the surface being looked
+    // for. See pick::next_visible_crossing.
+    const math::Ray r{kernel::cf3(ray[0], ray[1], ray[2]), kernel::cf3(ray[3], ray[4], ray[5])};
+    auto field = [&](kernel::cfloat3 p) { return tape.eval(p).d; };
+    const float step = kernel::cmax(groups->cell_size(), q.eps * 4.0f);
+    const float t = pick::next_visible_crossing(field, r, out->t + step * 0.5f, q.tmax, step,
+                                                *groups);
+    if (t < 0.0f) {
+        out->hit = 0;
+        return eval::Status::Ok;
+    }
+    const kernel::cfloat3 p = r.at(t);
+    out->t = t;
+    out->pos[0] = p.x;
+    out->pos[1] = p.y;
+    out->pos[2] = p.z;
+    const kernel::cfloat3 n = kernel::cnormal(field, p, 1e-4f);
+    out->normal[0] = n.x;
+    out->normal[1] = n.y;
+    out->normal[2] = n.z;
+    return eval::Status::Ok;
+}
+
+// Surface groups. FILE SCOPE, above the first extern "C" — a helper defined
+// inside that block is what broke the macOS and Windows builds in #235, and GCC
+// does not warn about it, so a green local build proves nothing.
+const voxel::GroupField* group_field(const clay_groups* groups) {
+    if (!groups || !groups->doc || !groups->doc->doc.groups) return nullptr;
+    return &*groups->doc->doc.groups;
+}
+
+voxel::GroupField* group_field_mut(clay_groups* groups) {
+    if (!groups || !groups->doc || !groups->doc->doc.groups) return nullptr;
+    return &*groups->doc->doc.groups;
+}
+
+const voxel::MaskField* mask_of(const clay_mask* mask) {
+    voxel::MaskField* m = nullptr;
+    return resolve_mask(mask, &m) == CLAY_OK ? m : nullptr;
+}
+
+// Brackets a group edit so it becomes one undo step, on the same RAII shape
+// MaskStep uses. Every mutating group entry point takes one, which is what
+// keeps eleven call sites from each having to remember — the omission that made
+// `record_barrier` a documented lie until unify-the-undo-history wired it.
+//
+// A standalone lattice cannot occur (a group handle is always a borrow), so
+// unlike MaskStep there is no not-in-a-document case to fall through.
+struct GroupStep {
+    clay_document* doc = nullptr;
+    voxel::GroupField* field = nullptr;
+
+    explicit GroupStep(clay_groups* groups) {
+        if (!groups || !groups->doc || !groups->doc->undo) return;
+        voxel::GroupField* g = group_field_mut(groups);
+        if (!g || !groups->doc->undo->begin_group_step(*g)) return;
+        doc = groups->doc;
+        field = g;
+    }
+    ~GroupStep() {
+        if (doc) doc->undo->end_group_step(*field);
+    }
+    GroupStep(const GroupStep&) = delete;
+    GroupStep& operator=(const GroupStep&) = delete;
+};
 
 // The shapes of argument list the voxel entry points start with, checked once
 // here so each entry point below is its own engine call and nothing else.
@@ -2339,6 +2440,14 @@ clay_result clay_document_enable_undo(clay_document* doc) {
     if (!doc->undo) {
         doc->undo = std::make_unique<session::History>();
         doc->undo->set_enabled(true);
+        // Set once rather than passed to undo/redo/replay like the three
+        // per-layer resolvers, because the group lattice is per DOCUMENT and
+        // there is no map lookup that can miss. Still a callable, so it is
+        // consulted at the moment of use and cannot outlive what it names — the
+        // lattice is created lazily and this must see it whenever that happens.
+        doc->undo->set_groups_resolver([doc]() -> voxel::GroupField* {
+            return doc->doc.groups ? &*doc->doc.groups : nullptr;
+        });
     }
     return CLAY_OK;
 }
@@ -4078,9 +4187,9 @@ clay_result clay_raycast(const clay_document* doc, const float origin[3], const 
     std::shared_ptr<const scene::Tape> tape_ref = doc->pickable_tape();
     const scene::Tape& tape = *tape_ref;
     float ray[6] = {origin[0], origin[1], origin[2], dir[0], dir[1], dir[2]};
-    eval::RayQuery q{ray, 1, 0.0f, 1e6f, 1e-4f, 256};
     eval::RayHit hit;
-    if (b->raycast(tape, q, &hit) != eval::Status::Ok)
+    if (raycast_visible(b, tape, ray, doc->doc.groups ? &*doc->doc.groups : nullptr, &hit) !=
+        eval::Status::Ok)
         return fail(CLAY_ERROR_BACKEND, "raycast failed");
     *out_hit = hit.hit;
     if (out_t) *out_t = hit.t;
@@ -4105,6 +4214,22 @@ clay_result clay_raycast_many(const clay_document* doc, const float* rays_origin
     eval::RayQuery q{rays.data(), count, 0.0f, 1e6f, 1e-4f, 256};
     if (b->raycast(tape, q, hits.data()) != eval::Status::Ok)
         return fail(CLAY_ERROR_BACKEND, "raycast failed");
+    // The batch stays a batch. Only the rays that actually landed on hidden
+    // surface are re-issued singly, so a document with nothing hidden — every
+    // document that never named a region — pays exactly what it always did, and
+    // one hidden group does not turn a thousand-ray batch into a thousand
+    // calls.
+    const voxel::GroupField* groups = doc->doc.groups ? &*doc->doc.groups : nullptr;
+    if (groups && groups->any_hidden()) {
+        for (std::size_t i = 0; i < count; ++i) {
+            if (!hits[i].hit) continue;
+            const kernel::cfloat3 p =
+                kernel::cf3(hits[i].pos[0], hits[i].pos[1], hits[i].pos[2]);
+            if (!groups->point_hidden(p)) continue;
+            if (raycast_visible(b, tape, &rays[i * 6], groups, &hits[i]) != eval::Status::Ok)
+                return fail(CLAY_ERROR_BACKEND, "raycast failed");
+        }
+    }
     write_ray_hits(hits, count, out_hits, out_t, out_positions_xyz, out_normals_xyz);
     return CLAY_OK;
 }
@@ -4119,7 +4244,11 @@ clay_result clay_raycast_attributed(const clay_document* doc, const float origin
     math::Ray ray;
     clay_result r = make_ray(origin, dir, &ray);
     if (r != CLAY_OK) return r;
-    pick::SceneHit hit = pick::raycast_scene(doc->doc.document, ray);
+    pick::RaycastOptions ropts;
+    // Hidden surface is stepped over, not turned into a miss: hiding the front
+    // of a head is how an artist reaches the inside of it.
+    if (doc->doc.groups) ropts.groups = &*doc->doc.groups;
+    pick::SceneHit hit = pick::raycast_scene(doc->doc.document, ray, ropts);
     *out_hit = hit.hit ? 1 : 0;
     if (out_t) *out_t = hit.t;
     if (out_position) write_f3(out_position, hit.position);
@@ -4213,6 +4342,10 @@ clay_result clay_document_mesh(const clay_document* doc, const clay_mesh_params*
     mesh::Mesh m;
     r = mesh_with(p.mesher, p.experimental != 0, tape, region, voxel, &m);
     if (r != CLAY_OK) return r;
+    // What the artist put away does not come back in the export. A no-op when
+    // nothing is hidden, so a document that never named a region meshes to the
+    // bytes it always did.
+    if (doc->doc.groups) voxel::drop_hidden(m, *doc->doc.groups);
     if (m.empty()) return fail(CLAY_ERROR_BACKEND, "meshing produced no triangles");
     if (p.decimate) {
         mesh::DecimateOptions opts;
@@ -4257,6 +4390,8 @@ clay_result clay_document_mesh_quads(const clay_document* doc, const clay_quad_p
     // The search stops at the mesher's own sample ceiling, so an empty mesh
     // here is a shape with no surface in the region rather than a lattice
     // nobody could afford.
+    // Filtered BY QUAD, so the export keeps its quads — see voxel::drop_hidden.
+    if (doc->doc.groups) voxel::drop_hidden(m, *doc->doc.groups);
     if (m.empty()) return fail(CLAY_ERROR_BACKEND, "quad meshing produced no faces");
 
     auto* handle = new clay_mesh();
@@ -6000,6 +6135,196 @@ clay_result clay_mask_to_field(const clay_mask* mask, float threshold, float ban
     item->node.prim = scene::Prim::volume();
     item->node.volume = std::make_shared<field::FieldVolume>(std::move(*volume));
     *out_item = item;
+    return CLAY_OK;
+}
+
+// -- surface groups (add-surface-groups) --------------------------------------
+
+clay_result clay_document_groups(clay_document* doc, float cell_size, clay_groups** out_groups) {
+    if (!doc || !out_groups) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_groups = nullptr;
+    if (!doc->doc.groups) {
+        const float size = cell_size > 0.0f ? cell_size : 0.05f;
+        if (!std::isfinite(size)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "cell size must be finite");
+        doc->doc.groups.emplace(size);
+    }
+    // An EXISTING lattice is not re-scaled, whatever cell_size says: re-scaling
+    // would move every boundary the artist placed, and silently.
+    auto* handle = new clay_groups();
+    handle->doc = doc;
+    *out_groups = handle;
+    return CLAY_OK;
+}
+
+clay_result clay_document_has_groups(const clay_document* doc, int32_t* out_has) {
+    if (!doc || !out_has) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_has = doc->doc.groups && !doc->doc.groups->empty() ? 1 : 0;
+    return CLAY_OK;
+}
+
+void clay_groups_destroy(clay_groups* groups) { delete groups; }
+
+clay_result clay_groups_at(const clay_groups* groups, const float world_p[3], uint16_t* out_group) {
+    const voxel::GroupField* g = group_field(groups);
+    if (!g || !world_p || !out_group) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_group = g->at(kernel::cf3(world_p[0], world_p[1], world_p[2]));
+    return CLAY_OK;
+}
+
+clay_result clay_groups_fill(clay_groups* groups, const float box_min[3], const float box_max[3],
+                             uint16_t group) {
+    voxel::GroupField* g = group_field_mut(groups);
+    if (!g || !box_min || !box_max) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    GroupStep step(groups);
+    g->fill(math::Aabb{kernel::cf3(box_min[0], box_min[1], box_min[2]),
+                       kernel::cf3(box_max[0], box_max[1], box_max[2])},
+            group);
+    return CLAY_OK;
+}
+
+clay_result clay_groups_fill_from_mask(clay_groups* groups, const clay_mask* mask, uint16_t group,
+                                       float threshold, uint64_t* out_cells) {
+    voxel::GroupField* g = group_field_mut(groups);
+    const voxel::MaskField* m = mask_of(mask);
+    if (!g || !m) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    GroupStep step(groups);
+    const std::size_t n = g->fill_from_mask(*m, group, threshold);
+    if (out_cells) *out_cells = n;
+    return CLAY_OK;
+}
+
+clay_result clay_groups_reassign(clay_groups* groups, uint16_t from, uint16_t to,
+                                 uint64_t* out_moved) {
+    voxel::GroupField* g = group_field_mut(groups);
+    if (!g) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null groups");
+    GroupStep step(groups);
+    const std::size_t n = g->reassign(from, to);
+    if (out_moved) *out_moved = n;
+    return CLAY_OK;
+}
+
+clay_result clay_groups_grow(clay_groups* groups, uint16_t group, int32_t steps,
+                             uint64_t* out_claimed) {
+    voxel::GroupField* g = group_field_mut(groups);
+    if (!g) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null groups");
+    GroupStep step(groups);
+    const std::size_t n = g->grow(group, steps);
+    if (out_claimed) *out_claimed = n;
+    return CLAY_OK;
+}
+
+clay_result clay_groups_shrink(clay_groups* groups, uint16_t group, int32_t steps,
+                               uint64_t* out_released) {
+    voxel::GroupField* g = group_field_mut(groups);
+    if (!g) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null groups");
+    GroupStep step(groups);
+    const std::size_t n = g->shrink(group, steps);
+    if (out_released) *out_released = n;
+    return CLAY_OK;
+}
+
+clay_result clay_groups_border(const clay_groups* groups, uint16_t group, int32_t* out_cells_xyz,
+                               size_t capacity, size_t* out_count) {
+    const voxel::GroupField* g = group_field(groups);
+    if (!g || !out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    const std::vector<voxel::VoxelCoord> rim = g->border(group);
+    *out_count = rim.size();
+    if (!out_cells_xyz) return CLAY_OK;  // a count query
+    const std::size_t n = rim.size() < capacity ? rim.size() : capacity;
+    for (std::size_t i = 0; i < n; ++i) {
+        out_cells_xyz[i * 3] = rim[i].x;
+        out_cells_xyz[i * 3 + 1] = rim[i].y;
+        out_cells_xyz[i * 3 + 2] = rim[i].z;
+    }
+    *out_count = n;
+    return CLAY_OK;
+}
+
+clay_result clay_groups_set_visible(clay_groups* groups, uint16_t group, int32_t visible) {
+    voxel::GroupField* g = group_field_mut(groups);
+    if (!g) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null groups");
+    GroupStep step(groups);
+    g->set_visible(group, visible != 0);
+    return CLAY_OK;
+}
+
+clay_result clay_groups_visible(const clay_groups* groups, uint16_t group, int32_t* out_visible) {
+    const voxel::GroupField* g = group_field(groups);
+    if (!g || !out_visible) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_visible = g->visible(group) ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_groups_isolate(clay_groups* groups, uint16_t group) {
+    voxel::GroupField* g = group_field_mut(groups);
+    if (!g) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null groups");
+    GroupStep step(groups);
+    g->isolate(group);
+    return CLAY_OK;
+}
+
+clay_result clay_groups_show_all(clay_groups* groups) {
+    voxel::GroupField* g = group_field_mut(groups);
+    if (!g) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null groups");
+    GroupStep step(groups);
+    g->show_all();
+    return CLAY_OK;
+}
+
+clay_result clay_groups_invert_visibility(clay_groups* groups) {
+    voxel::GroupField* g = group_field_mut(groups);
+    if (!g) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null groups");
+    GroupStep step(groups);
+    g->invert_visibility();
+    return CLAY_OK;
+}
+
+clay_result clay_groups_any_hidden(const clay_groups* groups, int32_t* out_any) {
+    const voxel::GroupField* g = group_field(groups);
+    if (!g || !out_any) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_any = g->any_hidden() ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_groups_point_hidden(const clay_groups* groups, const float world_p[3],
+                                     int32_t* out_hidden) {
+    const voxel::GroupField* g = group_field(groups);
+    if (!g || !world_p || !out_hidden) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_hidden = g->point_hidden(kernel::cf3(world_p[0], world_p[1], world_p[2])) ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_groups_ids(const clay_groups* groups, uint16_t* out_ids, size_t capacity,
+                            size_t* out_count) {
+    const voxel::GroupField* g = group_field(groups);
+    if (!g || !out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    const std::vector<voxel::GroupId> ids = g->ids();
+    *out_count = ids.size();
+    if (!out_ids) return CLAY_OK;
+    const std::size_t n = ids.size() < capacity ? ids.size() : capacity;
+    for (std::size_t i = 0; i < n; ++i) out_ids[i] = ids[i];
+    *out_count = n;
+    return CLAY_OK;
+}
+
+clay_result clay_groups_cell_size(const clay_groups* groups, float* out_cell_size) {
+    const voxel::GroupField* g = group_field(groups);
+    if (!g || !out_cell_size) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_cell_size = g->cell_size();
+    return CLAY_OK;
+}
+
+clay_result clay_groups_empty(const clay_groups* groups, int32_t* out_empty) {
+    const voxel::GroupField* g = group_field(groups);
+    if (!g || !out_empty) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_empty = g->empty() ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_groups_cell_count(const clay_groups* groups, uint16_t group, uint64_t* out_cells) {
+    const voxel::GroupField* g = group_field(groups);
+    if (!g || !out_cells) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_cells = group == CLAY_NO_GROUP ? g->cell_count() : g->cell_count(group);
     return CLAY_OK;
 }
 

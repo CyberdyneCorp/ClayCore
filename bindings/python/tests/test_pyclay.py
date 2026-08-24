@@ -6446,3 +6446,147 @@ def test_memory_without_undo_reports_no_history():
     report = doc.memory
     assert report["history"] == 0               # honest, not an error
     assert _parts(report) == report["total"]
+
+
+# -- surface groups: naming a region of the model (add-surface-groups) --------
+#
+# The capability shipped as a C++ lattice reachable from no host: no binding, no
+# serialisation, and hiding a group hid nothing because the mesher never asked.
+# These cover the half that makes it a workflow.
+
+
+def _grouped_sphere_doc(cell_size=0.05):
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("body")
+    layer.add(clay.Sphere(r=0.5))
+    groups = doc.groups(cell_size=cell_size)
+    groups.fill(((-0.6, 0.0, -0.6), (0.6, 0.6, 0.6)), 1)
+    groups.fill(((-0.6, -0.6, -0.6), (0.6, -0.001, 0.6)), 2)
+    return doc, groups
+
+
+def test_groups_a_point_resolves_to_its_group():
+    doc, groups = _grouped_sphere_doc()
+    assert groups.at((0.0, 0.3, 0.0)) == 1
+    assert groups.at((0.0, -0.3, 0.0)) == 2
+    assert groups.at((5.0, 5.0, 5.0)) == 0          # ungrouped
+    assert list(groups.ids) == [1, 2]
+
+
+def test_groups_hiding_removes_triangles_and_showing_restores_them():
+    # The regression for the gap this closes: before it, this count never moved.
+    doc, groups = _grouped_sphere_doc()
+    every = doc.mesh(voxel_size=0.02).triangle_count
+    assert every > 1000                              # non-degenerate first
+
+    groups.isolate(1)
+    isolated = doc.mesh(voxel_size=0.02).triangle_count
+    assert 0 < isolated < every
+
+    # HIDING IS NOT DELETING: the field was never touched, so this is exact.
+    groups.show_all()
+    assert doc.mesh(voxel_size=0.02).triangle_count == every
+
+
+def test_groups_a_quad_export_keeps_its_quads():
+    # mesh_data.h makes it a rule that rewriting indices clears quads, so a
+    # triangle-wise filter would return a quad export with no quads in it.
+    doc, groups = _grouped_sphere_doc()
+    groups.isolate(1)
+    quads = doc.mesh_quads(cell_size=0.04)
+    assert quads.quad_count > 0
+
+
+def test_groups_grow_claims_ungrouped_cells_and_not_a_neighbour():
+    doc, groups = _grouped_sphere_doc()
+    before_1, before_2 = groups.cell_count(1), groups.cell_count(2)
+    assert before_1 > 100 and before_2 > 100
+
+    claimed = groups.grow(1, steps=1)
+    assert claimed > 0
+    assert groups.cell_count(1) == before_1 + claimed
+    assert groups.cell_count(2) == before_2       # face-adjacent, untouched
+
+
+def test_groups_isolating_is_hiding_the_complement():
+    # The spec states this as an equivalence, so it is tested as one.
+    a_doc, a = _grouped_sphere_doc()
+    b_doc, b = _grouped_sphere_doc()
+    a.isolate(1)
+    for gid in list(b.ids):
+        if gid != 1:
+            b.set_visible(gid, False)
+    assert [a.visible(g) for g in a.ids] == [b.visible(g) for g in b.ids]
+
+
+def test_groups_naming_a_region_from_a_mask():
+    # How "addressed by group or by mask" stays ONE mechanism.
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("body")
+    layer.add(clay.Sphere(r=0.5))
+    mask = doc.add_mask("body", cell_size=0.05)
+    mask.fill(((-0.3, -0.3, -0.3), (0.3, 0.3, 0.3)), 1.0)
+    assert mask.painted_count > 100               # non-degenerate first
+
+    groups = doc.groups(cell_size=0.05)
+    assert groups.fill_from_mask(mask, 7) > 0
+    assert groups.at((0.0, 0.0, 0.0)) == 7
+
+
+def test_groups_survive_a_save_including_what_was_hidden(tmp_path):
+    # "Hiding is not deleting" has to survive a save to mean anything: a
+    # document that forgot which groups were hidden would show an artist
+    # geometry they had put away.
+    doc, groups = _grouped_sphere_doc()
+    groups.set_visible(2, False)
+    path = tmp_path / "groups.clayspace"
+    doc.save(str(path))
+
+    back = clay.load(str(path))
+    assert back.has_groups
+    reloaded = back.groups()
+    assert reloaded.at((0.0, 0.3, 0.0)) == 1
+    assert reloaded.at((0.0, -0.3, 0.0)) == 2
+    assert reloaded.visible(1)
+    assert not reloaded.visible(2)
+
+
+def test_groups_a_document_with_none_is_unchanged(tmp_path):
+    doc = clay.Document()
+    doc.add_sdf_layer("body").add(clay.Sphere(r=0.5))
+    assert not doc.has_groups
+    path = tmp_path / "plain.clayspace"
+    doc.save(str(path))
+    assert not clay.load(str(path)).has_groups
+
+
+def test_groups_hiding_is_undoable():
+    doc, groups = _grouped_sphere_doc()
+    doc.enable_undo()
+    every = doc.mesh(voxel_size=0.02).triangle_count
+
+    groups.isolate(1)
+    assert doc.undo_depth == 1
+    assert doc.mesh(voxel_size=0.02).triangle_count < every
+
+    assert doc.undo()
+    assert doc.mesh(voxel_size=0.02).triangle_count == every
+
+
+def test_groups_an_edit_that_changed_nothing_is_not_a_step():
+    # Isolating the group already isolated is ordinary, and must not add an
+    # undo that does nothing to the menu.
+    doc, groups = _grouped_sphere_doc()
+    groups.isolate(1)
+    doc.enable_undo()
+    groups.isolate(1)
+    assert doc.undo_depth == 0
+
+
+def test_groups_merging_away_takes_the_hidden_flag():
+    # Or a hidden id nobody carries keeps hiding a group that no longer exists.
+    doc, groups = _grouped_sphere_doc()
+    groups.set_visible(2, False)
+    assert groups.any_hidden
+    assert groups.reassign(2, 0) > 0
+    assert not groups.any_hidden
