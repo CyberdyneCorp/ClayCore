@@ -37,6 +37,7 @@
 #include <optional>
 
 #include "clay/field/volume.h"
+#include "clay/parallel/cancel.h"
 #include "clay/voxel/grid.h"
 #include "clay/voxel/mask.h"
 
@@ -101,9 +102,16 @@ struct MaskExtrudeSettings {
 // would look like a bug in the caller's mask rather than in their aim.
 //
 // The mask is not modified.
+//
+// CANCELLABLE (add-operation-cancellation). This is the most expensive verb in
+// the library — 4403 ms on the reference iPad — so it is the one a host most
+// needs to be able to stop. A cancelled call returns nullopt, which it already
+// does for "the mask never reached the surface", so the caller is told apart
+// by the token rather than by the return.
 std::optional<field::FieldVolume> mask_extrude(const std::function<float(kernel::cfloat3)>& source,
                                         const voxel::MaskField& mask,
-                                        const MaskExtrudeSettings& settings);
+                                        const MaskExtrudeSettings& settings,
+                                        parallel::CancelToken* token = nullptr);
 
 // The same verb on a voxel grid, in CELL space rather than by sampling a field.
 // A grid already knows which of its cells are on its surface, so going through a
@@ -116,7 +124,8 @@ std::optional<field::FieldVolume> mask_extrude(const std::function<float(kernel:
 // only one available. Neither the source nor the mask is modified.
 std::optional<voxel::VoxelGrid> mask_extrude(const voxel::VoxelGrid& grid,
                                              const voxel::MaskField& mask,
-                                             const MaskExtrudeSettings& settings);
+                                             const MaskExtrudeSettings& settings,
+                                             parallel::CancelToken* token = nullptr);
 
 }  // namespace brush
 }  // namespace clay

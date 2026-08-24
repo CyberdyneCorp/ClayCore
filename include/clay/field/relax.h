@@ -26,6 +26,7 @@
 #include <functional>
 
 #include "clay/field/volume.h"
+#include "clay/parallel/cancel.h"
 
 namespace clay {
 namespace field {
@@ -71,7 +72,8 @@ struct RelaxSettings {
 
 // Smooth `v`, returning a new volume sampled over the same region at the same
 // resolution. The input is not modified.
-FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings = {});
+FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings = {},
+                  parallel::CancelToken* token = nullptr);
 
 // The same, sampled from an arbitrary SOURCE first — a document's tape is the
 // intended one — mirroring flatten's pair of overloads. Deliberately exactly

@@ -5888,6 +5888,16 @@ clay_result clay_document_mask_extrude(clay_document* doc, clay_layer_id layer,
                                        const clay_mask* mask,
                                        const clay_mask_extrude_params* params,
                                        clay_item** out_item) {
+    // Sugar over the cancellable form with no token, so there is one
+    // implementation rather than two that could drift.
+    return clay_document_mask_extrude_cancellable(doc, layer, mask, params, out_item, nullptr);
+}
+
+clay_result clay_document_mask_extrude_cancellable(clay_document* doc, clay_layer_id layer,
+                                       const clay_mask* mask,
+                                       const clay_mask_extrude_params* params,
+                                       clay_item** out_item,
+                                                   clay_cancel_token* token) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     if (!out_item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_item");
     voxel::MaskField* m = nullptr;
@@ -5907,8 +5917,16 @@ clay_result clay_document_mask_extrude(clay_document* doc, clay_layer_id layer,
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "this layer has no field to extrude from");
 
     std::optional<field::FieldVolume> volume = brush::mask_extrude(
-        [&tape](kernel::cfloat3 p) { return tape.eval(p).d; }, *m, settings);
-    if (!volume) return no_extract();
+        [&tape](kernel::cfloat3 p) { return tape.eval(p).d; }, *m, settings,
+        token ? &token->token : nullptr);
+    // A cancel and "the mask never reached the surface" both come back as
+    // nullopt, and a host must not be shown the second when the user did the
+    // first.
+    if (!volume) {
+        if (token && token->token.cancelled())
+            return fail(CLAY_ERROR_CANCELLED, "the mask extrude was cancelled");
+        return no_extract();
+    }
 
     auto* item = new clay_item();
     item->node.prim = scene::Prim::volume();

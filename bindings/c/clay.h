@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 46
+#define CLAY_ABI_MINOR 47
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -2944,6 +2944,22 @@ clay_result clay_document_mask_extrude(clay_document* doc, clay_layer_id layer,
                                        const clay_mask* mask,
                                        const clay_mask_extrude_params* params,
                                        clay_item** out_item);
+
+/* The same, cancellable (add-operation-cancellation, ABI 0.47.0).
+ *
+ * THIS is the one a host most needs to be able to stop: 4403 ms on the
+ * reference iPad, the most expensive verb in the library and the measurement
+ * that motivated the token in the first place. A second entry point rather
+ * than a parameter, for the reason clay_layer_consolidate_cancellable gives.
+ *
+ * A cancelled call returns CLAY_ERROR_CANCELLED and changes nothing: the
+ * extrude builds a volume and the caller installs it, so a cancel is a
+ * discard. `token` may be NULL, which is exactly the older call. */
+clay_result clay_document_mask_extrude_cancellable(clay_document* doc, clay_layer_id layer,
+                                                   const clay_mask* mask,
+                                                   const clay_mask_extrude_params* params,
+                                                   clay_item** out_item,
+                                                   clay_cancel_token* token);
 
 /* The same verb on a voxel grid, in CELL space: the masked cells of the
  * source's surface, thickened, carrying the source's colours. It does not go
