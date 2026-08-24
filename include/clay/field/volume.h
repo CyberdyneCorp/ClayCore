@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "clay/math/geom.h"
+#include "clay/parallel/cancel.h"
 
 namespace clay {
 namespace field {
@@ -109,8 +110,17 @@ class FieldVolume {
     // result does not depend on the evaluator's scheduling.
     using BrickBlockFill = std::function<void(const BrickGrid& grid, std::size_t first,
                                               std::size_t count, float* out)>;
+    //
+    // `token` (optional) makes the sampling cancellable. The checkpoint is the
+    // window boundary the loop already has — 512 bricks — so the check costs
+    // one relaxed load per window rather than one per sample, and the brick
+    // count is an honest progress denominator. A cancelled call returns early
+    // and sets `out_cancelled`, which is how a caller tells "the user stopped
+    // it" from "there was no surface here": both leave a volume with no bricks.
     static FieldVolume sample_blocks(const BrickBlockFill& fill, const math::Aabb& region,
-                                     float cell_size, float band);
+                                     float cell_size, float band,
+                                     parallel::CancelToken* token = nullptr,
+                                     bool* out_cancelled = nullptr);
 
     float cell_size() const { return cell_size_; }
 

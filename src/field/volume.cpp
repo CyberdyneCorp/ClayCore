@@ -256,7 +256,9 @@ cfloat3 FieldVolume::eval_color(cfloat3 p) const {
 }
 
 FieldVolume FieldVolume::sample_blocks(const BrickBlockFill& fill, const math::Aabb& region,
-                                       float cell_size, float band) {
+                                       float cell_size, float band,
+                                       parallel::CancelToken* token, bool* out_cancelled) {
+                                       if (out_cancelled) *out_cancelled = false;
     FieldVolume v;
     v.cell_size_ = cell_size > 0.0f ? cell_size : 0.05f;
     v.band_ = band > 0.0f ? band : v.cell_size_ * 3.0f;
@@ -290,6 +292,16 @@ FieldVolume FieldVolume::sample_blocks(const BrickBlockFill& fill, const math::A
                          {v.bcount_[0], v.bcount_[1], v.bcount_[2]}};
     std::vector<float> blocks(std::min(total, kWindowBricks) * kBrickSamples);
     for (std::size_t first = 0; first < total; first += kWindowBricks) {
+        // The checkpoint is the window boundary the loop already has, so the
+        // cost is one relaxed load per 512 bricks rather than one per sample.
+        if (parallel::cancelled(token)) {
+            if (out_cancelled) *out_cancelled = true;
+            return v;  // discarded by the caller; see the header
+        }
+        if (token) {
+            token->advance(first, total ? static_cast<float>(first) / static_cast<float>(total)
+                                        : 1.0f);
+        }
         const std::size_t count = std::min(kWindowBricks, total - first);
         fill(grid, first, count, blocks.data());
         for (std::size_t s = 0; s < count; ++s) {

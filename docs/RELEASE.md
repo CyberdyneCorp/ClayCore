@@ -70,6 +70,15 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.45.0 is not such a release**: additive. Six new entry points for the
+   cancellation token, one new descriptor (`clay_progress`), one appended result
+   code (`CLAY_ERROR_CANCELLED = 9`), and `clay_layer_consolidate_cancellable`
+   beside `clay_layer_consolidate` rather than a parameter added to it — adding
+   one would have broken every host already compiled against it, and the whole
+   point of a token is that a host who does not want one is unaffected. The
+   older call is sugar over the new one with a null token, so there is one
+   implementation rather than two that could drift.
+
    **0.44.0 is not such a release**: additive, four new entry points
    (`clay_document_journal_since`, `_range`, `_trim`,
    `clay_document_replay_journal`) and no signature changes. One behaviour
