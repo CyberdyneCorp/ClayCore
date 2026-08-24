@@ -97,6 +97,34 @@ DEVICE_RELEVANT = ("src/", "include/", "backends/", "bindings/", "CMakeLists.txt
 # that cannot be satisfied is one people learn to ignore.
 DEVICE_GATE_OUTPUTS = ("tests/device/baseline.json", "tests/device/last-gate.json")
 
+# ...and pyclay's own tests, which are under bindings/ by location and are not
+# the engine by any reading. The device harness is Swift against the
+# xcframework: it never imports pyclay, so nothing in this directory can change
+# what a verb costs on a tablet. Everything else under bindings/ stays in —
+# bindings/c/clay.h is the surface the harness's own smoke test compiles
+# against, and bindings/python/pyclay_module.cpp is excluded from this carve-out
+# deliberately, because "it only builds a separate module" is an argument about
+# the build graph rather than a fact about the file.
+#
+# The alternative is a ten-minute hardware run to re-certify a .py file, and a
+# gate that expensive to satisfy for a change that cannot affect it is one
+# people route around.
+DEVICE_IRRELEVANT_PREFIXES = ("bindings/python/tests/",)
+
+
+def device_relevant_changes(paths: list[str]) -> list[str]:
+    """Of these changed paths, the ones that could change what a device measures.
+
+    Split out of check_device_gate so the three-way rule — relevant prefix, minus
+    the gate's own outputs, minus pyclay's tests — is one statement that can be
+    read and tested, rather than a filter nobody can exercise without a git
+    history to diff.
+    """
+    return [p for p in paths
+            if any(p.startswith(prefix) for prefix in DEVICE_RELEVANT)
+            and not any(p.startswith(skip) for skip in DEVICE_IRRELEVANT_PREFIXES)
+            and p not in DEVICE_GATE_OUTPUTS]
+
 
 def check_device_gate(cl: "Checklist") -> None:
     """The device gate ran, and it ran against this engine.
@@ -149,9 +177,7 @@ def check_device_gate(cl: "Checklist") -> None:
                f"cannot diff against the gated commit {commit[:9]} "
                f"(shallow clone?): {out.splitlines()[-1] if out else ''}")
         return
-    changed = [p for p in out.splitlines()
-               if any(p.startswith(prefix) for prefix in DEVICE_RELEVANT)
-               and p not in DEVICE_GATE_OUTPUTS]
+    changed = device_relevant_changes(out.splitlines())
     if changed:
         cl.add("device", False,
                f"engine changed since the gate ran at {commit[:9]}: "

@@ -893,7 +893,13 @@ it had been passing against an old one while the tree moved underneath it
 `check_device_bench.py` writes `tests/device/last-gate.json` on success,
 recording the commit it passed against. `tools/release_check.py` reads that
 file and **fails the release when anything under `src/`, `include/`,
-`backends/`, `bindings/` or `CMakeLists.txt` has changed since** — so the
+`backends/`, `bindings/` or `CMakeLists.txt` has changed since** — except
+`bindings/python/tests/`, which is under that prefix by location and is not the
+engine by any reading: the harness is Swift against the xcframework and never
+imports pyclay, so nothing there can change what a verb costs on a tablet.
+`bindings/python/pyclay_module.cpp` is deliberately NOT carved out, because
+"it only builds a separate module" is an argument about the build graph rather
+than a fact about the file — so the
 release can require the gate without an iPad being attached to CI. A docs or
 spec commit does not invalidate it.
 
