@@ -1,6 +1,7 @@
 #include "clay/scene/armature.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
+#include "clay/scene/memory.h"
 
 #include <cstring>
 #include <memory>
@@ -1367,29 +1368,17 @@ bool UndoStack::redo(Document& doc, math::Aabb* out_bound) {
 
 // -- what the history costs (add-history-budget) ------------------------------
 
-namespace {
+// node_bytes lives in scene/memory.h: the document rollup needs the identical
+// walk, and two copies would drift the moment Node grew a fifth heap member.
 
-std::size_t node_bytes(const Node& n) {
-    std::size_t b = sizeof(Node);
-    b += n.stroke.capacity() * sizeof(StrokePoint);
-    b += n.deformers.capacity() * sizeof(Deformer);
-    // A bend_curve deformer carries a guide of its own, which is the one
-    // deformer whose cost is not sizeof.
-    for (const Deformer& d : n.deformers) b += d.guide.capacity() * sizeof(StrokePoint);
-    b += n.children.capacity() * sizeof(NodeId);
-    return b;
-}
-
-}  // namespace
-
-std::size_t command_bytes(const Command& cmd) {
+std::size_t command_bytes(const Command& cmd, SharedSeen* seen) {
     std::size_t b = sizeof(Command);
     // Only the alternatives that own heap memory. This is the whole point: the
     // inverse of a REMOVAL carries a subtree, the inverse of an add carries an
     // id, and sizeof reports them identically.
     if (const auto* add = std::get_if<AddNodeCmd>(&cmd)) {
         b += add->subtree.capacity() * sizeof(Node);
-        for (const Node& n : add->subtree) b += node_bytes(n) - sizeof(Node);
+        for (const Node& n : add->subtree) b += node_bytes(n, seen) - sizeof(Node);
     } else if (const auto* stroke = std::get_if<AppendStrokeCmd>(&cmd)) {
         b += stroke->points.capacity() * sizeof(StrokePoint);
     } else if (const auto* points = std::get_if<SetStrokePointsCmd>(&cmd)) {
@@ -1405,18 +1394,26 @@ std::size_t command_bytes(const Command& cmd) {
 
 std::size_t UndoStack::undo_bytes() const {
     std::size_t b = 0;
+    // One set across the whole stack: a sampled volume held by ten inverses is
+    // one allocation, and reporting it ten times would tell a host the history
+    // is expensive in exactly the case where it is not.
+    SharedSeen seen;
     for (const Entry& e : undo_) {
         b += sizeof(Entry) + e.inverses.capacity() * sizeof(Command);
-        for (const Command& c : e.inverses) b += command_bytes(c) - sizeof(Command);
+        for (const Command& c : e.inverses) b += command_bytes(c, &seen) - sizeof(Command);
     }
     return b;
 }
 
 std::size_t UndoStack::redo_bytes() const {
     std::size_t b = 0;
+    // One set across the whole stack: a sampled volume held by ten inverses is
+    // one allocation, and reporting it ten times would tell a host the history
+    // is expensive in exactly the case where it is not.
+    SharedSeen seen;
     for (const Entry& e : redo_) {
         b += sizeof(Entry) + e.inverses.capacity() * sizeof(Command);
-        for (const Command& c : e.inverses) b += command_bytes(c) - sizeof(Command);
+        for (const Command& c : e.inverses) b += command_bytes(c, &seen) - sizeof(Command);
     }
     return b;
 }

@@ -232,6 +232,29 @@ class VoxelGrid {
     std::size_t sculpt_layer_bytes(std::size_t layer) const;
     std::size_t sculpt_layer_total_bytes() const;
 
+    // What the CONTENT costs — chunk storage across every level, the refined
+    // and dirty sets, the palette. Deliberately EXCLUDES the sculpt layers
+    // above, and that separation is the point rather than an oversight
+    // (roll-up-document-memory): they live in this one object and one is the
+    // user's model while the other is undo for it. A host under memory
+    // pressure may drop the second and may never drop the first, so a combined
+    // figure would hide the only voxel bytes it is allowed to touch.
+    //
+    // Counts what the containers have ALLOCATED, so this exceeds what the same
+    // grid serializes to — the file is RLE- and palette-compressed and a live
+    // chunk is a flat kChunkDim^3 array whether one cell is set or all of them.
+    //
+    // WHICH MEANS THIS FIGURE FOLLOWS CHUNKS, NOT CELLS, and that will surprise
+    // anyone reading it as "bytes per voxel". A chunk is 32^3 cells allocated
+    // whole: ONE voxel costs 32 KiB, and 32 768 voxels filling that same chunk
+    // cost the same 32 KiB. Two layers whose occupancy differs by three orders
+    // of magnitude report an IDENTICAL figure when they touch the same chunks.
+    //
+    // This is not an approximation — it is what the grid actually holds — but a
+    // host presenting it beside occupied_count() should expect the two to move
+    // independently. What grows this number is the REGION touched.
+    std::size_t content_bytes() const;
+
     // -- resolution levels ---------------------------------------------------
     // Level 0 is the coarsest; level k has half the cell size of level k-1.
     std::size_t level_count() const { return levels_.size(); }

@@ -29,6 +29,7 @@
 #include "clay/field/relax.h"
 #include "clay/field/volume.h"
 #include "clay/io/clayspace.h"
+#include "clay/io/memory.h"
 #include "clay/io/mesh_io.h"
 #include "clay/mesh/bvh.h"
 #include "clay/mesh/decimate.h"
@@ -59,6 +60,25 @@ using namespace nb::literals;
 using namespace clay;
 
 namespace {
+
+// One conversion, so the document-wide and per-layer paths cannot present the
+// report differently.
+nb::dict memory_dict(const io::MemoryReport& r) {
+    nb::dict out;
+    out["edit_list"] = r.edit_list;
+    out["voxel_content"] = r.voxel_content;
+    out["mesh_layers"] = r.mesh_layers;
+    out["masks"] = r.masks;
+    out["voxel_sculpt_layers"] = r.voxel_sculpt_layers;
+    out["history"] = r.history;
+    out["passthrough"] = r.passthrough;
+    out["transient"] = r.transient;
+    out["total"] = r.total;
+    out["voxel_layers"] = r.voxel_layers;
+    out["mesh_layer_count"] = r.mesh_layer_count;
+    out["mask_count"] = r.mask_count;
+    return out;
+}
 
 // -- argument parsing helpers -------------------------------------------------
 
@@ -5219,6 +5239,55 @@ NB_MODULE(pyclay, m) {
             "journal keeps its own copy, so crash recovery roughly doubles it.\n\n"
             "`dropped_steps` is how far the horizon has moved: show it rather\n"
             "than letting a user hunt for a step that is gone.")
+        .def_prop_ro(
+            "memory",
+            [](const PyDocument& d) {
+                return memory_dict(io::document_memory(*d.doc, d.undo ? d.undo->get() : nullptr));
+            },
+            "What this whole document costs, broken down by subsystem.\n\n"
+            "THE BREAKDOWN IS THE POINT, and a total is not. Under memory\n"
+            "pressure you do not need to know how big the document is, you need\n"
+            "to know WHICH PART, because that decides what you may release:\n\n"
+            "  history               -> costs undo depth (set_history_budget)\n"
+            "  voxel_sculpt_layers   -> costs voxel undo depth\n"
+            "  passthrough           -> a thumbnail; regenerable\n"
+            "  edit_list / voxel_content / mesh_layers / masks -> the user's\n"
+            "    work. Releasing any of it destroys something unrecoverable.\n\n"
+            "A FLOOR, NOT AN EQUALITY: these are container walks, so allocator\n"
+            "overhead and the library's own static data are outside them, and\n"
+            "the OS will charge the process more. It is also LARGER than the\n"
+            "same document's file, because the file is compressed and live\n"
+            "storage is not.\n\n"
+            "`voxel_content` FOLLOWS CHUNKS, NOT CELLS: a chunk is 32^3 cells\n"
+            "allocated whole, so one voxel costs 32 KiB and 32768 voxels in that\n"
+            "same chunk cost the same. Expect it to move independently of\n"
+            "occupied_count.")
+        .def(
+            "layer_memory",
+            [](const PyDocument& d, const std::string& name) {
+                // BY NAME, because every other layer lookup in this module is
+                // by name and a host should not have to learn where ids come
+                // from for one query.
+                for (const scene::Layer& l : d.doc->document.layers) {
+                    if (l.name != name) continue;
+                    io::MemoryReport r;
+                    if (io::layer_memory(*d.doc, l.id, &r)) return memory_dict(r);
+                    break;
+                }
+                throw std::runtime_error("no layer named '" + name + "'");
+            },
+            "name"_a,
+            "The same breakdown for ONE layer, so a large document can be\n"
+            "attributed to the layer responsible rather than merely called\n"
+            "large.\n\n"
+            "`history` and `passthrough` are document-wide and are always 0\n"
+            "here. The CONTENT figures sum exactly across layers; the edit list\n"
+            "does NOT, because the document-wide figure includes overhead owned\n"
+            "by no layer and INSTANCE layers share one edit list, which the\n"
+            "document counts once and each instance reports in full. A layer's\n"
+            "edit_list is a ceiling on its contribution, not a partition.\n\n"
+            "Raises for a layer that does not exist, rather than returning\n"
+            "zeros — which you would read as an empty layer.")
         .def(
             "set_history_budget",
             [](PyDocument& d, std::size_t bytes) {

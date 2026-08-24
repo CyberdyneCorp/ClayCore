@@ -569,6 +569,74 @@ an offline bake, or a document that is not on screen.
 publishes no refill loop, thread pool or timer for the same reason: the consumer
 owns scheduling. Eviction is something a host asks for.
 
+### What the document itself costs
+
+The cache is not the document, and until v0.49.0 the document could not be
+measured at all. Every subsystem accounted for itself and **nothing rolled up**:
+the history reported its bytes, one grid reported its sculpt layers, the brick
+cache reported a cache the document does not own — and the edit list, the voxel
+chunk storage those sculpt layers sit beside, masks, mesh layers and the
+passthrough blobs reported nothing. A rasterized voxel layer is the largest
+thing most documents hold and it was invisible.
+
+```c
+clay_memory_report m = { .struct_size = sizeof m };
+clay_document_memory(doc, &m);
+```
+
+**The breakdown is the feature, and the total is not.** Under pressure you do
+not need to know how big the document is; you need to know *which part*, because
+that is what decides what you may release:
+
+| | may you release it? | what it costs you |
+|---|---|---|
+| `history` | **yes** | undo depth — `clay_document_set_history_budget` is the lever |
+| `voxel_sculpt_layers` | **yes** | voxel undo depth |
+| `passthrough` | **yes** | a thumbnail; regenerable |
+| the brick cache | **yes** | a stall — *not counted here; not owned here* |
+| `edit_list`, `voxel_content`, `mesh_layers`, `masks` | **no** | it is the user's work |
+
+So the order on a warning is: trim the brick cache first (a stall), then the
+history (undo depth), and never the rest. `voxel_content` and
+`voxel_sculpt_layers` live inside the same grids and are reported separately for
+exactly that reason — a combined figure would hide the only voxel bytes you are
+allowed to touch.
+
+`clay_layer_memory` gives the same breakdown for one layer, so a large document
+can be attributed to the abandoned blockout that is 200 MB of it rather than
+merely called large.
+
+**Three things to expect, none of them a defect:**
+
+- **It is a floor, not an equality.** These are container walks. Allocator block
+  headers, size-class rounding and arena fragmentation are invisible from here,
+  as are this library's own code and static data. The OS will charge the process
+  more; do not read the gap as a leak.
+- **It exceeds the same document's file, often several times over.** A
+  `.clayspace` is RLE- and palette-compressed; live storage is not.
+- **`voxel_content` follows chunks, not cells.** A chunk is 32³ cells allocated
+  whole, so **one voxel costs 32 KiB** and 32 768 voxels filling that same chunk
+  cost the same 32 KiB. Two layers whose occupancy differs by three orders of
+  magnitude report an identical figure when they touch the same chunks. Present
+  it beside `clay_voxel_occupied_count` if you like, but expect the two to move
+  independently: what grows this number is the *region* an artist has worked in,
+  not how solidly they filled it.
+
+`transient` reports memory held only while an operation is in flight — a mask
+copies its chunks on the first touch inside a recorded step, roughly doubling
+for that step's duration. **Through the C ABI it always reads zero**, and that
+is a statement about the ABI rather than the mechanism: every mask entry point
+opens its step and closes it before returning, and calls on one document must be
+serialized, so there is no moment at which you could hold a handle, have a step
+open, and ask. It is reported anyway so the total stays the sum of the fields if
+an entry point spanning a step is ever added. Do not build a response around it.
+
+Runnable: [`examples/62_what_this_document_costs.py`](../examples/62_what_this_document_costs.py),
+which builds a document the way an artist would and attributes it. On that
+fixture a 60-item SDF blockout is 29 KiB and the layer rasterized from it is
+514 KiB — **18× the entire edit list**, and the largest term that used to be
+unreported.
+
 ### What "latency-critical" costs, measured
 
 "Latency-critical" was an adjective here until v0.25.0; it is now a number.

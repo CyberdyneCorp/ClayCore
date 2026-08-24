@@ -3,6 +3,8 @@
 
 #include "clay/voxel/mask.h"
 
+#include "clay/bytes.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -378,6 +380,23 @@ std::size_t MaskField::painted_count() const {
     std::size_t total = 0;
     for (const auto& [key, chunk] : chunks_) total += static_cast<std::size_t>(chunk.painted);
     return total;
+}
+
+std::size_t MaskField::chunk_map_bytes(const ChunkMap& m) {
+    std::size_t b = map_bytes(m);
+    for (const auto& [key, chunk] : m) b += vector_bytes(chunk.data);
+    return b;
+}
+
+std::size_t MaskField::content_bytes() const {
+    return sizeof(MaskField) + chunk_map_bytes(chunks_);
+}
+
+std::size_t MaskField::step_snapshot_bytes() const {
+    // Zero unless a step is open AND has actually touched something: the
+    // snapshot is lazy, so arming a step on a mask nobody edits costs nothing
+    // and must report nothing.
+    return snapshot_taken_ ? chunk_map_bytes(snapshot_) : 0;
 }
 
 std::optional<VoxelCoord> MaskField::bounds_min() const {

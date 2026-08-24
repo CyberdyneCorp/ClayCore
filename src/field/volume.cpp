@@ -4,6 +4,8 @@
 
 #include "clay/field/volume.h"
 
+#include "clay/bytes.h"
+
 #include "clay/parallel/thread_pool.h"
 
 #include <algorithm>
@@ -12,6 +14,15 @@
 
 namespace clay {
 namespace field {
+
+std::size_t FieldVolume::bytes() const {
+    // data_ is the term that matters: kBrickSamples floats per stored brick,
+    // and a volume sampled at a fine cell size over a real region runs to
+    // megabytes. index_ and far_ are per brick whether stored or not, so they
+    // are the floor a sparse volume pays.
+    return sizeof(FieldVolume) + vector_bytes(index_) + vector_bytes(far_) +
+           vector_bytes(data_) + vector_bytes(colors_);
+}
 
 using kernel::cf3;
 using kernel::cfloat3;

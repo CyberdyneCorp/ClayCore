@@ -128,6 +128,16 @@ class FieldVolume {
                                      parallel::CancelToken* token = nullptr,
                                      bool* out_cancelled = nullptr);
 
+    // What this volume holds. A sampled volume is the largest payload a scene
+    // node can carry — bricks of floats, plus an optional color channel — and
+    // it went entirely unaccounted until roll-up-document-memory, including in
+    // the undo history, which holds nodes by value.
+    //
+    // A volume is SHARED (nodes hold a shared_ptr), so a caller adding these up
+    // across a document must count each one ONCE by address; this method
+    // reports one volume and knows nothing about how many nodes point at it.
+    std::size_t bytes() const;
+
     float cell_size() const { return cell_size_; }
 
     // How fast the stored samples may vary. 1 for a volume sampled from a

@@ -408,6 +408,121 @@ clay_result clay_document_set_history_budget(clay_document* doc, uint64_t bytes)
  * waiting for the next edit. Does not set a budget. */
 clay_result clay_document_trim_history(clay_document* doc, uint64_t bytes);
 
+/* -- what the whole document costs (ABI 0.49.0) -----------------------------
+ *
+ * iOS asks this, not the user, and it does not ask politely:
+ * didReceiveMemoryWarning arrives with no argument and expects an answer within
+ * a frame or two. To decide what to release you must know what you are holding,
+ * and until this version the library could not tell you.
+ *
+ * Every subsystem accounted for itself and NOTHING ROLLED UP.
+ * clay_document_history_bytes reported the history, clay_voxel_sculpt_layers_-
+ * bytes reported part of one layer, clay_brick_cache_stats reported a cache the
+ * document does not own — and the edit list, the voxel chunk storage those
+ * sculpt layers sit beside, masks, mesh layers and the passthrough blobs
+ * reported nothing at all. The rest is where the memory is: a rasterized voxel
+ * layer is the largest thing most documents hold and it was invisible.
+ *
+ * THE BREAKDOWN IS THE FEATURE, and a total is not. Under pressure you do not
+ * need to know how big the document is, you need to know WHICH PART, because
+ * that decides what you are allowed to release:
+ *
+ *   trimming history        -> costs undo depth  (set_history_budget is the lever)
+ *   dropping the brick cache-> costs a stall     (not counted here; not owned here)
+ *   dropping voxel or mesh  -> destroys the user's work. Never.
+ *
+ * A FLOOR, NOT AN EQUALITY. These are container walks: allocator block headers,
+ * size-class rounding and arena fragmentation are invisible from here, as are
+ * the library's own code and static data. Expect the OS to charge the process
+ * MORE than this, and do not read the gap as a leak.
+ *
+ * It is also LARGER than the same document's file, often several times over: a
+ * .clayspace is RLE- and palette-compressed and a live voxel chunk is a flat
+ * array whether one cell is set or all of them.
+ *
+ * WHICH MEANS voxel_content FOLLOWS CHUNKS, NOT CELLS. A chunk is 32^3 cells
+ * allocated whole: ONE voxel costs 32 KiB, and 32 768 voxels filling that same
+ * chunk cost the same 32 KiB. Two layers whose occupancy differs by three
+ * orders of magnitude report an IDENTICAL figure when they touch the same
+ * chunks. Present it beside clay_voxel_occupied_count if you like, but expect
+ * the two to move independently: what grows this number is the REGION an artist
+ * has worked in, not how solidly they filled it. */
+typedef struct clay_memory_report {
+    uint32_t struct_size; /* = sizeof(clay_memory_report); required */
+
+    /* -- the model. None of this may be released; it IS the user's work. */
+    uint64_t edit_list;      /* nodes, strokes, deformer chains, sampled volumes */
+    uint64_t voxel_content;  /* chunk storage across every level */
+    uint64_t mesh_layers;    /* imported geometry, unrecoverable */
+    uint64_t masks;          /* authoring state; small, but not nothing */
+
+    /* -- droppable, in the order to reach for it. */
+    /* Undo for voxel layers. Held INSIDE the grids, beside voxel_content, and
+     * separated from it for exactly that reason: this is the only voxel figure
+     * you may act on. */
+    uint64_t voxel_sculpt_layers;
+    /* The undo history and its journal. clay_document_set_history_budget is the
+     * lever, and this is the only part of a document the engine evicts itself. */
+    uint64_t history;
+    /* A thumbnail and camera bookmarks carried without being interpreted.
+     * Regenerable, and usually trivial — reported so the fields sum. */
+    uint64_t passthrough;
+
+    /* -- transient: memory held only while an operation is in flight.
+     *
+     * A mask copies its chunks on the first touch inside a recorded step, so a
+     * mask costs roughly DOUBLE for the duration of that step. Reported apart
+     * from `masks` so that a figure about to halve on its own is not mistaken
+     * for one that will still be there afterwards.
+     *
+     * THROUGH THIS ABI IT IS ALWAYS ZERO, and that is a statement about the
+     * ABI rather than about the mechanism. Every mask entry point here opens
+     * its step and closes it before returning, and calls on one document must
+     * be serialized, so there is no moment at which you could hold a handle,
+     * a step could be open, and you could call this. A C++ embedder driving
+     * clay::session::History directly CAN hold one open across several edits,
+     * and sees a non-zero figure.
+     *
+     * It is exposed anyway so that `total` stays the sum of the fields above
+     * if an entry point that spans a step is ever added — the alternative is a
+     * total that silently gains bytes belonging to no reported field. Do not
+     * build a memory-pressure response around it today: it will read zero. */
+    uint64_t transient;
+
+    /* The sum of every field above. */
+    uint64_t total;
+
+    /* What is here, for presenting the figure. */
+    uint64_t voxel_layers;
+    uint64_t mesh_layer_count;
+    uint64_t mask_count;
+} clay_memory_report;
+
+clay_result clay_document_memory(const clay_document* doc, clay_memory_report* out_report);
+
+/* The same breakdown for ONE layer, so a large document can be attributed to
+ * the layer responsible rather than merely reported as large.
+ *
+ * `history` and `passthrough` are document-wide and are therefore ALWAYS ZERO
+ * here — documented rather than removed, so one struct serves both views.
+ *
+ * THE CONTENT LINES SUM EXACTLY ACROSS LAYERS AND THE EDIT LIST DOES NOT. The
+ * tempting reading — "the layers add up to the document" — is false and you
+ * would hit it. Content sums because every voxel chunk, mask cell and triangle
+ * belongs to exactly one layer id. The edit list does not, for two deliberate
+ * reasons: the document-wide figure includes overhead owned by no layer, and
+ * INSTANCE layers share one edit list, which the document counts ONCE (ten
+ * instances of one blockout are one allocation, and saying otherwise would
+ * invite you to free memory that does not exist) while each instance reports it
+ * in full (displaying an instance costs an evaluation like any other layer, and
+ * reporting zero would call it free). A layer's edit_list is a CEILING on its
+ * contribution, not a partition of it.
+ *
+ * An unknown layer id is CLAY_ERROR_NOT_FOUND, not a zeroed report: a zeroed
+ * report reads as an empty layer and shows a wrong answer confidently. */
+clay_result clay_layer_memory(const clay_document* doc, clay_layer_id layer,
+                              clay_memory_report* out_report);
+
 /* -- cancelling a long operation -------------------------------------------
  *
  * This library has three budget classes and the third had no exit. From the

@@ -45,6 +45,13 @@ struct Mesh {
     // the boundaries and the tests assert instead of trusting.
     std::vector<std::uint32_t> quads;
 
+    // What this mesh holds (roll-up-document-memory). EVERY array, because a
+    // mesh with normals, colors and UVs costs four times one carrying
+    // positions alone — and an imported mesh layer is the one thing in a
+    // document that cannot be regenerated, so a host needs to know its size
+    // before it decides what to release.
+    std::size_t bytes() const;
+
     std::size_t triangle_count() const { return indices.size() / 3; }
     std::size_t quad_count() const { return quads.size() / 4; }
     bool has_quads() const { return !quads.empty(); }
