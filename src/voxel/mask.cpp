@@ -105,7 +105,14 @@ float MaskField::get(VoxelCoord c) const {
 
 void MaskField::set(VoxelCoord c, float value) {
     touch();
-    std::uint8_t q = quantize(value);
+    write_quantized(c, quantize(value));
+}
+
+// The store itself, taking the value ALREADY quantized. Split out of set()
+// because a recorded step replays quantized bytes: round-tripping them back
+// through a float would re-quantize, and a value that landed between two
+// buckets would not come back where it went.
+void MaskField::write_quantized(VoxelCoord c, std::uint8_t q) {
     VoxelCoord key = chunk_key(c);
     auto it = chunks_.find(key);
     if (it == chunks_.end()) {
@@ -494,6 +501,86 @@ std::optional<MaskField> MaskField::deserialize(const std::uint8_t* data, std::s
                               std::move(chunk));
     }
     return m;
+}
+
+// -- recording a step (masks-in-the-history) ---------------------------------
+
+bool MaskField::begin_step() {
+    // Nested is refused rather than nested: a step is one edit.
+    if (step_armed_) return false;
+    step_armed_ = true;
+    snapshot_taken_ = false;
+    snapshot_.clear();
+    return true;
+}
+
+std::vector<MaskField::MaskChange> MaskField::end_step() {
+    std::vector<MaskChange> changes;
+    if (!step_armed_) return changes;
+    step_armed_ = false;
+    // Nothing touched: no snapshot was taken, so nothing changed.
+    if (!snapshot_taken_) return changes;
+
+    // Diff over the UNION of the keys, because a step can create a chunk that
+    // was not there and can drop one to nothing — a mask releases storage when
+    // its last painted cell goes, so "gone" is a real outcome rather than an
+    // all-zero chunk.
+    std::vector<VoxelCoord> keys;
+    keys.reserve(snapshot_.size() + chunks_.size());
+    for (const auto& [key, chunk] : snapshot_) keys.push_back(key);
+    for (const auto& [key, chunk] : chunks_)
+        if (snapshot_.find(key) == snapshot_.end()) keys.push_back(key);
+    // Deterministic order, so a record does not depend on hash iteration.
+    std::sort(keys.begin(), keys.end(), [](const VoxelCoord& a, const VoxelCoord& b) {
+        if (a.z != b.z) return a.z < b.z;
+        if (a.y != b.y) return a.y < b.y;
+        return a.x < b.x;
+    });
+
+    constexpr std::size_t kCells = static_cast<std::size_t>(kChunkDim) * kChunkDim * kChunkDim;
+    for (const VoxelCoord& key : keys) {
+        auto before_it = snapshot_.find(key);
+        auto after_it = chunks_.find(key);
+        const std::uint8_t* before =
+            before_it == snapshot_.end() ? nullptr : before_it->second.data.data();
+        const std::uint8_t* after =
+            after_it == chunks_.end() ? nullptr : after_it->second.data.data();
+        for (std::size_t i = 0; i < kCells; ++i) {
+            const std::uint8_t b = before ? before[i] : 0;
+            const std::uint8_t a = after ? after[i] : 0;
+            if (b == a) continue;
+            const int lx = static_cast<int>(i % kChunkDim);
+            const int ly = static_cast<int>((i / kChunkDim) % kChunkDim);
+            const int lz = static_cast<int>(i / (static_cast<std::size_t>(kChunkDim) * kChunkDim));
+            changes.push_back(MaskChange{VoxelCoord{key.x * kChunkDim + lx,
+                                                    key.y * kChunkDim + ly,
+                                                    key.z * kChunkDim + lz},
+                                         b, a});
+        }
+    }
+    snapshot_.clear();
+    snapshot_taken_ = false;
+    return changes;
+}
+
+void MaskField::revert_changes(const std::vector<MaskChange>& changes) {
+    // A replay is not an edit: the recorder is suspended so an undo cannot grow
+    // the thing it is unwinding. The revision still moves, because a consumer
+    // holding a derivation must still be told.
+    const bool was_armed = step_armed_;
+    step_armed_ = false;
+    for (std::size_t i = changes.size(); i > 0; --i)
+        write_quantized(changes[i - 1].cell, changes[i - 1].before);
+    ++revision_;
+    step_armed_ = was_armed;
+}
+
+void MaskField::reapply_changes(const std::vector<MaskChange>& changes) {
+    const bool was_armed = step_armed_;
+    step_armed_ = false;
+    for (const MaskChange& c : changes) write_quantized(c.cell, c.after);
+    ++revision_;
+    step_armed_ = was_armed;
 }
 
 }  // namespace voxel

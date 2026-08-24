@@ -116,6 +116,52 @@ class MaskField {
     std::optional<VoxelCoord> bounds_min() const;
     std::optional<VoxelCoord> bounds_max() const;
 
+    // -- recording a step, so a mask edit can be undone ----------------------
+    //
+    // A mask was the FOURTH representation with no history mechanism: twenty
+    // mutating entry points and not one command variant, which is why a mask
+    // edit was a BARRIER in the session history — nothing could reverse it and
+    // nothing could replay it.
+    //
+    // WHY THIS IS NOT THE VOXEL DESIGN. `VoxelGrid::set` is the one choke point
+    // every verb funnels through, so a sink there journals everything. A mask
+    // is not built that way: only `fill` and `invert_within` go through `set`,
+    // while `invert`, `clear`, `expand`, `contract` and `smooth` write chunk
+    // data directly. A sink on `set` would record two mutators and silently
+    // miss five, which is the failure mode this library keeps having to avoid.
+    //
+    // The choke point that DOES hold is `touch()`. The header has said so for
+    // as long as it has existed — "every mutator calls this ... which is why a
+    // test walks all of them" — and `tests/unit/test_mask.cpp` really does walk
+    // every mutating method, with a comment saying that adding one without a
+    // case there is the mistake it exists to make loud. So a step snapshots on
+    // the first touch and diffs when it closes.
+    //
+    // WHAT THAT COSTS. The transient is one copy of the painted chunks; the
+    // retained record is only the cells that differ, which is proportional to
+    // what changed rather than to the mask. A whole-mask operation like
+    // `invert` legitimately changes everything and records accordingly.
+    struct MaskChange {
+        VoxelCoord cell;
+        std::uint8_t before = 0;  // quantized, as stored
+        std::uint8_t after = 0;
+    };
+
+    // Arms the recording. Nested calls are refused rather than nested: a step
+    // is one edit, and a caller that opened two has a bug worth surfacing.
+    bool begin_step();
+    // Diffs against the snapshot and hands back what changed, in cell order.
+    // Empty when the step changed nothing — a mutator that ran over an empty
+    // region, or a paint that landed on cells already at that value — because
+    // an undo step that undoes nothing is what this whole mechanism is for
+    // avoiding.
+    std::vector<MaskChange> end_step();
+    bool recording_step() const { return step_armed_; }
+
+    // Replay. Neither records: a replay is not an edit.
+    void revert_changes(const std::vector<MaskChange>& changes);
+    void reapply_changes(const std::vector<MaskChange>& changes);
+
     // -- serialization (RLE, deterministic) ----------------------------------
     std::vector<std::uint8_t> serialize() const;
     static std::optional<MaskField> deserialize(const std::uint8_t* data, std::size_t size);
@@ -125,6 +171,8 @@ class MaskField {
         std::vector<std::uint8_t> data;  // kChunkDim^3
         int painted = 0;
     };
+    // Stores an ALREADY-quantized byte; see the note on set().
+    void write_quantized(VoxelCoord c, std::uint8_t q);
     static VoxelCoord chunk_key(VoxelCoord c);
     static std::size_t chunk_offset(VoxelCoord c);
     // Run a 3x3x3-separable neighbourhood op over the painted region padded by
@@ -133,12 +181,27 @@ class MaskField {
     void neighbourhood_op(int pad, Fn&& reduce);
 
     // Every mutator calls this. A mutator that forgets to leaves a consumer
-    // holding a stale derivation, which is why a test walks all of them.
-    void touch() { ++revision_; }
+    // holding a stale derivation, which is why a test walks all of them — and
+    // it is now also the hook a recorded step snapshots on, which is the same
+    // property being relied on for a second thing.
+    void touch() {
+        ++revision_;
+        // LAZY: taken on the first touch inside a step, not when the step
+        // opens, so arming a step on a mask nobody edits costs nothing.
+        if (step_armed_ && !snapshot_taken_) {
+            snapshot_ = chunks_;
+            snapshot_taken_ = true;
+        }
+    }
 
     float cell_size_;
     std::uint64_t revision_ = 0;
     std::unordered_map<VoxelCoord, Chunk, VoxelCoordHash> chunks_;
+    // The step recorder. `snapshot_` is the painted chunks as they were when
+    // the step first touched anything.
+    std::unordered_map<VoxelCoord, Chunk, VoxelCoordHash> snapshot_;
+    bool step_armed_ = false;
+    bool snapshot_taken_ = false;
 };
 
 }  // namespace voxel
