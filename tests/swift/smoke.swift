@@ -797,7 +797,7 @@ do {
     check(clay_document_save_memory(session, &snapshot) == CLAY_OK, "snapshot taken")
 
     var radius: Float = 0.5
-    if let item = clay_item_create(CLAY_PRIM_SPHERE, &radius, 1) {
+    if let item = clay_item_create(Int32(CLAY_PRIM_SPHERE.rawValue), &radius, 1) {
         var node: clay_node_id = 0
         check(clay_layer_add_item(session, sdf, item, &node) == CLAY_OK, "an edit to recover")
         clay_item_destroy(item)
