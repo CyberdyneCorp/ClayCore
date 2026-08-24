@@ -28,6 +28,7 @@ include(Dependencies)
 
 add_library(claycore
   src/version.cpp
+  src/brush/procedural_mask.cpp
   src/voxel/groups.cpp
   src/session/history.cpp
   src/scene/bounds.cpp
