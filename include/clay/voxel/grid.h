@@ -910,7 +910,11 @@ class VoxelGrid {
     // Level-addressed storage. Everything public funnels through these, so the
     // active level is read in one place rather than at every call site.
     std::uint8_t cell_at(std::size_t level, VoxelCoord c) const;
-    bool write_cell(std::size_t level, VoxelCoord c, std::uint8_t index);
+    // `out_before` (optional) receives the value the cell held. This is the one
+    // place that already has it, so the undo journal reads it here rather than
+    // paying a second hash probe through get() on the write path.
+    bool write_cell(std::size_t level, VoxelCoord c, std::uint8_t index,
+                    std::uint8_t* out_before = nullptr);
 
     // Propagation around an edited cell. Down averages into the coarser levels,
     // up replays the finer ones from their parent and their stored detail.
