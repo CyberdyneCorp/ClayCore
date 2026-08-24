@@ -14,30 +14,49 @@
 This is the change. Implementing before deciding it produces a mesh-only
 feature wearing a general name.
 
-- [ ] 1.1 DECIDE and record in `design.md`: how an SDF layer carries group ids.
+- [x] 1.1 DECIDED: a world-space id lattice, not a per-item rule. The case the
+      task names kills the free answer twice — an armour panel spanning two
+      items is not an item, and a face that is part of one sphere is not one
+      either. An artist's groups do not respect the edit list.
+      Original question:
       A spatial id field on a lattice, like the mask, is one answer and costs
       memory in a representation whose selling point is that it does not. A
       rule mapping a surface point to the item that produced it is the other,
       and it is free but cannot express a group that crosses an item boundary
       or splits one. Decide against a real case — an armour panel that spans
       two items, and a face that is part of one sphere
-- [ ] 1.2 DECIDE and record: voxel storage. A per-cell id is a second
+- [x] 1.2 DECIDED: no voxel storage at all. The same world-space lattice
+      answers for a grid, so the second palette channel this worried about —
+      doubling a 16.7 M cell guarantee — does not exist.
+      Original question:
       palette-indexed channel; measure what it costs on the corpus before
       committing, since the voxel grid's memory profile is a shipped guarantee
-- [ ] 1.3 DECIDE and record: what happens to ids across a representation
+- [x] 1.3 DECIDED: they SURVIVE, by construction rather than by transfer. The
+      ids were never in the SDF, the voxels or the mesh, so rasterizing,
+      meshing or converting cannot lose them. That is the strongest argument
+      for the shared lattice.
+      Original question:
       bridge. "They are gone" is an acceptable answer and a much better one
       than a transfer that half-works. If they DO survive, it is by attribute
       transfer and that is a dependency, not a detail
-- [ ] 1.4 DECIDE and record: are groups per LAYER or per DOCUMENT? Per layer is
+- [x] 1.4 DECIDED: per DOCUMENT. A mask is per layer because it gates edits to
+      that layer; a group names a region of the MODEL, and "isolate the head"
+      when the head spans two layers is the case per-layer storage makes
+      impossible.
+      Original question:
       simpler and makes "isolate the head" impossible when the head spans two
 
 ## 2. The id
 
-- [ ] 2.1 Storage per the 1.x decisions, one representation at a time, with the
-      SDF answer FIRST — it is the one that can invalidate the design
-- [ ] 2.2 Assign a region to a group, addressed the way brushes already address
-      a region, so a host reuses the vocabulary it has
-- [ ] 2.3 Resolve a surface point to its group
+- [x] 2.1 Storage per the 1.x decisions. There is only ONE store, which is the
+      decision: a world-space `voxel::GroupField` on the same chunked lattice
+      shape `MaskField` uses. The SDF answer came first as the task demanded,
+      and it invalidated the per-representation design rather than the reverse
+- [x] 2.2 `fill(region, id)`, deciding membership at the cell CENTRE so two
+      adjacent fills do not overlap by a cell — the rule `MaskField::fill`
+      already uses, with a test
+- [x] 2.3 `at(world)` — the one query every representation asks, and the
+      reason this is not three mechanisms
 - [ ] 2.4 Grow, shrink, border — defined on the region, per the spec delta
 - [ ] 2.5 Serialisation, with the format minor taken from the ROADMAP's
       assignment rather than picked here
@@ -74,3 +93,14 @@ feature wearing a general name.
       is the workflow and a capability list does not show a workflow
 - [ ] 5.4 `docs/sculpt_comparison.md` — the PolyGroups / Face Sets row that
       currently has no entry at all
+
+## 6. What building it settled
+
+- [x] 6.1 Visibility is a property of the ID, not of the cells. Hiding a group
+      is one flag rather than a rewrite of every cell carrying it, which is
+      also what makes `isolate` cheap — show one, hide the rest
+- [x] 6.2 `isolate` leaves kNoGroup VISIBLE. Ungrouped surface is not something
+      an artist hid, and isolating a group must not make the rest of the model
+      vanish because it was never named
+- [x] 6.3 Merging a group away takes its visibility with it, or a hidden id
+      nobody carries keeps hiding a group that no longer exists
