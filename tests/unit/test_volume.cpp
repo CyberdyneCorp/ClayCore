@@ -643,6 +643,60 @@ TEST_CASE("a shrink_band that cannot narrow the band changes nothing") {
     }
 }
 
+TEST_CASE("a region snapshot reads the volume as it was before the rewrite") {
+    // The invariant relax leans on, and the only one it needs: a snapshot taken
+    // of a region, used while THAT region is rewritten, answers with the
+    // volume as it stood beforehand — everywhere, not only inside the region.
+    //
+    // Inside, because those bricks were copied. Outside, because those bricks
+    // are not written, so the volume still holds what it held and the snapshot
+    // can simply ask it. That second half is what makes the copy small, and it
+    // is why the snapshot and the rewrite must use the SAME region.
+    auto bumpy = [](kernel::cfloat3 p) {
+        return kernel::clength(p) -
+               (0.7f + 0.05f * std::sin(11.0f * p.x) * std::sin(11.0f * p.y) *
+                           std::sin(11.0f * p.z));
+    };
+    const math::Aabb whole{cf3(-1, -1, -1), cf3(1, 1, 1)};
+
+    for (float cell : {0.05f, 0.02f}) {
+        CAPTURE(cell);
+        const FieldVolume before = FieldVolume::sample(bumpy, whole, cell, cell * 3.0f);
+        REQUIRE(before.brick_count() > 1);
+
+        // Off the brick lattice on purpose: a box on it would never put a
+        // snapshotted brick and an un-snapshotted one either side of a shared
+        // face sample, which is the case the lookup has a slow path for.
+        const math::Aabb boxes[] = {
+            {cf3(0.55f, -0.13f, -0.13f), cf3(0.86f, 0.13f, 0.13f)},
+            {cf3(-0.037f, -0.037f, 0.61f), cf3(0.037f, 0.037f, 0.79f)},
+            {cf3(-2, -2, -2), cf3(2, 2, 2)},  // every brick
+            {cf3(5, 5, 5), cf3(6, 6, 6)},     // none of them
+        };
+        int which = 0;
+        for (const math::Aabb& box : boxes) {
+            CAPTURE(++which);
+            FieldVolume live = before;
+            const FieldVolume::RegionSnapshot snap = live.snapshot_region(box);
+            // Rewrite the same region with something that depends on nothing,
+            // so a snapshot reading through to the live volume by mistake would
+            // come back with the constant rather than the original.
+            live.rewrite_region(box, [](int, int, int, float) { return -12.5f; });
+
+            const int nx = before.sample_extent(0), ny = before.sample_extent(1),
+                      nz = before.sample_extent(2);
+            for (int gz = 0; gz < nz; ++gz)
+                for (int gy = 0; gy < ny; ++gy)
+                    for (int gx = 0; gx < nx; ++gx) {
+                        const std::optional<float> was = before.sample_at(gx, gy, gz);
+                        const std::optional<float> got = snap.sample_at(gx, gy, gz);
+                        REQUIRE(was.has_value() == got.has_value());
+                        if (was) REQUIRE(*was == *got);
+                    }
+        }
+    }
+}
+
 TEST_CASE("rewrite_region equals rewrite where fn is identity outside the region") {
     // The property the region-limited brush rests on. `rewrite_region` writes
     // only the bricks that meet the region, and that is the same answer as

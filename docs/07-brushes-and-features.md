@@ -336,8 +336,25 @@ the grid and the band, none of which a later dab moves. Over a 24-dab stroke at
 a 0.01 cell the steady dab fell from 2.32 ms to **1.77 ms**, and the first dab
 did not move, correctly.
 
-One whole-volume term is left in a dab: the per-pass volume copy, about 9% of
-one. See [#278](https://github.com/CyberdyneCorp/ClayCore/issues/278).
+The per-pass volume copy is gone too. A stencil needs the pass's *input*, not
+its half-written output, and the obvious way to get that was to copy the whole
+volume — six megabytes at a 0.01 cell, to protect the few hundred kilobytes a
+brush touches. It now copies only the bricks the pass will overwrite, and reads
+outside them from the volume itself, which still holds what it held because
+those bricks are never written.
+
+| 24-dab stroke, cell 0.01 | before | after |
+|---|---:|---:|
+| first dab | 2.96 ms | **2.31 ms** |
+| steady dab | 1.81 ms | **1.60 ms** |
+
+At a 0.02 cell the two are level: the copy was already small there. The gain is
+not only the copy — a snapshot of one brush's worth of bricks is a few hundred
+kilobytes and fits in cache, where a tap against the whole volume walks a sparse
+index into six megabytes.
+
+**A dab now costs what it moves, with nothing left in it that scales with the
+model.**
 
 Smoothing destroys **exactness** but cannot break the **Lipschitz** bound: an
 average cannot vary faster than the thing it averages, and a 1-Lipschitz field

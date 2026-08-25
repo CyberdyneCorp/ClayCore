@@ -284,6 +284,42 @@ class FieldVolume {
     void rewrite_region(const math::Aabb& region,
                         const std::function<float(int, int, int, float)>& fn);
 
+    // The samples `rewrite_region` is about to overwrite, kept so an operator
+    // can read what was there while it writes what comes next.
+    //
+    // A stencil needs the pass's INPUT, not its half-written output, and the
+    // obvious way to get that is to copy the volume. That copy is the whole
+    // volume — six megabytes at an interactive cell — for a brush that will
+    // touch a few hundred kilobytes of it, and it put a term that scales with
+    // the MODEL back into a dab that had just been made to scale with itself.
+    //
+    // This copies only the bricks `rewrite_region` would select for the same
+    // region. Reads outside them are served from the volume itself, which is
+    // correct for exactly the reason the region limit is: a brick that does not
+    // meet the region is never written, so what it holds during the rewrite is
+    // what it held before it.
+    //
+    // Which makes the ORDER a requirement rather than a convention: take the
+    // snapshot, then rewrite the SAME region. A snapshot of one region used
+    // while another is rewritten reads half-written bricks and is silently
+    // wrong.
+    class RegionSnapshot {
+      public:
+        // The value at a global cell coordinate as it was when the snapshot was
+        // taken. Nothing where no brick stores it, exactly as `sample_at`.
+        std::optional<float> sample_at(int gx, int gy, int gz) const;
+
+      private:
+        friend class FieldVolume;
+        const FieldVolume* volume_ = nullptr;
+        int lo_[3] = {0, 0, 0};
+        int span_[3] = {0, 0, 0};
+        std::vector<std::int32_t> offset_;  // per brick in the box, or kBrickEmpty
+        std::vector<float> data_;
+    };
+
+    RegionSnapshot snapshot_region(const math::Aabb& region) const;
+
     // Drop the bricks whose samples all lie beyond the band, and re-derive
     // what the resulting sample-free bricks report. Returns how many went.
     //

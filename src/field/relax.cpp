@@ -104,11 +104,26 @@ FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings,
     for (int pass = 0; pass < iterations; ++pass) {
         if (parallel::cancelled(token)) return v;  // unchanged: the input copy
         progress.phase(static_cast<std::uint32_t>(pass));
-        const FieldVolume previous = current;
-        auto blend = [&previous, &stencil, &tuned, strength](int gx, int gy, int gz,
-                                                             float old) {
-            float here = previous.sample_at(gx, gy, gz).value_or(old);
-            const cfloat3 at = previous.cell_position(gx, gy, gz);
+        // The pass's INPUT, for the bricks the pass will overwrite. Copying the
+        // whole volume for that -- which is what this was -- costs six
+        // megabytes at an interactive cell to protect a few hundred kilobytes,
+        // and put a term that scales with the model back into a dab that had
+        // just been made to scale with itself. Reads outside the snapshotted
+        // bricks come from `current`, which still holds what it held, because
+        // those bricks are not written. The region must be the SAME one the
+        // rewrite uses, and below it is.
+        const std::optional<FieldVolume::RegionSnapshot> snapshot =
+            region_bounds ? std::optional<FieldVolume::RegionSnapshot>(
+                                current.snapshot_region(*region_bounds))
+                          : std::nullopt;
+        const FieldVolume previous = region_bounds ? FieldVolume() : current;
+        auto blend = [&previous, &snapshot, &current, &stencil, &tuned, strength](
+                         int gx, int gy, int gz, float old) {
+            auto tap_at = [&](int x, int y, int z) {
+                return snapshot ? snapshot->sample_at(x, y, z) : previous.sample_at(x, y, z);
+            };
+            float here = tap_at(gx, gy, gz).value_or(old);
+            const cfloat3 at = current.cell_position(gx, gy, gz);
             float weight = region_weight(tuned, at) * mask_gate(tuned.mask, at);
             if (weight <= 0.0f) return here;
 
@@ -120,7 +135,7 @@ FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings,
             float total = 0.0f;
             for (std::size_t i = 0; i < stencil.offsets.size(); ++i) {
                 const auto& d = stencil.offsets[i];
-                std::optional<float> tap = previous.sample_at(gx + d[0], gy + d[1], gz + d[2]);
+                std::optional<float> tap = tap_at(gx + d[0], gy + d[1], gz + d[2]);
                 if (!tap) continue;
                 averaged += stencil.weights[i] * *tap;
                 total += stencil.weights[i];
