@@ -95,8 +95,10 @@
       claim is silent.
 - [x] 6.2 Update `docs/05-claycore-library.md`, which currently ends the tape
       section saying the GPU still re-uploads.
-- [ ] 6.3 Update #197 with the Vulkan result, and state that Metal is the
+- [x] 6.3 Update #197 with the Vulkan result, and state that Metal is the
       remaining half.
-- [ ] 6.4 Open the Metal follow-up as its own issue rather than leaving it
+- [x] 6.4 Open the Metal follow-up as its own issue rather than leaving it
       implied — it needs a Mac to measure and an iPad to validate the memory
-      story.
+      story. Filed as #296, carrying the three things the Vulkan work learned
+      the hard way: patch on parent_id, ADVANCE the resident id or only the
+      first dab patches, and reserve slack or the patch declines every stamp.
