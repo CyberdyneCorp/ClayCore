@@ -47,6 +47,27 @@ struct Tape {
 // AABB by its narrow-band width; only items whose influence bound touches
 // the dilated region are compiled. Band-clamped results are bit-identical
 // to the full tape inside the region.
+//
+// The compiler adds its own pad on top of the caller's region (scene::cull_pad)
+// and the caller should NOT try to. Two things reach further than an item's own
+// bound:
+//
+//   - a feathered replace, whose crossfade steers a value from up to its
+//     volume's band away, and
+//   - a SMOOTH-UNION CHAIN, which is the subtler one. An item's bound is
+//     dilated by what one blend can move; but the accumulated value part way
+//     down a long chain sits well above where it ends up, so an item whose
+//     final contribution is nothing can still be within k of the RUNNING value
+//     and change it. Measured on a 600-dab sphere at k=0.06 the chain drags
+//     the field more than four k below the base shape's own distance, and
+//     without the pad, samples INSIDE the band differed from the full tape by
+//     up to half a cell.
+//
+// The chain pad is the largest single-item reach in the layer. That closed
+// every case measured, at chain lengths from 5 to 600, but it is not a proof:
+// the drag grows with chain length and no fixed dilation bounds it for an
+// arbitrary document. Hard unions have no such term — min() is exact and
+// associative — and measure identical at any length.
 struct CullRegion {
     math::Aabb region;
 };
