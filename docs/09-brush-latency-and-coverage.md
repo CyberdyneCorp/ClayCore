@@ -68,11 +68,11 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 | Move | Move | `brush::move_brush` | s | `sdf_move` | 0.098 | gesture |
 | Move | Move (elastic) | `sculpt_grab` | v | `voxel_grab` | 0.027 | gesture |
 | Move Topological | — | `field::move_topological` | s | *(exempt — see below)* | — | — |
-| Smooth | Smooth | `field::relax` | s | `sdf_relax` | 1.67 ‡ | operation |
+| Smooth | Smooth | `field::relax` | s | `sdf_relax` | **0.73** ‡ | operation |
 | Smooth | Smooth | `sculpt_smooth` | v | `voxel_smooth` | **0.0117** | interactive |
-| Flatten | Flatten | `field::flatten` (two-sided) | s | `sdf_flatten` | 3.15 ‡ | operation |
+| Flatten | Flatten | `field::flatten` (two-sided) | s | `sdf_flatten` | 7.36 ‡§ | operation |
 | Flatten | Flatten | `sculpt_flatten` | v | `voxel_flatten` | 0.0097 | interactive |
-| hPolish, Planar, Trim | Scrape / Planar | `field::flatten` cut-only | s | `volume_hpolish` | 72.2 ‡ | operation |
+| hPolish, Planar, Trim | Scrape / Planar | `field::flatten` cut-only | s | `volume_hpolish` | 88.2 ‡§ | operation |
 | The surface brushes, on a mesh LAYER (Standard, Move, Inflate, Smooth, Pinch, Flatten, Clay, DamStandard, Trim Dynamic, hPolish, SnakeHook, Layer, Nudge, Relax) | — | `mesh::MeshSculptor`, 14 verbs, with alphas | m | *(unmeasured — see Named gaps)* | — | — |
 | — | Scrape | `sculpt_scrape` | v | `voxel_scrape` | 0.0118 | interactive |
 | Pinch | Pinch | `magnify` (negative), `sculpt_pinch` | s v | `voxel_pinch` | 0.0091 | interactive |
@@ -87,13 +87,13 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 | Surface Noise | Noise | `noise` deformer | s | `noise_detail` | 0.269 | gesture |
 | Mask | Mask | mask fields + stroke engine | s v | `mask_paint` | 0.0058 | interactive |
 | Mask (freeze effect) | Mask | mask-gated verbs | s v | `mask_freeze` | 0.0140 | interactive |
-| Extract | Split / Extract | `brush::mask_extrude` | s v | `mask_extrude` | 4286.5 ‡ | operation |
+| Extract | Split / Extract | `brush::mask_extrude` | s v | `mask_extrude` | 4326.9 ‡ | operation |
 | ZSpheres | — | `Prim::armature` | s | `armature_edit` | 0.0008 | gesture |
 | Alphas | Alphas | `sculpt_carve_alpha` | v | `voxel_carve_alpha` | 0.0011 | interactive |
 | — | Paint | `voxel_paint_brush` | v | `voxel_paint` | 0.0036 | interactive |
 | — | Smudge | `sculpt_smudge` | v | `voxel_smudge` | 0.026 | gesture |
 | — | (fill holes) | `sculpt_fill_cavities` | v | `voxel_fill_cavities` | 0.62 | operation |
-| Dynamesh | Voxel Remesh | `Layer.consolidate` | s | `sdf_consolidate` | 314.7 ‡ | operation |
+| Dynamesh | Voxel Remesh | `Layer.consolidate` | s | `sdf_consolidate` | 312.8 ‡ | operation |
 | — | Multires | `VoxelGrid::add_level` | v | `voxel_add_level` | 0.511 | operation |
 | — | Multires (over a region) | `VoxelGrid::add_level(region)` | v | — | — | operation |
 | — | Multires (editing under one) | `sculpt_smooth`, one level finer | v | `voxel_smooth_l2` | 0.0149 | interactive |
@@ -120,34 +120,49 @@ The `8^d` write-amplification model and the cubic-radius model are both real
 descriptions of the work; they are poor predictors of the *time*, because the
 footprint that grows is not what dominates. Prefer the measurement.
 
-‡ **Re-measured on device, 2026-08-25.** These five rows come from a full
-59-case run on the reference iPad (iPad15,5, iPadOS 26.5.2), `valid: true`,
-`treeDirty: false`, nominal thermals at both ends — p95 at 1000 stamps, except
-`volume_hpolish`, whose axis is passes and which is quoted at 4. Every other row
-in the table is still the figure the committed baseline carries.
+‡ **Re-measured on device, 2026-08-25**, at the end of the bake-and-brush
+performance program. A full 59-case run on the reference iPad (iPad15,5,
+iPadOS 26.5.2) from a clean tree, `valid: true`, `treeDirty: false`, nominal
+thermals at both ends, `check_device_bench.py` OK with no case over budget —
+p95 at 1000 stamps, except `volume_hpolish`, whose axis is passes and which is
+quoted at 4. Every other row in the table is still the figure the committed
+baseline carries; see
+[#273](https://github.com/CyberdyneCorp/ClayCore/issues/273).
 
-Four of the five moved because `measure_sample_lipschitz()` stopped walking the
-dense sample lattice and started walking the stored bricks, which every verb
-that bakes pays for:
+Against the run of 2026-08-24, before any of that work:
 
 | | before | after | |
 |---|---:|---:|---|
-| `sdf_flatten` | 6.677 | 3.153 | **2.12×** |
-| `volume_hpolish` | 149.673 | 72.170 | **2.07×** |
-| `sdf_consolidate` | 340.462 | 314.686 | 1.08× |
-| `mask_extrude` | 4442.964 | 4286.490 | 1.04× |
+| `sdf_relax` | 1.661 | **0.727** | **2.28×** |
+| `sdf_consolidate` | 340.462 | 312.846 | 1.09× |
+| `mask_extrude` | 4442.964 | 4326.896 | 1.03× |
+| `sdf_flatten` | 6.677 | 7.364 | 0.91× § |
+| `volume_hpolish` | 149.673 | 88.166 | 1.70× § |
 
-`sdf_relax` did **not** move (1.661 → 1.669), and that is the control: `relax`
-is the one verb here that rewrites samples without re-measuring the bound, so it
-had nothing to save. The SDF stamp cases did not move either.
+`sdf_relax` is where the brush work landed: the traversal follows the brush
+rather than the band, the band's far bounds are no longer re-derived per dab,
+the pass no longer copies the volume to read its own input, and the samples the
+brush cannot reach are no longer weighed. On the Mac the same dab is 3.9× at a
+0.02 cell; the device fixture is a **0.05**-cell volume with `region_radius 0.4`,
+which is the least favourable case for a local brush, so 2.28× is the floor of
+that range rather than the middle of it.
 
-**`sdf_relax` and `mask_extrude` nonetheless read worse than this table used to
-claim, and that is drift rather than a regression.** The figures here had fallen
-out of step with `tests/device/baseline.json` itself — it records 1.686 for
-`sdf_relax` where this table said 0.74, and 4403.3 for `mask_extrude` where it
-said 3094.7 — so the old numbers described neither the current code nor the
-committed reference. The rest of the table has not been re-derived; see
-[#273](https://github.com/CyberdyneCorp/ClayCore/issues/273).
+§ **The two flatten rows are not comparable between these runs, and the second
+number is the softer one.** The suite's own pacing changed underneath them: the
+untimed fixture rebuild between cases is a document bake, and that went from a
+serial walk to an all-core one, so the whole run compressed from 236 s to
+**145 s** and the canary reached the same ×1.52 throttle **90 seconds sooner**.
+`sdf_flatten` moved from 172 s into the run to 127 s and still read higher.
+
+A Mac A/B of the identical operation over the identical fixture — the device's
+own `SceneBuilder.sdfDocument`, driven through the same two C ABI calls — puts
+the in-place flatten at **3.90 → 4.29 ms, a 10% regression**, not the 133% the
+device shows. The volume it flattens is byte-identical between the two builds,
+checked directly. So most of the device figure is the harness now saturating a
+passively cooled tablet, and roughly a tenth of it is real and worth finding.
+Do not read either flatten row as a clean measurement until the suite paces
+itself against the canary rather than against how long the fixtures take to
+build.
 
 `consolidate` and `mask_extrude` still scale with the document and still deserve
 progress UI. `sdf_relax`'s figure is a **0.05-cell** fixture
@@ -253,8 +268,8 @@ says nobody has measured one, because the gesture is what was instrumented.
 
 ### Tier 4 — the artist waits, correctly
 
-`sdf_relax` (1.67), `voxel_fill_cavities` (0.62), `sdf_flatten` (3.15),
-`volume_hpolish` (72), `sdf_consolidate` (315), `mask_extrude` (4286). The
+`sdf_relax` (0.73), `voxel_fill_cavities` (0.62), `sdf_flatten` (7.36),
+`volume_hpolish` (88), `sdf_consolidate` (313), `mask_extrude` (4327). The
 first two would numerically fit a frame; they are `operation` because that is
 what they are, and a host should give them progress UI rather than a frame.
 
