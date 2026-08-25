@@ -85,6 +85,16 @@ FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings,
     // and one of zero would step. Both are silently widened rather than obeyed.
     tuned.falloff = std::max(settings.falloff, cell * static_cast<float>(radius) * 2.0f);
 
+    // Where the weight can be non-zero: the region plus its taper. A radius of
+    // zero means "everywhere", which is a filter rather than a brush, and then
+    // there is nothing to bound.
+    std::optional<math::Aabb> region_bounds;
+    if (tuned.region_radius > 0.0f) {
+        const float reach = tuned.region_radius + tuned.falloff;
+        const cfloat3 r = cf3(reach, reach, reach);
+        region_bounds = math::Aabb{tuned.centre - r, tuned.centre + r};
+    }
+
     FieldVolume current = v;
     // The checkpoint is the pass boundary, which is the granularity that
     // already exists: relax is `iterations` sweeps of the whole band, so a
@@ -95,8 +105,8 @@ FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings,
         if (parallel::cancelled(token)) return v;  // unchanged: the input copy
         progress.phase(static_cast<std::uint32_t>(pass));
         const FieldVolume previous = current;
-        current.rewrite([&previous, &stencil, &tuned, strength](int gx, int gy, int gz,
-                                                                float old) {
+        auto blend = [&previous, &stencil, &tuned, strength](int gx, int gy, int gz,
+                                                             float old) {
             float here = previous.sample_at(gx, gy, gz).value_or(old);
             const cfloat3 at = previous.cell_position(gx, gy, gz);
             float weight = region_weight(tuned, at) * mask_gate(tuned.mask, at);
@@ -117,7 +127,23 @@ FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings,
             }
             if (total <= 0.0f) return here;
             return here + (averaged / total - here) * (strength * weight);
-        });
+        };
+        // A dab should cost what it moves. Outside the region `blend` returns
+        // the sample it was handed — that is the `weight <= 0` line above — so
+        // walking the rest of the band only to be told so is the whole of what
+        // made a five-cell brush cost what the model cost. The region is the
+        // sphere the weight is non-zero in, which is the taper's outer edge and
+        // not the brush radius; `rewrite_region` rounds it outward to whole
+        // bricks and requires exactly the identity `blend` already has.
+        //
+        // No margin for the STENCIL is needed, and that is worth being explicit
+        // about because it looks as though it should be: the taps are read from
+        // `previous`, which is the whole volume and is not being written, so a
+        // sample inside the region may read neighbours outside it freely. What
+        // the region bounds is where values CHANGE, and that is exactly where
+        // the weight is non-zero, on this pass and on every later one.
+        if (region_bounds) current.rewrite_region(*region_bounds, blend);
+        else current.rewrite(blend);
     }
 
     // Smoothing MOVES the surface, and the sample-free bricks were classified

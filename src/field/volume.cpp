@@ -551,6 +551,47 @@ void FieldVolume::rewrite(const std::function<float(int, int, int, float)>& fn) 
     }
 }
 
+void FieldVolume::rewrite_region(const math::Aabb& region,
+                                 const std::function<float(int, int, int, float)>& fn) {
+    if (empty() || region.empty()) return;
+    const int n = kBrickDim + 1;
+    const float brick = static_cast<float>(kBrickDim) * cell_size_;
+
+    // Brick b spans world [origin + b*brick, origin + (b+1)*brick] along an
+    // axis — the closing face is the halo sample, shared with b+1 — so a brick
+    // meets the region when its span overlaps it. Rounded OUTWARD by one brick
+    // on each side: a brick too many costs a brick of work, and the whole
+    // argument for skipping the rest is that `fn` is identity there, which a
+    // generous selection cannot break.
+    int lo[3], hi[3];
+    for (int a = 0; a < 3; ++a) {
+        const float o = a == 0 ? origin_.x : a == 1 ? origin_.y : origin_.z;
+        const float rmin = a == 0 ? region.min.x : a == 1 ? region.min.y : region.min.z;
+        const float rmax = a == 0 ? region.max.x : a == 1 ? region.max.y : region.max.z;
+        lo[a] = static_cast<int>(std::floor((rmin - o) / brick)) - 1;
+        hi[a] = static_cast<int>(std::floor((rmax - o) / brick)) + 1;
+        lo[a] = std::max(lo[a], 0);
+        hi[a] = std::min(hi[a], bcount_[a] - 1);
+    }
+    if (lo[0] > hi[0] || lo[1] > hi[1] || lo[2] > hi[2]) return;  // nothing meets it
+
+    for (int bz = lo[2]; bz <= hi[2]; ++bz)
+        for (int by = lo[1]; by <= hi[1]; ++by)
+            for (int bx = lo[0]; bx <= hi[0]; ++bx) {
+                const std::size_t slot =
+                    static_cast<std::size_t>((bz * bcount_[1] + by) * bcount_[0] + bx);
+                const std::int32_t entry = index_[slot];
+                if (entry < 0) continue;
+                for (int i = 0; i < kBrickSamples; ++i) {
+                    const int lx = i % n, ly = (i / n) % n, lz = i / (n * n);
+                    const std::size_t at =
+                        static_cast<std::size_t>(entry) + static_cast<std::size_t>(i);
+                    data_[at] = fn(bx * kBrickDim + lx, by * kBrickDim + ly,
+                                   bz * kBrickDim + lz, data_[at]);
+                }
+            }
+}
+
 float FieldVolume::measure_sample_lipschitz() const {
     if (empty()) return 1.0f;
     const int n = kBrickDim + 1;

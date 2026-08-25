@@ -256,6 +256,34 @@ class FieldVolume {
     // that "leave this one alone" needs no lookup and cannot be spelt as zero.
     void rewrite(const std::function<float(int, int, int, float)>& fn);
 
+    // The same, over the bricks that MEET `region` and no others.
+    //
+    // For a brush. A verb confined to a region still had to walk every stored
+    // sample in the volume to find out that most of them were not in it, which
+    // made a dab cost what the model cost rather than what the dab touched:
+    // at a 0.01 cell a five-cell brush paid 16.7 ms, of which about 0.6 ms was
+    // work inside the brush.
+    //
+    // `fn` MUST BE THE IDENTITY OUTSIDE `region`. That is not a hint about
+    // what the caller probably wants, it is what makes this equal to
+    // `rewrite`, and it is load-bearing twice over:
+    //
+    //   - the samples in bricks that are skipped keep their old values, which
+    //     is only the same answer if `fn` would have returned them anyway;
+    //   - a sample on a brick face lives in EVERY brick sharing it, and this
+    //     writes only the copies held by selected bricks. If `fn` changed such
+    //     a sample where one sharer was selected and another was not, the two
+    //     copies would drift apart and the field would step at the brick face.
+    //     It cannot: a brick that was not selected does not meet `region`, so
+    //     every sample it holds lies outside `region`, where `fn` is identity.
+    //
+    // The selection is conservative — whole bricks, rounded outward — so
+    // passing a slightly generous region costs a little work and no
+    // correctness. Passing one that is too SMALL is a defect this cannot
+    // detect.
+    void rewrite_region(const math::Aabb& region,
+                        const std::function<float(int, int, int, float)>& fn);
+
     // Drop the bricks whose samples all lie beyond the band, and re-derive
     // what the resulting sample-free bricks report. Returns how many went.
     //
