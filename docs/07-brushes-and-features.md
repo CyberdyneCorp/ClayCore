@@ -359,6 +359,29 @@ at those lattice points — so inside the band the two are identical, and a test
 holds that. What it buys is one entry point, and a source that can never be a
 volume derived from another volume.
 
+**The document-sourced forms bake through the CPU backend's pool.** Until
+v0.50.0 they did not: `clay_item_volume_from_document` and the `_relax_from` /
+`_flatten_from` pair handed the sampler a callable and asked the tape for one
+point at a time, while `Layer.consolidate` had gone through the batched window
+fill since it was written. A tape instruction costs about ten nanoseconds and
+its arithmetic costs one, so the interpreter was most of a bake and the
+interpreter was per point. Measured on a twelve-core machine, same document,
+byte-identical output:
+
+| | 193-node layer at cell 0.05 |
+|---|---:|
+| batched block fill | **23.6 ms** |
+| the per-point walk it replaced | 386 ms |
+
+Nothing in the ABI changed, and a host that already called these gets the
+16.4x without doing anything. Note the figure is the bake **alone** — the
+`sdf_consolidate` device case pays a serial redistance on top and moves less.
+
+`move_topological`'s document-sourced form is still per point. It samples the
+source at a *displaced* point rather than at the lattice, so batching it means
+building the query positions first; see
+[#275](https://github.com/CyberdyneCorp/ClayCore/issues/275).
+
 **Putting a bake back: feather the replace.** Every one of these verbs returns
 a volume that a host then places with `CLAY_OP_REPLACE`, and the hard replace
 corrugates the *shading* even when no verb was applied at all (issue #67). The
