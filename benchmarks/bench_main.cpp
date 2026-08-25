@@ -1196,6 +1196,38 @@ void BM_VolumeBakeSerialDoc(benchmark::State& state) {
 }
 BENCHMARK(BM_VolumeBakeSerialDoc)->Unit(benchmark::kMillisecond);
 
+// The document bake with its tape culled per brick, against the whole-tape
+// bake it is measured to equal byte for byte. check_bench.py requires the
+// culled form to be FASTER — and the pair is the only thing that would catch
+// the adaptive guard silently deciding never to cull.
+void BM_VolumeBakeCulledDoc(benchmark::State& state) {
+    scene::Document doc = sculpted_sphere(600);
+    const scene::Tape tape = scene::compile_document(doc);
+    const float cell = 0.04f, band = cell * 3.0f;
+    const kernel::cfloat3 pad = cf3(band, band, band);
+    const math::Aabb region{tape.bounds.min - pad, tape.bounds.max + pad};
+    for (auto _ : state) {
+        field::FieldVolume v = field::FieldVolume::sample_blocks(
+            eval::document_block_fill(doc, tape), region, cell, band);
+        benchmark::DoNotOptimize(v.sample_count());
+    }
+}
+BENCHMARK(BM_VolumeBakeCulledDoc)->Unit(benchmark::kMillisecond);
+
+void BM_VolumeBakeWholeTapeDoc(benchmark::State& state) {
+    scene::Document doc = sculpted_sphere(600);
+    const scene::Tape tape = scene::compile_document(doc);
+    const float cell = 0.04f, band = cell * 3.0f;
+    const kernel::cfloat3 pad = cf3(band, band, band);
+    const math::Aabb region{tape.bounds.min - pad, tape.bounds.max + pad};
+    for (auto _ : state) {
+        field::FieldVolume v = field::FieldVolume::sample_blocks(
+            eval::tape_block_fill(tape), region, cell, band);
+        benchmark::DoNotOptimize(v.sample_count());
+    }
+}
+BENCHMARK(BM_VolumeBakeWholeTapeDoc)->Unit(benchmark::kMillisecond);
+
 // Move Topological from a document, batched against the per-point walk it
 // replaced. The third of the document-sourced verbs to get a pooled evaluator
 // and the one that needed a different kind: its query positions are the

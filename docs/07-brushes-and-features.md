@@ -416,6 +416,40 @@ Nothing in the ABI changed, and a host that already called these gets the
 16.4x without doing anything. Note the figure is the bake **alone** — the
 `sdf_consolidate` device case pays a serial redistance on top and moves less.
 
+**And the tape is culled per brick, where that is worth doing.** A brick needs
+only the items whose influence reaches it — a 600-dab sphere hard-unioned
+compiles to 1,199 instructions and any one brick needs 5.4 of them — which is
+how the brick cache has always evaluated and how the bake now does too. On a
+0.02 cell:
+
+| blend `k` | brick tape / whole tape | bake |
+|---|---:|---:|
+| 0 (hard union) | 0.5% | **3.4×** |
+| 0.04 | 7% | **2.2×** |
+| 0.06 | 16% | 1.5× |
+| 0.10 | 49% | *refused* |
+
+The last row is the point of the table. A smooth union's cull pad grows with
+`k`, so a wide enough blend keeps every item in every brick's tape and the
+per-brick compile becomes pure overhead — measured at 0.55× before the guard
+existed. The bake therefore **measures** a sample of the lattice and falls back
+to the whole tape when a brick's tape is not a third of the document's or less.
+
+The result is byte-identical to the whole-tape bake, and that is a consequence
+rather than a tolerance: a culled value can only be *larger* than the truth, so
+one that lands inside the band already **is** the truth, and a brick with no
+sample in the band stores nothing but its sign. Only what a kept brick stores
+beyond the band has to be paid for with the whole tape, which is 27% of the
+samples, batched. Storing culled values there instead would make the volume
+overstate its own distance by 1.65 cells against the plain bake's 0.1 — a field
+a marcher steps through.
+
+`clay_item_volume_flatten_from` deliberately does **not** cull: flatten draws
+the samples onto a plane *after* the fill produces them, so a brick the fill saw
+as empty can come back holding the surface, and the values it would then store
+were never paid for. Relax is unaffected — it samples first and relaxes the
+volume afterwards.
+
 `move_topological`'s document-sourced form goes through the pool too, since
 v0.51.0, and it needed a different kind of batched source to get there. The
 other two verbs evaluate their source *at* the sample lattice; this one samples
