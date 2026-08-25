@@ -1,377 +1,970 @@
 {
-  "abiVersion": "0.39.0",
+  "abiVersion": "0.49.0",
   "budgets": {
     "armature_edit": {
-      "budgetMs": 0.0014,
+      "budgetMs": 0.0006,
       "class": "gesture",
-      "measuredMs": 0.0009
+      "machineFactor": 0.9979,
+      "measuredMs": 0.0004,
+      "rawMs": 0.0004
     },
     "cut_create": {
-      "budgetMs": 0.0004,
+      "budgetMs": 0.0002,
       "class": "gesture",
-      "measuredMs": 0.0003
+      "machineFactor": 1.1621,
+      "measuredMs": 0.0001,
+      "rawMs": 0.0002
     },
     "cut_passes": {
-      "budgetMs": 0.1079,
+      "budgetMs": 0.0806,
       "class": "gesture",
-      "measuredMs": 0.072
+      "measuredMs": 0.0537
     },
     "magnify_pinch": {
-      "budgetMs": 0.1736,
+      "budgetMs": 0.1302,
       "class": "gesture",
-      "measuredMs": 0.1157
+      "measuredMs": 0.0868
     },
     "mask_extract": {
-      "budgetMs": 145.7012,
+      "budgetMs": 148.9526,
       "class": "operation",
-      "measuredMs": 97.1341
+      "measuredMs": 99.3017
     },
     "mask_extrude": {
-      "budgetMs": 6604.9781,
+      "budgetMs": 6334.5491,
       "class": "operation",
-      "measuredMs": 4403.3188
+      "machineFactor": 1.0383,
+      "measuredMs": 4223.0327,
+      "rawMs": 4384.6145
     },
     "mask_freeze": {
-      "budgetMs": 0.0257,
+      "budgetMs": 0.0287,
       "class": "interactive",
-      "measuredMs": 0.0171
+      "measuredMs": 0.0191
     },
     "mask_paint": {
-      "budgetMs": 0.0067,
+      "budgetMs": 0.0118,
       "class": "interactive",
-      "measuredMs": 0.0045
+      "machineFactor": 1.0,
+      "measuredMs": 0.0079,
+      "rawMs": 0.0079
     },
     "move_drags": {
-      "budgetMs": 0.2639,
+      "budgetMs": 0.2827,
       "class": "gesture",
-      "measuredMs": 0.176
+      "measuredMs": 0.1885
     },
     "noise_detail": {
-      "budgetMs": 0.415,
+      "budgetMs": 0.3706,
       "class": "gesture",
-      "measuredMs": 0.2767
+      "measuredMs": 0.2471
     },
     "pose_region": {
-      "budgetMs": 0.0011,
+      "budgetMs": 0.0006,
       "class": "gesture",
-      "measuredMs": 0.0008
+      "machineFactor": 1.0001,
+      "measuredMs": 0.0004,
+      "rawMs": 0.0004
     },
     "sdf_consolidate": {
-      "budgetMs": 991.538,
+      "budgetMs": 373.7525,
       "class": "operation",
-      "measuredMs": 661.0253
+      "machineFactor": 1.2765,
+      "measuredMs": 249.1683,
+      "rawMs": 318.0637
     },
     "sdf_flatten": {
-      "budgetMs": 9.9658,
+      "budgetMs": 7.1391,
       "class": "operation",
-      "measuredMs": 6.6438
+      "machineFactor": 1.4322,
+      "measuredMs": 4.7594,
+      "rawMs": 6.8163
     },
     "sdf_move": {
-      "budgetMs": 0.1279,
+      "budgetMs": 0.1187,
       "class": "gesture",
-      "measuredMs": 0.0853
+      "machineFactor": 1.1277,
+      "measuredMs": 0.0791,
+      "rawMs": 0.0892
     },
     "sdf_relax": {
-      "budgetMs": 2.5288,
+      "budgetMs": 0.822,
       "class": "operation",
-      "measuredMs": 1.6859
+      "machineFactor": 1.3368,
+      "measuredMs": 0.548,
+      "rawMs": 0.7326
     },
     "sdf_stamp_bricks": {
-      "budgetMs": 4.6611,
+      "budgetMs": 2.5552,
       "class": "interactive",
-      "measuredMs": 3.1074
+      "machineFactor": 1.0157,
+      "measuredMs": 1.7035,
+      "rawMs": 1.7303
     },
     "sdf_stamp_cpu": {
-      "budgetMs": 8.6783,
+      "budgetMs": 3.9298,
       "class": "interactive",
-      "measuredMs": 5.7855
+      "machineFactor": 1.0008,
+      "measuredMs": 2.6199,
+      "rawMs": 2.6218
     },
     "sdf_stamp_metal": {
-      "budgetMs": 3.0032,
+      "budgetMs": 3.0375,
       "class": "interactive",
-      "measuredMs": 2.0021
+      "machineFactor": 1.001,
+      "measuredMs": 2.025,
+      "rawMs": 2.027
     },
     "sdf_stroke_cpu": {
-      "budgetMs": 3.6287,
+      "budgetMs": 3.7564,
       "class": "interactive",
-      "measuredMs": 2.4192
+      "machineFactor": 1.0201,
+      "measuredMs": 2.5042,
+      "rawMs": 2.5545
     },
     "sdf_stroke_metal": {
-      "budgetMs": 2.7505,
+      "budgetMs": 2.7109,
       "class": "interactive",
-      "measuredMs": 1.8337
+      "machineFactor": 0.9986,
+      "measuredMs": 1.8072,
+      "rawMs": 1.8048
     },
     "session_voxel_build": {
-      "budgetMs": 0.0096,
+      "budgetMs": 0.0088,
       "class": "gesture",
-      "measuredMs": 0.0064
+      "measuredMs": 0.0059
     },
     "session_voxel_carve_alpha": {
       "budgetMs": 0.0104,
       "class": "gesture",
-      "measuredMs": 0.007
+      "measuredMs": 0.0069
     },
     "session_voxel_erase": {
-      "budgetMs": 0.0086,
+      "budgetMs": 0.0079,
       "class": "gesture",
-      "measuredMs": 0.0057
+      "measuredMs": 0.0053
     },
     "session_voxel_fill_cavities": {
-      "budgetMs": 0.262,
+      "budgetMs": 0.2496,
       "class": "gesture",
-      "measuredMs": 0.1747
+      "measuredMs": 0.1664
     },
     "session_voxel_flatten": {
-      "budgetMs": 0.0171,
+      "budgetMs": 0.0158,
       "class": "gesture",
-      "measuredMs": 0.0114
+      "measuredMs": 0.0105
     },
     "session_voxel_grab": {
-      "budgetMs": 0.0203,
+      "budgetMs": 0.0206,
       "class": "gesture",
-      "measuredMs": 0.0135
+      "measuredMs": 0.0137
     },
     "session_voxel_inflate": {
-      "budgetMs": 0.0187,
+      "budgetMs": 0.0174,
       "class": "gesture",
-      "measuredMs": 0.0125
+      "measuredMs": 0.0116
     },
     "session_voxel_magnify": {
-      "budgetMs": 0.0118,
+      "budgetMs": 0.0109,
+      "class": "gesture",
+      "measuredMs": 0.0073
+    },
+    "session_voxel_paint": {
+      "budgetMs": 0.0084,
+      "class": "gesture",
+      "measuredMs": 0.0056
+    },
+    "session_voxel_pinch": {
+      "budgetMs": 0.0119,
       "class": "gesture",
       "measuredMs": 0.0079
     },
-    "session_voxel_paint": {
-      "budgetMs": 0.0085,
-      "class": "gesture",
-      "measuredMs": 0.0057
-    },
-    "session_voxel_pinch": {
-      "budgetMs": 0.0193,
-      "class": "gesture",
-      "measuredMs": 0.0129
-    },
     "session_voxel_scrape": {
-      "budgetMs": 0.0147,
+      "budgetMs": 0.0143,
       "class": "gesture",
-      "measuredMs": 0.0098
+      "measuredMs": 0.0095
     },
     "session_voxel_smooth": {
-      "budgetMs": 0.0346,
+      "budgetMs": 0.0353,
       "class": "gesture",
-      "measuredMs": 0.023
+      "measuredMs": 0.0235
     },
     "session_voxel_smudge": {
-      "budgetMs": 0.0211,
+      "budgetMs": 0.0205,
       "class": "gesture",
-      "measuredMs": 0.0141
+      "measuredMs": 0.0137
     },
     "snakehook_tendrils": {
-      "budgetMs": 0.4481,
+      "budgetMs": 0.2627,
       "class": "gesture",
-      "measuredMs": 0.2987
+      "measuredMs": 0.1751
     },
     "stroke_build": {
-      "budgetMs": 25.9047,
+      "budgetMs": 24.2037,
       "class": "gesture",
-      "measuredMs": 17.2698
+      "measuredMs": 16.1358
     },
     "stroke_carve": {
-      "budgetMs": 2.2339,
+      "budgetMs": 1.1658,
       "class": "gesture",
-      "measuredMs": 1.4892
+      "measuredMs": 0.7772
     },
     "stroke_resolve": {
-      "budgetMs": 0.0008,
+      "budgetMs": 0.0011,
       "class": "interactive",
-      "measuredMs": 0.0005
+      "machineFactor": 1.004,
+      "measuredMs": 0.0007,
+      "rawMs": 0.0007
     },
     "trim_curve": {
-      "budgetMs": 0.0004,
+      "budgetMs": 0.0002,
       "class": "gesture",
-      "measuredMs": 0.0003
+      "machineFactor": 1.0281,
+      "measuredMs": 0.0001,
+      "rawMs": 0.0001
     },
     "tube_create": {
-      "budgetMs": 0.0026,
+      "budgetMs": 0.0011,
       "class": "gesture",
-      "measuredMs": 0.0018
+      "machineFactor": 1.0003,
+      "measuredMs": 0.0007,
+      "rawMs": 0.0007
     },
     "volume_flatten": {
-      "budgetMs": 227.4633,
+      "budgetMs": 123.0127,
       "class": "operation",
-      "measuredMs": 151.6422
+      "measuredMs": 82.0085
     },
     "volume_hpolish": {
-      "budgetMs": 228.8583,
+      "budgetMs": 143.5681,
       "class": "operation",
-      "measuredMs": 152.5722
+      "measuredMs": 95.712
     },
     "volume_relax": {
-      "budgetMs": 536.2708,
+      "budgetMs": 447.8534,
       "class": "operation",
-      "measuredMs": 357.5139
+      "measuredMs": 298.569
     },
     "voxel_add_level": {
-      "budgetMs": 7.2683,
+      "budgetMs": 7.2942,
       "class": "operation",
-      "measuredMs": 4.8455
+      "machineFactor": 1.0,
+      "measuredMs": 4.8628,
+      "rawMs": 4.863
     },
     "voxel_apply_stroke": {
-      "budgetMs": 0.3251,
+      "budgetMs": 0.3235,
       "class": "gesture",
-      "measuredMs": 0.2167
+      "machineFactor": 1.0087,
+      "measuredMs": 0.2157,
+      "rawMs": 0.2175
     },
     "voxel_carve_alpha": {
-      "budgetMs": 0.0015,
+      "budgetMs": 0.0016,
       "class": "interactive",
-      "measuredMs": 0.001
+      "machineFactor": 1.002,
+      "measuredMs": 0.001,
+      "rawMs": 0.001
     },
     "voxel_erase": {
-      "budgetMs": 0.0059,
+      "budgetMs": 0.0061,
       "class": "interactive",
-      "measuredMs": 0.004
+      "machineFactor": 0.9993,
+      "measuredMs": 0.004,
+      "rawMs": 0.004
     },
     "voxel_fill_cavities": {
-      "budgetMs": 0.3134,
+      "budgetMs": 0.3261,
       "class": "operation",
-      "measuredMs": 0.209
+      "machineFactor": 0.9981,
+      "measuredMs": 0.2174,
+      "rawMs": 0.217
     },
     "voxel_flatten": {
-      "budgetMs": 0.0085,
-      "class": "interactive",
-      "measuredMs": 0.0057
-    },
-    "voxel_grab": {
-      "budgetMs": 0.0155,
-      "class": "gesture",
-      "measuredMs": 0.0103
-    },
-    "voxel_inflate": {
       "budgetMs": 0.0086,
       "class": "interactive",
-      "measuredMs": 0.0057
+      "machineFactor": 0.9988,
+      "measuredMs": 0.0058,
+      "rawMs": 0.0057
+    },
+    "voxel_grab": {
+      "budgetMs": 0.015,
+      "class": "gesture",
+      "machineFactor": 1.0016,
+      "measuredMs": 0.01,
+      "rawMs": 0.01
+    },
+    "voxel_inflate": {
+      "budgetMs": 0.0087,
+      "class": "interactive",
+      "machineFactor": 0.999,
+      "measuredMs": 0.0058,
+      "rawMs": 0.0058
     },
     "voxel_magnify": {
       "budgetMs": 0.0107,
       "class": "interactive",
-      "measuredMs": 0.0071
+      "machineFactor": 1.0,
+      "measuredMs": 0.0071,
+      "rawMs": 0.0071
     },
     "voxel_mesh_dirty": {
-      "budgetMs": 3.1686,
+      "budgetMs": 3.1812,
       "class": "interactive",
-      "measuredMs": 2.1124
+      "machineFactor": 0.9995,
+      "measuredMs": 2.1208,
+      "rawMs": 2.1198
     },
     "voxel_mesh_whole": {
-      "budgetMs": 19.3305,
+      "budgetMs": 19.8411,
       "class": "operation",
-      "measuredMs": 12.887
+      "machineFactor": 0.9998,
+      "measuredMs": 13.2274,
+      "rawMs": 13.2245
     },
     "voxel_paint": {
-      "budgetMs": 0.0047,
+      "budgetMs": 0.0051,
       "class": "interactive",
-      "measuredMs": 0.0032
+      "machineFactor": 0.9993,
+      "measuredMs": 0.0034,
+      "rawMs": 0.0034
     },
     "voxel_pinch": {
-      "budgetMs": 0.0102,
+      "budgetMs": 0.0101,
       "class": "interactive",
-      "measuredMs": 0.0068
+      "machineFactor": 1.0,
+      "measuredMs": 0.0068,
+      "rawMs": 0.0067
     },
     "voxel_scrape": {
-      "budgetMs": 0.0119,
+      "budgetMs": 0.0116,
       "class": "interactive",
-      "measuredMs": 0.0079
+      "machineFactor": 0.9985,
+      "measuredMs": 0.0078,
+      "rawMs": 0.0077
     },
     "voxel_smooth": {
-      "budgetMs": 0.0144,
+      "budgetMs": 0.0147,
       "class": "interactive",
-      "measuredMs": 0.0096
+      "machineFactor": 0.998,
+      "measuredMs": 0.0098,
+      "rawMs": 0.0097
     },
     "voxel_smooth_l2": {
-      "budgetMs": 0.0246,
+      "budgetMs": 0.025,
       "class": "interactive",
-      "measuredMs": 0.0164
+      "machineFactor": 1.0023,
+      "measuredMs": 0.0167,
+      "rawMs": 0.0167
     },
     "voxel_smooth_r32": {
-      "budgetMs": 0.2275,
+      "budgetMs": 0.2289,
       "class": "interactive",
-      "measuredMs": 0.1517
+      "machineFactor": 1.0097,
+      "measuredMs": 0.1526,
+      "rawMs": 0.1541
     },
     "voxel_smudge": {
-      "budgetMs": 0.0142,
+      "budgetMs": 0.0141,
       "class": "gesture",
-      "measuredMs": 0.0095
+      "machineFactor": 1.0006,
+      "measuredMs": 0.0094,
+      "rawMs": 0.0094
     },
     "voxel_stamp": {
-      "budgetMs": 0.0093,
+      "budgetMs": 0.009,
       "class": "interactive",
-      "measuredMs": 0.0062
+      "machineFactor": 0.9974,
+      "measuredMs": 0.006,
+      "rawMs": 0.006
     }
   },
+  "canary": [
+    {
+      "atMs": 0.000458,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "ms": 139.756667,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 4767.909708,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "ms": 131.915541,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 4.1e-05,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "ms": 131.825083,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 2869.438041,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "ms": 150.550333,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 4.2e-05,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "ms": 146.264083,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 792.799208,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "ms": 131.952833,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 4.2e-05,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 133.037708,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 153.323209,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.913709,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 854.823709,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.507292,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 985.398459,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.544458,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 1763.108292,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.939958,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 1894.081084,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 131.014459,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 0,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 133.450959,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 133.451625,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.857791,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 718.676875,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 134.477042,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 853.180458,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 131.288417,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 4.1e-05,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 132.672042,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 132.898083,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 131.137083,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 3874.027375,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 135.329042,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 4009.39625,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.612541,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 8598.016083,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.255458,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 8728.299416,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.482542,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 4.2e-05,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 131.652208,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 132.583,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 129.955833,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 269.905542,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.594959,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 400.526125,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.567125,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 537.909833,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.485,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 668.412542,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.702209,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 805.0645,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.328167,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 935.408667,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.267458,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 1073.762458,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.436125,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 1204.21425,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.486541,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 1341.372083,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.488583,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 1471.88,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.325875,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 1609.068875,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.591833,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 1739.677667,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.571167,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 1877.358208,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.644708,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 2008.017958,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.676292,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 2145.850875,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.548667,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 2276.415917,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.707959,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 2416.300792,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.923916,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 2547.239833,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.657167,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 2686.846875,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.730291,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 2817.5925,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.450167,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 2955.655667,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.380875,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 3086.054708,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.293542,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 3389.785208,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.442208,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 3520.24325,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.922875,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 3655.869792,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.817959,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 3786.703,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.506167,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 7064.925042,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.660875,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 7195.635167,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.580208,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 7631.060708,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.522042,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 7761.599125,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.727958,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 9096.30925,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.506291,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 9226.832917,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 131.504292,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 9374.199833,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.313458,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 9504.5465,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 131.378208,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 9708.908125,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 132.38175,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 9841.316292,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.319667,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 9973.021333,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 131.955542,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 10104.994792,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 132.233334,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 10367.739125,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 131.270958,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 10499.027958,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.7725,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 10633.8695,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.447708,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 10764.334542,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.689584,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 129461.546292,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 140.5305,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 129602.153583,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 135.99,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 135966.351083,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 213.228167,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 136179.619292,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 158.238833,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 143556.8905,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 215.877458,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 143772.801125,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 158.957584,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 144092.835667,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 135.634542,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 144228.486583,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 131.415667,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 155593.753667,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 202.0385,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 155795.846625,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 155.982625,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 155952.207167,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 147.598167,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 156099.822,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 137.136625,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 156237.494083,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 131.436417,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 156368.94675,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.590042,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 156500.411208,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.710667,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 156631.135625,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.45775,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 156762.843792,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.794166,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 156893.653208,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.282375,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 157026.176,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.387667,
+      "thermalState": "nominal"
+    },
+    {
+      "atMs": 157156.580083,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "ms": 130.459125,
+      "thermalState": "nominal"
+    }
+  ],
   "cases": [
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -1.3663877571389969,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": -1.7667030562520698,
       "measurements": [
         {
-          "p50Ms": 17.269833,
-          "p95Ms": 17.269833,
+          "p50Ms": 16.135792,
+          "p95Ms": 16.135792,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.315,
-          "p95Ms": 0.315,
+          "p50Ms": 0.374375,
+          "p95Ms": 0.374375,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.379583,
-          "p95Ms": 0.379583,
+          "p50Ms": 0.202417,
+          "p95Ms": 0.202417,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.50125,
-          "p95Ms": 0.50125,
+          "p50Ms": 0.237333,
+          "p95Ms": 0.237333,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.61125,
-          "p95Ms": 0.61125,
+          "p50Ms": 0.272083,
+          "p95Ms": 0.272083,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.798,
-          "p95Ms": 0.798,
+          "p50Ms": 0.317792,
+          "p95Ms": 0.317792,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.828958,
-          "p95Ms": 0.828958,
+          "p50Ms": 0.360334,
+          "p95Ms": 0.360334,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 1.007667,
-          "p95Ms": 1.007667,
+          "p50Ms": 0.409542,
+          "p95Ms": 0.409542,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -380,72 +973,78 @@
       ],
       "name": "stroke_build",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.stroke_build"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": 0.8149172302137738,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": 0.7604521306401572,
       "measurements": [
         {
-          "p50Ms": 0.273542,
-          "p95Ms": 0.273542,
+          "p50Ms": 0.159875,
+          "p95Ms": 0.159875,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.552,
-          "p95Ms": 0.552,
+          "p50Ms": 0.294417,
+          "p95Ms": 0.294417,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.642833,
-          "p95Ms": 0.642833,
+          "p50Ms": 0.322167,
+          "p95Ms": 0.322167,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.846583,
-          "p95Ms": 0.846583,
+          "p50Ms": 0.399708,
+          "p95Ms": 0.399708,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 1.005209,
-          "p95Ms": 1.005209,
+          "p50Ms": 0.498084,
+          "p95Ms": 0.498084,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 1.1885,
-          "p95Ms": 1.1885,
+          "p50Ms": 0.573208,
+          "p95Ms": 0.573208,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 1.326917,
-          "p95Ms": 1.326917,
+          "p50Ms": 0.699458,
+          "p95Ms": 0.699458,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 1.48925,
-          "p95Ms": 1.48925,
+          "p50Ms": 0.777208,
+          "p95Ms": 0.777208,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -454,72 +1053,78 @@
       ],
       "name": "stroke_carve",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.stroke_carve"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": 0.08989260691366653,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": 0.2622032528861628,
       "measurements": [
         {
-          "p50Ms": 0.145958,
-          "p95Ms": 0.145958,
+          "p50Ms": 0.10925,
+          "p95Ms": 0.10925,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.093375,
-          "p95Ms": 0.093375,
+          "p50Ms": 0.091917,
+          "p95Ms": 0.091917,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.0935,
-          "p95Ms": 0.0935,
+          "p50Ms": 0.090792,
+          "p95Ms": 0.090792,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.110458,
-          "p95Ms": 0.110458,
+          "p50Ms": 0.109166,
+          "p95Ms": 0.109166,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.116292,
-          "p95Ms": 0.116292,
+          "p50Ms": 0.13925,
+          "p95Ms": 0.13925,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.134667,
-          "p95Ms": 0.134667,
+          "p50Ms": 0.156042,
+          "p95Ms": 0.156042,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.15775,
-          "p95Ms": 0.15775,
+          "p50Ms": 0.165666,
+          "p95Ms": 0.165666,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.175958,
-          "p95Ms": 0.175958,
+          "p50Ms": 0.188458,
+          "p95Ms": 0.188458,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -528,72 +1133,78 @@
       ],
       "name": "move_drags",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.move_drags"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": 0.48682749307714834,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": 0.4102180397220044,
       "measurements": [
         {
-          "p50Ms": 0.108542,
-          "p95Ms": 0.108542,
+          "p50Ms": 0.074625,
+          "p95Ms": 0.074625,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.11175,
-          "p95Ms": 0.11175,
+          "p50Ms": 0.07775,
+          "p95Ms": 0.07775,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.119,
-          "p95Ms": 0.119,
+          "p50Ms": 0.095625,
+          "p95Ms": 0.095625,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.15725,
-          "p95Ms": 0.15725,
+          "p50Ms": 0.107,
+          "p95Ms": 0.107,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.179084,
-          "p95Ms": 0.179084,
+          "p50Ms": 0.120125,
+          "p95Ms": 0.120125,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.206333,
-          "p95Ms": 0.206333,
+          "p50Ms": 0.139042,
+          "p95Ms": 0.139042,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.235542,
-          "p95Ms": 0.235542,
+          "p50Ms": 0.161041,
+          "p95Ms": 0.161041,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.298708,
-          "p95Ms": 0.298708,
+          "p50Ms": 0.175125,
+          "p95Ms": 0.175125,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -602,72 +1213,78 @@
       ],
       "name": "snakehook_tendrils",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.snakehook_tendrils"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": 0.471868086950393,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": 0.6773250458171486,
       "measurements": [
         {
-          "p50Ms": 0.103709,
-          "p95Ms": 0.103709,
+          "p50Ms": 0.060417,
+          "p95Ms": 0.060417,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.128542,
-          "p95Ms": 0.128542,
+          "p50Ms": 0.085667,
+          "p95Ms": 0.085667,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.143875,
-          "p95Ms": 0.143875,
+          "p50Ms": 0.119458,
+          "p95Ms": 0.119458,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.164375,
-          "p95Ms": 0.164375,
+          "p50Ms": 0.155583,
+          "p95Ms": 0.155583,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.184042,
-          "p95Ms": 0.184042,
+          "p50Ms": 0.168625,
+          "p95Ms": 0.168625,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.215166,
-          "p95Ms": 0.215166,
+          "p50Ms": 0.197625,
+          "p95Ms": 0.197625,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.255667,
-          "p95Ms": 0.255667,
+          "p50Ms": 0.221916,
+          "p95Ms": 0.221916,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.276666,
-          "p95Ms": 0.276666,
+          "p50Ms": 0.247084,
+          "p95Ms": 0.247084,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -676,72 +1293,78 @@
       ],
       "name": "noise_detail",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.noise_detail"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": 0.23177372480524464,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": 0.12469411097073635,
       "measurements": [
         {
-          "p50Ms": 0.071458,
-          "p95Ms": 0.071458,
+          "p50Ms": 0.067,
+          "p95Ms": 0.067,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.047583,
-          "p95Ms": 0.047583,
+          "p50Ms": 0.038708,
+          "p95Ms": 0.038708,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.091917,
-          "p95Ms": 0.091917,
+          "p50Ms": 0.044,
+          "p95Ms": 0.044,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.0765,
-          "p95Ms": 0.0765,
+          "p50Ms": 0.063,
+          "p95Ms": 0.063,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.087666,
-          "p95Ms": 0.087666,
+          "p50Ms": 0.065542,
+          "p95Ms": 0.065542,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.094958,
-          "p95Ms": 0.094958,
+          "p50Ms": 0.073041,
+          "p95Ms": 0.073041,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.104417,
-          "p95Ms": 0.104417,
+          "p50Ms": 0.081292,
+          "p95Ms": 0.081292,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.115708,
-          "p95Ms": 0.115708,
+          "p50Ms": 0.086833,
+          "p95Ms": 0.086833,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -750,72 +1373,78 @@
       ],
       "name": "magnify_pinch",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.magnify_pinch"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": 0.4567929063012402,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": 0.10679175309903717,
       "measurements": [
         {
-          "p50Ms": 0.027833,
-          "p95Ms": 0.027833,
+          "p50Ms": 0.039042,
+          "p95Ms": 0.039042,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.042208,
-          "p95Ms": 0.042208,
+          "p50Ms": 0.020917,
+          "p95Ms": 0.020917,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.03775,
-          "p95Ms": 0.03775,
+          "p50Ms": 0.045792,
+          "p95Ms": 0.045792,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.043959,
-          "p95Ms": 0.043959,
+          "p50Ms": 0.05375,
+          "p95Ms": 0.05375,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.054417,
-          "p95Ms": 0.054417,
+          "p50Ms": 0.043916,
+          "p95Ms": 0.043916,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.053416,
-          "p95Ms": 0.053416,
+          "p50Ms": 0.043542,
+          "p95Ms": 0.043542,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.066125,
-          "p95Ms": 0.066125,
+          "p50Ms": 0.031209,
+          "p95Ms": 0.031209,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.071959,
-          "p95Ms": 0.071959,
+          "p50Ms": 0.04875,
+          "p95Ms": 0.04875,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -824,40 +1453,46 @@
       ],
       "name": "cut_passes",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.cut_passes"
     },
     {
       "backend": "cpu",
       "budgetClass": "operation",
-      "growthExponent": 0.02898064280156132,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": -0.019788253199931643,
       "measurements": [
         {
-          "p50Ms": 343.435208,
-          "p95Ms": 343.435208,
+          "p50Ms": 298.568958,
+          "p95Ms": 298.568958,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 343.358625,
-          "p95Ms": 343.358625,
+          "p50Ms": 280.92275,
+          "p95Ms": 280.92275,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 345.699458,
-          "p95Ms": 345.699458,
+          "p50Ms": 284.606292,
+          "p95Ms": 284.606292,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 357.513875,
-          "p95Ms": 357.513875,
+          "p50Ms": 290.489833,
+          "p95Ms": 290.489833,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -866,40 +1501,46 @@
       ],
       "name": "volume_relax",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.volume_relax"
     },
     {
       "backend": "cpu",
       "budgetClass": "operation",
-      "growthExponent": 0.0940031545032997,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": 0.17255083095916907,
       "measurements": [
         {
-          "p50Ms": 128.841292,
-          "p95Ms": 128.841292,
+          "p50Ms": 64.232292,
+          "p95Ms": 64.232292,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 151.642167,
-          "p95Ms": 151.642167,
+          "p50Ms": 78.961708,
+          "p95Ms": 78.961708,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 150.750917,
-          "p95Ms": 150.750917,
+          "p50Ms": 82.0085,
+          "p95Ms": 82.0085,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 146.7745,
-          "p95Ms": 146.7745,
+          "p50Ms": 81.590458,
+          "p95Ms": 81.590458,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -908,40 +1549,46 @@
       ],
       "name": "volume_flatten",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.volume_flatten"
     },
     {
       "backend": "cpu",
       "budgetClass": "operation",
-      "growthExponent": 0.10936856336372142,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": 0.07244349638736494,
       "measurements": [
         {
-          "p50Ms": 125.956584,
-          "p95Ms": 125.956584,
+          "p50Ms": 77.386833,
+          "p95Ms": 77.386833,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 152.572209,
-          "p95Ms": 152.572209,
+          "p50Ms": 95.712042,
+          "p95Ms": 95.712042,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 150.02225,
-          "p95Ms": 150.02225,
+          "p50Ms": 90.97175,
+          "p95Ms": 90.97175,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 146.5775,
-          "p95Ms": 146.5775,
+          "p50Ms": 85.562291,
+          "p95Ms": 85.562291,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -950,72 +1597,78 @@
       ],
       "name": "volume_hpolish",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.volume_hpolish"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": -0.3667378829019884,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": -0.37995419576136935,
       "measurements": [
         {
-          "p50Ms": 0.014291,
-          "p95Ms": 0.014291,
+          "p50Ms": 0.015791,
+          "p95Ms": 0.015791,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.017125,
-          "p95Ms": 0.017125,
+          "p50Ms": 0.019125,
+          "p95Ms": 0.019125,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.013333,
-          "p95Ms": 0.013333,
+          "p50Ms": 0.014791,
+          "p95Ms": 0.014791,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.009208,
-          "p95Ms": 0.009208,
+          "p50Ms": 0.009625,
+          "p95Ms": 0.009625,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.008542,
-          "p95Ms": 0.008542,
+          "p50Ms": 0.008958,
+          "p95Ms": 0.008958,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.007125,
-          "p95Ms": 0.007125,
+          "p50Ms": 0.007709,
+          "p95Ms": 0.007709,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.007083,
-          "p95Ms": 0.007083,
+          "p50Ms": 0.007459,
+          "p95Ms": 0.007459,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.006666,
-          "p95Ms": 0.006666,
+          "p50Ms": 0.007166,
+          "p95Ms": 0.007166,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -1024,15 +1677,21 @@
       ],
       "name": "mask_freeze",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.mask_freeze"
     },
     {
       "backend": "cpu",
       "budgetClass": "operation",
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
       "measurements": [
         {
-          "p50Ms": 97.134125,
-          "p95Ms": 97.134125,
+          "p50Ms": 99.301708,
+          "p95Ms": 99.301708,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -1041,24 +1700,30 @@
       ],
       "name": "mask_extract",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.mask_extract"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.07839920101952864,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": -0.06175398930495471,
       "measurements": [
         {
-          "p50Ms": 0.006375,
-          "p95Ms": 0.006375,
+          "p50Ms": 0.005875,
+          "p95Ms": 0.005875,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.004959,
-          "p95Ms": 0.004959,
+          "p50Ms": 0.004709,
+          "p95Ms": 0.004709,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -1073,40 +1738,40 @@
           "stamps": 3
         },
         {
-          "p50Ms": 0.005166,
-          "p95Ms": 0.005166,
+          "p50Ms": 0.004875,
+          "p95Ms": 0.004875,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.004959,
-          "p95Ms": 0.004959,
+          "p50Ms": 0.0045,
+          "p95Ms": 0.0045,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.005166,
-          "p95Ms": 0.005166,
+          "p50Ms": 0.004708,
+          "p95Ms": 0.004708,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.004834,
-          "p95Ms": 0.004834,
+          "p50Ms": 0.004542,
+          "p95Ms": 0.004542,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.005416,
-          "p95Ms": 0.005416,
+          "p50Ms": 0.005167,
+          "p95Ms": 0.005167,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -1115,40 +1780,46 @@
       ],
       "name": "session_voxel_build",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.session_voxel_build"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.01676263282863033,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": -0.05101269059093918,
       "measurements": [
         {
-          "p50Ms": 0.004875,
-          "p95Ms": 0.004875,
+          "p50Ms": 0.004958,
+          "p95Ms": 0.004958,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.004417,
-          "p95Ms": 0.004417,
+          "p50Ms": 0.004292,
+          "p95Ms": 0.004292,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.004792,
-          "p95Ms": 0.004792,
+          "p50Ms": 0.004958,
+          "p95Ms": 0.004958,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.00575,
-          "p95Ms": 0.00575,
+          "p50Ms": 0.005292,
+          "p95Ms": 0.005292,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -1163,24 +1834,24 @@
           "stamps": 5
         },
         {
-          "p50Ms": 0.00475,
-          "p95Ms": 0.00475,
+          "p50Ms": 0.004459,
+          "p95Ms": 0.004459,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.004417,
-          "p95Ms": 0.004417,
+          "p50Ms": 0.004166,
+          "p95Ms": 0.004166,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.004708,
-          "p95Ms": 0.004708,
+          "p50Ms": 0.004459,
+          "p95Ms": 0.004459,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -1189,72 +1860,78 @@
       ],
       "name": "session_voxel_erase",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.session_voxel_erase"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.10454447564486956,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": -0.11333638104532522,
       "measurements": [
         {
-          "p50Ms": 0.005333,
-          "p95Ms": 0.005333,
+          "p50Ms": 0.004958,
+          "p95Ms": 0.004958,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.0045,
-          "p95Ms": 0.0045,
+          "p50Ms": 0.004416,
+          "p95Ms": 0.004416,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.005208,
-          "p95Ms": 0.005208,
+          "p50Ms": 0.004792,
+          "p95Ms": 0.004792,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.005667,
-          "p95Ms": 0.005667,
+          "p50Ms": 0.005625,
+          "p95Ms": 0.005625,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.005333,
-          "p95Ms": 0.005333,
+          "p50Ms": 0.004875,
+          "p95Ms": 0.004875,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.00475,
-          "p95Ms": 0.00475,
+          "p50Ms": 0.004208,
+          "p95Ms": 0.004208,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.004167,
-          "p95Ms": 0.004167,
+          "p50Ms": 0.003875,
+          "p95Ms": 0.003875,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.004291,
-          "p95Ms": 0.004291,
+          "p50Ms": 0.003917,
+          "p95Ms": 0.003917,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -1263,32 +1940,118 @@
       ],
       "name": "session_voxel_paint",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.session_voxel_paint"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.5560710150164503,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": -0.5919146624658135,
       "measurements": [
         {
-          "p50Ms": 0.023042,
-          "p95Ms": 0.023042,
+          "p50Ms": 0.023541,
+          "p95Ms": 0.023541,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.008125,
-          "p95Ms": 0.008125,
+          "p50Ms": 0.007291,
+          "p95Ms": 0.007291,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.010958,
-          "p95Ms": 0.010958,
+          "p50Ms": 0.009875,
+          "p95Ms": 0.009875,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
+          "stamps": 3
+        },
+        {
+          "p50Ms": 0.009667,
+          "p95Ms": 0.009667,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
+          "stamps": 4
+        },
+        {
+          "p50Ms": 0.009208,
+          "p95Ms": 0.009208,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
+          "stamps": 5
+        },
+        {
+          "p50Ms": 0.008208,
+          "p95Ms": 0.008208,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
+          "stamps": 6
+        },
+        {
+          "p50Ms": 0.00725,
+          "p95Ms": 0.00725,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
+          "stamps": 7
+        },
+        {
+          "p50Ms": 0.006875,
+          "p95Ms": 0.006875,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
+          "stamps": 8
+        }
+      ],
+      "name": "session_voxel_smooth",
+      "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
+      "verb": "session.session_voxel_smooth"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "gesture",
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": -0.12341466909004312,
+      "measurements": [
+        {
+          "p50Ms": 0.007917,
+          "p95Ms": 0.007917,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
+          "stamps": 1
+        },
+        {
+          "p50Ms": 0.006708,
+          "p95Ms": 0.006708,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
+          "stamps": 2
+        },
+        {
+          "p50Ms": 0.011584,
+          "p95Ms": 0.011584,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -1303,106 +2066,32 @@
           "stamps": 4
         },
         {
-          "p50Ms": 0.010042,
-          "p95Ms": 0.010042,
+          "p50Ms": 0.009084,
+          "p95Ms": 0.009084,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.009125,
-          "p95Ms": 0.009125,
+          "p50Ms": 0.009292,
+          "p95Ms": 0.009292,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.007792,
-          "p95Ms": 0.007792,
+          "p50Ms": 0.006584,
+          "p95Ms": 0.006584,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.00725,
-          "p95Ms": 0.00725,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 8
-        }
-      ],
-      "name": "session_voxel_smooth",
-      "servedBy": "cpu",
-      "verb": "session.session_voxel_smooth"
-    },
-    {
-      "backend": "cpu",
-      "budgetClass": "gesture",
-      "growthExponent": -0.12806340241121972,
-      "measurements": [
-        {
-          "p50Ms": 0.008375,
-          "p95Ms": 0.008375,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 1
-        },
-        {
-          "p50Ms": 0.007125,
-          "p95Ms": 0.007125,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 2
-        },
-        {
-          "p50Ms": 0.012458,
-          "p95Ms": 0.012458,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 3
-        },
-        {
-          "p50Ms": 0.010083,
-          "p95Ms": 0.010083,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 4
-        },
-        {
-          "p50Ms": 0.0095,
-          "p95Ms": 0.0095,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 5
-        },
-        {
-          "p50Ms": 0.009666,
-          "p95Ms": 0.009666,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 6
-        },
-        {
-          "p50Ms": 0.006708,
-          "p95Ms": 0.006708,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 7
-        },
-        {
-          "p50Ms": 0.006417,
-          "p95Ms": 0.006417,
+          "p50Ms": 0.006125,
+          "p95Ms": 0.006125,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -1411,60 +2100,50 @@
       ],
       "name": "session_voxel_inflate",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.session_voxel_inflate"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.10914114281141907,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": -0.12664456610764266,
       "measurements": [
         {
-          "p50Ms": 0.008417,
-          "p95Ms": 0.008417,
+          "p50Ms": 0.007917,
+          "p95Ms": 0.007917,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.006833,
-          "p95Ms": 0.006833,
+          "p50Ms": 0.006459,
+          "p95Ms": 0.006459,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.011417,
-          "p95Ms": 0.011417,
+          "p50Ms": 0.0105,
+          "p95Ms": 0.0105,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.008625,
-          "p95Ms": 0.008625,
+          "p50Ms": 0.007834,
+          "p95Ms": 0.007834,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 4
-        },
-        {
-          "p50Ms": 0.007375,
-          "p95Ms": 0.007375,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 5
-        },
-        {
-          "p50Ms": 0.008958,
-          "p95Ms": 0.008958,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 6
         },
         {
           "p50Ms": 0.007083,
@@ -1472,11 +2151,27 @@
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
+          "stamps": 5
+        },
+        {
+          "p50Ms": 0.008459,
+          "p95Ms": 0.008459,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
+          "stamps": 6
+        },
+        {
+          "p50Ms": 0.006541,
+          "p95Ms": 0.006541,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.006708,
-          "p95Ms": 0.006708,
+          "p50Ms": 0.006084,
+          "p95Ms": 0.006084,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -1485,72 +2180,78 @@
       ],
       "name": "session_voxel_flatten",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.session_voxel_flatten"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.09648034621907972,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": -0.1144399953898303,
       "measurements": [
         {
-          "p50Ms": 0.007333,
-          "p95Ms": 0.007333,
+          "p50Ms": 0.007083,
+          "p95Ms": 0.007083,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.006584,
-          "p95Ms": 0.006584,
+          "p50Ms": 0.00625,
+          "p95Ms": 0.00625,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.012875,
-          "p95Ms": 0.012875,
+          "p50Ms": 0.007833,
+          "p95Ms": 0.007833,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.009,
-          "p95Ms": 0.009,
+          "p50Ms": 0.007917,
+          "p95Ms": 0.007917,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.0075,
-          "p95Ms": 0.0075,
+          "p50Ms": 0.007708,
+          "p95Ms": 0.007708,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.006583,
-          "p95Ms": 0.006583,
+          "p50Ms": 0.006333,
+          "p95Ms": 0.006333,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.006208,
-          "p95Ms": 0.006208,
+          "p50Ms": 0.005792,
+          "p95Ms": 0.005792,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.006,
-          "p95Ms": 0.006,
+          "p50Ms": 0.005583,
+          "p95Ms": 0.005583,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -1559,72 +2260,78 @@
       ],
       "name": "session_voxel_pinch",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.session_voxel_pinch"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": 0.04393265193634303,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": -0.0387498859416424,
       "measurements": [
         {
-          "p50Ms": 0.005666,
-          "p95Ms": 0.005666,
+          "p50Ms": 0.005916,
+          "p95Ms": 0.005916,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.00575,
-          "p95Ms": 0.00575,
+          "p50Ms": 0.005417,
+          "p95Ms": 0.005417,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.006625,
-          "p95Ms": 0.006625,
+          "p50Ms": 0.006375,
+          "p95Ms": 0.006375,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.007875,
-          "p95Ms": 0.007875,
+          "p50Ms": 0.007083,
+          "p95Ms": 0.007083,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.007542,
-          "p95Ms": 0.007542,
+          "p50Ms": 0.007292,
+          "p95Ms": 0.007292,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.005833,
-          "p95Ms": 0.005833,
+          "p50Ms": 0.005459,
+          "p95Ms": 0.005459,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.005458,
-          "p95Ms": 0.005458,
+          "p50Ms": 0.005042,
+          "p95Ms": 0.005042,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.006208,
-          "p95Ms": 0.006208,
+          "p50Ms": 0.005458,
+          "p95Ms": 0.005458,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -1633,60 +2340,26 @@
       ],
       "name": "session_voxel_magnify",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.session_voxel_magnify"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.1563895146432843,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": -0.15288655951759605,
       "measurements": [
         {
-          "p50Ms": 0.009459,
-          "p95Ms": 0.009459,
+          "p50Ms": 0.008875,
+          "p95Ms": 0.008875,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
-        },
-        {
-          "p50Ms": 0.007416,
-          "p95Ms": 0.007416,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 2
-        },
-        {
-          "p50Ms": 0.009833,
-          "p95Ms": 0.009833,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 3
-        },
-        {
-          "p50Ms": 0.009833,
-          "p95Ms": 0.009833,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 4
-        },
-        {
-          "p50Ms": 0.00925,
-          "p95Ms": 0.00925,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 5
-        },
-        {
-          "p50Ms": 0.0085,
-          "p95Ms": 0.0085,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 6
         },
         {
           "p50Ms": 0.007042,
@@ -1694,11 +2367,51 @@
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
+          "stamps": 2
+        },
+        {
+          "p50Ms": 0.009542,
+          "p95Ms": 0.009542,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
+          "stamps": 3
+        },
+        {
+          "p50Ms": 0.009083,
+          "p95Ms": 0.009083,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
+          "stamps": 4
+        },
+        {
+          "p50Ms": 0.009,
+          "p95Ms": 0.009,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
+          "stamps": 5
+        },
+        {
+          "p50Ms": 0.007958,
+          "p95Ms": 0.007958,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
+          "stamps": 6
+        },
+        {
+          "p50Ms": 0.006584,
+          "p95Ms": 0.006584,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.006833,
-          "p95Ms": 0.006833,
+          "p50Ms": 0.006458,
+          "p95Ms": 0.006458,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -1707,52 +2420,50 @@
       ],
       "name": "session_voxel_scrape",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.session_voxel_scrape"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.11331339138085385,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": -0.15775689486397967,
       "measurements": [
         {
-          "p50Ms": 0.0135,
-          "p95Ms": 0.0135,
+          "p50Ms": 0.013709,
+          "p95Ms": 0.013709,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.010334,
-          "p95Ms": 0.010334,
+          "p50Ms": 0.010333,
+          "p95Ms": 0.010333,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.012166,
-          "p95Ms": 0.012166,
+          "p50Ms": 0.011667,
+          "p95Ms": 0.011667,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.011625,
-          "p95Ms": 0.011625,
+          "p50Ms": 0.011334,
+          "p95Ms": 0.011334,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 4
-        },
-        {
-          "p50Ms": 0.011417,
-          "p95Ms": 0.011417,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 5
         },
         {
           "p50Ms": 0.010833,
@@ -1760,19 +2471,27 @@
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
+          "stamps": 5
+        },
+        {
+          "p50Ms": 0.009958,
+          "p95Ms": 0.009958,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.01025,
-          "p95Ms": 0.01025,
+          "p50Ms": 0.009542,
+          "p95Ms": 0.009542,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.010666,
-          "p95Ms": 0.010666,
+          "p50Ms": 0.009875,
+          "p95Ms": 0.009875,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -1781,72 +2500,78 @@
       ],
       "name": "session_voxel_grab",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.session_voxel_grab"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.102018337766387,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": -0.12893535408119572,
       "measurements": [
         {
-          "p50Ms": 0.013084,
-          "p95Ms": 0.013084,
+          "p50Ms": 0.013292,
+          "p95Ms": 0.013292,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.010916,
-          "p95Ms": 0.010916,
+          "p50Ms": 0.011042,
+          "p95Ms": 0.011042,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.013834,
-          "p95Ms": 0.013834,
+          "p50Ms": 0.013125,
+          "p95Ms": 0.013125,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.014083,
-          "p95Ms": 0.014083,
+          "p50Ms": 0.012875,
+          "p95Ms": 0.012875,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.013375,
-          "p95Ms": 0.013375,
+          "p50Ms": 0.013667,
+          "p95Ms": 0.013667,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.012708,
-          "p95Ms": 0.012708,
+          "p50Ms": 0.012167,
+          "p95Ms": 0.012167,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.010917,
-          "p95Ms": 0.010917,
+          "p50Ms": 0.010958,
+          "p95Ms": 0.010958,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.010583,
-          "p95Ms": 0.010583,
+          "p50Ms": 0.010166,
+          "p95Ms": 0.010166,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -1855,60 +2580,26 @@
       ],
       "name": "session_voxel_smudge",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.session_voxel_smudge"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -1.2341935217154063,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": -1.2230125051013057,
       "measurements": [
         {
-          "p50Ms": 0.174667,
-          "p95Ms": 0.174667,
+          "p50Ms": 0.166417,
+          "p95Ms": 0.166417,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
-        },
-        {
-          "p50Ms": 0.014542,
-          "p95Ms": 0.014542,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 2
-        },
-        {
-          "p50Ms": 0.014292,
-          "p95Ms": 0.014292,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 3
-        },
-        {
-          "p50Ms": 0.014458,
-          "p95Ms": 0.014458,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 4
-        },
-        {
-          "p50Ms": 0.171417,
-          "p95Ms": 0.171417,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 5
-        },
-        {
-          "p50Ms": 0.172,
-          "p95Ms": 0.172,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 1,
-          "stamps": 6
         },
         {
           "p50Ms": 0.013875,
@@ -1916,11 +2607,51 @@
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
+          "stamps": 2
+        },
+        {
+          "p50Ms": 0.014042,
+          "p95Ms": 0.014042,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
+          "stamps": 3
+        },
+        {
+          "p50Ms": 0.01425,
+          "p95Ms": 0.01425,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
+          "stamps": 4
+        },
+        {
+          "p50Ms": 0.165417,
+          "p95Ms": 0.165417,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
+          "stamps": 5
+        },
+        {
+          "p50Ms": 0.165334,
+          "p95Ms": 0.165334,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
+          "stamps": 6
+        },
+        {
+          "p50Ms": 0.013375,
+          "p95Ms": 0.013375,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.013416,
-          "p95Ms": 0.013416,
+          "p50Ms": 0.013083,
+          "p95Ms": 0.013083,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -1929,72 +2660,78 @@
       ],
       "name": "session_voxel_fill_cavities",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.session_voxel_fill_cavities"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.3540195633210326,
+      "bundle": "com.cyberdyne.claycore.devicegallery",
+      "canaryAfterMs": 0,
+      "canaryBeforeMs": 0,
+      "growthExponent": -0.36323557942707324,
       "measurements": [
         {
-          "p50Ms": 0.006959,
-          "p95Ms": 0.006959,
+          "p50Ms": 0.006917,
+          "p95Ms": 0.006917,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.00425,
-          "p95Ms": 0.00425,
+          "p50Ms": 0.003916,
+          "p95Ms": 0.003916,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.004,
-          "p95Ms": 0.004,
+          "p50Ms": 0.003916,
+          "p95Ms": 0.003916,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.004834,
-          "p95Ms": 0.004834,
+          "p50Ms": 0.004416,
+          "p95Ms": 0.004416,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.003916,
-          "p95Ms": 0.003916,
+          "p50Ms": 0.00375,
+          "p95Ms": 0.00375,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.003916,
-          "p95Ms": 0.003916,
+          "p50Ms": 0.003792,
+          "p95Ms": 0.003792,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.00325,
-          "p95Ms": 0.00325,
+          "p50Ms": 0.003458,
+          "p95Ms": 0.003458,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.003333,
-          "p95Ms": 0.003333,
+          "p50Ms": 0.00325,
+          "p95Ms": 0.00325,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
@@ -2003,32 +2740,38 @@
       ],
       "name": "session_voxel_carve_alpha",
       "servedBy": "cpu",
+      "startedAtMs": 0,
+      "thermalStateEnd": "unknown",
+      "thermalStateStart": "unknown",
       "verb": "session.session_voxel_carve_alpha"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": 0.9200039599537041,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.507292,
+      "canaryBeforeMs": 130.913709,
+      "growthExponent": 0.8097770511065226,
       "measurements": [
         {
-          "p50Ms": 0.074916,
-          "p95Ms": 0.083625,
+          "p50Ms": 0.05275,
+          "p95Ms": 0.062958,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.498375,
-          "p95Ms": 0.532833,
+          "p50Ms": 0.265417,
+          "p95Ms": 0.290584,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 4.769708,
-          "p95Ms": 5.785542,
+          "p50Ms": 2.424042,
+          "p95Ms": 2.621833,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2037,32 +2780,38 @@
       ],
       "name": "sdf_stamp_cpu",
       "servedBy": "cpu",
+      "startedAtMs": 284.240209,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "sdf_stamp"
     },
     {
       "backend": "metal",
       "budgetClass": "interactive",
-      "growthExponent": 0.3199376760624037,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.939958,
+      "canaryBeforeMs": 130.544458,
+      "growthExponent": 0.32555760543397033,
       "measurements": [
         {
-          "p50Ms": 0.411583,
-          "p95Ms": 0.458792,
+          "p50Ms": 0.405958,
+          "p95Ms": 0.452625,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.795125,
-          "p95Ms": 1.054458,
+          "p50Ms": 0.984166,
+          "p95Ms": 1.020167,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 1.949625,
-          "p95Ms": 2.002125,
+          "p50Ms": 1.842375,
+          "p95Ms": 2.027,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2071,32 +2820,38 @@
       ],
       "name": "sdf_stamp_metal",
       "servedBy": "metal",
+      "startedAtMs": 1115.9435,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "sdf_stamp"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": 0.7852499338995959,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 134.477042,
+      "canaryBeforeMs": 130.857791,
+      "growthExponent": 0.7304369367021337,
       "measurements": [
         {
-          "p50Ms": 0.058625,
-          "p95Ms": 0.083541,
+          "p50Ms": 0.036625,
+          "p95Ms": 0.059875,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.193333,
-          "p95Ms": 0.349041,
+          "p50Ms": 0.131541,
+          "p95Ms": 0.220042,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 1.43625,
-          "p95Ms": 3.107417,
+          "p50Ms": 0.81575,
+          "p95Ms": 1.730292,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2105,23 +2860,109 @@
       ],
       "name": "sdf_stamp_bricks",
       "servedBy": "cpu",
+      "startedAtMs": 264.310417,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "sdf_stamp_incremental"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": -0.1000894883574415,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 135.329042,
+      "canaryBeforeMs": 131.137083,
+      "growthExponent": 0.7565628483705271,
       "measurements": [
         {
-          "p50Ms": 0.00325,
-          "p95Ms": 0.006209,
+          "p50Ms": 0.07609545833333334,
+          "p95Ms": 0.078375,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.003083,
+          "p50Ms": 0.30740795833333334,
+          "p95Ms": 0.3143697916666667,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 200,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 2.491850708333333,
+          "p95Ms": 2.554484375,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 25,
+          "stamps": 1000
+        }
+      ],
+      "name": "sdf_stroke_cpu",
+      "servedBy": "cpu",
+      "startedAtMs": 264.035791,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
+      "verb": "sdf_stroke"
+    },
+    {
+      "backend": "metal",
+      "budgetClass": "interactive",
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.255458,
+      "canaryBeforeMs": 130.612541,
+      "growthExponent": 0.4386999862896632,
+      "measurements": [
+        {
+          "p50Ms": 0.23619616666666665,
+          "p95Ms": 0.23934375,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 200,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.37166666666666665,
+          "p95Ms": 0.3799565833333333,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 180,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 1.788295125,
+          "p95Ms": 1.8047708333333334,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 35,
+          "stamps": 1000
+        }
+      ],
+      "name": "sdf_stroke_metal",
+      "servedBy": "metal",
+      "startedAtMs": 4140.009458,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
+      "verb": "sdf_stroke"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.594959,
+      "canaryBeforeMs": 129.955833,
+      "growthExponent": -0.08881235450432366,
+      "measurements": [
+        {
+          "p50Ms": 0.00325,
+          "p95Ms": 0.005958,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 200,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.003125,
           "p95Ms": 0.004125,
           "p95SpreadMs": 0,
           "repeats": 1,
@@ -2129,8 +2970,8 @@
           "stamps": 100
         },
         {
-          "p50Ms": 0.003166,
-          "p95Ms": 0.003916,
+          "p50Ms": 0.003167,
+          "p95Ms": 0.003958,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2139,24 +2980,30 @@
       ],
       "name": "voxel_stamp",
       "servedBy": "cpu",
+      "startedAtMs": 262.540417,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_set_brush"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": -0.002830444423121535,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.485,
+      "canaryBeforeMs": 130.567125,
+      "growthExponent": -0.016711877743474823,
       "measurements": [
         {
-          "p50Ms": 0.002791,
-          "p95Ms": 0.003166,
+          "p50Ms": 0.00275,
+          "p95Ms": 0.003375,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.002667,
-          "p95Ms": 0.003125,
+          "p50Ms": 0.002666,
+          "p95Ms": 0.003083,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2173,15 +3020,21 @@
       ],
       "name": "voxel_paint",
       "servedBy": "cpu",
+      "startedAtMs": 531.094083,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_paint_brush"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": 0.051367740036055265,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.328167,
+      "canaryBeforeMs": 130.702209,
+      "growthExponent": 0.05581941438127701,
       "measurements": [
         {
-          "p50Ms": 0.002625,
+          "p50Ms": 0.002666,
           "p95Ms": 0.003125,
           "p95SpreadMs": 0,
           "repeats": 1,
@@ -2189,16 +3042,16 @@
           "stamps": 10
         },
         {
-          "p50Ms": 0.002709,
-          "p95Ms": 0.003667,
+          "p50Ms": 0.00275,
+          "p95Ms": 0.00375,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.003125,
-          "p95Ms": 0.003959,
+          "p50Ms": 0.003208,
+          "p95Ms": 0.004041,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2207,32 +3060,38 @@
       ],
       "name": "voxel_erase",
       "servedBy": "cpu",
+      "startedAtMs": 799.115125,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_erase_brush"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": 0.10626946705073113,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.436125,
+      "canaryBeforeMs": 130.267458,
+      "growthExponent": 0.11308803125472316,
       "measurements": [
         {
-          "p50Ms": 0.004584,
-          "p95Ms": 0.005875,
+          "p50Ms": 0.004667,
+          "p95Ms": 0.005792,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.005167,
-          "p95Ms": 0.009333,
+          "p50Ms": 0.00525,
+          "p95Ms": 0.009291,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.008166,
-          "p95Ms": 0.009584,
+          "p50Ms": 0.00825,
+          "p95Ms": 0.00975,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2241,32 +3100,38 @@
       ],
       "name": "voxel_smooth",
       "servedBy": "cpu",
+      "startedAtMs": 1065.676458,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_sculpt_smooth"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": -0.043170510138093726,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.488583,
+      "canaryBeforeMs": 130.486541,
+      "growthExponent": -0.04600223330636762,
       "measurements": [
         {
           "p50Ms": 0.004375,
-          "p95Ms": 0.005541,
+          "p95Ms": 0.005458,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.004209,
-          "p95Ms": 0.00575,
+          "p50Ms": 0.004167,
+          "p95Ms": 0.005791,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.004,
-          "p95Ms": 0.004542,
+          "p50Ms": 0.003875,
+          "p95Ms": 0.004416,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2275,32 +3140,38 @@
       ],
       "name": "voxel_inflate",
       "servedBy": "cpu",
+      "startedAtMs": 1334.701292,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_sculpt_inflate"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": 0.016596954617769565,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.591833,
+      "canaryBeforeMs": 130.325875,
+      "growthExponent": 0.018024004587083548,
       "measurements": [
         {
           "p50Ms": 0.004292,
-          "p95Ms": 0.00525,
+          "p95Ms": 0.005292,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.004417,
-          "p95Ms": 0.0055,
+          "p50Ms": 0.004458,
+          "p95Ms": 0.005375,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.00475,
-          "p95Ms": 0.005667,
+          "p50Ms": 0.004709,
+          "p95Ms": 0.00575,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2309,32 +3180,38 @@
       ],
       "name": "voxel_flatten",
       "servedBy": "cpu",
+      "startedAtMs": 1602.206208,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_sculpt_flatten"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": 0.062458775497447605,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.644708,
+      "canaryBeforeMs": 130.571167,
+      "growthExponent": 0.06339353769643714,
       "measurements": [
         {
-          "p50Ms": 0.004083,
-          "p95Ms": 0.005125,
+          "p50Ms": 0.003959,
+          "p95Ms": 0.005041,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.004542,
-          "p95Ms": 0.006458,
+          "p50Ms": 0.004417,
+          "p95Ms": 0.006583,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.005458,
-          "p95Ms": 0.006833,
+          "p50Ms": 0.005417,
+          "p95Ms": 0.00675,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2343,31 +3220,37 @@
       ],
       "name": "voxel_pinch",
       "servedBy": "cpu",
+      "startedAtMs": 1870.249167,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_sculpt_pinch"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": 0.07154549947637792,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.548667,
+      "canaryBeforeMs": 130.676292,
+      "growthExponent": 0.0769074321722645,
       "measurements": [
         {
-          "p50Ms": 0.004,
-          "p95Ms": 0.005125,
+          "p50Ms": 0.003917,
+          "p95Ms": 0.005,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.004625,
-          "p95Ms": 0.006792,
+          "p50Ms": 0.0045,
+          "p95Ms": 0.006708,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.005625,
+          "p50Ms": 0.0055,
           "p95Ms": 0.007125,
           "p95SpreadMs": 0,
           "repeats": 1,
@@ -2377,32 +3260,38 @@
       ],
       "name": "voxel_magnify",
       "servedBy": "cpu",
+      "startedAtMs": 2138.694583,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_sculpt_magnify"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.015412845604345606,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.923916,
+      "canaryBeforeMs": 130.707959,
+      "growthExponent": -0.011068777427266134,
       "measurements": [
         {
-          "p50Ms": 0.008125,
-          "p95Ms": 0.010333,
+          "p50Ms": 0.008041,
+          "p95Ms": 0.010041,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.008291,
-          "p95Ms": 0.009709,
+          "p50Ms": 0.007917,
+          "p95Ms": 0.009583,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.00825,
-          "p95Ms": 0.009625,
+          "p50Ms": 0.008208,
+          "p95Ms": 0.009542,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2411,32 +3300,38 @@
       ],
       "name": "voxel_grab",
       "servedBy": "cpu",
+      "startedAtMs": 2407.12425,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_sculpt_grab"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": 0.0048072020803249715,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.730291,
+      "canaryBeforeMs": 130.657167,
+      "growthExponent": 0.004872022524835721,
       "measurements": [
         {
-          "p50Ms": 0.0075,
-          "p95Ms": 0.009292,
+          "p50Ms": 0.007291,
+          "p95Ms": 0.009167,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.007709,
-          "p95Ms": 0.009291,
+          "p50Ms": 0.007625,
+          "p95Ms": 0.00925,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.00825,
-          "p95Ms": 0.0095,
+          "p50Ms": 0.008166,
+          "p95Ms": 0.009375,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2445,32 +3340,38 @@
       ],
       "name": "voxel_smudge",
       "servedBy": "cpu",
+      "startedAtMs": 2677.898083,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_sculpt_smudge"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": 0.061730073030343655,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.380875,
+      "canaryBeforeMs": 130.450167,
+      "growthExponent": 0.0712170373279404,
       "measurements": [
         {
-          "p50Ms": 0.004709,
-          "p95Ms": 0.005958,
+          "p50Ms": 0.004625,
+          "p95Ms": 0.005583,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.005125,
-          "p95Ms": 0.007625,
+          "p50Ms": 0.005,
+          "p95Ms": 0.0075,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.006583,
-          "p95Ms": 0.007917,
+          "p50Ms": 0.006542,
+          "p95Ms": 0.00775,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2479,32 +3380,38 @@
       ],
       "name": "voxel_scrape",
       "servedBy": "cpu",
+      "startedAtMs": 2948.042958,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_sculpt_scrape"
     },
     {
       "backend": "cpu",
       "budgetClass": "operation",
-      "growthExponent": 0.03174261879030683,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.442208,
+      "canaryBeforeMs": 130.293542,
+      "growthExponent": 0.02700378299304899,
       "measurements": [
         {
-          "p50Ms": 0.177875,
-          "p95Ms": 0.180541,
+          "p50Ms": 0.18725,
+          "p95Ms": 0.191625,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.181542,
-          "p95Ms": 0.184791,
+          "p50Ms": 0.191083,
+          "p95Ms": 0.193333,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.201291,
-          "p95Ms": 0.208959,
+          "p50Ms": 0.21,
+          "p95Ms": 0.217,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2513,15 +3420,21 @@
       ],
       "name": "voxel_fill_cavities",
       "servedBy": "cpu",
+      "startedAtMs": 3216.348625,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_sculpt_fill_cavities"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": 0,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.817959,
+      "canaryBeforeMs": 130.922875,
+      "growthExponent": 0.008933859481752841,
       "measurements": [
         {
-          "p50Ms": 0.000959,
+          "p50Ms": 0.001,
           "p95Ms": 0.001,
           "p95SpreadMs": 0,
           "repeats": 1,
@@ -2529,8 +3442,8 @@
           "stamps": 10
         },
         {
-          "p50Ms": 0.000958,
-          "p95Ms": 0.001,
+          "p50Ms": 0.000959,
+          "p95Ms": 0.001041,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2538,7 +3451,7 @@
         },
         {
           "p50Ms": 0.000959,
-          "p95Ms": 0.001,
+          "p95Ms": 0.001042,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2547,58 +3460,70 @@
       ],
       "name": "voxel_carve_alpha",
       "servedBy": "cpu",
+      "startedAtMs": 3651.166583,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_sculpt_carve_alpha"
     },
     {
       "backend": "cpu",
       "budgetClass": "operation",
-      "growthExponent": 0.4098128701860788,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.660875,
+      "canaryBeforeMs": 130.506167,
+      "growthExponent": 0.41442247895137024,
       "measurements": [
         {
-          "p50Ms": 1.942833,
-          "p95Ms": 1.952208,
+          "p50Ms": 1.946833,
+          "p95Ms": 1.96125,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 5.511458,
-          "p95Ms": 5.52675,
+          "p50Ms": 5.934084,
+          "p95Ms": 6.009625,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 12.842167,
-          "p95Ms": 12.887,
+          "p50Ms": 13.092458,
+          "p95Ms": 13.224459,
           "p95SpreadMs": 0,
           "repeats": 1,
-          "samples": 116,
+          "samples": 113,
           "stamps": 1000
         }
       ],
       "name": "voxel_mesh_whole",
       "servedBy": "cpu",
+      "startedAtMs": 3917.210583,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_mesh"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": 0.6852104971560726,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.522042,
+      "canaryBeforeMs": 130.580208,
+      "growthExponent": 0.686972933274504,
       "measurements": [
         {
-          "p50Ms": 0.152,
-          "p95Ms": 0.436083,
+          "p50Ms": 0.151791,
+          "p95Ms": 0.435833,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.999833,
-          "p95Ms": 2.112417,
+          "p50Ms": 1.005958,
+          "p95Ms": 2.119791,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2607,32 +3532,38 @@
       ],
       "name": "voxel_mesh_dirty",
       "servedBy": "cpu",
+      "startedAtMs": 7326.21675,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_mesh_chunks"
     },
     {
       "backend": "cpu",
       "budgetClass": "operation",
-      "growthExponent": 0.6929262483634194,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.506291,
+      "canaryBeforeMs": 130.727958,
+      "growthExponent": 0.6870887312403721,
       "measurements": [
         {
-          "p50Ms": 0.198292,
-          "p95Ms": 0.199292,
+          "p50Ms": 0.198708,
+          "p95Ms": 0.205458,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.807083,
-          "p95Ms": 0.809916,
+          "p50Ms": 0.811,
+          "p95Ms": 0.818292,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 4.829167,
-          "p95Ms": 4.845542,
+          "p50Ms": 4.846875,
+          "p95Ms": 4.862958,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2641,12 +3572,18 @@
       ],
       "name": "voxel_add_level",
       "servedBy": "cpu",
+      "startedAtMs": 7892.327708,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_add_level"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": 0.22567637773736507,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.313458,
+      "canaryBeforeMs": 131.504292,
+      "growthExponent": 0.2300479567019965,
       "measurements": [
         {
           "p50Ms": 0.004625,
@@ -2657,8 +3594,8 @@
           "stamps": 10
         },
         {
-          "p50Ms": 0.005291,
-          "p95Ms": 0.015291,
+          "p50Ms": 0.005333,
+          "p95Ms": 0.0155,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2666,7 +3603,7 @@
         },
         {
           "p50Ms": 0.013083,
-          "p95Ms": 0.016375,
+          "p95Ms": 0.016708,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2675,32 +3612,38 @@
       ],
       "name": "voxel_smooth_l2",
       "servedBy": "cpu",
+      "startedAtMs": 9358.338167,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_sculpt_smooth_levels"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": 0.04119320568805265,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 132.38175,
+      "canaryBeforeMs": 131.378208,
+      "growthExponent": 0.05694447878509176,
       "measurements": [
         {
-          "p50Ms": 0.101625,
-          "p95Ms": 0.125459,
+          "p50Ms": 0.104666,
+          "p95Ms": 0.118541,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.102625,
-          "p95Ms": 0.125542,
+          "p50Ms": 0.103833,
+          "p95Ms": 0.118958,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.114334,
-          "p95Ms": 0.151666,
+          "p50Ms": 0.118625,
+          "p95Ms": 0.154084,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2709,32 +3652,38 @@
       ],
       "name": "voxel_smooth_r32",
       "servedBy": "cpu",
+      "startedAtMs": 9635.925083,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_sculpt_smooth_large"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 131.955542,
+      "canaryBeforeMs": 130.319667,
       "growthExponent": 0,
       "measurements": [
         {
-          "p50Ms": 0.000459,
-          "p95Ms": 0.0005,
+          "p50Ms": 0.000666,
+          "p95Ms": 0.000709,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.000459,
-          "p95Ms": 0.0005,
+          "p50Ms": 0.000666,
+          "p95Ms": 0.000709,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.000459,
-          "p95Ms": 0.0005,
+          "p50Ms": 0.000666,
+          "p95Ms": 0.000709,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2743,32 +3692,38 @@
       ],
       "name": "stroke_resolve",
       "servedBy": "cpu",
+      "startedAtMs": 9971.637333,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "stroke_resolve"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.0077340074612802755,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 131.270958,
+      "canaryBeforeMs": 132.233334,
+      "growthExponent": 0.02025589110076078,
       "measurements": [
         {
-          "p50Ms": 0.212458,
-          "p95Ms": 0.21675,
+          "p50Ms": 0.190833,
+          "p95Ms": 0.198167,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.193375,
-          "p95Ms": 0.199167,
+          "p50Ms": 0.2075,
+          "p95Ms": 0.214667,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.204417,
-          "p95Ms": 0.209166,
+          "p50Ms": 0.211125,
+          "p95Ms": 0.217542,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2777,32 +3732,38 @@
       ],
       "name": "voxel_apply_stroke",
       "servedBy": "cpu",
+      "startedAtMs": 10237.229625,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "voxel_apply_stroke"
     },
     {
       "backend": "cpu",
       "budgetClass": "interactive",
-      "growthExponent": -0.018894280444699874,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.447708,
+      "canaryBeforeMs": 130.7725,
+      "growthExponent": -0.13821353100218003,
       "measurements": [
         {
-          "p50Ms": 0.003417,
-          "p95Ms": 0.0045,
+          "p50Ms": 0.003541,
+          "p95Ms": 0.007875,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.003334,
-          "p95Ms": 0.00425,
+          "p50Ms": 0.003375,
+          "p95Ms": 0.004291,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.003333,
-          "p95Ms": 0.004125,
+          "p50Ms": 0.003375,
+          "p95Ms": 0.004167,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2811,33 +3772,39 @@
       ],
       "name": "mask_paint",
       "servedBy": "cpu",
+      "startedAtMs": 10629.800875,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "mask_paint"
     },
     {
       "backend": "cpu",
       "budgetClass": "operation",
-      "growthExponent": 0.9404139345243182,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 140.5305,
+      "canaryBeforeMs": 130.689584,
+      "growthExponent": 0.9554138578891751,
       "measurements": [
         {
-          "p50Ms": 57.735875,
-          "p95Ms": 57.9365,
+          "p50Ms": 53.649459,
+          "p95Ms": 53.839833,
           "p95SpreadMs": 0,
           "repeats": 1,
-          "samples": 25,
+          "samples": 27,
           "stamps": 10
         },
         {
-          "p50Ms": 418.401875,
-          "p95Ms": 418.435709,
-          "p95SpreadMs": 1.3416239999999675,
+          "p50Ms": 412.998625,
+          "p95Ms": 413.245958,
+          "p95SpreadMs": 0.8562499999999886,
           "repeats": 3,
           "samples": 16,
           "stamps": 100
         },
         {
-          "p50Ms": 4392.328417,
-          "p95Ms": 4403.31875,
-          "p95SpreadMs": 30.871084000000337,
+          "p50Ms": 4373.648958,
+          "p95Ms": 4384.614542,
+          "p95SpreadMs": 20.581375000000662,
           "repeats": 3,
           "samples": 16,
           "stamps": 1000
@@ -2845,33 +3812,39 @@
       ],
       "name": "mask_extrude",
       "servedBy": "cpu",
+      "startedAtMs": 10895.024458,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "document_mask_extrude"
     },
     {
       "backend": "cpu",
       "budgetClass": "operation",
-      "growthExponent": 0.15402621897630683,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 213.228167,
+      "canaryBeforeMs": 135.99,
+      "growthExponent": 0.1144478112944211,
       "measurements": [
         {
-          "p50Ms": 0.80275,
-          "p95Ms": 0.829417,
+          "p50Ms": 0.351041,
+          "p95Ms": 0.4325,
           "p95SpreadMs": 0,
           "repeats": 1,
-          "samples": 85,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 1.373875,
-          "p95Ms": 1.41775,
-          "p95SpreadMs": 0.048292,
-          "repeats": 3,
-          "samples": 16,
+          "p50Ms": 0.714791,
+          "p95Ms": 0.723417,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 99,
           "stamps": 100
         },
         {
-          "p50Ms": 1.679458,
-          "p95Ms": 1.685875,
-          "p95SpreadMs": 0.01450000000000018,
+          "p50Ms": 0.720375,
+          "p95Ms": 0.732625,
+          "p95SpreadMs": 0.030457999999999985,
           "repeats": 3,
           "samples": 16,
           "stamps": 1000
@@ -2879,33 +3852,39 @@
       ],
       "name": "sdf_relax",
       "servedBy": "cpu",
+      "startedAtMs": 129738.144125,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "item_volume_relax"
     },
     {
       "backend": "cpu",
       "budgetClass": "operation",
-      "growthExponent": 0.05282699688857848,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 215.877458,
+      "canaryBeforeMs": 158.238833,
+      "growthExponent": 0.22553531398523038,
       "measurements": [
         {
-          "p50Ms": 5.034833,
-          "p95Ms": 5.209125,
+          "p50Ms": 2.402792,
+          "p95Ms": 2.412542,
           "p95SpreadMs": 0,
           "repeats": 1,
-          "samples": 70,
+          "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 6.280959,
-          "p95Ms": 6.3345,
-          "p95SpreadMs": 0.2007089999999998,
-          "repeats": 3,
-          "samples": 16,
+          "p50Ms": 5.476333,
+          "p95Ms": 5.515333,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 109,
           "stamps": 100
         },
         {
-          "p50Ms": 6.445459,
-          "p95Ms": 6.643834,
-          "p95SpreadMs": 0.15566799999999947,
+          "p50Ms": 6.768417,
+          "p95Ms": 6.81625,
+          "p95SpreadMs": 0.07679100000000005,
           "repeats": 3,
           "samples": 16,
           "stamps": 1000
@@ -2913,32 +3892,38 @@
       ],
       "name": "sdf_flatten",
       "servedBy": "cpu",
+      "startedAtMs": 136337.858667,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "item_volume_flatten"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": 0.9744378902469358,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 135.634542,
+      "canaryBeforeMs": 158.957584,
+      "growthExponent": 0.9753041123921153,
       "measurements": [
         {
-          "p50Ms": 0.000917,
-          "p95Ms": 0.000959,
+          "p50Ms": 0.001,
+          "p95Ms": 0.001,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.008125,
-          "p95Ms": 0.008209,
+          "p50Ms": 0.008625,
+          "p95Ms": 0.008792,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.080167,
-          "p95Ms": 0.08525,
+          "p50Ms": 0.085125,
+          "p95Ms": 0.08925,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -2947,33 +3932,39 @@
       ],
       "name": "sdf_move",
       "servedBy": "cpu",
+      "startedAtMs": 143931.759208,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "layer_move_surface"
     },
     {
       "backend": "cpu",
       "budgetClass": "operation",
-      "growthExponent": 0.6925613091082042,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 202.0385,
+      "canaryBeforeMs": 131.415667,
+      "growthExponent": 0.5960077637866585,
       "measurements": [
         {
-          "p50Ms": 26.961334,
-          "p95Ms": 27.233,
+          "p50Ms": 20.2785,
+          "p95Ms": 20.440833,
           "p95SpreadMs": 0,
           "repeats": 1,
-          "samples": 56,
+          "samples": 74,
           "stamps": 10
         },
         {
-          "p50Ms": 91.912792,
-          "p95Ms": 94.569625,
-          "p95SpreadMs": 12.215500000000006,
-          "repeats": 3,
-          "samples": 31,
+          "p50Ms": 51.54975,
+          "p95Ms": 54.546875,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 39,
           "stamps": 100
         },
         {
-          "p50Ms": 659.128,
-          "p95Ms": 661.025334,
-          "p95SpreadMs": 11.613959000000023,
+          "p50Ms": 314.4355,
+          "p95Ms": 318.063708,
+          "p95SpreadMs": 0.9253749999999741,
           "repeats": 3,
           "samples": 16,
           "stamps": 1000
@@ -2981,32 +3972,38 @@
       ],
       "name": "sdf_consolidate",
       "servedBy": "cpu",
+      "startedAtMs": 144359.902583,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "layer_consolidate"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 147.598167,
+      "canaryBeforeMs": 155.982625,
       "growthExponent": 0,
       "measurements": [
         {
-          "p50Ms": 0.000291,
-          "p95Ms": 0.000292,
+          "p50Ms": 0.000125,
+          "p95Ms": 0.000166,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.000291,
-          "p95Ms": 0.000292,
+          "p50Ms": 0.000125,
+          "p95Ms": 0.000166,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.000291,
-          "p95Ms": 0.000292,
+          "p50Ms": 0.000125,
+          "p95Ms": 0.000166,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -3015,32 +4012,38 @@
       ],
       "name": "cut_create",
       "servedBy": "cpu",
+      "startedAtMs": 155951.829792,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "cut_create"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 131.436417,
+      "canaryBeforeMs": 137.136625,
       "growthExponent": 0,
       "measurements": [
         {
-          "p50Ms": 0.000209,
-          "p95Ms": 0.00025,
+          "p50Ms": 8.4e-05,
+          "p95Ms": 0.000125,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.00025,
-          "p95Ms": 0.00025,
+          "p50Ms": 8.4e-05,
+          "p95Ms": 0.000125,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.000209,
-          "p95Ms": 0.00025,
+          "p50Ms": 8.4e-05,
+          "p95Ms": 0.000125,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -3049,32 +4052,38 @@
       ],
       "name": "trim_curve",
       "servedBy": "cpu",
+      "startedAtMs": 156236.959625,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "cut_polygon_from_open_curve"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.00012709818387527454,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.710667,
+      "canaryBeforeMs": 130.590042,
+      "growthExponent": 0,
       "measurements": [
         {
-          "p50Ms": 0.001584,
-          "p95Ms": 0.001709,
+          "p50Ms": 0.000667,
+          "p95Ms": 0.000709,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.001625,
-          "p95Ms": 0.00175,
+          "p50Ms": 0.000667,
+          "p95Ms": 0.000708,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.001584,
-          "p95Ms": 0.001708,
+          "p50Ms": 0.000667,
+          "p95Ms": 0.000709,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -3083,32 +4092,38 @@
       ],
       "name": "tube_create",
       "servedBy": "cpu",
+      "startedAtMs": 156499.537083,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "tube_create"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.0395906230238124,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.794166,
+      "canaryBeforeMs": 130.45775,
+      "growthExponent": 0.04884591073371879,
       "measurements": [
         {
-          "p50Ms": 0.000541,
-          "p95Ms": 0.00075,
+          "p50Ms": 0.00025,
+          "p95Ms": 0.000333,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.0005,
-          "p95Ms": 0.000625,
+          "p50Ms": 0.000209,
+          "p95Ms": 0.00025,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.000541,
-          "p95Ms": 0.000625,
+          "p50Ms": 0.000209,
+          "p95Ms": 0.000417,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -3117,32 +4132,38 @@
       ],
       "name": "pose_region",
       "servedBy": "cpu",
+      "startedAtMs": 156761.593625,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "pose"
     },
     {
       "backend": "cpu",
       "budgetClass": "gesture",
-      "growthExponent": -0.010180641323853913,
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.387667,
+      "canaryBeforeMs": 130.282375,
+      "growthExponent": 0,
       "measurements": [
         {
-          "p50Ms": 0.000833,
-          "p95Ms": 0.000917,
+          "p50Ms": 0.000334,
+          "p95Ms": 0.000375,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 10
         },
         {
-          "p50Ms": 0.000833,
-          "p95Ms": 0.000875,
+          "p50Ms": 0.000334,
+          "p95Ms": 0.000375,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
           "stamps": 100
         },
         {
-          "p50Ms": 0.000833,
-          "p95Ms": 0.000875,
+          "p50Ms": 0.000334,
+          "p95Ms": 0.000375,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 200,
@@ -3151,78 +4172,13 @@
       ],
       "name": "armature_edit",
       "servedBy": "cpu",
+      "startedAtMs": 157023.935917,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
       "verb": "layer_armature_edit"
-    },
-    {
-      "backend": "cpu",
-      "budgetClass": "interactive",
-      "growthExponent": 0.7478979776286513,
-      "measurements": [
-        {
-          "p50Ms": 0.07556420833333334,
-          "p95Ms": 0.07724479166666666,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 200,
-          "stamps": 10
-        },
-        {
-          "p50Ms": 0.28226216666666665,
-          "p95Ms": 0.2874809166666667,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 200,
-          "stamps": 100
-        },
-        {
-          "p50Ms": 2.369605875,
-          "p95Ms": 2.419163166666667,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 26,
-          "stamps": 1000
-        }
-      ],
-      "name": "sdf_stroke_cpu",
-      "servedBy": "cpu",
-      "verb": "sdf_stroke"
-    },
-    {
-      "backend": "metal",
-      "budgetClass": "interactive",
-      "growthExponent": 0.4421407254088719,
-      "measurements": [
-        {
-          "p50Ms": 0.23583508333333333,
-          "p95Ms": 0.23935416666666667,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 200,
-          "stamps": 10
-        },
-        {
-          "p50Ms": 0.3738662916666667,
-          "p95Ms": 0.38178125,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 164,
-          "stamps": 100
-        },
-        {
-          "p50Ms": 1.8057100833333333,
-          "p95Ms": 1.8336753333333335,
-          "p95SpreadMs": 0,
-          "repeats": 1,
-          "samples": 34,
-          "stamps": 1000
-        }
-      ],
-      "name": "sdf_stroke_metal",
-      "servedBy": "metal",
-      "verb": "sdf_stroke"
     }
   ],
-  "claycoreCommit": "8d13b47ac59e448c8e1e5f56765b85f2bc009053",
+  "claycoreCommit": "2aa5c74e0e0f4c8d4715f5ef14e08ecafc7c7afe",
   "deviceModel": "iPad15,5",
   "osVersion": "Version 26.5.2 (Build 23F84)",
   "tolerance": 1.4

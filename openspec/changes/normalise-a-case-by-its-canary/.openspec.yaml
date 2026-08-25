@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-08-25
+goal: Divide a case's measurement by the machine it ran on, so a thermal window
+  that moved cannot be reported as an engine that regressed

@@ -108,6 +108,34 @@ def canary_baselines(run: dict) -> dict[str, float]:
     return settled
 
 
+def bracket_factor(run: dict, case: dict) -> float | None:
+    """How much slower the machine was while THIS case ran, from its own bracket.
+
+    `canary_factor` above lines a case up against the NEAREST periodic sample,
+    which is the best a 30-second timer allows and is not good enough to gate
+    on: `sdf_move` runs at 135 s between samples at 122 s (x1.07) and 147 s
+    (x1.50), because the two pooled cases in that gap take the device from cold
+    to throttled in 13 seconds. Whichever sample happens to be nearer decides
+    the verdict. That reported a 1.6x regression on a verb measuring 1.05x
+    off-device (#297).
+
+    A bracketed case carries the canary sampled immediately before and
+    immediately after itself, so no interpolation is involved. Returns None
+    when the case was not bracketed — records written before that existed, and
+    the gallery bundle, which sets no per-case context at all. Those are
+    compared raw, exactly as they were before.
+    """
+    before = case.get("canaryBeforeMs", 0.0)
+    after = case.get("canaryAfterMs", 0.0)
+    if not before or not after:
+        return None
+    bundle = case.get("bundle")
+    base = canary_baselines(run).get(bundle) if bundle else None
+    if not base:
+        return None
+    return ((before + after) / 2.0) / base
+
+
 def canary_factor(run: dict, case: dict) -> float | None:
     """How much slower the machine was when THIS case ran, or None.
 
@@ -121,6 +149,14 @@ def canary_factor(run: dict, case: dict) -> float | None:
     lined up against, and guessing which process it came from would invent the
     attribution this function exists to make honest.
     """
+    # The case's own bracket when it has one, because that is the factor the
+    # gate DIVIDES BY — reporting the nearest periodic sample instead would
+    # tell a reader conditions were fine while a 1.43x correction was applied
+    # to sdf_flatten, which is the same class of mistake this file exists to
+    # stop making.
+    bracketed = bracket_factor(run, case)
+    if bracketed is not None:
+        return bracketed
     bundle = case.get("bundle")
     samples = _by_bundle(run).get(bundle) if bundle else None
     base = canary_baselines(run).get(bundle) if bundle else None
@@ -193,6 +229,21 @@ def single_observation(case: dict) -> bool:
     return bool(ms) and all(m.get("samples", 0) <= 1 for m in ms)
 
 
+def normalised_p95(run: dict, case: dict) -> tuple[float, float | None]:
+    """This case's worst p95, and the factor it was divided by (None if raw).
+
+    Dividing by the machine's own slowdown is what makes a case mean the same
+    thing wherever it runs, which is what the gate has always claimed and never
+    delivered. It is the comparison that is normalised, not the measurement:
+    the raw figure is what a user would feel and is printed beside it.
+    """
+    raw = worst_p95(case)
+    factor = bracket_factor(run, case)
+    if factor is None or factor <= 0:
+        return raw, None
+    return raw / factor, factor
+
+
 def worst_spread(case: dict) -> float:
     """Widest per-pass p95 spread over this case's measurement points.
 
@@ -220,13 +271,21 @@ def write_baseline(run: dict, path: pathlib.Path, tolerance: float) -> None:
     """
     budgets = {}
     for case in run["cases"]:
-        measured = worst_p95(case)
-        budgets[case["name"]] = {
+        # NORMALISED, like the check that will compare against it: a budget
+        # derived from a case measured on a throttled device bakes that
+        # throttling in as the engine's cost. `rawMs` keeps the figure a reader
+        # would recognise from the run's own output.
+        measured, factor = normalised_p95(run, case)
+        entry = {
             "class": case["budgetClass"],
             # headroom over what it measures today
             "budgetMs": round(measured * 1.5, 4),
             "measuredMs": round(measured, 4),
         }
+        if factor is not None:
+            entry["rawMs"] = round(worst_p95(case), 4)
+            entry["machineFactor"] = round(factor, 4)
+        budgets[case["name"]] = entry
     baseline = {
         "deviceModel": run["deviceModel"],
         "osVersion": run["osVersion"],
@@ -235,6 +294,10 @@ def write_baseline(run: dict, path: pathlib.Path, tolerance: float) -> None:
         "tolerance": tolerance,
         "budgets": budgets,
         "cases": run["cases"],
+        # The baseline's own canary, without which its cases cannot be
+        # normalised and the check would compare a normalised run against a
+        # raw baseline.
+        "canary": run.get("canary", []),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(baseline, indent=2, sort_keys=True) + "\n")
@@ -298,7 +361,13 @@ def main() -> int:
 
     for case in run["cases"]:
         name = case["name"]
-        measured = worst_p95(case)
+        raw = worst_p95(case)
+        # Compare like with like: a case's number divided by how slow the
+        # machine was while it ran. `raw` is what a user would feel and is what
+        # the frame-share note below is about; `measured` is what is gated.
+        measured, factor = normalised_p95(run, case)
+        shown = (f"{measured:.3f} ms p95 (raw {raw:.3f}, machine x{factor:.2f})"
+                 if factor is not None else f"{measured:.3f} ms p95")
 
         # BUDGET — every case must declare one. An unbudgeted latency number
         # is a measurement, and this tool exists to gate.
@@ -309,11 +378,13 @@ def main() -> int:
             over = measured - budget["budgetMs"]
             if measured > budget["budgetMs"] and over > NOISE_FLOOR_MS:
                 failures.append(
-                    f"{name}: BUDGET {measured:.3f} ms p95 exceeds "
+                    f"{name}: BUDGET {shown} exceeds "
                     f"{budget['budgetMs']:.3f} ms ({budget['class']})")
             elif (budget["class"] == "interactive"
-                  and measured > INTERACTIVE_FRAME_SHARE_MS):
-                notes.append(f"{name}: {measured:.3f} ms p95 is inside its budget but "
+                  and raw > INTERACTIVE_FRAME_SHARE_MS):
+                # RAW here, deliberately: a frame share is about the time a
+                # hand waits, and a throttled device still makes it wait.
+                notes.append(f"{name}: {raw:.3f} ms p95 is inside its budget but "
                              f"outside a 120 Hz frame share "
                              f"({INTERACTIVE_FRAME_SHARE_MS:.2f} ms)")
 
@@ -322,7 +393,13 @@ def main() -> int:
         if base is None:
             notes.append(f"{name}: new case, no baseline to compare against")
         else:
-            base_p95 = worst_p95(base)
+            base_p95, base_factor = normalised_p95(baseline, base)
+            if (factor is None) != (base_factor is None):
+                notes.append(
+                    f"{name}: comparing a "
+                    f"{'normalised' if factor is not None else 'raw'} measurement against a "
+                    f"{'normalised' if base_factor is not None else 'raw'} baseline; "
+                    "re-derive the baseline to compare like with like")
             grew = measured - base_p95
             if base_p95 > 0 and measured > base_p95 * tolerance and grew > NOISE_FLOOR_MS:
                 # Say what this case's own repeats measured, when it had any.
@@ -351,7 +428,7 @@ def main() -> int:
                               f"case spread {spread:.3f} ms, wider than the "
                               f"{grew:.3f} ms growth — treat as unproven")
                 failures.append(
-                    f"{name}: REGRESSION {measured:.3f} ms p95 vs baseline "
+                    f"{name}: REGRESSION {shown} vs baseline "
                     f"{base_p95:.3f} ms (x{measured / base_p95:.2f}, "
                     f"tolerance x{tolerance}, +{grew:.3f} ms){caveat}")
 

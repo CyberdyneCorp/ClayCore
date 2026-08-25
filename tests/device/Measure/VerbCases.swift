@@ -40,7 +40,9 @@ final class VerbLatencyTests: XCTestCase {
                            cleanup: () -> Void)?
     ) {
         var measurements: [Measurement] = []
-        collector.sampleCanaryIfDue()
+        // Bracket the case rather than sampling on a timer: what the gate
+        // needs is the machine THIS case ran on. See CaseResult.canaryBeforeMs.
+        let canaryBefore = collector.sampleCanaryNow()
         let caseStartedAtMs = collector.elapsedMs
         let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
         for stamps in axis {
@@ -55,6 +57,7 @@ final class VerbLatencyTests: XCTestCase {
                                             repeats: r.repeats,
                                             p95SpreadMs: r.spread))
         }
+        let canaryAfter = collector.sampleCanaryNow()
         collector.add(CaseResult(
             name: name, verb: verb, budgetClass: cls,
             backend: backend, servedBy: backend,
@@ -62,7 +65,9 @@ final class VerbLatencyTests: XCTestCase {
             growthExponent: Timing.growthExponent(measurements),
             startedAtMs: caseStartedAtMs,
             thermalStateStart: caseThermalStart,
-            thermalStateEnd: DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)))
+            thermalStateEnd: DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState),
+            canaryBeforeMs: canaryBefore,
+            canaryAfterMs: canaryAfter))
     }
 
     /// Every voxel verb and every mask/SDF verb, in one run so they share a
