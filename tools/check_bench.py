@@ -302,6 +302,34 @@ MAX_RATIO = [
     # to catch and this reads its healthy value. That is the gate working: it
     # charges for the duplication on the machine that actually pays for it.
     ("BM_TapeCombineAddColored", "BM_TapeCombineAddColoredRef", 1.25),
+    # Rebuilding the whole-document tape after an APPEND against compiling it
+    # from scratch (#197 phase 1). A sculpt grows a node per brush stamp and a
+    # host raycasts to place the next one, so this rebuild is on the
+    # interactive path and used to be the whole document every time.
+    #
+    # A RATIO rather than a ceiling, because both sides do the same work on the
+    # same document in the same process and only one of them reuses the
+    # compiled prefix. What it catches is the fast path silently ceasing to
+    # fire — a refused checkpoint, an invalidation that stopped recording
+    # appends, a prefix copied twice — all of which land at or above 1.0x.
+    #
+    # Measured quiet at 50 000 items: 0.544 ms against 10.3 ms, so 0.053x.
+    #
+    # THE CEILING IS NOT SET FROM THAT, and the reason is worth recording,
+    # because it is the trap a tighter number would have walked into. The two
+    # sides do not have the same bottleneck: reuse is a 7.8 MiB memcpy and is
+    # memory-bandwidth bound, while the full compile is dominated by per-item
+    # work and is compute bound. So a loaded runner does NOT move them
+    # together — measured on this machine with two other jobs at ~98% CPU, the
+    # append side went 0.544 -> 3.4 ms while the compile side barely moved,
+    # and the ratio degraded from 0.053x to 0.31x. A ceiling read off the
+    # quiet number would fail on a busy CI runner and teach the next person to
+    # distrust the gate.
+    #
+    # 0.50 sits an order of magnitude above the quiet measurement, above the
+    # worst contention observed, and still 2x below the 1.0x that a lost fast
+    # path reads.
+    ("BM_WholeDocAppend50000", "BM_WholeDocCompile50000", 0.50),
 ]
 
 

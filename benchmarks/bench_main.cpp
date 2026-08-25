@@ -394,6 +394,84 @@ BENCHMARK(BM_DeepDocCompile193)->Unit(benchmark::kMillisecond);
 void BM_DeepDocCompile2000(benchmark::State& state) { deep_doc_compile(state, 2000); }
 BENCHMARK(BM_DeepDocCompile2000)->Unit(benchmark::kMillisecond);
 
+// -- the whole-document tape after an append (#197 phase 1) ------------------
+//
+// A host that raycasts to place the next dab reads the WHOLE-document tape,
+// which is cached on the document revision and so thrown away by every edit.
+// The pair below is the cost of that rebuild, with and without reusing the
+// compiled prefix.
+//
+// What the ratio is bounded by is worth stating, because it is not the
+// instruction count. Reuse turns an O(N) COMPILE into an O(N) MEMCPY: it
+// removes the per-item work — influence bounds, transform inversion, curve
+// tessellation, info folding — but not the byte movement, and params are ~90%
+// of the bytes. Measured on this machine at 50k items: 7.58 ms to compile,
+// 0.83 ms to copy 7.82 MiB and append, so roughly 9x and no more. A result
+// far below that means something is copying twice.
+//
+// The append rows measure ONE rebuild on a document of the size in their
+// name: the dab is appended once and re-compiled onto the same prefix every
+// iteration.
+//
+// AND IT LEAVES THE GPU RE-UPLOAD UNTOUCHED. The reused tape has different
+// bytes and so a different compile_id, which is a guaranteed miss in the
+// Metal backend's resident-tape cache and a full re-emit for Vulkan's
+// memcmp. #197 is not closed by this pair improving; that needs the tape
+// identity to carry a generation and a dirty range.
+void deep_doc_whole_compile(benchmark::State& state, int nodes) {
+    scene::Document doc = deep_sphere(nodes);
+    for (auto _ : state) {
+        scene::Tape tape = scene::compile_document(doc);
+        benchmark::DoNotOptimize(tape.instrs.size());
+        state.counters["instrs"] = static_cast<double>(tape.instrs.size());
+    }
+    state.counters["nodes"] = static_cast<double>(nodes);
+}
+
+void deep_doc_whole_append(benchmark::State& state, int nodes) {
+    scene::Document doc = deep_sphere(nodes);
+    scene::TapeCheckpoint base_cp;
+    const scene::Tape base = scene::compile_document_resumable(doc, &base_cp);
+
+    // The dab is appended ONCE, and every iteration rebuilds the same tape
+    // from the same prefix. Appending per iteration instead would grow the
+    // document as the benchmark ran — at 1 000 nodes it reached 11 000 — and
+    // the row would report an average over sizes rather than the size in its
+    // name, which is not comparable with the compile row above it.
+    scene::Node dab;
+    dab.prim = scene::Prim::sphere(0.05f);
+    dab.xform.position = cf3(0.0f, 1.0f, 0.0f);
+    dab.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.03f};
+    const scene::NodeId id = doc.layers[0].sdf->insert(dab);
+
+    for (auto _ : state) {
+        scene::Tape grown;
+        if (!scene::compile_document_append(base, base_cp, doc, {id}, &grown, nullptr)) {
+            state.SkipWithError("the append was refused; the fast path is not being measured");
+            return;
+        }
+        benchmark::DoNotOptimize(grown.instrs.size());
+        state.counters["instrs"] = static_cast<double>(grown.instrs.size());
+    }
+    state.counters["nodes"] = static_cast<double>(doc.layers[0].sdf->roots.size());
+}
+
+// NAMED, not Arg()-parameterised: check_bench.py keys its gate on the part of
+// the name before "/", so BM_X/50000 and BM_X/1000 would collapse to one key.
+void BM_WholeDocCompile1000(benchmark::State& state) { deep_doc_whole_compile(state, 1000); }
+BENCHMARK(BM_WholeDocCompile1000)->Unit(benchmark::kMillisecond);
+void BM_WholeDocCompile10000(benchmark::State& state) { deep_doc_whole_compile(state, 10000); }
+BENCHMARK(BM_WholeDocCompile10000)->Unit(benchmark::kMillisecond);
+void BM_WholeDocCompile50000(benchmark::State& state) { deep_doc_whole_compile(state, 50000); }
+BENCHMARK(BM_WholeDocCompile50000)->Unit(benchmark::kMillisecond);
+
+void BM_WholeDocAppend1000(benchmark::State& state) { deep_doc_whole_append(state, 1000); }
+BENCHMARK(BM_WholeDocAppend1000)->Unit(benchmark::kMillisecond);
+void BM_WholeDocAppend10000(benchmark::State& state) { deep_doc_whole_append(state, 10000); }
+BENCHMARK(BM_WholeDocAppend10000)->Unit(benchmark::kMillisecond);
+void BM_WholeDocAppend50000(benchmark::State& state) { deep_doc_whole_append(state, 50000); }
+BENCHMARK(BM_WholeDocAppend50000)->Unit(benchmark::kMillisecond);
+
 // The cull ALONE, over a dab's worth of bricks: this is the ~64 ns x item x
 // brick walk #118 says is past the interactive budget at 10k items before a
 // sample is evaluated.

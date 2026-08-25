@@ -316,6 +316,207 @@ TEST_CASE("tape cache: every mutating entry point is seen by the next read") {
     }
 }
 
+// Appending an item is the one edit the cache rebuilds by REUSING the tape it
+// already had, compiling only the appended node onto the compiled prefix
+// rather than re-emitting the document. That fast path is invisible when it
+// works and silent when it is wrong: the read succeeds, nothing errors, and
+// the answer is the field as it was some dabs ago.
+//
+// So these check what the fast path can get wrong, not that it was taken.
+TEST_CASE("tape cache: an append is rebuilt by reuse and is still seen") {
+    SUBCASE("each append in a stroke reads as a document built from scratch") {
+        // The oracle is a FRESH document holding the same items: its first
+        // read has no prefix to reuse and so is always a full compile. A
+        // stale cache, or a prefix reused where it should not have been,
+        // shows up as a disagreement with it.
+        //
+        // `before != after` would be the weaker test and a trap here: a dab
+        // that lands entirely inside the base sphere changes no distance at
+        // all, because min() is unchanged, so it would fail against perfectly
+        // correct code.
+        auto built_with = [](int dabs) {
+            Doc fresh;
+            add_sphere(fresh, 1.0f, 0.0f);
+            for (int i = 1; i <= dabs; ++i)
+                add_sphere(fresh, 0.25f, -0.9f + 0.2f * static_cast<float>(i));
+            return field_signature(fresh.d);
+        };
+
+        Doc doc;
+        add_sphere(doc, 1.0f, 0.0f);
+        std::vector<float> base = field_signature(doc.d);
+        // A stroke, not one dab: every append after the first resumes from
+        // the tape the previous one produced, which is the path a single-dab
+        // test never reaches.
+        for (int i = 1; i <= 8; ++i) {
+            add_sphere(doc, 0.25f, -0.9f + 0.2f * static_cast<float>(i));
+            CHECK(field_signature(doc.d) == built_with(i));
+        }
+        // And the stroke did move the field, so the agreement above is not
+        // two identical readings of an unchanged document.
+        add_sphere(doc, 0.9f, 0.9f);
+        CHECK(field_signature(doc.d) != base);
+    }
+
+    SUBCASE("appending without reading in between still shows every item") {
+        // The log accumulates across several edits and is consumed by one
+        // rebuild; a rebuild that dropped all but the last would pass a
+        // read-after-every-dab test and fail this one.
+        Doc a;
+        add_sphere(a, 1.0f, 0.0f);
+        for (int i = 1; i <= 5; ++i) add_sphere(a, 0.25f, -0.9f + 0.2f * static_cast<float>(i));
+
+        Doc b;
+        add_sphere(b, 1.0f, 0.0f);
+        for (int i = 1; i <= 5; ++i) {
+            add_sphere(b, 0.25f, -0.9f + 0.2f * static_cast<float>(i));
+            field_signature(b.d);  // forces a rebuild per dab
+        }
+        CHECK(field_signature(a.d) == field_signature(b.d));
+    }
+
+    SUBCASE("an append reads the same as a document built without the cache") {
+        // The fast path's answer against the answer of a document that never
+        // had a prefix to reuse: same items, same order, so same field.
+        Doc grown;
+        add_sphere(grown, 1.0f, 0.0f);
+        field_signature(grown.d);  // compile, so the append below resumes
+        add_sphere(grown, 0.4f, 0.7f);
+
+        Doc built;
+        add_sphere(built, 1.0f, 0.0f);
+        add_sphere(built, 0.4f, 0.7f);
+        CHECK(field_signature(grown.d) == field_signature(built.d));
+    }
+
+    SUBCASE("undo after an append restores the field exactly") {
+        Doc doc;
+        REQUIRE(clay_document_enable_undo(doc.d) == CLAY_OK);
+        add_sphere(doc, 1.0f, 0.0f);
+        std::vector<float> before = field_signature(doc.d);
+
+        add_sphere(doc, 0.4f, 0.7f);
+        CHECK(field_signature(doc.d) != before);
+
+        std::int32_t undone = 0;
+        REQUIRE(clay_document_undo(doc.d, &undone) == CLAY_OK);
+        REQUIRE(undone != 0);
+        // Undo does not go through the append funnel, so it must fall back to
+        // a full recompile. If the append log survived it, this reads as the
+        // appended document and the sculpt silently refuses to undo.
+        CHECK(field_signature(doc.d) == before);
+
+        std::int32_t redone = 0;
+        REQUIRE(clay_document_redo(doc.d, &redone) == CLAY_OK);
+        REQUIRE(redone != 0);
+        CHECK(field_signature(doc.d) != before);
+    }
+
+    SUBCASE("an append interleaved with an ordinary edit") {
+        // A parameter edit between two appends breaks the log's contiguity.
+        // Reusing across it would answer with the pre-edit item.
+        Doc doc;
+        clay_node_id base = add_sphere(doc, 1.0f, 0.0f);
+        add_sphere(doc, 0.4f, 0.7f);
+        field_signature(doc.d);
+
+        const float r = 0.55f;
+        REQUIRE(clay_layer_set_prim(doc.d, doc.layer, base, CLAY_PRIM_SPHERE, &r, 1) == CLAY_OK);
+        add_sphere(doc, 0.3f, -0.7f);
+
+        Doc built;
+        clay_node_id b0 = add_sphere(built, 1.0f, 0.0f);
+        add_sphere(built, 0.4f, 0.7f);
+        REQUIRE(clay_layer_set_prim(built.d, built.layer, b0, CLAY_PRIM_SPHERE, &r, 1) == CLAY_OK);
+        add_sphere(built, 0.3f, -0.7f);
+        CHECK(field_signature(doc.d) == field_signature(built.d));
+    }
+
+    SUBCASE("appending to a second layer, which is where the union sits") {
+        // With two layers the tape ends in the hard union that folds the
+        // second into the first, and an appended item belongs in front of it.
+        // A soft blend is what makes the difference observable.
+        Doc doc;
+        add_sphere(doc, 1.0f, 0.0f);
+        clay_layer_id second = 0;
+        REQUIRE(clay_add_sdf_layer(doc.d, "detail", &second) == CLAY_OK);
+
+        auto add_soft = [&](clay_document* d, clay_layer_id layer, float x) {
+            float r = 0.5f;
+            clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+            REQUIRE(it != nullptr);
+            const float pos[3] = {x, 0.0f, 0.0f};
+            REQUIRE(clay_item_set_position(it, pos) == CLAY_OK);
+            REQUIRE(clay_item_set_op(it, CLAY_OP_ADD) == CLAY_OK);
+            REQUIRE(clay_item_set_blend(it, CLAY_BLEND_QUADRATIC, 0.25f) == CLAY_OK);
+            REQUIRE(clay_layer_add_item(d, layer, it, nullptr) == CLAY_OK);
+            clay_item_destroy(it);
+        };
+        add_soft(doc.d, second, 0.8f);
+        field_signature(doc.d);
+        add_soft(doc.d, second, 1.1f);
+
+        Doc built;
+        add_sphere(built, 1.0f, 0.0f);
+        clay_layer_id built_second = 0;
+        REQUIRE(clay_add_sdf_layer(built.d, "detail", &built_second) == CLAY_OK);
+        add_soft(built.d, built_second, 0.8f);
+        add_soft(built.d, built_second, 1.1f);
+        CHECK(field_signature(doc.d) == field_signature(built.d));
+    }
+}
+
+// Several readers can race the rebuild an append leaves pending. The append
+// log is consumed by whichever of them gets there first, so a second rebuild
+// must not apply it again — appending the same items twice would be a wrong
+// field that no single-threaded test could produce.
+//
+// Mutating a document while another thread reads it was never supported and
+// is not what this covers: the appends happen first, then the readers race.
+TEST_CASE("tape cache: readers racing a pending append all get the same field") {
+    // The probes, and the answer, computed on THIS thread: doctest's
+    // assertion macros are not thread-safe, so the workers below compare and
+    // count rather than REQUIRE — the same reason the reader test above
+    // inlines its eval instead of calling field_signature.
+    const int kProbes = 24;
+    std::vector<float> pts(kProbes * 3);
+    for (int i = 0; i < kProbes; ++i) {
+        pts[i * 3 + 0] = -1.2f + 0.1f * static_cast<float>(i);
+        pts[i * 3 + 1] = 0.11f * static_cast<float>(i % 7) - 0.3f;
+        pts[i * 3 + 2] = 0.09f * static_cast<float>(i % 5) - 0.2f;
+    }
+
+    Doc oracle;
+    add_sphere(oracle, 1.0f, 0.0f);
+    for (int i = 1; i <= 3; ++i) add_sphere(oracle, 0.3f, 0.4f * static_cast<float>(i));
+    std::vector<float> expected(kProbes);
+    REQUIRE(clay_eval_points(oracle.d, nullptr, pts.data(), kProbes, expected.data(), nullptr) ==
+            CLAY_OK);
+
+    Doc doc;
+    add_sphere(doc, 1.0f, 0.0f);
+    field_signature(doc.d);  // compile, so the appends below have a prefix
+    for (int i = 1; i <= 3; ++i) add_sphere(doc, 0.3f, 0.4f * static_cast<float>(i));
+    // Deliberately not read here: the rebuild is left pending so the threads
+    // race for it, and the append log must be consumed exactly once.
+
+    std::atomic<int> mismatches{0};
+    std::vector<std::thread> workers;
+    for (int t = 0; t < 8; ++t) {
+        workers.emplace_back([&] {
+            std::vector<float> got(kProbes);
+            for (int k = 0; k < 50; ++k) {
+                if (clay_eval_points(doc.d, nullptr, pts.data(), kProbes, got.data(), nullptr) !=
+                        CLAY_OK ||
+                    got != expected)
+                    mismatches.fetch_add(1);
+            }
+        });
+    }
+    for (std::thread& w : workers) w.join();
+    CHECK(mismatches.load() == 0);
+}
+
 TEST_CASE("tape cache: the picking tape has its own invalidation") {
     // Ghosting changes what picking sees and nothing about what the field
     // evaluates to, so the two tapes are different and cached separately. A

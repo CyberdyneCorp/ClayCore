@@ -120,6 +120,10 @@ The kernel dialect is the subset of C++ that all four targets accept: no virtual
 
 Scenes do not become shader code. The `scene` module compiles an edit list into a **flat postfix tape** (opcodes + parameter blocks, transforms pre-inverted). Every backend ships one fixed **tape interpreter kernel** — no per-edit shader recompiles, instant parameter edits (the mzschwartz5 lesson), and the door open to interval-arithmetic tape shortening (Keeter MPR) as the large-scene upgrade.
 
+A document remembers its compiled tape and rebuilds it when the document changes. **Appending an item — which is what a brush stamp is — reuses the compiled prefix** instead of re-emitting the document: the compiler emits items left to right and never moves what it has written, so the prefix's parameter offsets and blob handles are still correct with the new item's bytes after them. At 50 000 items that rebuild is 0.54 ms against 10.3 ms for a full compile. Every other edit — an insert anywhere but the tail, a removal, a move, a parameter change, undo, redo — recompiles in full, and so does an append the compiler cannot prove is one.
+
+This is the CPU half only. The reused tape has different bytes and so a different `compile_id`, which is a guaranteed miss in a backend's resident-tape cache: the ~148 bytes an appended dab adds still cost a full re-upload of the whole tape. Closing that needs the tape identity to carry a generation and a changed range rather than a fresh id.
+
 | Backend | Host layer | Kernel path | Status/notes |
 |---|---|---|---|
 | **CPU** | thread pool, batch API | same headers, scalar + SIMD (Apple `simd` / SSE-NEON via `xsimd`) | reference; always available |
