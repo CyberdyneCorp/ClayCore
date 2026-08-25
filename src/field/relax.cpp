@@ -134,5 +134,14 @@ FieldVolume relax(const std::function<float(kernel::cfloat3)>& source, const mat
     return relax(FieldVolume::sample(source, region, cell_size, band), settings);
 }
 
+FieldVolume relax(const FieldVolume::BrickBlockFill& source, const math::Aabb& region,
+                  float cell_size, float band, const RelaxSettings& settings) {
+    // Still exactly sample-then-relax, which is what the per-point overload
+    // above is too — relax averages cell-aligned taps and a fresh bake's taps
+    // ARE the source at those lattice points, so there is nothing a fused form
+    // could do better. All that changes is who evaluates the source.
+    return relax(FieldVolume::sample_blocks(source, region, cell_size, band), settings);
+}
+
 }  // namespace field
 }  // namespace clay

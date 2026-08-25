@@ -23,6 +23,7 @@
 #include "clay/scene/bounds.h"
 #include "clay/scene/commands.h"
 #include "clay/eval/bake_points.h"
+#include "clay/eval/bake_volume.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/cull_index.h"
 #include "clay/scene/tape.h"
@@ -1154,6 +1155,45 @@ void BM_ConsolidateColoredGrownDoc(benchmark::State& state) {
     }
 }
 BENCHMARK(BM_ConsolidateColoredGrownDoc)->Unit(benchmark::kMillisecond);
+
+// The volume bake the document-sourced verbs reach — clay_item_volume_from_document
+// and the _relax_from / _flatten_from pair — once through the pooled block fill
+// and once through the per-point tape callable it replaced. Same pairing, same
+// reason, as the consolidate pair above: check_bench.py requires the pooled bake
+// to be FASTER, which is what catches the one-point-at-a-time bake coming back
+// on THIS path. bake_layer was already gated; these three entry points were not,
+// which is how they kept the serial walk for as long as they did.
+//
+// Byte-identical by contract, and held by
+// "the pooled tape fill bakes the volume the per-point tape callable does" in
+// test_consolidate.cpp rather than by this benchmark.
+void BM_VolumeBakeDoc(benchmark::State& state) {
+    scene::Document doc = sculpted_sphere(193);
+    const scene::Tape tape = scene::compile_layer(doc.layers.front());
+    const float cell = 0.05f, band = cell * 3.0f;
+    const kernel::cfloat3 pad = cf3(band, band, band);
+    const math::Aabb region{tape.bounds.min - pad, tape.bounds.max + pad};
+    for (auto _ : state) {
+        field::FieldVolume v = field::FieldVolume::sample_blocks(eval::tape_block_fill(tape),
+                                                                 region, cell, band);
+        benchmark::DoNotOptimize(v.sample_count());
+    }
+}
+BENCHMARK(BM_VolumeBakeDoc)->Unit(benchmark::kMillisecond);
+
+void BM_VolumeBakeSerialDoc(benchmark::State& state) {
+    scene::Document doc = sculpted_sphere(193);
+    const scene::Tape tape = scene::compile_layer(doc.layers.front());
+    const float cell = 0.05f, band = cell * 3.0f;
+    const kernel::cfloat3 pad = cf3(band, band, band);
+    const math::Aabb region{tape.bounds.min - pad, tape.bounds.max + pad};
+    for (auto _ : state) {
+        field::FieldVolume v = field::FieldVolume::sample(
+            [&tape](kernel::cfloat3 p) { return tape.eval(p).d; }, region, cell, band);
+        benchmark::DoNotOptimize(v.sample_count());
+    }
+}
+BENCHMARK(BM_VolumeBakeSerialDoc)->Unit(benchmark::kMillisecond);
 
 // Batched brick raycast (accel/parallel-raycast): clay_brick_cache_raycast_many
 // fans its rays out across the CPU backend's pool; the serial reference is the

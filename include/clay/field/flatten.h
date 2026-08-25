@@ -107,6 +107,18 @@ FieldVolume flatten(const std::function<float(kernel::cfloat3)>& source,
                     const math::Aabb& region, float cell_size, float band,
                     const FlattenSettings& settings);
 
+// The same again, from a source that fills whole BLOCKS of the sample lattice.
+// See the note on `relax`'s equivalent for why a document wants this door.
+//
+// The blend is applied to the block the source filled rather than to a volume
+// built from it: `sample_blocks` decides which bricks to keep from the values
+// it is handed, and flatten moves the surface by many band widths, so baking
+// the source first and flattening afterwards would keep the bricks around the
+// surface the SOURCE had and leave the facet in a band nothing sampled.
+FieldVolume flatten(const FieldVolume::BrickBlockFill& source,
+                    const math::Aabb& region, float cell_size, float band,
+                    const FlattenSettings& settings);
+
 // The same, with a volume as the source — which is what an imported mesh
 // gives, since there is no document behind it.
 //

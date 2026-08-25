@@ -28,7 +28,14 @@ ALLOWED = {
     "kernel": set(),  # the GPU dialect: no host threading, deliberately
     "math": {"parallel", "kernel"},
     "scene": {"parallel", "kernel", "math", "field"},
-    "eval": {"parallel", "kernel", "math", "scene"},
+    # eval -> field is the batched document bake (bake_volume.h): the block
+    # fill that `field::FieldVolume::sample_blocks` wants, filled by asking
+    # the CPU backend for a whole window of points at once. It names a tape
+    # AND a backend, so it cannot live in `scene` or below; `field` is the
+    # type it fills. It adds no edge to the transitive graph — eval already
+    # depends on scene, and scene depends on field — and creates no cycle,
+    # because field depends on nothing above kernel and math.
+    "eval": {"parallel", "kernel", "math", "scene", "field"},
     "brick": {"parallel", "kernel", "math", "scene", "eval"},
     # voxel -> field is the return trip (#90): a sculpt converting into a
     # sampled field so it can be an operand again. It adds no edge to the

@@ -85,5 +85,22 @@ FieldVolume relax(const std::function<float(kernel::cfloat3)>& source,
                   const math::Aabb& region, float cell_size, float band,
                   const RelaxSettings& settings = {});
 
+// The same again, from a source that fills whole BLOCKS of the sample lattice
+// rather than answering one point at a time.
+//
+// A tape is the source this exists for. Evaluating a document costs about ten
+// nanoseconds per instruction and one nanosecond of arithmetic, so the
+// interpreter is most of a bake and the interpreter is per point; handing an
+// evaluator a window of points lets it compile the tape once and spread the
+// window across a pool. `eval::tape_block_fill` is that fill for a document,
+// and `scene::bake_layer` has gone through the same door since it was written.
+//
+// Byte-identical to the overload above given a fill that agrees with the
+// callable — which is the contract `sample_blocks` already states, since blocks
+// land in slot order whatever order they were computed in.
+FieldVolume relax(const FieldVolume::BrickBlockFill& source,
+                  const math::Aabb& region, float cell_size, float band,
+                  const RelaxSettings& settings = {});
+
 }  // namespace field
 }  // namespace clay

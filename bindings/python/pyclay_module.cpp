@@ -24,6 +24,7 @@
 #include "clay/cut/cut.h"
 #include "clay/eval/backend.h"
 #include "clay/eval/bake_points.h"
+#include "clay/eval/bake_volume.h"
 #include "clay/field/flatten.h"
 #include "clay/field/move_topological.h"
 #include "clay/field/relax.h"
@@ -2644,8 +2645,9 @@ NB_MODULE(pyclay, m) {
 
                 PyVolume out;
                 out.prim = scene::Prim::volume();
-                out.volume = std::make_shared<const field::FieldVolume>(field::FieldVolume::sample(
-                    [&tape](kernel::cfloat3 p) { return tape.eval(p).d; }, region, cell, width));
+                out.volume = std::make_shared<const field::FieldVolume>(
+                    field::FieldVolume::sample_blocks(eval::tape_block_fill(tape), region, cell,
+                                                      width));
                 place(out, position, rotation_axis_angle, scale);
                 return out;
             },
@@ -2931,8 +2933,7 @@ NB_MODULE(pyclay, m) {
                 {
                     nb::gil_scoped_release release;
                     out.volume = std::make_shared<const field::FieldVolume>(field::flatten(
-                        [&tape](kernel::cfloat3 p) { return tape.eval(p).d; }, where, cell, width,
-                        settings));
+                        eval::tape_block_fill(tape), where, cell, width, settings));
                 }
                 place(out, position, rotation_axis_angle, scale);
                 return out;

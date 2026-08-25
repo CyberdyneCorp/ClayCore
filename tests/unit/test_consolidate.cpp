@@ -18,6 +18,8 @@
 #include "clay/field/volume.h"
 #include "clay/kernel/exactness.h"
 #include "clay/eval/bake_points.h"
+#include "clay/eval/bake_volume.h"
+#include "clay/field/relax.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/tape.h"
 
@@ -551,6 +553,86 @@ TEST_CASE("the grid bake matches the serial bake on a steep volume chain") {
         scene::bake_layer(doc.layers.front(), params, nullptr, eval::pooled_bake_eval());
     REQUIRE(baked);
     CHECK(baked->serialize() == serial_bake(doc.layers.front(), params).serialize());
+}
+
+TEST_CASE("the pooled tape fill bakes the volume the per-point tape callable does") {
+    // What the document-sourced verbs in the bindings changed to. `sample`
+    // asks a tape for one point at a time; `tape_block_fill` hands the CPU
+    // backend a window and lets it spread the window across its pool. The
+    // contract is byte-identity, not a tolerance — eval_points writes to
+    // disjoint slices and each point goes through the same scalar reference
+    // arithmetic — so a difference of one ULP is a defect, not rounding.
+    //
+    // A polished sphere rather than a plain one: it is a STEEP field, so kept
+    // bricks hold values far past the band, and a fill that disagreed about a
+    // sample near a brick's edge would change which bricks survive rather than
+    // only what they hold.
+    scene::Document doc = wrap(polish(sphere_document(0.8f), cf3(0, 0, 1), 0.55f, 0.02f, 0.08f));
+    const scene::Tape tape = scene::compile_layer(doc.layers.front());
+    const float cell = 0.04f, band = 0.12f;
+    const kernel::cfloat3 pad = cf3(band, band, band);
+    const math::Aabb region{tape.bounds.min - pad, tape.bounds.max + pad};
+    auto per_point = [&tape](kernel::cfloat3 p) { return tape.eval(p).d; };
+
+    SUBCASE("the plain bake") {
+        const FieldVolume serial = FieldVolume::sample(per_point, region, cell, band);
+        const FieldVolume pooled =
+            FieldVolume::sample_blocks(eval::tape_block_fill(tape), region, cell, band);
+        REQUIRE(serial.brick_count() > 0);
+        CHECK(serial.serialize() == pooled.serialize());
+    }
+
+    SUBCASE("relax from a document") {
+        field::RelaxSettings settings;
+        settings.strength = 0.5f;
+        settings.radius_cells = 2;
+        settings.iterations = 2;
+        settings.centre = cf3(0, 0, 0.6f);
+        settings.region_radius = 0.3f;
+        settings.falloff = 0.1f;
+        const FieldVolume serial = field::relax(per_point, region, cell, band, settings);
+        const FieldVolume pooled =
+            field::relax(eval::tape_block_fill(tape), region, cell, band, settings);
+        REQUIRE(serial.brick_count() > 0);
+        CHECK(serial.serialize() == pooled.serialize());
+    }
+
+    SUBCASE("flatten from a document") {
+        // Flatten is the one that could not simply bake first and operate
+        // after: it blends toward the plane INSIDE the sampled callable, and
+        // sample_blocks decides which bricks to keep from the values it is
+        // handed. The batched form applies the blend to the block the source
+        // filled, which is what keeps the two brick sets the same one.
+        field::FlattenSettings settings;
+        settings.plane_point = cf3(0, 0, 0);
+        settings.plane_normal = cf3(0, 0, 1);
+        settings.strength = 0.5f;
+        settings.centre = cf3(0, 0, 0.7f);
+        settings.region_radius = 0.3f;
+        settings.falloff = 0.1f;
+        settings.mode = field::FlattenMode::TwoSided;
+        const FieldVolume serial = field::flatten(per_point, region, cell, band, settings);
+        const FieldVolume pooled =
+            field::flatten(eval::tape_block_fill(tape), region, cell, band, settings);
+        REQUIRE(serial.brick_count() > 0);
+        CHECK(serial.brick_count() == pooled.brick_count());
+        CHECK(serial.serialize() == pooled.serialize());
+    }
+
+    SUBCASE("flatten with settings that describe no flatten") {
+        // The guard both source overloads share: a zero normal, or no region,
+        // means the source is sampled unchanged. Worth pinning because the
+        // batched overload takes that branch through a different function.
+        field::FlattenSettings settings;
+        settings.plane_normal = cf3(0, 0, 0);
+        settings.strength = 1.0f;
+        settings.region_radius = 0.3f;
+        const FieldVolume serial = field::flatten(per_point, region, cell, band, settings);
+        const FieldVolume pooled =
+            field::flatten(eval::tape_block_fill(tape), region, cell, band, settings);
+        CHECK(serial.serialize() == pooled.serialize());
+        CHECK(serial.serialize() == FieldVolume::sample(per_point, region, cell, band).serialize());
+    }
 }
 
 TEST_CASE("a batched fill's order does not change the volume") {
