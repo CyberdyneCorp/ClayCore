@@ -6746,3 +6746,76 @@ def test_project_reports_a_miss_rather_than_a_distant_hit():
     # Conflating the two is what puts garbage in the seams of a bake.
     doc = _sphere_only(0.5)
     assert doc.project((10.0, 0, 0), (-1, 0, 0), 1.0) is None
+
+
+# -- the sculpt handoff (add-sculpt-handoff-export) ---------------------------
+#
+# The format is CyberRemesherAndUV's, not ours. Both properties tested here were
+# found by reading THEIR reader rather than by reasoning from this side.
+
+
+def test_handoff_declares_the_version_and_the_producer(tmp_path):
+    # Without the version comment their reader answers UnsupportedFormat by
+    # design — it is what tells a handoff from an ordinary PLY.
+    doc = clay.Document()
+    doc.add_sdf_layer("body").add(clay.Sphere(r=0.5))
+    mesh = doc.mesh(voxel_size=0.08)
+    path = tmp_path / "sculpt.ply"
+    mesh.save_handoff(str(path), binary=False)
+
+    header = path.read_text()[:2000]
+    assert "comment cyber_sculpt_handoff 1 0" in header
+    assert "comment cyber_handoff_producer claycore" in header
+    assert "property float material_mix" in header
+    assert "property float nx" in header
+
+
+def test_handoff_writes_triangles_even_for_a_quad_mesh(tmp_path):
+    # THE HAZARD READING THEIR READER FOUND: save() declares a mesh's QUADS as
+    # its faces, and their reader rejects any other arity. So the quad export —
+    # our best one — is exactly the file it would refuse.
+    doc = clay.Document()
+    doc.add_sdf_layer("body").add(clay.Sphere(r=0.5))
+    quads = doc.mesh_quads(cell_size=0.08)
+    assert quads.quad_count > 0            # non-degenerate: there ARE quads
+
+    path = tmp_path / "quads.ply"
+    quads.save_handoff(str(path), binary=False)
+    text = path.read_text()
+    assert f"element face {quads.triangle_count}" in text
+    assert "\n4 " not in text              # no quad row anywhere
+
+
+def test_handoff_material_mix_comes_from_a_mask():
+    doc = clay.Document()
+    doc.add_sdf_layer("body").add(clay.Sphere(r=0.5))
+    mesh = doc.mesh(voxel_size=0.08)
+
+    # A mask over the UPPER half only, so the column has both values in it. A
+    # mask covering everything, or nothing, compares a column against itself.
+    mask = doc.add_mask("body", cell_size=0.05)
+    mask.fill(((-1, 0, -1), (1, 1, 1)), 1.0)
+    assert mask.painted_count > 0
+
+    mixed = mesh.handoff_material_mix(mask)
+    assert len(mixed) == len(mesh.positions)
+    assert mixed.max() > 0.5               # the masked half
+    assert mixed.min() == 0.0              # and the unmasked one
+
+    # Without a mask the required payload is still there, and zero.
+    none = mesh.handoff_material_mix()
+    assert len(none) == len(mesh.positions)
+    assert (none == 0.0).all()
+
+
+def test_handoff_does_not_modify_the_mesh(tmp_path):
+    doc = clay.Document()
+    doc.add_sdf_layer("body").add(clay.Sphere(r=0.5))
+    quads = doc.mesh_quads(cell_size=0.08)
+    before_quads, before_tris = quads.quad_count, quads.triangle_count
+
+    quads.save_handoff(str(tmp_path / "h.ply"))
+    # Writing a handoff triangulates and computes normals INTO THE OUTPUT; the
+    # caller's mesh is untouched.
+    assert quads.quad_count == before_quads
+    assert quads.triangle_count == before_tris

@@ -29,14 +29,28 @@ example and the "retopo export profile" question still wait on 1.5 and 1.6.
       and a different set of parameters (ray count, length, falloff), so they
       are their own change rather than two more enumerators here pretending to
       be as cheap as the rest." This is that change
-- [ ] 1.5 ASK CyberRemesherAndUV what it needs that ClayCore does not emit.
-      Nobody in this repository can answer it. If the answer is "nothing", the
-      "retopo-oriented export profile" half of the ROADMAP row closes with a
-      documentation change and no code
-- [ ] 1.6 **DECIDE the seam: A, B or C** (see design.md). Recommendation is B —
-      every query B adds is useful to someone who is NOT baking, and every part
-      of A is useful only to someone who is. A is reachable on top of B later;
-      the reverse is not true. NOTHING BELOW STARTS UNTIL THIS IS ANSWERED
+- [x] 1.5 ANSWERED by reading that repository. The answer is NOT "nothing":
+      `docs/sculpt-handoff-format.md` defines a sculpt handoff, that repo ships
+      the READING half only, and it records that agreement with ClayCore was
+      outstanding because no negotiation ever took place. Their CLI already
+      assumed our half existed. Missing on our side were the two header comment
+      lines and `material_mix` — plus two hazards their reader enforces that we
+      would have violated: it rejects non-triangle faces (and `save_ply` writes
+      QUADS when a mesh has them, so our best export was exactly the file it
+      would refuse) and requires normals (which a mesh meshed without gradients
+      lacks). Built as `add-sculpt-handoff-export`; verified against their
+      actual CLI, not against our own parser
+- [x] 1.6 DECIDED: **B**. ClayCore answers field queries; their engine bakes.
+      Reading their side afterwards showed the decision was already half-taken
+      there and matches: they have a `FieldEvaluator` interface, a
+      `CyberFieldEvaluator` C struct of three callbacks, `cyber_bake_field`, and
+      a Python subclassable base — with no volumetric engine to plug in
+      ("this build links no volumetric engine, so `fieldSampledMaps` is always
+      []"). ClayCore is that engine, and the queries built in sections 2-4 fill
+      their callbacks with nothing further needed from this ABI. The
+      correspondence, and its two traps, are documented in
+      `docs/08-mesh-readback.md` and `clay.h` — see add-sculpt-handoff-export
+      task 6.2
 - [ ] 1.7 DECIDE the three open questions design.md lists: whose cage, AO on the
       field or on the mesh, and whether determinism across backends is a
       requirement for a seeded hemisphere sample. The last one is cheap to

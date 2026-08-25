@@ -3064,6 +3064,92 @@ clay_result clay_item_set_gate(clay_item* item, const clay_mask* mask, float thr
 clay_result clay_mask_to_field(const clay_mask* mask, float threshold, float band, float pad,
                                float cell_size, clay_item** out_item);
 
+/* -- the sculpt handoff: sculpt -> retopo -> UV -> bake (ABI 0.52.0) ---------
+ *
+ * THE FORMAT IS NOT DEFINED HERE. It is CyberRemesherAndUV's
+ * docs/sculpt-handoff-format.md, version 1.0, and that repository ships the
+ * READING half — it says so, and says agreement with ClayCore was outstanding
+ * because no negotiation ever took place. Their CLI already assumes this half
+ * exists:
+ *
+ *     producer --for-retopo | cyberremesh --target - --output low.obj
+ *
+ * Where their spec and this header disagree, their spec is right.
+ *
+ * TWO GUARANTEES THE WRITER MAKES FOR YOU, because both are conditions their
+ * reader enforces and neither is something a caller can be expected to know:
+ *
+ *   THE FACES ARE ALWAYS TRIANGLES. clay_mesh_save declares a mesh's QUADS as
+ *   its faces when it has them, and their reader rejects any other arity —
+ *   "a sculpt export that is not triangulated is a producer bug". So the quad
+ *   export, our best one, is exactly the file it would refuse.
+ *
+ *   NORMALS ARE ALWAYS PRESENT. They are required, and a mesh meshed without
+ *   gradients has none. They are computed into the output; your mesh is not
+ *   modified.
+ *
+ * WHAT material_mix IS. Their spec calls it "the sculpt's per-vertex blend
+ * weight between two material slots". ClayCore has no material slots and does
+ * not invent them: pass a MASK and its value at each vertex becomes the
+ * channel — a mask is already a painted scalar in [0,1] answerable at any
+ * point, which is the shape and the meaning asked for. NULL writes zeros,
+ * which is the honest answer for a document that never expressed one. */
+#define CLAY_HANDOFF_VERSION_MAJOR 1
+#define CLAY_HANDOFF_VERSION_MINOR 0
+
+/* Write the PLY profile, which their spec calls the normative one. `producer`
+ * may be NULL for the default label. `material_mask` may be NULL. */
+clay_result clay_mesh_save_handoff(const clay_mesh* mesh, const char* path,
+                                   const char* producer, const clay_mask* material_mask,
+                                   int32_t binary);
+
+/* The same bytes, in memory, for the pipe route their CLI documents. */
+clay_result clay_mesh_save_handoff_memory(const clay_mesh* mesh, const char* producer,
+                                          const clay_mask* material_mask, int32_t binary,
+                                          clay_blob** out_blob);
+
+/* The IN-MEMORY BUFFER PROFILE is deliberately not a struct here.
+ *
+ * Their cyber::handoff::BufferView wants positions, normals, colours, material
+ * mix and indices. FOUR OF THOSE FIVE YOU ALREADY HAVE as borrowed pointers —
+ * clay_mesh_positions, _normals, _colors, _indices — so a struct of ours would
+ * duplicate one they own and give the two engines two places to disagree about
+ * the layout. This produces the one array you cannot get from what is already
+ * exposed.
+ *
+ * Capacity in, count out. `mask` NULL fills zeros. Note that clay_mesh_normals
+ * may be NULL for a mesh meshed without gradients, which their buffer profile
+ * accepts (normals are optional there, unlike the PLY profile) — but a bake is
+ * better with them, so compute them first if you have the choice. */
+clay_result clay_mesh_handoff_material_mix(const clay_mesh* mesh, const clay_mask* material_mask,
+                                           float* out_values, size_t capacity,
+                                           size_t* out_count);
+
+/* -- WIRING ClayCore INTO THEIR BAKER ----------------------------------------
+ *
+ * Their engine bakes; this one answers field queries. That seam was chosen
+ * deliberately: baking wants UV semantics — seams, islands, padding, dilation,
+ * texel density — which is what their repository owns, and a second
+ * implementation here would disagree with theirs about exactly the details that
+ * make a bake look right.
+ *
+ * Their CyberFieldEvaluator takes three C callbacks and a void* user. Nothing
+ * further is needed from this ABI to fill them; the correspondence is:
+ *
+ *   distance(p)            -> clay_eval_points
+ *   gradient(p)            -> clay_eval_gradients (already unit length)
+ *   occlusion(p, n, r)     -> 1.0f - clay_measure_points(CLAY_MEASURE_OCCLUSION)
+ *   curvature(p, h)        -> leave it to their default, which derives it from
+ *                             gradient(). CLAY_MEASURE_CURVATURE is a SATURATED
+ *                             [0,1] value for masking, while theirs is signed
+ *                             mean curvature in 1/length units; they are not
+ *                             the same number and substituting one is wrong.
+ *
+ * NOTE THE INVERSION, which is the trap in this table. Their `occlusion` is
+ * OPENNESS — 1 is fully open — and CLAY_MEASURE_OCCLUSION is occlusion, where
+ * 1 is fully enclosed. Passing ours straight through bakes an inverted ambient
+ * occlusion map, which looks plausible and is wrong everywhere. */
+
 /* -- measuring the surface (ABI 0.51.0) -------------------------------------
  *
  * What the shape IS at a point: how it bends, how enclosed it is, how much
