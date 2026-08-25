@@ -591,6 +591,58 @@ TEST_CASE("volume: a volume reads its own blob, not the tape's") {
     CHECK(worst < 1e-6f);
 }
 
+TEST_CASE("a shrink_band that cannot narrow the band changes nothing") {
+    // What build_far_bounds() derives depends on the stored-brick set, the grid
+    // and the band. An operator that rewrites samples in place changes none of
+    // the first two, so once the band has reached its floor a further shrink
+    // recomputes the array that is already there — chamfer over every brick
+    // slot included.
+    //
+    // This is the steady state of a stroke, not an edge case: a bake starts at
+    // three cells and the floor is two, so the first dab spends the narrowing
+    // and every dab after it asks for one that cannot happen.
+    auto sphere = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.7f; };
+    const math::Aabb region{cf3(-1, -1, -1), cf3(1, 1, 1)};
+    const float cell = 0.02f;
+    FieldVolume v = FieldVolume::sample(sphere, region, cell, cell * 3.0f);
+    REQUIRE(v.brick_count() > 0);
+    REQUIRE(v.band() == doctest::Approx(cell * 3.0f));
+
+    SUBCASE("a shrink that DOES narrow re-derives the bounds") {
+        const std::vector<std::uint8_t> before = v.serialize();
+        v.shrink_band(cell);
+        CHECK(v.band() < cell * 3.0f);
+        CHECK(v.serialize() != before);
+    }
+
+    SUBCASE("a shrink at the floor is a no-op, byte for byte") {
+        v.shrink_band(cell * 4.0f);  // straight to the floor
+        REQUIRE(v.band() == doctest::Approx(cell * 2.0f));
+        const std::vector<std::uint8_t> settled = v.serialize();
+        v.shrink_band(cell);
+        CHECK(v.band() == doctest::Approx(cell * 2.0f));
+        CHECK(v.serialize() == settled);
+        v.shrink_band(cell * 10.0f);
+        CHECK(v.serialize() == settled);
+    }
+
+    SUBCASE("and the field it reports is unchanged, samples and bounds alike") {
+        // serialize() already covers this, but the point of the far bounds is
+        // what eval() says in the empty majority of the region — so ask it
+        // there rather than trusting the bytes.
+        v.shrink_band(cell * 4.0f);
+        clay_test::Lcg rng(4411);
+        std::vector<float> before;
+        std::vector<kernel::cfloat3> points;
+        for (int i = 0; i < 500; ++i) {
+            points.push_back(rng.vec3(-1.1f, 1.1f));
+            before.push_back(v.eval(points.back()));
+        }
+        v.shrink_band(cell);
+        for (std::size_t i = 0; i < points.size(); ++i) REQUIRE(v.eval(points[i]) == before[i]);
+    }
+}
+
 TEST_CASE("rewrite_region equals rewrite where fn is identity outside the region") {
     // The property the region-limited brush rests on. `rewrite_region` writes
     // only the bricks that meet the region, and that is the same answer as
