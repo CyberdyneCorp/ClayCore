@@ -489,3 +489,129 @@ A mask SHALL only reduce where an item acts. An item's influence bound SHALL the
 - **WHEN** the cull plan is built for a document whose item is gated
 - **THEN** the bricks selected are the same as for the ungated item, and none that the gated item affects are skipped
 
+### Requirement: The undo history is measurable and bounded
+The undo history SHALL report what it costs and SHALL accept a memory budget.
+
+A host SHALL be able to read, in one call, the bytes held by the undo and redo stacks and the depth of each. Bytes SHALL account for what the entries OWN — a recorded node's deformer chain and stroke points included — and not only the size of the command variant, because the entries that matter are the ones holding heap payloads.
+
+A host SHALL be able to set a byte budget on the history. When the budget is exceeded the OLDEST undo entries SHALL be dropped until it is met. Dropping SHALL be from the far end only: the most recent step SHALL always be undoable while the history is non-empty, so a budget can never make the next undo fail.
+
+A host SHALL be able to trim the history on demand without setting a budget, for a platform that reports memory pressure and expects an immediate response.
+
+Truncation SHALL be observable and SHALL NOT be an error. A host SHALL be able to tell that the history no longer reaches as far back as it did, so it can present the horizon rather than let a user search for a step that is gone.
+
+An unset budget SHALL mean unbounded, so a host that never sets one behaves exactly as before.
+
+#### Scenario: The history reports what it holds
+- **WHEN** a document with undo enabled receives a sequence of edits
+- **THEN** the reported byte count grows, and an edit whose inverse carries a whole node reports more than one whose inverse carries an id
+
+#### Scenario: A budget evicts the oldest step
+- **WHEN** a budget is set below what the history currently holds
+- **THEN** entries are dropped from the oldest end until the budget is met, the reported depth falls, and undo still reverses the most recent edit exactly
+
+#### Scenario: The newest step survives any budget
+- **WHEN** a budget smaller than a single entry is set and one edit is then performed
+- **THEN** that edit is still undoable
+
+#### Scenario: Trimming is not an error
+- **WHEN** a host trims the history and then queries it
+- **THEN** the call succeeds, the depth reflects the trim, and the host can distinguish a trimmed history from an empty one
+
+#### Scenario: No budget means no change
+- **WHEN** no budget is set
+- **THEN** the history grows without eviction and every recorded step remains undoable
+
+### Requirement: A layer carries a radial symmetry mode
+A layer SHALL carry a radial symmetry described by a count, an axis and a seam blend. A count of 0 or 1 SHALL mean the mode is off and SHALL cost nothing at evaluation.
+
+When the count is 2 or more, every participating item in the layer SHALL evaluate as itself plus `count - 1` copies, each rotated about the layer-local axis by `2πk / count` for `k` in `1 .. count-1`. The copies SHALL be combined into the item's own value, so a radial layer presents one accumulated field rather than N independent items.
+
+The axis SHALL pass through the origin of the layer's local frame, so the layer transform moves it and it persists in the document. Clearing the count SHALL restore the un-arrayed field exactly.
+
+#### Scenario: A single item becomes an N-fold rosette
+- **WHEN** a layer with one off-axis sphere is given a radial count of 6 about Y
+- **THEN** the field is invariant under rotation by 60° about the layer's local Y axis, and sampling at the sphere's centre rotated by any multiple of 60° returns the same distance
+
+#### Scenario: Turning it off restores the field
+- **WHEN** a radial count is set and then cleared
+- **THEN** the document evaluates identically to a probe of the same points taken before the count was set
+
+#### Scenario: The axis follows the layer
+- **WHEN** the layer holding a radial array is translated
+- **THEN** the array's centre moves with it, because the axis is the layer-local one rather than a world axis
+
+### Requirement: Radial symmetry uses the mirror's participation rule
+An item SHALL participate in its layer's radial symmetry under the same flag that governs its participation in the layer mirror. An item excluded from the layer mirror SHALL also be excluded from the radial array, so a single asymmetric detail is excluded once rather than twice.
+
+A stroke SHALL participate, because a stroke resolves into ordinary items — which is the property that makes this a sculpting mode rather than a modelling one.
+
+#### Scenario: An excluded item does not repeat
+- **WHEN** an item on a radial layer has its mirror participation cleared
+- **THEN** that item appears once while every other item in the layer appears `count` times
+
+#### Scenario: A stroke on a radial layer repeats
+- **WHEN** a stroke is applied to a layer with a radial count of 4
+- **THEN** the stamps it resolved into each appear 4 times, without the caller touching the resolved nodes
+
+### Requirement: The radial seam blends like the mirror seam
+The radial seam blend SHALL follow the semantics of the mirror blend: 0 SHALL be a hard union between a copy and its neighbours, and a positive value SHALL smooth-weld them where they meet. A positive seam SHALL mark the layer's tape as smooth-blended for exactness tracking, exactly as the mirror seam does.
+
+#### Scenario: A positive seam welds neighbouring copies
+- **WHEN** two adjacent copies of an item overlap and the seam blend is positive
+- **THEN** the surface between them is welded rather than creased, and the layer reports a smooth blend rather than an exact field
+
+### Requirement: Radial and mirror compose additively
+When both the radial count and one or more mirror axes are active, each SHALL contribute its own copies of the base item. The change SHALL NOT emit the products of the two — a rotated reflection is not emitted — which matches the existing mirror, where enabling two axes emits one reflection per axis rather than the four of a full two-plane symmetry.
+
+#### Scenario: Both modes active emits both sets
+- **WHEN** a layer has a radial count of 3 and mirroring on X
+- **THEN** each participating item evaluates as itself, plus 2 rotated copies, plus 1 reflected copy, and not as the 6 of a combined group
+
+### Requirement: A radial layer reports the influence it actually occupies
+An item's influence bound on a radial layer SHALL cover every copy the mode emits, so culling and the brick cache do not drop a copy that is on screen.
+
+#### Scenario: A culled region still sees the far copies
+- **WHEN** a brick overlapping only the far side of a radial array is evaluated
+- **THEN** the item whose copy reaches that brick is compiled into the brick's tape
+
+### Requirement: A surface region can be named
+The library SHALL provide a SURFACE GROUP: an identifier attachable to a region of a layer's surface, independent of how that layer stores its surface.
+
+A surface point SHALL be resolvable to the group it belongs to, and a group SHALL be resolvable to the region it covers, on every representation the library holds. Where a representation cannot store a per-element id — an SDF layer has no elements — the mechanism SHALL be stated in the specification rather than left to the binding, so a host learns one concept and not three.
+
+Group membership SHALL survive the operations that preserve a layer's identity: saving and loading, hiding and showing, transforming the layer, and reordering the stack. It SHALL NOT be claimed to survive a representation bridge, which resamples the surface; what happens across a bridge SHALL be stated explicitly and MAY be "the ids are gone".
+
+A group SHALL support the set operations an artist expects of a selection: grow, shrink, and the border between a group and its complement. These SHALL be defined on the region rather than on the storage, so growing a group on a mesh and on a voxel grid mean the same thing.
+
+#### Scenario: A point resolves to its group
+- **WHEN** a region of a layer's surface is assigned a group and a point inside that region is queried
+- **THEN** the query returns that group, and a point outside it does not
+
+#### Scenario: Groups survive a save
+- **WHEN** a document carrying surface groups is saved and reloaded
+- **THEN** every group covers the same region it covered before
+
+#### Scenario: Growing a group is defined on the region
+- **WHEN** a group is grown by one step on two layers holding the same shape in different representations
+- **THEN** both cover the geometrically corresponding region, within the coarser representation's resolution
+
+### Requirement: Visibility applies to a region, not only to a layer
+A host SHALL be able to hide part of a layer's surface, show it again, and invert what is hidden, addressing the part by surface group or by mask.
+
+Hiding SHALL NOT delete. Hidden geometry SHALL persist through save and load and SHALL be restored exactly when shown, matching the guarantee a hidden LAYER already carries.
+
+Hidden geometry SHALL be excluded from the operations that act on visible surface — evaluation for display, meshing, and picking — and a host SHALL be able to determine whether an operation respected the hidden set. **An operation that ignores hidden geometry SHALL say so**, because a brush that silently reaches hidden surface is worse than one that refuses.
+
+#### Scenario: A hidden region contributes nothing and is not lost
+- **WHEN** part of a layer is hidden, the document is saved and reloaded, and the region is shown again
+- **THEN** the meshed surface omits the region while hidden, still omits it after the reload, and matches the original once shown
+
+#### Scenario: Isolating is hiding the complement
+- **WHEN** a group is isolated
+- **THEN** the result is identical to hiding everything not in that group
+
+#### Scenario: Hiding is undoable
+- **WHEN** a region is hidden and the edit is undone
+- **THEN** the visible surface is restored exactly
+

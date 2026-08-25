@@ -36,11 +36,29 @@ The module SHALL provide quadric edge-collapse decimation via meshoptimizer, dri
 - **THEN** the output has ≤ 50% of input triangles, remains watertight if the input was, and preserves color regions within the attribute error bound
 
 ### Requirement: Mesh validation
-The module SHALL provide validation primitives: watertightness, 2-manifoldness, degenerate-triangle detection, and sampled self-intersection checks. These back both CI export gates and any consumer's "clean geometry" claims.
+The module SHALL provide validation primitives: watertightness, 2-manifoldness, orientation consistency, degenerate- and sliver-triangle detection, boundary- and non-manifold-edge counts, the Euler characteristic, and sampled self-intersection checks. These back both CI export gates and any consumer's "clean geometry" claims.
+
+Every one of those quantities SHALL be reachable by a consumer of the library, not only by code inside this repository. A validation primitive that only the repository's own tests can invoke does not satisfy this requirement, because the requirement's stated purpose is a consumer's claim about its geometry.
+
+The sampled self-intersection pass SHALL be invocable with an explicit cap by any consumer, and a report SHALL make clear whether that pass ran. The derived "clean" predicate treats zero intersecting pairs as clean, so a report that cannot distinguish an unrun pass from a clean one would let "clean" mean two different things.
+
+The module SHALL also provide the signed volume and the surface area of a mesh, and both SHALL be reachable by a consumer. The signed volume SHALL be positive for outward-facing normals, which is what locks the orientation convention.
 
 #### Scenario: Validator catches a hole
 - **WHEN** a mesh with one deleted triangle is validated
-- **THEN** the watertight check fails and reports the open edge loop
+- **THEN** the watertight check fails and the report names the number of open boundary edges
+
+#### Scenario: Self-intersection is checked when asked for
+- **WHEN** a consumer validates a mesh with a non-zero self-intersection cap
+- **THEN** spatially close, non-adjacent triangle pairs are tested exactly, up to that cap, and the count of hits is reported
+
+#### Scenario: An unrun pass is not a clean result
+- **WHEN** a mesh is validated with a zero self-intersection cap
+- **THEN** the report shows that the pass did not run, so a consumer does not read the zero count as evidence of no self-intersection
+
+#### Scenario: Volume locks the orientation convention
+- **WHEN** the signed volume of a closed, outward-oriented mesh is computed
+- **THEN** it is positive, and reversing the winding negates it
 
 ### Requirement: Mesh attributes
 Meshers SHALL emit vertex colors sampled from the scene color field (faithful to blend gradients via the material-mix factor), normals from field gradient or face normals (caller choice), and SHALL offer an optional box-projection UV utility.
@@ -642,4 +660,39 @@ The library SHALL NOT re-tessellate to recover from a deformation. Stretching th
 #### Scenario: A deformation reverts exactly
 - **WHEN** a deformation is reverted through its record
 - **THEN** the mesh is bit-identical to before it
+
+### Requirement: Attribute transfer between meshes
+The library SHALL transfer per-vertex attributes from one mesh to another by closest point: for each vertex of the target, the nearest point on the source surface SHALL be found and the source's attributes there interpolated by that point's barycentrics.
+
+This exists because everything that leaves a mesh layer loses what a mesh layer was holding. Sampling a mesh into a field and meshing it back preserves the shape and discards the colours and uvs, and that is the price of any trip through the field — a boolean, a consolidation, a level change. The nearest point on the original surface knows what belonged there, and the ray tree already returns the triangle and barycentrics needed to read it.
+
+Colours and uvs SHALL transfer by default. Normals SHALL NOT, unless the caller asks: a resampled mesh has its own geometry and its normals should describe it, so taking the source's would make new geometry shade like the old shape.
+
+Positions and topology SHALL NOT be modified. This is an attribute transfer and not a projection: a verb that moved the target's vertices toward the source would be a different operation, and conflating the two turns "transfer" into "deform" without saying so.
+
+A target vertex farther from the source than a caller-supplied threshold SHALL take a documented fallback rather than the attribute of whatever was nearest. Geometry can exist where the source never was — after a boolean, or where a mesher bridged a gap — and the closest point to it carries no meaning. The call SHALL report how many vertices transferred and how many fell back, because a result that fell back across most of the mesh is otherwise indistinguishable from a good one.
+
+Transferring a mesh's attributes onto ITSELF SHALL return them bit-identically for every vertex whose position is UNIQUE in the source. Where the source carries coincident vertices with differing attributes — a uv seam, which is what a seam IS — one position has several correct answers and the vertex takes one of them; that case is the seam limitation below rather than an exception to exactness.
+
+Transfer SHALL be DETERMINISTIC: the same pair of meshes SHALL produce the same attributes on every run and every platform.
+
+**The uv seam limitation SHALL be documented rather than left to be discovered.** Uvs are per VERTEX, which is how a seam is represented: the source duplicates a position into two vertices carrying different uvs. A target vertex lying on such a seam has one uv slot and two correct answers, and will take whichever triangle the closest-point query returned — which can stretch a triangle across the uv layout. Colour is unaffected, being continuous across a seam. This follows from per-vertex uvs and is a property of the operation, not a defect in it.
+
+**Attribute transfer SHALL NOT be described as recovering a round trip.** It refunds the paint and most of the uvs. It does not refund the topology: the target is still the mesher's geometry, with new vertices and no relationship to the retopology that went in.
+
+#### Scenario: An identity transfer is exact
+- **WHEN** a mesh's attributes are transferred onto a copy of itself
+- **THEN** every colour and uv is bit-identical, and positions and indices are unchanged
+
+#### Scenario: Colour survives a trip through the field
+- **WHEN** a coloured mesh is sampled into a field, meshed back, and given the original's attributes
+- **THEN** the colours approximate the original's across the surface, while the topology remains the mesher's
+
+#### Scenario: Geometry the source never occupied
+- **WHEN** a target vertex lies farther from the source than the threshold
+- **THEN** it takes the documented fallback, and the reported fallback count includes it
+
+#### Scenario: Nothing moves
+- **WHEN** attributes are transferred by any options
+- **THEN** the target's positions and indices are byte-identical before and after
 
