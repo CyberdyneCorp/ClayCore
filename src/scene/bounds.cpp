@@ -708,6 +708,55 @@ float feather_cull_pad(const SdfContent& content, const Layer& layer) {
     return pad;
 }
 
+// The pad a SMOOTH-UNION CHAIN needs beyond the caller's band, for the same
+// reason feather_cull_pad exists and by the same mechanism.
+//
+// An item's own influence bound is dilated by max(support, k), which is exactly
+// how far that item can move a value it is blended against. That is the right
+// bound for ONE blend and the wrong one for a chain: the accumulated field part
+// way down a long chain sits well ABOVE where it ends up, so an item whose
+// final contribution is nothing can still be within k of the RUNNING value and
+// change it. Measured on a 600-dab sphere at k=0.06, the chain drags the field
+// 0.26 below the base sphere's own distance -- more than four times k -- and
+// culling at the band alone left samples INSIDE the band differing from the
+// full tape by up to 0.009, which is half a cell at the resolution that
+// document bakes at.
+//
+// Hard unions do not have it: min() is exact and associative, and the same
+// documents measure zero disagreements at any chain length.
+//
+// The pad is the largest single-item reach in the layer, which closed every
+// case measured, at chain lengths from 5 to 600. It is not a proof for an
+// arbitrary chain -- no fixed dilation is, since the drag grows with length --
+// and tape.h says so rather than implying otherwise.
+float blend_cull_pad(const SdfContent& content, const Layer& layer) {
+    (void)layer;
+    float pad = 0.0f;
+    for (const auto& [id, n] : content.nodes()) {
+        (void)id;
+        if (!n.visible) continue;
+        pad = kernel::cmax(pad, kernel::cmax(n.blend.support(), n.blend.k));
+    }
+    return pad;
+}
+
+// Both pads in ONE walk of the node map. Worth its own function rather than
+// adding the two: each of them walks every node in the layer, the compiler asks
+// for the total on every uncached compile, and at ten thousand items that
+// second walk measured 20-30% on the per-brick cull benchmarks.
+float cull_pad(const SdfContent& content, const Layer& layer) {
+    float feather = 0.0f, blend = 0.0f;
+    for (const auto& [id, n] : content.nodes()) {
+        (void)id;
+        if (!n.visible) continue;
+        if (!n.is_group && item_is_feathered_replace(n))
+            feather = kernel::cmax(feather,
+                                   n.volume->band() * layer.xform.scale * n.xform.scale);
+        blend = kernel::cmax(blend, kernel::cmax(n.blend.support(), n.blend.k));
+    }
+    return feather + blend;
+}
+
 bool item_influence_is_local(const Node& item) {
     // Non-local ops (intersect, the spatial morphs) change the field
     // arbitrarily far from the item: claiming a finite bound would let

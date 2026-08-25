@@ -827,11 +827,11 @@ struct Compiler {
     void run(const Document& doc, const CullRegion* cull_region) {
         float pad = 0.0f;
         if (cull_region && index)
-            pad = index->feather_pad();
+            pad = index->cull_pad();
         else if (cull_region)
             for (const Layer& layer : doc.layers)
                 if (layer.visible && layer.kind == LayerKind::Sdf && layer.sdf)
-                    pad = kernel::cmax(pad, feather_cull_pad(*layer.sdf, layer));
+                    pad = kernel::cmax(pad, cull_pad(*layer.sdf, layer));
         begin_cull(cull_region, pad);
         bool have_acc = false;
         for (const Layer& layer : doc.layers) {
@@ -873,7 +873,7 @@ Tape compile_document(const Document& doc, const CullRegion* cull, const CullInd
 Tape compile_layer(const Layer& layer, const CullRegion* cull) {
     Compiler c;
     bool usable = layer.visible && layer.kind == LayerKind::Sdf && layer.sdf;
-    c.begin_cull(cull, cull && usable ? feather_cull_pad(*layer.sdf, layer) : 0.0f);
+    c.begin_cull(cull, cull && usable ? cull_pad(*layer.sdf, layer) : 0.0f);
     if (usable) c.compile_list(layer.sdf->roots, *layer.sdf, layer, false);
     c.tape.compile_id = next_compile_id();
     return std::move(c.tape);

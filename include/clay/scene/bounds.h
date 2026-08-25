@@ -79,6 +79,17 @@ bool item_is_feathered_replace(const Node& item);
 // caller built it.
 float feather_cull_pad(const SdfContent& content, const Layer& layer);
 
+// The pad a smooth-union CHAIN needs beyond the caller's band. An item's own
+// bound covers what ONE blend can move; a chain's running value sits above its
+// final one, so an item can steer it from further out than its own support.
+// See the definition for the measurements.
+float blend_cull_pad(const SdfContent& content, const Layer& layer);
+
+// Both of the above, in ONE walk of the node map. What a compile actually
+// wants: each of them walks every node, and at ten thousand items the second
+// walk measured 20-30% on the per-brick cull benchmarks.
+float cull_pad(const SdfContent& content, const Layer& layer);
+
 // Influence bound of any node (recursive union for groups, dilated by the
 // group's blend support; infinite for intersect anywhere in the subtree).
 math::Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& layer);

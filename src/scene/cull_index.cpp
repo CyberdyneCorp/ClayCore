@@ -11,7 +11,7 @@ CullIndex::CullIndex(const Document& doc) : doc_(&doc) {
         // feather_cull_pad walks the flat node map, exactly as the compiler
         // did per compile: it must count a feathered volume wherever it
         // sits, including under a group this build never descends into.
-        pad_ = kernel::cmax(pad_, feather_cull_pad(*layer.sdf, layer));
+        pad_ = kernel::cmax(pad_, ::clay::scene::cull_pad(*layer.sdf, layer));
         build_chain(*layer.sdf, layer.sdf->roots, layer);
     }
 }

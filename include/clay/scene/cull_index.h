@@ -52,9 +52,16 @@ class CullIndex {
 
     const Document* document() const { return doc_; }
 
-    // Max feather_cull_pad over the document's visible SDF layers — what
-    // compile_document would otherwise recompute per compile.
-    float feather_pad() const { return pad_; }
+    // The total pad a cull needs beyond the caller's region, over the
+    // document's visible SDF layers — what compile_document would otherwise
+    // recompute per compile.
+    //
+    // Two terms, and both exist because an item can steer a value from outside
+    // its own bound: a feathered replace's crossfade (feather_cull_pad) and a
+    // smooth-union chain's running accumulation (blend_cull_pad). Named for
+    // what it is rather than for the first of them, since it stopped being
+    // only the feather.
+    float cull_pad() const { return pad_; }
 
     // One coarse-cull survivor of a chain, in chain order: the node, and the
     // bound the compiler would have computed for it (item_geometry_bound for

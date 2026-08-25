@@ -1,6 +1,8 @@
 #include <doctest/doctest.h>
 
 #include "clay/field/volume.h"
+#include <algorithm>
+
 #include "clay/scene/bounds.h"
 #include "clay/scene/cull_index.h"
 #include "clay/scene/tape.h"
@@ -121,7 +123,16 @@ TEST_CASE("cull index: survivor entries carry the exact direct bounds") {
         }
     }
     CHECK(checked > 5);
-    CHECK(index.feather_pad() == 0.0f);  // no feathered replace in this corpus
+    // The cached pad is what the compiler would recompute per compile: the
+    // feather term (zero here, no feathered replace in this corpus) plus the
+    // blend term, which is NOT zero -- the corpus blends, and a smooth-union
+    // chain can be steered by an item outside its own bound.
+    float expected = 0.0f;
+    for (const Layer& layer : doc.layers)
+        if (layer.visible && layer.kind == LayerKind::Sdf && layer.sdf)
+            expected = std::max(expected, cull_pad(*layer.sdf, layer));
+    CHECK(expected > 0.0f);
+    CHECK(index.cull_pad() == expected);
 }
 
 TEST_CASE("cull index: byte-identical per-brick tapes on the gnarly corpus") {
@@ -129,6 +140,39 @@ TEST_CASE("cull index: byte-identical per-brick tapes on the gnarly corpus") {
     // paint, layer transforms and an instanced layer (shared SdfContent
     // compiled under two layers — the case that keys the index per layer).
     check_document(gnarly_document(), 401);
+}
+
+TEST_CASE("cull index: a long smooth-union chain is culled without moving the field") {
+    // The case the corpus above does not reach. A blend's own influence bound
+    // covers what ONE blend can move; a CHAIN is different, because the
+    // accumulated value part way down it sits well above where it ends up, so
+    // an item whose final contribution is nothing can still be within k of the
+    // RUNNING value and steer it.
+    //
+    // It needs length to show. Measured at band-only dilation on this shape:
+    // 5 items agree exactly, 25 differ by up to 0.009 — half a cell at the
+    // resolution this bakes at — and 600 differ in 95 samples of 1627. The
+    // magnitude falls as the chain grows and the COUNT rises, which is what a
+    // crowd of items each contributing near its own edge looks like.
+    Document doc;
+    Layer& l = doc.add_sdf_layer("chain");
+    Node base;
+    base.prim = Prim::sphere(1.0f);
+    l.sdf->insert(base);
+    for (int i = 1; i < 200; ++i) {
+        Node dab;
+        dab.prim = Prim::sphere(0.05f);
+        dab.blend = Blend{BlendProfile::Quadratic, 0.08f};
+        const float a = 0.3f * std::sin(static_cast<float>(i) * 0.7f);
+        const float b = 0.3f * std::cos(static_cast<float>(i) * 1.3f);
+        dab.xform.position =
+            cf3(-std::sqrt(std::max(0.0f, 1.0f - a * a - b * b)), a, b);
+        l.sdf->insert(dab);
+    }
+    // Tight bounds: the shape is a unit sphere, so bricks scattered over
+    // [-4, 4] would mostly miss it and the samples that matter are the ones
+    // near the surface.
+    check_document(doc, 9107, -1.4f, 1.4f);
 }
 
 TEST_CASE("cull index: mirrored layer with spline strokes and deformer chains") {
@@ -256,8 +300,8 @@ TEST_CASE("cull index: feathered replace chains keep the full walk") {
 
     // The pad the index caches equals the walk it replaced.
     CullIndex index(b);
-    CHECK(index.feather_pad() == feather_cull_pad(*lb.sdf, lb));
-    CHECK(index.feather_pad() > 0.0f);
+    CHECK(index.cull_pad() == feather_cull_pad(*lb.sdf, lb));
+    CHECK(index.cull_pad() > 0.0f);
 
     // (c) a feathered replace nested in a group, with prunable siblings
     // outside the group: only the volume's own chain refuses pruning.
@@ -372,7 +416,7 @@ TEST_CASE("cull index: the tree returns exactly what the scan did, in the same o
 
         // The index dilates by the feather pad exactly as the plan does.
         const std::vector<NodeId> want = expected_survivors(
-            l, index.feather_pad() > 0.0f ? region.dilated(index.feather_pad()) : region);
+            l, index.cull_pad() > 0.0f ? region.dilated(index.cull_pad()) : region);
         REQUIRE(got->size() == want.size());
         for (std::size_t i = 0; i < want.size(); ++i) CHECK((*got)[i].id == want[i]);
     }

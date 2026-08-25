@@ -112,6 +112,12 @@ class BrickCache {
     math::Aabb brick_bounds(BrickKey key) const;
     // AABB every request should be evaluated against (dilated by the band —
     // hand this to the tape compiler as the CullRegion).
+    //
+    // The band is all this adds, and all it should: an item that reaches
+    // further than its own bound — a feathered replace, or any item in a
+    // smooth-union chain — is accounted for by the COMPILER, which pads the
+    // region it is given by scene::cull_pad. Adding that here as well would
+    // dilate twice and keep items nothing needs.
     math::Aabb cull_region(BrickKey key) const { return brick_bounds(key).dilated(config_.band()); }
 
     // Mark every brick whose (band-dilated) volume intersects the bound as
