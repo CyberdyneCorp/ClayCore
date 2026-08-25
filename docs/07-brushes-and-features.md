@@ -409,10 +409,24 @@ Nothing in the ABI changed, and a host that already called these gets the
 16.4x without doing anything. Note the figure is the bake **alone** — the
 `sdf_consolidate` device case pays a serial redistance on top and moves less.
 
-`move_topological`'s document-sourced form is still per point. It samples the
-source at a *displaced* point rather than at the lattice, so batching it means
-building the query positions first; see
-[#275](https://github.com/CyberdyneCorp/ClayCore/issues/275).
+`move_topological`'s document-sourced form goes through the pool too, since
+v0.51.0, and it needed a different kind of batched source to get there. The
+other two verbs evaluate their source *at* the sample lattice; this one samples
+at the point the displacement pulls back to, which depends on the geodesic
+weight there — so it takes a batch of **arbitrary** points rather than a fill
+that knows the grid. Both places it asks the source anything go through that:
+the sampling pass, and the material the geodesic walk runs over.
+
+| 193-node layer, cell 0.02 | |
+|---|---:|
+| batch of arbitrary points | **305 ms** |
+| the per-point walk it replaced | 4,605 ms |
+
+15× at 193 nodes and 16× at 600, byte-identical. The geodesic walk itself was
+measured before any of this and is only 4–5% of the operation — it makes 87k of
+the 2.09 million source calls — so its traversal is deliberately left
+sequential. This form is reached from `pyclay`; the C ABI's move takes an
+existing volume.
 
 **Putting a bake back: feather the replace.** Every one of these verbs returns
 a volume that a host then places with `CLAY_OP_REPLACE`, and the hard replace
