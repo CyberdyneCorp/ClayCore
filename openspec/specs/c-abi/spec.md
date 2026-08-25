@@ -421,9 +421,19 @@ A null budget SHALL mean the library's defaults, and a zeroed field SHALL mean t
 ### Requirement: A file extension is matched case-insensitively
 An importer SHALL match a file's extension without regard to case, because a file named `MODEL.OBJ` is an OBJ file. The Python loader has always done so; the C one did not, and refused such a file as an unknown format.
 
+An EXPORTER SHALL match it the same way, and by the same normalisation the importer uses. The two disagreed: `clay_mesh_load` lowercased the extension and `clay_mesh_save` compared it as given, so a host could load `MODEL.OBJ` and then be refused when it saved back to the path it had just read from. A format name given to a memory entry point SHALL be normalised identically, so that one rule covers reading, writing, paths and buffers.
+
 #### Scenario: An upper-case extension loads
 - **WHEN** a mesh file whose extension is upper-case is loaded
 - **THEN** it loads, rather than being reported as an unknown format
+
+#### Scenario: An upper-case extension saves
+- **WHEN** a mesh is saved to a path whose extension is upper-case
+- **THEN** it is written in that format, rather than refused as unknown
+
+#### Scenario: One rule for names and extensions
+- **WHEN** the same format is named in upper case to a memory entry point and in upper case as an extension to a path entry point
+- **THEN** both are accepted and produce the same format
 
 ### Requirement: Relief is reachable as an ordinary op
 Relief SHALL be a combine op on the existing vocabulary, so that an app places a relief item exactly as it places any other item and gets undo, coalescing, serialization, picking and masking without any of them learning about it.
@@ -1387,4 +1397,244 @@ The device form SHALL produce the same values as the host form for the same inpu
 #### Scenario: A short device buffer is refused
 - **WHEN** the size available from the offset is smaller than the results require
 - **THEN** the call is refused and nothing is written
+
+### Requirement: Undo reports the region it changed
+The C API SHALL offer undo and redo entry points that additionally report the world-space INFLUENCE bound of what they applied, in the three-state shape the influence-bound queries already use: nothing changed, a finite box, or unbounded. The bound SHALL be usable directly as the region argument of the brick cache's dirty marking, with the unbounded state spelled the way that call already spells it.
+
+Without this the narrowest region a host can honestly dirty after an undo is the whole layer, because nothing in the ABI says which nodes the step touched. Every alternative available to the host is worse: diffing the layer's nodes across the call misses an in-place change — an undone move, resize or colour edit keeps its node id — and under-dirtying leaves stale bricks at a blend seam, which is silent and on screen.
+
+The bound SHALL be the union, over every command in the step, of what that command targets BEFORE it is applied and AFTER it is applied. One side alone cannot see a move (which has two ends), a removal (whose node is gone afterwards) or an add (whose node was not there before).
+
+The bound MAY be larger than the region that actually changed and SHALL NOT be smaller. Where being tight would cost correctness it SHALL be conservative: a node inside a group SHALL report its root ancestor's bound, because the group's blend spreads a child's influence past the child's own box; and a command on content shared by instanced layers SHALL report the union over every layer that shares that content.
+
+A command that cannot change what the document evaluates to SHALL contribute nothing to the bound, so a step made only of such commands reports that there is nothing to dirty rather than reporting the layer.
+
+The existing undo and redo entry points SHALL keep their signatures and their behaviour, and the reporting variants SHALL agree with them on what was undone and on the resulting document.
+
+#### Scenario: Undoing a dab dirties the dab
+- **WHEN** an item is added to a populated layer and the add is undone through the reporting variant
+- **THEN** the reported bound contains the added item's influence bound and is strictly smaller than the layer's
+
+#### Scenario: A move is bounded at both ends
+- **WHEN** an item is transformed far from where it was and the transform is undone
+- **THEN** the reported bound contains both the position it was moved to and the position it was moved back to
+
+#### Scenario: An undone removal is bounded by what came back
+- **WHEN** a node is removed and the removal is undone, restoring it
+- **THEN** the reported bound contains the restored node's influence bound
+
+#### Scenario: A group's blend is not cut off
+- **WHEN** a child of a smooth-blended group is edited and the edit is undone
+- **THEN** the reported bound is the group's influence bound, which reaches past the child's own box by the group's blend support
+
+#### Scenario: An instanced layer is not missed
+- **WHEN** a layer is instanced, an edit is made through one instance, and that edit is undone
+- **THEN** the reported bound covers where the change lands in every layer sharing the content, not only the layer named by the command
+
+#### Scenario: Unbounded influence is expressible
+- **WHEN** the undone step touched a node whose influence has no finite extent
+- **THEN** the call reports the unbounded state rather than a finite box, and the host's honest response is to dirty everything
+
+#### Scenario: An edit that changes no field dirties nothing
+- **WHEN** a layer rename is undone
+- **THEN** the call reports that there is nothing to dirty
+
+#### Scenario: Nothing to undo is still not an error
+- **WHEN** the reporting variant is called on a document with nothing to undo
+- **THEN** it reports that nothing was undone, reports nothing to dirty, and returns success
+
+### Requirement: The full mesh validation report crosses the ABI
+The C API SHALL expose every quantity `mesh::ValidationReport` computes, through a versioned output descriptor rather than through individual out-parameters.
+
+The descriptor SHALL carry the vertex and triangle counts, the watertight, manifold and oriented predicates, the boundary-edge, non-manifold-edge, degenerate-triangle, sliver-triangle and intersecting-pair counts, the Euler characteristic, and the derived clean predicate. It SHALL carry a leading `struct_size` and SHALL be filled bounded by the size the caller declares, per the versioned-descriptor rule.
+
+The entry point SHALL accept the sampled self-intersection cap that the engine's validator accepts, so that the self-intersection pass named in the meshing capability is reachable from a binding at all. A cap of zero SHALL skip the pass, matching the engine's own default.
+
+The report SHALL state whether the self-intersection pass ran, by carrying back the cap it was given. A caller SHALL be able to distinguish "no intersecting pairs were found" from "no intersecting pairs were looked for", because both leave the count at zero.
+
+The existing two-boolean entry point SHALL keep working with identical results, defined as sugar over the report, so no consumer is broken.
+
+#### Scenario: A hole is reported, not merely detected
+- **WHEN** a mesh with one deleted triangle is validated through the report
+- **THEN** the watertight predicate is false AND the boundary-edge count names how many edges are open, rather than the caller learning only that something is wrong
+
+#### Scenario: The self-intersection pass is reachable
+- **WHEN** a caller passes a non-zero self-intersection cap
+- **THEN** the pass runs, the intersecting-pair count reflects it, and the report shows the cap that was used
+
+#### Scenario: Not tested is distinguishable from none found
+- **WHEN** a caller passes a cap of zero
+- **THEN** the intersecting-pair count is zero, the reported cap is zero, and the caller can tell the pass did not run
+
+#### Scenario: The old entry point is unchanged
+- **WHEN** a caller uses the two-boolean validate entry point
+- **THEN** it returns exactly the watertight and manifold values it returned before this change
+
+#### Scenario: The descriptor obeys the versioned-descriptor rule
+- **WHEN** a caller declares a `struct_size` below the report's layout, or a value too large to be any descriptor
+- **THEN** the call is rejected with `CLAY_ERROR_INVALID_ARGUMENT` rather than reading or writing past the caller's object
+
+#### Scenario: A newer caller's tail is ignored
+- **WHEN** a caller declares a `struct_size` larger than this build's layout
+- **THEN** the write is clamped to what the build knows, the unknown tail is left untouched, and the size the caller declared is returned unchanged
+
+### Requirement: A mesh reports its volume and area
+The C API SHALL expose the signed volume and the surface area of a mesh.
+
+Both SHALL cross as `double`, matching the precision the engine computes them at, because a signed-volume sum over triangles cancels heavily and narrowing it at the boundary would discard the precision the engine chose deliberately.
+
+The signed volume SHALL be positive when triangle normals point outward, so its sign is usable as an orientation check, and SHALL be reported for any mesh rather than refused for one that is not watertight — an open mesh has a divergence-theorem sum, and refusing to state it hides the number a caller uses to notice the mesh is open.
+
+#### Scenario: Volume and area of a closed mesh
+- **WHEN** a caller measures a closed, outward-oriented mesh
+- **THEN** the signed volume is positive and both figures match the engine's own values
+
+#### Scenario: An inverted mesh reports a negative volume
+- **WHEN** a caller measures a closed mesh whose triangles are wound inward
+- **THEN** the signed volume is negative, which is what makes it an orientation check
+
+### Requirement: Serialized bytes cross the ABI
+A caller SHALL be able to serialize a document or a mesh to memory, and to construct one from memory, without naming a filesystem path.
+
+Serialized output SHALL be returned as an opaque owner handle carrying the bytes, with borrowing accessors for the pointer and the length and an explicit destroy — the pattern the mesh and tape handles already use. It SHALL NOT be returned by the size-query pattern, because answering the size would mean serializing the payload twice.
+
+The borrowed pointer SHALL remain valid until the handle is destroyed and SHALL be unaffected by any subsequent edit to the object it came from, so a host may hand the bytes to an asynchronous writer without copying them first.
+
+The bytes a memory save produces SHALL be byte-identical to what the corresponding file save writes for the same object, and a memory load SHALL accept exactly what a file load accepts. Neither direction SHALL introduce a format, a header, or a framing of its own.
+
+A mesh memory entry point SHALL take the format by NAME rather than deriving it from an extension, because a buffer has none. The names SHALL be the file extensions without the leading dot and SHALL be matched case-insensitively, consistent with the existing extension rule. An unknown name SHALL be refused with the same code an unsupported extension is refused with, and SHALL NOT fall back to a default format.
+
+#### Scenario: A document round-trips through memory
+- **WHEN** a document is saved to memory and loaded back from those bytes
+- **THEN** the loaded document evaluates identically to the original at every probe point, and its layers, names and stack order are recovered
+
+#### Scenario: Memory and file agree byte for byte
+- **WHEN** the same object is saved to a path and to memory
+- **THEN** the file's contents and the buffer's bytes are identical
+
+#### Scenario: The borrowed bytes survive an edit
+- **WHEN** a host saves a document to memory and then edits the document before reading the buffer
+- **THEN** the buffer still holds what was serialized, and destroying it is still the caller's single obligation
+
+#### Scenario: An unknown format name is refused
+- **WHEN** a caller asks to save a mesh to memory naming a format the library does not write
+- **THEN** the call is refused rather than served in some default format
+
+#### Scenario: Null and empty inputs
+- **WHEN** a memory loader is given a null pointer, a zero length, or bytes that are not the format claimed
+- **THEN** it fails with a typed error and produces no handle for the caller to free
+
+### Requirement: The import guardrails apply to bytes where they still mean something
+Every limit that guards a load from a path and that still has something to bound SHALL guard a load from memory identically. A limit that has nothing left to bound SHALL be stated as inapplicable rather than accepted and ignored.
+
+The mesh import budget's vertex and triangle ceilings SHALL be accepted and enforced by the mesh memory loader, unchanged. A buffer is the more likely untrusted input of the two — it is what arrives from a network, a pasteboard or another process — so a memory path that skipped them would invert the protection they exist to give.
+
+The budget's file-byte ceiling SHALL NOT be a parameter of any memory loader. It bounds the bytes a loader will read into memory before sizing a buffer, and a caller holding a buffer has already performed that read; accepting it there would be a parameter that cannot do anything, which is worse than not offering it. The document memory loader therefore SHALL take no budget at all, and the header SHALL say why rather than leave a reader to infer it from an absence.
+
+Bounds checking SHALL NOT depend on the budget. Every memory loader SHALL refuse a truncated, corrupt or mis-declared buffer without reading past the length it was given, which is a property of the readers rather than of any ceiling.
+
+#### Scenario: A budget refuses an oversized buffer
+- **WHEN** a mesh is loaded from memory under a budget smaller than the mesh
+- **THEN** the load is refused with the same error the file loader gives, and no mesh handle is produced
+
+#### Scenario: A malformed buffer stays in bounds
+- **WHEN** a truncated or corrupt buffer is loaded from memory
+- **THEN** the loader refuses it without reading past the length it was given, whether or not a budget was supplied
+
+### Requirement: A host can set and clear a layer's radial symmetry
+The C ABI SHALL expose setting a layer's radial symmetry by count, axis and seam blend, and SHALL treat a count of 0 or 1 as clearing it. The call SHALL respect a locked layer and SHALL be undoable, matching the layer mirror rather than writing the field directly — the defect the mirror entry point was created to fix.
+
+An axis outside 0..2, or a negative blend, SHALL be rejected with an invalid-argument result rather than clamped.
+
+#### Scenario: Setting and clearing round-trips
+- **WHEN** a host sets a radial count of 8 and then sets 0
+- **THEN** both calls succeed, the second restores the un-arrayed field, and each is a separate undo step
+
+#### Scenario: A locked layer refuses
+- **WHEN** a host sets a radial count on a locked layer
+- **THEN** the call fails and the layer is unchanged
+
+### Requirement: Radial symmetry survives a document round-trip
+A document written and read back SHALL preserve a layer's radial count, axis and seam blend. A document written by a build that predates the field SHALL load with the mode off rather than failing.
+
+#### Scenario: Save and load preserves the mode
+- **WHEN** a document with a radial layer is serialized and read back
+- **THEN** the layer's count, axis and blend match, and the field evaluates identically
+
+#### Scenario: An older document loads with it off
+- **WHEN** a document written before this field existed is read
+- **THEN** it loads successfully with a radial count of 0
+
+### Requirement: A document reports what it costs, broken down by subsystem
+The library SHALL report, in one call, the memory a document holds, separated into per-subsystem figures.
+
+The report SHALL cover every subsystem a document owns: the edit list, voxel content, the sculpt layers held beside that content, masks, mesh layers, the undo history, and the passthrough blobs a document carries without interpreting. A subsystem the document owns SHALL NOT be omitted from the breakdown, because a figure that silently excludes the largest thing in the document is worse than no figure.
+
+Voxel content and voxel sculpt layers SHALL be reported as SEPARATE figures. They live in the same object and one is the user's model while the other is undo for it; a combined figure would hide the only voxel bytes a host is permitted to release.
+
+The individual figures SHALL sum to the reported total, so a host can attribute every byte it is told about.
+
+Figures SHALL account for what containers have ALLOCATED, not for what they logically hold, since that is what the process is charged for. A report MAY therefore exceed the size the same document serializes to, and the interface SHALL say so rather than let a host read the difference as a defect.
+
+The report SHALL be a versioned descriptor, since every subsystem added later becomes a field in it.
+
+A memory report SHALL NOT include memory the document does not own. In particular the evaluation brick cache, which belongs to an evaluator and has its own accounting and its own trim, SHALL NOT be counted in a document figure.
+
+#### Scenario: The report moves with the content
+- **WHEN** content is rasterized into a voxel layer of a document
+- **THEN** the reported voxel content figure rises, and the reported total rises with it
+
+#### Scenario: The parts account for the whole
+- **WHEN** a memory report is read for a document holding an edit list, a voxel layer, a mask and history
+- **THEN** the per-subsystem figures sum to the reported total
+
+#### Scenario: A cost is attributed to the subsystem that incurred it
+- **WHEN** a mask is painted and nothing else is changed
+- **THEN** the mask figure rises and the voxel content and edit list figures are unchanged
+
+#### Scenario: An empty document reports a total
+- **WHEN** a memory report is read for a document with no layers
+- **THEN** the call succeeds and reports a total rather than an error
+
+### Requirement: Memory is reportable for a single layer
+The library SHALL report the same breakdown for ONE layer of a document, so a host can attribute a large document to the layer responsible for it rather than only learn that it is large.
+
+A per-layer report SHALL use the SAME descriptor as the document-wide report. Fields that are document-wide rather than per-layer SHALL be reported as zero and documented as such, so that one struct serves both.
+
+The CONTENT figures — voxel content, voxel sculpt layers, masks and mesh layers — SHALL sum exactly across the layers to the document-wide figures, since every byte of content belongs to exactly one layer.
+
+The edit-list figure SHALL NOT be required to sum exactly, and the interface SHALL say why rather than let a host discover the gap and read it as a defect. Two things make it inexact and both are deliberate: the document-wide figure includes container overhead that belongs to no single layer, and content SHARED by instance layers is counted ONCE document-wide while each instance reports it in full. Reporting a shared payload once per instance would tell a host to release memory that was never allocated; reporting zero for an instance would tell it the layer is free.
+
+Requesting a report for a layer that does not exist SHALL be an error and SHALL NOT return a zeroed report, which a host would read as an empty layer.
+
+#### Scenario: A heavy layer is identifiable
+- **WHEN** two voxel layers hold different amounts of content and each is reported
+- **THEN** the layer holding more content reports the larger voxel content figure
+
+#### Scenario: The layers account for all the content
+- **WHEN** every layer of a document is reported and the per-layer content figures are summed
+- **THEN** the sum equals the document-wide content figures exactly
+
+#### Scenario: Shared instance content is counted once for the document
+- **WHEN** a layer is instanced, so that two layers share one edit list
+- **THEN** the document-wide edit-list figure counts the shared content once, and each layer reports it in full
+
+#### Scenario: An unknown layer is an error
+- **WHEN** a report is requested for a layer id that does not exist
+- **THEN** the call fails rather than reporting an empty layer
+
+### Requirement: Transient memory is reported separately from resident memory
+Memory held only for the duration of an in-flight operation SHALL be reported as its own figure rather than folded into the subsystem it belongs to.
+
+A mask copies its storage when a recorded step opens, so a mask costs roughly double for the duration of that step. A figure that is about to fall on its own SHALL NOT be indistinguishable from one that will still be held afterwards.
+
+The interface SHALL state where this figure can and cannot be observed, rather than describe a behaviour a caller cannot reach. Through the C ABI it is always zero, because every mask entry point opens its step and closes it before returning and calls on one document must be serialized — so no caller can hold a handle while a step is open. The field SHALL still be reported, so that the total remains the sum of the reported fields if an entry point spanning a step is ever added; a total that silently gained bytes belonging to no reported field would be worse than a field that reads zero.
+
+#### Scenario: A snapshot taken during a step is visible and then released
+- **WHEN** memory is reported by an embedder that holds a recorded mask step open across two edits, and again after the step closes
+- **THEN** the transient figure is non-zero while the step is open and zero after it
+
+#### Scenario: The C ABI reports no transient memory
+- **WHEN** a document is asked for its memory after any sequence of mask edits through the C entry points
+- **THEN** the transient figure is zero, because no step can be open at that moment
 
