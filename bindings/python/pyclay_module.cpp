@@ -2864,9 +2864,8 @@ NB_MODULE(pyclay, m) {
                 {
                     nb::gil_scoped_release release;
                     out.volume = std::make_shared<const field::FieldVolume>(
-                        field::move_topological(
-                            [&tape](kernel::cfloat3 p) { return tape.eval(p).d; }, where, cell,
-                            width, settings));
+                        field::move_topological(eval::tape_point_batch(tape), where, cell, width,
+                                                settings));
                 }
                 place(out, position, rotation_axis_angle, scale);
                 return out;

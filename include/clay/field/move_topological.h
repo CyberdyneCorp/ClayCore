@@ -18,6 +18,7 @@
 // would have to grow. Baking needs no kernel change.
 
 #include <cstdint>
+#include <cstddef>
 #include <functional>
 
 #include "clay/field/volume.h"
@@ -54,6 +55,10 @@ struct TopologicalMoveSettings {
 // A zero displacement, a radius that is not positive, or an anchor with no
 // material within reach all yield a plain sampling of the source: a drag that
 // touches nothing is not an error.
+// A source that answers a batch of arbitrary points at once: `count` packed
+// xyz triples in, `count` distances out.
+using PointBatch = std::function<void(const float* points_xyz, std::size_t count, float* out)>;
+
 FieldVolume move_topological(const std::function<float(kernel::cfloat3)>& source,
                              const math::Aabb& region, float cell_size, float band,
                              const TopologicalMoveSettings& settings);
@@ -63,6 +68,29 @@ FieldVolume move_topological(const std::function<float(kernel::cfloat3)>& source
 // SIGN, which a narrow band reports correctly either side of the surface, so this
 // is less lossy here than it is for flatten. The result is still sampled over the
 // volume's own region.
+// The same again, from a source that answers a BATCH of arbitrary points --
+// packed xyz in, distances out, the same shape as FieldVolume::ColorBlockFill.
+//
+// NOT a BrickBlockFill, and the difference is the whole reason this overload
+// has a type of its own. Relax and flatten evaluate their source AT the sample
+// lattice, so a fill that knows the grid can answer them. This one samples at a
+// PULLED-BACK point: where an output sample takes its material from depends on
+// the geodesic weight there, so the query positions are not the lattice and
+// only the caller's evaluator can be told where they are.
+//
+// A tape is the source this exists for, and both places the source is asked
+// anything go through it: the material array the geodesic walk runs on, which
+// is one dense box of cells, and the sampling pass itself. Evaluating a
+// document costs about ten nanoseconds per instruction against one nanosecond
+// of arithmetic, so the interpreter is nearly all of this operation, and it was
+// being paid one point at a time. `eval::tape_point_batch` is that evaluator
+// for a document.
+//
+// Identical to the overload above given a source that agrees with the callable.
+FieldVolume move_topological(const PointBatch& source, const math::Aabb& region,
+                             float cell_size, float band,
+                             const TopologicalMoveSettings& settings);
+
 FieldVolume move_topological(const FieldVolume& v, const TopologicalMoveSettings& settings);
 
 }  // namespace field

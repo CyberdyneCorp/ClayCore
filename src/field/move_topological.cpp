@@ -85,8 +85,11 @@ struct Node {
 //
 // The graph is the MATERIAL, which is the whole point: free space is not in it,
 // so the distance cannot step across a gap however narrow the gap is.
-Geodesic solve(const std::function<float(cfloat3)>& source,
-               const TopologicalMoveSettings& settings, float cell_size) {
+// The lattice the walk runs on, sized to the reach. Split out so that filling
+// its material array -- the ONLY place the walk asks the source anything -- can
+// be done a point at a time or a batch at a time without the graph code
+// existing twice.
+Geodesic make_grid(const TopologicalMoveSettings& settings, float cell_size) {
     Geodesic g;
     g.cell = cell_size;
     // Set before anything can return. A sample point OUTSIDE the solved box has
@@ -106,14 +109,14 @@ Geodesic solve(const std::function<float(cfloat3)>& source,
     g.ny = std::max(1, static_cast<int>(std::ceil(g.box.extent().y / cell_size)));
     g.nz = std::max(1, static_cast<int>(std::ceil(g.box.extent().z / cell_size)));
     g.distance.assign(static_cast<std::size_t>(g.nx) * g.ny * g.nz, kUnreached);
+    return g;
+}
 
-    // Material, sampled once per cell. Reused by both the seeding and the walk.
-    std::vector<bool> material(g.distance.size(), false);
-    for (int z = 0; z < g.nz; ++z)
-        for (int y = 0; y < g.ny; ++y)
-            for (int x = 0; x < g.nx; ++x)
-                material[g.index(x, y, z)] = source(g.centre_of(x, y, z)) <= 0.0f;
-
+// The walk, over a material array the caller filled. `material` is the graph:
+// free space is not in it, so the distance cannot step across a gap however
+// narrow the gap is.
+Geodesic solve_over(Geodesic g, const std::vector<bool>& material,
+                    const TopologicalMoveSettings& settings, float cell_size) {
     // Seed from the material cell nearest the anchor. The anchor is a picked
     // SURFACE point, so it usually lands a hair outside the material; seeding
     // the nearest cell inside is what makes it behave as the user aimed.
@@ -235,6 +238,56 @@ Geodesic solve(const std::function<float(cfloat3)>& source,
     return g;
 }
 
+// The two ways to fill the material array, over the same grid and the same
+// walk. Sampled once per cell either way; the batched one just asks for every
+// cell at once, which is what lets an evaluator compile a tape once and spread
+// the cells across a pool.
+Geodesic solve(const std::function<float(cfloat3)>& source,
+               const TopologicalMoveSettings& settings, float cell_size) {
+    Geodesic g = make_grid(settings, cell_size);
+    std::vector<bool> material(g.distance.size(), false);
+    for (int z = 0; z < g.nz; ++z)
+        for (int y = 0; y < g.ny; ++y)
+            for (int x = 0; x < g.nx; ++x)
+                material[g.index(x, y, z)] = source(g.centre_of(x, y, z)) <= 0.0f;
+    return solve_over(std::move(g), material, settings, cell_size);
+}
+
+Geodesic solve_batched(const PointBatch& source, const TopologicalMoveSettings& settings,
+                       float cell_size) {
+    Geodesic g = make_grid(settings, cell_size);
+    const std::size_t n = g.distance.size();
+    std::vector<float> points(n * 3);
+    for (int z = 0; z < g.nz; ++z)
+        for (int y = 0; y < g.ny; ++y)
+            for (int x = 0; x < g.nx; ++x) {
+                const cfloat3 c = g.centre_of(x, y, z);
+                const std::size_t at = static_cast<std::size_t>(g.index(x, y, z)) * 3;
+                points[at] = c.x;
+                points[at + 1] = c.y;
+                points[at + 2] = c.z;
+            }
+    std::vector<float> d(n, 0.0f);
+    source(points.data(), n, d.data());
+    std::vector<bool> material(n, false);
+    for (std::size_t i = 0; i < n; ++i) material[i] = d[i] <= 0.0f;
+    return solve_over(std::move(g), material, settings, cell_size);
+}
+
+// Where one output sample takes its material from. The identity past the
+// reach, and the pulled-back point inside it -- shared by the two overloads so
+// the displacement map cannot drift between them.
+cfloat3 pull_back(const Geodesic& geo, const TopologicalMoveSettings& settings, cfloat3 p) {
+    const float g = geo.at(p);
+    if (g >= settings.radius) return p;  // past the reach: identity
+    const float t = kernel::cclamp(1.0f - g / settings.radius, 0.0f, 1.0f);
+    const float w = kernel::cease(settings.ease, t);
+    // The same displacement map grab uses, with geodesic distance in place of
+    // the straight line. Sampling the source at the pulled-back point is what
+    // moves the material to p.
+    return p - settings.displacement * w;
+}
+
 }  // namespace
 
 FieldVolume move_topological(const std::function<float(cfloat3)>& source,
@@ -249,15 +302,60 @@ FieldVolume move_topological(const std::function<float(cfloat3)>& source,
     const Geodesic geo = solve(source, settings, cell_size);
 
     FieldVolume out = FieldVolume::sample(
-        [&source, &geo, &settings](cfloat3 p) {
-            const float g = geo.at(p);
-            if (g >= settings.radius) return source(p);  // past the reach: identity
-            const float t = kernel::cclamp(1.0f - g / settings.radius, 0.0f, 1.0f);
-            const float w = kernel::cease(settings.ease, t);
-            // The same displacement map grab uses, with geodesic distance in
-            // place of the straight line. Sampling the source at the pulled-back
-            // point is what moves the material to p.
-            return source(p - settings.displacement * w);
+        [&source, &geo, &settings](cfloat3 p) { return source(pull_back(geo, settings, p)); },
+        region, cell_size, band);
+
+    // Measured, as flatten's is. A weight that varies along the surface can
+    // steepen the field, and by how much depends on the form rather than on any
+    // envelope that could be written down in advance.
+    out.set_sample_lipschitz(out.measure_sample_lipschitz());
+    return out;
+}
+
+FieldVolume move_topological(const PointBatch& source, const math::Aabb& region,
+                             float cell_size, float band,
+                             const TopologicalMoveSettings& settings) {
+    // A drag that touches nothing is not an error, so each of these hands back
+    // the source unchanged rather than refusing.
+    if (!(settings.radius > 0.0f) || !(cell_size > 0.0f) ||
+        kernel::clength(settings.displacement) <= 0.0f)
+        return FieldVolume::sample_blocks(
+            [&source](const FieldVolume::BrickGrid& grid, std::size_t first, std::size_t count,
+                      float* out) {
+                const std::size_t n = count * kBrickSamples;
+                std::vector<float> points(n * 3);
+                for (std::size_t s = 0; s < count; ++s)
+                    for (int i = 0; i < kBrickSamples; ++i) {
+                        const cfloat3 p = grid.sample_position(first + s, i);
+                        const std::size_t at = (s * kBrickSamples + static_cast<std::size_t>(i)) * 3;
+                        points[at] = p.x;
+                        points[at + 1] = p.y;
+                        points[at + 2] = p.z;
+                    }
+                source(points.data(), n, out);
+            },
+            region, cell_size, band);
+
+    const Geodesic geo = solve_batched(source, settings, cell_size);
+
+    // The query positions are the PULLED-BACK points, not the lattice, so the
+    // window builds them and hands the whole window over at once.
+    std::vector<float> points;
+    FieldVolume out = FieldVolume::sample_blocks(
+        [&source, &geo, &settings, &points](const FieldVolume::BrickGrid& grid,
+                                            std::size_t first, std::size_t count, float* block) {
+            const std::size_t n = count * kBrickSamples;
+            points.resize(n * 3);
+            for (std::size_t s = 0; s < count; ++s)
+                for (int i = 0; i < kBrickSamples; ++i) {
+                    const cfloat3 q =
+                        pull_back(geo, settings, grid.sample_position(first + s, i));
+                    const std::size_t at = (s * kBrickSamples + static_cast<std::size_t>(i)) * 3;
+                    points[at] = q.x;
+                    points[at + 1] = q.y;
+                    points[at + 2] = q.z;
+                }
+            source(points.data(), n, block);
         },
         region, cell_size, band);
 
