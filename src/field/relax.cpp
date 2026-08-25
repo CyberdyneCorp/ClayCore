@@ -50,13 +50,22 @@ Stencil build_stencil(int radius_cells) {
 // zero and the field is left exactly as it was.
 float region_weight(const RelaxSettings& settings, cfloat3 p) {
     if (!(settings.region_radius > 0.0f)) return 1.0f;  // everywhere
-    float distance = kernel::clength(p - settings.centre);
-    if (distance <= settings.region_radius) return 1.0f;
+    // Squared, because both answers that need no interpolation can be given
+    // from the square and they are the overwhelming majority. A brush selects
+    // whole bricks from a box around its sphere, so most samples it is handed
+    // are outside it entirely -- measured, between 62% and 95% -- and the
+    // square root that told them so was paid once per sample.
+    const cfloat3 d = p - settings.centre;
+    const float d2 = kernel::cdot(d, d);
+    const float inner = settings.region_radius;
+    if (d2 <= inner * inner) return 1.0f;
     // A hard edge would leave a visible rim where the smoothed field meets the
     // untouched one, so the effect tapers.
-    float taper = std::max(settings.falloff, 1e-4f);
-    float t = (distance - settings.region_radius) / taper;
-    if (t >= 1.0f) return 0.0f;
+    const float taper = std::max(settings.falloff, 1e-4f);
+    const float outer = inner + taper;
+    if (d2 >= outer * outer) return 0.0f;
+    // Only the taper itself needs the distance.
+    const float t = (std::sqrt(d2) - inner) / taper;
     return 1.0f - t * t * (3.0f - 2.0f * t);  // smoothstep
 }
 
@@ -88,12 +97,13 @@ FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings,
     // Where the weight can be non-zero: the region plus its taper. A radius of
     // zero means "everywhere", which is a filter rather than a brush, and then
     // there is nothing to bound.
-    std::optional<math::Aabb> region_bounds;
-    if (tuned.region_radius > 0.0f) {
-        const float reach = tuned.region_radius + tuned.falloff;
-        const cfloat3 r = cf3(reach, reach, reach);
-        region_bounds = math::Aabb{tuned.centre - r, tuned.centre + r};
-    }
+    std::optional<FieldVolume::Region> region_bounds;
+    if (tuned.region_radius > 0.0f)
+        // A BALL rather than the box around it: the weight is zero outside the
+        // taper, so a brick the ball cannot reach holds nothing this pass may
+        // change. The box around it holds nearly twice as many.
+        region_bounds = FieldVolume::Region::ball(tuned.centre,
+                                                  tuned.region_radius + tuned.falloff);
 
     FieldVolume current = v;
     // The checkpoint is the pass boundary, which is the granularity that
@@ -122,9 +132,20 @@ FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings,
             auto tap_at = [&](int x, int y, int z) {
                 return snapshot ? snapshot->sample_at(x, y, z) : previous.sample_at(x, y, z);
             };
-            float here = tap_at(gx, gy, gz).value_or(old);
+            // `old` is what a lookup of this sample would return, so there is
+            // no lookup. rewrite_region hands over the value held in the brick
+            // it is writing, and that brick has not been written yet this pass;
+            // the snapshot holds the same coordinate's value from before the
+            // pass; and the two copies of a sample shared across a brick face
+            // cannot disagree, because every writer is a function of the GLOBAL
+            // coordinate. So they are the same number.
+            //
+            // Worth removing rather than tidying: it ran once per sample, and
+            // most samples a brush is handed are outside it — the selection is
+            // whole bricks from a box around a sphere.
+            const float here = old;
             const cfloat3 at = current.cell_position(gx, gy, gz);
-            float weight = region_weight(tuned, at) * mask_gate(tuned.mask, at);
+            const float weight = region_weight(tuned, at) * mask_gate(tuned.mask, at);
             if (weight <= 0.0f) return here;
 
             // Only taps that EXIST count. A brick with no samples is not a

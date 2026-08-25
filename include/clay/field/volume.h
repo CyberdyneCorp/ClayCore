@@ -256,6 +256,35 @@ class FieldVolume {
     // that "leave this one alone" needs no lookup and cannot be spelt as zero.
     void rewrite(const std::function<float(int, int, int, float)>& fn);
 
+    // What part of the field an operator acts over.
+    //
+    // A box, because that is what selects bricks. Optionally narrowed to a BALL
+    // inside it, because that is what a brush actually is, and a box around a
+    // ball holds nearly twice its volume: measured on a relax dab, between 51%
+    // and 73% of the bricks a box selected could not hold a sample the brush
+    // could reach, and every sample in them was visited and weighed before
+    // being handed back unchanged.
+    //
+    // Constructible from an Aabb, so an operator whose region really is a box
+    // says nothing extra.
+    struct Region {
+        math::Aabb box;
+        kernel::cfloat3 centre = kernel::cf3(0, 0, 0);
+        float radius = -1.0f;  // negative: the box itself, no narrowing
+
+        Region(const math::Aabb& b) : box(b) {}  // NOLINT(*-explicit-constructor)
+        static Region ball(kernel::cfloat3 c, float r) {
+            Region g{math::Aabb{c - kernel::cf3(r, r, r), c + kernel::cf3(r, r, r)}};
+            g.centre = c;
+            g.radius = r;
+            return g;
+        }
+        // Whether a brick's box can hold anything the region reaches. The
+        // nearest point of the brick to the centre is three clamps, which is
+        // cheaper than one sample's worth of the work it saves.
+        bool meets(const math::Aabb& brick) const;
+    };
+
     // The same, over the bricks that MEET `region` and no others.
     //
     // For a brush. A verb confined to a region still had to walk every stored
@@ -281,7 +310,7 @@ class FieldVolume {
     // passing a slightly generous region costs a little work and no
     // correctness. Passing one that is too SMALL is a defect this cannot
     // detect.
-    void rewrite_region(const math::Aabb& region,
+    void rewrite_region(const Region& region,
                         const std::function<float(int, int, int, float)>& fn);
 
     // The samples `rewrite_region` is about to overwrite, kept so an operator
@@ -318,7 +347,7 @@ class FieldVolume {
         std::vector<float> data_;
     };
 
-    RegionSnapshot snapshot_region(const math::Aabb& region) const;
+    RegionSnapshot snapshot_region(const Region& region) const;
 
     // Drop the bricks whose samples all lie beyond the band, and re-derive
     // what the resulting sample-free bricks report. Returns how many went.

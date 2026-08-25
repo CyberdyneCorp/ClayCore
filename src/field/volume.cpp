@@ -556,6 +556,15 @@ void FieldVolume::rewrite(const std::function<float(int, int, int, float)>& fn) 
 // and they must not, since the snapshot is only correct for the bricks the
 // rewrite will actually write.
 namespace {
+math::Aabb brick_box_of(const kernel::cfloat3& origin, float cell, int bx, int by, int bz) {
+    const float brick = static_cast<float>(kBrickDim) * cell;
+    const kernel::cfloat3 lo =
+        origin + kernel::cf3(static_cast<float>(bx), static_cast<float>(by),
+                             static_cast<float>(bz)) *
+                     brick;
+    return math::Aabb{lo, lo + kernel::cf3(brick, brick, brick)};
+}
+
 bool region_brick_range(const kernel::cfloat3& origin, const std::int32_t* bcount, float brick,
                         const math::Aabb& region, int* lo, int* hi) {
     for (int a = 0; a < 3; ++a) {
@@ -569,6 +578,16 @@ bool region_brick_range(const kernel::cfloat3& origin, const std::int32_t* bcoun
     return true;
 }
 }  // namespace
+
+bool FieldVolume::Region::meets(const math::Aabb& brick) const {
+    if (!box.intersects(brick)) return false;
+    if (!(radius > 0.0f)) return true;
+    const kernel::cfloat3 near = kernel::cf3(std::clamp(centre.x, brick.min.x, brick.max.x),
+                                             std::clamp(centre.y, brick.min.y, brick.max.y),
+                                             std::clamp(centre.z, brick.min.z, brick.max.z));
+    const kernel::cfloat3 d = near - centre;
+    return kernel::cdot(d, d) <= radius * radius;
+}
 
 std::optional<float> FieldVolume::RegionSnapshot::sample_at(int gx, int gy, int gz) const {
     if (!volume_) return std::nullopt;
@@ -617,13 +636,13 @@ std::optional<float> FieldVolume::RegionSnapshot::sample_at(int gx, int gy, int 
     return volume_->sample_at(gx, gy, gz);
 }
 
-FieldVolume::RegionSnapshot FieldVolume::snapshot_region(const math::Aabb& region) const {
+FieldVolume::RegionSnapshot FieldVolume::snapshot_region(const Region& region) const {
     RegionSnapshot snap;
     snap.volume_ = this;
-    if (empty() || region.empty()) return snap;
+    if (empty() || region.box.empty()) return snap;
     const float brick = static_cast<float>(kBrickDim) * cell_size_;
     int lo[3], hi[3];
-    if (!region_brick_range(origin_, bcount_, brick, region, lo, hi)) return snap;
+    if (!region_brick_range(origin_, bcount_, brick, region.box, lo, hi)) return snap;
     for (int a = 0; a < 3; ++a) {
         snap.lo_[a] = lo[a];
         snap.span_[a] = hi[a] - lo[a] + 1;
@@ -638,6 +657,7 @@ FieldVolume::RegionSnapshot FieldVolume::snapshot_region(const math::Aabb& regio
                     static_cast<std::size_t>((bz * bcount_[1] + by) * bcount_[0] + bx);
                 const std::int32_t entry = index_[slot];
                 if (entry < 0) continue;
+                if (!region.meets(brick_box_of(origin_, cell_size_, bx, by, bz))) continue;
                 const std::size_t at = static_cast<std::size_t>(
                     (((bz - lo[2]) * snap.span_[1]) + (by - lo[1])) * snap.span_[0] +
                     (bx - lo[0]));
@@ -648,9 +668,9 @@ FieldVolume::RegionSnapshot FieldVolume::snapshot_region(const math::Aabb& regio
     return snap;
 }
 
-void FieldVolume::rewrite_region(const math::Aabb& region,
+void FieldVolume::rewrite_region(const Region& region,
                                  const std::function<float(int, int, int, float)>& fn) {
-    if (empty() || region.empty()) return;
+    if (empty() || region.box.empty()) return;
     const int n = kBrickDim + 1;
     const float brick = static_cast<float>(kBrickDim) * cell_size_;
 
@@ -661,7 +681,8 @@ void FieldVolume::rewrite_region(const math::Aabb& region,
     // argument for skipping the rest is that `fn` is identity there, which a
     // generous selection cannot break.
     int lo[3], hi[3];
-    if (!region_brick_range(origin_, bcount_, brick, region, lo, hi)) return;  // nothing meets it
+    if (!region_brick_range(origin_, bcount_, brick, region.box, lo, hi))
+        return;  // nothing meets it
 
     for (int bz = lo[2]; bz <= hi[2]; ++bz)
         for (int by = lo[1]; by <= hi[1]; ++by)
@@ -670,6 +691,10 @@ void FieldVolume::rewrite_region(const math::Aabb& region,
                     static_cast<std::size_t>((bz * bcount_[1] + by) * bcount_[0] + bx);
                 const std::int32_t entry = index_[slot];
                 if (entry < 0) continue;
+                // The brush is a ball; the brick range is a box around it. A
+                // brick the ball cannot reach holds only samples the operator
+                // is required to leave alone, so skipping it is the identity.
+                if (!region.meets(brick_box_of(origin_, cell_size_, bx, by, bz))) continue;
                 for (int i = 0; i < kBrickSamples; ++i) {
                     const int lx = i % n, ly = (i / n) % n, lz = i / (n * n);
                     const std::size_t at =
