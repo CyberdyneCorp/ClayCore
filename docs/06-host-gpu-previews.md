@@ -406,6 +406,18 @@ earlier strokes. Note the documented caveat — vertex welding
 spans brick seams, so a key's triangles may reference an earlier key's vertices:
 you may overwrite a key's ranges, but not free them in isolation.
 
+**The brick mesh is watertight whatever the field's steepness** (#292). A cell
+belongs to the brick its low corner falls in and takes its other seven corners
+from up to seven neighbours, so a cell owned by a brick the cache stores as a
+uniform state byte still crosses if a neighbour holds a sample of the opposite
+sign. That happens once a field moves more than the band across one voxel step
+— which no true distance field does, and a worked document does routinely,
+since a displacement over a region narrower than the displacement is steeper
+than the band. Through 0.52 those cells were marched by nobody and left
+pinholes in the frame mesh that `clay_document_mesh` of the same document did
+not have. They are marched now, on both the subset and the whole-cache call, so
+what you see while sculpting is the surface you export.
+
 `clay_mesh_copy_vertices` then writes the mesh into your own mapped buffer in
 your own interleaved layout, in one pass rather than an interleave into a
 staging vector plus a copy.
