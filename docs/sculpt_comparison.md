@@ -225,9 +225,24 @@ drag: it reaches as far as the drag goes and the field stays exact (step scale
 
 ### Tier 2 — finishing an asset
 
-- **The pipeline seam.** `add-claycore-bridge` (retopo/UV/bake) has not started;
-  UV and baking live in a sibling repository and neither engine owns the seam
-  yet. Without it you can sculpt but not ship.
+- ~~**The pipeline seam.**~~ **Closed 2026-08-24.** This row read "neither engine
+  owns the seam yet", and it was wrong in both directions once someone read the
+  other repository instead of assuming.
+
+  **They owned more of it than we knew.** CyberRemesherAndUV had already
+  specified a sculpt handoff, shipped the reader, and built a `FieldEvaluator`
+  with a three-callback C ABI for field-sampled baking — and recorded that
+  agreement with ClayCore was outstanding because no negotiation had taken
+  place. Their CLI already assumed our half existed.
+
+  **And we owned more of it than the roadmap said.** The bridge row asked for "a
+  field-evaluation callback so a baker can sample exact normals", which
+  `clay_eval_points` and `clay_eval_gradients` had done for releases.
+
+  The seam is now decided and both halves exist: **their engine bakes, this one
+  answers field queries**. `clay_mesh_save_handoff` writes what their reader
+  accepts — verified against their actual CLI, where a ClayCore quad export
+  retopologises to 708 quads with zero dropped faces. You can sculpt *and* ship.
 - **PBR material authoring.** Corrected by measurement
   (`decide-surface-colour`): this row used to read "there is no polypaint and no
   PBR painting", and the first half is false. **Polypaint works** — a stroke
@@ -246,11 +261,15 @@ drag: it reaches as far as the drag goes and the field stays exact (step scale
   has, rather than on two of three.
 
   What is genuinely absent is **PBR channels** — roughness, metallic, normal —
-  and that is now a declared non-goal for painting rather than a gap: material
-  authoring wants a UV parameterisation and a texture set, UVs live in
-  CyberRemesherAndUV, and `add-claycore-bridge` is where a baker's
-  field-sampling callback belongs. 3DCoat's moat is the texture pipeline, not
-  the colour channel.
+  and that is a declared non-goal for *painting* rather than a gap. **Baking
+  them is a different thing and is now reachable**: their `cyber_bake_field`
+  drives a normal/AO/curvature bake from a field, and ClayCore fills its three
+  callbacks with `clay_eval_points`, `clay_eval_gradients` and
+  `clay_measure_points`. What ClayCore deliberately does not learn is UV
+  semantics — seams, islands, padding, texel density — because that is what the
+  sibling owns and a second implementation would disagree with theirs about
+  precisely the details that make a bake look right. 3DCoat's moat is the
+  texture pipeline, not the colour channel.
 
 ### Tier 3 — scale, and the quiet one
 

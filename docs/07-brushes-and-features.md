@@ -12,8 +12,8 @@ whether it is exact, whether it can be undone as an edit, and whether it bakes.
 | **Deformer** | A map applied to the point before the item's primitive is evaluated. A chain per node. | Breaks exactness where it is not rigid; the Lipschitz factor is folded into the tape | Ordinary edit |
 | **Baked field operation** | Samples a field into a narrow-band `FieldVolume` with the operation applied. | Result is a bound field, not a distance — it declares the Lipschitz it measured | Replaces the item's volume |
 | **Resolver** | A pure function turning a gesture into an *ordinary item*. No document is read or touched. | Whatever the item it produces is | Ordinary edit |
-| **Voxel verb** | An in-place edit of a palette-indexed grid. | n/a — occupancy, not a field | **Not on the undo stack** — the command vocabulary covers document edits only |
-| **Mesh verb** | An in-place displacement of a mesh layer's own vertices. Topology never changes. | n/a — triangles, not a field | **Not on the undo stack** either; a sparse `VertexDeltas` record restores the gesture bit-exactly instead |
+| **Voxel verb** | An in-place edit of a palette-indexed grid. | n/a — occupancy, not a field | **Not on the COMMAND stack** — that vocabulary covers document edits only — but recorded as cell runs, so `Document.undo()` reverses a whole verb in one step |
+| **Mesh verb** | An in-place displacement of a mesh layer's own vertices. Topology never changes. | n/a — triangles, not a field | **Not on the COMMAND stack**; a sparse `VertexDeltas` record restores the gesture bit-exactly, and `Document.undo()` reaches it like any other step |
 
 Two rules hold throughout and explain most of the API shapes below:
 
@@ -21,11 +21,20 @@ Two rules hold throughout and explain most of the API shapes below:
   normal it already has, in world units. Picking and cameras stay in the host.
 - **Everything a document brush produces is an ordinary edit**, so undo,
   coalescing, serialization and instancing apply without any brush-specific
-  machinery. Voxel and mesh verbs are the exception: they mutate storage beside
-  the document in place, and `scene::Command` has no variant for either. A host
-  that wants undo over voxel edits is snapshotting them itself today (roadmap
-  item); for mesh edits it keeps a `mesh::VertexDeltas` per gesture, which is
-  bounded by the vertices the gesture reached rather than by the mesh.
+  machinery. Voxel and mesh verbs still mutate storage beside the document in
+  place and `scene::Command` still has no variant for either — but since
+  `unify-the-undo-history` that no longer means a host has to snapshot them
+  itself. **One `Document.undo()` spans all four representations**: the edit
+  list through the command stack, voxel edits as recorded cell runs, mesh edits
+  as the sparse `VertexDeltas` the sculptor already produced, and mask edits as
+  a diff taken on the step's first touch. A sculpt verb is ONE step however many
+  cells it changed, and an edit that changed nothing is not a step at all, so a
+  menu built from `undo_depth` never offers an undo that does nothing.
+
+  The mechanism is a `session::History` above scene, voxel and mesh, because
+  `tools/check_layering.py` forbids `clay::scene` from seeing the other two —
+  which is the same rule that keeps a mask's presence from changing what the
+  document evaluates to.
 
 ---
 
