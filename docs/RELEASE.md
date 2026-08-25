@@ -83,6 +83,18 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.52.0 is not such a release**: additive — the sculpt handoff writer
+   (`clay_mesh_save_handoff`, `_memory`, `clay_mesh_handoff_material_mix`) and
+   `mesh::vertex_normals`. No format change to `.clayspace`, and nothing that
+   compiled against 0.51.0 behaves differently.
+
+   The handoff's OWN version is 1.0 and is not ours: it is
+   CyberRemesherAndUV's `docs/sculpt-handoff-format.md`, defined unilaterally
+   there, and this release implements the producer half against it as written.
+   Their versioning policy governs it — a reader rejects a newer minor rather
+   than dropping what it does not know — so `CLAY_HANDOFF_VERSION_*` move only
+   when their spec does, never for our convenience.
+
    **0.51.0 is not such a release**: additive — surface measures
    (`clay_measure_points`, `clay_mask_from_surface`, `clay_measure_params`),
    bounded rays (`clay_raycast_bounded`) and cage projection

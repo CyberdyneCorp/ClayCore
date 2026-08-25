@@ -33,6 +33,7 @@
 #include "clay/kernel/field.h"
 #include "clay/io/clayspace.h"
 #include "clay/io/mesh_io.h"
+#include "clay/io/handoff.h"
 #include "clay/io/memory.h"
 #include "clay/io/parity_fixture.h"
 #include "clay/mesh/decimate.h"
@@ -4714,6 +4715,54 @@ clay_result clay_mesh_measure(const clay_mesh* mesh, double* out_signed_volume,
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "both outputs are null");
     if (out_signed_volume) *out_signed_volume = mesh::signed_volume(*m);
     if (out_surface_area) *out_surface_area = mesh::surface_area(*m);
+    return CLAY_OK;
+}
+
+// -- the sculpt handoff (add-sculpt-handoff-export) ---------------------------
+
+clay_result clay_mesh_save_handoff(const clay_mesh* mesh, const char* path,
+                                   const char* producer, const clay_mask* material_mask,
+                                   int32_t binary) {
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh, &m);
+    if (r != CLAY_OK) return r;
+    if (!path) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null path");
+    io::HandoffOptions o;
+    if (producer) o.producer = producer;
+    o.material_mask = mask_of(material_mask);
+    o.binary = binary != 0;
+    return from_io(io::save_handoff_ply_file(*m, path, o));
+}
+
+clay_result clay_mesh_save_handoff_memory(const clay_mesh* mesh, const char* producer,
+                                          const clay_mask* material_mask, int32_t binary,
+                                          clay_blob** out_blob) {
+    if (!out_blob) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_blob");
+    *out_blob = nullptr;
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh, &m);
+    if (r != CLAY_OK) return r;
+    io::HandoffOptions o;
+    if (producer) o.producer = producer;
+    o.material_mask = mask_of(material_mask);
+    o.binary = binary != 0;
+    *out_blob = new clay_blob{io::save_handoff_ply(*m, o)};
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_handoff_material_mix(const clay_mesh* mesh, const clay_mask* material_mask,
+                                           float* out_values, size_t capacity,
+                                           size_t* out_count) {
+    const mesh::Mesh* m = nullptr;
+    clay_result r = resolve_mesh(mesh, &m);
+    if (r != CLAY_OK) return r;
+    if (!out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null out_count");
+    const std::vector<float> mix = io::handoff_material_mix(*m, mask_of(material_mask));
+    *out_count = mix.size();
+    if (!out_values) return CLAY_OK;  // a count query
+    const std::size_t n = mix.size() < capacity ? mix.size() : capacity;
+    for (std::size_t i = 0; i < n; ++i) out_values[i] = mix[i];
+    *out_count = n;
     return CLAY_OK;
 }
 

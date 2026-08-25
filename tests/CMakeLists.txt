@@ -107,6 +107,7 @@ add_executable(clay_unit_tests
   unit/test_procedural_mask.cpp
   unit/test_surface_measure.cpp
   unit/test_c_field_queries.cpp
+  unit/test_sculpt_handoff.cpp
   unit/test_c_undo_spans.cpp
   unit/test_document_memory.cpp
   unit/test_document_memory_cpp.cpp

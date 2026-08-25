@@ -32,6 +32,7 @@
 #include "clay/brush/procedural_mask.h"
 #include "clay/kernel/field.h"
 #include "clay/io/clayspace.h"
+#include "clay/io/handoff.h"
 #include "clay/io/memory.h"
 #include "clay/io/mesh_io.h"
 #include "clay/mesh/bvh.h"
@@ -3666,6 +3667,51 @@ NB_MODULE(pyclay, m) {
                      "((lo), (hi)) enclosing the positions — how you frame an imported\n"
                      "model. Document.layer_bounds is derived from SDF shapes and reports\n"
                      "nothing for a mesh layer, which is why this lives here.")
+        .def(
+            "save_handoff",
+            [](const PyMesh& mesh, const std::string& path, const std::string& producer,
+               nb::handle material_mask, bool binary) {
+                io::HandoffOptions o;
+                o.producer = producer;
+                o.material_mask = borrow_mask(material_mask);
+                o.binary = binary;
+                io::IoStatus s = io::save_handoff_ply_file(mesh.data(), path, o);
+                if (!s.ok()) throw std::runtime_error("handoff write failed: " + s.detail);
+            },
+            "path"_a, "producer"_a = "claycore", "material_mask"_a = nb::none(),
+            "binary"_a = true,
+            "Write the SCULPT HANDOFF that CyberRemesherAndUV's reader accepts —\n"
+            "the sculpt -> retopo -> UV -> bake seam, with neither engine\n"
+            "linking the other.\n\n"
+            "THE FORMAT IS NOT DEFINED HERE. It is that repository's\n"
+            "docs/sculpt-handoff-format.md v1.0, which ships the READING half.\n\n"
+            "TWO GUARANTEES MADE FOR YOU, because their reader enforces both:\n"
+            "the faces written are always TRIANGLES (save() writes a mesh's\n"
+            "QUADS as its faces, and their reader rejects any other arity), and\n"
+            "NORMALS are always present (computed if the mesh has none; your\n"
+            "mesh is not modified).\n\n"
+            "`material_mask` fills their required `material_mix` channel: a mask\n"
+            "is already a painted scalar in [0,1] answerable at any point, which\n"
+            "is the shape their channel asks for. None writes zeros — ClayCore\n"
+            "has no material slots and does not invent them.")
+        .def(
+            "handoff_material_mix",
+            [](const PyMesh& mesh, nb::handle material_mask) {
+                const std::vector<float> mix =
+                    io::handoff_material_mix(mesh.data(), borrow_mask(material_mask));
+                nb::module_ np = nb::module_::import_("numpy");
+                nb::object out =
+                    np.attr("empty")(nb::make_tuple(mix.size()), "dtype"_a = "float32");
+                auto v = nb::cast<nb::ndarray<float, nb::ndim<1>, nb::c_contig>>(out);
+                for (std::size_t i = 0; i < mix.size(); ++i) v.data()[i] = mix[i];
+                return out;
+            },
+            "material_mask"_a = nb::none(),
+            "The `material_mix` column for the IN-MEMORY buffer profile.\n\n"
+            "The other four arrays their Mesh.load_handoff_buffers wants —\n"
+            "positions, normals, colors, indices — are already numpy views on\n"
+            "this mesh, so this produces the one column you cannot get from\n"
+            "them. ClayCore does not duplicate the struct they own.")
         .def("save",
              [](const PyMesh& pm, const std::string& path) { save_mesh_any(pm.data(), path); },
              "path"_a, "Save by extension: .obj, .ply, .fbx or .glb")

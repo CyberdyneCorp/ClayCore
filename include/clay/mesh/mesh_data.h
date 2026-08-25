@@ -58,5 +58,25 @@ struct Mesh {
     bool empty() const { return indices.empty(); }
 };
 
+
+// Per-vertex normals from the triangle list, AREA-WEIGHTED.
+//
+// The obvious missing utility: a mesher that was not asked for gradients
+// produces none, `Mesh::normals` is documented as "empty or positions.size()",
+// and every consumer that needs them has had to compute them itself or go
+// without. `MeshSculptor::recompute_normals` exists but is bound to weld
+// classes and a delta record, which is a sculpting concern rather than this
+// one.
+//
+// AREA-WEIGHTED rather than angle-weighted, and rather than unweighted: the
+// unweighted average lets a sliver triangle count as much as the large face
+// beside it, which is exactly the shape a marching-cubes lattice produces along
+// a diagonal. Area weighting is the cheapest form that does not do that.
+//
+// Uses `indices` and ignores `quads`, which is not a limitation: mesh_data.h's
+// invariant is that when quads are present, `indices` is exactly their
+// triangulation over the same positions.
+std::vector<kernel::cfloat3> vertex_normals(const Mesh& m);
+
 }  // namespace mesh
 }  // namespace clay

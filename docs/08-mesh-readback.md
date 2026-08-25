@@ -599,6 +599,82 @@ field with `clay_item_volume_from_mesh` (`clay.Volume.from_mesh` in Python); see
 [05 §7](05-claycore-library.md#7-meshing--mesh-processing-claymesh). That path
 discards the topology, which is exactly the difference between the two.
 
+## Handing a sculpt to the retopology engine
+
+`clay_mesh_save_handoff` writes the **sculpt handoff** that CyberRemesherAndUV's
+reader accepts — the `sculpt → retopo → UV → bake` seam, with neither engine
+linking the other.
+
+**The format is not ours.** It is that repository's
+`docs/sculpt-handoff-format.md`, version 1.0, which ships the *reading* half and
+records that agreement with ClayCore was outstanding because no negotiation ever
+took place. Their CLI already assumed this half existed:
+
+```sh
+producer --for-retopo | cyberremesh --target - --output low.obj --preset blender
+```
+
+Where their spec and ours disagree, theirs is right.
+
+```python
+mesh = doc.mesh_quads(cell_size=0.05)
+mesh.save_handoff("sculpt.ply", material_mask=doc.mask("body"))
+```
+
+**Two guarantees the writer makes for you**, because both are conditions their
+reader enforces and neither is something a caller can be expected to know:
+
+- **The faces are always triangles.** `save()` declares a mesh's *quads* as its
+  faces when it has them, and their reader rejects any other arity — *"a sculpt
+  export that is not triangulated is a producer bug."* So the quad export, our
+  best one, is exactly the file it would refuse. Verified against their reader:
+  a quad mesh written with `save()` is rejected; the same mesh written as a
+  handoff round-trips and retopologizes.
+- **Normals are always present.** They are required, and a mesh meshed without
+  gradients has none. They are computed into the output; your mesh is not
+  modified.
+
+**`material_mix` comes from a mask.** Their spec calls it *"the sculpt's
+per-vertex blend weight between two material slots."* ClayCore has no material
+slots and does not invent them — a mask is already a painted scalar in `[0,1]`
+answerable at any point, which is the shape and the meaning asked for. Pass the
+mask that means "the second material"; pass nothing and the required channel is
+zero, which is the honest answer for a document that never expressed one.
+
+**The in-memory buffer profile** is for when both engines share a process, which
+is the case that matters on a tablet. ClayCore deliberately does **not** publish
+a struct for it: four of the five arrays their `BufferView` wants — positions,
+normals, colours, indices — are already borrowed pointers here, so duplicating
+their struct would give the two engines two places to disagree about the layout.
+`clay_mesh_handoff_material_mix` produces the one column you cannot already get.
+
+### Wiring ClayCore into their baker
+
+The seam was chosen deliberately: **their engine bakes; this one answers field
+queries.** Baking wants UV semantics — seams, islands, padding, dilation, texel
+density — which their repository owns, and a second implementation here would
+disagree with theirs about exactly the details that make a bake look right.
+
+Their `CyberFieldEvaluator` takes three C callbacks and a `void*`. Nothing
+further is needed from this ABI to fill them:
+
+| their callback | ClayCore |
+|---|---|
+| `distance(p)` | `clay_eval_points` |
+| `gradient(p)` | `clay_eval_gradients` (already unit length) |
+| `occlusion(p, n, r)` | **`1.0f -`** `clay_measure_points(CLAY_MEASURE_OCCLUSION)` |
+| `curvature(p, h)` | leave it to their default, which derives it from `gradient()` |
+
+**Note the inversion**, which is the trap in that table. Their `occlusion` is
+*openness* — 1 is fully open — and `CLAY_MEASURE_OCCLUSION` is occlusion, where
+1 is fully enclosed. Passing ours straight through bakes an inverted ambient
+occlusion map, which looks plausible and is wrong everywhere.
+
+`CLAY_MEASURE_CURVATURE` is deliberately **not** in that table: it is a
+saturated `[0,1]` value built for masking, while theirs is signed mean curvature
+in `1/length` units where a sphere of radius *r* reads `1/r`. They are not the
+same number and substituting one for the other is wrong.
+
 ## Runnable examples
 
 | | |
