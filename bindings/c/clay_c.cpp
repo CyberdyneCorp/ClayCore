@@ -25,6 +25,7 @@
 #include "clay/cut/cut.h"
 #include "clay/eval/backend.h"
 #include "clay/eval/bake_points.h"
+#include "clay/eval/bake_volume.h"
 #include "clay/field/flatten.h"
 #include "clay/field/move_topological.h"
 #include "clay/field/relax.h"
@@ -5002,8 +5003,12 @@ clay_result clay_item_volume_from_document(const clay_document* doc,
     std::shared_ptr<const scene::Tape> tape_ref = doc->tape();
     const scene::Tape& tape = *tape_ref;
 
-    field::FieldVolume volume = field::FieldVolume::sample(
-        [&tape](kernel::cfloat3 q) { return tape.eval(q).d; }, region, cell, band);
+    // Through the pool, on the same terms scene::bake_layer has always used.
+    // The serial form this replaced asked the tape for one point at a time,
+    // which is where a bake's time went: 7.5x on the benchmark pair that gates
+    // consolidation, byte-identical output either way.
+    field::FieldVolume volume = field::FieldVolume::sample_blocks(
+        eval::tape_block_fill(tape), region, cell, band);
     // brick_count, not empty(): a volume covering only empty space still has a
     // full brick index, it just stores no samples. It evaluates perfectly well
     // as "at least this far from anything" — and returning one from a BAKE
@@ -5096,8 +5101,8 @@ clay_result clay_item_volume_relax_from(const clay_document* doc,
     // Samples the document exactly as clay_item_volume_from_document would,
     // then relaxes those samples: identical to bake-then-relax inside the
     // band, by construction — and held by a test rather than assumed.
-    field::FieldVolume relaxed = field::relax(
-        [&tape](kernel::cfloat3 q) { return tape.eval(q).d; }, region, cell, band, settings);
+    field::FieldVolume relaxed =
+        field::relax(eval::tape_block_fill(tape), region, cell, band, settings);
     if (relaxed.brick_count() == 0)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "the region contains no surface to sample");
     relaxed.set_feather(feather);
@@ -5217,8 +5222,8 @@ clay_result clay_item_volume_flatten_from(const clay_document* doc,
     // The point of this entry point: the source is the DOCUMENT, which is
     // exact everywhere, rather than a volume that reports a bound outside its
     // band and places the facet against it.
-    field::FieldVolume flattened = field::flatten(
-        [&tape](kernel::cfloat3 q) { return tape.eval(q).d; }, region, cell, band, settings);
+    field::FieldVolume flattened =
+        field::flatten(eval::tape_block_fill(tape), region, cell, band, settings);
     if (flattened.brick_count() == 0)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "the region contains no surface to sample");
     flattened.set_feather(feather);

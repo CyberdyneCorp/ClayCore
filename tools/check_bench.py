@@ -165,6 +165,15 @@ FASTER_THAN = [
     # because the second evaluation of the tape is exactly the difference
     # between them. Catches a uniform layer paying for colour it cannot show.
     ("BM_ConsolidateGrownDoc", "BM_ConsolidateColoredGrownDoc"),
+    # The VOLUME bake the document-sourced verbs reach — clay_item_volume_from_document
+    # and the _relax_from / _flatten_from pair, plus their pyclay equivalents.
+    # bake_layer was gated by the pair above and these three were not, which is
+    # how they kept the one-point-at-a-time walk long after bake_layer stopped
+    # using it: 386 ms against 23.6 ms on a twelve-core machine, byte-identical
+    # output. This pair is what stops that happening again on THIS path — it
+    # measures the bake alone, with no redistance floor on either side, so it is
+    # a wider margin than the consolidate pair and a sharper signal.
+    ("BM_VolumeBakeDoc", "BM_VolumeBakeSerialDoc"),
     # Batched brick raycast (accel/parallel-raycast): the batched C-ABI call
     # fans its rays across the CPU backend's pool and must beat the same rays
     # issued one single-ray call at a time (kept in the benchmark as the
