@@ -68,11 +68,11 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 | Move | Move | `brush::move_brush` | s | `sdf_move` | 0.098 | gesture |
 | Move | Move (elastic) | `sculpt_grab` | v | `voxel_grab` | 0.027 | gesture |
 | Move Topological | — | `field::move_topological` | s | *(exempt — see below)* | — | — |
-| Smooth | Smooth | `field::relax` | s | `sdf_relax` | 0.74 | operation |
+| Smooth | Smooth | `field::relax` | s | `sdf_relax` | 1.67 ‡ | operation |
 | Smooth | Smooth | `sculpt_smooth` | v | `voxel_smooth` | **0.0117** | interactive |
-| Flatten | Flatten | `field::flatten` (two-sided) | s | `sdf_flatten` | 6.05 | operation |
+| Flatten | Flatten | `field::flatten` (two-sided) | s | `sdf_flatten` | 3.15 ‡ | operation |
 | Flatten | Flatten | `sculpt_flatten` | v | `voxel_flatten` | 0.0097 | interactive |
-| hPolish, Planar, Trim | Scrape / Planar | `field::flatten` cut-only | s | `volume_hpolish` | 111.4 | operation |
+| hPolish, Planar, Trim | Scrape / Planar | `field::flatten` cut-only | s | `volume_hpolish` | 72.2 ‡ | operation |
 | The surface brushes, on a mesh LAYER (Standard, Move, Inflate, Smooth, Pinch, Flatten, Clay, DamStandard, Trim Dynamic, hPolish, SnakeHook, Layer, Nudge, Relax) | — | `mesh::MeshSculptor`, 14 verbs, with alphas | m | *(unmeasured — see Named gaps)* | — | — |
 | — | Scrape | `sculpt_scrape` | v | `voxel_scrape` | 0.0118 | interactive |
 | Pinch | Pinch | `magnify` (negative), `sculpt_pinch` | s v | `voxel_pinch` | 0.0091 | interactive |
@@ -87,13 +87,13 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 | Surface Noise | Noise | `noise` deformer | s | `noise_detail` | 0.269 | gesture |
 | Mask | Mask | mask fields + stroke engine | s v | `mask_paint` | 0.0058 | interactive |
 | Mask (freeze effect) | Mask | mask-gated verbs | s v | `mask_freeze` | 0.0140 | interactive |
-| Extract | Split / Extract | `brush::mask_extrude` | s v | `mask_extrude` | 3094.7 | operation |
+| Extract | Split / Extract | `brush::mask_extrude` | s v | `mask_extrude` | 4286.5 ‡ | operation |
 | ZSpheres | — | `Prim::armature` | s | `armature_edit` | 0.0008 | gesture |
 | Alphas | Alphas | `sculpt_carve_alpha` | v | `voxel_carve_alpha` | 0.0011 | interactive |
 | — | Paint | `voxel_paint_brush` | v | `voxel_paint` | 0.0036 | interactive |
 | — | Smudge | `sculpt_smudge` | v | `voxel_smudge` | 0.026 | gesture |
 | — | (fill holes) | `sculpt_fill_cavities` | v | `voxel_fill_cavities` | 0.62 | operation |
-| Dynamesh | Voxel Remesh | `Layer.consolidate` | s | `sdf_consolidate` | 1537.5 ‡ | operation |
+| Dynamesh | Voxel Remesh | `Layer.consolidate` | s | `sdf_consolidate` | 314.7 ‡ | operation |
 | — | Multires | `VoxelGrid::add_level` | v | `voxel_add_level` | 0.511 | operation |
 | — | Multires (over a region) | `VoxelGrid::add_level(region)` | v | — | — | operation |
 | — | Multires (editing under one) | `sculpt_smooth`, one level finer | v | `voxel_smooth_l2` | 0.0149 | interactive |
@@ -120,12 +120,40 @@ The `8^d` write-amplification model and the cubic-radius model are both real
 descriptions of the work; they are poor predictors of the *time*, because the
 footprint that grows is not what dominates. Prefer the measurement.
 
-‡ **Known stale, in the safe direction.** Since this baseline was taken,
-`consolidate`'s bake batches its lattice samples through the CPU backend's
-thread pool — ~6× faster at these sizes on an M2 Max, byte-identical output.
-The number above is what the committed baseline still says, because a baseline
-only moves on a device run. It still scales with the document and still deserves
-progress UI; re-measure on device before relaxing either. See
+‡ **Re-measured on device, 2026-08-25.** These five rows come from a full
+59-case run on the reference iPad (iPad15,5, iPadOS 26.5.2), `valid: true`,
+`treeDirty: false`, nominal thermals at both ends — p95 at 1000 stamps, except
+`volume_hpolish`, whose axis is passes and which is quoted at 4. Every other row
+in the table is still the figure the committed baseline carries.
+
+Four of the five moved because `measure_sample_lipschitz()` stopped walking the
+dense sample lattice and started walking the stored bricks, which every verb
+that bakes pays for:
+
+| | before | after | |
+|---|---:|---:|---|
+| `sdf_flatten` | 6.677 | 3.153 | **2.12×** |
+| `volume_hpolish` | 149.673 | 72.170 | **2.07×** |
+| `sdf_consolidate` | 340.462 | 314.686 | 1.08× |
+| `mask_extrude` | 4442.964 | 4286.490 | 1.04× |
+
+`sdf_relax` did **not** move (1.661 → 1.669), and that is the control: `relax`
+is the one verb here that rewrites samples without re-measuring the bound, so it
+had nothing to save. The SDF stamp cases did not move either.
+
+**`sdf_relax` and `mask_extrude` nonetheless read worse than this table used to
+claim, and that is drift rather than a regression.** The figures here had fallen
+out of step with `tests/device/baseline.json` itself — it records 1.686 for
+`sdf_relax` where this table said 0.74, and 4403.3 for `mask_extrude` where it
+said 3094.7 — so the old numbers described neither the current code nor the
+committed reference. The rest of the table has not been re-derived; see
+[#273](https://github.com/CyberdyneCorp/ClayCore/issues/273).
+
+`consolidate` and `mask_extrude` still scale with the document and still deserve
+progress UI. `sdf_relax`'s figure is a **0.05-cell** fixture
+(`Fixture.volumeItem`); at a production cell it is two orders of magnitude
+larger and the traversal, not the kernel, is why — see
+[#272](https://github.com/CyberdyneCorp/ClayCore/issues/272). See
 [05 §9](05-claycore-library.md#what-latency-critical-costs-measured).
 
 ## What already fits
@@ -225,8 +253,8 @@ says nobody has measured one, because the gesture is what was instrumented.
 
 ### Tier 4 — the artist waits, correctly
 
-`sdf_relax` (0.74), `voxel_fill_cavities` (0.62), `sdf_flatten` (6.05),
-`volume_hpolish` (111), `sdf_consolidate` (1538), `mask_extrude` (3095). The
+`sdf_relax` (1.67), `voxel_fill_cavities` (0.62), `sdf_flatten` (3.15),
+`volume_hpolish` (72), `sdf_consolidate` (315), `mask_extrude` (4286). The
 first two would numerically fit a frame; they are `operation` because that is
 what they are, and a host should give them progress UI rather than a frame.
 
