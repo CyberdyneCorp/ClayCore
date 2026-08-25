@@ -514,7 +514,17 @@ Smoothing shrinks convex features and grows concave ones. Repeated relaxing SHAL
 ### Requirement: An operator that transforms a field works on the samples
 A field's value where it has no samples is a lower bound, not a measurement. An operator that reads a volume and writes another SHALL work on the stored samples rather than by re-sampling through evaluation, because evaluation mixes measurements with bounds and re-sampling that mixture records the boundary between them as though it were part of the shape.
 
-An operator that MOVES the surface SHALL narrow the band by how far it moved, since the sample-free bricks were classified against where the surface used to be and their bounds would otherwise overstate the distance to where it is now.
+An operator that MOVES the surface SHALL narrow the band by how far it moved, since the sample-free bricks were classified against where the surface used to be and their bounds would otherwise overstate the distance to where it is now. Narrowing a band that is ALREADY at its floor SHALL cost nothing: what a sample-free brick reports is derived from the stored-brick set, the grid and the band, and an operator that rewrites samples in place changes neither of the first two — so with the band unmoved the derivation reproduces what is already held. This is the ordinary case rather than a corner: a bake begins a couple of cells above the floor, so the first edit of a stroke spends the narrowing and every edit after it asks for one that cannot happen.
+
+Reading a volume's own samples SHALL be proportional to the samples it STORES, not to the lattice its bounds span. A narrow band is sparse by construction — storage is proportional to surface area, and a bake at an interactive cell size stores under a fifth of the points its bounding lattice holds — so a traversal that visits the whole lattice pays for the sparsity twice: once in the points that hold nothing, and again in the sparse lookup each one costs. This applies to the measurement of a volume's sample Lipschitz as much as to the operators that rewrite it.
+
+A traversal over stored bricks SHALL compare a brick's HALO samples, not only the `kBrickDim` per axis a brick owns. A brick stores one extra sample per axis, so a forward pair of adjacent samples always lies wholly inside a single brick — the one holding the lower end below the halo — and dropping the halo drops exactly the pairs that straddle a brick boundary. Such a traversal SHALL agree with one over every point of the bounding lattice, for every volume.
+
+An operator CONFINED TO A REGION SHALL cost what the region contains rather than what the volume contains. A brush whose weight is zero over most of a field still has to be told so once per sample if it walks the whole band, and that reverses the property a brush exists to have.
+
+A traversal so confined SHALL be indistinguishable from the full one, sample for sample, and the operator SHALL be the identity outside the region it declares. That is what makes the two equal, and it is required for a second reason that does not follow from the first: a sample on a brick face is stored by every brick sharing it, and a partial traversal writes only the copies held by the bricks it selected. Were the operator to change such a sample where one sharer was selected and another was not, the copies would disagree and the field would step at the brick face. A brick that was not selected does not meet the region, so every sample it holds lies outside it — which is where the operator is required to do nothing.
+
+A region SHALL be measured to where the operator's weight can be non-zero, INCLUDING any taper, and after any widening the operator applies to that taper rather than as the caller stated it.
 
 #### Scenario: Smoothing does not manufacture a steep edge
 - **WHEN** a volume is relaxed and the steepest slope of the result is measured within the sampled region
@@ -523,6 +533,15 @@ An operator that MOVES the surface SHALL narrow the band by how far it moved, si
 #### Scenario: A sample shared by several bricks is found in any of them
 - **WHEN** a stored sample lying on a brick face, edge or corner is read by global coordinate
 - **THEN** it is found whichever of the bricks sharing it holds the samples
+
+#### Scenario: Narrowing a band already at its floor costs nothing and changes nothing
+- **GIVEN** a volume whose band has already been narrowed to its floor
+- **WHEN** it is asked to narrow again
+- **THEN** the volume is unchanged sample for sample and bound for bound, and the field it reports in the region's empty majority is the same field
+
+#### Scenario: Narrowing a band that CAN narrow still re-derives the bounds
+- **WHEN** a volume whose band is above its floor is narrowed
+- **THEN** what its sample-free bricks report changes accordingly
 
 ### Requirement: Kernel headers self-select their backend
 When no `CLAY_KERNEL_*` macro is defined, `shim.h` SHALL choose the backend
@@ -891,6 +910,10 @@ The distance SHALL be solved over cells the source reports as material. Free spa
 
 It SHALL bake, for the reason relax and flatten do: the weight is a solved field rather than a closed form, and putting one in the tape would require a deformer that reads out-of-line data, which no deformer does.
 
+Where a verb samples a source at positions that are NOT the sample lattice, it SHALL be able to take a source that answers a BATCH of arbitrary points, and SHALL ask it once per window rather than once per sample. A topological move is that case: an output sample takes its material from the point the displacement pulls back to, which depends on the geodesic weight there, so no evaluator that knows only the lattice can be told where the queries are. Evaluating a document costs an order of magnitude more per instruction than the arithmetic it performs, so a source asked one point at a time makes the interpreter nearly the whole operation.
+
+The batched form SHALL be indistinguishable from the per-point one, sample for sample. It SHALL route EVERY question it asks the source through the one batched evaluator — both the sampling pass and the material the geodesic walk runs over, the latter being a lattice of cells with no dependency between them and so a single batch.
+
 #### Scenario: A neighbouring part is not dragged
 - **WHEN** a topological move is applied to one of two parts that are close in space and joined only through a distant path, with a radius that spans the gap
 - **THEN** the neighbouring part is unchanged, where a Euclidean move of the same radius moves it
@@ -910,6 +933,21 @@ It SHALL bake, for the reason relax and flatten do: the weight is a solved field
 #### Scenario: The declared steepness is measured
 - **WHEN** a topological move is applied
 - **THEN** the result declares the Lipschitz its samples actually have, rather than an assumed bound
+
+#### Scenario: The batched source and the per-point source agree exactly
+- **GIVEN** a document-sourced topological move
+- **WHEN** it is run once through a source asked a point at a time and once through one asked a batch at a time
+- **THEN** the two volumes are the same sample for sample
+
+#### Scenario: A drag that moves nothing agrees too
+- **GIVEN** a move whose displacement is zero, which returns the source sampled unchanged
+- **WHEN** it is run through each kind of source
+- **THEN** both produce the volume a plain bake of that source produces
+
+#### Scenario: An anchor out of reach of any material agrees too
+- **GIVEN** an anchor with no material within the move's radius, so the walk never starts
+- **WHEN** it is run through each kind of source
+- **THEN** the two agree, and the field is the source's
 
 ### Requirement: A loft with fewer than two profiles evaluates far
 The loft opcode SHALL return the far value when its profile count is below two, rather than reading the two records it interpolates between. A tape is rebuilt from a document on every compile and a document may come from disk, so the count is not something the authoring layer alone can guarantee.
@@ -1367,4 +1405,56 @@ Mixing two fields by a spatially varying weight is not a distance field. The tap
 #### Scenario: Raymarching a gated document does not overshoot
 - **WHEN** a gated item's document is marched by its declared step scale
 - **THEN** no step lands past the surface
+
+### Requirement: A culled tape agrees with the full tape inside the band
+Compiling against a culling region SHALL produce a tape whose band-clamped values are identical to the full tape's at every point inside that region. A consumer that culls does so to go faster, not to get a different field, and the surface lies inside the band.
+
+Culling SHALL account for every way an item can reach a value beyond its own influence bound. Two do. A feathered replace crossfades, and steers a value from up to its volume's band away. A SMOOTH-UNION CHAIN is the subtler one: an item's bound is dilated by what a single blend can move, but the accumulated value part way down a chain sits well above where that chain ends up, so an item whose final contribution is nothing can still lie within the blend radius of the RUNNING value and change it. The reach therefore grows with the length of the chain rather than being a property of the item.
+
+Accounting for this SHALL be the COMPILER's responsibility rather than the caller's, so that a consumer dilating its region by the band alone — which is what the region is documented to be — gets the guarantee without knowing why. A hard union has no such term: the minimum is exact and associative, and dropping an item that does not win it changes nothing.
+
+Where no fixed dilation can bound the reach, the compiler SHALL apply the largest reach any single item in the layer declares, and the limits of that SHALL be stated where the contract is stated rather than left as an implied proof.
+
+#### Scenario: A long smooth-union chain culls without moving the field
+- **GIVEN** a document whose surface is built from a long chain of smoothly-unioned items
+- **WHEN** a region of it is compiled against a culling region dilated by the band alone, and evaluated inside that region
+- **THEN** every value within the band equals the full tape's exactly
+
+#### Scenario: A short chain and a hard union agree too
+- **WHEN** the same comparison is made on a handful of blended items, and on the same shapes unioned hard
+- **THEN** both agree exactly, as they did before
+
+#### Scenario: The caller does not compensate
+- **WHEN** a consumer builds its culling region by dilating a brick by its band and nothing else
+- **THEN** the guarantee holds, because the compiler adds what the chain needs
+
+### Requirement: A bake evaluates only the items a brick can see
+Sampling a document into a volume SHALL evaluate, for each brick, only the items whose influence can reach it, rather than the whole document at every sample. A brick of an ordinary sculpt needs a handful of a tape thousands of instructions long, and the cost of a bake is the interpreter rather than the arithmetic.
+
+The result SHALL be identical to evaluating the whole tape everywhere — sample for sample, not within a tolerance. That is available without approximation because a culled value can only exceed the true one, so a culled value inside the band IS the true one, and a brick with no sample inside the band stores none of them and is read only for which side it is on.
+
+Where a brick DOES store samples, the ones beyond the band SHALL be evaluated against the whole tape. They are stored as they are, and a culled value there is too large — a volume that overstates the distance to its own surface is one a sphere tracer steps through, which is the single thing the sparse representation may not do. Those samples SHALL be evaluated in batches rather than one at a time, since they are a minority of the lattice and scattered across it.
+
+Culling SHALL be REFUSED where it does not pay. A blend's cull pad grows with its radius, so a wide enough blend leaves every item in every brick's tape and the per-brick compile becomes pure overhead — measured, that is a bake at half the speed of not culling at all. Whether it pays SHALL be decided by measuring the culled tapes of a sample of the WHOLE lattice, not by a rule over the document's parameters, and not from a sample of one region of it.
+
+A verb that transforms the sampled block before it is stored SHALL NOT cull, because the classification that makes culling exact is about the values the fill produced and not about the values that end up stored.
+
+#### Scenario: A culled bake is the whole-tape bake
+- **GIVEN** a document whose items are spread over its surface
+- **WHEN** it is baked with the tape culled per brick, and again with the whole tape
+- **THEN** the two volumes have the same bricks, declare the same Lipschitz bound, and serialize to the same bytes
+
+#### Scenario: The culled bake does not overstate its own distance
+- **WHEN** the field of a culled bake is compared against the true distance at points outside the surface
+- **THEN** it exceeds it by no more than the whole-tape bake does
+
+#### Scenario: A wide blend refuses the cull rather than paying for it
+- **GIVEN** a document blended widely enough that a brick's tape is most of the document's
+- **WHEN** it is baked
+- **THEN** the bake is no slower than evaluating the whole tape, and the volume is the same
+
+#### Scenario: A single item is baked without ceremony
+- **GIVEN** a document of one primitive
+- **WHEN** it is baked
+- **THEN** the volume is the one the whole tape produces
 
