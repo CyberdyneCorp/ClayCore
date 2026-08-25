@@ -49,15 +49,23 @@ Node dab(float x, float y, float z, float r, Op op = Op::Add, float k = 0.0f) {
     return n;
 }
 
+// memcmp is declared never-null even for a zero length, and an empty vector's
+// data() is null — a document of plain prims has no blob at all — so the sizes
+// gate the compares rather than being checked alongside them. UBSan is right
+// about this and the guard is not defensive noise.
+template <typename T>
+bool same_bytes(const std::vector<T>& a, const std::vector<T>& b) {
+    if (a.size() != b.size()) return false;
+    return a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(T)) == 0;
+}
+
 void require_identical(const Tape& reused, const Tape& full) {
     REQUIRE(reused.instrs.size() == full.instrs.size());
     REQUIRE(reused.params.size() == full.params.size());
     REQUIRE(reused.blob.size() == full.blob.size());
-    CHECK(std::memcmp(reused.instrs.data(), full.instrs.data(),
-                      full.instrs.size() * sizeof(kernel::CTapeInstr)) == 0);
-    CHECK(std::memcmp(reused.params.data(), full.params.data(), full.params.size() * sizeof(float)) ==
-          0);
-    CHECK(std::memcmp(reused.blob.data(), full.blob.data(), full.blob.size() * sizeof(float)) == 0);
+    CHECK(same_bytes(reused.instrs, full.instrs));
+    CHECK(same_bytes(reused.params, full.params));
+    CHECK(same_bytes(reused.blob, full.blob));
     CHECK(reused.info.is_exact == full.info.is_exact);
     CHECK(reused.info.lipschitz == doctest::Approx(full.info.lipschitz));
     CHECK(reused.bounds.min.x == doctest::Approx(full.bounds.min.x));
