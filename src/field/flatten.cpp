@@ -47,8 +47,15 @@ struct Plane {
 // by the region's weight. Shared by the two source overloads — the
 // point-at-a-time one and the batched one — because a blend written twice is a
 // blend that drifts, and the two are required to agree sample for sample.
-float flatten_at(const FlattenSettings& s, const Plane& pl, cfloat3 p, float here) {
+// `src` is a CALLABLE rather than the value, so the weight is computed before
+// it is called. That is not a style preference: the source is a std::function,
+// which the optimiser must treat as able to touch anything, so reading the
+// settings after it means reloading every one of them. Passing `source(p)` as
+// an argument -- which evaluates first -- cost 5% of an in-place flatten.
+template <typename Src>
+float flatten_at(const FlattenSettings& s, const Plane& pl, cfloat3 p, Src&& src) {
     const float weight = region_weight(s, p) * pl.strength * mask_gate(s.mask, p);
+    const float here = src(p);
     if (weight <= 0.0f) return here;
     // The plane is itself a signed distance function, so blending toward it is
     // what makes this two-sided: above the plane the value rises and material
@@ -95,7 +102,7 @@ FieldVolume flatten(const std::function<float(cfloat3)>& source, const math::Aab
         return FieldVolume::sample(source, region, cell_size, band);
 
     FieldVolume out = FieldVolume::sample(
-        [&source, &settings, &pl](cfloat3 p) { return flatten_at(settings, pl, p, source(p)); },
+        [&source, &settings, &pl](cfloat3 p) { return flatten_at(settings, pl, p, source); },
         region, cell_size, band);
 
     // Measured, not bounded in advance. Inside the region the result is a
@@ -128,8 +135,8 @@ FieldVolume flatten(const FieldVolume::BrickBlockFill& source, const math::Aabb&
             for (std::size_t s = 0; s < count; ++s)
                 for (int i = 0; i < kBrickSamples; ++i) {
                     const std::size_t at = s * kBrickSamples + static_cast<std::size_t>(i);
-                    block[at] =
-                        flatten_at(settings, pl, grid.sample_position(first + s, i), block[at]);
+                    block[at] = flatten_at(settings, pl, grid.sample_position(first + s, i),
+                                           [&](cfloat3) { return block[at]; });
                 }
         },
         region, cell_size, band);
