@@ -679,7 +679,24 @@ void FieldVolume::shrink_band(float by) {
     // Never below the sample spacing: a band thinner than that says nothing the
     // samples do not already, and drives far_value() to zero, which stalls a
     // marcher rather than stepping it.
-    band_ = std::max(band_ - by, cell_size_ * 2.0f);
+    const float narrowed = std::max(band_ - by, cell_size_ * 2.0f);
+
+    // A band already at that floor cannot narrow, and then there is nothing to
+    // re-derive. What build_far_bounds() computes depends on the stored-brick
+    // SET, the grid, and the band — and an operator that rewrites samples in
+    // place changes none of the first two, so with the band unmoved it would
+    // recompute the array that is already there, chamfer and all.
+    //
+    // It is not a rare case, it is the steady state. A bake starts at three
+    // cells and the floor is two, so the first dab of a stroke spends the
+    // narrowing and every dab after it asks for a shrink that cannot happen:
+    // measured over five dabs, only the first (at a 0.01 cell) moved the band.
+    // The rebuild is a two-pass chamfer over every brick slot — 15,625 of them
+    // for the 2,132 that store anything — and it was 0.571 ms of a 2.234 ms
+    // dab, which is a term that scales with the model inside a brush that was
+    // just made local.
+    if (narrowed == band_) return;
+    band_ = narrowed;
     build_far_bounds();
 }
 

@@ -328,9 +328,16 @@ The gain follows how local the brush is, which is the point: cost tracks the
 dab rather than the document. A `region_radius` of zero means everywhere and
 still sweeps everything, correctly.
 
-Two whole-volume terms remain in a dab — the far-bound rebuild `shrink_band`
-does and the per-pass volume copy, together about a third of a small dab at
-that cell. See [#278](https://github.com/CyberdyneCorp/ClayCore/issues/278).
+The far-bound rebuild `shrink_band` does is no longer one of them. It used to
+run on every dab; it now runs only when the band actually narrows, which is the
+FIRST dab of a stroke and no other — a bake starts a couple of cells above the
+floor, and what a sample-free brick reports depends on the stored-brick set,
+the grid and the band, none of which a later dab moves. Over a 24-dab stroke at
+a 0.01 cell the steady dab fell from 2.32 ms to **1.77 ms**, and the first dab
+did not move, correctly.
+
+One whole-volume term is left in a dab: the per-pass volume copy, about 9% of
+one. See [#278](https://github.com/CyberdyneCorp/ClayCore/issues/278).
 
 Smoothing destroys **exactness** but cannot break the **Lipschitz** bound: an
 average cannot vary faster than the thing it averages, and a 1-Lipschitz field
