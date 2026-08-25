@@ -19,6 +19,15 @@ final class LatencyTests: XCTestCase {
     /// Sizes spanning two orders of magnitude, per the growth-axis requirement.
     static let axis = GrowthAxis.standard
 
+    /// Dabs in one stroke, for `testStrokeLatencyOnTheAppendPath`.
+    ///
+    /// Long enough that the first dab's full compile and upload are amortised
+    /// rather than dominant — at 24 the chained dabs outnumber it 23 to 1, so
+    /// a regression that put every dab back on the slow path moves the number
+    /// by an order of magnitude, not by 4%. Short enough that a pass at the
+    /// 1000-stamp end of the axis still costs about what the other cases do.
+    static let strokeDabs = 24
+
     private func abiVersion() -> String {
         var major: Int32 = 0, minor: Int32 = 0, patch: Int32 = 0
         clay_version(&major, &minor, &patch)
@@ -145,6 +154,136 @@ final class LatencyTests: XCTestCase {
             collector.add(CaseResult(
                 name: "sdf_stamp_\(backend)",
                 verb: "sdf_stamp",
+                budgetClass: .interactive,
+                backend: backend,
+                servedBy: backend,
+                measurements: measurements,
+                growthExponent: Timing.growthExponent(measurements),
+                startedAtMs: caseStartedAtMs,
+                thermalStateStart: caseThermalStart,
+                thermalStateEnd: DeviceInfo.thermalName(
+                    ProcessInfo.processInfo.thermalState)))
+        }
+
+        let record = collector.finish(abiVersion: abiVersion(), attachTo: self)
+        XCTAssertTrue(record.valid,
+                      "thermal state was \(record.thermalStateStart) -> "
+                      + "\(record.thermalStateEnd); a throttled run is a different "
+                      + "experiment, not a slower result")
+    }
+
+    /// A STROKE, which is the only shape that reaches the append fast path.
+    ///
+    /// `sdf_stamp_*` above removes the stamp between iterations so the document
+    /// stays the size the axis claims. That is right for the question it asks,
+    /// and it is exactly what makes it blind to this one: a removal is a
+    /// general invalidation, so every iteration recompiles the whole tape and
+    /// re-uploads it. A host sculpting does not do that. It appends dab after
+    /// dab, and since #294 the compiler reuses the compiled prefix and the
+    /// GPU backend copies only the suffix onto a tape it already holds.
+    ///
+    /// THE UNIT IS A STROKE, NOT A DAB, and it has to be. The chain is what is
+    /// under test: the first dab of a stroke pays a full compile and a full
+    /// upload, and every dab after it is served from what the one before left
+    /// behind. Timing a single dab with a reset would measure the first case
+    /// over and over and never the second — and there is no reset that
+    /// restores a document without breaking the chain, because breaking it is
+    /// what a reset IS.
+    ///
+    /// The recorded numbers are per dab: the stroke's cost divided by its
+    /// dabs. So `p95Ms` is the mean dab of the 95th-percentile STROKE rather
+    /// than the 95th-percentile dab — a coarser statistic than the other
+    /// cases', and the one the unit permits. It is directly comparable to
+    /// `sdf_stamp_\(backend)`, and the gap between them is what a host gives
+    /// up by invalidating instead of appending.
+    ///
+    /// TWO THINGS ABOUT THAT COMPARISON, both of which flatter nobody:
+    ///
+    /// The axis point is the size the stroke STARTS from, not the size it is
+    /// measured at — a stroke adds `strokeDabs` items as it runs. At 1000 that
+    /// is +2.4% and immaterial; at 10 the document more than triples, so the
+    /// small end of this case measures a bigger document than the same point
+    /// of `sdf_stamp_*` does and is the harder comparison of the two, not the
+    /// easier one. Measured on the reference iPad: `sdf_stroke_cpu` reads
+    /// 0.076 ms against `sdf_stamp_cpu`'s 0.038 ms at 10 stamps for exactly
+    /// this reason, and the two converge by 1000 (2.370 against 2.419).
+    ///
+    /// And the gap is NOT the GPU patch alone. Appending is cheaper to compile
+    /// as well as cheaper to transfer, and this case pays both — which is
+    /// right, because a host pays both. What isolates the transfer is
+    /// `BM_MetalStrokePatched`/`BM_MetalStrokeReupload`, which hold the compile
+    /// fixed and strip the lineage on one side.
+    func testStrokeLatencyOnTheAppendPath() throws {
+        let collector = RunCollector()
+        let available = registeredBackends()
+        XCTAssertTrue(available.contains("cpu"))
+
+        let points = SceneBuilder.drawLattice()
+        let pointCount = points.count / 3
+
+        for backend in ["cpu", "metal"] {
+            guard available.contains(backend) else {
+                XCTFail("backend '\(backend)' did not register on this device; "
+                        + "a case cannot be attributed to a backend that is absent")
+                continue
+            }
+
+            var measurements: [Measurement] = []
+            collector.sampleCanaryIfDue()
+            let caseStartedAtMs = collector.elapsedMs
+            let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
+            for stamps in Self.axis {
+                guard let (doc, layer) = SceneBuilder.sdfDocument(stamps: stamps) else {
+                    XCTFail("could not build a \(stamps)-stamp document"); continue
+                }
+                defer { clay_document_destroy(doc) }
+
+                var pts = points
+                var out = [Float](repeating: 0, count: pointCount)
+                var index = stamps
+                var evalFailures = 0
+                var addFailures = 0
+                var stroke: [clay_node_id] = []
+
+                let r = Timing.measureStable(reset: {
+                    // Roll the stroke back OUTSIDE the timing, so every pass
+                    // starts from the same document the axis names. This is
+                    // also what re-arms the measurement: the removals break
+                    // the append chain, so the next stroke's first dab pays a
+                    // full compile again, exactly as a real one does.
+                    for node in stroke.reversed() { _ = clay_remove_node(doc, layer, node) }
+                    stroke.removeAll(keepingCapacity: true)
+                }) {
+                    for _ in 0..<Self.strokeDabs {
+                        guard let node = SceneBuilder.addStampNode(doc, layer, index: index)
+                        else { addFailures += 1; continue }
+                        stroke.append(node)
+                        index += 1
+                        // The interactive unit, once per dab: the edit, then
+                        // the evaluation the host needs before it can draw.
+                        if clay_eval_points(doc, backend, &pts, pointCount, &out, nil)
+                            != CLAY_OK {
+                            evalFailures += 1
+                        }
+                    }
+                }
+                XCTAssertEqual(addFailures, 0,
+                               "a dab could not be added at \(stamps) stamps")
+                XCTAssertEqual(evalFailures, 0,
+                               "\(backend) failed to evaluate at \(stamps) stamps")
+
+                let perDab = Double(Self.strokeDabs)
+                measurements.append(Measurement(stamps: stamps,
+                                                p50Ms: r.p50 / perDab,
+                                                p95Ms: r.p95 / perDab,
+                                                samples: r.n,
+                                                repeats: r.repeats,
+                                                p95SpreadMs: r.spread / perDab))
+            }
+
+            collector.add(CaseResult(
+                name: "sdf_stroke_\(backend)",
+                verb: "sdf_stroke",
                 budgetClass: .interactive,
                 backend: backend,
                 servedBy: backend,

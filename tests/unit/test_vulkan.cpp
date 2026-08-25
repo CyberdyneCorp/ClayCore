@@ -25,6 +25,7 @@ using clay_test::item;
 namespace clay {
 namespace eval {
 std::uint64_t vulkan_tape_uploads(const Backend& backend);
+std::uint64_t vulkan_tape_patches(const Backend& backend);
 }
 }  // namespace clay
 
@@ -176,6 +177,208 @@ TEST_CASE("vulkan: buffers are reused across calls of different sizes") {
         std::vector<float> reference = cpu_distances(tape, pts);
         for (std::size_t i = 0; i < out.size(); ++i)
             CHECK(out[i] == doctest::Approx(reference[i]).epsilon(1e-4));
+    }
+}
+
+// An appended tape names the tape it grew from and where the two stop
+// agreeing, so the backend transfers only the suffix rather than re-uploading
+// 7.8 MiB to absorb ~148 bytes. See scene/tape.h -- lineage.
+//
+// A patch that writes to the wrong offset still counts as a patch, still
+// returns Ok, and still produces a field. So counting patches is the WEAK
+// half of these tests; the assertion that matters is that a field arrived at
+// by patching equals the same field uploaded whole.
+namespace {
+
+// A document that grows by appending, plus the tapes each append produces.
+struct Stroke {
+    scene::Document doc;
+    scene::LayerId layer = 0;
+    scene::TapeCheckpoint cp;
+    scene::Tape tape;
+
+    void begin(scene::Document d) {
+        doc = std::move(d);
+        layer = doc.layers.back().id;
+        tape = scene::compile_document_resumable(doc, &cp);
+    }
+    // Appends one dab and returns whether the compile could reuse the prefix.
+    bool dab(float x, float y) {
+        scene::Node n = item(scene::Prim::sphere(0.22f), kernel::cf3(x, y, 0.0f));
+        n.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.05f};
+        const scene::NodeId id = doc.find_layer(layer)->sdf->insert(n);
+        scene::Tape grown;
+        scene::TapeCheckpoint next;
+        if (!scene::compile_document_append(tape, cp, doc, {id}, &grown, &next)) return false;
+        tape = std::move(grown);
+        cp = next;
+        return true;
+    }
+};
+
+std::vector<float> eval_with(eval::Backend* vk, const scene::Tape& tape,
+                             const std::vector<float>& pts) {
+    eval::PointQuery q;
+    q.points_xyz = pts.data();
+    q.count = pts.size() / 3;
+    std::vector<float> out(q.count);
+    eval::PointResults res;
+    res.distances = out.data();
+    REQUIRE(vk->eval_points(tape, q, res) == eval::Status::Ok);
+    return out;
+}
+
+// Puts something else on the device so the next evaluation of `tape` cannot
+// be served by residency or by a patch, forcing a whole upload.
+void evict(eval::Backend* vk, const std::vector<float>& pts) {
+    scene::Document other;
+    other.add_sdf_layer("other").sdf->insert(
+        item(scene::Prim::box(kernel::cf3(0.3f, 0.9f, 0.2f)), kernel::cf3(-0.8f, 0.0f, 0.0f)));
+    eval_with(vk, scene::compile_document(other), pts);
+}
+
+}  // namespace
+
+TEST_CASE("vulkan: a stroke uploads once and patches after that") {
+    eval::Backend* vk = vulkan();
+    if (!vk) return;
+    const std::vector<float> pts = lattice(6, 1.5f);
+
+    Stroke s;
+    s.begin(two_spheres());
+    eval_with(vk, s.tape, pts);
+    const std::uint64_t uploads = eval::vulkan_tape_uploads(*vk);
+    const std::uint64_t patches = eval::vulkan_tape_patches(*vk);
+
+    for (int i = 1; i <= 8; ++i) {
+        REQUIRE(s.dab(-0.6f + 0.15f * static_cast<float>(i), 0.35f));
+        eval_with(vk, s.tape, pts);
+    }
+    // Every dab after the first evaluation was a suffix transfer, and the
+    // resident tape advanced each time -- without that only the first dab
+    // would patch and the other seven would re-upload.
+    CHECK(eval::vulkan_tape_uploads(*vk) == uploads);
+    CHECK(eval::vulkan_tape_patches(*vk) == patches + 8);
+}
+
+TEST_CASE("vulkan: a long stroke re-packs occasionally, not per dab") {
+    eval::Backend* vk = vulkan();
+    if (!vk) return;
+    const std::vector<float> pts = lattice(4, 1.5f);
+
+    // The buffers cannot have unbounded slack, so a stroke does eventually
+    // outgrow its reserved capacity and is uploaded whole again. That is
+    // correct and it is not a regression: each re-pack reserves half again,
+    // so the re-packs are geometric and their cost is amortised.
+    //
+    // What WOULD be a regression is re-packing per dab, which is what an
+    // exact-fit buffer does -- and it is invisible to a test that only checks
+    // the field, because every one of those uploads is correct. Hence a
+    // counter test, and hence a long stroke rather than a short one.
+    Stroke s;
+    s.begin(two_spheres());
+    eval_with(vk, s.tape, pts);
+    const std::uint64_t uploads = eval::vulkan_tape_uploads(*vk);
+    const std::uint64_t patches = eval::vulkan_tape_patches(*vk);
+
+    const int kDabs = 60;
+    for (int i = 1; i <= kDabs; ++i) {
+        REQUIRE(s.dab(-0.8f + 0.026f * static_cast<float>(i), 0.3f));
+        eval_with(vk, s.tape, pts);
+    }
+    const std::uint64_t re_packs = eval::vulkan_tape_uploads(*vk) - uploads;
+    const std::uint64_t patched = eval::vulkan_tape_patches(*vk) - patches;
+    CHECK(patched + re_packs == static_cast<std::uint64_t>(kDabs));
+    CHECK(patched >= static_cast<std::uint64_t>(kDabs) * 9 / 10);
+    CHECK(re_packs <= 6);  // geometric; per-dab would be 60
+}
+
+TEST_CASE("vulkan: a patched field is the field, not merely a field") {
+    eval::Backend* vk = vulkan();
+    if (!vk) return;
+    const std::vector<float> pts = lattice(6, 1.5f);
+
+    SUBCASE("over a stroke, so drift that accumulates is caught") {
+        Stroke s;
+        s.begin(two_spheres());
+        eval_with(vk, s.tape, pts);
+        for (int i = 1; i <= 10; ++i) {
+            REQUIRE(s.dab(-0.6f + 0.12f * static_cast<float>(i), 0.3f));
+            const std::vector<float> patched = eval_with(vk, s.tape, pts);
+            evict(vk, pts);
+            const std::vector<float> whole = eval_with(vk, s.tape, pts);
+            CHECK(patched == whole);
+        }
+    }
+
+    SUBCASE("on a document carrying a blob, which is what the slack is for") {
+        // A stroke item puts points in the blob, so params and blob both
+        // grow. With the blob packed directly behind params an append would
+        // shove it right; the reserved gap is what keeps it still.
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("l");
+        l.sdf->insert(item(scene::Prim::sphere(0.9f), kernel::cf3(0.0f, 0.0f, 0.0f)));
+        scene::Node stroke;
+        stroke.prim = scene::Prim::stroke();
+        stroke.stroke = {{kernel::cf3(-0.6f, 0.2f, 0.0f), 0.18f},
+                         {kernel::cf3(0.0f, 0.5f, 0.0f), 0.22f},
+                         {kernel::cf3(0.6f, 0.2f, 0.0f), 0.18f}};
+        stroke.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.06f};
+        l.sdf->insert(stroke);
+
+        Stroke s;
+        s.begin(std::move(doc));
+        REQUIRE(s.tape.blob.size() > 0);
+        eval_with(vk, s.tape, pts);
+        for (int i = 1; i <= 6; ++i) {
+            REQUIRE(s.dab(-0.5f + 0.18f * static_cast<float>(i), -0.4f));
+            const std::vector<float> patched = eval_with(vk, s.tape, pts);
+            evict(vk, pts);
+            const std::vector<float> whole = eval_with(vk, s.tape, pts);
+            CHECK(patched == whole);
+        }
+    }
+}
+
+TEST_CASE("vulkan: a tape that cannot be patched is uploaded whole") {
+    eval::Backend* vk = vulkan();
+    if (!vk) return;
+    const std::vector<float> pts = lattice(5, 1.5f);
+
+    SUBCASE("one claiming no lineage") {
+        scene::Tape plain = scene::compile_document(two_spheres());
+        CHECK(plain.parent_id == 0);
+        evict(vk, pts);
+        const std::uint64_t patches = eval::vulkan_tape_patches(*vk);
+        const std::vector<float> got = eval_with(vk, plain, pts);
+        CHECK(eval::vulkan_tape_patches(*vk) == patches);
+        CHECK(got.size() == pts.size() / 3);
+    }
+
+    SUBCASE("one whose ancestor is no longer resident") {
+        Stroke s;
+        s.begin(two_spheres());
+        eval_with(vk, s.tape, pts);
+        REQUIRE(s.dab(0.5f, 0.4f));
+        evict(vk, pts);  // the ancestor is gone
+        const std::uint64_t patches = eval::vulkan_tape_patches(*vk);
+        const std::uint64_t uploads = eval::vulkan_tape_uploads(*vk);
+        eval_with(vk, s.tape, pts);
+        CHECK(eval::vulkan_tape_patches(*vk) == patches);
+        CHECK(eval::vulkan_tape_uploads(*vk) == uploads + 1);
+    }
+
+    SUBCASE("a hand-assembled tape is never served a resident upload") {
+        // compile_id 0 means no identity, so nothing about it may be trusted
+        // to match what is on the device.
+        scene::Tape hand = scene::compile_document(two_spheres());
+        hand.compile_id = 0;
+        hand.parent_id = 0;
+        const std::vector<float> first = eval_with(vk, hand, pts);
+        const std::uint64_t uploads = eval::vulkan_tape_uploads(*vk);
+        const std::vector<float> second = eval_with(vk, hand, pts);
+        CHECK(eval::vulkan_tape_uploads(*vk) == uploads + 1);
+        CHECK(first == second);
     }
 }
 

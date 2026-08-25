@@ -35,6 +35,28 @@
 using namespace clay;
 using kernel::cf3;
 
+// The backends' upload and patch counters: a backend-private test hook,
+// declared here rather than published in a header, the same way the backends'
+// own tests reach them. Guarded because the symbols exist only where the
+// backend was built — the resident/reupload Metal pair below needs no guard,
+// since it reaches nothing beyond the registry, but the stroke pair does.
+#if defined(CLAY_HAS_VULKAN)
+namespace clay {
+namespace eval {
+std::uint64_t vulkan_tape_uploads(const Backend& backend);
+std::uint64_t vulkan_tape_patches(const Backend& backend);
+}  // namespace eval
+}  // namespace clay
+#endif
+#if defined(CLAY_HAS_METAL)
+namespace clay {
+namespace eval {
+std::uint64_t metal_tape_uploads(const Backend& backend);
+std::uint64_t metal_tape_patches(const Backend& backend);
+}  // namespace eval
+}  // namespace clay
+#endif
+
 namespace {
 
 // fixed benchmark scene: 12 items with blends, mirror, subtract
@@ -393,6 +415,84 @@ void BM_DeepDocCompile193(benchmark::State& state) { deep_doc_compile(state, 193
 BENCHMARK(BM_DeepDocCompile193)->Unit(benchmark::kMillisecond);
 void BM_DeepDocCompile2000(benchmark::State& state) { deep_doc_compile(state, 2000); }
 BENCHMARK(BM_DeepDocCompile2000)->Unit(benchmark::kMillisecond);
+
+// -- the whole-document tape after an append (#197 phase 1) ------------------
+//
+// A host that raycasts to place the next dab reads the WHOLE-document tape,
+// which is cached on the document revision and so thrown away by every edit.
+// The pair below is the cost of that rebuild, with and without reusing the
+// compiled prefix.
+//
+// What the ratio is bounded by is worth stating, because it is not the
+// instruction count. Reuse turns an O(N) COMPILE into an O(N) MEMCPY: it
+// removes the per-item work — influence bounds, transform inversion, curve
+// tessellation, info folding — but not the byte movement, and params are ~90%
+// of the bytes. Measured on this machine at 50k items: 7.58 ms to compile,
+// 0.83 ms to copy 7.82 MiB and append, so roughly 9x and no more. A result
+// far below that means something is copying twice.
+//
+// The append rows measure ONE rebuild on a document of the size in their
+// name: the dab is appended once and re-compiled onto the same prefix every
+// iteration.
+//
+// AND IT LEAVES THE GPU RE-UPLOAD UNTOUCHED. The reused tape has different
+// bytes and so a different compile_id, which is a guaranteed miss in the
+// Metal backend's resident-tape cache and a full re-emit for Vulkan's
+// memcmp. #197 is not closed by this pair improving; that needs the tape
+// identity to carry a generation and a dirty range.
+void deep_doc_whole_compile(benchmark::State& state, int nodes) {
+    scene::Document doc = deep_sphere(nodes);
+    for (auto _ : state) {
+        scene::Tape tape = scene::compile_document(doc);
+        benchmark::DoNotOptimize(tape.instrs.size());
+        state.counters["instrs"] = static_cast<double>(tape.instrs.size());
+    }
+    state.counters["nodes"] = static_cast<double>(nodes);
+}
+
+void deep_doc_whole_append(benchmark::State& state, int nodes) {
+    scene::Document doc = deep_sphere(nodes);
+    scene::TapeCheckpoint base_cp;
+    const scene::Tape base = scene::compile_document_resumable(doc, &base_cp);
+
+    // The dab is appended ONCE, and every iteration rebuilds the same tape
+    // from the same prefix. Appending per iteration instead would grow the
+    // document as the benchmark ran — at 1 000 nodes it reached 11 000 — and
+    // the row would report an average over sizes rather than the size in its
+    // name, which is not comparable with the compile row above it.
+    scene::Node dab;
+    dab.prim = scene::Prim::sphere(0.05f);
+    dab.xform.position = cf3(0.0f, 1.0f, 0.0f);
+    dab.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.03f};
+    const scene::NodeId id = doc.layers[0].sdf->insert(dab);
+
+    for (auto _ : state) {
+        scene::Tape grown;
+        if (!scene::compile_document_append(base, base_cp, doc, {id}, &grown, nullptr)) {
+            state.SkipWithError("the append was refused; the fast path is not being measured");
+            return;
+        }
+        benchmark::DoNotOptimize(grown.instrs.size());
+        state.counters["instrs"] = static_cast<double>(grown.instrs.size());
+    }
+    state.counters["nodes"] = static_cast<double>(doc.layers[0].sdf->roots.size());
+}
+
+// NAMED, not Arg()-parameterised: check_bench.py keys its gate on the part of
+// the name before "/", so BM_X/50000 and BM_X/1000 would collapse to one key.
+void BM_WholeDocCompile1000(benchmark::State& state) { deep_doc_whole_compile(state, 1000); }
+BENCHMARK(BM_WholeDocCompile1000)->Unit(benchmark::kMillisecond);
+void BM_WholeDocCompile10000(benchmark::State& state) { deep_doc_whole_compile(state, 10000); }
+BENCHMARK(BM_WholeDocCompile10000)->Unit(benchmark::kMillisecond);
+void BM_WholeDocCompile50000(benchmark::State& state) { deep_doc_whole_compile(state, 50000); }
+BENCHMARK(BM_WholeDocCompile50000)->Unit(benchmark::kMillisecond);
+
+void BM_WholeDocAppend1000(benchmark::State& state) { deep_doc_whole_append(state, 1000); }
+BENCHMARK(BM_WholeDocAppend1000)->Unit(benchmark::kMillisecond);
+void BM_WholeDocAppend10000(benchmark::State& state) { deep_doc_whole_append(state, 10000); }
+BENCHMARK(BM_WholeDocAppend10000)->Unit(benchmark::kMillisecond);
+void BM_WholeDocAppend50000(benchmark::State& state) { deep_doc_whole_append(state, 50000); }
+BENCHMARK(BM_WholeDocAppend50000)->Unit(benchmark::kMillisecond);
 
 // The cull ALONE, over a dab's worth of bricks: this is the ~64 ns x item x
 // brick walk #118 says is past the interactive budget at 10k items before a
@@ -1649,9 +1749,163 @@ void metal_consolidated_eval(benchmark::State& state, int tape_count) {
     state.counters["blob_floats"] = static_cast<double>(tapes.front().blob.size());
 }
 
+#if defined(CLAY_HAS_METAL)
+// -- a Metal stroke, patched against re-uploaded (#296) ----------------------
+//
+// The pair is the same stroke twice: append a dab, evaluate, repeat. One
+// evaluates the tape the compiler produced, which names its ancestor and so is
+// served by copying only the suffix; the other strips the lineage first, which
+// is exactly what the backend saw before #296 and forces a fresh
+// newBuffer(StorageModeShared) for all three sections of a tape that grew by
+// one item.
+//
+// Stripping the lineage rather than comparing against a second backend keeps
+// everything else identical — same document, same tapes, same dispatches, one
+// field different — so the gap is the transfer and nothing else.
+//
+// READ THE REALLOCATION COUNTER, NOT ONLY THE TIME. On unified memory both
+// rows evaluate the same field with the same dispatch, and a Mac has neither
+// the memory pressure nor the power budget an iPad sculpts under, so the
+// wall-clock gap here UNDER-reports what the change is worth on the hardware
+// that ships. The allocator churn is exact and machine-independent.
+void metal_stroke(benchmark::State& state, bool keep_lineage) {
+    eval::Backend* mtl = eval::Registry::instance().find("metal");
+    scene::Document doc = sculpted_sphere(20000);
+    scene::Layer& layer = doc.layers.front();
+    scene::TapeCheckpoint cp;
+    scene::Tape tape = scene::compile_document_resumable(doc, &cp);
+
+    eval::GridQuery q;
+    q.origin = cf3(0.2f, -0.08f, -0.08f);
+    q.spacing = 0.02f;
+    q.nx = q.ny = q.nz = 8;
+    std::vector<float> values(static_cast<std::size_t>(q.nx) * q.ny * q.nz);
+    mtl->eval_grid(tape, q, values.data());  // the first upload is not the measurement
+
+    const std::uint64_t uploads_before = eval::metal_tape_uploads(*mtl);
+    for (auto _ : state) {
+        // The APPEND IS NOT MEASURED. Phase 1 already gated what it costs, and
+        // leaving it inside would put ~0.2 ms of compile in front of the
+        // transfer this pair exists to compare.
+        state.PauseTiming();
+        scene::Node dab;
+        dab.prim = scene::Prim::sphere(0.05f);
+        dab.xform.position = cf3(0.0f, 1.0f, 0.0f);
+        dab.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.03f};
+        const scene::NodeId id = layer.sdf->insert(dab);
+        scene::Tape grown;
+        scene::TapeCheckpoint next;
+        if (!scene::compile_document_append(tape, cp, doc, {id}, &grown, &next)) {
+            state.SkipWithError("the append was refused; the fast path is not being measured");
+            return;
+        }
+        tape = std::move(grown);
+        cp = next;
+        if (!keep_lineage) tape.parent_id = 0;  // what the backend saw before #296
+        state.ResumeTiming();
+
+        mtl->eval_grid(tape, q, values.data());
+        benchmark::DoNotOptimize(values.data());
+    }
+    state.counters["instrs"] = static_cast<double>(tape.instrs.size());
+    state.counters["tape_KiB"] =
+        static_cast<double>(tape.instrs.size() * sizeof(kernel::CTapeInstr) +
+                            (tape.params.size() + tape.blob.size()) * sizeof(float)) /
+        1024.0;
+    // The allocator churn, which is half of what #197 is about and the half a
+    // wall-clock number on unified memory reports least honestly.
+    state.counters["repacks"] =
+        static_cast<double>(eval::metal_tape_uploads(*mtl) - uploads_before);
+}
+#endif
+
+#if defined(CLAY_HAS_VULKAN)
+// -- a Vulkan stroke, patched against re-uploaded (#197 phase 2) -------------
+//
+// The pair is the same stroke twice: append a dab, evaluate, repeat. One
+// evaluates the tape the compiler produced, which names its ancestor and so
+// is served by transferring only the suffix; the other strips the lineage
+// first, which is exactly what the backend saw before this change and forces
+// a whole re-upload of a tape that grew by one item.
+//
+// Stripping the lineage rather than comparing against a second backend keeps
+// everything else identical — same document, same tapes, same dispatches, one
+// field different — so the gap is the transfer and nothing else.
+void vulkan_stroke(benchmark::State& state, bool keep_lineage) {
+    eval::Backend* vk = eval::Registry::instance().find("vulkan");
+    scene::Document doc = sculpted_sphere(20000);
+    scene::Layer& layer = doc.layers.front();
+    scene::TapeCheckpoint cp;
+    scene::Tape tape = scene::compile_document_resumable(doc, &cp);
+
+    eval::GridQuery q;
+    q.origin = cf3(0.2f, -0.08f, -0.08f);
+    q.spacing = 0.02f;
+    q.nx = q.ny = q.nz = 8;
+    std::vector<float> values(static_cast<std::size_t>(q.nx) * q.ny * q.nz);
+    vk->eval_grid(tape, q, values.data());  // the first upload is not the measurement
+
+    const std::uint64_t uploads_before = eval::vulkan_tape_uploads(*vk);
+    for (auto _ : state) {
+        // The APPEND IS NOT MEASURED. Phase 1 already gated what it costs, and
+        // leaving it inside would put ~0.2 ms of compile in front of the
+        // transfer this pair exists to compare.
+        state.PauseTiming();
+        scene::Node dab;
+        dab.prim = scene::Prim::sphere(0.05f);
+        dab.xform.position = cf3(0.0f, 1.0f, 0.0f);
+        dab.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.03f};
+        const scene::NodeId id = layer.sdf->insert(dab);
+        scene::Tape grown;
+        scene::TapeCheckpoint next;
+        if (!scene::compile_document_append(tape, cp, doc, {id}, &grown, &next)) {
+            state.SkipWithError("the append was refused; the fast path is not being measured");
+            return;
+        }
+        tape = std::move(grown);
+        cp = next;
+        if (!keep_lineage) tape.parent_id = 0;  // what the backend saw before #294
+        state.ResumeTiming();
+
+        vk->eval_grid(tape, q, values.data());
+        benchmark::DoNotOptimize(values.data());
+    }
+    state.counters["instrs"] = static_cast<double>(tape.instrs.size());
+    state.counters["tape_KiB"] =
+        static_cast<double>(tape.instrs.size() * sizeof(kernel::CTapeInstr) +
+                            (tape.params.size() + tape.blob.size()) * sizeof(float)) /
+        1024.0;
+    // The allocator churn, which is half of what #197 is about and which no
+    // wall-clock number on a desktop with 8 GB of VRAM reports honestly.
+    state.counters["repacks"] =
+        static_cast<double>(eval::vulkan_tape_uploads(*vk) - uploads_before);
+}
+
 // Called from main, not from a static initializer: probing the registry
 // spins up backend runtimes (a Metal device), which has no business running
 // before main.
+void register_vulkan_benches() {
+    if (!eval::Registry::instance().find("vulkan")) return;
+    // FIXED ITERATION COUNT, deliberately. A stroke grows the document as it
+    // runs, so letting the harness pick iterations to fill a time budget
+    // would hand the faster row MORE dabs and a bigger document to be fast
+    // on — the two rows would stop measuring the same stroke. Measured that
+    // way once: 8 154 iterations and the document went from 2 000 items to
+    // 10 153.
+    benchmark::RegisterBenchmark("BM_VulkanStrokePatched",
+                                 [](benchmark::State& s) { vulkan_stroke(s, true); })
+        ->Unit(benchmark::kMillisecond)
+        ->Iterations(300);
+    benchmark::RegisterBenchmark("BM_VulkanStrokeReupload",
+                                 [](benchmark::State& s) { vulkan_stroke(s, false); })
+        ->Unit(benchmark::kMillisecond)
+        ->Iterations(300);
+}
+
+#else
+void register_vulkan_benches() {}
+#endif
+
 void register_metal_benches() {
     if (!eval::Registry::instance().find("metal")) return;
     benchmark::RegisterBenchmark("BM_MetalTapeResident",
@@ -1660,15 +1914,30 @@ void register_metal_benches() {
     benchmark::RegisterBenchmark("BM_MetalTapeReupload",
                                  [](benchmark::State& s) { metal_consolidated_eval(s, 6); })
         ->Unit(benchmark::kMillisecond);
+#if defined(CLAY_HAS_METAL)
+    // FIXED ITERATION COUNT, deliberately. A stroke grows the document as it
+    // runs, so letting the harness pick iterations to fill a time budget would
+    // hand the faster row MORE dabs and a bigger document to be fast on — the
+    // two rows would stop measuring the same stroke.
+    benchmark::RegisterBenchmark("BM_MetalStrokePatched",
+                                 [](benchmark::State& s) { metal_stroke(s, true); })
+        ->Unit(benchmark::kMillisecond)
+        ->Iterations(300);
+    benchmark::RegisterBenchmark("BM_MetalStrokeReupload",
+                                 [](benchmark::State& s) { metal_stroke(s, false); })
+        ->Unit(benchmark::kMillisecond)
+        ->Iterations(300);
+#endif
 }
 
 }  // namespace
 
 }  // namespace
 
-// BENCHMARK_MAIN(), plus the conditionally registered Metal pair.
+// BENCHMARK_MAIN(), plus the conditionally registered Metal and Vulkan pairs.
 int main(int argc, char** argv) {
     register_metal_benches();
+    register_vulkan_benches();
     benchmark::Initialize(&argc, argv);
     if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
     benchmark::RunSpecifiedBenchmarks();

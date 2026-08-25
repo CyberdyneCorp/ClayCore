@@ -318,6 +318,10 @@ class MetalBackend final : public Backend {
         return ok ? Status::Ok : Status::DeviceError;
     }
 
+    // For the backend's own tests and benchmarks; see tape_uploads_.
+    std::uint64_t tape_uploads() const { return tape_uploads_; }
+    std::uint64_t tape_patches() const { return tape_patches_; }
+
   private:
     MetalBackend() = default;
 
@@ -504,6 +508,13 @@ class MetalBackend final : public Backend {
         MTL::Buffer* instrs = nullptr;
         MTL::Buffer* params = nullptr;
         MTL::Buffer* blob = nullptr;
+        // How much of each buffer the resident tape actually occupies. The
+        // buffers are larger than that (see with_slack), so their length()
+        // is a capacity and says nothing about what a later tape agrees
+        // with. A patch is checked against these, not against the capacity.
+        std::size_t n_instrs = 0;
+        std::size_t n_params = 0;
+        std::size_t n_blob = 0;
     };
 
     void release_resident(ResidentTape& t) {
@@ -513,13 +524,43 @@ class MetalBackend final : public Backend {
         t = ResidentTape{};
     }
 
-    // An exact-size shared buffer holding a copy of one tape section; never
-    // zero-sized, because it gets bound.
-    MTL::Buffer* upload_section(const void* data, std::size_t bytes) {
-        if (bytes == 0) return device_->newBuffer(4, MTL::ResourceStorageModeShared);
-        return device_->newBuffer(data, bytes, MTL::ResourceStorageModeShared);
+    // Room for what a stroke is about to add. Every resident section is
+    // allocated through this rather than to the tape's exact length, and that
+    // is not a detail: an MTL::Buffer cannot be resized, so an exact fit
+    // means the very next dab does not fit, the patch declines, and all three
+    // buffers are re-allocated and re-copied — the allocation patching exists
+    // to avoid, still paid on every stamp.
+    //
+    // The two terms answer different documents. The PROPORTIONAL half keeps a
+    // large tape from re-packing often — and because each re-pack reserves
+    // half again, the re-packs over a stroke are geometric, so their cost is
+    // amortised rather than paid per dab. The CONSTANT half is for a small
+    // one, where half of very little is still not room for a single item: an
+    // item is ~37 params, so 64 floats of slack would absorb two dabs and
+    // then re-pack. 1024 absorbs a stroke's worth, and is 4 KiB a section
+    // against the 7.8 MiB it stops re-allocating at 50,000 items.
+    //
+    // Identical to the Vulkan backend's reservation, deliberately: the two
+    // are answering the same stroke, and a difference between them would be
+    // one more thing to explain when their numbers disagree.
+    static std::size_t with_slack(std::size_t n) { return n + n / 2 + 1024; }
+
+    // A shared buffer holding one tape section plus room to grow; never
+    // zero-sized, because it gets bound. newBuffer(ptr, len) would size it
+    // exactly, so the copy is done by hand into the reserved allocation.
+    MTL::Buffer* upload_section(const void* data, std::size_t bytes, std::size_t capacity) {
+        if (capacity < 4) capacity = 4;
+        MTL::Buffer* b = device_->newBuffer(capacity, MTL::ResourceStorageModeShared);
+        if (b && bytes) std::memcpy(b->contents(), data, bytes);
+        return b;
     }
 
+    // Where the tape goes, and how much of it actually has to be transferred.
+    //
+    // Three outcomes, in order: it is already here byte for byte (an id hit);
+    // it GREW from something that is here, so only the suffix it does not
+    // share is copied; or it is new and all three sections are allocated and
+    // filled.
     TapeBuffers upload_tape(const scene::Tape& tape) {
         const std::size_t instr_bytes = tape.instrs.size() * sizeof(kernel::CTapeInstr);
         const std::size_t param_bytes = tape.params.size() * sizeof(float);
@@ -529,20 +570,97 @@ class MetalBackend final : public Backend {
                                copy_in(kSlotTapeParams, tape.params.data(), param_bytes),
                                copy_in(kSlotTapeBlob, tape.blob.data(), blob_bytes)};
         ResidentTape* entry = &resident_[0];
+        ResidentTape* ancestor = nullptr;
         for (ResidentTape& t : resident_) {
             if (t.id == tape.compile_id) {
                 t.last_use = ++use_counter_;
                 return TapeBuffers{t.instrs, t.params, t.blob};
             }
+            if (t.id != 0 && t.id == tape.parent_id) ancestor = &t;
             if (t.last_use < entry->last_use) entry = &t;  // oldest = eviction victim
+        }
+        // Grew from what is here: transfer only what it does not share. A
+        // decline is a FALL-THROUGH, not a failure — the buffers as they
+        // stand cannot hold the grown tape, and re-allocating one hands back
+        // a fresh allocation with nothing in it, so the prefix the patch was
+        // built on has to be re-sent anyway.
+        if (ancestor && can_patch(tape, *ancestor) && patch_tape(tape, *ancestor)) {
+            ancestor->last_use = ++use_counter_;
+            return TapeBuffers{ancestor->instrs, ancestor->params, ancestor->blob};
         }
         release_resident(*entry);
         entry->id = tape.compile_id;
         entry->last_use = ++use_counter_;
-        entry->instrs = upload_section(tape.instrs.data(), instr_bytes);
-        entry->params = upload_section(tape.params.data(), param_bytes);
-        entry->blob = upload_section(tape.blob.data(), blob_bytes);
+        entry->n_instrs = tape.instrs.size();
+        entry->n_params = tape.params.size();
+        entry->n_blob = tape.blob.size();
+        entry->instrs = upload_section(tape.instrs.data(), instr_bytes,
+                                       with_slack(tape.instrs.size()) * sizeof(kernel::CTapeInstr));
+        entry->params = upload_section(tape.params.data(), param_bytes,
+                                       with_slack(tape.params.size()) * sizeof(float));
+        entry->blob = upload_section(tape.blob.data(), blob_bytes,
+                                     with_slack(tape.blob.size()) * sizeof(float));
+        ++tape_uploads_;
         return TapeBuffers{entry->instrs, entry->params, entry->blob};
+    }
+
+    // A tape may be patched onto a resident one when it says so itself —
+    // Tape::parent_id names the compile whose bytes it shares, and the
+    // agree_* offsets say how many. Everything else about it is checked here
+    // rather than trusted, because a patch written past what the two tapes
+    // actually share evaluates a field that never existed, with no error and
+    // no crash to say so (scene/tape.h — lineage).
+    static bool can_patch(const scene::Tape& tape, const ResidentTape& res) {
+        if (tape.compile_id == 0 || tape.parent_id == 0) return false;
+        if (!res.instrs || !res.params || !res.blob) return false;
+        // Lineage says the tapes agree BELOW these; a tape cannot agree with
+        // the resident one past its own length or past what was uploaded.
+        if (tape.agree_instrs > tape.instrs.size() || tape.agree_params > tape.params.size() ||
+            tape.agree_blob > tape.blob.size())
+            return false;
+        return tape.agree_instrs <= res.n_instrs && tape.agree_params <= res.n_params &&
+               tape.agree_blob <= res.n_blob;
+    }
+
+    // The suffixes only, written into the shared buffers the device already
+    // holds. Writing in place is safe for the same reason the scratch pool's
+    // reuse is: every submit returns only once the command buffer completed,
+    // and mutex_ serializes the public entry points, so no resident buffer is
+    // being read by the device while this runs.
+    bool patch_tape(const scene::Tape& tape, ResidentTape& res) {
+        const std::size_t instr_bytes = tape.instrs.size() * sizeof(kernel::CTapeInstr);
+        const std::size_t param_bytes = tape.params.size() * sizeof(float);
+        const std::size_t blob_bytes = tape.blob.size() * sizeof(float);
+        // Declining, so the caller uploads whole: an MTL::Buffer cannot grow,
+        // so a section that has outrun its reservation needs a new one — and
+        // then the prefix is gone and there is nothing to patch onto.
+        if (instr_bytes > res.instrs->length() || param_bytes > res.params->length() ||
+            blob_bytes > res.blob->length())
+            return false;
+
+        if (tape.instrs.size() > tape.agree_instrs)
+            std::memcpy(static_cast<kernel::CTapeInstr*>(res.instrs->contents()) +
+                            tape.agree_instrs,
+                        tape.instrs.data() + tape.agree_instrs,
+                        (tape.instrs.size() - tape.agree_instrs) * sizeof(kernel::CTapeInstr));
+        if (tape.params.size() > tape.agree_params)
+            std::memcpy(static_cast<float*>(res.params->contents()) + tape.agree_params,
+                        tape.params.data() + tape.agree_params,
+                        (tape.params.size() - tape.agree_params) * sizeof(float));
+        if (tape.blob.size() > tape.agree_blob)
+            std::memcpy(static_cast<float*>(res.blob->contents()) + tape.agree_blob,
+                        tape.blob.data() + tape.agree_blob,
+                        (tape.blob.size() - tape.agree_blob) * sizeof(float));
+
+        // The resident tape is now THIS one, which is what makes a stroke
+        // cheap rather than only its first dab: the next append names this
+        // compile as its parent, not the one uploaded whole several dabs ago.
+        res.id = tape.compile_id;
+        res.n_instrs = tape.instrs.size();
+        res.n_params = tape.params.size();
+        res.n_blob = tape.blob.size();
+        ++tape_patches_;
+        return true;
     }
 
     // A batch's per-grid tapes concatenated into three shared buffers, plus
@@ -714,6 +832,12 @@ class MetalBackend final : public Backend {
     static constexpr int kResidentTapes = 4;
     ResidentTape resident_[kResidentTapes];
     std::uint64_t use_counter_ = 0;
+    // Counts uploads, not dispatches. "The tape is uploaded when it changes"
+    // is otherwise a claim no test can check, and an unchecked claim about a
+    // cache is how a stale field ships. tape_patches_ is the same argument
+    // for the half that transfers a suffix instead.
+    std::uint64_t tape_uploads_ = 0;
+    std::uint64_t tape_patches_ = 0;
 
     MTL::Device* device_ = nullptr;
     MTL::CommandQueue* queue_ = nullptr;
@@ -733,6 +857,20 @@ std::unique_ptr<Backend> create_metal_backend() { return MetalBackend::create();
 
 std::unique_ptr<Backend> adopt_metal_backend(const DeviceHandles& device) {
     return MetalBackend::adopt(device);
+}
+
+// How many times a tape was allocated and copied onto the device whole.
+// Exposed for the backend's own tests; a caller has no use for it and none is
+// published in the C ABI.
+std::uint64_t metal_tape_uploads(const Backend& backend) {
+    return static_cast<const MetalBackend&>(backend).tape_uploads();
+}
+
+// How many times an appended tape was served by copying only the suffix it
+// did not share with the resident one. Same reason as the counter above: "a
+// stroke uploads once and patches after that" is otherwise unfalsifiable.
+std::uint64_t metal_tape_patches(const Backend& backend) {
+    return static_cast<const MetalBackend&>(backend).tape_patches();
 }
 
 }  // namespace eval

@@ -302,6 +302,68 @@ MAX_RATIO = [
     # to catch and this reads its healthy value. That is the gate working: it
     # charges for the duplication on the machine that actually pays for it.
     ("BM_TapeCombineAddColored", "BM_TapeCombineAddColoredRef", 1.25),
+    # Rebuilding the whole-document tape after an APPEND against compiling it
+    # from scratch (#197 phase 1). A sculpt grows a node per brush stamp and a
+    # host raycasts to place the next one, so this rebuild is on the
+    # interactive path and used to be the whole document every time.
+    #
+    # A RATIO rather than a ceiling, because both sides do the same work on the
+    # same document in the same process and only one of them reuses the
+    # compiled prefix. What it catches is the fast path silently ceasing to
+    # fire — a refused checkpoint, an invalidation that stopped recording
+    # appends, a prefix copied twice — all of which land at or above 1.0x.
+    #
+    # Measured quiet at 50 000 items: 0.544 ms against 10.3 ms, so 0.053x.
+    #
+    # THE CEILING IS NOT SET FROM THAT, and the reason is worth recording,
+    # because it is the trap a tighter number would have walked into. The two
+    # sides do not have the same bottleneck: reuse is a 7.8 MiB memcpy and is
+    # memory-bandwidth bound, while the full compile is dominated by per-item
+    # work and is compute bound. So a loaded runner does NOT move them
+    # together — measured on this machine with two other jobs at ~98% CPU, the
+    # append side went 0.544 -> 3.4 ms while the compile side barely moved,
+    # and the ratio degraded from 0.053x to 0.31x. A ceiling read off the
+    # quiet number would fail on a busy CI runner and teach the next person to
+    # distrust the gate.
+    #
+    # 0.50 sits an order of magnitude above the quiet measurement, above the
+    # worst contention observed, and still 2x below the 1.0x that a lost fast
+    # path reads.
+    ("BM_WholeDocAppend50000", "BM_WholeDocCompile50000", 0.50),
+]
+
+# counter gates: (bench, counter, max_value) — the named counter must be at
+# most max_value. SKIPPED when the benchmark is absent, the way FASTER_THAN is
+# and unlike MAX_RATIO, because a GPU benchmark only registers where a device
+# is present and CPU-only CI must not fail for lacking one.
+#
+# This exists because some properties are not times. Whether an appended tape
+# is patched onto the resident one or re-uploaded whole is, on a discrete GPU,
+# almost invisible in wall clock: measured on an RTX 5060 the patched stroke
+# is 48.7 ms against 57.8 ms, because both pay the same ~48 ms of dispatch and
+# fence latency. The same pair is 0.333 ms against 9.44 ms of HOST CPU, and
+# reallocates 0 times against 300 — and the reallocation count is exact,
+# deterministic and the same on every machine, where a 16% wall-clock margin
+# on a GPU is a flaky gate waiting to happen.
+#
+# The allocator churn is also the half of #197 that matters most on the
+# platform the issue is actually about: a desktop with 8 GB of VRAM shrugs at
+# re-allocating a 3 MiB buffer per stamp; an iPad is where memory pressure
+# ends sessions.
+MAX_COUNTER = [
+    # A stroke re-packs when it outgrows its reserved slack, which is
+    # geometric — measured 8 re-packs over 8 154 appends, and 0 over the 300
+    # this benchmark runs. Per-dab reallocation, which is what the code did
+    # before patching and what a regression would restore, is 300.
+    ("BM_VulkanStrokePatched", "repacks", 4),
+    # The same claim on Metal (#296), and on Metal it is the WHOLE gate. The
+    # Vulkan pair at least moves the wall clock 1.19x; on unified memory the
+    # two rows measure 49.0 ms against 50.2 ms, because both evaluate the same
+    # 40k-instruction tape with the same dispatch and differ only in what the
+    # host copied first. A time gate on 1.02x would flake on any machine. The
+    # reallocation count does not: 0 against 300 over the same stroke, exact
+    # and machine-independent.
+    ("BM_MetalStrokePatched", "repacks", 4),
 ]
 
 
@@ -314,10 +376,12 @@ def main() -> int:
     failures = []
     seen = set()
     times = {}
+    counters = {}
     for bench in data.get("benchmarks", []):
         name = bench["name"].split("/")[0]
         seen.add(name)
         times[name] = bench.get("real_time", 0)
+        counters[name] = bench
         if name not in FLOORS:
             continue
         rule = FLOORS[name]
@@ -339,6 +403,16 @@ def main() -> int:
             print(f"bench-gate: {fast}: {times[fast]:,.1f} ms vs {slow}: {times[slow]:,.1f} ms")
             if times[fast] >= times[slow]:
                 failures.append(f"{fast}: {times[fast]:,.1f} ms not faster than {slow}")
+    for name, counter, max_value in MAX_COUNTER:
+        if name not in counters:
+            continue  # no device here; see the note on MAX_COUNTER
+        got = counters[name].get(counter)
+        if got is None:
+            failures.append(f"{name}: counter '{counter}' missing from results")
+            continue
+        print(f"bench-gate: {name}: {counter}={got:,.0f} (ceiling {max_value:,})")
+        if got > max_value:
+            failures.append(f"{name}: {counter}={got:,.0f} above ceiling {max_value:,}")
     for name, reference, max_ratio in MAX_RATIO:
         for missing in (n for n in (name, reference) if n not in seen):
             failures.append(f"{missing}: benchmark missing from results")

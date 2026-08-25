@@ -97,6 +97,12 @@ EXTRA_VERBS = {
     # The SDF stamp is a composition (create item, add to layer, evaluate)
     # rather than one entry point, but it is the verb a stroke is made of.
     "sdf_stamp",
+    # And the same composition repeated without an invalidation between the
+    # repeats, which is a different cost and a different code path -- the
+    # compiled prefix is reused and the GPU tape is patched rather than
+    # re-uploaded. No entry point of its own for the same reason sdf_stamp has
+    # none.
+    "sdf_stroke",
     # Every deformer arrives through clay_item_add_deformer, so a pattern
     # matching that entry point would collapse fourteen warps into one verb and
     # call the family covered as soon as any single one had a case. The

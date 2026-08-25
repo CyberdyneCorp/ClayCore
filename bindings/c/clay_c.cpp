@@ -1048,11 +1048,69 @@ struct clay_document {
     // another thread invalidating and rebuilding.
     std::atomic<std::uint64_t> revision{1};
 
-    void touch() { revision.fetch_add(1, std::memory_order_relaxed); }
+    // The general invalidation: everything the cache knows becomes stale.
+    // This stays the DEFAULT, and the append form below is the exception you
+    // have to ask for by name — a tape rebuilt from a prefix that has in fact
+    // moved is silent, so any entry point that does not positively know it
+    // appended must land here.
+    void touch() {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        forget_appends();
+        revision.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // The narrow one: `node` was appended at the tail of `layer`'s root list
+    // and nothing else changed, so the next rebuild can reuse the compiled
+    // prefix instead of re-emitting the whole document.
+    void touch_appended(scene::LayerId layer, scene::NodeId node) {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        const std::uint64_t now = revision.load(std::memory_order_relaxed);
+        // The log is only usable while it is CONTIGUOUS: it describes the
+        // appends made on top of append_base_, and every revision between
+        // that and now has to be one of them. A general touch() in between
+        // cleared it, and a different layer starts a new one.
+        if (!append_valid_ || append_layer_ != layer || append_at_ != now) {
+            append_valid_ = true;
+            append_layer_ = layer;
+            append_base_ = now;
+            append_log_.clear();
+        }
+        append_log_.push_back(node);
+        revision.fetch_add(1, std::memory_order_relaxed);
+        append_at_ = revision.load(std::memory_order_relaxed);
+    }
 
     std::shared_ptr<const scene::Tape> tape() const {
-        return cached(tape_cache_, tape_revision_,
-                      [this] { return scene::compile_document(doc.document); });
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        const std::uint64_t now = revision.load(std::memory_order_relaxed);
+        if (tape_cache_ && tape_revision_ == now) return tape_cache_;
+        // The append fast path, taken only when the cached tape is exactly
+        // the document the log sits on top of. compile_document_append does
+        // its own checking and refuses rather than trusting any of this, so a
+        // wrong answer here costs a full compile, not a wrong field.
+        if (tape_cache_ && append_valid_ && append_at_ == now && tape_revision_ == append_base_ &&
+            tape_checkpoint_.valid) {
+            scene::Tape grown;
+            scene::TapeCheckpoint next;
+            if (scene::compile_document_append(*tape_cache_, tape_checkpoint_, doc.document,
+                                               append_log_, &grown, &next)) {
+                tape_cache_ = std::make_shared<const scene::Tape>(std::move(grown));
+                tape_checkpoint_ = next;
+                tape_revision_ = now;
+                // The log has been consumed into the tape; the next append
+                // starts a fresh one on top of what is now cached.
+                forget_appends();
+                return tape_cache_;
+            }
+        }
+        scene::TapeCheckpoint fresh;
+        tape_cache_ =
+            std::make_shared<const scene::Tape>(scene::compile_document_resumable(doc.document,
+                                                                                  &fresh));
+        tape_checkpoint_ = fresh;
+        tape_revision_ = now;
+        forget_appends();
+        return tape_cache_;
     }
 
     // Picking excludes ghosted layers, so it is a different tape and gets its
@@ -1071,6 +1129,12 @@ struct clay_document {
     }
 
   private:
+    // Caller holds cache_mutex_.
+    void forget_appends() const {
+        append_valid_ = false;
+        append_log_.clear();
+    }
+
     template <typename T, typename Build>
     std::shared_ptr<const T> cached(std::shared_ptr<const T>& slot,
                                     std::uint64_t& slot_revision, Build build) const {
@@ -1086,6 +1150,15 @@ struct clay_document {
     mutable std::mutex cache_mutex_;
     mutable std::shared_ptr<const scene::Tape> tape_cache_;
     mutable std::uint64_t tape_revision_ = 0;
+    // Where a resumed compile picks tape_cache_ up, and the appends recorded
+    // since it was built: the log applies on top of revision append_base_ and
+    // brings the document to append_at_.
+    mutable scene::TapeCheckpoint tape_checkpoint_;
+    mutable std::vector<scene::NodeId> append_log_;
+    mutable scene::LayerId append_layer_ = 0;
+    mutable std::uint64_t append_base_ = 0;
+    mutable std::uint64_t append_at_ = 0;
+    mutable bool append_valid_ = false;
     mutable std::shared_ptr<const scene::Tape> pick_cache_;
     mutable std::uint64_t pick_revision_ = 0;
     mutable std::shared_ptr<const scene::CullIndex> index_cache_;
@@ -1744,6 +1817,26 @@ clay_item item_from_desc(const clay_item_desc& d) {
     return item;
 }
 
+// The one command shape whose result a later compile can resume from: a
+// subtree appended at the TAIL of a layer's root list, which is what a brush
+// stamp is. `layer` is 0 for every other edit — including an insert one place
+// short of the end, which reads almost the same here and moves the compiled
+// prefix, so it must fall through to the general invalidation.
+struct TailAppend {
+    scene::LayerId layer = 0;
+    scene::NodeId node = 0;
+};
+
+TailAppend tail_append(const scene::Document& doc, const scene::Command& cmd) {
+    const auto* add = std::get_if<scene::AddNodeCmd>(&cmd);
+    if (!add || add->parent != scene::kNoNode || add->index != -1) return {};
+    const scene::Layer* l = doc.find_layer(add->layer);
+    if (!l || l->kind != scene::LayerKind::Sdf || !l->sdf || l->sdf->roots.empty()) return {};
+    // roots.back(), not the command's own subtree: this cannot then disagree
+    // with what apply() actually did to the list.
+    return TailAppend{add->layer, l->sdf->roots.back()};
+}
+
 // Every edit below routes through the command vocabulary rather than touching
 // the document, so a C edit means what a saved document means — and becomes
 // undoable for free once the undo stack is exposed. apply() reports failure by
@@ -1767,7 +1860,14 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
                         : static_cast<bool>(scene::apply(doc->doc.document, cmd));
     if (!ok) return fail(CLAY_ERROR_NOT_FOUND, what);
     // The funnel every command-based edit passes through, so the tape cache is
-    // invalidated in one place for all of them.
+    // invalidated in one place for all of them — and the one place that can
+    // tell the cache an edit was an APPEND, which is what a brush stamp is
+    // and what lets the next compile reuse its prefix. Everything else, here
+    // and at every other call site, keeps the general invalidation.
+    if (const TailAppend appended = tail_append(doc->doc.document, cmd); appended.layer != 0) {
+        doc->touch_appended(appended.layer, appended.node);
+        return CLAY_OK;
+    }
     doc->touch();
     return CLAY_OK;
 }

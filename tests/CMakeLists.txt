@@ -4,6 +4,7 @@ add_executable(clay_unit_tests
   unit/test_prim2d.cpp
   unit/test_ops.cpp
   unit/test_tape_block.cpp
+  unit/test_tape_prefix_reuse.cpp
   unit/test_xform_repeat.cpp
   unit/test_lift_ease.cpp
   unit/test_deform_exactness.cpp
@@ -150,6 +151,9 @@ endif()
 if(CLAY_BACKEND_METAL AND APPLE)
   target_sources(clay_unit_tests PRIVATE unit/test_metal_interop.cpp)
   target_include_directories(clay_unit_tests SYSTEM PRIVATE ${metalcpp_SOURCE_DIR})
+  # The tape-residency cases reach the backend only through the registry and
+  # its two upload counters, so they need no Metal headers of their own.
+  target_sources(clay_unit_tests PRIVATE unit/test_metal_tape.cpp)
 endif()
 
 target_link_libraries(clay_unit_tests PRIVATE clay::core doctest::doctest)

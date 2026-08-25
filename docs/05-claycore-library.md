@@ -120,6 +120,21 @@ The kernel dialect is the subset of C++ that all four targets accept: no virtual
 
 Scenes do not become shader code. The `scene` module compiles an edit list into a **flat postfix tape** (opcodes + parameter blocks, transforms pre-inverted). Every backend ships one fixed **tape interpreter kernel** — no per-edit shader recompiles, instant parameter edits (the mzschwartz5 lesson), and the door open to interval-arithmetic tape shortening (Keeter MPR) as the large-scene upgrade.
 
+A document remembers its compiled tape and rebuilds it when the document changes. **Appending an item — which is what a brush stamp is — reuses the compiled prefix** instead of re-emitting the document: the compiler emits items left to right and never moves what it has written, so the prefix's parameter offsets and blob handles are still correct with the new item's bytes after them. At 50 000 items that rebuild is 0.54 ms against 10.3 ms for a full compile. Every other edit — an insert anywhere but the tail, a removal, a move, a parameter change, undo, redo — recompiles in full, and so does an append the compiler cannot prove is one.
+
+The reused tape has different bytes and so its own `compile_id`, but it also **names the tape it grew from** and the offset in each section where the two stop agreeing. A backend holding the ancestor resident transfers only that suffix instead of the whole tape. **Both GPU backends do.** Over a 300-dab stroke on a 20,000-item document, 3.25 MiB of tape:
+
+| | host CPU per dab | buffer reallocations | wall |
+|---|---:|---:|---:|
+| Vulkan, patched | 0.333 ms | **0** | 48.7 ms |
+| Vulkan, re-uploaded | 9.44 ms | 300 | 57.8 ms |
+| Metal, patched | 2.02 ms | **0** | 49.0 ms |
+| Metal, re-uploaded | 2.70 ms | 300 | 49.2 ms |
+
+**Read the reallocation count, not the wall clock.** Both rows of each pair evaluate the same 40,000-instruction tape with the same dispatch, so they pay the same GPU latency and differ only in what the host copied first — 1.19x apart on a discrete GPU and 1.02x on unified memory. What the change removes is host CPU and allocator churn, and on Metal the allocator is the whole of it: 300 `newBuffer(StorageModeShared)` calls a stroke become none, on the platform where memory pressure ends sessions.
+
+Metal's layout needed less work than Vulkan's — it already kept `instrs`, `params` and `blob` in three separate buffers, so an append is a tail write into each with no gap to reserve between them. What it did need is slack inside each buffer, because an `MTL::Buffer` cannot be resized: an exact fit means the next dab does not fit and the patch declines. Both backends reserve the same `n + n/2 + 1024`, which makes the re-packs over a stroke geometric rather than per-dab.
+
 | Backend | Host layer | Kernel path | Status/notes |
 |---|---|---|---|
 | **CPU** | thread pool, batch API | same headers, scalar + SIMD (Apple `simd` / SSE-NEON via `xsimd`) | reference; always available |

@@ -824,6 +824,12 @@ struct Compiler {
         return true;
     }
 
+    // Where a resumed compile would pick up: overwritten as each visible SDF
+    // layer's chain finishes, so what survives run() describes the LAST one.
+    // Recorded before that layer's union with the layers below, because an
+    // appended item belongs inside the chain and so in front of the union.
+    TapeCheckpoint checkpoint;
+
     void run(const Document& doc, const CullRegion* cull_region) {
         float pad = 0.0f;
         if (cull_region && index)
@@ -837,12 +843,43 @@ struct Compiler {
         for (const Layer& layer : doc.layers) {
             if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
             bool layer_val = compile_list(layer.sdf->roots, *layer.sdf, layer, false);
+            // Recorded even when the chain emitted nothing: appending to an
+            // empty last layer is resumable too, with layer_have_acc false.
+            checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(),
+                                        tape.blob.size(), layer.id, layer_val, have_acc, true};
             if (!layer_val) continue;
             if (have_acc) emit_combine(Op::Add, Blend{}, 0.0f);  // layers union hard
             have_acc = true;
         }
     }
+
+    // Carry on from a checkpoint: the chain of `layer` continues with
+    // `appended`, then the union the checkpoint was taken in front of is
+    // re-emitted. The tape already holds the copied prefix.
+    void resume(const TapeCheckpoint& cp, const Layer& layer,
+                const std::vector<NodeId>& appended) {
+        cull = nullptr;
+        bool layer_val = compile_list(appended, *layer.sdf, layer, cp.layer_have_acc);
+        // Recorded exactly where run() records it — after the chain, before
+        // the union — so the NEXT append resumes from here too. Without this
+        // a stroke would take the fast path on its first dab and the slow one
+        // on every dab after it.
+        checkpoint = TapeCheckpoint{tape.instrs.size(), tape.params.size(), tape.blob.size(),
+                                    cp.layer, layer_val, cp.doc_have_acc, true};
+        if (!layer_val) return;
+        if (cp.doc_have_acc) emit_combine(Op::Add, Blend{}, 0.0f);
+    }
 };
+
+// The last layer compile_document would emit for, which is the only one an
+// append can extend: anything before it is followed by a union the appended
+// item would have to be emitted in front of.
+const Layer* last_visible_sdf_layer(const Document& doc) {
+    const Layer* found = nullptr;
+    for (const Layer& layer : doc.layers)
+        if (layer.visible && layer.kind == LayerKind::Sdf && layer.sdf) found = &layer;
+    return found;
+}
 
 // Process-unique nonzero ids for compiled tapes (Tape::compile_id): equal ids
 // mean the same compile produced the bytes, which is what lets a backend keep
@@ -868,6 +905,63 @@ Tape compile_document(const Document& doc, const CullRegion* cull, const CullInd
     c.run(doc, cull);
     c.tape.compile_id = next_compile_id();
     return std::move(c.tape);
+}
+
+Tape compile_document_resumable(const Document& doc, TapeCheckpoint* out_checkpoint) {
+    Compiler c;
+    c.run(doc, nullptr);
+    c.tape.compile_id = next_compile_id();
+    if (out_checkpoint) *out_checkpoint = c.checkpoint;
+    return std::move(c.tape);
+}
+
+bool compile_document_append(const Tape& prefix, const TapeCheckpoint& cp, const Document& doc,
+                             const std::vector<NodeId>& appended, Tape* out,
+                             TapeCheckpoint* out_checkpoint) {
+    if (!out || !cp.valid || appended.empty()) return false;
+    // Every one of these means the checkpoint describes a document that is no
+    // longer this one. Each is cheap; a wrong reuse is silent.
+    const Layer* layer = last_visible_sdf_layer(doc);
+    if (!layer || layer->id != cp.layer) return false;
+    if (cp.instrs > prefix.instrs.size() || cp.params > prefix.params.size() ||
+        cp.blob > prefix.blob.size())
+        return false;
+    // The appended ids must actually be at the tail of that layer's roots, in
+    // order: this is the one claim the caller makes that the compiler can
+    // check for itself, and checking it is O(appended), not O(document).
+    const std::vector<NodeId>& roots = layer->sdf->roots;
+    if (appended.size() > roots.size()) return false;
+    const std::size_t first = roots.size() - appended.size();
+    for (std::size_t i = 0; i < appended.size(); ++i)
+        if (roots[first + i] != appended[i]) return false;
+
+    Compiler c;
+    // The prefix, copied rather than moved: `prefix` is a tape a reader may
+    // still be holding, and Tape is immutable once compiled.
+    c.tape.instrs.assign(prefix.instrs.begin(), prefix.instrs.begin() + (std::ptrdiff_t)cp.instrs);
+    c.tape.params.assign(prefix.params.begin(), prefix.params.begin() + (std::ptrdiff_t)cp.params);
+    c.tape.blob.assign(prefix.blob.begin(), prefix.blob.begin() + (std::ptrdiff_t)cp.blob);
+    // The layer union the checkpoint sits in front of folds neither of these:
+    // a hard Add is exact and adds no extent, so the prefix's are the chain's.
+    c.tape.info = prefix.info;
+    c.tape.bounds = prefix.bounds;
+    c.resume(cp, *layer, appended);
+    c.tape.compile_id = next_compile_id();  // different bytes, so a different identity
+    // The lineage, set HERE and nowhere else: the checkpoint is the point up
+    // to which this tape and `prefix` agree, because the bytes below it were
+    // copied from `prefix` unchanged a few lines above. A backend patches on
+    // this, so it is derived from the copy rather than asserted about it.
+    // A prefix with no identity of its own cannot be named, so a tape grown
+    // from one carries no lineage either.
+    if (prefix.compile_id != 0) {
+        c.tape.parent_id = prefix.compile_id;
+        c.tape.agree_instrs = cp.instrs;
+        c.tape.agree_params = cp.params;
+        c.tape.agree_blob = cp.blob;
+    }
+    if (out_checkpoint) *out_checkpoint = c.checkpoint;
+    *out = std::move(c.tape);
+    return true;
 }
 
 Tape compile_layer(const Layer& layer, const CullRegion* cull) {
