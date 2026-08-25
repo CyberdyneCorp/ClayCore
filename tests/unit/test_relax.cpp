@@ -302,3 +302,55 @@ TEST_CASE("relax: the result is an ordinary item") {
     CHECK(tape.eval(cf3(0.95f, 0.95f, 0.95f)).d < 0.0f);
     CHECK_FALSE(tape.info.is_exact);
 }
+
+TEST_CASE("a region-limited relax touches nothing outside its taper") {
+    // What makes a dab cost what it moves: relax rewrites only the bricks its
+    // region meets. The field beyond the taper must be the input's, sample for
+    // sample — not close to it, equal to it — because relax returns `here`
+    // there and always did, and the region limit is only allowed to skip work
+    // that would have been the identity.
+    const math::Aabb whole{cf3(-1, -1, -1), cf3(1, 1, 1)};
+    const float cell = 0.02f;
+    auto bumpy = [](kernel::cfloat3 p) {
+        return kernel::clength(p) -
+               (0.7f + 0.05f * std::sin(11.0f * p.x) * std::sin(11.0f * p.y) *
+                           std::sin(11.0f * p.z));
+    };
+    const FieldVolume base = FieldVolume::sample(bumpy, whole, cell, cell * 3.0f);
+
+    field::RelaxSettings settings;
+    settings.strength = 0.6f;
+    settings.radius_cells = 2;
+    settings.iterations = 3;  // more than one pass: the region must hold across all of them
+    settings.centre = cf3(0.7f, 0, 0);
+    settings.region_radius = 0.15f;
+    settings.falloff = 0.05f;
+    const FieldVolume out = field::relax(base, settings);
+
+    // The taper relax actually uses, not the one asked for: a falloff narrower
+    // than the kernel is silently widened, so the untouched set is measured
+    // against the widened one.
+    const float taper = std::max(settings.falloff,
+                                 cell * static_cast<float>(settings.radius_cells) * 2.0f);
+    const float reach = settings.region_radius + taper;
+
+    int compared = 0, changed_inside = 0;
+    for (int gz = 0; gz < base.sample_extent(2); ++gz)
+        for (int gy = 0; gy < base.sample_extent(1); ++gy)
+            for (int gx = 0; gx < base.sample_extent(0); ++gx) {
+                const std::optional<float> a = base.sample_at(gx, gy, gz);
+                const std::optional<float> b = out.sample_at(gx, gy, gz);
+                REQUIRE(a.has_value() == b.has_value());
+                if (!a) continue;
+                if (kernel::clength(base.cell_position(gx, gy, gz) - settings.centre) > reach) {
+                    ++compared;
+                    REQUIRE(*a == *b);
+                } else if (*a != *b) {
+                    ++changed_inside;
+                }
+            }
+    CHECK(compared > 0);
+    // And it did DO something, so the case above is not passing because relax
+    // became a no-op.
+    CHECK(changed_inside > 0);
+}

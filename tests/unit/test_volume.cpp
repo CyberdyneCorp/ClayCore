@@ -591,6 +591,69 @@ TEST_CASE("volume: a volume reads its own blob, not the tape's") {
     CHECK(worst < 1e-6f);
 }
 
+TEST_CASE("rewrite_region equals rewrite where fn is identity outside the region") {
+    // The property the region-limited brush rests on. `rewrite_region` writes
+    // only the bricks that meet the region, and that is the same answer as
+    // writing all of them exactly when `fn` would have left the rest alone.
+    //
+    // The second half is the one that bites: a sample on a brick face lives in
+    // every brick sharing it, and this writes only the copies held by selected
+    // bricks. serialize() compares the raw arrays, so two copies of a shared
+    // sample drifting apart shows up here rather than as a step in the field
+    // someone finds later.
+    auto bumpy = [](kernel::cfloat3 p) {
+        return kernel::clength(p) -
+               (0.7f + 0.05f * std::sin(11.0f * p.x) * std::sin(11.0f * p.y) *
+                           std::sin(11.0f * p.z));
+    };
+    const math::Aabb whole{cf3(-1, -1, -1), cf3(1, 1, 1)};
+
+    for (float cell : {0.05f, 0.02f}) {
+        CAPTURE(cell);
+        const FieldVolume base = FieldVolume::sample(bumpy, whole, cell, cell * 3.0f);
+        REQUIRE(base.brick_count() > 1);
+
+        // Deliberately NOT brick-aligned. A box on the lattice would never put
+        // a written sample and an unwritten one in the same brick face.
+        const math::Aabb boxes[] = {
+            {cf3(0.55f, -0.13f, -0.13f), cf3(0.86f, 0.13f, 0.13f)},
+            {cf3(-0.037f, -0.037f, 0.61f), cf3(0.037f, 0.037f, 0.79f)},
+            {cf3(-2, -2, -2), cf3(2, 2, 2)},  // covers every brick
+            {cf3(5, 5, 5), cf3(6, 6, 6)},     // meets none of them
+        };
+        int which = 0;
+        for (const math::Aabb& box : boxes) {
+            CAPTURE(++which);
+            // Structure inside, identity outside — a constant would cancel with
+            // itself and hide a sample written twice or not at all.
+            auto fn = [&box, &base](int gx, int gy, int gz, float old) {
+                const kernel::cfloat3 p = base.cell_position(gx, gy, gz);
+                if (p.x < box.min.x || p.y < box.min.y || p.z < box.min.z) return old;
+                if (p.x > box.max.x || p.y > box.max.y || p.z > box.max.z) return old;
+                return old + 0.013f * static_cast<float>((gx * 7 + gy * 13 + gz * 17) % 11);
+            };
+            FieldVolume full = base, part = base;
+            full.rewrite(fn);
+            part.rewrite_region(box, fn);
+            CHECK(full.serialize() == part.serialize());
+        }
+    }
+
+    SUBCASE("and the comparison can fail") {
+        // Without this the case above proves nothing: the selection rounds
+        // outward by a whole brick, so a region merely a little too small is
+        // absorbed and still agrees. Breaking the precondition outright is what
+        // shows the comparison has teeth.
+        const FieldVolume base = FieldVolume::sample(bumpy, whole, 0.02f, 0.06f);
+        auto everywhere = [](int, int, int, float old) { return old + 0.05f; };
+        FieldVolume full = base, part = base;
+        full.rewrite(everywhere);
+        part.rewrite_region(math::Aabb{cf3(0.5f, -0.2f, -0.2f), cf3(0.52f, 0.2f, 0.2f)},
+                            everywhere);
+        CHECK(full.serialize() != part.serialize());
+    }
+}
+
 TEST_CASE("sample_parallel is byte-identical to sample") {
     // The whole contract of the parallel sampler: same samples, same sparsity,
     // same far bounds, same measured Lipschitz. Not "within a tolerance" —
