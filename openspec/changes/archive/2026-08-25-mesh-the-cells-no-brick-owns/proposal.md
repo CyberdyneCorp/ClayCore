@@ -47,7 +47,7 @@ The subset path mirrored the same rule on purpose: `shell_cells` skipped ring
 cells whose owner was not a surface brick, with the comment "the whole-surface
 mesh marches no cell of theirs". It was faithful to a whole that was wrong.
 
-## What
+## What Changes
 
 Both paths collect the straddlers, and the straddler pass no longer consults
 the owner's state.
