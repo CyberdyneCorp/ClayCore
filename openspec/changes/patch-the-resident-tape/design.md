@@ -13,13 +13,13 @@ See `proposal.md` — Why. Four facts about the code decide the shape.
 ## Goals / Non-Goals
 
 **Goals:**
-- An append transfers what changed, not the whole tape.
+- An append transfers what changed, not the whole tape, on both GPU backends.
 - Vulkan stops keeping a full CPU-side copy of the tape it has already uploaded.
 - A stroke does not reallocate device buffers on every stamp.
-- A backend that ignores all of this stays correct, so Metal can follow separately.
+- A backend that ignores all of this stays correct — which is what let Metal follow separately rather than simultaneously.
+- The Metal claim is measured on a Mac and validated on the reference iPad, since Metal is the iPad app's production path.
 
 **Non-Goals:**
-- Metal. Its layout makes the patch straightforward, but nothing here can measure it; it follows on a Mac using the lineage this change defines.
 - Patching anything but an append. A mid-document edit has no stable prefix and is out of scope for the same reason it was in phase 1.
 - Vulkan's single resident slot. It holds one tape where Metal holds several, so alternating pick and eval tapes thrashes it. Pre-existing, unrelated to appends, and a separate change.
 
@@ -33,11 +33,11 @@ One producer is the whole safety argument. Lineage is a claim that two tapes are
 
 *Alternative considered — a backend diffing the tapes itself.* That is what Vulkan's `memcmp` already does, and it costs what the upload costs. The point of lineage is to know without looking.
 
-### `compile_id` keeps its meaning, and that is what makes Metal deferrable
+### `compile_id` keeps its meaning, and that is what made Metal deferrable
 
 Lineage is additive. `compile_id` stays process-unique per compile and equal only for byte-identical sections, so `if (t.id == tape.compile_id)` in `metal_backend.cpp:531` keeps doing exactly what it does now: on an append it misses, releases, and re-uploads. Correct, no faster, no worse than today.
 
-This is deliberate, not incidental. It means the phase can land, be measured on the backend this machine can measure, and leave Metal in a working state rather than a half-converted one.
+This is deliberate, not incidental. It meant the Vulkan half could land, be measured on the backend that machine could measure, and leave Metal in a working state rather than a half-converted one — which is exactly what happened between the two halves.
 
 ### Vulkan keys residency on the id, and stops shadowing the tape
 
@@ -53,6 +53,18 @@ The `memcmp` and the `res_instrs_`/`res_params_`/`res_blob_` vectors go with it 
 The existing comment argues against a *hash*, and it is right: two different tapes that hashed alike would evaluate the wrong field silently. An id is not a hash. It is stamped by the compiler, process-unique, and never collides by construction — which is the same reasoning Metal has relied on since it was written. Both existing Vulkan residency tests keep passing, and the second gets stricter: the "same length, different contents" tape it moves is now caught by identity rather than by a compare that had to read every byte to find out.
 
 **A patch advances the resident id to the patched tape's own.** A stroke is a chain — tape B extends A, C extends B — so without advancing it, only the first dab after an upload would patch. This is one line and the whole reason a stroke rather than a dab is cheap.
+
+### Metal patches in place, and needs none of the gap Vulkan needed
+
+Metal already keeps `instrs`, `params` and `blob` in three separate `MTL::Buffer`s, so an append is a tail write into each and there is no packing problem to solve. The three things it does need are the three the Vulkan work learned the hard way, and each is a distinct failure:
+
+- **Patch on `parent_id`, not on `compile_id`.** The `compile_id` compare stays first and unchanged; a `parent_id` match is checked next, and a hand-assembled tape (`compile_id == 0`) still goes through the scratch slots and is never served a resident buffer.
+- **Advance the resident entry's id to the patched tape's own.** A stroke is a chain, so without this only the first dab after an upload patches and every dab after it re-uploads. One line; the whole difference between a cheap stroke and a cheap first dab.
+- **Reserve slack at `newBuffer` time.** An `MTL::Buffer` cannot be resized, so an exact fit means the next dab does not fit, the patch declines and all three sections are re-allocated — the allocation patching exists to avoid, still paid per stamp. The reservation is `n + n/2 + 1024` elements, identical to Vulkan's, so the two backends do not need separate explanations when their numbers are compared.
+
+**Writing into a resident buffer in place is safe here for a reason the file already relies on**: every Metal submit returns only once its command buffer reports completed or errored, and `mutex_` serializes the public entry points, so no resident buffer is being read by the device while a patch runs. That is the same argument the scratch pool's reuse has always rested on.
+
+**The eviction hazard is Metal's alone.** Metal holds four tapes resident under an LRU where Vulkan holds one, so the entry a patch lands in is found by *ancestor id* while the entry a whole upload evicts is found by *least-recent use*. Patch into the wrong slot and an unrelated resident tape — a pick tape, a layer tape — silently becomes the stroke. There is a test for exactly that, and it is Metal-only because the hazard is.
 
 ### The blob sits after a gap, so appended params never move it
 
@@ -80,12 +92,14 @@ When the slack runs out — params grow past the reserved capacity — the tape 
 
 **Slack wastes device memory → ** bounded, and set against what it saves: re-uploading 7.82 MiB per stamp. The re-pack path keeps it from growing without limit.
 
-**Metal is left behind → ** stated in the proposal and enforced by the design: it ignores lineage and keeps today's behaviour. The risk is that it stays behind, so the follow-up is named in the tasks rather than left implied.
+**Metal was left behind → ** it was, deliberately, and it no longer is. Between the two halves it ignored lineage and kept its previous behaviour, which is what "correct, merely no faster" was written to guarantee. The follow-up was named in the tasks and filed as #296 rather than left implied, which is what made it get done.
+
+**A Mac measures the wrong half of this on Metal → ** and it does. On unified memory the patched and re-uploaded strokes measure 49.0 ms against 50.2 ms of wall clock — 1.02x, well inside noise — because both evaluate the same 40,000-instruction tape with the same dispatch and differ only in what the host copied first. The numbers that moved are host CPU (2.0 ms against 3.1 ms a dab) and the reallocation count (0 against 300). So the **gate is the counter**, which is exact and machine-independent, and the iPad is where the memory story is checked rather than inferred — a device case that drives a real stroke, because every other latency case resets between iterations and the reset is itself the invalidation that makes the append path unreachable.
 
 ## Migration Plan
 
-No ABI, file-format or shader change. Lineage is additive and ignored by default; Vulkan's patching is internal. Rollback is making `resident()` return false for the patch case, which restores upload-per-append.
+No ABI, file-format or shader change. Lineage is additive and ignored by default; both backends' patching is internal. Rollback is making the patch path decline — `resident()` returning false on Vulkan, `can_patch` returning false on Metal — which restores upload-per-append on either backend independently.
 
 ## Open Questions
 
-- How much slack, and whether it should scale with the document or be a fixed reserve. Decidable from the benchmark once patching works — the trade is device memory against how often the re-pack path runs, and both are measurable. It does not change the specs, the layout, or the task breakdown.
+- ~~How much slack, and whether it should scale with the document or be a fixed reserve.~~ Settled by measurement: **both terms**, `n + n/2 + 1024`. The proportional half alone starves a small document — an item is ~37 params, so a 50% reserve on very little is not room for one dab — and the constant half alone re-packs a large one linearly. Together the re-packs over a stroke are geometric: 0 over the 300-dab benchmark and 8 over 8,154 appends. The same reservation is used on both backends.

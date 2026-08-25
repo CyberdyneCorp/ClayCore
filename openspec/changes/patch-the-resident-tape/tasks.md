@@ -102,3 +102,78 @@
       story. Filed as #296, carrying the three things the Vulkan work learned
       the hard way: patch on parent_id, ADVANCE the resident id or only the
       first dab patches, and reserve slack or the patch declines every stamp.
+
+## 7. Metal: the deferred half (#296)
+
+- [x] 7.1 Confirm the Metal backend registers on this Mac and its suite is
+      green before building anything on it, so a later failure is attributable.
+- [x] 7.2 Give `ResidentTape` the section LENGTHS it holds, not just its
+      buffers: with slack reserved, `buffer->length()` is a capacity and says
+      nothing about what a later tape agrees with.
+- [x] 7.3 Reserve slack at `newBuffer` time — an `MTL::Buffer` cannot be
+      resized, so the reservation has to happen at allocation or not at all.
+      Same `n + n/2 + 1024` as Vulkan, deliberately.
+- [x] 7.4 Find the ancestor by `parent_id` in the same pass that looks for a
+      `compile_id` hit and picks the LRU victim, and patch the three suffixes
+      into the buffers' `contents()`.
+- [x] 7.5 Advance the patched entry's id to the tape's own, or only the first
+      dab of a stroke patches.
+- [x] 7.6 Decline rather than corrupt: a tape that has outgrown its
+      reservation falls through to a whole upload, which re-packs with fresh
+      slack.
+- [x] 7.7 Add `tape_uploads_`/`tape_patches_` and expose them the way Vulkan
+      does, so "a stroke uploads once and patches after that" is falsifiable.
+- [x] 7.8 State in the code why patching a resident buffer in place is safe —
+      every submit returns only once completed, and `mutex_` serializes the
+      entry points. It is the same argument the scratch pool already rests on.
+
+## 8. Prove it on Metal
+
+- [x] 8.1 The Vulkan suite's four cases, mirrored: a stroke is one upload and
+      N patches; a long stroke re-packs geometrically; a patched field is
+      byte-identical to the same field uploaded whole, over a stroke and over
+      a document carrying a blob; and no-lineage, evicted-ancestor and
+      hand-assembled tapes are never patched.
+- [x] 8.2 THE Metal-ONLY case: patching a stroke must leave the other resident
+      tapes alone. Metal holds four under an LRU, so the entry a patch lands
+      in is found by ancestor id while the entry an upload evicts is found by
+      least-recent use — patch into the wrong slot and a pick tape silently
+      becomes the stroke. Vulkan cannot have this bug; it holds one tape.
+- [x] 8.3 `evict()` has to push out FOUR entries, not one. A helper that
+      assumed a single resident slot would stop testing eviction the day the
+      residency grew.
+- [x] 8.4 Mutation-check the suite rather than trusting it: wrong patch
+      offset, resident id not advanced, and slack removed each fail it. All
+      three are the failures #296 named, and all three are caught.
+
+## 9. Measure Metal, on the Mac and on the iPad
+
+- [x] 9.1 A Metal stroke benchmark pair mirroring the Vulkan one — same
+      document, same tapes, lineage stripped on one side — with the
+      reallocation count reported beside the time.
+- [x] 9.2 Gate the COUNTER, not the time. On unified memory the two rows are
+      49.0 ms against 50.2 ms; a gate on 1.02x would flake on any machine,
+      and 0 reallocations against 300 would not.
+- [x] 9.3 A device case that drives a real STROKE. Every other latency case
+      resets between iterations, and the reset is a general invalidation — so
+      the whole suite was blind to the append path by construction.
+- [x] 9.4 Time a stroke rather than a dab and divide, because there is no
+      reset that restores a document without breaking the chain the case
+      exists to measure. Record what that makes p95 mean.
+- [x] 9.5 Cover the new case in the coverage table and its checker, so the
+      path cannot lose its case silently.
+- [x] 9.6 Run it on the reference iPad (iPad15,5, iPadOS 26.5.2) and seed the
+      budget from what it measured: `sdf_stroke_metal` 0.236 / 0.374 / 1.806 ms
+      per dab across the axis against `sdf_stamp_metal`'s 0.401 / 0.983 /
+      1.867 — the same dab, with and without the invalidation between dabs.
+- [x] 9.7 Seed the two budgets BY HAND rather than with `--update`, which
+      rewrites the whole baseline from one run. The gallery bundle drove that
+      run's thermal flag to `serious` and re-seeding every case from it would
+      have written throttled numbers into a committed release gate.
+- [x] 9.8 Read the record rather than the flag, and say which half is
+      trustworthy: every measure-bundle case read `nominal` at both ends,
+      which is where both new cases ran. The run is marked INVALID because the
+      gallery half cooked the device and one gallery case crashed and
+      restarted, losing seven cases — a known, pre-existing failure of that
+      bundle, unrelated to anything here. Against the salvaged record, all 54
+      cases pass their budgets with no regression and no growth failure.

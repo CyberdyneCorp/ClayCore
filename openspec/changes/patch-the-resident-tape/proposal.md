@@ -15,12 +15,14 @@ Phase 1 is what makes the fix expressible: it produces a **stable prefix**, so "
 
 - A compiled tape gains a **lineage** beside its identity: the `compile_id` it grew from, and the offset in each of `instrs`/`params`/`blob` at which it stops agreeing with that ancestor. `compile_document_append` already knows all four — the checkpoint *is* the agreement point — and every other compile entry point reports no lineage, exactly as today.
 - **`compile_id` keeps its current meaning, unchanged**: process-unique per compile, equal only for byte-identical sections. Lineage is additive. A backend that ignores it keeps working, misses, and re-uploads — correct, just not faster. This is what lets Metal land separately without leaving anything inconsistent.
-- **Vulkan patches instead of re-uploading**: when the resident tape is the named ancestor, write only the changed suffix into the persistently-mapped buffers.
+- **Both GPU backends patch instead of re-uploading**: when a resident tape is the named ancestor, write only the changed suffix — into Vulkan's persistently-mapped buffers, and into the `contents()` of Metal's three shared ones.
 - **Vulkan stops keeping a full CPU shadow.** With lineage the `memcmp` is unnecessary for the append case; the shadow shrinks to the identity it needs to recognise its ancestor.
 - **Buffers grow with slack.** `ensure()` is exact-fit and reallocates whenever the size grows, so patching alone would still reallocate every stamp. Growth becomes geometric.
 - Tests assert what the counters already make visible: a stroke of N dabs performs one upload and N patches, and the field after patching is bit-identical to the field after a full upload.
 
-**Not in this change: Metal.** Its three-buffer layout makes the patch straightforward, but this machine cannot measure it — `BM_MetalTapeResident`/`BM_MetalTapeReupload` only register where the Metal backend is found. CI's macOS+Metal parity job gates correctness, not cost, and shipping a performance change whose number nobody has seen is how unverified claims enter a codebase. It follows on a Mac, using the lineage this change defines.
+**Metal was deferred and is no longer.** It was left out of the first pass on purpose: nothing on the machine that pass was written on could measure it, and shipping a performance change whose number nobody has seen is how unverified claims enter a codebase. It was filed as #296 and is now here, written and measured on a Mac and validated on the reference iPad — which is the hardware the claim was always about, since Metal is the iPad app's production path and an iPad is where a per-stamp allocation is paid under memory pressure.
+
+The deferral cost nothing, which is the point of having made `compile_id`'s meaning survive lineage: between the two, Metal ignored the lineage, missed, re-uploaded, and stayed correct.
 
 **Not in this change: the per-brick path.** Culled tapes are compiled per dab against a `CullPlan` and are already 0.13% of a stamp (#197).
 
@@ -51,5 +53,7 @@ None. This adds requirements to two existing capabilities.
 - `include/clay/scene/tape.h` — the lineage fields beside `compile_id`, and what they promise.
 - `src/scene/tape_build.cpp` — `compile_document_append` fills them in; every other entry point leaves them empty.
 - `backends/vulkan/vulkan_backend.cpp` — `upload_tape`, `resident`, `remember`, `ensure`.
+- `backends/metal/metal_backend.cpp` — `upload_tape`, `upload_section`, `ResidentTape`, and the two counters beside them.
+- `tests/device/` — a case that drives a STROKE rather than a stamp-and-undo, since the reset every other latency case uses is itself the invalidation that makes the append path unreachable.
 - `tests/unit/test_backend_residency.cpp` and the Vulkan tests — one upload per stroke, and patched output bit-identical to uploaded output.
 - No ABI change, no file-format change, and **no shader change** — the slack layout keeps `blob_base` a push constant the shader already reads.

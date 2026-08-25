@@ -16,15 +16,17 @@ Lineage is a claim about bytes and SHALL be exact: below the stated offsets the 
 - **THEN** the resulting tape names no ancestor, and a backend treats it exactly as it does today
 
 ### Requirement: A backend may patch a resident tape instead of re-uploading it
-A backend holding an uploaded tape resident MAY, when a tape names that resident tape as its ancestor, transfer only the sections above the stated offsets rather than the whole tape.
+A backend holding an uploaded tape resident MAY, when a tape names that resident tape as its ancestor, transfer only the sections above the stated offsets rather than the whole tape. A backend that does so SHALL patch only on a lineage the tape itself declares — never on a length, a shape or any other inference about what two tapes have in common — and SHALL upload whole in every other case.
 
 Patching SHALL change only speed. The values a patched tape evaluates to SHALL be identical to those of the same tape uploaded whole, an appended dab SHALL NOT be served the pre-append field, and a tape whose ancestor is not resident SHALL be uploaded whole.
 
-A backend that grows its device buffers to absorb an append SHALL do so with spare capacity rather than to the exact size required, so that a stroke does not reallocate on every stamp — an exact-fit buffer turns every append back into the allocation the patch exists to avoid.
+A backend that grows its device buffers to absorb an append SHALL do so with spare capacity rather than to the exact size required, so that a stroke does not reallocate on every stamp — an exact-fit buffer turns every append back into the allocation the patch exists to avoid. Where a backend's buffers cannot be resized in place, the capacity SHALL be reserved when the buffer is created, since there is no later opportunity to reserve it.
 
 That capacity is finite, so a long enough stroke SHALL eventually exhaust it and be uploaded whole again. That is not a failure of patching: reserving proportionally means the re-packs over a stroke are geometric, so their cost is amortised. What SHALL NOT happen is re-packing on every append, which is what an exact fit does and which no test of the evaluated field can catch, because every one of those uploads is correct.
 
 Where a backend packs two sections into one buffer, it SHALL NOT let one section's growth displace another that is already resident. Placing the sections with slack between them is one way; the requirement is that an append stays a write to the end of what changed.
+
+Where a backend holds SEVERAL tapes resident, a patch SHALL land on the entry naming the ancestor and SHALL leave every other resident tape untouched. The entry a patch belongs in is found by ancestor identity while the entry a whole upload replaces is found by eviction policy; these are different searches over the same set, and a patch written into the entry the eviction policy chose would replace an unrelated tape with the appended one — silently, since both are valid tapes.
 
 #### Scenario: A stroke uploads once and patches after that
 - **WHEN** a document is evaluated, then an item is appended and it is evaluated again, for a stroke short enough to fit the reserved capacity
@@ -41,6 +43,10 @@ Where a backend packs two sections into one buffer, it SHALL NOT let one section
 #### Scenario: An unrelated tape is not patched onto a resident one
 - **WHEN** a tape naming no ancestor, or naming one that is not resident, is evaluated
 - **THEN** it is uploaded whole and evaluates correctly
+
+#### Scenario: Patching one resident tape does not disturb another
+- **WHEN** a backend holds more than one tape resident and patches an appended tape onto its ancestor
+- **THEN** every other resident tape still evaluates to what it did before the patch
 
 #### Scenario: A stroke does not reallocate per stamp
 - **WHEN** items are appended one at a time and the document is evaluated after each

@@ -103,6 +103,13 @@ enum Coverage {
         // The same stamp through the brick cache — the incremental path a
         // host actually drives, as opposed to re-evaluating everything.
         .measured("sdf_stamp_incremental", by: "sdf_stamp_bricks"),
+        // Dab after dab without an invalidation between them, which is the
+        // only shape that reaches the compiled-prefix reuse and the GPU
+        // suffix copy (#294, #296). Named against the METAL row rather than
+        // the cpu one, unlike sdf_stamp above: the residency this exercises
+        // is the GPU backend's, and a table entry pointing at cpu would be
+        // satisfied by a run in which Metal never patched anything.
+        .measured("sdf_stroke", by: "sdf_stroke_metal"),
 
         // -- masks ------------------------------------------------------------
         .measured("mask_paint", by: "mask_paint"),

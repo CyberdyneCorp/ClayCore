@@ -356,6 +356,14 @@ MAX_COUNTER = [
     # this benchmark runs. Per-dab reallocation, which is what the code did
     # before patching and what a regression would restore, is 300.
     ("BM_VulkanStrokePatched", "repacks", 4),
+    # The same claim on Metal (#296), and on Metal it is the WHOLE gate. The
+    # Vulkan pair at least moves the wall clock 1.19x; on unified memory the
+    # two rows measure 49.0 ms against 50.2 ms, because both evaluate the same
+    # 40k-instruction tape with the same dispatch and differ only in what the
+    # host copied first. A time gate on 1.02x would flake on any machine. The
+    # reallocation count does not: 0 against 300 over the same stroke, exact
+    # and machine-independent.
+    ("BM_MetalStrokePatched", "repacks", 4),
 ]
 
 

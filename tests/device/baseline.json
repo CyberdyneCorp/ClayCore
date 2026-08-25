@@ -91,6 +91,16 @@
       "class": "interactive",
       "measuredMs": 2.0021
     },
+    "sdf_stroke_cpu": {
+      "budgetMs": 3.6287,
+      "class": "interactive",
+      "measuredMs": 2.4192
+    },
+    "sdf_stroke_metal": {
+      "budgetMs": 2.7505,
+      "class": "interactive",
+      "measuredMs": 1.8337
+    },
     "session_voxel_build": {
       "budgetMs": 0.0096,
       "class": "gesture",
@@ -3142,6 +3152,74 @@
       "name": "armature_edit",
       "servedBy": "cpu",
       "verb": "layer_armature_edit"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "growthExponent": 0.7478979776286513,
+      "measurements": [
+        {
+          "p50Ms": 0.07556420833333334,
+          "p95Ms": 0.07724479166666666,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 200,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.28226216666666665,
+          "p95Ms": 0.2874809166666667,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 200,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 2.369605875,
+          "p95Ms": 2.419163166666667,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 26,
+          "stamps": 1000
+        }
+      ],
+      "name": "sdf_stroke_cpu",
+      "servedBy": "cpu",
+      "verb": "sdf_stroke"
+    },
+    {
+      "backend": "metal",
+      "budgetClass": "interactive",
+      "growthExponent": 0.4421407254088719,
+      "measurements": [
+        {
+          "p50Ms": 0.23583508333333333,
+          "p95Ms": 0.23935416666666667,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 200,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.3738662916666667,
+          "p95Ms": 0.38178125,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 164,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 1.8057100833333333,
+          "p95Ms": 1.8336753333333335,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 34,
+          "stamps": 1000
+        }
+      ],
+      "name": "sdf_stroke_metal",
+      "servedBy": "metal",
+      "verb": "sdf_stroke"
     }
   ],
   "claycoreCommit": "8d13b47ac59e448c8e1e5f56765b85f2bc009053",
