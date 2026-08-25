@@ -20,6 +20,7 @@
 #include "clay/eval/bake_points.h"
 #include "clay/eval/bake_volume.h"
 #include "clay/field/relax.h"
+#include "clay/field/move_topological.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/tape.h"
 
@@ -632,6 +633,65 @@ TEST_CASE("the pooled tape fill bakes the volume the per-point tape callable doe
             field::flatten(eval::tape_block_fill(tape), region, cell, band, settings);
         CHECK(serial.serialize() == pooled.serialize());
         CHECK(serial.serialize() == FieldVolume::sample(per_point, region, cell, band).serialize());
+    }
+}
+
+TEST_CASE("the pooled point batch moves the volume the per-point source does") {
+    // move_topological could not join the batched bake when the other verbs did
+    // (#271), and the reason is in the query positions rather than in the
+    // arithmetic: where an output sample takes its material from is the
+    // PULLED-BACK point, which depends on the geodesic weight there. So this
+    // takes a batch of arbitrary points rather than a fill that knows the
+    // lattice, and both places the source is asked anything go through it --
+    // the material array the walk runs on, and the sampling pass.
+    //
+    // Byte-identity, not a tolerance: the batched evaluator slices its output
+    // disjointly and each point goes through the same scalar reference
+    // arithmetic.
+    scene::Document doc = wrap(polish(sphere_document(0.8f), cf3(0, 0, 1), 0.55f, 0.02f, 0.08f));
+    const scene::Tape tape = scene::compile_layer(doc.layers.front());
+    const float cell = 0.04f, band = 0.12f;
+    const kernel::cfloat3 pad = cf3(band, band, band);
+    const math::Aabb region{tape.bounds.min - pad, tape.bounds.max + pad};
+    auto per_point = [&tape](kernel::cfloat3 p) { return tape.eval(p).d; };
+
+    field::TopologicalMoveSettings settings;
+    settings.anchor = cf3(0, 0, 0.8f);
+    settings.radius = 0.3f;
+    settings.displacement = cf3(0.0f, 0.08f, 0.0f);
+    settings.ease = 0;
+
+    SUBCASE("a drag that moves material") {
+        const FieldVolume serial =
+            field::move_topological(per_point, region, cell, band, settings);
+        const FieldVolume pooled =
+            field::move_topological(eval::tape_point_batch(tape), region, cell, band, settings);
+        REQUIRE(serial.brick_count() > 0);
+        CHECK(serial.serialize() == pooled.serialize());
+    }
+
+    SUBCASE("a drag that moves nothing takes the other door") {
+        // Zero displacement returns the source sampled unchanged, and the two
+        // overloads reach that through different functions -- so it is pinned
+        // rather than assumed.
+        field::TopologicalMoveSettings none = settings;
+        none.displacement = cf3(0, 0, 0);
+        const FieldVolume serial = field::move_topological(per_point, region, cell, band, none);
+        const FieldVolume pooled =
+            field::move_topological(eval::tape_point_batch(tape), region, cell, band, none);
+        CHECK(serial.serialize() == pooled.serialize());
+        CHECK(serial.serialize() == FieldVolume::sample(per_point, region, cell, band).serialize());
+    }
+
+    SUBCASE("an anchor with no material within reach") {
+        // solve() gives up before the walk, which is a third path through the
+        // split between make_grid and solve_over.
+        field::TopologicalMoveSettings away = settings;
+        away.anchor = cf3(4.0f, 4.0f, 4.0f);
+        const FieldVolume serial = field::move_topological(per_point, region, cell, band, away);
+        const FieldVolume pooled =
+            field::move_topological(eval::tape_point_batch(tape), region, cell, band, away);
+        CHECK(serial.serialize() == pooled.serialize());
     }
 }
 

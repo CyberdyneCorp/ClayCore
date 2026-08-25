@@ -174,6 +174,11 @@ FASTER_THAN = [
     # measures the bake alone, with no redistance floor on either side, so it is
     # a wider margin than the consolidate pair and a sharper signal.
     ("BM_VolumeBakeDoc", "BM_VolumeBakeSerialDoc"),
+    # And the third document-sourced verb, which needed a different kind of
+    # batched source: move_topological's query positions are the PULLED-BACK
+    # points rather than the sample lattice, so it takes a batch of arbitrary
+    # points. 15x on a twelve-core machine, byte-identical output.
+    ("BM_VolumeMoveDoc", "BM_VolumeMoveSerialDoc"),
     # Batched brick raycast (accel/parallel-raycast): the batched C-ABI call
     # fans its rays across the CPU backend's pool and must beat the same rays
     # issued one single-ray call at a time (kept in the benchmark as the

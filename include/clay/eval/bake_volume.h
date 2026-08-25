@@ -103,5 +103,32 @@ inline field::FieldVolume::BrickBlockFill tape_block_fill(const scene::Tape& tap
     };
 }
 
+// The same evaluator, for a source asked at ARBITRARY points rather than at a
+// sample lattice. `move_topological` is the case: where an output sample takes
+// its material from depends on the geodesic weight there, so the query
+// positions are not the grid's and no fill that only knows the grid can answer
+// them.
+//
+// Same fallback and same borrowing rule as `tape_block_fill` above: the tape
+// must outlive every call made through the returned callable.
+inline std::function<void(const float*, std::size_t, float*)> tape_point_batch(
+    const scene::Tape& tape) {
+    return [&tape](const float* points_xyz, std::size_t count, float* out) {
+        if (Backend* cpu = Registry::instance().find("cpu")) {
+            PointQuery q;
+            q.points_xyz = points_xyz;
+            q.count = count;
+            PointResults res;
+            res.distances = out;
+            res.colors_rgb = nullptr;
+            if (cpu->eval_points(tape, q, res) == Status::Ok) return;
+        }
+        for (std::size_t i = 0; i < count; ++i)
+            out[i] = tape.eval(kernel::cf3(points_xyz[i * 3], points_xyz[i * 3 + 1],
+                                           points_xyz[i * 3 + 2]))
+                         .d;
+    };
+}
+
 }  // namespace eval
 }  // namespace clay

@@ -24,6 +24,7 @@
 #include "clay/scene/commands.h"
 #include "clay/eval/bake_points.h"
 #include "clay/eval/bake_volume.h"
+#include "clay/field/move_topological.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/cull_index.h"
 #include "clay/scene/tape.h"
@@ -1194,6 +1195,50 @@ void BM_VolumeBakeSerialDoc(benchmark::State& state) {
     }
 }
 BENCHMARK(BM_VolumeBakeSerialDoc)->Unit(benchmark::kMillisecond);
+
+// Move Topological from a document, batched against the per-point walk it
+// replaced. The third of the document-sourced verbs to get a pooled evaluator
+// and the one that needed a different kind: its query positions are the
+// PULLED-BACK points rather than the sample lattice, so it takes a batch of
+// arbitrary points. check_bench.py requires the batched form to be FASTER.
+//
+// Byte-identity is held by "the pooled point batch moves the volume the
+// per-point source does" in test_consolidate.cpp, not by this pair.
+void BM_VolumeMoveDoc(benchmark::State& state) {
+    scene::Document doc = sculpted_sphere(193);
+    const scene::Tape tape = scene::compile_layer(doc.layers.front());
+    const float cell = 0.05f, band = cell * 3.0f;
+    const kernel::cfloat3 pad = cf3(band, band, band);
+    const math::Aabb region{tape.bounds.min - pad, tape.bounds.max + pad};
+    field::TopologicalMoveSettings s;
+    s.anchor = cf3(0, 0, 1.0f);
+    s.radius = 0.3f;
+    s.displacement = cf3(0.0f, 0.06f, 0.0f);
+    for (auto _ : state) {
+        field::FieldVolume v =
+            field::move_topological(eval::tape_point_batch(tape), region, cell, band, s);
+        benchmark::DoNotOptimize(v.sample_count());
+    }
+}
+BENCHMARK(BM_VolumeMoveDoc)->Unit(benchmark::kMillisecond);
+
+void BM_VolumeMoveSerialDoc(benchmark::State& state) {
+    scene::Document doc = sculpted_sphere(193);
+    const scene::Tape tape = scene::compile_layer(doc.layers.front());
+    const float cell = 0.05f, band = cell * 3.0f;
+    const kernel::cfloat3 pad = cf3(band, band, band);
+    const math::Aabb region{tape.bounds.min - pad, tape.bounds.max + pad};
+    field::TopologicalMoveSettings s;
+    s.anchor = cf3(0, 0, 1.0f);
+    s.radius = 0.3f;
+    s.displacement = cf3(0.0f, 0.06f, 0.0f);
+    for (auto _ : state) {
+        field::FieldVolume v = field::move_topological(
+            [&tape](kernel::cfloat3 p) { return tape.eval(p).d; }, region, cell, band, s);
+        benchmark::DoNotOptimize(v.sample_count());
+    }
+}
+BENCHMARK(BM_VolumeMoveSerialDoc)->Unit(benchmark::kMillisecond);
 
 // Batched brick raycast (accel/parallel-raycast): clay_brick_cache_raycast_many
 // fans its rays out across the CPU backend's pool; the serial reference is the
