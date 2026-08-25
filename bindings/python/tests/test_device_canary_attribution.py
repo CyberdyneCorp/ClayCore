@@ -178,3 +178,23 @@ def test_the_bracket_is_the_mean_of_both_ends_not_whichever_is_nearer():
     run = run_record(SETTLED, [bracketed("sdf_move", 135_000, 130.5, 195.0, 0.1299)])
     factor = check.bracket_factor(run, run["cases"][0])
     assert factor == pytest.approx(((130.5 + 195.0) / 2) / 130.5, abs=0.01)
+
+
+def test_drift_attribution_reports_the_factor_the_gate_actually_divides_by():
+    # The report and the gate must not disagree. Before this, attribution used
+    # the nearest periodic sample while the gate divided by the bracket, so a
+    # run printed "every case was measured with the canary inside tolerance"
+    # while applying a 1.43x correction to sdf_flatten.
+    run = run_record(
+        SETTLED + [sample(133.0, 130_000), sample(190.0, 200_000)],
+        [bracketed("sdf_flatten", 131_000, 180.0, 194.0, 6.8)])
+    case = run["cases"][0]
+    assert check.canary_factor(run, case) == pytest.approx(
+        check.bracket_factor(run, case)), "attribution must follow the bracket"
+    assert [n for n, _ in check.cases_measured_under_drift(run)] == ["sdf_flatten"]
+
+
+def test_attribution_still_falls_back_to_the_nearest_sample_when_unbracketed():
+    run = run_record(SETTLED + [sample(190.0, 130_000)],
+                     [bracketed("legacy", 131_000, 0, 0, 6.8)])
+    assert check.canary_factor(run, run["cases"][0]) == pytest.approx(190.0 / 130.5, abs=0.02)

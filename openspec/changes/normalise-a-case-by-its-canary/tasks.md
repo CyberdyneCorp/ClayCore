@@ -61,10 +61,28 @@
 
 ## 5. Re-derive and validate on the device
 
-- [ ] 5.1 Run the suite on the reference iPad with brackets recorded.
-- [ ] 5.2 Re-derive the baseline from that run — the numbers mean something
-      different now, so every budget moves once.
-- [ ] 5.3 Confirm `sdf_move` passes, and that it passes because it is normalised
-      rather than because the budget grew.
-- [ ] 5.4 Confirm the bracket's own cost is what was predicted (~16 s) and not
-      material to the run.
+- [x] 5.1 Run the suite on the reference iPad with brackets recorded. Valid,
+      `nominal` at both ends, clean tree, 61 cases, 36 of them bracketed (the
+      measure bundle) and 86 canary samples against the previous 15.
+- [x] 5.2 Re-derive the baseline from that run.
+- [x] 5.3 `sdf_move` normalises to **0.0791 ms** against the cold run's
+      **0.079 ms** — 1.00x. And it passes because it is normalised, not because
+      the budget grew: the budget got TIGHTER, 0.1279 -> 0.1187 ms. So did
+      `sdf_relax` (2.53 -> 0.82) and `sdf_consolidate` (991.5 -> 373.8, which
+      had been budgeted against a 661 ms measurement that stopped being true
+      several changes ago).
+- [x] 5.4 The bracket's cost is not material, and its VALUE showed up
+      immediately: `sdf_move`'s two readings are 159.0 ms before and 135.6 ms
+      after — the case starts hot behind `sdf_flatten` and cools during itself.
+      Either end alone is wrong in a different direction, which is the case for
+      the mean and against "whichever sample is nearer".
+
+## 6. Keep the report and the gate telling the same story
+
+- [x] 6.1 Caught while validating 5.2: drift attribution still used the nearest
+      periodic sample while the gate divided by the bracket. They disagree —
+      `sdf_flatten` reads x1.21 nearest and x1.43 bracketed — so the run printed
+      "every case was measured with the canary inside tolerance" while applying
+      a 43% correction to it. Attribution now follows the bracket.
+- [x] 6.2 Tests for both directions: attribution follows the bracket when there
+      is one, and still falls back to the nearest sample when there is not.

@@ -108,6 +108,34 @@ def canary_baselines(run: dict) -> dict[str, float]:
     return settled
 
 
+def bracket_factor(run: dict, case: dict) -> float | None:
+    """How much slower the machine was while THIS case ran, from its own bracket.
+
+    `canary_factor` above lines a case up against the NEAREST periodic sample,
+    which is the best a 30-second timer allows and is not good enough to gate
+    on: `sdf_move` runs at 135 s between samples at 122 s (x1.07) and 147 s
+    (x1.50), because the two pooled cases in that gap take the device from cold
+    to throttled in 13 seconds. Whichever sample happens to be nearer decides
+    the verdict. That reported a 1.6x regression on a verb measuring 1.05x
+    off-device (#297).
+
+    A bracketed case carries the canary sampled immediately before and
+    immediately after itself, so no interpolation is involved. Returns None
+    when the case was not bracketed — records written before that existed, and
+    the gallery bundle, which sets no per-case context at all. Those are
+    compared raw, exactly as they were before.
+    """
+    before = case.get("canaryBeforeMs", 0.0)
+    after = case.get("canaryAfterMs", 0.0)
+    if not before or not after:
+        return None
+    bundle = case.get("bundle")
+    base = canary_baselines(run).get(bundle) if bundle else None
+    if not base:
+        return None
+    return ((before + after) / 2.0) / base
+
+
 def canary_factor(run: dict, case: dict) -> float | None:
     """How much slower the machine was when THIS case ran, or None.
 
@@ -121,6 +149,14 @@ def canary_factor(run: dict, case: dict) -> float | None:
     lined up against, and guessing which process it came from would invent the
     attribution this function exists to make honest.
     """
+    # The case's own bracket when it has one, because that is the factor the
+    # gate DIVIDES BY — reporting the nearest periodic sample instead would
+    # tell a reader conditions were fine while a 1.43x correction was applied
+    # to sdf_flatten, which is the same class of mistake this file exists to
+    # stop making.
+    bracketed = bracket_factor(run, case)
+    if bracketed is not None:
+        return bracketed
     bundle = case.get("bundle")
     samples = _by_bundle(run).get(bundle) if bundle else None
     base = canary_baselines(run).get(bundle) if bundle else None
@@ -191,34 +227,6 @@ def single_observation(case: dict) -> bool:
     """
     ms = case.get("measurements", [])
     return bool(ms) and all(m.get("samples", 0) <= 1 for m in ms)
-
-
-def bracket_factor(run: dict, case: dict) -> float | None:
-    """How much slower the machine was while THIS case ran, from its own bracket.
-
-    `canary_factor` above lines a case up against the NEAREST periodic sample,
-    which is the best a 30-second timer allows and is not good enough to gate
-    on: `sdf_move` runs at 135 s between samples at 122 s (x1.07) and 147 s
-    (x1.50), because the two pooled cases in that gap take the device from cold
-    to throttled in 13 seconds. Whichever sample happens to be nearer decides
-    the verdict. That reported a 1.6x regression on a verb measuring 1.05x
-    off-device (#297).
-
-    A bracketed case carries the canary sampled immediately before and
-    immediately after itself, so no interpolation is involved. Returns None
-    when the case was not bracketed — records written before that existed, and
-    the gallery bundle, which sets no per-case context at all. Those are
-    compared raw, exactly as they were before.
-    """
-    before = case.get("canaryBeforeMs", 0.0)
-    after = case.get("canaryAfterMs", 0.0)
-    if not before or not after:
-        return None
-    bundle = case.get("bundle")
-    base = canary_baselines(run).get(bundle) if bundle else None
-    if not base:
-        return None
-    return ((before + after) / 2.0) / base
 
 
 def normalised_p95(run: dict, case: dict) -> tuple[float, float | None]:
