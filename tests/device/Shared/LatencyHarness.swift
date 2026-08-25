@@ -83,6 +83,21 @@ struct CaseResult: Codable {
     /// moved.
     var thermalStateStart: String = "unknown"
     var thermalStateEnd: String = "unknown"
+    /// The canary, sampled immediately before and immediately after THIS case.
+    ///
+    /// `startedAtMs` says where a case ran; these say what the machine was
+    /// doing while it ran, which is the number the gate actually needs. A
+    /// periodic canary cannot supply it: `sdf_move` runs at 135 s between
+    /// samples at 122 s (x1.07) and 147 s (x1.50), because the two pooled
+    /// cases in that gap take the device from cold to throttled in 13
+    /// seconds. Interpolating across that gap makes the gate's verdict depend
+    /// on where a 30-second timer happened to fire — it reported a 1.6x
+    /// regression on a verb that measures 1.05x off-device (#297).
+    ///
+    /// 0 means the case was not bracketed: records written before this
+    /// existed, which the gate compares raw rather than guessing.
+    var canaryBeforeMs: Double = 0
+    var canaryAfterMs: Double = 0
 }
 
 /// One sample of a fixed workload that touches nothing under test.
@@ -374,6 +389,18 @@ final class RunCollector {
     func sampleCanaryIfDue(everyMs: Double = 30_000) {
         if let last = canary.last, elapsedMs - last.atMs < everyMs { return }
         sampleCanary()
+    }
+
+    /// Take a reading AND hand it back, so a case can record the machine it
+    /// was measured on rather than the machine some timer last looked at.
+    ///
+    /// Called twice per case, which is ~16 s over a 61-case run against the
+    /// ~250 s the run already takes — cheap enough not to trade against, and
+    /// the alternative is a gate whose verdict depends on timer phase.
+    @discardableResult
+    func sampleCanaryNow() -> Double {
+        sampleCanary()
+        return canary.last?.ms ?? 0
     }
 
     func add(_ result: CaseResult) {
