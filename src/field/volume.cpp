@@ -553,22 +553,51 @@ void FieldVolume::rewrite(const std::function<float(int, int, int, float)>& fn) 
 
 float FieldVolume::measure_sample_lipschitz() const {
     if (empty()) return 1.0f;
-    const int nx = sample_extent(0), ny = sample_extent(1), nz = sample_extent(2);
-    const std::size_t total = static_cast<std::size_t>(nx) * ny * nz;
-    // Only the three forward neighbours: the reverse ones are the same pairs
-    // seen from the other end.
-    constexpr int kForward[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    const int n = kBrickDim + 1;
+
+    // Walking the STORED bricks rather than the dense lattice. The two see
+    // exactly the same pairs, and the reason is the halo: a forward pair
+    // (g, g+1) lies wholly inside the one brick g/8 — at locals (g%8, g%8+1),
+    // and g%8 is at most kBrickDim-1 so the upper end is at worst the halo
+    // sample. If that brick has no samples then neither does the upper end,
+    // because the only OTHER brick holding a sample is the one below, and it
+    // holds it at its halo, which is the lower end of the pair and never the
+    // upper. So a pair the dense sweep counted is a pair some stored brick
+    // owns, and a pair a stored brick owns is one the dense sweep counted.
+    //
+    // What it saves is not arithmetic, it is lookups. The dense sweep asked
+    // sample_at() for every point of the bounding lattice — 8.1M of them for a
+    // volume storing 1.55M samples in 2,132 of 15,625 brick slots — and each
+    // one is a sparse localize plus up to eight brick probes. Six million of
+    // those returned nothing. Inside a brick the pairs are neighbours in
+    // memory, so this asks for nothing at all.
+    //
+    // Halo duplicates cannot disagree, which is what lets a pair be settled
+    // inside one brick: both copies of a shared sample come from the same
+    // global coordinate through the same arithmetic — sample_position builds
+    // it as bx * kBrickDim + x, so brick b's halo and brick b+1's face are the
+    // same integer — and rewrite() hands both copies the same question.
+    constexpr int kStride[3] = {1, kBrickDim + 1, (kBrickDim + 1) * (kBrickDim + 1)};
 
     float steepest = 0.0f;
-    for (std::size_t i = 0; i < total; ++i) {
-        const int gx = static_cast<int>(i) % nx;
-        const int gy = (static_cast<int>(i) / nx) % ny;
-        const int gz = static_cast<int>(i) / (nx * ny);
-        const std::optional<float> here = sample_at(gx, gy, gz);
-        if (!here) continue;
-        for (const auto& d : kForward) {
-            const std::optional<float> next = sample_at(gx + d[0], gy + d[1], gz + d[2]);
-            if (next) steepest = std::max(steepest, std::abs(*next - *here));
+    for (std::size_t slot = 0; slot < index_.size(); ++slot) {
+        const std::int32_t entry = index_[slot];
+        if (entry < 0) continue;
+        const float* block = data_.data() + static_cast<std::size_t>(entry);
+        // One sweep per axis, each stopping a sample short along that axis so
+        // the forward neighbour is always in the block. Only the three forward
+        // neighbours: the reverse ones are the same pairs seen from the other
+        // end.
+        for (int axis = 0; axis < 3; ++axis) {
+            const int stride = kStride[axis];
+            const int last[3] = {axis == 0 ? n - 1 : n, axis == 1 ? n - 1 : n,
+                                 axis == 2 ? n - 1 : n};
+            for (int z = 0; z < last[2]; ++z)
+                for (int y = 0; y < last[1]; ++y) {
+                    const float* row = block + (z * n + y) * n;
+                    for (int x = 0; x < last[0]; ++x)
+                        steepest = std::max(steepest, std::abs(row[x + stride] - row[x]));
+                }
         }
     }
     return std::max(1.0f, steepest / cell_size_);
