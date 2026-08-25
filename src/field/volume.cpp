@@ -551,6 +551,103 @@ void FieldVolume::rewrite(const std::function<float(int, int, int, float)>& fn) 
     }
 }
 
+// The brick index range a region selects. Shared by rewrite_region and
+// snapshot_region so the two cannot disagree about which bricks are in play --
+// and they must not, since the snapshot is only correct for the bricks the
+// rewrite will actually write.
+namespace {
+bool region_brick_range(const kernel::cfloat3& origin, const std::int32_t* bcount, float brick,
+                        const math::Aabb& region, int* lo, int* hi) {
+    for (int a = 0; a < 3; ++a) {
+        const float o = a == 0 ? origin.x : a == 1 ? origin.y : origin.z;
+        const float rmin = a == 0 ? region.min.x : a == 1 ? region.min.y : region.min.z;
+        const float rmax = a == 0 ? region.max.x : a == 1 ? region.max.y : region.max.z;
+        lo[a] = std::max(static_cast<int>(std::floor((rmin - o) / brick)) - 1, 0);
+        hi[a] = std::min(static_cast<int>(std::floor((rmax - o) / brick)) + 1, bcount[a] - 1);
+        if (lo[a] > hi[a]) return false;
+    }
+    return true;
+}
+}  // namespace
+
+std::optional<float> FieldVolume::RegionSnapshot::sample_at(int gx, int gy, int gz) const {
+    if (!volume_) return std::nullopt;
+    // The CANONICAL brick first, and usually only. Every global coordinate has
+    // one -- g / kBrickDim, whose local index is then in [0, kBrickDim) -- and
+    // a stencil walking the inside of a region hits it every time. Trying the
+    // eight bricks that could share a face sample before this one, which is
+    // what the obvious loop does, cost more per tap than copying the whole
+    // volume saved: measured 4% SLOWER over a stroke than the copy it replaced.
+    const int b[3] = {floor_div(gx, kBrickDim), floor_div(gy, kBrickDim),
+                      floor_div(gz, kBrickDim)};
+    if (b[0] >= lo_[0] && b[0] < lo_[0] + span_[0] && b[1] >= lo_[1] &&
+        b[1] < lo_[1] + span_[1] && b[2] >= lo_[2] && b[2] < lo_[2] + span_[2]) {
+        const std::size_t at = static_cast<std::size_t>(
+            ((b[2] - lo_[2]) * span_[1] + (b[1] - lo_[1])) * span_[0] + (b[0] - lo_[0]));
+        const std::int32_t off = offset_[at];
+        if (off >= 0)
+            return data_[static_cast<std::size_t>(off) +
+                         sample_index(gx - b[0] * kBrickDim, gy - b[1] * kBrickDim,
+                                      gz - b[2] * kBrickDim)];
+    }
+    // The canonical brick is not snapshotted. A sample on a brick face also
+    // lives in the brick below, at its halo, so that one may hold it -- and if
+    // neither does, nothing wrote this sample and the volume still holds what
+    // it held.
+    for (int dz = 0; dz < 2; ++dz)
+        for (int dy = 0; dy < 2; ++dy)
+            for (int dx = 0; dx < 2; ++dx) {
+                if (!dx && !dy && !dz) continue;  // done above
+                const int n[3] = {b[0] - dx, b[1] - dy, b[2] - dz};
+                const int local[3] = {gx - n[0] * kBrickDim, gy - n[1] * kBrickDim,
+                                      gz - n[2] * kBrickDim};
+                bool inside = true;
+                for (int a = 0; a < 3; ++a)
+                    if (local[a] < 0 || local[a] > kBrickDim || n[a] < lo_[a] ||
+                        n[a] >= lo_[a] + span_[a])
+                        inside = false;
+                if (!inside) continue;
+                const std::size_t at = static_cast<std::size_t>(
+                    ((n[2] - lo_[2]) * span_[1] + (n[1] - lo_[1])) * span_[0] + (n[0] - lo_[0]));
+                const std::int32_t off = offset_[at];
+                if (off < 0) continue;
+                return data_[static_cast<std::size_t>(off) +
+                             sample_index(local[0], local[1], local[2])];
+            }
+    return volume_->sample_at(gx, gy, gz);
+}
+
+FieldVolume::RegionSnapshot FieldVolume::snapshot_region(const math::Aabb& region) const {
+    RegionSnapshot snap;
+    snap.volume_ = this;
+    if (empty() || region.empty()) return snap;
+    const float brick = static_cast<float>(kBrickDim) * cell_size_;
+    int lo[3], hi[3];
+    if (!region_brick_range(origin_, bcount_, brick, region, lo, hi)) return snap;
+    for (int a = 0; a < 3; ++a) {
+        snap.lo_[a] = lo[a];
+        snap.span_[a] = hi[a] - lo[a] + 1;
+    }
+    const std::size_t boxes = static_cast<std::size_t>(snap.span_[0]) * snap.span_[1] *
+                              snap.span_[2];
+    snap.offset_.assign(boxes, kBrickEmpty);
+    for (int bz = lo[2]; bz <= hi[2]; ++bz)
+        for (int by = lo[1]; by <= hi[1]; ++by)
+            for (int bx = lo[0]; bx <= hi[0]; ++bx) {
+                const std::size_t slot =
+                    static_cast<std::size_t>((bz * bcount_[1] + by) * bcount_[0] + bx);
+                const std::int32_t entry = index_[slot];
+                if (entry < 0) continue;
+                const std::size_t at = static_cast<std::size_t>(
+                    (((bz - lo[2]) * snap.span_[1]) + (by - lo[1])) * snap.span_[0] +
+                    (bx - lo[0]));
+                snap.offset_[at] = static_cast<std::int32_t>(snap.data_.size());
+                snap.data_.insert(snap.data_.end(), data_.begin() + entry,
+                                  data_.begin() + entry + kBrickSamples);
+            }
+    return snap;
+}
+
 void FieldVolume::rewrite_region(const math::Aabb& region,
                                  const std::function<float(int, int, int, float)>& fn) {
     if (empty() || region.empty()) return;
@@ -564,16 +661,7 @@ void FieldVolume::rewrite_region(const math::Aabb& region,
     // argument for skipping the rest is that `fn` is identity there, which a
     // generous selection cannot break.
     int lo[3], hi[3];
-    for (int a = 0; a < 3; ++a) {
-        const float o = a == 0 ? origin_.x : a == 1 ? origin_.y : origin_.z;
-        const float rmin = a == 0 ? region.min.x : a == 1 ? region.min.y : region.min.z;
-        const float rmax = a == 0 ? region.max.x : a == 1 ? region.max.y : region.max.z;
-        lo[a] = static_cast<int>(std::floor((rmin - o) / brick)) - 1;
-        hi[a] = static_cast<int>(std::floor((rmax - o) / brick)) + 1;
-        lo[a] = std::max(lo[a], 0);
-        hi[a] = std::min(hi[a], bcount_[a] - 1);
-    }
-    if (lo[0] > hi[0] || lo[1] > hi[1] || lo[2] > hi[2]) return;  // nothing meets it
+    if (!region_brick_range(origin_, bcount_, brick, region, lo, hi)) return;  // nothing meets it
 
     for (int bz = lo[2]; bz <= hi[2]; ++bz)
         for (int by = lo[1]; by <= hi[1]; ++by)
