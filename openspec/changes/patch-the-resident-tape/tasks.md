@@ -21,79 +21,79 @@
 - [x] 1.7 Confirmed the two existing Vulkan residency tests keep passing under
       id-keyed residency, and that the "same length, different contents" one
       gets stricter rather than weaker.
-- [ ] 1.8 Verify the Vulkan backend registers and its tests run on this box
+- [x] 1.8 Verify the Vulkan backend registers and its tests run on this box
       before building anything on it. (14 cases passed on the RTX 5060 during
       scoping; re-confirm against the phase-1 branch.)
 
 ## 2. Lineage on the tape
 
-- [ ] 2.1 Add `parent_id`, `agree_instrs`, `agree_params`, `agree_blob` to
+- [x] 2.1 Add `parent_id`, `agree_instrs`, `agree_params`, `agree_blob` to
       `Tape`, documented as a claim about BYTES: below those offsets the two
       tapes are identical. `parent_id == 0` means no lineage.
-- [ ] 2.2 Fill them in `compile_document_append` from the checkpoint it just
+- [x] 2.2 Fill them in `compile_document_append` from the checkpoint it just
       consumed — the agreement point IS the checkpoint — and nowhere else.
-- [ ] 2.3 Leave `compile_id` semantics untouched, so a backend that ignores
+- [x] 2.3 Leave `compile_id` semantics untouched, so a backend that ignores
       lineage misses and re-uploads exactly as today. This is what lets Metal
       follow separately.
-- [ ] 2.4 Test that a lineage claim is TRUE: read the ancestor's sections and
+- [x] 2.4 Test that a lineage claim is TRUE: read the ancestor's sections and
       assert byte-identity below all three offsets. Not "the field looks
       right" — the bytes.
-- [ ] 2.5 Test that every other compile entry point reports no lineage.
+- [x] 2.5 Test that every other compile entry point reports no lineage.
 
 ## 3. Vulkan: patch instead of re-upload
 
-- [ ] 3.1 Replace the `memcmp` residency check with an id compare: hit on
+- [x] 3.1 Replace the `memcmp` residency check with an id compare: hit on
       `compile_id`, patch on `parent_id`, upload whole otherwise, and ALWAYS
       upload whole for `compile_id == 0`.
-- [ ] 3.2 Delete the CPU-side shadow vectors; one `std::uint64_t` replaces
+- [x] 3.2 Delete the CPU-side shadow vectors; one `std::uint64_t` replaces
       them.
-- [ ] 3.3 Advance the resident id to the patched tape's own id, so a STROKE
+- [x] 3.3 Advance the resident id to the patched tape's own id, so a STROKE
       chains — without this only the first dab after an upload patches.
-- [ ] 3.4 Lay the floats buffer out as `[params | slack | blob]` and make
+- [x] 3.4 Lay the floats buffer out as `[params | slack | blob]` and make
       `blob_base` the params capacity rather than `params.size()`.
-- [ ] 3.5 Patch the three suffixes into the mapped buffers at their offsets.
-- [ ] 3.6 Fall back to a full upload and re-pack when params outgrow the
+- [x] 3.5 Patch the three suffixes into the mapped buffers at their offsets.
+- [x] 3.6 Fall back to a full upload and re-pack when params outgrow the
       reserved capacity.
-- [ ] 3.7 Grow buffers geometrically in `ensure()`, reserving the slack out of
+- [x] 3.7 Grow buffers geometrically in `ensure()`, reserving the slack out of
       the grown capacity rather than on top of it.
-- [ ] 3.8 Add a `tape_patches_` counter beside `tape_uploads_`, exposed the
+- [x] 3.8 Add a `tape_patches_` counter beside `tape_uploads_`, exposed the
       same way for tests.
 
 ## 4. Prove the patched field is the uploaded field
 
-- [ ] 4.1 THE test: evaluate the same appended document through a backend that
+- [x] 4.1 THE test: evaluate the same appended document through a backend that
       patched its way to it and through one that uploaded it whole, and
       require IDENTICAL values. A patch written to the wrong offset passes a
       counter test and fails this one.
-- [ ] 4.2 Run that over a stroke of many dabs, not one, so a drift that
+- [x] 4.2 Run that over a stroke of many dabs, not one, so a drift that
       accumulates is caught.
-- [ ] 4.3 Over a document carrying a blob — strokes, a sampled volume, a gate
+- [x] 4.3 Over a document carrying a blob — strokes, a sampled volume, a gate
       — which is the case the slack layout exists for.
-- [ ] 4.4 Counter test: a stroke of N dabs is one upload and N patches.
-- [ ] 4.5 Regression: a tape with no lineage, and one naming an ancestor that
+- [x] 4.4 Counter test: a stroke of N dabs is one upload and N patches.
+- [x] 4.5 Regression: a tape with no lineage, and one naming an ancestor that
       is not resident, are uploaded whole and evaluate correctly.
-- [ ] 4.6 Regression: a hand-assembled tape (`compile_id == 0`) is never
+- [x] 4.6 Regression: a hand-assembled tape (`compile_id == 0`) is never
       served a resident upload.
-- [ ] 4.7 Regression: exhausting the slack re-packs and still evaluates
+- [x] 4.7 Regression: exhausting the slack re-packs and still evaluates
       correctly.
-- [ ] 4.8 Keep the two existing Vulkan residency tests passing unchanged.
+- [x] 4.8 Keep the two existing Vulkan residency tests passing unchanged.
 
 ## 5. Measure
 
-- [ ] 5.1 Benchmark a stroke through the Vulkan backend: append, evaluate,
+- [x] 5.1 Benchmark a stroke through the Vulkan backend: append, evaluate,
       repeat, against the same stroke with patching disabled.
-- [ ] 5.2 Report the reallocation count as well as the time — the allocator
+- [x] 5.2 Report the reallocation count as well as the time — the allocator
       churn is half of what #197 is about, and a wall-clock number on a
       desktop with 8 GB of VRAM under-reports what it costs an iPad.
-- [ ] 5.3 Gate it, named rather than `Arg()`-parameterised, and set the
+- [x] 5.3 Gate it, named rather than `Arg()`-parameterised, and set the
       ceiling from measured contention rather than from the quiet number —
       the trap phase 1's gate walked into.
 
 ## 6. Documentation and the follow-up
 
-- [ ] 6.1 Update the `Tape` header: what lineage promises, and that a false
+- [x] 6.1 Update the `Tape` header: what lineage promises, and that a false
       claim is silent.
-- [ ] 6.2 Update `docs/05-claycore-library.md`, which currently ends the tape
+- [x] 6.2 Update `docs/05-claycore-library.md`, which currently ends the tape
       section saying the GPU still re-uploads.
 - [ ] 6.3 Update #197 with the Vulkan result, and state that Metal is the
       remaining half.

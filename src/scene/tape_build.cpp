@@ -947,6 +947,18 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& cp, const
     c.tape.bounds = prefix.bounds;
     c.resume(cp, *layer, appended);
     c.tape.compile_id = next_compile_id();  // different bytes, so a different identity
+    // The lineage, set HERE and nowhere else: the checkpoint is the point up
+    // to which this tape and `prefix` agree, because the bytes below it were
+    // copied from `prefix` unchanged a few lines above. A backend patches on
+    // this, so it is derived from the copy rather than asserted about it.
+    // A prefix with no identity of its own cannot be named, so a tape grown
+    // from one carries no lineage either.
+    if (prefix.compile_id != 0) {
+        c.tape.parent_id = prefix.compile_id;
+        c.tape.agree_instrs = cp.instrs;
+        c.tape.agree_params = cp.params;
+        c.tape.agree_blob = cp.blob;
+    }
     if (out_checkpoint) *out_checkpoint = c.checkpoint;
     *out = std::move(c.tape);
     return true;

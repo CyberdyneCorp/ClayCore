@@ -108,6 +108,7 @@ class VulkanBackend final : public Backend {
 
     const char* name() const override { return "vulkan"; }
     std::uint64_t tape_uploads() const { return tape_uploads_; }
+    std::uint64_t tape_patches() const { return tape_patches_; }
     BackendCaps caps() const override { return BackendCaps{false, false, 0}; }
 
     Status eval_points(const scene::Tape& tape, const PointQuery& q,
@@ -458,18 +459,114 @@ class VulkanBackend final : public Backend {
         return true;
     }
 
-    // The tape's params and blob live in ONE buffer, in that order, so the
-    // shader needs one binding and the cursors are indices into it.
+    // The tape's params and blob live in ONE buffer, so the shader needs one
+    // binding and the cursors are indices into it. The blob does NOT begin
+    // where params end: it begins at a reserved capacity, with a gap between
+    // them.
+    //
+    // The gap is what makes an append a tail write. A dab adds params, and
+    // with the blob packed immediately behind them every append would shove
+    // the whole blob right — which for a document of strokes or sampled
+    // volumes is the 7.2 MiB this change exists to stop moving. The shader
+    // reads blob_base as an opaque cursor (clay_kernels.comp.in), so the gap
+    // costs nothing but the space it occupies and no shader change at all.
+    // Room for what a stroke is about to add. Every tape buffer is sized
+    // through this rather than to the tape's exact length, and that is not a
+    // detail: an exact fit means the very next dab does not fit, the patch
+    // declines, and the whole tape is re-uploaded — the allocation patching
+    // exists to avoid, still paid on every stamp, just with less copied into
+    // it. Measured before this: 3 patches and 5 whole uploads over 8 dabs.
+    //
+    // The two terms answer different documents. The PROPORTIONAL half keeps a
+    // large tape from re-packing often — and because each re-pack reserves
+    // half again, the re-packs over a stroke are geometric, so their cost is
+    // amortised rather than paid per dab. The CONSTANT half is for a small
+    // one, where half of very little is still not room for a single item: an
+    // item is ~37 params, so 64 floats of slack absorbed two dabs and then
+    // re-packed. 1024 absorbs a stroke's worth. It is 4 KiB a section, which
+    // is nothing against the 7.8 MiB it stops re-sending.
+    static std::size_t with_slack(std::size_t n) { return n + n / 2 + 1024; }
+
+    // Where the tape goes, and how much of it actually has to be transferred.
     bool upload_tape(const scene::Tape& tape, PushConstants* pc) {
         pc->instr_count = static_cast<std::uint32_t>(tape.instrs.size());
         pc->params_base = 0;
-        pc->blob_base = static_cast<std::uint32_t>(tape.params.size());
 
-        const std::size_t floats = tape.params.size() + tape.blob.size();
-        if (resident(tape)) return true;
+        // Already here, byte for byte: this is the same compile.
+        if (has_resident_ && tape.compile_id != 0 && tape.compile_id == resident_id_) {
+            pc->blob_base = static_cast<std::uint32_t>(params_cap_);
+            return true;
+        }
+        // Grew from what is here: transfer only what it does not share. The
+        // patch declines when the buffers cannot hold the grown tape, and
+        // that is a FALL-THROUGH, not a failure — growing a buffer hands back
+        // a fresh allocation with nothing in it, so the prefix that was going
+        // to be kept has to be re-sent.
+        if (can_patch(tape) && patch_tape(tape)) {
+            pc->blob_base = static_cast<std::uint32_t>(params_cap_);
+            return true;
+        }
+        return upload_whole(tape, pc);
+    }
 
-        if (!ensure(&instrs_, tape.instrs.size() * sizeof(kernel::CTapeInstr))) return false;
-        if (!ensure(&floats_, floats * sizeof(float))) return false;
+    // A tape may be patched onto the resident one when it says so itself —
+    // Tape::parent_id names the compile whose bytes it shares, and the
+    // agree_* offsets say how many. Everything else about it is checked here
+    // rather than trusted, because a patch written past what the two tapes
+    // actually share evaluates a field that never existed, with no error and
+    // no crash to say so.
+    bool can_patch(const scene::Tape& tape) const {
+        if (!has_resident_ || resident_id_ == 0) return false;
+        if (tape.compile_id == 0 || tape.parent_id != resident_id_) return false;
+        // Lineage says the tapes agree BELOW these; a tape cannot agree with
+        // the resident one past its own length or past what was uploaded.
+        if (tape.agree_instrs > tape.instrs.size() || tape.agree_params > tape.params.size() ||
+            tape.agree_blob > tape.blob.size())
+            return false;
+        if (tape.agree_instrs > res_instrs_ || tape.agree_params > res_params_ ||
+            tape.agree_blob > res_blob_)
+            return false;
+        // The params must still fit under the blob. When they do not, the
+        // slack is spent and the tape is re-packed by an ordinary upload.
+        return tape.params.size() <= params_cap_;
+    }
+
+    // The suffixes only, written into the persistently mapped buffers.
+    bool patch_tape(const scene::Tape& tape) {
+        const std::size_t instr_bytes = tape.instrs.size() * sizeof(kernel::CTapeInstr);
+        // Declining, so the caller uploads whole: the buffers as they stand
+        // have to hold the grown tape, because growing one would throw away
+        // the prefix this patch is built on. ensure() grows geometrically, so
+        // this is occasional rather than per-dab.
+        if (instr_bytes > instrs_.size ||
+            (params_cap_ + tape.blob.size()) * sizeof(float) > floats_.size)
+            return false;
+
+        if (tape.instrs.size() > tape.agree_instrs)
+            std::memcpy(static_cast<kernel::CTapeInstr*>(instrs_.mapped) + tape.agree_instrs,
+                        tape.instrs.data() + tape.agree_instrs,
+                        (tape.instrs.size() - tape.agree_instrs) * sizeof(kernel::CTapeInstr));
+        float* dst = static_cast<float*>(floats_.mapped);
+        if (tape.params.size() > tape.agree_params)
+            std::memcpy(dst + tape.agree_params, tape.params.data() + tape.agree_params,
+                        (tape.params.size() - tape.agree_params) * sizeof(float));
+        if (tape.blob.size() > tape.agree_blob)
+            std::memcpy(dst + params_cap_ + tape.agree_blob, tape.blob.data() + tape.agree_blob,
+                        (tape.blob.size() - tape.agree_blob) * sizeof(float));
+
+        // The resident tape is now THIS one, which is what makes a stroke
+        // cheap rather than only its first dab: the next append names this
+        // compile as its parent, not the one uploaded whole several dabs ago.
+        remember(tape);
+        ++tape_patches_;
+        return true;
+    }
+
+    bool upload_whole(const scene::Tape& tape, PushConstants* pc) {
+        const std::size_t cap = with_slack(tape.params.size());
+        if (!ensure(&instrs_, with_slack(tape.instrs.size()) * sizeof(kernel::CTapeInstr)))
+            return false;
+        if (!ensure(&floats_, (cap + with_slack(tape.blob.size())) * sizeof(float))) return false;
         if (!tape.instrs.empty())
             std::memcpy(instrs_.mapped, tape.instrs.data(),
                         tape.instrs.size() * sizeof(kernel::CTapeInstr));
@@ -477,33 +574,29 @@ class VulkanBackend final : public Backend {
         if (!tape.params.empty())
             std::memcpy(dst, tape.params.data(), tape.params.size() * sizeof(float));
         if (!tape.blob.empty())
-            std::memcpy(dst + tape.params.size(), tape.blob.data(),
-                        tape.blob.size() * sizeof(float));
+            std::memcpy(dst + cap, tape.blob.data(), tape.blob.size() * sizeof(float));
+        params_cap_ = cap;
+        pc->blob_base = static_cast<std::uint32_t>(cap);
         remember(tape);
         ++tape_uploads_;
         return true;
     }
 
-    // An exact compare, not a hash. Two different tapes that hash alike would
-    // evaluate the wrong field silently, which is worse than any upload it
-    // could save; the compare touches the same bytes the upload would.
-    bool resident(const scene::Tape& tape) const {
-        return has_resident_ && res_instrs_.size() == tape.instrs.size() &&
-               res_params_.size() == tape.params.size() &&
-               res_blob_.size() == tape.blob.size() &&
-               std::memcmp(res_instrs_.data(), tape.instrs.data(),
-                           res_instrs_.size() * sizeof(kernel::CTapeInstr)) == 0 &&
-               std::memcmp(res_params_.data(), tape.params.data(),
-                           res_params_.size() * sizeof(float)) == 0 &&
-               std::memcmp(res_blob_.data(), tape.blob.data(),
-                           res_blob_.size() * sizeof(float)) == 0;
-    }
-
+    // What is resident is now an IDENTITY, not a copy of the bytes.
+    //
+    // The compare this replaces was exact rather than a hash, and rightly so:
+    // two different tapes that hashed alike would evaluate the wrong field
+    // silently. But compile_id is not a hash — the compiler stamps it,
+    // process-unique, so it cannot collide, which is what the Metal backend
+    // has relied on since it was written. Keeping a full copy of the tape to
+    // compare against cost 7.8 MiB of host memory at 50,000 items, for a
+    // check that could never match once a stroke started changing the tape.
     void remember(const scene::Tape& tape) {
-        res_instrs_ = tape.instrs;
-        res_params_ = tape.params;
-        res_blob_ = tape.blob;
-        has_resident_ = true;
+        resident_id_ = tape.compile_id;
+        res_instrs_ = tape.instrs.size();
+        res_params_ = tape.params.size();
+        res_blob_ = tape.blob.size();
+        has_resident_ = tape.compile_id != 0;
     }
 
     // -- dispatch ------------------------------------------------------------
@@ -607,11 +700,19 @@ class VulkanBackend final : public Backend {
     bool has_resident_ = false;
     // Counts uploads, not dispatches. "The tape is uploaded when it changes"
     // is otherwise a claim no test can check, and an unchecked claim about a
-    // cache is how a stale field ships.
+    // cache is how a stale field ships. tape_patches_ is the same argument
+    // for the half that transfers a suffix instead.
     std::uint64_t tape_uploads_ = 0;
-    std::vector<kernel::CTapeInstr> res_instrs_;
-    std::vector<float> res_params_;
-    std::vector<float> res_blob_;
+    std::uint64_t tape_patches_ = 0;
+    // The resident tape's identity and section lengths — what used to be a
+    // full copy of its bytes.
+    std::uint64_t resident_id_ = 0;
+    std::size_t res_instrs_ = 0;
+    std::size_t res_params_ = 0;
+    std::size_t res_blob_ = 0;
+    // Where the blob starts in floats_, which is the params capacity rather
+    // than the params length: see params_capacity_for.
+    std::size_t params_cap_ = 0;
 };
 
 }  // namespace
@@ -627,6 +728,13 @@ std::unique_ptr<Backend> adopt_vulkan_backend(const DeviceHandles& device) {
 // the C ABI.
 std::uint64_t vulkan_tape_uploads(const Backend& backend) {
     return static_cast<const VulkanBackend&>(backend).tape_uploads();
+}
+
+// How many times an appended tape was served by transferring only the suffix
+// it did not share with the resident one. Same reason as the counter above:
+// "a stroke uploads once and patches after that" is otherwise unfalsifiable.
+std::uint64_t vulkan_tape_patches(const Backend& backend) {
+    return static_cast<const VulkanBackend&>(backend).tape_patches();
 }
 
 }  // namespace eval

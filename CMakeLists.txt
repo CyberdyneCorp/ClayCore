@@ -386,6 +386,12 @@ if(CLAY_BUILD_BENCHMARKS)
   target_link_libraries(clay_bench PRIVATE claycore benchmark::benchmark)
   # The batched-raycast pair drives the C ABI, where its fan-out lives.
   target_include_directories(clay_bench PRIVATE bindings/c)
+  # The Vulkan stroke pair reaches the backend's private upload/patch counters,
+  # which only exist when the backend is built. claycore takes CLAY_HAS_VULKAN
+  # PRIVATE, so the benchmark needs its own.
+  if(CLAY_BACKEND_VULKAN)
+    target_compile_definitions(clay_bench PRIVATE CLAY_HAS_VULKAN=1)
+  endif()
   clay_apply_warnings(clay_bench)
 
   # Not a gated benchmark: the evidence behind add-cpu-simd-path's retarget,

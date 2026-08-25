@@ -22,11 +22,17 @@ Patching SHALL change only speed. The values a patched tape evaluates to SHALL b
 
 A backend that grows its device buffers to absorb an append SHALL do so with spare capacity rather than to the exact size required, so that a stroke does not reallocate on every stamp — an exact-fit buffer turns every append back into the allocation the patch exists to avoid.
 
+That capacity is finite, so a long enough stroke SHALL eventually exhaust it and be uploaded whole again. That is not a failure of patching: reserving proportionally means the re-packs over a stroke are geometric, so their cost is amortised. What SHALL NOT happen is re-packing on every append, which is what an exact fit does and which no test of the evaluated field can catch, because every one of those uploads is correct.
+
 Where a backend packs two sections into one buffer, it SHALL NOT let one section's growth displace another that is already resident. Placing the sections with slack between them is one way; the requirement is that an append stays a write to the end of what changed.
 
 #### Scenario: A stroke uploads once and patches after that
-- **WHEN** a document is evaluated, then an item is appended and it is evaluated again, repeatedly
+- **WHEN** a document is evaluated, then an item is appended and it is evaluated again, for a stroke short enough to fit the reserved capacity
 - **THEN** the tape is uploaded whole once and patched for each later append
+
+#### Scenario: A long stroke re-packs occasionally rather than per dab
+- **WHEN** a stroke runs long enough to exhaust the reserved capacity several times over
+- **THEN** the overwhelming majority of its appends are patched, and the whole uploads number in the handful that geometric growth implies rather than one per append
 
 #### Scenario: A patched tape evaluates identically to an uploaded one
 - **WHEN** the same appended document is evaluated through a patched resident tape and through a backend that uploaded it whole

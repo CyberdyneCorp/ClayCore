@@ -332,6 +332,32 @@ MAX_RATIO = [
     ("BM_WholeDocAppend50000", "BM_WholeDocCompile50000", 0.50),
 ]
 
+# counter gates: (bench, counter, max_value) — the named counter must be at
+# most max_value. SKIPPED when the benchmark is absent, the way FASTER_THAN is
+# and unlike MAX_RATIO, because a GPU benchmark only registers where a device
+# is present and CPU-only CI must not fail for lacking one.
+#
+# This exists because some properties are not times. Whether an appended tape
+# is patched onto the resident one or re-uploaded whole is, on a discrete GPU,
+# almost invisible in wall clock: measured on an RTX 5060 the patched stroke
+# is 48.7 ms against 57.8 ms, because both pay the same ~48 ms of dispatch and
+# fence latency. The same pair is 0.333 ms against 9.44 ms of HOST CPU, and
+# reallocates 0 times against 300 — and the reallocation count is exact,
+# deterministic and the same on every machine, where a 16% wall-clock margin
+# on a GPU is a flaky gate waiting to happen.
+#
+# The allocator churn is also the half of #197 that matters most on the
+# platform the issue is actually about: a desktop with 8 GB of VRAM shrugs at
+# re-allocating a 3 MiB buffer per stamp; an iPad is where memory pressure
+# ends sessions.
+MAX_COUNTER = [
+    # A stroke re-packs when it outgrows its reserved slack, which is
+    # geometric — measured 8 re-packs over 8 154 appends, and 0 over the 300
+    # this benchmark runs. Per-dab reallocation, which is what the code did
+    # before patching and what a regression would restore, is 300.
+    ("BM_VulkanStrokePatched", "repacks", 4),
+]
+
 
 def main() -> int:
     if len(sys.argv) != 2:
@@ -342,10 +368,12 @@ def main() -> int:
     failures = []
     seen = set()
     times = {}
+    counters = {}
     for bench in data.get("benchmarks", []):
         name = bench["name"].split("/")[0]
         seen.add(name)
         times[name] = bench.get("real_time", 0)
+        counters[name] = bench
         if name not in FLOORS:
             continue
         rule = FLOORS[name]
@@ -367,6 +395,16 @@ def main() -> int:
             print(f"bench-gate: {fast}: {times[fast]:,.1f} ms vs {slow}: {times[slow]:,.1f} ms")
             if times[fast] >= times[slow]:
                 failures.append(f"{fast}: {times[fast]:,.1f} ms not faster than {slow}")
+    for name, counter, max_value in MAX_COUNTER:
+        if name not in counters:
+            continue  # no device here; see the note on MAX_COUNTER
+        got = counters[name].get(counter)
+        if got is None:
+            failures.append(f"{name}: counter '{counter}' missing from results")
+            continue
+        print(f"bench-gate: {name}: {counter}={got:,.0f} (ceiling {max_value:,})")
+        if got > max_value:
+            failures.append(f"{name}: {counter}={got:,.0f} above ceiling {max_value:,}")
     for name, reference, max_ratio in MAX_RATIO:
         for missing in (n for n in (name, reference) if n not in seen):
             failures.append(f"{missing}: benchmark missing from results")

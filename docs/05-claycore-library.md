@@ -122,7 +122,11 @@ Scenes do not become shader code. The `scene` module compiles an edit list into 
 
 A document remembers its compiled tape and rebuilds it when the document changes. **Appending an item — which is what a brush stamp is — reuses the compiled prefix** instead of re-emitting the document: the compiler emits items left to right and never moves what it has written, so the prefix's parameter offsets and blob handles are still correct with the new item's bytes after them. At 50 000 items that rebuild is 0.54 ms against 10.3 ms for a full compile. Every other edit — an insert anywhere but the tail, a removal, a move, a parameter change, undo, redo — recompiles in full, and so does an append the compiler cannot prove is one.
 
-This is the CPU half only. The reused tape has different bytes and so a different `compile_id`, which is a guaranteed miss in a backend's resident-tape cache: the ~148 bytes an appended dab adds still cost a full re-upload of the whole tape. Closing that needs the tape identity to carry a generation and a changed range rather than a fresh id.
+The reused tape has different bytes and so its own `compile_id`, but it also **names the tape it grew from** and the offset in each section where the two stop agreeing. A backend holding the ancestor resident transfers only that suffix instead of the whole tape. Vulkan does: a 300-dab stroke on a 20,000-item document costs 0.333 ms of host CPU per dab against 9.44 ms re-uploading, and reallocates its device buffers **0 times against 300**, because the blob sits after a reserved gap that appended params land in rather than displacing it.
+
+The wall-clock gap on a discrete GPU is much smaller — 48.7 ms against 57.8 ms on an RTX 5060 — because both pay the same dispatch and fence latency. The reallocation count is the number that matters on a device where memory pressure ends sessions.
+
+Metal still re-uploads. It keys residency on `compile_id` alone and ignores lineage, which is correct and merely no faster; patching it is a follow-up that needs a Mac to measure.
 
 | Backend | Host layer | Kernel path | Status/notes |
 |---|---|---|---|

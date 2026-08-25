@@ -106,7 +106,7 @@
 
 - [x] 6.1 Update the `Tape` header contract to say what a resumed compile
       guarantees and what it does not.
-- [ ] 6.2 Comment on #197 with the measured result, and say explicitly that
+- [x] 6.2 Comment on #197 with the measured result, and say explicitly that
       phase 2 — the tape identity carrying a generation and a dirty range so
       Metal patches instead of re-uploading and Vulkan skips its `memcmp` — is
       what actually closes the issue.

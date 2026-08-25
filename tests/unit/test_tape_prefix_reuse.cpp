@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cstring>
 #include <vector>
 
@@ -270,6 +271,90 @@ TEST_CASE("prefix reuse: a stroke resumes from itself, dab after dab") {
         require_identical(grown, compile_document(d));
         tape = std::move(grown);
         cp = next;
+    }
+}
+
+// The lineage a reused tape carries is a claim that it and its ancestor are
+// byte-identical below three offsets. A backend patches on that claim without
+// checking it, so a false one is silent: it transfers the wrong suffix and
+// evaluates a field that never existed.
+//
+// These tests therefore check the BYTES, not that the field looks right.
+TEST_CASE("prefix reuse: the lineage a tape claims is true") {
+    Document d;
+    LayerRef a = add_layer(d, "a");
+    LayerRef b = add_layer(d, "b");
+    a.sdf->insert(dab(0, 0, 0, 1.0f));
+    b.sdf->insert(dab(1, 0, 0, 0.5f));
+
+    TapeCheckpoint cp;
+    Tape prefix = compile_document_resumable(d, &cp);
+    NodeId id = b.sdf->insert(dab(1.0f, 0.4f, 0, 0.3f, Op::Add, 0.05f));
+    Tape reused;
+    REQUIRE(compile_document_append(prefix, cp, d, {id}, &reused, nullptr));
+
+    SUBCASE("it names the tape it grew from") {
+        CHECK(reused.parent_id == prefix.compile_id);
+        CHECK(reused.parent_id != 0);
+        CHECK(reused.compile_id != reused.parent_id);
+    }
+    SUBCASE("the two tapes really are identical below the offsets") {
+        REQUIRE(reused.agree_instrs <= prefix.instrs.size());
+        REQUIRE(reused.agree_params <= prefix.params.size());
+        REQUIRE(reused.agree_blob <= prefix.blob.size());
+        REQUIRE(reused.agree_instrs <= reused.instrs.size());
+        REQUIRE(reused.agree_params <= reused.params.size());
+        REQUIRE(reused.agree_blob <= reused.blob.size());
+        CHECK(std::equal(prefix.instrs.begin(), prefix.instrs.begin() + (long)reused.agree_instrs,
+                         reused.instrs.begin(),
+                         [](const kernel::CTapeInstr& x, const kernel::CTapeInstr& y) {
+                             return std::memcmp(&x, &y, sizeof(x)) == 0;
+                         }));
+        CHECK(std::equal(prefix.params.begin(), prefix.params.begin() + (long)reused.agree_params,
+                         reused.params.begin()));
+        CHECK(std::equal(prefix.blob.begin(), prefix.blob.begin() + (long)reused.agree_blob,
+                         reused.blob.begin()));
+    }
+    SUBCASE("the agreement stops short of the whole tape") {
+        // Otherwise the claim would be vacuous: a backend told everything
+        // agrees would transfer nothing and show the pre-append field. With
+        // two layers the ancestor's trailing layer union is re-emitted after
+        // the appended item, so the agreement ends before the tape does.
+        CHECK(reused.agree_instrs < prefix.instrs.size());
+        CHECK(reused.agree_instrs < reused.instrs.size());
+    }
+}
+
+TEST_CASE("prefix reuse: a tape that did not grow from another claims no lineage") {
+    Document d;
+    LayerRef a = add_layer(d, "a");
+    a.sdf->insert(dab(0, 0, 0, 1.0f));
+    a.sdf->insert(dab(0.5f, 0, 0, 0.3f, Op::Add, 0.05f));
+
+    SUBCASE("a whole-document compile") {
+        CHECK(compile_document(d).parent_id == 0);
+    }
+    SUBCASE("a resumable whole-document compile") {
+        TapeCheckpoint cp;
+        CHECK(compile_document_resumable(d, &cp).parent_id == 0);
+    }
+    SUBCASE("a culled per-brick compile") {
+        const CullRegion cull{math::Aabb{math::cfloat3{-1, -1, -1}, math::cfloat3{1, 1, 1}}};
+        CHECK(compile_document(d, &cull).parent_id == 0);
+    }
+    SUBCASE("a layer compile") {
+        CHECK(compile_layer(*d.find_layer(a.id)).parent_id == 0);
+    }
+    SUBCASE("a prefix with no identity cannot be named") {
+        // A hand-assembled tape carries compile_id 0, so a tape grown from
+        // one has nothing to name and must not claim it did.
+        TapeCheckpoint cp;
+        Tape prefix = compile_document_resumable(d, &cp);
+        prefix.compile_id = 0;
+        NodeId id = a.sdf->insert(dab(0, 0.5f, 0, 0.3f));
+        Tape reused;
+        REQUIRE(compile_document_append(prefix, cp, d, {id}, &reused, nullptr));
+        CHECK(reused.parent_id == 0);
     }
 }
 

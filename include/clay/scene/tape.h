@@ -35,13 +35,39 @@ struct Tape {
     //
     // A tape built by REUSING another's prefix (compile_document_append) is no
     // exception and gets its own fresh id: it shares a prefix with the tape it
-    // grew from, not its bytes, and the contract here is about bytes. So an
-    // appended dab is still a miss in a backend's resident-tape cache and
-    // still costs a full re-upload — reusing the prefix makes the CPU
-    // re-emission cheap and does nothing for the GPU. Fixing that needs this
-    // identity to carry a generation and a changed range instead of a fresh
-    // id, which is the phase this one exists to make expressible.
+    // grew from, not its bytes, and the contract here is about bytes. What it
+    // shares is recorded separately, in the lineage fields below, which is how
+    // a backend serves an appended dab without re-uploading the tape.
     std::uint64_t compile_id = 0;
+
+    // -- lineage: what this tape shares with the one it grew from ------------
+    //
+    // A tape built by reusing another's prefix (compile_document_append)
+    // names that tape here, together with the offset in each section at which
+    // the two stop agreeing. BELOW those offsets the two tapes are
+    // byte-identical; at and above them this tape is its own.
+    //
+    // That is what lets a backend holding the ancestor resident transfer only
+    // what changed instead of the whole tape — an appended dab adds ~148
+    // bytes to a tape that is 7.8 MiB at 50,000 items, and without this
+    // nothing downstream can tell that all but 148 of those bytes are the
+    // ones it already uploaded.
+    //
+    // 0 means NO LINEAGE, the way compile_id 0 means no identity: every
+    // compile entry point but the appending one leaves it there, and a
+    // backend must then treat the tape as entirely new.
+    //
+    // THIS IS A CLAIM ABOUT BYTES, AND A FALSE ONE IS SILENT. A backend that
+    // patches on a lineage that does not hold evaluates a field that never
+    // existed — no error, no crash, just wrong answers. So it is set in
+    // exactly one place, from the checkpoint that was actually used to build
+    // the tape, which makes it true by construction rather than by
+    // inspection. Anything that mutates a compiled tape's sections must clear
+    // it along with compile_id.
+    std::uint64_t parent_id = 0;
+    std::size_t agree_instrs = 0;
+    std::size_t agree_params = 0;
+    std::size_t agree_blob = 0;
 
     float safe_step_scale() const { return kernel::csafe_step_scale(info); }
     bool empty() const { return instrs.empty(); }
@@ -154,6 +180,10 @@ Tape compile_document_resumable(const Document& doc, TapeCheckpoint* out_checkpo
 // `out_checkpoint` receives the checkpoint for the tape just built, so the
 // next append resumes from this one rather than falling back to a full
 // compile — which is what makes a stroke, rather than one dab, cheap.
+//
+// The tape it writes also carries its LINEAGE (Tape::parent_id and the three
+// agree_* offsets): `prefix`'s identity, and the checkpoint's lengths, which
+// are exactly the point up to which the two tapes agree.
 bool compile_document_append(const Tape& prefix, const TapeCheckpoint& checkpoint,
                              const Document& doc, const std::vector<NodeId>& appended,
                              Tape* out, TapeCheckpoint* out_checkpoint);
