@@ -631,6 +631,91 @@ TEST_CASE("sample_parallel is byte-identical to sample") {
     }
 }
 
+TEST_CASE("measure_sample_lipschitz matches the dense traversal it replaced") {
+    // The measurement walks the STORED bricks; it used to walk the whole
+    // bounding lattice and ask sample_at() for every point of it. The two see
+    // the same pairs — a forward pair lies wholly inside one brick — and this
+    // holds the claim against the traversal it replaced rather than against a
+    // number someone wrote down.
+    auto dense = [](const FieldVolume& v) {
+        if (v.empty()) return 1.0f;
+        const int nx = v.sample_extent(0), ny = v.sample_extent(1), nz = v.sample_extent(2);
+        const std::size_t total = static_cast<std::size_t>(nx) * ny * nz;
+        constexpr int kForward[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        float steepest = 0.0f;
+        for (std::size_t i = 0; i < total; ++i) {
+            const int gx = static_cast<int>(i) % nx;
+            const int gy = (static_cast<int>(i) / nx) % ny;
+            const int gz = static_cast<int>(i) / (nx * ny);
+            const std::optional<float> here = v.sample_at(gx, gy, gz);
+            if (!here) continue;
+            for (const auto& d : kForward) {
+                const std::optional<float> next = v.sample_at(gx + d[0], gy + d[1], gz + d[2]);
+                if (next) steepest = std::max(steepest, std::abs(*next - *here));
+            }
+        }
+        return std::max(1.0f, steepest / v.cell_size());
+    };
+
+    const math::Aabb region{cf3(-1, -1, -1), cf3(1, 1, 1)};
+
+    // A field with structure at the SAMPLE scale, for the same reason
+    // sample_parallel's parity test uses one: a smooth analytic field looks
+    // plausible whichever pairs a traversal happened to miss.
+    auto ripple = [](kernel::cfloat3 p) {
+        return kernel::clength(p) - 0.7f +
+               0.03f * std::sin(37.0f * p.x) * std::sin(31.0f * p.y) * std::sin(41.0f * p.z);
+    };
+    for (float cell : {0.05f, 0.02f, 0.011f}) {
+        CAPTURE(cell);
+        const FieldVolume v = FieldVolume::sample(ripple, region, cell, cell * 3.0f);
+        REQUIRE(v.brick_count() > 0);
+        // Exact, not approximate: both traversals take a max over the same set
+        // of differences between the same stored floats.
+        CHECK(v.measure_sample_lipschitz() == dense(v));
+    }
+
+    // A STEEP field is the case the measurement exists for — a volume that
+    // measures 1 tells nothing apart.
+    for (float scale : {3.0f, 14.0f}) {
+        CAPTURE(scale);
+        auto steep = [scale](kernel::cfloat3 p) {
+            return (kernel::clength(p) - 0.7f) * scale;
+        };
+        const FieldVolume v = FieldVolume::sample(steep, region, 0.02f, 0.06f * scale);
+        REQUIRE(v.measure_sample_lipschitz() > 2.0f);
+        CHECK(v.measure_sample_lipschitz() == dense(v));
+    }
+}
+
+TEST_CASE("measure_sample_lipschitz compares a brick's halo sample") {
+    // The one pair a stored-brick walk can drop. A brick holds kBrickDim + 1
+    // samples per axis, and the last of them is the halo — shared with the
+    // next brick, which holds it as its FIRST. So the pair (7, 8) lives only
+    // in brick 0, at locals 7 and 8, and a sweep that stopped at local
+    // kBrickDim - 1 would never compare it.
+    //
+    // The planted field makes that pair the steepest one in the volume, so
+    // missing it does not shade the answer, it changes it: 2.5 becomes the 1.5
+    // planted one sample further along, which lives at locals 0 and 1 of the
+    // next brick and would survive.
+    const math::Aabb region{cf3(0, 0, 0), cf3(0.8f, 0.4f, 0.4f)};
+    const float cell = 0.05f;
+    // A field that is zero everywhere is within any band, so every brick is
+    // stored and the planted pattern is the whole of what is measured.
+    FieldVolume v =
+        FieldVolume::sample([](kernel::cfloat3) { return 0.0f; }, region, cell, cell * 3.0f);
+    REQUIRE(v.sample_extent(0) > field::kBrickDim + 1);  // more than one brick across
+
+    v.rewrite([cell](int gx, int, int, float) {
+        const float ramp = static_cast<float>(gx) * cell * 0.5f;  // 0.5 per cell
+        return gx == field::kBrickDim ? ramp + 2.0f * cell : ramp;
+    });
+
+    // |v(8) - v(7)| = 0.5 + 2.0 cells; |v(9) - v(8)| = 2.0 - 0.5.
+    CHECK(v.measure_sample_lipschitz() == doctest::Approx(2.5f));
+}
+
 TEST_CASE("sample_parallel gives the same answer every time") {
     // A race would show up as an answer that VARIES rather than one that is
     // wrong, so this runs the same sample repeatedly and requires identity.
