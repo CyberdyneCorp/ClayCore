@@ -179,6 +179,13 @@ FASTER_THAN = [
     # points rather than the sample lattice, so it takes a batch of arbitrary
     # points. 15x on a twelve-core machine, byte-identical output.
     ("BM_VolumeMoveDoc", "BM_VolumeMoveSerialDoc"),
+    # And the bake with its tape culled per brick, against the whole-tape bake
+    # it equals byte for byte. The decision to cull is ADAPTIVE — a wide enough
+    # blend keeps every item in every brick's tape and culling becomes pure
+    # overhead, so the fill measures a sample of the lattice and falls back —
+    # and this pair is the only thing that would notice the guard deciding never
+    # to cull at all.
+    ("BM_VolumeBakeCulledDoc", "BM_VolumeBakeWholeTapeDoc"),
     # Batched brick raycast (accel/parallel-raycast): the batched C-ABI call
     # fans its rays across the CPU backend's pool and must beat the same rays
     # issued one single-ray call at a time (kept in the benchmark as the

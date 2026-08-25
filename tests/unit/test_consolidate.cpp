@@ -636,6 +636,88 @@ TEST_CASE("the pooled tape fill bakes the volume the per-point tape callable doe
     }
 }
 
+TEST_CASE("the per-brick culled bake is the whole-tape bake, byte for byte") {
+    // Culling the bake's tape per brick is not a tolerance, it is exact, and
+    // the reason is two facts about culling rather than a measurement:
+    //
+    //   culled >= true, because culling drops items from a minimum; and
+    //   culled <= band => true <= band => the two are EQUAL, because an item is
+    //   only dropped when its bound is more than a band from the brick.
+    //
+    // So a sample the culled tape puts inside the band is already the truth; a
+    // brick with no such sample stores nothing, and only its side is read; and
+    // the rest -- the samples a KEPT brick stores beyond the band -- are paid
+    // for with the whole tape. Storing culled values there instead would make
+    // the volume overstate its own distance by 1.65 cells against the plain
+    // bake's 0.1, which is a field a marcher steps through.
+    const float cell = 0.04f, band = 0.12f;
+
+    auto compare = [&](const scene::Document& doc, const char* what) {
+        CAPTURE(what);
+        const scene::Tape tape = scene::compile_document(doc);
+        REQUIRE(!tape.empty());
+        const kernel::cfloat3 pad = cf3(band, band, band);
+        const math::Aabb region{tape.bounds.min - pad, tape.bounds.max + pad};
+        const FieldVolume plain =
+            FieldVolume::sample_blocks(eval::tape_block_fill(tape), region, cell, band);
+        const FieldVolume culled =
+            FieldVolume::sample_blocks(eval::document_block_fill(doc, tape), region, cell, band);
+        REQUIRE(plain.brick_count() > 0);
+        CHECK(plain.brick_count() == culled.brick_count());
+        CHECK(plain.sample_lipschitz() == culled.sample_lipschitz());
+        CHECK(plain.serialize() == culled.serialize());
+    };
+
+    // Spread items: the case culling exists for, where a brick needs a handful
+    // of a long tape.
+    auto sphere_of_dabs = [&](float k, int nodes) {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("s");
+        scene::Node base;
+        base.prim = scene::Prim::sphere(1.0f);
+        l.sdf->insert(base);
+        for (int i = 1; i < nodes; ++i) {
+            scene::Node dab;
+            dab.prim = scene::Prim::sphere(0.05f);
+            if (k > 0.0f) dab.blend = scene::Blend{scene::BlendProfile::Quadratic, k};
+            const float a = 0.3f * std::sin(static_cast<float>(i) * 0.7f);
+            const float b = 0.3f * std::cos(static_cast<float>(i) * 1.3f);
+            dab.xform.position =
+                cf3(-std::sqrt(std::max(0.0f, 1.0f - a * a - b * b)), a, b);
+            l.sdf->insert(dab);
+        }
+        return doc;
+    };
+
+    // A hard union culls hardest, so it is where a wrong value would show.
+    compare(sphere_of_dabs(0.0f, 120), "hard union, 120 items");
+    // A blend keeps more per brick and eventually makes culling a loss, at
+    // which point the fill falls back to the whole tape — which must ALSO give
+    // the same volume, since that is the same code path the plain bake takes.
+    compare(sphere_of_dabs(0.05f, 120), "smooth union, 120 items");
+    compare(sphere_of_dabs(0.30f, 120), "smooth union so wide the cull is refused");
+    // One item: nothing to cull, and the probe must not divide by zero or
+    // decide anything silly on a tape of two instructions.
+    {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("one");
+        scene::Node n;
+        n.prim = scene::Prim::sphere(0.6f);
+        l.sdf->insert(n);
+        compare(doc, "a single sphere");
+    }
+    // Subtraction, so the sign of a sample-free brick is decided by something
+    // other than a plain union.
+    {
+        scene::Document doc = sphere_of_dabs(0.0f, 40);
+        scene::Node hole;
+        hole.prim = scene::Prim::sphere(0.45f);
+        hole.op = scene::Op::Subtract;
+        doc.layers.front().sdf->insert(hole);
+        compare(doc, "with a subtracted void");
+    }
+}
+
 TEST_CASE("the pooled point batch moves the volume the per-point source does") {
     // move_topological could not join the batched bake when the other verbs did
     // (#271), and the reason is in the query positions rather than in the
