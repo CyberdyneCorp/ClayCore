@@ -300,6 +300,29 @@ means:
   the result **is** the plane, so with no region it replaces the shape with a
   half-space — a ball comes back as a box.
 
+**A relax with a region costs what the region contains.** Until v0.50.0 it did
+not: `relax` swept every stored sample in the volume so its callback could
+discover, per sample, that the weight there was zero. At a 0.01 cell a
+five-cell brush cost 16.7 ms and about 0.6 ms of that was work inside the
+brush. It now rewrites only the bricks the region meets — the region being the
+radius plus the **taper**, since a falloff narrower than the kernel is widened
+before it is used.
+
+| cell 0.01, `radius_cells` 1, one pass | before | after | |
+|---|---:|---:|---|
+| brush radius 0.05 | 16.7 ms | **2.2 ms** | 7.5× |
+| brush radius 0.20 | 18.6 ms | 5.9 ms | 3.2× |
+| brush radius 0.40 | 23.5 ms | 13.7 ms | 1.7× |
+| `region_radius` 0 (a filter, not a brush) | 71.5 ms | 71.5 ms | unchanged |
+
+The gain follows how local the brush is, which is the point: cost tracks the
+dab rather than the document. A `region_radius` of zero means everywhere and
+still sweeps everything, correctly.
+
+Two whole-volume terms remain in a dab — the far-bound rebuild `shrink_band`
+does and the per-pass volume copy, together about a third of a small dab at
+that cell. See [#278](https://github.com/CyberdyneCorp/ClayCore/issues/278).
+
 Smoothing destroys **exactness** but cannot break the **Lipschitz** bound: an
 average cannot vary faster than the thing it averages, and a 1-Lipschitz field
 is automatically a conservative bound on the distance to its own zero set, so
