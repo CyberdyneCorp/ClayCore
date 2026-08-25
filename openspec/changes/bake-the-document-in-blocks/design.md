@@ -70,6 +70,29 @@ This is also what makes the byte-identity test meaningful rather than
 tautological: the two overloads differ in *who evaluates the source and in what
 batch*, and in nothing else.
 
+## The layering edge this adds
+
+`tape_block_fill` names three modules at once — a `scene::Tape`, an
+`eval::Backend`, and the `field::FieldVolume::BrickBlockFill` it returns — so
+`eval/` is the lowest home it has: `scene` and `field` both sit below the
+backend registry and cannot see it. That makes `bake_volume.h` the first
+`eval -> field` include in the tree, and `tools/check_layering.py` did not allow
+that edge, so the gate failed on it.
+
+The edge is added to the table rather than worked around. It creates no cycle
+and adds nothing to the transitive graph: `eval` already depends on `scene`, and
+`scene` already depends on `field`, which itself depends on nothing above
+`kernel` and `math`. It is the same shape as the `voxel -> field` and
+`brush -> field` exceptions already in that table, and for the same reason — a
+sampled field is a leaf payload, so depending on it is a statement about what a
+module *produces*, not about what sits above it.
+
+The alternative homes were worse. `io` may already include both, but a bake fill
+is not a file format; and passing the fill in from the bindings, the way
+`scene::bake_layer` takes an injected `BakePointEval`, would mean writing the
+same window loop in `clay_c.cpp` and in `pyclay_module.cpp` — two copies of the
+thing whose byte-identity is the contract.
+
 ## Lifetime
 
 `tape_block_fill` captures the tape by reference and returns a lambda. That is a

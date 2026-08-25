@@ -59,6 +59,17 @@
       `examples/20_relax.py`, `21_flatten.py` and `38_consolidation.py` all
       exit 0, which is the pyclay side driven end to end.
 
+## 4b. Module layering
+
+- [x] 4b.1 `bake_volume.h` is the first `eval -> field` include in the tree.
+      The edge is added to `ALLOWED` in `tools/check_layering.py` with the
+      reason, beside the `voxel -> field` and `brush -> field` exceptions it
+      matches: no cycle, and nothing new in the transitive graph, since `eval`
+      already depends on `scene` and `scene` on `field`.
+- [x] 4b.2 `python3 tools/check_layering.py` OK, and the rest of that CI job —
+      kernel dialect, the kernels artifact, the license manifest, binding
+      parity, SwiftPM linkage — verified locally behind it.
+
 ## 5. The gate
 
 - [x] 5.1 `BM_VolumeBakeDoc` and `BM_VolumeBakeSerialDoc`, the second kept as
