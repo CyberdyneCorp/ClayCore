@@ -353,6 +353,20 @@ not only the copy — a snapshot of one brush's worth of bricks is a few hundred
 kilobytes and fits in cache, where a tap against the whole volume walks a sparse
 index into six megabytes.
 
+**And it stopped paying for the samples it cannot reach.** A brush is a ball;
+the bricks it selects are a box around one. Measured, 51–73% of those bricks
+could not hold a reachable sample, and 62–95% of the samples visited came back
+with a weight of zero — each having paid a lookup, a `cell_position` and a
+square root to say so. Three things fixed that: the selection narrows to the
+ball, the weight compares squared distances so only the taper takes a square
+root, and the base value comes from the sample the rewrite already handed over
+rather than from a lookup that would return the same number.
+
+| 24-dab stroke | before | after | |
+|---|---:|---:|---|
+| steady dab, cell 0.01 | 1.61 ms | **1.00 ms** | 1.61× |
+| steady dab, cell 0.02 | 0.61 ms | **0.23 ms** | 2.71× |
+
 **A dab now costs what it moves, with nothing left in it that scales with the
 model.**
 

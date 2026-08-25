@@ -643,6 +643,68 @@ TEST_CASE("a shrink_band that cannot narrow the band changes nothing") {
     }
 }
 
+TEST_CASE("a ball region rewrites what the box around it would, and no more") {
+    // A brush is a ball; the brick range is a box around it. Narrowing the
+    // selection to the ball is only sound for the same reason the region limit
+    // is at all: the operator is the identity outside it, so a brick the ball
+    // cannot reach holds nothing the pass may change.
+    //
+    // Worth its own case because the box is what selects bricks and the ball
+    // only rejects them, so a wrong rejection shows up as samples that SHOULD
+    // have changed and did not — which no test of the box form can see.
+    auto bumpy = [](kernel::cfloat3 p) {
+        return kernel::clength(p) -
+               (0.7f + 0.05f * std::sin(11.0f * p.x) * std::sin(11.0f * p.y) *
+                           std::sin(11.0f * p.z));
+    };
+    const math::Aabb whole{cf3(-1, -1, -1), cf3(1, 1, 1)};
+
+    for (float cell : {0.05f, 0.02f}) {
+        CAPTURE(cell);
+        const FieldVolume base = FieldVolume::sample(bumpy, whole, cell, cell * 3.0f);
+        REQUIRE(base.brick_count() > 1);
+
+        for (float radius : {0.06f, 0.2f, 0.5f}) {
+            CAPTURE(radius);
+            const kernel::cfloat3 centre = cf3(0.7f, 0.03f, -0.02f);
+            // Identity outside the BALL, with structure inside it.
+            auto fn = [&base, centre, radius](int gx, int gy, int gz, float old) {
+                const kernel::cfloat3 p = base.cell_position(gx, gy, gz);
+                if (kernel::clength(p - centre) > radius) return old;
+                return old + 0.011f * static_cast<float>((gx * 7 + gy * 13 + gz * 17) % 11);
+            };
+            FieldVolume full = base, ball = base, box = base;
+            full.rewrite(fn);
+            ball.rewrite_region(FieldVolume::Region::ball(centre, radius), fn);
+            // And the box around the same ball, which must agree too — the two
+            // differ only in how many bricks they were handed.
+            const kernel::cfloat3 r3 = cf3(radius, radius, radius);
+            box.rewrite_region(math::Aabb{centre - r3, centre + r3}, fn);
+
+            CHECK(full.serialize() == ball.serialize());
+            CHECK(full.serialize() == box.serialize());
+        }
+    }
+
+    SUBCASE("and a snapshot of a ball reads the field as it was") {
+        const float cell = 0.02f;
+        const FieldVolume base = FieldVolume::sample(bumpy, whole, cell, cell * 3.0f);
+        const kernel::cfloat3 centre = cf3(0.7f, 0.03f, -0.02f);
+        const FieldVolume::Region ball = FieldVolume::Region::ball(centre, 0.2f);
+        FieldVolume live = base;
+        const FieldVolume::RegionSnapshot snap = live.snapshot_region(ball);
+        live.rewrite_region(ball, [](int, int, int, float) { return -12.5f; });
+        for (int gz = 0; gz < base.sample_extent(2); ++gz)
+            for (int gy = 0; gy < base.sample_extent(1); ++gy)
+                for (int gx = 0; gx < base.sample_extent(0); ++gx) {
+                    const std::optional<float> was = base.sample_at(gx, gy, gz);
+                    const std::optional<float> got = snap.sample_at(gx, gy, gz);
+                    REQUIRE(was.has_value() == got.has_value());
+                    if (was) REQUIRE(*was == *got);
+                }
+    }
+}
+
 TEST_CASE("a region snapshot reads the volume as it was before the rewrite") {
     // The invariant relax leans on, and the only one it needs: a snapshot taken
     // of a region, used while THAT region is rewritten, answers with the
