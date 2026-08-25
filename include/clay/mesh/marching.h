@@ -105,6 +105,28 @@ struct BrickMeshRange {
 // a straddler touching two requested keys is attributed to one of them per
 // call and may move between shares as the requested set changes.
 //
+// THE WHOLE-SURFACE MESH OWES STRADDLERS TOO (issue #292), which is not
+// obvious and was got wrong: marching the cells that surface bricks OWN is not
+// marching every cell that crosses. A cell belongs to the brick its low corner
+// falls in and takes its other seven corners from up to seven neighbours, so a
+// cell owned by a brick that stores no lattice — uniformly inside, uniformly
+// outside, or never evaluated — crosses as soon as one of those neighbours
+// holds a sample of the opposite sign. Nothing marched it and the surface was
+// open there: pinholes in a worked sculpt, none in a mesh of the same document.
+//
+// It takes a field that moves more than a band across one voxel step. A
+// 1-Lipschitz distance field never does, which is why an ordinary sphere is
+// fine; a worked document does it routinely and declares it, since a
+// displacement applied over a region narrower than the displacement is
+// steeper than the band and drops the tape's safe step scale to match.
+//
+// Such a cell is attributed WHOLE, to the lowest requested key whose closed box
+// holds one of the CELL's eight corner lattice points, rather than per corner
+// like a straddler. Nobody else marches it, and its crossing vertices sit
+// inside the owner's box and strictly outside every requested brick's, so the
+// per-corner rule would drop every triangle it produces. Where the band does
+// bracket the field there are no such cells and the mesh is unchanged.
+//
 // `out_ranges` (may be nullptr) receives one entry per key, in the order given.
 //
 // `cull_index` (scene/cull_index.h) may share the caller's per-revision cull

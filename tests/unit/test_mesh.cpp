@@ -1,13 +1,16 @@
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include "clay/brick/cache.h"
 #include "clay/scene/bounds.h"
 #include "clay/mesh/decimate.h"
 #include "clay/mesh/marching.h"
 #include "clay/mesh/validate.h"
+#include "clay/scene/tape.h"
 #include "clay/parallel/thread_pool.h"
 #include "kernel_utils.h"
 #include "scene_utils.h"
@@ -125,6 +128,73 @@ TEST_CASE("brick-cache meshing is watertight across brick seams") {
     CHECK(r.watertight);  // no holes at brick boundaries
     CHECK(r.manifold);
     CHECK(r.oriented);
+}
+
+TEST_CASE("brick-cache meshing stays watertight where the field is steeper than the band") {
+    // Issue #292: pinholes in the frame mesh of a worked surface, and none in
+    // clay_document_mesh of the same document at the same moment.
+    //
+    // A cell is owned by the brick its LOW corner falls in, and takes its other
+    // seven corners from up to seven neighbours. Marching only the cells owned
+    // by surface bricks therefore misses a crossing whenever a brick that
+    // stores no lattice — every sample a band or more from the surface, so
+    // uniformly inside or uniformly outside — has a neighbour whose adjacent
+    // sample has the opposite sign. That needs the field to move more than a
+    // band over one voxel, which no 1-Lipschitz distance field does and a
+    // worked document does routinely: relief and incise displace the surface by
+    // an amplitude over a region narrower than the amplitude, and the tape says
+    // so — safe_step_scale here is ~1e-8.
+    //
+    // The dabs below are the reported reproduction in miniature: a ball, a ring
+    // of relief dabs with every third one incised.
+    scene::Document doc;
+    scene::Layer& layer = doc.add_sdf_layer("l");
+    scene::Node ball;
+    ball.prim = scene::Prim::sphere(1.0f);
+    layer.sdf->insert(std::move(ball));
+    for (int i = 0; i < 40; ++i) {
+        const float a = 6.2831853f * static_cast<float>(i) / 40.0f;
+        scene::Node dab;
+        dab.prim = scene::Prim::sphere(0.14f);
+        dab.xform.position = cf3(0.85f * std::cos(a), 0.85f * std::sin(a), 0.9f);
+        dab.op = (i % 3 == 0) ? scene::Op::Incise : scene::Op::Relief;
+        dab.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.9f};
+        layer.sdf->insert(std::move(dab));
+    }
+    REQUIRE(scene::compile_document(doc).safe_step_scale() < 1.0f);
+
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    brick::BrickCache cache(brick::BrickConfig{8, 0.05f, 3, 0});
+    cache.mark_dirty(scene::layer_influence_bound(doc.layers[0]));
+    for (const brick::BrickRequest& req : cache.take_dirty()) {
+        scene::CullRegion cull{cache.cull_region(req.key)};
+        scene::Tape tape = scene::compile_document(doc, &cull);
+        std::vector<float> values(static_cast<std::size_t>(req.grid.nx) * req.grid.ny *
+                                  req.grid.nz);
+        REQUIRE(cpu->eval_grid(tape, req.grid, values.data()) == eval::Status::Ok);
+        cache.submit(req, values.data());
+    }
+    std::vector<brick::BrickKey> surface = cache.surface_bricks();
+    REQUIRE(surface.size() > 16);
+
+    // The export path: every brick the cache stores, in one call. 28 boundary
+    // edges before the fix.
+    const Mesh whole = mesh::mesh_bricks(cache, nullptr, {});
+    REQUIRE(!whole.empty());
+    ValidationReport r = mesh::validate(whole);
+    CHECK(r.boundary_edges == 0);
+    CHECK(r.watertight);
+    CHECK(r.manifold);
+    CHECK(r.oriented);
+
+    // And the frame path over the same bricks, which is what a sculptor looks
+    // at: naming the keys must not open what naming none of them closes.
+    const Mesh named = mesh::mesh_bricks(cache, nullptr, {}, &surface);
+    ValidationReport rn = mesh::validate(named);
+    CHECK(rn.boundary_edges == 0);
+    CHECK(rn.watertight);
+    CHECK(rn.manifold);
+    CHECK(rn.oriented);
 }
 
 TEST_CASE("parallel brick meshing is deterministic and welds across seams") {

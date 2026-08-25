@@ -5786,6 +5786,20 @@ typedef struct clay_brick_mesh_range {
  * when a later request names a different set — its content is identical
  * wherever it lands, so keeping either copy is right.
  *
+ * THE WHOLE-SURFACE CALL RETURNS STRADDLERS TOO. Marching the cells the surface
+ * bricks OWN is not marching every cell that crosses: a cell belongs to the
+ * brick its low corner falls in and takes its other seven corners from up to
+ * seven neighbours, so a cell owned by a brick that stores no lattice still
+ * crosses whenever a neighbour holds a sample of the opposite sign. It takes a
+ * field that moves more than the band across one voxel step — which no true
+ * distance field does, and a worked document does routinely, since a
+ * displacement applied over a region narrower than the displacement is steeper
+ * than the band. Left unmarched those cells punched pinholes into the frame
+ * mesh that clay_document_mesh of the same document did not have (issue #292).
+ * Such a cell is attributed whole, to the lowest requested key whose closed box
+ * holds one of the CELL's corners; where the band brackets the field there are
+ * none and the mesh is unchanged.
+ *
  * out_ranges (may be NULL) receives key_count clay_brick_mesh_range values in
  * the order the keys were given. It REQUIRES keys_xyz: with no key list there
  * is no count for the caller to have sized this buffer from, and inferring one

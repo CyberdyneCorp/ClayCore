@@ -267,6 +267,28 @@ std::optional<brick::BrickKey> lowest_requested_owner(const std::array<float, 3>
     return best;
 }
 
+// The same rule for a whole CELL rather than a triangle: the lowest requested
+// key whose closed box holds one of the cell's eight corner lattice points.
+//
+// It exists because a cell owned by a brick with no lattice is marched by
+// nobody else, so dropping its triangles is a hole rather than a subset
+// boundary (issue #292) — and their crossing vertices sit in the OWNER's box,
+// strictly outside every requested brick's, so the per-corner rule above would
+// drop every one of them. The cell touched the request; that is what decides.
+std::optional<brick::BrickKey> cell_attribution(int i, int j, int k, int dim,
+                                                const RequestedSet& requested) {
+    std::optional<brick::BrickKey> best;
+    BrickKeyLess less;
+    for (int c = 0; c < 8; ++c) {
+        const std::array<float, 3> corner{static_cast<float>(i + (c & 1)),
+                                          static_cast<float>(j + ((c >> 1) & 1)),
+                                          static_cast<float>(k + ((c >> 2) & 1))};
+        auto owner = lowest_requested_owner(corner, dim, requested);
+        if (owner && (!best || less(*owner, *best))) best = owner;
+    }
+    return best;
+}
+
 std::optional<brick::BrickKey> straddler_attribution(const ShellCollector& shell,
                                                     const std::array<std::uint32_t, 3>& tri,
                                                     int dim, const RequestedSet& requested) {
@@ -280,44 +302,109 @@ std::optional<brick::BrickKey> straddler_attribution(const ShellCollector& shell
     return best;
 }
 
+// The bricks that can own a ring cell: a neighbour of some requested key that
+// was not itself requested. Sorted by key, so the cells below come out the same
+// way every call whatever order the caller's list or the cache's map was in.
+std::vector<brick::BrickKey> ring_owners(const std::vector<brick::BrickKey>& keys,
+                                         const RequestedSet& requested) {
+    RequestedSet seen;
+    std::vector<brick::BrickKey> owners;
+    for (const brick::BrickKey& key : keys)
+        for (int n = 0; n < 27; ++n) {
+            if (n == 13) continue;  // the key itself
+            const brick::BrickKey o{key.x + n % 3 - 1, key.y + n / 3 % 3 - 1, key.z + n / 9 - 1};
+            if (!requested.count(o) && seen.insert(o).second) owners.push_back(o);
+        }
+    std::sort(owners.begin(), owners.end(), BrickKeyLess{});
+    return owners;
+}
+
+// Whether any neighbour a cell reaches was requested. `wanted` is the owner's
+// 3x3x3 neighbourhood flattened as (dz+1)*9 + (dy+1)*3 + dx+1; the three offset
+// lists are what that cell's index reaches on each axis.
+bool reaches_request(const bool wanted[27], const int* ax, int nx, const int* ay, int ny,
+                     const int* az, int nz) {
+    for (int a = 0; a < nz; ++a)
+        for (int b = 0; b < ny; ++b)
+            for (int c = 0; c < nx; ++c)
+                if (wanted[(az[a] + 1) * 9 + (ay[b] + 1) * 3 + ax[c] + 1]) return true;
+    return false;
+}
+
+// The cells `owner` owns that touch a requested brick, appended in z, y, x
+// order.
+void append_ring_cells(brick::BrickKey owner, int dim, const RequestedSet& requested,
+                       std::vector<std::uint64_t>& out) {
+    bool wanted[27];
+    for (int n = 0; n < 27; ++n)
+        wanted[n] = n != 13 && requested.count(brick::BrickKey{owner.x + n % 3 - 1,
+                                                              owner.y + n / 3 % 3 - 1,
+                                                              owner.z + n / 9 - 1});
+    // Which neighbours one cell index reaches on its axis: always the owner
+    // itself, plus the brick below when the index is on the owner's FIRST plane
+    // — that brick's closed box includes it — and the brick above on its last.
+    auto offsets = [dim](int c, int base, int* into) {
+        int n = 0;
+        if (c == base) into[n++] = -1;
+        into[n++] = 0;
+        if (c == base + dim - 1) into[n++] = 1;
+        return n;
+    };
+    const int ox = owner.x * dim, oy = owner.y * dim, oz = owner.z * dim;
+    int ax[3], ay[3], az[3];
+    for (int k = oz; k < oz + dim; ++k) {
+        const int nz = offsets(k, oz, az);
+        for (int j = oy; j < oy + dim; ++j) {
+            const int ny = offsets(j, oy, ay);
+            // When y and z reach nobody, only x's two face planes can, so the
+            // row's interior is stepped straight over rather than tested cell
+            // by cell — most of a brick's cells are interior.
+            const int step = (ny == 1 && nz == 1) ? std::max(dim - 1, 1) : 1;
+            for (int i = ox; i < ox + dim; i += step) {
+                const int nx = offsets(i, ox, ax);
+                if (reaches_request(wanted, ax, nx, ay, ny, az, nz))
+                    out.push_back(pack_point(i, j, k));
+            }
+        }
+    }
+}
+
 // The ring cells to test: every cell whose closed span can touch a requested
 // brick's closed box but is owned by an unrequested brick — one cell deep on
-// every side, corners included. Owners that are not surface bricks are
-// skipped: the whole-surface mesh marches no cell of theirs, and the subset
-// must stay a filter of the whole, never a superset.
-std::vector<std::uint64_t> shell_cells(const brick::BrickCache& cache,
-                                       const std::vector<brick::BrickKey>& keys, int dim,
-                                       const RequestedSet& requested, int lod) {
-    auto fdiv = [](int a, int b) { return a >= 0 ? a / b : -(((-a) + b - 1) / b); };
-    std::unordered_set<std::uint64_t> seen;
+// every side, corners included.
+//
+// The owner's STATE is deliberately not consulted (issue #292). A cell is
+// owned by the brick its low corner falls in, but the other seven corners
+// belong to up to seven neighbours, so a cell owned by a brick that stores no
+// lattice — uniform inside, uniform outside, or never evaluated — still
+// crosses whenever one of those neighbours' samples has the opposite sign.
+// That takes a field steeper than the band is wide, which is ordinary in a
+// worked document: relief and incise displace by an amplitude over a region
+// narrower than it, and the document says so through safe_step_scale. Skipping
+// those owners left the crossing unmarched in BOTH paths and punched pinholes
+// in the surface. They are marched here, and the whole-surface path collects
+// them the same way, so the subset stays a filter of the whole.
+//
+// Walked one OWNER BRICK at a time rather than one key's ring at a time, and
+// that is what keeps it affordable now that the whole-surface path runs it too.
+// Ringing every key visits a shared cell from up to eight keys, so it needed a
+// hash set to dedup and a sort to order — 42 ms of the pass's 51 on a
+// 6,000-brick surface, against 9 ms for the marching it exists to feed. An
+// owner owns each of its cells exactly once, so walking owners emits each cell
+// once, with no set and no sort. The order — owners by key, then z, y, x within
+// an owner — is fixed, which is all a reproducible replay needs.
+std::vector<std::uint64_t> shell_cells(const std::vector<brick::BrickKey>& keys, int dim,
+                                       const RequestedSet& requested) {
     std::vector<std::uint64_t> cells;
-    for (const brick::BrickKey& key : keys) {
-        for (int k = key.z * dim - 1; k <= key.z * dim + dim; ++k)
-            for (int j = key.y * dim - 1; j <= key.y * dim + dim; ++j)
-                for (int i = key.x * dim - 1; i <= key.x * dim + dim; ++i) {
-                    const bool ring = i < key.x * dim || i >= key.x * dim + dim ||
-                                      j < key.y * dim || j >= key.y * dim + dim ||
-                                      k < key.z * dim || k >= key.z * dim + dim;
-                    if (!ring) continue;
-                    brick::BrickKey owner{fdiv(i, dim), fdiv(j, dim), fdiv(k, dim)};
-                    if (requested.count(owner)) continue;
-                    // The level's own bricks, so the subset stays a filter of
-                    // the whole mesh AT THAT LEVEL rather than borrowing cells
-                    // from another one.
-                    const brick::Brick* b = cache.find_lod(lod, owner);
-                    if (!b || b->state != brick::BrickState::Surface) continue;
-                    if (seen.insert(pack_point(i, j, k)).second)
-                        cells.push_back(pack_point(i, j, k));
-                }
-    }
-    // pack_point orders lexicographically by (i, j, k): a deterministic march
-    // order, so a bucket's triangles come out the same way every call.
-    std::sort(cells.begin(), cells.end());
+    for (const brick::BrickKey& owner : ring_owners(keys, requested))
+        append_ring_cells(owner, dim, requested, cells);
     return cells;
 }
 
-// Every straddler a subset request owes, bucketed by the requested key each
-// one is attributed to.
+// Every straddler a request owes, bucketed by the requested key each one is
+// attributed to. Run for a subset AND for the whole surface: a subset owes the
+// cells of the surface bricks it did not ask for, and both owe the cells of
+// bricks that store no lattice at all (issue #292).
 std::unordered_map<brick::BrickKey, std::vector<ShellTriangle>, brick::BrickKeyHash>
 collect_straddlers(const brick::BrickCache& cache, const std::vector<brick::BrickKey>& keys,
                    const std::function<float(int, int, int)>& sample, int lod) {
@@ -326,17 +413,65 @@ collect_straddlers(const brick::BrickCache& cache, const std::vector<brick::Bric
     std::unordered_map<brick::BrickKey, std::vector<ShellTriangle>, brick::BrickKeyHash> buckets;
     constexpr std::uint64_t mask21 = (1u << 21) - 1;
     constexpr std::int64_t bias = 1u << 20;
-    for (std::uint64_t packed : shell_cells(cache, keys, dim, requested, lod)) {
-        const int i = static_cast<int>(static_cast<std::int64_t>(packed >> 42) - bias);
-        const int j = static_cast<int>(static_cast<std::int64_t>((packed >> 21) & mask21) - bias);
-        const int k = static_cast<int>(static_cast<std::int64_t>(packed & mask21) - bias);
-        ShellCollector shell;
-        march_cell(shell, sample, i, j, k);
-        for (const auto& tri : shell.tris) {
-            auto owner = straddler_attribution(shell, tri, dim, requested);
-            if (!owner) continue;
-            buckets[*owner].push_back(
-                {shell.edges[tri[0]], shell.edges[tri[1]], shell.edges[tri[2]]});
+    auto fdiv = [](int a, int b) { return a >= 0 ? a / b : -(((-a) + b - 1) / b); };
+    const std::vector<std::uint64_t> cells = shell_cells(keys, dim, requested);
+    // MARCHED IN PARALLEL, BUCKETED SERIALLY — the same split, and for the same
+    // reason, as the brick march below: `sample` is a const cache read and the
+    // cells are independent, but the buckets are shared and their ORDER is what
+    // makes a replay reproducible. So each cell records into its own collector
+    // and the buckets are filled afterwards, walking `cells` in the order
+    // shell_cells emitted them. Byte-identical to marching them one at a time.
+    //
+    // In waves, because a collector holds one entry per edge_vertex call and a
+    // whole surface's ring is millions of cells; the wave bounds the recording
+    // without changing the order it is consumed in.
+    constexpr std::size_t kCellsPerWave = 8192;
+    std::vector<ShellCollector> recorded;
+    for (std::size_t wave = 0; wave < cells.size(); wave += kCellsPerWave) {
+        const std::size_t wave_end = std::min(wave + kCellsPerWave, cells.size());
+        const std::size_t wave_n = wave_end - wave;
+        recorded.clear();
+        recorded.resize(wave_n);
+        parallel::for_range(wave_n, 1, [&](std::size_t first, std::size_t last) {
+            for (std::size_t c = first; c < last; ++c) {
+                const std::uint64_t packed = cells[wave + c];
+                const int i = static_cast<int>(static_cast<std::int64_t>(packed >> 42) - bias);
+                const int j =
+                    static_cast<int>(static_cast<std::int64_t>((packed >> 21) & mask21) - bias);
+                const int k = static_cast<int>(static_cast<std::int64_t>(packed & mask21) - bias);
+                march_cell(recorded[c], sample, i, j, k);
+            }
+        });
+        for (std::size_t c = 0; c < wave_n; ++c) {
+            const ShellCollector& shell = recorded[c];
+            if (shell.tris.empty()) continue;
+            const std::uint64_t packed = cells[wave + c];
+            const int i = static_cast<int>(static_cast<std::int64_t>(packed >> 42) - bias);
+            const int j =
+                static_cast<int>(static_cast<std::int64_t>((packed >> 21) & mask21) - bias);
+            const int k = static_cast<int>(static_cast<std::int64_t>(packed & mask21) - bias);
+            // Whether anyone ELSE marches this cell decides how it is
+            // attributed. A cell owned by a surface brick is marched whenever
+            // that brick is requested, so a subset takes only the triangles
+            // that reach into it — the straddler rule. A cell owned by a brick
+            // with no lattice at this level is marched by no request at all, so
+            // it is kept whole.
+            const brick::BrickKey owner{fdiv(i, dim), fdiv(j, dim), fdiv(k, dim)};
+            const brick::Brick* stored = cache.find_lod(lod, owner);
+            const bool owner_is_marched = stored && stored->state == brick::BrickState::Surface;
+            std::optional<brick::BrickKey> whole_cell;
+            if (!owner_is_marched) {
+                whole_cell = cell_attribution(i, j, k, dim, requested);
+                if (!whole_cell) continue;
+            }
+            for (const auto& tri : shell.tris) {
+                auto attributed = owner_is_marched
+                                      ? straddler_attribution(shell, tri, dim, requested)
+                                      : whole_cell;
+                if (!attributed) continue;
+                buckets[*attributed].push_back(
+                    {shell.edges[tri[0]], shell.edges[tri[1]], shell.edges[tri[2]]});
+            }
         }
     }
     return buckets;
@@ -608,7 +743,6 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
 
     // The subset a consumer named, or every brick the LEVEL stores — which is
     // the export path and stays the default.
-    const bool is_subset = keys != nullptr;
     std::vector<brick::BrickKey> owned;
     if (!keys) {
         owned = cache.surface_bricks_lod(lod);
@@ -619,12 +753,20 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
         out_ranges->reserve(keys->size());
     }
 
-    // A subset also owes the straddlers: triangles from cells owned by
-    // unrequested surface bricks that reach a corner into a requested brick.
-    // The whole-surface path marches every cell already and owes nothing.
+    // The straddlers: triangles from cells owned by a brick nobody asked for
+    // that reach a corner into a requested one.
+    //
+    // The WHOLE-surface path owes them too (issue #292). It marches every cell
+    // owned by a surface brick, and that is not every cell that crosses: a cell
+    // takes seven of its eight corners from its neighbours, so one owned by a
+    // brick with no lattice — uniform, or never evaluated — crosses as soon as
+    // a neighbour's sample has the opposite sign, which a field steeper than
+    // the band is wide does routinely. Those cells went unmarched and left
+    // pinholes in the frame mesh. Collecting straddlers unconditionally marches
+    // them once, attributed to the lowest requested key they touch; for a field
+    // the band does bracket there are none and the mesh is unchanged.
     std::unordered_map<brick::BrickKey, std::vector<ShellTriangle>, brick::BrickKeyHash>
-        straddlers;
-    if (is_subset) straddlers = collect_straddlers(cache, *keys, global_sample, lod);
+        straddlers = collect_straddlers(cache, *keys, global_sample, lod);
 
     // MARCH IN PARALLEL, WELD SERIALLY — and the split is forced by what makes
     // this mesh watertight rather than chosen for convenience.
