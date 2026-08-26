@@ -188,5 +188,45 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& checkpoin
                              const Document& doc, const std::vector<NodeId>& appended,
                              Tape* out, TapeCheckpoint* out_checkpoint);
 
+// -- compiling only the SUFFIX, to be evaluated onto a value ------------------
+//
+// The same compile as `compile_document_append`, without the prefix. Where that
+// one copies the prefix's bytes so the result stands alone, this emits ONLY the
+// instructions for `appended` — a tape that expects the accumulator the prefix
+// would have left, already on the stack, and folds onto it.
+//
+// What that is for: a dab's cost currently follows everything the artist has
+// already sculpted, because a dirty brick re-evaluates every surviving item
+// over its samples even though almost none of them changed. Measured at a 0.05
+// voxel with dabs spread evenly over a sphere, one dab into 12 bricks costs
+// 0.23 ms at 200 items and 18.07 ms at 50,000 (#306). If the value the prefix
+// produced at those lattice points is known, this is what the rest costs.
+//
+// SOUND BECAUSE THE CHAIN IS A FOLD AT ITEM BOUNDARIES. The compiler emits each
+// item's contribution as a self-contained expression and then folds it into one
+// running accumulator, so after every item the stack holds exactly one value —
+// including with a layer mirror, where an item emits two prims and a combine
+// before folding in. `TapeCheckpoint` already names the places that is true,
+// which is why the validity question here is the one `compile_document_append`
+// answers rather than a new one.
+//
+// Continuing from that value is not an approximation of evaluating the whole
+// chain, it IS evaluating the whole chain: the same instructions in the same
+// order over the same floats, with the ones already folded represented by the
+// number they produced. Where the seed is exact the result is bit-identical,
+// and `test_suffix_tape.cpp` holds that rather than a tolerance.
+//
+// Refuses on the same terms and for the same reason: no valid checkpoint, the
+// layer gone or no longer the last visible SDF layer, or `appended` not
+// actually the tail of its roots. A caller that is refused evaluates in full.
+//
+// THE TAPE IS NOT SELF-CONTAINED and must not be handed to a plain evaluator.
+// Its `bounds` and `info` describe the appended items only, and evaluating it
+// with an empty stack yields the suffix against empty space rather than against
+// the shape. `eval::eval_points_seeded` is what reads it.
+bool compile_layer_suffix(const TapeCheckpoint& checkpoint, const Document& doc,
+                          const std::vector<NodeId>& appended, Tape* out,
+                          TapeCheckpoint* out_checkpoint);
+
 }  // namespace scene
 }  // namespace clay
