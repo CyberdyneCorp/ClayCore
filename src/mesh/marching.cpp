@@ -882,19 +882,87 @@ Mesh mesh_bricks(const brick::BrickCache& cache, const scene::Document* doc_for_
     return m;
 }
 
-void apply_tape_attributes(Mesh& m, const scene::Tape& tape, const MeshingOptions& options) {
-    if (options.colors) {
-        m.colors.resize(m.positions.size());
-        for (std::size_t i = 0; i < m.positions.size(); ++i)
-            m.colors[i] = tape.eval(m.positions[i]).color;
+namespace {
+
+// The serial attribute pass: one tape walk for the colour and four more for the
+// gradient, per vertex, on this thread.
+//
+// It is the FALLBACK, kept for a build with no CPU backend registered, and it
+// is also the definition of what the batched path below must produce. The two
+// are compared bit for bit by `test_points_batch.cpp` rather than within a
+// tolerance, which is the only comparison that catches a reordered tap.
+void tape_attributes_serial(Mesh& m, const scene::Tape& tape, const MeshingOptions& options,
+                            bool colors, bool gradients) {
+    auto field = [&](cfloat3 p) { return tape.eval(p).d; };
+    for (std::size_t i = 0; i < m.positions.size(); ++i) {
+        if (colors) m.colors[i] = tape.eval(m.positions[i]).color;
+        if (gradients) m.normals[i] = kernel::cnormal(field, m.positions[i], options.gradient_eps);
     }
-    if (options.normals == NormalMode::Gradient) {
-        m.normals.resize(m.positions.size());
-        auto field = [&](cfloat3 p) { return tape.eval(p).d; };
-        for (std::size_t i = 0; i < m.positions.size(); ++i)
-            m.normals[i] = kernel::cnormal(field, m.positions[i], options.gradient_eps);
-    } else if (options.normals == NormalMode::Face) {
+}
+
+}  // namespace
+
+void apply_tape_attributes(Mesh& m, const scene::Tape& tape, const MeshingOptions& options) {
+    if (options.normals == NormalMode::Face) {
         compute_face_normals(m);
+        if (!options.colors) return;
+    }
+    const bool colors = options.colors;
+    const bool gradients = options.normals == NormalMode::Gradient;
+    if (!colors && !gradients) return;
+
+    const std::size_t count = m.positions.size();
+    if (colors) m.colors.resize(count);
+    if (gradients) m.normals.resize(count);
+    if (count == 0) return;
+
+    // Through the backend, as one batch, for the same reason `mesh_bricks`
+    // does: five scalar field taps per vertex on ONE core is what kept a dense
+    // mesh slow, while the evaluator underneath has walked the tape once per
+    // BLOCK of points since #207 and the pool has been there longer than that.
+    // This is the non-brick mesher's half of the same fix -- `mesh_tape`,
+    // `mesh_tape_dc` and the dual-grid path all land here, and none of them had
+    // it. Measured on a 4k-instruction document at voxel 0.015: 50.8 s to
+    // 0.95 s, 53x, and the attributes are unchanged BIT FOR BIT (#302).
+    //
+    // Bit-identical rather than close, and structurally so: `eval_points`'s
+    // blocked walk is asserted identical to `ctape_eval` by
+    // `test_tape_block.cpp`, and its gradient path writes out the same four
+    // taps, the same weighted sum and the same normalize that `kernel::cnormal`
+    // performs, in that order.
+    //
+    // NOT culled per region, which is the other half of what `mesh_bricks`
+    // does. That one is handed a Document and can compile a tape per brick;
+    // this is handed a Tape and cannot, and the batching alone is what the 53x
+    // above measures. See #302 for why culling here is a separate question.
+    std::vector<float> points(count * 3);
+    for (std::size_t i = 0; i < count; ++i) {
+        points[i * 3] = m.positions[i].x;
+        points[i * 3 + 1] = m.positions[i].y;
+        points[i * 3 + 2] = m.positions[i].z;
+    }
+    // `distances` is scratch the backend requires rather than a result anyone
+    // wants: a vertex sits on the surface, so its distance is the zero this
+    // already knows.
+    std::vector<float> distances(count);
+    std::vector<float> grads(gradients ? count * 3 : 0);
+    std::vector<float> cols(colors ? count * 3 : 0);
+    eval::PointQuery q;
+    q.points_xyz = points.data();
+    q.count = count;
+    q.gradient_eps = options.gradient_eps;
+    eval::PointResults out;
+    out.distances = distances.data();
+    out.gradients_xyz = gradients ? grads.data() : nullptr;
+    out.colors_rgb = colors ? cols.data() : nullptr;
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    if (!cpu || cpu->eval_points(tape, q, out) != eval::Status::Ok) {
+        tape_attributes_serial(m, tape, options, colors, gradients);
+        return;
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+        if (colors) m.colors[i] = cf3(cols[i * 3], cols[i * 3 + 1], cols[i * 3 + 2]);
+        if (gradients) m.normals[i] = cf3(grads[i * 3], grads[i * 3 + 1], grads[i * 3 + 2]);
     }
 }
 
