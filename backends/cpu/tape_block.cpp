@@ -215,7 +215,8 @@ struct SlotOf<false> {
 template <bool WithColour>
 void walk_blocked(const kernel::CTapeInstr* in, std::size_t ni, const float* params,
                   const float* blob, const PointQuery& q, const PointResults& out,
-                  std::size_t block, std::size_t depth, const float* seed = nullptr) {
+                  std::size_t block, std::size_t depth, const float* seed = nullptr,
+                  const float* seed_rgb = nullptr) {
     using Slot = typename SlotOf<WithColour>::type;
     // Thread-local so the allocation happens once per thread rather than once
     // per call, and sized to the work present rather than to `block`: the grid
@@ -235,13 +236,26 @@ void walk_blocked(const kernel::CTapeInstr* in, std::size_t ni, const float* par
         std::size_t top = 0;
         // A SEEDED walk starts holding the value the instructions ahead of
         // these produced, so the first combine folds onto it exactly as it
-        // would have. Distance only: the seeded entry point is for a suffix
-        // whose prefix was reduced to one number a point, and a colour is not
-        // one number.
+        // would have.
+        //
+        // What the accumulator IS decides what a seed has to carry: a
+        // distance-only walk folds one float a point, and a coloured one folds
+        // a CTapeValue, so the colour has to come with it or the first combine
+        // reads whatever was in the slot. `seed_rgb` is that colour, three
+        // floats a point in the same order.
         if (seed) {
             Slot* s0 = &stack[0];
-            for (std::size_t j = 0; j < n; ++j)
-                if constexpr (!WithColour) s0[j] = seed[base + j];
+            for (std::size_t j = 0; j < n; ++j) {
+                const std::size_t i = base + j;
+                if constexpr (WithColour) {
+                    s0[j].d = seed[i];
+                    s0[j].color =
+                        seed_rgb ? cf3(seed_rgb[i * 3], seed_rgb[i * 3 + 1], seed_rgb[i * 3 + 2])
+                                 : cf3(0.0f, 0.0f, 0.0f);
+                } else {
+                    s0[j] = seed[i];
+                }
+            }
             top = 1;
         }
         for (std::size_t k = 0; k < ni; ++k) {
@@ -396,26 +410,34 @@ std::size_t seeded_stack_depth(const scene::Tape& tape) {
 }  // namespace
 
 void eval_points_seeded(const scene::Tape& suffix, const PointQuery& q, const float* seed,
-                        const PointResults& out, std::size_t block) {
+                        const float* seed_rgb, const PointResults& out, std::size_t block) {
     if (block == 0) block = kDefaultBlock;
     if (!seed || !out.distances) return;
-    // Distances only. A seeded walk continues a fold whose prefix is one float
-    // a point; gradients would need the prefix's four taps and a colour would
-    // need a colour, and neither is a thing a seed can carry.
+    // Colour is carried when the caller wants it back AND supplied the colour
+    // the prefix reached. Asking for it without giving it would fold every
+    // combine against black, which is a wrong answer rather than a missing one.
+    const bool with_colour = out.colors_rgb != nullptr && seed_rgb != nullptr;
     PointResults d;
     d.distances = out.distances;
+    if (with_colour) d.colors_rgb = out.colors_rgb;
 
     const std::size_t ni = suffix.instrs.size();
     // An empty suffix is the prefix, unchanged -- which is what the seed
     // already is. Not "far outside": the stack is not empty here.
     if (ni == 0) {
         for (std::size_t i = 0; i < q.count; ++i) out.distances[i] = seed[i];
+        if (with_colour)
+            for (std::size_t i = 0; i < q.count * 3; ++i) out.colors_rgb[i] = seed_rgb[i];
         return;
     }
     const std::size_t depth = seeded_stack_depth(suffix);
     const std::size_t span = std::min(block, q.count);
-    walk_blocked<false>(suffix.instrs.data(), ni, suffix.params.data(), suffix.blob.data(), q, d,
-                        span, depth, seed);
+    if (with_colour)
+        walk_blocked<true>(suffix.instrs.data(), ni, suffix.params.data(), suffix.blob.data(), q, d,
+                           span, depth, seed, seed_rgb);
+    else
+        walk_blocked<false>(suffix.instrs.data(), ni, suffix.params.data(), suffix.blob.data(), q,
+                            d, span, depth, seed, nullptr);
 }
 
 void eval_points_blocked(const scene::Tape& tape, const PointQuery& q, const PointResults& out,

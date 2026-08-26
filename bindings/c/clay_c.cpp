@@ -1135,17 +1135,19 @@ struct clay_document {
         float spacing = 0.0f;
         std::int32_t dims[3] = {0, 0, 0};
         std::vector<float> values;
+        std::vector<float> colors;  // empty when that refill carried none
     };
 
-    // Bricks kept, not bytes: every brick of one cache is the same lattice, so
-    // a count is a byte budget stated in the unit the caller thinks in. 16,384
-    // of a dim-8 cache is 32 MB, which is a stroke's working set several times
-    // over.
-    static constexpr std::size_t kResumeBricks = 16384;
+    // A BYTE budget, not a brick count. With colour a brick carries four times
+    // the floats, so a count would mean two very different ceilings depending
+    // on what the host asked for. 64 MB is 16,384 distance-only bricks of a
+    // dim-8 cache, or 4,096 coloured ones -- a stroke's working set either way.
+    static constexpr std::size_t kResumeBytes = 64u << 20;
 
     void forget_resume() const {
         resume_.clear();
         resume_order_.clear();
+        resume_bytes_ = 0;
     }
 
     // What a resumable refill needs, decided under one lock so the answer
@@ -1198,7 +1200,7 @@ struct clay_document {
     // this exists for they always do; anything else takes the full path rather
     // than compiling a suffix per revision.
     std::uint64_t seed_revision_for(const clay_brick_request* requests, std::size_t count,
-                                    std::size_t per) const {
+                                    std::size_t per, bool want_colour) const {
         std::uint64_t shared = 0;
         for (std::size_t i = 0; i < count; ++i) {
             auto it =
@@ -1206,6 +1208,7 @@ struct clay_document {
             if (it == resume_.end()) return 0;
             const ResumeEntry& e = it->second;
             if (e.values.size() != per || e.spacing != requests[i].spacing) return 0;
+            if (want_colour && e.colors.size() != per * 3) return 0;
             if (e.dims[0] != requests[i].dims[0] || e.dims[1] != requests[i].dims[1] ||
                 e.dims[2] != requests[i].dims[2])
                 return 0;
@@ -1217,9 +1220,16 @@ struct clay_document {
         return shared;
     }
 
-    const float* seed_for(const clay_brick_request& request, float pad) const {
+    const float* seed_for(const clay_brick_request& request, float pad, bool want_colour,
+                          const float** out_colors) const {
+        if (out_colors) *out_colors = nullptr;
         auto it = resume_.find(ResumeKey{request.key[0], request.key[1], request.key[2]});
         if (it == resume_.end()) return nullptr;
+        // A colour asked for is a colour that has to have been kept: continuing
+        // a coloured fold from a distance alone folds every combine against
+        // black.
+        if (want_colour && it->second.colors.empty()) return nullptr;
+        if (want_colour && out_colors) *out_colors = it->second.colors.data();
         // The cull pad decides which items a brick's compile keeps, so a seed
         // taken under a different one was continued from a different field.
         // The pad only grows on an append, so this is a real gate rather than
@@ -1230,18 +1240,12 @@ struct clay_document {
     }
 
     void store_seed(const clay_brick_request& request, std::uint64_t at, float pad,
-                    const float* values, std::size_t per) const {
+                    const float* values, const float* colors, std::size_t per) const {
         const ResumeKey key{request.key[0], request.key[1], request.key[2]};
         auto [it, fresh] = resume_.try_emplace(key);
-        if (fresh) {
-            resume_order_.push_back(key);
-            while (resume_order_.size() > kResumeBricks) {
-                const ResumeKey oldest = resume_order_.front();
-                resume_order_.pop_front();
-                if (!(oldest == key)) resume_.erase(oldest);
-            }
-        }
         ResumeEntry& e = it->second;
+        resume_bytes_ -= (e.values.size() + e.colors.size()) * sizeof(float);
+        if (fresh) resume_order_.push_back(key);
         e.had_acc = false;
         for (std::size_t s = 0; s < per && !e.had_acc; ++s) e.had_acc = values[s] != CLAY_TAPE_FAR;
         e.revision = at;
@@ -1251,13 +1255,33 @@ struct clay_document {
         e.dims[1] = request.dims[1];
         e.dims[2] = request.dims[2];
         e.values.assign(values, values + per);
+        if (colors)
+            e.colors.assign(colors, colors + per * 3);
+        else
+            e.colors.clear();
+        resume_bytes_ += (e.values.size() + e.colors.size()) * sizeof(float);
+        // Oldest first, and never the brick just written -- a budget smaller
+        // than one brick would otherwise evict what it just stored.
+        while (resume_bytes_ > kResumeBytes && resume_order_.size() > 1) {
+            const ResumeKey oldest = resume_order_.front();
+            resume_order_.pop_front();
+            if (oldest == key) {
+                resume_order_.push_back(oldest);
+                continue;
+            }
+            auto old = resume_.find(oldest);
+            if (old == resume_.end()) continue;
+            resume_bytes_ -=
+                (old->second.values.size() + old->second.colors.size()) * sizeof(float);
+            resume_.erase(old);
+        }
     }
 
     // The batch's results, kept as the next dab's seeds. `at` 0 means "the
     // current revision", which is what the full path passes -- it has just
     // produced the document as it is now.
     void store_seeds(const clay_brick_request* requests, std::size_t count, const float* values,
-                     std::size_t per, std::uint64_t at, float pad) const {
+                     const float* colors, std::size_t per, std::uint64_t at, float pad) const {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         const std::uint64_t now = revision.load(std::memory_order_relaxed);
         if (at == 0) {
@@ -1267,7 +1291,8 @@ struct clay_document {
             return;  // the document moved under the batch; keeping it would lie
         }
         for (std::size_t i = 0; i < count; ++i)
-            store_seed(requests[i], at, pad, values + i * per, per);
+            store_seed(requests[i], at, pad, values + i * per,
+                       colors ? colors + i * per * 3 : nullptr, per);
     }
 
     std::mutex& cache_lock() const { return cache_mutex_; }
@@ -1400,6 +1425,7 @@ struct clay_document {
     mutable std::uint64_t index_revision_ = 0;
     mutable std::unordered_map<ResumeKey, ResumeEntry, ResumeKeyHash> resume_;
     mutable std::deque<ResumeKey> resume_order_;  // insertion order, for eviction
+    mutable std::size_t resume_bytes_ = 0;
 };
 
 // The item builder is a scene::Node under construction. Whether a transition
@@ -8753,9 +8779,10 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
     std::size_t resumed_count = 0;
     float resume_pad = 0.0f;
     std::uint64_t resume_now = 0;
-    if (!out_colors_rgb) {
+    {
         std::lock_guard<std::mutex> lock(doc->cache_lock());
-        const std::uint64_t seed_rev = doc->seed_revision_for(requests, count, per);
+        const bool want_colour = out_colors_rgb != nullptr;
+        const std::uint64_t seed_rev = doc->seed_revision_for(requests, count, per, want_colour);
         const clay_document::ResumePlan plan = doc->plan_resume(seed_rev);
         if (plan.usable) {
             std::shared_ptr<const scene::CullIndex> index = doc->cull_index_locked();
@@ -8763,7 +8790,8 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
             resume_now = plan.now;
             std::vector<float> points;
             for (std::size_t i = 0; i < count; ++i) {
-                const float* seed = doc->seed_for(requests[i], resume_pad);
+                const float* seed_rgb = nullptr;
+                const float* seed = doc->seed_for(requests[i], resume_pad, want_colour, &seed_rgb);
                 if (!seed) continue;
                 eval::GridQuery g;
                 std::size_t samples = 0;
@@ -8795,7 +8823,8 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
                 pq.count = samples;
                 eval::PointResults pr;
                 pr.distances = out_values + i * per;
-                eval::eval_points_seeded(suffix, pq, seed, pr);
+                if (want_colour) pr.colors_rgb = out_colors_rgb + i * per * 3;
+                eval::eval_points_seeded(suffix, pq, seed, seed_rgb, pr);
                 resumed[i] = 1;
                 ++resumed_count;
             }
@@ -8812,7 +8841,7 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
     // Only the bricks the resumable path did not answer, gathered so the batch
     // stays a batch, then scattered back to their fixed slots.
     if (resumed_count == count) {
-        doc->store_seeds(requests, count, out_values, per, resume_now, resume_pad);
+        doc->store_seeds(requests, count, out_values, out_colors_rgb, per, resume_now, resume_pad);
         return CLAY_OK;
     }
     if (resumed_count > 0) {
@@ -8837,7 +8866,7 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
         if (mr != CLAY_OK) return mr;
         for (std::size_t j = 0; j < where.size(); ++j)
             std::memcpy(out_values + where[j] * per, scratch.data() + j * per, per * sizeof(float));
-        doc->store_seeds(requests, count, out_values, per, resume_now, resume_pad);
+        doc->store_seeds(requests, count, out_values, out_colors_rgb, per, resume_now, resume_pad);
         return CLAY_OK;
     }
     r = eval_requests_in_chunks(
@@ -8852,7 +8881,7 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
     // Kept so the NEXT dab can resume from it. This is the accumulator, exact
     // and in float32, which is the whole reason a refill is where the seed
     // comes from.
-    doc->store_seeds(requests, count, out_values, per, 0, 0.0f);
+    doc->store_seeds(requests, count, out_values, out_colors_rgb, per, 0, 0.0f);
     return CLAY_OK;
 }
 

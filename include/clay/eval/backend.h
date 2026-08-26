@@ -394,10 +394,17 @@ void eval_points_blocked(const scene::Tape& tape, const PointQuery& q, const Poi
 // `test_suffix_tape.cpp` asserts.
 //
 // `seed` holds `q.count` distances, one per point of `q`, in the same order.
-// Distances only: `out.gradients_xyz` and `out.colors_rgb` are ignored, because
-// a seed is one float a point and neither a gradient nor a colour is.
+//
+// COLOUR is carried when `out.colors_rgb` is set AND `seed_rgb` is given --
+// three floats a point, the colour the prefix reached. What the accumulator IS
+// decides what a seed must carry: a coloured walk folds a CTapeValue, so a
+// caller asking for colour back without supplying it would fold every combine
+// against black, and this returns distances only rather than doing that.
+//
+// `out.gradients_xyz` is ignored either way: a gradient is four taps of the
+// whole field, not something a single accumulator can be continued into.
 void eval_points_seeded(const scene::Tape& suffix, const PointQuery& q, const float* seed,
-                        const PointResults& out, std::size_t block = 0);
+                        const float* seed_rgb, const PointResults& out, std::size_t block = 0);
 
 // The stack depth a tape actually reaches, which is a property of its
 // instruction sequence rather than of any point. The blocked path allocates
