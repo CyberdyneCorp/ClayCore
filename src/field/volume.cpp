@@ -84,16 +84,26 @@ void chamfer_pass(std::vector<std::int32_t>& steps, const std::int32_t count[3],
 
 }  // namespace
 
-cfloat3 FieldVolume::BrickGrid::sample_position(std::size_t slot, int i) const {
+void FieldVolume::BrickGrid::sample_cell(std::size_t slot, int i, int out[3]) const {
     const int n = kBrickDim + 1;
     const int bx = static_cast<int>(slot) % bcount[0];
     const int by = (static_cast<int>(slot) / bcount[0]) % bcount[1];
     const int bz = static_cast<int>(slot) / (bcount[0] * bcount[1]);
-    const int x = i % n, y = (i / n) % n, z = i / (n * n);
-    return origin + cf3(static_cast<float>(bx * kBrickDim + x),
-                        static_cast<float>(by * kBrickDim + y),
-                        static_cast<float>(bz * kBrickDim + z)) *
-                        cell_size;
+    out[0] = bx * kBrickDim + i % n;
+    out[1] = by * kBrickDim + (i / n) % n;
+    out[2] = bz * kBrickDim + i / (n * n);
+}
+
+cfloat3 FieldVolume::BrickGrid::sample_position(std::size_t slot, int i) const {
+    // Through sample_cell rather than beside it. The two must name the same
+    // sample -- a fill asks for the position and then asks the volume what it
+    // stores at the coordinate -- and two copies of the same index arithmetic
+    // is how that stops being true.
+    int g[3];
+    sample_cell(slot, i, g);
+    return origin +
+           cf3(static_cast<float>(g[0]), static_cast<float>(g[1]), static_cast<float>(g[2])) *
+               cell_size;
 }
 
 math::Aabb FieldVolume::BrickGrid::brick_box(std::size_t slot) const {
@@ -565,6 +575,31 @@ math::Aabb brick_box_of(const kernel::cfloat3& origin, float cell, int bx, int b
     return math::Aabb{lo, lo + kernel::cf3(brick, brick, brick)};
 }
 
+// The steepest difference between neighbouring samples inside ONE brick's
+// block. Shared by the whole-volume measurement and by a region-limited
+// resample, which measures only the blocks it wrote -- two callers that must
+// not come to different answers about the same block.
+//
+// One sweep per axis, each stopping a sample short along that axis so the
+// forward neighbour is always in the block. Only the three FORWARD neighbours:
+// the reverse ones are the same pairs seen from the other end.
+float steepest_in_block(const float* block) {
+    constexpr int n = kBrickDim + 1;
+    constexpr int kStride[3] = {1, n, n * n};
+    float steepest = 0.0f;
+    for (int axis = 0; axis < 3; ++axis) {
+        const int stride = kStride[axis];
+        const int last[3] = {axis == 0 ? n - 1 : n, axis == 1 ? n - 1 : n, axis == 2 ? n - 1 : n};
+        for (int z = 0; z < last[2]; ++z)
+            for (int y = 0; y < last[1]; ++y) {
+                const float* row = block + (z * n + y) * n;
+                for (int x = 0; x < last[0]; ++x)
+                    steepest = std::max(steepest, std::abs(row[x + stride] - row[x]));
+            }
+    }
+    return steepest;
+}
+
 bool region_brick_range(const kernel::cfloat3& origin, const std::int32_t* bcount, float brick,
                         const math::Aabb& region, int* lo, int* hi) {
     for (int a = 0; a < 3; ++a) {
@@ -705,9 +740,120 @@ void FieldVolume::rewrite_region(const Region& region,
             }
 }
 
+// The bricks that meet `region`, in ascending slot order, with `fill`'s block
+// for each. Ascending because the compact rebuild walks slots once and
+// merge-steps this list rather than carrying a lookup structure -- and the
+// bz/by/bx loop below produces slots in exactly that order.
+std::vector<std::size_t> FieldVolume::fill_region_bricks(const Region& region,
+                                                         const BrickBlockFill& fill,
+                                                         std::vector<float>* blocks) const {
+    std::vector<std::size_t> slots;
+    const float brick = static_cast<float>(kBrickDim) * cell_size_;
+    int lo[3], hi[3];
+    if (!region_brick_range(origin_, bcount_, brick, region.box, lo, hi)) return slots;
+
+    const BrickGrid grid{origin_, cell_size_, band_, {bcount_[0], bcount_[1], bcount_[2]}};
+    for (int bz = lo[2]; bz <= hi[2]; ++bz)
+        for (int by = lo[1]; by <= hi[1]; ++by)
+            for (int bx = lo[0]; bx <= hi[0]; ++bx) {
+                // The brush is a ball; the brick range is a box around it. A
+                // brick the ball cannot reach holds only samples `fill` is
+                // required to reproduce, so skipping it is the identity --
+                // and skipping it is also what keeps a brick that stores
+                // nothing from being evaluated for no reason.
+                if (!region.meets(brick_box_of(origin_, cell_size_, bx, by, bz))) continue;
+                const std::size_t slot =
+                    static_cast<std::size_t>((bz * bcount_[1] + by) * bcount_[0] + bx);
+                slots.push_back(slot);
+                const std::size_t at = blocks->size();
+                blocks->resize(at + kBrickSamples);
+                // A window of one: a region selects a scattered set of slots,
+                // not the consecutive run sample_blocks walks.
+                fill(grid, slot, 1, blocks->data() + at);
+            }
+    return slots;
+}
+
+FieldVolume::ResampleTally FieldVolume::resample_region(const Region& region,
+                                                        const BrickBlockFill& fill) {
+    ResampleTally tally;
+    if (empty() || region.box.empty()) return tally;
+
+    std::vector<float> blocks;
+    const std::vector<std::size_t> slots = fill_region_bricks(region, fill, &blocks);
+    tally.evaluated = slots.size();
+    if (slots.empty()) return tally;
+
+    // A brick that stored nothing stored no colours either, and the fill that
+    // supplies its distances has nothing to say about its colour, so a volume
+    // whose support changes cannot keep a complete colour channel. Dropping it
+    // whole beats a facet of default grey in the middle of a painted surface.
+    // `field::flatten` -- the only caller today -- dropped it already, by
+    // sampling a fresh volume.
+    colors_.clear();
+
+    // Compact storage is rebuilt rather than patched: each stored brick owns a
+    // contiguous run of `data_` and `index_` points into it, so bricks
+    // appearing and disappearing cannot be edited in place. One walk in slot
+    // order, copying an untouched brick's block and inserting a written one's,
+    // which is an O(stored) memcpy against the O(stored) source evaluation it
+    // replaces. #300 has why that is the right first trade.
+    std::vector<float> next;
+    next.reserve(data_.size() + slots.size() * kBrickSamples);
+    float steepest = 0.0f;
+    std::size_t pick = 0;
+
+    for (std::size_t slot = 0; slot < index_.size(); ++slot) {
+        const std::int32_t entry = index_[slot];
+        if (pick >= slots.size() || slots[pick] != slot) {
+            if (entry < 0) continue;
+            index_[slot] = static_cast<std::int32_t>(next.size());
+            next.insert(next.end(), data_.begin() + entry, data_.begin() + entry + kBrickSamples);
+            continue;
+        }
+        const float* block = blocks.data() + pick * kBrickSamples;
+        ++pick;
+        // The bake's own scan, over the values the fill produced. That it runs
+        // AFTER the fill is the whole point of this entry point: a brick that
+        // looked irrelevant against the source's surface is exactly where a
+        // displaced one lands. It is no less sound than a re-bake of the same
+        // field, because it is the same question asked of the same values.
+        const BrickScan scan = scan_block(block, band_);
+        if (!scan.near_surface) {
+            index_[slot] = kBrickEmpty;
+            // Sign only; build_far_bounds supplies the magnitude, exactly as
+            // sample_blocks records it.
+            far_[slot] = scan.any_inside ? -1.0f : 1.0f;
+            if (entry >= 0) ++tally.removed;
+            continue;
+        }
+        index_[slot] = static_cast<std::int32_t>(next.size());
+        next.insert(next.end(), block, block + kBrickSamples);
+        steepest = std::max(steepest, steepest_in_block(block));
+        if (entry >= 0)
+            ++tally.kept;
+        else
+            ++tally.added;
+    }
+
+    data_.swap(next);
+    data_.shrink_to_fit();
+    // Which bricks store samples has changed, and a sample-free brick reports
+    // its distance to the nearest one that does. No band NARROWING though, and
+    // that is the difference from an operator that rewrites in place: the field
+    // outside the region is untouched, so the empty bricks out there are still
+    // classified against the surface that is still there.
+    build_far_bounds();
+    // Bricks this did not touch cannot have got steeper, so the volume's own
+    // declaration bounds them and only the blocks written need measuring. It
+    // may OVERSTATE, if the steepest brick was one this emptied -- which is the
+    // safe direction, since a Lipschitz bound only ever shortens a step.
+    sample_lipschitz_ = std::max(sample_lipschitz_, std::max(1.0f, steepest / cell_size_));
+    return tally;
+}
+
 float FieldVolume::measure_sample_lipschitz() const {
     if (empty()) return 1.0f;
-    const int n = kBrickDim + 1;
 
     // Walking the STORED bricks rather than the dense lattice. The two see
     // exactly the same pairs, and the reason is the halo: a forward pair
@@ -731,28 +877,12 @@ float FieldVolume::measure_sample_lipschitz() const {
     // global coordinate through the same arithmetic — sample_position builds
     // it as bx * kBrickDim + x, so brick b's halo and brick b+1's face are the
     // same integer — and rewrite() hands both copies the same question.
-    constexpr int kStride[3] = {1, kBrickDim + 1, (kBrickDim + 1) * (kBrickDim + 1)};
-
     float steepest = 0.0f;
     for (std::size_t slot = 0; slot < index_.size(); ++slot) {
         const std::int32_t entry = index_[slot];
         if (entry < 0) continue;
-        const float* block = data_.data() + static_cast<std::size_t>(entry);
-        // One sweep per axis, each stopping a sample short along that axis so
-        // the forward neighbour is always in the block. Only the three forward
-        // neighbours: the reverse ones are the same pairs seen from the other
-        // end.
-        for (int axis = 0; axis < 3; ++axis) {
-            const int stride = kStride[axis];
-            const int last[3] = {axis == 0 ? n - 1 : n, axis == 1 ? n - 1 : n,
-                                 axis == 2 ? n - 1 : n};
-            for (int z = 0; z < last[2]; ++z)
-                for (int y = 0; y < last[1]; ++y) {
-                    const float* row = block + (z * n + y) * n;
-                    for (int x = 0; x < last[0]; ++x)
-                        steepest = std::max(steepest, std::abs(row[x + stride] - row[x]));
-                }
-        }
+        steepest =
+            std::max(steepest, steepest_in_block(data_.data() + static_cast<std::size_t>(entry)));
     }
     return std::max(1.0f, steepest / cell_size_);
 }
