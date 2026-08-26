@@ -1163,10 +1163,13 @@ smooth = baked.relaxed(radius_cells=3, centre=(0, 0.7, 0),   # a brush, not a
 # flatten: put a facet on part of a shape, which a Cut cannot — a cut is global
 # to its prism and has no falloff. Two-sided, matching the voxel sculpt_flatten:
 # material on the normal's side goes AND hollows on the other side fill.
-# It SAMPLES rather than editing a volume, because flatten moves the surface by
-# many band widths and a band cannot follow one that walks out of it. Sample
-# from the DOCUMENT where you can: a volume reports a bound, not a distance,
-# outside its own band.
+# It RESAMPLES rather than rewriting samples in place, because flatten moves the
+# surface by many band widths and a fixed set of bricks cannot follow one that
+# walks out of it — the facet needs bricks that held nothing. Sample from the
+# DOCUMENT where you can: a volume reports a bound, not a distance, outside its
+# own band. Flattening a volume costs what the brush touches, not what the
+# volume holds (#300): only the bricks its ball reaches are re-evaluated and
+# reclassified, and the rest keep their bytes.
 # A REGION IS REQUIRED. Where flatten's weight is 1 the result IS the plane, so
 # with no region it would replace the shape with a half-space — a ball comes
 # back as a box. Not ZBrush's Clip either: as a solid, Clip is exactly Trim.

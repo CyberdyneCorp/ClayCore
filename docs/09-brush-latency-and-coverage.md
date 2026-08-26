@@ -168,7 +168,15 @@ build.
 progress UI. `sdf_relax`'s figure is a **0.05-cell** fixture
 (`Fixture.volumeItem`); at a production cell it is two orders of magnitude
 larger and the traversal, not the kernel, is why — see
-[#272](https://github.com/CyberdyneCorp/ClayCore/issues/272). See
+[#272](https://github.com/CyberdyneCorp/ClayCore/issues/272).
+
+`sdf_flatten` had the same disease and is now local too: the in-place overload
+resampled the whole volume for a brush that reaches a ball, and a five-cell dab
+at cell 0.01 cost 262.7 ms on one ball and **1.80 s** on eight balls' worth of
+unrelated surface. It is 3.5 ms and 28.7 ms respectively
+([#300](https://github.com/CyberdyneCorp/ClayCore/issues/300)). Both flatten
+rows above predate that, and the device figures need re-taking against a build
+that carries it. See
 [05 §9](05-claycore-library.md#what-latency-critical-costs-measured).
 
 ## What already fits
