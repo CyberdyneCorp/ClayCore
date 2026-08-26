@@ -1134,8 +1134,16 @@ struct clay_document {
         float pad = 0.0f;  // the cull pad the values were computed under
         float spacing = 0.0f;
         std::int32_t dims[3] = {0, 0, 0};
+        // The ACTIVE layer's chain at this brick's lattice -- what a suffix
+        // continues. For a document with one visible SDF layer that IS the
+        // whole field, which is why the single-layer case needs nothing else.
         std::vector<float> values;
         std::vector<float> colors;  // empty when that refill carried none
+        // The visible SDF layers BEFORE the active one, hard-unioned. Empty
+        // when there are none. Static across a stroke -- only the active layer
+        // moves -- so it is stored once and carried forward untouched.
+        std::vector<float> below;
+        std::vector<float> below_colors;
     };
 
     // A BYTE budget, not a brick count. With colour a brick carries four times
@@ -1143,6 +1151,11 @@ struct clay_document {
     // on what the host asked for. 64 MB is 16,384 distance-only bricks of a
     // dim-8 cache, or 4,096 coloured ones -- a stroke's working set either way.
     static constexpr std::size_t kResumeBytes = 64u << 20;
+
+    static std::size_t entry_bytes(const ResumeEntry& e) {
+        return (e.values.size() + e.colors.size() + e.below.size() + e.below_colors.size()) *
+               sizeof(float);
+    }
 
     void forget_resume() const {
         resume_.clear();
@@ -1154,6 +1167,8 @@ struct clay_document {
     // cannot be overtaken between the parts of it.
     struct ResumePlan {
         bool usable = false;
+        bool has_below = false;
+        scene::LayerId active = 0;
         std::uint64_t now = 0;
         std::vector<scene::NodeId> appended;  // what to compile as the suffix
         scene::TapeCheckpoint checkpoint;
@@ -1177,19 +1192,28 @@ struct clay_document {
         ResumePlan p;
         p.now = revision.load(std::memory_order_relaxed);
         if (seed_revision == 0 || seed_revision == p.now) return p;
-        const scene::Layer* only = nullptr;
+        // The LAST visible SDF layer, which is the one an append extends. The
+        // layers beneath it are held as their own value and folded in
+        // afterwards, so more than one is no longer a reason to refuse.
+        const scene::Layer* active = nullptr;
+        int visible = 0;
         for (const scene::Layer& l : doc.document.layers) {
             if (!l.visible || l.kind != scene::LayerKind::Sdf || !l.sdf) continue;
-            if (only) return p;  // more than one, so a seed may sit under a union
-            only = &l;
+            active = &l;
+            ++visible;
         }
-        if (!only) return p;
+        if (!active) return p;
+        p.active = active->id;
+        p.has_below = visible > 1;
         p.appended = appends_since(seed_revision, p.now);
         if (p.appended.empty()) return p;
         p.checkpoint = scene::TapeCheckpoint{};
         p.checkpoint.valid = true;
-        p.checkpoint.layer = only->id;
+        p.checkpoint.layer = active->id;
         p.checkpoint.layer_have_acc = true;
+        // FALSE even when layers sit beneath, so the suffix emits no union: the
+        // refill holds that value separately and folds it in itself, with the
+        // same hard Add the whole-document compile emits between layers.
         p.checkpoint.doc_have_acc = false;
         p.usable = true;
         return p;
@@ -1200,7 +1224,7 @@ struct clay_document {
     // this exists for they always do; anything else takes the full path rather
     // than compiling a suffix per revision.
     std::uint64_t seed_revision_for(const clay_brick_request* requests, std::size_t count,
-                                    std::size_t per, bool want_colour) const {
+                                    std::size_t per, bool want_colour, bool want_below) const {
         std::uint64_t shared = 0;
         for (std::size_t i = 0; i < count; ++i) {
             auto it =
@@ -1209,6 +1233,8 @@ struct clay_document {
             const ResumeEntry& e = it->second;
             if (e.values.size() != per || e.spacing != requests[i].spacing) return 0;
             if (want_colour && e.colors.size() != per * 3) return 0;
+            if (want_below != !e.below.empty()) return 0;
+            if (want_below && want_colour && e.below_colors.size() != per * 3) return 0;
             if (e.dims[0] != requests[i].dims[0] || e.dims[1] != requests[i].dims[1] ||
                 e.dims[2] != requests[i].dims[2])
                 return 0;
@@ -1220,31 +1246,49 @@ struct clay_document {
         return shared;
     }
 
-    const float* seed_for(const clay_brick_request& request, float pad, bool want_colour,
-                          const float** out_colors) const {
-        if (out_colors) *out_colors = nullptr;
+    // What a brick's stored seed holds, or `values == nullptr` when it cannot
+    // serve this request.
+    struct Seed {
+        const float* values = nullptr;
+        const float* colors = nullptr;
+        const float* below = nullptr;  // null when no layer sits beneath
+        const float* below_colors = nullptr;
+    };
+
+    Seed seed_for(const clay_brick_request& request, float pad, bool want_colour,
+                  bool want_below) const {
+        Seed s;
         auto it = resume_.find(ResumeKey{request.key[0], request.key[1], request.key[2]});
-        if (it == resume_.end()) return nullptr;
+        if (it == resume_.end()) return s;
         // A colour asked for is a colour that has to have been kept: continuing
         // a coloured fold from a distance alone folds every combine against
-        // black.
-        if (want_colour && it->second.colors.empty()) return nullptr;
-        if (want_colour && out_colors) *out_colors = it->second.colors.data();
+        // black. The same for the layers beneath: a document that has them and
+        // a seed that does not are describing different fields.
+        if (want_colour && it->second.colors.empty()) return s;
+        if (want_below != !it->second.below.empty()) return s;
+        if (want_below && want_colour && it->second.below_colors.empty()) return s;
         // The cull pad decides which items a brick's compile keeps, so a seed
         // taken under a different one was continued from a different field.
         // The pad only grows on an append, so this is a real gate rather than
         // a formality.
-        if (it->second.pad != pad) return nullptr;
-        if (!it->second.had_acc) return nullptr;
-        return it->second.values.data();
+        if (it->second.pad != pad) return s;
+        if (!it->second.had_acc) return s;
+        s.values = it->second.values.data();
+        if (want_colour) s.colors = it->second.colors.data();
+        if (want_below) {
+            s.below = it->second.below.data();
+            if (want_colour) s.below_colors = it->second.below_colors.data();
+        }
+        return s;
     }
 
     void store_seed(const clay_brick_request& request, std::uint64_t at, float pad,
-                    const float* values, const float* colors, std::size_t per) const {
+                    const float* values, const float* colors, const float* below,
+                    const float* below_colors, std::size_t per) const {
         const ResumeKey key{request.key[0], request.key[1], request.key[2]};
         auto [it, fresh] = resume_.try_emplace(key);
         ResumeEntry& e = it->second;
-        resume_bytes_ -= (e.values.size() + e.colors.size()) * sizeof(float);
+        resume_bytes_ -= entry_bytes(e);
         if (fresh) resume_order_.push_back(key);
         e.had_acc = false;
         for (std::size_t s = 0; s < per && !e.had_acc; ++s) e.had_acc = values[s] != CLAY_TAPE_FAR;
@@ -1259,7 +1303,15 @@ struct clay_document {
             e.colors.assign(colors, colors + per * 3);
         else
             e.colors.clear();
-        resume_bytes_ += (e.values.size() + e.colors.size()) * sizeof(float);
+        if (below)
+            e.below.assign(below, below + per);
+        else
+            e.below.clear();
+        if (below_colors)
+            e.below_colors.assign(below_colors, below_colors + per * 3);
+        else
+            e.below_colors.clear();
+        resume_bytes_ += entry_bytes(e);
         // Oldest first, and never the brick just written -- a budget smaller
         // than one brick would otherwise evict what it just stored.
         while (resume_bytes_ > kResumeBytes && resume_order_.size() > 1) {
@@ -1271,8 +1323,7 @@ struct clay_document {
             }
             auto old = resume_.find(oldest);
             if (old == resume_.end()) continue;
-            resume_bytes_ -=
-                (old->second.values.size() + old->second.colors.size()) * sizeof(float);
+            resume_bytes_ -= entry_bytes(old->second);
             resume_.erase(old);
         }
     }
@@ -1281,7 +1332,8 @@ struct clay_document {
     // current revision", which is what the full path passes -- it has just
     // produced the document as it is now.
     void store_seeds(const clay_brick_request* requests, std::size_t count, const float* values,
-                     const float* colors, std::size_t per, std::uint64_t at, float pad) const {
+                     const float* colors, const float* below, const float* below_colors,
+                     std::size_t per, std::uint64_t at, float pad) const {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         const std::uint64_t now = revision.load(std::memory_order_relaxed);
         if (at == 0) {
@@ -1292,7 +1344,28 @@ struct clay_document {
         }
         for (std::size_t i = 0; i < count; ++i)
             store_seed(requests[i], at, pad, values + i * per,
-                       colors ? colors + i * per * 3 : nullptr, per);
+                       colors ? colors + i * per * 3 : nullptr, below ? below + i * per : nullptr,
+                       below_colors ? below_colors + i * per * 3 : nullptr, per);
+    }
+
+    // The resumed path's store: the ACTIVE layer's value moved, the half
+    // beneath it did not. Caller holds cache_mutex_.
+    void store_active(const clay_brick_request& request, std::uint64_t at, float pad,
+                      const float* values, const float* colors, std::size_t per) const {
+        auto it = resume_.find(ResumeKey{request.key[0], request.key[1], request.key[2]});
+        if (it == resume_.end()) return;
+        ResumeEntry& e = it->second;
+        resume_bytes_ -= entry_bytes(e);
+        e.had_acc = false;
+        for (std::size_t s = 0; s < per && !e.had_acc; ++s) e.had_acc = values[s] != CLAY_TAPE_FAR;
+        e.revision = at;
+        e.pad = pad;
+        e.values.assign(values, values + per);
+        if (colors)
+            e.colors.assign(colors, colors + per * 3);
+        else
+            e.colors.clear();
+        resume_bytes_ += entry_bytes(e);
     }
 
     std::mutex& cache_lock() const { return cache_mutex_; }
@@ -2456,10 +2529,14 @@ math::Aabb request_brick_box(const clay_brick_request& req) {
 // run(bq, base) evaluates one chunk, whose requests start at `base`, into
 // the caller's destination — host memory or the caller's device buffer, the
 // only thing the two entry points do differently.
+// Which of a document a batch compiles: the whole thing, or one side of the
+// split a resumable multi-layer refill holds as two values.
+enum class ChunkHalf { Whole, Below, Active };
+
 template <typename Run>
-clay_result eval_requests_in_chunks(const clay_document* doc,
-                                    const clay_brick_request* requests, std::size_t count,
-                                    Run&& run) {
+clay_result eval_requests_in_chunks(const clay_document* doc, const clay_brick_request* requests,
+                                    std::size_t count, Run&& run, ChunkHalf half = ChunkHalf::Whole,
+                                    scene::LayerId active = 0) {
     std::vector<kernel::cfloat3> origins(count);
     for (std::size_t i = 0; i < count; ++i) {
         eval::GridQuery q;
@@ -2492,7 +2569,11 @@ clay_result eval_requests_in_chunks(const clay_document* doc,
         tape_ptrs.reserve(n);
         for (std::size_t i = base; i < base + n; ++i) {
             scene::CullRegion cull{request_brick_box(requests[i]).dilated(requests[i].band)};
-            tapes.push_back(scene::compile_document(doc->doc.document, &cull, index.get(), &plan));
+            tapes.push_back(
+                half == ChunkHalf::Whole
+                    ? scene::compile_document(doc->doc.document, &cull, index.get(), &plan)
+                    : scene::compile_document_part(doc->doc.document, active,
+                                                   half == ChunkHalf::Below, &cull, index.get()));
             tape_ptrs.push_back(&tapes.back());
         }
         eval::GridBatchQuery bq;
@@ -8734,6 +8815,36 @@ clay_result clay_brick_cache_take_dirty(clay_brick_cache* cache,
     return CLAY_OK;
 }
 
+namespace {
+// The hard union a whole-document compile emits between visible SDF layers,
+// applied sample by sample to the two halves a resumable refill holds apart.
+// Through the kernel's own combine rather than a min written out here: the two
+// have to agree bit for bit, and one of them is the definition.
+void fold_layers_below(const float* below_d, const float* below_rgb, const float* active_d,
+                       const float* active_rgb, std::size_t per, float* out_d, float* out_rgb) {
+    for (std::size_t s = 0; s < per; ++s) {
+        kernel::CTapeValue a;
+        a.d = below_d[s];
+        a.color = below_rgb
+                      ? kernel::cf3(below_rgb[s * 3], below_rgb[s * 3 + 1], below_rgb[s * 3 + 2])
+                      : kernel::cf3(0.0f, 0.0f, 0.0f);
+        kernel::CTapeValue c;
+        c.d = active_d[s];
+        c.color = active_rgb
+                      ? kernel::cf3(active_rgb[s * 3], active_rgb[s * 3 + 1], active_rgb[s * 3 + 2])
+                      : kernel::cf3(0.0f, 0.0f, 0.0f);
+        const kernel::CTapeValue r = kernel::ctape_combine_values(
+            a, c, static_cast<CLAY_UINT_T>(scene::Op::Add), 0, 0.0f, 0.0f);
+        out_d[s] = r.d;
+        if (out_rgb) {
+            out_rgb[s * 3] = r.color.x;
+            out_rgb[s * 3 + 1] = r.color.y;
+            out_rgb[s * 3 + 2] = r.color.z;
+        }
+    }
+}
+}  // namespace
+
 clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char* backend,
                                            const clay_brick_request* requests, size_t count,
                                            float* out_values, size_t values_capacity,
@@ -8775,24 +8886,42 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
     //
     // Distances only. A seed is one float a sample; a colour is not, so a
     // caller asking for colour takes the full path.
+    // -- the resumable path (#306) -----------------------------------------
+    //
+    // When every brick asked for carries a seed from the same revision, and the
+    // document has only been APPENDED to since, what this call has to evaluate
+    // is the appended items -- not the whole surviving edit list over every
+    // sample. The suffix is compiled per brick and culled exactly as a whole-
+    // document compile would cull it, which is what makes continuing from the
+    // seed the same arithmetic rather than an approximation of it.
+    //
+    // WITH MORE THAN ONE VISIBLE SDF LAYER the seed is two values, not one. The
+    // layers hard-union left to right, so the tape holds the layers BENEATH the
+    // active one as its own accumulator, and a single stored number cannot be
+    // taken apart into the two again. They are kept apart instead: the suffix
+    // folds into the active layer's value and the union is applied here, with
+    // the same hard Add the whole-document compile emits between layers. The
+    // layers beneath are static across a stroke, so their half is stored once
+    // and carried forward untouched.
+    const bool want_colour = out_colors_rgb != nullptr;
     std::vector<std::uint8_t> resumed(count, 0);
     std::size_t resumed_count = 0;
     float resume_pad = 0.0f;
-    std::uint64_t resume_now = 0;
     {
         std::lock_guard<std::mutex> lock(doc->cache_lock());
-        const bool want_colour = out_colors_rgb != nullptr;
-        const std::uint64_t seed_rev = doc->seed_revision_for(requests, count, per, want_colour);
+        const clay_document::ResumePlan probe = doc->plan_resume(1);  // for has_below only
+        const std::uint64_t seed_rev =
+            doc->seed_revision_for(requests, count, per, want_colour, probe.has_below);
         const clay_document::ResumePlan plan = doc->plan_resume(seed_rev);
         if (plan.usable) {
             std::shared_ptr<const scene::CullIndex> index = doc->cull_index_locked();
             resume_pad = index->cull_pad();
-            resume_now = plan.now;
             std::vector<float> points;
+            std::vector<float> active(per), active_rgb(want_colour ? per * 3 : 0);
             for (std::size_t i = 0; i < count; ++i) {
-                const float* seed_rgb = nullptr;
-                const float* seed = doc->seed_for(requests[i], resume_pad, want_colour, &seed_rgb);
-                if (!seed) continue;
+                const clay_document::Seed seed =
+                    doc->seed_for(requests[i], resume_pad, want_colour, plan.has_below);
+                if (!seed.values) continue;
                 eval::GridQuery g;
                 std::size_t samples = 0;
                 if (read_grid(requests[i].origin, requests[i].spacing, requests[i].dims, &g,
@@ -8822,31 +8951,39 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
                 pq.points_xyz = points.data();
                 pq.count = samples;
                 eval::PointResults pr;
-                pr.distances = out_values + i * per;
-                if (want_colour) pr.colors_rgb = out_colors_rgb + i * per * 3;
-                eval::eval_points_seeded(suffix, pq, seed, seed_rgb, pr);
+                // Into scratch when there is a union still to apply, straight
+                // out when there is not.
+                pr.distances = plan.has_below ? active.data() : out_values + i * per;
+                if (want_colour)
+                    pr.colors_rgb =
+                        plan.has_below ? active_rgb.data() : out_colors_rgb + i * per * 3;
+                eval::eval_points_seeded(suffix, pq, seed.values, seed.colors, pr);
+                if (plan.has_below) {
+                    fold_layers_below(seed.below, seed.below_colors, active.data(),
+                                      want_colour ? active_rgb.data() : nullptr, per,
+                                      out_values + i * per,
+                                      want_colour ? out_colors_rgb + i * per * 3 : nullptr);
+                    // The seed for the NEXT dab is the ACTIVE layer's value,
+                    // not what was just written out.
+                    doc->store_active(requests[i], plan.now, resume_pad, active.data(),
+                                      want_colour ? active_rgb.data() : nullptr, per);
+                } else {
+                    doc->store_active(requests[i], plan.now, resume_pad, out_values + i * per,
+                                      want_colour ? out_colors_rgb + i * per * 3 : nullptr, per);
+                }
                 resumed[i] = 1;
                 ++resumed_count;
             }
         }
     }
+    if (resumed_count == count) return CLAY_OK;
 
-    // The whole batch goes to the backend as BATCHES of per-brick culled
-    // tapes, not one call per brick: a GPU backend turns a batch into a single
-    // device submission, and a per-brick submission costs more than the 512
-    // samples it carries (issue #64). Validation, the cull index and the
-    // chunking rules live in eval_requests_in_chunks, shared with the
-    // device-destination form.
-    //
-    // Only the bricks the resumable path did not answer, gathered so the batch
-    // stays a batch, then scattered back to their fixed slots.
-    if (resumed_count == count) {
-        doc->store_seeds(requests, count, out_values, out_colors_rgb, per, resume_now, resume_pad);
-        return CLAY_OK;
-    }
-    if (resumed_count > 0) {
-        std::vector<clay_brick_request> misses;
-        std::vector<std::size_t> where;
+    // The bricks the resumable path did not answer, gathered so the batch stays
+    // a batch, then scattered back to their fixed slots.
+    std::vector<clay_brick_request> misses;
+    std::vector<std::size_t> where;
+    const bool partial = resumed_count > 0;
+    if (partial) {
         misses.reserve(count - resumed_count);
         where.reserve(count - resumed_count);
         for (std::size_t i = 0; i < count; ++i)
@@ -8854,34 +8991,73 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
                 misses.push_back(requests[i]);
                 where.push_back(i);
             }
-        std::vector<float> scratch(misses.size() * per);
-        clay_result mr = eval_requests_in_chunks(
-            doc, misses.data(), misses.size(),
+    }
+    const clay_brick_request* todo = partial ? misses.data() : requests;
+    const std::size_t todo_count = partial ? misses.size() : count;
+
+    // Which layer an append would extend, and whether anything sits beneath it.
+    scene::LayerId active_layer = 0;
+    int visible_sdf = 0;
+    for (const scene::Layer& l : doc->doc.document.layers)
+        if (l.visible && l.kind == scene::LayerKind::Sdf && l.sdf) {
+            active_layer = l.id;
+            ++visible_sdf;
+        }
+    const bool has_below = visible_sdf > 1;
+
+    std::vector<float> act(todo_count * per);
+    std::vector<float> act_rgb(want_colour ? todo_count * per * 3 : 0);
+    std::vector<float> bel(has_below ? todo_count * per : 0);
+    std::vector<float> bel_rgb(has_below && want_colour ? todo_count * per * 3 : 0);
+
+    // The ACTIVE half -- or the whole document when nothing is beneath it, in
+    // which case the two are the same tape and only one batch is run.
+    clay_result br = eval_requests_in_chunks(
+        doc, todo, todo_count,
+        [&](const eval::GridBatchQuery& bq, std::size_t base) -> clay_result {
+            if (b->eval_grid_batch(bq, act.data() + base * per,
+                                   act_rgb.empty() ? nullptr : act_rgb.data() + base * per * 3) !=
+                eval::Status::Ok)
+                return fail(CLAY_ERROR_BACKEND, "eval_grid_batch failed");
+            return CLAY_OK;
+        },
+        has_below ? ChunkHalf::Active : ChunkHalf::Whole, active_layer);
+    if (br != CLAY_OK) return br;
+    if (has_below) {
+        br = eval_requests_in_chunks(
+            doc, todo, todo_count,
             [&](const eval::GridBatchQuery& bq, std::size_t base) -> clay_result {
-                if (b->eval_grid_batch(bq, scratch.data() + base * per, nullptr) !=
+                if (b->eval_grid_batch(
+                        bq, bel.data() + base * per,
+                        bel_rgb.empty() ? nullptr : bel_rgb.data() + base * per * 3) !=
                     eval::Status::Ok)
                     return fail(CLAY_ERROR_BACKEND, "eval_grid_batch failed");
                 return CLAY_OK;
-            });
-        if (mr != CLAY_OK) return mr;
-        for (std::size_t j = 0; j < where.size(); ++j)
-            std::memcpy(out_values + where[j] * per, scratch.data() + j * per, per * sizeof(float));
-        doc->store_seeds(requests, count, out_values, out_colors_rgb, per, resume_now, resume_pad);
-        return CLAY_OK;
+            },
+            ChunkHalf::Below, active_layer);
+        if (br != CLAY_OK) return br;
     }
-    r = eval_requests_in_chunks(
-        doc, requests, count, [&](const eval::GridBatchQuery& bq, std::size_t base) -> clay_result {
-            if (b->eval_grid_batch(bq, out_values + base * per,
-                                   out_colors_rgb ? out_colors_rgb + base * per * 3
-                                                  : nullptr) != eval::Status::Ok)
-                return fail(CLAY_ERROR_BACKEND, "eval_grid_batch failed");
-            return CLAY_OK;
-        });
-    if (r != CLAY_OK) return r;
-    // Kept so the NEXT dab can resume from it. This is the accumulator, exact
-    // and in float32, which is the whole reason a refill is where the seed
-    // comes from.
-    doc->store_seeds(requests, count, out_values, out_colors_rgb, per, 0, 0.0f);
+
+    for (std::size_t j = 0; j < todo_count; ++j) {
+        const std::size_t slot = partial ? where[j] : j;
+        float* vd = out_values + slot * per;
+        float* vc = want_colour ? out_colors_rgb + slot * per * 3 : nullptr;
+        if (has_below)
+            fold_layers_below(
+                bel.data() + j * per, bel_rgb.empty() ? nullptr : bel_rgb.data() + j * per * 3,
+                act.data() + j * per, act_rgb.empty() ? nullptr : act_rgb.data() + j * per * 3, per,
+                vd, vc);
+        else {
+            std::memcpy(vd, act.data() + j * per, per * sizeof(float));
+            if (vc) std::memcpy(vc, act_rgb.data() + j * per * 3, per * 3 * sizeof(float));
+        }
+    }
+    // Kept so the NEXT dab can resume from it. The ACTIVE half is the seed a
+    // suffix continues; the half beneath is what the union needs and does not
+    // move while the active layer is being sculpted.
+    doc->store_seeds(todo, todo_count, act.data(), act_rgb.empty() ? nullptr : act_rgb.data(),
+                     has_below ? bel.data() : nullptr, bel_rgb.empty() ? nullptr : bel_rgb.data(),
+                     per, 0, 0.0f);
     return CLAY_OK;
 }
 

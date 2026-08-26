@@ -830,14 +830,42 @@ struct Compiler {
     // appended item belongs inside the chain and so in front of the union.
     TapeCheckpoint checkpoint;
 
-    void run(const Document& doc, const CullRegion* cull_region) {
+    // The cull pad the whole document compiles under. Split out because a
+    // PART of a document must still cull under it: a tape for one layer that
+    // used only that layer's pad would drop items the whole-document compile
+    // keeps, and the two halves of a split would no longer sum to the whole.
+    float document_pad(const Document& doc, const CullRegion* cull_region) const {
         float pad = 0.0f;
-        if (cull_region && index)
-            pad = index->cull_pad();
-        else if (cull_region)
+        if (cull_region && index) return index->cull_pad();
+        if (cull_region)
             for (const Layer& layer : doc.layers)
                 if (layer.visible && layer.kind == LayerKind::Sdf && layer.sdf)
                     pad = kernel::cmax(pad, cull_pad(*layer.sdf, layer));
+        return pad;
+    }
+
+    // Compile only the visible SDF layers BEFORE `stop`, or only `stop` itself.
+    // Together the two are the whole document apart from the hard union
+    // between them, which is what lets a caller hold them as two values and
+    // fold one of them forward.
+    void run_part(const Document& doc, const CullRegion* cull_region, LayerId stop, bool below) {
+        begin_cull(cull_region, document_pad(doc, cull_region));
+        bool have_acc = false;
+        for (const Layer& layer : doc.layers) {
+            if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
+            if (below ? layer.id == stop : layer.id != stop) {
+                if (below && layer.id == stop) break;  // everything after it too
+                continue;
+            }
+            if (!compile_list(layer.sdf->roots, *layer.sdf, layer, false)) continue;
+            if (have_acc) emit_combine(Op::Add, Blend{}, 0.0f);  // layers union hard
+            have_acc = true;
+        }
+    }
+
+    void run(const Document& doc, const CullRegion* cull_region) {
+        float pad = 0.0f;
+        pad = document_pad(doc, cull_region);
         begin_cull(cull_region, pad);
         bool have_acc = false;
         for (const Layer& layer : doc.layers) {
@@ -1006,6 +1034,16 @@ bool compile_layer_suffix(const TapeCheckpoint& cp, const Document& doc,
     if (out_checkpoint) *out_checkpoint = c.checkpoint;
     *out = std::move(c.tape);
     return true;
+}
+
+Tape compile_document_part(const Document& doc, LayerId active, bool below, const CullRegion* cull,
+                           const CullIndex* index) {
+    Compiler c;
+    if (index && index->document() != &doc) index = nullptr;
+    c.index = index;
+    c.run_part(doc, cull, active, below);
+    c.tape.compile_id = next_compile_id();
+    return std::move(c.tape);
 }
 
 Tape compile_layer(const Layer& layer, const CullRegion* cull) {
