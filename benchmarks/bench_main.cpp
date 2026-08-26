@@ -748,7 +748,7 @@ void BM_DabSuffixSeeded(benchmark::State& state) {
             q.count = n;
             eval::PointResults r;
             r.distances = v.data();
-            eval::eval_points_seeded(suffix, q, seeds[s].data(), r);
+            eval::eval_points_seeded(suffix, q, seeds[s].data(), nullptr, r);
         }
     }
     state.counters["instrs"] = static_cast<double>(suffix.instrs.size());

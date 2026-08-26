@@ -822,33 +822,82 @@ TEST_CASE("resumable refill: a resumed brick is the brick a full refill gives") 
         CHECK(std::memcmp(again.data(), three.data(), again.size() * sizeof(float)) == 0);
     }
 
-    SUBCASE("colour is asked for, so the full path runs") {
-        // A seed is one float a sample and a colour is not, so a caller asking
-        // for colour takes the full path — and must still get the right answer.
+    SUBCASE("colour is carried through the resumed path") {
+        // A coloured walk folds a CTapeValue, so the seed carries the colour
+        // the prefix reached as well as its distance. Continuing from the
+        // distance alone would fold every combine against black.
         constexpr int kDim = 8;
         const std::size_t per = static_cast<std::size_t>(kDim) * kDim * kDim;
+        auto refill_rgb = [&](clay_document* d, std::vector<float>& v, std::vector<float>& c) {
+            clay_brick_request req;
+            std::memset(&req, 0, sizeof(req));
+            req.key[0] = 2;
+            req.key[1] = -1;
+            req.key[2] = -1;
+            for (int a = 0; a < 3; ++a)
+                req.origin[a] = static_cast<float>(req.key[a]) * kDim * 0.05f;
+            req.spacing = 0.05f;
+            req.dims[0] = req.dims[1] = req.dims[2] = kDim;
+            req.band = 0.15f;
+            v.assign(per, 0.0f);
+            c.assign(per * 3, 0.0f);
+            REQUIRE(clay_brick_cache_eval_requests(d, nullptr, &req, 1, v.data(), v.size(),
+                                                   c.data(), c.size()) == CLAY_OK);
+        };
         Doc doc;
         add_sphere(doc, 1.0f, 0.0f);
-        refill_signature(doc.d);
-        add_sphere(doc, 0.30f, -0.95f);
+        std::vector<float> v0, c0;
+        refill_rgb(doc.d, v0, c0);  // seeds the store, with colour
+        for (int i = 1; i <= 4; ++i) add_sphere(doc, 0.30f, 1.0f - 0.03f * static_cast<float>(i));
+        std::vector<float> v, c;
+        refill_rgb(doc.d, v, c);
 
-        clay_brick_request req;
-        std::memset(&req, 0, sizeof(req));
-        req.spacing = 0.05f;
-        req.dims[0] = kDim;
-        req.dims[1] = kDim;
-        req.dims[2] = kDim;
-        req.band = 0.15f;
-        std::vector<float> v(per), c(per * 3);
-        REQUIRE(clay_brick_cache_eval_requests(doc.d, nullptr, &req, 1, v.data(), v.size(),
-                                               c.data(), c.size()) == CLAY_OK);
         Doc oracle;
         add_sphere(oracle, 1.0f, 0.0f);
-        add_sphere(oracle, 0.30f, -0.95f);
+        for (int i = 1; i <= 4; ++i)
+            add_sphere(oracle, 0.30f, 1.0f - 0.03f * static_cast<float>(i));
+        std::vector<float> ov, oc;
+        refill_rgb(oracle.d, ov, oc);
+
+        CHECK(std::memcmp(v.data(), ov.data(), per * sizeof(float)) == 0);
+        CHECK(std::memcmp(c.data(), oc.data(), per * 3 * sizeof(float)) == 0);
+        // The stroke moved the field, so the agreement is not two readings of
+        // an unchanged document.
+        CHECK(std::memcmp(v.data(), v0.data(), per * sizeof(float)) != 0);
+    }
+
+    SUBCASE("a distance-only seed cannot serve a coloured refill") {
+        // The store may hold a brick that was refilled WITHOUT colour. Serving
+        // a coloured request from it would fold against black, so it falls back
+        // and the answer is still right.
+        constexpr int kDim = 8;
+        const std::size_t per = static_cast<std::size_t>(kDim) * kDim * kDim;
+        clay_brick_request req;
+        std::memset(&req, 0, sizeof(req));
+        req.key[0] = 2;
+        req.key[1] = -1;
+        req.key[2] = -1;
+        for (int a = 0; a < 3; ++a) req.origin[a] = static_cast<float>(req.key[a]) * kDim * 0.05f;
+        req.spacing = 0.05f;
+        req.dims[0] = req.dims[1] = req.dims[2] = kDim;
+        req.band = 0.15f;
+
+        Doc doc;
+        add_sphere(doc, 1.0f, 0.0f);
+        std::vector<float> v(per);
+        REQUIRE(clay_brick_cache_eval_requests(doc.d, nullptr, &req, 1, v.data(), v.size(), nullptr,
+                                               0) == CLAY_OK);  // no colour stored
+        add_sphere(doc, 0.30f, 0.95f);
+        std::vector<float> v2(per), c2(per * 3);
+        REQUIRE(clay_brick_cache_eval_requests(doc.d, nullptr, &req, 1, v2.data(), v2.size(),
+                                               c2.data(), c2.size()) == CLAY_OK);
+        Doc oracle;
+        add_sphere(oracle, 1.0f, 0.0f);
+        add_sphere(oracle, 0.30f, 0.95f);
         std::vector<float> ov(per), oc(per * 3);
         REQUIRE(clay_brick_cache_eval_requests(oracle.d, nullptr, &req, 1, ov.data(), ov.size(),
                                                oc.data(), oc.size()) == CLAY_OK);
-        CHECK(std::memcmp(v.data(), ov.data(), per * sizeof(float)) == 0);
-        CHECK(std::memcmp(c.data(), oc.data(), per * 3 * sizeof(float)) == 0);
+        CHECK(std::memcmp(v2.data(), ov.data(), per * sizeof(float)) == 0);
+        CHECK(std::memcmp(c2.data(), oc.data(), per * 3 * sizeof(float)) == 0);
     }
 }
