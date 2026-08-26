@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -713,5 +714,141 @@ TEST_CASE("cull index cache: an extended index reads as a rebuilt one") {
         // which is what a log left dangling across the undo would break.
         add_sphere(doc, 0.25f, -0.9f + 0.2f * 3.0f);
         CHECK(grid_signature(doc.d) == three);
+    }
+}
+
+namespace {
+
+// A brick refill, which is the read the RESUMABLE path serves: when every
+// brick asked for carries a seed from the same revision and the document has
+// only been appended to since, the refill evaluates the appended items onto
+// those seeds instead of the whole surviving edit list over every sample.
+std::vector<float> refill_signature(clay_document* d) {
+    constexpr int kDim = 8;
+    constexpr float kVox = 0.05f;
+    constexpr int kBricks = 8;
+    const std::size_t per = static_cast<std::size_t>(kDim) * kDim * kDim;
+    std::vector<clay_brick_request> reqs(kBricks);
+    for (int i = 0; i < kBricks; ++i) {
+        std::memset(&reqs[i], 0, sizeof(reqs[i]));
+        // A row of bricks through the sphere's equator. The origin of a brick
+        // IS key * dim * spacing, so the two cannot be chosen independently.
+        const int kx = i - kBricks / 2;
+        reqs[i].key[0] = kx;
+        reqs[i].key[1] = -1;
+        reqs[i].key[2] = -1;
+        reqs[i].origin[0] = static_cast<float>(kx) * kDim * kVox;
+        reqs[i].origin[1] = -1.0f * kDim * kVox;
+        reqs[i].origin[2] = -1.0f * kDim * kVox;
+        reqs[i].spacing = kVox;
+        reqs[i].dims[0] = kDim;
+        reqs[i].dims[1] = kDim;
+        reqs[i].dims[2] = kDim;
+        reqs[i].band = 3.0f * kVox;
+    }
+    std::vector<float> out(static_cast<std::size_t>(kBricks) * per, 0.0f);
+    REQUIRE(clay_brick_cache_eval_requests(d, nullptr, reqs.data(), kBricks, out.data(), out.size(),
+                                           nullptr, 0) == CLAY_OK);
+    // The bricks must actually STRADDLE the surface, or every comparison below
+    // is two readings of "far outside" agreeing with each other. This is the
+    // check that would have caught a row of bricks placed off the shape.
+    bool near_surface = false;
+    for (float v : out) near_surface = near_surface || std::fabs(v) < 0.5f;
+    REQUIRE(near_surface);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("resumable refill: a resumed brick is the brick a full refill gives") {
+    // The oracle is a FRESH document holding the same items: it has no seeds,
+    // so its refill is always the full evaluation. Bit-for-bit, not
+    // approximately — continuing a fold from the value it reached is the same
+    // instructions over the same floats, so anything short of identity means
+    // the suffix is not the suffix.
+    auto built_with = [](int dabs) {
+        Doc fresh;
+        add_sphere(fresh, 1.0f, 0.0f);
+        for (int i = 1; i <= dabs; ++i)
+            add_sphere(fresh, 0.30f, -1.0f + 0.03f * static_cast<float>(i));
+        return refill_signature(fresh.d);
+    };
+
+    SUBCASE("every dab of a stroke") {
+        Doc doc;
+        add_sphere(doc, 1.0f, 0.0f);
+        const std::vector<float> base = refill_signature(doc.d);  // seeds the store
+        for (int i = 1; i <= 8; ++i) {
+            CAPTURE(i);
+            add_sphere(doc, 0.30f, -1.0f + 0.03f * static_cast<float>(i));
+            const std::vector<float> got = refill_signature(doc.d);
+            const std::vector<float> want = built_with(i);
+            REQUIRE(got.size() == want.size());
+            CHECK(std::memcmp(got.data(), want.data(), got.size() * sizeof(float)) == 0);
+        }
+        // A dab entirely INSIDE the base sphere changes no distance at all --
+        // min() is unchanged -- so the dabs above are placed to protrude, and
+        // this holds that they did.
+        CHECK(refill_signature(doc.d) != base);
+    }
+
+    SUBCASE("several appends between reads") {
+        Doc doc;
+        add_sphere(doc, 1.0f, 0.0f);
+        refill_signature(doc.d);
+        for (int i = 1; i <= 4; ++i) add_sphere(doc, 0.30f, -1.0f + 0.03f * static_cast<float>(i));
+        const std::vector<float> got = refill_signature(doc.d);
+        const std::vector<float> want = built_with(4);
+        CHECK(std::memcmp(got.data(), want.data(), got.size() * sizeof(float)) == 0);
+    }
+
+    SUBCASE("an edit that is not an append falls back") {
+        // Undo removes an item, so no seed can be carried across it.
+        Doc doc;
+        REQUIRE(clay_document_enable_undo(doc.d) == CLAY_OK);
+        add_sphere(doc, 1.0f, 0.0f);
+        for (int i = 1; i <= 3; ++i) add_sphere(doc, 0.30f, -1.0f + 0.03f * static_cast<float>(i));
+        const std::vector<float> three = refill_signature(doc.d);
+        CHECK(std::memcmp(three.data(), built_with(3).data(), three.size() * sizeof(float)) == 0);
+
+        int32_t undone = 0;
+        REQUIRE(clay_document_undo(doc.d, &undone) == CLAY_OK);
+        const std::vector<float> two = refill_signature(doc.d);
+        CHECK(std::memcmp(two.data(), built_with(2).data(), two.size() * sizeof(float)) == 0);
+
+        // And appending again after the undo still lands right.
+        add_sphere(doc, 0.30f, -1.0f + 0.03f * 3.0f);
+        const std::vector<float> again = refill_signature(doc.d);
+        CHECK(std::memcmp(again.data(), three.data(), again.size() * sizeof(float)) == 0);
+    }
+
+    SUBCASE("colour is asked for, so the full path runs") {
+        // A seed is one float a sample and a colour is not, so a caller asking
+        // for colour takes the full path — and must still get the right answer.
+        constexpr int kDim = 8;
+        const std::size_t per = static_cast<std::size_t>(kDim) * kDim * kDim;
+        Doc doc;
+        add_sphere(doc, 1.0f, 0.0f);
+        refill_signature(doc.d);
+        add_sphere(doc, 0.30f, -0.95f);
+
+        clay_brick_request req;
+        std::memset(&req, 0, sizeof(req));
+        req.spacing = 0.05f;
+        req.dims[0] = kDim;
+        req.dims[1] = kDim;
+        req.dims[2] = kDim;
+        req.band = 0.15f;
+        std::vector<float> v(per), c(per * 3);
+        REQUIRE(clay_brick_cache_eval_requests(doc.d, nullptr, &req, 1, v.data(), v.size(),
+                                               c.data(), c.size()) == CLAY_OK);
+        Doc oracle;
+        add_sphere(oracle, 1.0f, 0.0f);
+        add_sphere(oracle, 0.30f, -0.95f);
+        std::vector<float> ov(per), oc(per * 3);
+        REQUIRE(clay_brick_cache_eval_requests(oracle.d, nullptr, &req, 1, ov.data(), ov.size(),
+                                               oc.data(), oc.size()) == CLAY_OK);
+        CHECK(std::memcmp(v.data(), ov.data(), per * sizeof(float)) == 0);
+        CHECK(std::memcmp(c.data(), oc.data(), per * 3 * sizeof(float)) == 0);
     }
 }

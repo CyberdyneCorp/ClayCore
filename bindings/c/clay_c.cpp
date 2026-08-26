@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -14,13 +15,14 @@
 #include <string>
 #include <vector>
 
-#include "clay/parallel/thread_pool.h"
 #include "clay.h"
 #include "clay/brush/gate_bake.h"
-#include "clay/brush/mask_extrude.h"
 #include "clay/brush/lattice_gizmo.h"
+#include "clay/brush/mask_extrude.h"
 #include "clay/brush/move.h"
+#include "clay/brush/procedural_mask.h"
 #include "clay/brush/stroke.h"
+#include "clay/brush/surface_measure.h"
 #include "clay/brush/tube.h"
 #include "clay/cut/cut.h"
 #include "clay/eval/backend.h"
@@ -29,35 +31,34 @@
 #include "clay/field/flatten.h"
 #include "clay/field/move_topological.h"
 #include "clay/field/relax.h"
-#include "clay/brush/procedural_mask.h"
-#include "clay/brush/surface_measure.h"
-#include "clay/kernel/field.h"
 #include "clay/io/clayspace.h"
-#include "clay/io/mesh_io.h"
 #include "clay/io/handoff.h"
 #include "clay/io/memory.h"
+#include "clay/io/mesh_io.h"
 #include "clay/io/parity_fixture.h"
+#include "clay/kernel/field.h"
 #include "clay/mesh/decimate.h"
+#include "clay/mesh/deform.h"
 #include "clay/mesh/dual_contouring.h"
+#include "clay/mesh/lattice.h"
 #include "clay/mesh/marching.h"
 #include "clay/mesh/quad_mesh.h"
-#include "clay/mesh/lattice.h"
-#include "clay/mesh/deform.h"
 #include "clay/mesh/sculpt.h"
-#include "clay/mesh/transfer.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/to_field.h"
+#include "clay/mesh/transfer.h"
 #include "clay/mesh/validate.h"
+#include "clay/parallel/cancel.h"
+#include "clay/parallel/thread_pool.h"
 #include "clay/pick/pick.h"
 #include "clay/scene/armature.h"
 #include "clay/scene/bounds.h"
-#include "clay/parallel/cancel.h"
 #include "clay/scene/commands.h"
-#include "clay/session/history.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/cull_index.h"
 #include "clay/scene/curve.h"
 #include "clay/scene/tape.h"
+#include "clay/session/history.h"
 #include "clay/version.h"
 #include "clay/voxel/grid.h"
 #include "clay/voxel/groups.h"
@@ -1056,13 +1057,28 @@ struct clay_document {
     void touch() {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         forget_appends();
-        forget_index_appends();
+        // A seed is only usable across APPENDS, so one kept past any other
+        // edit is memory nothing can ever read again.
+        forget_resume();
         revision.fetch_add(1, std::memory_order_relaxed);
     }
 
     // The narrow one: `node` was appended at the tail of `layer`'s root list
-    // and nothing else changed, so the next rebuild can reuse the compiled
-    // prefix instead of re-emitting the whole document.
+    // and nothing else changed, so a cache built at any revision the log
+    // covers can be brought forward instead of rebuilt.
+    //
+    // ONE LOG, READ BY SEVERAL CACHES, and that is a change from how it began.
+    // It used to be reset when a reader absorbed it, which made it
+    // single-consumer: whichever cache the host asked for first spent it, and
+    // the others rebuilt. #309 worked around that by giving the cull index a
+    // second copy, and a third reader would have wanted a third.
+    //
+    // Instead nothing resets it on a read. An append bumps the revision by
+    // exactly one, so entry i IS the append that took the document from
+    // `append_base_ + i` to `append_base_ + i + 1` -- which means a reader
+    // sitting at revision R wants entries from `R - append_base_` onward, and
+    // several readers at different revisions can each take their own tail of
+    // the same log. `appends_since` is that lookup.
     void touch_appended(scene::LayerId layer, scene::NodeId node) {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         const std::uint64_t now = revision.load(std::memory_order_relaxed);
@@ -1077,21 +1093,195 @@ struct clay_document {
             append_log_.clear();
         }
         append_log_.push_back(node);
-        // The cull index gets its OWN log rather than sharing the tape's. That
-        // one is single-consumer by construction: it resets its base when the
-        // tape absorbs it, which is what keeps the NEXT append reusable, so a
-        // second reader would find it already spent about half the time
-        // depending on which cache the host asked for first.
-        if (!index_append_valid_ || index_append_layer_ != layer || index_append_at_ != now) {
-            index_append_valid_ = true;
-            index_append_layer_ = layer;
-            index_append_base_ = now;
-            index_append_log_.clear();
-        }
-        index_append_log_.push_back(node);
         revision.fetch_add(1, std::memory_order_relaxed);
         append_at_ = revision.load(std::memory_order_relaxed);
-        index_append_at_ = append_at_;
+    }
+
+    // -- resumable brick refill (#306) --------------------------------------
+    //
+    // A dab re-evaluates every surviving item of the edit list over a dirty
+    // brick's samples, so its cost follows what the artist has already
+    // sculpted: 18 ms at 50,000 items against a 4.17 ms budget. #308 built the
+    // way out -- compile only the appended items and run them onto the value
+    // the rest produced -- and this is the value. What a refill hands back IS
+    // that accumulator, exact and in float32, so keeping it is all that is
+    // needed to make the next dab cost what the dab adds.
+    //
+    // NOT the brick cache's own samples: those are fp16 clamped to the band,
+    // and its Inside/Outside bricks hold nothing at all, which is exactly
+    // where a growing dab lands.
+    struct ResumeKey {
+        std::int32_t x = 0, y = 0, z = 0;
+        bool operator==(const ResumeKey& o) const { return x == o.x && y == o.y && z == o.z; }
+    };
+    struct ResumeKeyHash {
+        std::size_t operator()(const ResumeKey& k) const {
+            std::size_t h = static_cast<std::size_t>(static_cast<std::uint32_t>(k.x));
+            h = h * 0x9e3779b97f4a7c15ull + static_cast<std::uint32_t>(k.y);
+            h = h * 0x9e3779b97f4a7c15ull + static_cast<std::uint32_t>(k.z);
+            return h;
+        }
+    };
+    struct ResumeEntry {
+        std::uint64_t revision = 0;
+        // Whether that brick's culled prefix produced a value at all. A brick
+        // whose whole chain the cull dropped has NO accumulator, and a suffix
+        // compiled as though it had one would combine against far-outside
+        // instead of seeding the chain. Read off the values: an empty tape
+        // evaluates to CLAY_TAPE_FAR everywhere, and a non-empty one that
+        // happens to as well only makes this refuse.
+        bool had_acc = false;
+        float pad = 0.0f;  // the cull pad the values were computed under
+        float spacing = 0.0f;
+        std::int32_t dims[3] = {0, 0, 0};
+        std::vector<float> values;
+    };
+
+    // Bricks kept, not bytes: every brick of one cache is the same lattice, so
+    // a count is a byte budget stated in the unit the caller thinks in. 16,384
+    // of a dim-8 cache is 32 MB, which is a stroke's working set several times
+    // over.
+    static constexpr std::size_t kResumeBricks = 16384;
+
+    void forget_resume() const {
+        resume_.clear();
+        resume_order_.clear();
+    }
+
+    // What a resumable refill needs, decided under one lock so the answer
+    // cannot be overtaken between the parts of it.
+    struct ResumePlan {
+        bool usable = false;
+        std::uint64_t now = 0;
+        std::vector<scene::NodeId> appended;  // what to compile as the suffix
+        scene::TapeCheckpoint checkpoint;
+    };
+
+    // The suffix that takes every stored seed forward, or `usable = false`.
+    //
+    // The checkpoint is BUILT here rather than borrowed from the cached tape.
+    // A brick refill never reads the tape, so `tape_checkpoint_` is cold in
+    // exactly the case this exists for -- which made the fast path unreachable
+    // until a mutation test showed it never fired.
+    //
+    // What `compile_layer_suffix` reads from a checkpoint is the layer, and
+    // whether an accumulator is on the stack: the byte lengths are for
+    // `compile_document_append`, which copies a prefix, and this does not.
+    // Both are stated rather than derived, and gated so the statement is true:
+    // ONE visible SDF layer, so nothing is underneath (`doc_have_acc` false),
+    // and every seed recorded a prefix that produced a value
+    // (`layer_have_acc` true, checked per brick in `seed_for`).
+    ResumePlan plan_resume(std::uint64_t seed_revision) const {
+        ResumePlan p;
+        p.now = revision.load(std::memory_order_relaxed);
+        if (seed_revision == 0 || seed_revision == p.now) return p;
+        const scene::Layer* only = nullptr;
+        for (const scene::Layer& l : doc.document.layers) {
+            if (!l.visible || l.kind != scene::LayerKind::Sdf || !l.sdf) continue;
+            if (only) return p;  // more than one, so a seed may sit under a union
+            only = &l;
+        }
+        if (!only) return p;
+        p.appended = appends_since(seed_revision, p.now);
+        if (p.appended.empty()) return p;
+        p.checkpoint = scene::TapeCheckpoint{};
+        p.checkpoint.valid = true;
+        p.checkpoint.layer = only->id;
+        p.checkpoint.layer_have_acc = true;
+        p.checkpoint.doc_have_acc = false;
+        p.usable = true;
+        return p;
+    }
+
+    // The one revision every stored seed shares, or 0 when they do not share
+    // one. A batch is refilled together and stored together, so in the case
+    // this exists for they always do; anything else takes the full path rather
+    // than compiling a suffix per revision.
+    std::uint64_t seed_revision_for(const clay_brick_request* requests, std::size_t count,
+                                    std::size_t per) const {
+        std::uint64_t shared = 0;
+        for (std::size_t i = 0; i < count; ++i) {
+            auto it =
+                resume_.find(ResumeKey{requests[i].key[0], requests[i].key[1], requests[i].key[2]});
+            if (it == resume_.end()) return 0;
+            const ResumeEntry& e = it->second;
+            if (e.values.size() != per || e.spacing != requests[i].spacing) return 0;
+            if (e.dims[0] != requests[i].dims[0] || e.dims[1] != requests[i].dims[1] ||
+                e.dims[2] != requests[i].dims[2])
+                return 0;
+            if (shared == 0)
+                shared = e.revision;
+            else if (shared != e.revision)
+                return 0;
+        }
+        return shared;
+    }
+
+    const float* seed_for(const clay_brick_request& request, float pad) const {
+        auto it = resume_.find(ResumeKey{request.key[0], request.key[1], request.key[2]});
+        if (it == resume_.end()) return nullptr;
+        // The cull pad decides which items a brick's compile keeps, so a seed
+        // taken under a different one was continued from a different field.
+        // The pad only grows on an append, so this is a real gate rather than
+        // a formality.
+        if (it->second.pad != pad) return nullptr;
+        if (!it->second.had_acc) return nullptr;
+        return it->second.values.data();
+    }
+
+    void store_seed(const clay_brick_request& request, std::uint64_t at, float pad,
+                    const float* values, std::size_t per) const {
+        const ResumeKey key{request.key[0], request.key[1], request.key[2]};
+        auto [it, fresh] = resume_.try_emplace(key);
+        if (fresh) {
+            resume_order_.push_back(key);
+            while (resume_order_.size() > kResumeBricks) {
+                const ResumeKey oldest = resume_order_.front();
+                resume_order_.pop_front();
+                if (!(oldest == key)) resume_.erase(oldest);
+            }
+        }
+        ResumeEntry& e = it->second;
+        e.had_acc = false;
+        for (std::size_t s = 0; s < per && !e.had_acc; ++s) e.had_acc = values[s] != CLAY_TAPE_FAR;
+        e.revision = at;
+        e.pad = pad;
+        e.spacing = request.spacing;
+        e.dims[0] = request.dims[0];
+        e.dims[1] = request.dims[1];
+        e.dims[2] = request.dims[2];
+        e.values.assign(values, values + per);
+    }
+
+    // The batch's results, kept as the next dab's seeds. `at` 0 means "the
+    // current revision", which is what the full path passes -- it has just
+    // produced the document as it is now.
+    void store_seeds(const clay_brick_request* requests, std::size_t count, const float* values,
+                     std::size_t per, std::uint64_t at, float pad) const {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        const std::uint64_t now = revision.load(std::memory_order_relaxed);
+        if (at == 0) {
+            at = now;
+            pad = cull_index_locked()->cull_pad();
+        } else if (at != now) {
+            return;  // the document moved under the batch; keeping it would lie
+        }
+        for (std::size_t i = 0; i < count; ++i)
+            store_seed(requests[i], at, pad, values + i * per, per);
+    }
+
+    std::mutex& cache_lock() const { return cache_mutex_; }
+
+    // The appends that take revision `from` to the current one, or nothing
+    // when the log does not cover that span -- no valid log, a reader older
+    // than its base, or a reader ahead of its end. Caller holds cache_mutex_.
+    std::vector<scene::NodeId> appends_since(std::uint64_t from, std::uint64_t now) const {
+        if (!append_valid_ || append_at_ != now || from < append_base_ || from > append_at_)
+            return {};
+        const std::size_t skip = static_cast<std::size_t>(from - append_base_);
+        if (skip > append_log_.size()) return {};
+        return std::vector<scene::NodeId>(append_log_.begin() + static_cast<std::ptrdiff_t>(skip),
+                                          append_log_.end());
     }
 
     std::shared_ptr<const scene::Tape> tape() const {
@@ -1102,18 +1292,19 @@ struct clay_document {
         // the document the log sits on top of. compile_document_append does
         // its own checking and refuses rather than trusting any of this, so a
         // wrong answer here costs a full compile, not a wrong field.
-        if (tape_cache_ && append_valid_ && append_at_ == now && tape_revision_ == append_base_ &&
-            tape_checkpoint_.valid) {
+        const std::vector<scene::NodeId> since =
+            tape_cache_ ? appends_since(tape_revision_, now) : std::vector<scene::NodeId>{};
+        if (!since.empty() && tape_checkpoint_.valid) {
             scene::Tape grown;
             scene::TapeCheckpoint next;
-            if (scene::compile_document_append(*tape_cache_, tape_checkpoint_, doc.document,
-                                               append_log_, &grown, &next)) {
+            if (scene::compile_document_append(*tape_cache_, tape_checkpoint_, doc.document, since,
+                                               &grown, &next)) {
                 tape_cache_ = std::make_shared<const scene::Tape>(std::move(grown));
                 tape_checkpoint_ = next;
                 tape_revision_ = now;
-                // The log has been consumed into the tape; the next append
-                // starts a fresh one on top of what is now cached.
-                forget_appends();
+                // The log is NOT cleared here: another cache may still be
+                // behind it, and the next append extends it rather than
+                // starting over. See touch_appended.
                 return tape_cache_;
             }
         }
@@ -1123,7 +1314,6 @@ struct clay_document {
                                                                                   &fresh));
         tape_checkpoint_ = fresh;
         tape_revision_ = now;
-        forget_appends();
         return tape_cache_;
     }
 
@@ -1139,6 +1329,11 @@ struct clay_document {
     // revision as the tape — an edit invalidates both the same way.
     std::shared_ptr<const scene::CullIndex> cull_index() const {
         std::lock_guard<std::mutex> lock(cache_mutex_);
+        return cull_index_locked();
+    }
+
+    // The same, for a caller that already holds cache_mutex_.
+    std::shared_ptr<const scene::CullIndex> cull_index_locked() const {
         const std::uint64_t now = revision.load(std::memory_order_relaxed);
         if (index_cache_ && index_revision_ == now) return index_cache_;
         // The append fast path, taken only when the cached index is exactly
@@ -1152,21 +1347,18 @@ struct clay_document {
         // may be holding the old one against a plan it already made. Copying
         // the entries is the memcpy the rebuild would have done anyway, and it
         // is what the 0.13 ms above is mostly made of.
-        if (index_cache_ && index_append_valid_ && index_append_at_ == now &&
-            index_revision_ == index_append_base_) {
+        const std::vector<scene::NodeId> since =
+            index_cache_ ? appends_since(index_revision_, now) : std::vector<scene::NodeId>{};
+        if (!since.empty()) {
             auto grown = std::make_shared<scene::CullIndex>(*index_cache_);
-            if (grown->append(index_append_log_)) {
+            if (grown->append(since)) {
                 index_cache_ = std::move(grown);
                 index_revision_ = now;
-                // Consumed, so the next append starts a fresh log on top of
-                // what is now cached -- the same rule the tape's log follows.
-                forget_index_appends();
                 return index_cache_;
             }
         }
         index_cache_ = std::make_shared<const scene::CullIndex>(doc.document);
         index_revision_ = now;
-        forget_index_appends();
         return index_cache_;
     }
 
@@ -1177,10 +1369,6 @@ struct clay_document {
         append_log_.clear();
     }
 
-    void forget_index_appends() const {
-        index_append_valid_ = false;
-        index_append_log_.clear();
-    }
 
     template <typename T, typename Build>
     std::shared_ptr<const T> cached(std::shared_ptr<const T>& slot,
@@ -1210,13 +1398,8 @@ struct clay_document {
     mutable std::uint64_t pick_revision_ = 0;
     mutable std::shared_ptr<const scene::CullIndex> index_cache_;
     mutable std::uint64_t index_revision_ = 0;
-    // The index's own copy of the append log; see touch_appended for why it is
-    // not the tape's.
-    mutable std::vector<scene::NodeId> index_append_log_;
-    mutable scene::LayerId index_append_layer_ = 0;
-    mutable std::uint64_t index_append_base_ = 0;
-    mutable std::uint64_t index_append_at_ = 0;
-    mutable bool index_append_valid_ = false;
+    mutable std::unordered_map<ResumeKey, ResumeEntry, ResumeKeyHash> resume_;
+    mutable std::deque<ResumeKey> resume_order_;  // insertion order, for eviction
 };
 
 // The item builder is a scene::Node under construction. Whether a transition
@@ -8555,21 +8738,122 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
     const char* name = backend ? backend : "cpu";
     eval::Backend* b = eval::Registry::instance().find(name);
     if (!b) return fail(CLAY_ERROR_NOT_FOUND, std::string("backend not registered: ") + name);
+    // -- the resumable path (#306) -----------------------------------------
+    //
+    // When every brick asked for carries a seed from the same revision, and
+    // the document has only been APPENDED to since, what this call has to
+    // evaluate is the appended items -- not the whole surviving edit list over
+    // every sample. The suffix is compiled per brick and culled exactly as a
+    // whole-document compile would cull it, which is what makes continuing
+    // from the seed the same arithmetic rather than an approximation of it.
+    //
+    // Distances only. A seed is one float a sample; a colour is not, so a
+    // caller asking for colour takes the full path.
+    std::vector<std::uint8_t> resumed(count, 0);
+    std::size_t resumed_count = 0;
+    float resume_pad = 0.0f;
+    std::uint64_t resume_now = 0;
+    if (!out_colors_rgb) {
+        std::lock_guard<std::mutex> lock(doc->cache_lock());
+        const std::uint64_t seed_rev = doc->seed_revision_for(requests, count, per);
+        const clay_document::ResumePlan plan = doc->plan_resume(seed_rev);
+        if (plan.usable) {
+            std::shared_ptr<const scene::CullIndex> index = doc->cull_index_locked();
+            resume_pad = index->cull_pad();
+            resume_now = plan.now;
+            std::vector<float> points;
+            for (std::size_t i = 0; i < count; ++i) {
+                const float* seed = doc->seed_for(requests[i], resume_pad);
+                if (!seed) continue;
+                eval::GridQuery g;
+                std::size_t samples = 0;
+                if (read_grid(requests[i].origin, requests[i].spacing, requests[i].dims, &g,
+                              &samples) != CLAY_OK)
+                    continue;
+                const math::Aabb box = request_brick_box(requests[i]).dilated(requests[i].band);
+                scene::CullRegion cull{box};
+                scene::Tape suffix;
+                if (!scene::compile_layer_suffix(plan.checkpoint, doc->doc.document, plan.appended,
+                                                 &suffix, nullptr, &cull, index.get()))
+                    continue;
+                points.resize(samples * 3);
+                std::size_t at = 0;
+                for (int k = 0; k < g.nz; ++k)
+                    for (int j = 0; j < g.ny; ++j)
+                        for (int x = 0; x < g.nx; ++x) {
+                            const kernel::cfloat3 pt =
+                                g.origin + kernel::cf3(static_cast<float>(x) * g.spacing,
+                                                       static_cast<float>(j) * g.spacing,
+                                                       static_cast<float>(k) * g.spacing);
+                            points[at * 3] = pt.x;
+                            points[at * 3 + 1] = pt.y;
+                            points[at * 3 + 2] = pt.z;
+                            ++at;
+                        }
+                eval::PointQuery pq;
+                pq.points_xyz = points.data();
+                pq.count = samples;
+                eval::PointResults pr;
+                pr.distances = out_values + i * per;
+                eval::eval_points_seeded(suffix, pq, seed, pr);
+                resumed[i] = 1;
+                ++resumed_count;
+            }
+        }
+    }
+
     // The whole batch goes to the backend as BATCHES of per-brick culled
     // tapes, not one call per brick: a GPU backend turns a batch into a single
     // device submission, and a per-brick submission costs more than the 512
     // samples it carries (issue #64). Validation, the cull index and the
     // chunking rules live in eval_requests_in_chunks, shared with the
     // device-destination form.
-    return eval_requests_in_chunks(
-        doc, requests, count,
-        [&](const eval::GridBatchQuery& bq, std::size_t base) -> clay_result {
+    //
+    // Only the bricks the resumable path did not answer, gathered so the batch
+    // stays a batch, then scattered back to their fixed slots.
+    if (resumed_count == count) {
+        doc->store_seeds(requests, count, out_values, per, resume_now, resume_pad);
+        return CLAY_OK;
+    }
+    if (resumed_count > 0) {
+        std::vector<clay_brick_request> misses;
+        std::vector<std::size_t> where;
+        misses.reserve(count - resumed_count);
+        where.reserve(count - resumed_count);
+        for (std::size_t i = 0; i < count; ++i)
+            if (!resumed[i]) {
+                misses.push_back(requests[i]);
+                where.push_back(i);
+            }
+        std::vector<float> scratch(misses.size() * per);
+        clay_result mr = eval_requests_in_chunks(
+            doc, misses.data(), misses.size(),
+            [&](const eval::GridBatchQuery& bq, std::size_t base) -> clay_result {
+                if (b->eval_grid_batch(bq, scratch.data() + base * per, nullptr) !=
+                    eval::Status::Ok)
+                    return fail(CLAY_ERROR_BACKEND, "eval_grid_batch failed");
+                return CLAY_OK;
+            });
+        if (mr != CLAY_OK) return mr;
+        for (std::size_t j = 0; j < where.size(); ++j)
+            std::memcpy(out_values + where[j] * per, scratch.data() + j * per, per * sizeof(float));
+        doc->store_seeds(requests, count, out_values, per, resume_now, resume_pad);
+        return CLAY_OK;
+    }
+    r = eval_requests_in_chunks(
+        doc, requests, count, [&](const eval::GridBatchQuery& bq, std::size_t base) -> clay_result {
             if (b->eval_grid_batch(bq, out_values + base * per,
                                    out_colors_rgb ? out_colors_rgb + base * per * 3
                                                   : nullptr) != eval::Status::Ok)
                 return fail(CLAY_ERROR_BACKEND, "eval_grid_batch failed");
             return CLAY_OK;
         });
+    if (r != CLAY_OK) return r;
+    // Kept so the NEXT dab can resume from it. This is the accumulator, exact
+    // and in float32, which is the whole reason a refill is where the seed
+    // comes from.
+    doc->store_seeds(requests, count, out_values, per, 0, 0.0f);
+    return CLAY_OK;
 }
 
 clay_result clay_brick_cache_submit(clay_brick_cache* cache,

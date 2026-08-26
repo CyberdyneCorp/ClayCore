@@ -224,9 +224,17 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& checkpoin
 // Its `bounds` and `info` describe the appended items only, and evaluating it
 // with an empty stack yields the suffix against empty space rather than against
 // the shape. `eval::eval_points_seeded` is what reads it.
+//
+// `cull` (with `index` for its pad, as compile_document takes them) drops
+// appended items a region cannot reach, exactly as a whole-document compile
+// would -- which is REQUIRED rather than an optimisation when the value being
+// folded onto was itself computed under that cull. A suffix culled differently
+// from the prefix it continues is a different field, and only outside the band,
+// which is where nothing is looking.
 bool compile_layer_suffix(const TapeCheckpoint& checkpoint, const Document& doc,
                           const std::vector<NodeId>& appended, Tape* out,
-                          TapeCheckpoint* out_checkpoint);
+                          TapeCheckpoint* out_checkpoint, const CullRegion* cull = nullptr,
+                          const CullIndex* index = nullptr);
 
 }  // namespace scene
 }  // namespace clay
