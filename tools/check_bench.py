@@ -174,6 +174,13 @@ FASTER_THAN = [
     # batched. Catches the pass falling back to the serial walk — which it does
     # silently, by design, when no CPU backend is registered.
     ("BM_MeshTapeAttributes", "BM_MeshTapeAttributesSerial"),
+    # A dab's other fixed cost: the cull index was rebuilt from scratch every
+    # stamp, walking every node to recompute bounds that had not moved, so that
+    # one appended item could be added. 2.42 ms at 50,000 items against 0.13 ms
+    # to extend, and the margin widens with the document rather than being a
+    # percentage. Both sides produce the index a rebuild gives --
+    # test_cull_index.cpp holds the per-brick tapes byte-identical either way.
+    ("BM_CullIndexAppend", "BM_CullIndexRebuild"),
     ("BM_MeshBricksSubset", "BM_MeshBricksWhole"),
     # Grid-path consolidation (accel/parallel-consolidate): baking a grown
     # layer through the CPU backend's batch path must beat the serial

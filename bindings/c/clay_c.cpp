@@ -1056,6 +1056,7 @@ struct clay_document {
     void touch() {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         forget_appends();
+        forget_index_appends();
         revision.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -1076,8 +1077,21 @@ struct clay_document {
             append_log_.clear();
         }
         append_log_.push_back(node);
+        // The cull index gets its OWN log rather than sharing the tape's. That
+        // one is single-consumer by construction: it resets its base when the
+        // tape absorbs it, which is what keeps the NEXT append reusable, so a
+        // second reader would find it already spent about half the time
+        // depending on which cache the host asked for first.
+        if (!index_append_valid_ || index_append_layer_ != layer || index_append_at_ != now) {
+            index_append_valid_ = true;
+            index_append_layer_ = layer;
+            index_append_base_ = now;
+            index_append_log_.clear();
+        }
+        index_append_log_.push_back(node);
         revision.fetch_add(1, std::memory_order_relaxed);
         append_at_ = revision.load(std::memory_order_relaxed);
+        index_append_at_ = append_at_;
     }
 
     std::shared_ptr<const scene::Tape> tape() const {
@@ -1124,8 +1138,36 @@ struct clay_document {
     // coarse pruning for per-brick culled compiles, keyed on the same
     // revision as the tape — an edit invalidates both the same way.
     std::shared_ptr<const scene::CullIndex> cull_index() const {
-        return cached(index_cache_, index_revision_,
-                      [this] { return scene::CullIndex(doc.document); });
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        const std::uint64_t now = revision.load(std::memory_order_relaxed);
+        if (index_cache_ && index_revision_ == now) return index_cache_;
+        // The append fast path, taken only when the cached index is exactly
+        // the document the log sits on top of. Rebuilding it to add one item
+        // walks every node recomputing bounds that did not move -- 2.42 ms at
+        // 50,000 items against 0.13 ms to extend. CullIndex::append does its
+        // own checking and refuses rather than trusting any of this, so being
+        // wrong here costs a rebuild, not a wrong cull.
+        //
+        // A COPY, because the cached index is shared and const: another thread
+        // may be holding the old one against a plan it already made. Copying
+        // the entries is the memcpy the rebuild would have done anyway, and it
+        // is what the 0.13 ms above is mostly made of.
+        if (index_cache_ && index_append_valid_ && index_append_at_ == now &&
+            index_revision_ == index_append_base_) {
+            auto grown = std::make_shared<scene::CullIndex>(*index_cache_);
+            if (grown->append(index_append_log_)) {
+                index_cache_ = std::move(grown);
+                index_revision_ = now;
+                // Consumed, so the next append starts a fresh log on top of
+                // what is now cached -- the same rule the tape's log follows.
+                forget_index_appends();
+                return index_cache_;
+            }
+        }
+        index_cache_ = std::make_shared<const scene::CullIndex>(doc.document);
+        index_revision_ = now;
+        forget_index_appends();
+        return index_cache_;
     }
 
   private:
@@ -1133,6 +1175,11 @@ struct clay_document {
     void forget_appends() const {
         append_valid_ = false;
         append_log_.clear();
+    }
+
+    void forget_index_appends() const {
+        index_append_valid_ = false;
+        index_append_log_.clear();
     }
 
     template <typename T, typename Build>
@@ -1163,6 +1210,13 @@ struct clay_document {
     mutable std::uint64_t pick_revision_ = 0;
     mutable std::shared_ptr<const scene::CullIndex> index_cache_;
     mutable std::uint64_t index_revision_ = 0;
+    // The index's own copy of the append log; see touch_appended for why it is
+    // not the tape's.
+    mutable std::vector<scene::NodeId> index_append_log_;
+    mutable scene::LayerId index_append_layer_ = 0;
+    mutable std::uint64_t index_append_base_ = 0;
+    mutable std::uint64_t index_append_at_ = 0;
+    mutable bool index_append_valid_ = false;
 };
 
 // The item builder is a scene::Node under construction. Whether a transition

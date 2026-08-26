@@ -477,3 +477,155 @@ TEST_CASE("cull index: the cost is SUBLINEAR in document size, not merely smalle
     CHECK(large > 0);
     CHECK(large <= small * 2);  // flat, not growing with the document
 }
+
+namespace {
+
+// The property an appended index must have: for every brick of a batch, the
+// tape it produces is byte-identical to the one a FRESHLY BUILT index
+// produces — which the tests above already hold equal to the unindexed
+// compile, so this inherits that too.
+void check_append_matches_fresh(Document& doc, const std::vector<NodeId>& appended,
+                                CullIndex& grown, std::uint64_t seed) {
+    const float band = 0.15f;
+    REQUIRE(grown.append(appended));
+
+    const CullIndex fresh(doc);
+    CHECK(grown.cull_pad() == fresh.cull_pad());  // exact, not approx
+
+    clay_test::Lcg rng(seed);
+    std::vector<math::Aabb> bricks;
+    math::Aabb batch;
+    for (int b = 0; b < 24; ++b) {
+        cfloat3 corner = rng.vec3(-2.0f, 2.0f);
+        bricks.push_back(math::Aabb{corner, corner + cf3(0.4f, 0.4f, 0.4f)});
+        batch.expand(bricks.back().dilated(band));
+    }
+    const CullPlan grown_plan = grown.plan(batch);
+    const CullPlan fresh_plan = fresh.plan(batch);
+
+    for (const math::Aabb& brick : bricks) {
+        CullRegion cull{brick.dilated(band)};
+        const Tape a = compile_document(doc, &cull, &grown, &grown_plan);
+        const Tape b = compile_document(doc, &cull, &fresh, &fresh_plan);
+        require_same_tape(a, b);
+        // And against the compile that uses no index at all, which is the
+        // claim the whole class rests on.
+        require_same_tape(compile_document(doc, &cull), a);
+    }
+}
+
+Node dab(cfloat3 at, float k = 0.05f) {
+    Node n = item(Prim::sphere(0.25f), at);
+    n.blend = Blend{BlendProfile::Quadratic, k};
+    return n;
+}
+
+}  // namespace
+
+TEST_CASE("cull index: an appended index is the index a rebuild would give") {
+    SUBCASE("one dab onto the gnarly corpus") {
+        Document doc = gnarly_document();
+        CullIndex grown(doc);
+        const NodeId id = doc.layers[0].sdf->insert(dab(cf3(0.4f, 0.2f, -0.3f)));
+        check_append_matches_fresh(doc, {id}, grown, 811);
+    }
+
+    SUBCASE("several at once") {
+        Document doc = gnarly_document();
+        CullIndex grown(doc);
+        std::vector<NodeId> ids;
+        for (int i = 0; i < 5; ++i)
+            ids.push_back(doc.layers[0].sdf->insert(dab(cf3(0.1f * i, 0.3f, 0.2f))));
+        check_append_matches_fresh(doc, ids, grown, 812);
+    }
+
+    SUBCASE("a GROUP, whose children are chains of their own") {
+        Document doc = gnarly_document();
+        CullIndex grown(doc);
+        Node g;
+        g.is_group = true;
+        g.blend = Blend{BlendProfile::Quadratic, 0.07f};
+        const NodeId gid = doc.layers[0].sdf->insert(g);
+        REQUIRE(gid != kNoNode);
+        doc.layers[0].sdf->insert(dab(cf3(0.5f, -0.2f, 0.1f)), gid);
+        doc.layers[0].sdf->insert(dab(cf3(0.6f, -0.1f, 0.2f)), gid);
+        check_append_matches_fresh(doc, {gid}, grown, 813);
+    }
+
+    SUBCASE("a feathered volume replace, which forbids pruning its chain") {
+        // The entry that changes the chain's PRUNABILITY rather than its
+        // bounds: if the append missed it, the grown index would prune a chain
+        // the compiler needs the full walk of, and the tapes would differ.
+        Document doc = gnarly_document();
+        CullIndex grown(doc);
+        Node n;
+        n.prim = Prim::volume();
+        n.volume =
+            std::make_shared<field::FieldVolume>(feathered_ball(cf3(0.3f, 0.1f, 0.0f), 0.4f));
+        n.op = Op::Replace;
+        const NodeId id = doc.layers[0].sdf->insert(std::move(n));
+        check_append_matches_fresh(doc, {id}, grown, 814);
+    }
+
+    SUBCASE("an item whose blend widens the document's cull pad") {
+        // The pad is a maximum over visible nodes, so an append can raise it.
+        // A grown index that kept the old pad would plan against too small a
+        // region and drop an item a brick needed.
+        Document doc = gnarly_document();
+        CullIndex grown(doc);
+        const float before = grown.cull_pad();
+        const NodeId id = doc.layers[0].sdf->insert(dab(cf3(0.2f, 0.2f, 0.2f), 1.5f));
+        check_append_matches_fresh(doc, {id}, grown, 815);
+        CHECK(grown.cull_pad() > before);  // it really did move
+    }
+
+    SUBCASE("a stroke: every dab carried forward on the same index") {
+        // The case this exists for. Each append builds on the one before, so a
+        // drift would compound rather than show up once.
+        Document doc = gnarly_document();
+        CullIndex grown(doc);
+        for (int i = 0; i < 8; ++i) {
+            const NodeId id = doc.layers[0].sdf->insert(
+                dab(cf3(0.35f + 0.05f * static_cast<float>(i), 0.1f, -0.2f)));
+            REQUIRE(grown.append({id}));
+        }
+        const CullIndex fresh(doc);
+        CHECK(grown.cull_pad() == fresh.cull_pad());
+        check_append_matches_fresh(doc, {doc.layers[0].sdf->insert(dab(cf3(0.8f, 0.0f, 0.0f)))},
+                                   grown, 816);
+    }
+}
+
+TEST_CASE("cull index: an append it cannot be sure of is refused, not guessed") {
+    Document doc = gnarly_document();
+    const std::vector<NodeId>& roots = doc.layers[0].sdf->roots;
+
+    SUBCASE("nothing appended") {
+        CullIndex ix(doc);
+        CHECK_FALSE(ix.append({}));
+    }
+    SUBCASE("ids that are not the tail") {
+        CullIndex ix(doc);
+        CHECK_FALSE(ix.append({roots.front()}));
+    }
+    SUBCASE("more ids than the layer holds") {
+        CullIndex ix(doc);
+        std::vector<NodeId> too_many(roots.size() + 2, roots.back());
+        CHECK_FALSE(ix.append(too_many));
+    }
+    SUBCASE("a refusal leaves the index usable") {
+        // Nothing is written until every check has passed, so the index a
+        // refused caller still holds is the one it had.
+        CullIndex ix(doc);
+        const float pad = ix.cull_pad();
+        CHECK_FALSE(ix.append({roots.front()}));
+        CHECK(ix.cull_pad() == pad);
+        const CullIndex fresh(doc);
+        const math::Aabb region{cf3(-2, -2, -2), cf3(2, 2, 2)};
+        CullRegion cull{region};
+        const CullPlan kept_plan = ix.plan(region);
+        const CullPlan fresh_plan = fresh.plan(region);
+        require_same_tape(compile_document(doc, &cull, &ix, &kept_plan),
+                          compile_document(doc, &cull, &fresh, &fresh_plan));
+    }
+}

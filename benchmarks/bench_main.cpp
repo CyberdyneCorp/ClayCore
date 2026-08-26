@@ -627,6 +627,71 @@ BENCHMARK(BM_DeepDocRefillPlanned2000)->Unit(benchmark::kMillisecond);
 void BM_DeepDocRefillPlanned10000(benchmark::State& state) { deep_doc_refill_planned(state, 10000); }
 BENCHMARK(BM_DeepDocRefillPlanned10000)->Unit(benchmark::kMillisecond);
 
+// Rebuilding the cull index per dab against extending it (#306 follow-up).
+// A stroke appends one item per stamp, and a rebuild walks every node
+// recomputing bounds that did not move -- 2.42 ms at 50,000 items, of which
+// 2.29 ms is bounds and 0.15 ms the pad. The pair holds the same scaling law
+// the tape's prefix reuse does: the margin widens with the document.
+namespace {
+constexpr int kIndexAppendNodes = 20000;
+
+// Dabs spread evenly over a sphere, so per-brick culling is genuinely working
+// and the index is not trivially small.
+scene::Document index_sculpt(int nodes) {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("s");
+    scene::Node base;
+    base.prim = scene::Prim::sphere(1.0f);
+    l.sdf->insert(base);
+    for (int i = 1; i < nodes; ++i) {
+        scene::Node d;
+        d.prim = scene::Prim::sphere(0.04f);
+        const double z = 1.0 - 2.0 * (i + 0.5) / nodes;
+        const double r = std::sqrt(std::max(0.0, 1.0 - z * z));
+        const double th = 2.399963 * i;
+        const double a = r * std::cos(th), b = r * std::sin(th);
+        d.xform.position = cf3(static_cast<float>(std::sqrt(std::max(0.0, 1.0 - a * a - b * b))),
+                               static_cast<float>(a), static_cast<float>(b));
+        d.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.04f};
+        l.sdf->insert(d);
+    }
+    return doc;
+}
+}  // namespace
+
+void BM_CullIndexRebuild(benchmark::State& state) {
+    const scene::Document doc = index_sculpt(kIndexAppendNodes);
+    for (auto _ : state) {
+        const scene::CullIndex index(doc);
+        benchmark::DoNotOptimize(index.cull_pad());
+    }
+    state.counters["nodes"] = static_cast<double>(kIndexAppendNodes);
+}
+BENCHMARK(BM_CullIndexRebuild)->Unit(benchmark::kMillisecond);
+
+void BM_CullIndexAppend(benchmark::State& state) {
+    scene::Document doc = index_sculpt(kIndexAppendNodes);
+    scene::CullIndex index(doc);
+    // One dab per iteration, each extending the index the last one produced --
+    // a stroke, which is the case this exists for. The insert is outside the
+    // timed region the same way the rebuild's document build is.
+    for (auto _ : state) {
+        state.PauseTiming();
+        scene::Node n;
+        n.prim = scene::Prim::sphere(0.04f);
+        n.xform.position = cf3(1.0f, 0.001f * static_cast<float>(state.iterations()), 0.0f);
+        n.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.04f};
+        const scene::NodeId id = doc.layers[0].sdf->insert(std::move(n));
+        state.ResumeTiming();
+        if (!index.append({id})) {
+            state.SkipWithError("the append was refused");
+            return;
+        }
+    }
+    state.counters["nodes"] = static_cast<double>(kIndexAppendNodes);
+}
+BENCHMARK(BM_CullIndexAppend)->Unit(benchmark::kMillisecond);
+
 void BM_DeepDocRefill193(benchmark::State& state) { deep_doc_refill(state, 193); }
 BENCHMARK(BM_DeepDocRefill193)->Unit(benchmark::kMillisecond);
 void BM_DeepDocRefill2000(benchmark::State& state) { deep_doc_refill(state, 2000); }
