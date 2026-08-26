@@ -231,6 +231,29 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& checkpoin
 // folded onto was itself computed under that cull. A suffix culled differently
 // from the prefix it continues is a different field, and only outside the band,
 // which is where nothing is looking.
+// -- one half of a document, for a resumable multi-layer refill --------------
+//
+// A document's visible SDF layers hard-union left to right, so a compile that
+// stops before `active` and one that emits only `active` are, together, the
+// whole document apart from that union. A caller that holds the two VALUES can
+// fold appended items into the second and union them itself, which is what a
+// brick refill does when more than one layer is visible: the layers below are
+// static across a stroke, and only the active one moves.
+//
+// `below` true emits the visible SDF layers BEFORE `active`; false emits only
+// `active`. One half per call, because a caller that wants both wants them into
+// two batches and one that wants one should not pay for the other.
+//
+// Both halves cull under the WHOLE DOCUMENT's pad, not their own. A part
+// compiled under a smaller pad drops items the whole-document compile keeps,
+// and then the two halves no longer sum to the whole.
+//
+// The union to fold them with is a HARD Add -- `ctape_combine_values` with the
+// Add mode and no blend -- which is what the whole-document compile emits
+// between layers. Anything else is a different field.
+Tape compile_document_part(const Document& doc, LayerId active, bool below,
+                           const CullRegion* cull = nullptr, const CullIndex* index = nullptr);
+
 bool compile_layer_suffix(const TapeCheckpoint& checkpoint, const Document& doc,
                           const std::vector<NodeId>& appended, Tape* out,
                           TapeCheckpoint* out_checkpoint, const CullRegion* cull = nullptr,
