@@ -83,6 +83,25 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.52.3 is not such a release**: no symbol added or removed, no signature
+   changed. It is a BEHAVIOUR change to one existing call, and the kind worth
+   reading before upgrading: `clay_layer_bounds` used to report no bounds for a
+   voxel or a mesh layer however much material it held, and now answers from the
+   occupied cells or the vertices (issue #318).
+
+   Nothing recompiles and nothing links differently. What moves is a caller that
+   read `has_bounds == 0` as "this is not an SDF layer" — that reading was never
+   sound, since an empty SDF layer reports 0 too, but it worked by accident and
+   now does not. A caller that read it as "this layer is nowhere" was being told
+   something false and is now told the truth.
+
+   The old behaviour was DELIBERATE and a unit test asserted it, which is why it
+   is called out here rather than filed as a bug fix: reversing a decision the
+   tests record is a thing a reader should be able to find. The decision was
+   about the implementation — `scene::Layer` holds only SDF content, because the
+   layering rule withholds `clay/voxel` and `clay/mesh` from `clay::scene` — and
+   it had been written down as though it were about the contract.
+
    **0.52.2 is not such a release**: no symbol added or removed against 0.52.1,
    and none against 0.52.0 either. It is one fix to `tools/release_check.py`.
 

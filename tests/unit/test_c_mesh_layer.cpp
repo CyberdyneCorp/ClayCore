@@ -217,7 +217,17 @@ TEST_CASE("c mesh layer: not found, and the refusals") {
     clay_mesh_destroy(source);
 }
 
-TEST_CASE("c mesh layer: bounds come off the mesh, not off clay_layer_bounds") {
+TEST_CASE("c mesh layer: clay_layer_bounds answers from the mesh") {
+    // THIS TEST ASSERTED THE OPPOSITE until issue #318, and the reversal is
+    // deliberate rather than a drift. The old text read "clay_layer_bounds is
+    // derived from SDF shapes and is deliberately left meaning what it always
+    // meant: a mesh layer shows it nothing" -- which is a decision about the
+    // IMPLEMENTATION (scene::Layer holds only SDF content) dressed as a
+    // decision about the CONTRACT. A mesh cannot be unbounded: its vertices are
+    // a box, and clay_mesh_bounds will give it. Reporting none was never the
+    // truth, and every host worked around it by reading the geometry back --
+    // for a 300k-triangle model, a copy of every position to answer a question
+    // the engine can answer from data it already holds.
     Doc d;
     clay_mesh* source = tetrahedron();
     float lo[3] = {0, 0, 0};
@@ -232,13 +242,48 @@ TEST_CASE("c mesh layer: bounds come off the mesh, not off clay_layer_bounds") {
     clay_layer_id layer = 0;
     REQUIRE(clay_document_add_mesh_layer(d.doc, source, &desc, &layer, nullptr) == CLAY_OK);
     clay_mesh_destroy(source);
-    // clay_layer_bounds is derived from SDF shapes and is deliberately left
-    // meaning what it always meant: a mesh layer shows it nothing.
+
     float bmin[3] = {0, 0, 0};
     float bmax[3] = {0, 0, 0};
-    std::int32_t has_bounds = 1;
+    std::int32_t has_bounds = 0;
     REQUIRE(clay_layer_bounds(d.doc, layer, bmin, bmax, &has_bounds) == CLAY_OK);
-    CHECK(has_bounds == 0);
+    REQUIRE(has_bounds == 1);
+    // The SAME box clay_mesh_bounds reports, to the float. Compared against the
+    // other entry point rather than against literals, so the two cannot drift.
+    for (int i = 0; i < 3; ++i) {
+        CHECK(bmin[i] == doctest::Approx(lo[i]));
+        CHECK(bmax[i] == doctest::Approx(hi[i]));
+    }
+}
+
+TEST_CASE("c mesh layer: layer bounds are WORLD space, so the transform applies") {
+    // The SDF arm composes layer.xform with each node's own, so a caller
+    // comparing two layers is asking one question. A mesh layer answering in
+    // its own local space would answer a different one, and the difference is
+    // invisible until somebody moves a layer.
+    Doc d;
+    clay_mesh* source = tetrahedron();
+    clay_mesh_layer_desc desc = layer_desc("scan");
+    clay_layer_id layer = 0;
+    REQUIRE(clay_document_add_mesh_layer(d.doc, source, &desc, &layer, nullptr) == CLAY_OK);
+    clay_mesh_destroy(source);
+
+    const float offset[3] = {10.0f, -5.0f, 2.0f};
+    const float axis[3] = {0.0f, 1.0f, 0.0f};
+    REQUIRE(clay_document_set_layer_transform(d.doc, layer, offset, axis, 0.0f, 1.0f) == CLAY_OK);
+
+    float bmin[3] = {0, 0, 0};
+    float bmax[3] = {0, 0, 0};
+    std::int32_t has_bounds = 0;
+    REQUIRE(clay_layer_bounds(d.doc, layer, bmin, bmax, &has_bounds) == CLAY_OK);
+    REQUIRE(has_bounds == 1);
+    // the tetrahedron is (0,0,0)..(1,2,3) in its own space
+    CHECK(bmin[0] == doctest::Approx(10.0f));
+    CHECK(bmin[1] == doctest::Approx(-5.0f));
+    CHECK(bmin[2] == doctest::Approx(2.0f));
+    CHECK(bmax[0] == doctest::Approx(11.0f));
+    CHECK(bmax[1] == doctest::Approx(-3.0f));
+    CHECK(bmax[2] == doctest::Approx(5.0f));
 }
 
 TEST_CASE("c mesh layer: clay_document_mesh is untouched by one") {

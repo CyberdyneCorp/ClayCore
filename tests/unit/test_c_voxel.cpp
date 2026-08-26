@@ -890,3 +890,108 @@ TEST_CASE("c abi: sculpt layers record, dial and survive a round trip") {
 
     CHECK(clay_voxel_grid_destroy(grid) == CLAY_OK);
 }
+
+// -- clay_layer_bounds over a voxel layer (issue #318) ------------------------
+//
+// Reported for MESH layers; the voxel arm had the identical defect and the
+// issue did not know it. Worth its own case rather than a second assertion in
+// the mesh one: the two read different side tables, and a cell is a BOX where a
+// vertex is a point, which is the part a shared test would not have caught.
+TEST_CASE("c voxel layer: clay_layer_bounds answers from the occupied cells") {
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+
+    clay_layer_id layer = 0;
+    clay_voxel_grid* grid = nullptr;
+    const float vs = 0.05f;
+    REQUIRE(clay_document_add_voxel_layer(doc, "grid", vs, &layer, &grid) == CLAY_OK);
+
+    float bmin[3] = {0, 0, 0};
+    float bmax[3] = {0, 0, 0};
+    std::int32_t has = 1;
+
+    // An EMPTY grid is genuinely nowhere, and that is a different answer from
+    // "this kind of layer cannot say". The fix must not turn it into a box.
+    REQUIRE(clay_layer_bounds(doc, layer, bmin, bmax, &has) == CLAY_OK);
+    CHECK(has == 0);
+
+    // One cell at the origin. Its extent is the CELL, not the point: a single
+    // occupied cell spans [0,vs] on every axis, so a bound that took the near
+    // corner twice would report an empty box and read as "nowhere" again.
+    const std::int32_t cell[3] = {0, 0, 0};
+    REQUIRE(clay_voxel_set(grid, cell, 1) == CLAY_OK);
+    has = 0;
+    REQUIRE(clay_layer_bounds(doc, layer, bmin, bmax, &has) == CLAY_OK);
+    REQUIRE(has == 1);
+    for (int i = 0; i < 3; ++i) {
+        CHECK(bmin[i] == doctest::Approx(0.0f));
+        CHECK(bmax[i] == doctest::Approx(vs));
+    }
+
+    // A second cell away from the first, so the box has to grow rather than
+    // merely exist. Cell 3 spans [3*vs, 4*vs], hence the +1 on the far corner.
+    const std::int32_t far_cell[3] = {3, 2, 1};
+    REQUIRE(clay_voxel_set(grid, far_cell, 1) == CLAY_OK);
+    REQUIRE(clay_layer_bounds(doc, layer, bmin, bmax, &has) == CLAY_OK);
+    REQUIRE(has == 1);
+    CHECK(bmin[0] == doctest::Approx(0.0f));
+    CHECK(bmax[0] == doctest::Approx(4 * vs));
+    CHECK(bmax[1] == doctest::Approx(3 * vs));
+    CHECK(bmax[2] == doctest::Approx(2 * vs));
+
+    // World space, like the SDF and mesh arms: the layer transform applies.
+    const float offset[3] = {1.0f, 0.0f, -2.0f};
+    const float axis[3] = {0.0f, 1.0f, 0.0f};
+    REQUIRE(clay_document_set_layer_transform(doc, layer, offset, axis, 0.0f, 1.0f) == CLAY_OK);
+    REQUIRE(clay_layer_bounds(doc, layer, bmin, bmax, &has) == CLAY_OK);
+    REQUIRE(has == 1);
+    CHECK(bmin[0] == doctest::Approx(1.0f));
+    CHECK(bmin[2] == doctest::Approx(-2.0f));
+    CHECK(bmax[0] == doctest::Approx(1.0f + 4 * vs));
+
+    clay_document_destroy(doc);
+}
+
+// The conversion issue #318 says is unreachable: a host cannot supply a region
+// for a mesh layer without reading every vertex back, so CLAY_PRIM-side
+// mesh-to-voxel could not be driven through the ordinary path at all.
+TEST_CASE("c voxel: a mesh layer's bounds are a region rasterize_mesh accepts") {
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+
+    const float positions[12] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    const std::uint32_t indices[12] = {0, 1, 2, 0, 1, 3, 0, 2, 3, 1, 2, 3};
+    clay_mesh* source = nullptr;
+    REQUIRE(clay_mesh_from_triangles(positions, 4, indices, 12, &source) == CLAY_OK);
+
+    clay_mesh_layer_desc desc;
+    std::memset(&desc, 0, sizeof desc);
+    desc.struct_size = static_cast<std::uint32_t>(sizeof desc);
+    desc.name = "scan";
+    clay_layer_id mesh_layer = 0;
+    clay_mesh* borrowed = nullptr;
+    REQUIRE(clay_document_add_mesh_layer(doc, source, &desc, &mesh_layer, &borrowed) == CLAY_OK);
+    clay_mesh_destroy(source);
+
+    float bmin[3] = {0, 0, 0};
+    float bmax[3] = {0, 0, 0};
+    std::int32_t has = 0;
+    REQUIRE(clay_layer_bounds(doc, mesh_layer, bmin, bmax, &has) == CLAY_OK);
+    REQUIRE(has == 1);
+
+    clay_layer_id voxel_layer = 0;
+    clay_voxel_grid* grid = nullptr;
+    REQUIRE(clay_document_add_voxel_layer(doc, "from_mesh", 0.05f, &voxel_layer, &grid) == CLAY_OK);
+    REQUIRE(clay_voxel_rasterize_mesh(grid, borrowed, bmin, bmax) == CLAY_OK);
+
+    std::size_t occupied = 0;
+    REQUIRE(clay_voxel_occupied_count(grid, &occupied) == CLAY_OK);
+    // The assertion that matters is that it rasterized ANYTHING: before the fix
+    // the region could not be obtained, and the call refused with "this layer
+    // has no bounds, so a region is needed to say where the rasterization
+    // stops".
+    CHECK(occupied > 0);
+
+    clay_document_destroy(doc);
+}
