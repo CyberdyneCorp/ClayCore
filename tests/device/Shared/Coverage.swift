@@ -110,6 +110,15 @@ enum Coverage {
         // is the GPU backend's, and a table entry pointing at cpu would be
         // satisfied by a run in which Metal never patched anything.
         .measured("sdf_stroke", by: "sdf_stroke_metal"),
+        // The same unbroken stroke through the BRICK CACHE, which is a
+        // different code path from sdf_stroke above and the only one that can
+        // reach the resumed refill (#306: the seeded suffix, the cull-index
+        // append, the brick seed store). sdf_stamp_incremental cannot: its
+        // reset removes the node, and a removal is not an append, so the chain
+        // breaks before the fast path is ever consulted. Named separately for
+        // the same reason sdf_stroke is named apart from sdf_stamp -- one is
+        // not evidence for the other.
+        .measured("sdf_stroke_incremental", by: "sdf_stroke_bricks"),
 
         // -- masks ------------------------------------------------------------
         .measured("mask_paint", by: "mask_paint"),
