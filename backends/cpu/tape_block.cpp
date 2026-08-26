@@ -215,7 +215,7 @@ struct SlotOf<false> {
 template <bool WithColour>
 void walk_blocked(const kernel::CTapeInstr* in, std::size_t ni, const float* params,
                   const float* blob, const PointQuery& q, const PointResults& out,
-                  std::size_t block, std::size_t depth) {
+                  std::size_t block, std::size_t depth, const float* seed = nullptr) {
     using Slot = typename SlotOf<WithColour>::type;
     // Thread-local so the allocation happens once per thread rather than once
     // per call, and sized to the work present rather than to `block`: the grid
@@ -233,6 +233,17 @@ void walk_blocked(const kernel::CTapeInstr* in, std::size_t ni, const float* par
             return cf3(q.points_xyz[i * 3], q.points_xyz[i * 3 + 1], q.points_xyz[i * 3 + 2]);
         };
         std::size_t top = 0;
+        // A SEEDED walk starts holding the value the instructions ahead of
+        // these produced, so the first combine folds onto it exactly as it
+        // would have. Distance only: the seeded entry point is for a suffix
+        // whose prefix was reduced to one number a point, and a colour is not
+        // one number.
+        if (seed) {
+            Slot* s0 = &stack[0];
+            for (std::size_t j = 0; j < n; ++j)
+                if constexpr (!WithColour) s0[j] = seed[base + j];
+            top = 1;
+        }
         for (std::size_t k = 0; k < ni; ++k) {
             const kernel::CTapeInstr& instr = in[k];
             const float* pr = params + instr.param_offset;
@@ -361,6 +372,51 @@ void walk_blocked(const kernel::CTapeInstr* in, std::size_t ni, const float* par
 }
 
 }  // namespace
+
+namespace {
+// `tape_stack_depth` for a walk that starts already holding one value. Not that
+// one plus one: a combine is SKIPPED at depth zero and executed at depth one, so
+// the two simulations do not run the same instructions and the deepest point of
+// one is not the deepest point of the other shifted up.
+std::size_t seeded_stack_depth(const scene::Tape& tape) {
+    std::size_t top = 1;
+    std::size_t depth = 1;
+    for (const kernel::CTapeInstr& instr : tape.instrs) {
+        if (instr.op == kernel::ctape_combine) {
+            if (top < 1) continue;
+            if (top >= 2) --top;
+        } else {
+            if (top >= static_cast<std::size_t>(CLAY_TAPE_MAX_STACK)) continue;
+            ++top;
+        }
+        depth = std::max(depth, top);
+    }
+    return depth;
+}
+}  // namespace
+
+void eval_points_seeded(const scene::Tape& suffix, const PointQuery& q, const float* seed,
+                        const PointResults& out, std::size_t block) {
+    if (block == 0) block = kDefaultBlock;
+    if (!seed || !out.distances) return;
+    // Distances only. A seeded walk continues a fold whose prefix is one float
+    // a point; gradients would need the prefix's four taps and a colour would
+    // need a colour, and neither is a thing a seed can carry.
+    PointResults d;
+    d.distances = out.distances;
+
+    const std::size_t ni = suffix.instrs.size();
+    // An empty suffix is the prefix, unchanged -- which is what the seed
+    // already is. Not "far outside": the stack is not empty here.
+    if (ni == 0) {
+        for (std::size_t i = 0; i < q.count; ++i) out.distances[i] = seed[i];
+        return;
+    }
+    const std::size_t depth = seeded_stack_depth(suffix);
+    const std::size_t span = std::min(block, q.count);
+    walk_blocked<false>(suffix.instrs.data(), ni, suffix.params.data(), suffix.blob.data(), q, d,
+                        span, depth, seed);
+}
 
 void eval_points_blocked(const scene::Tape& tape, const PointQuery& q, const PointResults& out,
                          std::size_t block) {

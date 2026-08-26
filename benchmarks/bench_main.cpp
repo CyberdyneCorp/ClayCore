@@ -627,6 +627,134 @@ BENCHMARK(BM_DeepDocRefillPlanned2000)->Unit(benchmark::kMillisecond);
 void BM_DeepDocRefillPlanned10000(benchmark::State& state) { deep_doc_refill_planned(state, 10000); }
 BENCHMARK(BM_DeepDocRefillPlanned10000)->Unit(benchmark::kMillisecond);
 
+// Continuing the fold against replaying it (#306). A dab's cost follows
+// everything already sculpted, because a dirty brick re-evaluates every
+// surviving item over its samples even though almost none of them changed;
+// `compile_layer_suffix` + `eval_points_seeded` run only what the dab adds,
+// onto the value the rest produced.
+//
+// The pair holds the scaling law rather than a percentage: the suffix is two
+// instructions whatever the document holds, so the gap widens with the sculpt.
+// At 10,000 dabs spread over a sphere the full walk compiles 16,000-odd
+// instructions for 12 bricks and the suffix compiles none.
+namespace {
+scene::Document spread_sculpt(int nodes) {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("s");
+    scene::Node base;
+    base.prim = scene::Prim::sphere(1.0f);
+    l.sdf->insert(base);
+    for (int i = 1; i < nodes; ++i) {
+        scene::Node d;
+        d.prim = scene::Prim::sphere(0.04f);
+        const double z = 1.0 - 2.0 * (i + 0.5) / nodes;
+        const double r = std::sqrt(std::max(0.0, 1.0 - z * z));
+        const double th = 2.399963 * i;
+        const double a = r * std::cos(th), b = r * std::sin(th);
+        d.xform.position = cf3(static_cast<float>(std::sqrt(std::max(0.0, 1.0 - a * a - b * b))),
+                               static_cast<float>(a), static_cast<float>(b));
+        l.sdf->insert(d);
+    }
+    return doc;
+}
+
+// The dab's dirty bricks, and the lattice points of each.
+struct DabWork {
+    brick::BrickCache cache{brick::BrickConfig{8, 0.05f, 3, 0}};
+    std::vector<brick::BrickRequest> reqs;
+    std::vector<std::vector<float>> points;
+    DabWork() {
+        cache.mark_dirty(math::Aabb{cf3(0.90f, -0.08f, -0.08f), cf3(1.06f, 0.08f, 0.08f)});
+        reqs = cache.take_dirty();
+        points.resize(reqs.size());
+        for (std::size_t s = 0; s < reqs.size(); ++s) {
+            const auto& g = reqs[s].grid;
+            points[s].resize(static_cast<std::size_t>(g.nx) * g.ny * g.nz * 3);
+            std::size_t at = 0;
+            for (int k = 0; k < g.nz; ++k)
+                for (int j = 0; j < g.ny; ++j)
+                    for (int i = 0; i < g.nx; ++i) {
+                        const kernel::cfloat3 p = g.origin + cf3(static_cast<float>(i) * g.spacing,
+                                                                 static_cast<float>(j) * g.spacing,
+                                                                 static_cast<float>(k) * g.spacing);
+                        points[s][at * 3] = p.x;
+                        points[s][at * 3 + 1] = p.y;
+                        points[s][at * 3 + 2] = p.z;
+                        ++at;
+                    }
+        }
+    }
+};
+constexpr int kSuffixDabNodes = 10000;
+}  // namespace
+
+void BM_DabFullWalk(benchmark::State& state) {
+    const scene::Document doc = spread_sculpt(kSuffixDabNodes);
+    DabWork w;
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    std::int64_t instrs = 0;
+    for (auto _ : state) {
+        std::int64_t per_iter = 0;
+        const scene::CullIndex index(doc);
+        math::Aabb batch;
+        for (const auto& q : w.reqs) batch.expand(w.cache.cull_region(q.key));
+        const scene::CullPlan plan = index.plan(batch);
+        for (const auto& q : w.reqs) {
+            scene::CullRegion cr{w.cache.cull_region(q.key)};
+            const scene::Tape tp = scene::compile_document(doc, &cr, &index, &plan);
+            per_iter += static_cast<std::int64_t>(tp.instrs.size());
+            std::vector<float> v(static_cast<std::size_t>(q.grid.nx) * q.grid.ny * q.grid.nz);
+            cpu->eval_grid(tp, q.grid, v.data());
+        }
+        instrs = per_iter;  // every brick's culled tape, this dab
+    }
+    state.counters["instrs"] = static_cast<double>(instrs);
+}
+BENCHMARK(BM_DabFullWalk)->Unit(benchmark::kMillisecond);
+
+void BM_DabSuffixSeeded(benchmark::State& state) {
+    const scene::Document doc = spread_sculpt(kSuffixDabNodes);
+    const scene::Document before = spread_sculpt(kSuffixDabNodes - 1);
+    DabWork w;
+    scene::TapeCheckpoint cp;
+    scene::compile_document_resumable(before, &cp);
+    const std::vector<scene::NodeId>& roots = doc.layers[0].sdf->roots;
+    scene::Tape suffix;
+    if (!scene::compile_layer_suffix(cp, doc, {roots.back()}, &suffix, nullptr)) {
+        state.SkipWithError("the checkpoint was refused");
+        return;
+    }
+    // The seed a cache would hold: what everything before the dab says at these
+    // lattice points. Paid once here, as it would be paid once per stroke --
+    // during a stroke each dab's own result is the next dab's seed.
+    std::vector<std::vector<float>> seeds(w.reqs.size());
+    for (std::size_t s = 0; s < w.reqs.size(); ++s) {
+        const std::size_t n = w.points[s].size() / 3;
+        seeds[s].assign(n, 0.0f);
+        eval::PointQuery q;
+        q.points_xyz = w.points[s].data();
+        q.count = n;
+        eval::PointResults r;
+        r.distances = seeds[s].data();
+        scene::CullRegion cr{w.cache.cull_region(w.reqs[s].key)};
+        eval::eval_points_blocked(scene::compile_document(before, &cr), q, r);
+    }
+    for (auto _ : state) {
+        for (std::size_t s = 0; s < w.reqs.size(); ++s) {
+            const std::size_t n = seeds[s].size();
+            std::vector<float> v(n);
+            eval::PointQuery q;
+            q.points_xyz = w.points[s].data();
+            q.count = n;
+            eval::PointResults r;
+            r.distances = v.data();
+            eval::eval_points_seeded(suffix, q, seeds[s].data(), r);
+        }
+    }
+    state.counters["instrs"] = static_cast<double>(suffix.instrs.size());
+}
+BENCHMARK(BM_DabSuffixSeeded)->Unit(benchmark::kMillisecond);
+
 void BM_DeepDocRefill193(benchmark::State& state) { deep_doc_refill(state, 193); }
 BENCHMARK(BM_DeepDocRefill193)->Unit(benchmark::kMillisecond);
 void BM_DeepDocRefill2000(benchmark::State& state) { deep_doc_refill(state, 2000); }
