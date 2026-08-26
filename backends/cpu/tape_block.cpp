@@ -455,9 +455,16 @@ void eval_points_blocked(const scene::Tape& tape, const PointQuery& q, const Poi
     // result is bit-identical — which is what lets `eval_points_reference` stay
     // the definition of correctness for the gradient path too.
     if (out.gradients_xyz) {
-        PointResults base = out;
-        base.gradients_xyz = nullptr;
-        eval_points_blocked(tape, q, base, block);
+        // The base walk produces the DISTANCE and the COLOUR at each point. The
+        // four taps below produce the gradient and need neither, so when a
+        // caller asked for neither this walk is a fifth of the work for an
+        // answer nobody reads -- which is exactly what a brick mesh asking for
+        // gradient normals without colours was paying.
+        if (out.distances || out.colors_rgb) {
+            PointResults base = out;
+            base.gradients_xyz = nullptr;
+            eval_points_blocked(tape, q, base, block);
+        }
 
         const cfloat3 e[4] = {cf3(1.0f, -1.0f, -1.0f), cf3(-1.0f, -1.0f, 1.0f),
                               cf3(-1.0f, 1.0f, -1.0f), cf3(1.0f, 1.0f, 1.0f)};

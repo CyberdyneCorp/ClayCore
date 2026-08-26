@@ -678,7 +678,6 @@ void apply_brick_attributes(Mesh& m, const brick::BrickCache& cache, const scene
         points[at * 3 + 1] = p.y;
         points[at * 3 + 2] = p.z;
     }
-    std::vector<float> distances(order.size());
     std::vector<float> grads(gradients ? order.size() * 3 : 0);
     std::vector<float> cols(colors ? order.size() * 3 : 0);
     eval::PointBatchQuery q;
@@ -688,7 +687,8 @@ void apply_brick_attributes(Mesh& m, const brick::BrickCache& cache, const scene
     q.count = tapes.size();
     q.gradient_eps = options.gradient_eps;
     eval::PointResults out;
-    out.distances = distances.data();
+    // No distances asked for: nothing here reads one, and asking made the
+    // gradient path walk the tape a fifth time to produce them.
     out.gradients_xyz = gradients ? grads.data() : nullptr;
     out.colors_rgb = colors ? cols.data() : nullptr;
     eval::Backend* cpu = eval::Registry::instance().find("cpu");
