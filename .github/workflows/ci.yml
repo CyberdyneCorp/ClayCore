@@ -179,6 +179,27 @@ jobs:
       - name: Test
         run: ctest --preset cpu-only
 
+  release-config:
+    # The configuration tools/release_check.py builds, on Linux. Nothing else in
+    # this matrix builds it: the ubuntu job uses the cpu-only preset, while the
+    # checklist turns benchmarks AND python on, which is more translation units
+    # and more peak memory. That gap cost v0.52.1 -- the checklist's build was
+    # forking a compile per ready target and the runner killed it, and no PR
+    # could have shown that because no PR built this.
+    name: build (release checklist config, ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Configure exactly as the checklist does
+        run: >
+          cmake -S . -B build/relcheck -DCMAKE_BUILD_TYPE=Release
+          -DCLAY_BUILD_BENCHMARKS=ON -DCLAY_BUILD_PYTHON=ON
+      - name: Build (the gate — this configuration only ever ran on a tag)
+        run: cmake --build build/relcheck --parallel $(nproc)
+
   manylinux:
     # The toolchain the RELEASE wheels are built with, and until v0.52.0 the only
     # compiler in the matrix that nothing exercised before a tag. GCC 12 raised

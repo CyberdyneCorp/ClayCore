@@ -103,6 +103,12 @@ EXTRA_VERBS = {
     # re-uploaded. No entry point of its own for the same reason sdf_stamp has
     # none.
     "sdf_stroke",
+    # The same unbroken stroke driven through the brick cache rather than a
+    # whole-lattice evaluation. A separate verb because it is a separate path:
+    # this is the one that reaches the resumed refill, and sdf_stamp_incremental
+    # cannot -- its reset removes the node, and a removal breaks the append
+    # chain before the fast path is consulted.
+    "sdf_stroke_incremental",
     # Every deformer arrives through clay_item_add_deformer, so a pattern
     # matching that entry point would collapse fourteen warps into one verb and
     # call the family covered as soon as any single one had a case. The

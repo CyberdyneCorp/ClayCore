@@ -83,7 +83,30 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
-   **0.52.1 is not such a release**: no symbol added or removed against 0.52.0.
+   **0.52.2 is not such a release**: no symbol added or removed against 0.52.1,
+   and none against 0.52.0 either. It is one fix to `tools/release_check.py`.
+
+   **0.52.1 IS THE SECOND TAG IN A ROW THAT PRODUCED NO RELEASE**, and for a
+   reason with nothing to do with the library. The checklist ran
+   `cmake --build <dir> -j` with no job count. The default generator here is Unix
+   Makefiles and a bare `-j` to make means UNLIMITED — measured, a 40-source
+   target forks 47 concurrent compiles — so on this project it was close to a
+   hundred parallel `g++` against a hosted runner's 16 GB. The runner SIGTERMed
+   the process tree and the job died with exit 143 after `configure`, with no
+   compiler error and no failing gate to point at. It reproduced on a re-run.
+
+   It passed at 0.52.0 because the tree was smaller and passed locally because a
+   developer machine has the memory to absorb it, which is what kept it latent.
+   The build now passes `--parallel` with an explicit count.
+
+   **Both lost releases are the same defect in the process**: a configuration
+   that ONLY the tag path builds. The wheels job uses a toolchain no CI job used;
+   the checklist builds with `CLAY_BUILD_BENCHMARKS=ON -DCLAY_BUILD_PYTHON=ON`,
+   which no CI job builds on Linux. Before adding a compiler, a container or a
+   build configuration to the release path, give it a CI job first.
+
+   **0.52.1 was not such a release either**: no symbol added or removed against
+   0.52.0.
    It is a build fix plus performance — the appended-dab evaluation path (#306),
    the batched attribute pass and the fused dual walk (#302, #304). No format
    change, and every measured result is bit-identical to what 0.52.0 computed.
@@ -1086,7 +1109,7 @@ release's body when the workflow finishes.
 They exist to tell a host what it must DO, so the two sections that are not
 optional are what moves under a caller who changes nothing (an entry point that
 returns a different answer, a format that round-trips lossily, a C++ member that
-moved) and what is still known-broken or unmeasured. `docs/release-notes/v0.52.1.md`
+moved) and what is still known-broken or unmeasured. `docs/release-notes/v0.52.2.md`
 is the worked example. v0.49.0's notes predate the convention and live only on
 the GitHub release.
 

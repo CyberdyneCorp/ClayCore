@@ -115,6 +115,13 @@
       "measuredMs": 2.025,
       "rawMs": 2.027
     },
+    "sdf_stroke_bricks": {
+      "budgetMs": 0.2413,
+      "class": "interactive",
+      "machineFactor": 0.9999,
+      "measuredMs": 0.1608,
+      "rawMs": 0.1608
+    },
     "sdf_stroke_cpu": {
       "budgetMs": 3.7564,
       "class": "interactive",
@@ -4176,6 +4183,46 @@
       "thermalStateEnd": "nominal",
       "thermalStateStart": "nominal",
       "verb": "layer_armature_edit"
+    },
+    {
+      "backend": "cpu",
+      "budgetClass": "interactive",
+      "bundle": "com.cyberdyne.claycore.devicemeasure",
+      "canaryAfterMs": 130.794083,
+      "canaryBeforeMs": 130.386041,
+      "growthExponent": 0.30448711057802214,
+      "measurements": [
+        {
+          "p50Ms": 0.03888020833333333,
+          "p95Ms": 0.03956941666666667,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 200,
+          "stamps": 10
+        },
+        {
+          "p50Ms": 0.048576375,
+          "p95Ms": 0.04968229166666666,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 200,
+          "stamps": 100
+        },
+        {
+          "p50Ms": 0.15839929166666666,
+          "p95Ms": 0.16081770833333334,
+          "p95SpreadMs": 0,
+          "repeats": 1,
+          "samples": 200,
+          "stamps": 1000
+        }
+      ],
+      "name": "sdf_stroke_bricks",
+      "servedBy": "cpu",
+      "startedAtMs": 261.886208,
+      "thermalStateEnd": "nominal",
+      "thermalStateStart": "nominal",
+      "verb": "sdf_stroke_incremental"
     }
   ],
   "claycoreCommit": "2aa5c74e0e0f4c8d4715f5ef14e08ecafc7c7afe",

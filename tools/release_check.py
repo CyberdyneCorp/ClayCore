@@ -26,6 +26,7 @@ Gates:
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -33,6 +34,10 @@ import sys
 import sysconfig
 import tempfile
 from pathlib import Path
+
+# Bounded build parallelism: see the --parallel call below for why a bare -j is
+# not safe here. Honour CMAKE_BUILD_PARALLEL_LEVEL when a caller sets it.
+BUILD_JOBS = int(os.environ.get("CMAKE_BUILD_PARALLEL_LEVEL") or (os.cpu_count() or 4))
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -234,7 +239,16 @@ def main() -> int:
     cl.add("configure", ok, "" if ok else out[-400:])
     if not ok:
         return 1
-    ok, out = run(["cmake", "--build", str(build_dir), "-j"])
+    # --parallel with an explicit COUNT, not a bare -j. The default generator
+    # here is Unix Makefiles, and `cmake --build ... -j` passes a bare -j
+    # through to make, which means UNLIMITED: make forks every ready target at
+    # once. Measured, a 40-source target spawns 47 concurrent compiles. On this
+    # project that is ~100 parallel g++ against a hosted runner's memory, and
+    # the runner SIGTERMs the whole process tree -- the checklist dies with exit
+    # 143 after `configure`, with no compiler error and no failing gate to point
+    # at. That is what killed v0.52.1's release workflow, twice, on a build that
+    # passes on a developer machine with more RAM.
+    ok, out = run(["cmake", "--build", str(build_dir), "--parallel", str(BUILD_JOBS)])
     cl.add("build", ok, "" if ok else out[-400:])
     if not ok:
         return 1
