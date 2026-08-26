@@ -768,6 +768,98 @@ namespace {
 constexpr int kIndexAppendNodes = 20000;
 }  // namespace
 
+// A brick refill that RESUMES against one that replays (#306). The refill's own
+// float32 output is the accumulator the edit list reached at that brick's
+// lattice, so keeping it is all a dab needs to cost what the dab adds. Both
+// sides are bit-identical by contract (test_c_tape_cache.cpp).
+namespace {
+constexpr int kRefillBricks = 12;
+
+std::vector<clay_brick_request> pole_requests() {
+    std::vector<clay_brick_request> reqs(kRefillBricks);
+    for (int i = 0; i < kRefillBricks; ++i) {
+        std::memset(&reqs[i], 0, sizeof(reqs[i]));
+        reqs[i].key[0] = 2;
+        reqs[i].key[1] = (i % 4) - 2;
+        reqs[i].key[2] = (i / 4) - 1;
+        for (int a = 0; a < 3; ++a)
+            reqs[i].origin[a] = static_cast<float>(reqs[i].key[a]) * 8 * 0.05f;
+        reqs[i].spacing = 0.05f;
+        reqs[i].dims[0] = reqs[i].dims[1] = reqs[i].dims[2] = 8;
+        reqs[i].band = 0.15f;
+    }
+    return reqs;
+}
+
+// A document of `nodes` dabs over a sphere, through the C ABI so the caches
+// under test are the ones a host actually drives.
+clay_document* abi_sculpt(int nodes) {
+    clay_document* d = clay_document_create();
+    clay_layer_id l = 0;
+    clay_add_sdf_layer(d, "s", &l);
+    auto add = [&](float r, float x, float y, float z) {
+        clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+        const float p[3] = {x, y, z};
+        clay_item_set_position(it, p);
+        clay_layer_add_item(d, l, it, nullptr);
+        clay_item_destroy(it);
+    };
+    add(1.0f, 0, 0, 0);
+    for (int i = 1; i < nodes; ++i) {
+        const double z = 1.0 - 2.0 * (i + 0.5) / nodes;
+        const double r = std::sqrt(std::max(0.0, 1.0 - z * z));
+        const double th = 2.399963 * i;
+        const double a = r * std::cos(th), b = r * std::sin(th);
+        add(0.05f, static_cast<float>(std::sqrt(std::max(0.0, 1.0 - a * a - b * b))),
+            static_cast<float>(a), static_cast<float>(b));
+    }
+    return d;
+}
+
+constexpr int kRefillHistory = 5000;
+
+void refill_stroke(benchmark::State& state, bool prime) {
+    clay_document* d = abi_sculpt(kRefillHistory);
+    const std::vector<clay_brick_request> reqs = pole_requests();
+    const std::size_t per = 8 * 8 * 8;
+    std::vector<float> out(static_cast<std::size_t>(kRefillBricks) * per);
+    // Priming stores the seeds the resumed form continues from. Without it
+    // every call is the full walk, which is the control.
+    if (prime)
+        clay_brick_cache_eval_requests(d, nullptr, reqs.data(), kRefillBricks, out.data(),
+                                       out.size(), nullptr, 0);
+    float y = 0.0f;
+    for (auto _ : state) {
+        state.PauseTiming();
+        clay_item* it = nullptr;
+        const float r = 0.05f;
+        it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+        const float p[3] = {0.98f, y, -0.1f};
+        y += 0.001f;
+        clay_item_set_position(it, p);
+        clay_layer_add_item(d, 1, it, nullptr);
+        clay_item_destroy(it);
+        if (!prime) {
+            // The control: a document that never keeps a seed. Rebuilt rather
+            // than reused, so the comparison is refill against refill.
+            clay_document_destroy(d);
+            d = abi_sculpt(kRefillHistory);
+        }
+        state.ResumeTiming();
+        clay_brick_cache_eval_requests(d, nullptr, reqs.data(), kRefillBricks, out.data(),
+                                       out.size(), nullptr, 0);
+    }
+    state.counters["history"] = static_cast<double>(kRefillHistory);
+    clay_document_destroy(d);
+}
+}  // namespace
+
+void BM_BrickRefillResumed(benchmark::State& state) { refill_stroke(state, true); }
+BENCHMARK(BM_BrickRefillResumed)->Unit(benchmark::kMillisecond);
+
+void BM_BrickRefillFull(benchmark::State& state) { refill_stroke(state, false); }
+BENCHMARK(BM_BrickRefillFull)->Unit(benchmark::kMillisecond);
+
 void BM_CullIndexRebuild(benchmark::State& state) {
     const scene::Document doc = spread_sculpt(kIndexAppendNodes);
     for (auto _ : state) {

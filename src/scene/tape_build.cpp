@@ -856,9 +856,14 @@ struct Compiler {
     // Carry on from a checkpoint: the chain of `layer` continues with
     // `appended`, then the union the checkpoint was taken in front of is
     // re-emitted. The tape already holds the copied prefix.
-    void resume(const TapeCheckpoint& cp, const Layer& layer,
-                const std::vector<NodeId>& appended) {
-        cull = nullptr;
+    void resume(const TapeCheckpoint& cp, const Layer& layer, const std::vector<NodeId>& appended,
+                const CullRegion* cull_region = nullptr, float pad = 0.0f) {
+        // compile_document_append passes NO cull, and must: it copies a prefix
+        // that was compiled without one, and a culled suffix folded onto an
+        // unculled prefix is a tape neither compile would have produced.
+        // compile_layer_suffix passes one, because there the prefix is a VALUE
+        // that was itself computed under the same cull.
+        begin_cull(cull_region, pad);
         bool layer_val = compile_list(appended, *layer.sdf, layer, cp.layer_have_acc);
         // Recorded exactly where run() records it — after the chain, before
         // the union — so the NEXT append resumes from here too. Without this
@@ -966,7 +971,8 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& cp, const
 
 bool compile_layer_suffix(const TapeCheckpoint& cp, const Document& doc,
                           const std::vector<NodeId>& appended, Tape* out,
-                          TapeCheckpoint* out_checkpoint) {
+                          TapeCheckpoint* out_checkpoint, const CullRegion* cull,
+                          const CullIndex* index) {
     if (!out || !cp.valid || appended.empty()) return false;
     // The same claims `compile_document_append` checks, minus the ones about
     // the prefix's bytes -- there are none here to be out of range.
@@ -979,11 +985,23 @@ bool compile_layer_suffix(const TapeCheckpoint& cp, const Document& doc,
         if (roots[first + i] != appended[i]) return false;
 
     Compiler c;
+    // The cull pad is the DOCUMENT's, exactly as run() computes it, so a
+    // suffix drops an appended item for a region precisely when a whole-
+    // document compile would have. Anything else and the seed this suffix
+    // folds onto -- computed under the whole-document cull -- would be
+    // continued under a different one.
+    float pad = 0.0f;
+    if (cull && index)
+        pad = index->cull_pad();
+    else if (cull)
+        for (const Layer& l : doc.layers)
+            if (l.visible && l.kind == LayerKind::Sdf && l.sdf)
+                pad = kernel::cmax(pad, cull_pad(*l.sdf, l));
     // No prefix copy, and no prefix `info` or `bounds` either: what this
     // describes is the appended items, which is what its consumer wants to cull
     // against. The header says so, because a tape that cannot stand alone is
     // not what a reader expects to be handed.
-    c.resume(cp, *layer, appended);
+    c.resume(cp, *layer, appended, cull, pad);
     c.tape.compile_id = next_compile_id();
     if (out_checkpoint) *out_checkpoint = c.checkpoint;
     *out = std::move(c.tape);

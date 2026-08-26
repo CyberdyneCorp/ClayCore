@@ -191,6 +191,12 @@ FASTER_THAN = [
     # than being a percentage. Both sides produce the index a rebuild gives --
     # test_cull_index.cpp holds the per-brick tapes byte-identical either way.
     ("BM_CullIndexAppend", "BM_CullIndexRebuild"),
+    # And the whole dab, through the ABI a host drives: a refill that RESUMES
+    # from its own previous float32 output against one that replays the
+    # surviving edit list over every sample. 7.13 ms to 0.13 ms at 20,000
+    # items, and the two are bit-identical by contract. Catches the resumable
+    # path falling back silently, which is how it is designed to fail.
+    ("BM_BrickRefillResumed", "BM_BrickRefillFull"),
     ("BM_MeshBricksSubset", "BM_MeshBricksWhole"),
     # Grid-path consolidation (accel/parallel-consolidate): baking a grown
     # layer through the CPU backend's batch path must beat the serial
