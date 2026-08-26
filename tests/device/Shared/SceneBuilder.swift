@@ -74,6 +74,54 @@ enum SceneBuilder {
         return (doc, layer)
     }
 
+    /// Where dab `k` of a STROKE lands.
+    ///
+    /// Deliberately NOT `stampPosition`. That one fills the working volume on
+    /// purpose — a spread is what the growth axis needs, and a spread that
+    /// collapses onto a plane calibrates the budgets against a workload nobody
+    /// runs. But a spread is not a stroke: consecutive dabs land nowhere near
+    /// each other, so each one dirties a fresh set of bricks.
+    ///
+    /// That distinction is invisible to `sdf_stroke_cpu`/`_metal`, which
+    /// measure the tape path, where an append is an append wherever it lands.
+    /// It decides everything for the BRICK path: the resumed refill continues
+    /// from the accumulator a previous refill of THAT BRICK left, so it fires
+    /// when successive dabs overlap and does not when they scatter.
+    ///
+    /// Measured on an M2 Max through the C ABI, one dab of 24, per dab:
+    ///
+    ///   dabs scattered by stampPosition   1.36 -> 1.29 ms   1.05x
+    ///   dabs along this path              1.80 -> 0.24 ms   7.6x
+    ///
+    /// at 1000 items, and 8.38 -> 0.87 (9.7x) at 5000 with the path. A case
+    /// built on the spread would have reported the resumed refill as worth
+    /// nothing and passed, which is the shape of gate this suite exists to
+    /// stop shipping.
+    ///
+    /// A short march rather than a long one: 24 dabs 0.025 apart is 0.6 of a
+    /// unit, comfortably inside the working volume at every axis size, and a
+    /// step well under the 0.12 dab radius so consecutive dabs genuinely
+    /// overlap the way a drag does.
+    static func strokeDabPosition(_ k: Int) -> (Float, Float, Float) {
+        (-0.30 + 0.025 * Float(k), 0.10, 0.05)
+    }
+
+    /// One dab of a stroke, at `strokeDabPosition(k)`.
+    static func addStrokeDabNode(_ doc: OpaquePointer, _ layer: clay_layer_id,
+                                 dab k: Int) -> clay_node_id? {
+        var params: [Float] = [0.12]
+        guard let item = clay_item_create(Int32(CLAY_PRIM_SPHERE.rawValue), &params, 1) else {
+            return nil
+        }
+        defer { clay_item_destroy(item) }
+        let (x, y, z) = strokeDabPosition(k)
+        var position: [Float] = [x, y, z]
+        if clay_item_set_position(item, &position) != CLAY_OK { return nil }
+        var node: clay_node_id = 0
+        guard clay_layer_add_item(doc, layer, item, &node) == CLAY_OK else { return nil }
+        return node
+    }
+
     /// One stamp: a small blended sphere, which is what a stroke deposits.
     /// Returns the node it became, which the brick-cache case needs to dirty
     /// exactly the region the new item influences.

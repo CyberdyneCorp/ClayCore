@@ -389,7 +389,6 @@ final class LatencyTests: XCTestCase {
                                  "the first fill refreshed no bricks at \(stamps) stamps; "
                                  + "the case below would measure nothing")
 
-            var index = stamps
             var stroke: [clay_node_id] = []
             var starved = 0
             var refreshedTotal = 0
@@ -404,11 +403,16 @@ final class LatencyTests: XCTestCase {
                 stroke.removeAll(keepingCapacity: true)
                 _ = pump()
             }) {
-                for _ in 0..<Self.strokeDabs {
-                    guard let node = SceneBuilder.addStampNode(doc, layer, index: index)
+                for k in 0..<Self.strokeDabs {
+                    // A STROKE, not a spread: SceneBuilder.strokeDabPosition
+                    // marches the dabs along a short path so consecutive ones
+                    // overlap. That is what the resumed refill continues from,
+                    // and a scattered dab reaches a brick whose seed is from a
+                    // different revision. Measured off-device, the spread
+                    // reports this work as 1.05x and the path as 7.6x.
+                    guard let node = SceneBuilder.addStrokeDabNode(doc, layer, dab: k)
                     else { addFailures += 1; continue }
                     stroke.append(node)
-                    index += 1
                     var one = [node]
                     _ = clay_brick_cache_mark_dirty_nodes(cache, doc, layer, &one, 1, nil)
                     let refreshed = pump()
