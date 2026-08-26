@@ -24,8 +24,8 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 52
-#define CLAY_ABI_PATCH 2
+#define CLAY_ABI_MINOR 53
+#define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
  * selected node ids, stroke points, polygon vertices. A count above it is
@@ -1391,6 +1391,75 @@ clay_result clay_layer_children(const clay_document* doc, clay_layer_id layer,
  * hidden layer answers normally. */
 clay_result clay_layer_node_prim(const clay_document* doc, clay_layer_id layer,
                                  clay_node_id node, int32_t* out_prim);
+
+/* -- what a placed node holds (ABI 0.53.0) ---------------------------------
+ * The reading half of "editing a placed node" above. clay_layer_node_prim says
+ * WHICH primitive a node carries; these three say where it stands, how big it
+ * is and how it combines — the values a host that reloaded a document
+ * otherwise has to have kept for itself, in a table beside the .clay keyed by
+ * node id, and to have kept correct across undo and redo on its own.
+ *
+ * clay_layer_set_color is the one setter with no reader here; a host that
+ * needs one should say so rather than keep the table alive for it.
+ *
+ * clay_layer_node_influence_bound is NOT the position answer, and a host that
+ * reaches for it gets a wrong one: it is dilated by rounding and blend support,
+ * and under a layer mirror it covers the reflection too, so an item placed at
+ * x = 0.9 in a mirrored layer reports a bound centred on the origin.
+ *
+ * Each reader takes what its setter takes, so what comes out goes straight back
+ * in. Every out-pointer is optional; a call that passes none of them still
+ * validates the layer and the node, which is how a host asks "is this id still
+ * a node of that layer" without a buffer. Reading is not editing: a ghosted,
+ * locked or hidden layer answers normally. */
+
+/* Position, rotation and scale, as clay_layer_set_transform takes them. A
+ * GROUP is refused for the reason its setter refuses one — the compiler
+ * composes layer * item and a group's transform reaches nothing.
+ *
+ * The node stores a quaternion, so the axis and angle are A representative of
+ * that rotation rather than the exact pair last written: the angle comes back
+ * in [0, pi] with the axis flipped when that is what it takes, which is the
+ * same rotation by the other route. The axis is always unit length and never
+ * zero — an identity rotation reads back as angle 0 about (0, 1, 0) rather
+ * than about nothing — because clay_layer_set_transform refuses a zero axis
+ * and a reader whose output its own setter rejects would not be a round trip. */
+clay_result clay_layer_node_transform(const clay_document* doc, clay_layer_id layer,
+                                      clay_node_id node, float out_position[3],
+                                      float out_rotation_axis[3], float* out_rotation_angle,
+                                      float* out_scale);
+
+/* The primitive's parameter block, as clay_layer_set_prim takes it, by the
+ * size-query pattern clay_layer_children uses and counted in FLOATS: call with
+ * out_params == NULL to receive the count in *count, then again with a buffer
+ * of that many floats. *count is the capacity going in and the count written
+ * coming out; a buffer that is too small gets CLAY_ERROR_BUFFER_TOO_SMALL with
+ * the needed count in *count and writes nothing.
+ *
+ * The count is a property of the PRIMITIVE — the arity each CLAY_PRIM_*
+ * comment above documents — so a caller that has just asked
+ * clay_layer_node_prim what the node is does not also need a table of arities
+ * to size a buffer. The primitives whose payload is out of line answer 0 and
+ * are read by the typed reader that applies where there is one:
+ * CLAY_PRIM_STROKE and CLAY_PRIM_ARMATURE through clay_layer_stroke_points.
+ * A lift or a loft answers with its own parameters and not with its profiles,
+ * exactly as its setter takes them.
+ *
+ * A group carries no primitive and is CLAY_ERROR_INVALID_ARGUMENT, as
+ * clay_layer_node_prim is. */
+clay_result clay_layer_node_params(const clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                   float* out_params, size_t* count);
+
+/* Op, blend profile, blend radius and rounding, as clay_layer_set_op_blend
+ * takes them. out_op is a clay_op and out_blend a clay_blend.
+ *
+ * This one answers for a GROUP as well as an item, because a group carries an
+ * op and a blend and its setter writes them. A group with CLAY_OP_INLINE reads
+ * back the blend, radius and rounding it was required to be created with —
+ * CLAY_BLEND_HARD and zeroes — since an inline group consults none of them. */
+clay_result clay_layer_node_op_blend(const clay_document* doc, clay_layer_id layer,
+                                     clay_node_id node, int32_t* out_op, int32_t* out_blend,
+                                     float* out_blend_k, float* out_rounding);
 
 /* The layer's TOP-LEVEL nodes, count-then-index, in the layer's EVALUATION
  * order — index 0 is the node evaluated first, and the index is the one
