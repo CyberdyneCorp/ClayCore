@@ -378,6 +378,27 @@ void eval_points_reference(const scene::Tape& tape, const PointQuery& q,
 void eval_points_blocked(const scene::Tape& tape, const PointQuery& q, const PointResults& out,
                          std::size_t block = 0);
 
+// The same walk, CONTINUED from a value already computed at each point.
+//
+// `suffix` must come from `scene::compile_layer_suffix`: it holds only the
+// instructions for the appended items and expects the accumulator the items in
+// front of them left, which `seed` supplies per point. That makes a dab cost
+// what the dab adds rather than what the document holds -- one spread over 12
+// bricks at a 0.05 voxel is 0.23 ms at 200 items and 18.07 ms at 50,000, and
+// almost all of the difference is history being re-evaluated unchanged (#306).
+//
+// NOT AN APPROXIMATION. The instructions are the ones a full walk would have
+// run, in the same order, over the same floats; only the part already folded is
+// represented by the number it produced. Given an exact seed the result is
+// bit-identical to evaluating the whole document, which is what
+// `test_suffix_tape.cpp` asserts.
+//
+// `seed` holds `q.count` distances, one per point of `q`, in the same order.
+// Distances only: `out.gradients_xyz` and `out.colors_rgb` are ignored, because
+// a seed is one float a point and neither a gradient nor a colour is.
+void eval_points_seeded(const scene::Tape& suffix, const PointQuery& q, const float* seed,
+                        const PointResults& out, std::size_t block = 0);
+
 // The stack depth a tape actually reaches, which is a property of its
 // instruction sequence rather than of any point. The blocked path allocates
 // `block * depth` values, so a tape of depth 2 — which a flat chain of stamps is

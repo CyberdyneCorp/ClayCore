@@ -964,6 +964,32 @@ bool compile_document_append(const Tape& prefix, const TapeCheckpoint& cp, const
     return true;
 }
 
+bool compile_layer_suffix(const TapeCheckpoint& cp, const Document& doc,
+                          const std::vector<NodeId>& appended, Tape* out,
+                          TapeCheckpoint* out_checkpoint) {
+    if (!out || !cp.valid || appended.empty()) return false;
+    // The same claims `compile_document_append` checks, minus the ones about
+    // the prefix's bytes -- there are none here to be out of range.
+    const Layer* layer = last_visible_sdf_layer(doc);
+    if (!layer || layer->id != cp.layer) return false;
+    const std::vector<NodeId>& roots = layer->sdf->roots;
+    if (appended.size() > roots.size()) return false;
+    const std::size_t first = roots.size() - appended.size();
+    for (std::size_t i = 0; i < appended.size(); ++i)
+        if (roots[first + i] != appended[i]) return false;
+
+    Compiler c;
+    // No prefix copy, and no prefix `info` or `bounds` either: what this
+    // describes is the appended items, which is what its consumer wants to cull
+    // against. The header says so, because a tape that cannot stand alone is
+    // not what a reader expects to be handed.
+    c.resume(cp, *layer, appended);
+    c.tape.compile_id = next_compile_id();
+    if (out_checkpoint) *out_checkpoint = c.checkpoint;
+    *out = std::move(c.tape);
+    return true;
+}
+
 Tape compile_layer(const Layer& layer, const CullRegion* cull) {
     Compiler c;
     bool usable = layer.visible && layer.kind == LayerKind::Sdf && layer.sdf;

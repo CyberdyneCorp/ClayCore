@@ -176,6 +176,14 @@ FASTER_THAN = [
     # batched. Catches the pass falling back to the serial walk — which it does
     # silently, by design, when no CPU backend is registered.
     ("BM_MeshTapeAttributes", "BM_MeshTapeAttributesSerial"),
+    # Continuing the fold against replaying it (#306): a dab re-evaluated every
+    # surviving item of the edit list over its samples, so its cost followed
+    # what the artist had already sculpted rather than what the dab added. The
+    # suffix is two instructions whatever the document holds, so this pair holds
+    # a SCALING LAW rather than a percentage and its margin widens with the
+    # fixture -- 76x at 5,000 dabs, 845x at 50,000. Both sides evaluate the same
+    # points and are bit-identical by contract (test_suffix_tape.cpp).
+    ("BM_DabSuffixSeeded", "BM_DabFullWalk"),
     ("BM_MeshBricksSubset", "BM_MeshBricksWhole"),
     # Grid-path consolidation (accel/parallel-consolidate): baking a grown
     # layer through the CPU backend's batch path must beat the serial
