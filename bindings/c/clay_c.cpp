@@ -8571,8 +8571,12 @@ clay_result clay_layer_node_influence_bound(const clay_document* doc, clay_layer
     // no node to name one — reported as "nothing", not as a failure.
     if (!layer->sdf)
         return write_influence(math::Aabb{}, out_min, out_max, out_has_bounds, out_infinite);
-    return write_influence(scene::node_influence_bound(*layer->sdf, node, *layer), out_min,
-                           out_max, out_has_bounds, out_infinite);
+    // Over every layer sharing this content, not just the one named: an
+    // instanced layer compiles the same node under its own transform, and a
+    // host handed one copy's box leaves the others stale (issue #325).
+    return write_influence(
+        scene::node_influence_bound_in_document(doc->doc.document, *layer->sdf, node), out_min,
+        out_max, out_has_bounds, out_infinite);
 }
 
 clay_result clay_layer_influence_bound(const clay_document* doc, clay_layer_id layer_id,
@@ -9105,7 +9109,11 @@ clay_result clay_brick_cache_mark_dirty_nodes(clay_brick_cache* cache, const cla
     std::vector<math::Aabb> bounds;
     if (layer->sdf) {
         for (std::size_t i = 0; i < count; ++i) {
-            math::Aabb b = scene::node_influence_bound(*layer->sdf, nodes[i], *layer);
+            // Over every layer sharing this content (issue #325): the same
+            // union clay_layer_node_influence_bound reports, so what a host
+            // dirties and what the query told it cannot disagree.
+            math::Aabb b = scene::node_influence_bound_in_document(doc->doc.document,
+                                                                  *layer->sdf, nodes[i]);
             if (b.empty()) continue;  // absent, hidden, or contributing nothing
             r = check_dirty_span(cache->cache, b);
             if (r != CLAY_OK) return r;

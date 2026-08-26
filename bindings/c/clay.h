@@ -5052,6 +5052,14 @@ clay_result clay_voxel_build_plane_pick(const clay_voxel_grid* grid, const float
  * A node the layer does not hold, or one that is hidden, reports no bounds
  * rather than failing: a selection outlives the nodes in it. A layer the
  * document does not hold is CLAY_ERROR_NOT_FOUND. */
+/* NOTE (0.53.0, issue #325): this covers every layer sharing the node's
+ * content, not only `layer`. Instancing a layer shares one edit list between
+ * layers with different transforms, so a node is compiled once per instancing
+ * layer and an edit moves every copy; reporting one copy's box left a host
+ * dirtying by it with the others stale, measured at 0.103 outside the box
+ * against a band of 0.15. clay_brick_cache_mark_dirty_nodes dirties by the same
+ * union, so what a host is told and what it dirties cannot disagree. On a
+ * document with no instancing the answer is unchanged. */
 clay_result clay_layer_node_influence_bound(const clay_document* doc, clay_layer_id layer,
                                             clay_node_id node, float out_min[3],
                                             float out_max[3], int32_t* out_has_bounds,

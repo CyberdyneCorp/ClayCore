@@ -629,3 +629,229 @@ TEST_CASE("cull index: an append it cannot be sure of is refused, not guessed") 
                           compile_document(doc, &cull, &fresh, &fresh_plan));
     }
 }
+
+// -- what an influence bound PROMISES (issue #319) ----------------------------
+//
+// item_influence_bound answers "the box outside which this item cannot change
+// the field", and a host uses it as the box to DIRTY. That promise had never
+// been stated as a test: the cull tests above hold the CULL contract, which is
+// a different one and reads a different bound (item_geometry_bound for items).
+//
+// The property here is the promise itself, and it is checked the way a host
+// would be hurt if it were false: edit a node, and require every band-clamped
+// value OUTSIDE the box to be unchanged. A box that is too small shows up as a
+// point that moved and would have been left stale.
+//
+// The union of the bound BEFORE and AFTER the edit is what a host dirties --
+// command_influence_bound says so, and for the same reason: on one side of an
+// add the node is not there, and a move has two ends.
+namespace {
+
+// Every band-clamped value outside `dirty` must be identical across the edit.
+// Returns how many points were actually checked, so a caller can refuse a
+// vacuous run rather than pass one.
+int require_unchanged_outside(const Tape& before, const Tape& after, const math::Aabb& dirty,
+                              float band, std::uint64_t seed, float lo, float hi, float* worst,
+                              int samples = 4000) {
+    clay_test::Lcg rng(seed);
+    int checked = 0;
+    for (int i = 0; i < samples; ++i) {
+        cfloat3 p = rng.vec3(lo, hi);
+        if (dirty.contains(p)) continue;  // inside: free to move
+        const float a = cclamp(before.eval(p).d, -band, band);
+        const float b = cclamp(after.eval(p).d, -band, band);
+        const float dv = a > b ? a - b : b - a;
+        if (dv > *worst) *worst = dv;
+        // EXACT, not approx. Outside the box the item did not participate in
+        // any value that survives the clamp, so the two evaluate the same
+        // instructions over the same floats. A tolerance here would admit
+        // precisely the staleness this exists to catch: the defect measured
+        // 0.119 against a 0.15 band, and a "close enough" bound would have
+        // passed at anything above that.
+        CHECK(a == b);
+        ++checked;
+    }
+    return checked;
+}
+
+// Move every visible ITEM of every visible SDF layer in turn, and hold the
+// promise for each. `moved` counts the nodes actually exercised.
+void check_influence_promise(Document doc, std::uint64_t seed, float lo, float hi,
+                             int* out_moved, int* out_points, int* out_infinite,
+                             float* out_worst) {
+    const float band = 0.15f;
+    const cfloat3 delta = cf3(0.11f, -0.07f, 0.05f);
+    int moved = 0, points = 0, infinite = 0;
+    for (Layer& layer : doc.layers) {
+        if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
+        std::vector<NodeId> ids;
+        for (const auto& [id, n] : layer.sdf->nodes()) {
+            if (n.is_group || !n.visible) continue;
+            ids.push_back(id);
+        }
+        for (NodeId id : ids) {
+            Node* n = layer.sdf->find_mut(id);
+            REQUIRE(n);
+            const math::Aabb before_box =
+                node_influence_bound_in_document(doc, *layer.sdf, id);
+            const Tape before = compile_document(doc);
+            const cfloat3 was = n->xform.position;
+            n->xform.position = was + delta;
+            const math::Aabb after_box =
+                node_influence_bound_in_document(doc, *layer.sdf, id);
+            const Tape after = compile_document(doc);
+
+            if (before_box.is_infinite() || after_box.is_infinite()) {
+                // Claims everything: trivially true, and counted so the suite
+                // can show the corpus still exercises the finite path.
+                ++infinite;
+            } else {
+                math::Aabb dirty = before_box;
+                dirty.expand(after_box);
+                // The band dilation every consumer applies: a local item's
+                // bound is its geometry bound and relies on the same one.
+                // The band, PLUS the chain pad the compiler already applies when
+                // culling (scene::cull_pad, #282): an item's own bound is what
+                // ONE blend can move, and a smooth-union chain drags further.
+                const float pad = band + cull_pad(*layer.sdf, layer);
+                points += require_unchanged_outside(before, after, dirty.dilated(pad), band,
+                                                    seed + id, lo, hi, out_worst);
+                ++moved;
+            }
+            n->xform.position = was;  // leave the document as it was found
+        }
+    }
+    *out_moved = moved;
+    *out_points = points;
+    *out_infinite = infinite;
+}
+
+}  // namespace
+
+TEST_CASE("influence bound: an edit changes nothing outside the box, on the gnarly corpus") {
+    int moved = 0, points = 0, infinite = 0;
+    float worst = 0;
+    check_influence_promise(gnarly_document(), 8801, -3.0f, 3.0f, &moved, &points, &infinite, &worst);
+    MESSAGE("gnarly: worst band-clamped drift outside the dirty box = ", worst);
+    // Guards against a vacuous pass: the corpus must actually have exercised
+    // the finite path, and points must actually have landed outside the boxes.
+    CHECK(moved > 5);
+    CHECK(points > 500);
+}
+
+TEST_CASE("influence bound: an INTERSECT is bounded, and the box it names holds") {
+    // The case #319 is about. An intersect reads the accumulated field far from
+    // itself, so its bound is not its own geometry — but it is not Everything
+    // either, and this is what decides which.
+    Document doc;
+    Layer& l = doc.add_sdf_layer("l");
+    l.sdf->insert(item(Prim::sphere(1.0f), cf3(0, 0, 0)));
+    l.sdf->insert(item(Prim::box(cf3(0.3f, 0.3f, 0.3f)), cf3(-0.4f, 0, 0), Op::Intersect));
+    // and something blended AFTER it, so the intersect's value feeds a further
+    // combine and can move the result away from the intersect's own geometry —
+    // the case a bound of the item's own box would miss.
+    l.sdf->insert(item(Prim::sphere(0.35f), cf3(0.7f, 0.2f, 0), Op::Add,
+                       Blend{BlendProfile::Quadratic, 0.12f}));
+
+    int moved = 0, points = 0, infinite = 0;
+    float worst = 0;
+    check_influence_promise(doc, 8802, -2.5f, 2.5f, &moved, &points, &infinite, &worst);
+    MESSAGE("intersect: worst drift = ", worst);
+    CHECK(moved > 0);
+    CHECK(points > 500);
+}
+
+TEST_CASE("influence bound: a layer of non-local ops still holds its promise") {
+    Document doc;
+    Layer& nl = doc.add_sdf_layer("nonlocal");
+    nl.sdf->insert(item(Prim::sphere(1.2f), cf3(0, 0, 0)));
+    nl.sdf->insert(item(Prim::sphere(2.8f), cf3(0.5f, 0, 0), Op::Intersect));
+    nl.sdf->insert(item(Prim::box(cf3(0.6f, 0.6f, 0.6f)), cf3(0, 0.8f, 0), Op::Intersect,
+                        Blend{BlendProfile::Quadratic, 0.05f}));
+    int moved = 0, points = 0, infinite = 0;
+    float worst = 0;
+    check_influence_promise(doc, 8803, -3.5f, 3.5f, &moved, &points, &infinite, &worst);
+    MESSAGE("non-local: worst drift = ", worst);
+    CHECK(moved > 0);
+    CHECK(points > 500);
+}
+
+TEST_CASE("influence bound: a MIRRORED item's box understates what moving it changes") {
+    // Isolated from the gnarly corpus, where every one of the worst drifts came
+    // from a node with mirror set. item_geometry_bound does reflect the box and
+    // does dilate by the mirror seam's blend support, so the bound is not
+    // ignoring the mirror -- it is understating it by enough to matter.
+    Document doc;
+    Layer& l = doc.add_sdf_layer("body");
+    l.mirror_axes = kMirrorX;
+    l.mirror_k = 0.08f;
+    l.sdf->insert(item(Prim::sphere(1.0f), cf3(0, 0, 0)));
+    Node ear = item(Prim::round_cone(0.25f, 0.1f, 0.4f), cf3(0.9f, 0.6f, 0));
+    ear.mirror = true;
+    ear.blend = Blend{BlendProfile::Quadratic, 0.05f};
+    l.sdf->insert(ear);
+
+    int moved = 0, points = 0, infinite = 0;
+    float worst = 0;
+    check_influence_promise(doc, 8804, -3.0f, 3.0f, &moved, &points, &infinite, &worst);
+    MESSAGE("mirrored-only: worst drift = ", worst);
+    CHECK(moved > 0);
+    CHECK(points > 500);
+}
+
+TEST_CASE("influence bound: the same document WITHOUT the mirror") {
+    // The control. Same geometry, same blend, mirror off -- if this one is
+    // clean the drift above is the mirror rather than the chain.
+    Document doc;
+    Layer& l = doc.add_sdf_layer("body");
+    l.sdf->insert(item(Prim::sphere(1.0f), cf3(0, 0, 0)));
+    Node ear = item(Prim::round_cone(0.25f, 0.1f, 0.4f), cf3(0.9f, 0.6f, 0));
+    ear.blend = Blend{BlendProfile::Quadratic, 0.05f};
+    l.sdf->insert(ear);
+
+    int moved = 0, points = 0, infinite = 0;
+    float worst = 0;
+    check_influence_promise(doc, 8805, -3.0f, 3.0f, &moved, &points, &infinite, &worst);
+    MESSAGE("no-mirror control: worst drift = ", worst);
+    CHECK(moved > 0);
+    CHECK(points > 500);
+}
+
+TEST_CASE("influence bound: an INSTANCED layer's other copy is inside the box") {
+    // The defect, isolated. instance_layer copies the Layer and SHARES the
+    // SdfContent by shared_ptr, so one node is compiled once per instancing
+    // layer under that layer's own transform -- and editing it moves every
+    // copy. A bound naming one copy left the others stale: 0.103 outside the
+    // box against a band of 0.15, before node_influence_bound_in_document.
+    Document doc;
+    Layer& body = doc.add_sdf_layer("body");
+    body.sdf->insert(item(Prim::sphere(1.0f), cf3(0, 0, 0)));
+    body.sdf->insert(item(Prim::box(cf3(0.4f, 0.4f, 0.4f)), cf3(0.6f, 0, 0), Op::Add,
+                          Blend{BlendProfile::Quadratic, 0.1f}));
+    Layer* inst = doc.instance_layer(doc.layers[0].id, "body-instance");
+    REQUIRE(inst);
+    inst->xform.position = cf3(3, 0, 0);
+
+    int moved = 0, points = 0, infinite = 0;
+    float worst = 0;
+    check_influence_promise(doc, 8806, -5.0f, 5.0f, &moved, &points, &infinite, &worst);
+    CHECK(moved > 0);
+    CHECK(points > 500);
+}
+
+TEST_CASE("influence bound: the same document with the instance removed") {
+    // The control: without the second layer the per-layer bound was already
+    // right, which is what makes the case above about instancing rather than
+    // about the geometry.
+    Document doc;
+    Layer& body = doc.add_sdf_layer("body");
+    body.sdf->insert(item(Prim::sphere(1.0f), cf3(0, 0, 0)));
+    body.sdf->insert(item(Prim::box(cf3(0.4f, 0.4f, 0.4f)), cf3(0.6f, 0, 0), Op::Add,
+                          Blend{BlendProfile::Quadratic, 0.1f}));
+
+    int moved = 0, points = 0, infinite = 0;
+    float worst = 0;
+    check_influence_promise(doc, 8807, -5.0f, 5.0f, &moved, &points, &infinite, &worst);
+    CHECK(moved > 0);
+    CHECK(points > 500);
+}
