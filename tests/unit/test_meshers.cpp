@@ -222,7 +222,7 @@ TEST_CASE("the dual walk places a cell's vertex before any quad that references 
     options.normals = mesh::NormalMode::None;
     options.colors = false;
     const Mesh m = mesh::mesh_tape_quads(tape, tape.bounds, 0.03f, options);
-    REQUIRE(m.quads.size() >= 4 * 1000);  // a real surface, not a corner case
+    REQUIRE(m.quads.size() >= std::size_t{4000});  // a real surface, not a corner case
 
     std::uint32_t high_water = 0;
     for (std::size_t q = 0; q < m.quads.size(); q += 4) {

@@ -175,11 +175,16 @@ inline Mesh dual_grid_mesh(const Sample& sample, const int cell_min[3], const in
                                     static_cast<std::uint32_t>(m.positions.size()));
                 m.positions.push_back(place(crossings, n, lo, hi));
 
-                // The three edges leaving the min corner: corner 0 against
-                // corners 1, 2 and 4, which are f[1 << d].
+                // The three edges leaving the min corner: corner 0 against the
+                // corner one step along each axis. Named rather than computed
+                // as `1 << d` — the corner bit convention is x=1, y=2, z=4, so
+                // the shift is right, but it says less than the numbers do and
+                // MSVC reads a 32-bit shift used as a 64-bit index as a
+                // question (C4334) rather than as an answer.
+                constexpr int kAxisNeighbourCorner[3] = {1, 2, 4};
                 const float f0 = f[0];
                 for (int d = 0; d < 3; ++d) {
-                    const float f1 = f[1 << d];
+                    const float f1 = f[kAxisNeighbourCorner[d]];
                     if ((f0 < 0.0f) == (f1 < 0.0f)) continue;
                     const int u = kAxisUV[d][0], v = kAxisUV[d][1];
                     auto cell_at = [&](int a, int b) -> const std::uint32_t* {
