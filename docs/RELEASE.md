@@ -83,6 +83,28 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.52.1 is not such a release**: no symbol added or removed against 0.52.0.
+   It is a build fix plus performance — the appended-dab evaluation path (#306),
+   the batched attribute pass and the fused dual walk (#302, #304). No format
+   change, and every measured result is bit-identical to what 0.52.0 computed.
+
+   **0.52.0 IS A TAG THAT PRODUCED NO RELEASE, and the reason belongs here.**
+   `save_handoff_ply` did not compile under GCC 12 in the manylinux container:
+   three `-Werror=restrict` false positives on `operator+(const char*, string&&)`.
+   The wheels job failed, `draft-release` is gated on it, and so the tag exists
+   with no wheels, no xcframework and no kernels artifact attached. Nothing was
+   ever published from it. **Do not re-tag in this situation** — 0.52.1 supersedes
+   it and the failed tag stays in history saying what happened.
+
+   The lesson is the one this file keeps writing down. The wheels job compiles
+   with a toolchain NO other job in the matrix uses, and it only runs on a tag,
+   so `release_check.py` passing locally said nothing about it. CI now carries
+   `build (manylinux gcc-toolset-12 — the wheel toolchain)`, which builds every
+   TU in the same container on every PR. Before adding a compiler to the release
+   path, add it to CI first: this is the fourth tag-only gate to cost a release
+   cycle, after the Swift `Int32`, the `extern "C"` linkage break (#235) and the
+   `ProgressScope` narrowing.
+
    **0.52.0 is not such a release**: additive — the sculpt handoff writer
    (`clay_mesh_save_handoff`, `_memory`, `clay_mesh_handoff_material_mix`) and
    `mesh::vertex_normals`. No format change to `.clayspace`, no symbol removed,
@@ -1064,7 +1086,7 @@ release's body when the workflow finishes.
 They exist to tell a host what it must DO, so the two sections that are not
 optional are what moves under a caller who changes nothing (an entry point that
 returns a different answer, a format that round-trips lossily, a C++ member that
-moved) and what is still known-broken or unmeasured. `docs/release-notes/v0.52.0.md`
+moved) and what is still known-broken or unmeasured. `docs/release-notes/v0.52.1.md`
 is the worked example. v0.49.0's notes predate the convention and live only on
 the GitHub release.
 
