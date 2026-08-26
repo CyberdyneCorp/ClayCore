@@ -179,6 +179,29 @@ jobs:
       - name: Test
         run: ctest --preset cpu-only
 
+  manylinux:
+    # The toolchain the RELEASE wheels are built with, and until v0.52.0 the only
+    # compiler in the matrix that nothing exercised before a tag. GCC 12 raised
+    # three -Werror=restrict errors in src/io/handoff.cpp that no other compiler
+    # here raises, and they were found by the wheels job AFTER v0.52.0 was tagged,
+    # which is the fourth time a tag-only gate has cost a release cycle.
+    # Build only: this container has no test fixtures, and the gate is "every TU
+    # compiles clean under the wheel toolchain".
+    name: build (manylinux gcc-toolset-12 — the wheel toolchain)
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64:2024.10.07-1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: |
+          source /opt/rh/gcc-toolset-12/enable
+          g++ --version | head -1
+          cmake -S . -B build/manylinux -DCMAKE_BUILD_TYPE=Release
+      - name: Build (the gate — every TU must compile clean under GCC 12 -Werror)
+        run: |
+          source /opt/rh/gcc-toolset-12/enable
+          cmake --build build/manylinux -j
+
   sanitizers:
     name: ASan + UBSan (ubuntu)
     runs-on: ubuntu-latest
