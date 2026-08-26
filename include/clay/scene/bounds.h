@@ -95,6 +95,14 @@ float cull_pad(const SdfContent& content, const Layer& layer);
 math::Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& layer);
 
 // Whole-layer bound (union of root node bounds).
+// The box outside which this node cannot change the DOCUMENT's field: the union
+// over every visible layer sharing its content, since an instanced layer
+// compiles the same node again under its own transform. Prefer this to
+// node_influence_bound wherever a Document is in scope and the answer is going
+// to a host as a region to dirty (issue #325).
+math::Aabb node_influence_bound_in_document(const Document& doc, const SdfContent& content,
+                                            NodeId id);
+
 math::Aabb layer_influence_bound(const Layer& layer);
 
 }  // namespace scene

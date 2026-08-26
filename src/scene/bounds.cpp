@@ -799,6 +799,38 @@ Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& lay
     return b.empty() ? b : b.dilated(support);
 }
 
+Aabb node_influence_bound_in_document(const Document& doc, const SdfContent& content,
+                                      NodeId id) {
+    // A node can be in more than one PLACE. instance_layer copies the Layer and
+    // shares the SdfContent by shared_ptr, so one node is compiled once per
+    // instancing layer, each under that layer's own transform -- and editing it
+    // moves every copy.
+    //
+    // node_influence_bound answers for the layer it is handed, which is the
+    // right answer to a different question. Handed to a host as "the box to
+    // dirty", it names one copy and leaves the others stale: measured on a
+    // two-layer instance, a band-clamped value 0.103 outside the box moved,
+    // against a band of 0.15 (issue #325).
+    //
+    // scene::node_command_bound already unions this way for the undo path. This
+    // is the same union, shared so the query, the dirty call and the command
+    // path cannot disagree about where an edit reaches.
+    // Shared content is the only test, matching node_command_bound. NOT
+    // layer.visible: the caller named a node and wants to know where it
+    // reaches, and node_influence_bound already returns nothing for a node that
+    // is itself invisible. Filtering on the LAYER here made a hidden layer
+    // report no bounds where it used to report a box, which is a second
+    // behaviour change and not this one.
+    Aabb out;
+    for (const Layer& l : doc.layers) {
+        if (l.sdf.get() != &content) continue;
+        const Aabb b = node_influence_bound(content, id, l);
+        if (b.is_infinite()) return Aabb::infinite();
+        out.expand(b);
+    }
+    return out;
+}
+
 Aabb layer_influence_bound(const Layer& layer) {
     Aabb b;
     if (!layer.sdf) return b;

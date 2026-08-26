@@ -103,9 +103,10 @@ forward-refuse).
    and this release does not give it a reader; #317 asked for three calls and
    named the four values its side-car held, and colour was not one of them.
 
-   **0.52.3 is not such a release**: no symbol added or removed, no signature
-   changed. It is a BEHAVIOUR change to one existing call, and the kind worth
-   reading before upgrading: `clay_layer_bounds` used to report no bounds for a
+   **0.53.0 CARRIES A BEHAVIOUR CHANGE from #318 too**, written up here as
+   0.52.3 before main took 0.53.0 over that number — no release ever carried
+   0.52.3, and the change shipped in 0.53.0. It adds no symbol and changes no
+   signature: `clay_layer_bounds` used to report no bounds for a
    voxel or a mesh layer however much material it held, and now answers from the
    occupied cells or the vertices (issue #318).
 
@@ -121,6 +122,22 @@ forward-refuse).
    about the implementation — `scene::Layer` holds only SDF content, because the
    layering rule withholds `clay/voxel` and `clay/mesh` from `clay::scene` — and
    it had been written down as though it were about the contract.
+
+   **0.53.0 CARRIES A SECOND BEHAVIOUR CHANGE**, beside the additive surface
+   #324 brought and the `clay_layer_bounds` change below. It adds no symbol and
+   changes no signature: `clay_layer_node_influence_bound` and
+   `clay_brick_cache_mark_dirty_nodes` now cover every layer sharing a node's
+   content rather than only the one named (issue #325).
+
+   On a document with an INSTANCED layer both used to name one copy's box and
+   leave the others stale — measured at 0.103 outside the box against a band of
+   0.15, which is most of a band of wrong geometry with nothing to say so. A
+   host now dirties more bricks on such a document, which is what the right
+   answer costs; the cheaper figure was cheaper because it was wrong.
+
+   On a document with no instancing nothing moves, which is why no existing test
+   changed. The per-layer bound the compiler uses is untouched, so per-brick
+   culling is unaffected.
 
    **0.52.2 is not such a release**: no symbol added or removed against 0.52.1,
    and none against 0.52.0 either. It is one fix to `tools/release_check.py`.
