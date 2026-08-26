@@ -16,6 +16,8 @@ FLOORS = {
     "BM_BrickFill": {"min_items_per_second": 100},
     "BM_MeshTape": {"max_ms": 20_000},
     "BM_SurfaceNets": {"max_ms": 20_000},
+    "BM_MeshLatticeMarch": {"max_ms": 20_000},
+    "BM_MeshLatticeNets": {"max_ms": 20_000},
     # Issue #86: voxel greedy meshing must cost the material, not a chunk-map
     # lookup per cell probed. Both grids hold one voxel per chunk. Measured at
     # 3.8 ms and 256 ms with the per-cell lookup, 0.21 ms and 12.9 ms without,
@@ -147,24 +149,24 @@ FLOORS = {
 # brick-cache requires that meshing a dab's worth of bricks costs less than
 # meshing the surface, which is the whole point of taking a key list
 FASTER_THAN = [
-    # ("BM_SurfaceNets", "BM_MeshTape") WAS here, for the meshing spec's
-    # "preview is cheaper than marching" claim. It was measuring the ATTRIBUTE
-    # PASS, not the mesher. Both sides walked the tape once per vertex for the
-    # colour and four more for the gradient, on one thread, and surface nets
-    # emits 3.2x fewer vertices — so the pair passed on vertex count and the
-    # geometry step never entered into it. Batching that pass (#302) removed
-    # the confound and left the meshers visible:
+    # The meshing spec's "preview is cheaper than marching" claim, measured on
+    # ONE precomputed lattice so that the comparison is the MESHERS.
     #
-    #   bench_document, voxel 0.02      marching   surface nets
-    #     geometry only                   82.5 ms      138.3 ms   nets 1.68x SLOWER
-    #     + attributes, before #302       500.7 ms     275.0 ms   nets 1.8x faster
-    #     + attributes, after #302         91.0 ms     144.4 ms   nets 1.59x slower
+    # It used to be ("BM_SurfaceNets", "BM_MeshTape"), and that pair could not
+    # say it. Two things were wrong with it. Until #302 both sides meshed with
+    # the default attributes, and the attribute pass was 80-96% of each, so the
+    # pair passed on nets emitting 3.2x fewer VERTICES while the geometry step
+    # went unmeasured -- and once #302 batched that pass, nets was measured
+    # 1.68x SLOWER to build (#304). And even with attributes off, both sides
+    # spend about half their time in `eval_tape_grid` on the same field, which
+    # compresses whatever the meshers differ by.
     #
-    # So the claim is false on the tape path and the pair cannot be made to
-    # hold by re-scoping it. Removed rather than quietly weakened, and #304
-    # carries the numbers and the question of what the spec should say. What
-    # nets IS cheaper at — 3.2x the triangles for a preview — is not a timing
-    # gate and has none here yet.
+    # #304's answer was the mesher rather than the spec: the dual walk was
+    # sampling 12 lattice corners per cell through a std::function where it
+    # needed 8 inlined, so nets went 113 ms -> 75 ms serial and the claim came
+    # back. This pair holds it where it can be seen -- 86.8 ms against 120 ms,
+    # no field evaluation on either side.
+    ("BM_MeshLatticeNets", "BM_MeshLatticeMarch"),
     # The non-brick meshers' attribute pass (#302): `apply_tape_attributes`
     # walked the tape once per vertex for the colour and four more for the
     # gradient, on one thread, while the brick mesher had gone through the
