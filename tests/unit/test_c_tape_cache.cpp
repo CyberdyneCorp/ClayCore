@@ -760,6 +760,61 @@ std::vector<float> refill_signature(clay_document* d) {
 
 }  // namespace
 
+TEST_CASE("resumable refill: an edit a brick cannot reach keeps its seed") {
+    // An edit that is not an append used to drop every seed, so adjusting one
+    // item cost every brick the whole edit list again. A seed is the value of
+    // that brick's CULLED tape, and an item whose influence misses the brick's
+    // cull region is dropped from that tape -- so editing it cannot change what
+    // the brick evaluates to.
+    //
+    // The bricks this reads span the sphere. The item removed sits at x = 3,
+    // outside every one of their cull regions -- which is why it was culled
+    // from all of them and its removal cannot change what they say.
+    auto build = [](bool with_far) {
+        Doc d;
+        add_sphere(d, 1.0f, 0.0f);
+        add_sphere(d, 0.30f, 0.95f);               // near the bricks read
+        if (with_far) add_sphere(d, 0.30f, 3.0f);  // outside every brick read
+        return refill_signature(d.d);
+    };
+
+    SUBCASE("removing a far item leaves the near bricks reading the same") {
+        // The values must match a document that never had it, which is the
+        // whole claim: the far item was culled from these bricks anyway.
+        Doc doc;
+        REQUIRE(clay_document_enable_undo(doc.d) == CLAY_OK);
+        add_sphere(doc, 1.0f, 0.0f);
+        add_sphere(doc, 0.30f, 0.95f);
+        add_sphere(doc, 0.30f, 3.0f);
+        const std::vector<float> before = refill_signature(doc.d);
+        CHECK(before == build(true));
+
+        int32_t undone = 0;
+        REQUIRE(clay_document_undo(doc.d, &undone) == CLAY_OK);  // drops the far item
+        CHECK(refill_signature(doc.d) == build(false));
+        // And the far item never mattered here, which is why the seed survived.
+        CHECK(build(true) == build(false));
+    }
+
+    SUBCASE("an edit the bricks CAN reach still gives the right answer") {
+        // The other side of the gate: the seed is dropped and recomputed.
+        Doc doc;
+        REQUIRE(clay_document_enable_undo(doc.d) == CLAY_OK);
+        add_sphere(doc, 1.0f, 0.0f);
+        add_sphere(doc, 0.30f, 0.95f);
+        const std::vector<float> with = refill_signature(doc.d);
+
+        int32_t undone = 0;
+        REQUIRE(clay_document_undo(doc.d, &undone) == CLAY_OK);  // drops the NEAR item
+        const std::vector<float> without = refill_signature(doc.d);
+
+        Doc oracle;
+        add_sphere(oracle, 1.0f, 0.0f);
+        CHECK(without == refill_signature(oracle.d));
+        CHECK(without != with);  // it really did reach them
+    }
+}
+
 TEST_CASE("resumable refill: a resumed brick is the brick a full refill gives") {
     // The oracle is a FRESH document holding the same items: it has no seeds,
     // so its refill is always the full evaluation. Bit-for-bit, not

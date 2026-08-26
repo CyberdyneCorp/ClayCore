@@ -1133,6 +1133,7 @@ struct clay_document {
         bool had_acc = false;
         float pad = 0.0f;  // the cull pad the values were computed under
         float spacing = 0.0f;
+        float band = 0.0f;
         std::int32_t dims[3] = {0, 0, 0};
         std::vector<float> values;
         std::vector<float> colors;  // empty when that refill carried none
@@ -1244,13 +1245,14 @@ struct clay_document {
         const ResumeKey key{request.key[0], request.key[1], request.key[2]};
         auto [it, fresh] = resume_.try_emplace(key);
         ResumeEntry& e = it->second;
-        resume_bytes_ -= (e.values.size() + e.colors.size()) * sizeof(float);
+        resume_bytes_ -= entry_bytes(e);
         if (fresh) resume_order_.push_back(key);
         e.had_acc = false;
         for (std::size_t s = 0; s < per && !e.had_acc; ++s) e.had_acc = values[s] != CLAY_TAPE_FAR;
         e.revision = at;
         e.pad = pad;
         e.spacing = request.spacing;
+        e.band = request.band;
         e.dims[0] = request.dims[0];
         e.dims[1] = request.dims[1];
         e.dims[2] = request.dims[2];
@@ -1259,7 +1261,7 @@ struct clay_document {
             e.colors.assign(colors, colors + per * 3);
         else
             e.colors.clear();
-        resume_bytes_ += (e.values.size() + e.colors.size()) * sizeof(float);
+        resume_bytes_ += entry_bytes(e);
         // Oldest first, and never the brick just written -- a budget smaller
         // than one brick would otherwise evict what it just stored.
         while (resume_bytes_ > kResumeBytes && resume_order_.size() > 1) {
@@ -1271,8 +1273,7 @@ struct clay_document {
             }
             auto old = resume_.find(oldest);
             if (old == resume_.end()) continue;
-            resume_bytes_ -=
-                (old->second.values.size() + old->second.colors.size()) * sizeof(float);
+            resume_bytes_ -= entry_bytes(old->second);
             resume_.erase(old);
         }
     }
@@ -1294,6 +1295,58 @@ struct clay_document {
             store_seed(requests[i], at, pad, values + i * per,
                        colors ? colors + i * per * 3 : nullptr, per);
     }
+
+    static std::size_t entry_bytes(const ResumeEntry& e) {
+        return (e.values.size() + e.colors.size()) * sizeof(float);
+    }
+
+    // The invalidation for an edit that is NOT an append but whose reach is
+    // known: everything the caches hold by revision goes, but a brick's seed
+    // survives when the change cannot reach it.
+    //
+    // A seed is the value of that brick's CULLED tape. An item whose influence
+    // misses the brick's cull region is dropped from that tape, so editing it
+    // cannot change what the brick evaluates to -- the seed is still the answer,
+    // now at the new revision. Seeds the change does reach are dropped, and the
+    // next refill computes them.
+    //
+    // `changed` MUST cover both sides of the edit. `command_influence_bound` on
+    // one side is not an answer -- an add's node is not there before, a removal's
+    // is not there after, a move has two ends -- so a caller unions the two, as
+    // the undo stack does.
+    //
+    // An EMPTY box means the edit cannot change what the document evaluates to
+    // (a rename, a protection flag), so every seed survives. An INFINITE one
+    // reaches everywhere and takes them all.
+    void touch_region(const math::Aabb& changed) {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        forget_appends();  // not an append; no prefix may be reused
+        const std::uint64_t next = revision.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (changed.is_infinite()) {
+            forget_resume();
+            return;
+        }
+        for (auto it = resume_.begin(); it != resume_.end();) {
+            const ResumeEntry& e = it->second;
+            const float width = static_cast<float>(e.dims[0]) * e.spacing;
+            const kernel::cfloat3 lo =
+                kernel::cf3(static_cast<float>(it->first.x), static_cast<float>(it->first.y),
+                            static_cast<float>(it->first.z)) *
+                width;
+            const math::Aabb cull =
+                math::Aabb{lo, lo + kernel::cf3(width, width, width)}.dilated(e.band + e.pad);
+            if (!changed.empty() && changed.intersects(cull)) {
+                resume_bytes_ -= entry_bytes(e);
+                it = resume_.erase(it);
+                continue;
+            }
+            // Untouched: the same value, now current.
+            it->second.revision = next;
+            ++it;
+        }
+    }
+
+    std::uint64_t current_revision() const { return revision.load(std::memory_order_relaxed); }
 
     std::mutex& cache_lock() const { return cache_mutex_; }
 
@@ -2119,9 +2172,17 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
                         std::string("layer ") + std::to_string(target) + " is " +
                             (l->ghost ? "ghosted" : "locked") + " and takes no edits");
     }
+    // What this edit can reach, taken on BOTH sides of the apply and unioned.
+    // One side is not an answer: an add's node is not there before, a removal's
+    // is not there after, and a move has two ends -- the contract
+    // command_influence_bound states and the undo stack already follows.
+    // Gathered before the apply because after it the old shape is gone.
+    const math::Aabb reach_before = scene::command_influence_bound(doc->doc.document, cmd);
     bool ok = doc->undo ? doc->undo->perform(doc->doc.document, cmd)
                         : static_cast<bool>(scene::apply(doc->doc.document, cmd));
     if (!ok) return fail(CLAY_ERROR_NOT_FOUND, what);
+    math::Aabb reach = reach_before;
+    reach.expand(scene::command_influence_bound(doc->doc.document, cmd));
     // The funnel every command-based edit passes through, so the tape cache is
     // invalidated in one place for all of them — and the one place that can
     // tell the cache an edit was an APPEND, which is what a brush stamp is
@@ -2131,7 +2192,10 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
         doc->touch_appended(appended.layer, appended.node);
         return CLAY_OK;
     }
-    doc->touch();
+    // Not an append, but its reach is known: a brick the edit cannot touch keeps
+    // the seed it already has, so adjusting one item no longer costs every
+    // brick the whole edit list.
+    doc->touch_region(reach);
     return CLAY_OK;
 }
 
@@ -2880,8 +2944,9 @@ clay_result clay_document_undo_bound(clay_document* doc, int32_t* out_undone, fl
                       ? 1
                       : 0;
     // Undo and redo replay commands straight onto the document rather than
-    // through apply_edit, so they invalidate here.
-    if (*out_undone) doc->touch();
+    // through apply_edit, so they invalidate here -- with the bound the stack
+    // already unioned over the commands it replayed.
+    if (*out_undone) doc->touch_region(bound);
     return write_influence(bound, out_min, out_max, out_has_bounds, out_infinite);
 }
 
@@ -2895,7 +2960,7 @@ clay_result clay_document_redo_bound(clay_document* doc, int32_t* out_redone, fl
                                   &bound, doc->mask_for())
                       ? 1
                       : 0;
-    if (*out_redone) doc->touch();
+    if (*out_redone) doc->touch_region(bound);
     return write_influence(bound, out_min, out_max, out_has_bounds, out_infinite);
 }
 
@@ -8783,6 +8848,25 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
         std::lock_guard<std::mutex> lock(doc->cache_lock());
         const bool want_colour = out_colors_rgb != nullptr;
         const std::uint64_t seed_rev = doc->seed_revision_for(requests, count, per, want_colour);
+        // A seed already AT the current revision is the answer: its brick's
+        // culled tape has not changed since it was computed, so there is
+        // nothing to fold into it. That is what a region-limited invalidation
+        // leaves behind -- an edit the brick cannot reach advances the seed
+        // rather than dropping it -- and it is also the plain case of a refill
+        // asked for twice without an edit in between.
+        if (seed_rev != 0 && seed_rev == doc->current_revision()) {
+            for (std::size_t i = 0; i < count; ++i) {
+                const float* seed_rgb = nullptr;
+                const float* seed = doc->seed_for(requests[i], doc->cull_index_locked()->cull_pad(),
+                                                  want_colour, &seed_rgb);
+                if (!seed) continue;
+                std::memcpy(out_values + i * per, seed, per * sizeof(float));
+                if (want_colour)
+                    std::memcpy(out_colors_rgb + i * per * 3, seed_rgb, per * 3 * sizeof(float));
+                resumed[i] = 1;
+                ++resumed_count;
+            }
+        }
         const clay_document::ResumePlan plan = doc->plan_resume(seed_rev);
         if (plan.usable) {
             std::shared_ptr<const scene::CullIndex> index = doc->cull_index_locked();
