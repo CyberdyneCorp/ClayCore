@@ -285,6 +285,9 @@ struct PyChamfer : PyBlend {
 struct PyPrim {
     scene::Prim prim;
     math::Transform xform;
+    // The per-axis half of the placement (#320). scale= on every constructor
+    // takes one number or three; three land here and leave xform.scale at 1.
+    kernel::cfloat3 scale_axes = kernel::cf3(1.0f, 1.0f, 1.0f);
     std::vector<scene::StrokePoint> stroke;
     float stroke_blend_k = 0.0f;
     bool stroke_closed = false;
@@ -320,11 +323,35 @@ math::Quat to_axis_angle(nb::handle rotation_axis_angle) {
     return math::Quat::from_axis_angle(to_f3(s[0], "rotation axis"), nb::cast<float>(s[1]));
 }
 
-void place(PyPrim& p, nb::handle position, nb::handle rotation_axis_angle, float scale) {
+// scale= takes ONE number or THREE. Python can carry both in one argument where
+// C cannot, so pyclay spells the per-axis scale as the scale it already had
+// rather than as a second entry point (issue #320): `scale=2` and
+// `scale=(2, 1, 1)` are the same argument, and the second is a squash.
+//
+// The uniform factor and the per-axis one MULTIPLY, so writing one leaves the
+// other where it was — which is what makes this safe from a partial update.
+void apply_scale(float& uniform, kernel::cfloat3& axes, nb::handle scale) {
+    if (nb::isinstance<nb::sequence>(scale) && !nb::isinstance<nb::str>(scale)) {
+        nb::sequence s = nb::cast<nb::sequence>(scale);
+        if (nb::len(s) != 3)
+            throw std::invalid_argument("scale must be one number or (sx, sy, sz)");
+        const kernel::cfloat3 v = to_f3(scale, "scale");
+        if (!(v.x > 0.0f && v.y > 0.0f && v.z > 0.0f))
+            throw std::invalid_argument("every scale component must be > 0");
+        uniform = 1.0f;
+        axes = v;
+        return;
+    }
+    const float f = nb::cast<float>(scale);
+    if (!(f > 0.0f)) throw std::invalid_argument("scale must be > 0");
+    uniform = f;
+    axes = kernel::cf3(1.0f, 1.0f, 1.0f);
+}
+
+void place(PyPrim& p, nb::handle position, nb::handle rotation_axis_angle, nb::handle scale) {
     if (!position.is_none()) p.xform.position = to_f3(position, "position");
     if (!rotation_axis_angle.is_none()) p.xform.rotation = to_axis_angle(rotation_axis_angle);
-    if (scale <= 0.0f) throw std::invalid_argument("scale must be > 0");
-    p.xform.scale = scale;
+    if (!scale.is_none()) apply_scale(p.xform.scale, p.scale_axes, scale);
 }
 
 // One concrete Python class per primitive (Sphere, Box, ...); all share the
@@ -2078,14 +2105,17 @@ NB_MODULE(pyclay, m) {
             "The deformer chain, in application order");
 
     // Every primitive constructor accepts position=(x, y, z),
-    // rotation_axis_angle=((x, y, z), radians) and scale=<uniform factor>.
+    // rotation_axis_angle=((x, y, z), radians) and scale=<one number, or
+    // (sx, sy, sz) for a per-axis squash — issue #320>. The default is None
+    // rather than 1.0 because "say nothing" and "say uniform 1" now differ:
+    // the first leaves both halves of the scale alone.
 #define CLAY_PLACE_ARGS                                            \
     nb::arg("position") = nb::none(),                              \
-    nb::arg("rotation_axis_angle") = nb::none(), nb::arg("scale") = 1.0f
+    nb::arg("rotation_axis_angle") = nb::none(), nb::arg("scale") = nb::none()
 
     nb::class_<PySphere, PyPrim>(m, "Sphere", "Sphere of radius r")
         .def("__init__",
-             [](PySphere* self, float r, nb::handle pos, nb::handle rot, float scale) {
+             [](PySphere* self, float r, nb::handle pos, nb::handle rot, nb::handle scale) {
                  new (self) PySphere();
                  self->prim = scene::Prim::sphere(r);
                  place(*self, pos, rot, scale);
@@ -2093,7 +2123,7 @@ NB_MODULE(pyclay, m) {
              "r"_a = 1.0f, CLAY_PLACE_ARGS);
     nb::class_<PyBox, PyPrim>(m, "Box", "Axis-aligned box; size = full side lengths")
         .def("__init__",
-             [](PyBox* self, nb::handle size, nb::handle pos, nb::handle rot, float scale) {
+             [](PyBox* self, nb::handle size, nb::handle pos, nb::handle rot, nb::handle scale) {
                  new (self) PyBox();
                  kernel::cfloat3 s = to_f3(size, "size");
                  self->prim = scene::Prim::box(s * 0.5f);
@@ -2104,7 +2134,7 @@ NB_MODULE(pyclay, m) {
                                    "Box with rounded edges; size = full side lengths, r = radius")
         .def("__init__",
              [](PyRoundBox* self, nb::handle size, float r, nb::handle pos, nb::handle rot,
-                float scale) {
+                nb::handle scale) {
                  new (self) PyRoundBox();
                  kernel::cfloat3 s = to_f3(size, "size");
                  self->prim = scene::Prim::round_box(s * 0.5f, r);
@@ -2113,7 +2143,7 @@ NB_MODULE(pyclay, m) {
              "size"_a, "r"_a, CLAY_PLACE_ARGS);
     nb::class_<PyTorus, PyPrim>(m, "Torus", "Torus: R = ring radius, r = tube radius")
         .def("__init__",
-             [](PyTorus* self, float R, float r, nb::handle pos, nb::handle rot, float scale) {
+             [](PyTorus* self, float R, float r, nb::handle pos, nb::handle rot, nb::handle scale) {
                  new (self) PyTorus();
                  self->prim = scene::Prim::torus(R, r);
                  place(*self, pos, rot, scale);
@@ -2122,7 +2152,7 @@ NB_MODULE(pyclay, m) {
     nb::class_<PyCapsule, PyPrim>(m, "Capsule", "Capsule between local endpoints a and b")
         .def("__init__",
              [](PyCapsule* self, nb::handle a, nb::handle b, float r, nb::handle pos,
-                nb::handle rot, float scale) {
+                nb::handle rot, nb::handle scale) {
                  new (self) PyCapsule();
                  self->prim = scene::Prim::capsule(to_f3(a, "a"), to_f3(b, "b"), r);
                  place(*self, pos, rot, scale);
@@ -2132,7 +2162,7 @@ NB_MODULE(pyclay, m) {
                                    "Vertical capped cylinder: radius r, half-height h")
         .def("__init__",
              [](PyCylinder* self, float r, float h, nb::handle pos, nb::handle rot,
-                float scale) {
+                nb::handle scale) {
                  new (self) PyCylinder();
                  self->prim = scene::Prim::capped_cylinder(r, h);
                  place(*self, pos, rot, scale);
@@ -2142,7 +2172,7 @@ NB_MODULE(pyclay, m) {
                                "Capped cone: half-height h, base radius r1, top radius r2")
         .def("__init__",
              [](PyCone* self, float h, float r1, float r2, nb::handle pos, nb::handle rot,
-                float scale) {
+                nb::handle scale) {
                  new (self) PyCone();
                  self->prim = scene::Prim::capped_cone(h, r1, r2);
                  place(*self, pos, rot, scale);
@@ -2152,7 +2182,7 @@ NB_MODULE(pyclay, m) {
         m, "RoundCone", "Sphere-swept cone: radius r1 at origin, r2 at height h up the y axis")
         .def("__init__",
              [](PyRoundCone* self, float r1, float r2, float h, nb::handle pos, nb::handle rot,
-                float scale) {
+                nb::handle scale) {
                  new (self) PyRoundCone();
                  self->prim = scene::Prim::round_cone(r1, r2, h);
                  place(*self, pos, rot, scale);
@@ -2161,7 +2191,7 @@ NB_MODULE(pyclay, m) {
     nb::class_<PyEllipsoid, PyPrim>(m, "Ellipsoid",
                                     "Ellipsoid with per-axis radii r=(rx, ry, rz) (bound field)")
         .def("__init__",
-             [](PyEllipsoid* self, nb::handle r, nb::handle pos, nb::handle rot, float scale) {
+             [](PyEllipsoid* self, nb::handle r, nb::handle pos, nb::handle rot, nb::handle scale) {
                  new (self) PyEllipsoid();
                  self->prim = scene::Prim::ellipsoid(to_f3(r, "r"));
                  place(*self, pos, rot, scale);
@@ -2169,7 +2199,7 @@ NB_MODULE(pyclay, m) {
              "r"_a, CLAY_PLACE_ARGS);
     nb::class_<PyOctahedron, PyPrim>(m, "Octahedron", "Octahedron of size s")
         .def("__init__",
-             [](PyOctahedron* self, float s, nb::handle pos, nb::handle rot, float scale) {
+             [](PyOctahedron* self, float s, nb::handle pos, nb::handle rot, nb::handle scale) {
                  new (self) PyOctahedron();
                  self->prim = scene::Prim::octahedron(s);
                  place(*self, pos, rot, scale);
@@ -2179,7 +2209,7 @@ NB_MODULE(pyclay, m) {
                                    "Hexagonal prism: hx = flat-to-flat half-width, hy = half-height")
         .def("__init__",
              [](PyHexPrism* self, float hx, float hy, nb::handle pos, nb::handle rot,
-                float scale) {
+                nb::handle scale) {
                  new (self) PyHexPrism();
                  self->prim = scene::Prim::hex_prism(hx, hy);
                  place(*self, pos, rot, scale);
@@ -2187,7 +2217,7 @@ NB_MODULE(pyclay, m) {
              "hx"_a, "hy"_a, CLAY_PLACE_ARGS);
     nb::class_<PyPyramid, PyPrim>(m, "Pyramid", "Unit-base pyramid of height h")
         .def("__init__",
-             [](PyPyramid* self, float h, nb::handle pos, nb::handle rot, float scale) {
+             [](PyPyramid* self, float h, nb::handle pos, nb::handle rot, nb::handle scale) {
                  new (self) PyPyramid();
                  self->prim = scene::Prim::pyramid(h);
                  place(*self, pos, rot, scale);
@@ -2199,7 +2229,7 @@ NB_MODULE(pyclay, m) {
                            "Torus arc: aperture half-angle, ring radius ra, tube radius rb")
         .def("__init__",
              [](PyCappedTorus* self, float aperture, float ra, float rb, nb::handle position,
-                nb::handle rotation_axis_angle, float scale) {
+                nb::handle rotation_axis_angle, nb::handle scale) {
                  new (self) PyCappedTorus();
                  self->prim = scene::Prim::capped_torus(aperture, ra, rb);
                  place(*self, position, rotation_axis_angle, scale);
@@ -2210,7 +2240,7 @@ NB_MODULE(pyclay, m) {
                            "Chain link: straight length, ring radius r1, tube radius r2")
         .def("__init__",
              [](PyLink* self, float length, float r1, float r2, nb::handle position,
-                nb::handle rotation_axis_angle, float scale) {
+                nb::handle rotation_axis_angle, nb::handle scale) {
                  new (self) PyLink();
                  self->prim = scene::Prim::link(length, r1, r2);
                  place(*self, position, rotation_axis_angle, scale);
@@ -2221,7 +2251,7 @@ NB_MODULE(pyclay, m) {
                            "Infinite cylinder along Y (UNBOUNDED: never culled)")
         .def("__init__",
              [](PyCylinderInfinite* self, float cx, float cz, float r, nb::handle position,
-                nb::handle rotation_axis_angle, float scale) {
+                nb::handle rotation_axis_angle, nb::handle scale) {
                  new (self) PyCylinderInfinite();
                  self->prim = scene::Prim::cylinder_infinite(cx, cz, r);
                  place(*self, position, rotation_axis_angle, scale);
@@ -2232,7 +2262,7 @@ NB_MODULE(pyclay, m) {
                            "Exact cone: half-angle at the apex, height h")
         .def("__init__",
              [](PyExactCone* self, float half_angle, float h, nb::handle position,
-                nb::handle rotation_axis_angle, float scale) {
+                nb::handle rotation_axis_angle, nb::handle scale) {
                  new (self) PyExactCone();
                  self->prim = scene::Prim::cone(half_angle, h);
                  place(*self, position, rotation_axis_angle, scale);
@@ -2243,7 +2273,7 @@ NB_MODULE(pyclay, m) {
                            "Half-space with the given normal and offset (UNBOUNDED: never culled)")
         .def("__init__",
              [](PyPlane* self, nb::handle normal, float offset, nb::handle position,
-                nb::handle rotation_axis_angle, float scale) {
+                nb::handle rotation_axis_angle, nb::handle scale) {
                  new (self) PyPlane();
                  self->prim = scene::Prim::plane(to_f3(normal, "normal"), offset);
                  place(*self, position, rotation_axis_angle, scale);
@@ -2254,7 +2284,7 @@ NB_MODULE(pyclay, m) {
                            "Sphere of radius r cut by the plane y = h")
         .def("__init__",
              [](PyCutSphere* self, float r, float h, nb::handle position,
-                nb::handle rotation_axis_angle, float scale) {
+                nb::handle rotation_axis_angle, nb::handle scale) {
                  new (self) PyCutSphere();
                  self->prim = scene::Prim::cut_sphere(r, h);
                  place(*self, position, rotation_axis_angle, scale);
@@ -2265,7 +2295,7 @@ NB_MODULE(pyclay, m) {
                            "Hollow cut sphere of wall thickness t")
         .def("__init__",
              [](PyCutHollowSphere* self, float r, float h, float t, nb::handle position,
-                nb::handle rotation_axis_angle, float scale) {
+                nb::handle rotation_axis_angle, nb::handle scale) {
                  new (self) PyCutHollowSphere();
                  self->prim = scene::Prim::cut_hollow_sphere(r, h, t);
                  place(*self, position, rotation_axis_angle, scale);
@@ -2276,7 +2306,7 @@ NB_MODULE(pyclay, m) {
                            "Spherical wedge: cone half-angle and radius")
         .def("__init__",
              [](PySolidAngle* self, float angle, float ra, nb::handle position,
-                nb::handle rotation_axis_angle, float scale) {
+                nb::handle rotation_axis_angle, nb::handle scale) {
                  new (self) PySolidAngle();
                  self->prim = scene::Prim::solid_angle(angle, ra);
                  place(*self, position, rotation_axis_angle, scale);
@@ -2287,7 +2317,7 @@ NB_MODULE(pyclay, m) {
                            "Regular tetrahedron of size r")
         .def("__init__",
              [](PyTetrahedron* self, float r, nb::handle position,
-                nb::handle rotation_axis_angle, float scale) {
+                nb::handle rotation_axis_angle, nb::handle scale) {
                  new (self) PyTetrahedron();
                  self->prim = scene::Prim::tetrahedron(r);
                  place(*self, position, rotation_axis_angle, scale);
@@ -2298,7 +2328,7 @@ NB_MODULE(pyclay, m) {
                            "Regular dodecahedron (plane folds)")
         .def("__init__",
              [](PyDodecahedron* self, float r, nb::handle position,
-                nb::handle rotation_axis_angle, float scale) {
+                nb::handle rotation_axis_angle, nb::handle scale) {
                  new (self) PyDodecahedron();
                  self->prim = scene::Prim::dodecahedron(r);
                  place(*self, position, rotation_axis_angle, scale);
@@ -2309,7 +2339,7 @@ NB_MODULE(pyclay, m) {
                            "Regular icosahedron (plane folds)")
         .def("__init__",
              [](PyIcosahedron* self, float r, nb::handle position,
-                nb::handle rotation_axis_angle, float scale) {
+                nb::handle rotation_axis_angle, nb::handle scale) {
                  new (self) PyIcosahedron();
                  self->prim = scene::Prim::icosahedron(r);
                  place(*self, position, rotation_axis_angle, scale);
@@ -2320,7 +2350,7 @@ NB_MODULE(pyclay, m) {
                            "Triangular prism (BOUND field, not exact)")
         .def("__init__",
              [](PyTriPrism* self, float hx, float hy, nb::handle position,
-                nb::handle rotation_axis_angle, float scale) {
+                nb::handle rotation_axis_angle, nb::handle scale) {
                  new (self) PyTriPrism();
                  self->prim = scene::Prim::tri_prism(hx, hy);
                  place(*self, position, rotation_axis_angle, scale);
@@ -2331,7 +2361,7 @@ NB_MODULE(pyclay, m) {
                            "Cheap octahedron (BOUND field, not exact)")
         .def("__init__",
              [](PyOctahedronCheap* self, float s, nb::handle position,
-                nb::handle rotation_axis_angle, float scale) {
+                nb::handle rotation_axis_angle, nb::handle scale) {
                  new (self) PyOctahedronCheap();
                  self->prim = scene::Prim::octahedron_cheap(s);
                  place(*self, position, rotation_axis_angle, scale);
@@ -2342,7 +2372,7 @@ NB_MODULE(pyclay, m) {
                            "Superellipsoid / L-norm sphere, n >= 2 (BOUND field)")
         .def("__init__",
              [](PyLNormSphere* self, float r, float n, nb::handle position,
-                nb::handle rotation_axis_angle, float scale) {
+                nb::handle rotation_axis_angle, nb::handle scale) {
                  new (self) PyLNormSphere();
                  self->prim = scene::Prim::lnorm_sphere(r, n);
                  place(*self, position, rotation_axis_angle, scale);
@@ -2418,7 +2448,7 @@ NB_MODULE(pyclay, m) {
         .def("__init__",
              [](PyArmature* self, nb::handle nodes, nb::handle parents, nb::handle signs,
                 float blend_k, nb::handle position, nb::handle rotation_axis_angle,
-                float scale) {
+                nb::handle scale) {
                  new (self) PyArmature();
                  self->prim = scene::Prim::armature();
                  if (!nodes.is_none()) self->stroke = to_stroke_points(nodes);
@@ -2430,7 +2460,7 @@ NB_MODULE(pyclay, m) {
              },
              "nodes"_a = nb::none(), "parents"_a = nb::none(), "signs"_a = nb::none(),
              "blend_k"_a = 0.0f, "position"_a = nb::none(),
-             "rotation_axis_angle"_a = nb::none(), "scale"_a = 1.0f)
+             "rotation_axis_angle"_a = nb::none(), "scale"_a = nb::none())
         .def("add_child",
              [](PyArmature& self, nb::handle position, float radius, int parent) {
                  if (radius < 0.0f) throw std::invalid_argument("radius must be >= 0");
@@ -2492,7 +2522,7 @@ NB_MODULE(pyclay, m) {
                                   "Exact extrusion of a profile along Z (half_depth)")
         .def("__init__",
              [](PyExtrude* self, const PyProfile& profile, float half_depth,
-                nb::handle position, nb::handle rotation_axis_angle, float scale) {
+                nb::handle position, nb::handle rotation_axis_angle, nb::handle scale) {
                  new (self) PyExtrude();
                  if (half_depth <= 0.0f)
                      throw std::invalid_argument("half_depth must be > 0");
@@ -2507,7 +2537,7 @@ NB_MODULE(pyclay, m) {
                                   "Exact revolution of a profile about Y at a given offset")
         .def("__init__",
              [](PyRevolve* self, const PyProfile& profile, float offset, nb::handle position,
-                nb::handle rotation_axis_angle, float scale) {
+                nb::handle rotation_axis_angle, nb::handle scale) {
                  new (self) PyRevolve();
                  self->prim = scene::Prim::revolve(offset);
                  self->profile = profile.profile;
@@ -2528,7 +2558,7 @@ NB_MODULE(pyclay, m) {
         "is what keeps the raymarcher from stepping through the surface.")
         .def("__init__",
              [](PyLoft* self, nb::sequence profiles, float half_depth, std::uint8_t ease,
-                nb::handle position, nb::handle rotation_axis_angle, float scale) {
+                nb::handle position, nb::handle rotation_axis_angle, nb::handle scale) {
                  if (nb::len(profiles) < 2)
                      throw std::invalid_argument("a loft needs two or more profiles");
                  if (!(half_depth > 0.0f))
@@ -2572,7 +2602,7 @@ NB_MODULE(pyclay, m) {
              [](PySwept* self, nb::handle guide, nb::sequence profiles, nb::handle types,
                 float tolerance, std::uint8_t ease, nb::handle in_handles,
                 nb::handle out_handles, nb::handle position, nb::handle rotation_axis_angle,
-                float scale) {
+                nb::handle scale) {
                  if (nb::len(profiles) < 2)
                      throw std::invalid_argument("a sweep needs two or more profiles");
                  if (!(tolerance > 0.0f))
@@ -2619,7 +2649,7 @@ NB_MODULE(pyclay, m) {
         .def_static(
             "from_document",
             [](nb::handle source, float cell, nb::handle band, nb::handle bounds,
-               nb::handle position, nb::handle rotation_axis_angle, float scale) {
+               nb::handle position, nb::handle rotation_axis_angle, nb::handle scale) {
                 if (!(cell > 0.0f)) throw std::invalid_argument("cell must be > 0");
                 float width = band.is_none() ? cell * 3.0f : nb::cast<float>(band);
                 if (!(width > 0.0f)) throw std::invalid_argument("band must be > 0");
@@ -2694,7 +2724,7 @@ NB_MODULE(pyclay, m) {
         .def_static(
             "from_mesh",
             [](const PyMesh& mesh, float cell, nb::handle band, float beta, nb::handle position,
-               nb::handle rotation_axis_angle, float scale) {
+               nb::handle rotation_axis_angle, nb::handle scale) {
                 if (mesh.data().triangle_count() == 0)
                     throw std::invalid_argument("cannot sample a mesh with no triangles");
                 if (cell < 0.0f) throw std::invalid_argument("cell must be >= 0");
@@ -2735,7 +2765,7 @@ NB_MODULE(pyclay, m) {
         .def_static(
             "from_voxels",
             [](const PyVoxelGrid& grid, int blur, int index, nb::handle band,
-               nb::handle position, nb::handle rotation_axis_angle, float scale) {
+               nb::handle position, nb::handle rotation_axis_angle, nb::handle scale) {
                 if (blur < 0 || blur > 8) throw std::invalid_argument("blur must be 0..8");
                 if (index < 0 || index > 255) throw std::invalid_argument("index must be 0..255");
                 voxel::VoxelGrid::FieldOptions options{
@@ -2832,7 +2862,7 @@ NB_MODULE(pyclay, m) {
             "moved_topologically_from",
             [](nb::handle source, nb::handle anchor, nb::handle displacement, float radius,
                int ease, float cell, nb::handle band, nb::handle bounds, nb::handle position,
-               nb::handle rotation_axis_angle, float scale) {
+               nb::handle rotation_axis_angle, nb::handle scale) {
                 if (!(cell > 0.0f)) throw std::invalid_argument("cell must be > 0");
                 if (!(radius > 0.0f)) throw std::invalid_argument("radius must be > 0");
                 field::TopologicalMoveSettings settings;
@@ -2889,7 +2919,7 @@ NB_MODULE(pyclay, m) {
             [](nb::handle source, nb::handle plane_point, nb::handle plane_normal, float cell,
                nb::handle band, nb::handle bounds, float strength, nb::handle centre,
                float region_radius, float falloff, const std::string& mode,
-               nb::handle position, nb::handle rotation_axis_angle, float scale,
+               nb::handle position, nb::handle rotation_axis_angle, nb::handle scale,
                nb::handle mask) {
                 if (!(cell > 0.0f)) throw std::invalid_argument("cell must be > 0");
                 if (!(strength >= 0.0f && strength <= 1.0f))
@@ -3173,7 +3203,7 @@ NB_MODULE(pyclay, m) {
         .def("__init__",
              [](PyStroke* self, nb::handle points, float blend_k, nb::handle types,
                 bool closed, float tolerance, nb::handle in_handles, nb::handle out_handles,
-                nb::handle position, nb::handle rotation_axis_angle, float scale) {
+                nb::handle position, nb::handle rotation_axis_angle, nb::handle scale) {
                  new (self) PyStroke();
                  self->prim = scene::Prim::stroke();
                  if (!points.is_none()) self->stroke = to_stroke_points(points);
@@ -3189,7 +3219,7 @@ NB_MODULE(pyclay, m) {
              "points"_a = nb::none(), "blend_k"_a = 0.0f, "types"_a = nb::none(),
              "closed"_a = false, "tolerance"_a = 0.01f, "in_handles"_a = nb::none(),
              "out_handles"_a = nb::none(), "position"_a = nb::none(),
-             "rotation_axis_angle"_a = nb::none(), "scale"_a = 1.0f)
+             "rotation_axis_angle"_a = nb::none(), "scale"_a = nb::none())
         .def("add_point",
              [](PyStroke& self, nb::handle position, float radius, const std::string& type,
                 nb::handle in_handle, nb::handle out_handle) {
@@ -4224,6 +4254,7 @@ NB_MODULE(pyclay, m) {
                  scene::Node n;
                  n.prim = prim.prim;
                  n.xform = prim.xform;
+                 n.scale_axes = prim.scale_axes;
                  n.stroke = prim.stroke;
                  n.stroke_blend_k = prim.stroke_blend_k;
                  n.armature_parents = prim.armature_parents;
@@ -4621,16 +4652,27 @@ NB_MODULE(pyclay, m) {
                  if (n->is_group)
                      throw std::invalid_argument(
                          "a group has no transform of its own: transform its children");
-                 scene::SetTransformCmd cmd{l.id, node, n->xform};
+                 // The per-axis scale is seeded from the node, not defaulted:
+                 // these bindings take PARTIAL updates, so a call that says
+                 // nothing about scale must leave a squash alone. The C ABI
+                 // takes the whole transform and collapses it instead, which
+                 // is the difference between the two surfaces, not an accident.
+                 scene::SetTransformCmd cmd{l.id, node, n->xform, n->scale_axes};
                  if (!position.is_none()) cmd.xform.position = to_f3(position, "position");
                  if (!rotation_axis_angle.is_none())
                      cmd.xform.rotation = to_axis_angle(rotation_axis_angle);
-                 if (!scale.is_none()) cmd.xform.scale = nb::cast<float>(scale);
+                 if (!scale.is_none()) apply_scale(cmd.xform.scale, cmd.scale_axes, scale);
                  apply_or_throw(l.doc->document, scene::Command{cmd}, "set_transform", l.undo.get());
              },
              "node"_a, "position"_a = nb::none(), "rotation_axis_angle"_a = nb::none(),
              "scale"_a = nb::none(),
-             "Retransform a placed node; omitted arguments keep their current value")
+             "Retransform a placed node; omitted arguments keep their current "
+             "value. scale= takes one number for a uniform scale or "
+             "(sx, sy, sz) for a per-axis one — which is how a slot, an oval "
+             "hole or a stretched chamfer is said. A per-axis scale costs no "
+             "step size (the field stays 1-Lipschitz, so safe_step_scale does "
+             "not move); what it costs is exactness — the value becomes a "
+             "BOUND on the distance rather than the distance.")
         .def("set_prim",
              [](PyLayer& l, scene::NodeId node, const PyPrim& prim) {
                  // Only the primitive is replaced: the node's deformers,

@@ -1173,6 +1173,7 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | Voxel resolution levels | `VoxelGrid::add_level` etc. | `VoxelGrid.add_level(...)`, `.set_active_level(...)` | `clay_voxel_add_level`, `clay_voxel_set_active_level`, `clay_voxel_drop_level` |
 | Groups a host builds | `scene::Node::is_group` | `Layer.add_group(...)` | `clay_layer_add_group`, `clay_layer_add_item_in_group`, `clay_item_add_child`, `clay_layer_children`, `clay_layer_node_count`, `clay_layer_node_at` |
 | What a placed node holds | `scene::Node::xform/prim/op/blend` | — (pyclay follow-up) | `clay_layer_node_transform`, `clay_layer_node_params`, `clay_layer_node_op_blend` |
+| A per-axis scale on an item | `scene::Node::scale_axes`, `cscale_nu_*` | `scale=(sx, sy, sz)` on every placement | `clay_item_set_scale_nonuniform`, `clay_layer_set_transform_nonuniform`, `clay_layer_node_transform_nonuniform`, `clay_mesh_transform_nonuniform` |
 | Quad meshing, with a target count | `mesh::mesh_tape_quads`, `mesh_tape_quads_fit`, `VoxelGrid::mesh_quads` | `Document.mesh_quads(...)`, `VoxelGrid.mesh_quads(...)` | `clay_document_mesh_quads`, `clay_voxel_mesh_quads` |
 | Triangles straight to voxels | `VoxelGrid::rasterize_mesh` | `VoxelGrid.rasterize_mesh(...)` | `clay_voxel_rasterize_mesh` |
 | A mesh a document carries | `scene::LayerKind::Mesh` | `Document.add_mesh_layer(...)`, `.mesh_layer(...)` | `clay_document_add_mesh_layer`, `clay_document_mesh_layer`, `clay_mesh_layer` |

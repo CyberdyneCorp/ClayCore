@@ -54,6 +54,8 @@ add_executable(clay_unit_tests
   unit/test_c_layer_enum.cpp
   unit/test_c_layer_nodes.cpp
   unit/test_c_node_readback.cpp
+  unit/test_scale_axes.cpp
+  unit/test_c_scale_axes.cpp
   unit/test_c_layer_rename.cpp
   unit/test_c_layer_mirror.cpp
   unit/test_c_layer_radial.cpp

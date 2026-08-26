@@ -2319,6 +2319,19 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
     return CLAY_OK;
 }
 
+// A per-axis scale, checked once for every entry point that takes one. Zero has
+// no inverse — it collapses the item onto a plane — and a negative component
+// mirrors it, which the layer mirror already expresses and which would flip the
+// winding of a boolean without saying so.
+clay_result read_scale_axes(const float scale[3], kernel::cfloat3* out) {
+    if (!scale) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null scale");
+    for (int i = 0; i < 3; ++i)
+        if (!(scale[i] > 0.0f))
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "every scale component must be > 0");
+    *out = kernel::cf3(scale[0], scale[1], scale[2]);
+    return CLAY_OK;
+}
+
 clay_result read_transform(const float position[3], const float rotation_axis[3],
                            float rotation_angle, float scale, math::Transform* out) {
     if (!position || !rotation_axis) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transform");
@@ -3128,7 +3141,30 @@ clay_result clay_layer_set_transform(clay_document* doc, clay_layer_id layer, cl
     math::Transform xform;
     clay_result r = read_transform(position, rotation_axis, rotation_angle, scale, &xform);
     if (r != CLAY_OK) return r;
+    // The command carries the WHOLE transform, so a uniform edit collapses any
+    // per-axis scale the node had. Stated at the declaration: this call means
+    // "this node's scale is uniform s".
     return apply_edit(doc, scene::Command{scene::SetTransformCmd{layer, node, xform}},
+                      "node not found");
+}
+
+clay_result clay_layer_set_transform_nonuniform(clay_document* doc, clay_layer_id layer,
+                                                clay_node_id node, const float position[3],
+                                                const float rotation_axis[3], float rotation_angle,
+                                                const float scale[3]) {
+    const scene::Node* target = peek_node(doc, layer, node);
+    if (target && target->is_group)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "a group has no transform of its own: transform its children");
+    kernel::cfloat3 axes;
+    clay_result r = read_scale_axes(scale, &axes);
+    if (r != CLAY_OK) return r;
+    // The uniform factor stays 1 here and the three components carry the whole
+    // scale, so what this call writes is exactly what its reader returns.
+    math::Transform xform;
+    r = read_transform(position, rotation_axis, rotation_angle, 1.0f, &xform);
+    if (r != CLAY_OK) return r;
+    return apply_edit(doc, scene::Command{scene::SetTransformCmd{layer, node, xform, axes}},
                       "node not found");
 }
 
@@ -3361,13 +3397,49 @@ clay_result clay_layer_node_transform(const clay_document* doc, clay_layer_id la
     if (n->is_group)
         return fail(CLAY_ERROR_INVALID_ARGUMENT,
                     "a group has no transform of its own: read its children");
+    // One float cannot express three, and every way of pretending otherwise is
+    // a lie a host would act on: the uniform factor alone describes a
+    // differently-shaped item, and a read-change-write through the uniform
+    // setter would round the artist's squash away. #317's own lesson — a reader
+    // that cannot express what is there must not answer.
+    if (!scene::scale_axes_uniform(n->scale_axes))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "this node carries a per-axis scale: use "
+                    "clay_layer_node_transform_nonuniform");
     if (out_position) {
         out_position[0] = n->xform.position.x;
         out_position[1] = n->xform.position.y;
         out_position[2] = n->xform.position.z;
     }
     axis_angle_of(n->xform, out_rotation_axis, out_rotation_angle);
-    if (out_scale) *out_scale = n->xform.scale;
+    if (out_scale) *out_scale = n->xform.scale * n->scale_axes.x;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_node_transform_nonuniform(const clay_document* doc, clay_layer_id layer,
+                                                 clay_node_id node, float out_position[3],
+                                                 float out_rotation_axis[3],
+                                                 float* out_rotation_angle, float out_scale[3]) {
+    const scene::Node* n = nullptr;
+    clay_result r = find_node(doc, layer, node, &n);
+    if (r != CLAY_OK) return r;
+    if (n->is_group)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "a group has no transform of its own: read its children");
+    if (out_position) {
+        out_position[0] = n->xform.position.x;
+        out_position[1] = n->xform.position.y;
+        out_position[2] = n->xform.position.z;
+    }
+    axis_angle_of(n->xform, out_rotation_axis, out_rotation_angle);
+    // The two scales multiply, and this call reports the product — so a node
+    // placed through the UNIFORM setter answers (s, s, s) here rather than
+    // (1, 1, 1) with the factor hidden somewhere the caller cannot see.
+    if (out_scale) {
+        out_scale[0] = n->xform.scale * n->scale_axes.x;
+        out_scale[1] = n->xform.scale * n->scale_axes.y;
+        out_scale[2] = n->xform.scale * n->scale_axes.z;
+    }
     return CLAY_OK;
 }
 
@@ -3668,6 +3740,14 @@ clay_result clay_item_set_scale(clay_item* item, float scale) {
     if (scale <= 0.0f) return fail(CLAY_ERROR_INVALID_ARGUMENT, "scale must be > 0");
     item->node.xform.scale = scale;
     return CLAY_OK;
+}
+
+clay_result clay_item_set_scale_nonuniform(clay_item* item, const float scale[3]) {
+    if (!item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null item");
+    // The two scales MULTIPLY rather than replace: the uniform one stays the
+    // similarity factor and this modulates it per axis, so setting both in
+    // either order means the same thing.
+    return read_scale_axes(scale, &item->node.scale_axes);
 }
 
 clay_result clay_item_set_op(clay_item* item, int32_t op) {
@@ -6137,6 +6217,48 @@ clay_result clay_mesh_transform(const clay_mesh* mesh, const float position[3],
     // leaves a direction unchanged, and adding the position would turn a
     // direction into a point.
     for (kernel::cfloat3& n : handle->data.normals) n = xform.rotation.rotate(n);
+    *out_mesh = handle;
+    return CLAY_OK;
+}
+
+clay_result clay_mesh_transform_nonuniform(const clay_mesh* mesh, const float position[3],
+                                           const float rotation_axis[3], float rotation_angle,
+                                           const float scale[3], clay_mesh** out_mesh) {
+    if (!mesh || !out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null argument");
+    *out_mesh = nullptr;
+    const mesh::Mesh* src = mesh_of(mesh);
+    if (!src) return fail(CLAY_ERROR_NOT_FOUND, "this handle refers to no mesh");
+
+    kernel::cfloat3 axes;
+    clay_result r = read_scale_axes(scale, &axes);
+    if (r != CLAY_OK) return r;
+    // The rotation and position come through the same reader every other
+    // transform in this ABI uses; the scale is the part that is not a
+    // similarity, so it is applied here rather than carried by the Transform.
+    math::Transform xform;
+    r = read_transform(position, rotation_axis, rotation_angle, 1.0f, &xform);
+    if (r != CLAY_OK) return r;
+
+    auto* handle = new clay_mesh();
+    handle->data = *src;
+    handle->quad_provenance = mesh->quad_provenance;
+    for (kernel::cfloat3& v : handle->data.positions)
+        v = xform.apply(kernel::cf3(v.x * axes.x, v.y * axes.y, v.z * axes.z));
+    // Normals go through the INVERSE TRANSPOSE of the linear part, which for
+    // rotation-times-diagonal is the rotation times the reciprocal scale. The
+    // uniform call can rotate a normal and stop, because a similarity leaves a
+    // direction alone; a squash does not — transforming a normal as a direction
+    // tilts every one of them off the surface, and the shading and every
+    // consumer that trusts them go with it. Renormalized, since the reciprocal
+    // scale does not preserve length.
+    for (kernel::cfloat3& n : handle->data.normals) {
+        kernel::cfloat3 t =
+            xform.rotation.rotate(kernel::cf3(n.x / axes.x, n.y / axes.y, n.z / axes.z));
+        // A normal that was already degenerate stays as it was rather than
+        // becoming a NaN: this call moves a mesh, it does not repair one.
+        const float len2 = kernel::cdot2(t);
+        n = len2 > 0.0f ? t / kernel::csqrt(len2) : n;
+    }
     *out_mesh = handle;
     return CLAY_OK;
 }

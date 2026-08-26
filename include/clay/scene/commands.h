@@ -38,6 +38,12 @@ struct SetTransformCmd {
     LayerId layer = 0;
     NodeId node = kNoNode;
     math::Transform xform;
+    // The per-axis scale rides the transform command rather than getting one of
+    // its own because this command is the WHOLE transform: a caller that sets a
+    // uniform transform means a uniform scale, and one undo step should put
+    // back everything one edit changed. Default (1, 1, 1), so a command built
+    // by anything that predates the field is a uniform transform and says so.
+    kernel::cfloat3 scale_axes = kernel::cf3(1.0f, 1.0f, 1.0f);
 };
 struct SetPrimCmd {
     LayerId layer = 0;
@@ -209,7 +215,14 @@ math::Aabb command_influence_bound(const Document& doc, const Command& cmd);
 //
 // Minor 11 adds an item's GATE — the mask that protects a surface from any
 // operation.
-inline constexpr std::uint16_t kSceneMinor = 13;
+//
+// Minor 14 adds an item's PER-AXIS SCALE (issue #320): three floats appended
+// last in the node record, and three more in SetTransformCmd, which carries the
+// whole transform and so had to carry this too. Writing AT minor 13 or below
+// drops them, and the item degrades to its UNIFORM scale — a squashed cylinder
+// comes back round rather than missing, which is the recoverable direction and
+// the one an older build can evaluate.
+inline constexpr std::uint16_t kSceneMinor = 14;
 
 // Apply a command; returns its inverse, or nullopt if the target does not
 // exist or is protected (ghosted or locked). The document is unchanged in

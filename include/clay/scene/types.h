@@ -869,6 +869,39 @@ struct Node {
     // item fields
     Prim prim;
     math::Transform xform;
+    // A PER-AXIS scale, applied INNERMOST — in the item's own local frame,
+    // before `xform` places it (issue #320). The full map is
+    // `layer.xform * xform * diag(scale_axes)`, and the two scales multiply:
+    // `xform.scale` stays the uniform similarity factor and this modulates it
+    // per axis, which is what makes a slot a squashed capsule and an oval hole
+    // a squashed cylinder without re-authoring the primitive.
+    //
+    // NOT a field of math::Transform, deliberately. A Transform is a
+    // SIMILARITY — rotation, translation, one scale — and its algebra is closed
+    // because of that: `a * b` is another Transform and `inverse()` exists in
+    // closed form. A non-uniform scale does not commute with rotation, so
+    // widening Transform would make every composition in the engine a general
+    // matrix and take the exactness bookkeeping with it. Innermost and
+    // node-local, it composes as one matrix multiply at the four places that
+    // build a matrix from an item, and nothing else moves.
+    //
+    // THE FIELD IS NO LONGER A DISTANCE where this is not uniform. The tape
+    // evaluates at `p / s` and multiplies back by `min(s)` — cscale_nu_dist —
+    // which never overestimates, so |grad| stays <= 1.
+    //
+    // NOTHING GETS SLOWER, and that is worth stating precisely because it is
+    // the opposite of what the cost usually is here. The Lipschitz bound and
+    // the safe step scale are UNCHANGED — a marcher takes the same steps it
+    // always did. What is lost is `is_exact`: the value is a BOUND on the
+    // distance rather than the distance, so a consumer that reads it AS a
+    // distance — offsetting by it, measuring with it — is reading a number that
+    // can be short by up to max(s)/min(s). `cfi_scale_nonuniform` records it
+    // and `clay_tape_info` reports it.
+    //
+    // A UNIFORM value here — the default (1, 1, 1) included — keeps the field
+    // exact and compiles to bit-identical tape, so no existing document
+    // changes.
+    kernel::cfloat3 scale_axes = kernel::cf3(1.0f, 1.0f, 1.0f);
     float rounding = 0.0f;
     kernel::cfloat3 color = kernel::cf3(0.7f, 0.7f, 0.7f);
     // Participates in the layer's active mirror. TRUE by default: a sculptor
@@ -950,6 +983,35 @@ struct Node {
     // group fields
     std::vector<NodeId> children;
 };
+
+// -- a node's per-axis scale, as the three consumers need it ----------------
+// One place each, so tape_build, bounds and pick cannot drift on the order the
+// scale composes in or on which component the distance is corrected by.
+
+// True when a per-axis scale is a similarity after all — the default (1, 1, 1)
+// included. This is the case that keeps the field EXACT and compiles to
+// bit-identical tape, so it is a fast path and a correctness statement at once.
+inline bool scale_axes_uniform(kernel::cfloat3 s) { return s.x == s.y && s.y == s.z; }
+
+// The factor a local distance is multiplied back by: the SMALLEST component,
+// which is what makes cscale_nu_dist conservative rather than merely wrong on
+// two axes out of three.
+inline float scale_axes_factor(kernel::cfloat3 s) {
+    return kernel::cmin(s.x, kernel::cmin(s.y, s.z));
+}
+
+// The item's own matrix and its inverse, per-axis scale INNERMOST:
+//   world_from_local = xform * diag(scale_axes)
+//   local_from_world = diag(1 / scale_axes) * xform^-1
+inline math::cfloat4x4 item_matrix(const Node& n) {
+    if (scale_axes_uniform(n.scale_axes) && n.scale_axes.x == 1.0f) return n.xform.matrix();
+    return math::mul(n.xform.matrix(), math::scale_matrix(n.scale_axes));
+}
+
+inline math::cfloat4x4 item_inverse_matrix(const Node& n) {
+    if (scale_axes_uniform(n.scale_axes) && n.scale_axes.x == 1.0f) return n.xform.inverse_matrix();
+    return math::mul(math::inverse_scale_matrix(n.scale_axes), n.xform.inverse_matrix());
+}
 
 }  // namespace scene
 }  // namespace clay

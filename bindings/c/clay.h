@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 53
+#define CLAY_ABI_MINOR 54
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -798,6 +798,20 @@ clay_result clay_document_end_undo_group(clay_document* doc);
 clay_result clay_layer_set_transform(clay_document* doc, clay_layer_id layer, clay_node_id node,
                                      const float position[3], const float rotation_axis[3],
                                      float rotation_angle, float scale);
+/* The same edit with a PER-AXIS scale (ABI 0.54.0, issue #320) — see
+ * clay_item_set_scale_nonuniform for what it means and what it costs. The scale
+ * is applied INNERMOST, in the node's own local frame.
+ *
+ * These two calls are ONE command and one undo step, and each writes the WHOLE
+ * transform, which settles what the uniform one does to a node that carries a
+ * per-axis scale: it COLLAPSES IT. clay_layer_set_transform means "this node's
+ * scale is uniform s", because a call that took the whole transform and quietly
+ * left one component of it alone would be the partial update this ABI does not
+ * do. Read, change, write back — with the reader that matches. */
+clay_result clay_layer_set_transform_nonuniform(clay_document* doc, clay_layer_id layer,
+                                                clay_node_id node, const float position[3],
+                                                const float rotation_axis[3], float rotation_angle,
+                                                const float scale[3]);
 /* Replace a node's primitive. Its deformers, repetition, profile and stroke
  * belong to the node, not to the primitive, and survive the edit. */
 clay_result clay_layer_set_prim(clay_document* doc, clay_layer_id layer, clay_node_id node,
@@ -1007,6 +1021,38 @@ clay_result clay_item_set_position(clay_item* item, const float position[3]);
 /* Rotation as an axis (need not be normalized) and an angle in radians. */
 clay_result clay_item_set_rotation(clay_item* item, const float axis[3], float radians);
 clay_result clay_item_set_scale(clay_item* item, float scale);           /* uniform, > 0 */
+/* A PER-AXIS scale (ABI 0.54.0, issue #320), multiplying the uniform one above
+ * and applied INNERMOST — in the item's own local frame, before its rotation
+ * and position place it. This is what makes a slot a squashed capsule and an
+ * oval bolt hole a squashed cylinder without re-authoring the primitive: the
+ * kinds that carry their own extents could say it at creation and never
+ * afterwards, and the kinds that do not (a capsule, a cylinder, a torus) could
+ * not say it at all.
+ *
+ * Every component must be > 0. A zero collapses the item onto a plane and has
+ * no inverse; a negative one mirrors it, which the layer mirror already
+ * expresses and which would silently flip the winding of a boolean.
+ *
+ * WHAT IT COSTS, and it is not what you would guess. A non-uniform scale is
+ * not a similarity, so the result is no longer a true distance: the engine
+ * evaluates at p / s and multiplies back by the SMALLEST component, which never
+ * overestimates.
+ *
+ * NOTHING GETS SLOWER. The field stays 1-Lipschitz, so the Lipschitz bound and
+ * clay_layer_safe_step_scale are UNCHANGED and a marcher takes the steps it
+ * always did. What is lost is EXACTNESS — clay_tape_info's out_is_exact goes to
+ * 0 — so the value becomes a BOUND on the distance rather than the distance,
+ * short by at most the ratio of the largest axis to the smallest. That matters
+ * to a consumer that reads the value AS a distance (offsetting by it, measuring
+ * with it) and to nothing else.
+ *
+ * A uniform value here, the default (1, 1, 1) included, keeps the field exact
+ * and compiles to identical tape.
+ *
+ * Not on clay_item_desc, deliberately: that struct is zero-filled by its own
+ * contract, and a zeroed per-axis scale would have to mean (1, 1, 1) rather
+ * than what it says. Compose it here. */
+clay_result clay_item_set_scale_nonuniform(clay_item* item, const float scale[3]);
 clay_result clay_item_set_op(clay_item* item, int32_t op);               /* clay_op */
 clay_result clay_item_set_blend(clay_item* item, int32_t blend, float k); /* clay_blend, k >= 0 */
 clay_result clay_item_set_rounding(clay_item* item, float rounding);     /* >= 0 */
@@ -1423,11 +1469,35 @@ clay_result clay_layer_node_prim(const clay_document* doc, clay_layer_id layer,
  * same rotation by the other route. The axis is always unit length and never
  * zero — an identity rotation reads back as angle 0 about (0, 1, 0) rather
  * than about nothing — because clay_layer_set_transform refuses a zero axis
- * and a reader whose output its own setter rejects would not be a round trip. */
+ * and a reader whose output its own setter rejects would not be a round trip.
+ *
+ * SINCE 0.54.0 A NODE CARRYING A PER-AXIS SCALE IS REFUSED HERE, with
+ * CLAY_ERROR_INVALID_ARGUMENT and nothing written: one float cannot express
+ * three, and the alternatives are all lies. Reporting the uniform factor alone
+ * would hand back a placement that reads back a differently-shaped item, and a
+ * host doing read-change-write through the uniform setter would silently round
+ * off the artist's squash. That is the same failure #317 was filed about —
+ * clay_layer_node_influence_bound answering a positional question it cannot
+ * answer — and the lesson taken from it is that a reader which cannot express
+ * what is there must not answer. Use clay_layer_node_transform_nonuniform,
+ * which always can. A host that never sets a per-axis scale never meets this. */
 clay_result clay_layer_node_transform(const clay_document* doc, clay_layer_id layer,
                                       clay_node_id node, float out_position[3],
                                       float out_rotation_axis[3], float* out_rotation_angle,
                                       float* out_scale);
+
+/* The same reading with the per-axis scale (ABI 0.54.0). Answers for EVERY
+ * item, uniform or not: a node with a uniform scale s reports (s, s, s), so a
+ * host that has one manipulator for both cases can call this one alone and
+ * never branch. out_scale is the three factors clay_layer_set_transform_nonuniform
+ * takes, so what comes out goes straight back in.
+ *
+ * A GROUP is refused as the uniform reader refuses one, for its setter's
+ * reason: a group has no transform of its own. */
+clay_result clay_layer_node_transform_nonuniform(const clay_document* doc, clay_layer_id layer,
+                                                 clay_node_id node, float out_position[3],
+                                                 float out_rotation_axis[3],
+                                                 float* out_rotation_angle, float out_scale[3]);
 
 /* The primitive's parameter block, as clay_layer_set_prim takes it, by the
  * size-query pattern clay_layer_children uses and counted in FLOATS: call with
@@ -2325,6 +2395,16 @@ clay_result clay_mesh_layer(const clay_mesh* mesh, clay_layer_id* out_layer);
  * Quads survive: this rewrites positions and touches no index, so the quad
  * list still describes the triangles beside it. So does the quad report — it
  * is the same mesh, moved. */
+/* The same move with a PER-AXIS scale (ABI 0.54.0, issue #320). A mesh is real
+ * vertices and no field, so nothing about exactness applies here: the positions
+ * go through the matrix and the NORMALS through its inverse transpose, then
+ * renormalized. That last part is why this is not the uniform call with three
+ * numbers — under a non-uniform scale a normal is no longer carried by the
+ * rotation alone, and transforming it as a direction tilts every one of them
+ * off the surface. Every component must be > 0. */
+clay_result clay_mesh_transform_nonuniform(const clay_mesh* mesh, const float position[3],
+                                           const float rotation_axis[3], float rotation_angle,
+                                           const float scale[3], clay_mesh** out_mesh);
 clay_result clay_mesh_transform(const clay_mesh* mesh, const float position[3],
                                 const float rotation_axis[3], float rotation_angle,
                                 float scale, clay_mesh** out_mesh);
