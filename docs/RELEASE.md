@@ -85,8 +85,44 @@ forward-refuse).
 
    **0.52.0 is not such a release**: additive — the sculpt handoff writer
    (`clay_mesh_save_handoff`, `_memory`, `clay_mesh_handoff_material_mix`) and
-   `mesh::vertex_normals`. No format change to `.clayspace`, and nothing that
-   compiled against 0.51.0 behaves differently.
+   `mesh::vertex_normals`. No format change to `.clayspace`, no symbol removed,
+   no signature changed and no struct re-laid out, so a host compiled against
+   0.51.0 keeps linking.
+
+   It is NOT a release where nothing behaves differently, and the difference is
+   the whole bake-and-brush program that landed under this minor rather than the
+   handoff. Four existing entry points return something other than what 0.51.0
+   returned, every one of them because 0.51.0 was wrong:
+
+   - `clay_brick_cache_mesh` and `clay_brick_cache_mesh_lod` march the cells
+     that a brick with no stored lattice OWNS. A field steeper than its band —
+     which a worked sculpt is, routinely — used to leave those cells unmarched
+     and the surface open there: 386 open boundary edges on a relief ball at
+     voxel 0.02, against 0 for `clay_document_mesh` of the same document
+     (issue #292). A caller counting triangles gets more of them; a caller
+     rendering the result gets a closed surface. For a field the band brackets
+     there are no such cells and the mesh is byte-identical.
+   - `clay_item_volume_flatten` no longer inflates the volume it flattens. It
+     read its source back through `eval()`, which outside the band reports the
+     far bound, and re-recorded those brick-quantised steps as samples: a
+     re-baked ball came back with 1,246 stored bricks declaring a Lipschitz of
+     14 where its source declared 1, compounding on every stroke. It is 444
+     bricks at 1.74 now. A host that sized a buffer from the old brick count
+     will see a smaller one, and `safe_step_scale` improves rather than
+     degrades.
+   - `clay_item_volume_flatten` with settings that describe no flatten hands
+     back the source volume instead of a resampled copy of it. Same values,
+     and no longer a copy.
+   - Culled evaluation is bit-identical to the full tape inside the region it
+     promised that for, which for a smooth-union chain it had not been: 95 of
+     1,627 in-band samples differed on a 600-node document at `k=0.06`, worst
+     0.00014 — and 0.0091, half a cell, at 25 nodes (issue #282). Anything
+     reading a field through `BrickCache` moves by that much, toward the truth.
+
+   Nothing here is a compatibility break; all four are documents that were
+   being computed wrongly and now are not. They are listed because a host with
+   golden images or pinned brick counts will see them, and should re-record
+   rather than go looking for a regression.
 
    The handoff's OWN version is 1.0 and is not ours: it is
    CyberRemesherAndUV's `docs/sculpt-handoff-format.md`, defined unilaterally
@@ -1016,6 +1052,25 @@ publishing.
 A host consuming the kernels artifact pins it by release tag, so a release
 that changes kernel math changes the fixture too: regenerate and re-run it on
 the host side rather than assuming the previous one still passes.
+
+### Release notes
+
+`--generate-notes` produces a commit list, which is not a release note. Write
+the notes as `docs/release-notes/vX.Y.Z.md` in the release PR — in the repository
+rather than only in the GitHub release body, so they are reviewable beside the
+change and survive the release being edited — and paste that file as the draft
+release's body when the workflow finishes.
+
+They exist to tell a host what it must DO, so the two sections that are not
+optional are what moves under a caller who changes nothing (an entry point that
+returns a different answer, a format that round-trips lossily, a C++ member that
+moved) and what is still known-broken or unmeasured. `docs/release-notes/v0.52.0.md`
+is the worked example. v0.49.0's notes predate the convention and live only on
+the GitHub release.
+
+Every measurement quoted must name what it was measured on. A device number
+without its model and OS, or a Mac number presented as a device number, is worse
+than no number.
 
 ## Open items before v1.0
 
