@@ -53,6 +53,82 @@ void CullIndex::build_chain(const SdfContent& content, const std::vector<NodeId>
     chains_.push_back(std::move(chain));
 }
 
+namespace {
+// The last layer a compile emits for, which is the only one an append extends
+// -- the same rule compile_document_append follows, and for the same reason.
+const Layer* last_visible_sdf_layer(const Document& doc) {
+    const Layer* found = nullptr;
+    for (const Layer& layer : doc.layers)
+        if (layer.visible && layer.kind == LayerKind::Sdf && layer.sdf) found = &layer;
+    return found;
+}
+}  // namespace
+
+bool CullIndex::append(const std::vector<NodeId>& appended) {
+    if (!doc_ || appended.empty()) return false;
+    const Layer* last = last_visible_sdf_layer(*doc_);
+    if (!last) return false;
+    const std::vector<NodeId>& roots = last->sdf->roots;
+
+    // The one claim the caller makes that this can check for itself, and it is
+    // O(appended) rather than O(document).
+    if (appended.size() > roots.size()) return false;
+    const std::size_t first = roots.size() - appended.size();
+    for (std::size_t i = 0; i < appended.size(); ++i)
+        if (roots[first + i] != appended[i]) return false;
+
+    // EVERY chain over that root list, not just the last layer's. An INSTANCED
+    // layer shares its SdfContent with the layer it instances, so one roots
+    // vector is compiled once per layer that names it -- and each of those is
+    // its own chain, with its own bounds, because `item_geometry_bound` reads
+    // the layer's transform and mirror. Appending to only one of them leaves
+    // the others describing a document that no longer exists, which is a
+    // silently smaller tape rather than a crash: the corpus in
+    // test_cull_index.cpp has such a layer and caught exactly that.
+    std::vector<std::size_t> targets;
+    for (std::size_t i = 0; i < chains_.size(); ++i)
+        if (chains_[i].ids == &roots) targets.push_back(i);
+    if (targets.empty()) return false;
+
+    // Nothing is written until every check has passed, so a refusal leaves the
+    // index exactly as it was.
+    for (std::size_t at : targets) {
+        const Layer& layer = *chains_[at].layer;
+        const SdfContent& content = *layer.sdf;
+        for (NodeId id : appended) {
+            const Node* n = content.find(id);
+            if (!n || !n->visible) continue;
+            Entry e;
+            e.node = n;
+            e.id = id;
+            bool forbids_pruning = false;
+            if (n->is_group) {
+                e.bound = node_influence_bound(content, id, layer);
+                // A group is always cull-tested; its bound reports infinity for
+                // a non-local subtree, which the survive test lets through.
+                e.local = true;
+                // Grows chains_, so nothing may hold a Chain* across this.
+                build_chain(content, n->children, layer);
+            } else {
+                e.bound = item_geometry_bound(*n, layer);
+                e.local = item_influence_is_local(*n);
+                forbids_pruning = item_is_feathered_replace(*n);
+            }
+            chains_[at].entries.push_back(e);
+            if (forbids_pruning) chains_[at].prunable = false;
+        }
+        // Both terms of a layer's pad are maxima over its visible nodes, so an
+        // append can only raise them, and only for the layers it touched -- so
+        // the document's pad is the old one against theirs. Recomputed rather
+        // than tracked: it is a cheap walk of the flat node map (0.15 ms of the
+        // 2.45 this avoids), and keeping the two maxima separately to update in
+        // place would store a sum of maxima where the pad is a maximum of sums
+        // -- safe, being larger, but no longer what a fresh build says.
+        pad_ = kernel::cmax(pad_, ::clay::scene::cull_pad(content, layer));
+    }
+    return true;
+}
+
 CullPlan CullIndex::plan(const math::Aabb& region) const {
     CullPlan plan;
     plan.pruned_.reserve(chains_.size());

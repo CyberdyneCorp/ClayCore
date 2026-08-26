@@ -755,6 +755,51 @@ void BM_DabSuffixSeeded(benchmark::State& state) {
 }
 BENCHMARK(BM_DabSuffixSeeded)->Unit(benchmark::kMillisecond);
 
+// Rebuilding the cull index per dab against extending it (#306 follow-up, and
+// the other half of the pair above: seeding a suffix removes the per-brick
+// compile and the evaluation, and then this IS the dab). A stroke appends one
+// item per stamp and every stamp bumps the revision, so the index is rebuilt
+// from scratch -- walking every node recomputing bounds that did not move.
+// 2.42 ms at 50,000 items, of which 2.29 ms is bounds and 0.15 ms the pad.
+//
+// Same fixture as the pair above, deliberately: the two measure the two costs
+// of one dab over one document.
+namespace {
+constexpr int kIndexAppendNodes = 20000;
+}  // namespace
+
+void BM_CullIndexRebuild(benchmark::State& state) {
+    const scene::Document doc = spread_sculpt(kIndexAppendNodes);
+    for (auto _ : state) {
+        const scene::CullIndex index(doc);
+        benchmark::DoNotOptimize(index.cull_pad());
+    }
+    state.counters["nodes"] = static_cast<double>(kIndexAppendNodes);
+}
+BENCHMARK(BM_CullIndexRebuild)->Unit(benchmark::kMillisecond);
+
+void BM_CullIndexAppend(benchmark::State& state) {
+    scene::Document doc = spread_sculpt(kIndexAppendNodes);
+    scene::CullIndex index(doc);
+    // One dab per iteration, each extending the index the last one produced --
+    // a stroke, which is the case this exists for. The insert is outside the
+    // timed region the same way the rebuild's document build is.
+    for (auto _ : state) {
+        state.PauseTiming();
+        scene::Node n;
+        n.prim = scene::Prim::sphere(0.04f);
+        n.xform.position = cf3(1.0f, 0.001f * static_cast<float>(state.iterations()), 0.0f);
+        const scene::NodeId id = doc.layers[0].sdf->insert(std::move(n));
+        state.ResumeTiming();
+        if (!index.append({id})) {
+            state.SkipWithError("the append was refused");
+            return;
+        }
+    }
+    state.counters["nodes"] = static_cast<double>(kIndexAppendNodes);
+}
+BENCHMARK(BM_CullIndexAppend)->Unit(benchmark::kMillisecond);
+
 void BM_DeepDocRefill193(benchmark::State& state) { deep_doc_refill(state, 193); }
 BENCHMARK(BM_DeepDocRefill193)->Unit(benchmark::kMillisecond);
 void BM_DeepDocRefill2000(benchmark::State& state) { deep_doc_refill(state, 2000); }

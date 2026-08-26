@@ -623,3 +623,95 @@ TEST_CASE("tape cache: concurrent readers of one document agree") {
     for (std::thread& w : workers) w.join();
     CHECK(mismatches.load() == 0);
 }
+
+namespace {
+
+// A culled grid evaluation, which is the read that goes through the CULL
+// INDEX rather than through the tape — the cache `clay_eval_grid` consults
+// per brick, and the one an append now extends instead of rebuilding.
+std::vector<float> grid_signature(const clay_document* d) {
+    clay_grid_query g;
+    std::memset(&g, 0, sizeof(g));
+    g.struct_size = sizeof(g);
+    g.origin[0] = -1.1f;
+    g.origin[1] = -1.1f;
+    g.origin[2] = -1.1f;
+    g.spacing = 0.13f;
+    g.dims[0] = 18;
+    g.dims[1] = 18;
+    g.dims[2] = 18;
+    const float lo[3] = {-1.2f, -1.2f, -1.2f};
+    const float hi[3] = {1.2f, 1.2f, 1.2f};
+    std::vector<float> v(static_cast<std::size_t>(g.dims[0]) * g.dims[1] * g.dims[2]);
+    REQUIRE(clay_eval_grid(d, nullptr, &g, lo, hi, v.data(), nullptr, v.size()) == CLAY_OK);
+    return v;
+}
+
+}  // namespace
+
+TEST_CASE("cull index cache: an extended index reads as a rebuilt one") {
+    // The index is cached per revision like the tape, and an append now
+    // EXTENDS it rather than rebuilding — 2.42 ms to 0.13 ms at 50,000 items.
+    // The oracle is a fresh document holding the same items: its first read
+    // has no index to extend and so is always a full build, so an extension
+    // that drifted shows as a disagreement with it.
+    //
+    // Bit-for-bit, not approximately: the index is a pure acceleration, so the
+    // culled compile it feeds must make exactly the decisions a rebuilt one
+    // makes and the values must be the same floats.
+    auto built_with = [](int dabs) {
+        Doc fresh;
+        add_sphere(fresh, 1.0f, 0.0f);
+        for (int i = 1; i <= dabs; ++i)
+            add_sphere(fresh, 0.25f, -0.9f + 0.2f * static_cast<float>(i));
+        return grid_signature(fresh.d);
+    };
+
+    SUBCASE("every dab of a stroke") {
+        Doc doc;
+        add_sphere(doc, 1.0f, 0.0f);
+        const std::vector<float> base = grid_signature(doc.d);
+        // A stroke: every append after the first extends the index the
+        // previous one produced, which one dab never reaches.
+        for (int i = 1; i <= 8; ++i) {
+            CAPTURE(i);
+            add_sphere(doc, 0.25f, -0.9f + 0.2f * static_cast<float>(i));
+            CHECK(grid_signature(doc.d) == built_with(i));
+        }
+        add_sphere(doc, 0.9f, 0.9f);
+        CHECK(grid_signature(doc.d) != base);  // the stroke did move the field
+    }
+
+    SUBCASE("several appends absorbed by one read") {
+        // The log accumulates across edits and is consumed by one extension;
+        // one that took only the last item would pass a read-per-dab test.
+        Doc a;
+        add_sphere(a, 1.0f, 0.0f);
+        grid_signature(a.d);  // build the index, so the appends below extend it
+        for (int i = 1; i <= 5; ++i) add_sphere(a, 0.25f, -0.9f + 0.2f * static_cast<float>(i));
+        CHECK(grid_signature(a.d) == built_with(5));
+    }
+
+    SUBCASE("a general edit falls back to a rebuild") {
+        // Anything that is not an append clears the log, and the index must
+        // then be rebuilt rather than extended over a document that moved.
+        // Undo is the sharpest case: it takes an item AWAY, so an index that
+        // carried on extending would describe a document with one item too
+        // many.
+        Doc doc;
+        REQUIRE(clay_document_enable_undo(doc.d) == CLAY_OK);
+        add_sphere(doc, 1.0f, 0.0f);
+        for (int i = 1; i <= 3; ++i) add_sphere(doc, 0.25f, -0.9f + 0.2f * static_cast<float>(i));
+        const std::vector<float> three = grid_signature(doc.d);
+        CHECK(three == built_with(3));
+
+        int32_t undone = 0;
+        REQUIRE(clay_document_undo(doc.d, &undone) == CLAY_OK);
+        CHECK(grid_signature(doc.d) == built_with(2));
+
+        // And appending again after the undo still lands on the right answer,
+        // which is what a log left dangling across the undo would break.
+        add_sphere(doc, 0.25f, -0.9f + 0.2f * 3.0f);
+        CHECK(grid_signature(doc.d) == three);
+    }
+}

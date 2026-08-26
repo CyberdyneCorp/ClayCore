@@ -80,7 +80,38 @@ class CullIndex {
     // applies the feather pad, as the per-brick test does.
     CullPlan plan(const math::Aabb& region) const;
 
-  private:
+    // -- extending an index after an append --------------------------------
+    //
+    // A stroke appends one item per stamp, and rebuilding the index to add it
+    // walks every node in the document recomputing bounds that did not move:
+    // 2.45 ms at 50,000 items, of which 2.29 ms is bounds and 0.15 ms is the
+    // pad. The same disease `compile_document_append` cures for the tape.
+    //
+    // Extends this index IN PLACE for a document that has gained `appended` at
+    // the tail of its last visible SDF layer's roots, and nothing else.
+    // Returns false and leaves the index UNTOUCHED when it cannot be sure that
+    // is what happened -- no such layer, no chain for its roots, or `appended`
+    // not actually at the tail in order. A refused caller rebuilds, which is
+    // what it would have done anyway; a wrong extension is silent.
+    //
+    // The result is the index a fresh build would produce: the same chains
+    // with the same cached bounds and the same prunability, and the same pad.
+    // Chain ORDER may differ -- a fresh build emits a group's children before
+    // the group's own chain and this appends them after -- which changes
+    // nothing, because a plan keys chains by (layer, child list) and those
+    // keys are unique. `test_cull_index.cpp` holds the tapes byte-identical
+    // either way, which is the property that matters.
+    //
+    // WHY THE CACHED POINTERS SURVIVE, which the class contract otherwise
+    // forbids relying on: entries hold `const Node*` into the layer's node
+    // map, and that map is a `std::unordered_map`, whose references stay valid
+    // across an insert even when it rehashes. A chain holds `&roots`, the
+    // address of the vector rather than of its buffer, so growing it is fine
+    // too. Those two facts are what make an append the ONE document mutation
+    // this may be carried across.
+    bool append(const std::vector<NodeId>& appended);
+
+   private:
     friend class CullPlan;
 
     // A (layer, address) pair. Chains depend on the layer as well as the
