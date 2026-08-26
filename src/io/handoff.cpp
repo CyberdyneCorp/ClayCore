@@ -71,21 +71,39 @@ std::vector<std::uint8_t> save_handoff_ply(const mesh::Mesh& m, const HandoffOpt
 
     if (!options.binary) {
         std::string body;
+        // Appended one field at a time rather than built with `" " + to_string(x)`.
+        // That form is operator+(const char*, string&&), whose aliasing analysis
+        // GCC 12 gets wrong under -Werror=restrict in the manylinux toolchain --
+        // it reports a memcpy of 9223372036854775810 bytes for a two-byte insert.
+        // Appending in place is immune, and is a temporary and an allocation
+        // cheaper per field besides. Only the wheels job compiles with that
+        // toolchain, and it only runs on a tag: see docs/RELEASE.md.
+        const auto field = [&body](auto v) {
+            body += ' ';
+            body += std::to_string(v);
+        };
         for (std::size_t i = 0; i < vertex_count; ++i) {
             const kernel::cfloat3 p = m.positions[i], n = normals[i];
             const kernel::cfloat3 c = has_colors ? m.colors[i] : kernel::cf3(1, 1, 1);
-            body += std::to_string(p.x) + " " + std::to_string(p.y) + " " + std::to_string(p.z);
-            body += " " + std::to_string(n.x) + " " + std::to_string(n.y) + " " +
-                    std::to_string(n.z);
-            body += " " + std::to_string(static_cast<int>(to_u8(c.x))) + " " +
-                    std::to_string(static_cast<int>(to_u8(c.y))) + " " +
-                    std::to_string(static_cast<int>(to_u8(c.z)));
-            body += " " + std::to_string(mix[i]) + "\n";
+            body += std::to_string(p.x);
+            field(p.y);
+            field(p.z);
+            field(n.x);
+            field(n.y);
+            field(n.z);
+            field(static_cast<int>(to_u8(c.x)));
+            field(static_cast<int>(to_u8(c.y)));
+            field(static_cast<int>(to_u8(c.z)));
+            field(mix[i]);
+            body += '\n';
         }
-        for (std::size_t f = 0; f < face_count; ++f)
-            body += "3 " + std::to_string(m.indices[f * 3]) + " " +
-                    std::to_string(m.indices[f * 3 + 1]) + " " +
-                    std::to_string(m.indices[f * 3 + 2]) + "\n";
+        for (std::size_t f = 0; f < face_count; ++f) {
+            body += '3';
+            field(m.indices[f * 3]);
+            field(m.indices[f * 3 + 1]);
+            field(m.indices[f * 3 + 2]);
+            body += '\n';
+        }
         std::vector<std::uint8_t> out(header.begin(), header.end());
         out.insert(out.end(), body.begin(), body.end());
         return out;
