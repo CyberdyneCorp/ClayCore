@@ -31,10 +31,13 @@ there are no samples where the surface now is, and the isosurface comes apart in
 fragments. That was measured, not theorised — eight strokes moved a surface by
 0.20 with a band of 0.05, and the render showed the wreckage.
 
-So flatten samples a **fresh** volume, blending the plane in as it goes, and the
-new band brackets the flattened surface by construction. It samples from the
-document's own field, which is exact everywhere; sampling from a volume instead
-would mix distances with the bounds it reports outside its band.
+So flatten blends the plane in *before* deciding which bricks to keep, and the
+new band brackets the flattened surface by construction. Sampling from a
+document builds a fresh volume that way; flattening an existing volume
+resamples only the bricks the brush's ball reaches and re-decides which of them
+store samples, which is what lets the facet land in bricks that held nothing.
+Prefer the document: its field is exact everywhere, where a volume reports a
+bound rather than a distance outside its own band.
 
 **A brush can steepen the field, and this one says so.** `relax` could lean on
 averaging being non-expansive. A blend under a weight that *varies across a

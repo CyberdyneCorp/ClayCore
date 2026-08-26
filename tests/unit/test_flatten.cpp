@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <functional>
+#include <optional>
 #include <vector>
 
 #include "clay/field/flatten.h"
@@ -485,4 +487,325 @@ TEST_CASE("flatten: a one-sided result is no steeper than the two-sided one") {
                                  << fill.sample_lipschitz());
     CHECK(cut.sample_lipschitz() <= two.sample_lipschitz() + 1e-3f);
     CHECK(fill.sample_lipschitz() <= two.sample_lipschitz() + 1e-3f);
+}
+
+// -- flattening a volume in place (make-the-flatten-dab-local) ---------------
+
+namespace {
+
+// A ball at the origin, plus `extra` unrelated ones marching off in +x that no
+// brush here ever reaches. What "unrelated model" means for a scaling test.
+FieldVolume balls_volume(int extra, float cell) {
+    auto f = [extra](kernel::cfloat3 p) {
+        float d = kernel::clength(p) - 0.6f;
+        for (int i = 1; i <= extra; ++i)
+            d = std::min(d, kernel::clength(p - cf3(1.6f * static_cast<float>(i), 0, 0)) - 0.6f);
+        return d;
+    };
+    return FieldVolume::sample(
+        f, math::Aabb{cf3(-1, -1, -1), cf3(1.0f + 1.6f * static_cast<float>(extra), 1, 1)}, cell,
+        cell * 4.0f);
+}
+
+// How many stored samples differ between two volumes over the same lattice,
+// and how many of the ones that survived are the identical float.
+struct SampleDiff {
+    int changed = 0;
+    int identical = 0;
+    int appeared = 0;
+    int vanished = 0;
+};
+
+SampleDiff diff_samples(const FieldVolume& a, const FieldVolume& b, int extent) {
+    SampleDiff d;
+    for (int gx = 0; gx < extent; ++gx)
+        for (int gy = 0; gy < extent; ++gy)
+            for (int gz = 0; gz < extent; ++gz) {
+                const std::optional<float> was = a.sample_at(gx, gy, gz);
+                const std::optional<float> now = b.sample_at(gx, gy, gz);
+                if (!was && !now) continue;
+                if (!was) {
+                    ++d.appeared;
+                    continue;
+                }
+                if (!now) {
+                    ++d.vanished;
+                    continue;
+                }
+                if (*was == *now)
+                    ++d.identical;
+                else
+                    ++d.changed;
+            }
+    return d;
+}
+
+// A brush on the north pole of the ball at the origin, with a plane cutting
+// through it.
+FlattenSettings pole_brush(float cell, kernel::cfloat3 centre = cf3(0, 0.6f, 0)) {
+    FlattenSettings s;
+    s.plane_point = cf3(0, 0.55f, 0);
+    s.plane_normal = cf3(0, 1, 0);
+    s.centre = centre;
+    s.region_radius = 5.0f * cell;
+    s.falloff = 5.0f * cell;
+    return s;
+}
+
+}  // namespace
+
+TEST_CASE("flatten on a volume touches only the bricks its brush reaches") {
+    // The locality claim, read back through the stored samples rather than
+    // through eval. Every sample beyond the brush and its taper must be the
+    // float it was — not close to it, the same one — because the fill hands
+    // back the volume's own stored sample wherever the weight is zero.
+    const float cell = 0.03f;
+    const FieldVolume before = balls_volume(0, cell);
+    const FlattenSettings settings = pole_brush(cell);
+    const FieldVolume after = field::flatten(before, settings);
+    REQUIRE_FALSE(after.empty());
+
+    const float reach = settings.region_radius + settings.falloff;
+    int compared = 0, moved = 0, dropped = 0;
+    for (int gx = 0; gx < 80; ++gx)
+        for (int gy = 0; gy < 80; ++gy)
+            for (int gz = 0; gz < 80; ++gz) {
+                const std::optional<float> was = before.sample_at(gx, gy, gz);
+                if (!was) continue;
+                const kernel::cfloat3 p = before.cell_position(gx, gy, gz);
+                const float d = kernel::clength(p - settings.centre);
+                const std::optional<float> now = after.sample_at(gx, gy, gz);
+                if (d > reach) {
+                    // Outside the taper the VALUE cannot move. The brick may
+                    // still stop storing it -- a brick straddling the taper
+                    // whose in-brush samples all left the band is emptied as a
+                    // whole -- and then no copy of it survives, which the loop
+                    // below requires to have been beyond the band anyway.
+                    if (now) {
+                        REQUIRE(*now == *was);
+                        ++compared;
+                    } else {
+                        REQUIRE(std::abs(*was) > before.band());
+                        ++dropped;
+                    }
+                } else if (now && *now != *was) {
+                    ++moved;
+                }
+            }
+    CHECK(compared > 1000);
+    CHECK(moved > 0);  // the brush did something, or the above is vacuous
+    INFO("dropped " << dropped);
+}
+
+TEST_CASE("flatten's cost follows the brush, not the model around it") {
+    // The scaling law, as counts rather than a stopwatch. The same dab into a
+    // volume covering four times the surface must change the same samples and
+    // add the same bricks; before this it re-sampled the whole bounds and the
+    // second volume came back with everything rewritten.
+    const float cell = 0.03f;
+    SampleDiff first;
+    std::ptrdiff_t first_bricks = 0;
+    for (int extra : {0, 3}) {
+        CAPTURE(extra);
+        const FieldVolume before = balls_volume(extra, cell);
+        const FieldVolume after = field::flatten(before, pole_brush(cell));
+        REQUIRE_FALSE(after.empty());
+        // Only the lattice around the first ball; the others sit beyond it.
+        const SampleDiff d = diff_samples(before, after, 70);
+        const std::ptrdiff_t bricks = static_cast<std::ptrdiff_t>(after.brick_count()) -
+                                      static_cast<std::ptrdiff_t>(before.brick_count());
+        if (extra == 0) {
+            first = d;
+            first_bricks = bricks;
+            REQUIRE(d.changed > 0);
+        } else {
+            CHECK(d.changed == first.changed);
+            CHECK(d.appeared == first.appeared);
+            CHECK(d.vanished == first.vanished);
+            CHECK(bricks == first_bricks);
+        }
+    }
+}
+
+TEST_CASE("flatten on a volume does not re-record its far bounds as samples") {
+    // Sampling a volume through eval() reads a BOUND outside the band — one
+    // that steps by brick rather than by cell — and storing those steps as
+    // samples inflated a re-baked ball from 444 stored bricks to 1,246 and
+    // declared a Lipschitz of 14 where its source declared 1. A local flatten
+    // reads the stored sample instead, so only the brush can move either
+    // number.
+    const float cell = 0.03f;
+    const FieldVolume before = balls_volume(0, cell);
+    REQUIRE(before.sample_lipschitz() == doctest::Approx(1.0f).epsilon(0.01));
+
+    const FieldVolume after = field::flatten(before, pole_brush(cell));
+    CHECK(after.sample_lipschitz() < 4.0f);
+    // A five-cell dab on a ball of hundreds of bricks cannot double it.
+    CHECK(static_cast<double>(after.brick_count()) <
+          1.15 * static_cast<double>(before.brick_count()));
+
+    SUBCASE("and the inflation does not compound over a stroke") {
+        FieldVolume rolling = before;
+        for (int dab = 0; dab < 4; ++dab) rolling = field::flatten(rolling, pole_brush(cell));
+        CHECK(rolling.sample_lipschitz() < 4.0f);
+        CHECK(static_cast<double>(rolling.brick_count()) <
+              1.15 * static_cast<double>(before.brick_count()));
+    }
+}
+
+TEST_CASE("flatten on a volume puts the facet where the plane is") {
+    // The blend still means what it meant. Compared against the same flatten
+    // sampled from the EXACT field the volume was built from, which is the
+    // oracle — not the old whole-bounds implementation, whose answer this
+    // change is correcting.
+    const float cell = 0.02f;
+    auto exact = [](kernel::cfloat3 p) { return kernel::clength(p) - 0.6f; };
+    const math::Aabb box{cf3(-1, -1, -1), cf3(1, 1, 1)};
+    const FieldVolume before = FieldVolume::sample(exact, box, cell, cell * 4.0f);
+
+    for (FlattenMode mode : {FlattenMode::TwoSided, FlattenMode::CutOnly, FlattenMode::FillOnly}) {
+        CAPTURE(static_cast<int>(mode));
+        FlattenSettings settings = pole_brush(cell);
+        settings.plane_point = cf3(0, 0.52f, 0);
+        settings.region_radius = 0.12f;
+        settings.falloff = 0.08f;
+        settings.mode = mode;
+
+        const FieldVolume local = field::flatten(before, settings);
+        const FieldVolume oracle = field::flatten(std::function<float(kernel::cfloat3)>(exact), box,
+                                                  cell, cell * 4.0f, settings);
+        REQUIRE_FALSE(local.empty());
+
+        // Under the brush, on the plane. CutOnly removes the cap, FillOnly has
+        // nothing below the plane to fill and so leaves the ball alone.
+        const float expected = mode == FlattenMode::FillOnly ? 0.6f : 0.52f;
+        for (float x = -0.06f; x <= 0.06f; x += 0.03f) {
+            CAPTURE(x);
+            const float got = surface_height(local, x, 0.0f);
+            REQUIRE(got > -5.0f);
+            CHECK(got == doctest::Approx(expected).epsilon(0.0).scale(1.0).epsilon(0.035));
+            CHECK(got == doctest::Approx(surface_height(oracle, x, 0.0f))
+                             .epsilon(0.0)
+                             .scale(1.0)
+                             .epsilon(0.035));
+        }
+    }
+}
+
+TEST_CASE("flatten on a volume can put the facet in bricks that stored nothing") {
+    // The reason rewrite_region could not do this job. The plane sits well
+    // outside the band around the source surface, so the bricks the facet
+    // lands in held no samples at all before the dab.
+    const float cell = 0.02f;
+    const FieldVolume before =
+        FieldVolume::sample([](kernel::cfloat3 p) { return kernel::clength(p) - 0.6f; },
+                            math::Aabb{cf3(-1, -1, -1), cf3(1, 1, 1)}, cell, cell * 4.0f);
+
+    FlattenSettings settings;
+    settings.plane_point = cf3(0, 0.42f, 0);
+    settings.plane_normal = cf3(0, 1, 0);
+    settings.centre = cf3(0, 0.6f, 0);
+    settings.region_radius = 0.25f;
+    settings.falloff = 0.1f;
+
+    // 0.18 is well past a band of four cells: nothing describes the facet yet.
+    REQUIRE_FALSE(before.has_samples_at(cf3(0, 0.42f, 0)));
+
+    const FieldVolume after = field::flatten(before, settings);
+    CHECK(after.has_samples_at(cf3(0, 0.42f, 0)));
+    CHECK(surface_height(after, 0.0f, 0.0f) ==
+          doctest::Approx(0.42f).epsilon(0.0).scale(1.0).epsilon(0.03));
+    // And the bricks the surface left no longer claim to hold it.
+    CHECK(after.eval(cf3(0, 0.6f, 0)) > 0.0f);
+}
+
+TEST_CASE("flatten on a volume keeps the copies of a shared sample together") {
+    // A sample on a brick face, edge or corner is stored by every brick
+    // sharing it, and a region selects whole bricks — so a brush placed on one
+    // of those boundaries has selected and unselected bricks holding the same
+    // sample. sample_at answers from whichever brick it finds first, so the
+    // copies drifting apart would show as a step in the field rather than as a
+    // failure here; serialize() compares the raw arrays and does catch it.
+    const float cell = 0.025f;
+    const FieldVolume before = balls_volume(0, cell);
+    const float brick = static_cast<float>(field::kBrickDim) * cell;
+    const kernel::cfloat3 o = before.origin();
+
+    // Snap to a brick corner near the north pole, then step off it by a face,
+    // an edge and a corner offset.
+    auto on_lattice = [&](float v, float from) {
+        return from + std::round((v - from) / brick) * brick;
+    };
+    const kernel::cfloat3 corner =
+        cf3(on_lattice(0.0f, o.x), on_lattice(0.58f, o.y), on_lattice(0.0f, o.z));
+    const kernel::cfloat3 places[] = {
+        corner + cf3(brick * 0.5f, brick * 0.5f, brick * 0.5f),  // inside a brick
+        corner + cf3(0.0f, brick * 0.5f, brick * 0.5f),          // on a face
+        corner + cf3(0.0f, 0.0f, brick * 0.5f),                  // on an edge
+        corner,                                                  // on a corner
+    };
+
+    int which = 0;
+    for (const kernel::cfloat3& centre : places) {
+        CAPTURE(++which);
+        FlattenSettings settings = pole_brush(cell, centre);
+        settings.plane_point = cf3(0, 0.5f, 0);
+        const FieldVolume after = field::flatten(before, settings);
+        REQUIRE_FALSE(after.empty());
+
+        // Every copy of every stored sample agrees. A volume whose halo copies
+        // had drifted would still answer sample_at, so this reads the bricks
+        // themselves: re-sampling the result at its own sample positions must
+        // reproduce the stored value, which is only true when the brick the
+        // lookup lands in holds the same float as its neighbours.
+        FieldVolume rebuilt = after;
+        rebuilt.rewrite([&after](int gx, int gy, int gz, float old) {
+            const std::optional<float> s = after.sample_at(gx, gy, gz);
+            return s ? *s : old;
+        });
+        CHECK(rebuilt.serialize() == after.serialize());
+    }
+}
+
+TEST_CASE("flatten on a volume hands back settings that describe no flatten") {
+    // Not a resampled copy of the volume, which is what this used to return
+    // and which is neither free nor faithful. The volume IS the source,
+    // sampled.
+    const float cell = 0.03f;
+    const FieldVolume before = balls_volume(0, cell);
+    const std::vector<std::uint8_t> was = before.serialize();
+
+    SUBCASE("a zero normal") {
+        FlattenSettings s = pole_brush(cell);
+        s.plane_normal = cf3(0, 0, 0);
+        CHECK(field::flatten(before, s).serialize() == was);
+    }
+    SUBCASE("no strength") {
+        FlattenSettings s = pole_brush(cell);
+        s.strength = 0.0f;
+        CHECK(field::flatten(before, s).serialize() == was);
+    }
+    SUBCASE("no region") {
+        FlattenSettings s = pole_brush(cell);
+        s.region_radius = 0.0f;
+        CHECK(field::flatten(before, s).serialize() == was);
+    }
+    SUBCASE("a region frozen solid by a mask") {
+        // The weight is zero at every sample, so the fill is the identity
+        // everywhere and the resample writes back what it read.
+        FlattenSettings s = pole_brush(cell);
+        s.mask = [](kernel::cfloat3) { return 1.0f; };
+        CHECK(field::flatten(before, s).serialize() == was);
+    }
+}
+
+TEST_CASE("flatten declares the Lipschitz its sampling already measured") {
+    // sample_blocks ends by measuring what it stored, and the flatten
+    // overloads that sample used to measure it a second time — a sweep of
+    // every stored sample in the volume for a number already in hand.
+    FlattenSettings settings = horizontal_at(0.55f);
+    settings.falloff = 0.04f;  // a tight taper, so there is something to declare
+    const FieldVolume sampled = flatten_source(settings);
+    REQUIRE(sampled.sample_lipschitz() > 1.0f);
+    CHECK(sampled.sample_lipschitz() == doctest::Approx(sampled.measure_sample_lipschitz()));
 }

@@ -421,6 +421,38 @@ flatten moves it many band widths, so flattening a volume in place is accurate
 only near the band it came from. The volume overload exists for imported meshes,
 where there is no document behind the surface.
 
+**A flatten on a volume costs what the brush touches.** Until v0.52.0 it did
+not: the overload resampled the whole of `v.bounds()` for a brush that reaches
+a ball, so the dab cost what the model cost. It now resamples only the bricks
+that ball meets — the radius plus the **taper**, exactly as relax measures its
+region — and re-decides which of them store samples, which is the part a rewrite
+could not do: flatten moves the surface many band widths, and the facet lands in
+bricks that held nothing.
+
+| a five-cell dab, one ball at the origin plus N-1 far away | before | after | |
+|---|---:|---:|---|
+| cell 0.02, 1 ball | 40.8 ms | **0.8 ms** | 53× |
+| cell 0.02, 8 balls | 266.9 ms | 5.9 ms | 45× |
+| cell 0.015, 8 balls | 628.9 ms | 12.0 ms | 52× |
+| cell 0.01, 1 ball | 262.7 ms | **3.5 ms** | 75× |
+| cell 0.01, 8 balls | 1800.3 ms | 28.7 ms | 63× |
+
+The field evaluation is what became local: the same dab asks for the same 36
+bricks whatever surrounds them, and a test holds that as a count rather than a
+time. What still scales with the model is the compact rebuild of `data_` and the
+far-bounds chamfer — at cell 0.01 with eight balls, 11.2 ms of the 28.7 is the
+volume copy the overload returns and most of the rest is those two.
+
+It also stopped **inflating the volume it flattened**. The overload read its
+source back through `eval()`, which outside the band reports the far bound — a
+value that steps by brick rather than by cell — so re-recording those steps as
+samples took a re-baked ball from 444 stored bricks to 1,246 and declared a
+Lipschitz of **14** where its source declared 1, compounding on every stroke. It
+now reads the volume's own stored sample and falls back to the bound only where
+no brick holds one, floored at what an empty brick already guarantees. The same
+ball flattened is 444 bricks at a Lipschitz of 1.7, and 444 at 2.4 after eight
+dabs. See [#300](https://github.com/CyberdyneCorp/ClayCore/issues/300).
+
 `relax` has the same pair, mirroring flatten symbol for symbol
 (`clay_item_volume_relax_from` beside `clay_item_volume_flatten_from`). For
 relax the document-sourced form is exactly bake-then-relax fused into one call

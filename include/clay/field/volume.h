@@ -101,6 +101,13 @@ class FieldVolume {
         // Sample `i` (x-fastest over (kBrickDim+1)^3, halo included) of the
         // brick at linear `slot` (x-fastest over bcount).
         kernel::cfloat3 sample_position(std::size_t slot, int i) const;
+        // The GLOBAL cell coordinate of the same sample -- the integers
+        // sample_position turns into a world point. A fill that wants to ask
+        // the volume what it already stores there needs them, and deriving
+        // them from the world position would be inverting arithmetic that is
+        // right here.
+        void sample_cell(std::size_t slot, int i, int out[3]) const;
+
         // The box the brick's samples span, halo face included.
         math::Aabb brick_box(std::size_t slot) const;
     };
@@ -349,6 +356,62 @@ class FieldVolume {
 
     RegionSnapshot snapshot_region(const Region& region) const;
 
+    // -- resampling a region ------------------------------------------------
+    //
+    // What `resample_region` did, for a caller that wants to know without
+    // diffing two volumes -- and for a scaling TEST, which needs a number that
+    // does not depend on how fast the machine is: `evaluated` is what must stay
+    // put when unrelated model is added around a brush.
+    struct ResampleTally {
+        std::size_t evaluated = 0;  // bricks the fill was asked for
+        std::size_t kept = 0;       // stored before and after
+        std::size_t added = 0;      // stored nothing before, stores samples now
+        std::size_t removed = 0;    // stored samples before, stores none now
+    };
+
+    // The bricks that MEET `region`, re-evaluated from `fill` and RECLASSIFIED
+    // from what it produced. Every other brick keeps its bytes.
+    //
+    // The primitive `rewrite_region` could not be. That one preserves which
+    // bricks store samples, which is what makes it right for an operator that
+    // filters an already-sampled surface: relax moves the surface by less than
+    // a cell, so it never leaves the band. An operator that DISPLACES the
+    // surface does leave it -- flatten moves it by many band widths -- and the
+    // facet then lands in bricks that hold nothing, which a rewrite cannot
+    // create. So:
+    //
+    //     rewrite_region()    values change, sparse support fixed
+    //     resample_region()   values change, sparse support re-decided
+    //
+    // Inside the region a brick may keep storing samples with new values, start
+    // storing them, or stop. The decision is `sample_blocks`' -- the same
+    // scan, over the values `fill` produced -- so there is one definition of
+    // near-the-surface and not two. That the scan runs AFTER the fill is the
+    // point: a brick that looks irrelevant against the source's surface is
+    // exactly where a displaced surface lands, so nothing may cull between
+    // them.
+    //
+    // `fill` IS THE IDENTITY OUTSIDE `region`, which for a fill means it
+    // reproduces the samples the volume already stores there. That is the same
+    // precondition `rewrite_region` states and it is load-bearing the same two
+    // ways: skipped bricks keep their old values, which is only the same answer
+    // if `fill` would have produced them; and a sample on a brick face is held
+    // by every brick sharing it, so a fill that changed such a sample where one
+    // sharer was selected and another was not would leave the copies
+    // disagreeing and the field stepping at the face. A caller reading a volume
+    // gets this exactly, not nearly, by preferring `sample_at` to `eval` --
+    // see field::flatten.
+    //
+    // The region needs NO margin for how far the operator moves the surface.
+    // The field outside it is unchanged, so the zero set outside it is
+    // unchanged, and whatever surface the operator creates lies inside the
+    // region that created it.
+    //
+    // `fill` is called once per selected brick -- a window of one, since a
+    // region selects a scattered set rather than the consecutive run
+    // `sample_blocks` walks.
+    ResampleTally resample_region(const Region& region, const BrickBlockFill& fill);
+
     // Drop the bricks whose samples all lie beyond the band, and re-derive
     // what the resulting sample-free bricks report. Returns how many went.
     //
@@ -407,6 +470,11 @@ class FieldVolume {
 
   private:
     void build_far_bounds();
+    // The half of resample_region that only READS: which bricks meet the
+    // region, and what `fill` produced for each. Split out so the half that
+    // rewrites the sparse storage is one walk over the slots and nothing else.
+    std::vector<std::size_t> fill_region_bricks(const Region& region, const BrickBlockFill& fill,
+                                                std::vector<float>* blocks) const;
     float eval_inside(kernel::cfloat3 p) const;
 
     kernel::cfloat3 origin_ = kernel::cf3(0, 0, 0);

@@ -5,17 +5,18 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <vector>
 
 #include "clay.h"
 #include "clay/field/volume.h"
-#include "kernel_utils.h"
 #include "clay/io/clayspace.h"
-#include "clay/scene/commands.h"
 #include "clay/kernel/exactness.h"
 #include "clay/scene/bounds.h"
+#include "clay/scene/commands.h"
 #include "clay/scene/tape.h"
+#include "kernel_utils.h"
 
 using namespace clay;
 using field::FieldVolume;
@@ -966,4 +967,238 @@ TEST_CASE("sample_parallel gives the same answer every time") {
         REQUIRE(again.brick_count() == first.brick_count());
         for (const kernel::cfloat3& p : probes) REQUIRE(again.eval(p) == first.eval(p));
     }
+}
+
+TEST_CASE("resample_region equals resampling every brick, where the fill is identity outside") {
+    // The property a displacing brush rests on, and the counterpart of
+    // rewrite_region's. A resample may change WHICH bricks store samples, so
+    // "the same answer" has to cover the sparse index and the far bounds as
+    // well as the samples — which is what comparing serialize() buys.
+    //
+    // The halo is the half that bites, exactly as it does for a rewrite: a
+    // sample on a brick face lives in every brick sharing it, and this writes
+    // only the copies held by selected bricks.
+    auto bumpy = [](kernel::cfloat3 p) {
+        return kernel::clength(p) - (0.7f + 0.05f * std::sin(11.0f * p.x) * std::sin(11.0f * p.y) *
+                                                std::sin(11.0f * p.z));
+    };
+    const math::Aabb whole{cf3(-1, -1, -1), cf3(1, 1, 1)};
+    const kernel::cfloat3 dent = cf3(0.0f, 0.71f, 0.0f);
+
+    // A dent deep enough to empty the bricks it sits in and to fill the ones
+    // beyond them — the two transitions a rewrite cannot make. Identity
+    // outside `bite`, so the two resamples below are required to agree.
+    const float bite = 0.22f;
+    auto pushed = [&bumpy, dent, bite](kernel::cfloat3 p) {
+        const float d = kernel::clength(p - dent);
+        if (d >= bite) return bumpy(p);
+        return bumpy(p) + 0.45f * (1.0f - d / bite);
+    };
+
+    for (float cell : {0.05f, 0.02f}) {
+        CAPTURE(cell);
+        const FieldVolume base = FieldVolume::sample(bumpy, whole, cell, cell * 3.0f);
+        REQUIRE(base.brick_count() > 1);
+
+        // A bake's fill, over `pushed`: the same values a fresh sample would
+        // take, so a resample covering every brick IS a re-bake.
+        const FieldVolume::BrickBlockFill fill = [&pushed](const FieldVolume::BrickGrid& grid,
+                                                           std::size_t first, std::size_t count,
+                                                           float* out) {
+            for (std::size_t s = 0; s < count; ++s)
+                for (int i = 0; i < field::kBrickSamples; ++i)
+                    out[s * field::kBrickSamples + static_cast<std::size_t>(i)] =
+                        pushed(grid.sample_position(first + s, i));
+        };
+
+        // Deliberately not brick-aligned, and a ball rather than the box around
+        // it, so selected and unselected bricks share samples.
+        const FieldVolume::Region regions[] = {
+            FieldVolume::Region::ball(dent, bite + 0.03f),
+            math::Aabb{dent - cf3(0.31f, 0.29f, 0.27f), dent + cf3(0.26f, 0.33f, 0.28f)},
+            math::Aabb{cf3(-9, -9, -9), cf3(9, 9, 9)},  // every brick
+        };
+        int which = 0;
+        FieldVolume every = base;
+        every.resample_region(math::Aabb{cf3(-9, -9, -9), cf3(9, 9, 9)}, fill);
+        for (const FieldVolume::Region& region : regions) {
+            CAPTURE(++which);
+            FieldVolume part = base;
+            const FieldVolume::ResampleTally tally = part.resample_region(region, fill);
+            CHECK(tally.evaluated > 0);
+            CHECK(part.serialize() == every.serialize());
+            CHECK(part.sample_lipschitz() == doctest::Approx(every.sample_lipschitz()));
+        }
+
+        // The agreement is not vacuous: the resample really did move samples.
+        FieldVolume moved = base;
+        moved.resample_region(FieldVolume::Region::ball(dent, bite + 0.03f), fill);
+        CHECK(moved.serialize() != base.serialize());
+    }
+
+    SUBCASE("and the comparison can fail") {
+        // Without this the case above proves nothing: the selection rounds
+        // outward by a whole brick, so a region a little too small is absorbed
+        // and still agrees. Breaking the precondition outright is what shows
+        // the comparison has teeth.
+        const FieldVolume base = FieldVolume::sample(bumpy, whole, 0.02f, 0.06f);
+        auto everywhere = [&bumpy](const FieldVolume::BrickGrid& grid, std::size_t first,
+                                   std::size_t count, float* out) {
+            for (std::size_t s = 0; s < count; ++s)
+                for (int i = 0; i < field::kBrickSamples; ++i)
+                    out[s * field::kBrickSamples + static_cast<std::size_t>(i)] =
+                        bumpy(grid.sample_position(first + s, i)) + 0.05f;
+        };
+        FieldVolume full = base, part = base;
+        full.resample_region(math::Aabb{cf3(-9, -9, -9), cf3(9, 9, 9)}, everywhere);
+        part.resample_region(math::Aabb{cf3(0.5f, -0.2f, -0.2f), cf3(0.52f, 0.2f, 0.2f)},
+                             everywhere);
+        CHECK(full.serialize() != part.serialize());
+    }
+}
+
+TEST_CASE("resample_region moves the surface out of bricks and into others") {
+    // What rewrite_region cannot do, and the whole reason this exists. The
+    // fill drives the surface a brick and a quarter down inside its ball, so
+    // the bricks it left must stop storing samples and the bricks it arrived
+    // in must start.
+    const float cell = 0.02f;
+    const FieldVolume base = FieldVolume::sample(
+        sphere_field(0.6f), math::Aabb{cf3(-1, -1, -1), cf3(1, 1, 1)}, cell, cell * 4.0f);
+    const kernel::cfloat3 centre = cf3(0, 0.6f, 0);
+    // The plane passes INSIDE the full-weight radius, so the facet it creates
+    // lands where the blend is the plane outright rather than in the taper.
+    const float plane_y = 0.42f;
+    const float radius = 0.25f, taper = 0.1f;
+
+    // A plane at y = 0.2 blended in under a taper — identity outside
+    // radius + taper, which is what makes the selection legal.
+    const FieldVolume::BrickBlockFill onto_plane =
+        [centre, radius, taper, plane_y](const FieldVolume::BrickGrid& grid, std::size_t first,
+                                         std::size_t count, float* out) {
+            for (std::size_t s = 0; s < count; ++s)
+                for (int i = 0; i < field::kBrickSamples; ++i) {
+                    const kernel::cfloat3 p = grid.sample_position(first + s, i);
+                    const float here = kernel::clength(p) - 0.6f;
+                    const float d = kernel::clength(p - centre);
+                    float w = 1.0f;
+                    if (d > radius + taper)
+                        w = 0.0f;
+                    else if (d > radius) {
+                        const float u = (d - radius) / taper;
+                        w = 1.0f - u * u * (3.0f - 2.0f * u);
+                    }
+                    out[s * field::kBrickSamples + static_cast<std::size_t>(i)] =
+                        here + ((p.y - plane_y) - here) * w;
+                }
+        };
+
+    REQUIRE(base.has_samples_at(centre));                    // the surface is here now
+    REQUIRE_FALSE(base.has_samples_at(cf3(0, plane_y, 0)));  // and not here
+
+    FieldVolume moved = base;
+    const FieldVolume::ResampleTally tally =
+        moved.resample_region(FieldVolume::Region::ball(centre, radius + taper), onto_plane);
+
+    CHECK(tally.added > 0);    // empty bricks now hold the facet
+    CHECK(tally.removed > 0);  // the bricks the surface left hold nothing
+    CHECK(tally.kept + tally.added + tally.removed <= tally.evaluated);
+    CHECK(moved.has_samples_at(cf3(0, plane_y, 0)));
+    // And the far bounds were re-derived against the support that is there
+    // now: a brick the surface left may no longer claim to be at it.
+    CHECK(moved.eval(centre) > 0.0f);
+    CHECK(moved.eval(cf3(0, plane_y, 0)) ==
+          doctest::Approx(0.0f).epsilon(0.0).scale(1.0).epsilon(static_cast<double>(cell)));
+
+    SUBCASE("and the volume beyond the brush is untouched") {
+        // The identity claim, read back through the samples rather than
+        // through eval: every stored sample outside the ball is the float it
+        // was.
+        const float reach = radius + taper;
+        int compared = 0;
+        for (int gx = 0; gx < 40; ++gx)
+            for (int gy = 0; gy < 40; ++gy)
+                for (int gz = 0; gz < 40; ++gz) {
+                    const std::optional<float> was = base.sample_at(gx, gy, gz);
+                    if (!was) continue;
+                    const kernel::cfloat3 p = base.cell_position(gx, gy, gz);
+                    if (kernel::clength(p - centre) <= reach + 8.0f * cell) continue;
+                    const std::optional<float> now = moved.sample_at(gx, gy, gz);
+                    REQUIRE(now.has_value());
+                    REQUIRE(*now == *was);
+                    ++compared;
+                }
+        CHECK(compared > 1000);
+    }
+}
+
+TEST_CASE("resample_region evaluates what the region holds, not what the volume does") {
+    // The scaling law, as a count rather than a stopwatch. The same ball
+    // resampled into a volume that covers far more surface must ask for the
+    // same bricks; a machine's speed does not enter into it.
+    auto balls = [](int extra) {
+        return [extra](kernel::cfloat3 p) {
+            float d = kernel::clength(p) - 0.6f;
+            for (int i = 1; i <= extra; ++i)
+                d = std::min(d,
+                             kernel::clength(p - cf3(1.6f * static_cast<float>(i), 0, 0)) - 0.6f);
+            return d;
+        };
+    };
+    const float cell = 0.04f;
+    const FieldVolume::Region brush = FieldVolume::Region::ball(cf3(0, 0.6f, 0), 5.0f * cell);
+
+    std::size_t first_count = 0;
+    std::size_t first_calls = 0;
+    for (int extra : {0, 3}) {
+        CAPTURE(extra);
+        const math::Aabb box{cf3(-1, -1, -1), cf3(1.0f + 1.6f * static_cast<float>(extra), 1, 1)};
+        FieldVolume v = FieldVolume::sample(balls(extra), box, cell, cell * 4.0f);
+        std::size_t calls = 0;
+        const FieldVolume::ResampleTally tally = v.resample_region(
+            brush, [&calls, &v](const FieldVolume::BrickGrid& grid, std::size_t first,
+                                std::size_t count, float* out) {
+                calls += count;
+                for (std::size_t s = 0; s < count; ++s)
+                    for (int i = 0; i < field::kBrickSamples; ++i) {
+                        int g[3];
+                        grid.sample_cell(first + s, i, g);
+                        const std::optional<float> stored = v.sample_at(g[0], g[1], g[2]);
+                        out[s * field::kBrickSamples + static_cast<std::size_t>(i)] =
+                            stored ? *stored : v.eval(grid.sample_position(first + s, i));
+                    }
+            });
+        CHECK(tally.evaluated == calls);
+        if (extra == 0) {
+            first_count = tally.evaluated;
+            first_calls = calls;
+            REQUIRE(first_count > 0);
+            // The volumes really do differ in size, or the check below is empty.
+            REQUIRE(v.brick_count() > 0);
+        } else {
+            CHECK(tally.evaluated == first_count);
+            CHECK(calls == first_calls);
+        }
+    }
+}
+
+TEST_CASE("resample_region drops the colour channel rather than inventing one") {
+    // A brick that stored no samples stored no colours either, and the fill
+    // that supplies its distances has nothing to say about its colour. Dropping
+    // the channel beats a facet of default grey in a painted surface — and it
+    // is what flatten did already, by sampling a fresh volume.
+    const FieldVolume::Region everything{math::Aabb{cf3(-9, -9, -9), cf3(9, 9, 9)}};
+    FieldVolume v = FieldVolume::sample_colored(
+        sphere_field(0.7f), [](kernel::cfloat3) { return cf3(0.2f, 0.9f, 0.4f); },
+        math::Aabb{cf3(-1, -1, -1), cf3(1, 1, 1)}, 0.06f, 0.25f);
+    REQUIRE(v.has_color());
+    v.resample_region(everything, [](const FieldVolume::BrickGrid& grid, std::size_t first,
+                                     std::size_t count, float* out) {
+        for (std::size_t s = 0; s < count; ++s)
+            for (int i = 0; i < field::kBrickSamples; ++i)
+                out[s * field::kBrickSamples + static_cast<std::size_t>(i)] =
+                    kernel::clength(grid.sample_position(first + s, i)) - 0.7f;
+    });
+    CHECK_FALSE(v.has_color());
+    CHECK(v.brick_count() > 0);
 }
