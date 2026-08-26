@@ -758,6 +758,80 @@ void BM_SurfaceNets(benchmark::State& state) {
 }
 BENCHMARK(BM_SurfaceNets)->Unit(benchmark::kMillisecond);
 
+// The two meshers on ONE precomputed lattice, which is what the meshing spec's
+// "cheaper preview" claim is actually about. The pair above cannot say it: both
+// its sides spend about half their time in `eval_tape_grid`, evaluating the
+// same field, and that shared half compresses whatever the meshers differ by.
+//
+// It also used to say the opposite of the truth. Until #302 both benchmarks
+// meshed with the default attributes, and the attribute pass -- one tape walk
+// per vertex for the colour and four for the gradient, on one thread -- was
+// 80-96% of each. Surface nets emits 3.2x fewer vertices, so it paid 3.2x less
+// of that and the pair passed on VERTEX COUNT while the geometry step went
+// unmeasured. With the attributes batched, nets was measured 1.68x SLOWER to
+// build (#304), and the fix was the mesher rather than the spec.
+namespace {
+struct LatticeFixture {
+    std::vector<float> values;
+    int nx = 0, ny = 0, nz = 0;
+    float voxel = 0.02f;
+    kernel::cfloat3 origin;
+};
+
+const LatticeFixture& bench_lattice() {
+    static const LatticeFixture fixture = [] {
+        LatticeFixture f;
+        const scene::Document doc = bench_document();
+        const scene::Tape tape = scene::compile_document(doc);
+        const math::Aabb r = tape.bounds;
+        f.origin = r.min;
+        f.nx = static_cast<int>(kernel::cround((r.max.x - r.min.x) / f.voxel)) + 1;
+        f.ny = static_cast<int>(kernel::cround((r.max.y - r.min.y) / f.voxel)) + 1;
+        f.nz = static_cast<int>(kernel::cround((r.max.z - r.min.z) / f.voxel)) + 1;
+        f.values.resize(static_cast<std::size_t>(f.nx) * f.ny * f.nz);
+        eval::GridQuery q;
+        q.origin = r.min;
+        q.spacing = f.voxel;
+        q.nx = f.nx;
+        q.ny = f.ny;
+        q.nz = f.nz;
+        eval::Registry::instance().find("cpu")->eval_grid(tape, q, f.values.data());
+        return f;
+    }();
+    return fixture;
+}
+}  // namespace
+
+void BM_MeshLatticeMarch(benchmark::State& state) {
+    const LatticeFixture& f = bench_lattice();
+    auto sample = [&f](int i, int j, int k) -> float {
+        if (i < 0 || j < 0 || k < 0 || i >= f.nx || j >= f.ny || k >= f.nz) return f.voxel;
+        return f.values[(static_cast<std::size_t>(k) * f.ny + j) * f.nx + i];
+    };
+    int cmin[3] = {-1, -1, -1};
+    int cmax[3] = {f.nx, f.ny, f.nz};
+    for (auto _ : state) {
+        mesh::Mesh m = mesh::mesh_lattice(sample, cmin, cmax, f.origin, f.voxel);
+        benchmark::DoNotOptimize(m.triangle_count());
+    }
+}
+BENCHMARK(BM_MeshLatticeMarch)->Unit(benchmark::kMillisecond);
+
+void BM_MeshLatticeNets(benchmark::State& state) {
+    const LatticeFixture& f = bench_lattice();
+    auto sample = [&f](int i, int j, int k) -> float {
+        if (i < 0 || j < 0 || k < 0 || i >= f.nx || j >= f.ny || k >= f.nz) return f.voxel;
+        return f.values[(static_cast<std::size_t>(k) * f.ny + j) * f.nx + i];
+    };
+    const int cmin[3] = {-1, -1, -1};
+    const int cmax[3] = {f.nx, f.ny, f.nz};
+    for (auto _ : state) {
+        mesh::Mesh m = mesh::mesh_lattice_nets(sample, cmin, cmax, f.origin, f.voxel);
+        benchmark::DoNotOptimize(m.triangle_count());
+    }
+}
+BENCHMARK(BM_MeshLatticeNets)->Unit(benchmark::kMillisecond);
+
 // The attribute pass the non-brick meshers reach — `mesh_tape`, `mesh_tape_dc`
 // and the dual-grid path all land in `apply_tape_attributes`. It walked the
 // tape once per vertex for the colour and four more for the gradient, on ONE

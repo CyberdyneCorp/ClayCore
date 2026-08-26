@@ -100,18 +100,50 @@ inline kernel::cfloat3 nets_vertex(const DualCrossing* crossings, int count, ker
 // changes nothing else — same vertices, same triangles, same 0-2 diagonal —
 // so the quad meshers and the triangle meshers are one code path and cannot
 // drift into two that disagree about where the surface is.
-inline Mesh dual_grid_mesh(const std::function<float(int, int, int)>& sample,
-                           const int cell_min[3], const int cell_max[3], kernel::cfloat3 origin,
-                           float spacing, const DualNormalFn& normal_at, const DualPlacer& place,
-                           bool keep_quads = false) {
+// TEMPLATED ON THE SAMPLER, not taking a std::function, and that is the whole
+// of why this is fast enough to be a preview. `sample` is called for eight
+// lattice corners of every cell in the range -- 33 million calls for a 0.02
+// mesh of the benchmark document -- and through a std::function none of them
+// inlines. Measured on that lattice: 52.6 ms of indirect calls against 6.7 ms
+// for the same reads inlined. The tape-level meshers below pass a lambda and
+// get that; `mesh_lattice_nets` and `mesh_lattice_dc` keep their public
+// std::function parameter and instantiate this on it, which is no worse than
+// what they paid before.
+template <typename Sample>
+inline Mesh dual_grid_mesh(const Sample& sample, const int cell_min[3], const int cell_max[3],
+                           kernel::cfloat3 origin, float spacing, const DualNormalFn& normal_at,
+                           const DualPlacer& place, bool keep_quads = false) {
     using kernel::cf3;
     using kernel::cfloat3;
     // corner bit c: x=1, y=2, z=4 (same convention as the marching mesher)
     constexpr int kEdges[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3},
                                    {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+    // Cell (i,j,k) owns the three lattice edges leaving its min corner. For edge
+    // axis d, (d,u,v) below is a right-handed permutation, so the loop
+    // [c11, c01, c00, c10] of adjacent cells has normal +d.
+    constexpr int kAxisUV[3][2] = {{1, 2}, {2, 0}, {0, 1}};
     Mesh m;
     std::unordered_map<std::uint64_t, std::uint32_t> cell_vertex;
 
+    // ONE walk, placing a cell's vertex and then emitting the quads on the
+    // edges it owns, where this used to walk the whole range twice.
+    //
+    // The quads can be emitted here because every cell a quad references is at
+    // or before this one in (k, j, i) order: `cell_at` moves back along the two
+    // axes that are not the edge's, never forward, so the four cells around an
+    // owned edge are this one and three already placed. The vertices and the
+    // indices therefore come out in exactly the order the two-pass form
+    // produced them.
+    //
+    // What it saves is a whole pass of SAMPLING. The second pass read four
+    // corners of every cell in the range to find its sign-changing edges, and
+    // all four -- the min corner and its three axis neighbours -- are corners
+    // 0, 1, 2 and 4 of the eight this pass already has. It also read them for
+    // cells that own no vertex, which cannot contribute a quad at all: an edge
+    // leaving the min corner changes sign only if two of the cell's corners
+    // differ, and then the cell is a surface cell. Measured on a 0.02 mesh of
+    // the benchmark document, that second pass was 27.4 ms of sampling for
+    // nothing.
     for (int k = cell_min[2]; k < cell_max[2]; ++k)
         for (int j = cell_min[1]; j < cell_max[1]; ++j)
             for (int i = cell_min[0]; i < cell_max[0]; ++i) {
@@ -142,20 +174,12 @@ inline Mesh dual_grid_mesh(const std::function<float(int, int, int)>& sample,
                 cell_vertex.emplace(pack_cell(i, j, k),
                                     static_cast<std::uint32_t>(m.positions.size()));
                 m.positions.push_back(place(crossings, n, lo, hi));
-            }
 
-    // Quad pass: cell (i,j,k) owns the three lattice edges leaving its min
-    // corner. For edge axis d, (d,u,v) below is a right-handed permutation,
-    // so the loop [c11, c01, c00, c10] of adjacent cells has normal +d.
-    constexpr int kAxisUV[3][2] = {{1, 2}, {2, 0}, {0, 1}};
-    for (int k = cell_min[2]; k < cell_max[2]; ++k)
-        for (int j = cell_min[1]; j < cell_max[1]; ++j)
-            for (int i = cell_min[0]; i < cell_max[0]; ++i) {
-                float f0 = sample(i, j, k);
+                // The three edges leaving the min corner: corner 0 against
+                // corners 1, 2 and 4, which are f[1 << d].
+                const float f0 = f[0];
                 for (int d = 0; d < 3; ++d) {
-                    int q[3] = {i, j, k};
-                    q[d] += 1;
-                    float f1 = sample(q[0], q[1], q[2]);
+                    const float f1 = f[1 << d];
                     if ((f0 < 0.0f) == (f1 < 0.0f)) continue;
                     const int u = kAxisUV[d][0], v = kAxisUV[d][1];
                     auto cell_at = [&](int a, int b) -> const std::uint32_t* {

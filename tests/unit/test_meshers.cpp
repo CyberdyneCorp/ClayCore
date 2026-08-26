@@ -1,9 +1,12 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <cstdint>
 #include <limits>
 
 #include "clay/mesh/dual_contouring.h"
 #include "clay/mesh/marching.h"
+#include "clay/mesh/quad_mesh.h"
 #include "clay/mesh/surface_nets.h"
 #include "clay/mesh/validate.h"
 #include "scene_utils.h"
@@ -193,4 +196,41 @@ TEST_CASE("dual contouring: lattice API with central-difference normals") {
     CHECK(r.oriented);
     CHECK(r.degenerate_triangles == 0);
     CHECK(mesh::signed_volume(m) == doctest::Approx(0.5236).epsilon(0.05));  // 4/3*pi*0.5^3
+}
+
+TEST_CASE("the dual walk places a cell's vertex before any quad that references it") {
+    // The property that lets the dual mesher place vertices and emit quads in
+    // ONE walk of the cell range instead of two. A quad sits on a lattice edge
+    // leaving a cell's min corner, and the four cells around that edge are
+    // reached by stepping BACK along the two axes that are not the edge's --
+    // never forward. So they are the owning cell and three already placed, and
+    // the walk never needs a vertex it has not made yet.
+    //
+    // Read off the output as: the largest index in successive quads never goes
+    // backwards. If a future change reordered the walk, or emitted quads for a
+    // cell that owns no vertex, this is what would notice.
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("l");
+    scene::Node a = item(scene::Prim::sphere(0.8f), cf3(0, 0, 0));
+    scene::Node b = item(scene::Prim::box(cf3(0.5f, 0.4f, 0.6f)), cf3(0.6f, 0.3f, 0.0f));
+    b.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.1f};
+    l.sdf->insert(a);
+    l.sdf->insert(b);
+    const scene::Tape tape = scene::compile_document(doc);
+
+    mesh::MeshingOptions options;
+    options.normals = mesh::NormalMode::None;
+    options.colors = false;
+    const Mesh m = mesh::mesh_tape_quads(tape, tape.bounds, 0.03f, options);
+    REQUIRE(m.quads.size() >= 4 * 1000);  // a real surface, not a corner case
+
+    std::uint32_t high_water = 0;
+    for (std::size_t q = 0; q < m.quads.size(); q += 4) {
+        CAPTURE(q);
+        const std::uint32_t largest = std::max(std::max(m.quads[q], m.quads[q + 1]),
+                                               std::max(m.quads[q + 2], m.quads[q + 3]));
+        REQUIRE(largest < m.positions.size());
+        REQUIRE(largest >= high_water);  // never references a vertex placed later
+        high_water = largest;
+    }
 }
