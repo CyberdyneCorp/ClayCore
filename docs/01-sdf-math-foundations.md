@@ -313,6 +313,21 @@ float opScale( vec3 p, float s ) { return primitive(p/s)*s; }
 float opScaleNU( vec3 p, vec3 s ) { return primitive(p/s) * min(s.x, min(s.y, s.z)); }
 ```
 
+**What the non-uniform case actually costs** (#320, exposed at ABI 0.54.0 as an
+item's per-axis scale). "NOT an SDF" is the right warning and it is easy to read
+as the wrong one. Multiplying back by the *smallest* factor can only SHORTEN a
+distance, so `|grad| <= min(s) * max(1/s) = 1`: the field stays 1-Lipschitz, the
+safe step scale does not move, and **no marcher slows down**. What is lost is
+`is_exact` — the value becomes a bound on the distance rather than the distance,
+short by at most `max(s)/min(s)` — which matters to a consumer that reads the
+value *as* a distance (offsetting by it, measuring with it) and to nothing else.
+`cfi_scale_nonuniform` records exactly that: exactness false, Lipschitz
+unchanged.
+
+A per-axis scale whose components are equal is a similarity, so it stays exact
+and compiles identically to `opScale` — worth checking for rather than paying
+the classification for nothing.
+
 ### 2.4 Repetition — the correct clamped-cell math
 
 ```glsl

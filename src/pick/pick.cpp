@@ -534,16 +534,21 @@ math::Aabb node_shape_bounds(const scene::SdfContent& content, const scene::Node
     math::Aabb local = scene::item_local_bounds(n);
     if (local.empty()) return local;
     math::Transform world = layer.xform * n.xform;
-    math::Aabb bound = local.transformed(world.matrix());
+    // The item's per-axis scale, innermost, as scene::item_geometry_bound
+    // composes it — a selection box around the shape the item IS, not around
+    // the one its primitive was authored as.
+    const math::cfloat4x4 axes = math::scale_matrix(n.scale_axes);
+    const float axis_factor = scene::scale_axes_factor(n.scale_axes);
+    math::Aabb bound = local.transformed(math::mul(world.matrix(), axes));
     if (n.mirror && layer.mirror_axes != 0) {
         for (int axis = 0; axis < 3; ++axis) {
             if (!(layer.mirror_axes & (1u << axis))) continue;
-            bound.expand(local.transformed(
-                math::mul(layer.xform.matrix(),
-                          math::mul(math::reflection_matrix(axis), n.xform.matrix()))));
+            bound.expand(local.transformed(math::mul(
+                layer.xform.matrix(),
+                math::mul(math::reflection_matrix(axis), math::mul(n.xform.matrix(), axes)))));
         }
     }
-    return bound.dilated(kernel::cmax(n.rounding * world.scale, 0.0f));
+    return bound.dilated(kernel::cmax(n.rounding * world.scale * axis_factor, 0.0f));
 }
 
 }  // namespace

@@ -236,7 +236,10 @@ struct Compiler {
     // the kernel can weigh the crossfade by the inset into the sampled box.
     void emit_replace_feather(const Node& item, const Layer& layer) {
         math::Transform world = layer.xform * item.xform;
-        cfloat4x4 inv = world.inverse_matrix();
+        // The item's per-axis scale composes here exactly as it does for the
+        // item's own record: a squashed item's sampled box is squashed with it,
+        // or the crossfade would weigh an inset the geometry no longer has.
+        cfloat4x4 inv = item_scaled_inverse(item, world.inverse_matrix());
         CTapeInstr instr;
         instr.op = kernel::ctape_combine;
         instr.param_offset = static_cast<unsigned int>(tape.params.size());
@@ -250,7 +253,7 @@ struct Compiler {
         const float xf[12] = {inv.c0.x, inv.c0.y, inv.c0.z, inv.c1.x, inv.c1.y, inv.c1.z,
                               inv.c2.x, inv.c2.y, inv.c2.z, inv.c3.x, inv.c3.y, inv.c3.z};
         tape.params.insert(tape.params.end(), xf, xf + 12);
-        tape.params.push_back(world.scale);
+        tape.params.push_back(world.scale * scale_axes_factor(item.scale_axes));
     }
 
     // rb: second radius of the two-parameter extended modes (groove/tongue
@@ -272,11 +275,14 @@ struct Compiler {
         // A gate is placed by the ITEM's transform, so it travels with the item
         // it protects rather than staying where the mask was painted.
         const math::Transform world = layer->xform * item->xform;
-        const kernel::cfloat4x4 inv = world.inverse_matrix();
+        // ...and it is squashed with the item, for the reason the item's own
+        // record is: a gate that kept its round footprint under a squashed
+        // cylinder would protect a region the surface no longer occupies.
+        const kernel::cfloat4x4 inv = item_scaled_inverse(*item, world.inverse_matrix());
         for (float v : {inv.c0.x, inv.c0.y, inv.c0.z, inv.c1.x, inv.c1.y, inv.c1.z, inv.c2.x,
                         inv.c2.y, inv.c2.z, inv.c3.x, inv.c3.y, inv.c3.z})
             tape.blob.push_back(v);
-        tape.blob.push_back(world.scale);
+        tape.blob.push_back(world.scale * scale_axes_factor(item->scale_axes));
         tape.blob.push_back(item->gate_width);
         const std::vector<float> flat = item->gate->to_blob();
         tape.blob.insert(tape.blob.end(), flat.begin(), flat.end());
@@ -539,6 +545,16 @@ struct Compiler {
     // -- items ---------------------------------------------------------------
 
     // One primitive instance evaluated through the given world matrix.
+    // A placement's inverse with the item's own per-axis scale folded in
+    // outermost, which is what puts the scale INNERMOST in the forward map.
+    // One helper because the mirror and radial copies compose their own
+    // placement and must scale identically — a copy that missed it would be a
+    // differently-shaped reflection of the same item.
+    static math::cfloat4x4 item_scaled_inverse(const Node& item, const math::cfloat4x4& inv_world) {
+        if (scale_axes_uniform(item.scale_axes) && item.scale_axes.x == 1.0f) return inv_world;
+        return math::mul(math::inverse_scale_matrix(item.scale_axes), inv_world);
+    }
+
     void emit_item_instance(const Node& item, const math::cfloat4x4& inv_world, float scale) {
         float round_world = item.rounding * scale;
         if (item.prim.type == PrimType::Stroke) {
@@ -652,7 +668,25 @@ struct Compiler {
     // Blend, left on the stack as one value.
     void emit_item(const Node& item, const Layer& layer) {
         math::Transform world = layer.xform * item.xform;
-        emit_item_instance(item, world.inverse_matrix(), world.scale);
+        // The item's PER-AXIS scale is innermost — in its own local frame,
+        // inside the placement — so it goes into the INVERSE matrix outermost
+        // and the distance factor takes its smallest component. That is
+        // cscale_nu_point and cscale_nu_dist exactly, expressed through the
+        // tape record the interpreter already reads: the matrix carries 1/s
+        // and `prim_value * scale` multiplies the local distance back.
+        //
+        // No new opcode and no wider record, which is why this is plumbing
+        // rather than a kernel change (#320).
+        const kernel::cfloat3 axes = item.scale_axes;
+        const float axis_factor = scale_axes_factor(axes);
+        const float scale_world = world.scale * axis_factor;
+        emit_item_instance(item, item_scaled_inverse(item, world.inverse_matrix()), scale_world);
+        // A non-uniform scale stops the result being a true distance. It stays
+        // 1-Lipschitz — dividing by s and multiplying back by min(s) can only
+        // shorten — so the safe step scale does not move and no marcher slows
+        // down. What goes is `is_exact`, which is what cfi_scale_nonuniform
+        // says and all it says.
+        if (!scale_axes_uniform(axes)) tape.info = kernel::cfi_scale_nonuniform(tape.info);
         // A feathered replace does not participate in the layer mirror: its
         // combine crossfades by the inset into ONE sampled box, and a mirror
         // copy pre-combined into the same operand would sit outside that box
@@ -670,7 +704,7 @@ struct Compiler {
                 cfloat4x4 inv = math::mul(
                     item.xform.inverse_matrix(),
                     math::mul(math::reflection_matrix(axis), layer.xform.inverse_matrix()));
-                emit_item_instance(item, inv, world.scale);
+                emit_item_instance(item, item_scaled_inverse(item, inv), scale_world);
                 emit_combine(Op::Add, mirror_blend, 0.0f);
             }
             if (layer.mirror_k > 0.0f)
@@ -701,7 +735,7 @@ struct Compiler {
                 cfloat4x4 inv = math::mul(
                     item.xform.inverse_matrix(),
                     math::mul(math::rotation_matrix(axis, -angle), layer.xform.inverse_matrix()));
-                emit_item_instance(item, inv, world.scale);
+                emit_item_instance(item, item_scaled_inverse(item, inv), scale_world);
                 emit_combine(Op::Add, radial_blend, 0.0f);
             }
             if (layer.radial_k > 0.0f)

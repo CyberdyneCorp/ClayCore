@@ -142,6 +142,21 @@ inline cfloat4x4 rotation_matrix(int axis, float radians) {
     return m;
 }
 
+// Per-axis scale about the origin, and its inverse. A Transform carries one
+// uniform factor because it is a SIMILARITY and its algebra is closed only
+// while it stays one; a per-axis scale is composed as a matrix at the point of
+// use instead (scene::Node::scale_axes).
+//
+// Every component must be non-zero — a zero collapses the item to a plane and
+// its inverse does not exist. The callers refuse one before they get here.
+inline cfloat4x4 scale_matrix(cfloat3 s) {
+    return cfloat4x4{cf4(s.x, 0, 0, 0), cf4(0, s.y, 0, 0), cf4(0, 0, s.z, 0), cf4(0, 0, 0, 1)};
+}
+
+inline cfloat4x4 inverse_scale_matrix(cfloat3 s) {
+    return scale_matrix(cf3(1.0f / s.x, 1.0f / s.y, 1.0f / s.z));
+}
+
 // Reflection across the local plane whose normal is axis 0/1/2.
 inline cfloat4x4 reflection_matrix(int axis) {
     cfloat4x4 m{cf4(1, 0, 0, 0), cf4(0, 1, 0, 0), cf4(0, 0, 1, 0), cf4(0, 0, 0, 1)};

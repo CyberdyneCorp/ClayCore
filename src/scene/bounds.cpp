@@ -644,13 +644,19 @@ Aabb item_geometry_bound(const Node& item, const Layer& layer) {
     if (local.empty()) return local;
 
     math::Transform world = layer.xform * item.xform;
-    Aabb bound = local.transformed(world.matrix());
+    // The item's PER-AXIS scale is innermost, so it multiplies the local box
+    // before the placement does. A bound that missed it would be tight around
+    // the shape the item no longer is, and the cull would drop a squashed
+    // cylinder that is on screen.
+    const math::cfloat4x4 axes = math::scale_matrix(item.scale_axes);
+    const float axis_factor = scale_axes_factor(item.scale_axes);
+    Aabb bound = local.transformed(math::mul(world.matrix(), axes));
     if (item.mirror && layer.mirror_axes != 0) {
         for (int axis = 0; axis < 3; ++axis) {
             if (!(layer.mirror_axes & (1u << axis))) continue;
             math::cfloat4x4 m = math::mul(
                 layer.xform.matrix(),
-                math::mul(math::reflection_matrix(axis), item.xform.matrix()));
+                math::mul(math::reflection_matrix(axis), math::mul(item.xform.matrix(), axes)));
             bound.expand(local.transformed(m));
         }
         bound = bound.dilated(kernel::csmin_quadratic_support(layer.mirror_k));
@@ -665,9 +671,9 @@ Aabb item_geometry_bound(const Node& item, const Layer& layer) {
         for (int k = 1; k < count; ++k) {
             const float angle =
                 6.2831853071795864769f * static_cast<float>(k) / static_cast<float>(count);
-            math::cfloat4x4 m = math::mul(
-                layer.xform.matrix(),
-                math::mul(math::rotation_matrix(axis, angle), item.xform.matrix()));
+            math::cfloat4x4 m =
+                math::mul(layer.xform.matrix(), math::mul(math::rotation_matrix(axis, angle),
+                                                          math::mul(item.xform.matrix(), axes)));
             bound.expand(local.transformed(m));
         }
         bound = bound.dilated(kernel::csmin_quadratic_support(layer.radial_k));
@@ -678,7 +684,10 @@ Aabb item_geometry_bound(const Node& item, const Layer& layer) {
     // within their documented support of the item surface (kernel/tape.h) —
     // for groove/tongue that is the rounding again (rb), on top of the
     // rounding dilation the item field already carries.
-    float round_world = item.rounding * world.scale;
+    // Rounding is authored in item-local units and the tape converts it by the
+    // same factor it multiplies the distance by, so the bound has to use that
+    // factor too rather than the uniform scale alone.
+    float round_world = item.rounding * world.scale * axis_factor;
     float combine = op_is_extended(item.op)
                         ? kernel::ccombine_extended_support(static_cast<int>(item.op),
                                                             item.blend.k, round_world)
@@ -703,7 +712,8 @@ float feather_cull_pad(const SdfContent& content, const Layer& layer) {
         (void)id;
         if (n.is_group || !n.visible) continue;
         if (!item_is_feathered_replace(n)) continue;
-        pad = kernel::cmax(pad, n.volume->band() * layer.xform.scale * n.xform.scale);
+        pad = kernel::cmax(pad, n.volume->band() * layer.xform.scale * n.xform.scale *
+                                    scale_axes_factor(n.scale_axes));
     }
     return pad;
 }
@@ -750,8 +760,8 @@ float cull_pad(const SdfContent& content, const Layer& layer) {
         (void)id;
         if (!n.visible) continue;
         if (!n.is_group && item_is_feathered_replace(n))
-            feather = kernel::cmax(feather,
-                                   n.volume->band() * layer.xform.scale * n.xform.scale);
+            feather = kernel::cmax(feather, n.volume->band() * layer.xform.scale * n.xform.scale *
+                                                scale_axes_factor(n.scale_axes));
         blend = kernel::cmax(blend, kernel::cmax(n.blend.support(), n.blend.k));
     }
     return feather + blend;

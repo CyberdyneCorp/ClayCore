@@ -63,8 +63,18 @@ std::optional<Command> apply_field(Document& doc, const Cmd& c, Get get, Set set
 
 std::optional<Command> apply_one(Document& doc, const SetTransformCmd& c) {
     return apply_field(
-        doc, c, [](SetTransformCmd& inv, const Node& n) { inv.xform = n.xform; },
-        [](Node& n, const SetTransformCmd& cc) { n.xform = cc.xform; });
+        doc, c,
+        [](SetTransformCmd& inv, const Node& n) {
+            inv.xform = n.xform;
+            inv.scale_axes = n.scale_axes;
+        },
+        [](Node& n, const SetTransformCmd& cc) {
+            n.xform = cc.xform;
+            // The whole transform, per-axis scale included: a uniform edit
+            // MEANS a uniform scale, and the inverse above captured whatever
+            // was there, so one undo puts back everything one edit changed.
+            n.scale_axes = cc.scale_axes;
+        });
 }
 
 std::optional<Command> apply_one(Document& doc, const SetPrimCmd& c) {
@@ -633,6 +643,12 @@ void write_node(Writer& w, const Node& n) {
     write_deformers(w, n.deformers);
     w.u32(static_cast<std::uint32_t>(n.children.size()));
     for (NodeId c : n.children) w.pod(c);
+    // The item's PER-AXIS SCALE, from minor 14 (#320). Appended after the
+    // children rather than beside `xform`, so a build that predates it reads
+    // exactly the bytes it always did. Writing AT an older minor drops it and
+    // the item degrades to its UNIFORM scale — a squashed cylinder comes back
+    // round rather than missing, which is the recoverable direction.
+    if (w.minor >= 14) w.pod(n.scale_axes);
 }
 
 std::vector<Deformer> read_deformers(Reader& r) {
@@ -812,6 +828,10 @@ Node read_node(Reader& r) {
         return n;
     }
     for (std::uint32_t i = 0; i < cc && r.ok; ++i) n.children.push_back(r.pod<NodeId>());
+    // Minor 13 and below have no per-axis scale, and the default (1, 1, 1) is
+    // exactly what those documents already meant, so an older file's field is
+    // unchanged rather than reinterpreted.
+    if (r.minor >= 14) n.scale_axes = r.pod<kernel::cfloat3>();
     return n;
 }
 
@@ -968,6 +988,10 @@ struct SerializeVisitor {
         w.pod(c.layer);
         w.pod(c.node);
         w.pod(c.xform);
+        // Appended and gated for the node record's reason: a journal written at
+        // minor 13 replays on a build that predates the field, and replays as
+        // the uniform transform it always was.
+        if (w.minor >= 14) w.pod(c.scale_axes);
     }
     void operator()(const SetPrimCmd& c) {
         w.pod(Tag::SetPrim);
@@ -1117,6 +1141,7 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
             c.layer = r.pod<LayerId>();
             c.node = r.pod<NodeId>();
             c.xform = r.pod<math::Transform>();
+            if (r.minor >= 14) c.scale_axes = r.pod<kernel::cfloat3>();
             cmd = c;
             break;
         }

@@ -83,6 +83,43 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.54.0 is not such a release**: additive — a per-axis scale on an item
+   (`clay_item_set_scale_nonuniform`, `clay_layer_set_transform_nonuniform`,
+   `clay_layer_node_transform_nonuniform`, `clay_mesh_transform_nonuniform`,
+   #320). No existing signature changes and no struct is re-laid out, so a host
+   compiled against 0.53.0 keeps linking.
+
+   **IT DOES CHANGE ONE EXISTING CALL'S BEHAVIOUR, and only for documents that
+   use the new feature.** `clay_layer_node_transform` — the single-factor reader
+   0.53.0 added — now REFUSES a node carrying a non-uniform scale, with
+   `CLAY_ERROR_INVALID_ARGUMENT` and nothing written. One float cannot express
+   three, and the alternatives are all lies a host would act on: the uniform
+   factor alone describes a differently-shaped item, and a read-change-write
+   through the uniform setter would round the artist's squash away silently.
+   That is the failure #317 was filed about, and the rule taken from it is that
+   a reader which cannot express what is there must not answer. A host that
+   never sets a per-axis scale never meets this.
+
+   The other behaviour worth reading before upgrading is the same coin:
+   `clay_layer_set_transform` COLLAPSES a per-axis scale, because it writes the
+   whole transform and this ABI does not do partial updates.
+
+   **The format moves: scene and `.clayspace` minor 14.** Three floats appended
+   last in the node record and gated, so a build predating them reads exactly
+   the bytes it always did, and writing AT minor 13 degrades a squashed cylinder
+   to a round one rather than to a missing one.
+
+   **The cost of a squash is not the one it looks like.** The field stops being
+   a true distance, but multiplying back by the smallest factor can only shorten
+   one — so it stays 1-Lipschitz, `clay_layer_safe_step_scale` does not move and
+   nothing gets slower. What goes is `clay_tape_info`'s `out_is_exact`. A
+   uniform value, the default included, keeps the field exact and compiles to
+   identical tape.
+
+   A LAYER's scale stays uniform, deliberately: `layer.xform * node.xform` is
+   consumed as a rigid FRAME by the move brush and the lattice gizmo, and a
+   frame with a per-axis scale is not one. That arm is not in this release.
+
    **0.53.0 is not such a release**: additive — three readers for a placed node
    (`clay_layer_node_transform`, `clay_layer_node_params`,
    `clay_layer_node_op_blend`, #317). No signature changed, no struct grown, no

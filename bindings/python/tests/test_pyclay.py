@@ -6819,3 +6819,92 @@ def test_handoff_does_not_modify_the_mesh(tmp_path):
     # caller's mesh is untouched.
     assert quads.quad_count == before_quads
     assert quads.triangle_count == before_tris
+
+
+# -- a per-axis scale (#320) --------------------------------------------------
+# Every transform took one factor, so a slot, an oval bolt hole and a stretched
+# chamfer — the shapes a boolean workflow cuts with — had no route. Python can
+# carry one number or three in the SAME argument where C needs a second entry
+# point, so scale= takes either.
+
+
+def test_scale_takes_one_number_or_three():
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("a")
+    layer.add(clay.Sphere(r=1.0, scale=(2.0, 1.0, 1.0)))
+
+    # A unit sphere squashed 2x on X is an ellipsoid: the surface crosses x at
+    # 2 and y at 1, which no sphere parameter could have said.
+    lo, hi = layer.bounds()
+    assert hi[0] == pytest.approx(2.0, abs=1e-4)
+    assert hi[1] == pytest.approx(1.0, abs=1e-4)
+    d = layer.eval([(2.0, 0, 0), (0, 1.0, 0), (3.0, 0, 0)])
+    assert d[0] == pytest.approx(0.0, abs=1e-4)
+    assert d[1] == pytest.approx(0.0, abs=1e-4)
+    assert d[2] > 0.0
+
+
+def test_a_uniform_scale_still_means_what_it_meant():
+    # The regression that matters: scale=2 has to keep doing exactly what it
+    # always did, and a THREE-equal-number scale has to agree with it.
+    one = clay.Document()
+    one_layer = one.add_sdf_layer("a")
+    one_layer.add(clay.Sphere(r=1.0, scale=2.0))
+    three = clay.Document()
+    three_layer = three.add_sdf_layer("a")
+    three_layer.add(clay.Sphere(r=1.0, scale=(2.0, 2.0, 2.0)))
+
+    pts = [(0.5, 0.3, -0.2), (1.9, 0, 0), (3.0, 1.0, 0.0)]
+    for x, y in zip(one.eval(pts), three.eval(pts)):
+        assert x == pytest.approx(y, abs=1e-5)
+    assert one_layer.bounds() == three_layer.bounds()
+
+
+def test_set_transform_leaves_a_squash_alone_unless_asked():
+    # These bindings take PARTIAL updates, unlike the C ABI which takes the
+    # whole transform — so moving a squashed item must not un-squash it.
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("a")
+    node = layer.add(clay.Sphere(r=1.0, scale=(2.0, 1.0, 1.0)))
+
+    layer.set_transform(node, position=(1.0, 0, 0))
+    lo, hi = layer.bounds()
+    assert hi[0] == pytest.approx(3.0, abs=1e-4)   # moved, still 2 wide on X
+    assert hi[1] == pytest.approx(1.0, abs=1e-4)
+
+    # ...and saying scale= explicitly does change it, in both spellings.
+    layer.set_transform(node, scale=(1.0, 3.0, 1.0))
+    lo, hi = layer.bounds()
+    assert hi[1] == pytest.approx(3.0, abs=1e-4)
+    layer.set_transform(node, scale=2.0)
+    lo, hi = layer.bounds()
+    assert hi[1] == pytest.approx(2.0, abs=1e-4)
+
+
+def test_a_squash_survives_a_save_and_reload(tmp_path):
+    path = tmp_path / "squash.clayspace"
+    doc = clay.Document()
+    doc.add_sdf_layer("a").add(clay.Sphere(r=1.0, scale=(2.0, 0.5, 3.0)))
+    # Sampled where the squash puts the surface, so the comparison is against
+    # the SHAPE and not merely against whatever number came back twice.
+    pts = [(2.0, 0, 0), (0, 0.5, 0), (0, 0, 3.0), (1.0, 0.2, -0.4)]
+    values = doc.eval(pts)
+    for on_surface in values[:3]:
+        assert on_surface == pytest.approx(0.0, abs=1e-4)
+    doc.save(str(path))
+
+    back = clay.load(str(path))
+    for x, y in zip(back.eval(pts), values):
+        assert x == pytest.approx(y, abs=1e-6)
+
+
+def test_a_bad_per_axis_scale_is_refused():
+    # Zero has no inverse and collapses the item onto a plane; a negative
+    # component mirrors it, which the layer mirror already expresses.
+    for bad in ((1.0, 0.0, 1.0), (1.0, -2.0, 1.0)):
+        with pytest.raises(ValueError):
+            clay.Sphere(r=1.0, scale=bad)
+    with pytest.raises(ValueError):
+        clay.Sphere(r=1.0, scale=(1.0, 1.0))
+    with pytest.raises(ValueError):
+        clay.Sphere(r=1.0, scale=0.0)

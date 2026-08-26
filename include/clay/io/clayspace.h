@@ -135,7 +135,7 @@ inline constexpr std::uint16_t kClaySpaceMajor = 1;
 // group AND every hidden flag, so a region an artist had put away comes back
 // visible. That is the safe direction — geometry reappearing is recoverable and
 // obvious, geometry silently staying hidden is neither.
-inline constexpr std::uint16_t kClaySpaceMinor = 13;
+inline constexpr std::uint16_t kClaySpaceMinor = 14;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).
