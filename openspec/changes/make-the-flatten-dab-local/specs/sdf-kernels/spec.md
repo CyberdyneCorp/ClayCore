@@ -60,9 +60,10 @@ source declared 1.
 ## ADDED Requirements
 
 ### Requirement: An operator that moves the surface resamples its region locally
-An operator CONFINED TO A REGION that can move the surface OUTSIDE the sampled
-band SHALL cost what the region contains rather than what the volume contains,
-exactly as a region-limited rewrite does for an operator that cannot. The two
+An operator confined to a region SHALL cost what that region contains rather
+than what the volume contains, even when it can move the surface OUTSIDE the
+sampled band, exactly as a region-limited rewrite does for an operator that
+cannot. The two
 differ only in what they may change: a rewrite preserves which bricks store
 samples, a resample decides that again from the values it produced.
 
