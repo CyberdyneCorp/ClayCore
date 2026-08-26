@@ -1955,6 +1955,56 @@ clay_result write_bounds(const math::Aabb& box, float out_min[3], float out_max[
     return CLAY_OK;
 }
 
+// Where a layer IS, answered from whichever representation the layer actually
+// holds (issue #318).
+//
+// pick::layer_bounds walks scene::Layer::sdf and can do nothing else: a
+// scene::Layer HOLDS only SDF content, and the voxel grid and the mesh live in
+// side tables keyed by layer id because check_layering.py withholds clay/voxel
+// and clay/mesh from clay::scene. That is the invariant working, not a gap to
+// route around, so the composition happens HERE, where the document that owns
+// all three is in scope.
+//
+// Both non-SDF kinds reported nothing however much material they held. A mesh
+// cannot be unbounded -- its vertices ARE a box -- and a grid says where it is
+// itself, so "no bounds" was never the truth for either; it was the answer a
+// walk of the wrong container gives.
+//
+// WORLD SPACE, like the SDF arm, which composes layer.xform with the node's
+// own. A caller comparing two layers, framing a camera or placing a manipulator
+// is asking one question, and it would be answered in two different spaces
+// otherwise.
+math::Aabb layer_world_bounds(const clay_document* doc, const scene::Layer& layer) {
+    if (layer.kind == scene::LayerKind::Sdf) return pick::layer_bounds(layer);
+
+    math::Aabb local;  // default-constructed is the empty box
+    if (layer.kind == scene::LayerKind::Voxel) {
+        auto it = doc->doc.voxel_layers.find(layer.id);
+        if (it == doc->doc.voxel_layers.end()) return local;
+        const voxel::VoxelGrid& grid = it->second;
+        const std::optional<voxel::VoxelCoord> lo = grid.bounds_min();
+        const std::optional<voxel::VoxelCoord> hi = grid.bounds_max();
+        if (!lo || !hi) return local;  // no material: genuinely nowhere
+        const float vs = grid.voxel_size();
+        if (!(vs > 0.0f)) return local;
+        // A cell is a BOX, not a point: cell i spans [i*vs, (i+1)*vs], which is
+        // the convention build_plane_pick reads back with floor(p / vs). So the
+        // far corner takes the +1, and a single occupied cell has the extent of
+        // one cell rather than zero.
+        local.expand(kernel::cf3(static_cast<float>(lo->x) * vs, static_cast<float>(lo->y) * vs,
+                                 static_cast<float>(lo->z) * vs));
+        local.expand(kernel::cf3(static_cast<float>(hi->x + 1) * vs,
+                                 static_cast<float>(hi->y + 1) * vs,
+                                 static_cast<float>(hi->z + 1) * vs));
+    } else if (layer.kind == scene::LayerKind::Mesh) {
+        auto it = doc->doc.mesh_layers.find(layer.id);
+        if (it == doc->doc.mesh_layers.end()) return local;
+        for (const kernel::cfloat3& p : it->second.positions) local.expand(p);
+    }
+    if (local.empty()) return local;  // transforming an empty box invents one
+    return local.transformed(layer.xform.matrix());
+}
+
 // A cell reaches the caller as three int32 values, which is exactly the
 // engine's layout (asserted at the top of this file).
 void write_cell(std::int32_t out[3], voxel::VoxelCoord c) {
@@ -4948,7 +4998,7 @@ clay_result clay_layer_bounds(const clay_document* doc, clay_layer_id layer_id, 
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
     const scene::Layer* layer = doc->doc.document.find_layer(layer_id);
     if (!layer) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
-    return write_bounds(pick::layer_bounds(*layer), out_min, out_max, out_has_bounds);
+    return write_bounds(layer_world_bounds(doc, *layer), out_min, out_max, out_has_bounds);
 }
 
 clay_result clay_layer_selection_bounds(const clay_document* doc, clay_layer_id layer_id,
