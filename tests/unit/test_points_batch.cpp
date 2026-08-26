@@ -174,9 +174,15 @@ TEST_CASE("eval_points_batch: input validation") {
         q = batch.query();
         q.points_xyz = nullptr;
         CHECK(cpu->eval_points_batch(q, out.results()) == eval::Status::InvalidInput);
+        // A null DISTANCE buffer is no longer refused: a caller may want only
+        // the gradient, or only the colour, and requiring a distance made the
+        // gradient path walk the tape a fifth time to fill a buffer nobody
+        // reads. What is refused is asking for NOTHING.
         eval::PointResults no_dist = out.results();
         no_dist.distances = nullptr;
-        CHECK(cpu->eval_points_batch(batch.query(), no_dist) == eval::Status::InvalidInput);
+        CHECK(cpu->eval_points_batch(batch.query(), no_dist) == eval::Status::Ok);
+        eval::PointResults nothing;
+        CHECK(cpu->eval_points_batch(batch.query(), nothing) == eval::Status::InvalidInput);
     }
     SUBCASE("a null tape is refused") {
         std::vector<const scene::Tape*> ptrs = batch.ptrs;
