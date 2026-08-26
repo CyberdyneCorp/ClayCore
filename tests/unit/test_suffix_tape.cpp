@@ -111,11 +111,96 @@ TEST_CASE("a seeded suffix is the whole document, bit for bit") {
         q.count = count;
         eval::PointResults r;
         r.distances = got.data();
-        eval::eval_points_seeded(suffix, q, seed.data(), r);
+        eval::eval_points_seeded(suffix, q, seed.data(), nullptr, r);
 
         // Against the whole document, compiled and walked in full.
         const std::vector<float> want = eval_whole(scene::compile_document(after), pts);
         CHECK(std::memcmp(got.data(), want.data(), count * sizeof(float)) == 0);
+    }
+}
+
+TEST_CASE("a seeded suffix carries colour, bit for bit") {
+    // The accumulator a coloured walk folds is a CTapeValue, so the seed has to
+    // be one too: a distance AND the colour the prefix reached. Continuing with
+    // the distance alone would fold every combine against black, which is a
+    // wrong answer rather than a missing one.
+    const std::vector<float> pts = lattice(20);
+    const std::size_t count = pts.size() / 3;
+    const int kept = 3;
+
+    // Coloured items, so the combines actually mix rather than pass one through.
+    auto coloured = [](int dabs) {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("s");
+        scene::Node base;
+        base.prim = scene::Prim::sphere(1.0f);
+        base.color = cf3(0.8f, 0.2f, 0.1f);
+        l.sdf->insert(base);
+        for (int i = 1; i <= dabs; ++i) {
+            scene::Node d;
+            d.prim = scene::Prim::sphere(0.3f);
+            const float a = 0.5f * std::sin(static_cast<float>(i) * 0.9f);
+            d.xform.position = cf3(std::sqrt(std::max(0.0f, 1.0f - a * a)), a, 0.0f);
+            d.color = cf3(0.1f * static_cast<float>(i % 7), 0.9f, 0.3f);
+            d.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.09f};
+            l.sdf->insert(d);
+        }
+        return doc;
+    };
+
+    scene::Document before = coloured(9 - kept);
+    scene::Document after = coloured(9);
+    scene::TapeCheckpoint cp;
+    const scene::Tape prefix = scene::compile_document_resumable(before, &cp);
+    REQUIRE(cp.valid);
+    const std::vector<scene::NodeId>& roots = after.layers[0].sdf->roots;
+    const std::vector<scene::NodeId> appended(roots.end() - kept, roots.end());
+    scene::Tape suffix;
+    REQUIRE(scene::compile_layer_suffix(cp, after, appended, &suffix, nullptr));
+
+    auto eval_full = [&](const scene::Tape& tape, std::vector<float>& d, std::vector<float>& c) {
+        d.assign(count, 0.0f);
+        c.assign(count * 3, 0.0f);
+        eval::PointQuery q;
+        q.points_xyz = pts.data();
+        q.count = count;
+        eval::PointResults r;
+        r.distances = d.data();
+        r.colors_rgb = c.data();
+        eval::eval_points_blocked(tape, q, r);
+    };
+    std::vector<float> seed_d, seed_c, want_d, want_c;
+    eval_full(prefix, seed_d, seed_c);
+    eval_full(scene::compile_document(after), want_d, want_c);
+
+    std::vector<float> got_d(count, 0.0f), got_c(count * 3, 0.0f);
+    eval::PointQuery q;
+    q.points_xyz = pts.data();
+    q.count = count;
+    eval::PointResults r;
+    r.distances = got_d.data();
+    r.colors_rgb = got_c.data();
+    eval::eval_points_seeded(suffix, q, seed_d.data(), seed_c.data(), r);
+
+    CHECK(std::memcmp(got_d.data(), want_d.data(), count * sizeof(float)) == 0);
+    CHECK(std::memcmp(got_c.data(), want_c.data(), count * 3 * sizeof(float)) == 0);
+
+    SUBCASE("and the colours are not all the same, so the comparison has teeth") {
+        bool varies = false;
+        for (std::size_t i = 3; i < want_c.size(); i += 3)
+            varies = varies || want_c[i] != want_c[0];
+        CHECK(varies);
+    }
+
+    SUBCASE("asking for colour without supplying it returns distances only") {
+        // Rather than folding every combine against black.
+        std::vector<float> d(count, 0.0f), c(count * 3, 7.0f);
+        eval::PointResults only;
+        only.distances = d.data();
+        only.colors_rgb = c.data();
+        eval::eval_points_seeded(suffix, q, seed_d.data(), nullptr, only);
+        CHECK(std::memcmp(d.data(), want_d.data(), count * sizeof(float)) == 0);
+        CHECK(c[0] == 7.0f);  // untouched
     }
 }
 
@@ -134,7 +219,7 @@ TEST_CASE("a seeded suffix of nothing is the seed") {
     q.count = got.size();
     eval::PointResults r;
     r.distances = got.data();
-    eval::eval_points_seeded(scene::Tape{}, q, seed.data(), r);
+    eval::eval_points_seeded(scene::Tape{}, q, seed.data(), nullptr, r);
     CHECK(std::memcmp(got.data(), seed.data(), seed.size() * sizeof(float)) == 0);
 }
 
