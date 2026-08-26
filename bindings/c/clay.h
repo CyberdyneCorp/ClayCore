@@ -25,7 +25,7 @@ extern "C" {
 
 #define CLAY_ABI_MAJOR 0
 #define CLAY_ABI_MINOR 52
-#define CLAY_ABI_PATCH 2
+#define CLAY_ABI_PATCH 3
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
  * selected node ids, stroke points, polygon vertices. A count above it is
@@ -1687,9 +1687,20 @@ clay_result clay_snap_to_surface(const clay_document* doc, const float* points_x
                                  size_t count, float* out_positions_xyz,
                                  float* out_normals_xyz, int32_t* out_ok);
 
-/* Tight world-space bounds of a layer's shapes, with no blend or rounding
+/* Tight world-space bounds of a layer's content, with no blend or rounding
  * dilation — the box to frame a camera on. *out_has_bounds is 0 when the layer
- * shows nothing, and out_min/out_max are then left alone. */
+ * shows nothing, and out_min/out_max are then left alone.
+ *
+ * ANSWERS FOR ALL THREE REPRESENTATIONS since 0.52.3 (issue #318). It used to
+ * walk a layer's SDF shapes only and report nothing for a voxel or mesh layer
+ * however much material it held — which is not a tight bound, it is a wrong
+ * one: a mesh's vertices ARE a box and a grid says where it is itself. A voxel
+ * layer answers from its occupied cells (a cell is a box, so the far corner
+ * takes the whole last cell) and a mesh layer from its vertices, both composed
+ * with the layer transform exactly as the SDF arm composes it.
+ *
+ * A layer holding no material still reports 0 — an empty grid is genuinely
+ * nowhere, which is a different answer from "this kind cannot say". */
 clay_result clay_layer_bounds(const clay_document* doc, clay_layer_id layer, float out_min[3],
                               float out_max[3], int32_t* out_has_bounds);
 /* The same box for a subset of the layer's nodes — zoom to selection. nodes is
