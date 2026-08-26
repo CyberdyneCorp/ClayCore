@@ -83,6 +83,33 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.54.1 is not such a release**: no symbol added or removed and no
+   signature changed. It is a BEHAVIOUR fix to one existing verb, and the kind
+   worth reading because the old behaviour was not wrong-looking, it was inert.
+
+   `brush::move` composed an item's world frame as `layer.xform * node.xform`,
+   which was the whole story until 0.54.0 gave an item a per-axis scale. That
+   scale is applied INNERMOST and the tape takes it off before the deformer
+   chain runs, so a grab authored in the placed frame lands in a space the
+   squashed item does not occupy. Measured on a unit sphere scaled 3x on X,
+   whose surface is therefore at world x = 3: dragging at (3, 0, 0) moved
+   nothing at all, against the same drag on the uniform sphere moving the
+   surface by 0.077. An artist dragging a stretched object saw the tool do
+   nothing.
+
+   The radius is a choice this release makes explicit rather than burying: a
+   grab carries ONE radius and a squashed frame turns a world sphere into a
+   local ellipsoid, so the radius is divided by the LARGEST factor and a drag
+   never reaches outside what was circled. Under-reach is recoverable by
+   dragging again; over-reach is not.
+
+   **`brush::lattice_gizmo` has the identical bug and is NOT fixed here.** It
+   cannot be without a format change — the gizmo hands the deformer a
+   `local_to_cage` placement and `Deformer::cage_xform` is a `math::Transform`,
+   while the map it now needs is `Transform` composed with a diagonal. It goes
+   with the layer per-axis scale, which forces the same widening for its own
+   reasons.
+
    **0.54.0 is not such a release**: additive — a per-axis scale on an item
    (`clay_item_set_scale_nonuniform`, `clay_layer_set_transform_nonuniform`,
    `clay_layer_node_transform_nonuniform`, `clay_mesh_transform_nonuniform`,

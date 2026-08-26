@@ -1000,6 +1000,21 @@ inline float scale_axes_factor(kernel::cfloat3 s) {
     return kernel::cmin(s.x, kernel::cmin(s.y, s.z));
 }
 
+// The LARGEST component. A world-space radius divided by it never names a
+// region wider than the one it circled once the per-axis scale has stretched
+// the frame — the conservative reading, and the dual of the factor above.
+inline float scale_axes_reach(kernel::cfloat3 s) {
+    return kernel::cmax(s.x, kernel::cmax(s.y, s.z));
+}
+
+// A point or a direction, out of the item's PLACED frame and into the space its
+// DEFORMERS run in. Those are not the same space: the tape applies the whole
+// inverse — per-axis scale included — before the deformer chain, so a warp
+// authored in the placed frame lands in the wrong place on a squashed item.
+inline kernel::cfloat3 into_scaled_local(kernel::cfloat3 v, kernel::cfloat3 s) {
+    return kernel::cf3(v.x / s.x, v.y / s.y, v.z / s.z);
+}
+
 // The item's own matrix and its inverse, per-axis scale INNERMOST:
 //   world_from_local = xform * diag(scale_axes)
 //   local_from_world = diag(1 / scale_axes) * xform^-1

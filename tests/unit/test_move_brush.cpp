@@ -447,3 +447,101 @@ TEST_CASE("move: a moved document still loads at every earlier scene minor") {
         CHECK(compile_document(*back).eval(cf3(0, 0.5f, 0)).d == doctest::Approx(reference));
     }
 }
+
+// -- a squashed item (#320) ---------------------------------------------------
+// The per-axis scale is applied INNERMOST and the tape takes it off before the
+// deformer chain runs, so a warp authored in the item's PLACED frame lands
+// where the squashed item is not. `layer.xform * node.xform` composed the
+// placed frame and dropped the scale, so a drag on the surface of a stretched
+// item did nothing whatsoever.
+
+namespace {
+
+// One sphere, optionally scaled per axis. Its local geometry is identical in
+// every case, so anything the drag does differently is the FRAME.
+Document one_ball(cfloat3 axes) {
+    Document doc;
+    Layer layer;
+    layer.id = 1;
+    layer.kind = LayerKind::Sdf;
+    layer.sdf = std::make_shared<SdfContent>();
+    Node ball;
+    ball.prim = Prim::sphere(1.0f);
+    ball.op = Op::Add;
+    ball.scale_axes = axes;
+    layer.sdf->insert(ball);
+    doc.layers.push_back(layer);
+    return doc;
+}
+
+float value_at(const Document& doc, cfloat3 p) { return compile_document(doc).eval(p).d; }
+
+}  // namespace
+
+TEST_CASE("move: a drag reaches the surface of a STRETCHED item") {
+    // Stretched 3x on X, so its surface is at world x = 3. On the placed frame
+    // alone that point maps to local (3, 0, 0) — far outside the unit sphere —
+    // and the grab's falloff reached nothing at all.
+    Document doc = one_ball(cf3(3.0f, 1.0f, 1.0f));
+    const cfloat3 grab = cf3(3.0f, 0, 0);
+    REQUIRE(value_at(doc, grab) == doctest::Approx(0.0f).epsilon(1e-3));
+
+    MoveSettings s;
+    s.radius = 0.6f;
+    const std::vector<MoveWarp> warps = brush::move_brush(doc.layers[0], grab, cf3(0, 0.4f, 0), s);
+    REQUIRE(warps.size() == 1);
+    REQUIRE(apply_move(doc, 1, warps) == 1);
+    CHECK(value_at(doc, grab) > 0.05f);  // the surface moved off the point
+}
+
+TEST_CASE("move: a stretched item drags exactly as the unstretched one does") {
+    // The strongest form of the same statement. The local geometry is the same
+    // sphere either way, and the grab is authored in local space, so a drag on
+    // the corresponding point must produce the SAME local warp — the frame is
+    // the only thing that differs, and mapping it correctly is what makes the
+    // two agree.
+    Document plain = one_ball(cf3(1.0f, 1.0f, 1.0f));
+    Document wide = one_ball(cf3(3.0f, 1.0f, 1.0f));
+    MoveSettings s;
+    s.radius = 0.6f;
+
+    const std::vector<MoveWarp> a =
+        brush::move_brush(plain.layers[0], cf3(1.0f, 0, 0), cf3(0, 0.4f, 0), s);
+    const std::vector<MoveWarp> b =
+        brush::move_brush(wide.layers[0], cf3(3.0f, 0, 0), cf3(0, 0.4f, 0), s);
+    REQUIRE(a.size() == 1);
+    REQUIRE(b.size() == 1);
+
+    // The grab centre is the same local point in both.
+    CHECK(b[0].deformer.k == doctest::Approx(a[0].deformer.k));
+    CHECK(b[0].deformer.a == doctest::Approx(a[0].deformer.a));
+    CHECK(b[0].deformer.b == doctest::Approx(a[0].deformer.b));
+
+    REQUIRE(apply_move(plain, 1, a) == 1);
+    REQUIRE(apply_move(wide, 1, b) == 1);
+    CHECK(value_at(wide, cf3(3.0f, 0, 0)) ==
+          doctest::Approx(value_at(plain, cf3(1.0f, 0, 0))).epsilon(1e-3));
+}
+
+TEST_CASE("move: a squashed frame never drags outside what was circled") {
+    // A grab carries ONE radius and a squashed frame turns the world sphere
+    // into a local ellipsoid, so no scalar is exact. The choice is the
+    // conservative one — divide by the LARGEST factor — so every world reach is
+    // at most the radius the artist enclosed. Pinned as a direction, since the
+    // opposite choice is equally arithmetic and takes geometry nobody circled.
+    Document doc = one_ball(cf3(4.0f, 1.0f, 1.0f));
+    MoveSettings s;
+    s.radius = 0.5f;
+    const std::vector<MoveWarp> warps =
+        brush::move_brush(doc.layers[0], cf3(4.0f, 0, 0), cf3(0, 0.3f, 0), s);
+    REQUIRE(warps.size() == 1);
+    // c is the grab's local radius; the widest world reach it can have is
+    // c * max(axes), which must not exceed the radius circled.
+    CHECK(warps[0].deformer.c * 4.0f <= doctest::Approx(0.5f));
+    REQUIRE(apply_move(doc, 1, warps) == 1);
+    // Well outside the circle along the stretched axis, the surface is where it
+    // always was.
+    Document untouched = one_ball(cf3(4.0f, 1.0f, 1.0f));
+    const cfloat3 far_off = cf3(0.0f, 1.0f, 0.0f);
+    CHECK(value_at(doc, far_off) == doctest::Approx(value_at(untouched, far_off)).epsilon(1e-4));
+}

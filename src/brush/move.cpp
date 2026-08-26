@@ -46,18 +46,31 @@ void collect(const scene::SdfContent& content, const scene::Layer& layer,
         if (!reaches(scene::item_influence_bound(*n, layer), world_centre, settings.radius))
             continue;
 
-        // The item's world frame. `layer.xform * node.xform` is the whole
-        // story: the evaluator composes exactly these two, and a group in
-        // between contributes nothing.
+        // The item's world frame. `layer.xform * node.xform` PLUS the item's
+        // own per-axis scale, which is innermost and which this composition
+        // used to drop (#320): the tape applies the whole inverse before the
+        // deformer chain, so a warp authored in the placed frame lands
+        // somewhere the squashed item is not. Dragging the surface of an item
+        // scaled 3x on one axis did nothing at all.
         const math::Transform world = layer.xform * n->xform;
         const float scale = world.scale != 0.0f ? world.scale : 1.0f;
+        const cfloat3 axes = n->scale_axes;
 
         // A point maps through the full inverse; a DISPLACEMENT is a vector, so
-        // it takes the rotation and the scale but not the translation.
-        const cfloat3 local_centre = world.apply_inverse(world_centre);
-        const cfloat3 local_displacement =
-            world.rotation.conjugate().rotate(world_displacement) / scale;
-        const float local_radius = settings.radius / scale;
+        // it takes the rotation and the scale but not the translation. The
+        // per-axis scale comes off both of them last, because it is innermost.
+        const cfloat3 local_centre =
+            scene::into_scaled_local(world.apply_inverse(world_centre), axes);
+        const cfloat3 local_displacement = scene::into_scaled_local(
+            world.rotation.conjugate().rotate(world_displacement) / scale, axes);
+        // A grab carries ONE radius, and a squashed frame turns the artist's
+        // world-space sphere into a local ELLIPSOID, so no scalar is exact.
+        // Dividing by the LARGEST factor is the conservative reading: every
+        // world reach `R * s_i * scale` is then at most the radius circled, so
+        // a drag never takes geometry the artist did not enclose. Under-reach
+        // is recoverable by dragging again; over-reach is not. This is the same
+        // instinct cscale_nu_dist follows by taking the smallest factor.
+        const float local_radius = settings.radius / (scale * scene::scale_axes_reach(axes));
 
         MoveWarp warp;
         warp.node = id;
