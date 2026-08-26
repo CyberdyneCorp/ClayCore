@@ -3298,6 +3298,122 @@ clay_result clay_layer_node_prim(const clay_document* doc, clay_layer_id layer,
     return CLAY_OK;
 }
 
+namespace {
+
+// Every reader below asks the same two questions before it answers anything,
+// and each has its own typed refusal: an id that is not a layer's, then an id
+// that layer does not hold. Protection is deliberately NOT consulted — reading
+// is not editing, so a ghosted, locked or hidden layer answers normally.
+clay_result find_node(const clay_document* doc, clay_layer_id layer, clay_node_id node,
+                      const scene::Node** out) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    const scene::Layer* l = doc->doc.document.find_layer(layer);
+    if (!l) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
+    const scene::Node* n = l->sdf ? l->sdf->find(node) : nullptr;
+    if (!n) return fail(CLAY_ERROR_NOT_FOUND, "no node with that id in that layer");
+    *out = n;
+    return CLAY_OK;
+}
+
+// The quaternion a node stores, as the axis and angle its setter takes.
+// Canonical in two ways, both so the pair feeds straight back into
+// clay_layer_set_transform:
+//   - w is made non-negative, which picks one of the two names every rotation
+//     has (q and -q are the same rotation) and puts the angle in [0, pi], so
+//     a turn of 4 radians about +Z comes back as 2*pi - 4 about -Z;
+//   - a rotation with no axis to speak of reads back as angle 0 about +Y
+//     rather than about the zero vector, which read_transform refuses. A
+//     reader whose output its own setter rejects would not be a round trip.
+// atan2 rather than acos: near identity acos(w) loses most of its precision to
+// the flat top of the cosine, and this is exactly where an unrotated item sits.
+void axis_angle_of(const math::Transform& xform, float out_axis[3], float* out_angle) {
+    math::Quat q = xform.rotation;
+    const float n = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+    // A stored rotation is unit length; a zero one could only come from a
+    // corrupt file, and identity is the reading that keeps this call total
+    // rather than handing a NaN to the caller's manipulator.
+    q = (n > 0.0f) ? math::Quat{q.x / n, q.y / n, q.z / n, q.w / n} : math::Quat::identity();
+    if (q.w < 0.0f) q = math::Quat{-q.x, -q.y, -q.z, -q.w};
+
+    const float s = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z);
+    const bool has_axis = s > 1e-7f;
+    if (out_angle) *out_angle = has_axis ? 2.0f * std::atan2(s, q.w) : 0.0f;
+    if (!out_axis) return;
+    const kernel::cfloat3 axis =
+        has_axis ? kernel::cf3(q.x / s, q.y / s, q.z / s) : kernel::cf3(0.0f, 1.0f, 0.0f);
+    out_axis[0] = axis.x;
+    out_axis[1] = axis.y;
+    out_axis[2] = axis.z;
+}
+
+}  // namespace
+
+clay_result clay_layer_node_transform(const clay_document* doc, clay_layer_id layer,
+                                      clay_node_id node, float out_position[3],
+                                      float out_rotation_axis[3], float* out_rotation_angle,
+                                      float* out_scale) {
+    const scene::Node* n = nullptr;
+    clay_result r = find_node(doc, layer, node, &n);
+    if (r != CLAY_OK) return r;
+    // The refusal clay_layer_set_transform makes, for its reason: the compiler
+    // composes layer * item and nothing else, so a group holds no transform
+    // this call could answer with.
+    if (n->is_group)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "a group has no transform of its own: read its children");
+    if (out_position) {
+        out_position[0] = n->xform.position.x;
+        out_position[1] = n->xform.position.y;
+        out_position[2] = n->xform.position.z;
+    }
+    axis_angle_of(n->xform, out_rotation_axis, out_rotation_angle);
+    if (out_scale) *out_scale = n->xform.scale;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_node_params(const clay_document* doc, clay_layer_id layer, clay_node_id node,
+                                   float* out_params, size_t* count) {
+    if (!count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null count");
+    const scene::Node* n = nullptr;
+    clay_result r = find_node(doc, layer, node, &n);
+    if (r != CLAY_OK) return r;
+    // A group carries no primitive, so it has no parameter block either: the
+    // refusal clay_layer_node_prim already makes, worded the same way.
+    if (n->is_group) return fail(CLAY_ERROR_INVALID_ARGUMENT, "node is a group");
+
+    // The arity is the primitive's, which is what makes this answerable from
+    // clay_layer_node_prim alone: a caller that has just learned the prim does
+    // not also need kPrimParams. The out-of-line kinds count 0 here and are
+    // read by the typed reader that applies.
+    const std::size_t needed =
+        static_cast<std::size_t>(kPrimParams[static_cast<int>(n->prim.type)]);
+    if (out_params && *count < needed) {
+        *count = needed;
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "that primitive takes " + std::to_string(needed) + " parameters");
+    }
+    if (out_params)
+        for (std::size_t i = 0; i < needed; ++i) out_params[i] = n->prim.params[i];
+    *count = needed;
+    return CLAY_OK;
+}
+
+clay_result clay_layer_node_op_blend(const clay_document* doc, clay_layer_id layer,
+                                     clay_node_id node, int32_t* out_op, int32_t* out_blend,
+                                     float* out_blend_k, float* out_rounding) {
+    const scene::Node* n = nullptr;
+    clay_result r = find_node(doc, layer, node, &n);
+    if (r != CLAY_OK) return r;
+    // No group refusal: a group carries an op and a blend like any other node,
+    // and clay_layer_set_op_blend writes them, so this is the one of the three
+    // that answers for both kinds.
+    if (out_op) *out_op = static_cast<std::int32_t>(n->op);
+    if (out_blend) *out_blend = static_cast<std::int32_t>(n->blend.profile);
+    if (out_blend_k) *out_blend_k = n->blend.k;
+    if (out_rounding) *out_rounding = n->rounding;
+    return CLAY_OK;
+}
+
 clay_result clay_layer_node_count(const clay_document* doc, clay_layer_id layer,
                                   size_t* out_count) {
     if (!doc || !out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or count");

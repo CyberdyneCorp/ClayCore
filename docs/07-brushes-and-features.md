@@ -783,6 +783,18 @@ the armature is findable without probing readers until one stops refusing, and
 about — without them the host still had to guess ids, and a rig placed after a
 run of removed nodes was invisible to the guess.
 
+**And so does a plain item** (#317). The walk above ends in a typed reader for
+every kind except the one every other branch falls through to: a placed
+primitive answered which primitive it was and nothing else, so where it stood,
+how big it was and how it combined lived in a table beside the document, keyed
+by node id, that the host also had to keep correct across undo and redo.
+`clay_layer_node_transform`, `clay_layer_node_params` and
+`clay_layer_node_op_blend` are the reading half of the setters that write those
+values, each taking what its setter takes. `clay_layer_node_influence_bound` is
+not a substitute and never was: it is dilated by rounding and blend support and
+covers a layer mirror's reflection too, so an item at x = 0.9 in a mirrored
+layer reports a bound centred on the origin.
+
 ---
 
 ## 7. Voxel sculpting verbs
@@ -1160,6 +1172,7 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | What a layer's field costs | `scene::field_report` | `Layer.field_report()` | `clay_layer_field_report` |
 | Voxel resolution levels | `VoxelGrid::add_level` etc. | `VoxelGrid.add_level(...)`, `.set_active_level(...)` | `clay_voxel_add_level`, `clay_voxel_set_active_level`, `clay_voxel_drop_level` |
 | Groups a host builds | `scene::Node::is_group` | `Layer.add_group(...)` | `clay_layer_add_group`, `clay_layer_add_item_in_group`, `clay_item_add_child`, `clay_layer_children`, `clay_layer_node_count`, `clay_layer_node_at` |
+| What a placed node holds | `scene::Node::xform/prim/op/blend` | — (pyclay follow-up) | `clay_layer_node_transform`, `clay_layer_node_params`, `clay_layer_node_op_blend` |
 | Quad meshing, with a target count | `mesh::mesh_tape_quads`, `mesh_tape_quads_fit`, `VoxelGrid::mesh_quads` | `Document.mesh_quads(...)`, `VoxelGrid.mesh_quads(...)` | `clay_document_mesh_quads`, `clay_voxel_mesh_quads` |
 | Triangles straight to voxels | `VoxelGrid::rasterize_mesh` | `VoxelGrid.rasterize_mesh(...)` | `clay_voxel_rasterize_mesh` |
 | A mesh a document carries | `scene::LayerKind::Mesh` | `Document.add_mesh_layer(...)`, `.mesh_layer(...)` | `clay_document_add_mesh_layer`, `clay_document_mesh_layer`, `clay_mesh_layer` |

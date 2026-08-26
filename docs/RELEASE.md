@@ -83,6 +83,26 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.53.0 is not such a release**: additive — three readers for a placed node
+   (`clay_layer_node_transform`, `clay_layer_node_params`,
+   `clay_layer_node_op_blend`, #317). No signature changed, no struct grown, no
+   enumerator moved, and nothing new is stored, so `.clayspace` and the scene
+   minor are both untouched and a host compiled against 0.52.3 keeps linking.
+
+   They complete the reading half of the four setters that write a placed node.
+   The gap they close was paid for outside the engine: a host that let an artist
+   place a primitive, move it with a manipulator and edit its operation
+   afterwards kept those values in a table beside the `.clay`, keyed by node id,
+   and kept it correct across undo and redo by following the engine's history by
+   depth. `clay_layer_node_influence_bound` looked like the positional answer and
+   is not one — it is dilated by rounding and blend support and covers a layer
+   mirror's reflection, so an item at x = 0.9 in a mirrored layer reports a bound
+   centred on the origin.
+
+   **Colour is still write-only.** `clay_layer_set_color` is the fourth setter
+   and this release does not give it a reader; #317 asked for three calls and
+   named the four values its side-car held, and colour was not one of them.
+
    **0.52.3 is not such a release**: no symbol added or removed, no signature
    changed. It is a BEHAVIOUR change to one existing call, and the kind worth
    reading before upgrading: `clay_layer_bounds` used to report no bounds for a
