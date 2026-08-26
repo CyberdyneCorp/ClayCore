@@ -760,6 +760,150 @@ std::vector<float> refill_signature(clay_document* d) {
 
 }  // namespace
 
+TEST_CASE("resumable refill: an edit a brick cannot reach keeps its seed") {
+    // An edit that is not an append used to drop every seed, so adjusting one
+    // item cost every brick the whole edit list again. A seed is the value of
+    // that brick's CULLED tape, and an item whose influence misses the brick's
+    // cull region is dropped from that tape -- so editing it cannot change what
+    // the brick evaluates to.
+    //
+    // The bricks this reads span the sphere. The item removed sits at x = 3,
+    // outside every one of their cull regions -- which is why it was culled
+    // from all of them and its removal cannot change what they say.
+    auto build = [](bool with_far) {
+        Doc d;
+        add_sphere(d, 1.0f, 0.0f);
+        add_sphere(d, 0.30f, 0.95f);               // near the bricks read
+        if (with_far) add_sphere(d, 0.30f, 3.0f);  // outside every brick read
+        return refill_signature(d.d);
+    };
+
+    SUBCASE("removing a far item leaves the near bricks reading the same") {
+        // The values must match a document that never had it, which is the
+        // whole claim: the far item was culled from these bricks anyway.
+        Doc doc;
+        REQUIRE(clay_document_enable_undo(doc.d) == CLAY_OK);
+        add_sphere(doc, 1.0f, 0.0f);
+        add_sphere(doc, 0.30f, 0.95f);
+        add_sphere(doc, 0.30f, 3.0f);
+        const std::vector<float> before = refill_signature(doc.d);
+        CHECK(before == build(true));
+
+        int32_t undone = 0;
+        REQUIRE(clay_document_undo(doc.d, &undone) == CLAY_OK);  // drops the far item
+        CHECK(refill_signature(doc.d) == build(false));
+        // And the far item never mattered here, which is why the seed survived.
+        CHECK(build(true) == build(false));
+    }
+
+    SUBCASE("an edit the bricks CAN reach still gives the right answer") {
+        // The other side of the gate: the seed is dropped and recomputed.
+        Doc doc;
+        REQUIRE(clay_document_enable_undo(doc.d) == CLAY_OK);
+        add_sphere(doc, 1.0f, 0.0f);
+        add_sphere(doc, 0.30f, 0.95f);
+        const std::vector<float> with = refill_signature(doc.d);
+
+        int32_t undone = 0;
+        REQUIRE(clay_document_undo(doc.d, &undone) == CLAY_OK);  // drops the NEAR item
+        const std::vector<float> without = refill_signature(doc.d);
+
+        Doc oracle;
+        add_sphere(oracle, 1.0f, 0.0f);
+        CHECK(without == refill_signature(oracle.d));
+        CHECK(without != with);  // it really did reach them
+    }
+}
+
+namespace {
+
+// Two SDF layers, the second of which is the one a stroke appends to. The
+// layers hard-union, so the tape holds the one BENEATH as its own accumulator
+// and a single stored number could not be taken apart into the two again.
+struct TwoLayerDoc {
+    clay_document* d = nullptr;
+    clay_layer_id below = 0, active = 0;
+    TwoLayerDoc() {
+        d = clay_document_create();
+        REQUIRE(d != nullptr);
+        REQUIRE(clay_add_sdf_layer(d, "below", &below) == CLAY_OK);
+        REQUIRE(clay_add_sdf_layer(d, "active", &active) == CLAY_OK);
+    }
+    ~TwoLayerDoc() { clay_document_destroy(d); }
+    TwoLayerDoc(const TwoLayerDoc&) = delete;
+    TwoLayerDoc& operator=(const TwoLayerDoc&) = delete;
+};
+
+void add_to(TwoLayerDoc& doc, clay_layer_id layer, float r, float x) {
+    clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+    REQUIRE(it != nullptr);
+    const float pos[3] = {x, 0.0f, 0.0f};
+    REQUIRE(clay_item_set_position(it, pos) == CLAY_OK);
+    REQUIRE(clay_layer_add_item(doc.d, layer, it, nullptr) == CLAY_OK);
+    clay_item_destroy(it);
+}
+
+}  // namespace
+
+TEST_CASE("resumable refill: a second layer beneath is folded in, not replayed") {
+    // The layers below are held as their own value and unioned afterwards, so
+    // the stored seed is TWO numbers per sample rather than one. Getting that
+    // wrong shows here as a brick that disagrees with a document built fresh.
+    auto built = [](int dabs) {
+        TwoLayerDoc fresh;
+        add_to(fresh, fresh.below, 1.0f, 0.0f);
+        add_to(fresh, fresh.below, 0.45f, 0.85f);  // beneath, and OVERLAPPING
+        add_to(fresh, fresh.active, 0.35f, 0.9f);
+        for (int i = 1; i <= dabs; ++i)
+            add_to(fresh, fresh.active, 0.30f, 1.05f - 0.03f * static_cast<float>(i));
+        return refill_signature(fresh.d);
+    };
+
+    SUBCASE("every dab of a stroke on the upper layer") {
+        TwoLayerDoc doc;
+        add_to(doc, doc.below, 1.0f, 0.0f);
+        add_to(doc, doc.below, 0.45f, 0.85f);
+        add_to(doc, doc.active, 0.35f, 0.9f);
+        const std::vector<float> base = refill_signature(doc.d);
+        for (int i = 1; i <= 6; ++i) {
+            CAPTURE(i);
+            add_to(doc, doc.active, 0.30f, 1.05f - 0.03f * static_cast<float>(i));
+            const std::vector<float> got = refill_signature(doc.d);
+            const std::vector<float> want = built(i);
+            REQUIRE(got.size() == want.size());
+            CHECK(std::memcmp(got.data(), want.data(), got.size() * sizeof(float)) == 0);
+        }
+        CHECK(refill_signature(doc.d) != base);  // the stroke moved the field
+    }
+
+    SUBCASE("the layer beneath really does reach these bricks") {
+        // Otherwise the union is the identity and the case above proves
+        // nothing about folding it in.
+        TwoLayerDoc with;
+        add_to(with, with.below, 1.0f, 0.0f);
+        add_to(with, with.below, 0.45f, 0.85f);
+        add_to(with, with.active, 0.35f, 0.9f);
+        TwoLayerDoc without;
+        add_to(without, without.active, 0.35f, 0.9f);
+        CHECK(refill_signature(with.d) != refill_signature(without.d));
+    }
+
+    SUBCASE("an edit to the layer BENEATH is not resumed") {
+        // It is not an append to the active layer, so every seed goes.
+        TwoLayerDoc doc;
+        add_to(doc, doc.below, 1.0f, 0.0f);
+        add_to(doc, doc.active, 0.35f, 0.9f);
+        refill_signature(doc.d);
+        add_to(doc, doc.below, 0.45f, 0.85f);  // appended, but to the wrong layer
+
+        TwoLayerDoc oracle;
+        add_to(oracle, oracle.below, 1.0f, 0.0f);
+        add_to(oracle, oracle.active, 0.35f, 0.9f);
+        add_to(oracle, oracle.below, 0.45f, 0.85f);
+        CHECK(refill_signature(doc.d) == refill_signature(oracle.d));
+    }
+}
+
 TEST_CASE("resumable refill: a resumed brick is the brick a full refill gives") {
     // The oracle is a FRESH document holding the same items: it has no seeds,
     // so its refill is always the full evaluation. Bit-for-bit, not

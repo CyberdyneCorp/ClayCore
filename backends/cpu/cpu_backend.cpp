@@ -53,14 +53,18 @@ class CpuBackend final : public Backend {
 
     Status eval_points(const scene::Tape& tape, const PointQuery& q,
                        const PointResults& out) override {
-        if (!q.points_xyz || !out.distances) return Status::InvalidInput;
+        // Not `!out.distances`: a caller may want only the gradient, or only
+        // the colour, and requiring a distance buffer would make it pay for a
+        // walk it does not read.
+        if (!q.points_xyz) return Status::InvalidInput;
+        if (!out.distances && !out.gradients_xyz && !out.colors_rgb) return Status::InvalidInput;
         parallel::ThreadPool::instance().parallel_for(
             q.count, 256, [&](std::size_t b, std::size_t e) {
                 PointQuery sub = q;
                 sub.points_xyz = q.points_xyz + b * 3;
                 sub.count = e - b;
                 PointResults sub_out;
-                sub_out.distances = out.distances + b;
+                sub_out.distances = out.distances ? out.distances + b : nullptr;
                 sub_out.gradients_xyz = out.gradients_xyz ? out.gradients_xyz + b * 3 : nullptr;
                 sub_out.colors_rgb = out.colors_rgb ? out.colors_rgb + b * 3 : nullptr;
                 eval_points_blocked(tape, sub, sub_out);
@@ -77,8 +81,8 @@ class CpuBackend final : public Backend {
     // so the results match the default bit for bit.
     Status eval_points_batch(const PointBatchQuery& q, const PointResults& out) override {
         if (q.count == 0) return Status::Ok;
-        if (!q.tapes || !q.offsets || !q.points_xyz || !out.distances)
-            return Status::InvalidInput;
+        if (!q.tapes || !q.offsets || !q.points_xyz) return Status::InvalidInput;
+        if (!out.distances && !out.gradients_xyz && !out.colors_rgb) return Status::InvalidInput;
         for (std::size_t i = 0; i < q.count; ++i)
             if (!q.tapes[i] || q.offsets[i] > q.offsets[i + 1]) return Status::InvalidInput;
         const std::size_t first = q.offsets[0];
@@ -98,7 +102,7 @@ class CpuBackend final : public Backend {
                     sub.count = stop - at;
                     sub.gradient_eps = q.gradient_eps;
                     PointResults slice;
-                    slice.distances = out.distances + at;
+                    slice.distances = out.distances ? out.distances + at : nullptr;
                     slice.gradients_xyz =
                         out.gradients_xyz ? out.gradients_xyz + at * 3 : nullptr;
                     slice.colors_rgb = out.colors_rgb ? out.colors_rgb + at * 3 : nullptr;

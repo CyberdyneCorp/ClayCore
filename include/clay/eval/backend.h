@@ -184,6 +184,11 @@ class Backend {
     virtual const char* name() const = 0;
     virtual BackendCaps caps() const = 0;
 
+    // `out` says what is WANTED, and a null buffer means "not this one". A
+    // caller after only the gradient leaves `distances` null and does not pay
+    // for the walk that fills it -- which is a fifth of a gradient, since the
+    // four taps need neither the distance nor the colour. Asking for nothing at
+    // all is refused.
     virtual Status eval_points(const scene::Tape& tape, const PointQuery& q,
                                const PointResults& out) = 0;
     virtual Status eval_grid(const scene::Tape& tape, const GridQuery& q, float* out_values,
