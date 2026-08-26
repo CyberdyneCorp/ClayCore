@@ -8,6 +8,7 @@
 #include "clay/brick/cache.h"
 #include "clay/eval/backend.h"
 #include "clay/kernel/field.h"
+#include "clay/mesh/dual_contouring.h"
 #include "clay/mesh/marching.h"
 #include "clay/scene/bounds.h"
 #include "clay/scene/tape.h"
@@ -248,4 +249,123 @@ TEST_CASE("brick-mesh attributes: batched evaluation leaves the mesh byte-identi
                       m.normals.size() * sizeof(cfloat3)) == 0);
     CHECK(std::memcmp(m.colors.data(), want_colors.data(), m.colors.size() * sizeof(cfloat3)) ==
           0);
+}
+
+TEST_CASE("mesh_tape attributes: the batched pass is the serial pass, bit for bit") {
+    // The non-brick meshers' half of the same fix. `mesh_tape`, `mesh_tape_dc`
+    // and the dual-grid path all reach `apply_tape_attributes`, which walked
+    // the tape once per vertex for the colour and four more times for the
+    // gradient, on one thread — 96% of a coloured mesh, and 53x was sitting in
+    // the backend the rest of the engine already used (#302).
+    //
+    // memcmp rather than a tolerance: the batched gradient is the same four
+    // taps summed and normalized in the same order, so anything short of
+    // identity means a tap moved.
+    scene::Document doc = gnarly_document();
+    REQUIRE(eval::Registry::instance().find("cpu") != nullptr);
+    const scene::Tape tape = scene::compile_document(doc);
+    REQUIRE(!tape.empty());
+    const cfloat3 pad = cf3(0.2f, 0.2f, 0.2f);
+    const math::Aabb region{tape.bounds.min - pad, tape.bounds.max + pad};
+
+    mesh::MeshingOptions options;
+    options.normals = mesh::NormalMode::Gradient;
+    options.colors = true;
+    const mesh::Mesh m = mesh::mesh_tape(tape, region, 0.06f, options);
+    REQUIRE(!m.empty());
+    REQUIRE(m.normals.size() == m.positions.size());
+    REQUIRE(m.colors.size() == m.positions.size());
+
+    // The serial reference, over the identical geometry.
+    std::vector<cfloat3> want_normals(m.positions.size());
+    std::vector<cfloat3> want_colors(m.positions.size());
+    auto field = [&](cfloat3 p) { return tape.eval(p).d; };
+    for (std::size_t i = 0; i < m.positions.size(); ++i) {
+        want_colors[i] = tape.eval(m.positions[i]).color;
+        want_normals[i] = kernel::cnormal(field, m.positions[i], options.gradient_eps);
+    }
+    CHECK(std::memcmp(m.normals.data(), want_normals.data(), m.normals.size() * sizeof(cfloat3)) ==
+          0);
+    CHECK(std::memcmp(m.colors.data(), want_colors.data(), m.colors.size() * sizeof(cfloat3)) == 0);
+
+    SUBCASE("and the dual-contouring mesher lands on the same pass") {
+        // DC ships behind the experimental flag and returns {} without it.
+        mesh::DualContouringOptions dc;
+        dc.enable_experimental = true;
+        mesh::Mesh d = mesh::mesh_tape_dc(tape, region, 0.06f, dc);
+        mesh::apply_tape_attributes(d, tape, options);
+        REQUIRE(!d.empty());
+        for (std::size_t i = 0; i < d.positions.size(); ++i) {
+            CAPTURE(i);
+            REQUIRE(d.colors[i].x == tape.eval(d.positions[i]).color.x);
+            REQUIRE(d.normals[i].x ==
+                    kernel::cnormal(field, d.positions[i], options.gradient_eps).x);
+        }
+    }
+}
+
+TEST_CASE("apply_tape_attributes: every combination of what was asked for") {
+    // The branch it used to be was `if (colors) ... ; if (Gradient) ... else if
+    // (Face) ...`, so face normals AND colours had to keep working together,
+    // and NormalMode::None had to leave the normals alone. Batching the two
+    // asks into one call rearranged that branch; this holds it.
+    scene::Document doc = gnarly_document();
+    const scene::Tape tape = scene::compile_document(doc);
+    REQUIRE(!tape.empty());
+    const cfloat3 pad = cf3(0.2f, 0.2f, 0.2f);
+    const math::Aabb region{tape.bounds.min - pad, tape.bounds.max + pad};
+
+    mesh::MeshingOptions bare;
+    bare.normals = mesh::NormalMode::None;
+    bare.colors = false;
+    const mesh::Mesh base = mesh::mesh_tape(tape, region, 0.09f, bare);
+    REQUIRE(!base.empty());
+    CHECK(base.colors.empty());
+    CHECK(base.normals.empty());
+
+    auto attributed = [&](mesh::NormalMode normals, bool colors) {
+        mesh::Mesh m = base;
+        mesh::MeshingOptions o;
+        o.normals = normals;
+        o.colors = colors;
+        mesh::apply_tape_attributes(m, tape, o);
+        return m;
+    };
+
+    SUBCASE("colour alone leaves the normals untouched") {
+        const mesh::Mesh m = attributed(mesh::NormalMode::None, true);
+        CHECK(m.colors.size() == m.positions.size());
+        CHECK(m.normals.empty());
+    }
+    SUBCASE("gradient alone leaves the colours untouched") {
+        const mesh::Mesh m = attributed(mesh::NormalMode::Gradient, false);
+        CHECK(m.normals.size() == m.positions.size());
+        CHECK(m.colors.empty());
+    }
+    SUBCASE("face normals and colour are both filled") {
+        const mesh::Mesh m = attributed(mesh::NormalMode::Face, true);
+        REQUIRE(m.normals.size() == m.positions.size());
+        REQUIRE(m.colors.size() == m.positions.size());
+        // Face normals come from the triangles, not the tape.
+        mesh::Mesh faces = base;
+        mesh::compute_face_normals(faces);
+        CHECK(std::memcmp(m.normals.data(), faces.normals.data(),
+                          m.normals.size() * sizeof(cfloat3)) == 0);
+        for (std::size_t i = 0; i < m.positions.size(); ++i)
+            REQUIRE(m.colors[i].x == tape.eval(m.positions[i]).color.x);
+    }
+    SUBCASE("asking for nothing does nothing") {
+        const mesh::Mesh m = attributed(mesh::NormalMode::None, false);
+        CHECK(m.colors.empty());
+        CHECK(m.normals.empty());
+    }
+    SUBCASE("an empty mesh is not a batch of zero points") {
+        mesh::Mesh empty;
+        mesh::MeshingOptions o;
+        o.normals = mesh::NormalMode::Gradient;
+        o.colors = true;
+        mesh::apply_tape_attributes(empty, tape, o);  // must not reach the backend
+        CHECK(empty.colors.empty());
+        CHECK(empty.normals.empty());
+    }
 }

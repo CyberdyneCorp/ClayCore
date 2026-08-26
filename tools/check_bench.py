@@ -147,7 +147,33 @@ FLOORS = {
 # brick-cache requires that meshing a dab's worth of bricks costs less than
 # meshing the surface, which is the whole point of taking a key list
 FASTER_THAN = [
-    ("BM_SurfaceNets", "BM_MeshTape"),
+    # ("BM_SurfaceNets", "BM_MeshTape") WAS here, for the meshing spec's
+    # "preview is cheaper than marching" claim. It was measuring the ATTRIBUTE
+    # PASS, not the mesher. Both sides walked the tape once per vertex for the
+    # colour and four more for the gradient, on one thread, and surface nets
+    # emits 3.2x fewer vertices — so the pair passed on vertex count and the
+    # geometry step never entered into it. Batching that pass (#302) removed
+    # the confound and left the meshers visible:
+    #
+    #   bench_document, voxel 0.02      marching   surface nets
+    #     geometry only                   82.5 ms      138.3 ms   nets 1.68x SLOWER
+    #     + attributes, before #302       500.7 ms     275.0 ms   nets 1.8x faster
+    #     + attributes, after #302         91.0 ms     144.4 ms   nets 1.59x slower
+    #
+    # So the claim is false on the tape path and the pair cannot be made to
+    # hold by re-scoping it. Removed rather than quietly weakened, and #304
+    # carries the numbers and the question of what the spec should say. What
+    # nets IS cheaper at — 3.2x the triangles for a preview — is not a timing
+    # gate and has none here yet.
+    # The non-brick meshers' attribute pass (#302): `apply_tape_attributes`
+    # walked the tape once per vertex for the colour and four more for the
+    # gradient, on one thread, while the brick mesher had gone through the
+    # backend's batch since #73. Both sides here evaluate the identical taps
+    # against the identical tape over the identical vertices and are
+    # byte-identical by contract; they differ only in whether the evaluation is
+    # batched. Catches the pass falling back to the serial walk — which it does
+    # silently, by design, when no CPU backend is registered.
+    ("BM_MeshTapeAttributes", "BM_MeshTapeAttributesSerial"),
     ("BM_MeshBricksSubset", "BM_MeshBricksWhole"),
     # Grid-path consolidation (accel/parallel-consolidate): baking a grown
     # layer through the CPU backend's batch path must beat the serial

@@ -6,8 +6,8 @@
 #include <benchmark/benchmark.h>
 
 #include <algorithm>
-#include <cmath>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <ctime>
 #include <thread>
@@ -16,20 +16,21 @@
 #include "clay.h"
 #include "clay/brick/cache.h"
 #include "clay/eval/backend.h"
-#include "clay/mesh/marching.h"
-#include "clay/mesh/to_field.h"
-#include "clay/mesh/surface_nets.h"
-#include "clay/field/redistance.h"
-#include "clay/scene/bounds.h"
-#include "clay/scene/commands.h"
 #include "clay/eval/bake_points.h"
 #include "clay/eval/bake_volume.h"
 #include "clay/field/move_topological.h"
+#include "clay/field/redistance.h"
+#include "clay/kernel/field.h"
+#include "clay/mesh/bvh.h"
+#include "clay/mesh/marching.h"
+#include "clay/mesh/surface_nets.h"
+#include "clay/mesh/to_field.h"
+#include "clay/scene/bounds.h"
+#include "clay/scene/commands.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/cull_index.h"
 #include "clay/scene/tape.h"
 #include "clay/voxel/grid.h"
-#include "clay/mesh/bvh.h"
 #include "scatter_spread.h"
 
 using namespace clay;
@@ -756,6 +757,63 @@ void BM_SurfaceNets(benchmark::State& state) {
     }
 }
 BENCHMARK(BM_SurfaceNets)->Unit(benchmark::kMillisecond);
+
+// The attribute pass the non-brick meshers reach — `mesh_tape`, `mesh_tape_dc`
+// and the dual-grid path all land in `apply_tape_attributes`. It walked the
+// tape once per vertex for the colour and four more for the gradient, on ONE
+// thread, which was 96% of a coloured mesh; it now hands the whole vertex set
+// to the CPU backend's blocked, pooled evaluator (#302).
+//
+// The pair is what stops that walk coming back. Both sides mesh the identical
+// geometry and evaluate the identical taps against the identical tape — they
+// differ only in whether the evaluation goes through the backend — and the
+// attributes are byte-identical by contract, held by `test_points_batch.cpp`.
+// It holds on any machine with more than one core, and the margin is wide
+// because neither side pays a floor the other does not: 53x on a twelve-core
+// machine at this fixture's size.
+void BM_MeshTapeAttributes(benchmark::State& state) {
+    scene::Document doc = bench_document();
+    scene::Tape tape = scene::compile_document(doc);
+    mesh::MeshingOptions bare;
+    bare.normals = mesh::NormalMode::None;
+    bare.colors = false;
+    const mesh::Mesh base = mesh::mesh_tape(tape, tape.bounds, 0.02f, bare);
+    mesh::MeshingOptions full;
+    full.normals = mesh::NormalMode::Gradient;
+    full.colors = true;
+    for (auto _ : state) {
+        mesh::Mesh m = base;
+        mesh::apply_tape_attributes(m, tape, full);
+        benchmark::DoNotOptimize(m.normals.size());
+    }
+    state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations()) *
+                            static_cast<std::int64_t>(base.positions.size()));
+}
+BENCHMARK(BM_MeshTapeAttributes)->Unit(benchmark::kMillisecond);
+
+// The serial reference the pass above replaced, kept as the thing it must beat.
+void BM_MeshTapeAttributesSerial(benchmark::State& state) {
+    scene::Document doc = bench_document();
+    scene::Tape tape = scene::compile_document(doc);
+    mesh::MeshingOptions bare;
+    bare.normals = mesh::NormalMode::None;
+    bare.colors = false;
+    const mesh::Mesh base = mesh::mesh_tape(tape, tape.bounds, 0.02f, bare);
+    auto field = [&tape](kernel::cfloat3 p) { return tape.eval(p).d; };
+    for (auto _ : state) {
+        mesh::Mesh m = base;
+        m.colors.resize(m.positions.size());
+        m.normals.resize(m.positions.size());
+        for (std::size_t i = 0; i < m.positions.size(); ++i) {
+            m.colors[i] = tape.eval(m.positions[i]).color;
+            m.normals[i] = kernel::cnormal(field, m.positions[i], 1e-4f);
+        }
+        benchmark::DoNotOptimize(m.normals.size());
+    }
+    state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations()) *
+                            static_cast<std::int64_t>(base.positions.size()));
+}
+BENCHMARK(BM_MeshTapeAttributesSerial)->Unit(benchmark::kMillisecond);
 
 // Issue #86: greedy meshing cost a flat ~4 ms per occupied chunk however empty
 // the chunk was, because the exposure mask probed the chunk map — a hash and a
