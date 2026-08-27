@@ -110,6 +110,32 @@ IoStatus read_mesh_chunk(const std::uint8_t* payload, std::size_t len, ClaySpace
     return IoStatus::success();
 }
 
+// The voxel half of the same rule. It was deferred when the mesh rule landed
+// (add-mesh-layers task 7.7 — "the mesh rule makes the inconsistency visible
+// and a follow-up can close it") because a voxel layer could not be removed by
+// anything that left the grid behind. Recording the CREATION changed that
+// (#341): undoing a crossing now removes a voxel layer and deliberately keeps
+// its cells, so that a redo can pick them back up, and an orphaned grid became
+// an ordinary state rather than an unreachable one.
+//
+// Without this the orphan reaches the file, and on load the ids are no longer
+// monotonic across the gap: deserialize_document derives next_layer_id_ from
+// the layers PRESENT, so the next voxel layer created can take the missing id
+// and come up holding a dead sculpt.
+bool is_voxel_layer(const scene::Document& document, scene::LayerId id) {
+    const scene::Layer* layer = document.find_layer(id);
+    return layer && layer->kind == scene::LayerKind::Voxel;
+}
+
+void drop_unmatched_voxel_chunks(ClaySpaceDoc* out) {
+    for (auto it = out->voxel_layers.begin(); it != out->voxel_layers.end();) {
+        if (is_voxel_layer(out->document, it->first))
+            ++it;
+        else
+            it = out->voxel_layers.erase(it);
+    }
+}
+
 void drop_unmatched_mesh_chunks(ClaySpaceDoc* out) {
     for (auto it = out->mesh_layers.begin(); it != out->mesh_layers.end();) {
         if (is_mesh_layer(out->document, it->first))
@@ -129,6 +155,7 @@ std::vector<std::uint8_t> save_clayspace(const ClaySpaceDoc& doc) {
 
     put_chunk(out, kScene, scene::serialize_document(doc.document));
     for (const auto& [layer_id, grid] : doc.voxel_layers) {
+        if (!is_voxel_layer(doc.document, layer_id)) continue;
         std::vector<std::uint8_t> payload;
         put_u32(payload, layer_id);
         std::vector<std::uint8_t> grid_bytes = grid.serialize();
@@ -234,6 +261,7 @@ IoStatus load_clayspace(const std::uint8_t* data, std::size_t size, ClaySpaceDoc
     // business, and the scene chunk a mesh chunk is matched against may not
     // have been read yet.
     drop_unmatched_mesh_chunks(&result);
+    drop_unmatched_voxel_chunks(&result);
     *out = std::move(result);
     return IoStatus::success();
 }

@@ -5008,14 +5008,24 @@ NB_MODULE(pyclay, m) {
         .def("add_voxel_layer",
              [](PyDocument& d, const std::string& name, float voxel_size) {
                  if (voxel_size <= 0.0f) throw std::invalid_argument("voxel_size must be > 0");
-                 scene::Layer& l = d.doc->document.add_sdf_layer(name);
+                 // Through AddLayerCmd so the creation is undoable; see
+                 // add_sdf_layer and add_mesh_layer, which both already were.
+                 // This one mutated the document directly, so "no reachable
+                 // edit escapes undo" was false here (#341). A voxel layer
+                 // carries no SDF content.
+                 scene::Layer l;
+                 l.id = d.doc->document.reserve_layer_id();
+                 l.name = name;
                  l.kind = scene::LayerKind::Voxel;
-                 l.sdf.reset();
-                 d.doc->voxel_layers.emplace(l.id, voxel::VoxelGrid(voxel_size));
+                 const scene::LayerId id = l.id;
+                 apply_or_throw(d.doc->document,
+                                scene::Command{scene::AddLayerCmd{std::move(l), -1}},
+                                "add_voxel_layer", d.undo.get());
+                 d.doc->voxel_layers.insert_or_assign(id, voxel::VoxelGrid(voxel_size));
                  PyVoxelGrid g;
                  g.doc = d.doc;
                  g.undo = d.undo;
-                 g.layer = l.id;
+                 g.layer = id;
                  return g;
              },
              "name"_a, "voxel_size"_a = 0.1f,

@@ -67,6 +67,19 @@ struct Step {
         // GroupBegin/GroupEnd on COMMAND grouping, which is an unrelated idea —
         // one bundles edits into a step, the other names a region of the model.
         SurfaceGroup,
+        // Every step an explicit begin_group/end_group bracket collected, as
+        // ONE step. The command stack already collapses SCENE commands into a
+        // single entry; this is the same promise for the kinds it cannot see.
+        //
+        // It exists because the bracket did not actually bracket. begin_group
+        // forwards to UndoStack::begin_group and nothing else, so a voxel,
+        // mask or mesh step recorded between the two calls was pushed straight
+        // onto the step list and stayed its own undo. A crossing — create a
+        // voxel layer, rasterize into it — is exactly that shape, and it undid
+        // in two: the layer went, then the fill it contained (#341). clay.h has
+        // promised "undo as one step" since the bracket shipped, and for every
+        // representation but the edit list the promise was false.
+        Compound,
         Barrier  // an operation nothing records; not reversible, not silent
     };
 
@@ -88,6 +101,17 @@ struct Step {
     // the hidden set (isolate does both), and a snapshot reverses both without
     // two payloads that have to stay in step.
     std::vector<std::uint8_t> group_before, group_after;
+    // Compound: what the bracket collected, in the order it is REPLAYED —
+    // undo walks it backwards, redo forwards.
+    //
+    // The Scene child, when there is one, is first, and there is never more
+    // than one: an open group occupies a single UndoStack entry however many
+    // commands land in it, and sync_scene_steps reconciles that to one Scene
+    // step. First rather than in the order it was reconciled, because a Voxel,
+    // Mask or Mesh child names a LAYER and the Scene child is what creates or
+    // removes it — so undoing scene last, and redoing it first, keeps every
+    // payload applied while the layer it names is present.
+    std::vector<Step> children;
     std::string barrier;                      // Barrier: what happened, for a host to show
 
     bool reversible() const { return kind != Kind::Barrier; }
@@ -348,6 +372,15 @@ class History {
     bool apply_step(const Step& step, bool forward, scene::Document& doc,
                     const GridFor& grid_for, const MeshFor& mesh_for, math::Aabb* out_bound,
                     const MaskFor& mask_for);
+    // Fold everything the just-closed bracket produced into one Compound step.
+    // Called only from end_group, and only after sync_scene_steps has appended
+    // the group's Scene entry, so the whole bracket is in steps_ at or after
+    // group_start_.
+    void collapse_group();
+    // How many Scene steps a step accounts for — 1 for a Scene step, the sum
+    // over children for a Compound. The census in sync_scene_steps counts
+    // entries on the wrapped stack, and a collapsed group still names one.
+    static std::size_t scene_steps_in(const Step& s);
 
     scene::UndoStack commands_;
     std::vector<Step> steps_;
@@ -373,6 +406,9 @@ class History {
     std::vector<std::uint8_t> group_snapshot_;
     scene::LayerId open_mask_layer_ = 0;
     bool grouping_ = false;
+    // Where steps_ stood when the open bracket began, so end_group knows what
+    // the bracket produced. Meaningful only while grouping_.
+    std::size_t group_start_ = 0;
     bool enabled_ = false;
 };
 

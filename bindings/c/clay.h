@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 55
+#define CLAY_ABI_MINOR 56
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -724,11 +724,20 @@ clay_result clay_remove_node(clay_document* doc, clay_layer_id layer, clay_node_
  * are recorded by mechanisms the command stack never saw. One undo now takes
  * off the most recent edit whatever made it.
  *
- * WHAT IS STILL NOT A STEP, because nothing records it: every MASK edit — a
- * mask is a fourth representation with no history mechanism at all — and the
- * operations that destroy history itself (dropping a resolution level,
- * removing a sculpt layer, merging one down). Consolidate IS undoable and is
- * worth naming because it is the one most often assumed otherwise.
+ * CREATING A LAYER IS A STEP, of every kind: clay_add_sdf_layer,
+ * clay_document_add_voxel_layer and clay_document_add_mesh_layer each record
+ * one command. Through 0.55.0 the voxel one did not, so a conversion — make a
+ * voxel layer, rasterize into it — recorded its FILL and not its layer, and one
+ * undo emptied the new layer and left it standing. Undoing a voxel or mesh
+ * layer's creation removes the layer and KEEPS its payload, which is what lets
+ * a redo bring the content back rather than an empty layer; the payload is not
+ * reachable while the layer is absent, and is not saved.
+ *
+ * WHAT IS STILL NOT A STEP, because nothing records it: creating a MASK — mask
+ * EDITS record, since 0.47.0, but the mask's existence does not — and the
+ * operations that destroy history itself (dropping a resolution level, removing
+ * a sculpt layer, merging one down). Consolidate IS undoable and is worth
+ * naming because it is the one most often assumed otherwise.
  *
  * The depths reported by clay_document_undo_state count steps that will
  * actually reverse something, so a host greying a menu item from one never
@@ -776,7 +785,17 @@ clay_result clay_document_redo_bound(clay_document* doc, int32_t* out_redone, fl
  * distinguishes from an enabled-but-empty history. */
 clay_result clay_document_undo_state(const clay_document* doc, int32_t* out_enabled,
                                      size_t* out_undo_depth, size_t* out_redo_depth);
-/* Bracket a burst of edits so they undo as one step. */
+/* Bracket a burst of edits so they undo as one step — ACROSS REPRESENTATIONS.
+ *
+ * The bracket spans the SDF edit list, voxel grids, masks and mesh layers, so
+ * one gesture a host bracketed is one undo however many of them it touched.
+ * Through 0.55.0 it bracketed the edit list alone and every other kind stayed
+ * its own step, which is what made a crossing two undos: the layer went first
+ * and the fill it contained second.
+ *
+ * A bracket that produced a single step is unchanged by the grouping, and an
+ * operation nothing records stays its own step rather than being folded in —
+ * so an undo is never offered across the horizon such an operation draws. */
 clay_result clay_document_begin_undo_group(clay_document* doc);
 clay_result clay_document_end_undo_group(clay_document* doc);
 
@@ -2814,7 +2833,18 @@ clay_voxel_grid* clay_voxel_grid_create(float voxel_size);
 clay_result clay_voxel_grid_destroy(clay_voxel_grid* grid);
 
 /* Adds a voxel layer and borrows its grid. A voxel layer carries no SDF
- * content, so clay_add_item and clay_layer_add_item do not apply to it. */
+ * content, so clay_add_item and clay_layer_add_item do not apply to it.
+ *
+ * ONE COMMAND, so an enabled undo stack records the creation and a single undo
+ * removes the layer. The grid is RETAINED across that undo — an AddLayerCmd
+ * carries a layer by value and could not carry a sculpt — so a redo brings the
+ * layer back with its cells and its id. While the layer is absent the grid is
+ * not reachable (clay_document_voxel_layer reports NOT_FOUND) and is not
+ * written by clay_document_save.
+ *
+ * Bracket this with the fill that follows it (clay_document_begin_undo_group)
+ * and the whole crossing is one undo, which is what a user who asked for a
+ * conversion is taking back. */
 clay_result clay_document_add_voxel_layer(clay_document* doc, const char* name,
                                           float voxel_size, clay_layer_id* out_layer,
                                           clay_voxel_grid** out_grid);
