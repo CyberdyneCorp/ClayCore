@@ -576,6 +576,17 @@ final class StrokeGalleryTests: XCTestCase {
             _ = clay_voxel_change_count(grid, &before)
 
             var brush = Fixture.brush(size: 9)
+            // BRACKET THIS CASE, as the measure bundle does (VerbCases.swift). The
+            // gallery bundle was the only one that never did: every one of its cases
+            // recorded canaryBeforeMs/AfterMs of 0, so bracket_factor() returned None
+            // and the gate compared them RAW -- against a device that drifts x1.8 over
+            // a run. That is a large part of why these cases move so much between runs
+            // on unchanged code (move_drags: 0.149 -> 0.434 ms), and it has to be fixed
+            // BEFORE any of them is made big enough to fail, or "cannot fail" simply
+            // becomes "fails at random" (issues #331, #337).
+            let canaryBefore = collector.sampleCanaryNow()
+            let caseStartedAtMs = collector.elapsedMs
+            let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
             var measurements: [Measurement] = []
             for i in 0..<Self.strokeCount {
                 // a drag across the ball's upper surface
@@ -606,7 +617,12 @@ final class StrokeGalleryTests: XCTestCase {
                 name: session.name, verb: "session.\(session.name)",
                 budgetClass: .gesture, backend: "cpu", servedBy: "cpu",
                 measurements: measurements,
-                growthExponent: Timing.growthExponent(measurements)))
+                growthExponent: Timing.growthExponent(measurements),
+                startedAtMs: caseStartedAtMs,
+                thermalStateStart: caseThermalStart,
+                thermalStateEnd: DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState),
+                canaryBeforeMs: canaryBefore,
+                canaryAfterMs: collector.sampleCanaryNow()))
 
             if let image = Render.imageVoxel(of: grid) {
                 Render.attach(image, named: session.name, to: self)
@@ -685,6 +701,17 @@ final class StrokeGalleryTests: XCTestCase {
             }
             defer { clay_item_destroy(volume) }
 
+            // BRACKET THIS CASE, as the measure bundle does (VerbCases.swift). The
+            // gallery bundle was the only one that never did: every one of its cases
+            // recorded canaryBeforeMs/AfterMs of 0, so bracket_factor() returned None
+            // and the gate compared them RAW -- against a device that drifts x1.8 over
+            // a run. That is a large part of why these cases move so much between runs
+            // on unchanged code (move_drags: 0.149 -> 0.434 ms), and it has to be fixed
+            // BEFORE any of them is made big enough to fail, or "cannot fail" simply
+            // becomes "fails at random" (issues #331, #337).
+            let canaryBefore = collector.sampleCanaryNow()
+            let caseStartedAtMs = collector.elapsedMs
+            let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
             var measurements: [Measurement] = []
             for i in 0..<passes {
                 let t0 = DispatchTime.now().uptimeNanoseconds
@@ -729,7 +756,12 @@ final class StrokeGalleryTests: XCTestCase {
             collector.add(CaseResult(
                 name: name, verb: "session.\(name)", budgetClass: .operation,
                 backend: "cpu", servedBy: "cpu", measurements: measurements,
-                growthExponent: Timing.growthExponent(measurements)))
+                growthExponent: Timing.growthExponent(measurements),
+                startedAtMs: caseStartedAtMs,
+                thermalStateStart: caseThermalStart,
+                thermalStateEnd: DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState),
+                canaryBeforeMs: canaryBefore,
+                canaryAfterMs: collector.sampleCanaryNow()))
             if let image = Render.image(of: doc) {
                 Render.attach(image, named: name, to: self)
             } else {
@@ -836,6 +868,17 @@ final class StrokeGalleryTests: XCTestCase {
             // frozen side must survive.
             var carve = Fixture.brush(size: 11)
             carve.mask = mask   // clay_mask* is an OpaquePointer in Swift
+            // BRACKET THIS CASE, as the measure bundle does (VerbCases.swift). The
+            // gallery bundle was the only one that never did: every one of its cases
+            // recorded canaryBeforeMs/AfterMs of 0, so bracket_factor() returned None
+            // and the gate compared them RAW -- against a device that drifts x1.8 over
+            // a run. That is a large part of why these cases move so much between runs
+            // on unchanged code (move_drags: 0.149 -> 0.434 ms), and it has to be fixed
+            // BEFORE any of them is made big enough to fail, or "cannot fail" simply
+            // becomes "fails at random" (issues #331, #337).
+            let canaryBefore = collector.sampleCanaryNow()
+            let caseStartedAtMs = collector.elapsedMs
+            let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
             var measurements: [Measurement] = []
             for i in 0..<Self.strokeCount {
                 let t = Float(i) / Float(max(Self.strokeCount - 1, 1))
@@ -859,7 +902,12 @@ final class StrokeGalleryTests: XCTestCase {
                 name: "mask_freeze", verb: "session.mask_freeze",
                 budgetClass: .interactive, backend: "cpu", servedBy: "cpu",
                 measurements: measurements,
-                growthExponent: Timing.growthExponent(measurements)))
+                growthExponent: Timing.growthExponent(measurements),
+                startedAtMs: caseStartedAtMs,
+                thermalStateStart: caseThermalStart,
+                thermalStateEnd: DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState),
+                canaryBeforeMs: canaryBefore,
+                canaryAfterMs: collector.sampleCanaryNow()))
             if let image = Render.imageVoxel(of: grid) {
                 Render.attach(image, named: "mask_freeze", to: self)
             }
@@ -879,6 +927,17 @@ final class StrokeGalleryTests: XCTestCase {
             // fixture was wrong rather than the engine.
             var brush = Fixture.brush(size: 9)
             var painted = 0
+            // BRACKET THIS CASE, as the measure bundle does (VerbCases.swift). The
+            // gallery bundle was the only one that never did: every one of its cases
+            // recorded canaryBeforeMs/AfterMs of 0, so bracket_factor() returned None
+            // and the gate compared them RAW -- against a device that drifts x1.8 over
+            // a run. That is a large part of why these cases move so much between runs
+            // on unchanged code (move_drags: 0.149 -> 0.434 ms), and it has to be fixed
+            // BEFORE any of them is made big enough to fail, or "cannot fail" simply
+            // becomes "fails at random" (issues #331, #337).
+            let canaryBefore = collector.sampleCanaryNow()
+            let caseStartedAtMs = collector.elapsedMs
+            let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
             for k in 0..<40 {
                 let (x, y, z) = SceneBuilder.stampPosition(k)
                 let l = max(sqrt(x * x + y * y + z * z), 1e-6)
@@ -925,7 +984,12 @@ final class StrokeGalleryTests: XCTestCase {
                 name: "mask_extract", verb: "session.mask_extract",
                 budgetClass: .operation, backend: "cpu", servedBy: "cpu",
                 measurements: [Measurement(stamps: 1, p50Ms: ms, p95Ms: ms, samples: 1)],
-                growthExponent: nil))
+                growthExponent: nil,
+                startedAtMs: caseStartedAtMs,
+                thermalStateStart: caseThermalStart,
+                thermalStateEnd: DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState),
+                canaryBeforeMs: canaryBefore,
+                canaryAfterMs: collector.sampleCanaryNow()))
             if let image = Render.image(of: out) {
                 Render.attach(image, named: "mask_extract", to: self)
             }
@@ -961,6 +1025,17 @@ final class StrokeGalleryTests: XCTestCase {
             var pts = points
             var out = [Float](repeating: 0, count: pointCount)
 
+            // BRACKET THIS CASE, as the measure bundle does (VerbCases.swift). The
+            // gallery bundle was the only one that never did: every one of its cases
+            // recorded canaryBeforeMs/AfterMs of 0, so bracket_factor() returned None
+            // and the gate compared them RAW -- against a device that drifts x1.8 over
+            // a run. That is a large part of why these cases move so much between runs
+            // on unchanged code (move_drags: 0.149 -> 0.434 ms), and it has to be fixed
+            // BEFORE any of them is made big enough to fail, or "cannot fail" simply
+            // becomes "fails at random" (issues #331, #337).
+            let canaryBefore = collector.sampleCanaryNow()
+            let caseStartedAtMs = collector.elapsedMs
+            let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
             var measurements: [Measurement] = []
             var failed = false
             for i in 0..<Self.strokeCount {
@@ -1058,7 +1133,12 @@ final class StrokeGalleryTests: XCTestCase {
                 backend: "cpu",
                 servedBy: "cpu",
                 measurements: measurements,
-                growthExponent: Timing.growthExponent(measurements)))
+                growthExponent: Timing.growthExponent(measurements),
+                startedAtMs: caseStartedAtMs,
+                thermalStateStart: caseThermalStart,
+                thermalStateEnd: DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState),
+                canaryBeforeMs: canaryBefore,
+                canaryAfterMs: collector.sampleCanaryNow()))
 
             // The picture. Rendered on the device, from the same document the
             // timings above came from.
