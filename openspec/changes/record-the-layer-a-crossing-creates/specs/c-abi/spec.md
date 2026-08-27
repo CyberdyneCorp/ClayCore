@@ -26,11 +26,11 @@ produced a single step SHALL be unchanged by the grouping, and a bracket
 containing an operation that nothing records SHALL leave that operation as its
 own step, so that an undo is never offered across a barrier.
 
-#### Scenario: A C consumer undoes an edit
+#### Scenario: Undo from Swift
 - **WHEN** a C consumer enables undo, edits, and undoes
-- **THEN** the edit is reversed and the depths report what remains
+- **THEN** the document serializes bit-identically to its pre-edit state, matching what `pyclay` produces for the same sequence
 
-#### Scenario: Nothing to undo
+#### Scenario: Empty stack is not an error
 - **WHEN** undo is called on a document with nothing to undo
 - **THEN** the call reports that nothing was undone without returning a failure code
 
@@ -60,13 +60,40 @@ own step, so that an undo is never offered across a barrier.
 - **AND** the first undo empties the layer and the second removes it
 
 ### Requirement: Voxel grids across the ABI
+The API SHALL expose voxel grids through an opaque handle: palette management, single-cell and batch edits, cube and sphere brushes with falloff and strength, the sculpting verbs (smooth, inflate, flatten, pinch), box and line fills, mirrored edits, flood select, occupancy and bounds queries, greedy meshing, SDF rasterization, and step-field sampling.
 
-A voxel grid borrowed from a document SHALL remain owned by the document, and
-SHALL NOT be destroyed by the caller.
+Ownership SHALL be explicit: a grid created standalone is owned by the caller and destroyed with an explicit destroy call, while a grid obtained as a document layer is borrowed, remains owned by the document, and SHALL NOT be destroyed by the caller. Destroying a borrowed handle SHALL return an error rather than corrupting the document.
 
 A handle borrowed from a layer whose creation has been undone SHALL NOT be used:
 the layer is absent from the document and the ABI's own lookup reports it as not
-found. The cells are retained for a redo, not for a caller to reach.
+found. The cells are retained so that a redo restores them, not for a caller to
+reach while the layer is gone.
+
+#### Scenario: Voxel sculpting from C
+- **WHEN** a C consumer creates a grid, adds palette entries, stamps a sphere brush, runs a sculpting verb, and greedy-meshes the result
+- **THEN** the mesh matches the same sequence performed through `pyclay`
+
+#### Scenario: Borrowed layer handle is protected
+- **WHEN** a consumer calls destroy on a handle obtained from a document voxel layer
+- **THEN** the call returns an invalid-argument error and the document is unaffected
+
+#### Scenario: Batch edits use the size-query pattern
+- **WHEN** flood select is called with a null buffer
+- **THEN** it reports the required cell count, and a second call with an adequate buffer fills it
+
+#### Scenario: Falloff brushes are reproducible across the boundary
+- **WHEN** a C consumer stamps a falloff brush with a given seed
+- **THEN** the affected cells are identical to the same stamp through `pyclay`
+
+#### Scenario: Brush strength is passed through, never reinterpreted
+- **WHEN** a C consumer stamps a brush at any strength the boundary accepts
+- **THEN** the coverage reaches the engine untouched, so the affected cells are identical to the same stamp through `pyclay`
+- **AND WHEN** the strength is not greater than zero, which covers no cell at all
+- **THEN** the call returns an invalid-argument error and the grid is unchanged, rather than the value being read as full coverage
+
+#### Scenario: A region with a non-finite bound is refused
+- **WHEN** rasterization is asked for a region whose bounds contain a NaN or an infinity
+- **THEN** the call returns an invalid-argument error and the grid is unchanged
 
 #### Scenario: A borrowed grid outlives an undone creation
 - **GIVEN** a voxel layer whose creation has been undone
