@@ -2882,6 +2882,19 @@ clay_result for_each_run(const std::vector<std::uint8_t>& mark, bool want, Run&&
     return CLAY_OK;
 }
 
+// The slice of a caller's allocation holding `n` bricks from brick `at`, at the
+// fixed per-brick stride the device refill documents. FILE SCOPE, above the
+// first extern "C" — a helper returning a C++ type from inside that block is
+// what broke the macOS builds in #235, and GCC does not warn about it, so a
+// green local build proves nothing.
+eval::DeviceBuffer brick_slot(const eval::DeviceBuffer& whole, std::size_t at, std::size_t n,
+                              std::size_t stride) {
+    eval::DeviceBuffer s = whole;
+    s.offset = whole.offset + static_cast<std::uint64_t>(at) * stride * sizeof(float);
+    s.size = static_cast<std::uint64_t>(n) * stride * sizeof(float);
+    return s;
+}
+
 }  // namespace
 
 extern "C" {
@@ -8776,16 +8789,6 @@ clay_result device_batch_status(eval::Status s) {
             return fail(CLAY_ERROR_INVALID_ARGUMENT, "a brick's device slot is invalid");
         default: return fail(CLAY_ERROR_BACKEND, "device evaluation failed");
     }
-}
-
-// The slice of a caller's allocation holding `n` bricks from brick `at`, at the
-// fixed per-brick stride the device refill documents.
-eval::DeviceBuffer brick_slot(const eval::DeviceBuffer& whole, std::size_t at, std::size_t n,
-                              std::size_t stride) {
-    eval::DeviceBuffer s = whole;
-    s.offset = whole.offset + static_cast<std::uint64_t>(at) * stride * sizeof(float);
-    s.size = static_cast<std::uint64_t>(n) * stride * sizeof(float);
-    return s;
 }
 
 // Answers whichever of `requests` carry a usable seed into `host_values` /
