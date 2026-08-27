@@ -133,6 +133,37 @@ def verbs_in_header() -> set[str]:
     return found | EXTRA_VERBS
 
 
+# The gate's own floor, imported rather than copied so the two cannot drift
+# apart about what counts as a difference. check_device_bench requires a
+# regression to be BOTH relatively large (its tolerance) and absolutely
+# meaningful (this), which is right -- a 20 us move on a tablet is not a move.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+try:
+    from check_device_bench import DEFAULT_TOLERANCE as TOLERANCE
+    from check_device_bench import NOISE_FLOOR_MS, worst_p95
+except ImportError:  # pragma: no cover - the tools ship together
+    NOISE_FLOOR_MS, TOLERANCE, worst_p95 = 0.05, 1.4, None
+
+
+def gate_reach(case: dict) -> tuple[float, float | None]:
+    """What this case measures, and the ratio a regression must reach to FAIL.
+
+    A case fails only when the growth is over the tolerance AND over the floor,
+    so with a measurement of `m` the smallest detectable ratio is
+    `max(TOLERANCE, (m + NOISE_FLOOR_MS) / m)`. Below `NOISE_FLOOR_MS / (TOLERANCE - 1)`
+    the floor is the binding constraint and the tolerance never applies.
+
+    Returns (measured, ratio) with ratio None when the case took no measurement.
+    """
+    ms = case.get("measurements") or []
+    if not ms:
+        return (0.0, None)
+    measured = worst_p95(case) if worst_p95 else max(m["p95Ms"] for m in ms)
+    if measured <= 0:
+        return (0.0, None)
+    return (measured, max(TOLERANCE, (measured + NOISE_FLOOR_MS) / measured))
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
@@ -174,8 +205,35 @@ def main() -> int:
 
     covered = sum(1 for e in table if e.get("exemption") is None)
     exempt = len(table) - covered
+
+    # MEASURED IS NOT PROTECTED, and until now this line said the first and was
+    # read as the second (issue #337). A verb whose case measures 6 us cannot
+    # fail the gate at any plausible regression: the floor is the binding
+    # constraint long before the tolerance is. Saying so costs nothing and stops
+    # `coverage: OK` implying a guarantee the tool does not provide.
+    cases = {c["name"]: c for c in record.get("cases", [])}
+    gated, reported = [], []
+    for entry in table:
+        if entry.get("exemption") is not None:
+            continue
+        case = cases.get(entry.get("caseName") or "")
+        if case is None:
+            continue
+        value, ratio = gate_reach(case)
+        (gated if ratio is not None and ratio <= TOLERANCE else reported).append(
+            (entry["verb"], entry.get("caseName"), value, ratio))
+
     print(f"coverage: {covered} verb(s) measured, {exempt} exempt, "
           f"{len(measured)} case(s) in the run")
+    print(f"  of the {covered} measured: {len(gated)} GATED, {len(reported)} "
+          f"REPORTED ONLY — too small for the {NOISE_FLOOR_MS:.2f} ms floor, so a "
+          f"regression in them cannot fail this check")
+    for verb, case, value, ratio in sorted(reported, key=lambda r: -(r[3] or 0))[:8]:
+        shown = f"{ratio:.0f}x" if ratio and ratio >= 10 else f"{ratio:.2f}x"
+        print(f"  reported only: {verb} ({case}) {value:.4f} ms — needs {shown}")
+    if len(reported) > 8:
+        print(f"  ...and {len(reported) - 8} more reported-only verbs")
+
     for entry in table:
         if entry.get("exemption"):
             print(f"  exempt: {entry['verb']} — {entry['exemption'][:70]}...")
