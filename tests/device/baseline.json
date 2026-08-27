@@ -16,14 +16,14 @@
       "rawMs": 0.0002
     },
     "cut_passes": {
-      "budgetMs": 0.0656,
+      "budgetMs": 0.0615,
       "class": "gesture",
-      "measuredMs": 0.0437
+      "measuredMs": 0.041
     },
     "magnify_pinch": {
-      "budgetMs": 0.0994,
+      "budgetMs": 0.0904,
       "class": "gesture",
-      "measuredMs": 0.0663
+      "measuredMs": 0.0603
     },
     "mask_extract": {
       "budgetMs": 148.9526,
@@ -50,14 +50,14 @@
       "rawMs": 0.0079
     },
     "move_drags": {
-      "budgetMs": 0.1864,
+      "budgetMs": 0.1468,
       "class": "gesture",
-      "measuredMs": 0.1242
+      "measuredMs": 0.0979
     },
     "noise_detail": {
-      "budgetMs": 0.2432,
+      "budgetMs": 0.2419,
       "class": "gesture",
-      "measuredMs": 0.1621
+      "measuredMs": 0.1613
     },
     "pose_region": {
       "budgetMs": 0.0006,
@@ -202,19 +202,19 @@
       "measuredMs": 0.0125
     },
     "snakehook_tendrils": {
-      "budgetMs": 0.1703,
+      "budgetMs": 0.1723,
       "class": "gesture",
-      "measuredMs": 0.1136
+      "measuredMs": 0.1149
     },
     "stroke_build": {
-      "budgetMs": 0.5086,
+      "budgetMs": 0.4475,
       "class": "gesture",
-      "measuredMs": 0.3391
+      "measuredMs": 0.2984
     },
     "stroke_carve": {
-      "budgetMs": 0.6733,
+      "budgetMs": 0.5728,
       "class": "gesture",
-      "measuredMs": 0.4489
+      "measuredMs": 0.3819
     },
     "stroke_resolve": {
       "budgetMs": 0.0011,
@@ -911,69 +911,69 @@
       "bundle": "com.cyberdyne.claycore.devicegallery",
       "canaryAfterMs": 0,
       "canaryBeforeMs": 0,
-      "growthExponent": -1.7667030562520698,
+      "growthExponent": -1.8839328691495725,
       "measurements": [
         {
-          "p50Ms": 16.135792,
-          "p95Ms": 16.135792,
+          "p50Ms": 20.577624,
+          "p95Ms": 20.577624,
           "p95SpreadMs": 0,
           "repeats": 1,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.374375,
-          "p95Ms": 0.374375,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.155667,
+          "p95Ms": 0.155667,
+          "p95SpreadMs": 0.046791999999999986,
+          "repeats": 5,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.202417,
-          "p95Ms": 0.202417,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.194166,
+          "p95Ms": 0.194166,
+          "p95SpreadMs": 0.024249999999999994,
+          "repeats": 5,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.237333,
-          "p95Ms": 0.237333,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.248,
+          "p95Ms": 0.248,
+          "p95SpreadMs": 0.042041999999999996,
+          "repeats": 5,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.272083,
-          "p95Ms": 0.272083,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.28183400000000003,
+          "p95Ms": 0.28183400000000003,
+          "p95SpreadMs": 0.015832999999999986,
+          "repeats": 5,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.317792,
-          "p95Ms": 0.317792,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.314875,
+          "p95Ms": 0.314875,
+          "p95SpreadMs": 0.028834000000000026,
+          "repeats": 5,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.360334,
-          "p95Ms": 0.360334,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.36408399999999996,
+          "p95Ms": 0.36408399999999996,
+          "p95SpreadMs": 0.00412499999999999,
+          "repeats": 5,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.409542,
-          "p95Ms": 0.409542,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.409293,
+          "p95Ms": 0.409293,
+          "p95SpreadMs": 0.007916000000000034,
+          "repeats": 5,
           "samples": 1,
           "stamps": 8
         }
@@ -991,69 +991,69 @@
       "bundle": "com.cyberdyne.claycore.devicegallery",
       "canaryAfterMs": 0,
       "canaryBeforeMs": 0,
-      "growthExponent": 0.7604521306401572,
+      "growthExponent": 0.7349342435317138,
       "measurements": [
         {
-          "p50Ms": 0.159875,
-          "p95Ms": 0.159875,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.140208,
+          "p95Ms": 0.140208,
+          "p95SpreadMs": 0.026708999999999997,
+          "repeats": 5,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.294417,
-          "p95Ms": 0.294417,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.20662399999999997,
+          "p95Ms": 0.20662399999999997,
+          "p95SpreadMs": 0.032417,
+          "repeats": 5,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.322167,
-          "p95Ms": 0.322167,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.299375,
+          "p95Ms": 0.299375,
+          "p95SpreadMs": 0.044999999999999984,
+          "repeats": 5,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.399708,
-          "p95Ms": 0.399708,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.347125,
+          "p95Ms": 0.347125,
+          "p95SpreadMs": 0.010166999999999982,
+          "repeats": 5,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.498084,
-          "p95Ms": 0.498084,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.416583,
+          "p95Ms": 0.416583,
+          "p95SpreadMs": 0.0072510000000000074,
+          "repeats": 5,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.573208,
-          "p95Ms": 0.573208,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.537625,
+          "p95Ms": 0.537625,
+          "p95SpreadMs": 0.010499000000000036,
+          "repeats": 5,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.699458,
-          "p95Ms": 0.699458,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.5734170000000001,
+          "p95Ms": 0.5734170000000001,
+          "p95SpreadMs": 0.008000000000000007,
+          "repeats": 4,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.777208,
-          "p95Ms": 0.777208,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.646375,
+          "p95Ms": 0.646375,
+          "p95SpreadMs": 0.010375000000000023,
+          "repeats": 4,
           "samples": 1,
           "stamps": 8
         }
@@ -1071,69 +1071,69 @@
       "bundle": "com.cyberdyne.claycore.devicegallery",
       "canaryAfterMs": 0,
       "canaryBeforeMs": 0,
-      "growthExponent": 0.2622032528861628,
+      "growthExponent": -0.510233715080929,
       "measurements": [
         {
-          "p50Ms": 0.10925,
-          "p95Ms": 0.10925,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.325042,
+          "p95Ms": 0.325042,
+          "p95SpreadMs": 0.013292000000000002,
+          "repeats": 5,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.091917,
-          "p95Ms": 0.091917,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.078875,
+          "p95Ms": 0.078875,
+          "p95SpreadMs": 0.025332,
+          "repeats": 5,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.090792,
-          "p95Ms": 0.090792,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.07241600000000001,
+          "p95Ms": 0.07241600000000001,
+          "p95SpreadMs": 0.010999999999999996,
+          "repeats": 5,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.109166,
-          "p95Ms": 0.109166,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.089584,
+          "p95Ms": 0.089584,
+          "p95SpreadMs": 0.023167000000000007,
+          "repeats": 5,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.13925,
-          "p95Ms": 0.13925,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.093667,
+          "p95Ms": 0.093667,
+          "p95SpreadMs": 0.023707999999999993,
+          "repeats": 5,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.156042,
-          "p95Ms": 0.156042,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.10212500000000001,
+          "p95Ms": 0.10212500000000001,
+          "p95SpreadMs": 0.018791000000000002,
+          "repeats": 5,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.165666,
-          "p95Ms": 0.165666,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.107083,
+          "p95Ms": 0.107083,
+          "p95SpreadMs": 0.027165999999999996,
+          "repeats": 5,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.188458,
-          "p95Ms": 0.188458,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.1125,
+          "p95Ms": 0.1125,
+          "p95SpreadMs": 0.032042,
+          "repeats": 5,
           "samples": 1,
           "stamps": 8
         }
@@ -1151,69 +1151,69 @@
       "bundle": "com.cyberdyne.claycore.devicegallery",
       "canaryAfterMs": 0,
       "canaryBeforeMs": 0,
-      "growthExponent": 0.4102180397220044,
+      "growthExponent": 0.4347996141241196,
       "measurements": [
         {
-          "p50Ms": 0.074625,
-          "p95Ms": 0.074625,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.070333,
+          "p95Ms": 0.070333,
+          "p95SpreadMs": 0.010459000000000003,
+          "repeats": 5,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.07775,
-          "p95Ms": 0.07775,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.075626,
+          "p95Ms": 0.075626,
+          "p95SpreadMs": 0.022790999999999992,
+          "repeats": 5,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.095625,
-          "p95Ms": 0.095625,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.085041,
+          "p95Ms": 0.085041,
+          "p95SpreadMs": 0.0043330000000000035,
+          "repeats": 5,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.107,
-          "p95Ms": 0.107,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.10400000000000001,
+          "p95Ms": 0.10400000000000001,
+          "p95SpreadMs": 0.012667999999999999,
+          "repeats": 5,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.120125,
-          "p95Ms": 0.120125,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.125792,
+          "p95Ms": 0.125792,
+          "p95SpreadMs": 0.017124999999999987,
+          "repeats": 5,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.139042,
-          "p95Ms": 0.139042,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.13766699999999998,
+          "p95Ms": 0.13766699999999998,
+          "p95SpreadMs": 0.02400000000000002,
+          "repeats": 5,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.161041,
-          "p95Ms": 0.161041,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.157334,
+          "p95Ms": 0.157334,
+          "p95SpreadMs": 0.019583000000000017,
+          "repeats": 5,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.175125,
-          "p95Ms": 0.175125,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.173709,
+          "p95Ms": 0.173709,
+          "p95SpreadMs": 0.003499000000000002,
+          "repeats": 5,
           "samples": 1,
           "stamps": 8
         }
@@ -1231,69 +1231,69 @@
       "bundle": "com.cyberdyne.claycore.devicegallery",
       "canaryAfterMs": 0,
       "canaryBeforeMs": 0,
-      "growthExponent": 0.6773250458171486,
+      "growthExponent": 0.6841896714788864,
       "measurements": [
         {
-          "p50Ms": 0.060417,
-          "p95Ms": 0.060417,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.059209000000000005,
+          "p95Ms": 0.059209000000000005,
+          "p95SpreadMs": 0.035584,
+          "repeats": 5,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.085667,
-          "p95Ms": 0.085667,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.08591700000000001,
+          "p95Ms": 0.08591700000000001,
+          "p95SpreadMs": 0.052417000000000005,
+          "repeats": 5,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.119458,
-          "p95Ms": 0.119458,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.112792,
+          "p95Ms": 0.112792,
+          "p95SpreadMs": 0.005208000000000004,
+          "repeats": 5,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.155583,
-          "p95Ms": 0.155583,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.14245899999999997,
+          "p95Ms": 0.14245899999999997,
+          "p95SpreadMs": 0.012874999999999998,
+          "repeats": 5,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.168625,
-          "p95Ms": 0.168625,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.180083,
+          "p95Ms": 0.180083,
+          "p95SpreadMs": 0.018334000000000017,
+          "repeats": 5,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.197625,
-          "p95Ms": 0.197625,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.193041,
+          "p95Ms": 0.193041,
+          "p95SpreadMs": 0.01008400000000001,
+          "repeats": 5,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.221916,
-          "p95Ms": 0.221916,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.216749,
+          "p95Ms": 0.216749,
+          "p95SpreadMs": 0.005084000000000005,
+          "repeats": 5,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.247084,
-          "p95Ms": 0.247084,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.245625,
+          "p95Ms": 0.245625,
+          "p95SpreadMs": 0.003958000000000017,
+          "repeats": 5,
           "samples": 1,
           "stamps": 8
         }
@@ -1311,69 +1311,69 @@
       "bundle": "com.cyberdyne.claycore.devicegallery",
       "canaryAfterMs": 0,
       "canaryBeforeMs": 0,
-      "growthExponent": 0.12469411097073635,
+      "growthExponent": 0.47219695742862033,
       "measurements": [
         {
-          "p50Ms": 0.067,
-          "p95Ms": 0.067,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.033417,
+          "p95Ms": 0.033417,
+          "p95SpreadMs": 0.0315,
+          "repeats": 5,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.038708,
-          "p95Ms": 0.038708,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.048709,
+          "p95Ms": 0.048709,
+          "p95SpreadMs": 0.022750000000000006,
+          "repeats": 5,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.044,
-          "p95Ms": 0.044,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.049792,
+          "p95Ms": 0.049792,
+          "p95SpreadMs": 0.017874,
+          "repeats": 5,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.063,
-          "p95Ms": 0.063,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.0565,
+          "p95Ms": 0.0565,
+          "p95SpreadMs": 0.0027510000000000034,
+          "repeats": 5,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.065542,
-          "p95Ms": 0.065542,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.064084,
+          "p95Ms": 0.064084,
+          "p95SpreadMs": 0.006542000000000006,
+          "repeats": 5,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.073041,
-          "p95Ms": 0.073041,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.069541,
+          "p95Ms": 0.069541,
+          "p95SpreadMs": 0.011624999999999996,
+          "repeats": 5,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.081292,
-          "p95Ms": 0.081292,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.082792,
+          "p95Ms": 0.082792,
+          "p95SpreadMs": 0.022750000000000006,
+          "repeats": 5,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.086833,
-          "p95Ms": 0.086833,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.089208,
+          "p95Ms": 0.089208,
+          "p95SpreadMs": 0.010957999999999996,
+          "repeats": 5,
           "samples": 1,
           "stamps": 8
         }
@@ -1391,69 +1391,69 @@
       "bundle": "com.cyberdyne.claycore.devicegallery",
       "canaryAfterMs": 0,
       "canaryBeforeMs": 0,
-      "growthExponent": 0.10679175309903717,
+      "growthExponent": 0.27036070198133316,
       "measurements": [
         {
-          "p50Ms": 0.039042,
-          "p95Ms": 0.039042,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.027999,
+          "p95Ms": 0.027999,
+          "p95SpreadMs": 0.024000999999999998,
+          "repeats": 5,
           "samples": 1,
           "stamps": 1
         },
         {
-          "p50Ms": 0.020917,
-          "p95Ms": 0.020917,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.023751,
+          "p95Ms": 0.023751,
+          "p95SpreadMs": 0.028041000000000003,
+          "repeats": 5,
           "samples": 1,
           "stamps": 2
         },
         {
-          "p50Ms": 0.045792,
-          "p95Ms": 0.045792,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.038958,
+          "p95Ms": 0.038958,
+          "p95SpreadMs": 0.016833,
+          "repeats": 5,
           "samples": 1,
           "stamps": 3
         },
         {
-          "p50Ms": 0.05375,
-          "p95Ms": 0.05375,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.038708,
+          "p95Ms": 0.038708,
+          "p95SpreadMs": 0.024665999999999997,
+          "repeats": 5,
           "samples": 1,
           "stamps": 4
         },
         {
-          "p50Ms": 0.043916,
-          "p95Ms": 0.043916,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.043083,
+          "p95Ms": 0.043083,
+          "p95SpreadMs": 0.007792,
+          "repeats": 5,
           "samples": 1,
           "stamps": 5
         },
         {
-          "p50Ms": 0.043542,
-          "p95Ms": 0.043542,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.041583,
+          "p95Ms": 0.041583,
+          "p95SpreadMs": 0.018541000000000002,
+          "repeats": 5,
           "samples": 1,
           "stamps": 6
         },
         {
-          "p50Ms": 0.031209,
-          "p95Ms": 0.031209,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.041875,
+          "p95Ms": 0.041875,
+          "p95SpreadMs": 0.024624,
+          "repeats": 5,
           "samples": 1,
           "stamps": 7
         },
         {
-          "p50Ms": 0.04875,
-          "p95Ms": 0.04875,
-          "p95SpreadMs": 0,
-          "repeats": 1,
+          "p50Ms": 0.049125,
+          "p95Ms": 0.049125,
+          "p95SpreadMs": 0.020374999999999997,
+          "repeats": 5,
           "samples": 1,
           "stamps": 8
         }

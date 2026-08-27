@@ -1247,8 +1247,43 @@ The worst point is still printed beside the scored one, and a case whose worst
 exceeds its median by more than 1.5x says so in a note. Nothing is hidden; what
 changed is what the gate fires on.
 
-**The limit worth knowing**: `cut_passes` still spreads 1.55x on the median,
-above the 1.4x tolerance. It is the one gallery case this does not fully settle.
+**A gallery pass repeats the half that can be repeated.** The stroke happens
+once — it edits the document the next pass builds on — but the evaluation after
+it is a pure read, and is taken as the median of up to five. That is where the
+variance lived: measured on a quiet Mac over 300 sessions, `cut_passes`'s stroke
+is 3% of its pass and its evaluation is 97%, and ONE evaluation's p95 is 1.9-2.4x
+its own median. Repeating it took the run-to-run spread of the scored figure from
+**1.55x to 1.02x** on device (issue #333).
+
+Adaptive, so a heavy session pays nothing: a pass stops repeating once 2 ms have
+gone into its evaluations. `volume_relax` evaluates in ~300 ms and takes exactly
+one; `stroke_build` takes one on its 23 ms first pass and five on its 0.3 ms
+later ones.
+
+**A CASE BELOW THE NOISE FLOOR CANNOT GATE, however stable it is.**
+`NOISE_FLOOR_MS` is 0.05 ms and both the budget and the regression check require
+the absolute difference to exceed it, so a case gates only when
+`measured * 0.4 > 0.05` — above **0.125 ms**:
+
+| case | measured | ratio needed to trip the floor | gates? |
+|---|---:|---:|---|
+| `stroke_carve` | 0.382 ms | 1.13x | yes |
+| `stroke_build` | 0.298 ms | 1.17x | yes |
+| `noise_detail` | 0.161 ms | 1.31x | yes |
+| `snakehook_tendrils` | 0.115 ms | 1.44x | no |
+| `move_drags` | 0.098 ms | 1.51x | no |
+| `magnify_pinch` | 0.060 ms | 1.83x | no |
+| `cut_passes` | 0.041 ms | **2.22x** | no |
+
+Four of the seven REPORT rather than gate, and a +60% injected into `cut_passes`
+or `move_drags` is correctly not caught. That is not the repeats failing: the
+measurement is trustworthy now, which is what stops those four raising FALSE
+alarms — and raising one is what cost a four-merge bisect. What it does not do is
+let them raise true ones. A regression in a 0.041 ms case is never 0.05 ms, and
+the floor is right that a difference that small is not a difference.
+
+Making them gate means more work per pass, which changes the workload for every
+gallery session and is a decision of its own.
 
 ## Tagging
 
