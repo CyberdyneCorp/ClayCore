@@ -50,6 +50,18 @@ struct Measurement: Codable {
     /// repeat. This is the number that says whether a case is worth trusting
     /// at the tolerance the gate uses, and it is recorded rather than acted on.
     var p95SpreadMs: Double = 0
+    /// How many applications of the verb ONE timed body performed. 1 means the
+    /// figure is the cost of a single application, which is what every case
+    /// recorded before this existed.
+    ///
+    /// It is recorded because the number would otherwise lie. The gate cannot
+    /// fail a case whose growth is under 0.05 ms however large the ratio, so a
+    /// verb measured at 6 us was reported as covered while being unable to
+    /// object to any regression at all (#337). Batching moves the figure to a
+    /// scale the tolerance means something at; saying HOW MANY keeps it a
+    /// statement about the verb rather than an unexplained hundredfold jump.
+    /// Divide by this for a per-application cost.
+    var batch: Int = 1
 }
 
 struct CaseResult: Codable {

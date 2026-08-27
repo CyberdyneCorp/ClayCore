@@ -19,6 +19,29 @@ final class LatencyTests: XCTestCase {
     /// Sizes spanning two orders of magnitude, per the growth-axis requirement.
     static let axis = GrowthAxis.standard
 
+    /// `sdf_stamp_bricks` alone runs one point further out.
+    ///
+    /// Its cost is (bricks dirtied) x O(document), and the brick work of
+    /// #306..#311 took the 1000-stamp point to 0.078 ms — under the gate's
+    /// 0.05 ms floor, where a regression needs 1.6x before the check can
+    /// object at all (#337). The floor is right; the axis was short.
+    ///
+    /// TWO points past the standard axis, not one. A single 10,000-stamp point
+    /// cleared the floor when it was added and was back under it within the
+    /// day: `perf/cull-index-append-cost` (#352) is an optimisation of exactly
+    /// this path at exactly this size, and took the point from 0.183 ms to
+    /// 0.123 — 0.002 ms under the line. Chasing a threshold by a hair means the
+    /// next honest win switches the gate off again. 30,000 measures 0.471 ms,
+    /// which is margin rather than luck.
+    ///
+    /// This case is deliberately NOT batched the way the verb cases are. Its
+    /// reset removes the previous node, so every timed body starts from a
+    /// general invalidation and pays a full tape recompile; K stamps inside one
+    /// body would let stamps 2..K append onto an un-invalidated document, which
+    /// is the compile-a-suffix path `sdf_stroke_bricks` owns. Batching would
+    /// make it measure a different path than its verb names.
+    static let brickAxis = GrowthAxis.standard + [10_000, 30_000]
+
     /// Dabs in one stroke, for `testStrokeLatencyOnTheAppendPath`.
     ///
     /// Long enough that the first dab's full compile and upload are amortised
@@ -432,13 +455,24 @@ final class LatencyTests: XCTestCase {
             print("stroke bricks/dab at \(stamps) stamps: "
                   + "\(String(format: "%.1f", perStamp)) (initial fill \(initial))")
 
-            let perDab = Double(Self.strokeDabs)
+            // THE WHOLE STROKE, with `batch` saying how many dabs it was,
+            // rather than the per-dab quotient this used to record.
+            //
+            // The timed body has always been the whole 24-dab stroke; dividing
+            // by 24 on the way out is what put the figure under the gate's
+            // 0.05 ms floor. It cleared the floor until #355 landed, which took
+            // the 1000-stamp point from 0.164 ms to 0.047 — a 3.5x WIN that
+            // made the case unable to object to a regression, which is #337's
+            // defect arriving by the front door. Recording the batch keeps the
+            // number honest and gateable at once; a per-dab cost is `p95Ms /
+            // batch`, which is what the pair with `sdf_stamp_bricks` needs.
             measurements.append(Measurement(stamps: stamps,
-                                            p50Ms: r.p50 / perDab,
-                                            p95Ms: r.p95 / perDab,
+                                            p50Ms: r.p50,
+                                            p95Ms: r.p95,
                                             samples: r.n,
                                             repeats: r.repeats,
-                                            p95SpreadMs: r.spread / perDab))
+                                            p95SpreadMs: r.spread,
+                                            batch: Self.strokeDabs))
         }
 
         collector.add(CaseResult(
@@ -477,7 +511,7 @@ final class LatencyTests: XCTestCase {
         let canaryBefore = collector.sampleCanaryNow()
         let caseStartedAtMs = collector.elapsedMs
         let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
-        for stamps in Self.axis {
+        for stamps in Self.brickAxis {
             guard let (doc, layer) = SceneBuilder.sdfDocument(stamps: stamps) else {
                 XCTFail("could not build a \(stamps)-stamp document"); continue
             }

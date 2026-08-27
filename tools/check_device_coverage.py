@@ -225,9 +225,17 @@ def main() -> int:
 
     print(f"coverage: {covered} verb(s) measured, {exempt} exempt, "
           f"{len(measured)} case(s) in the run")
-    print(f"  of the {covered} measured: {len(gated)} GATED, {len(reported)} "
-          f"REPORTED ONLY — too small for the {NOISE_FLOOR_MS:.2f} ms floor, so a "
-          f"regression in them cannot fail this check")
+    if reported:
+        print(f"  of the {covered} measured: {len(gated)} GATED, {len(reported)} "
+              f"REPORTED ONLY — too small for the {NOISE_FLOOR_MS:.2f} ms floor, so a "
+              f"regression in them cannot fail this check")
+    else:
+        # Worth saying rather than staying silent: "all of them" is the claim
+        # this line exists to make, and printing the reported-only clause with a
+        # count of zero reads as though the caveat still applied to something.
+        print(f"  of the {covered} measured: all {len(gated)} GATED — every one "
+              f"measures above the {NOISE_FLOOR_MS:.2f} ms floor, so a regression "
+              f"in any of them can fail this check")
     for verb, case, value, ratio in sorted(reported, key=lambda r: -(r[3] or 0))[:8]:
         shown = f"{ratio:.0f}x" if ratio and ratio >= 10 else f"{ratio:.2f}x"
         print(f"  reported only: {verb} ({case}) {value:.4f} ms — needs {shown}")

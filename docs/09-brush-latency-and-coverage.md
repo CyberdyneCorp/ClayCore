@@ -584,6 +584,26 @@ that was never taken.
 
 ## Coverage: every brush has a test and a picture
 
+**Measured is not protected.** The gate fails a case only when its growth
+clears both the 1.4x tolerance and the 0.05 ms floor, so a case can only fail
+above **0.125 ms**. At 0.55.0, 39 of the 61 covered verbs measured below that:
+`trim_curve` at 0.0001 ms would have needed a 401x regression before the suite
+could object, and `cut_create` 300x. `coverage: OK` read as "these verbs are
+protected" and for 39 of them meant "a number exists" (issue #337).
+
+A timed body now performs `batch` applications of its verb and the record says
+how many, so the figure stays a statement about the verb — a per-application
+cost is `p95Ms / batch` — and the coverage check reports 61 GATED, 0 reported
+only. The floor and the tolerance are unchanged: both bound FALSE failures, and
+a check that cannot fail is a smaller defect than one that fails at random.
+
+The cost of batching is that a regression confined to ONE application is
+diluted by the batch. It is acceptable for these cases because each is a single
+ABI call against a resident fixture with no first-touch behaviour to hide; it is
+why the two brick cases are handled differently. `sdf_stamp_bricks` is not
+batched at all — its reset is the invalidation it measures — and had its axis
+extended to 10,000 stamps instead.
+
 Two gates already enforce this, in opposite directions:
 
 - `tools/check_device_coverage.py` checks the verb entry points in
