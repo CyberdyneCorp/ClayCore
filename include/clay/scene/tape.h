@@ -259,5 +259,20 @@ bool compile_layer_suffix(const TapeCheckpoint& checkpoint, const Document& doc,
                           TapeCheckpoint* out_checkpoint, const CullRegion* cull = nullptr,
                           const CullIndex* index = nullptr);
 
+// The first `count` roots of the last visible SDF layer, compiled as a
+// STANDALONE tape under the DOCUMENT's cull pad — the pad compile_layer_suffix
+// computes (index->cull_pad(), else the max over visible SDF layers), NOT
+// compile_layer's per-layer pad. The value this tape produces is the seed a
+// suffix compiled by compile_layer_suffix will be folded onto, and prefix and
+// suffix must cull under one pad or they describe two different fields.
+//
+// Evaluable by a plain evaluator — unlike a suffix tape it starts from
+// nothing, so there is no accumulator for it to expect. Refuses on count == 0
+// (an empty prefix is not a tape, it is the absence of one), count past the
+// root list, or no visible SDF layer.
+bool compile_layer_prefix(const Document& doc, std::size_t count, Tape* out,
+                          const CullRegion* cull = nullptr,
+                          const CullIndex* index = nullptr);
+
 }  // namespace scene
 }  // namespace clay

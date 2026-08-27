@@ -1070,6 +1070,36 @@ bool compile_layer_suffix(const TapeCheckpoint& cp, const Document& doc,
     return true;
 }
 
+bool compile_layer_prefix(const Document& doc, std::size_t count, Tape* out,
+                          const CullRegion* cull, const CullIndex* index) {
+    if (!out || count == 0) return false;
+    const Layer* layer = last_visible_sdf_layer(doc);
+    if (!layer) return false;
+    const std::vector<NodeId>& roots = layer->sdf->roots;
+    if (count > roots.size()) return false;
+
+    Compiler c;
+    if (index && index->document() != &doc) index = nullptr;
+    c.index = index;
+    // The DOCUMENT's pad, exactly as compile_layer_suffix computes it -- not
+    // compile_layer's per-layer pad. The value this produces is the seed a
+    // suffix will be folded onto, and prefix and suffix culled under two
+    // different pads are two different fields.
+    float pad = 0.0f;
+    if (cull && index)
+        pad = index->cull_pad();
+    else if (cull)
+        for (const Layer& l : doc.layers)
+            if (l.visible && l.kind == LayerKind::Sdf && l.sdf)
+                pad = kernel::cmax(pad, cull_pad(*l.sdf, l));
+    c.begin_cull(cull, pad);
+    std::vector<NodeId> prefix(roots.begin(), roots.begin() + static_cast<std::ptrdiff_t>(count));
+    c.compile_list(prefix, *layer->sdf, *layer, false);
+    c.tape.compile_id = next_compile_id();
+    *out = std::move(c.tape);
+    return true;
+}
+
 Tape compile_document_part(const Document& doc, LayerId active, bool below, const CullRegion* cull,
                            const CullIndex* index) {
     Compiler c;

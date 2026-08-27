@@ -1063,6 +1063,10 @@ struct clay_document {
         // A seed is only usable across APPENDS, so one kept past any other
         // edit is memory nothing can ever read again.
         forget_resume();
+        // The general funnel does not know what moved, so it must assume the
+        // evaluation order did: an ordinal held against the old order is a
+        // wrong boundary against the new one, silently.
+        ++structure_revision_;
         revision.fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -1096,6 +1100,12 @@ struct clay_document {
             append_log_.clear();
         }
         append_log_.push_back(node);
+        // An append IS an order change: it grows the root list, so every
+        // ordinal taken before it counts a different tail. This does not gate
+        // the append fast path -- plan_resume never reads structure_revision_
+        // -- it only retires prefix seeds, which a stamp landing mid-drag must
+        // do: their boundaries were counted against the shorter list.
+        ++structure_revision_;
         revision.fetch_add(1, std::memory_order_relaxed);
         append_at_ = revision.load(std::memory_order_relaxed);
     }
@@ -1175,6 +1185,17 @@ struct clay_document {
             return h;
         }
     };
+    // Frontier sentinels (#360). `dirty_from` counts ROOT-LIST ordinals of the
+    // active layer -- boundary N means N semantic items already folded, so an
+    // edit inside root i dirties from i. kFrontierClean means "no semantic
+    // dirtying pending" and is the identity of the min-merge below.
+    // kFrontierDrop is the touch_region_locked argument meaning "no frontier --
+    // drop what the bound reaches", i.e. the legacy behaviour, and no real
+    // ordinal can collide with either: both sit above any root list a document
+    // can hold.
+    static constexpr std::uint32_t kFrontierClean = 0xFFFFFFFFu;
+    static constexpr std::uint32_t kFrontierDrop = 0xFFFFFFFFu - 1u;
+
     struct ResumeEntry {
         std::uint64_t revision = 0;
         // Whether that brick's culled prefix produced a value at all. A brick
@@ -1199,6 +1220,36 @@ struct clay_document {
         // dropping it -- eviction, or a region invalidation that reaches it --
         // is a list erase and not a scan of the order (#346).
         std::list<ResumeKey>::iterator lru;
+        // -- the frontier half (#360): ONE extra checkpoint, not a ladder ----
+        //
+        // A continuing Move drag replaces the tail deformer(s) every frame, so
+        // nothing an append can describe changed -- and the append log dies on
+        // the first non-append edit anyway. What DOES survive such a frame is
+        // everything before the dragged nodes, so the entry can carry a second
+        // value: the active chain folded through the first `prefix_boundary`
+        // roots, at this brick's lattice, under `prefix_pad`. A dirty entry
+        // (`dirty_from` != kFrontierClean) whose prefix sits at or before the
+        // dirty frontier is refilled by folding only roots[boundary..end) onto
+        // it -- the seeded walk the append path already runs.
+        //
+        // One prefix, deliberately: a ladder of checkpoints per entry would
+        // scale per-brick bytes with history, and the drag workload only ever
+        // wants the boundary in front of its own deformers (out of scope by
+        // the issue). `dirty_from` is MIN-merged, never overwritten: two edits
+        // at two ordinals dirty from the earlier one, and an overwrite would
+        // resurrect a prefix the first edit already invalidated.
+        //
+        // `prefix_structure` tags the structure_revision_ the ordinals were
+        // taken under; 0 means no prefix recorded. Ordinals are positions and
+        // positions do not survive a reorder, so a mismatch is a full refusal,
+        // never a remap.
+        std::uint32_t dirty_from = kFrontierClean;  // min-merged; kFrontierClean = none
+        std::uint32_t prefix_boundary = 0;          // roots folded into prefix_values
+        bool prefix_had_acc = false;
+        float prefix_pad = 0.0f;
+        std::uint64_t prefix_structure = 0;  // 0 = no prefix recorded
+        std::vector<float> prefix_values;    // roots[0..prefix_boundary) at this lattice
+        std::vector<float> prefix_colors;    // empty when the entry is distance-only
     };
 
     // A BYTE budget, not a brick count. With colour a brick carries four times
@@ -1225,7 +1276,8 @@ struct clay_document {
     // out is always the one that was put in.
     static std::size_t entry_bytes(const ResumeEntry& e) {
         return (e.values.capacity() + e.colors.capacity() + e.below.capacity() +
-                e.below_colors.capacity()) *
+                e.below_colors.capacity() + e.prefix_values.capacity() +
+                e.prefix_colors.capacity()) *
                sizeof(float);
     }
 
@@ -1332,6 +1384,45 @@ struct clay_document {
         return p;
     }
 
+    // The frontier analogue of plan_resume (#360): the suffix that carries a
+    // PREFIX seed at `boundary` forward. No append log involved -- the proof
+    // that roots[0..boundary) still means what it meant when the prefix was
+    // evaluated is structure_revision_ equality plus boundary <= dirty_from,
+    // both checked per brick in frontier_seed_for. This is the same shape of
+    // guarantee the layer gate above gives the append path: the checkpoint's
+    // statements are made true elsewhere and only STATED here. Caller holds
+    // cache_mutex_.
+    ResumePlan plan_frontier(std::uint32_t boundary) const {
+        ResumePlan p;
+        p.now = revision.load(std::memory_order_relaxed);
+        const scene::Layer* active = nullptr;
+        int visible = 0;
+        for (const scene::Layer& l : doc.document.layers) {
+            if (!l.visible || l.kind != scene::LayerKind::Sdf || !l.sdf) continue;
+            active = &l;
+            ++visible;
+        }
+        if (!active) return p;
+        p.active = active->id;
+        p.has_below = visible > 1;
+        const std::vector<scene::NodeId>& roots = active->sdf->roots;
+        // Boundary 0 would be an empty prefix -- no accumulator, which the
+        // layer_have_acc statement below could not honestly make -- and a
+        // boundary at or past the end leaves no suffix to compile.
+        if (boundary == 0 || static_cast<std::size_t>(boundary) >= roots.size()) return p;
+        p.appended.assign(roots.begin() + static_cast<std::ptrdiff_t>(boundary), roots.end());
+        p.checkpoint = scene::TapeCheckpoint{};
+        p.checkpoint.valid = true;
+        p.checkpoint.layer = active->id;
+        p.checkpoint.layer_have_acc = true;
+        // FALSE even when layers sit beneath, so the suffix emits no union: the
+        // refill holds that value separately and folds it in itself, with the
+        // same hard Add the whole-document compile emits between layers.
+        p.checkpoint.doc_have_acc = false;
+        p.usable = true;
+        return p;
+    }
+
     // The entry that can serve this request's LATTICE, or null. Shape only --
     // what the stored floats mean is the same question for every caller, and
     // getting it wrong hands back a buffer of the wrong length.
@@ -1418,6 +1509,53 @@ struct clay_document {
         return s;
     }
 
+    struct FrontierSeed {
+        Seed seed;  // seed.values == nullptr when the prefix cannot serve
+        std::uint32_t boundary = 0;
+    };
+
+    // The prefix half of a dirty entry, or seed.values == nullptr. Caller
+    // holds cache_mutex_. ELIGIBILITY IS NOT PROOF, so every claim the keep in
+    // touch_region_locked relied on is re-checked here per brick: shape
+    // (shaped_entry -- the same five checks, colour and below symmetry
+    // included), structure (ordinals are only comparable inside one
+    // structure_revision_), boundary <= dirty_from (equality valid: boundary B
+    // means B items folded, dirty_from = i means item i changed, and item i is
+    // the FIRST suffix item), pad (the document cull pad the prefix was
+    // evaluated under; the pad only grows on an append and an append bumps
+    // structure_revision_, so this is belt over braces), and prefix_had_acc
+    // (the layer_have_acc statement plan_frontier makes, made true per brick
+    // exactly as seed_for makes it for the append path). Any failure means the
+    // full walk -- slower, never wrong.
+    FrontierSeed frontier_seed_for(const clay_brick_request& request, std::size_t per, float pad,
+                                   bool want_colour, bool want_below) const {
+        FrontierSeed fs;
+        const ResumeEntry* e = shaped_entry(request, per, want_colour, want_below);
+        if (!e) return fs;
+        if (e->dirty_from == kFrontierClean) return fs;
+        if (e->prefix_structure == 0 || e->prefix_structure != structure_revision_) return fs;
+        if (e->prefix_boundary > e->dirty_from) return fs;
+        if (e->prefix_values.size() != per) return fs;
+        if (want_colour && e->prefix_colors.size() != per * 3) return fs;
+        if (e->prefix_pad != pad) return fs;
+        if (!e->prefix_had_acc) return fs;
+        // The USE in least-recently-used, for seed_for's reason: a brick the
+        // drag rewrites every frame is the working set.
+        touch_lru(const_cast<ResumeEntry&>(*e));
+        fs.seed.values = e->prefix_values.data();
+        if (want_colour) fs.seed.colors = e->prefix_colors.data();
+        if (want_below) {
+            // The below half is the append path's own: static across a drag
+            // for the same reason it is static across a stroke -- only the
+            // active layer moves, and command_frontier refuses edits that
+            // would move this half.
+            fs.seed.below = e->below.data();
+            if (want_colour) fs.seed.below_colors = e->below_colors.data();
+        }
+        fs.boundary = e->prefix_boundary;
+        return fs;
+    }
+
     void store_seed(const clay_brick_request& request, std::uint64_t at, float pad,
                     const float* values, const float* colors, const float* below,
                     const float* below_colors, std::size_t per) const {
@@ -1446,6 +1584,17 @@ struct clay_document {
             e.below_colors.assign(below_colors, below_colors + per * 3);
         else
             e.below_colors.clear();
+        // A full-path answer is a fresh whole world for this brick; a prefix
+        // kept beside it describes an older one -- dead bytes inside a budget
+        // that would then evict live seeds, and a structure-stale prefix
+        // waiting for a counter wrap that never comes. The prepare pass
+        // re-records cheaply when a drag wants one.
+        e.dirty_from = kFrontierClean;
+        e.prefix_structure = 0;
+        e.prefix_boundary = 0;
+        e.prefix_had_acc = false;
+        e.prefix_values.clear();
+        e.prefix_colors.clear();
         resume_bytes_ += entry_bytes(e);
         evict_locked();
     }
@@ -1487,6 +1636,13 @@ struct clay_document {
         e.had_acc = false;
         for (std::size_t s = 0; s < per && !e.had_acc; ++s) e.had_acc = values[s] != CLAY_TAPE_FAR;
         e.revision = at;
+        // This is the ACCEPTED CURRENT-GENERATION submit -- the call site only
+        // reaches here when the plan's `now` is still the current revision, so
+        // a stale submit never clears a frontier a newer edit set. The prefix
+        // vectors are deliberately NOT touched: they are the next frame's
+        // seed, and overwriting them with the post-suffix value is what would
+        // turn every drag frame after the first back into a full walk.
+        e.dirty_from = kFrontierClean;
         e.pad = pad;
         e.values.assign(values, values + per);
         if (colors)
@@ -1518,36 +1674,32 @@ struct clay_document {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         forget_appends();  // not an append; no prefix may be reused
         const std::uint64_t next = revision.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (changed.is_infinite()) {
-            forget_resume();
-            return;
-        }
-        for (auto it = resume_.begin(); it != resume_.end();) {
-            const ResumeKey& k = it->first;
-            const ResumeEntry& e = it->second;
-            const float width = static_cast<float>(k.dims[0]) * k.spacing;
-            const kernel::cfloat3 lo =
-                kernel::cf3(static_cast<float>(k.x), static_cast<float>(k.y),
-                            static_cast<float>(k.z)) *
-                width;
-            const math::Aabb cull =
-                math::Aabb{lo, lo + kernel::cf3(width, width, width)}.dilated(k.band + e.pad);
-            if (!changed.empty() && changed.intersects(cull)) {
-                resume_bytes_ -= entry_bytes(e);
-                // The order node goes with the entry. It used to be left
-                // behind: the order then grew without bound (its nodes are not
-                // counted by entry_bytes, so they sat outside the budget
-                // entirely) and a key erased here and stored again later was
-                // inserted a SECOND time, so one brick held several slots and
-                // the order stopped describing the store (#346).
-                resume_order_.erase(e.lru);
-                it = resume_.erase(it);
-                continue;
-            }
-            // Untouched: the same value, now current.
-            it->second.revision = next;
-            ++it;
-        }
+        touch_region_locked(changed, kFrontierDrop, next);
+    }
+
+    // The region invalidation for an edit that MOVES ordinals -- node
+    // add/insert/delete/move, layer add/remove/visibility, and a replayed undo
+    // or redo, which can contain any of them. The same drop as touch_region,
+    // plus the structure bump that retires every prefix seed: their boundaries
+    // were counted against a root list this edit just rewrote, and
+    // over-invalidating costs one full walk (the rule at touch(), restated).
+    void touch_region_structural(const math::Aabb& changed) {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        forget_appends();
+        ++structure_revision_;
+        const std::uint64_t next = revision.fetch_add(1, std::memory_order_relaxed) + 1;
+        touch_region_locked(changed, kFrontierDrop, next);
+    }
+
+    // The frontier invalidation (#360): a parameter edit inside root ordinal
+    // `frontier` of the active layer. Seeds inside the bound whose prefix can
+    // still serve that frontier are KEPT and marked dirty rather than dropped;
+    // everything else behaves exactly as touch_region.
+    void touch_region_from(const math::Aabb& changed, std::uint32_t frontier) {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        forget_appends();  // not an append either; the log's contiguity is broken
+        const std::uint64_t next = revision.fetch_add(1, std::memory_order_relaxed) + 1;
+        touch_region_locked(changed, frontier, next);
     }
 
     std::uint64_t current_revision() const { return revision.load(std::memory_order_relaxed); }
@@ -1596,6 +1748,160 @@ struct clay_document {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         resume_budget_ = bytes;
         evict_locked();
+    }
+
+    // The interleaving the ABI cannot produce single-threaded: an edit landing
+    // between a resume batch's seeded walks and the retaken store lock, which
+    // is the only window where the plan->now == now gate in front of
+    // store_active has a stale submit to refuse. resume_bricks fires this once,
+    // right before that lock, and it disarms itself BEFORE the callback runs so
+    // the edit the callback makes cannot re-trigger it on the refill that
+    // follows. Exists only so that gate is testable (clay_internal.h); never
+    // armed outside a test, so the fast path pays one null check.
+    void set_resume_store_interleave(void (*fn)(void*), void* user) const {
+        resume_interleave_ = fn;
+        resume_interleave_user_ = user;
+    }
+    void run_resume_store_interleave() const {
+        if (!resume_interleave_) return;
+        void (*fn)(void*) = resume_interleave_;
+        void* user = resume_interleave_user_;
+        resume_interleave_ = nullptr;
+        resume_interleave_user_ = nullptr;
+        fn(user);
+    }
+
+    // -- the pre-drag seed pass (#360) --------------------------------------
+    //
+    // One prefix evaluation the prepare pass owes a brick: which entry (by
+    // key), at what lattice, at which boundary. Phase B fills `values` /
+    // `colors` / `had_acc` off the lock; a job whose compile or evaluation
+    // refused leaves `values` shorter than `per`, and phase C skips it.
+    struct FrontierJob {
+        ResumeKey key;
+        std::size_t per = 0;
+        bool want_colour = false;
+        std::uint32_t boundary = 0;
+        bool had_acc = false;
+        std::vector<float> values;
+        std::vector<float> colors;
+    };
+
+    // Everything phase A decided under one lock, carried across the unlocked
+    // evaluation so phase C can tell whether the document moved underneath it.
+    struct FrontierPrepare {
+        std::uint64_t now = 0;
+        std::uint64_t structure = 0;
+        float pad = 0.0f;
+        std::shared_ptr<const scene::CullIndex> index;
+        std::vector<FrontierJob> jobs;
+    };
+
+    // PHASE A: which entries the coming applies will dirty and which of them
+    // lack a usable prefix at this frame's boundary. `warps` carries one
+    // (root ordinal, pre-apply influence bound) pair per node the drag will
+    // rewrite. Only a CLEAN, CURRENT entry is a candidate -- a dirty or stale
+    // one describes a field a prefix cannot be sliced out of -- and an entry
+    // already holding a prefix this frame can use is skipped, which is what
+    // makes calling this every frame cost the region once: frame one pays for
+    // it, later frames pay only for bricks the growing drag has just reached.
+    FrontierPrepare frontier_prepare(
+        const std::vector<std::pair<std::uint32_t, math::Aabb>>& warps) const {
+        FrontierPrepare out;
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        out.now = revision.load(std::memory_order_relaxed);
+        out.structure = structure_revision_;
+        for (const auto& [k, e] : resume_) {
+            if (e.dirty_from != kFrontierClean || e.revision != out.now) continue;
+            const float width = static_cast<float>(k.dims[0]) * k.spacing;
+            const kernel::cfloat3 lo =
+                kernel::cf3(static_cast<float>(k.x), static_cast<float>(k.y),
+                            static_cast<float>(k.z)) *
+                width;
+            const math::Aabb cull =
+                math::Aabb{lo, lo + kernel::cf3(width, width, width)}.dilated(k.band + e.pad);
+            // The boundary this brick needs: the earliest ordinal among the
+            // warps whose influence reaches it. MIN for touch_region_locked's
+            // reason -- the seed has to sit before everything that will move.
+            std::uint32_t boundary = kFrontierClean;
+            for (const auto& [ordinal, bound] : warps)
+                if (!bound.empty() && bound.intersects(cull))
+                    boundary = std::min(boundary, ordinal);
+            // Ordinal 0 would be an empty prefix, which plan_frontier refuses
+            // anyway; kFrontierClean means no warp reaches this brick.
+            if (boundary == kFrontierClean || boundary == 0) continue;
+            // The cull index is only wanted once a brick turns out to be a
+            // candidate, for resume_bricks's reason: a document with no seeds
+            // near the drag should not pay an O(document) index rebuild per
+            // frame on its way to doing nothing.
+            if (!out.index) {
+                out.index = cull_index_locked();
+                out.pad = out.index->cull_pad();
+            }
+            const bool want_colour = !e.colors.empty();
+            const bool usable_already =
+                e.prefix_structure == out.structure && e.prefix_boundary <= boundary &&
+                e.prefix_values.size() == e.values.size() &&
+                (!want_colour || e.prefix_colors.size() == e.values.size() * 3) &&
+                e.prefix_pad == out.pad;
+            if (usable_already) continue;
+            FrontierJob job;
+            job.key = k;
+            job.per = e.values.size();
+            job.want_colour = want_colour;
+            job.boundary = boundary;
+            out.jobs.push_back(std::move(job));
+        }
+        return out;
+    }
+
+    // PHASE C: keep what phase B evaluated, INSIDE the existing budget and
+    // LRU. If the document or its structure moved while the lock was down the
+    // whole batch is abandoned -- a prefix stored against a document that has
+    // moved would lie, the same discipline store_seeds keeps. Per job the
+    // entry is re-verified (evicted meanwhile => skip; dirtied or re-stamped
+    // meanwhile => skip) and every mutation sits inside the entry_bytes
+    // bracket, so the budget stays exact. One evict after the loop: the
+    // prefixes live under the same ceiling as everything else.
+    void frontier_store(FrontierPrepare& prep) const {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        if (revision.load(std::memory_order_relaxed) != prep.now) return;
+        if (structure_revision_ != prep.structure) return;
+        bool stored = false;
+        for (FrontierJob& job : prep.jobs) {
+            if (job.per == 0 || job.values.size() != job.per) continue;
+            if (job.want_colour && job.colors.size() != job.per * 3) continue;
+            auto it = resume_.find(job.key);
+            if (it == resume_.end()) continue;  // evicted while the lock was down
+            ResumeEntry& e = it->second;
+            if (e.dirty_from != kFrontierClean || e.revision != prep.now) continue;
+            if (e.values.size() != job.per) continue;
+            resume_bytes_ -= entry_bytes(e);
+            e.prefix_boundary = job.boundary;
+            e.prefix_structure = prep.structure;
+            e.prefix_pad = prep.pad;
+            e.prefix_had_acc = job.had_acc;
+            e.prefix_values = std::move(job.values);
+            e.prefix_colors = std::move(job.colors);
+            resume_bytes_ += entry_bytes(e);
+            stored = true;
+        }
+        if (stored) evict_locked();
+    }
+
+    // dirty_from / prefix_boundary / prefix_structure of one brick's entry,
+    // for bindings/c/clay_internal.h. Tests pin the min-merge, the clear-on-
+    // accepted-submit and the structure tagging on it; a host has no business
+    // with any of the three numbers.
+    bool frontier_probe(const clay_brick_request& request, std::uint32_t* dirty_from,
+                        std::uint32_t* boundary, std::uint64_t* structure) const {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        auto it = resume_.find(resume_key(request));
+        if (it == resume_.end()) return false;
+        *dirty_from = it->second.dirty_from;
+        *boundary = it->second.prefix_boundary;
+        *structure = it->second.prefix_structure;
+        return true;
     }
 
     // The appends that take revision `from` to the current one, or nothing
@@ -1700,6 +2006,73 @@ struct clay_document {
         append_log_.clear();
     }
 
+    // The one loop behind the three touch_region fronts; caller holds
+    // cache_mutex_ and has already bumped `revision` to `next`.
+    //
+    // `frontier` == kFrontierDrop is the legacy behaviour: everything the
+    // bound reaches is dropped. Any other frontier F KEEPS an in-bound entry
+    // whose prefix can still serve F, marking dirty_from = min(dirty_from, F)
+    // -- MIN because two edits at two ordinals dirty from the EARLIER one, and
+    // an overwrite would resurrect a prefix the first edit already
+    // invalidated.
+    void touch_region_locked(const math::Aabb& changed, std::uint32_t frontier,
+                             std::uint64_t next) const {
+        if (changed.is_infinite()) {
+            forget_resume();
+            return;
+        }
+        for (auto it = resume_.begin(); it != resume_.end();) {
+            const ResumeKey& k = it->first;
+            ResumeEntry& e = it->second;
+            const float width = static_cast<float>(k.dims[0]) * k.spacing;
+            const kernel::cfloat3 lo =
+                kernel::cf3(static_cast<float>(k.x), static_cast<float>(k.y),
+                            static_cast<float>(k.z)) *
+                width;
+            const math::Aabb cull =
+                math::Aabb{lo, lo + kernel::cf3(width, width, width)}.dilated(k.band + e.pad);
+            if (!changed.empty() && changed.intersects(cull)) {
+                // ELIGIBILITY, not proof: kept only when the prefix's claims
+                // still stand -- same structure, right shape, boundary at or
+                // before both the existing frontier and this one. The refill
+                // re-proves all of it per brick in frontier_seed_for, so a
+                // keep that turns out wrong there costs a full walk, never a
+                // wrong field.
+                const bool keepable =
+                    frontier != kFrontierDrop && e.prefix_structure != 0 &&
+                    e.prefix_structure == structure_revision_ &&
+                    e.prefix_values.size() == e.values.size() &&
+                    e.prefix_boundary <= std::min(e.dirty_from, frontier);
+                if (keepable) {
+                    e.dirty_from = std::min(e.dirty_from, frontier);
+                    ++it;
+                    continue;
+                }
+                resume_bytes_ -= entry_bytes(e);
+                // The order node goes with the entry. It used to be left
+                // behind: the order then grew without bound (its nodes are not
+                // counted by entry_bytes, so they sat outside the budget
+                // entirely) and a key erased here and stored again later was
+                // inserted a SECOND time, so one brick held several slots and
+                // the order stopped describing the store (#346).
+                resume_order_.erase(e.lru);
+                it = resume_.erase(it);
+                continue;
+            }
+            // Untouched: the same value, now current -- but ONLY while the
+            // entry is clean. Advancing a DIRTY entry to the current revision
+            // would let the rev == now shortcut in resume_bricks hand out its
+            // stale composite as the whole answer: a later edit sweeping past
+            // ELSEWHERE would launder the entry current without anything ever
+            // folding the suffix in. A dirty entry stays at its old revision
+            // until an accepted submit clears it in store_active. For a store
+            // that holds no dirty entries -- every path before #360 -- this is
+            // byte-for-byte the old behaviour.
+            if (e.dirty_from == kFrontierClean) e.revision = next;
+            ++it;
+        }
+    }
+
 
     template <typename T, typename Build>
     std::shared_ptr<const T> cached(std::shared_ptr<const T>& slot,
@@ -1725,6 +2098,14 @@ struct clay_document {
     mutable std::uint64_t append_base_ = 0;
     mutable std::uint64_t append_at_ = 0;
     mutable bool append_valid_ = false;
+    // Bumps on any edit that can change the active layer's EVALUATION ORDER --
+    // append/insert/delete/move of nodes, layer add/remove/visibility, and the
+    // unknown-mutation funnels (touch) -- and on nothing parameter-shaped. A
+    // prefix seed is only meaningful inside one value of this counter: its
+    // boundary is a POSITION in the root list, and positions do not survive a
+    // reorder, so a mismatch is a full refusal, never a remap. Guarded by
+    // cache_mutex_, like the append log beside it.
+    mutable std::uint64_t structure_revision_ = 1;
     mutable std::shared_ptr<const scene::Tape> pick_cache_;
     mutable std::uint64_t pick_revision_ = 0;
     // NOT const, unlike the tape beside it: an append extends it in place when
@@ -1747,6 +2128,11 @@ struct clay_document {
     // than a slightly stale one.
     mutable std::atomic<std::uint64_t> resumed_bricks_{0};
     mutable std::atomic<std::uint64_t> refilled_bricks_{0};
+    // The one-shot test seam of set_resume_store_interleave. Not under
+    // cache_mutex_: it is armed and fired on the one thread a test owns, and
+    // the point where it fires holds no lock by design.
+    mutable void (*resume_interleave_)(void*) = nullptr;
+    mutable void* resume_interleave_user_ = nullptr;
 };
 
 // The item builder is a scene::Node under construction. Whether a transition
@@ -2476,6 +2862,101 @@ TailAppend tail_append(const scene::Document& doc, const scene::Command& cmd) {
     return TailAppend{add->layer, l->sdf->roots.back()};
 }
 
+// The commands that can move a root ordinal or change WHICH layer is the last
+// visible SDF layer. Either breaks what a frontier ordinal means, so these
+// take the structural drop: same spatial behaviour, plus the structure bump
+// that retires every prefix seed. (A tail AddNodeCmd never reaches this --
+// tail_append routes it to touch_appended, which bumps structure itself.)
+bool command_is_structural(const scene::Command& cmd) {
+    return std::holds_alternative<scene::AddNodeCmd>(cmd) ||
+           std::holds_alternative<scene::RemoveNodeCmd>(cmd) ||
+           std::holds_alternative<scene::MoveNodeCmd>(cmd) ||
+           std::holds_alternative<scene::AddLayerCmd>(cmd) ||
+           std::holds_alternative<scene::RemoveLayerCmd>(cmd) ||
+           std::holds_alternative<scene::SetLayerVisibleCmd>(cmd);
+}
+
+// The root-list ordinal of the root subtree holding `node`: chase locate()
+// parents to kNoNode, whose sibling index IS the root ordinal. O(depth), no
+// cache, no invalidation triggers to get wrong. Bounded like root_ancestor in
+// scene/commands.cpp: `roots` is a public vector and the walk must terminate
+// whatever a caller wrote there.
+bool root_ordinal_of(const scene::SdfContent& content, scene::NodeId node, std::uint32_t* out) {
+    scene::NodeId cur = node;
+    for (std::size_t step = 0; step <= content.nodes().size(); ++step) {
+        scene::NodeId parent = scene::kNoNode;
+        int index = -1;
+        if (!content.locate(cur, &parent, &index)) return false;
+        if (parent == scene::kNoNode) {
+            *out = static_cast<std::uint32_t>(index);
+            return true;
+        }
+        cur = parent;
+    }
+    return false;
+}
+
+// Whether `cmd` is a (layer, node) PARAMETER edit the frontier path can carry
+// -- and if so, the root ordinal it dirties from (#360).
+struct CommandFrontier {
+    bool usable = false;
+    std::uint32_t ordinal = 0;
+};
+
+CommandFrontier command_frontier(const scene::Document& doc, const scene::Command& cmd) {
+    // The (layer, node) parameter commands and nothing else. Structural
+    // commands are listed in command_is_structural; layer-parameter commands
+    // (mirror/radial/transform) reach the whole layer, and the legacy region
+    // drop already says everything true about them.
+    scene::LayerId layer = 0;
+    scene::NodeId node = scene::kNoNode;
+    const bool parameter = std::visit(
+        [&](const auto& c) -> bool {
+            using C = std::decay_t<decltype(c)>;
+            if constexpr (std::is_same_v<C, scene::SetTransformCmd> ||
+                          std::is_same_v<C, scene::SetPrimCmd> ||
+                          std::is_same_v<C, scene::SetColorCmd> ||
+                          std::is_same_v<C, scene::SetOpBlendCmd> ||
+                          std::is_same_v<C, scene::SetDeformersCmd> ||
+                          std::is_same_v<C, scene::SetStrokePointsCmd> ||
+                          std::is_same_v<C, scene::AppendStrokeCmd> ||
+                          std::is_same_v<C, scene::TrimStrokeCmd> ||
+                          std::is_same_v<C, scene::SetArmatureCmd>) {
+                layer = c.layer;
+                node = c.node;
+                return true;
+            } else {
+                return false;
+            }
+        },
+        cmd);
+    if (!parameter) return {};
+    // The edit must land on the ACTIVE layer -- the last visible SDF layer,
+    // the only one whose chain the stored seeds hold as their own value. A
+    // non-active-layer edit changes the BELOW half of every seed it reaches,
+    // which the frontier path carries forward untouched, so it must take the
+    // legacy drop.
+    const scene::Layer* active = nullptr;
+    for (const scene::Layer& l : doc.layers) {
+        if (!l.visible || l.kind != scene::LayerKind::Sdf || !l.sdf) continue;
+        active = &l;
+    }
+    if (!active || active->id != layer) return {};
+    // And no other visible SDF layer may share the active layer's content.
+    // Instancing compiles the same node again under the lower layer's
+    // transform, so an edit through the active layer also moves the below
+    // half -- the same family of silent corruption as the layer gate in
+    // plan_resume (#354), refused the same way: legacy drop, full walk.
+    for (const scene::Layer& l : doc.layers) {
+        if (&l == active) continue;
+        if (l.visible && l.kind == scene::LayerKind::Sdf && l.sdf == active->sdf) return {};
+    }
+    CommandFrontier f;
+    if (!root_ordinal_of(*active->sdf, node, &f.ordinal)) return {};
+    f.usable = true;
+    return f;
+}
+
 // Every edit below routes through the command vocabulary rather than touching
 // the document, so a C edit means what a saved document means — and becomes
 // undoable for free once the undo stack is exposed. apply() reports failure by
@@ -2541,10 +3022,25 @@ clay_result apply_edit_in_gesture(clay_document* doc, const scene::Command& cmd,
 struct GestureRegion {
     clay_document* doc = nullptr;
     math::Aabb reach;
+    // A gesture that states its reach may state its FRONTIER for the same
+    // reason (#360): it knows every command it issues is a parameter edit on
+    // nodes whose root ordinals it resolved, so the seeds it dirties can keep
+    // their prefix half instead of being dropped. A gesture that cannot say
+    // that must leave this unset and take the legacy drop. The RAII-on-refusal
+    // property is unchanged either way: touch_region_from is still a real
+    // invalidation -- every entry in reach is dirtied, just not dropped when
+    // its prefix can still serve the stated frontier.
+    std::uint32_t frontier = clay_document::kFrontierDrop;
 
-    GestureRegion(clay_document* d, const math::Aabb& r) : doc(d), reach(r) {}
+    GestureRegion(clay_document* d, const math::Aabb& r,
+                  std::uint32_t f = clay_document::kFrontierDrop)
+        : doc(d), reach(r), frontier(f) {}
     ~GestureRegion() {
-        if (doc) doc->touch_region(reach);
+        if (!doc) return;
+        if (frontier == clay_document::kFrontierDrop)
+            doc->touch_region(reach);
+        else
+            doc->touch_region_from(reach, frontier);
     }
     GestureRegion(const GestureRegion&) = delete;
     GestureRegion& operator=(const GestureRegion&) = delete;
@@ -2574,7 +3070,21 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
     }
     // Not an append, but its reach is known: a brick the edit cannot touch keeps
     // the seed it already has, so adjusting one item no longer costs every
-    // brick the whole edit list.
+    // brick the whole edit list. Three fronts (#360): an edit that can move
+    // root ordinals retires every prefix seed with it; a parameter edit inside
+    // one root of the active layer dirties the seeds it reaches from that
+    // ordinal instead of dropping them; everything else keeps the legacy drop.
+    // `reach` is already the union of command_influence_bound on both sides of
+    // the apply -- root-subtree influence, deformed and blend-dilated, on
+    // every instancing layer -- never a primitive's raw box.
+    if (command_is_structural(cmd)) {
+        doc->touch_region_structural(reach);
+        return CLAY_OK;
+    }
+    if (const CommandFrontier f = command_frontier(doc->doc.document, cmd); f.usable) {
+        doc->touch_region_from(reach, f.ordinal);
+        return CLAY_OK;
+    }
     doc->touch_region(reach);
     return CLAY_OK;
 }
@@ -3390,8 +3900,11 @@ clay_result clay_document_undo_bound(clay_document* doc, int32_t* out_undone, fl
                       : 0;
     // Undo and redo replay commands straight onto the document rather than
     // through apply_edit, so they invalidate here -- with the bound the stack
-    // already unioned over the commands it replayed.
-    if (*out_undone) doc->touch_region(bound);
+    // already unioned over the commands it replayed. STRUCTURAL, because a
+    // replayed inverse can be one (removing what an edit added), and
+    // over-invalidating a prefix seed costs one full walk -- the rule at
+    // touch(), restated.
+    if (*out_undone) doc->touch_region_structural(bound);
     return write_influence(bound, out_min, out_max, out_has_bounds, out_infinite);
 }
 
@@ -3405,7 +3918,7 @@ clay_result clay_document_redo_bound(clay_document* doc, int32_t* out_redone, fl
                                   &bound, doc->mask_for())
                       ? 1
                       : 0;
-    if (*out_redone) doc->touch_region(bound);
+    if (*out_redone) doc->touch_region_structural(bound);
     return write_influence(bound, out_min, out_max, out_has_bounds, out_infinite);
 }
 
@@ -4703,6 +5216,143 @@ clay_result resolve_move(const clay_document* doc, clay_layer_id layer, const fl
     return CLAY_OK;
 }
 
+// What one drag can state about the FRONTIER it dirties from (#360), decided
+// once per gesture and shared by the prepare pass below and the gesture's own
+// invalidation: the ordinal walk is one walk, not one per consumer.
+struct DragFrontier {
+    // The two gates command_frontier makes, decided here for the whole drag
+    // because every command it issues lands on the same layer. A drag on a
+    // non-active layer moves the below half the frontier path carries forward
+    // untouched; an active layer whose content a visible lower layer instances
+    // moves BOTH halves on one edit. Either refusal means the legacy drop, and
+    // nothing the prepare pass records could ever be used.
+    bool usable = false;
+    // Whether EVERY warp node resolved to a root ordinal. A gesture may state
+    // a frontier only when it can vouch for all of its commands; one
+    // unresolved node and the whole drag takes the legacy drop.
+    bool all_resolved = false;
+    // The earliest root ordinal any warp dirties from -- MIN for
+    // touch_region_locked's reason: the kept prefix has to sit before
+    // everything that will move.
+    std::uint32_t min_ordinal = clay_document::kFrontierClean;
+    // (ordinal, pre-apply influence bound) per resolved warp -- what
+    // frontier_prepare consumes to find the bricks the applies will dirty.
+    std::vector<std::pair<std::uint32_t, math::Aabb>> spans;
+};
+
+// Filled through an out-parameter, as resolve_move above is: this namespace
+// sits inside the extern "C" block, where a function RETURNING a class type
+// has no C-compatible calling convention (MSVC gates it as C4190). Parameters
+// of C++ type are fine — it is the return slot that has to be C-shaped.
+void drag_frontier(const clay_document* doc, const scene::Layer& layer,
+                   const std::vector<brush::MoveWarp>& warps, DragFrontier* out) {
+    DragFrontier& df = *out;
+    const scene::Document& d = doc->doc.document;
+    const scene::Layer* active = nullptr;
+    for (const scene::Layer& l : d.layers) {
+        if (!l.visible || l.kind != scene::LayerKind::Sdf || !l.sdf) continue;
+        active = &l;
+    }
+    if (!active || active->id != layer.id) return;
+    for (const scene::Layer& l : d.layers) {
+        if (&l == active) continue;
+        if (l.visible && l.kind == scene::LayerKind::Sdf && l.sdf == active->sdf) return;
+    }
+    df.usable = true;
+    df.all_resolved = !warps.empty();
+    // Per warp: the root ordinal it will dirty from, and its PRE-apply
+    // influence. The post-apply territory a growing displacement reaches next
+    // frame is dirtied by the apply itself and refilled once by the full path,
+    // after which the prepare pass seeds it -- so a brick the drag grows into
+    // is slow for one frame and resumed after.
+    for (const brush::MoveWarp& w : warps) {
+        std::uint32_t ordinal = 0;
+        if (!root_ordinal_of(*layer.sdf, w.node, &ordinal)) {
+            df.all_resolved = false;
+            continue;
+        }
+        df.min_ordinal = std::min(df.min_ordinal, ordinal);
+        const math::Aabb bound = scene::command_influence_bound(
+            d, scene::Command{scene::SetDeformersCmd{layer.id, w.node, {}}});
+        if (bound.empty()) continue;
+        df.spans.emplace_back(ordinal, bound);
+    }
+}
+
+// Record, for every resume entry the coming applies will dirty, the value of
+// the active chain BEFORE the dragged nodes -- the seed the frontier path
+// folds each frame's deformer suffix onto (#360). Runs BEFORE the applies of
+// one clay_layer_move_surface call, EVERY frame: no drag-start detection is
+// needed, because entries that already hold a usable prefix at this frame's
+// boundary are skipped in frontier_prepare, so frame one pays for the region
+// and later frames pay only for bricks the growing drag has just reached.
+// Missing entries are not created -- a brick the store never held falls to
+// the full path, which is the fallback contract.
+//
+// Takes cache_lock() itself (twice, around an unlocked evaluation) and must
+// NOT be called with it held.
+void prepare_frontier_seeds(clay_document* doc, const DragFrontier& frontier) {
+    const scene::Document& d = doc->doc.document;
+    if (frontier.spans.empty()) return;
+    clay_document::FrontierPrepare prep = doc->frontier_prepare(frontier.spans);  // phase A, locked
+    if (prep.jobs.empty()) return;
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    if (!cpu) return;
+    // Phase B, off the lock: evaluate each job's prefix at its brick's
+    // lattice, exactly as the refill would have -- same brick geometry from
+    // the KEY (the arithmetic touch_region trusts), same cull region, same
+    // document pad through compile_layer_prefix. Serial, deliberately: a
+    // region is prepared once per gesture, not per frame, and a pool here
+    // would burn cores to save microseconds nothing is waiting on.
+    std::vector<float> points;
+    for (clay_document::FrontierJob& job : prep.jobs) {
+        const float width = static_cast<float>(job.key.dims[0]) * job.key.spacing;
+        const kernel::cfloat3 lo =
+            kernel::cf3(static_cast<float>(job.key.x), static_cast<float>(job.key.y),
+                        static_cast<float>(job.key.z)) *
+            width;
+        const kernel::cfloat3 size =
+            kernel::cf3(job.key.spacing * static_cast<float>(job.key.dims[0]),
+                        job.key.spacing * static_cast<float>(job.key.dims[1]),
+                        job.key.spacing * static_cast<float>(job.key.dims[2]));
+        const math::Aabb box = math::Aabb{lo, lo + size}.dilated(job.key.band);
+        scene::CullRegion cull{box};
+        scene::Tape prefix;
+        if (!scene::compile_layer_prefix(d, job.boundary, &prefix, &cull, prep.index.get()))
+            continue;  // values stay empty; phase C skips the job
+        points.resize(job.per * 3);
+        std::size_t at = 0;
+        for (int k = 0; k < job.key.dims[2]; ++k)
+            for (int j = 0; j < job.key.dims[1]; ++j)
+                for (int x = 0; x < job.key.dims[0]; ++x) {
+                    const kernel::cfloat3 pt =
+                        lo + kernel::cf3(static_cast<float>(x) * job.key.spacing,
+                                         static_cast<float>(j) * job.key.spacing,
+                                         static_cast<float>(k) * job.key.spacing);
+                    points[at * 3] = pt.x;
+                    points[at * 3 + 1] = pt.y;
+                    points[at * 3 + 2] = pt.z;
+                    ++at;
+                }
+        job.values.resize(job.per);
+        if (job.want_colour) job.colors.resize(job.per * 3);
+        eval::PointQuery q;
+        q.points_xyz = points.data();
+        q.count = job.per;
+        eval::PointResults res;
+        res.distances = job.values.data();
+        res.colors_rgb = job.want_colour ? job.colors.data() : nullptr;
+        if (cpu->eval_points(prefix, q, res) != eval::Status::Ok) {
+            job.values.clear();
+            continue;
+        }
+        job.had_acc = false;
+        for (std::size_t s = 0; s < job.per && !job.had_acc; ++s)
+            job.had_acc = job.values[s] != CLAY_TAPE_FAR;
+    }
+    doc->frontier_store(prep);  // phase C, locked; abandons all if the document moved
+}
+
 }  // namespace
 
 clay_result clay_layer_move_surface_preview(const clay_document* doc, clay_layer_id layer,
@@ -4754,10 +5404,31 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
     math::Aabb reach{c, c};
     reach = reach.dilated(radius + pull);
 
+    // What the drag can state about HISTORY, beside what the ball states about
+    // space (#360): every command it issues is a SetDeformersCmd -- a parameter
+    // edit -- so when the gates hold and every warp node resolves to a root
+    // ordinal, the gesture may state the earliest of those ordinals as its
+    // frontier and the seeds it dirties keep their prefix half. Stated here
+    // rather than derived per command because the gesture-grained invalidation
+    // below sees no commands; left unstated, the legacy drop would destroy the
+    // prefix seeds every frame and the frontier path would never resume.
+    DragFrontier frontier;
+    drag_frontier(doc, *l, warps, &frontier);
+    const bool states_frontier = frontier.usable && frontier.all_resolved;
+
+    // The pre-drag seeds (#360), recorded before the applies dirty anything:
+    // once a seed is dirty its stored value no longer describes the document,
+    // and a prefix can only be sliced out of a value that does. Skipped when
+    // the gesture cannot state its frontier -- the drop below would only
+    // destroy what this pass recorded.
+    if (states_frontier) prepare_frontier_seeds(doc, frontier);
+
     // One group for the whole drag: it is one gesture, and undoing it item by
     // item would be the implementation showing through. One invalidation too,
     // for the same reason and at the same grain (#358).
-    GestureRegion region{doc, reach};
+    GestureRegion region{doc, reach,
+                         states_frontier ? frontier.min_ordinal
+                                         : clay_document::kFrontierDrop};
     if (doc->undo) doc->undo->begin_group();
     std::size_t applied = 0;
     for (const brush::MoveWarp& w : warps) {
@@ -9569,6 +10240,29 @@ clay_result clay_internal_set_resume_budget(clay_document* doc, uint64_t bytes) 
     return CLAY_OK;
 }
 
+clay_result clay_internal_resume_frontier(const clay_document* doc,
+                                          const clay_brick_request* request,
+                                          uint32_t* out_dirty_from, uint32_t* out_boundary,
+                                          uint64_t* out_structure) {
+    if (!doc || !request || !out_dirty_from || !out_boundary || !out_structure)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document, request or out");
+    std::uint32_t dirty = 0, boundary = 0;
+    std::uint64_t structure = 0;
+    if (!doc->frontier_probe(*request, &dirty, &boundary, &structure))
+        return fail(CLAY_ERROR_NOT_FOUND, "no resume entry for that brick");
+    *out_dirty_from = dirty;
+    *out_boundary = boundary;
+    *out_structure = structure;
+    return CLAY_OK;
+}
+
+clay_result clay_internal_set_resume_store_interleave(clay_document* doc, void (*fn)(void* user),
+                                                      void* user) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    doc->set_resume_store_interleave(fn, user);
+    return CLAY_OK;
+}
+
 clay_result clay_brick_cache_trim(clay_brick_cache* cache, uint64_t target_bytes,
                                   const float focus[3], uint64_t* out_dropped) {
     if (!cache) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brick cache");
@@ -9857,6 +10551,11 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
     // a tenth of its bricks should not allocate for all of them.
     std::vector<float> stage_active, stage_active_rgb, stage_below, stage_below_rgb;
     std::unordered_map<std::uint64_t, clay_document::ResumePlan> plans;
+    // One plan per distinct prefix BOUNDARY (#360), memoized like `plans` and
+    // held by address for the same reason: node-based, and nothing inserts
+    // after the lock drops. A drag's bricks overwhelmingly share one boundary,
+    // so this is one plan_frontier call per batch in the common case.
+    std::unordered_map<std::uint32_t, clay_document::ResumePlan> fplans;
     std::shared_ptr<const scene::CullIndex> index;
     float resume_pad = 0.0f;
     bool has_below = false;
@@ -9922,8 +10621,25 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
 
             auto pit = plans.find(rev);
             if (pit == plans.end()) pit = plans.emplace(rev, doc->plan_resume(rev)).first;
-            const clay_document::ResumePlan& plan = pit->second;
-            if (!plan.usable) continue;
+            const clay_document::ResumePlan* plan = &pit->second;
+            clay_document::Seed chosen = seed;
+            if (!plan->usable) {
+                // The append log cannot carry this brick -- a non-append edit
+                // broke its contiguity, which is every touch_region front. The
+                // frontier path (#360) is the second way forward: same
+                // checkpoint shape, same suffix compiler, same seeded walk --
+                // only the seed is the entry's PREFIX half and the suffix is
+                // roots[boundary..end) instead of the log's tail.
+                const clay_document::FrontierSeed fs =
+                    doc->frontier_seed_for(requests[i], per, resume_pad, want_colour, has_below);
+                if (!fs.seed.values) continue;
+                auto fit = fplans.find(fs.boundary);
+                if (fit == fplans.end())
+                    fit = fplans.emplace(fs.boundary, doc->plan_frontier(fs.boundary)).first;
+                if (!fit->second.usable) continue;
+                plan = &fit->second;
+                chosen = fs.seed;
+            }
 
             ResumeTask task;
             std::size_t samples = 0;
@@ -9931,9 +10647,9 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
                           &samples) != CLAY_OK)
                 continue;
             task.slot = i;
-            task.plan = &plan;
-            task.seed = seed;
-            units += per * plan.appended.size();
+            task.plan = plan;
+            task.seed = chosen;
+            units += per * plan->appended.size();
             tasks.push_back(task);
         }
 
@@ -10042,6 +10758,12 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
     // The values still go back to the caller -- they are the batch it asked
     // for, at the revision it asked at.
     if (!tasks.empty()) {
+        // The test seam (clay_internal.h): single-threaded nothing can edit
+        // the document between the walks above and the lock below, which is
+        // exactly why the stale case the gate refuses needs this to be
+        // reachable at all. Unarmed -- every call outside one test -- it is a
+        // null check.
+        doc->run_resume_store_interleave();
         std::lock_guard<std::mutex> lock(doc->cache_lock());
         const std::uint64_t now = doc->current_revision();
         for (const ResumeTask& t : tasks)

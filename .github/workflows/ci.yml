@@ -221,7 +221,13 @@ jobs:
       - name: Build (the gate — every TU must compile clean under GCC 12 -Werror)
         run: |
           source /opt/rh/gcc-toolset-12/enable
-          cmake --build build/manylinux -j
+          # -j$(nproc), not bare -j: with Makefiles a bare -j is UNLIMITED, so
+          # when the test TUs all become ready at once the container runs one
+          # g++ per remaining TU and the runner's OOM killer ends the job with
+          # exit 137 and no compile error to show for it. It passed for as long
+          # as the TU count kept peak memory under the ceiling — two added test
+          # files were enough to end that, deterministically, at [ 98%].
+          cmake --build build/manylinux -j "$(nproc)"
 
   sanitizers:
     name: ASan + UBSan (ubuntu)

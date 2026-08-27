@@ -41,6 +41,44 @@ extern "C" {
 clay_result clay_internal_resume_order_size(const clay_document* doc, uint64_t* out_entries);
 clay_result clay_internal_set_resume_budget(clay_document* doc, uint64_t bytes);
 
+/* -- the frontier half of one brick's seed (issue #360) ---------------------
+ *
+ * dirty_from / prefix_boundary / prefix_structure of the resume entry serving
+ * `request`, or CLAY_ERROR_NOT_FOUND when the store holds none for that brick.
+ * Tests pin the min-merge (two edits at two ordinals leave the EARLIER one),
+ * the clear-on-accepted-submit (only a refill whose plan is still current
+ * resets dirty_from), and the structure tagging (a prefix from before a
+ * structural edit reads as stale) on these three numbers. A host has no
+ * business with any of them: the fast path they steer is bit-identical to the
+ * full walk by contract, and clay_document_resume_stats is the observable.
+ *
+ * dirty_from == 0xFFFFFFFF means clean; prefix_structure == 0 means no prefix
+ * recorded. CLAY_ERROR_INVALID_ARGUMENT on any null argument.
+ */
+clay_result clay_internal_resume_frontier(const clay_document* doc,
+                                          const clay_brick_request* request,
+                                          uint32_t* out_dirty_from, uint32_t* out_boundary,
+                                          uint64_t* out_structure);
+
+/* -- the stale-submit half of the generation invariant (issue #360) ---------
+ *
+ * A resumed refill captures the revision its plan was made at, runs its seeded
+ * walks off the lock, and only then retakes it to store the results as the
+ * next frame's seeds -- behind a plan->now == now gate, so a submit that raced
+ * an edit can never clear a dirty_from that newer edit set. Single-threaded
+ * through the public ABI the race is unreachable: nothing can edit the
+ * document between a refill's walks and its store, because the same thread is
+ * inside the refill. This seam exists ONLY so that gate is testable. `fn` is
+ * invoked ONCE, with `user`, at exactly that point -- after the walks, before
+ * the retaken lock -- on the next refill of `doc` that has anything to store,
+ * and is cleared before it runs so the edit it makes cannot re-trigger it.
+ * Pass a null `fn` to clear an armed seam. Never set outside a test.
+ *
+ * Returns CLAY_ERROR_INVALID_ARGUMENT on a null document.
+ */
+clay_result clay_internal_set_resume_store_interleave(clay_document* doc,
+                                                      void (*fn)(void* user), void* user);
+
 #ifdef __cplusplus
 }
 #endif

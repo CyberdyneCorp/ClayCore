@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "clay.h"
+#include "clay_internal.h"
 #include "clay/brick/cache.h"
 #include "clay/eval/backend.h"
 #include "clay/eval/bake_points.h"
@@ -1143,6 +1144,358 @@ BENCHMARK(BM_BrickRefillWindow)
     ->Args({48, 5000, 16})
     ->Args({48, 20000, 16})
     ->Unit(benchmark::kMicrosecond);
+
+// -- dirty-prefix (frontier) tracking (#360) ---------------------------------
+//
+// A continuing Move drag replaces the tail grab deformer every frame, so
+// nothing BEFORE the dragged node ever changes -- and before #360 every frame
+// still dropped every seed the drag's bound reached and replayed the whole
+// chain per dirty brick. Now a seed carries a PREFIX (the active chain folded
+// through the first B roots), the drag's parameter edit marks it
+// dirty_from = B instead of dropping it, and the refill folds only
+// roots[B..end) onto the prefix.
+//
+// Three claims, three shapes:
+//   BM_MoveDragRefill / BM_MoveDragRefillCold -- the per-frame win: one drag
+//       frame plus one window refill, seeds kept against seeds disabled.
+//   BM_TouchRegionSeedStore / BM_TouchRegionFromSeedStore (and the Small
+//       pair) -- the invalidation overhead: one parameter edit over a live
+//       store, the frontier MARK against the legacy DROP, at the same store
+//       size and the same bound magnitude.
+//   BM_MoveDragRefillHistory500/5000 and BM_TouchRegionFromSeedStore against
+//       BM_TouchRegionFromDeepHistory -- the same dirty brick count at short
+//       and long history: tracking cost must not scale with history length.
+//
+// Ratios, not absolutes, and benches measure while the TESTS hold parity
+// (test_c_frontier_resume.cpp memcmps every kept seed against an oracle that
+// never resumed) -- the same division of labour as the volume-move pair.
+namespace {
+
+constexpr std::size_t kFrontierPer = 8u * 8u * 8u;
+
+// One brick, addressed the way the cache addresses it (brick width 0.4,
+// band 0.15 -- the frontier tests' geometry).
+clay_brick_request frontier_brick(int kx, int ky, int kz) {
+    clay_brick_request q;
+    std::memset(&q, 0, sizeof q);
+    const int k[3] = {kx, ky, kz};
+    for (int a = 0; a < 3; ++a) {
+        q.key[a] = k[a];
+        q.origin[a] = static_cast<float>(k[a]) * 8 * 0.05f;
+        q.dims[a] = 8;
+    }
+    q.spacing = 0.05f;
+    q.band = 0.15f;
+    return q;
+}
+
+clay_resume_stats frontier_stats(const clay_document* d) {
+    clay_resume_stats s{};
+    s.struct_size = sizeof s;
+    clay_document_resume_stats(d, &s);
+    return s;
+}
+
+// One drag frame: grab whatever surface sits inside `radius` of `centre` and
+// pull it +x by `displacement`. Centre and radius held fixed across a
+// gesture, which is what makes moved_chain REPLACE the leading grab rather
+// than stack another -- the continuing drag #360 exists for.
+bool frontier_drag(clay_document* d, clay_layer_id layer, const float centre[3], float radius,
+                   float displacement) {
+    clay_move_params p;
+    std::memset(&p, 0, sizeof p);
+    p.struct_size = static_cast<std::uint32_t>(sizeof p);
+    p.radius = radius;
+    const float disp[3] = {displacement, 0.0f, 0.0f};
+    std::size_t applied = 0;
+    return clay_layer_move_surface(d, layer, centre, disp, &p, &applied) == CLAY_OK &&
+           applied >= 1;
+}
+
+// abi_sculpt plus a smooth-unioned drag TARGET appended LAST (its root
+// ordinal is the frontier), sticking out at x 1.35 so the brush at its +x
+// pole (1.6) reaches nothing else. Quadratic blend for the reason the
+// frontier tests give: the dragged suffix then folds non-idempotently, so a
+// broken fixture cannot hide behind min. Layer id 1 is abi_sculpt's one
+// layer, as in refill_stroke above.
+clay_document* frontier_sculpt(int history) {
+    clay_document* d = abi_sculpt(history);
+    clay_item_desc desc;
+    std::memset(&desc, 0, sizeof desc);
+    desc.struct_size = static_cast<std::uint32_t>(sizeof desc);
+    desc.prim = CLAY_PRIM_SPHERE;
+    desc.params[0] = 0.25f;
+    desc.op = CLAY_OP_ADD;
+    desc.blend = CLAY_BLEND_QUADRATIC;
+    desc.blend_k = 0.05f;
+    desc.position[0] = 1.35f;
+    desc.rotation[3] = 1.0f;
+    desc.scale = 1.0f;
+    clay_add_item(d, 1, &desc, nullptr);
+    return d;
+}
+
+// One drag frame plus one window refill -- what a host pays per frame of a
+// continuing Move drag. The window (kx -1..3 along the equator) mixes ground
+// the drag dirties (kx 1..3) with ground it leaves clean, as a real re-mesh
+// region does. The cold row is byte-identical but runs with the resume budget
+// at zero, so every frame is the full walk -- the gated #360 ratio.
+void move_drag_refill(benchmark::State& state, int history, bool keep_seeds) {
+    clay_document* d = frontier_sculpt(history);
+    if (!keep_seeds) clay_internal_set_resume_budget(d, 0);
+    const float centre[3] = {1.6f, 0.0f, 0.0f};
+    std::vector<clay_brick_request> reqs;
+    for (int kx = -1; kx <= 3; ++kx) reqs.push_back(frontier_brick(kx, -1, -1));
+    std::vector<float> out(reqs.size() * kFrontierPer);
+    auto refill = [&] {
+        clay_brick_cache_eval_requests(d, nullptr, reqs.data(), reqs.size(), out.data(),
+                                       out.size(), nullptr, 0);
+    };
+    refill();  // warm: every brick holds a seed (or none at all, in the cold row)
+    // Frame one pays the pre-drag prefix recording; after it, the fast path
+    // must be REAL before it is measured -- a fixture whose bricks quietly
+    // fell to the full walk would report the cold row's time as the warm one.
+    if (!frontier_drag(d, 1, centre, 0.2f, 0.05f)) {
+        state.SkipWithError("the drag reached nothing; the fixture is not a drag");
+        clay_document_destroy(d);
+        return;
+    }
+    {
+        const clay_resume_stats b = frontier_stats(d);
+        refill();
+        const clay_resume_stats a = frontier_stats(d);
+        if (keep_seeds && (a.refilled_bricks != b.refilled_bricks ||
+                           a.resumed_bricks - b.resumed_bricks != reqs.size())) {
+            state.SkipWithError("a warm drag frame did not resume every brick");
+            clay_document_destroy(d);
+            return;
+        }
+    }
+    const clay_resume_stats before = frontier_stats(d);
+    int f = 0;
+    for (auto _ : state) {
+        // The displacement grows (a drag that stands still is a no-op frame)
+        // but stays under 0.09, so the target's influence never crosses into
+        // another brick and the dirty set stays put for the whole run.
+        frontier_drag(d, 1, centre, 0.2f, 0.05f + 0.0001f * static_cast<float>(++f));
+        refill();
+        benchmark::DoNotOptimize(out.data());
+    }
+    const clay_resume_stats after = frontier_stats(d);
+    const double served = static_cast<double>((after.resumed_bricks - before.resumed_bricks) +
+                                              (after.refilled_bricks - before.refilled_bricks));
+    state.counters["history"] = static_cast<double>(history);
+    state.counters["bricks"] = static_cast<double>(reqs.size());
+    // 1.0 on the warm rows by the guard above. The cold row reads 1/window
+    // (0.2), not 0.0: eviction always keeps the newest entry, so one brick of
+    // the window resumes even at budget zero -- which only flatters the full
+    // walk the cold row stands for. A guard on the fixture, not the
+    // measurement, as in the moving pair.
+    state.counters["resumed_frac"] =
+        served > 0 ? static_cast<double>(after.resumed_bricks - before.resumed_bricks) / served
+                   : 0.0;
+    state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations()) *
+                            static_cast<std::int64_t>(reqs.size() * kFrontierPer));
+    clay_document_destroy(d);
+}
+
+// The invalidation fixture: a store of `bricks` live seeds under a two-layer
+// document whose ACTIVE layer is a base that reaches every brick (the prefix
+// must hold an accumulator everywhere, or frontier_seed_for correctly refuses
+// per brick and the frontier row measures the drop path by accident),
+// `history - 2` dabs, and a big blended ball appended LAST -- the drag target
+// and the frontier edit's node. The BELOW layer holds a twin of that ball, so
+// the legacy edit has the same bound magnitude: both timed edits nudge a ball
+// whose influence covers the whole store, one through the frontier keep, one
+// through the legacy drop.
+struct TouchStore {
+    clay_document* d = nullptr;
+    clay_layer_id below = 0;
+    clay_layer_id active = 0;
+    clay_node_id below_ball = 0;
+    clay_node_id ball = 0;
+    std::vector<clay_brick_request> reqs;
+};
+
+TouchStore touch_store(int bricks, int history) {
+    TouchStore t;
+    t.d = clay_document_create();
+    clay_add_sdf_layer(t.d, "below", &t.below);
+    clay_add_sdf_layer(t.d, "active", &t.active);
+    auto ball = [&](clay_layer_id layer, float r, float k) {
+        clay_item_desc desc;
+        std::memset(&desc, 0, sizeof desc);
+        desc.struct_size = static_cast<std::uint32_t>(sizeof desc);
+        desc.prim = CLAY_PRIM_SPHERE;
+        desc.params[0] = r;
+        desc.op = CLAY_OP_ADD;
+        desc.blend = k > 0.0f ? CLAY_BLEND_QUADRATIC : CLAY_BLEND_HARD;
+        desc.blend_k = k;
+        desc.rotation[3] = 1.0f;
+        desc.scale = 1.0f;
+        clay_node_id id = 0;
+        clay_add_item(t.d, layer, &desc, &id);
+        return id;
+    };
+    t.below_ball = ball(t.below, 2.2f, 0.0f);
+    ball(t.active, 2.0f, 0.0f);  // the base, and the whole of the prefix
+    for (int i = 1; i < history - 1; ++i) {
+        // The dab spiral abi_sculpt walks, scaled onto the base's surface.
+        const double z = 1.0 - 2.0 * (i + 0.5) / (history - 1);
+        const double r = std::sqrt(std::max(0.0, 1.0 - z * z));
+        const double th = 2.399963 * i;
+        clay_item* it = nullptr;
+        const float dr = 0.05f;
+        it = clay_item_create(CLAY_PRIM_SPHERE, &dr, 1);
+        const float p[3] = {static_cast<float>(2.0 * r * std::cos(th)),
+                            static_cast<float>(2.0 * r * std::sin(th)),
+                            static_cast<float>(2.0 * z)};
+        clay_item_set_position(it, p);
+        clay_layer_add_item(t.d, t.active, it, nullptr);
+        clay_item_destroy(it);
+    }
+    t.ball = ball(t.active, 2.2f, 0.05f);
+    // The `bricks` bricks nearest the origin out of an 8x6x6 block, so a
+    // small region is the innermost one and every brick's culled PREFIX is
+    // non-empty (worst corner cull box sits ~1.4 from the origin, well inside
+    // the base's 2.2 influence-plus-pad reach).
+    std::vector<clay_brick_request> all;
+    for (int kz = -3; kz < 3; ++kz)
+        for (int ky = -3; ky < 3; ++ky)
+            for (int kx = -4; kx < 4; ++kx) all.push_back(frontier_brick(kx, ky, kz));
+    std::sort(all.begin(), all.end(), [](const clay_brick_request& a, const clay_brick_request& b) {
+        auto d2 = [](const clay_brick_request& q) {
+            double s = 0.0;
+            for (int i = 0; i < 3; ++i) {
+                const double c = static_cast<double>(q.key[i]) + 0.5;
+                s += c * c;
+            }
+            return s;
+        };
+        return d2(a) < d2(b);
+    });
+    all.resize(static_cast<std::size_t>(bricks));
+    t.reqs = std::move(all);
+    return t;
+}
+
+// One parameter edit over a store of live seeds. The frontier row nudges the
+// active layer's tail ball -- touch_region_from, which MARKS every in-bound
+// entry dirty_from = its ordinal and keeps the seed. The legacy row nudges
+// the below twin -- a non-active-layer edit moves the below half of every
+// seed, so it takes the legacy drop, exactly as every edit did before #360.
+// The refill between edits is untimed: it restores what the legacy edit
+// destroyed (and clears what the frontier edit marked), so every timed edit
+// works over the same full store.
+void touch_seed_store(benchmark::State& state, int bricks, int history, bool frontier) {
+    TouchStore t = touch_store(bricks, history);
+    std::vector<float> out(t.reqs.size() * kFrontierPer);
+    auto refill = [&] {
+        clay_brick_cache_eval_requests(t.d, nullptr, t.reqs.data(), t.reqs.size(), out.data(),
+                                       out.size(), nullptr, 0);
+    };
+    auto nudge = [&](clay_layer_id layer, clay_node_id node, float x) {
+        const float pos[3] = {x, 0.0f, 0.0f};
+        const float axis[3] = {0.0f, 0.0f, 1.0f};
+        clay_layer_set_transform(t.d, layer, node, pos, axis, 0.0f, 1.0f);
+    };
+    refill();  // warm: every brick holds a seed
+    // One drag records the prefixes (the pre-drag pass runs before its
+    // applies); the brush grabs the active ball's +x pole and nothing else --
+    // the base's surface sits 0.25 away, past the 0.1 radius.
+    const float centre[3] = {2.25f, 0.0f, 0.0f};
+    if (!frontier_drag(t.d, t.active, centre, 0.1f, 0.02f)) {
+        state.SkipWithError("the drag reached nothing; no prefixes were recorded");
+        clay_document_destroy(t.d);
+        return;
+    }
+    refill();
+    if (frontier) {
+        // The fixture guard: one nudge must MARK the store, not drop it, and
+        // the next refill must resume every brick. A store that quietly fell
+        // to the drop path would report the legacy row's time here.
+        nudge(t.active, t.ball, 0.004f);
+        const clay_resume_stats b = frontier_stats(t.d);
+        refill();
+        const clay_resume_stats a = frontier_stats(t.d);
+        if (a.refilled_bricks != b.refilled_bricks) {
+            state.SkipWithError("a nudge dropped seeds the frontier should have kept");
+            clay_document_destroy(t.d);
+            return;
+        }
+    }
+    float x = 0.0f;
+    for (auto _ : state) {
+        state.PauseTiming();
+        refill();
+        state.ResumeTiming();
+        x = (x == 0.0f) ? 0.004f : 0.0f;
+        if (frontier)
+            nudge(t.active, t.ball, x);
+        else
+            nudge(t.below, t.below_ball, x);
+    }
+    std::uint64_t entries = 0;
+    clay_internal_resume_order_size(t.d, &entries);
+    state.counters["bricks"] = static_cast<double>(bricks);
+    state.counters["history"] = static_cast<double>(history);
+    state.counters["entries"] = static_cast<double>(entries);
+    state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations()) * bricks);
+    clay_document_destroy(t.d);
+}
+
+}  // namespace
+
+// FIXED ITERATION COUNTS throughout, for the usual reason: the drag rows grow
+// their displacement as they run and the touch rows pay an untimed refill per
+// edit, so left to the clock the faster side would sweep a different workload
+// (and the touch rows would run for minutes of untimed wall clock). NAMED
+// variants rather than ->Arg(): check_bench.py keys its gates on the part of
+// the name before "/".
+void BM_MoveDragRefill(benchmark::State& state) { move_drag_refill(state, 2000, true); }
+BENCHMARK(BM_MoveDragRefill)->Unit(benchmark::kMillisecond)->Iterations(300);
+
+void BM_MoveDragRefillCold(benchmark::State& state) { move_drag_refill(state, 2000, false); }
+BENCHMARK(BM_MoveDragRefillCold)->Unit(benchmark::kMillisecond)->Iterations(300);
+
+// The same warm frame at two histories: the whole point of the prefix seed is
+// that a frame costs what the SUFFIX costs, so these two rows must sit
+// together however deep the sculpt under the drag is.
+void BM_MoveDragRefillHistory500(benchmark::State& state) { move_drag_refill(state, 500, true); }
+BENCHMARK(BM_MoveDragRefillHistory500)->Unit(benchmark::kMillisecond)->Iterations(300);
+
+void BM_MoveDragRefillHistory5000(benchmark::State& state) { move_drag_refill(state, 5000, true); }
+BENCHMARK(BM_MoveDragRefillHistory5000)->Unit(benchmark::kMillisecond)->Iterations(300);
+
+// The <=5% overhead claim (#360 spec): marking a live store must cost no more
+// than dropping it did. Both rows time ONE edit whose bound covers the whole
+// store; the pair differs only in which path the edit takes.
+void BM_TouchRegionSeedStore(benchmark::State& state) { touch_seed_store(state, 288, 2, false); }
+BENCHMARK(BM_TouchRegionSeedStore)->Unit(benchmark::kMicrosecond)->Iterations(512);
+
+void BM_TouchRegionFromSeedStore(benchmark::State& state) {
+    touch_seed_store(state, 288, 2, true);
+}
+BENCHMARK(BM_TouchRegionFromSeedStore)->Unit(benchmark::kMicrosecond)->Iterations(512);
+
+void BM_TouchRegionSeedStoreSmall(benchmark::State& state) {
+    touch_seed_store(state, 12, 2, false);
+}
+BENCHMARK(BM_TouchRegionSeedStoreSmall)->Unit(benchmark::kMicrosecond)->Iterations(2048);
+
+void BM_TouchRegionFromSeedStoreSmall(benchmark::State& state) {
+    touch_seed_store(state, 12, 2, true);
+}
+BENCHMARK(BM_TouchRegionFromSeedStoreSmall)->Unit(benchmark::kMicrosecond)->Iterations(2048);
+
+// The history-scaling check: the same 288-entry store, the same edit, under a
+// 5000-root sculpt. Per-brick frontier metadata is three numbers whatever the
+// history, and the edit's ordinal lookup is one walk of the root list -- so
+// this row must sit beside BM_TouchRegionFromSeedStore, not above it.
+void BM_TouchRegionFromDeepHistory(benchmark::State& state) {
+    touch_seed_store(state, 288, 5000, true);
+}
+BENCHMARK(BM_TouchRegionFromDeepHistory)->Unit(benchmark::kMicrosecond)->Iterations(512);
 
 void BM_CullIndexRebuild(benchmark::State& state) {
     const scene::Document doc = spread_sculpt(kIndexAppendNodes);
