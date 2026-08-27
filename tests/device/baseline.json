@@ -16,14 +16,14 @@
       "rawMs": 0.0002
     },
     "cut_passes": {
-      "budgetMs": 0.0806,
+      "budgetMs": 0.0656,
       "class": "gesture",
-      "measuredMs": 0.0537
+      "measuredMs": 0.0437
     },
     "magnify_pinch": {
-      "budgetMs": 0.1302,
+      "budgetMs": 0.0994,
       "class": "gesture",
-      "measuredMs": 0.0868
+      "measuredMs": 0.0663
     },
     "mask_extract": {
       "budgetMs": 148.9526,
@@ -38,9 +38,9 @@
       "rawMs": 4384.6145
     },
     "mask_freeze": {
-      "budgetMs": 0.0287,
+      "budgetMs": 0.0139,
       "class": "interactive",
-      "measuredMs": 0.0191
+      "measuredMs": 0.0093
     },
     "mask_paint": {
       "budgetMs": 0.0118,
@@ -50,14 +50,14 @@
       "rawMs": 0.0079
     },
     "move_drags": {
-      "budgetMs": 0.2827,
+      "budgetMs": 0.1864,
       "class": "gesture",
-      "measuredMs": 0.1885
+      "measuredMs": 0.1242
     },
     "noise_detail": {
-      "budgetMs": 0.3706,
+      "budgetMs": 0.2432,
       "class": "gesture",
-      "measuredMs": 0.2471
+      "measuredMs": 0.1621
     },
     "pose_region": {
       "budgetMs": 0.0006,
@@ -137,84 +137,84 @@
       "rawMs": 1.8048
     },
     "session_voxel_build": {
-      "budgetMs": 0.0088,
+      "budgetMs": 0.0072,
       "class": "gesture",
-      "measuredMs": 0.0059
+      "measuredMs": 0.0048
     },
     "session_voxel_carve_alpha": {
-      "budgetMs": 0.0104,
+      "budgetMs": 0.0058,
       "class": "gesture",
-      "measuredMs": 0.0069
+      "measuredMs": 0.0039
     },
     "session_voxel_erase": {
-      "budgetMs": 0.0079,
+      "budgetMs": 0.0071,
       "class": "gesture",
-      "measuredMs": 0.0053
+      "measuredMs": 0.0047
     },
     "session_voxel_fill_cavities": {
-      "budgetMs": 0.2496,
+      "budgetMs": 0.0212,
       "class": "gesture",
-      "measuredMs": 0.1664
+      "measuredMs": 0.0141
     },
     "session_voxel_flatten": {
-      "budgetMs": 0.0158,
+      "budgetMs": 0.0112,
       "class": "gesture",
-      "measuredMs": 0.0105
+      "measuredMs": 0.0075
     },
     "session_voxel_grab": {
-      "budgetMs": 0.0206,
+      "budgetMs": 0.0159,
       "class": "gesture",
-      "measuredMs": 0.0137
+      "measuredMs": 0.0106
     },
     "session_voxel_inflate": {
-      "budgetMs": 0.0174,
+      "budgetMs": 0.0128,
       "class": "gesture",
-      "measuredMs": 0.0116
+      "measuredMs": 0.0085
     },
     "session_voxel_magnify": {
-      "budgetMs": 0.0109,
+      "budgetMs": 0.0085,
       "class": "gesture",
-      "measuredMs": 0.0073
+      "measuredMs": 0.0057
     },
     "session_voxel_paint": {
-      "budgetMs": 0.0084,
+      "budgetMs": 0.0069,
       "class": "gesture",
-      "measuredMs": 0.0056
+      "measuredMs": 0.0046
     },
     "session_voxel_pinch": {
-      "budgetMs": 0.0119,
+      "budgetMs": 0.0101,
       "class": "gesture",
-      "measuredMs": 0.0079
+      "measuredMs": 0.0067
     },
     "session_voxel_scrape": {
-      "budgetMs": 0.0143,
+      "budgetMs": 0.0126,
       "class": "gesture",
-      "measuredMs": 0.0095
+      "measuredMs": 0.0084
     },
     "session_voxel_smooth": {
-      "budgetMs": 0.0353,
+      "budgetMs": 0.0131,
       "class": "gesture",
-      "measuredMs": 0.0235
+      "measuredMs": 0.0087
     },
     "session_voxel_smudge": {
-      "budgetMs": 0.0205,
+      "budgetMs": 0.0188,
       "class": "gesture",
-      "measuredMs": 0.0137
+      "measuredMs": 0.0125
     },
     "snakehook_tendrils": {
-      "budgetMs": 0.2627,
+      "budgetMs": 0.1703,
       "class": "gesture",
-      "measuredMs": 0.1751
+      "measuredMs": 0.1136
     },
     "stroke_build": {
-      "budgetMs": 24.2037,
+      "budgetMs": 0.5086,
       "class": "gesture",
-      "measuredMs": 16.1358
+      "measuredMs": 0.3391
     },
     "stroke_carve": {
-      "budgetMs": 1.1658,
+      "budgetMs": 0.6733,
       "class": "gesture",
-      "measuredMs": 0.7772
+      "measuredMs": 0.4489
     },
     "stroke_resolve": {
       "budgetMs": 0.0011,
@@ -238,19 +238,19 @@
       "rawMs": 0.0007
     },
     "volume_flatten": {
-      "budgetMs": 123.0127,
+      "budgetMs": 120.4141,
       "class": "operation",
-      "measuredMs": 82.0085
+      "measuredMs": 80.2761
     },
     "volume_hpolish": {
-      "budgetMs": 143.5681,
+      "budgetMs": 132.4005,
       "class": "operation",
-      "measuredMs": 95.712
+      "measuredMs": 88.267
     },
     "volume_relax": {
-      "budgetMs": 447.8534,
+      "budgetMs": 431.3221,
       "class": "operation",
-      "measuredMs": 298.569
+      "measuredMs": 287.5481
     },
     "voxel_add_level": {
       "budgetMs": 7.2942,

@@ -207,6 +207,48 @@ def canary_drift(run: dict) -> tuple[float, dict, dict] | None:
 
 
 def worst_p95(case: dict) -> float:
+    """The figure this case is SCORED on.
+
+    For an ordinary case that is the worst point of the axis, which is what a
+    budget means: a ceiling the engine must not exceed anywhere.
+
+    For a SINGLE-TIMING case it is the MEDIAN of its points instead, and the
+    difference is not a softening — it is the only honest statistic available.
+    Those cases time each stroke of a progressive sculpt once, so the axis is a
+    sequence of one-shot observations rather than a percentile at each size, and
+    the max of N one-shot draws is the worst draw. `move_drags` proved what that
+    costs: across 18 records spanning five ABI versions its max spreads 3.41x
+    (0.127 .. 0.434) while its median spreads 1.27x (0.103 .. 0.131), and two
+    records at the SAME commit read 0.149 and 0.434 -- a 2.91x difference on
+    identical code (issue #331).
+
+    A budget drawn against a distribution that wide lands between the modes, so
+    the gate fires on which draw it happened to get. That is worse than a check
+    that fires every time: often enough to be noise, rare enough to look like a
+    finding, and it cost a full off-device bisect across four merges before the
+    history said the case had produced both modes on unchanged code.
+
+    The median uses every observation the case actually took rather than only
+    its unluckiest, and for these cases the axis is passes over one sculpt
+    rather than a growth curve, so no point is privileged the way the largest
+    document is elsewhere.
+    """
+    ms = case.get("measurements", [])
+    if not ms:
+        return float("nan")
+    values = [m["p95Ms"] for m in ms]
+    if single_observation(case):
+        return statistics.median(values)
+    return max(values)
+
+
+def reported_p95(case: dict) -> float:
+    """The worst point, whatever the case is scored on — what a user would feel.
+
+    Kept beside the scored figure for the same reason the raw figure is kept
+    beside the normalised one: the slowest stroke is a real thing that happened,
+    and hiding it would be the softening this deliberately is not.
+    """
     return max((m["p95Ms"] for m in case.get("measurements", [])), default=float("nan"))
 
 
@@ -230,7 +272,7 @@ def single_observation(case: dict) -> bool:
 
 
 def normalised_p95(run: dict, case: dict) -> tuple[float, float | None]:
-    """This case's worst p95, and the factor it was divided by (None if raw).
+    """This case's SCORED p95 (see worst_p95), and the factor it was divided by.
 
     Dividing by the machine's own slowdown is what makes a case mean the same
     thing wherever it runs, which is what the gate has always claimed and never
@@ -362,6 +404,11 @@ def main() -> int:
     for case in run["cases"]:
         name = case["name"]
         raw = worst_p95(case)
+        # The slowest single point, whatever the case is scored on. For an
+        # ordinary case this IS `raw`; for a single-timing one it is the worst
+        # draw the median deliberately does not gate on, and it is still printed
+        # because it is a real thing that happened.
+        peak = reported_p95(case)
         # Compare like with like: a case's number divided by how slow the
         # machine was while it ran. `raw` is what a user would feel and is what
         # the frame-share note below is about; `measured` is what is gated.
@@ -381,12 +428,20 @@ def main() -> int:
                     f"{name}: BUDGET {shown} exceeds "
                     f"{budget['budgetMs']:.3f} ms ({budget['class']})")
             elif (budget["class"] == "interactive"
-                  and raw > INTERACTIVE_FRAME_SHARE_MS):
-                # RAW here, deliberately: a frame share is about the time a
-                # hand waits, and a throttled device still makes it wait.
-                notes.append(f"{name}: {raw:.3f} ms p95 is inside its budget but "
+                  and peak > INTERACTIVE_FRAME_SHARE_MS):
+                # The PEAK here, deliberately: a frame share is about the time a
+                # hand waits, a throttled device still makes it wait, and a
+                # single-timing case's worst stroke was waited for even though
+                # the median is what the budget gates.
+                notes.append(f"{name}: {peak:.3f} ms p95 is inside its budget but "
                              f"outside a 120 Hz frame share "
                              f"({INTERACTIVE_FRAME_SHARE_MS:.2f} ms)")
+        # Say what the median hid, so a case drifting into a worse mode is
+        # visible even though it is not gated on.
+        if single_observation(case) and peak > raw * 1.5:
+            notes.append(f"{name}: scored on the median of its {len(case['measurements'])} "
+                         f"one-shot points ({raw:.3f} ms); its worst was {peak:.3f} ms "
+                         f"(x{peak / raw:.2f}). See issue #331 for why the max is not gated.")
 
         # REGRESSION — against what this build used to do.
         base = base_cases.get(name)

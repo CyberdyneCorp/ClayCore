@@ -1199,6 +1199,41 @@ the engine's half of a 120 Hz frame, its budget is a regression ceiling rather
 than an endorsement, and the checker reprints the breach on every run so
 writing it down does not retire it.
 
+**A SINGLE-TIMING case is scored on the MEDIAN of its points, not the worst.**
+The `devicegallery` sessions time each stroke of a progressive sculpt once, so
+their axis is a sequence of one-shot observations rather than a percentile at
+each size — and the max of N one-shot draws is the worst draw. Measured over 18
+records spanning five ABI versions:
+
+| case | max of all passes | median of all passes |
+|---|---:|---:|
+| `snakehook_tendrils` | 5.94x | 1.21x |
+| `cut_passes` | 4.86x | 1.55x |
+| `move_drags` | 3.41x | 1.27x |
+| `stroke_build` | 2.47x | 1.38x |
+
+Against a tolerance of 1.4x, the old statistic made five of the six gallery
+cases un-gateable — their budgets landed BETWEEN the modes, so the gate fired on
+which draw it happened to get. `move_drags` is the one that was caught doing it:
+two records at the SAME commit read 0.149 and 0.434, a 2.91x difference on
+identical code, and two consecutive high draws cost a full off-device bisect
+across four merges before the history said the case had produced both modes on
+unchanged code (issue #331).
+
+**Pass 1 is the reason.** It pays the session's one-time costs, which is visible
+as a large NEGATIVE growth exponent: `stroke_build` reads 23.311 ms then 0.201
+to 0.411, growth `^-1.94`. Cases that genuinely grow — `snakehook_tendrils`
+`^+0.45`, `noise_detail` `^+0.51` — have their CHEAPEST pass first, so the
+median does not hide their growth either; it was the most stable statistic for
+those two as well.
+
+The worst point is still printed beside the scored one, and a case whose worst
+exceeds its median by more than 1.5x says so in a note. Nothing is hidden; what
+changed is what the gate fires on.
+
+**The limit worth knowing**: `cut_passes` still spreads 1.55x on the median,
+above the 1.4x tolerance. It is the one gallery case this does not fully settle.
+
 ## Tagging
 
 ```sh
