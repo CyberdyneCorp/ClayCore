@@ -235,6 +235,47 @@ jobs:
       - name: Test
         run: ctest --preset asan-ubsan
 
+  # ThreadSanitizer, and it exists because a whole class of this library's
+  # guarantees has no other gate. The C ABI promises that any number of threads
+  # may run clay_brick_cache_eval_requests and clay_eval_points against one
+  # const document at once (clay.h, THREADING), and the resumed brick refill
+  # now copies its seeds out and drops cache_mutex_ before it evaluates (#348).
+  # Revert that copy and the values a refill returns are still RIGHT -- the
+  # concurrency test's assertions pass, doctest reports SUCCESS -- while a raw
+  # pointer into a hash map another thread may rehash is live across the
+  # unlock. Nothing but a race detector can tell those two apart, so without
+  # this job the fix ships with no standing regression guard.
+  #
+  # RelWithDebInfo, not Debug as the ASan job uses: races are timing-dependent,
+  # so the build worth racing is the optimised one, and TSan's own slowdown on
+  # top of a Debug build would put the suite past what a PR should cost. It
+  # runs the WHOLE suite rather than the new case alone -- everything else
+  # threaded in the tree (the pool, the tape cache's readers, the brick-mesh
+  # attribute pass) has been in the same position as the refill was, exercised
+  # concurrently and never checked for races. Measured 6 min on a 24-thread
+  # desktop, clean: 1501/1501, zero TSan warnings.
+  #
+  # setarch -R DISABLES ASLR for the run, and it is not optional. TSan maps
+  # fixed shadow regions, and a kernel handing out mappings with more entropy
+  # than it expects -- which Ubuntu 24.04 does, vm.mmap_rnd_bits=32 -- aborts
+  # the process with "FATAL: ThreadSanitizer: unexpected memory mapping" before
+  # a single test runs. It exits 66, so ctest does fail the job rather than
+  # passing it silently, but the log says nothing about a race and the job
+  # would be a gate on nothing. `sudo sysctl -w vm.mmap_rnd_bits=28` is the
+  # other fix; setarch needs no privilege and applies to the child processes
+  # ctest spawns, which is what has to be de-randomised.
+  thread-sanitizer:
+    name: ThreadSanitizer (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset tsan
+      - name: Build
+        run: cmake --build --preset tsan
+      - name: Test (ASLR off — see the note above)
+        run: setarch -R ctest --preset tsan
+
   checks:
     name: layering, kernel dialect, licenses, binding parity
     runs-on: ubuntu-latest

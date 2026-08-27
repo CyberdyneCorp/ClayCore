@@ -258,3 +258,116 @@ TEST_CASE("compile_layer_suffix refuses what it cannot be sure of") {
         CHECK(scene::compile_layer_suffix(cp, doc, {roots.back()}, &out, nullptr));
     }
 }
+
+TEST_CASE("a seeded suffix may be walked in place") {
+    // #306 left open whether a seeded walk can write over the seed it is
+    // reading. It can, and #348 depends on it: the resumed refill copies each
+    // brick's seed out of the seed store under the document's cache lock and
+    // then evaluates with the lock released, so if the copy could not land in
+    // the buffer the walk is about to fill it would need a second buffer and a
+    // second pass over every sample.
+    //
+    // The reason it holds is structural rather than incidental. `walk_blocked`
+    // reads a block's seed into its stack before it runs the tape, and writes
+    // that block's result only after -- so within a block the read strictly
+    // precedes the write, and blocks do not overlap.
+    const std::vector<float> pts = lattice(18);
+    const std::size_t count = pts.size() / 3;
+    const int kept = 3;
+
+    auto coloured = [](int dabs) {
+        scene::Document doc;
+        scene::Layer& l = doc.add_sdf_layer("s");
+        scene::Node base;
+        base.prim = scene::Prim::sphere(1.0f);
+        base.color = cf3(0.8f, 0.2f, 0.1f);
+        l.sdf->insert(base);
+        for (int i = 1; i <= dabs; ++i) {
+            scene::Node d;
+            d.prim = scene::Prim::sphere(0.3f);
+            const float a = 0.5f * std::sin(static_cast<float>(i) * 1.1f);
+            d.xform.position = cf3(std::sqrt(std::max(0.0f, 1.0f - a * a)), a, 0.0f);
+            d.color = cf3(0.1f * static_cast<float>(i % 7), 0.9f, 0.3f);
+            d.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.09f};
+            l.sdf->insert(d);
+        }
+        return doc;
+    };
+
+    scene::Document before = coloured(9 - kept);
+    scene::Document after = coloured(9);
+    scene::TapeCheckpoint cp;
+    const scene::Tape prefix = scene::compile_document_resumable(before, &cp);
+    REQUIRE(cp.valid);
+    const std::vector<scene::NodeId>& roots = after.layers[0].sdf->roots;
+    const std::vector<scene::NodeId> appended(roots.end() - kept, roots.end());
+    scene::Tape suffix;
+    REQUIRE(scene::compile_layer_suffix(cp, after, appended, &suffix, nullptr));
+    REQUIRE(suffix.instrs.size() > 0);
+
+    // The seed, and the answer with the two buffers kept apart.
+    std::vector<float> seed_d(count, 0.0f), seed_c(count * 3, 0.0f);
+    {
+        eval::PointQuery q;
+        q.points_xyz = pts.data();
+        q.count = count;
+        eval::PointResults r;
+        r.distances = seed_d.data();
+        r.colors_rgb = seed_c.data();
+        eval::eval_points_blocked(prefix, q, r);
+    }
+    eval::PointQuery q;
+    q.points_xyz = pts.data();
+    q.count = count;
+    std::vector<float> want_d(count, 0.0f), want_c(count * 3, 0.0f);
+    {
+        eval::PointResults r;
+        r.distances = want_d.data();
+        r.colors_rgb = want_c.data();
+        eval::eval_points_seeded(suffix, q, seed_d.data(), seed_c.data(), r);
+    }
+
+    // The same walk, seeded from its own destination.
+    std::vector<float> got_d = seed_d, got_c = seed_c;
+    {
+        eval::PointResults r;
+        r.distances = got_d.data();
+        r.colors_rgb = got_c.data();
+        eval::eval_points_seeded(suffix, q, got_d.data(), got_c.data(), r);
+    }
+    CHECK(std::memcmp(got_d.data(), want_d.data(), count * sizeof(float)) == 0);
+    CHECK(std::memcmp(got_c.data(), want_c.data(), count * 3 * sizeof(float)) == 0);
+
+    // And the suffix has to have MOVED the seed, or this is two copies of one
+    // buffer agreeing with each other.
+    CHECK(std::memcmp(want_d.data(), seed_d.data(), count * sizeof(float)) != 0);
+    CHECK(std::memcmp(want_c.data(), seed_c.data(), count * 3 * sizeof(float)) != 0);
+
+    SUBCASE("a block boundary is not where it breaks") {
+        // The walk runs in blocks, and an in-place seed is only safe because a
+        // block reads before it writes. A count that is not a multiple of the
+        // block size runs a short last block, which is the one that would show
+        // an off-by-one in that ordering.
+        for (std::size_t n :
+             {std::size_t{1}, std::size_t{63}, std::size_t{64}, std::size_t{65}, count}) {
+            CAPTURE(n);
+            eval::PointQuery part;
+            part.points_xyz = pts.data();
+            part.count = n;
+            std::vector<float> apart(n, 0.0f), apart_c(n * 3, 0.0f);
+            eval::PointResults r;
+            r.distances = apart.data();
+            r.colors_rgb = apart_c.data();
+            eval::eval_points_seeded(suffix, part, seed_d.data(), seed_c.data(), r);
+
+            std::vector<float> same(seed_d.begin(), seed_d.begin() + n);
+            std::vector<float> same_c(seed_c.begin(), seed_c.begin() + n * 3);
+            eval::PointResults ir;
+            ir.distances = same.data();
+            ir.colors_rgb = same_c.data();
+            eval::eval_points_seeded(suffix, part, same.data(), same_c.data(), ir);
+            CHECK(std::memcmp(same.data(), apart.data(), n * sizeof(float)) == 0);
+            CHECK(std::memcmp(same_c.data(), apart_c.data(), n * 3 * sizeof(float)) == 0);
+        }
+    }
+}

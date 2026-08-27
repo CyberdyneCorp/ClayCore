@@ -975,6 +975,105 @@ BENCHMARK(BM_BrickRefillMoving5000)->Unit(benchmark::kMillisecond);
 void BM_BrickRefillMoving20000(benchmark::State& state) { refill_moving(state, 20000); }
 BENCHMARK(BM_BrickRefillMoving20000)->Unit(benchmark::kMillisecond);
 
+// The resumed refill at several WINDOW SIZES, which is what #348 needed
+// measuring before it could pick a shape. A dab's dirty window is one brick for
+// a small brush and dozens for a big one or a symmetry pass, and the resumed
+// path's per-brick compile-and-evaluate used to run serially under the document
+// cache mutex however many bricks the host asked for.
+//
+// A STILL window, primed, so every brick resumes and the timed region is the
+// resumed path and nothing else: the moving pair above already covers the
+// admission gate, and mixing the two would make this measure both.
+namespace {
+void refill_window(benchmark::State& state, int window, int history, int dabs) {
+    clay_document* d = abi_sculpt(history);
+    const std::size_t per = 8 * 8 * 8;
+    std::vector<clay_brick_request> reqs(static_cast<std::size_t>(window));
+    for (int i = 0; i < window; ++i) {
+        std::memset(&reqs[i], 0, sizeof(reqs[i]));
+        // A compact block starting at the equator and growing into the two
+        // rows behind it, so a window of any size stays ON the sphere: a brick
+        // that runs off the shape carries no accumulator and is walked in full
+        // for ever, which would put the full path inside this timing. Same
+        // reason the moving pair above runs along the equator.
+        reqs[i].key[0] = -3 + (i % 6);
+        reqs[i].key[1] = -1 + (i / 6) % 2;
+        reqs[i].key[2] = -1 + (i / 12);
+        for (int a = 0; a < 3; ++a)
+            reqs[i].origin[a] = static_cast<float>(reqs[i].key[a]) * 8 * 0.05f;
+        reqs[i].spacing = 0.05f;
+        reqs[i].dims[0] = reqs[i].dims[1] = reqs[i].dims[2] = 8;
+        reqs[i].band = 0.15f;
+    }
+    std::vector<float> out(static_cast<std::size_t>(window) * per);
+    clay_brick_cache_eval_requests(d, nullptr, reqs.data(), static_cast<std::size_t>(window),
+                                   out.data(), out.size(), nullptr, 0);
+    const clay_resume_stats before = [&] {
+        clay_resume_stats rs{};
+        rs.struct_size = sizeof rs;
+        clay_document_resume_stats(d, &rs);
+        return rs;
+    }();
+    float y = 0.0f;
+    for (auto _ : state) {
+        state.PauseTiming();
+        // `dabs` appends between refills, which is the SUFFIX LENGTH each brick
+        // has to walk. One is the host that refills every dab; more is the host
+        // that refills every few, and the brick a moving window left behind.
+        for (int k = 0; k < dabs; ++k) {
+            const float r = 0.05f;
+            clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+            const float p[3] = {0.98f, y, -0.1f};
+            y += 0.001f;
+            clay_item_set_position(it, p);
+            clay_layer_add_item(d, 1, it, nullptr);
+            clay_item_destroy(it);
+        }
+        state.ResumeTiming();
+        clay_brick_cache_eval_requests(d, nullptr, reqs.data(), static_cast<std::size_t>(window),
+                                       out.data(), out.size(), nullptr, 0);
+    }
+    clay_resume_stats rs{};
+    rs.struct_size = sizeof rs;
+    clay_document_resume_stats(d, &rs);
+    const double served = static_cast<double>((rs.resumed_bricks - before.resumed_bricks) +
+                                              (rs.refilled_bricks - before.refilled_bricks));
+    state.counters["window"] = static_cast<double>(window);
+    state.counters["history"] = static_cast<double>(history);
+    state.counters["dabs"] = static_cast<double>(dabs);
+    // 1.0 by construction: every brick of a primed still window resumes. Read
+    // as a guard on the fixture, not as the thing being measured -- a fixture
+    // that quietly stopped resuming would report the full path's time here.
+    state.counters["resumed_frac"] =
+        served > 0 ? static_cast<double>(rs.resumed_bricks - before.resumed_bricks) / served : 0.0;
+    // Its complement, and the one tools/check_bench.py GATES -- the same pair
+    // and the same reason as the moving benchmarks above. A ceiling belongs on
+    // the share WALKED IN FULL rather than on the share resumed, because that
+    // is the direction a broken fixture moves in and a ceiling reads the same
+    // way as every other entry in that table.
+    state.counters["refilled_frac"] =
+        served > 0 ? static_cast<double>(rs.refilled_bricks - before.refilled_bricks) / served
+                   : 1.0;
+    clay_document_destroy(d);
+}
+}  // namespace
+
+void BM_BrickRefillWindow(benchmark::State& state) {
+    refill_window(state, static_cast<int>(state.range(0)), static_cast<int>(state.range(1)),
+                  static_cast<int>(state.range(2)));
+}
+BENCHMARK(BM_BrickRefillWindow)
+    ->Args({1, 5000, 1})
+    ->Args({4, 5000, 1})
+    ->Args({12, 5000, 1})
+    ->Args({48, 5000, 1})
+    ->Args({1, 5000, 16})
+    ->Args({4, 5000, 16})
+    ->Args({12, 5000, 16})
+    ->Args({48, 5000, 16})
+    ->Args({48, 20000, 16})
+    ->Unit(benchmark::kMicrosecond);
+
 void BM_CullIndexRebuild(benchmark::State& state) {
     const scene::Document doc = spread_sculpt(kIndexAppendNodes);
     for (auto _ : state) {

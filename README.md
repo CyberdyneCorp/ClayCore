@@ -531,6 +531,24 @@ cmake --build --preset cpu-only
 ctest --preset cpu-only
 ```
 
+Two sanitizer presets, both run per pull request. `asan-ubsan` is a Debug build
+with Address and UB sanitizers; `tsan` is a RelWithDebInfo build with
+ThreadSanitizer, which is what holds the C ABI's threading promise — that any
+number of threads may evaluate one const document at once — since a lock the
+code stopped taking still returns the right values and only a race detector can
+say so.
+
+```sh
+cmake --preset tsan && cmake --build --preset tsan
+setarch -R ctest --preset tsan   # ASLR OFF, and not optional
+```
+
+`setarch -R` disables ASLR for the run. TSan maps fixed shadow regions, and a
+kernel handing out mappings with more entropy than it expects — Ubuntu 24.04's
+`vm.mmap_rnd_bits=32`, for one — aborts with `FATAL: ThreadSanitizer:
+unexpected memory mapping` before any test runs. `sudo sysctl -w
+vm.mmap_rnd_bits=28` is the other fix.
+
 ## Backends
 
 | Backend | Preset | Status | Capabilities |

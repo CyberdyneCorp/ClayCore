@@ -5727,14 +5727,23 @@ clay_result clay_brick_cache_take_dirty(clay_brick_cache* cache,
  * is a value that will one day arrive as zero.
  *
  * It takes NO cache handle: it does not submit, does not touch a cache and
- * starts no thread, so it is free-threaded and any number of threads may run
- * it against one const document at once. The host still calls
- * clay_brick_cache_submit, and still decides how many requests to run and
- * where. Fan out over REQUESTS, one brick per worker: the CPU backend already
- * splits a single grid's z axis over a process-wide pool, and a brick is 8
- * slices of 64 samples, so a per-brick call is already a small dispatch. That
- * is measured, not reasoned: on an M2 Max it takes a 216-brick fill from
- * 24.7 ms to 8.2 ms on twelve workers.
+ * starts no thread of its own, so it is free-threaded and any number of threads
+ * may run it against one const document at once. It does WRITE the document's
+ * own seed store (clay_document_resume_stats reports it), behind a lock of its
+ * own that is not yours to take: held to read the seeds and again to store
+ * them, and RELEASED across the compile and the evaluation between — so a
+ * refill does not block a clay_eval_points on another thread for as long as it
+ * evaluates. It may also spread a large batch's own work over the library's
+ * process-wide pool while that lock is down, exactly as the full path always
+ * has, so a refill can occupy every core for its duration; "starts no thread"
+ * means it spawns none, not that it runs on one.
+ *
+ * The host still calls clay_brick_cache_submit, and still decides how many
+ * requests to run and where. Fan out over REQUESTS, one brick per worker: the
+ * CPU backend already splits a single grid's z axis over a process-wide pool,
+ * and a brick is 8 slices of 64 samples, so a per-brick call is already a small
+ * dispatch. That is measured, not reasoned: on an M2 Max it takes a 216-brick
+ * fill from 24.7 ms to 8.2 ms on twelve workers.
  *
  * out_colors_rgb (may be NULL) receives the field's colour at the same lattice
  * points, count * dim^3 * 3 floats with brick i at i * dim^3 * 3, and

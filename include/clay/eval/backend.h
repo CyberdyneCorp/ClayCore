@@ -408,6 +408,19 @@ void eval_points_blocked(const scene::Tape& tape, const PointQuery& q, const Poi
 //
 // `out.gradients_xyz` is ignored either way: a gradient is four taps of the
 // whole field, not something a single accumulator can be continued into.
+//
+// IN PLACE IS ALLOWED, and callers depend on it. `seed` MAY be `out.distances`
+// and `seed_rgb` MAY be `out.colors_rgb` -- the same buffer, seeded on entry
+// and holding the answer on exit. The blocked walk reads a block's seed into
+// its own stack before it writes that block's result, which is what makes it
+// safe, and this is a CONTRACT rather than an accident of the current code: the
+// C ABI's resumed brick refill copies each seed out of the document's seed
+// store into the buffer the walk will answer into, so that it can drop the
+// cache lock before evaluating (#348), and the single-layer case copies into
+// the host's own output slot. Hoisting the output store above the seed load, or
+// marking either pointer `restrict`, would break that caller silently -- the
+// values would be wrong, not the addresses -- so `test_suffix_tape.cpp` asserts
+// the property directly on a buffer that is its own seed.
 void eval_points_seeded(const scene::Tape& suffix, const PointQuery& q, const float* seed,
                         const float* seed_rgb, const PointResults& out, std::size_t block = 0);
 
