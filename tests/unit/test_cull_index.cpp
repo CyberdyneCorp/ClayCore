@@ -2,6 +2,7 @@
 
 #include "clay/field/volume.h"
 #include <algorithm>
+#include <memory>
 
 #include "clay/scene/bounds.h"
 #include "clay/scene/cull_index.h"
@@ -520,6 +521,23 @@ Node dab(cfloat3 at, float k = 0.05f) {
     return n;
 }
 
+// How many items an index believes its layers' root chains hold. Everything
+// survives a plan over an all-containing region, so this is the index's own
+// cached entries. Summed over layers rather than per chain because the corpus
+// instances a layer: one appended item lands in every chain over that root
+// list, so what an append adds here is more than one and is compared against a
+// fresh build rather than counted.
+std::size_t root_entries(const CullIndex& ix) {
+    const CullPlan plan = ix.plan(math::Aabb{cf3(-100, -100, -100), cf3(100, 100, 100)});
+    std::size_t n = 0;
+    for (const Layer& layer : ix.document()->layers) {
+        if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
+        if (const std::vector<CullIndex::Entry>* e = plan.chain(layer, layer.sdf->roots))
+            n += e->size();
+    }
+    return n;
+}
+
 }  // namespace
 
 TEST_CASE("cull index: an appended index is the index a rebuild would give") {
@@ -723,6 +741,81 @@ TEST_CASE("cull index: an append it cannot be sure of is refused, not guessed") 
         const CullPlan fresh_plan = fresh.plan(region);
         require_same_tape(compile_document(doc, &cull, &ix, &kept_plan),
                           compile_document(doc, &cull, &fresh, &fresh_plan));
+    }
+}
+
+TEST_CASE("cull index: a cached index is extended in place only while unobserved") {
+    // scene::append_cached, the cache's half of an append. Extending the cached
+    // index itself is what makes a dab cost the dab rather than the document,
+    // and it is safe only while nothing else holds that index: a holder planned
+    // against what it took and must go on seeing it, entries and pad both.
+    //
+    // Both directions are asserted here rather than through the C ABI because
+    // the C ABI never lets a handle out from under its mutex, so the copy
+    // branch is reachable there only across threads -- see cull_index.h.
+
+    SUBCASE("a stroke extends the cached index without copying it") {
+        Document doc = gnarly_document();
+        auto slot = std::make_shared<CullIndex>(doc);
+        // A weak handle rather than a bare address: a copy destroys the index
+        // it replaces, and the allocator is free to hand the copy the very
+        // block it just freed -- comparing addresses passed by luck on half the
+        // iterations of this loop. A weak_ptr adds no owner, so it does not
+        // itself force the copy branch, and it goes empty exactly when the
+        // index it watches is replaced.
+        std::weak_ptr<CullIndex> watch = slot;
+        const std::size_t before = root_entries(*slot);
+        for (int i = 0; i < 6; ++i) {
+            const NodeId id = doc.layers[0].sdf->insert(dab(cf3(0.1f * i, 0.35f, -0.2f)));
+            REQUIRE(slot.use_count() == 1);
+            REQUIRE(append_cached(slot, {id}));
+            CHECK(watch.lock() == slot);  // the same index, grown, not a copy
+        }
+        const CullIndex fresh(doc);
+        CHECK(root_entries(*slot) > before);
+        CHECK(root_entries(*slot) == root_entries(fresh));
+        CHECK(slot->cull_pad() == fresh.cull_pad());
+    }
+
+    SUBCASE("a held index is not mutated under its holder") {
+        Document doc = gnarly_document();
+        auto slot = std::make_shared<CullIndex>(doc);
+        // What a reader has: a handle it keeps for as long as it reads, and the
+        // numbers it planned against.
+        const std::shared_ptr<const CullIndex> held = slot;
+        const float held_pad = held->cull_pad();
+        const std::size_t held_entries = root_entries(*held);
+
+        // Wide enough to move the pad, so an in-place extension would show up
+        // in BOTH numbers the holder plans with and not just in the entries.
+        const NodeId id = doc.layers[0].sdf->insert(dab(cf3(0.45f, -0.15f, 0.1f), 1.7f));
+        REQUIRE(append_cached(slot, {id}));
+
+        CHECK(slot != held);  // the cache took a copy to extend
+        CHECK(held->cull_pad() == held_pad);  // and left the holder its own
+        CHECK(root_entries(*held) == held_entries);
+
+        // And the copy is the extended index a rebuild would give, not merely
+        // an untouched copy.
+        const CullIndex fresh(doc);
+        CHECK(slot->cull_pad() > held_pad);
+        CHECK(root_entries(*slot) > held_entries);
+        CHECK(root_entries(*slot) == root_entries(fresh));
+        CHECK(slot->cull_pad() == fresh.cull_pad());
+    }
+
+    SUBCASE("a refused append leaves the holder and the slot alone") {
+        // The copy branch has the same contract as the in-place one: a refusal
+        // costs a rebuild, never a half-extended index in either hand.
+        Document doc = gnarly_document();
+        auto slot = std::make_shared<CullIndex>(doc);
+        const std::shared_ptr<const CullIndex> held = slot;
+        const float pad = held->cull_pad();
+        const NodeId id = doc.layers[0].sdf->insert(dab(cf3(0.2f, 0.2f, 0.2f)));
+        doc.layers[0].sdf->insert(dab(cf3(0.3f, 0.2f, 0.2f)));  // id is no longer the tail
+        CHECK_FALSE(append_cached(slot, {id}));
+        CHECK(slot == held);
+        CHECK(held->cull_pad() == pad);
     }
 }
 

@@ -220,5 +220,18 @@ CullPlan CullIndex::plan(const math::Aabb& region) const {
     return plan;
 }
 
+// See the header for why the in-place branch is safe and why this decision
+// lives here rather than in the cache that makes it.
+bool append_cached(std::shared_ptr<CullIndex>& slot, const std::vector<NodeId>& appended) {
+    if (!slot) return false;
+    if (slot.use_count() == 1) return slot->append(appended);
+    // Shared: copying the entries is the memcpy the rebuild this replaces
+    // would have done anyway, and the holder keeps the index it planned with.
+    auto grown = std::make_shared<CullIndex>(*slot);
+    if (!grown->append(appended)) return false;
+    slot = std::move(grown);
+    return true;
+}
+
 }  // namespace scene
 }  // namespace clay

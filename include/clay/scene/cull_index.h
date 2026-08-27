@@ -35,6 +35,7 @@
 // document the same way and additionally must not outlive its index's
 // revision.
 
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -158,6 +159,15 @@ class CullIndex {
     // that plans against too small a region. Checked rather than trusted: a map
     // that did not grow by exactly the subtree refuses the append, which costs
     // a rebuild.
+    //
+    // A COUNT catches what the map GAINED, not what it changed: a node already
+    // in it whose band or `k` widened leaves the count alone and the terms low.
+    // That is not a new hole -- the entry bounds cached beside them were
+    // already stale by then, which is why the class contract is an append "and
+    // nothing else" -- and the C ABI cannot reach it, since every non-append
+    // mutation runs through `touch()` or `touch_region()`, both of which forget
+    // the append log, leaving nothing to append and forcing the rebuild
+    // (bindings/c/clay_c.cpp).
     struct LayerPad {
         const Layer* layer;
         CullPadTerms terms;
@@ -207,6 +217,27 @@ class CullPlan {
     std::unordered_map<CullIndex::Key, std::vector<CullIndex::Entry>, CullIndex::KeyHash>
         pruned_;
 };
+
+// The cached-index form of CullIndex::append, and the ONE place the decision
+// between extending in place and copying first is made -- so that the decision
+// itself is testable, which it is not when it lives inside a cache whose handle
+// never leaves the mutex it is taken under (#347).
+//
+// Extends what `slot` holds for `appended`. IN PLACE WHEN NOBODY ELSE IS
+// LOOKING: the copy exists to protect a reader holding the index against a
+// plan it already made, so an ownership count of one means no such reader
+// exists, and the extension can skip an O(document) copy to add one item's
+// bounds. Otherwise `slot` is replaced by an extended COPY and the holder's
+// index is left exactly as it was.
+//
+// Returns false when the append was refused, leaving `slot` -- and every other
+// holder -- untouched, so the caller rebuilds as it would have anyway.
+//
+// THREADING is the caller's: the count is only meaningful while no new handle
+// can be born, which for the C ABI means under the same mutex every handle is
+// taken under (bindings/c/clay_c.cpp, cull_index_locked). A holder dropping its
+// handle concurrently can only make the count read HIGH, which costs a copy.
+bool append_cached(std::shared_ptr<CullIndex>& slot, const std::vector<NodeId>& appended);
 
 }  // namespace scene
 }  // namespace clay

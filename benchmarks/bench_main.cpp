@@ -1113,10 +1113,11 @@ namespace {
 // region the same way the rebuild's document build is, and so is the periodic
 // rebuild of the fixture.
 //
-// `shared` takes the COPY the C ABI falls back to when a reader is holding the
-// index against a plan it already made (clay_document::cull_index_locked); with
-// nobody looking the append extends the cached index in place instead, which is
-// what the other two measure (#347).
+// Through scene::append_cached, which is the decision the C ABI makes
+// (clay_document::cull_index_locked) rather than a copy of it. `shared` holds a
+// second handle across the timed call -- a reader with a plan it already made
+// -- which is what makes append_cached copy; with nobody looking it extends the
+// cached index in place instead, which is what the other two measure (#347).
 void index_append(benchmark::State& state, int nodes, bool shared) {
     scene::Document doc;
     std::shared_ptr<scene::CullIndex> index;
@@ -1148,9 +1149,12 @@ void index_append(benchmark::State& state, int nodes, bool shared) {
         n.prim = scene::Prim::sphere(0.04f);
         n.xform.position = cf3(1.0f, 0.001f * static_cast<float>(since_reset++), 0.0f);
         const scene::NodeId id = doc.layers[0].sdf->insert(std::move(n));
+        // Taken untimed: the handle is what the reader would already be
+        // holding, not work the append does.
+        std::shared_ptr<const scene::CullIndex> reader;
+        if (shared) reader = index;
         state.ResumeTiming();
-        if (shared) index = std::make_shared<scene::CullIndex>(*index);
-        if (!index->append({id})) {
+        if (!scene::append_cached(index, {id})) {
             state.SkipWithError("the append was refused");
             return;
         }
