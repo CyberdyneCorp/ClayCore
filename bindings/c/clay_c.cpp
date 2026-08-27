@@ -7,7 +7,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstring>
-#include <deque>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "clay.h"
+#include "clay_internal.h"
 #include "clay/brush/gate_bake.h"
 #include "clay/brush/lattice_gizmo.h"
 #include "clay/brush/mask_extrude.h"
@@ -1147,17 +1148,58 @@ struct clay_document {
         // moves -- so it is stored once and carried forward untouched.
         std::vector<float> below;
         std::vector<float> below_colors;
+        // This entry's node in resume_order_. Held on the entry so that
+        // dropping it -- eviction, or a region invalidation that reaches it --
+        // is a list erase and not a scan of the order (#346).
+        std::list<ResumeKey>::iterator lru;
     };
 
     // A BYTE budget, not a brick count. With colour a brick carries four times
-    // the floats, so a count would mean two very different ceilings depending
-    // on what the host asked for. 64 MB is 16,384 distance-only bricks of a
-    // dim-8 cache, or 4,096 coloured ones -- a stroke's working set either way.
+    // the floats -- one value plus three channels a sample -- so a count would
+    // mean two very different ceilings depending on what the host asked for.
+    // Measured through clay_document_resume_stats over one visible SDF layer, a
+    // dim-8 entry is 2,048 B distance-only and 8,192 B coloured, so 64 MB is
+    // 32,768 of the first or 8,192 of the second -- a stroke's working set
+    // either way. A layer beneath the active one doubles both: the entry then
+    // carries that half's lattice as well.
     static constexpr std::size_t kResumeBytes = 64u << 20;
 
+    // CAPACITY, not size, and that is the deliberate answer to #346's third
+    // question. `store_active` clears `colors` for a request that carries none,
+    // and a cleared vector keeps its buffer -- so a size-based sum reports
+    // memory the entry still holds as free, and the 64 MB ceiling becomes
+    // optimistic by an amount the host cannot see. Counting capacity makes it a
+    // true bound on what the store has allocated. The alternative,
+    // `shrink_to_fit` on every clear, would free and reallocate one lattice per
+    // brick per dab on the path this whole cache exists to keep cheap.
+    //
+    // Exact because every mutation is bracketed: entry_bytes is subtracted
+    // before the vectors are touched and added back after, so the number taken
+    // out is always the one that was put in.
     static std::size_t entry_bytes(const ResumeEntry& e) {
-        return (e.values.size() + e.colors.size() + e.below.size() + e.below_colors.size()) *
+        return (e.values.capacity() + e.colors.capacity() + e.below.capacity() +
+                e.below_colors.capacity()) *
                sizeof(float);
+    }
+
+    // Move an entry to the most-recently-used end. O(1), and it neither
+    // invalidates `e.lru` nor the pointers a caller may be holding into the
+    // entry's vectors -- splice relinks a node, it does not move one.
+    void touch_lru(ResumeEntry& e) const {
+        resume_order_.splice(resume_order_.end(), resume_order_, e.lru);
+    }
+
+    // Down to the budget, oldest USE first. Never the most recently used entry:
+    // a budget smaller than one brick would otherwise evict what the caller
+    // just stored, which is the brick the next dab is about to read.
+    void evict_locked() const {
+        while (resume_bytes_ > resume_budget_ && resume_order_.size() > 1) {
+            auto old = resume_.find(resume_order_.front());
+            resume_order_.pop_front();
+            if (old == resume_.end()) continue;  // the invariant says unreachable
+            resume_bytes_ -= entry_bytes(old->second);
+            resume_.erase(old);
+        }
     }
 
     void forget_resume() const {
@@ -1314,6 +1356,11 @@ struct clay_document {
         // a formality.
         if (e->pad != pad) return s;
         if (!e->had_acc) return s;
+        // The USE in least-recently-used. A brick answered straight from its
+        // seed -- a refill with no edit in between, or one a region
+        // invalidation could not reach -- is never re-stored, so without this
+        // the only bricks kept young would be the ones that were rebuilt.
+        touch_lru(const_cast<ResumeEntry&>(*e));
         s.values = e->values.data();
         if (want_colour) s.colors = e->colors.data();
         if (want_below) {
@@ -1330,7 +1377,10 @@ struct clay_document {
         auto [it, fresh] = resume_.try_emplace(key);
         ResumeEntry& e = it->second;
         resume_bytes_ -= entry_bytes(e);
-        if (fresh) resume_order_.push_back(key);
+        if (fresh)
+            e.lru = resume_order_.insert(resume_order_.end(), key);
+        else
+            touch_lru(e);
         e.had_acc = false;
         for (std::size_t s = 0; s < per && !e.had_acc; ++s) e.had_acc = values[s] != CLAY_TAPE_FAR;
         e.revision = at;
@@ -1354,20 +1404,7 @@ struct clay_document {
         else
             e.below_colors.clear();
         resume_bytes_ += entry_bytes(e);
-        // Oldest first, and never the brick just written -- a budget smaller
-        // than one brick would otherwise evict what it just stored.
-        while (resume_bytes_ > kResumeBytes && resume_order_.size() > 1) {
-            const ResumeKey oldest = resume_order_.front();
-            resume_order_.pop_front();
-            if (oldest == key) {
-                resume_order_.push_back(oldest);
-                continue;
-            }
-            auto old = resume_.find(oldest);
-            if (old == resume_.end()) continue;
-            resume_bytes_ -= entry_bytes(old->second);
-            resume_.erase(old);
-        }
+        evict_locked();
     }
 
     // The batch's results, kept as the next dab's seeds. `at` 0 means "the
@@ -1397,6 +1434,12 @@ struct clay_document {
         auto it = resume_.find(ResumeKey{request.key[0], request.key[1], request.key[2]});
         if (it == resume_.end()) return;
         ResumeEntry& e = it->second;
+        // The rewrite a dab makes is the strongest statement there is that this
+        // brick is in the working set: it was read this dab and will be read
+        // the next. Leaving the order alone here is what made the policy
+        // anti-LRU -- the bricks rewritten every dab are the ones stored first,
+        // so a first-insertion order evicted precisely them (#346).
+        touch_lru(e);
         resume_bytes_ -= entry_bytes(e);
         e.had_acc = false;
         for (std::size_t s = 0; s < per && !e.had_acc; ++s) e.had_acc = values[s] != CLAY_TAPE_FAR;
@@ -1447,6 +1490,13 @@ struct clay_document {
                 math::Aabb{lo, lo + kernel::cf3(width, width, width)}.dilated(e.band + e.pad);
             if (!changed.empty() && changed.intersects(cull)) {
                 resume_bytes_ -= entry_bytes(e);
+                // The order node goes with the entry. It used to be left
+                // behind: the order then grew without bound (its nodes are not
+                // counted by entry_bytes, so they sat outside the budget
+                // entirely) and a key erased here and stored again later was
+                // inserted a SECOND time, so one brick held several slots and
+                // the order stopped describing the store (#346).
+                resume_order_.erase(e.lru);
                 it = resume_.erase(it);
                 continue;
             }
@@ -1475,10 +1525,33 @@ struct clay_document {
             std::lock_guard<std::mutex> lock(cache_mutex_);
             *entries = resume_.size();
             *bytes = resume_bytes_;
+            *budget = resume_budget_;
         }
-        *budget = kResumeBytes;
         *resumed = resumed_bricks_.load(std::memory_order_relaxed);
         *refilled = refilled_bricks_.load(std::memory_order_relaxed);
+    }
+
+    // -- what only a test asks for (bindings/c/clay_internal.h) -------------
+    //
+    // The eviction order holds one node per entry and no others, which is the
+    // invariant #346 broke. Not in clay_resume_stats because a host has nothing
+    // to do with the number: a store reporting an order size that differs from
+    // its entry count would be describing its own bug, not a state to react to.
+    std::size_t resume_order_size() const {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        return resume_order_.size();
+    }
+
+    // A byte ceiling reachable in a test. 64 MB is 32,768 dim-8 distance-only
+    // bricks (2,048 B each, measured), so proving anything about eviction at the
+    // shipped budget means filling and refilling that many -- which measures the
+    // machine rather than the policy. Lowering it evicts down immediately, so
+    // the store is never left above a budget it has been told to keep -- other
+    // than the one entry evict_locked always keeps.
+    void set_resume_budget(std::size_t bytes) const {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
+        resume_budget_ = bytes;
+        evict_locked();
     }
 
     // The appends that take revision `from` to the current one, or nothing
@@ -1616,8 +1689,14 @@ struct clay_document {
     mutable std::shared_ptr<scene::CullIndex> index_cache_;
     mutable std::uint64_t index_revision_ = 0;
     mutable std::unordered_map<ResumeKey, ResumeEntry, ResumeKeyHash> resume_;
-    mutable std::deque<ResumeKey> resume_order_;  // insertion order, for eviction
+    // The eviction order, least recently USED at the front, one node per live
+    // entry. A list rather than a deque because both of the operations #346
+    // needed are O(1) on it and neither is on a deque: moving a re-used brick
+    // to the back, and removing an invalidated one from the middle. Every entry
+    // holds its own node (ResumeEntry::lru), so neither is a search.
+    mutable std::list<ResumeKey> resume_order_;
     mutable std::size_t resume_bytes_ = 0;
+    mutable std::size_t resume_budget_ = kResumeBytes;
     // Cumulative over the document's life, so a host can see whether its refill
     // loop is actually reaching the fast path. Atomic rather than under
     // cache_mutex_: they are read without it, and a torn count would be worse
@@ -9314,6 +9393,20 @@ clay_result clay_document_resume_stats(const clay_document* doc, clay_resume_sta
     doc->resume_stats(&filled.entries, &filled.bytes, &filled.budget, &filled.resumed_bricks,
                       &filled.refilled_bricks);
     write_desc(out_stats, declared, filled);
+    return CLAY_OK;
+}
+
+// -- bindings/c/clay_internal.h: not the ABI, and not versioned --------------
+
+clay_result clay_internal_resume_order_size(const clay_document* doc, uint64_t* out_entries) {
+    if (!doc || !out_entries) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out");
+    *out_entries = static_cast<std::uint64_t>(doc->resume_order_size());
+    return CLAY_OK;
+}
+
+clay_result clay_internal_set_resume_budget(clay_document* doc, uint64_t bytes) {
+    if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
+    doc->set_resume_budget(static_cast<std::size_t>(bytes));
     return CLAY_OK;
 }
 

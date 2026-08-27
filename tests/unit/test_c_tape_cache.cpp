@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "clay.h"
+#include "clay_internal.h"
 
 // The compiled tape is cached on the document and invalidated by a revision the
 // mutating entry points bump. Under-bumping is the dangerous direction: the
@@ -1283,6 +1284,20 @@ std::vector<clay_brick_request> brick_block(int from, int count) {
             }
     return reqs;
 }
+std::uint64_t resume_order_size(const clay_document* d) {
+    std::uint64_t n = 0;
+    REQUIRE(clay_internal_resume_order_size(d, &n) == CLAY_OK);
+    return n;
+}
+
+// Move an item that already exists. NOT an append, so it lands in
+// touch_region: the seeds it can reach are dropped and the rest are carried
+// forward at the new revision.
+void move_item(Doc& doc, clay_node_id node, float x) {
+    const float pos[3] = {x, 0.0f, 0.0f};
+    const float axis[3] = {0.0f, 0.0f, 1.0f};
+    REQUIRE(clay_layer_set_transform(doc.d, doc.layer, node, pos, axis, 0.0f, 1.0f) == CLAY_OK);
+}
 
 }  // namespace
 
@@ -1442,4 +1457,115 @@ TEST_CASE("resumable refill: a refill racing readers is the refill it would be a
         for (float f : v) near_surface = near_surface || std::fabs(f) < 0.5f;
         CHECK(near_surface);
     }
+}
+TEST_CASE("resumable refill: the eviction order holds one node per seed and no others") {
+    // touch_region erased entries from the store and left their keys in the
+    // eviction order (#346). Nothing observable broke at once, which is why it
+    // stood: the order's nodes are not counted by entry_bytes, so they grew
+    // OUTSIDE the 64 MB budget, and a key erased here and stored again later
+    // was inserted a second time -- one brick in several slots, an order that
+    // no longer described the store it was ordering.
+    //
+    // The invariant is the whole fix: one node per live entry, so the order's
+    // size IS the entry count. A leak shows up as the two diverging, and it
+    // diverges by a whole window per edit, so a handful of edits is plenty.
+    Doc doc;
+    const clay_node_id base = add_sphere(doc, 1.0f, 0.0f);
+    const std::vector<clay_brick_request> row = brick_row(-3, 4);
+
+    for (int i = 1; i <= 6; ++i) {
+        CAPTURE(i);
+        refill(doc.d, row);
+        // A sphere that covers the whole row, so every seed is reached and
+        // dropped -- and re-stored by the next refill.
+        move_item(doc, base, 0.01f * static_cast<float>(i));
+        CHECK(resume_order_size(doc.d) == resume_stats(doc.d).entries);
+    }
+
+    const clay_resume_stats st = resume_stats(doc.d);
+    CHECK(st.entries == 0);  // the last edit reached every one of them
+    CHECK(st.bytes == 0);
+    CHECK(resume_order_size(doc.d) == 0);
+
+    refill(doc.d, row);
+    CHECK(resume_stats(doc.d).entries == row.size());
+    CHECK(resume_order_size(doc.d) == row.size());  // stored once, not once per cycle
+}
+
+TEST_CASE("resumable refill: eviction drops the brick nobody came back to") {
+    // The order used to be FIRST INSERTION: `resume_order_` was appended to
+    // only when try_emplace reported a fresh key, so re-storing a brick did not
+    // move it (#346). That is anti-LRU for a stroke. The hot working set is
+    // stored at the FIRST dab and rewritten by every dab after it, so the
+    // bricks nearest the front of the order are precisely the ones the next dab
+    // is about to ask for, and a store under pressure evicted them while
+    // keeping ground the brush passed over once and left.
+    //
+    // Ordered so that a first-insertion policy and a least-recently-used one
+    // disagree: the hot brick is seeded FIRST and the cold one second.
+    Doc doc;
+    add_sphere(doc, 1.0f, 0.0f);
+    const std::vector<clay_brick_request> hot = brick_row(-3, 1);
+    const std::vector<clay_brick_request> cold = brick_row(-2, 1);
+    const std::vector<clay_brick_request> fresh = brick_row(-1, 1);
+
+    refill(doc.d, hot);
+    refill(doc.d, cold);
+    const clay_resume_stats two = resume_stats(doc.d);
+    REQUIRE(two.entries == 2);
+
+    // Room for exactly the two that are stored, measured rather than assumed --
+    // what one entry costs is an allocator's business. The third store below is
+    // then the one that has to evict.
+    REQUIRE(clay_internal_set_resume_budget(doc.d, two.bytes) == CLAY_OK);
+    CHECK(resume_stats(doc.d).entries == 2);  // lowering to what is held evicts nothing
+
+    // The stroke: three more dabs, each followed by a refill of the hot brick
+    // alone. The cold one is never asked for again.
+    for (int i = 1; i <= 3; ++i) {
+        add_sphere(doc, 0.30f, -1.05f + 0.05f * static_cast<float>(i));
+        const RefillSplit split = refill_counting(doc.d, hot);
+        CHECK(split.resumed == 1);  // it is warm the whole way through
+    }
+
+    // A brick the stroke has just grown into. Storing it puts the store over
+    // budget, so exactly one entry goes.
+    refill(doc.d, fresh);
+    const clay_resume_stats after = resume_stats(doc.d);
+    CHECK(after.entries == 2);
+    CHECK(after.bytes <= after.budget);
+    CHECK(resume_order_size(doc.d) == after.entries);
+
+    // Which one went is the whole question. Read the hot brick FIRST: a miss
+    // would store it, and storing evicts again.
+    const RefillSplit hot_again = refill_counting(doc.d, hot);
+    CHECK(hot_again.resumed == 1);  // kept: rewritten by every dab
+    const RefillSplit cold_again = refill_counting(doc.d, cold);
+    CHECK(cold_again.refilled == 1);  // dropped: stored once and abandoned
+}
+
+TEST_CASE("resumable refill: a budget below one seed still keeps the newest") {
+    // The floor evict_locked places on itself, pinned because the spec now
+    // states it: a budget with room for less than one entry keeps the most
+    // recently used entry anyway, so the store reports bytes ABOVE its budget
+    // rather than emptying itself. Evicting to zero would discard what the
+    // caller had just stored -- the brick the next dab is about to read.
+    //
+    // Only reachable through clay_internal.h; a host cannot move the 64 MB.
+    Doc doc;
+    add_sphere(doc, 1.0f, 0.0f);
+    REQUIRE(clay_internal_set_resume_budget(doc.d, 0) == CLAY_OK);
+
+    const std::vector<clay_brick_request> row = brick_row(-3, 5);
+    refill(doc.d, row);
+
+    const clay_resume_stats st = resume_stats(doc.d);
+    CHECK(st.budget == 0);
+    CHECK(st.entries == 1);
+    CHECK(st.bytes > st.budget);  // the carve-out, not a breach
+    CHECK(resume_order_size(doc.d) == st.entries);
+
+    // And it is the LAST brick stored that survives, not an arbitrary one.
+    const std::vector<clay_brick_request> newest(row.end() - 1, row.end());
+    CHECK(refill_counting(doc.d, newest).resumed == 1);
 }
