@@ -718,6 +718,14 @@ float feather_cull_pad(const SdfContent& content, const Layer& layer) {
     return pad;
 }
 
+// See bounds.h, including why this is not the reach a node's own bound uses.
+float chain_drag_reach(const Node& item) {
+    if (item.blend.profile == BlendProfile::Hard && item.op != Op::Paint &&
+        !op_is_extended(item.op))
+        return 0.0f;
+    return kernel::cmax(item.blend.support(), item.blend.k);
+}
+
 // The pad a SMOOTH-UNION CHAIN needs beyond the caller's band, for the same
 // reason feather_cull_pad exists and by the same mechanism.
 //
@@ -745,7 +753,7 @@ float blend_cull_pad(const SdfContent& content, const Layer& layer) {
     for (const auto& [id, n] : content.nodes()) {
         (void)id;
         if (!n.visible) continue;
-        pad = kernel::cmax(pad, kernel::cmax(n.blend.support(), n.blend.k));
+        pad = kernel::cmax(pad, chain_drag_reach(n));
     }
     return pad;
 }
@@ -762,7 +770,7 @@ float cull_pad(const SdfContent& content, const Layer& layer) {
         if (!n.is_group && item_is_feathered_replace(n))
             feather = kernel::cmax(feather, n.volume->band() * layer.xform.scale * n.xform.scale *
                                                 scale_axes_factor(n.scale_axes));
-        blend = kernel::cmax(blend, kernel::cmax(n.blend.support(), n.blend.k));
+        blend = kernel::cmax(blend, chain_drag_reach(n));
     }
     return feather + blend;
 }

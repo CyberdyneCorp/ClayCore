@@ -369,7 +369,7 @@ scene::Document pole_dense_sphere(int nodes) {
 // than trivially empty.
 namespace {
 
-scene::Document deep_sphere(int nodes) {
+scene::Document deep_sphere(int nodes, float k = 0.03f) {
     scene::Document doc;
     scene::Layer& l = doc.add_sdf_layer("sculpt");
     scene::Node base;
@@ -388,7 +388,7 @@ scene::Document deep_sphere(int nodes) {
         dab.xform.position = cf3(static_cast<float>(std::sin(phi) * std::cos(th)),
                                  static_cast<float>(std::cos(phi)),
                                  static_cast<float>(std::sin(phi) * std::sin(th)));
-        dab.blend = scene::Blend{scene::BlendProfile::Quadratic, 0.03f};
+        dab.blend = scene::Blend{scene::BlendProfile::Quadratic, k};
         l.sdf->insert(dab);
     }
     return doc;
@@ -521,8 +521,8 @@ void deep_doc_cull(benchmark::State& state, int nodes) {
 // revision and one plan per batch, then compiles each brick against the
 // plan's survivor lists. Measuring the unaccelerated path and calling it the
 // cost of a dab overstates it — this is the correction.
-void deep_doc_cull_planned(benchmark::State& state, int nodes) {
-    scene::Document doc = deep_sphere(nodes);
+void deep_doc_cull_planned(benchmark::State& state, int nodes, float k = 0.03f) {
+    scene::Document doc = deep_sphere(nodes, k);
     brick::BrickCache cache = filled_cache(doc);
     std::vector<brick::BrickKey> all = cache.surface_bricks();
     std::vector<brick::BrickKey> dab(all.begin(),
@@ -535,11 +535,17 @@ void deep_doc_cull_planned(benchmark::State& state, int nodes) {
         math::Aabb batch_region;
         for (const brick::BrickKey& key : dab) batch_region.expand(cache.cull_region(key));
         const scene::CullPlan plan = index.plan(batch_region);
+        std::size_t survived = 0;
         for (const brick::BrickKey& key : dab) {
             scene::CullRegion cull{cache.cull_region(key)};
             scene::Tape tape = scene::compile_document(doc, &cull, &index, &plan);
+            survived += tape.instrs.size();
             benchmark::DoNotOptimize(tape.instrs.size());
         }
+        // What the cull actually left, which is the deterministic half of this
+        // measurement: the time is a machine's, the survivor count is the
+        // pad's, and a change to either shows up here first.
+        state.counters["instrs"] = static_cast<double>(survived);
     }
     state.counters["nodes"] = static_cast<double>(nodes);
     state.counters["bricks"] = static_cast<double>(dab.size());
@@ -554,6 +560,25 @@ BENCHMARK(BM_DeepDocCullPlanned2000)->Unit(benchmark::kMillisecond);
 // this build.
 void BM_DeepDocCullPlanned10000(benchmark::State& state) { deep_doc_cull_planned(state, 10000); }
 BENCHMARK(BM_DeepDocCullPlanned10000)->Unit(benchmark::kMillisecond);
+
+// THE SAME CULL AT A SCULPT'S BLEND RADIUS, and the pair is the point (#335).
+//
+// Everything above blends at k = 0.03. #282's chain pad is the largest
+// single-item reach in the layer, which for a quadratic profile is 4k, and it
+// is added to a cull region that is a fixed brick plus band — so the survivor
+// count grows superlinearly in k while every gate here sat at one value of it.
+// The pad's cost was recorded as "20-35% on the DeepDocCull benchmarks" and
+// measured 1.87x on a document that blends at 0.06, which is an ordinary
+// sculpt and is what ClaySpaceDesktop reported as a 1.76x frame-path
+// regression it could not find in any fixture we had.
+//
+// Held as a RATIO against the k = 0.03 row rather than a ceiling: the absolute
+// number is a machine's, the spread between the two blend radii is the pad's,
+// and a change that widens the pad again moves this and nothing else.
+void BM_DeepDocCullPlanned2000K06(benchmark::State& state) {
+    deep_doc_cull_planned(state, 2000, 0.06f);
+}
+BENCHMARK(BM_DeepDocCullPlanned2000K06)->Unit(benchmark::kMillisecond);
 
 void BM_DeepDocCull193(benchmark::State& state) { deep_doc_cull(state, 193); }
 BENCHMARK(BM_DeepDocCull193)->Unit(benchmark::kMillisecond);

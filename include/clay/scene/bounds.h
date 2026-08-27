@@ -79,6 +79,27 @@ bool item_is_feathered_replace(const Node& item);
 // caller built it.
 float feather_cull_pad(const SdfContent& content, const Layer& layer);
 
+// How far this node can drag a CHAIN's running value, which is the quantity the
+// pad below is the maximum of — and NOT the same question as how far the node's
+// own combine reaches, which is `max(support, k)` and stays that way.
+//
+// A HARD profile drags nothing: `ctape_smin_m` hands it back a step, so the
+// running value it produces is `min()` of two operands and moves by no `k` at
+// all. `Paint` and the extended modes still drag — paint's colour fades over
+// `max(support, k)` whatever the profile, and the extended modes ignore the
+// profile by design — so they keep it.
+//
+// A `k` left on a hard node, which is what a UI that keeps its blend slider
+// when the artist picks "hard" writes, therefore used to set the pad for the
+// WHOLE LAYER out of a blend that drags nothing (#335).
+//
+// DO NOT reuse this for a node's own bound. That bound's `max(support, k)`
+// dilation is doing a second job in a mixed chain — margin for the drag its
+// SMOOTH neighbours apply to a running value it contributed to — and taking it
+// away measured 540 -> 10,105 band-clamped disagreements on a 12-node
+// hard/smooth document, against 0 for narrowing the pad alone.
+float chain_drag_reach(const Node& item);
+
 // The pad a smooth-union CHAIN needs beyond the caller's band. An item's own
 // bound covers what ONE blend can move; a chain's running value sits above its
 // final one, so an item can steer it from further out than its own support.

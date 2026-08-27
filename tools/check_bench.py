@@ -351,6 +351,21 @@ MAX_RATIO = [
     # to catch and this reads its healthy value. That is the gate working: it
     # charges for the duplication on the machine that actually pays for it.
     ("BM_TapeCombineAddColored", "BM_TapeCombineAddColoredRef", 1.25),
+    # THE CHAIN PAD, MEASURED WHERE IT BITES (#335). #282 pads a per-brick cull
+    # region by the largest single-item reach in the layer, which is 4k for a
+    # quadratic profile; the region it pads is a fixed brick plus band, so the
+    # survivor count grows superlinearly in k. Every cull row here blended at
+    # k = 0.03, where the pad cost the "20-35%" that change recorded, and the
+    # same pad measured 1.87x on a document blending at 0.06 — an ordinary
+    # sculpt, and the frame-path regression ClaySpaceDesktop reported at 1.76x
+    # against a fixture set that could not show it.
+    #
+    # The same document and the same eight bricks at twice the blend radius, so
+    # the runner cancels and what is left is the pad. 0.298 ms against 0.248 ms
+    # here (1.20x), with the `instrs` counter — the deterministic half — at
+    # 4,590 against 2,802. The ceiling is well above that because the failure
+    # worth catching is the pad widening again, not a few per cent of drift.
+    ("BM_DeepDocCullPlanned2000K06", "BM_DeepDocCullPlanned2000", 2.0),
     # Rebuilding the whole-document tape after an APPEND against compiling it
     # from scratch (#197 phase 1). A sculpt grows a node per brush stamp and a
     # host raycasts to place the next one, so this rebuild is on the
