@@ -245,3 +245,115 @@ TEST_CASE("history budget: the journal is reported but NOT evicted") {
     h.trim_journal(h.journal_next());
     CHECK(h.bytes().journal == 0);
 }
+
+// -- a group is one step across representations (#341) ------------------------
+//
+// begin_group forwarded to UndoStack::begin_group and nothing else, so it
+// grouped SCENE COMMANDS and only those. A voxel, mask or mesh step recorded
+// between the brackets was pushed straight onto the step list and stayed its
+// own undo — which made a crossing (create a voxel layer, rasterize into it)
+// two steps, the first of which removed the layer out from under the fill it
+// contained.
+
+TEST_CASE("history group: a bracket is one step, whatever it spans") {
+    World w;
+    session::History h;
+    h.set_enabled(true);
+
+    h.begin_group();
+    REQUIRE(h.perform(w.doc, add_sphere(w.sdf, 0.5f)));
+    voxel_step(h, w, 0, 8);
+    h.end_group();
+
+    CHECK(h.undo_depth() == 1);  // not 2
+    CHECK(h.bytes().undo_steps == 1);
+    // The fold owns its children, so the cost is theirs — otherwise a budget
+    // would read a collapsed group as an empty Step and never evict it.
+    CHECK(h.bytes().undo > sizeof(session::Step) * 2);
+
+    const std::size_t filled = w.grid.occupied_count();
+    CHECK(filled == 8);
+    const std::size_t nodes = w.doc.layers[0].sdf->roots.size();
+
+    REQUIRE(h.undo(w.doc, w.grid_for(), w.mesh_for()));
+    CHECK(h.undo_depth() == 0);
+    CHECK(w.grid.occupied_count() == 0);                    // the cells went
+    CHECK(w.doc.layers[0].sdf->roots.size() == nodes - 1);  // and so did the sphere
+
+    REQUIRE(h.redo(w.doc, w.grid_for(), w.mesh_for()));
+    CHECK(h.undo_depth() == 1);
+    CHECK(w.grid.occupied_count() == filled);
+    CHECK(w.doc.layers[0].sdf->roots.size() == nodes);
+}
+
+TEST_CASE("history group: a bracket of commands alone is unchanged") {
+    // The fold must not wrap a lone scene entry, or a host that has always
+    // bracketed its command bursts sees a different step shape for no reason.
+    World w;
+    session::History h;
+    h.set_enabled(true);
+
+    h.begin_group();
+    REQUIRE(h.perform(w.doc, add_sphere(w.sdf, 0.5f)));
+    REQUIRE(h.perform(w.doc, add_sphere(w.sdf, 0.25f)));
+    h.end_group();
+
+    CHECK(h.undo_depth() == 1);
+    CHECK(h.step_count() == 1);
+    REQUIRE(h.undo(w.doc, w.grid_for(), w.mesh_for()));
+    CHECK(w.doc.layers[0].sdf->roots.empty());  // both, as one step
+}
+
+TEST_CASE("history group: a barrier inside a bracket is not swallowed") {
+    // A barrier is the horizon a host draws. Folded into a reversible compound
+    // it would offer an undo straight across the thing that says you cannot go
+    // back, so a bracket holding one is left alone.
+    World w;
+    session::History h;
+    h.set_enabled(true);
+
+    h.begin_group();
+    voxel_step(h, w, 0, 4);
+    h.record_barrier("dropped a resolution level");
+    h.end_group();
+
+    CHECK(h.undo_depth() == 0);  // the barrier is on top and stops the count
+    CHECK(h.next_barrier() == "dropped a resolution level");
+    CHECK(h.step_count() == 2);  // still two steps, not one folded one
+    CHECK_FALSE(h.undo(w.doc, w.grid_for(), w.mesh_for()));
+}
+
+TEST_CASE("history group: an empty bracket still records nothing") {
+    World w;
+    session::History h;
+    h.set_enabled(true);
+    h.begin_group();
+    h.end_group();
+    CHECK(h.step_count() == 0);
+    CHECK(h.undo_depth() == 0);
+}
+
+TEST_CASE("history group: a refused child leaves the whole step unapplied") {
+    // Half a compound is exactly the state this exists to remove. The voxel
+    // child names a layer the resolver cannot find, so the step must refuse
+    // and put back the scene child it had already reversed.
+    World w;
+    session::History h;
+    h.set_enabled(true);
+
+    h.begin_group();
+    REQUIRE(h.perform(w.doc, add_sphere(w.sdf, 0.5f)));
+    voxel_step(h, w, 0, 4);
+    h.end_group();
+    const std::size_t nodes = w.doc.layers[0].sdf->roots.size();
+
+    // A resolver that knows no layer at all.
+    session::History::GridFor none = [](scene::LayerId) -> voxel::VoxelGrid* { return nullptr; };
+    CHECK_FALSE(h.undo(w.doc, none, w.mesh_for()));
+    CHECK(h.undo_depth() == 1);                            // still on the stack
+    CHECK(w.doc.layers[0].sdf->roots.size() == nodes);     // and the sphere is back
+    CHECK(w.grid.occupied_count() == 4);                   // nothing moved
+
+    REQUIRE(h.undo(w.doc, w.grid_for(), w.mesh_for()));    // with a real resolver it goes
+    CHECK(h.undo_depth() == 0);
+}

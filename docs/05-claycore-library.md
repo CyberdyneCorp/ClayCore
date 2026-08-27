@@ -326,6 +326,24 @@ vertex displacement is not an edit item.
 **A verb is one step, not one per cell.** A `sculpt_smooth` that touches four
 hundred cells is a single undo. So is a `fill_box`.
 
+**Creating a layer is a step, of any kind.** `clay_add_sdf_layer`,
+`clay_document_add_voxel_layer` and `clay_document_add_mesh_layer` each record
+one command. Through 0.55.0 the voxel one did not, and the seam showed at a
+*crossing* — make a voxel layer, rasterize a starting form into it — because
+the fill recorded and the layer did not, so one undo emptied the new layer and
+left it standing (#341). Undoing a voxel or mesh layer's creation removes the
+layer and **keeps its payload**: an `AddLayerCmd` carries a layer by value and
+could not carry a sculpt, so retaining the cells is what lets a redo restore
+content rather than an empty layer. While the layer is absent the payload is
+not reachable and is not saved.
+
+**A group is one step across representations.** `begin_undo_group` /
+`end_undo_group` bundle every step the bracket produced — edit list, voxel,
+mask, mesh — not just the commands. Through 0.55.0 they bracketed the edit list
+alone, so a bracketed crossing still undid in two, layer first and fill second.
+A bracket that produced one step is unchanged, and an operation nothing records
+stays its own step rather than being folded in.
+
 **An edit that changed nothing is not a step.** A dab that misses every cell, a
 flatten meeting a flat region, erasing an already-empty cell — all ordinary
 here, and none of them produce an undo that does nothing. `undo_depth` counts
@@ -351,6 +369,8 @@ What genuinely is not:
   none, so they are not steps yet.
 - **Operations that destroy history itself** — dropping a resolution level,
   removing a sculpt layer.
+- **Creating a mask.** Mask *edits* record; the mask's existence does not. It is
+  the same shape of gap that layer creation had until #341 closed it.
 - Anything a **host** does that the engine never sees.
 
 A host that needs a boundary can read it: the history records unreversible
@@ -373,6 +393,9 @@ guessing:
   node — 440 bytes plus its deformer chain and stroke points — while *adding*
   one records an id. A session of deletes and a session of adds cost very
   differently.
+- An **undone layer creation** still costs what its payload costs. The cells are
+  retained for the redo, so they are counted document-wide until the creation is
+  redone or the document is saved.
 - A voxel or mask step is proportional to the cells it **changed**, so one big
   fill can outweigh a thousand dabs.
 - A mesh step holds its deltas **by value**, which is what makes it

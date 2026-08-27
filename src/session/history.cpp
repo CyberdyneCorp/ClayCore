@@ -54,6 +54,10 @@ bool History::perform(scene::Document& doc, const scene::Command& cmd) {
 // truth and the step list learns what it missed. A group that stayed empty is
 // popped by end_group, so it correctly yields no step.
 void History::begin_group() {
+    // Where the bracket starts, so end_group can fold what it produced into
+    // one step. Taken before grouping_ is set, and eviction is held off while
+    // a bracket is open (see enforce_budget), so this index stays valid.
+    group_start_ = steps_.size();
     grouping_ = true;
     if (enabled_) {
         JournalEvent e;
@@ -72,6 +76,50 @@ void History::end_group() {
         journal_.push_back(std::move(e));
     }
     sync_scene_steps();
+    // Last, because sync_scene_steps is what appends the group's Scene entry
+    // and the fold has to see it.
+    collapse_group();
+}
+
+// One bracket, one step — across every representation, which is what the
+// bracket has always claimed and never did. Everything the group produced sits
+// in steps_ at or after group_start_ by the time this runs.
+void History::collapse_group() {
+    if (!enabled_) return;
+    if (group_start_ > steps_.size()) group_start_ = steps_.size();  // defensive
+    const std::size_t n = steps_.size() - group_start_;
+    // Nothing to fold. One step is already one step, and folding it would put
+    // a Compound wrapper around a lone Scene entry for no gain — a group of
+    // commands alone must keep behaving exactly as it did.
+    if (n < 2) return;
+    // A barrier is the horizon a host draws and must stay its own step: folded
+    // into a reversible Compound it would offer an undo straight across the
+    // thing that says you cannot go back. A bracket holding one is left alone.
+    for (std::size_t i = group_start_; i < steps_.size(); ++i)
+        if (!steps_[i].reversible()) return;
+
+    Step compound;
+    compound.kind = Step::Kind::Compound;
+    compound.children.reserve(n);
+    // The Scene child first — see Step::children. There is at most one.
+    for (std::size_t i = group_start_; i < steps_.size(); ++i)
+        if (steps_[i].kind == Step::Kind::Scene) compound.children.push_back(std::move(steps_[i]));
+    for (std::size_t i = group_start_; i < steps_.size(); ++i)
+        if (steps_[i].kind != Step::Kind::Scene) compound.children.push_back(std::move(steps_[i]));
+
+    steps_.erase(steps_.begin() + static_cast<std::ptrdiff_t>(group_start_), steps_.end());
+    steps_.push_back(std::move(compound));
+    // The fold changed what the list costs; the budget was held off while the
+    // bracket was open and applies again now.
+    enforce_budget();
+}
+
+std::size_t History::scene_steps_in(const Step& s) {
+    if (s.kind == Step::Kind::Scene) return 1;
+    if (s.kind != Step::Kind::Compound) return 0;
+    std::size_t n = 0;
+    for (const Step& c : s.children) n += scene_steps_in(c);
+    return n;
 }
 
 // Reconcile after an engine call that performed commands through commands().
@@ -81,9 +129,10 @@ void History::sync_scene_steps() {
     // An OPEN group already occupies an entry on the stack and is not a step
     // until it closes. Reconciling here would record it early.
     if (grouping_) return;
+    // Recursive, because a collapsed group still names one entry on the
+    // wrapped stack while no longer being a Scene step at the top level.
     std::size_t counted = 0;
-    for (const Step& s : steps_)
-        if (s.kind == Step::Kind::Scene) ++counted;
+    for (const Step& s : steps_) counted += scene_steps_in(s);
     const std::size_t actual = commands_.undo_depth();
     for (; counted < actual; ++counted) {
         Step step;
@@ -95,6 +144,10 @@ void History::sync_scene_steps() {
     // Removing the newest is correct because coalescing merges backwards.
     for (; counted > actual; --counted) {
         for (std::size_t i = steps_.size(); i > 0; --i) {
+            // Top-level Scene steps only. A coalesce can never target a CLOSED
+            // group — this function returns early while one is open, so by the
+            // time a Compound exists its entry is settled — and reaching into
+            // one would take a child out of a step the host sees as atomic.
             if (steps_[i - 1].kind == Step::Kind::Scene) {
                 steps_.erase(steps_.begin() + static_cast<std::ptrdiff_t>(i - 1));
                 break;
@@ -274,6 +327,25 @@ bool History::apply_step(const Step& step, bool forward, scene::Document& doc,
                 voxel::GroupField::deserialize(want.data(), want.size());
             if (!restored) return false;
             *groups = std::move(*restored);
+            return true;
+        }
+        case Step::Kind::Compound: {
+            // Backwards undoing, forwards redoing. A child that REFUSES leaves
+            // the whole step unapplied — the ones already moved are put back —
+            // because half a compound is precisely the state this exists to
+            // remove. Restoring cannot itself fail: it re-applies a direction
+            // that just succeeded, on a document nothing else has touched.
+            const std::size_t n = step.children.size();
+            for (std::size_t k = 0; k < n; ++k) {
+                const Step& child = forward ? step.children[k] : step.children[n - 1 - k];
+                if (apply_step(child, forward, doc, grid_for, mesh_for, out_bound, mask_for))
+                    continue;
+                for (std::size_t j = k; j-- > 0;) {
+                    const Step& done = forward ? step.children[j] : step.children[n - 1 - j];
+                    apply_step(done, !forward, doc, grid_for, mesh_for, nullptr, mask_for);
+                }
+                return false;
+            }
             return true;
         }
         case Step::Kind::Barrier:
@@ -705,6 +777,11 @@ std::size_t History::step_bytes(const Step& s) {
     // the term that matters for it rather than a rounding error — the same
     // omission roll-up-document-memory found six of in node_bytes.
     n += s.group_before.capacity() + s.group_after.capacity();
+    // A Compound owns its children outright, so its cost is theirs. Without
+    // this a folded group would report the cost of an empty Step and a budget
+    // would never evict it.
+    n += s.children.capacity() * sizeof(Step);
+    for (const Step& c : s.children) n += step_bytes(c);
     return n;
 }
 
@@ -743,6 +820,11 @@ void History::set_budget(std::size_t bytes) {
 
 void History::enforce_budget() {
     if (budget_ == 0) return;  // unbounded: exactly today's behaviour
+    // Not while a bracket is open: evicting from the oldest end would shift
+    // group_start_ out from under it and the fold would take the wrong steps.
+    // The budget applies again the moment the group closes, which collapse_group
+    // does explicitly.
+    if (grouping_) return;
     // Redo goes first. It is transient — the next edit discards it anyway — so
     // spending the budget on it before the undo the user can actually reach
     // would be the wrong trade.
@@ -787,6 +869,11 @@ void History::clear() {
     mask_open_ = false;
     open_layer_ = 0;
     open_mask_layer_ = 0;
+    // An open bracket does not survive a clear: leaving grouping_ set would
+    // hold off the budget forever and leave group_start_ naming a step list
+    // that no longer exists.
+    grouping_ = false;
+    group_start_ = 0;
 }
 
 }  // namespace session

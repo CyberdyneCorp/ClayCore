@@ -6127,13 +6127,36 @@ clay_result clay_document_add_voxel_layer(clay_document* doc, const char* name, 
                                           clay_layer_id* out_layer, clay_voxel_grid** out_grid) {
     if (!doc || !name) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or name");
     if (!(voxel_size > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "voxel_size must be > 0");
-    scene::Layer& layer = doc->doc.document.add_sdf_layer(name);
-    doc->touch();
+    // Through the command vocabulary (AddLayerCmd with a reserved id), exactly
+    // as clay_add_sdf_layer and clay_document_add_mesh_layer do, so an enabled
+    // undo stack records the creation.
+    //
+    // This was the ONE reachable layer creation the history never saw (#341).
+    // It mattered most at a crossing — make a voxel layer, rasterize a starting
+    // form into it — because the rasterize DOES record: the fill was one step
+    // and the layer was none, so a single undo emptied the new layer and left
+    // it standing, which is not the half of a conversion anyone asked to take
+    // back. A voxel layer carries no SDF content.
+    scene::Layer layer;
+    layer.id = doc->doc.document.reserve_layer_id();
+    layer.name = name;
     layer.kind = scene::LayerKind::Voxel;
-    layer.sdf.reset();  // a voxel layer carries no SDF content
-    doc->doc.voxel_layers.emplace(layer.id, voxel::VoxelGrid(voxel_size));
-    if (out_layer) *out_layer = layer.id;
-    if (out_grid) *out_grid = borrow_layer(doc, layer.id);
+    const clay_layer_id id = layer.id;
+    clay_result r = apply_edit(doc, scene::Command{scene::AddLayerCmd{std::move(layer), -1}},
+                               "the voxel layer could not be added");
+    if (r != CLAY_OK) return r;
+    // Beside the document, keyed by layer id, as the mesh path does: undoing
+    // the creation removes the LAYER and leaves this entry, which is what lets
+    // a redo pick the cells back up. AddLayerCmd carries a scene::Layer by
+    // value and could not carry a grid. save_clayspace is what keeps an
+    // orphan from reaching a file — see is_voxel_layer there.
+    //
+    // insert_or_assign rather than emplace: a loaded document can carry a grid
+    // for a layer it no longer has, and emplace would keep that dead sculpt
+    // and hand it to the next layer that takes the id.
+    doc->doc.voxel_layers.insert_or_assign(id, voxel::VoxelGrid(voxel_size));
+    if (out_layer) *out_layer = id;
+    if (out_grid) *out_grid = borrow_layer(doc, id);
     return CLAY_OK;
 }
 

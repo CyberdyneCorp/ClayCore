@@ -6908,3 +6908,59 @@ def test_a_bad_per_axis_scale_is_refused():
         clay.Sphere(r=1.0, scale=(1.0, 1.0))
     with pytest.raises(ValueError):
         clay.Sphere(r=1.0, scale=0.0)
+
+
+# -- a crossing, and the layer it creates (#341) ------------------------------
+#
+# add_sdf_layer and add_mesh_layer both applied AddLayerCmd; add_voxel_layer
+# inserted into the document directly, so "no reachable edit escapes undo" was
+# false wherever a host converted into a new voxel layer. The seam showed at a
+# crossing, where the FILL recorded and the layer did not: one undo emptied the
+# new layer and left it standing.
+
+
+def test_creating_a_voxel_layer_is_undoable():
+    doc = clay.Document()
+    doc.add_sdf_layer("body")
+    doc.enable_undo()
+
+    grid = doc.add_voxel_layer("blocks", voxel_size=0.05)
+    assert doc.undo_depth == 1
+    assert doc.voxel_layer("blocks") is not None
+
+    assert doc.undo() is True
+    assert doc.voxel_layer("blocks") is None  # gone, not merely hidden
+    assert doc.undo_depth == 0
+
+    assert doc.redo() is True
+    assert doc.voxel_layer("blocks") is not None
+    assert grid.voxel_size == pytest.approx(0.05)
+
+
+def test_a_bracketed_crossing_is_one_undo_step():
+    # Both halves have to hold at once: the creation must record, AND the
+    # bracket must span step kinds. With only the first, the crossing is two
+    # steps whose first undo removes the layer out from under the fill.
+    doc = clay.Document()
+    layer = doc.add_sdf_layer("body")
+    layer.add(clay.Sphere(r=0.5))
+    doc.enable_undo()
+    before = doc.undo_depth
+
+    doc.begin_undo_group()
+    grid = doc.add_voxel_layer("blocks", voxel_size=0.05)
+    grid.rasterize(doc, ((-1, -1, -1), (1, 1, 1)))
+    doc.end_undo_group()
+
+    filled = grid.occupied_count
+    assert filled > 0  # the crossing really converted something
+    assert doc.undo_depth == before + 1  # ONE step, not two
+
+    assert doc.undo() is True
+    assert doc.voxel_layer("blocks") is None  # the layer went with the fill
+    assert doc.undo_depth == before
+
+    assert doc.redo() is True
+    back = doc.voxel_layer("blocks")
+    assert back is not None
+    assert back.occupied_count == filled  # and the cells came back with it
