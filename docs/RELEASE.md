@@ -1285,6 +1285,32 @@ the floor is right that a difference that small is not a difference.
 Making them gate means more work per pass, which changes the workload for every
 gallery session and is a decision of its own.
 
+**MEASURED IS NOT PROTECTED**, and the coverage check now says which is which.
+`check_device_bench` requires a regression to be over the tolerance AND over
+`NOISE_FLOOR_MS` (0.05 ms), so a case gates only above
+`NOISE_FLOOR_MS / (tolerance - 1)` = **0.125 ms**. Below that the floor binds
+long before the tolerance does, and the row records a number it can never
+object to:
+
+```
+coverage: 61 verb(s) measured, 9 exempt, 62 case(s) in the run
+  of the 61 measured: 22 GATED, 39 REPORTED ONLY — too small for the 0.05 ms
+  floor, so a regression in them cannot fail this check
+  reported only: cut_polygon_from_open_curve (trim_curve) 0.0001 ms — needs 401x
+  reported only: cut_create (cut_create) 0.0002 ms — needs 300x
+```
+
+**It is not a gallery problem**: most of the reported-only verbs are
+`devicemeasure` cases, and the worst measure sub-microsecond operations that
+would need a three-hundredfold regression to be noticed (issue #337). The line
+that mattered most is `sdf_stamp_incremental` at 0.0765 ms, needing 1.65x — the
+incremental brick path, just under the line.
+
+This changes the REPORT and no verdict: `coverage: OK` still means every verb is
+named and every named case ran. What it stops doing is implying a guarantee the
+tool does not provide. Making those verbs gateable means giving them more work
+per case, which is per-case and needs re-baselining.
+
 ## Tagging
 
 ```sh
