@@ -2861,6 +2861,232 @@ clay_result import_limits(const clay_import_budget* budget, io::ImportBudget* ou
     return CLAY_OK;
 }
 
+// The hard union a whole-document compile emits between visible SDF layers,
+// applied sample by sample to the two halves a resumable refill holds apart.
+// Through the kernel's own combine rather than a min written out here: the two
+// have to agree bit for bit, and one of them is the definition.
+void fold_layers_below(const float* below_d, const float* below_rgb, const float* active_d,
+                       const float* active_rgb, std::size_t per, float* out_d, float* out_rgb) {
+    for (std::size_t s = 0; s < per; ++s) {
+        kernel::CTapeValue a;
+        a.d = below_d[s];
+        a.color = below_rgb
+                      ? kernel::cf3(below_rgb[s * 3], below_rgb[s * 3 + 1], below_rgb[s * 3 + 2])
+                      : kernel::cf3(0.0f, 0.0f, 0.0f);
+        kernel::CTapeValue c;
+        c.d = active_d[s];
+        c.color = active_rgb
+                      ? kernel::cf3(active_rgb[s * 3], active_rgb[s * 3 + 1], active_rgb[s * 3 + 2])
+                      : kernel::cf3(0.0f, 0.0f, 0.0f);
+        const kernel::CTapeValue r = kernel::ctape_combine_values(
+            a, c, static_cast<CLAY_UINT_T>(scene::Op::Add), 0, 0.0f, 0.0f);
+        out_d[s] = r.d;
+        if (out_rgb) {
+            out_rgb[s * 3] = r.color.x;
+            out_rgb[s * 3 + 1] = r.color.y;
+            out_rgb[s * 3 + 2] = r.color.z;
+        }
+    }
+}
+
+// What one batch's resumed bricks share, carried across the per-brick calls so
+// each is paid once rather than per brick.
+//
+// The cull index is the reason it exists: obtaining it deep-copies the cached
+// one on an append, and a batch with nothing to resume should not pay for that
+// on its way to the full path — so it is fetched by the first brick that turns
+// out to have a seed and not before. The plans are one per DISTINCT stored
+// revision, which a moving window holds one or two of; the vectors are scratch
+// the per-brick walk would otherwise reallocate.
+struct ResumeScratch {
+    std::unordered_map<std::uint64_t, clay_document::ResumePlan> plans;
+    std::shared_ptr<const scene::CullIndex> index;
+    float pad = 0.0f;
+    std::vector<float> points;
+    std::vector<float> active, active_rgb;
+};
+
+// One brick's resumed field into `vd`/`vc`, or false when that brick cannot be
+// served and has to take the full walk. Caller holds `doc->cache_lock()`.
+//
+// Written once and driven by BOTH refill entry points. The host-memory form
+// hands it the caller's own buffer and the device-destination form hands it
+// scratch it then writes across the device boundary (#345); which memory the
+// answer lands in is the only difference between them, and the arithmetic that
+// decides the answer is the same question either way. Keeping two copies of it
+// is how the two would drift into computing different fields.
+bool resume_one_brick(const clay_document* doc, const clay_brick_request& request,
+                      std::size_t per, bool want_colour, bool has_below, std::uint64_t now,
+                      ResumeScratch* s, float* vd, float* vc) {
+    const std::uint64_t rev = doc->seed_revision_for(request, per, want_colour, has_below);
+    if (rev == 0) return false;
+    if (!s->index) {
+        s->index = doc->cull_index_locked();
+        s->pad = s->index->cull_pad();
+    }
+    const clay_document::Seed seed = doc->seed_for(request, per, s->pad, want_colour, has_below);
+    if (!seed.values) return false;
+
+    // A seed already AT the current revision is the answer: its brick's culled
+    // tape has not changed since it was computed, so there is nothing to fold
+    // into it. That is what a region-limited invalidation leaves behind -- an
+    // edit the brick cannot reach advances the seed rather than dropping it --
+    // and it is also the plain case of a refill asked for twice without an edit
+    // in between.
+    //
+    // The union still applies: what is stored is the ACTIVE layer's value, and
+    // the layers beneath are their own half.
+    if (rev == now) {
+        if (has_below) {
+            fold_layers_below(seed.below, seed.below_colors, seed.values, seed.colors, per, vd,
+                              vc);
+        } else {
+            std::memcpy(vd, seed.values, per * sizeof(float));
+            if (vc) std::memcpy(vc, seed.colors, per * 3 * sizeof(float));
+        }
+        return true;
+    }
+
+    auto pit = s->plans.find(rev);
+    if (pit == s->plans.end()) pit = s->plans.emplace(rev, doc->plan_resume(rev)).first;
+    const clay_document::ResumePlan& plan = pit->second;
+    if (!plan.usable) return false;
+
+    eval::GridQuery g;
+    std::size_t samples = 0;
+    if (read_grid(request.origin, request.spacing, request.dims, &g, &samples) != CLAY_OK)
+        return false;
+    const math::Aabb box = request_brick_box(request).dilated(request.band);
+    scene::CullRegion cull{box};
+    scene::Tape suffix;
+    if (!scene::compile_layer_suffix(plan.checkpoint, doc->doc.document, plan.appended, &suffix,
+                                     nullptr, &cull, s->index.get()))
+        return false;
+    s->points.resize(samples * 3);
+    std::size_t at = 0;
+    for (int k = 0; k < g.nz; ++k)
+        for (int j = 0; j < g.ny; ++j)
+            for (int x = 0; x < g.nx; ++x) {
+                const kernel::cfloat3 pt =
+                    g.origin + kernel::cf3(static_cast<float>(x) * g.spacing,
+                                           static_cast<float>(j) * g.spacing,
+                                           static_cast<float>(k) * g.spacing);
+                s->points[at * 3] = pt.x;
+                s->points[at * 3 + 1] = pt.y;
+                s->points[at * 3 + 2] = pt.z;
+                ++at;
+            }
+    eval::PointQuery pq;
+    pq.points_xyz = s->points.data();
+    pq.count = samples;
+    eval::PointResults pr;
+    // Into scratch when there is a union still to apply, straight out when
+    // there is not.
+    if (has_below) {
+        s->active.resize(per);
+        if (want_colour) s->active_rgb.resize(per * 3);
+    }
+    pr.distances = has_below ? s->active.data() : vd;
+    if (want_colour) pr.colors_rgb = has_below ? s->active_rgb.data() : vc;
+    eval::eval_points_seeded(suffix, pq, seed.values, seed.colors, pr);
+    if (has_below) {
+        fold_layers_below(seed.below, seed.below_colors, s->active.data(),
+                          want_colour ? s->active_rgb.data() : nullptr, per, vd, vc);
+        // The seed for the NEXT dab is the ACTIVE layer's value, not what was
+        // just written out.
+        doc->store_active(request, plan.now, s->pad, s->active.data(),
+                          want_colour ? s->active_rgb.data() : nullptr, per);
+    } else {
+        doc->store_active(request, plan.now, s->pad, vd, vc, per);
+    }
+    return true;
+}
+
+// A batched device evaluation's outcome in the ABI's words. Its own function
+// because a batch split into runs reports it from more than one place, and a
+// switch written out at each of them is a switch that can disagree with itself.
+clay_result device_batch_status(eval::Status s) {
+    switch (s) {
+        case eval::Status::Ok: return CLAY_OK;
+        case eval::Status::Unsupported:
+            return fail(CLAY_ERROR_UNSUPPORTED,
+                        "this backend does not evaluate into a caller's device buffer");
+        case eval::Status::InvalidInput:
+            return fail(CLAY_ERROR_INVALID_ARGUMENT, "a brick's device slot is invalid");
+        default: return fail(CLAY_ERROR_BACKEND, "device evaluation failed");
+    }
+}
+
+// The slice of a caller's allocation holding `n` bricks from brick `at`, at the
+// fixed per-brick stride the device refill documents.
+eval::DeviceBuffer brick_slot(const eval::DeviceBuffer& whole, std::size_t at, std::size_t n,
+                              std::size_t stride) {
+    eval::DeviceBuffer s = whole;
+    s.offset = whole.offset + static_cast<std::uint64_t>(at) * stride * sizeof(float);
+    s.size = static_cast<std::uint64_t>(n) * stride * sizeof(float);
+    return s;
+}
+
+// Answers whichever of `requests` carry a usable seed into `host_values` /
+// `host_colors` and marks them in `resumed`, returning how many. `keep_seeds`
+// comes back false when a seed may not be KEPT for the bricks this did NOT
+// answer -- a stronger question than whether one may be used, and the only
+// reason this needs to say anything beyond the count.
+//
+// With more than one visible SDF layer a seed is two values -- the active
+// layer's and the hard union of everything beneath it -- and the device refill
+// evaluates the document whole, so what it could store is neither half. It
+// stores nothing rather than something mislabelled: the shape gate in
+// `shaped_entry` would refuse such an entry to a multi-layer reader, but a
+// document that later loses a layer would find it acceptable and wrong. The
+// host-memory refill keeps the two halves apart and resumes multi-layer
+// documents fine; the device one leaves them to the full walk.
+std::size_t resume_batch_into_host(const clay_document* doc,
+                                   const clay_brick_request* requests, std::size_t count,
+                                   std::size_t per, bool want_colour,
+                                   std::vector<std::uint8_t>* resumed,
+                                   std::vector<float>* host_values,
+                                   std::vector<float>* host_colors, bool* keep_seeds) {
+    std::lock_guard<std::mutex> lock(doc->cache_lock());
+    *keep_seeds = !doc->plan_resume(1).has_below;  // probed for has_below only
+    if (!*keep_seeds) return 0;
+    const std::uint64_t now = doc->current_revision();
+    ResumeScratch scratch;
+    host_values->resize(count * per);
+    if (want_colour) host_colors->resize(count * per * 3);
+    std::size_t answered = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (!resume_one_brick(doc, requests[i], per, want_colour, false, now, &scratch,
+                              host_values->data() + i * per,
+                              want_colour ? host_colors->data() + i * per * 3 : nullptr))
+            continue;
+        (*resumed)[i] = 1;
+        ++answered;
+    }
+    return answered;
+}
+
+// Calls `run(first, n)` once per maximal run of consecutive bricks whose mark
+// is `want`. Both refill destinations address a brick by a FIXED slot, so a run
+// of bricks is a run of bytes and a run is the unit that can be handed to a
+// batched evaluation or a single buffer write.
+template <typename Run>
+clay_result for_each_run(const std::vector<std::uint8_t>& mark, bool want, Run&& run) {
+    const std::size_t count = mark.size();
+    for (std::size_t i = 0; i < count;) {
+        if ((mark[i] != 0) != want) {
+            ++i;
+            continue;
+        }
+        std::size_t end = i;
+        while (end < count && (mark[end] != 0) == want) ++end;
+        const clay_result r = run(i, end - i);
+        if (r != CLAY_OK) return r;
+        i = end;
+    }
+    return CLAY_OK;
+}
+
 }  // namespace
 
 extern "C" {
@@ -8892,8 +9118,81 @@ clay_result clay_brick_cache_eval_requests_device(const clay_document* doc, clay
                     "the device colour buffer is too small for " + std::to_string(count) +
                         " bricks");
 
-    // The same batch pipeline the host-memory form runs — validation up
-    // front, one cull index and coarse plan, per-brick culled tapes in
+    // -- the resumable path on a device destination (#345) ------------------
+    //
+    // The host-memory refill has kept each brick's float32 result as a seed
+    // since #306, so a dab costs what the dab adds rather than what the sculpt
+    // holds. This entry point is the one a RENDERER uses — clay_device_adopt
+    // exists so evaluation lands in the caller's own GPU buffer — and it had
+    // none of that: every dab walked the whole surviving edit list over every
+    // sample, which is what the host path did before #306.
+    //
+    // The seed is host-resident float32 and the answer here is not, so the two
+    // halves are joined by the backend's buffer write and read:
+    //
+    //   * a brick that CAN be resumed is answered on the host, exactly as the
+    //     host-memory form answers it — same suffix, same arithmetic, the same
+    //     `resume_one_brick` — and the finished lattice is written into its
+    //     fixed slot in the caller's allocation;
+    //   * a brick that cannot is evaluated on the DEVICE into that same slot,
+    //     as the whole batch was before, and read back so it becomes the next
+    //     dab's seed.
+    //
+    // So a resumed brick here is a CPU suffix continued from a GPU prefix, and
+    // it is held to the parity suite's backend standard rather than to bit
+    // identity -- which is the standard the device path was already held to,
+    // since the prefix is the same GPU walk either way. The host-memory refill
+    // named with a GPU backend has done exactly this since #306.
+    //
+    // MEASURED before it was chosen (openspec/changes/resume-the-device-refill).
+    // The other shape the issue names — seeds resident on the device, so the
+    // suffix evaluates there and nothing crosses — cannot win on the windows a
+    // sculpt actually submits: a device seeded kernel still has to DISPATCH,
+    // and on an RTX 5060 one dispatch of the emptiest possible tape costs 23 us
+    // a brick, where the whole host-side resumed refill of 12 bricks — the
+    // per-brick suffix compile a device path would also have to pay included —
+    // is 18 us at 200 items and 155 us at 20,000. The copy it would save is
+    // 24 KiB, under a microsecond. Residency would only start to pay on a
+    // window of hundreds of resumable bricks, and a window that large is one a
+    // stroke has not covered before, so its bricks have no seed to be resident.
+    //
+    // A backend with no buffer write and read says so through
+    // `caps().device_copy`, and the whole batch takes the full walk it took
+    // before — correct, silent, and exactly as fast as it always was.
+    const bool want_colour = !colors.empty();
+    std::vector<std::uint8_t> resumed(count, 0);
+    std::size_t resumed_count = 0;
+    std::vector<float> host_values, host_colors;
+    // Whether a seed may be KEPT for the bricks the resume does not answer,
+    // which `resume_batch_into_host` decides and explains.
+    bool keep_seeds = false;
+    if (device->backend->caps().device_copy)
+        resumed_count = resume_batch_into_host(doc, requests, count, per, want_colour, &resumed,
+                                               &host_values, &host_colors, &keep_seeds);
+    doc->note_refill(resumed_count, count - resumed_count);
+
+    // The resumed answers into their slots, one write per CONTIGUOUS run rather
+    // than one per brick: the slots are a fixed stride, so consecutive bricks
+    // are consecutive bytes and a moving window is one or two writes.
+    const clay_result written = for_each_run(resumed, true, [&](std::size_t at, std::size_t n) {
+        if (device->backend->write_device_buffer(brick_slot(values, at, n, per),
+                                                 host_values.data() + at * per,
+                                                 static_cast<std::uint64_t>(n) * per *
+                                                     sizeof(float)) != eval::Status::Ok)
+            return fail(CLAY_ERROR_BACKEND, "writing a resumed brick to the device failed");
+        if (!want_colour) return CLAY_OK;
+        if (device->backend->write_device_buffer(brick_slot(colors, at, n, per * 3),
+                                                 host_colors.data() + at * per * 3,
+                                                 static_cast<std::uint64_t>(n) * per * 3 *
+                                                     sizeof(float)) != eval::Status::Ok)
+            return fail(CLAY_ERROR_BACKEND, "writing a resumed brick's colours failed");
+        return CLAY_OK;
+    });
+    if (written != CLAY_OK) return written;
+    if (resumed_count == count) return CLAY_OK;
+
+    // The rest take the batch pipeline the host-memory form runs — validation
+    // up front, one cull index and coarse plan, per-brick culled tapes in
     // chunks — with the whole chunk reaching the adopted backend as ONE
     // batched device evaluation (issue #64 applied to the zero-copy path:
     // the per-brick loop paid a command buffer and a wait per 8^3 lattice,
@@ -8901,30 +9200,38 @@ clay_result clay_brick_cache_eval_requests_device(const clay_document* doc, clay
     // lands at its requests' fixed slots in the caller's single allocation,
     // so brick i still occupies out_values[i * dim^3 ...] exactly as
     // documented, and the values are identical to the host-memory form's.
-    return eval_requests_in_chunks(
-        doc, requests, count,
-        [&](const eval::GridBatchQuery& bq, std::size_t base) -> clay_result {
-            eval::DeviceBuffer slot = values;
-            slot.offset = values.offset + static_cast<std::uint64_t>(base) * per * sizeof(float);
-            slot.size = static_cast<std::uint64_t>(bq.count) * per * sizeof(float);
-            eval::DeviceBuffer color_slot;
-            if (!colors.empty()) {
-                color_slot = colors;
-                color_slot.offset =
-                    colors.offset + static_cast<std::uint64_t>(base) * per * 3 * sizeof(float);
-                color_slot.size = static_cast<std::uint64_t>(bq.count) * per * 3 * sizeof(float);
-            }
-            switch (device->backend->eval_grid_batch_device(bq, slot, color_slot)) {
-                case eval::Status::Ok: return CLAY_OK;
-                case eval::Status::Unsupported:
-                    return fail(CLAY_ERROR_UNSUPPORTED,
-                                "this backend does not evaluate into a caller's device buffer");
-                case eval::Status::InvalidInput:
-                    return fail(CLAY_ERROR_INVALID_ARGUMENT,
-                                "a brick's device slot is invalid");
-                default: return fail(CLAY_ERROR_BACKEND, "device evaluation failed");
-            }
-        });
+    //
+    // Per RUN of un-resumed bricks rather than over the whole batch, because a
+    // batched device evaluation writes its grids consecutively: a run of bricks
+    // is the largest thing that can land at the slots it belongs in. A batch
+    // with nothing resumed is one run and is exactly the call this made before.
+    return for_each_run(resumed, false, [&](std::size_t at, std::size_t n) {
+        const clay_result walked = eval_requests_in_chunks(
+            doc, requests + at, n,
+            [&](const eval::GridBatchQuery& bq, std::size_t base) -> clay_result {
+                return device_batch_status(device->backend->eval_grid_batch_device(
+                    bq, brick_slot(values, at + base, bq.count, per),
+                    colors.empty() ? eval::DeviceBuffer{}
+                                   : brick_slot(colors, at + base, bq.count, per * 3)));
+            });
+        if (walked != CLAY_OK || !keep_seeds) return walked;
+        // Read back what the device just produced, so the NEXT dab over this
+        // ground resumes instead of walking the edit list again. A few
+        // kilobytes a brick, attached to the walk that is the expensive half.
+        if (device->backend->read_device_buffer(
+                host_values.data() + at * per, brick_slot(values, at, n, per),
+                static_cast<std::uint64_t>(n) * per * sizeof(float)) != eval::Status::Ok)
+            return fail(CLAY_ERROR_BACKEND, "reading a refilled brick back failed");
+        if (want_colour &&
+            device->backend->read_device_buffer(
+                host_colors.data() + at * per * 3, brick_slot(colors, at, n, per * 3),
+                static_cast<std::uint64_t>(n) * per * 3 * sizeof(float)) != eval::Status::Ok)
+            return fail(CLAY_ERROR_BACKEND, "reading a refilled brick's colours back failed");
+        doc->store_seeds(requests + at, n, host_values.data() + at * per,
+                         want_colour ? host_colors.data() + at * per * 3 : nullptr, nullptr,
+                         nullptr, per, 0, 0.0f);
+        return CLAY_OK;
+    });
 }
 
 // -- the compiled tape (c-abi spec: the compiled tape is exportable) ---------

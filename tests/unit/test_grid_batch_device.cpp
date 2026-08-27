@@ -185,3 +185,28 @@ TEST_CASE("eval_grid_batch_device default: a backend with no device path says Un
     CHECK(cpu->eval_grid_batch_device(batch_of(tapes, origins), values,
                                       eval::DeviceBuffer{}) == eval::Status::Unsupported);
 }
+
+TEST_CASE("device copy: a backend that does not move bytes says so, and says it up front") {
+    // The device-destination refill keeps a seed only when the backend can
+    // write a resumed brick into the caller's buffer and read a refilled one
+    // back (#345). A backend without those has to be recognisable BEFORE the
+    // refill commits to a plan — a discovery made half way through would leave
+    // part of the batch resumed and part not, with no way back — so the
+    // capability is REPORTED and the operations refuse. A backend that reports
+    // nothing gets the whole-batch full walk, which is correct and is exactly
+    // what it did before there was a resumed path at all.
+    RecordingBackend b;
+    CHECK(b.caps().device_copy == false);  // the default, for every backend
+    int mem = 0;
+    float host = 0.0f;
+    const eval::DeviceBuffer slice{&mem, 0, sizeof(float)};
+    CHECK(b.write_device_buffer(slice, &host, sizeof(float)) == eval::Status::Unsupported);
+    CHECK(b.read_device_buffer(&host, slice, sizeof(float)) == eval::Status::Unsupported);
+
+    // Including the CPU backend, which is the one every fallback lands on.
+    eval::Backend* cpu = eval::Registry::instance().find("cpu");
+    REQUIRE(cpu != nullptr);
+    CHECK(cpu->caps().device_copy == false);
+    CHECK(cpu->write_device_buffer(slice, &host, sizeof(float)) == eval::Status::Unsupported);
+    CHECK(cpu->read_device_buffer(&host, slice, sizeof(float)) == eval::Status::Unsupported);
+}

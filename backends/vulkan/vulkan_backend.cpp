@@ -35,6 +35,8 @@ extern const unsigned char clay_spv_points[];
 extern const unsigned int clay_spv_points_size;
 extern const unsigned char clay_spv_grid[];
 extern const unsigned int clay_spv_grid_size;
+extern const unsigned char clay_spv_copy[];
+extern const unsigned int clay_spv_copy_size;
 }
 
 namespace clay {
@@ -96,6 +98,7 @@ class VulkanBackend final : public Backend {
             if (desc_pool_) vkDestroyDescriptorPool(device_, desc_pool_, nullptr);
             if (pipe_points_) vkDestroyPipeline(device_, pipe_points_, nullptr);
             if (pipe_grid_) vkDestroyPipeline(device_, pipe_grid_, nullptr);
+            if (pipe_copy_) vkDestroyPipeline(device_, pipe_copy_, nullptr);
             if (layout_) vkDestroyPipelineLayout(device_, layout_, nullptr);
             if (set_layout_) vkDestroyDescriptorSetLayout(device_, set_layout_, nullptr);
             // Destroy nothing we did not make. On an adopted device the caller
@@ -109,7 +112,13 @@ class VulkanBackend final : public Backend {
     const char* name() const override { return "vulkan"; }
     std::uint64_t tape_uploads() const { return tape_uploads_; }
     std::uint64_t tape_patches() const { return tape_patches_; }
-    BackendCaps caps() const override { return BackendCaps{false, false, 0}; }
+    BackendCaps caps() const override {
+        BackendCaps c{false, false, 0};
+        // Only on an ADOPTED device: `device_copy` names a buffer the CALLER
+        // lent us, and one from the device we made for ourselves is not that.
+        c.device_copy = !owns_device_;
+        return c;
+    }
 
     Status eval_points(const scene::Tape& tape, const PointQuery& q,
                        const PointResults& out) override {
@@ -222,6 +231,48 @@ class VulkanBackend final : public Backend {
             return Status::DeviceError;
         // dispatch() waits on its own fence before returning, so the work has
         // COMPLETED here — nothing is left in flight on the caller's queue.
+        return Status::Ok;
+    }
+
+    // -- host memory <-> a buffer the caller owns (#345) ---------------------
+    //
+    // What these carry is the resumable refill's traffic across the device
+    // boundary: a brick answered from its seed is computed on the host and
+    // WRITTEN into the caller's slot, and a brick that had to be walked in full
+    // is READ back so it becomes the next dab's seed. Both are a few kilobytes
+    // a brick, against a full walk of the surviving edit list per sample.
+    //
+    // Both run the copy shader over our own host-visible staging buffer, so the
+    // caller's buffer is touched only through the storage binding the
+    // evaluation path already binds it to. clay_kernels.comp.in says why that
+    // is not vkCmdCopyBuffer.
+    Status write_device_buffer(const DeviceBuffer& dst, const void* src,
+                               std::uint64_t bytes) override {
+        if (owns_device_) return Status::Unsupported;
+        if (dst.empty() || !src) return Status::InvalidInput;
+        if (bytes == 0) return Status::Ok;
+        if (!copyable(bytes, dst)) return Status::InvalidInput;
+        if (!ensure_copy_buffers(bytes)) return Status::DeviceError;
+        std::memcpy(in_.mapped, src, static_cast<std::size_t>(bytes));
+        PushConstants pc{};
+        pc.count = static_cast<std::uint32_t>(bytes / sizeof(float));
+        const Borrowed to{static_cast<VkBuffer>(dst.handle), dst.offset, bytes};
+        return dispatch(pipe_copy_, pc, pc.count, &to) ? Status::Ok : Status::DeviceError;
+    }
+
+    Status read_device_buffer(void* dst, const DeviceBuffer& src,
+                              std::uint64_t bytes) override {
+        if (owns_device_) return Status::Unsupported;
+        if (src.empty() || !dst) return Status::InvalidInput;
+        if (bytes == 0) return Status::Ok;
+        if (!copyable(bytes, src)) return Status::InvalidInput;
+        if (!ensure_copy_buffers(bytes)) return Status::DeviceError;
+        PushConstants pc{};
+        pc.count = static_cast<std::uint32_t>(bytes / sizeof(float));
+        const Borrowed from{static_cast<VkBuffer>(src.handle), src.offset, bytes};
+        if (!dispatch(pipe_copy_, pc, pc.count, nullptr, nullptr, &from))
+            return Status::DeviceError;
+        std::memcpy(dst, dist_.mapped, static_cast<std::size_t>(bytes));
         return Status::Ok;
     }
 
@@ -358,7 +409,8 @@ class VulkanBackend final : public Backend {
         if (vkCreatePipelineLayout(device_, &plci, nullptr, &layout_) != VK_SUCCESS) return false;
 
         return make_pipeline(clay_spv_points, clay_spv_points_size, &pipe_points_) &&
-               make_pipeline(clay_spv_grid, clay_spv_grid_size, &pipe_grid_);
+               make_pipeline(clay_spv_grid, clay_spv_grid_size, &pipe_grid_) &&
+               make_pipeline(clay_spv_copy, clay_spv_copy_size, &pipe_copy_);
     }
 
     bool make_pipeline(const unsigned char* spv, unsigned int bytes, VkPipeline* out) {
@@ -457,6 +509,22 @@ class VulkanBackend final : public Backend {
             return false;
         b->size = bytes;
         return true;
+    }
+
+    // A copy the shader can express: whole floats, a span the slice actually
+    // holds, and an element count a 32-bit push constant can name.
+    static bool copyable(std::uint64_t bytes, const DeviceBuffer& slice) {
+        return bytes % sizeof(float) == 0 && slice.size >= bytes &&
+               bytes / sizeof(float) <= 0xffffffffull;
+    }
+
+    // Every binding must name a real buffer for the descriptor write, including
+    // the three the copy shader never touches. `ensure` only ever grows, so the
+    // placeholders cost nothing once an evaluation has sized them.
+    bool ensure_copy_buffers(std::uint64_t bytes) {
+        const std::size_t span = static_cast<std::size_t>(bytes);
+        return ensure(&instrs_, sizeof(float)) && ensure(&floats_, sizeof(float)) &&
+               ensure(&color_, sizeof(float)) && ensure(&in_, span) && ensure(&dist_, span);
     }
 
     // The tape's params and blob live in ONE buffer, so the shader needs one
@@ -614,10 +682,14 @@ class VulkanBackend final : public Backend {
     // the device path and the host path run the same shader over the same tape
     // and differ only in where the writes land — which is what makes them
     // comparable bit for bit.
-    void bind_descriptors(const Borrowed* dist, const Borrowed* color) {
+    //
+    // `in` overrides binding 2 the same way, and only the copy shader uses it:
+    // reading a caller's buffer back is the same copy as writing it with the
+    // two ends exchanged (#345).
+    void bind_descriptors(const Borrowed* dist, const Borrowed* color, const Borrowed* in) {
         VkDescriptorBufferInfo infos[kBindings]{};
         const Buffer* buffers[kBindings] = {&instrs_, &floats_, &in_, &dist_, &color_};
-        const Borrowed* overrides[kBindings] = {nullptr, nullptr, nullptr, dist, color};
+        const Borrowed* overrides[kBindings] = {nullptr, nullptr, in, dist, color};
         VkWriteDescriptorSet writes[kBindings]{};
         for (std::uint32_t i = 0; i < kBindings; ++i) {
             if (overrides[i]) {
@@ -639,8 +711,9 @@ class VulkanBackend final : public Backend {
     }
 
     bool dispatch(VkPipeline pipeline, PushConstants pc, std::size_t elements,
-                  const Borrowed* dist = nullptr, const Borrowed* color = nullptr) {
-        bind_descriptors(dist, color);
+                  const Borrowed* dist = nullptr, const Borrowed* color = nullptr,
+                  const Borrowed* in = nullptr) {
+        bind_descriptors(dist, color, in);
         // Split against the device's own limit rather than assuming a large
         // one: a 256^3 preview grid is 262144 groups, past what some devices
         // accept in a single dispatch.
@@ -689,6 +762,7 @@ class VulkanBackend final : public Backend {
     VkPipelineLayout layout_ = VK_NULL_HANDLE;
     VkPipeline pipe_points_ = VK_NULL_HANDLE;
     VkPipeline pipe_grid_ = VK_NULL_HANDLE;
+    VkPipeline pipe_copy_ = VK_NULL_HANDLE;
     VkDescriptorPool desc_pool_ = VK_NULL_HANDLE;
     VkDescriptorSet set_ = VK_NULL_HANDLE;
     VkCommandPool pool_ = VK_NULL_HANDLE;
