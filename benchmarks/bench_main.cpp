@@ -791,6 +791,17 @@ BENCHMARK(BM_DabSuffixSeeded)->Unit(benchmark::kMillisecond);
 // of one dab over one document.
 namespace {
 constexpr int kIndexAppendNodes = 20000;
+// A tenth of the document, for the SLOPE: extending an index costs what the
+// dab adds, so the two sizes must measure the same. See tools/check_bench.py.
+constexpr int kIndexAppendSmallNodes = 2000;
+// A FIXED iteration count, and a fixture rebuilt every kIndexAppendReset of
+// them. Every append GROWS the document it appends to, so left to the clock
+// these measure a document whose size is a property of the MACHINE -- the
+// faster side runs more iterations and so grows more -- which is exactly what
+// a slope gate must not depend on. Rebuilt, both sizes sweep the same
+// [nodes, nodes + 256] on every machine.
+constexpr int kIndexAppendIters = 1024;
+constexpr int kIndexAppendReset = 256;
 }  // namespace
 
 // A brick refill that RESUMES against one that replays (#306). The refill's own
@@ -969,11 +980,23 @@ void refill_moving(benchmark::State& state, int history) {
 }
 }  // namespace
 
+// A FIXED iteration count, because every iteration stamps another item into the
+// document: left to the clock, how far the fixture grows is a property of how
+// fast the timed region is. That was tolerable while a dab cost 0.17 ms and
+// stopped being so when #347 took it to 0.004 -- 40x the iterations, 40x the
+// growth, and minutes of wall clock per repetition. 4096 is about what the
+// clock chose before, so the fixture is the one these counters were read on.
+namespace {
+constexpr int kRefillMovingIters = 4096;
+}  // namespace
+
 void BM_BrickRefillMoving5000(benchmark::State& state) { refill_moving(state, 5000); }
-BENCHMARK(BM_BrickRefillMoving5000)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_BrickRefillMoving5000)->Unit(benchmark::kMillisecond)
+    ->Iterations(kRefillMovingIters);
 
 void BM_BrickRefillMoving20000(benchmark::State& state) { refill_moving(state, 20000); }
-BENCHMARK(BM_BrickRefillMoving20000)->Unit(benchmark::kMillisecond);
+BENCHMARK(BM_BrickRefillMoving20000)->Unit(benchmark::kMillisecond)
+    ->Iterations(kRefillMovingIters);
 
 // The resumed refill at several WINDOW SIZES, which is what #348 needed
 // measuring before it could pick a shape. A dab's dirty window is one brick for
@@ -1084,27 +1107,72 @@ void BM_CullIndexRebuild(benchmark::State& state) {
 }
 BENCHMARK(BM_CullIndexRebuild)->Unit(benchmark::kMillisecond);
 
-void BM_CullIndexAppend(benchmark::State& state) {
-    scene::Document doc = spread_sculpt(kIndexAppendNodes);
-    scene::CullIndex index(doc);
-    // One dab per iteration, each extending the index the last one produced --
-    // a stroke, which is the case this exists for. The insert is outside the
-    // timed region the same way the rebuild's document build is.
+namespace {
+// One dab per iteration, each extending the index the last one produced -- a
+// stroke, which is the case this exists for. The insert is outside the timed
+// region the same way the rebuild's document build is, and so is the periodic
+// rebuild of the fixture.
+//
+// `shared` takes the COPY the C ABI falls back to when a reader is holding the
+// index against a plan it already made (clay_document::cull_index_locked); with
+// nobody looking the append extends the cached index in place instead, which is
+// what the other two measure (#347).
+void index_append(benchmark::State& state, int nodes, bool shared) {
+    scene::Document doc;
+    std::shared_ptr<scene::CullIndex> index;
+    int since_reset = kIndexAppendReset;
     for (auto _ : state) {
         state.PauseTiming();
+        if (since_reset == kIndexAppendReset) {
+            index.reset();  // it borrows the document about to be replaced
+            doc = spread_sculpt(nodes);
+            index = std::make_shared<scene::CullIndex>(doc);
+            since_reset = 0;
+            // WARM THE FIXTURE, untimed. A fresh index reserves each chain's
+            // entries exactly, so the FIRST append doubles a 20,000-entry
+            // vector -- a megabyte of copy that a stroke pays once and that
+            // this loop would otherwise pay every reset, amortised over the
+            // 256 appends between them. That is a cost proportional to the
+            // DOCUMENT masquerading as the cost of an append, which is the one
+            // thing the pair of sizes below must not measure.
+            scene::Node warm;
+            warm.prim = scene::Prim::sphere(0.04f);
+            warm.xform.position = cf3(1.0f, -0.001f, 0.0f);
+            const scene::NodeId warm_id = doc.layers[0].sdf->insert(std::move(warm));
+            if (!index->append({warm_id})) {
+                state.SkipWithError("the append was refused");
+                return;
+            }
+        }
         scene::Node n;
         n.prim = scene::Prim::sphere(0.04f);
-        n.xform.position = cf3(1.0f, 0.001f * static_cast<float>(state.iterations()), 0.0f);
+        n.xform.position = cf3(1.0f, 0.001f * static_cast<float>(since_reset++), 0.0f);
         const scene::NodeId id = doc.layers[0].sdf->insert(std::move(n));
         state.ResumeTiming();
-        if (!index.append({id})) {
+        if (shared) index = std::make_shared<scene::CullIndex>(*index);
+        if (!index->append({id})) {
             state.SkipWithError("the append was refused");
             return;
         }
     }
-    state.counters["nodes"] = static_cast<double>(kIndexAppendNodes);
+    state.counters["nodes"] = static_cast<double>(nodes);
 }
-BENCHMARK(BM_CullIndexAppend)->Unit(benchmark::kMillisecond);
+}  // namespace
+
+void BM_CullIndexAppend(benchmark::State& state) {
+    index_append(state, kIndexAppendNodes, false);
+}
+BENCHMARK(BM_CullIndexAppend)->Unit(benchmark::kMillisecond)->Iterations(kIndexAppendIters);
+
+void BM_CullIndexAppendSmall(benchmark::State& state) {
+    index_append(state, kIndexAppendSmallNodes, false);
+}
+BENCHMARK(BM_CullIndexAppendSmall)->Unit(benchmark::kMillisecond)->Iterations(kIndexAppendIters);
+
+void BM_CullIndexAppendShared(benchmark::State& state) {
+    index_append(state, kIndexAppendNodes, true);
+}
+BENCHMARK(BM_CullIndexAppendShared)->Unit(benchmark::kMillisecond)->Iterations(kIndexAppendIters);
 
 void BM_DeepDocRefill193(benchmark::State& state) { deep_doc_refill(state, 193); }
 BENCHMARK(BM_DeepDocRefill193)->Unit(benchmark::kMillisecond);

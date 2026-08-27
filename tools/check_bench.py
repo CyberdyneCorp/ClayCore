@@ -366,6 +366,27 @@ MAX_RATIO = [
     # 4,590 against 2,802. The ceiling is well above that because the failure
     # worth catching is the pad widening again, not a few per cent of drift.
     ("BM_DeepDocCullPlanned2000K06", "BM_DeepDocCullPlanned2000", 2.0),
+    # EXTENDING THE CULL INDEX MUST COST THE DAB, NOT THE DOCUMENT (#347). The
+    # same one-item append onto a document ten times the size must measure the
+    # same, because what an append does is bounded by the subtree it adds.
+    #
+    # It did not. `CullIndex::append` re-walked the touched layer's whole flat
+    # node map to recompute the cull pad -- a walk the change that introduced it
+    # defended as cheap, and it was: 0.15 ms against the 2.45 ms rebuild it
+    # replaced. Against a resumed dab it was not. Measured on a quiet twelve-core
+    # Linux box at 20,000 and 2,000 nodes: 0.0542 ms against 0.00454 ms, an
+    # 11.9x slope, which is the document showing through -- and this gate reads
+    # 12.5x on the unfixed code.
+    #
+    # Raising the pad from the appended subtree instead leaves 0.000258 ms
+    # against 0.000257 ms -- 1.00x quiet, 1.03-1.13x over three loaded runs, with
+    # one 1.8x seen while another job had the box. A RATIO, so a slow runner
+    # moves both sides together; 4.0 sits well above the contended reading and
+    # well below the 12x a document-proportional append reads. Both benchmarks pin their
+    # iteration count and rebuild their fixture, because each append grows the
+    # document it appends to and the number of appends must not be a property of
+    # the machine.
+    ("BM_CullIndexAppend", "BM_CullIndexAppendSmall", 4.0),
     # Rebuilding the whole-document tape after an APPEND against compiling it
     # from scratch (#197 phase 1). A sculpt grows a node per brush stamp and a
     # host raycasts to place the next one, so this rebuild is on the

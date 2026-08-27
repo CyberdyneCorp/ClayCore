@@ -8,12 +8,22 @@ namespace scene {
 CullIndex::CullIndex(const Document& doc) : doc_(&doc) {
     for (const Layer& layer : doc.layers) {
         if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
-        // feather_cull_pad walks the flat node map, exactly as the compiler
-        // did per compile: it must count a feathered volume wherever it
-        // sits, including under a group this build never descends into.
-        pad_ = kernel::cmax(pad_, ::clay::scene::cull_pad(*layer.sdf, layer));
+        // cull_pad_terms walks the flat node map, exactly as the compiler did
+        // per compile: it must count a feathered volume wherever it sits,
+        // including under a group this build never descends into. Kept per
+        // layer and unadded (see LayerPad) so an append need not walk again.
+        pads_.push_back(LayerPad{&layer, ::clay::scene::cull_pad_terms(*layer.sdf, layer),
+                                 layer.sdf->nodes().size()});
         build_chain(*layer.sdf, layer.sdf->roots, layer);
     }
+    refresh_pad();
+}
+
+// The document's pad from the layers': a maximum of their sums, never a sum of
+// their maxima. O(layers), so an append pays it whole.
+void CullIndex::refresh_pad() {
+    pad_ = 0.0f;
+    for (const LayerPad& p : pads_) pad_ = kernel::cmax(pad_, p.terms.total());
 }
 
 // One Chain per (layer, child list), mirroring the compiler's traversal:
@@ -62,20 +72,72 @@ const Layer* last_visible_sdf_layer(const Document& doc) {
         if (layer.visible && layer.kind == LayerKind::Sdf && layer.sdf) found = &layer;
     return found;
 }
+
+// The one claim the caller makes that an index can check for itself, and it is
+// O(appended) rather than O(document).
+bool is_tail_of(const std::vector<NodeId>& roots, const std::vector<NodeId>& appended) {
+    if (appended.size() > roots.size()) return false;
+    const std::size_t first = roots.size() - appended.size();
+    for (std::size_t i = 0; i < appended.size(); ++i)
+        if (roots[first + i] != appended[i]) return false;
+    return true;
+}
+
+// What one appended subtree contributes to its layer's pad, and how many nodes
+// it holds, in ONE walk of the subtree.
+//
+// EVERY node it reaches, including the children of an invisible group: the pad
+// is a fold over the flat node map, which does not care what a build descends
+// into, and cull_pad_terms already zeroes an invisible node itself.
+std::size_t gather_pad(const SdfContent& content, const Layer& layer, NodeId id,
+                       CullPadTerms* terms) {
+    const Node* n = content.find(id);
+    if (!n) return 0;
+    terms->raise(::clay::scene::cull_pad_terms(*n, layer));
+    std::size_t count = 1;
+    for (NodeId child : n->children) count += gather_pad(content, layer, child, terms);
+    return count;
+}
 }  // namespace
+
+std::vector<std::size_t> CullIndex::chains_over(const std::vector<NodeId>& ids) const {
+    std::vector<std::size_t> found;
+    for (std::size_t i = 0; i < chains_.size(); ++i)
+        if (chains_[i].ids == &ids) found.push_back(i);
+    return found;
+}
+
+// The pad half of an append, gathered before the entry half writes anything.
+// Refuses -- which costs the caller a rebuild -- when a layer has no pad slot,
+// or when its node map did not grow by exactly the appended subtree: the terms
+// are raised from that subtree alone, so a map that gained something else would
+// leave them BELOW what a fresh build reports, and a pad that is too small
+// plans against too small a region.
+bool CullIndex::plan_pads(const std::vector<std::size_t>& targets,
+                          const std::vector<NodeId>& appended,
+                          std::vector<PadGain>* gains) const {
+    for (std::size_t at : targets) {
+        const Layer& layer = *chains_[at].layer;
+        const SdfContent& content = *layer.sdf;
+        PadGain gain{pads_.size(), CullPadTerms{}, 0};
+        for (std::size_t i = 0; i < pads_.size(); ++i)
+            if (pads_[i].layer == &layer) gain.slot = i;
+        if (gain.slot == pads_.size()) return false;
+        std::size_t added = 0;
+        for (NodeId id : appended) added += gather_pad(content, layer, id, &gain.terms);
+        if (pads_[gain.slot].nodes + added != content.nodes().size()) return false;
+        gain.nodes = content.nodes().size();
+        gains->push_back(gain);
+    }
+    return true;
+}
 
 bool CullIndex::append(const std::vector<NodeId>& appended) {
     if (!doc_ || appended.empty()) return false;
     const Layer* last = last_visible_sdf_layer(*doc_);
     if (!last) return false;
     const std::vector<NodeId>& roots = last->sdf->roots;
-
-    // The one claim the caller makes that this can check for itself, and it is
-    // O(appended) rather than O(document).
-    if (appended.size() > roots.size()) return false;
-    const std::size_t first = roots.size() - appended.size();
-    for (std::size_t i = 0; i < appended.size(); ++i)
-        if (roots[first + i] != appended[i]) return false;
+    if (!is_tail_of(roots, appended)) return false;
 
     // EVERY chain over that root list, not just the last layer's. An INSTANCED
     // layer shares its SdfContent with the layer it instances, so one roots
@@ -85,13 +147,15 @@ bool CullIndex::append(const std::vector<NodeId>& appended) {
     // the others describing a document that no longer exists, which is a
     // silently smaller tape rather than a crash: the corpus in
     // test_cull_index.cpp has such a layer and caught exactly that.
-    std::vector<std::size_t> targets;
-    for (std::size_t i = 0; i < chains_.size(); ++i)
-        if (chains_[i].ids == &roots) targets.push_back(i);
+    const std::vector<std::size_t> targets = chains_over(roots);
     if (targets.empty()) return false;
 
     // Nothing is written until every check has passed, so a refusal leaves the
-    // index exactly as it was.
+    // index exactly as it was -- which is why the pad is gathered here and
+    // applied below rather than raised as the walk goes.
+    std::vector<PadGain> gains;
+    if (!plan_pads(targets, appended, &gains)) return false;
+
     for (std::size_t at : targets) {
         const Layer& layer = *chains_[at].layer;
         const SdfContent& content = *layer.sdf;
@@ -117,15 +181,20 @@ bool CullIndex::append(const std::vector<NodeId>& appended) {
             chains_[at].entries.push_back(e);
             if (forbids_pruning) chains_[at].prunable = false;
         }
-        // Both terms of a layer's pad are maxima over its visible nodes, so an
-        // append can only raise them, and only for the layers it touched -- so
-        // the document's pad is the old one against theirs. Recomputed rather
-        // than tracked: it is a cheap walk of the flat node map (0.15 ms of the
-        // 2.45 this avoids), and keeping the two maxima separately to update in
-        // place would store a sum of maxima where the pad is a maximum of sums
-        // -- safe, being larger, but no longer what a fresh build says.
-        pad_ = kernel::cmax(pad_, ::clay::scene::cull_pad(content, layer));
     }
+    // Both terms of a layer's pad are maxima over its visible nodes, so an
+    // append can only raise them, and only for the layers it touched. They used
+    // to be recomputed by re-walking the layer's node map -- a cheap walk
+    // against the 2.45 ms rebuild it avoided, and all but 0.0003 ms of the
+    // 0.054 ms an append cost once that rebuild was gone (#347). Raising them
+    // from the appended subtree instead is exact because they are kept PER
+    // LAYER, where a maximum of sums and a sum of maxima are the same number;
+    // see LayerPad for why one global pair would not be.
+    for (const PadGain& gain : gains) {
+        pads_[gain.slot].terms.raise(gain.terms);
+        pads_[gain.slot].nodes = gain.nodes;
+    }
+    refresh_pad();
     return true;
 }
 

@@ -1551,22 +1551,39 @@ struct clay_document {
         // 50,000 items against 0.13 ms to extend. CullIndex::append does its
         // own checking and refuses rather than trusting any of this, so being
         // wrong here costs a rebuild, not a wrong cull.
-        //
-        // A COPY, because the cached index is shared and const: another thread
-        // may be holding the old one against a plan it already made. Copying
-        // the entries is the memcpy the rebuild would have done anyway, and it
-        // is what the 0.13 ms above is mostly made of.
         const std::vector<scene::NodeId> since =
             index_cache_ ? appends_since(index_revision_, now) : std::vector<scene::NodeId>{};
         if (!since.empty()) {
-            auto grown = std::make_shared<scene::CullIndex>(*index_cache_);
-            if (grown->append(since)) {
-                index_cache_ = std::move(grown);
-                index_revision_ = now;
-                return index_cache_;
+            // IN PLACE WHEN NOBODY IS LOOKING. The copy below exists to protect
+            // a reader holding the old index against a plan it already made,
+            // and every such reader took its handle from here under this mutex
+            // and holds it while it reads -- so a use_count of one, observed
+            // under the lock, means no snapshot exists and none can appear
+            // until the lock is released. Then the append can extend the cached
+            // index itself, and a dab stops paying an O(document) copy to add
+            // one item's bounds -- 0.043 ms at 20,000 items, which with the
+            // 0.054 ms pad walk beside it was 79% of the 0.123 ms a whole
+            // resumed dab cost there (#347).
+            //
+            // An append that refuses leaves the index untouched (its contract),
+            // so the rebuild below is still correct after one.
+            if (index_cache_.use_count() == 1) {
+                if (index_cache_->append(since)) {
+                    index_revision_ = now;
+                    return index_cache_;
+                }
+            } else {
+                // Shared: copy, and copying the entries is the memcpy the
+                // rebuild would have done anyway.
+                auto grown = std::make_shared<scene::CullIndex>(*index_cache_);
+                if (grown->append(since)) {
+                    index_cache_ = std::move(grown);
+                    index_revision_ = now;
+                    return index_cache_;
+                }
             }
         }
-        index_cache_ = std::make_shared<const scene::CullIndex>(doc.document);
+        index_cache_ = std::make_shared<scene::CullIndex>(doc.document);
         index_revision_ = now;
         return index_cache_;
     }
@@ -1605,7 +1622,10 @@ struct clay_document {
     mutable bool append_valid_ = false;
     mutable std::shared_ptr<const scene::Tape> pick_cache_;
     mutable std::uint64_t pick_revision_ = 0;
-    mutable std::shared_ptr<const scene::CullIndex> index_cache_;
+    // NOT const, unlike the tape beside it: an append extends it in place when
+    // the handle here is the only one alive (see cull_index_locked). Handed out
+    // as shared_ptr<const>, so a caller still cannot write through it.
+    mutable std::shared_ptr<scene::CullIndex> index_cache_;
     mutable std::uint64_t index_revision_ = 0;
     mutable std::unordered_map<ResumeKey, ResumeEntry, ResumeKeyHash> resume_;
     mutable std::deque<ResumeKey> resume_order_;  // insertion order, for eviction
