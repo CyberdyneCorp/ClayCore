@@ -1113,15 +1113,65 @@ struct clay_document {
     // NOT the brick cache's own samples: those are fp16 clamped to the band,
     // and its Inside/Outside bricks hold nothing at all, which is exactly
     // where a growing dab lands.
+    //
+    // WHAT A SEED DESCRIBES, not merely where it sits (#349). A brick
+    // coordinate alone is not an identity: the same (x, y, z) names a
+    // different set of samples under a different lattice, and a different
+    // FIELD under a different band, because a brick's tape is culled against
+    // `request_brick_box(req).dilated(req.band)` -- a smaller band drops items
+    // a larger one keeps. Both are properties of the CACHE that asked, fixed
+    // for its lifetime, so they belong in the key rather than in a gate:
+    // keying on them lets two caches over one document each hold their own
+    // seeds instead of evicting each other's on every call.
+    //
+    // The cull PAD is the other term of that dilation and is deliberately NOT
+    // here. It is a property of the document -- a global maximum that an
+    // append can raise -- so it moves under a single cache, and a key would
+    // strand the old entry rather than replace it. It is gated in `seed_for`
+    // instead.
     struct ResumeKey {
         std::int32_t x = 0, y = 0, z = 0;
-        bool operator==(const ResumeKey& o) const { return x == o.x && y == o.y && z == o.z; }
+        std::int32_t dims[3] = {0, 0, 0};
+        float spacing = 0.0f;
+        float band = 0.0f;
+        // BY BITS, not by float ==. An unordered_map requires equal keys to
+        // hash equal, and -0.0 == 0.0 while their bits differ. Comparing bits
+        // both ways keeps that invariant; the cost is that a caller passing
+        // -0.0 gets its own entry, which no valid spacing or band is.
+        static std::uint32_t bits(float f) {
+            std::uint32_t u = 0;
+            std::memcpy(&u, &f, sizeof u);
+            return u;
+        }
+        bool operator==(const ResumeKey& o) const {
+            return x == o.x && y == o.y && z == o.z && dims[0] == o.dims[0] &&
+                   dims[1] == o.dims[1] && dims[2] == o.dims[2] &&
+                   bits(spacing) == bits(o.spacing) && bits(band) == bits(o.band);
+        }
     };
+    static ResumeKey resume_key(const clay_brick_request& request) {
+        ResumeKey k;
+        k.x = request.key[0];
+        k.y = request.key[1];
+        k.z = request.key[2];
+        k.dims[0] = request.dims[0];
+        k.dims[1] = request.dims[1];
+        k.dims[2] = request.dims[2];
+        k.spacing = request.spacing;
+        k.band = request.band;
+        return k;
+    }
     struct ResumeKeyHash {
         std::size_t operator()(const ResumeKey& k) const {
             std::size_t h = static_cast<std::size_t>(static_cast<std::uint32_t>(k.x));
-            h = h * 0x9e3779b97f4a7c15ull + static_cast<std::uint32_t>(k.y);
-            h = h * 0x9e3779b97f4a7c15ull + static_cast<std::uint32_t>(k.z);
+            auto mix = [&h](std::uint32_t v) { h = h * 0x9e3779b97f4a7c15ull + v; };
+            mix(static_cast<std::uint32_t>(k.y));
+            mix(static_cast<std::uint32_t>(k.z));
+            mix(static_cast<std::uint32_t>(k.dims[0]));
+            mix(static_cast<std::uint32_t>(k.dims[1]));
+            mix(static_cast<std::uint32_t>(k.dims[2]));
+            mix(ResumeKey::bits(k.spacing));
+            mix(ResumeKey::bits(k.band));
             return h;
         }
     };
@@ -1135,9 +1185,6 @@ struct clay_document {
         // happens to as well only makes this refuse.
         bool had_acc = false;
         float pad = 0.0f;  // the cull pad the values were computed under
-        float spacing = 0.0f;
-        float band = 0.0f;
-        std::int32_t dims[3] = {0, 0, 0};
         // The ACTIVE layer's chain at this brick's lattice -- what a suffix
         // continues. For a document with one visible SDF layer that IS the
         // whole field, which is why the single-layer case needs nothing else.
@@ -1294,13 +1341,14 @@ struct clay_document {
     // brick's own business, decided in `seed_for`.
     const ResumeEntry* shaped_entry(const clay_brick_request& request, std::size_t per,
                                     bool want_colour, bool want_below) const {
-        auto it = resume_.find(ResumeKey{request.key[0], request.key[1], request.key[2]});
+        auto it = resume_.find(resume_key(request));
         if (it == resume_.end()) return nullptr;
         const ResumeEntry& e = it->second;
-        if (e.values.size() != per || e.spacing != request.spacing) return nullptr;
-        if (e.dims[0] != request.dims[0] || e.dims[1] != request.dims[1] ||
-            e.dims[2] != request.dims[2])
-            return nullptr;
+        // The key already fixes the lattice, so this holds by construction --
+        // kept because it is what makes the `per`-length reads of `values` in
+        // `seed_for` safe by inspection rather than by an argument about a
+        // caller two frames up.
+        if (e.values.size() != per) return nullptr;
         // A colour asked for is a colour that has to have been kept: continuing
         // a coloured fold from a distance alone folds every combine against
         // black. The same for the layers beneath: a document that has them and
@@ -1373,7 +1421,7 @@ struct clay_document {
     void store_seed(const clay_brick_request& request, std::uint64_t at, float pad,
                     const float* values, const float* colors, const float* below,
                     const float* below_colors, std::size_t per) const {
-        const ResumeKey key{request.key[0], request.key[1], request.key[2]};
+        const ResumeKey key = resume_key(request);
         auto [it, fresh] = resume_.try_emplace(key);
         ResumeEntry& e = it->second;
         resume_bytes_ -= entry_bytes(e);
@@ -1385,11 +1433,6 @@ struct clay_document {
         for (std::size_t s = 0; s < per && !e.had_acc; ++s) e.had_acc = values[s] != CLAY_TAPE_FAR;
         e.revision = at;
         e.pad = pad;
-        e.spacing = request.spacing;
-        e.band = request.band;
-        e.dims[0] = request.dims[0];
-        e.dims[1] = request.dims[1];
-        e.dims[2] = request.dims[2];
         e.values.assign(values, values + per);
         if (colors)
             e.colors.assign(colors, colors + per * 3);
@@ -1431,7 +1474,7 @@ struct clay_document {
     // beneath it did not. Caller holds cache_mutex_.
     void store_active(const clay_brick_request& request, std::uint64_t at, float pad,
                       const float* values, const float* colors, std::size_t per) const {
-        auto it = resume_.find(ResumeKey{request.key[0], request.key[1], request.key[2]});
+        auto it = resume_.find(resume_key(request));
         if (it == resume_.end()) return;
         ResumeEntry& e = it->second;
         // The rewrite a dab makes is the strongest statement there is that this
@@ -1480,14 +1523,15 @@ struct clay_document {
             return;
         }
         for (auto it = resume_.begin(); it != resume_.end();) {
+            const ResumeKey& k = it->first;
             const ResumeEntry& e = it->second;
-            const float width = static_cast<float>(e.dims[0]) * e.spacing;
+            const float width = static_cast<float>(k.dims[0]) * k.spacing;
             const kernel::cfloat3 lo =
-                kernel::cf3(static_cast<float>(it->first.x), static_cast<float>(it->first.y),
-                            static_cast<float>(it->first.z)) *
+                kernel::cf3(static_cast<float>(k.x), static_cast<float>(k.y),
+                            static_cast<float>(k.z)) *
                 width;
             const math::Aabb cull =
-                math::Aabb{lo, lo + kernel::cf3(width, width, width)}.dilated(e.band + e.pad);
+                math::Aabb{lo, lo + kernel::cf3(width, width, width)}.dilated(k.band + e.pad);
             if (!changed.empty() && changed.intersects(cull)) {
                 resume_bytes_ -= entry_bytes(e);
                 // The order node goes with the entry. It used to be left
