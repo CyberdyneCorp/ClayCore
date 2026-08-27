@@ -437,12 +437,17 @@ MAX_COUNTER = [
     # The wall clock is the wrong gate for it. Both paths are bit-identical by
     # contract and the fixture is small, so the margin is a property of how much
     # history the benchmark happens to hold. The SHARE OF BRICKS WALKED IN FULL
-    # is not: it is a ratio of counts, exact on any machine, and it is the thing
-    # that actually broke. A four-brick window sliding one brick every third dab
-    # reads 0.005-0.012 resuming per brick and 0.35-0.39 with the batch gate
-    # back, so this ceiling has an order of magnitude either side of it.
-    ("BM_BrickRefillMoving5000", "refilled_frac", 0.10),
-    ("BM_BrickRefillMoving20000", "refilled_frac", 0.10),
+    # is not: it is a ratio of counts and it is the thing that actually broke.
+    #
+    # The benchmark primes every window position first, which is what makes the
+    # ratio machine-independent rather than merely count-based. Left unprimed it
+    # measures a warmup transient amortised over the iteration count, so a slow
+    # runner reads higher for no reason -- 0.053 locally against 0.085 on a CI
+    # runner, both correct, against a ceiling of 0.10. Primed, every brick asked
+    # for has a seed, so resuming per brick this is 0 and a batch-wide gate makes
+    # it 1: the whole window, every dab.
+    ("BM_BrickRefillMoving5000", "refilled_frac", 0.05),
+    ("BM_BrickRefillMoving20000", "refilled_frac", 0.05),
 ]
 
 

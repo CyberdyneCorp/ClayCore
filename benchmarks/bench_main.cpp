@@ -901,12 +901,18 @@ void refill_moving(benchmark::State& state, int history) {
     const std::size_t per = 8 * 8 * 8;
     constexpr int kWindow = 4;
     std::vector<float> out(static_cast<std::size_t>(kWindow) * per);
+    // Along the sphere's EQUATOR (key[1] = key[2] = -1), not up its side. Every
+    // brick of the swept range then either straddles the surface or lies inside
+    // it, and both carry an accumulator. A window that runs off the shape holds
+    // bricks whose culled prefix produced nothing at all, which are correctly
+    // walked in full for ever -- a legitimate refusal that would sit in this
+    // benchmark's counter pretending to be the defect it is gating.
     auto window = [&](int shift) {
         std::vector<clay_brick_request> reqs(kWindow);
         for (int i = 0; i < kWindow; ++i) {
             std::memset(&reqs[i], 0, sizeof(reqs[i]));
-            reqs[i].key[0] = 2;
-            reqs[i].key[1] = -2 + shift + i;
+            reqs[i].key[0] = -3 + shift + i;
+            reqs[i].key[1] = -1;
             reqs[i].key[2] = -1;
             for (int a = 0; a < 3; ++a)
                 reqs[i].origin[a] = static_cast<float>(reqs[i].key[a]) * 8 * 0.05f;
@@ -916,8 +922,16 @@ void refill_moving(benchmark::State& state, int history) {
         }
         return reqs;
     };
-    clay_brick_cache_eval_requests(d, nullptr, window(0).data(), kWindow, out.data(), out.size(),
-                                   nullptr, 0);
+    // Prime EVERY window position the loop will ask for, so no brick inside the
+    // timed region is one the stroke has never reached. That is deliberate: a
+    // brick with no seed is correctly walked in full, and leaving that in makes
+    // the counter below a warmup transient amortised over the iteration count --
+    // which is a property of how fast the runner is, not of the code. Primed,
+    // what remains is purely bricks that HAVE a seed at a revision the window's
+    // neighbours do not share, which is the thing under test.
+    for (int shift = 0; shift < 3; ++shift)
+        clay_brick_cache_eval_requests(d, nullptr, window(shift).data(), kWindow, out.data(),
+                                       out.size(), nullptr, 0);
     int n = 0;
     float y = 0.0f;
     for (auto _ : state) {
@@ -939,11 +953,13 @@ void refill_moving(benchmark::State& state, int history) {
     clay_document_resume_stats(d, &rs);
     state.counters["history"] = static_cast<double>(history);
     // The share of bricks that had to be WALKED IN FULL, which is the gate.
-    // A moving window never reaches 0 -- the brick it has just entered has no
-    // seed and is correctly walked -- but it should sit near 1 / kWindow per
-    // slide, and a batch-wide gate returning takes it to a third of every dab.
-    // A ratio of counts rather than a time, so it says the same thing on any
-    // machine; `resumed_frac` is reported beside it to be read, not gated.
+    // Every brick the loop asks for is primed, so resuming per brick this is 0:
+    // the bricks of a window sit at whatever revision their last refill stamped,
+    // and each is carried forward from its own. A gate that admits a batch only
+    // when they AGREE takes it to 1 -- the whole window, every dab. A ratio of
+    // counts rather than a time, so it says the same thing on any machine and
+    // does not move with the iteration count; `resumed_frac` is reported beside
+    // it to be read, not gated.
     const double served = static_cast<double>(rs.resumed_bricks + rs.refilled_bricks);
     state.counters["resumed_frac"] =
         served > 0 ? static_cast<double>(rs.resumed_bricks) / served : 0.0;
