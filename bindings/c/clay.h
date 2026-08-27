@@ -5728,7 +5728,12 @@ clay_result clay_brick_cache_take_dirty(clay_brick_cache* cache,
  *
  * It takes NO cache handle: it does not submit, does not touch a cache and
  * starts no thread, so it is free-threaded and any number of threads may run
- * it against one const document at once. The host still calls
+ * it against one const document at once. It does WRITE the document's own seed
+ * store (clay_document_resume_stats reports it), behind a lock of its own that
+ * is not yours to take: held to read the seeds and again to store them, and
+ * RELEASED across the compile and the evaluation between — so a refill does not
+ * block a clay_eval_points on another thread for as long as it evaluates. The
+ * host still calls
  * clay_brick_cache_submit, and still decides how many requests to run and
  * where. Fan out over REQUESTS, one brick per worker: the CPU backend already
  * splits a single grid's z axis over a process-wide pool, and a brick is 8

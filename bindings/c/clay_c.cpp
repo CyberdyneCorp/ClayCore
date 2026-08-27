@@ -9291,6 +9291,297 @@ void fold_layers_below(const float* below_d, const float* below_rgb, const float
         }
     }
 }
+
+// -- the resumable path (#306, #348) --------------------------------------
+//
+// How many of `count` bricks this answered from their seeds, with `resumed[i]`
+// marking each one it did. The rest are the caller's to walk in full.
+//
+// When a brick carries a seed and the document has only been APPENDED to
+// since that seed was taken, what this call has to evaluate for it is the
+// appended items -- not the whole surviving edit list over every sample.
+// The suffix is compiled per brick and culled exactly as a whole-document
+// compile would cull it, which is what makes continuing from the seed the
+// same arithmetic rather than an approximation of it.
+//
+// PER BRICK, not per batch. Whether a brick can be resumed, and how far it
+// has to be carried, is that brick's own question: the bricks of one batch
+// routinely sit at different revisions, because a refill re-stamps only the
+// bricks it filled and an append re-stamps none. A stroke whose dirty window
+// moves -- which is every stroke -- therefore mixes the ground it covered
+// last dab with the ground it has just reached, and a brick it has never
+// reached has no seed at all. Bricks that cannot be served drop into the
+// miss gather below and take the full path alone.
+//
+// WITH MORE THAN ONE VISIBLE SDF LAYER the seed is two values, not one. The
+// layers hard-union left to right, so the tape holds the layers BENEATH the
+// active one as its own accumulator, and a single stored number cannot be
+// taken apart into the two again. They are kept apart instead: the suffix
+// folds into the active layer's value and the union is applied here, with
+// the same hard Add the whole-document compile emits between layers. The
+// layers beneath are static across a stroke, so their half is stored once
+// and carried forward untouched.
+std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* requests,
+                          std::size_t count, std::size_t per, bool want_colour, float* out_values,
+                          float* out_colors_rgb, std::uint8_t* resumed) {
+    std::size_t resumed_count = 0;
+
+    // OFF THE LOCK, AND OVER THE POOL (#348).
+    //
+    // This used to compile and evaluate every brick inside the one
+    // `cache_lock()` it takes to read the seeds, which made a refill two wrong
+    // things at once: serial, where the full path it replaces hands the batch
+    // to a row-level parallel_for across every brick; and a writer holding a
+    // mutex `clay_eval_points` on another thread also takes, so a refill
+    // blocked unrelated readers for as long as it evaluated.
+    //
+    // The lock was held because `seed_for` hands out a raw pointer into the
+    // seed store and a concurrent refill may evict the entry under it. So the
+    // seed is COPIED OUT under the lock -- into the buffer the evaluation will
+    // write its answer to, which costs nothing extra in the common
+    // single-layer case because that buffer is the caller's own output and had
+    // to be written anyway. `eval_points_seeded` reads a block's seed into the
+    // stack before it writes that block's result, so seeding a walk from its
+    // own destination is safe: that is #306's open question 7, answered here.
+    //
+    // Three phases: resolve the plans and copy the seeds under the lock;
+    // compile and evaluate with it released; retake it to keep what the bricks
+    // reached as the next dab's seeds.
+    //
+    // WHAT THE POOL IS WORTH, measured on a 24-thread desktop at a dim-8
+    // lattice. Dispatching an empty `parallel_for` over 48 units costs 16-19 us
+    // there, and that is the whole of the question:
+    //
+    //   48 bricks, 16-dab suffix   393,216 units    66 us serial -> 30 us pooled
+    //   12 bricks, 16-dab suffix    98,304 units    21 us serial -> 25 us pooled
+    //   48 bricks,  1-dab suffix    24,576 units    19 us serial
+    //
+    // The middle row is why this is gated rather than always taken: the pool
+    // costs more than it saves there, and burns two dozen cores to do it.
+    // `kResumeParallelUnits` sits above it, at about three times the dispatch.
+    //
+    // A UNIT is one sample times one appended item -- the shape of the work the
+    // walk actually does -- so the gate does not have to be restated for a
+    // different lattice size or a longer suffix. Below it the loop still runs
+    // OFF the lock; only the pool is skipped.
+    struct ResumeTask {
+        std::size_t slot = 0;  // which brick of the batch
+        const clay_document::ResumePlan* plan = nullptr;
+        eval::GridQuery grid;
+        // Where the seed IS, valid only while the lock is held. Cleared by the
+        // copy pass below, so nothing can still be holding one when the lock
+        // drops.
+        clay_document::Seed seed;
+        // The seed on entry and the ACTIVE layer's answer on exit: the walk
+        // runs in place. The caller's own output slot when nothing sits
+        // beneath, staging when something does and a union is still to apply.
+        float* active = nullptr;
+        float* active_rgb = nullptr;
+        const float* below = nullptr;
+        const float* below_rgb = nullptr;
+        bool ok = false;
+    };
+    std::vector<ResumeTask> tasks;
+    // Staging for the multi-layer case only, where the walk cannot write to the
+    // caller's slot because a union still has to be applied to it. Sized once
+    // the tasks are known rather than for the whole batch: a call that resumes
+    // a tenth of its bricks should not allocate for all of them.
+    std::vector<float> stage_active, stage_active_rgb, stage_below, stage_below_rgb;
+    std::unordered_map<std::uint64_t, clay_document::ResumePlan> plans;
+    std::shared_ptr<const scene::CullIndex> index;
+    float resume_pad = 0.0f;
+    bool has_below = false;
+    std::size_t units = 0;  // sample-instructions of deferred work
+    {
+        std::lock_guard<std::mutex> lock(doc->cache_lock());
+        const clay_document::ResumePlan probe = doc->plan_resume(1);  // for has_below only
+        has_below = probe.has_below;
+        const std::uint64_t now = doc->current_revision();
+
+        // One plan per distinct stored revision. A moving window holds one or
+        // two of them -- what the last dab stamped, and what it had not reached
+        // -- so this is a couple of plan_resume calls for the batch rather than
+        // one per brick. Each plan carries its own `appended` tail, which is
+        // what lets a brick left behind two dabs ago catch up in one go.
+        //
+        // Tasks hold plans by ADDRESS, which this container allows and a vector
+        // would not: an unordered_map's elements are nodes, so a rehash moves
+        // iterators and not values. Nothing inserts into it after the lock
+        // drops.
+        for (std::size_t i = 0; i < count; ++i) {
+            const std::uint64_t rev =
+                doc->seed_revision_for(requests[i], per, want_colour, has_below);
+            if (rev == 0) continue;
+            // The cull index is only wanted once a brick turns out to have a
+            // seed: obtaining it copies the cached one, and a batch with
+            // nothing to resume should not pay for that on its way to the full
+            // path.
+            if (!index) {
+                index = doc->cull_index_locked();
+                resume_pad = index->cull_pad();
+            }
+            const clay_document::Seed seed =
+                doc->seed_for(requests[i], per, resume_pad, want_colour, has_below);
+            if (!seed.values) continue;
+            float* vd = out_values + i * per;
+            float* vc = want_colour ? out_colors_rgb + i * per * 3 : nullptr;
+
+            // A seed already AT the current revision is the answer: its brick's
+            // culled tape has not changed since it was computed, so there is
+            // nothing to fold into it. That is what a region-limited
+            // invalidation leaves behind -- an edit the brick cannot reach
+            // advances the seed rather than dropping it -- and it is also the
+            // plain case of a refill asked for twice without an edit in
+            // between.
+            //
+            // The union still applies: what is stored is the ACTIVE layer's
+            // value, and the layers beneath are their own half. Answered under
+            // the lock rather than deferred because it is one copy either way,
+            // and deferring it would be that same copy plus a task.
+            if (rev == now) {
+                if (has_below) {
+                    fold_layers_below(seed.below, seed.below_colors, seed.values, seed.colors, per,
+                                      vd, vc);
+                } else {
+                    std::memcpy(vd, seed.values, per * sizeof(float));
+                    if (vc) std::memcpy(vc, seed.colors, per * 3 * sizeof(float));
+                }
+                resumed[i] = 1;
+                ++resumed_count;
+                continue;
+            }
+
+            auto pit = plans.find(rev);
+            if (pit == plans.end()) pit = plans.emplace(rev, doc->plan_resume(rev)).first;
+            const clay_document::ResumePlan& plan = pit->second;
+            if (!plan.usable) continue;
+
+            ResumeTask task;
+            std::size_t samples = 0;
+            if (read_grid(requests[i].origin, requests[i].spacing, requests[i].dims, &task.grid,
+                          &samples) != CLAY_OK)
+                continue;
+            task.slot = i;
+            task.plan = &plan;
+            task.seed = seed;
+            units += per * plan.appended.size();
+            tasks.push_back(task);
+        }
+
+        // THE COPY, in its own pass so the staging can be sized to the tasks
+        // that exist rather than to the batch that might have needed it. Still
+        // under the lock: `Seed` names memory the seed store owns, and the
+        // whole point is that no one holds such a pointer once it drops.
+        if (has_below && !tasks.empty()) {
+            stage_active.resize(tasks.size() * per);
+            stage_below.resize(tasks.size() * per);
+            if (want_colour) {
+                stage_active_rgb.resize(tasks.size() * per * 3);
+                stage_below_rgb.resize(tasks.size() * per * 3);
+            }
+        }
+        for (std::size_t t = 0; t < tasks.size(); ++t) {
+            ResumeTask& task = tasks[t];
+            if (has_below) {
+                task.active = stage_active.data() + t * per;
+                task.below = stage_below.data() + t * per;
+                std::memcpy(stage_below.data() + t * per, task.seed.below, per * sizeof(float));
+                if (want_colour) {
+                    task.active_rgb = stage_active_rgb.data() + t * per * 3;
+                    task.below_rgb = stage_below_rgb.data() + t * per * 3;
+                    std::memcpy(stage_below_rgb.data() + t * per * 3, task.seed.below_colors,
+                                per * 3 * sizeof(float));
+                }
+            } else {
+                task.active = out_values + task.slot * per;
+                task.active_rgb = want_colour ? out_colors_rgb + task.slot * per * 3 : nullptr;
+            }
+            std::memcpy(task.active, task.seed.values, per * sizeof(float));
+            if (task.active_rgb)
+                std::memcpy(task.active_rgb, task.seed.colors, per * 3 * sizeof(float));
+            task.seed = clay_document::Seed{};  // nothing may read it past here
+        }
+    }
+
+    // -- released ---------------------------------------------------------
+    //
+    // Nothing here reads the seed store. What it does read -- the document and
+    // the cull index snapshot -- is what the full path reads unlocked too: the
+    // ABI's contract is that a mutating clay_document_* call is not concurrent
+    // with a refill (clay.h, THREADING), while any number of refills and
+    // readers may be. Each task writes its own brick's samples and nothing
+    // else, so the tasks are disjoint by construction.
+    auto run_task = [&](ResumeTask& t, std::vector<float>& points) {
+        const math::Aabb box = request_brick_box(requests[t.slot]).dilated(requests[t.slot].band);
+        scene::CullRegion cull{box};
+        scene::Tape suffix;
+        if (!scene::compile_layer_suffix(t.plan->checkpoint, doc->doc.document, t.plan->appended,
+                                         &suffix, nullptr, &cull, index.get()))
+            return;
+        const eval::GridQuery& g = t.grid;
+        points.resize(per * 3);
+        std::size_t at = 0;
+        for (int k = 0; k < g.nz; ++k)
+            for (int j = 0; j < g.ny; ++j)
+                for (int x = 0; x < g.nx; ++x) {
+                    const kernel::cfloat3 pt =
+                        g.origin + kernel::cf3(static_cast<float>(x) * g.spacing,
+                                               static_cast<float>(j) * g.spacing,
+                                               static_cast<float>(k) * g.spacing);
+                    points[at * 3] = pt.x;
+                    points[at * 3 + 1] = pt.y;
+                    points[at * 3 + 2] = pt.z;
+                    ++at;
+                }
+        eval::PointQuery pq;
+        pq.points_xyz = points.data();
+        pq.count = per;
+        eval::PointResults pr;
+        pr.distances = t.active;
+        if (t.active_rgb) pr.colors_rgb = t.active_rgb;
+        // In place: the seed was copied here under the lock, and the answer
+        // lands on top of it.
+        eval::eval_points_seeded(suffix, pq, t.active, t.active_rgb, pr);
+        if (t.below)
+            fold_layers_below(t.below, t.below_rgb, t.active, t.active_rgb, per,
+                              out_values + t.slot * per,
+                              want_colour ? out_colors_rgb + t.slot * per * 3 : nullptr);
+        t.ok = true;
+    };
+    constexpr std::size_t kResumeParallelUnits = 256u * 1024u;
+    if (tasks.size() > 1 && units >= kResumeParallelUnits) {
+        parallel::ThreadPool::instance().parallel_for(
+            tasks.size(), 1, [&](std::size_t task_b, std::size_t task_e) {
+                std::vector<float> points;  // one per chunk, reused across its bricks
+                for (std::size_t t = task_b; t < task_e; ++t) run_task(tasks[t], points);
+            });
+    } else {
+        std::vector<float> points;
+        for (ResumeTask& t : tasks) run_task(t, points);
+    }
+    for (const ResumeTask& t : tasks)
+        if (t.ok) {
+            resumed[t.slot] = 1;
+            ++resumed_count;
+        }
+
+    // -- retaken ----------------------------------------------------------
+    //
+    // The revision check is the one `store_seeds` already makes for the full
+    // path: a document that moved while the lock was down means these answer a
+    // revision that is no longer current, and keeping them as seeds would lie.
+    // The values still go back to the caller -- they are the batch it asked
+    // for, at the revision it asked at.
+    if (!tasks.empty()) {
+        std::lock_guard<std::mutex> lock(doc->cache_lock());
+        const std::uint64_t now = doc->current_revision();
+        for (const ResumeTask& t : tasks)
+            if (t.ok && t.plan->now == now)
+                doc->store_active(requests[t.slot], t.plan->now, resume_pad, t.active, t.active_rgb,
+                                  per);
+    }
+    return resumed_count;
+}
 }  // namespace
 
 clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char* backend,
@@ -9323,149 +9614,12 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
     const char* name = backend ? backend : "cpu";
     eval::Backend* b = eval::Registry::instance().find(name);
     if (!b) return fail(CLAY_ERROR_NOT_FOUND, std::string("backend not registered: ") + name);
-    // -- the resumable path (#306) -----------------------------------------
-    //
-    // When a brick carries a seed and the document has only been APPENDED to
-    // since that seed was taken, what this call has to evaluate for it is the
-    // appended items -- not the whole surviving edit list over every sample.
-    // The suffix is compiled per brick and culled exactly as a whole-document
-    // compile would cull it, which is what makes continuing from the seed the
-    // same arithmetic rather than an approximation of it.
-    //
-    // PER BRICK, not per batch. Whether a brick can be resumed, and how far it
-    // has to be carried, is that brick's own question: the bricks of one batch
-    // routinely sit at different revisions, because a refill re-stamps only the
-    // bricks it filled and an append re-stamps none. A stroke whose dirty window
-    // moves -- which is every stroke -- therefore mixes the ground it covered
-    // last dab with the ground it has just reached, and a brick it has never
-    // reached has no seed at all. Bricks that cannot be served drop into the
-    // miss gather below and take the full path alone.
-    //
-    // WITH MORE THAN ONE VISIBLE SDF LAYER the seed is two values, not one. The
-    // layers hard-union left to right, so the tape holds the layers BENEATH the
-    // active one as its own accumulator, and a single stored number cannot be
-    // taken apart into the two again. They are kept apart instead: the suffix
-    // folds into the active layer's value and the union is applied here, with
-    // the same hard Add the whole-document compile emits between layers. The
-    // layers beneath are static across a stroke, so their half is stored once
-    // and carried forward untouched.
-    const bool want_colour = out_colors_rgb != nullptr;
+    // The resumable path (#306, #348), which answers what it can from the seeds
+    // it kept last dab and leaves the rest to the full walk below.
     std::vector<std::uint8_t> resumed(count, 0);
-    std::size_t resumed_count = 0;
-    {
-        std::lock_guard<std::mutex> lock(doc->cache_lock());
-        const clay_document::ResumePlan probe = doc->plan_resume(1);  // for has_below only
-        const bool has_below = probe.has_below;
-        const std::uint64_t now = doc->current_revision();
-
-        // The cull index is only wanted once a brick turns out to have a seed:
-        // obtaining it copies the cached one, and a batch with nothing to
-        // resume should not pay for that on its way to the full path.
-        std::shared_ptr<const scene::CullIndex> index;
-        float resume_pad = 0.0f;
-
-        // One plan per distinct stored revision. A moving window holds one or
-        // two of them -- what the last dab stamped, and what it had not reached
-        // -- so this is a couple of plan_resume calls for the batch rather than
-        // one per brick. Each plan carries its own `appended` tail, which is
-        // what lets a brick left behind two dabs ago catch up in one go.
-        std::unordered_map<std::uint64_t, clay_document::ResumePlan> plans;
-        std::vector<float> points;
-        std::vector<float> active, active_rgb;
-        for (std::size_t i = 0; i < count; ++i) {
-            const std::uint64_t rev =
-                doc->seed_revision_for(requests[i], per, want_colour, has_below);
-            if (rev == 0) continue;
-            if (!index) {
-                index = doc->cull_index_locked();
-                resume_pad = index->cull_pad();
-            }
-            const clay_document::Seed seed =
-                doc->seed_for(requests[i], per, resume_pad, want_colour, has_below);
-            if (!seed.values) continue;
-            float* vd = out_values + i * per;
-            float* vc = want_colour ? out_colors_rgb + i * per * 3 : nullptr;
-
-            // A seed already AT the current revision is the answer: its brick's
-            // culled tape has not changed since it was computed, so there is
-            // nothing to fold into it. That is what a region-limited
-            // invalidation leaves behind -- an edit the brick cannot reach
-            // advances the seed rather than dropping it -- and it is also the
-            // plain case of a refill asked for twice without an edit in
-            // between.
-            //
-            // The union still applies: what is stored is the ACTIVE layer's
-            // value, and the layers beneath are their own half.
-            if (rev == now) {
-                if (has_below) {
-                    fold_layers_below(seed.below, seed.below_colors, seed.values, seed.colors, per,
-                                      vd, vc);
-                } else {
-                    std::memcpy(vd, seed.values, per * sizeof(float));
-                    if (vc) std::memcpy(vc, seed.colors, per * 3 * sizeof(float));
-                }
-                resumed[i] = 1;
-                ++resumed_count;
-                continue;
-            }
-
-            auto pit = plans.find(rev);
-            if (pit == plans.end()) pit = plans.emplace(rev, doc->plan_resume(rev)).first;
-            const clay_document::ResumePlan& plan = pit->second;
-            if (!plan.usable) continue;
-
-            eval::GridQuery g;
-            std::size_t samples = 0;
-            if (read_grid(requests[i].origin, requests[i].spacing, requests[i].dims, &g,
-                          &samples) != CLAY_OK)
-                continue;
-            const math::Aabb box = request_brick_box(requests[i]).dilated(requests[i].band);
-            scene::CullRegion cull{box};
-            scene::Tape suffix;
-            if (!scene::compile_layer_suffix(plan.checkpoint, doc->doc.document, plan.appended,
-                                             &suffix, nullptr, &cull, index.get()))
-                continue;
-            points.resize(samples * 3);
-            std::size_t at = 0;
-            for (int k = 0; k < g.nz; ++k)
-                for (int j = 0; j < g.ny; ++j)
-                    for (int x = 0; x < g.nx; ++x) {
-                        const kernel::cfloat3 pt =
-                            g.origin + kernel::cf3(static_cast<float>(x) * g.spacing,
-                                                   static_cast<float>(j) * g.spacing,
-                                                   static_cast<float>(k) * g.spacing);
-                        points[at * 3] = pt.x;
-                        points[at * 3 + 1] = pt.y;
-                        points[at * 3 + 2] = pt.z;
-                        ++at;
-                    }
-            eval::PointQuery pq;
-            pq.points_xyz = points.data();
-            pq.count = samples;
-            eval::PointResults pr;
-            // Into scratch when there is a union still to apply, straight out
-            // when there is not.
-            if (has_below) {
-                active.resize(per);
-                if (want_colour) active_rgb.resize(per * 3);
-            }
-            pr.distances = has_below ? active.data() : vd;
-            if (want_colour) pr.colors_rgb = has_below ? active_rgb.data() : vc;
-            eval::eval_points_seeded(suffix, pq, seed.values, seed.colors, pr);
-            if (has_below) {
-                fold_layers_below(seed.below, seed.below_colors, active.data(),
-                                  want_colour ? active_rgb.data() : nullptr, per, vd, vc);
-                // The seed for the NEXT dab is the ACTIVE layer's value, not
-                // what was just written out.
-                doc->store_active(requests[i], plan.now, resume_pad, active.data(),
-                                  want_colour ? active_rgb.data() : nullptr, per);
-            } else {
-                doc->store_active(requests[i], plan.now, resume_pad, vd, vc, per);
-            }
-            resumed[i] = 1;
-            ++resumed_count;
-        }
-    }
+    const bool want_colour = out_colors_rgb != nullptr;
+    const std::size_t resumed_count = resume_bricks(doc, requests, count, per, want_colour,
+                                                    out_values, out_colors_rgb, resumed.data());
     doc->note_refill(resumed_count, count - resumed_count);
     if (resumed_count == count) return CLAY_OK;
 

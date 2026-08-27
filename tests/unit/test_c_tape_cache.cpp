@@ -1254,3 +1254,192 @@ TEST_CASE("resumable refill: an append to a layer beneath is never resumed onto 
         CHECK(got == want);
     }
 }
+
+namespace {
+
+// A CUBE of brick keys, which `brick_row` cannot give. Two things want more
+// bricks than a row of six: the resumed refill only reaches for the thread pool
+// once the deferred work is worth a dispatch, and a race wants enough bricks in
+// flight that two threads are inside the seed store at the same moment.
+std::vector<clay_brick_request> brick_block(int from, int count) {
+    constexpr int kDim = 8;
+    constexpr float kVox = 0.05f;
+    std::vector<clay_brick_request> reqs;
+    reqs.reserve(static_cast<std::size_t>(count) * count * count);
+    for (int z = 0; z < count; ++z)
+        for (int y = 0; y < count; ++y)
+            for (int x = 0; x < count; ++x) {
+                clay_brick_request r;
+                std::memset(&r, 0, sizeof(r));
+                r.key[0] = from + x;
+                r.key[1] = from + y;
+                r.key[2] = from + z;
+                for (int a = 0; a < 3; ++a)
+                    r.origin[a] = static_cast<float>(r.key[a]) * kDim * kVox;
+                r.spacing = kVox;
+                r.dims[0] = r.dims[1] = r.dims[2] = kDim;
+                r.band = 3.0f * kVox;
+                reqs.push_back(r);
+            }
+    return reqs;
+}
+
+}  // namespace
+
+TEST_CASE("resumable refill: a refill racing readers is the refill it would be alone") {
+    // NOTHING DROVE THIS PATH CONCURRENTLY (#348). The cases above run one
+    // refill at a time, and the concurrent-reader cases higher up drive the
+    // tape cache rather than a refill, so the refill's locking was untested
+    // rather than proven -- which mattered the moment the refill stopped
+    // holding `cache_mutex_` across its evaluation.
+    //
+    // It no longer does: it copies each brick's seed out under the lock,
+    // compiles and evaluates with the lock released (over the thread pool when
+    // the deferred work is worth a dispatch), then retakes it to store what the
+    // bricks reached. The seed store is a hash map another refill may be
+    // writing to, so a raw pointer into it held across that gap is a race, and
+    // this is what would see one.
+    //
+    // What the ABI promises is exactly what is exercised here: any number of
+    // threads may run `clay_brick_cache_eval_requests` and `clay_eval_points`
+    // against one document at once (clay.h, THREADING), and a mutating call may
+    // not overlap them -- so the stroke advances between rounds, with every
+    // thread joined.
+    //
+    // The check is BIT-FOR-BIT against a fresh document holding the same items,
+    // which has no seeds and so always takes the full walk. Same contract as
+    // the single-threaded cases: nothing about the answer may depend on which
+    // path produced it, or on who else was reading at the time.
+    //
+    // FEW CALLS PER ROUND, MANY ROUNDS, and that is deliberate. Only the first
+    // refill after a dab has anything to defer: it carries every brick forward
+    // to the current revision, and a call after it finds the seeds already
+    // there and answers by copying them. So a round of many calls is one racing
+    // refill and a tail of memcpys, and what is wanted is the opposite -- three
+    // threads entering the deferred phase together, over and over.
+    constexpr int kRounds = 30;
+    constexpr int kDabsPerRound = 12;
+    constexpr int kRefillThreads = 3;
+    constexpr int kReaderThreads = 3;
+    constexpr int kCallsPerThread = 2;
+    const std::size_t per = 8u * 8u * 8u;
+    // TWO WINDOW SIZES, alternating, because the refill has two shapes. 4^3
+    // bricks over a twelve-dab suffix is enough deferred work to clear the
+    // pool's dispatch and take the parallel branch; a row of four is not, and
+    // runs the deferred phase on the calling thread. Both are off the lock, and
+    // both have to be raced -- as measured, 63 of one and 27 of the other. The
+    // row lies inside the block's keys, so the two overlap and the threads
+    // contend for the same seeds rather than politely dividing them.
+    const std::vector<clay_brick_request> reqs = brick_block(-2, 4);
+    const std::vector<clay_brick_request> row = brick_row(-2, 4);
+
+    Doc doc;
+    add_sphere(doc, 1.0f, 0.0f);
+    std::vector<float> dabs_x;
+
+    // The probes the readers use, spread over the same ground the bricks cover.
+    constexpr int kProbes = 32;
+    std::vector<float> probes(kProbes * 3);
+    for (int i = 0; i < kProbes; ++i) {
+        probes[i * 3 + 0] = -0.9f + 0.06f * static_cast<float>(i);
+        probes[i * 3 + 1] = 0.07f * static_cast<float>(i % 9) - 0.3f;
+        probes[i * 3 + 2] = 0.05f * static_cast<float>(i % 7) - 0.15f;
+    }
+
+    std::atomic<int> refill_mismatches{0};
+    std::atomic<int> reader_mismatches{0};
+    std::atomic<int> failures{0};
+
+    for (int round = 0; round < kRounds; ++round) {
+        for (int i = 0; i < kDabsPerRound; ++i) {
+            const float x = -0.9f + 0.09f * static_cast<float>(dabs_x.size());
+            add_sphere(doc, 0.30f, x);
+            dabs_x.push_back(x);
+        }
+
+        // The oracle: the same items in a document that has never resumed
+        // anything, so its refill is the full walk this one has to match.
+        std::vector<float> want(reqs.size() * per, 0.0f);
+        std::vector<float> want_row(row.size() * per, 0.0f);
+        {
+            Doc oracle;
+            add_sphere(oracle, 1.0f, 0.0f);
+            for (float x : dabs_x) add_sphere(oracle, 0.30f, x);
+            REQUIRE(clay_brick_cache_eval_requests(oracle.d, nullptr, reqs.data(), reqs.size(),
+                                                   want.data(), want.size(), nullptr,
+                                                   0) == CLAY_OK);
+            REQUIRE(clay_brick_cache_eval_requests(oracle.d, nullptr, row.data(), row.size(),
+                                                   want_row.data(), want_row.size(), nullptr,
+                                                   0) == CLAY_OK);
+        }
+        // Read from `doc` itself, single-threaded, so a reader disagreeing is
+        // the race and not a question about how the tape was compiled.
+        std::vector<float> want_probe(kProbes, 0.0f);
+        REQUIRE(clay_eval_points(doc.d, nullptr, probes.data(), kProbes, want_probe.data(),
+                                 nullptr) == CLAY_OK);
+
+        std::vector<std::thread> workers;
+        for (int t = 0; t < kRefillThreads; ++t)
+            workers.emplace_back([&, t] {
+                // Its own output buffer; the document, the seed store and the
+                // cull index are what is shared.
+                std::vector<float> got;
+                for (int k = 0; k < kCallsPerThread; ++k) {
+                    const bool wide = ((t + k) % 2) == 0;
+                    const std::vector<clay_brick_request>& ask = wide ? reqs : row;
+                    const std::vector<float>& expect = wide ? want : want_row;
+                    got.assign(ask.size() * per, 0.0f);
+                    if (clay_brick_cache_eval_requests(doc.d, nullptr, ask.data(), ask.size(),
+                                                       got.data(), got.size(), nullptr,
+                                                       0) != CLAY_OK) {
+                        failures.fetch_add(1);
+                        continue;
+                    }
+                    if (std::memcmp(got.data(), expect.data(), expect.size() * sizeof(float)) != 0)
+                        refill_mismatches.fetch_add(1);
+                }
+            });
+        for (int t = 0; t < kReaderThreads; ++t)
+            workers.emplace_back([&] {
+                std::vector<float> got(kProbes, 0.0f);
+                for (int k = 0; k < kCallsPerThread * 16; ++k) {
+                    if (clay_eval_points(doc.d, nullptr, probes.data(), kProbes, got.data(),
+                                         nullptr) != CLAY_OK) {
+                        failures.fetch_add(1);
+                        continue;
+                    }
+                    if (std::memcmp(got.data(), want_probe.data(), got.size() * sizeof(float)) != 0)
+                        reader_mismatches.fetch_add(1);
+                }
+            });
+        for (std::thread& w : workers) w.join();
+    }
+
+    CHECK(failures.load() == 0);
+    CHECK(refill_mismatches.load() == 0);
+    CHECK(reader_mismatches.load() == 0);
+    // The stroke has to have MOVED the field the bricks read, or every
+    // comparison above is two readings of an unchanged document agreeing.
+    {
+        Doc base;
+        add_sphere(base, 1.0f, 0.0f);
+        std::vector<float> plain(reqs.size() * per, 0.0f);
+        REQUIRE(clay_brick_cache_eval_requests(base.d, nullptr, reqs.data(), reqs.size(),
+                                               plain.data(), plain.size(), nullptr, 0) == CLAY_OK);
+        std::vector<float> sculpted(reqs.size() * per, 0.0f);
+        REQUIRE(clay_brick_cache_eval_requests(doc.d, nullptr, reqs.data(), reqs.size(),
+                                               sculpted.data(), sculpted.size(), nullptr,
+                                               0) == CLAY_OK);
+        CHECK(std::memcmp(sculpted.data(), plain.data(), plain.size() * sizeof(float)) != 0);
+    }
+    // And the bricks must actually STRADDLE the surface: a block of "far
+    // outside" agreeing with another block of "far outside" proves nothing.
+    {
+        std::vector<float> v(reqs.size() * per, 0.0f);
+        REQUIRE(clay_brick_cache_eval_requests(doc.d, nullptr, reqs.data(), reqs.size(), v.data(),
+                                               v.size(), nullptr, 0) == CLAY_OK);
+        bool near_surface = false;
+        for (float f : v) near_surface = near_surface || std::fabs(f) < 0.5f;
+        CHECK(near_surface);
+    }
+}
