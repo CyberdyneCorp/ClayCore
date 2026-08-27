@@ -206,6 +206,45 @@ the host-memory batch, which is what `clay_brick_cache_eval_requests_device`
 rides: without it the zero-copy path paid a command buffer and a wait per
 brick and sat 25-165x behind the host-memory route it exists to beat.
 
+**The device destination resumes too** (#345). The host-memory refill has kept
+each brick's float32 result as a seed since #306, so a dab costs what the dab
+adds; its device sibling had none of that and walked the whole surviving edit
+list over every sample, every dab — which put the callers most likely to be
+latency-bound, a renderer evaluating into the buffer it will draw from, on the
+slowest route in the library. `clay_brick_cache_eval_requests_device` now shares
+the document's seed store with the host-memory form: a brick that can be resumed
+is answered on the host by the same code the host-memory refill runs and
+**written into its own slot**; a brick that cannot is evaluated on the device
+into that slot as before and **read back** so it becomes the next dab's seed.
+On an RTX 5060, a 12-brick window over a 20,000-item sculpt went **59.3 ms to
+0.27 ms** per dab, and 5,000 items **15.2 ms to 0.08 ms**.
+
+The two new primitives that join the halves are `Backend::write_device_buffer`
+and `Backend::read_device_buffer` — host memory into a caller-owned slice and
+back, `caps().device_copy` saying which backends have them. **Default false and
+Unsupported**, so a backend without them takes the whole-batch full walk it took
+before: correct, silent, and exactly as fast as it always was. Vulkan implements
+them with a **compute shader**, not `vkCmdCopyBuffer`, because nothing obliges a
+caller to have created its buffer with `VK_BUFFER_USAGE_TRANSFER_SRC/DST` —
+the storage binding the evaluation path already needs is the one usage that can
+be assumed. Metal has no seeded path yet and falls back (#350).
+
+The seed is kept only where this path can say what it means: with **more than
+one visible SDF layer** a seed is two values — the active layer's and the hard
+union of everything beneath it — and this path evaluates the document whole, so
+what it could store is neither half. It stores nothing rather than something
+mislabelled, and multi-layer documents take the full walk here. The host-memory
+form keeps the two halves apart and resumes them fine.
+
+The shape this **did not** take, and why, is measured rather than argued
+(`openspec/changes/resume-the-device-refill/design.md`): making the seed
+device-resident so the suffix evaluates on the GPU cannot win on the windows a
+sculpt actually submits. A seeded kernel still has to dispatch, and one dispatch
+of the emptiest possible tape costs **23 µs a brick** on that GPU, where the
+whole host-side resumed refill of 12 bricks — including the per-brick suffix
+compile a device path would also have to pay — is **18 µs** at 200 items and
+**155 µs** at 20,000. The copy it would save is 24 KiB, under a microsecond.
+
 The limit worth stating plainly: this makes evaluation **output**
 device-resident, **not** brick **storage**. Generations, staleness,
 classification, quantization and the memory budget are host code over host

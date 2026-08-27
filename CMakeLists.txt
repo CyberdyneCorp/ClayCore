@@ -319,10 +319,10 @@ if(CLAY_BACKEND_VULKAN)
             ${CMAKE_CURRENT_SOURCE_DIR}/tools/amalgamate_glsl.py
     COMMENT "Amalgamating claycore kernels for Vulkan (single-source)")
 
-  # One source, two modules: a SPIR-V module has one entry point, and a
+  # One source, three modules: a SPIR-V module has one entry point, and a
   # runtime branch on the mode would cost every invocation.
   set(CLAY_SPV_EMBED "")
-  foreach(entry points grid)
+  foreach(entry points grid copy)
     string(TOUPPER ${entry} ENTRY_UPPER)
     set(spv ${CMAKE_CURRENT_BINARY_DIR}/clay_kernels_${entry}.spv)
     set(embed ${CMAKE_CURRENT_BINARY_DIR}/clay_spv_${entry}_embedded.cpp)

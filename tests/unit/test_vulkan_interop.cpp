@@ -2,6 +2,8 @@
 
 #include <vulkan/vulkan.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -516,4 +518,194 @@ TEST_CASE("device interop: a host adopts its device through the C ABI") {
     clay_document_destroy(doc);
     clay_device_release(dev);
     clay_device_release(nullptr);  // releasing a null handle is a no-op
+}
+
+// -- the resumable refill on a device destination (#345) ---------------------
+//
+// The host-memory refill has kept each brick's float32 result as a seed since
+// #306; its device-buffer sibling did none of that, so the callers most likely
+// to be latency-bound -- a renderer evaluating into the buffer it will draw
+// from -- walked the whole surviving edit list over every sample, every dab.
+//
+// What this pins is not the speed, which is the benchmark harness's, but the
+// two things resuming must not bend:
+//
+//   1. A resumed brick holds what a FULL WALK of the same document holds.
+//      The oracle is a document rebuilt from the same items and refilled
+//      through the CPU with no seed to its name, so it is a full walk by
+//      construction and not the host resumed path checking itself.
+//   2. The resumed path actually FIRES. It is bit-identical to the full walk
+//      by contract, so nothing in the output can say whether it ran, and a
+//      fast path that quietly stopped firing reads as correct --
+//      clay_document_resume_stats is the only witness.
+namespace {
+
+// The parity suite's relative error (test_parity.cpp), so the bar this holds
+// the device path to is the bar every backend is already held to.
+float rel_err(float a, float b) {
+    const float scale = std::max(std::max(std::fabs(a), std::fabs(b)), 1.0f);
+    return std::fabs(a - b) / scale;
+}
+
+// A dab, kept so the oracle document can be rebuilt item for item.
+struct Dab {
+    float radius;
+    float pos[3];
+};
+
+clay_document* build(const std::vector<Dab>& dabs, clay_layer_id* out_layer) {
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "body", &layer) == CLAY_OK);
+    for (const Dab& d : dabs) {
+        clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &d.radius, 1);
+        REQUIRE(it != nullptr);
+        REQUIRE(clay_item_set_position(it, d.pos) == CLAY_OK);
+        REQUIRE(clay_layer_add_item(doc, layer, it, nullptr) == CLAY_OK);
+        clay_item_destroy(it);
+    }
+    if (out_layer) *out_layer = layer;
+    return doc;
+}
+
+// A window of bricks over the sphere's equator, where every brick either
+// straddles the surface or lies inside it. A window that runs off the shape
+// holds bricks whose culled prefix produced nothing at all, which are
+// correctly walked in full for ever -- a legitimate refusal that would sit in
+// the counter below pretending to be the defect it is gating.
+std::vector<clay_brick_request> equator_window(int n) {
+    std::vector<clay_brick_request> reqs(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        std::memset(&reqs[static_cast<std::size_t>(i)], 0, sizeof(clay_brick_request));
+        clay_brick_request& r = reqs[static_cast<std::size_t>(i)];
+        r.key[0] = i - 1;
+        r.key[1] = 0;
+        r.key[2] = 0;
+        for (int a = 0; a < 3; ++a)
+            r.origin[a] = static_cast<float>(r.key[a]) * 8 * 0.05f;
+        r.spacing = 0.05f;
+        r.dims[0] = r.dims[1] = r.dims[2] = 8;
+        r.band = 0.15f;
+    }
+    return reqs;
+}
+
+}  // namespace
+
+TEST_CASE("device refill: a stroke resumes into the caller's buffer and matches a full walk") {
+    HostDevice host;
+    if (!host.ok) {
+        MESSAGE("no Vulkan device; skipping");
+        return;
+    }
+    clay_device_desc desc{};
+    desc.struct_size = static_cast<std::uint32_t>(sizeof desc);
+    desc.api = CLAY_DEVICE_API_VULKAN;
+    desc.handles[0] = host.instance;
+    desc.handles[1] = host.physical;
+    desc.handles[2] = host.device;
+    desc.handles[3] = host.queue;
+    desc.queue_family = host.family;
+    clay_device* dev = clay_device_adopt(&desc);
+    REQUIRE(dev != nullptr);
+
+    // A sculpt with enough history that a full walk and a suffix are visibly
+    // different amounts of work, then a stroke of dabs on top of it.
+    std::vector<Dab> dabs;
+    dabs.push_back(Dab{1.0f, {0.0f, 0.0f, 0.0f}});
+    for (int i = 0; i < 200; ++i) {
+        const float t = static_cast<float>(i) * 0.031f;
+        dabs.push_back(Dab{0.08f, {std::cos(t), std::sin(t) * 0.4f, std::sin(t * 1.7f) * 0.4f}});
+    }
+
+    clay_layer_id layer = 0;
+    clay_document* doc = build(dabs, &layer);
+    const std::vector<clay_brick_request> reqs = equator_window(6);
+    const std::size_t count = reqs.size();
+    const std::size_t per = 8 * 8 * 8;
+    const std::size_t total = count * per;
+
+    HostDevice::Buf values = host.alloc(total * sizeof(float));
+    HostDevice::Buf colors = host.alloc(total * 3 * sizeof(float));
+    REQUIRE(values.mapped != nullptr);
+    REQUIRE(colors.mapped != nullptr);
+    clay_device_buffer dst{};
+    dst.struct_size = static_cast<std::uint32_t>(sizeof dst);
+    dst.handle = values.buffer;
+    dst.size = total * sizeof(float);
+    clay_device_buffer dst_colors = dst;
+    dst_colors.handle = colors.buffer;
+    dst_colors.size = total * 3 * sizeof(float);
+
+    // Primed in the MIDDLE, and through the host-memory entry point, so the
+    // first device call has to hold three cases apart at once: a run of
+    // resumable bricks that does NOT start at brick 0, and un-resumable bricks
+    // on both sides of it. Every destination here is a fixed slot, so a run
+    // that lands at the run's own offset and a run that lands at the buffer's
+    // start differ only when the run does not start at 0 -- which is the shape
+    // a moving dirty window is in every dab but the first. The seed store is
+    // the DOCUMENT's, not either entry point's, so priming through the host
+    // path is also the check that one refill's seeds serve the other's.
+    std::vector<float> prime(4 * per), prime_rgb(4 * per * 3);
+    REQUIRE(clay_brick_cache_eval_requests(doc, "cpu", reqs.data() + 1, 4, prime.data(),
+                                           prime.size(), prime_rgb.data(),
+                                           prime_rgb.size()) == CLAY_OK);
+
+    std::vector<float> oracle(total), oracle_rgb(total * 3);
+    float worst = 0.0f, worst_rgb = 0.0f;
+    for (int step = 0; step < 6; ++step) {
+        // One dab, appended -- which is the case a suffix exists for.
+        const float t = static_cast<float>(step) * 0.05f;
+        dabs.push_back(Dab{0.07f, {0.95f, t, -0.1f}});
+        clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &dabs.back().radius, 1);
+        REQUIRE(it != nullptr);
+        REQUIRE(clay_item_set_position(it, dabs.back().pos) == CLAY_OK);
+        REQUIRE(clay_layer_add_item(doc, layer, it, nullptr) == CLAY_OK);
+        clay_item_destroy(it);
+
+        REQUIRE(clay_brick_cache_eval_requests_device(doc, dev, reqs.data(), count, &dst,
+                                                      &dst_colors) == CLAY_OK);
+
+        // The oracle: the same items in a document that has never been
+        // refilled, so its CPU refill walks the whole edit list.
+        clay_document* fresh = build(dabs, nullptr);
+        REQUIRE(clay_brick_cache_eval_requests(fresh, "cpu", reqs.data(), count, oracle.data(),
+                                               total, oracle_rgb.data(), total * 3) == CLAY_OK);
+        clay_document_destroy(fresh);
+
+        const float* got = static_cast<const float*>(values.mapped);
+        const float* got_rgb = static_cast<const float*>(colors.mapped);
+        for (std::size_t i = 0; i < total; ++i) worst = std::max(worst, rel_err(got[i], oracle[i]));
+        for (std::size_t i = 0; i < total * 3; ++i)
+            worst_rgb = std::max(worst_rgb, rel_err(got_rgb[i], oracle_rgb[i]));
+    }
+    // The parity suite's standard for a GPU backend against the CPU scalar
+    // reference (test_parity.cpp): 1e-4 relative. Not bit-identity, because the
+    // half of each answer that was NOT resumed came off the GPU and the oracle
+    // is the CPU; identity is the wrong bar for that pair, and it is the bar
+    // the device path already had to meet before it resumed anything.
+    CHECK(worst <= 1e-4f);
+    CHECK(worst_rgb <= 1e-4f);
+
+    // And it fired. Without this the two checks above pass just as happily on
+    // a device path that resumes nothing, which is what they did before #345.
+    clay_resume_stats rs{};
+    rs.struct_size = static_cast<std::uint32_t>(sizeof rs);
+    REQUIRE(clay_document_resume_stats(doc, &rs) == CLAY_OK);
+    CHECK(rs.resumed_bricks > 0);
+    // The bricks outside the primed middle were walked in full on the first
+    // device call, which is what left them a seed.
+    CHECK(rs.refilled_bricks >= 2);
+    // and carried the stroke rather than firing once. Not "every brick after
+    // the first call": the cull pad GROWS as a stroke reaches outward, and a
+    // seed taken under a smaller one is correctly refused and refilled, which
+    // is a legitimate refusal the host path makes too.
+    CHECK(rs.resumed_bricks > rs.refilled_bricks);
+    CHECK(rs.entries >= count);
+
+    host.free(values);
+    host.free(colors);
+    clay_document_destroy(doc);
+    clay_device_release(dev);
 }

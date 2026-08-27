@@ -48,6 +48,18 @@ struct BackendCaps {
     bool eval_points = true;
     bool eval_grid = true;
     bool raycast = true;
+
+    // Whether this backend can move bytes between host memory and a slice of a
+    // buffer the CALLER owns (`write_device_buffer` / `read_device_buffer`).
+    //
+    // FALSE by default, unlike the three above: it is meaningful only on a
+    // backend bound to a caller-supplied device, and the backends that create
+    // their own have no caller buffer to address. Reported rather than probed
+    // because the device-destination brick refill has to decide BEFORE it
+    // writes anything whether it can keep seeds at all — a decision taken half
+    // way through would leave part of the batch resumed and part not, with no
+    // way back (issue #345).
+    bool device_copy = false;
 };
 
 // Why a compiled-in backend is not in the registry, or is in it without all of
@@ -322,6 +334,29 @@ class Backend {
             if (s != Status::Ok) return s;
         }
         return Status::Ok;
+    }
+
+    // Host memory into a slice of a buffer the CALLER owns, and back.
+    //
+    // What these exist for is the resumable brick refill (#306) reaching the
+    // device destination (#345). A brick's seed is host-resident float32 and
+    // the answer a resumed brick produces is computed on the host, so landing
+    // it in the caller's allocation needs a write; a brick that could NOT be
+    // resumed is evaluated on the device, and its result has to come back to
+    // become the next dab's seed. Both are a few kilobytes a brick against a
+    // full walk measured in milliseconds.
+    //
+    // NOT a general memory service, and deliberately not one: `bytes` from
+    // `src`'s start, no strides, no format conversion, and the transfer has
+    // COMPLETED when the call returns — the same rule every other device entry
+    // point here follows. Only a backend bound to a caller-supplied device can
+    // serve them, so the default is Unsupported and `caps().device_copy` says
+    // which those are, before a caller commits to a plan that needs them.
+    virtual Status write_device_buffer(const DeviceBuffer&, const void*, std::uint64_t) {
+        return Status::Unsupported;
+    }
+    virtual Status read_device_buffer(void*, const DeviceBuffer&, std::uint64_t) {
+        return Status::Unsupported;
     }
 };
 
