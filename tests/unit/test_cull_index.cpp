@@ -855,3 +855,135 @@ TEST_CASE("influence bound: the same document with the instance removed") {
     CHECK(moved > 0);
     CHECK(points > 500);
 }
+
+// -- a `k` a hard profile never drags (#335) --------------------------------
+//
+// ClaySpaceDesktop's move brush measured 1.82x on a frame path the notes record
+// at 1.34x faster. The cause is the chain pad #282 added, which is the cost of
+// that fix and not a defect; what IS a defect turned up beside it.
+//
+// The pad is the largest single-item reach in the LAYER, and reach is spelled
+// `max(support, k)` because a hard profile has zero support — so a `k` left on
+// a hard node set the pad for every brick out of a blend that drags nothing.
+// `ctape_smin_m` hands a hard profile back a step: the running value is a
+// plain `min()` and moves by no `k`. `Paint` and the extended modes still drag
+// and keep their reach.
+//
+// THE NODE'S OWN BOUND IS A DIFFERENT QUESTION and keeps `max(support, k)`.
+// That dilation does a second job in a mixed chain — margin for the drag a
+// node's SMOOTH neighbours apply to a running value it contributed to — and
+// the last case here is what says so, because the first version of this change
+// took it away too and only an arm64 runner noticed.
+TEST_CASE("a k on a hard blend drags no chain, and pads nothing") {
+    const Blend hard_with_k{BlendProfile::Hard, 0.5f};
+    const Blend smooth{BlendProfile::Quadratic, 0.5f};
+    Document one;
+    Layer& ol = one.add_sdf_layer("l");
+
+    SUBCASE("a hard blend drags nothing, whatever its k says") {
+        Node n = item(Prim::sphere(0.5f), cf3(0, 0, 0), Op::Add, hard_with_k);
+        CHECK(chain_drag_reach(n) == 0.0f);
+        // Not a vacuous pass: the same node blended SMOOTHLY drags 4k.
+        Node soft = item(Prim::sphere(0.5f), cf3(0, 0, 0), Op::Add, smooth);
+        CHECK(chain_drag_reach(soft) == 2.0f);
+    }
+
+    SUBCASE("its own bound still carries the k, and that is deliberate") {
+        Node n = item(Prim::sphere(0.5f), cf3(0, 0, 0), Op::Add, hard_with_k);
+        // 0.5 of shape plus 0.5 of reach. The pad narrowed; this did not.
+        CHECK(item_geometry_bound(n, ol).max.x == 1.0f);
+    }
+
+    SUBCASE("Paint and the extended modes still drag") {
+        Node painted = item(Prim::sphere(0.5f), cf3(0, 0, 0), Op::Paint, hard_with_k);
+        CHECK(chain_drag_reach(painted) == 0.5f);  // its colour fades over k
+        Node grooved = item(Prim::sphere(0.5f), cf3(0, 0, 0), Op::Groove, hard_with_k);
+        REQUIRE(op_is_extended(grooved.op));
+        CHECK(chain_drag_reach(grooved) == 0.5f);  // the mode ignores the profile
+    }
+
+    SUBCASE("a layer of hard nodes pads no cull region at all") {
+        Document doc;
+        Layer& l = doc.add_sdf_layer("hard");
+        for (int i = 0; i < 8; ++i)
+            l.sdf->insert(item(Prim::sphere(0.4f), cf3(0.3f * static_cast<float>(i), 0, 0), Op::Add,
+                               hard_with_k));
+        CHECK(cull_pad(*l.sdf, l) == 0.0f);
+        CHECK(blend_cull_pad(*l.sdf, l) == 0.0f);
+        CullIndex index(doc);
+        CHECK(index.cull_pad() == 0.0f);
+    }
+
+    SUBCASE("the smooth chain's pad is untouched") {
+        Document doc;
+        Layer& l = doc.add_sdf_layer("smooth");
+        for (int i = 0; i < 8; ++i)
+            l.sdf->insert(
+                item(Prim::sphere(0.4f), cf3(0.3f * static_cast<float>(i), 0, 0), Op::Add, smooth));
+        // #282's pad, to the float: the largest single-item DRAG in the layer.
+        CHECK(cull_pad(*l.sdf, l) ==
+              kernel::ctape_blend_support(static_cast<int>(BlendProfile::Quadratic), 0.5f));
+        CHECK(cull_pad(*l.sdf, l) > 0.0f);
+    }
+
+    SUBCASE("and a mixed chain's field does not move") {
+        // THE CASE THAT CAUGHT THE OVER-REACH. The first version of this change
+        // narrowed the node's own bound as well, and 2,400 samples over 24
+        // bricks passed it on x86-64 while an arm64 runner failed — so this
+        // sweeps 200 bricks, and its document is one the cull contract HOLDS
+        // on rather than one that merely looks adversarial. (A 12-node chain
+        // blending at k = 0.5 disagrees 540 times in 800,000 samples on main
+        // and exactly 540 with this change: #282's pad is a heuristic and that
+        // document is past it, which makes it useless for measuring anything
+        // here.)
+        Document doc;
+        Layer& l = doc.add_sdf_layer("mixed");
+        l.sdf->insert(item(Prim::sphere(1.0f), cf3(0, 0, 0)));
+        const double golden = 0.6180339887;
+        for (int i = 1; i < 200; ++i) {
+            const double u = std::fmod(static_cast<double>(i) * golden, 1.0);
+            const double v = (static_cast<double>(i) + 0.5) / 200.0;
+            const double phi = std::acos(1.0 - 2.0 * v), th = 6.283185307 * u;
+            const cfloat3 at = cf3(static_cast<float>(std::sin(phi) * std::cos(th)),
+                                   static_cast<float>(std::cos(phi)),
+                                   static_cast<float>(std::sin(phi) * std::sin(th)));
+            // Alternating, and the HARD one carries the larger k — which is
+            // what makes it the layer's maximum and so the whole of the pad.
+            l.sdf->insert(item(
+                Prim::sphere(0.05f), at, Op::Add,
+                (i % 2) ? Blend{BlendProfile::Hard, 0.5f} : Blend{BlendProfile::Quadratic, 0.05f}));
+        }
+        // The pad is now the smooth drag alone. Stated here because it is the
+        // whole mechanism: before, a hard 0.5 set it and every brick paid.
+        CHECK(cull_pad(*l.sdf, l) ==
+              kernel::ctape_blend_support(static_cast<int>(BlendProfile::Quadratic), 0.05f));
+
+        const float band = 0.15f;
+        const Tape full = compile_document(doc);
+        const CullIndex index(doc);
+        clay_test::Lcg rng(335);
+        int differ = 0, sampled = 0;
+        std::size_t culled_instrs = 0;
+        for (int b = 0; b < 200; ++b) {
+            cfloat3 corner = rng.vec3(-1.4f, 1.4f);
+            math::Aabb brick{corner, corner + cf3(0.4f, 0.4f, 0.4f)};
+            CullRegion cull{brick.dilated(band)};
+            const CullPlan plan = index.plan(brick.dilated(band));
+            const Tape culled = compile_document(doc, &cull, &index, &plan);
+            culled_instrs += culled.instrs.size();
+            for (int i = 0; i < 40; ++i) {
+                cfloat3 p =
+                    cf3(rng.range(brick.min.x, brick.max.x), rng.range(brick.min.y, brick.max.y),
+                        rng.range(brick.min.z, brick.max.z));
+                ++sampled;
+                if (cclamp(full.eval(p).d, -band, band) != cclamp(culled.eval(p).d, -band, band))
+                    ++differ;
+            }
+        }
+        CHECK(differ == 0);
+        // NOT a vacuous pass in either direction: the sweep ran, and the cull
+        // it is checking actually dropped most of the document per brick.
+        CHECK(sampled == 8000);
+        CHECK(culled_instrs < 200 * full.instrs.size() / 2);
+    }
+}

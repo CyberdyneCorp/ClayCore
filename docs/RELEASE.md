@@ -126,6 +126,40 @@ forward-refuse).
    `clay_mesh_transform`. A host matching on the exact old string would stop
    matching; `clay_last_error` is a diagnostic and not a value to branch on.
 
+   **0.54.1 ALSO NARROWS ONE CULL PAD, on documents carrying a blend radius
+   nothing drags with** (issue #335). No symbol added or removed, no signature
+   changed, and **no bound and no reported value moves** — only the per-brick
+   cull region does.
+
+   The pad a per-brick cull takes for a smooth chain (#282) is the largest
+   single-item reach in the LAYER, spelled `max(support, k)` because a hard
+   profile has zero support. So a `k` left on a hard node — what a UI that keeps
+   its blend slider when the artist picks "hard" writes — set the pad for every
+   brick in the layer out of a blend that drags nothing: a hard profile's smin
+   is a step, the running value is a plain `min()`, and no `k` is read. On a
+   200-node chain alternating hard `k = 0.5` with smooth `k = 0.05`, that is
+   35,068 tape instructions against 19,724 over 200 bricks. `Paint` and the
+   extended modes keep the drag they have, since their colour fade and their
+   channel do read `k`.
+
+   A node's OWN bound keeps its `max(support, k)` dilation, and the header now
+   says why: in a mixed chain that is margin for the drag its SMOOTH neighbours
+   apply to a running value it contributed to. Taking it away as well measured
+   540 to 10,105 band-clamped disagreements against the full tape on a 12-node
+   hard/smooth document, where narrowing the pad alone measures 540 to 540
+   exactly.
+
+   **This is NOT the whole of what #335 reported.** The 1.76x that issue
+   measures is #282's chain pad, which is the accepted cost of a correctness
+   fix; what was under-measured is how that cost scales. The pad is `4k` for a
+   quadratic profile against a cull region of a fixed brick plus band, so the
+   survivor count grows superlinearly in `k` — 1.37x at the `k = 0.03` every
+   cull benchmark blended at, which is the "20-35%" #282 recorded, and 1.87x at
+   the 0.06 an ordinary sculpt uses. `BM_DeepDocCullPlanned2000K06` measures the
+   second, gated as a ratio against the first. Narrowing the pad itself is
+   still open, and this change's own first attempt is the argument for taking
+   that carefully.
+
    **0.54.0 is not such a release**: additive — a per-axis scale on an item
    (`clay_item_set_scale_nonuniform`, `clay_layer_set_transform_nonuniform`,
    `clay_layer_node_transform_nonuniform`, `clay_mesh_transform_nonuniform`,
