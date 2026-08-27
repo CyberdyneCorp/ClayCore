@@ -140,12 +140,12 @@ def verbs_in_header() -> set[str]:
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 try:
     from check_device_bench import DEFAULT_TOLERANCE as TOLERANCE
-    from check_device_bench import NOISE_FLOOR_MS, worst_p95
+    from check_device_bench import NOISE_FLOOR_MS, normalised_p95, worst_p95
 except ImportError:  # pragma: no cover - the tools ship together
-    NOISE_FLOOR_MS, TOLERANCE, worst_p95 = 0.05, 1.4, None
+    NOISE_FLOOR_MS, TOLERANCE, worst_p95, normalised_p95 = 0.05, 1.4, None, None
 
 
-def gate_reach(case: dict) -> tuple[float, float | None]:
+def gate_reach(run: dict, case: dict) -> tuple[float, float | None]:
     """What this case measures, and the ratio a regression must reach to FAIL.
 
     A case fails only when the growth is over the tolerance AND over the floor,
@@ -153,12 +153,27 @@ def gate_reach(case: dict) -> tuple[float, float | None]:
     `max(TOLERANCE, (m + NOISE_FLOOR_MS) / m)`. Below `NOISE_FLOOR_MS / (TOLERANCE - 1)`
     the floor is the binding constraint and the tolerance never applies.
 
+    THE NORMALISED FIGURE, because that is the one the gate decides on. This
+    read `worst_p95` — the RAW number — and so answered a different question
+    than the gate asks. The two part company exactly when the device was slow
+    while a case ran: normalisation divides the measurement by that slowdown,
+    so a case can clear the floor raw and sit under it normalised, and be
+    reported GATED while the gate cannot fail it.
+
+    `sdf_move` was that case, and it is not academic: raw 0.1324 ms reads as
+    gated, normalised 0.1158 ms needs 1.43x, and a REAL 1.46x regression in
+    `layer_move_surface` has been sitting under it since v0.52.2 unreported —
+    over the tolerance, under the floor, and called protected by this line.
+
     Returns (measured, ratio) with ratio None when the case took no measurement.
     """
     ms = case.get("measurements") or []
     if not ms:
         return (0.0, None)
-    measured = worst_p95(case) if worst_p95 else max(m["p95Ms"] for m in ms)
+    if normalised_p95:
+        measured = normalised_p95(run, case)[0]
+    else:  # pragma: no cover - the tools ship together
+        measured = max(m["p95Ms"] for m in ms)
     if measured <= 0:
         return (0.0, None)
     return (measured, max(TOLERANCE, (measured + NOISE_FLOOR_MS) / measured))
@@ -219,7 +234,7 @@ def main() -> int:
         case = cases.get(entry.get("caseName") or "")
         if case is None:
             continue
-        value, ratio = gate_reach(case)
+        value, ratio = gate_reach(record, case)
         (gated if ratio is not None and ratio <= TOLERANCE else reported).append(
             (entry["verb"], entry.get("caseName"), value, ratio))
 

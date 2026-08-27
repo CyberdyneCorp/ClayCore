@@ -61,45 +61,45 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 
 | ZBrush | Nomad | claycore | rep | device case | p95 (ms) | class |
 |---|---|---|---|---|---|---|
-| Standard | Brush | `Op::Relief` | s | `sdf_stamp_cpu` | 4.81 | interactive |
-| ClayBuildup | Clay / Clay Strips | `Op::Relief` along a stroke | s | `stroke_build` | 0.85 | gesture |
-| Crease, DamStandard | Crease | `Op::Incise` | s | `stroke_carve` | 1.27 | gesture |
-| Inflate | Inflate | `Op::Relief`, `sculpt_inflate` | s v | `voxel_inflate` | 0.0112 | interactive |
-| Move | Move | `brush::move_brush` | s | `sdf_move` | 0.098 | gesture |
-| Move | Move (elastic) | `sculpt_grab` | v | `voxel_grab` | 0.027 | gesture |
+| Standard | Brush | `Op::Relief` | s | `sdf_stamp_cpu` | 2.62 | interactive |
+| ClayBuildup | Clay / Clay Strips | `Op::Relief` along a stroke | s | `stroke_build` | 0.298 | gesture |
+| Crease, DamStandard | Crease | `Op::Incise` | s | `stroke_carve` | 0.382 | gesture |
+| Inflate | Inflate | `Op::Relief`, `sculpt_inflate` | s v | `voxel_inflate` | 0.0043 | interactive |
+| Move | Move | `brush::move_brush` | s | `sdf_move` | 0.116 ¶ | gesture |
+| Move | Move (elastic) | `sculpt_grab` | v | `voxel_grab` | 0.0078 | gesture |
 | Move Topological | — | `field::move_topological` | s | *(exempt — see below)* | — | — |
-| Smooth | Smooth | `field::relax` | s | `sdf_relax` | **0.73** ‡ | operation |
-| Smooth | Smooth | `sculpt_smooth` | v | `voxel_smooth` | **0.0117** | interactive |
-| Flatten | Flatten | `field::flatten` (two-sided) | s | `sdf_flatten` | 7.36 ‡§ | operation |
-| Flatten | Flatten | `sculpt_flatten` | v | `voxel_flatten` | 0.0097 | interactive |
-| hPolish, Planar, Trim | Scrape / Planar | `field::flatten` cut-only | s | `volume_hpolish` | 88.2 ‡§ | operation |
+| Smooth | Smooth | `field::relax` | s | `sdf_relax` | **0.548** ‡ | operation |
+| Smooth | Smooth | `sculpt_smooth` | v | `voxel_smooth` | **0.0045** | interactive |
+| Flatten | Flatten | `field::flatten` (two-sided) | s | `sdf_flatten` | 0.410 ‡§ | operation |
+| Flatten | Flatten | `sculpt_flatten` | v | `voxel_flatten` | 0.0040 | interactive |
+| hPolish, Planar, Trim | Scrape / Planar | `field::flatten` cut-only | s | `volume_hpolish` | 3.37 ‡§ | operation |
 | The surface brushes, on a mesh LAYER (Standard, Move, Inflate, Smooth, Pinch, Flatten, Clay, DamStandard, Trim Dynamic, hPolish, SnakeHook, Layer, Nudge, Relax) | — | `mesh::MeshSculptor`, 14 verbs, with alphas | m | *(unmeasured — see Named gaps)* | — | — |
-| — | Scrape | `sculpt_scrape` | v | `voxel_scrape` | 0.0118 | interactive |
-| Pinch | Pinch | `magnify` (negative), `sculpt_pinch` | s v | `voxel_pinch` | 0.0091 | interactive |
-| Magnify | Inflate (local) | `magnify` (positive), `sculpt_magnify` | s v | `voxel_magnify` | 0.0088 | interactive |
-| Magnify / Pinch (SDF) | — | `magnify` deformer | s | `magnify_pinch` | 0.101 | gesture |
-| Rotate | Twist | `pose` / `pose_line` | s | `pose_region` | 0.0005 | gesture |
-| SnakeHook | Tube / SnakeHook | `brush::snakehook` | s | `snakehook_tendrils` | 0.212 | gesture |
-| — | Tube | `brush::tube` | s | `tube_create` | 0.0013 | gesture |
+| — | Scrape | `sculpt_scrape` | v | `voxel_scrape` | 0.0046 | interactive |
+| Pinch | Pinch | `magnify` (negative), `sculpt_pinch` | s v | `voxel_pinch` | 0.0041 | interactive |
+| Magnify | Inflate (local) | `magnify` (positive), `sculpt_magnify` | s v | `voxel_magnify` | 0.0041 | interactive |
+| Magnify / Pinch (SDF) | — | `magnify` deformer | s | `magnify_pinch` | 0.289 | gesture |
+| Rotate | Twist | `pose` / `pose_line` | s | `pose_region` | 0.0038 | gesture |
+| SnakeHook | Tube / SnakeHook | `brush::snakehook` | s | `snakehook_tendrils` | 0.289 | gesture |
+| — | Tube | `brush::tube` | s | `tube_create` | 0.0009 | gesture |
 | Trim (Rect/Circle/Lasso) | Trim | `cut::cut_item` | s | `cut_create` / `cut_passes` | 0.0001 / 0.077 | gesture |
 | Trim Curve | Trim (curve) | `CutShape::from_open_curve` | s | `trim_curve` | 0.0002 | gesture |
-| Clip | Trim | `cut::cut_item` | s | `cut_passes` | 0.077 | gesture |
-| Surface Noise | Noise | `noise` deformer | s | `noise_detail` | 0.269 | gesture |
-| Mask | Mask | mask fields + stroke engine | s v | `mask_paint` | 0.0058 | interactive |
-| Mask (freeze effect) | Mask | mask-gated verbs | s v | `mask_freeze` | 0.0140 | interactive |
-| Extract | Split / Extract | `brush::mask_extrude` | s v | `mask_extrude` | 4326.9 ‡ | operation |
-| ZSpheres | — | `Prim::armature` | s | `armature_edit` | 0.0008 | gesture |
+| Clip | Trim | `cut::cut_item` | s | `cut_passes` | 0.207 | gesture |
+| Surface Noise | Noise | `noise` deformer | s | `noise_detail` | 0.161 | gesture |
+| Mask | Mask | mask fields + stroke engine | s v | `mask_paint` | 0.0035 | interactive |
+| Mask (freeze effect) | Mask | mask-gated verbs | s v | `mask_freeze` | 0.0076 | interactive |
+| Extract | Split / Extract | `brush::mask_extrude` | s v | `mask_extrude` | 4223 ‡ | operation |
+| ZSpheres | — | `Prim::armature` | s | `armature_edit` | 0.0006 | gesture |
 | Alphas | Alphas | `sculpt_carve_alpha` | v | `voxel_carve_alpha` | 0.0011 | interactive |
-| — | Paint | `voxel_paint_brush` | v | `voxel_paint` | 0.0036 | interactive |
-| — | Smudge | `sculpt_smudge` | v | `voxel_smudge` | 0.026 | gesture |
-| — | (fill holes) | `sculpt_fill_cavities` | v | `voxel_fill_cavities` | 0.62 | operation |
-| Dynamesh | Voxel Remesh | `Layer.consolidate` | s | `sdf_consolidate` | 312.8 ‡ | operation |
-| — | Multires | `VoxelGrid::add_level` | v | `voxel_add_level` | 0.511 | operation |
+| — | Paint | `voxel_paint_brush` | v | `voxel_paint` | 0.0023 | interactive |
+| — | Smudge | `sculpt_smudge` | v | `voxel_smudge` | 0.0072 | gesture |
+| — | (fill holes) | `sculpt_fill_cavities` | v | `voxel_fill_cavities` | 0.217 | operation |
+| Dynamesh | Voxel Remesh | `Layer.consolidate` | s | `sdf_consolidate` | 249.2 ‡ | operation |
+| — | Multires | `VoxelGrid::add_level` | v | `voxel_add_level` | 4.86 | operation |
 | — | Multires (over a region) | `VoxelGrid::add_level(region)` | v | — | — | operation |
-| — | Multires (editing under one) | `sculpt_smooth`, one level finer | v | `voxel_smooth_l2` | 0.0149 | interactive |
-| — | (large brush) | `sculpt_smooth` at radius 32 | v | `voxel_smooth_r32` | 0.479 | interactive |
-| — | (display) | `VoxelGrid::mesh_greedy` | v | `voxel_mesh_whole` | 4.72 | operation |
-| — | (display, incremental) | `mesh_greedy_chunks` | v | `voxel_mesh_dirty` | **0.528** | interactive |
+| — | Multires (editing under one) | `sculpt_smooth`, one level finer | v | `voxel_smooth_l2` | 0.0045 | interactive |
+| — | (large brush) | `sculpt_smooth` at radius 32 | v | `voxel_smooth_r32` | 0.153 | interactive |
+| — | (display) | `VoxelGrid::mesh_greedy` | v | `voxel_mesh_whole` | 13.23 | operation |
+| — | (display, incremental) | `mesh_greedy_chunks` | v | `voxel_mesh_dirty` | **2.12** | interactive |
 | Blob | — | *not implemented* | | | | |
 | Slice / Knife | Split | *not implemented* | | | | |
 | surface-mode mesh brushes | — | *out of scope* | | | | |
@@ -120,14 +120,38 @@ The `8^d` write-amplification model and the cubic-radius model are both real
 descriptions of the work; they are poor predictors of the *time*, because the
 footprint that grows is not what dominates. Prefer the measurement.
 
+**Every figure in the table is now derived from `tests/device/baseline.json`
+rather than typed**, and `tools/check_doc_latency.py` fails CI when a row and
+the baseline disagree — which closes
+[#273](https://github.com/CyberdyneCorp/ClayCore/issues/273). They had drifted
+in BOTH directions: `pose_region` read 7.6x optimistic and `magnify_pinch`
+2.9x, while a dozen voxel rows read 2-3x pessimistic. A host sizing a progress
+affordance from an optimistic row under-budgets the work.
+
+**The figure is PER APPLICATION of the verb**, which is what the column header
+has always claimed. A batched case records what K applications cost together
+(see `Measurement.batch`), so the quoted number is `measuredMs / batch`.
+
+The tolerance is per bundle, because per-case reliability is not uniform: the
+`devicemeasure` cases reproduce to under 0.5% across runs and are held to
+1.30x, while the gallery cases move far more on identical code — `move_drags`
+went 0.149 -> 0.434 ms between two runs — and are held to 2.10x and quoted to
+fewer figures.
+
+¶ `sdf_move` is the one row that does NOT quote the baseline, deliberately. The
+baseline holds the pre-regression figure (0.0791 ms) as the reference a fix
+must return to, while the engine measures ~0.116 ms today — a ~1.5x regression
+in `layer_move_surface` that is over the gate's tolerance and under its floor,
+so nothing fails. The table quotes what a host will actually wait for. See
+[#358](https://github.com/CyberdyneCorp/ClayCore/issues/358); the exemption and
+its reason live in `tools/check_doc_latency.py`.
+
 ‡ **Re-measured on device, 2026-08-25**, at the end of the bake-and-brush
 performance program. A full 59-case run on the reference iPad (iPad15,5,
 iPadOS 26.5.2) from a clean tree, `valid: true`, `treeDirty: false`, nominal
 thermals at both ends, `check_device_bench.py` OK with no case over budget —
 p95 at 1000 stamps, except `volume_hpolish`, whose axis is passes and which is
-quoted at 4. Every other row in the table is still the figure the committed
-baseline carries; see
-[#273](https://github.com/CyberdyneCorp/ClayCore/issues/273).
+quoted at 4.
 
 Against the run of 2026-08-24, before any of that work:
 

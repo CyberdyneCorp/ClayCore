@@ -277,7 +277,7 @@ jobs:
         run: setarch -R ctest --preset tsan
 
   checks:
-    name: layering, kernel dialect, licenses, binding parity
+    name: layering, kernel dialect, licenses, binding parity, doc latency
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -294,6 +294,13 @@ jobs:
           python3 tools/package_kernels.py --verify
       - name: License manifest
         run: python3 tools/check_licenses.py
+      # The latency table is what a host reads to size progress UI; the
+      # baseline is what the release gate compares against. They were copied
+      # apart by hand and drifted in both directions (#273), so the table is
+      # now derived and this is what keeps it that way. No device needed: it
+      # compares two files already in the tree.
+      - name: Doc latency table matches the baseline
+        run: python3 tools/check_doc_latency.py
       # no build here, so the gate reads pyclay's surface out of its nanobind
       # registrations; the pytest suite runs the same gate against the built
       # module, and the two readings must agree

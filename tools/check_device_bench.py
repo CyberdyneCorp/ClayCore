@@ -58,6 +58,26 @@ MAX_GROWTH_EXPONENT = 1.25
 # 120 Hz frame.
 NOISE_FLOOR_MS = 0.05
 
+# Above this ratio of budget to measurement, the budget has stopped describing
+# its case and is reported.
+#
+# THE MIRROR OF THE NOISE FLOOR, and the same defect from the other side. A case
+# under the floor records a number it can never object to because the number is
+# too small; a case this far under its budget cannot object because the BUDGET is
+# too large. `volume_hpolish` sat at 39x — it could have got 36x slower with
+# nothing failing — and the regression arm was no help, because `write_baseline`
+# writes budgets and `cases[]` from the same run and they go stale together.
+#
+# Six rather than four. `--update` derives 1.5x, so anything past ~4x is already
+# suspicious, but a case that is merely FAST in one run should not be named:
+# `sdf_stamp_bricks` reads 1.50x of its budget in one run and 5.75x in another
+# on a nearby commit. Six still catches the 9.7x, 17x and 25x this was found by.
+#
+# REPORTED, never failed. A generous budget can be a deliberate ceiling over
+# content-varying work — every case that has tripped this so far is
+# `operation` class — so the class is printed beside it and a human decides.
+BUDGET_SLACK = 6.0
+
 # How far the canary may spread across a run before the run is called one where
 # position mattered.
 #
@@ -286,6 +306,25 @@ def normalised_p95(run: dict, case: dict) -> tuple[float, float | None]:
     return raw / factor, factor
 
 
+def budget_reach(budget_ms: float, measured_ms: float) -> float | None:
+    """How many times its own measurement a case's budget sits at.
+
+    The exact mirror of `check_device_coverage.gate_reach`, which answers "what
+    ratio must a regression reach before the FLOOR permits a failure". This
+    answers it for the budget: a case measuring `m` against a budget `b` must
+    get `b / m` times slower before the budget objects at all.
+
+    Against the RUN's measurement, deliberately, and not against the baseline's
+    own `measuredMs`. The baseline's two numbers are written from one run and
+    move together, so a baseline-internal ratio reads ~1.5 for every case in the
+    file and detects nothing. It is the drift between the budget and what the
+    engine does TODAY that this exists to see.
+    """
+    if measured_ms <= 0:
+        return None
+    return budget_ms / measured_ms
+
+
 def worst_spread(case: dict) -> float:
     """Widest per-pass p95 spread over this case's measurement points.
 
@@ -407,7 +446,7 @@ def main() -> int:
     tolerance = baseline.get("tolerance", args.tolerance)
     budgets = baseline.get("budgets", {})
     base_cases = {c["name"]: c for c in baseline.get("cases", [])}
-    failures, notes = [], []
+    failures, notes, slack = [], [], []
 
     for case in run["cases"]:
         name = case["name"]
@@ -444,6 +483,13 @@ def main() -> int:
                 notes.append(f"{name}: {peak:.3f} ms p95 is inside its budget but "
                              f"outside a 120 Hz frame share "
                              f"({INTERACTIVE_FRAME_SHARE_MS:.2f} ms)")
+            # Its own `if`, not chained to the frame share above: a case can be
+            # both inside a frame and far under its budget, and the two say
+            # different things.
+            slack_ratio = budget_reach(budget["budgetMs"], measured)
+            if slack_ratio is not None and slack_ratio > BUDGET_SLACK:
+                slack.append((name, budget["class"], measured,
+                              budget["budgetMs"], slack_ratio))
         # Say what the median hid, so a case drifting into a worse mode is
         # visible even though it is not gated on.
         if single_observation(case) and peak > raw * 1.5:
@@ -565,6 +611,20 @@ def main() -> int:
             print(f"    {name}: median of {reps} passes, spread {spread:.3f} ms")
         if len(repeated) > 5:
             print(f"    ... and {len(repeated) - 5} more")
+
+    if slack:
+        # Its own block rather than a note among notes: this says the BASELINE
+        # has drifted, which is a different kind of thing from a remark about a
+        # single case, and it is the one a reader must act on rather than read.
+        print(f"  {len(slack)} case(s) whose BUDGET no longer describes them — "
+              f"over {BUDGET_SLACK:.0f}x the measurement, so the budget cannot "
+              f"object to any plausible regression:")
+        for name, cls, measured, budget_ms, ratio in sorted(slack, key=lambda r: -r[4]):
+            print(f"    {name}: {measured:.3f} ms against a {budget_ms:.3f} ms "
+                  f"budget ({cls}) — {ratio:.1f}x, so it could get {ratio:.0f}x "
+                  f"slower unnoticed")
+        print("    Re-derive them, or say in the baseline why the ceiling is "
+              "deliberately that generous.")
 
     for note in notes:
         print(f"  note: {note}")
