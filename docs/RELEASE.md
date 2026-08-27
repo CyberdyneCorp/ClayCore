@@ -1326,6 +1326,8 @@ gallery session and is a decision of its own.
 long before the tolerance does, and the row records a number it can never
 object to:
 
+At 0.55.0 that read:
+
 ```
 coverage: 61 verb(s) measured, 9 exempt, 62 case(s) in the run
   of the 61 measured: 22 GATED, 39 REPORTED ONLY — too small for the 0.05 ms
@@ -1334,16 +1336,28 @@ coverage: 61 verb(s) measured, 9 exempt, 62 case(s) in the run
   reported only: cut_create (cut_create) 0.0002 ms — needs 300x
 ```
 
-**It is not a gallery problem**: most of the reported-only verbs are
-`devicemeasure` cases, and the worst measure sub-microsecond operations that
-would need a three-hundredfold regression to be noticed (issue #337). The line
-that mattered most is `sdf_stamp_incremental` at 0.0765 ms, needing 1.65x — the
-incremental brick path, just under the line.
+**It was not a gallery problem**: twenty-one of the thirty-nine were
+`devicemeasure` cases, and the worst measured sub-microsecond operations that
+would have needed a three-hundredfold regression to be noticed (issue #337).
 
-This changes the REPORT and no verdict: `coverage: OK` still means every verb is
-named and every named case ran. What it stops doing is implying a guarantee the
-tool does not provide. Making those verbs gateable means giving them more work
-per case, which is per-case and needs re-baselining.
+Saying so changed the REPORT and no verdict. The cases themselves were the
+other half, and `lift-a-case-over-the-gates-floor` closed it: a timed body now
+performs `batch` applications of its verb and the record says how many, so a
+figure is still a statement about the verb and a per-application cost is
+`p95Ms / batch`.
+
+**The floor and the tolerance did not move**, and must not: both bound FALSE
+failures, and a check that cannot fail is a smaller defect than one that fails
+at random — which is what #331, #333 and #336 were spent fixing.
+
+Two cases are deliberately not batched. `sdf_stamp_bricks`' reset is what
+forces the full recompile it measures, so repeating its body would put every
+repeat after the first onto the suffix-compile path `sdf_stroke_bricks` owns;
+its axis was extended to 10,000 stamps instead. `sdf_stroke_bricks` had always
+timed a whole 24-dab stroke and divided by 24 — and that quotient is how
+`perf/device-refill-resume` (#355), a 3.5x WIN, pushed the case under the floor
+and switched off the gate protecting it. It records the stroke and its count
+now, so an optimisation cannot do that again.
 
 ## Tagging
 

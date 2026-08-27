@@ -206,6 +206,50 @@ final class StrokeGalleryTests: XCTestCase {
     /// degradation notes use — "2.7x over eight strokes", "79x by nine drags".
     static let strokeCount = 8
 
+    /// Dabs inside ONE timed drag, for the voxel session cases and the mask
+    /// freeze.
+    ///
+    /// A single voxel ABI call on a resident grid measures 4-13 us here, and
+    /// the gate cannot fail a case whose growth is under 0.05 ms at any ratio
+    /// — so those rows recorded a number and could not object to it (#337).
+    /// A drag is what these cases already claim to measure, and timing the
+    /// whole drag rather than one dab of it puts the figure where the
+    /// tolerance means something without changing the verb, the brush, the
+    /// path or the fixture.
+    ///
+    /// Every drag walks the SAME path deliberately. Two fixtures depend on it
+    /// — fill_cavities' pockets lie on the swept curve, and the freeze mask is
+    /// painted along one line — and offsetting the drags would take both cases
+    /// back to measuring nothing while passing.
+    static let dabsPerDrag = 64
+
+    /// Deposits inside ONE timed drag, for the three SDF session cases whose
+    /// stroke placed a single item. Sized per case, because what one costs is
+    /// the eval over the lattice afterwards and each deposits a different
+    /// amount of field: a cut is cheap, a 6-point tapered chain is not.
+    ///
+    /// Smaller than `dabsPerDrag` for a second reason. Batching M items per
+    /// stroke multiplies the DOCUMENT by M as well as the per-stroke work, so
+    /// it moves the growth exponent as well as the level, and the gate fails a
+    /// case whose exponent passes 1.25. These sizes keep the fitted exponents
+    /// under 0.9.
+    static let cutsPerPass = 18
+    static let magnifyDabsPerDrag = 8
+    static let tendrilsPerDrag = 3
+
+    /// Sub-steps one Move drag is delivered in. A real pointer drag delivers
+    /// many, and one call per stroke measured 0.11 ms — just under the floor.
+    ///
+    /// FOUR, and no more, deliberately. This case is the expensive one in the
+    /// bundle: at eight stacked warps the layer already reports a Lipschitz
+    /// bound of 333 and a safe step scale of 0.003, so the sphere trace behind
+    /// its two renders burns its whole iteration budget on every ray, and the
+    /// consolidate after them pays the same field. Deepening the chain
+    /// multiplies all three. It is also the only case in this bundle whose own
+    /// canary bracket reads elevated. Four clears the floor; eight would buy a
+    /// number no more gateable at several times the wall clock.
+    static let moveSubSteps = 4
+
     private func abiVersion() -> String {
         var major: Int32 = 0, minor: Int32 = 0, patch: Int32 = 0
         clay_version(&major, &minor, &patch)
@@ -321,13 +365,29 @@ final class StrokeGalleryTests: XCTestCase {
                 // moved the surface by less than a pixel.
                 //
                 // Pull from ON the surface, and far enough to see.
+                //
+                // Delivered as `moveSubSteps` sub-steps of a quarter of the
+                // displacement each, which is what a real pointer drag does and
+                // what puts the timed unit over the gate's floor (#337). The
+                // total displacement per stroke is unchanged, so the form the
+                // render shows is the same; what changes is that the chain
+                // deepens by four warps a drag instead of one.
                 let a = Float(i) * 0.8
                 let r: Float = 0.62
-                var centre: [Float] = [cos(a) * r, sin(a) * r * 0.6, 0.25]
-                var displacement: [Float] = [cos(a) * 0.16, sin(a) * 0.16, 0.06]
                 var applied = 0
-                let rc = clay_layer_move_surface(doc, layer, &centre, &displacement,
-                                                 &params, &applied)
+                var rc = CLAY_OK
+                for j in 0..<Self.moveSubSteps {
+                    let step = Float(j) / Float(Self.moveSubSteps)
+                    var centre: [Float] = [cos(a) * r + cos(a) * 0.16 * step,
+                                           sin(a) * r * 0.6 + sin(a) * 0.16 * step,
+                                           0.25 + 0.06 * step]
+                    var displacement: [Float] = [cos(a) * 0.04, sin(a) * 0.04, 0.015]
+                    var appliedHere = 0
+                    rc = clay_layer_move_surface(doc, layer, &centre, &displacement,
+                                                 &params, &appliedHere)
+                    applied += appliedHere
+                    if rc != CLAY_OK { break }
+                }
                 // `applied` is how many items took a warp. A drag that reaches
                 // nothing SUCCEEDS and changes nothing, so the return code
                 // alone cannot tell "moved the form" from "moved nothing" —
@@ -346,10 +406,15 @@ final class StrokeGalleryTests: XCTestCase {
             // A snakehook is a tapered stroke chain: the resolver is
             // Python-only, so what reaches this ABI is the chain it produces.
         out.append(StrokeSession(name: "snakehook_tendrils") { doc, layer, i in
+                // Three tendrils fanned out of one drag rather than one, so the
+                // timed unit clears the gate's floor (#337). The chain, the
+                // taper and the blend are untouched; only how many the drag
+                // lays down changes.
+                for j in 0..<Self.tendrilsPerDrag {
                 guard let item = clay_item_create(
                     Int32(CLAY_PRIM_STROKE.rawValue), nil, 0) else { return false }
                 defer { clay_item_destroy(item) }
-                let a = Float(i) * 0.8
+                let a = Float(i) * 0.8 + Float(j) * 0.26
                 var chain: [Float] = []
                 for k in 0..<6 {
                     let s = Float(k) / 5.0
@@ -366,7 +431,11 @@ final class StrokeGalleryTests: XCTestCase {
                 }
                 _ = clay_item_set_blend(item, Int32(CLAY_BLEND_QUADRATIC.rawValue), 0.07)
                 var node: clay_node_id = 0
-                return clay_layer_add_item(doc, layer, item, &node) == CLAY_OK
+                guard clay_layer_add_item(doc, layer, item, &node) == CLAY_OK else {
+                    return false
+                }
+                }
+                return true
             })
 
             // Noise, applied as a deformer to a fresh item per stroke.
@@ -389,11 +458,17 @@ final class StrokeGalleryTests: XCTestCase {
             // Magnify and pinch are ONE deformation with a signed strength,
             // so alternating the sign per stroke exercises both.
         out.append(StrokeSession(name: "magnify_pinch") { doc, layer, i in
+                // Eight dabs ALONG the drag rather than one, so the timed unit
+                // clears the gate's floor (#337). The angle advances per dab so
+                // they lie along the drag instead of stacking on one spot; the
+                // signed strength still alternates per STROKE, so a session
+                // still exercises magnify and pinch alike.
+                for j in 0..<Self.magnifyDabsPerDrag {
                 var r: [Float] = [0.34]
                 guard let item = clay_item_create(
                     Int32(CLAY_PRIM_SPHERE.rawValue), &r, 1) else { return false }
                 defer { clay_item_destroy(item) }
-                let a = Float(i) * 0.9
+                let a = Float(i) * 0.9 + Float(j) * 0.11
                 var pos: [Float] = [cos(a) * 0.45, sin(a) * 0.45, 0.3]
                 _ = clay_item_set_position(item, &pos)
                 let strength: Float = (i % 2 == 0) ? 0.5 : -0.5
@@ -402,13 +477,21 @@ final class StrokeGalleryTests: XCTestCase {
                                            &params, params.count, 2)
                 _ = clay_item_set_blend(item, Int32(CLAY_BLEND_QUADRATIC.rawValue), 0.06)
                 var node: clay_node_id = 0
-                return clay_layer_add_item(doc, layer, item, &node) == CLAY_OK
+                guard clay_layer_add_item(doc, layer, item, &node) == CLAY_OK else {
+                    return false
+                }
+                }
+                return true
             })
 
         out.append(StrokeSession(name: "cut_passes") { doc, layer, i in
+                // 18 passes stepped along the drag rather than one, so the
+                // timed unit clears the gate's floor (#337). The shape, radius,
+                // rounding and region are untouched; the origin walks.
+                for j in 0..<Self.cutsPerPass {
                 var desc = clay_cut_desc()
                 desc.struct_size = UInt32(MemoryLayout<clay_cut_desc>.size)
-                let a = Float(i) * 0.9
+                let a = Float(i) * 0.9 + Float(j) * 0.05
                 desc.origin = (cos(a) * 0.5, sin(a) * 0.5, -1.4)
                 desc.right = (1, 0, 0)
                 desc.up = (0, 1, 0)
@@ -424,7 +507,11 @@ final class StrokeGalleryTests: XCTestCase {
                 defer { clay_item_destroy(cut) }
                 _ = clay_item_set_op(cut, Int32(CLAY_OP_SUBTRACT.rawValue))
                 var node: clay_node_id = 0
-                return clay_layer_add_item(doc, layer, cut, &node) == CLAY_OK
+                guard clay_layer_add_item(doc, layer, cut, &node) == CLAY_OK else {
+                    return false
+                }
+                }
+                return true
             })
         return out
     }
@@ -589,17 +676,22 @@ final class StrokeGalleryTests: XCTestCase {
             let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
             var measurements: [Measurement] = []
             for i in 0..<Self.strokeCount {
-                // a drag across the ball's upper surface
-                let t = Float(i) / Float(max(Self.strokeCount - 1, 1))
-                let cell: [Int32] = [Int32((t * 1.2 - 0.6) / voxelSize),
-                                     Int32(0.32 / voxelSize),
-                                     Int32(sin(t * 3.0) * 0.25 / voxelSize)]
+                // ONE DRAG per point, not one dab of one. The dabs walk the
+                // ball's upper surface inside the timed bracket, which is what
+                // this case has always said it measures.
                 let t0 = DispatchTime.now().uptimeNanoseconds
-                session.apply(grid, cell, &brush)
+                for k in 0..<Self.dabsPerDrag {
+                    let t = Float(k) / Float(max(Self.dabsPerDrag - 1, 1))
+                    let cell: [Int32] = [Int32((t * 1.2 - 0.6) / voxelSize),
+                                         Int32(0.32 / voxelSize),
+                                         Int32(sin(t * 3.0) * 0.25 / voxelSize)]
+                    session.apply(grid, cell, &brush)
+                }
                 let t1 = DispatchTime.now().uptimeNanoseconds
                 let ms = Double(t1 - t0) / 1_000_000.0
                 measurements.append(Measurement(stamps: i + 1, p50Ms: ms,
-                                                p95Ms: ms, samples: 1))
+                                                p95Ms: ms, samples: 1,
+                                                batch: Self.dabsPerDrag))
             }
 
             var after: UInt64 = 0
@@ -881,17 +973,24 @@ final class StrokeGalleryTests: XCTestCase {
             let caseThermalStart = DeviceInfo.thermalName(ProcessInfo.processInfo.thermalState)
             var measurements: [Measurement] = []
             for i in 0..<Self.strokeCount {
-                let t = Float(i) / Float(max(Self.strokeCount - 1, 1))
-                // sweep the groove right across the ball, through the frozen half
-                var cell: [Int32] = [Int32((t * 0.72 - 0.36) / voxelSize),
-                                     surfaceCell, 0]
+                // One timed DRAG, as the voxel session cases are (#337). The
+                // sweep stays on `surfaceCell` at z = 0: the mask is painted
+                // only along x > 0 at that line, and moving off it would stop
+                // the case testing the freeze at all.
                 let t0 = DispatchTime.now().uptimeNanoseconds
-                _ = clay_voxel_erase_brush(grid, &cell, &carve)
+                for k in 0..<Self.dabsPerDrag {
+                    let t = Float(k) / Float(max(Self.dabsPerDrag - 1, 1))
+                    // sweep the groove right across the ball, through the frozen half
+                    var cell: [Int32] = [Int32((t * 0.72 - 0.36) / voxelSize),
+                                         surfaceCell, 0]
+                    _ = clay_voxel_erase_brush(grid, &cell, &carve)
+                }
                 let t1 = DispatchTime.now().uptimeNanoseconds
                 measurements.append(Measurement(stamps: i + 1,
                                                 p50Ms: Double(t1 - t0) / 1_000_000.0,
                                                 p95Ms: Double(t1 - t0) / 1_000_000.0,
-                                                samples: 1))
+                                                samples: 1,
+                                                batch: Self.dabsPerDrag))
             }
             var after: UInt64 = 0
             _ = clay_voxel_change_count(grid, &after)
@@ -900,7 +999,10 @@ final class StrokeGalleryTests: XCTestCase {
 
             collector.add(CaseResult(
                 name: "mask_freeze", verb: "session.mask_freeze",
-                budgetClass: .interactive, backend: "cpu", servedBy: "cpu",
+                // A DRAG now, not a stamp: the timed unit is the whole sweep.
+                // Left `interactive` it would point the frame-share note at a
+                // figure that is no longer a frame's worth of work.
+                budgetClass: .gesture, backend: "cpu", servedBy: "cpu",
                 measurements: measurements,
                 growthExponent: Timing.growthExponent(measurements),
                 startedAtMs: caseStartedAtMs,

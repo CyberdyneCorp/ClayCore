@@ -33,9 +33,41 @@ final class VerbLatencyTests: XCTestCase {
     /// `axis` overrides the shared growth axis for a case whose smallest point
     /// its fixture cannot feed. Only `voxel_mesh_dirty` uses it; the reason is
     /// recorded there.
+    /// How many distinct positions a walking case visits before it wraps.
+    ///
+    /// The walking cases take no reset — a dab lands wherever the walk has
+    /// reached — and un-batched they made ~203 calls per axis point, which
+    /// sparsely sampled the working volume. Batched at 128 they would make
+    /// ~26,000 and SATURATE it: `stampPosition` is bounded to +/-0.8, so at a
+    /// 0.02 cell that is an 80^3 mask and a 64^3 grid fully written rather than
+    /// dotted. That is a fixture several times larger than the one the case was
+    /// calibrated on, and it took the measure bundle over the jetsam limit —
+    /// `testEveryVerbOnDevice` died with signal kill at `mask_extrude`, the
+    /// heaviest case in the suite, on two runs out of three.
+    ///
+    /// Wrapping keeps the fixture the size it was and is the more faithful
+    /// gesture besides: a stroke passes over ground it has already touched.
+    static let walkWindow = 256
+
+    /// `batch` applications of the verb per timed body, recorded alongside the
+    /// figure so it stays a statement about the verb.
+    ///
+    /// A case can only fail the gate when its growth clears BOTH the 1.4x
+    /// tolerance and the 0.05 ms floor, so a figure under 0.125 ms cannot be
+    /// objected to at any ratio (#337). The verbs below are genuinely that
+    /// cheap: one `clay_cut_create` is 0.2 us and would need a THREE-HUNDRED-
+    /// fold regression before this suite noticed. Batching puts the figure
+    /// where the tolerance means something without changing what is timed —
+    /// the same call, on the same fixture, N times.
+    ///
+    /// Growing the per-application workload instead was the other option, and
+    /// is right where a knob exists (`voxel_smooth_r32` is exactly that). It
+    /// does not exist for most of these: `cut_create` resolves a fixed rect,
+    /// and reaching 300x through its only size input would mean a 3,000-vertex
+    /// lasso, which is not the gesture the verb names.
     private func measureAxis(
         name: String, verb: String, _ cls: BudgetClass, backend: String = "cpu",
-        axis: [Int] = GrowthAxis.standard,
+        axis: [Int] = GrowthAxis.standard, batch: Int = 1,
         prepare: (Int) -> (body: () -> Void, reset: (() -> Void)?,
                            cleanup: () -> Void)?
     ) {
@@ -50,12 +82,15 @@ final class VerbLatencyTests: XCTestCase {
                 XCTFail("\(name): could not build a fixture at \(stamps) stamps")
                 continue
             }
-            let r = Timing.measureStable(reset: fixture.reset, fixture.body)
+            let one = fixture.body
+            let body: () -> Void = batch <= 1 ? one : { for _ in 0..<batch { one() } }
+            let r = Timing.measureStable(reset: fixture.reset, body)
             fixture.cleanup()
             measurements.append(Measurement(stamps: stamps, p50Ms: r.p50,
                                             p95Ms: r.p95, samples: r.n,
                                             repeats: r.repeats,
-                                            p95SpreadMs: r.spread))
+                                            p95SpreadMs: r.spread,
+                                            batch: batch))
         }
         let canaryAfter = collector.sampleCanaryNow()
         collector.add(CaseResult(
@@ -80,12 +115,12 @@ final class VerbLatencyTests: XCTestCase {
 
         for (name, verb, index) in [("voxel_stamp", "voxel_set_brush", Int32(1)),
                                     ("voxel_paint", "voxel_paint_brush", Int32(1))] {
-            measureAxis(name: name, verb: verb, .interactive) { stamps in
+            measureAxis(name: name, verb: verb, .interactive, batch: 128) { stamps in
                 guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
                 var b = Fixture.brush()
-                var i = stamps
+                var i = 0
                 return ({
-                    var c = Fixture.cell(i); i += 1
+                    var c = Fixture.cell(stamps + i); i = (i + 1) % Self.walkWindow
                     if name == "voxel_paint" {
                         _ = clay_voxel_paint_brush(f.grid, &c, &b, index)
                     } else {
@@ -95,65 +130,71 @@ final class VerbLatencyTests: XCTestCase {
             }
         }
 
-        measureAxis(name: "voxel_erase", verb: "voxel_erase_brush", .interactive) { stamps in
+        measureAxis(name: "voxel_erase", verb: "voxel_erase_brush", .interactive,
+                    batch: 128) { stamps in
             guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
             var b = Fixture.brush()
             var i = 0
             return ({
-                var c = Fixture.cell(i); i += 1
+                var c = Fixture.cell(i); i = (i + 1) % Self.walkWindow
                 _ = clay_voxel_erase_brush(f.grid, &c, &b)
             }, nil, { clay_document_destroy(f.doc) })
         }
 
         // -- voxel sculpt verbs ------------------------------------------------
 
-        measureAxis(name: "voxel_smooth", verb: "voxel_sculpt_smooth", .interactive) { stamps in
+        measureAxis(name: "voxel_smooth", verb: "voxel_sculpt_smooth", .interactive,
+                    batch: 128) { stamps in
             guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
             var b = Fixture.brush()
             var i = 0
             return ({
-                var c = Fixture.cell(i); i += 1
+                var c = Fixture.cell(i); i = (i + 1) % Self.walkWindow
                 _ = clay_voxel_sculpt_smooth(f.grid, &c, &b)
             }, nil, { clay_document_destroy(f.doc) })
         }
 
-        measureAxis(name: "voxel_inflate", verb: "voxel_sculpt_inflate", .interactive) { stamps in
+        measureAxis(name: "voxel_inflate", verb: "voxel_sculpt_inflate", .interactive,
+                    batch: 128) { stamps in
             guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
             var b = Fixture.brush()
             var i = 0
             return ({
-                var c = Fixture.cell(i); i += 1
+                var c = Fixture.cell(i); i = (i + 1) % Self.walkWindow
                 _ = clay_voxel_sculpt_inflate(f.grid, &c, &b, 1)
             }, nil, { clay_document_destroy(f.doc) })
         }
 
-        measureAxis(name: "voxel_flatten", verb: "voxel_sculpt_flatten", .interactive) { stamps in
+        measureAxis(name: "voxel_flatten", verb: "voxel_sculpt_flatten", .interactive,
+                    batch: 128) { stamps in
             guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
             var b = Fixture.brush()
             var normal: [Float] = [0, 1, 0]
             var i = 0
             return ({
-                var c = Fixture.cell(i); i += 1
+                var c = Fixture.cell(i); i = (i + 1) % Self.walkWindow
                 _ = clay_voxel_sculpt_flatten(f.grid, &c, &b, &normal, 0)
             }, nil, { clay_document_destroy(f.doc) })
         }
 
-        measureAxis(name: "voxel_pinch", verb: "voxel_sculpt_pinch", .interactive) { stamps in
+        measureAxis(name: "voxel_pinch", verb: "voxel_sculpt_pinch", .interactive,
+                    batch: 128) { stamps in
             guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
             var b = Fixture.brush()
             var i = 0
             return ({
-                var c = Fixture.cell(i); i += 1
+                var c = Fixture.cell(i); i = (i + 1) % Self.walkWindow
                 _ = clay_voxel_sculpt_pinch(f.grid, &c, &b)
             }, nil, { clay_document_destroy(f.doc) })
         }
 
-        measureAxis(name: "voxel_magnify", verb: "voxel_sculpt_magnify", .interactive) { stamps in
+        measureAxis(name: "voxel_magnify", verb: "voxel_sculpt_magnify", .interactive,
+                    batch: 128) { stamps in
             guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
             var b = Fixture.brush()
             var i = 0
             return ({
-                var c = Fixture.cell(i); i += 1
+                var c = Fixture.cell(i); i = (i + 1) % Self.walkWindow
                 _ = clay_voxel_sculpt_magnify(f.grid, &c, &b)
             }, nil, { clay_document_destroy(f.doc) })
         }
@@ -162,35 +203,38 @@ final class VerbLatencyTests: XCTestCase {
         // under half a cell on every axis they read each cell's source as
         // itself, return OK, and move nothing. Measuring that would time the
         // walk without the work.
-        measureAxis(name: "voxel_grab", verb: "voxel_sculpt_grab", .gesture) { stamps in
+        measureAxis(name: "voxel_grab", verb: "voxel_sculpt_grab", .gesture,
+                    batch: 128) { stamps in
             guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
             var b = Fixture.brush()
             var displacement: [Float] = [0.06, 0, 0]  // 3 cells at 0.02
             var i = 0
             return ({
-                var c = Fixture.cell(i); i += 1
+                var c = Fixture.cell(i); i = (i + 1) % Self.walkWindow
                 _ = clay_voxel_sculpt_grab(f.grid, &c, &b, &displacement, 0)
             }, nil, { clay_document_destroy(f.doc) })
         }
 
-        measureAxis(name: "voxel_smudge", verb: "voxel_sculpt_smudge", .gesture) { stamps in
+        measureAxis(name: "voxel_smudge", verb: "voxel_sculpt_smudge", .gesture,
+                    batch: 128) { stamps in
             guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
             var b = Fixture.brush()
             var displacement: [Float] = [0.06, 0, 0]
             var i = 0
             return ({
-                var c = Fixture.cell(i); i += 1
+                var c = Fixture.cell(i); i = (i + 1) % Self.walkWindow
                 _ = clay_voxel_sculpt_smudge(f.grid, &c, &b, &displacement)
             }, nil, { clay_document_destroy(f.doc) })
         }
 
-        measureAxis(name: "voxel_scrape", verb: "voxel_sculpt_scrape", .interactive) { stamps in
+        measureAxis(name: "voxel_scrape", verb: "voxel_sculpt_scrape", .interactive,
+                    batch: 128) { stamps in
             guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
             var b = Fixture.brush()
             var normal: [Float] = [0, 1, 0]
             var i = 0
             return ({
-                var c = Fixture.cell(i); i += 1
+                var c = Fixture.cell(i); i = (i + 1) % Self.walkWindow
                 _ = clay_voxel_sculpt_scrape(f.grid, &c, &b, &normal, 0)
             }, nil, { clay_document_destroy(f.doc) })
         }
@@ -233,7 +277,7 @@ final class VerbLatencyTests: XCTestCase {
         }
 
         measureAxis(name: "voxel_carve_alpha", verb: "voxel_sculpt_carve_alpha",
-                    .interactive) { stamps in
+                    .interactive, batch: 512) { stamps in
             guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
             var b = Fixture.brush()
             // A host with an alpha has already loaded the PNG; the engine
@@ -248,7 +292,7 @@ final class VerbLatencyTests: XCTestCase {
             var direction: [Float] = [0, 1, 0]
             var i = 0
             return ({
-                var c = Fixture.cell(i); i += 1
+                var c = Fixture.cell(i); i = (i + 1) % Self.walkWindow
                 _ = clay_voxel_sculpt_carve_alpha(f.grid, &c, &b, &alpha,
                                                   Int32(side), Int32(side), &direction, 0)
             }, nil, { clay_document_destroy(f.doc) })
@@ -326,7 +370,7 @@ final class VerbLatencyTests: XCTestCase {
             var calls = 0
             var starved = 0
             return ({
-                var c = Fixture.cell(i); i += 1
+                var c = Fixture.cell(i); i = (i + 1) % Self.walkWindow
                 _ = clay_voxel_sculpt_smooth(f.grid, &c, &b)
 
                 var count = keys.count / 3
@@ -382,7 +426,7 @@ final class VerbLatencyTests: XCTestCase {
         // wants to keep editing there. Same verb and same brush as
         // `voxel_smooth`, so the pair is the measurement.
         measureAxis(name: "voxel_smooth_l2", verb: "voxel_sculpt_smooth_levels",
-                    .interactive) { stamps in
+                    .interactive, batch: 128) { stamps in
             guard let f = Fixture.voxelGrid(stamps: stamps) else { return nil }
             var level = 0
             guard clay_voxel_add_level(f.grid, &level) == CLAY_OK,
@@ -392,7 +436,7 @@ final class VerbLatencyTests: XCTestCase {
             var b = Fixture.brush()
             var i = 0
             return ({
-                var c = Fixture.cell(i); i += 1
+                var c = Fixture.cell(i); i = (i + 1) % Self.walkWindow
                 _ = clay_voxel_sculpt_smooth(f.grid, &c, &b)
             }, nil, { clay_document_destroy(f.doc) })
         }
@@ -410,14 +454,15 @@ final class VerbLatencyTests: XCTestCase {
             var b = Fixture.brush(size: 32)
             var i = 0
             return ({
-                var c = Fixture.cell(i); i += 1
+                var c = Fixture.cell(i); i = (i + 1) % Self.walkWindow
                 _ = clay_voxel_sculpt_smooth(f.grid, &c, &b)
             }, nil, { clay_document_destroy(f.doc) })
         }
 
         // -- the stroke engine -------------------------------------------------
 
-        measureAxis(name: "stroke_resolve", verb: "stroke_resolve", .interactive) { _ in
+        measureAxis(name: "stroke_resolve", verb: "stroke_resolve", .interactive,
+                    batch: 512) { _ in
             var preset = Fixture.strokePreset()
             var samples = Fixture.strokeSamples()
             let sampleCount = samples.count / 5
@@ -445,12 +490,13 @@ final class VerbLatencyTests: XCTestCase {
 
         // -- masks --------------------------------------------------------------
 
-        measureAxis(name: "mask_paint", verb: "mask_paint", .interactive) { _ in
+        measureAxis(name: "mask_paint", verb: "mask_paint", .interactive, batch: 128) { _ in
             guard let mask = clay_mask_create(0.02) else { return nil }
             var b = Fixture.brush()
             var i = 0
             return ({
-                let (x, y, z) = SceneBuilder.stampPosition(i); i += 1
+                let (x, y, z) = SceneBuilder.stampPosition(i)
+                i = (i + 1) % Self.walkWindow
                 var point: [Float] = [x, y, z]
                 _ = clay_mask_paint(mask, &point, &b, 1.0)
             }, nil, { _ = clay_mask_destroy(mask) })
@@ -651,7 +697,7 @@ final class VerbLatencyTests: XCTestCase {
 
         // -- the cut tool ----------------------------------------------------------
 
-        measureAxis(name: "cut_create", verb: "cut_create", .gesture) { _ in
+        measureAxis(name: "cut_create", verb: "cut_create", .gesture, batch: 2048) { _ in
             var desc = clay_cut_desc()
             desc.struct_size = UInt32(MemoryLayout<clay_cut_desc>.size)
             desc.origin = (0, 0, -1)
@@ -673,7 +719,8 @@ final class VerbLatencyTests: XCTestCase {
         // Trim Curve: an OPEN stroke closed against the frame bounds. Two
         // calls, as a host makes them — size query, then tessellate — because
         // the size query is not free and a host cannot skip it.
-        measureAxis(name: "trim_curve", verb: "cut_polygon_from_open_curve", .gesture) { _ in
+        measureAxis(name: "trim_curve", verb: "cut_polygon_from_open_curve", .gesture,
+                    batch: 4096) { _ in
             var points = Fixture.curvePoints()
             var types = [Int32](repeating: Int32(CLAY_POINT_SPLINE.rawValue),
                                 count: points.count / 4)
@@ -696,7 +743,7 @@ final class VerbLatencyTests: XCTestCase {
         // Nomad's Tube, and the swept-sphere half of SnakeHook. Round rather
         // than profiled: with no profile the tube is an exact distance field,
         // which is the configuration a host reaches for first.
-        measureAxis(name: "tube_create", verb: "tube_create", .gesture) { _ in
+        measureAxis(name: "tube_create", verb: "tube_create", .gesture, batch: 512) { _ in
             var path = Fixture.tubePath()
             var params = clay_tube_params()
             params.struct_size = UInt32(MemoryLayout<clay_tube_params>.size)
@@ -718,11 +765,18 @@ final class VerbLatencyTests: XCTestCase {
         // ZBrush's Rotate. A deformer rather than an entry point of its own, so
         // the timed body is what a host does per drag: build the item, put the
         // warp at the FRONT of its chain, place it.
-        measureAxis(name: "pose_region", verb: "pose", .gesture) { stamps in
+        // The batched body needs a reset the single one did not. Each iteration
+        // PLACES a node, so 512 of them per timed body would grow the document
+        // by 512 while the axis point still claimed to name `stamps` — which is
+        // the failure Timing.measure's own warm-up note describes. Rolled back
+        // untimed between samples instead, so every sample starts at the size
+        // its axis point names.
+        measureAxis(name: "pose_region", verb: "pose", .gesture, batch: 512) { stamps in
             guard let (doc, layer) = SceneBuilder.sdfDocument(stamps: stamps) else { return nil }
             // centre(3), radius, axis(3), angle
             var pose: [Float] = [0, 0, 0, 0.6, 0, 1, 0, 0.4]
             var radius: Float = 0.35
+            var placed: [clay_node_id] = []
             return ({
                 guard let item = clay_item_create(Int32(CLAY_PRIM_SPHERE.rawValue),
                                                   &radius, 1) else { return }
@@ -730,8 +784,13 @@ final class VerbLatencyTests: XCTestCase {
                 _ = clay_item_add_deformer(item, Int32(CLAY_DEFORM_POSE.rawValue),
                                            &pose, pose.count, CLAY_EASE_LINEAR)
                 var node: clay_node_id = 0
-                _ = clay_layer_add_item(doc, layer, item, &node)
-            }, nil, { clay_document_destroy(doc) })
+                if clay_layer_add_item(doc, layer, item, &node) == CLAY_OK {
+                    placed.append(node)
+                }
+            }, {
+                for node in placed.reversed() { _ = clay_remove_node(doc, layer, node) }
+                placed.removeAll(keepingCapacity: true)
+            }, { clay_document_destroy(doc) })
         }
 
         // -- rigs -------------------------------------------------------------------
@@ -739,7 +798,8 @@ final class VerbLatencyTests: XCTestCase {
         // ZSpheres. One MOVE on a placed armature, which is the drag an artist
         // repeats: `value` is a delta and the target's whole subtree travels
         // with it, so the cost follows the subtree rather than the document.
-        measureAxis(name: "armature_edit", verb: "layer_armature_edit", .gesture) { stamps in
+        measureAxis(name: "armature_edit", verb: "layer_armature_edit", .gesture,
+                    batch: 1024) { stamps in
             guard let f = Fixture.armatureLayer(stamps: stamps) else { return nil }
             var delta: [Float] = [0.01, 0, 0]
             return ({
