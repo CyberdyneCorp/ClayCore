@@ -938,13 +938,17 @@ void refill_moving(benchmark::State& state, int history) {
     rs.struct_size = sizeof rs;
     clay_document_resume_stats(d, &rs);
     state.counters["history"] = static_cast<double>(history);
-    // The share of bricks the fast path actually answered. A moving window
-    // never reaches 1.0 -- the brick it has just entered has no seed and is
-    // correctly walked in full -- but it should sit near (kWindow - 1) / kWindow
-    // over a slide, and reads 0 if the fast path has stopped firing.
+    // The share of bricks that had to be WALKED IN FULL, which is the gate.
+    // A moving window never reaches 0 -- the brick it has just entered has no
+    // seed and is correctly walked -- but it should sit near 1 / kWindow per
+    // slide, and a batch-wide gate returning takes it to a third of every dab.
+    // A ratio of counts rather than a time, so it says the same thing on any
+    // machine; `resumed_frac` is reported beside it to be read, not gated.
     const double served = static_cast<double>(rs.resumed_bricks + rs.refilled_bricks);
     state.counters["resumed_frac"] =
         served > 0 ? static_cast<double>(rs.resumed_bricks) / served : 0.0;
+    state.counters["refilled_frac"] =
+        served > 0 ? static_cast<double>(rs.refilled_bricks) / served : 1.0;
     clay_document_destroy(d);
 }
 }  // namespace
