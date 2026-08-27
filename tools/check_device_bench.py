@@ -325,7 +325,15 @@ def write_baseline(run: dict, path: pathlib.Path, tolerance: float) -> None:
             "measuredMs": round(measured, 4),
         }
         if factor is not None:
-            entry["rawMs"] = round(worst_p95(case), 4)
+            # reported_p95, not worst_p95: `rawMs` is "the figure a reader would
+            # recognise from the run's own output", which is the slowest point.
+            # worst_p95 is the SCORED figure and is the median for a
+            # single-timing case, so using it here would quietly record a
+            # different number than the label promises. No gallery case is
+            # bracketed today, so `factor` is None for all of them and this
+            # never fired -- which is exactly why it would have gone unnoticed
+            # if one ever were.
+            entry["rawMs"] = round(reported_p95(case), 4)
             entry["machineFactor"] = round(factor, 4)
         budgets[case["name"]] = entry
     baseline = {
