@@ -1299,6 +1299,44 @@ void move_item(Doc& doc, clay_node_id node, float x) {
     REQUIRE(clay_layer_set_transform(doc.d, doc.layer, node, pos, axis, 0.0f, 1.0f) == CLAY_OK);
 }
 
+constexpr int kSeedDim = 8;
+constexpr float kSeedVox = 0.05f;
+
+// One brick, addressed the way a cache addresses it: `dim` samples of `vox`
+// from the lattice origin `key * dim * vox`, culled against the brick dilated
+// by `band`.
+clay_brick_request brick_at(int kx, int ky, int kz, int dim, float vox, float band) {
+    clay_brick_request q;
+    std::memset(&q, 0, sizeof q);
+    const int k[3] = {kx, ky, kz};
+    for (int a = 0; a < 3; ++a) {
+        q.key[a] = k[a];
+        q.origin[a] = static_cast<float>(k[a]) * static_cast<float>(dim) * vox;
+        q.dims[a] = dim;
+    }
+    q.spacing = vox;
+    q.band = band;
+    return q;
+}
+
+clay_node_id add_sphere_at(Doc& doc, float r, float x, float y, float z) {
+    clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+    REQUIRE(it != nullptr);
+    const float pos[3] = {x, y, z};
+    REQUIRE(clay_item_set_position(it, pos) == CLAY_OK);
+    clay_node_id id = 0;
+    REQUIRE(clay_layer_add_item(doc.d, doc.layer, it, &id) == CLAY_OK);
+    clay_item_destroy(it);
+    return id;
+}
+
+std::vector<float> refill_brick(clay_document* d, const clay_brick_request& q, std::size_t per) {
+    std::vector<float> v(per, 0.0f);
+    REQUIRE(clay_brick_cache_eval_requests(d, nullptr, &q, 1, v.data(), v.size(), nullptr, 0) ==
+            CLAY_OK);
+    return v;
+}
+
 }  // namespace
 
 TEST_CASE("resumable refill: a refill racing readers is the refill it would be alone") {
@@ -1568,4 +1606,163 @@ TEST_CASE("resumable refill: a budget below one seed still keeps the newest") {
     // And it is the LAST brick stored that survives, not an arbitrary one.
     const std::vector<clay_brick_request> newest(row.end() - 1, row.end());
     CHECK(refill_counting(doc.d, newest).resumed == 1);
+}
+
+TEST_CASE("resumable refill: a seed taken under one band cannot serve another") {
+    // A brick's tape is culled against `request_brick_box(req).dilated(band)`,
+    // so the band is not a display setting -- it decides which items the
+    // evaluation contains. A seed taken under a SMALLER band was continued
+    // from a tape that dropped items a larger band keeps, and folding a suffix
+    // onto it leaves those items out of the answer for good.
+    //
+    // The band was recorded on the entry and read by no admission gate (#349),
+    // so any seed served any band. The sweep filed with that issue found no
+    // difference because it varied the band with appends that also moved the
+    // cull pad, which `seed_for` already gates. Holding the pad still -- plain
+    // spheres under a hard union have no feather pad at all -- shows it.
+    //
+    // Brick (0,0,0) of a dim-8, 0.05 cache is [0, 0.4]^3.
+    //   `near`  r 0.05 at the origin: inside every band's region, and what
+    //           gives the seed an accumulator to continue from.
+    //   `outer` r 0.30 at (1, 0.4, 0.4): its bound starts at x = 0.7, so a
+    //           0.15 band (reaching x = 0.55) drops it and a 0.6 band
+    //           (reaching x = 1.0) keeps it.
+    // Measured before the fix: 9 of 512 samples wrong, worst 0.105 -- two
+    // voxels -- at a sample whose true distance is 0.354, well inside the 0.6
+    // band the caller asked for, so it is a sample a submit stores rather than
+    // clamps.
+    constexpr float kSeedBand = 0.15f;
+    constexpr float kWideBand = 0.60f;
+    const std::size_t per = static_cast<std::size_t>(kSeedDim) * kSeedDim * kSeedDim;
+    const clay_brick_request wide = brick_at(0, 0, 0, kSeedDim, kSeedVox, kWideBand);
+    const clay_brick_request narrow = brick_at(0, 0, 0, kSeedDim, kSeedVox, kSeedBand);
+
+    auto build = [](Doc& d, bool with_dab) {
+        add_sphere_at(d, 0.05f, 0.0f, 0.0f, 0.0f);  // near
+        add_sphere_at(d, 0.30f, 1.0f, 0.4f, 0.4f);  // outer
+        if (with_dab) add_sphere_at(d, 0.12f, 0.05f, 0.0f, 0.0f);
+    };
+
+    // The two fields, each read by its OWN document that never resumed
+    // anything. One document read twice would not do: the second read is a
+    // seed away from the first, which is the very thing under test.
+    std::vector<float> wide_want, narrow_want;
+    {
+        Doc oracle;
+        build(oracle, true);
+        wide_want = refill_brick(oracle.d, wide, per);
+    }
+    {
+        Doc oracle;
+        build(oracle, true);
+        narrow_want = refill_brick(oracle.d, narrow, per);
+    }
+
+    SUBCASE("the two bands are two fields, and they differ where it counts") {
+        // Everything below rests on this: if a wider band could not change a
+        // value inside itself, gating the band would be pointless.
+        std::size_t worst = per;
+        float gap = 0.0f;
+        for (std::size_t i = 0; i < per; ++i) {
+            const float d = std::fabs(wide_want[i] - narrow_want[i]);
+            if (d > gap) {
+                gap = d;
+                worst = i;
+            }
+        }
+        REQUIRE(worst < per);
+        CHECK(gap > kSeedVox);                          // 0.105 measured: two voxels
+        CHECK(std::fabs(wide_want[worst]) < kWideBand);  // and inside the band asked for
+    }
+
+    SUBCASE("a wider band is refilled, not resumed") {
+        Doc doc;
+        build(doc, false);
+        refill_brick(doc.d, narrow, per);               // seeds the store, narrow
+        add_sphere_at(doc, 0.12f, 0.05f, 0.0f, 0.0f);   // the dab
+
+        std::vector<float> got;
+        const RefillSplit split = refill_counting(doc.d, {wide}, &got);
+        CHECK(split.resumed == 0);
+        CHECK(split.refilled == 1);
+        REQUIRE(got.size() == wide_want.size());
+        CHECK(got == wide_want);  // bit-identical, not within a tolerance
+        // The narrow-culled tape plus the dab IS what resuming produced, so
+        // this says the seed was not served rather than merely that the answer
+        // is close.
+        CHECK(got != narrow_want);
+    }
+
+    SUBCASE("a narrower band is refilled too") {
+        // The other direction. A seed taken WIDE holds items the narrow
+        // request's own tape drops, so it is a different evaluation again. The
+        // difference lands outside the narrow band, where a submit would clamp
+        // it away -- but the resumed and full paths are equal by contract, and
+        // a caller reading these floats is entitled to that.
+        Doc doc;
+        build(doc, false);
+        refill_brick(doc.d, wide, per);
+        add_sphere_at(doc, 0.12f, 0.05f, 0.0f, 0.0f);
+
+        std::vector<float> got;
+        const RefillSplit split = refill_counting(doc.d, {narrow}, &got);
+        CHECK(split.resumed == 0);
+        CHECK(got == narrow_want);
+    }
+
+    SUBCASE("the same band still resumes") {
+        // The control: without it every case above would pass against a store
+        // that had simply stopped serving anything.
+        Doc doc;
+        build(doc, false);
+        refill_brick(doc.d, narrow, per);
+        add_sphere_at(doc, 0.12f, 0.05f, 0.0f, 0.0f);
+        const RefillSplit split = refill_counting(doc.d, {narrow});
+        CHECK(split.resumed == 1);
+        CHECK(split.refilled == 0);
+    }
+}
+
+TEST_CASE("resumable refill: two caches over one document keep their own seeds") {
+    // The seed key used to be the brick coordinate alone (#349), and a brick
+    // coordinate is only unique WITHIN a lattice. A coarse cache and a fine
+    // one over the same document -- a viewport and a mesher, say -- share
+    // brick (2, -1, -1) while holding different numbers of samples in it.
+    // `shaped_entry` refused the mismatched entry, so the answers stayed
+    // right, but `store_seed` then overwrote it: asked in turn the two evicted
+    // each other on every call and NEITHER ever resumed.
+    Doc doc;
+    add_sphere_at(doc, 1.0f, 0.0f, 0.0f, 0.0f);
+
+    // The same world box, 8 samples of 0.05 against 16 of 0.025, straddling
+    // the sphere's surface at x = 1 -- both need an accumulator to continue
+    // from, and a brick whose whole chain the cull drops has none.
+    const clay_brick_request coarse = brick_at(2, -1, -1, 8, kSeedVox, 0.15f);
+    const clay_brick_request fine = brick_at(2, -1, -1, 16, kSeedVox * 0.5f, 0.15f);
+    const std::size_t coarse_per = 8u * 8u * 8u;
+    const std::size_t fine_per = 16u * 16u * 16u;
+
+    refill_brick(doc.d, coarse, coarse_per);
+    refill_brick(doc.d, fine, fine_per);
+    CHECK(resume_stats(doc.d).entries == 2);  // one key each, not one shared
+
+    // A stroke, with both caches refreshed after every dab.
+    for (int i = 0; i < 3; ++i) {
+        CAPTURE(i);
+        add_sphere_at(doc, 0.30f, 0.90f + 0.02f * static_cast<float>(i), 0.0f, 0.0f);
+        const clay_resume_stats before = resume_stats(doc.d);
+        refill_brick(doc.d, coarse, coarse_per);
+        refill_brick(doc.d, fine, fine_per);
+        const clay_resume_stats after = resume_stats(doc.d);
+        CHECK(after.resumed_bricks - before.resumed_bricks == 2);
+        CHECK(after.refilled_bricks - before.refilled_bricks == 0);
+    }
+
+    // And what each holds is still its own cache's field.
+    Doc oracle;
+    add_sphere_at(oracle, 1.0f, 0.0f, 0.0f, 0.0f);
+    for (int i = 0; i < 3; ++i)
+        add_sphere_at(oracle, 0.30f, 0.90f + 0.02f * static_cast<float>(i), 0.0f, 0.0f);
+    CHECK(refill_brick(doc.d, coarse, coarse_per) == refill_brick(oracle.d, coarse, coarse_per));
+    CHECK(refill_brick(doc.d, fine, fine_per) == refill_brick(oracle.d, fine, fine_per));
 }
