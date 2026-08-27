@@ -236,6 +236,17 @@ final class StrokeGalleryTests: XCTestCase {
     /// Appended rather than written as one array literal: seven closures in a
     /// single expression is more than the Swift type-checker will take, and it
     /// fails with a timeout rather than a useful message.
+    /// Evaluations per pass to take the median of, when they are cheap enough.
+    /// Five, because the run-to-run spread of the scored figure falls 2.37x ->
+    /// 1.23x at five and only to 1.17x at nine: the fourth and fifth readings
+    /// buy the tolerance, and the rest buy noise reduction nobody needs.
+    static let evalRepeats = 5
+    /// Stop repeating once this much time has gone into one pass's evaluations.
+    /// 2 ms admits every session whose eval is small enough to be noise-bound
+    /// and excludes the ones that are not -- `volume_relax` spends ~300 ms in a
+    /// single evaluation and takes exactly one.
+    static let evalRepeatBudgetMs = 2.0
+
     private func sessions() -> [StrokeSession] {
         var out: [StrokeSession] = []
         out.append(StrokeSession(name: "stroke_build") { doc, layer, i in
@@ -955,14 +966,62 @@ final class StrokeGalleryTests: XCTestCase {
             for i in 0..<Self.strokeCount {
                 let t0 = DispatchTime.now().uptimeNanoseconds
                 let ok = session.stroke(doc, layer, i)
-                let evaluated = clay_eval_points(doc, "cpu", &pts, pointCount,
-                                                 &out, nil) == CLAY_OK
-                let t1 = DispatchTime.now().uptimeNanoseconds
+                let afterStroke = DispatchTime.now().uptimeNanoseconds
+
+                // THE TWO HALVES OF A PASS ARE NOT EQUALLY REPEATABLE, and
+                // splitting them is what makes a cheap session gateable.
+                //
+                // The STROKE happens once: it edits the document the next pass
+                // builds on, so re-running it would measure a different sculpt.
+                // The EVALUATION is a pure read of the result and can be taken
+                // as often as we like.
+                //
+                // For `cut_passes` that distinction is the whole issue. Its
+                // stroke is 3% of the pass -- a descriptor and a node insert,
+                // 0.001-0.002 ms -- and its evaluation is the other 97% at
+                // ~0.035 ms, which is small enough that ONE reading is mostly
+                // scheduling noise: measured on a quiet Mac over 300 sessions,
+                // a single eval's p95 is 1.9-2.4x its own median. That noise
+                // reached the gate as a case whose scored figure spread 1.55x
+                // run to run against a 1.4x tolerance (issue #333).
+                //
+                // Taking the median of a few evaluations costs nothing and
+                // takes the run-to-run spread of the scored figure from 2.37x
+                // to 1.23x. It does NOT change what is measured: same document,
+                // same points, same verb.
+                var evals: [Double] = []
+                var evaluated = true
+                var spentMs = 0.0
+                repeat {
+                    let e0 = DispatchTime.now().uptimeNanoseconds
+                    if clay_eval_points(doc, "cpu", &pts, pointCount, &out, nil) != CLAY_OK {
+                        evaluated = false
+                        break
+                    }
+                    let e = Double(DispatchTime.now().uptimeNanoseconds - e0) / 1_000_000.0
+                    evals.append(e)
+                    spentMs += e
+                    // ADAPTIVE, so a heavy session pays nothing. `volume_relax`
+                    // evaluates in ~300 ms; repeating that four more times would
+                    // add a second per pass and heat the device the run is trying
+                    // to measure. A case only repeats while repeating is cheap.
+                } while evals.count < Self.evalRepeats && spentMs < Self.evalRepeatBudgetMs
+
                 if !ok { XCTFail("\(session.name): stroke \(i) failed"); failed = true; break }
                 XCTAssertTrue(evaluated, "\(session.name): evaluation failed at stroke \(i)")
-                let ms = Double(t1 - t0) / 1_000_000.0
+                let strokeMs = Double(afterStroke - t0) / 1_000_000.0
+                let sorted = evals.sorted()
+                let ms = strokeMs + sorted[sorted.count / 2]
+                // samples STAYS 1: the stroke was observed once, which is the
+                // property check_device_bench's single_observation() detects and
+                // the reason the case is scored on the median of its axis rather
+                // than its worst point (issue #331). `repeats` records that the
+                // repeatable half was sampled more than once, as it does for the
+                // latency cases.
                 measurements.append(Measurement(stamps: i + 1, p50Ms: ms,
-                                                p95Ms: ms, samples: 1))
+                                                p95Ms: ms, samples: 1,
+                                                repeats: evals.count,
+                                                p95SpreadMs: (sorted.last ?? 0) - (sorted.first ?? 0)))
 
                 // The first stroke, rendered. For most sessions this is only
                 // a before-picture; for Move it is the whole finding, because
