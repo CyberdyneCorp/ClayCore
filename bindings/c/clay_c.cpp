@@ -486,6 +486,8 @@ constexpr std::size_t kBrickConfigOriginal =
     offsetof(clay_brick_config, memory_budget) + sizeof(std::uint64_t);
 constexpr std::size_t kBrickStatsOriginal =
     offsetof(clay_brick_stats, memory_budget) + sizeof(std::uint64_t);
+constexpr std::size_t kResumeStatsOriginal =
+    offsetof(clay_resume_stats, refilled_bricks) + sizeof(std::uint64_t);
 constexpr std::size_t kBrickMeshParamsOriginal =
     offsetof(clay_brick_mesh_params, gradient_eps) + sizeof(float);
 constexpr std::size_t kVertexLayoutOriginal =
@@ -1204,8 +1206,29 @@ struct clay_document {
             ++visible;
         }
         if (!active) return p;
+        // Both are properties of the DOCUMENT rather than of any append, and
+        // callers probe this plan for `has_below` alone, so they are set before
+        // anything below can decline.
         p.active = active->id;
         p.has_below = visible > 1;
+        // THE APPENDS HAVE TO HAVE GONE TO THE LAYER THE SUFFIX WOULD EXTEND.
+        //
+        // Without this the log is trusted whatever layer it describes, and the
+        // only thing left standing between that and a wrong field is
+        // `compile_layer_suffix`'s check that `appended` is the tail of the
+        // active layer's roots -- which compares NodeIds, and a NodeId is only
+        // meaningful inside one SdfContent. Every layer's ids start at 1, so an
+        // append to a lower layer whose new id happens to equal the active
+        // layer's last root PASSES that check, and the suffix then folds the
+        // active layer's own last node onto the seed a second time while the
+        // dab that was actually made is never evaluated at all. The brick is
+        // marked answered, so the full path that would have caught it never
+        // runs, and `store_active` keeps the wrong value as the next seed.
+        //
+        // Measured on a two-layer document sculpted on the lower layer: up to
+        // 0.49 in distance, ~10 cells at a 0.05 voxel, silently.
+        // `touch_appended` already records the layer; this is only reading it.
+        if (!append_valid_ || append_layer_ != active->id) return p;
         p.appended = appends_since(seed_revision, p.now);
         if (p.appended.empty()) return p;
         p.checkpoint = scene::TapeCheckpoint{};
@@ -1220,31 +1243,55 @@ struct clay_document {
         return p;
     }
 
-    // The one revision every stored seed shares, or 0 when they do not share
-    // one. A batch is refilled together and stored together, so in the case
-    // this exists for they always do; anything else takes the full path rather
-    // than compiling a suffix per revision.
-    std::uint64_t seed_revision_for(const clay_brick_request* requests, std::size_t count,
-                                    std::size_t per, bool want_colour, bool want_below) const {
-        std::uint64_t shared = 0;
-        for (std::size_t i = 0; i < count; ++i) {
-            auto it =
-                resume_.find(ResumeKey{requests[i].key[0], requests[i].key[1], requests[i].key[2]});
-            if (it == resume_.end()) return 0;
-            const ResumeEntry& e = it->second;
-            if (e.values.size() != per || e.spacing != requests[i].spacing) return 0;
-            if (want_colour && e.colors.size() != per * 3) return 0;
-            if (want_below != !e.below.empty()) return 0;
-            if (want_below && want_colour && e.below_colors.size() != per * 3) return 0;
-            if (e.dims[0] != requests[i].dims[0] || e.dims[1] != requests[i].dims[1] ||
-                e.dims[2] != requests[i].dims[2])
-                return 0;
-            if (shared == 0)
-                shared = e.revision;
-            else if (shared != e.revision)
-                return 0;
-        }
-        return shared;
+    // The entry that can serve this request's LATTICE, or null. Shape only --
+    // what the stored floats mean is the same question for every caller, and
+    // getting it wrong hands back a buffer of the wrong length.
+    //
+    // Deliberately NOT a revision test. A brick's seed is usable at whatever
+    // revision it was taken; how far it has to be carried forward is that
+    // brick's own business, decided in `seed_for`.
+    const ResumeEntry* shaped_entry(const clay_brick_request& request, std::size_t per,
+                                    bool want_colour, bool want_below) const {
+        auto it = resume_.find(ResumeKey{request.key[0], request.key[1], request.key[2]});
+        if (it == resume_.end()) return nullptr;
+        const ResumeEntry& e = it->second;
+        if (e.values.size() != per || e.spacing != request.spacing) return nullptr;
+        if (e.dims[0] != request.dims[0] || e.dims[1] != request.dims[1] ||
+            e.dims[2] != request.dims[2])
+            return nullptr;
+        // A colour asked for is a colour that has to have been kept: continuing
+        // a coloured fold from a distance alone folds every combine against
+        // black. The same for the layers beneath: a document that has them and
+        // a seed that does not are describing different fields.
+        if (want_colour && e.colors.size() != per * 3) return nullptr;
+        if (want_below != !e.below.empty()) return nullptr;
+        if (want_below && want_colour && e.below_colors.size() != per * 3) return nullptr;
+        return &e;
+    }
+
+    // The revision a brick's seed sits at, or 0 when it has none this request
+    // can use. PER BRICK, and that is the point of it.
+    //
+    // It used to be one revision for the whole batch, and a batch that did not
+    // agree on one took the full path entire. That reads as a rare case and is
+    // in fact the common one: `touch_appended` does not re-stamp seeds, and a
+    // refill only re-stamps the bricks it filled, so a dirty window that MOVES
+    // -- any stroke that is not standing still -- mixes the revision it stamped
+    // last dab with whatever the newly entered ground was stamped at. One brick
+    // the stroke had not reached before, or one evicted by the byte budget, did
+    // the same. So the fast path #306 exists for fired only while the window
+    // stood still, and every other dab paid the 18 ms it was built to remove.
+    //
+    // Nothing about the arithmetic wanted that. The suffix is compiled and
+    // evaluated per brick against that brick's own cull region either way;
+    // only the PLAN was shared, and a plan is cheap enough to keep one per
+    // distinct revision. Bricks that cannot be served fall into the miss
+    // gather below, which already existed and already scatters back to fixed
+    // slots.
+    std::uint64_t seed_revision_for(const clay_brick_request& request, std::size_t per,
+                                    bool want_colour, bool want_below) const {
+        const ResumeEntry* e = shaped_entry(request, per, want_colour, want_below);
+        return e ? e->revision : 0;
     }
 
     // What a brick's stored seed holds, or `values == nullptr` when it cannot
@@ -1256,29 +1303,22 @@ struct clay_document {
         const float* below_colors = nullptr;
     };
 
-    Seed seed_for(const clay_brick_request& request, float pad, bool want_colour,
+    Seed seed_for(const clay_brick_request& request, std::size_t per, float pad, bool want_colour,
                   bool want_below) const {
         Seed s;
-        auto it = resume_.find(ResumeKey{request.key[0], request.key[1], request.key[2]});
-        if (it == resume_.end()) return s;
-        // A colour asked for is a colour that has to have been kept: continuing
-        // a coloured fold from a distance alone folds every combine against
-        // black. The same for the layers beneath: a document that has them and
-        // a seed that does not are describing different fields.
-        if (want_colour && it->second.colors.empty()) return s;
-        if (want_below != !it->second.below.empty()) return s;
-        if (want_below && want_colour && it->second.below_colors.empty()) return s;
+        const ResumeEntry* e = shaped_entry(request, per, want_colour, want_below);
+        if (!e) return s;
         // The cull pad decides which items a brick's compile keeps, so a seed
         // taken under a different one was continued from a different field.
         // The pad only grows on an append, so this is a real gate rather than
         // a formality.
-        if (it->second.pad != pad) return s;
-        if (!it->second.had_acc) return s;
-        s.values = it->second.values.data();
-        if (want_colour) s.colors = it->second.colors.data();
+        if (e->pad != pad) return s;
+        if (!e->had_acc) return s;
+        s.values = e->values.data();
+        if (want_colour) s.colors = e->colors.data();
         if (want_below) {
-            s.below = it->second.below.data();
-            if (want_colour) s.below_colors = it->second.below_colors.data();
+            s.below = e->below.data();
+            if (want_colour) s.below_colors = e->below_colors.data();
         }
         return s;
     }
@@ -1420,6 +1460,27 @@ struct clay_document {
 
     std::mutex& cache_lock() const { return cache_mutex_; }
 
+    // What the last refills did, and what the seed store costs. The counts are
+    // what makes the resumable path OBSERVABLE: it is bit-identical to the full
+    // path by contract, so nothing about a refill's output can tell whether it
+    // fired, and a fast path that quietly stopped firing reads as correct.
+    void note_refill(std::uint64_t resumed, std::uint64_t refilled) const {
+        resumed_bricks_.fetch_add(resumed, std::memory_order_relaxed);
+        refilled_bricks_.fetch_add(refilled, std::memory_order_relaxed);
+    }
+
+    void resume_stats(std::uint64_t* entries, std::uint64_t* bytes, std::uint64_t* budget,
+                      std::uint64_t* resumed, std::uint64_t* refilled) const {
+        {
+            std::lock_guard<std::mutex> lock(cache_mutex_);
+            *entries = resume_.size();
+            *bytes = resume_bytes_;
+        }
+        *budget = kResumeBytes;
+        *resumed = resumed_bricks_.load(std::memory_order_relaxed);
+        *refilled = refilled_bricks_.load(std::memory_order_relaxed);
+    }
+
     // The appends that take revision `from` to the current one, or nothing
     // when the log does not cover that span -- no valid log, a reader older
     // than its base, or a reader ahead of its end. Caller holds cache_mutex_.
@@ -1549,6 +1610,12 @@ struct clay_document {
     mutable std::unordered_map<ResumeKey, ResumeEntry, ResumeKeyHash> resume_;
     mutable std::deque<ResumeKey> resume_order_;  // insertion order, for eviction
     mutable std::size_t resume_bytes_ = 0;
+    // Cumulative over the document's life, so a host can see whether its refill
+    // loop is actually reaching the fast path. Atomic rather than under
+    // cache_mutex_: they are read without it, and a torn count would be worse
+    // than a slightly stale one.
+    mutable std::atomic<std::uint64_t> resumed_bricks_{0};
+    mutable std::atomic<std::uint64_t> refilled_bricks_{0};
 };
 
 // The item builder is a scene::Node under construction. Whether a transition
@@ -9057,6 +9124,19 @@ clay_result clay_brick_cache_stats(const clay_brick_cache* cache, clay_brick_sta
     return CLAY_OK;
 }
 
+clay_result clay_document_resume_stats(const clay_document* doc, clay_resume_stats* out_stats) {
+    if (!doc || !out_stats) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or stats");
+    clay_resume_stats probe;
+    clay_result r = read_desc(out_stats, kResumeStatsOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    const std::uint32_t declared = out_stats->struct_size;
+    clay_resume_stats filled{};
+    doc->resume_stats(&filled.entries, &filled.bytes, &filled.budget, &filled.resumed_bricks,
+                      &filled.refilled_bricks);
+    write_desc(out_stats, declared, filled);
+    return CLAY_OK;
+}
+
 clay_result clay_brick_cache_trim(clay_brick_cache* cache, uint64_t target_bytes,
                                   const float focus[3], uint64_t* out_dropped) {
     if (!cache) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null brick cache");
@@ -9245,23 +9325,21 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
     if (!b) return fail(CLAY_ERROR_NOT_FOUND, std::string("backend not registered: ") + name);
     // -- the resumable path (#306) -----------------------------------------
     //
-    // When every brick asked for carries a seed from the same revision, and
-    // the document has only been APPENDED to since, what this call has to
-    // evaluate is the appended items -- not the whole surviving edit list over
-    // every sample. The suffix is compiled per brick and culled exactly as a
-    // whole-document compile would cull it, which is what makes continuing
-    // from the seed the same arithmetic rather than an approximation of it.
+    // When a brick carries a seed and the document has only been APPENDED to
+    // since that seed was taken, what this call has to evaluate for it is the
+    // appended items -- not the whole surviving edit list over every sample.
+    // The suffix is compiled per brick and culled exactly as a whole-document
+    // compile would cull it, which is what makes continuing from the seed the
+    // same arithmetic rather than an approximation of it.
     //
-    // Distances only. A seed is one float a sample; a colour is not, so a
-    // caller asking for colour takes the full path.
-    // -- the resumable path (#306) -----------------------------------------
-    //
-    // When every brick asked for carries a seed from the same revision, and the
-    // document has only been APPENDED to since, what this call has to evaluate
-    // is the appended items -- not the whole surviving edit list over every
-    // sample. The suffix is compiled per brick and culled exactly as a whole-
-    // document compile would cull it, which is what makes continuing from the
-    // seed the same arithmetic rather than an approximation of it.
+    // PER BRICK, not per batch. Whether a brick can be resumed, and how far it
+    // has to be carried, is that brick's own question: the bricks of one batch
+    // routinely sit at different revisions, because a refill re-stamps only the
+    // bricks it filled and an append re-stamps none. A stroke whose dirty window
+    // moves -- which is every stroke -- therefore mixes the ground it covered
+    // last dab with the ground it has just reached, and a brick it has never
+    // reached has no seed at all. Bricks that cannot be served drop into the
+    // miss gather below and take the full path alone.
     //
     // WITH MORE THAN ONE VISIBLE SDF LAYER the seed is two values, not one. The
     // layers hard-union left to right, so the tape holds the layers BENEATH the
@@ -9274,30 +9352,52 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
     const bool want_colour = out_colors_rgb != nullptr;
     std::vector<std::uint8_t> resumed(count, 0);
     std::size_t resumed_count = 0;
-    float resume_pad = 0.0f;
     {
         std::lock_guard<std::mutex> lock(doc->cache_lock());
         const clay_document::ResumePlan probe = doc->plan_resume(1);  // for has_below only
-        const std::uint64_t seed_rev =
-            doc->seed_revision_for(requests, count, per, want_colour, probe.has_below);
-        // A seed already AT the current revision is the answer: its brick's
-        // culled tape has not changed since it was computed, so there is
-        // nothing to fold into it. That is what a region-limited invalidation
-        // leaves behind -- an edit the brick cannot reach advances the seed
-        // rather than dropping it -- and it is also the plain case of a refill
-        // asked for twice without an edit in between.
-        //
-        // The union still applies: what is stored is the ACTIVE layer's value,
-        // and the layers beneath are their own half.
-        if (seed_rev != 0 && seed_rev == doc->current_revision()) {
-            const float pad = doc->cull_index_locked()->cull_pad();
-            for (std::size_t i = 0; i < count; ++i) {
-                const clay_document::Seed seed =
-                    doc->seed_for(requests[i], pad, want_colour, probe.has_below);
-                if (!seed.values) continue;
-                float* vd = out_values + i * per;
-                float* vc = want_colour ? out_colors_rgb + i * per * 3 : nullptr;
-                if (probe.has_below) {
+        const bool has_below = probe.has_below;
+        const std::uint64_t now = doc->current_revision();
+
+        // The cull index is only wanted once a brick turns out to have a seed:
+        // obtaining it copies the cached one, and a batch with nothing to
+        // resume should not pay for that on its way to the full path.
+        std::shared_ptr<const scene::CullIndex> index;
+        float resume_pad = 0.0f;
+
+        // One plan per distinct stored revision. A moving window holds one or
+        // two of them -- what the last dab stamped, and what it had not reached
+        // -- so this is a couple of plan_resume calls for the batch rather than
+        // one per brick. Each plan carries its own `appended` tail, which is
+        // what lets a brick left behind two dabs ago catch up in one go.
+        std::unordered_map<std::uint64_t, clay_document::ResumePlan> plans;
+        std::vector<float> points;
+        std::vector<float> active, active_rgb;
+        for (std::size_t i = 0; i < count; ++i) {
+            const std::uint64_t rev =
+                doc->seed_revision_for(requests[i], per, want_colour, has_below);
+            if (rev == 0) continue;
+            if (!index) {
+                index = doc->cull_index_locked();
+                resume_pad = index->cull_pad();
+            }
+            const clay_document::Seed seed =
+                doc->seed_for(requests[i], per, resume_pad, want_colour, has_below);
+            if (!seed.values) continue;
+            float* vd = out_values + i * per;
+            float* vc = want_colour ? out_colors_rgb + i * per * 3 : nullptr;
+
+            // A seed already AT the current revision is the answer: its brick's
+            // culled tape has not changed since it was computed, so there is
+            // nothing to fold into it. That is what a region-limited
+            // invalidation leaves behind -- an edit the brick cannot reach
+            // advances the seed rather than dropping it -- and it is also the
+            // plain case of a refill asked for twice without an edit in
+            // between.
+            //
+            // The union still applies: what is stored is the ACTIVE layer's
+            // value, and the layers beneath are their own half.
+            if (rev == now) {
+                if (has_below) {
                     fold_layers_below(seed.below, seed.below_colors, seed.values, seed.colors, per,
                                       vd, vc);
                 } else {
@@ -9306,72 +9406,67 @@ clay_result clay_brick_cache_eval_requests(const clay_document* doc, const char*
                 }
                 resumed[i] = 1;
                 ++resumed_count;
+                continue;
             }
-        }
-        const clay_document::ResumePlan plan = doc->plan_resume(seed_rev);
-        if (plan.usable) {
-            std::shared_ptr<const scene::CullIndex> index = doc->cull_index_locked();
-            resume_pad = index->cull_pad();
-            std::vector<float> points;
-            std::vector<float> active(per), active_rgb(want_colour ? per * 3 : 0);
-            for (std::size_t i = 0; i < count; ++i) {
-                const clay_document::Seed seed =
-                    doc->seed_for(requests[i], resume_pad, want_colour, plan.has_below);
-                if (!seed.values) continue;
-                eval::GridQuery g;
-                std::size_t samples = 0;
-                if (read_grid(requests[i].origin, requests[i].spacing, requests[i].dims, &g,
-                              &samples) != CLAY_OK)
-                    continue;
-                const math::Aabb box = request_brick_box(requests[i]).dilated(requests[i].band);
-                scene::CullRegion cull{box};
-                scene::Tape suffix;
-                if (!scene::compile_layer_suffix(plan.checkpoint, doc->doc.document, plan.appended,
-                                                 &suffix, nullptr, &cull, index.get()))
-                    continue;
-                points.resize(samples * 3);
-                std::size_t at = 0;
-                for (int k = 0; k < g.nz; ++k)
-                    for (int j = 0; j < g.ny; ++j)
-                        for (int x = 0; x < g.nx; ++x) {
-                            const kernel::cfloat3 pt =
-                                g.origin + kernel::cf3(static_cast<float>(x) * g.spacing,
-                                                       static_cast<float>(j) * g.spacing,
-                                                       static_cast<float>(k) * g.spacing);
-                            points[at * 3] = pt.x;
-                            points[at * 3 + 1] = pt.y;
-                            points[at * 3 + 2] = pt.z;
-                            ++at;
-                        }
-                eval::PointQuery pq;
-                pq.points_xyz = points.data();
-                pq.count = samples;
-                eval::PointResults pr;
-                // Into scratch when there is a union still to apply, straight
-                // out when there is not.
-                pr.distances = plan.has_below ? active.data() : out_values + i * per;
-                if (want_colour)
-                    pr.colors_rgb =
-                        plan.has_below ? active_rgb.data() : out_colors_rgb + i * per * 3;
-                eval::eval_points_seeded(suffix, pq, seed.values, seed.colors, pr);
-                if (plan.has_below) {
-                    fold_layers_below(seed.below, seed.below_colors, active.data(),
-                                      want_colour ? active_rgb.data() : nullptr, per,
-                                      out_values + i * per,
-                                      want_colour ? out_colors_rgb + i * per * 3 : nullptr);
-                    // The seed for the NEXT dab is the ACTIVE layer's value,
-                    // not what was just written out.
-                    doc->store_active(requests[i], plan.now, resume_pad, active.data(),
-                                      want_colour ? active_rgb.data() : nullptr, per);
-                } else {
-                    doc->store_active(requests[i], plan.now, resume_pad, out_values + i * per,
-                                      want_colour ? out_colors_rgb + i * per * 3 : nullptr, per);
-                }
-                resumed[i] = 1;
-                ++resumed_count;
+
+            auto pit = plans.find(rev);
+            if (pit == plans.end()) pit = plans.emplace(rev, doc->plan_resume(rev)).first;
+            const clay_document::ResumePlan& plan = pit->second;
+            if (!plan.usable) continue;
+
+            eval::GridQuery g;
+            std::size_t samples = 0;
+            if (read_grid(requests[i].origin, requests[i].spacing, requests[i].dims, &g,
+                          &samples) != CLAY_OK)
+                continue;
+            const math::Aabb box = request_brick_box(requests[i]).dilated(requests[i].band);
+            scene::CullRegion cull{box};
+            scene::Tape suffix;
+            if (!scene::compile_layer_suffix(plan.checkpoint, doc->doc.document, plan.appended,
+                                             &suffix, nullptr, &cull, index.get()))
+                continue;
+            points.resize(samples * 3);
+            std::size_t at = 0;
+            for (int k = 0; k < g.nz; ++k)
+                for (int j = 0; j < g.ny; ++j)
+                    for (int x = 0; x < g.nx; ++x) {
+                        const kernel::cfloat3 pt =
+                            g.origin + kernel::cf3(static_cast<float>(x) * g.spacing,
+                                                   static_cast<float>(j) * g.spacing,
+                                                   static_cast<float>(k) * g.spacing);
+                        points[at * 3] = pt.x;
+                        points[at * 3 + 1] = pt.y;
+                        points[at * 3 + 2] = pt.z;
+                        ++at;
+                    }
+            eval::PointQuery pq;
+            pq.points_xyz = points.data();
+            pq.count = samples;
+            eval::PointResults pr;
+            // Into scratch when there is a union still to apply, straight out
+            // when there is not.
+            if (has_below) {
+                active.resize(per);
+                if (want_colour) active_rgb.resize(per * 3);
             }
+            pr.distances = has_below ? active.data() : vd;
+            if (want_colour) pr.colors_rgb = has_below ? active_rgb.data() : vc;
+            eval::eval_points_seeded(suffix, pq, seed.values, seed.colors, pr);
+            if (has_below) {
+                fold_layers_below(seed.below, seed.below_colors, active.data(),
+                                  want_colour ? active_rgb.data() : nullptr, per, vd, vc);
+                // The seed for the NEXT dab is the ACTIVE layer's value, not
+                // what was just written out.
+                doc->store_active(requests[i], plan.now, resume_pad, active.data(),
+                                  want_colour ? active_rgb.data() : nullptr, per);
+            } else {
+                doc->store_active(requests[i], plan.now, resume_pad, vd, vc, per);
+            }
+            resumed[i] = 1;
+            ++resumed_count;
         }
     }
+    doc->note_refill(resumed_count, count - resumed_count);
     if (resumed_count == count) return CLAY_OK;
 
     // The bricks the resumable path did not answer, gathered so the batch stays

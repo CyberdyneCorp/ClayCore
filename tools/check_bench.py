@@ -428,6 +428,26 @@ MAX_COUNTER = [
     # reallocation count does not: 0 against 300 over the same stroke, exact
     # and machine-independent.
     ("BM_MetalStrokePatched", "repacks", 4),
+    # A brick refill resumes PER BRICK (#342). The gate used to admit a batch
+    # only when every brick in it carried a seed at one shared revision, and
+    # nothing re-stamps a seed but the refill that writes it -- so a dirty
+    # window that MOVED, which is every stroke, mixed the ground the last dab
+    # covered with ground it had not and sent all of them down the full walk.
+    #
+    # The wall clock is the wrong gate for it. Both paths are bit-identical by
+    # contract and the fixture is small, so the margin is a property of how much
+    # history the benchmark happens to hold. The SHARE OF BRICKS WALKED IN FULL
+    # is not: it is a ratio of counts and it is the thing that actually broke.
+    #
+    # The benchmark primes every window position first, which is what makes the
+    # ratio machine-independent rather than merely count-based. Left unprimed it
+    # measures a warmup transient amortised over the iteration count, so a slow
+    # runner reads higher for no reason -- 0.053 locally against 0.085 on a CI
+    # runner, both correct, against a ceiling of 0.10. Primed, every brick asked
+    # for has a seed, so resuming per brick this is 0 and a batch-wide gate makes
+    # it 1: the whole window, every dab.
+    ("BM_BrickRefillMoving5000", "refilled_frac", 0.05),
+    ("BM_BrickRefillMoving20000", "refilled_frac", 0.05),
 ]
 
 
@@ -474,9 +494,13 @@ def main() -> int:
         if got is None:
             failures.append(f"{name}: counter '{counter}' missing from results")
             continue
-        print(f"bench-gate: {name}: {counter}={got:,.0f} (ceiling {max_value:,})")
+        # Counts print as integers and fractions as fractions: a ceiling below 1
+        # is a ratio, and rounding it to "0" would make a failure unreadable.
+        fmt = ",.3f" if max_value < 1 else ",.0f"
+        shown = f"{got:{fmt}}"
+        print(f"bench-gate: {name}: {counter}={shown} (ceiling {max_value:{fmt}})")
         if got > max_value:
-            failures.append(f"{name}: {counter}={got:,.0f} above ceiling {max_value:,}")
+            failures.append(f"{name}: {counter}={shown} above ceiling {max_value:{fmt}}")
     for name, reference, max_ratio in MAX_RATIO:
         for missing in (n for n in (name, reference) if n not in seen):
             failures.append(f"{missing}: benchmark missing from results")

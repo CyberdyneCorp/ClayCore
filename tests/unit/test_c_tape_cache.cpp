@@ -1045,3 +1045,212 @@ TEST_CASE("resumable refill: a resumed brick is the brick a full refill gives") 
         CHECK(std::memcmp(c2.data(), oc.data(), per * 3 * sizeof(float)) == 0);
     }
 }
+
+namespace {
+
+// A row of `count` bricks starting at brick key x = `from`, along the sphere's
+// equator. Separate from `refill_signature`'s fixed row because the case this
+// guards is a row that MOVES.
+std::vector<clay_brick_request> brick_row(int from, int count) {
+    constexpr int kDim = 8;
+    constexpr float kVox = 0.05f;
+    std::vector<clay_brick_request> reqs(static_cast<std::size_t>(count));
+    for (int i = 0; i < count; ++i) {
+        std::memset(&reqs[i], 0, sizeof(reqs[i]));
+        const int kx = from + i;
+        reqs[i].key[0] = kx;
+        reqs[i].key[1] = -1;
+        reqs[i].key[2] = -1;
+        reqs[i].origin[0] = static_cast<float>(kx) * kDim * kVox;
+        reqs[i].origin[1] = -1.0f * kDim * kVox;
+        reqs[i].origin[2] = -1.0f * kDim * kVox;
+        reqs[i].spacing = kVox;
+        reqs[i].dims[0] = kDim;
+        reqs[i].dims[1] = kDim;
+        reqs[i].dims[2] = kDim;
+        reqs[i].band = 3.0f * kVox;
+    }
+    return reqs;
+}
+
+std::vector<float> refill(clay_document* d, const std::vector<clay_brick_request>& reqs) {
+    const std::size_t per = 8u * 8u * 8u;
+    std::vector<float> out(reqs.size() * per, 0.0f);
+    REQUIRE(clay_brick_cache_eval_requests(d, nullptr, reqs.data(), reqs.size(), out.data(),
+                                           out.size(), nullptr, 0) == CLAY_OK);
+    return out;
+}
+
+clay_resume_stats resume_stats(const clay_document* d) {
+    clay_resume_stats s{};
+    s.struct_size = sizeof s;
+    REQUIRE(clay_document_resume_stats(d, &s) == CLAY_OK);
+    return s;
+}
+
+// How many bricks the NEXT refill answers from a seed, rather than by walking
+// the whole surviving edit list. The counts are cumulative, so a caller reads
+// them as a difference across the one call it cares about.
+struct RefillSplit {
+    std::uint64_t resumed = 0;
+    std::uint64_t refilled = 0;
+};
+
+RefillSplit refill_counting(clay_document* d, const std::vector<clay_brick_request>& reqs,
+                            std::vector<float>* out_values = nullptr) {
+    const clay_resume_stats before = resume_stats(d);
+    std::vector<float> v = refill(d, reqs);
+    const clay_resume_stats after = resume_stats(d);
+    if (out_values) *out_values = std::move(v);
+    return RefillSplit{after.resumed_bricks - before.resumed_bricks,
+                       after.refilled_bricks - before.refilled_bricks};
+}
+
+}  // namespace
+
+TEST_CASE("resumable refill: a brick's seed is its own, not the batch's") {
+    // Whether a brick can be resumed is that brick's question. It used to be
+    // the BATCH's: one brick without a usable seed, or one sitting at a
+    // different revision from its neighbours, sent every brick in the call down
+    // the full walk.
+    //
+    // That reads as a corner case and is in fact the ordinary one. A refill
+    // re-stamps only the bricks it filled and an append re-stamps none, so a
+    // stroke whose dirty window MOVES -- which is every stroke -- always mixes
+    // the ground it covered last dab with the ground it has just reached. The
+    // fast path #306 exists for therefore fired only while the brush stood
+    // still.
+    //
+    // These read the resumed/refilled counters rather than the values, because
+    // the two paths are bit-identical by contract: nothing about a brick can
+    // say which one produced it, which is why the regression was invisible.
+
+    SUBCASE("a window that moves resumes the ground it already covered") {
+        Doc doc;
+        add_sphere(doc, 1.0f, 0.0f);
+        const std::vector<clay_brick_request> first = brick_row(-3, 4);
+        refill(doc.d, first);  // warm: every brick of the first window has a seed
+
+        // The brush slides one brick along and stamps a dab. Three of the four
+        // bricks are ground it already covered and must resume; the fourth is
+        // new and correctly takes the full walk.
+        add_sphere(doc, 0.30f, 0.35f);
+        const RefillSplit moved = refill_counting(doc.d, brick_row(-2, 4));
+        CHECK(moved.resumed == 3);
+        CHECK(moved.refilled == 1);
+    }
+
+    SUBCASE("one brick with no seed does not cost the others theirs") {
+        Doc doc;
+        add_sphere(doc, 1.0f, 0.0f);
+        const std::vector<clay_brick_request> warm = brick_row(-3, 4);
+        refill(doc.d, warm);
+
+        // The same four bricks, plus one the cache has never been asked for.
+        std::vector<clay_brick_request> plus_cold = warm;
+        const std::vector<clay_brick_request> cold = brick_row(9, 1);
+        plus_cold.push_back(cold[0]);
+
+        add_sphere(doc, 0.30f, 0.35f);
+        const RefillSplit split = refill_counting(doc.d, plus_cold);
+        CHECK(split.resumed == 4);   // the warm four, unaffected by their neighbour
+        CHECK(split.refilled == 1);  // the cold one, alone
+    }
+
+    SUBCASE("bricks stamped by different dabs still resume, each from its own") {
+        // Two windows filled at two different revisions, then asked for
+        // together. Neither is stale; they simply have different distances to
+        // travel, and a plan is compiled for each.
+        Doc doc;
+        add_sphere(doc, 1.0f, 0.0f);
+        const std::vector<clay_brick_request> left = brick_row(-3, 2);
+        const std::vector<clay_brick_request> right = brick_row(-1, 2);
+        refill(doc.d, left);
+        add_sphere(doc, 0.30f, -0.55f);
+        refill(doc.d, right);  // `right` is now one revision ahead of `left`
+
+        add_sphere(doc, 0.30f, 0.35f);
+        std::vector<clay_brick_request> both = left;
+        both.insert(both.end(), right.begin(), right.end());
+        const RefillSplit split = refill_counting(doc.d, both);
+        CHECK(split.resumed == 4);
+        CHECK(split.refilled == 0);
+    }
+
+    SUBCASE("and what it resumes to is what a full walk would have said") {
+        // The speed is only worth having if the field is the same one. Bricks
+        // resumed from two different revisions, against a document that never
+        // resumed anything.
+        auto built = [](int dabs) {
+            Doc fresh;
+            add_sphere(fresh, 1.0f, 0.0f);
+            for (int i = 1; i <= dabs; ++i)
+                add_sphere(fresh, 0.30f, -0.7f + 0.25f * static_cast<float>(i));
+            return refill(fresh.d, brick_row(-3, 6));
+        };
+
+        Doc doc;
+        add_sphere(doc, 1.0f, 0.0f);
+        for (int i = 1; i <= 6; ++i) {
+            add_sphere(doc, 0.30f, -0.7f + 0.25f * static_cast<float>(i));
+            // A window that slides, so every refill mixes warm ground with new.
+            refill(doc.d, brick_row(-3 + (i % 3), 4));
+        }
+        const std::vector<float> resumed = refill(doc.d, brick_row(-3, 6));
+        const std::vector<float> oracle = built(6);
+        REQUIRE(resumed.size() == oracle.size());
+        CHECK(resumed == oracle);  // bit-identical, not within a tolerance
+    }
+}
+
+TEST_CASE("resumable refill: an append to a layer beneath is never resumed onto the active one") {
+    // A NodeId is only meaningful inside one layer's content -- every layer's
+    // ids start at 1. The append log records which layer it describes, but the
+    // plan did not read it, so the only thing left standing was
+    // `compile_layer_suffix` checking that the appended ids are the tail of the
+    // ACTIVE layer's roots. That check compares ids across layers, and when the
+    // lower layer's new id happens to equal the active layer's last root it
+    // PASSES: the suffix folds the active layer's own last node onto the seed a
+    // second time, the dab that was actually made is never evaluated, and the
+    // brick is marked answered so the full path that would have caught it never
+    // runs.
+    //
+    // Measured before the fix at up to 0.49 in distance -- ten cells at a 0.05
+    // voxel -- silently. The sizes below are chosen so the ids DO collide: the
+    // active layer gets `n` roots, the layer beneath gets n - 1, so the next
+    // append to it takes id n, which is the active layer's roots.back().
+    for (int n = 2; n <= 6; ++n) {
+        CAPTURE(n);
+        const std::vector<clay_brick_request> row = brick_row(-3, 5);
+
+        // The same items, in a document that never resumed anything.
+        std::vector<float> want;
+        {
+            TwoLayerDoc oracle;
+            for (int i = 0; i < n - 1; ++i)
+                add_to(oracle, oracle.below, 0.30f, -0.2f + 0.1f * static_cast<float>(i));
+            add_to(oracle, oracle.below, 0.30f, 0.35f);
+            for (int i = 0; i < n; ++i)
+                add_to(oracle, oracle.active, 0.25f, -0.2f + 0.1f * static_cast<float>(i));
+            want = refill(oracle.d, row);
+        }
+
+        // Seed every brick, then append to the layer BENEATH the active one.
+        TwoLayerDoc doc;
+        for (int i = 0; i < n - 1; ++i)
+            add_to(doc, doc.below, 0.30f, -0.2f + 0.1f * static_cast<float>(i));
+        for (int i = 0; i < n; ++i)
+            add_to(doc, doc.active, 0.25f, -0.2f + 0.1f * static_cast<float>(i));
+        refill(doc.d, row);
+        add_to(doc, doc.below, 0.30f, 0.35f);
+
+        // The appends did not go to the layer a suffix would extend, so no
+        // brick may be resumed -- and the field must be the one a document
+        // holding the same items reads.
+        std::vector<float> got;
+        const RefillSplit split = refill_counting(doc.d, row, &got);
+        CHECK(split.resumed == 0);
+        REQUIRE(got.size() == want.size());
+        CHECK(got == want);
+    }
+}
