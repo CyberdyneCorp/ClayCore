@@ -763,13 +763,18 @@ TEST_CASE("cull index: a cached index is extended in place only while unobserved
         // iterations of this loop. A weak_ptr adds no owner, so it does not
         // itself force the copy branch, and it goes empty exactly when the
         // index it watches is replaced.
+        //
+        // Compared as raw pointers because MSVC's <memory> cannot stream a
+        // shared_ptr, which doctest needs to report the operands (/WX). It is
+        // the same assertion: an expired lock() is null, and null is never one
+        // of these addresses.
         std::weak_ptr<CullIndex> watch = slot;
         const std::size_t before = root_entries(*slot);
         for (int i = 0; i < 6; ++i) {
             const NodeId id = doc.layers[0].sdf->insert(dab(cf3(0.1f * i, 0.35f, -0.2f)));
             REQUIRE(slot.use_count() == 1);
             REQUIRE(append_cached(slot, {id}));
-            CHECK(watch.lock() == slot);  // the same index, grown, not a copy
+            CHECK(watch.lock().get() == slot.get());  // the same index, grown, not a copy
         }
         const CullIndex fresh(doc);
         CHECK(root_entries(*slot) > before);
@@ -791,7 +796,9 @@ TEST_CASE("cull index: a cached index is extended in place only while unobserved
         const NodeId id = doc.layers[0].sdf->insert(dab(cf3(0.45f, -0.15f, 0.1f), 1.7f));
         REQUIRE(append_cached(slot, {id}));
 
-        CHECK(slot != held);  // the cache took a copy to extend
+        // Addresses are sound here where they were not above: `held` keeps the
+        // old index alive, so nothing can be handed its block.
+        CHECK(slot.get() != held.get());  // the cache took a copy to extend
         CHECK(held->cull_pad() == held_pad);  // and left the holder its own
         CHECK(root_entries(*held) == held_entries);
 
@@ -814,7 +821,7 @@ TEST_CASE("cull index: a cached index is extended in place only while unobserved
         const NodeId id = doc.layers[0].sdf->insert(dab(cf3(0.2f, 0.2f, 0.2f)));
         doc.layers[0].sdf->insert(dab(cf3(0.3f, 0.2f, 0.2f)));  // id is no longer the tail
         CHECK_FALSE(append_cached(slot, {id}));
-        CHECK(slot == held);
+        CHECK(slot.get() == held.get());
         CHECK(held->cull_pad() == pad);
     }
 }
