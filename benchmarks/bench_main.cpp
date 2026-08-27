@@ -885,6 +885,76 @@ BENCHMARK(BM_BrickRefillResumed)->Unit(benchmark::kMillisecond);
 void BM_BrickRefillFull(benchmark::State& state) { refill_stroke(state, false); }
 BENCHMARK(BM_BrickRefillFull)->Unit(benchmark::kMillisecond);
 
+// The pair above holds one window still. A REAL stroke drags its dirty window
+// across the model, and that is the case the resumed path used to lose: a
+// refill re-stamps only the bricks it filled and an append re-stamps none, so
+// every dab mixed the ground the last one covered with ground it had not, and
+// the batch-wide admission gate spent one un-resumable brick on all of them.
+//
+// The window here slides one brick every third dab, so three dabs in four ask
+// for bricks that are entirely warm and the fourth brings in one new one. It
+// should cost what the dab adds either way; before #342 it cost what the sculpt
+// holds, every dab.
+namespace {
+void refill_moving(benchmark::State& state, int history) {
+    clay_document* d = abi_sculpt(history);
+    const std::size_t per = 8 * 8 * 8;
+    constexpr int kWindow = 4;
+    std::vector<float> out(static_cast<std::size_t>(kWindow) * per);
+    auto window = [&](int shift) {
+        std::vector<clay_brick_request> reqs(kWindow);
+        for (int i = 0; i < kWindow; ++i) {
+            std::memset(&reqs[i], 0, sizeof(reqs[i]));
+            reqs[i].key[0] = 2;
+            reqs[i].key[1] = -2 + shift + i;
+            reqs[i].key[2] = -1;
+            for (int a = 0; a < 3; ++a)
+                reqs[i].origin[a] = static_cast<float>(reqs[i].key[a]) * 8 * 0.05f;
+            reqs[i].spacing = 0.05f;
+            reqs[i].dims[0] = reqs[i].dims[1] = reqs[i].dims[2] = 8;
+            reqs[i].band = 0.15f;
+        }
+        return reqs;
+    };
+    clay_brick_cache_eval_requests(d, nullptr, window(0).data(), kWindow, out.data(), out.size(),
+                                   nullptr, 0);
+    int n = 0;
+    float y = 0.0f;
+    for (auto _ : state) {
+        state.PauseTiming();
+        const float r = 0.05f;
+        clay_item* it = clay_item_create(CLAY_PRIM_SPHERE, &r, 1);
+        const float p[3] = {0.98f, y, -0.1f};
+        y += 0.001f;
+        clay_item_set_position(it, p);
+        clay_layer_add_item(d, 1, it, nullptr);
+        clay_item_destroy(it);
+        const std::vector<clay_brick_request> reqs = window((n++ / 3) % 3);
+        state.ResumeTiming();
+        clay_brick_cache_eval_requests(d, nullptr, reqs.data(), kWindow, out.data(), out.size(),
+                                       nullptr, 0);
+    }
+    clay_resume_stats rs{};
+    rs.struct_size = sizeof rs;
+    clay_document_resume_stats(d, &rs);
+    state.counters["history"] = static_cast<double>(history);
+    // The share of bricks the fast path actually answered. A moving window
+    // never reaches 1.0 -- the brick it has just entered has no seed and is
+    // correctly walked in full -- but it should sit near (kWindow - 1) / kWindow
+    // over a slide, and reads 0 if the fast path has stopped firing.
+    const double served = static_cast<double>(rs.resumed_bricks + rs.refilled_bricks);
+    state.counters["resumed_frac"] =
+        served > 0 ? static_cast<double>(rs.resumed_bricks) / served : 0.0;
+    clay_document_destroy(d);
+}
+}  // namespace
+
+void BM_BrickRefillMoving5000(benchmark::State& state) { refill_moving(state, 5000); }
+BENCHMARK(BM_BrickRefillMoving5000)->Unit(benchmark::kMillisecond);
+
+void BM_BrickRefillMoving20000(benchmark::State& state) { refill_moving(state, 20000); }
+BENCHMARK(BM_BrickRefillMoving20000)->Unit(benchmark::kMillisecond);
+
 void BM_CullIndexRebuild(benchmark::State& state) {
     const scene::Document doc = spread_sculpt(kIndexAppendNodes);
     for (auto _ : state) {

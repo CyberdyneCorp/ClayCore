@@ -24,8 +24,8 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 54
-#define CLAY_ABI_PATCH 1
+#define CLAY_ABI_MINOR 55
+#define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
  * selected node ids, stroke points, polygon vertices. A count above it is
@@ -5507,6 +5507,39 @@ typedef struct clay_brick_stats {
      * that checks first trims BEFORE evaluating rather than after. */
     uint64_t brick_bytes;
 } clay_brick_stats;
+
+/* -- is the refill actually resuming? (ABI 0.55.0, issue #342) --------------
+ *
+ * clay_brick_cache_eval_requests keeps each brick's float32 result as a SEED,
+ * and a later refill of that brick evaluates only what the document gained
+ * since — bit-identical to walking the whole edit list, and cheap where that is
+ * not (#306).
+ *
+ * Bit-identical is the problem this descriptor solves. Nothing about a refill's
+ * output can tell you whether the fast path fired, so a host whose refill loop
+ * stopped hitting it sees correct bricks and a frame time that quietly follows
+ * the size of the sculpt. These counters are how you see it instead:
+ *
+ *     resumed_bricks / (resumed_bricks + refilled_bricks)
+ *
+ * over a stroke. A stroke that is warm and appending should sit high. Bricks
+ * the stroke has just grown into have no seed and are counted as refilled,
+ * correctly — a moving brush never reaches 1.0, and does not need to.
+ *
+ * Both counts are CUMULATIVE over the document's life and never reset, so read
+ * them as differences across the interval you care about. A seed is a pure
+ * performance cache: dropping every one of them changes no geometry, only the
+ * time it takes to produce it. */
+typedef struct clay_resume_stats {
+    uint32_t struct_size;      /* = sizeof(clay_resume_stats); required */
+    uint64_t entries;          /* bricks currently holding a seed */
+    uint64_t bytes;            /* what those seeds cost */
+    uint64_t budget;           /* the ceiling they are evicted against */
+    uint64_t resumed_bricks;   /* cumulative: bricks answered from a seed */
+    uint64_t refilled_bricks;  /* cumulative: bricks that took the full walk */
+} clay_resume_stats;
+
+clay_result clay_document_resume_stats(const clay_document* doc, clay_resume_stats* out_stats);
 
 /* One evaluation request, and the only thing that crosses between the cache
  * and the host's evaluator.
