@@ -433,6 +433,31 @@ MAX_RATIO = [
     # worst contention observed, and still 2x below the 1.0x that a lost fast
     # path reads.
     ("BM_WholeDocAppend50000", "BM_WholeDocCompile50000", 0.50),
+    # DIRTY-PREFIX (FRONTIER) TRACKING (#360): one frame of a continuing Move
+    # drag — drag plus window refill — with the pre-drag prefix seeds kept,
+    # against the same frame with the resume budget at zero. Warm, every
+    # dirtied brick folds only the dragged suffix onto its prefix; cold, every
+    # frame replays the 2000-item chain per brick. Measured 0.12-0.16x on a
+    # loaded 24-core Linux box. The failure this catches is categorical — a
+    # frontier path that stopped firing lands at ~1x (the fixture's own guard
+    # SkipWithErrors first when the warm row stops resuming) — so 0.5 is the
+    # usual generosity, not a tight delta.
+    ("BM_MoveDragRefill", "BM_MoveDragRefillCold", 0.50),
+    # The spec's own <=5% overhead line, held directly: MARKING a live
+    # 288-entry store (touch_region_from, one dirty_from write per kept entry)
+    # must not cost more than the legacy DROP of the same store under the same
+    # bound (touch_region, which frees every entry's vectors). Measured
+    # 0.11-0.13x — marking is cheaper than dropping, not merely within 5% of
+    # it — so the spec's 1.05 ceiling carries ~8x headroom and still reads as
+    # the spec's number.
+    ("BM_TouchRegionFromSeedStore", "BM_TouchRegionSeedStore", 1.05),
+    # Tracking cost must not scale with history length: the same edit over the
+    # same 288-entry store under a 5000-root sculpt against a 2-root one. The
+    # per-brick frontier state is three numbers whatever the history, and the
+    # edit's only O(history) step is one root-list walk for its ordinal.
+    # Measured 1.2-1.3x; 3.0 catches an O(history x entries) path coming
+    # back, not runner noise.
+    ("BM_TouchRegionFromDeepHistory", "BM_TouchRegionFromSeedStore", 3.0),
 ]
 
 # counter gates: (bench, counter, max_value) — the named counter must be at

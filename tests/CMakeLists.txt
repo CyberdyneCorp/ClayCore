@@ -4,6 +4,7 @@ add_executable(clay_unit_tests
   unit/test_prim2d.cpp
   unit/test_ops.cpp
   unit/test_suffix_tape.cpp
+  unit/test_layer_prefix_tape.cpp
   unit/test_tape_block.cpp
   unit/test_tape_prefix_reuse.cpp
   unit/test_xform_repeat.cpp
@@ -93,6 +94,7 @@ add_executable(clay_unit_tests
   unit/test_c_mask_brush.cpp
   unit/test_c_pick_eval.cpp
   unit/test_c_tape_cache.cpp
+  unit/test_c_frontier_resume.cpp
   unit/test_c_brick.cpp
   unit/test_c_undo_bound.cpp
   unit/test_c_out_descriptors.cpp
