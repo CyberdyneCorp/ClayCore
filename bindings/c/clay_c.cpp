@@ -2332,9 +2332,19 @@ clay_result read_scale_axes(const float scale[3], kernel::cfloat3* out) {
     return CLAY_OK;
 }
 
+// A whole transform, checked once for every entry point that takes one. Both
+// arrays are REQUIRED: this ABI takes the whole value rather than a partial
+// update, so a null one is a missing argument and not a "leave this alone".
+// Named separately (#327), because a caller who reads a null axis as "no
+// rotation" and gets "null transform" back learns that something was null but
+// not which of the two, and the refusal is the only thing standing between
+// them and an edit they believe landed.
 clay_result read_transform(const float position[3], const float rotation_axis[3],
                            float rotation_angle, float scale, math::Transform* out) {
-    if (!position || !rotation_axis) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transform");
+    if (!position) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null position");
+    if (!rotation_axis)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "null rotation axis: name an axis and pass angle 0 for no rotation");
     if (!(scale > 0.0f)) return fail(CLAY_ERROR_INVALID_ARGUMENT, "scale must be > 0");
     out->position = kernel::cf3(position[0], position[1], position[2]);
     kernel::cfloat3 axis = kernel::cf3(rotation_axis[0], rotation_axis[1], rotation_axis[2]);
