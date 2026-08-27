@@ -1766,3 +1766,128 @@ TEST_CASE("resumable refill: two caches over one document keep their own seeds")
     CHECK(refill_brick(doc.d, coarse, coarse_per) == refill_brick(oracle.d, coarse, coarse_per));
     CHECK(refill_brick(doc.d, fine, fine_per) == refill_brick(oracle.d, fine, fine_per));
 }
+
+// -- a drag invalidates what it reached (#358) --------------------------------
+//
+// `clay_layer_move_surface` states its own reachable region -- the drag's ball
+// -- instead of letting apply_edit derive one per command, which cost two
+// influence bounds and a seed-store walk for every node the drag caught. That
+// is only sound if the stated region COVERS the change: a region that does not
+// leaves bricks holding seeds for a shape that has moved, which is a wrong
+// picture rather than a slow one.
+//
+// The oracle is the same one the resumed-refill tests use: a FRESH document
+// holding the same items, dragged the same way. It has no seeds, so its refill
+// is the full evaluation. Bit-for-bit, because a served seed is the same
+// instructions over the same floats.
+
+namespace {
+
+clay_result drag(Doc& doc, float cx, float dx, float radius) {
+    clay_move_params p{};
+    p.struct_size = sizeof(p);
+    p.radius = radius;
+    p.ease = 0;
+    p.front_only = 0;
+    const float centre[3] = {cx, 0.0f, 0.0f};
+    const float disp[3] = {dx, 0.0f, 0.0f};
+    std::size_t applied = 0;
+    return clay_layer_move_surface(doc.d, doc.layer, centre, disp, &p, &applied);
+}
+
+std::size_t drag_applied(Doc& doc, float cx, float dx, float radius) {
+    clay_move_params p{};
+    p.struct_size = sizeof(p);
+    p.radius = radius;
+    p.ease = 0;
+    p.front_only = 0;
+    const float centre[3] = {cx, 0.0f, 0.0f};
+    const float disp[3] = {dx, 0.0f, 0.0f};
+    std::size_t applied = 0;
+    REQUIRE(clay_layer_move_surface(doc.d, doc.layer, centre, disp, &p, &applied) == CLAY_OK);
+    return applied;
+}
+
+}  // namespace
+
+TEST_CASE("move drag: a dragged brick reads as a full refill of the dragged document") {
+    // THE TEST THAT WOULD CATCH AN UNDER-INVALIDATION. The drag lands on the
+    // brick row, so every one of those seeds must be dropped and recomputed.
+    auto oracle = [](float cx, float dx, float radius) {
+        Doc fresh;
+        add_sphere(fresh, 1.0f, 0.0f);
+        REQUIRE(drag(fresh, cx, dx, radius) == CLAY_OK);
+        return refill_signature(fresh.d);   // no seeds: the full evaluation
+    };
+
+    SUBCASE("a drag across the bricks the cache already holds") {
+        Doc doc;
+        add_sphere(doc, 1.0f, 0.0f);
+        const std::vector<float> seeded = refill_signature(doc.d);  // seeds the store
+
+        REQUIRE(drag_applied(doc, 0.0f, 0.20f, 0.6f) > 0);
+        const std::vector<float> got = refill_signature(doc.d);
+        const std::vector<float> want = oracle(0.0f, 0.20f, 0.6f);
+
+        REQUIRE(got.size() == want.size());
+        CHECK(std::memcmp(got.data(), want.data(), got.size() * sizeof(float)) == 0);
+        // And the drag really moved the surface these bricks read, or the
+        // comparison above is two readings of an unchanged field agreeing.
+        CHECK(got != seeded);
+    }
+
+    SUBCASE("a drag repeated, so the second starts from seeds the first wrote") {
+        Doc doc;
+        add_sphere(doc, 1.0f, 0.0f);
+        refill_signature(doc.d);
+        REQUIRE(drag_applied(doc, 0.0f, 0.10f, 0.6f) > 0);
+        refill_signature(doc.d);
+        REQUIRE(drag_applied(doc, 0.0f, 0.10f, 0.6f) > 0);
+        const std::vector<float> got = refill_signature(doc.d);
+
+        Doc fresh;
+        add_sphere(fresh, 1.0f, 0.0f);
+        REQUIRE(drag(fresh, 0.0f, 0.10f, 0.6f) == CLAY_OK);
+        REQUIRE(drag(fresh, 0.0f, 0.10f, 0.6f) == CLAY_OK);
+        const std::vector<float> want = refill_signature(fresh.d);
+        CHECK(std::memcmp(got.data(), want.data(), got.size() * sizeof(float)) == 0);
+    }
+
+    SUBCASE("a drag whose ball only clips the brick row") {
+        // The interesting boundary: most of the drag is elsewhere, but part of
+        // it reaches these bricks. A region computed from the drag centre alone,
+        // without the radius, would miss this.
+        Doc doc;
+        add_sphere(doc, 1.0f, 0.0f);
+        const std::vector<float> seeded = refill_signature(doc.d);
+        REQUIRE(drag_applied(doc, 0.0f, 0.0f, 0.6f) >= 0);  // re-seed at the same state
+
+        Doc moved;
+        add_sphere(moved, 1.0f, 0.0f);
+        refill_signature(moved.d);
+        REQUIRE(drag_applied(moved, 0.9f, -0.25f, 0.7f) > 0);
+        const std::vector<float> got = refill_signature(moved.d);
+        const std::vector<float> want = oracle(0.9f, -0.25f, 0.7f);
+        REQUIRE(got.size() == want.size());
+        CHECK(std::memcmp(got.data(), want.data(), got.size() * sizeof(float)) == 0);
+        CHECK(got != seeded);
+    }
+}
+
+TEST_CASE("move drag: a drag the bricks cannot reach keeps their seeds") {
+    // The other half of the contract, and the reason the region is stated
+    // rather than dropped: a drag far from the brick row must NOT cost it.
+    // Correctness only -- that the values are right either way -- because a
+    // kept seed and a recomputed one are bit-identical by contract.
+    Doc doc;
+    add_sphere(doc, 1.0f, 0.0f);
+    add_sphere(doc, 0.25f, 3.0f);            // a far item for the drag to catch
+    const std::vector<float> before = refill_signature(doc.d);
+
+    REQUIRE(drag_applied(doc, 3.0f, 0.15f, 0.4f) > 0);
+    const std::vector<float> after = refill_signature(doc.d);
+
+    REQUIRE(before.size() == after.size());
+    // The far drag cannot change what this brick row evaluates to.
+    CHECK(std::memcmp(before.data(), after.data(), before.size() * sizeof(float)) == 0);
+}

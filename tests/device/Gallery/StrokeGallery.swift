@@ -237,18 +237,6 @@ final class StrokeGalleryTests: XCTestCase {
     static let magnifyDabsPerDrag = 8
     static let tendrilsPerDrag = 3
 
-    /// Sub-steps one Move drag is delivered in. A real pointer drag delivers
-    /// many, and one call per stroke measured 0.11 ms — just under the floor.
-    ///
-    /// FOUR, and no more, deliberately. This case is the expensive one in the
-    /// bundle: at eight stacked warps the layer already reports a Lipschitz
-    /// bound of 333 and a safe step scale of 0.003, so the sphere trace behind
-    /// its two renders burns its whole iteration budget on every ray, and the
-    /// consolidate after them pays the same field. Deepening the chain
-    /// multiplies all three. It is also the only case in this bundle whose own
-    /// canary bracket reads elevated. Four clears the floor; eight would buy a
-    /// number no more gateable at several times the wall clock.
-    static let moveSubSteps = 4
 
     private func abiVersion() -> String {
         var major: Int32 = 0, minor: Int32 = 0, patch: Int32 = 0
@@ -366,28 +354,32 @@ final class StrokeGalleryTests: XCTestCase {
                 //
                 // Pull from ON the surface, and far enough to see.
                 //
-                // Delivered as `moveSubSteps` sub-steps of a quarter of the
-                // displacement each, which is what a real pointer drag does and
-                // what puts the timed unit over the gate's floor (#337). The
-                // total displacement per stroke is unchanged, so the form the
-                // render shows is the same; what changes is that the chain
-                // deepens by four warps a drag instead of one.
+                // ONE application per stroke, so the chain reaches eight warps
+                // over a session and not thirty-two.
+                //
+                // It was delivered in four sub-steps for one release, to put the
+                // timed unit over the gate's floor (#337). That was a bad trade
+                // and is reverted: the cost of this case is not in its timed
+                // body but in the two renders and the consolidate after it, and
+                // at thirty-two stacked warps the layer reports a Lipschitz
+                // bound of 1931 and a safe step scale of 0.0005, so the sphere
+                // trace burns its whole iteration budget on every one of
+                // 102,400 rays. The bundle went from 6.2 s to 10.7 s and began
+                // dying to jetsam — `testBrushSessionsAndGallery` was killed
+                // outright on 2026-08-27. Deepening a pathology the file
+                // already documents revealed nothing and cost the suite its
+                // reliability, which is the more valuable thing.
+                //
+                // So this case is REPORTED, not GATED, and the coverage check
+                // says so. Its median reproduces to 1.06x run to run, which is
+                // a good number to read and a bad one to gate on.
                 let a = Float(i) * 0.8
                 let r: Float = 0.62
+                var centre: [Float] = [cos(a) * r, sin(a) * r * 0.6, 0.25]
+                var displacement: [Float] = [cos(a) * 0.16, sin(a) * 0.16, 0.06]
                 var applied = 0
-                var rc = CLAY_OK
-                for j in 0..<Self.moveSubSteps {
-                    let step = Float(j) / Float(Self.moveSubSteps)
-                    var centre: [Float] = [cos(a) * r + cos(a) * 0.16 * step,
-                                           sin(a) * r * 0.6 + sin(a) * 0.16 * step,
-                                           0.25 + 0.06 * step]
-                    var displacement: [Float] = [cos(a) * 0.04, sin(a) * 0.04, 0.015]
-                    var appliedHere = 0
-                    rc = clay_layer_move_surface(doc, layer, &centre, &displacement,
-                                                 &params, &appliedHere)
-                    applied += appliedHere
-                    if rc != CLAY_OK { break }
-                }
+                let rc = clay_layer_move_surface(doc, layer, &centre, &displacement,
+                                                 &params, &applied)
                 // `applied` is how many items took a warp. A drag that reaches
                 // nothing SUCCEEDS and changes nothing, so the return code
                 // alone cannot tell "moved the form" from "moved nothing" —

@@ -74,23 +74,36 @@ def test_a_drifted_row_fails(tmp_path):
     assert doc.main() == 1
 
 
-def test_a_held_row_is_exempt_and_says_why():
-    """`sdf_move` quotes what the engine does, not what the baseline holds.
+def test_every_held_exemption_carries_a_reason():
+    """An exemption nobody can read is an omission nobody noticed — the rule
+    check_device_coverage.py applies to its own.
 
-    A held exemption must carry a reason, as check_device_coverage.py's do —
-    an exemption nobody can read is an omission nobody noticed.
+    HELD is empty today. `sdf_move` sat in it for one release while
+    layer_move_surface was 1.5x slower than the figure its baseline held as the
+    target (#358); the fix landed and the row quotes the baseline again.
     """
-    assert "sdf_move" in doc.HELD
-    assert "#358" in doc.HELD["sdf_move"]
-    assert len(doc.HELD["sdf_move"]) > 40
+    for name, reason in doc.HELD.items():
+        assert reason.strip(), f"{name} is held with an empty reason"
+        assert len(reason) > 40, f"{name}'s reason says too little to act on"
 
 
-def test_a_held_row_that_vanished_fails(tmp_path):
-    """An exemption for a row that no longer exists stops applying silently."""
+def test_a_held_row_is_exempt_from_the_ratio(tmp_path, monkeypatch):
+    """A held row may quote a figure the baseline does not carry."""
     text = doc.DOC.read_text()
     line = next(l for l in text.splitlines()
-                if doc.ROW.match(l) and "`sdf_move`" in l)
-    scratch = tmp_path / "gone.md"
-    scratch.write_text(text.replace(line, ""))
+                if doc.ROW.match(l) and "`voxel_smooth`" in l)
+    m = doc.ROW.match(line)
+    drifted = line.replace(m.group(2), str(float(m.group(2)) * 10), 1)
+    scratch = tmp_path / "held.md"
+    scratch.write_text(text.replace(line, drifted))
     sys.argv = ["check_doc_latency.py", str(scratch)]
+    assert doc.main() == 1                                   # drifted, and checked
+    monkeypatch.setattr(doc, "HELD", {"voxel_smooth": "held for a reason " * 4})
+    assert doc.main() == 0                                   # drifted, and held
+
+
+def test_a_held_row_that_vanished_fails(tmp_path, monkeypatch):
+    """An exemption for a row that no longer exists stops applying silently."""
+    monkeypatch.setattr(doc, "HELD", {"a_case_no_row_names": "gone " * 12})
+    sys.argv = ["check_doc_latency.py"]
     assert doc.main() == 1

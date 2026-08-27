@@ -46,6 +46,24 @@ FLOORS = {
     # with it rather than the workload shrinking to fit the old number. The
     # headroom ratio is unchanged: ~3x measured, as before.
     "BM_VoxelAddLevelWhole": {"max_ms": 16.0},
+    # A Move drag through the C ABI. It exists because NO cpu benchmark covered
+    # this path, and that is how `layer_move_surface` lost 1.34x when region
+    # invalidation landed and kept it for four releases (#358): the only gate
+    # that saw it was the device suite, which cannot run in CI, and its own
+    # noise floor then suppressed the failure.
+    #
+    # THIS CEILING DOES NOT CATCH THAT, and says so rather than implying a gate
+    # it cannot be — the same admission BM_VoxelAddLevelWhole above makes. 1.25x
+    # is inside the spread between a developer machine and a shared runner, so a
+    # threshold tight enough to fail on it would flake instead. Measured 0.077 /
+    # 0.840 ms on an M2 Max; these sit ~7x above, for the order-of-magnitude
+    # case this file exists for.
+    #
+    # What it DOES buy is a one-command local A/B for anyone touching
+    # apply_edit, which is what the fix was developed against, and a row in CI
+    # output where there was silence.
+    "BM_MoveDrag1000": {"max_ms": 0.6},
+    "BM_MoveDrag10000": {"max_ms": 6.0},
     # Writing INTO a whole level stack — the same defect #137 hoisted out of
     # subdivide_into, in the two places propagation reaches it: record_detail
     # (via refresh_detail, per child of every downward step) and propagate_up
