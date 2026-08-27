@@ -1046,6 +1046,14 @@ void refill_window(benchmark::State& state, int window, int history, int dabs) {
     // that quietly stopped resuming would report the full path's time here.
     state.counters["resumed_frac"] =
         served > 0 ? static_cast<double>(rs.resumed_bricks - before.resumed_bricks) / served : 0.0;
+    // Its complement, and the one tools/check_bench.py GATES -- the same pair
+    // and the same reason as the moving benchmarks above. A ceiling belongs on
+    // the share WALKED IN FULL rather than on the share resumed, because that
+    // is the direction a broken fixture moves in and a ceiling reads the same
+    // way as every other entry in that table.
+    state.counters["refilled_frac"] =
+        served > 0 ? static_cast<double>(rs.refilled_bricks - before.refilled_bricks) / served
+                   : 1.0;
     clay_document_destroy(d);
 }
 }  // namespace

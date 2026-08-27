@@ -21,4 +21,14 @@
       ThreadSanitizer reports the race. Confirm the revert compiles.
 - [x] Full suite green under `cpu-only`, `asan-ubsan` and a ThreadSanitizer
       build.
-- [x] docs/05-claycore-library.md.
+- [x] Re-measure the gate with 1-12 CONCURRENT refills, against `main` and
+      against a never-pool build, before treating the constant as settled: the
+      pool has one job slot and a second host thread's dispatch replaces the
+      first, which `in_job()` does not guard.
+- [x] A `tsan` preset and a CI job, so the spec's "no data race is reported"
+      scenario is checked by something. Record that the run needs `setarch -R`.
+- [x] State the in-place aliasing contract in `include/clay/eval/backend.h`,
+      where `eval_points_seeded` is declared.
+- [x] Expose `refilled_frac` from `BM_BrickRefillWindow` and gate it in
+      `tools/check_bench.py`, as the moving pair is gated.
+- [x] docs/05-claycore-library.md, README.md (the `tsan` preset).

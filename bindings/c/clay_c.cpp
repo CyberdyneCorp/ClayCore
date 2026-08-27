@@ -9364,6 +9364,43 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
     // walk actually does -- so the gate does not have to be restated for a
     // different lattice size or a longer suffix. Below it the loop still runs
     // OFF the lock; only the pool is skipped.
+    //
+    // CALIBRATED CONCURRENTLY TOO, because letting several host threads refill
+    // at once is the whole point of coming off the lock and the pool holds ONE
+    // job slot. A dispatch from a second thread REPLACES the advertised job, so
+    // workers that have not yet woken for the first never will
+    // (thread_pool.h); `in_job()` guards nesting on ONE thread and does not
+    // guard this at all. It degrades toward serial rather than deadlocking, and
+    // the question a gate has to answer is whether it degrades past the serial
+    // branch it is choosing between.
+    //
+    // It does not, at any concurrency this machine can produce. T threads each
+    // refilling the same 48-brick window at a sixteen-dab suffix over a
+    // 5,000-item document, minimum over 25 interleaved repetitions of 60
+    // rounds, box at load 3-9, microseconds:
+    //
+    //   T     main   pooled   serial    pooled/serial
+    //   1     93.1     74.9     94.8         0.79
+    //   2    110.1     84.7    110.6         0.77
+    //   4    127.1    115.2    130.8         0.88
+    //   6    142.6    142.7    155.2         0.92
+    //  12    199.9    197.7    233.9         0.85
+    //
+    // Main is the column that stops improving: it holds the mutex across its
+    // evaluation, so T concurrent refills are T serial refills, which is why
+    // 12 threads cost it 2.1x one thread and cost this 2.6x -- the same work
+    // actually overlapping.
+    //
+    // The OTHER shape is the one clay.h recommends -- fan out over REQUESTS,
+    // one batch split across threads -- and there the gate settles it without
+    // any of the above: 48 bricks over two threads is 196,608 units a slice,
+    // under the gate, so no thread dispatches and the collision cannot happen.
+    // That shape runs 0.55-0.77x main at one to six threads.
+    //
+    // Read the ratios and not the times. Two builds running IDENTICAL code --
+    // the split shape at T >= 2, where both are below the gate -- measure
+    // 1.01-1.07x apart here, which is this harness's noise floor and wider than
+    // several of the differences the table would otherwise invite reading.
     struct ResumeTask {
         std::size_t slot = 0;  // which brick of the batch
         const clay_document::ResumePlan* plan = nullptr;
@@ -9538,7 +9575,7 @@ std::size_t resume_bricks(const clay_document* doc, const clay_brick_request* re
         pq.count = per;
         eval::PointResults pr;
         pr.distances = t.active;
-        if (t.active_rgb) pr.colors_rgb = t.active_rgb;
+        pr.colors_rgb = t.active_rgb;  // null unless the batch asked for colour
         // In place: the seed was copied here under the lock, and the answer
         // lands on top of it.
         eval::eval_points_seeded(suffix, pq, t.active, t.active_rgb, pr);

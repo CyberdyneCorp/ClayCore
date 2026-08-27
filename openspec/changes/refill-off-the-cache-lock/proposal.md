@@ -96,6 +96,54 @@ suffix. It sits at **262,144**, about three times the dispatch. Below it the
 loop is serial and off the lock; the copy that buys that costs about **0.05 µs a
 brick**, which is inside the noise at one brick.
 
+## Where the crossover is, with several threads refilling at once
+
+The table above calibrates the gate against ONE caller, and this change exists
+so that there can be several. That needs its own measurement, because
+`clay::parallel::ThreadPool` holds one `current_` job slot: a dispatch from a
+second host thread REPLACES the advertised job, so workers that have not woken
+for the first never will (`thread_pool.h` says so in its own header comment).
+`in_job()` guards nesting on ONE thread and does not guard this. The result is a
+degradation toward serial, not a deadlock — so the question a gate has to answer
+is whether it degrades PAST the serial branch it is choosing between.
+
+It does not, at any concurrency this machine can produce. T threads each
+refilling the same 48-brick window at a sixteen-dab suffix over a 5,000-item
+document; three libraries — `main`, this branch, and this branch with the gate
+forced to never pool — interleaved run for run; minimum over 25 repetitions of
+60 rounds; box at load average 3–9, `uptime` read before and after:
+
+| threads | main | pooled | serial | pooled / serial | pooled / main |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 93.1 µs | 74.9 µs | 94.8 µs | **0.79** | 0.81 |
+| 2 | 110.1 µs | 84.7 µs | 110.6 µs | **0.77** | 0.77 |
+| 3 | 115.1 µs | 102.7 µs | 121.8 µs | **0.84** | 0.89 |
+| 4 | 127.1 µs | 115.2 µs | 130.8 µs | **0.88** | 0.91 |
+| 6 | 142.6 µs | 142.7 µs | 155.2 µs | **0.92** | 1.00 |
+| 8 | 164.1 µs | 158.7 µs | 186.9 µs | **0.85** | 0.97 |
+| 12 | 199.9 µs | 197.7 µs | 233.9 µs | **0.85** | 0.99 |
+
+The pooled branch beats the serial one at every thread count, so **the constant
+holds** and 262,144 stays where the single-caller measurement put it.
+
+`main` is the column that stops improving: it holds the mutex across its
+evaluation, so T concurrent refills are T serial refills. Twelve threads cost it
+2.1x one thread and cost this branch 2.6x — the same work actually overlapping.
+Against `main` the margin narrows from 0.81 to a wash by six threads, which is
+this change's honest ceiling in that shape and is worth stating plainly rather
+than quoting the single-threaded 0.81 as the number.
+
+The OTHER shape is the one clay.h recommends — fan out over REQUESTS, one batch
+split across threads — and there the gate settles it without any of the above:
+48 bricks over two threads is 196,608 units a slice, under the gate, so no
+thread dispatches and the collision cannot arise. Measured at 0.55–0.77x `main`
+from one thread to six.
+
+Read the ratios, not the times. Two builds running IDENTICAL code — the split
+shape at two threads and up, where both are below the gate — measure 1.01–1.07x
+apart on this box. That is the harness's noise floor, and it is wider than
+several of the differences the tables above would otherwise invite reading.
+
 ## What this is NOT
 
 **It is not the largest cost under that lock.** Obtaining the per-revision cull
@@ -129,7 +177,33 @@ value assertions still pass in that mutant — every thread computes the same
 seed — which is precisely why a sanitizer, and not a value check, is what guards
 this.
 
+Which means the guard only exists if the sanitizer RUNS. There was no `tsan`
+preset and no ThreadSanitizer job, so the spec's "no data race is reported"
+scenario was a scenario nothing checked. This change adds both: a `tsan`
+configure/build/test preset (RelWithDebInfo, `CLAY_SANITIZE=thread`) and a CI
+job that runs the WHOLE suite under it — everything else threaded in this tree
+has been in the same position the refill was, exercised concurrently and never
+checked. Measured at 6 minutes on a 24-thread desktop: 1501/1501, zero TSan
+warnings.
+
+The job runs under `setarch -R`, which is not optional. ThreadSanitizer maps
+fixed shadow regions and a kernel handing out mappings with more entropy than it
+expects — Ubuntu 24.04's `vm.mmap_rnd_bits=32` — aborts the process with
+`FATAL: ThreadSanitizer: unexpected memory mapping` before one test runs. It
+exits 66, so ctest does fail rather than passing silently, but the log says
+nothing about a race and the job would be gating nothing.
+
+`BM_BrickRefillWindow` reports `refilled_frac` beside `resumed_frac`, and
+`tools/check_bench.py` gates it at 0.05 — the same mechanism and the same reason
+as the moving-window pair. The benchmark primes every brick so its timed region
+is the resumed path alone; a fixture that quietly stopped resuming would report
+the full path's time under the resumed path's name, and only a ratio of counts
+can tell that from a slower runner.
+
 The in-place property gets its own case in `test_suffix_tape.cpp`, across block
 boundaries as well as whole batches, which fails on eight assertions when
 `walk_blocked` is mutated to write a block's destination before reading its
-seed.
+seed. It is also stated where it is DECLARED, in `include/clay/eval/backend.h`:
+the property is now load-bearing at a distance, and a future optimisation that
+hoisted the output store above the seed load, or added `restrict`, would break
+the refill silently with only that one test to catch it.

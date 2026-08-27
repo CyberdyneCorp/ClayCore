@@ -59,6 +59,15 @@
       }
     },
     {
+      "name": "tsan",
+      "displayName": "CPU only, ThreadSanitizer (Clang/GCC)",
+      "inherits": "cpu-only",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CLAY_SANITIZE": "thread"
+      }
+    },
+    {
       "name": "vulkan",
       "displayName": "CPU + Vulkan compute",
       "inherits": "base",
@@ -81,6 +90,11 @@
     {
       "name": "asan-ubsan",
       "configurePreset": "asan-ubsan"
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan",
+      "configuration": "RelWithDebInfo"
     },
     {
       "name": "opencl",
@@ -118,6 +132,14 @@
     {
       "name": "asan-ubsan",
       "configurePreset": "asan-ubsan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan",
+      "configuration": "RelWithDebInfo",
       "output": {
         "outputOnFailure": true
       }

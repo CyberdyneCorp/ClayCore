@@ -448,6 +448,19 @@ MAX_COUNTER = [
     # it 1: the whole window, every dab.
     ("BM_BrickRefillMoving5000", "refilled_frac", 0.05),
     ("BM_BrickRefillMoving20000", "refilled_frac", 0.05),
+    # The still-window fixture (#348), whose whole point is that the TIMED
+    # REGION is the resumed path and nothing else. It primes every brick before
+    # the loop, so a correct fixture walks none of them in full and this is 0;
+    # a fixture that stopped resuming would report the full path's time under
+    # the resumed path's name, which no timing gate here could tell from a
+    # slower runner.
+    #
+    # This benchmark is PARAMETERISED and the loop below keys on
+    # name.split("/")[0], so the row that lands here is the last one registered
+    # -- Args({48, 20000, 16}), the deepest document at the widest window, which
+    # is the row most likely to lose a seed to the store's 64 MB bound and so
+    # the right one to hold. Measured 0.000 at all nine rows.
+    ("BM_BrickRefillWindow", "refilled_frac", 0.05),
 ]
 
 
