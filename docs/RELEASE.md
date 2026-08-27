@@ -110,6 +110,22 @@ forward-refuse).
    with the layer per-axis scale, which forces the same widening for its own
    reasons.
 
+   **0.54.1 also sharpens one refusal's DIAGNOSTIC, and changes no result
+   code** (issue #327). Every transform in the ABI requires both a `position`
+   and a `rotation_axis`, and a null one has always been
+   `CLAY_ERROR_INVALID_ARGUMENT` — the check is byte-identical back to 0.39.0.
+   What it said was `"null transform"` whichever of the two was missing, which
+   names the pair and not the mistake: a caller who reads the axis as optional
+   and passes NULL for the rotation they do not have learns only that one of
+   two arguments was null. It now says `"null position"`, or `"null rotation
+   axis: name an axis and pass angle 0 for no rotation"`.
+
+   Nothing else moves. Every input returns the result it returned before, and
+   `clay.h` now states the requirement at `clay_layer_set_transform` and
+   `clay_document_set_layer_transform` rather than only at
+   `clay_mesh_transform`. A host matching on the exact old string would stop
+   matching; `clay_last_error` is a diagnostic and not a value to branch on.
+
    **0.54.0 is not such a release**: additive — a per-axis scale on an item
    (`clay_item_set_scale_nonuniform`, `clay_layer_set_transform_nonuniform`,
    `clay_layer_node_transform_nonuniform`, `clay_mesh_transform_nonuniform`,

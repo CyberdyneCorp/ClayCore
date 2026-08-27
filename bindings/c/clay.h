@@ -791,7 +791,19 @@ clay_result clay_document_end_undo_group(clay_document* doc);
  * whole value: C has no idiomatic "leave this one alone" argument. Read the
  * current state, change what you want, pass all of it back. */
 
-/* Retransform a node. axis/angle give the rotation; scale must be > 0.
+/* Retransform a node. Takes a transform on the same terms as every other
+ * transform in this ABI (see clay_mesh_transform): `position` and
+ * `rotation_axis` are REQUIRED and the axis must be NON-ZERO, `scale` must
+ * be > 0.
+ *
+ * A NULL axis is therefore CLAY_ERROR_INVALID_ARGUMENT and not "no rotation"
+ * (#327). It reads like "no rotation", but the signature already says that —
+ * any axis with rotation_angle 0, e.g. {0, 1, 0}, which is what
+ * clay_layer_node_transform reads an unrotated node back as. Accepting NULL as
+ * a second way to say it would mean a caller who only wanted to MOVE a node,
+ * and passed NULL for the rotation they did not have, got a call that
+ * succeeded and discarded the position too.
+ *
  * A GROUP is refused: the engine composes layer * item and nothing else, so a
  * group's transform never reaches its children — recording one would be an
  * undoable, saved edit that changes nothing. Transform the children. */
@@ -894,6 +906,8 @@ clay_result clay_document_set_layer_protection(clay_document* doc, clay_layer_id
                                                int32_t ghost, int32_t locked);
 clay_result clay_document_layer_protection(const clay_document* doc, clay_layer_id layer,
                                            int32_t* out_ghost, int32_t* out_locked);
+/* Place the whole layer. Same terms as clay_layer_set_transform: `position`
+ * and `rotation_axis` are required, the axis must be non-zero, `scale` > 0. */
 clay_result clay_document_set_layer_transform(clay_document* doc, clay_layer_id layer,
                                               const float position[3],
                                               const float rotation_axis[3],
