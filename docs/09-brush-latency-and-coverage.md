@@ -65,7 +65,7 @@ representation, `s` the SDF one, `m` a mesh layer's own triangles.
 | ClayBuildup | Clay / Clay Strips | `Op::Relief` along a stroke | s | `stroke_build` | 0.298 | gesture |
 | Crease, DamStandard | Crease | `Op::Incise` | s | `stroke_carve` | 0.382 | gesture |
 | Inflate | Inflate | `Op::Relief`, `sculpt_inflate` | s v | `voxel_inflate` | 0.0043 | interactive |
-| Move | Move | `brush::move_brush` | s | `sdf_move` | 0.116 ¶ | gesture |
+| Move | Move | `brush::move_brush` | s | `sdf_move` | 0.0791 | gesture |
 | Move | Move (elastic) | `sculpt_grab` | v | `voxel_grab` | 0.0078 | gesture |
 | Move Topological | — | `field::move_topological` | s | *(exempt — see below)* | — | — |
 | Smooth | Smooth | `field::relax` | s | `sdf_relax` | **0.548** ‡ | operation |
@@ -138,13 +138,12 @@ The tolerance is per bundle, because per-case reliability is not uniform: the
 went 0.149 -> 0.434 ms between two runs — and are held to 2.10x and quoted to
 fewer figures.
 
-¶ `sdf_move` is the one row that does NOT quote the baseline, deliberately. The
-baseline holds the pre-regression figure (0.0791 ms) as the reference a fix
-must return to, while the engine measures ~0.116 ms today — a ~1.5x regression
-in `layer_move_surface` that is over the gate's tolerance and under its floor,
-so nothing fails. The table quotes what a host will actually wait for. See
-[#358](https://github.com/CyberdyneCorp/ClayCore/issues/358); the exemption and
-its reason live in `tools/check_doc_latency.py`.
+`sdf_move` quoted 0.116 ms for one release, against a baseline deliberately
+held at 0.0791 — `layer_move_surface` was 1.5x slower than the figure a fix had
+to return to, over the gate's tolerance and under its floor, so nothing failed
+([#358](https://github.com/CyberdyneCorp/ClayCore/issues/358)). The fix landed
+and it measures 0.083, so the row quotes the baseline again and the exemption in
+`tools/check_doc_latency.py` is gone.
 
 ‡ **Re-measured on device, 2026-08-25**, at the end of the bake-and-brush
 performance program. A full 59-case run on the reference iPad (iPad15,5,

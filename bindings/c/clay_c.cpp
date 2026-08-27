@@ -1791,6 +1791,11 @@ namespace {
 // command vocabulary. Declared here because it is used above.
 clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what);
 
+// The same edit, WITHOUT the invalidation — for a gesture that knows the region
+// it can reach and invalidates once for all of its commands. See GestureRegion.
+clay_result apply_edit_in_gesture(clay_document* doc, const scene::Command& cmd,
+                                  const char* what);
+
 // The one insertion path: everything authored through this ABI, flat
 // descriptor included, ends here. It routes through the command vocabulary —
 // an AddNodeCmd with a reserved id, since command replay preserves ids — so
@@ -2475,14 +2480,18 @@ TailAppend tail_append(const scene::Document& doc, const scene::Command& cmd) {
 // the document, so a C edit means what a saved document means — and becomes
 // undoable for free once the undo stack is exposed. apply() reports failure by
 // returning nullopt and leaves the document untouched.
-clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what) {
+// May this edit be applied at all? Shared, so apply_edit and the gesture path
+// cannot drift about what an edit is allowed to do or how a refusal reads.
+//
+// Separate from the apply because the ORDER matters on the cost side: the
+// caller checks this BEFORE computing any influence bound, so a refused edit
+// pays nothing for a region it will not touch.
+clay_result edit_guard(const clay_document* doc, const scene::Command& cmd) {
     if (!doc) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document");
-    // With a stack attached the edit is applied AND its inverse recorded, so
-    // no reachable edit can escape undo.
     // apply() says no for two different reasons, and a caller needs to tell
     // them apart: a missing layer is a bug in the caller's bookkeeping, while
     // a protected one is a state the artist chose and a UI can explain.
-    scene::LayerId target = scene::edited_layer(cmd);
+    const scene::LayerId target = scene::edited_layer(cmd);
     if (target != 0) {
         const scene::Layer* l = doc->doc.document.find_layer(target);
         if (l && l->protected_from_edits())
@@ -2490,15 +2499,68 @@ clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char
                         std::string("layer ") + std::to_string(target) + " is " +
                             (l->ghost ? "ghosted" : "locked") + " and takes no edits");
     }
+    return CLAY_OK;
+}
+
+// The apply itself. With a stack attached the edit is applied AND its inverse
+// recorded, so no reachable edit can escape undo.
+clay_result perform_edit(clay_document* doc, const scene::Command& cmd, const char* what) {
+    const bool ok = doc->undo ? doc->undo->perform(doc->doc.document, cmd)
+                              : static_cast<bool>(scene::apply(doc->doc.document, cmd));
+    if (!ok) return fail(CLAY_ERROR_NOT_FOUND, what);
+    return CLAY_OK;
+}
+
+// One command of a gesture whose reach its CALLER knows. No bound is computed
+// and no cache is invalidated; the enclosing GestureRegion does that once.
+clay_result apply_edit_in_gesture(clay_document* doc, const scene::Command& cmd,
+                                  const char* what) {
+    const clay_result r = edit_guard(doc, cmd);
+    return r != CLAY_OK ? r : perform_edit(doc, cmd, what);
+}
+
+// ONE invalidation for a whole gesture, from a region the caller knows.
+//
+// A gesture that issues one command per node it reaches pays, in apply_edit,
+// two `command_influence_bound` calls and one seed-store walk PER COMMAND. A
+// Move drag over a 1000-item document issues 257 of them, and that is where
+// `layer_move_surface` lost 1.34x when region invalidation landed (#358):
+// measured on an M2 Max, 0.094 ms before, 0.126 after, of which the bounds are
+// about three quarters.
+//
+// The region is taken UP FRONT rather than accumulated, because accumulating it
+// is what costs. It MUST cover everything the bracket does — a region that does
+// not is stale bricks, which is a silent wrong picture rather than a slow one.
+// Only a caller that can state its reach analytically should use this; a
+// gesture that cannot must keep apply_edit, whose per-command bound is derived
+// and therefore always right.
+//
+// RAII because the invalidation must happen on the failure path too: a gesture
+// that applied three of its commands and then refused has still changed the
+// document.
+struct GestureRegion {
+    clay_document* doc = nullptr;
+    math::Aabb reach;
+
+    GestureRegion(clay_document* d, const math::Aabb& r) : doc(d), reach(r) {}
+    ~GestureRegion() {
+        if (doc) doc->touch_region(reach);
+    }
+    GestureRegion(const GestureRegion&) = delete;
+    GestureRegion& operator=(const GestureRegion&) = delete;
+};
+
+clay_result apply_edit(clay_document* doc, const scene::Command& cmd, const char* what) {
     // What this edit can reach, taken on BOTH sides of the apply and unioned.
     // One side is not an answer: an add's node is not there before, a removal's
     // is not there after, and a move has two ends -- the contract
     // command_influence_bound states and the undo stack already follows.
     // Gathered before the apply because after it the old shape is gone.
+    clay_result r = edit_guard(doc, cmd);
+    if (r != CLAY_OK) return r;
     const math::Aabb reach_before = scene::command_influence_bound(doc->doc.document, cmd);
-    bool ok = doc->undo ? doc->undo->perform(doc->doc.document, cmd)
-                        : static_cast<bool>(scene::apply(doc->doc.document, cmd));
-    if (!ok) return fail(CLAY_ERROR_NOT_FOUND, what);
+    r = perform_edit(doc, cmd, what);
+    if (r != CLAY_OK) return r;
     math::Aabb reach = reach_before;
     reach.expand(scene::command_influence_bound(doc->doc.document, cmd));
     // The funnel every command-based edit passes through, so the tape cache is
@@ -4605,10 +4667,14 @@ namespace {
 
 // The half both entry points share: validate, find the layer, resolve. Kept in
 // one place so a preview can never disagree with the move it is previewing.
+// `out_radius` is the radius AS READ through the versioned descriptor, which is
+// the only value a caller may use: reading params->radius directly would take a
+// field an older struct version does not carry.
 clay_result resolve_move(const clay_document* doc, clay_layer_id layer, const float centre[3],
                          const float displacement[3], const clay_move_params* params,
                          const scene::Layer** out_layer,
-                         std::vector<brush::MoveWarp>* out_warps) {
+                         std::vector<brush::MoveWarp>* out_warps,
+                         float* out_radius = nullptr) {
     if (!doc || !centre || !displacement)
         return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document, centre or displacement");
     if (!params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null move parameters");
@@ -4629,6 +4695,7 @@ clay_result resolve_move(const clay_document* doc, clay_layer_id layer, const fl
     settings.front_only = p.front_only != 0;
 
     *out_layer = l;
+    if (out_radius) *out_radius = p.radius;
     *out_warps = brush::move_brush(*l, kernel::cf3(centre[0], centre[1], centre[2]),
                                    kernel::cf3(displacement[0], displacement[1],
                                                displacement[2]),
@@ -4661,18 +4728,43 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
                                     const clay_move_params* params, size_t* out_applied) {
     const scene::Layer* l = nullptr;
     std::vector<brush::MoveWarp> warps;
-    clay_result r = resolve_move(doc, layer, centre, displacement, params, &l, &warps);
+    float radius = 0.0f;
+    clay_result r = resolve_move(doc, layer, centre, displacement, params, &l, &warps, &radius);
     if (r != CLAY_OK) return r;
 
+    // WHAT A DRAG CAN REACH, in one box, without asking the geometry.
+    //
+    // The warp's region weight is zero outside `radius` of the drag centre, and
+    // a point whose weight is zero is not moved -- so a sample there evaluates
+    // the same nodes at the same place and the field cannot have changed. The
+    // reachable region is therefore the drag's own ball, whatever the drag
+    // touched, dilated by the displacement as margin. `front_only` only gates
+    // the pull further, and a uniform item scale keeps the falloff spherical in
+    // the item's frame (see brush/move.h), so neither widens this.
+    //
+    // Cheaper AND TIGHTER than what apply_edit would derive. Per command it
+    // unions the whole influence bound of each moved node, so a drag that
+    // catches the edge of 257 items spread through the volume invalidates the
+    // union of 257 whole items -- far more than the ball the drag actually
+    // reached.
+    const float pull = std::sqrt(displacement[0] * displacement[0] +
+                                 displacement[1] * displacement[1] +
+                                 displacement[2] * displacement[2]);
+    const kernel::cfloat3 c = kernel::cf3(centre[0], centre[1], centre[2]);
+    math::Aabb reach{c, c};
+    reach = reach.dilated(radius + pull);
+
     // One group for the whole drag: it is one gesture, and undoing it item by
-    // item would be the implementation showing through.
+    // item would be the implementation showing through. One invalidation too,
+    // for the same reason and at the same grain (#358).
+    GestureRegion region{doc, reach};
     if (doc->undo) doc->undo->begin_group();
     std::size_t applied = 0;
     for (const brush::MoveWarp& w : warps) {
         const scene::Node* n = l->sdf->find(w.node);
         if (!n) continue;
         scene::SetDeformersCmd cmd{layer, w.node, brush::moved_chain(*n, w)};
-        r = apply_edit(doc, scene::Command{cmd}, "node not found");
+        r = apply_edit_in_gesture(doc, scene::Command{cmd}, "node not found");
         if (r != CLAY_OK) {
             if (doc->undo) doc->undo->end_group();
             return r;

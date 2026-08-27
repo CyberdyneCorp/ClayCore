@@ -49,12 +49,11 @@ DEFAULT_TOLERANCE = 1.30
 #
 # A held baseline is the one case where quoting the baseline would be WRONG: the
 # table tells a host what to expect, and a host expects what the engine does.
-HELD = {
-    "sdf_move": (
-        "the baseline deliberately holds the pre-regression figure (0.0791 ms) "
-        "as the reference a fix must return to; the engine measures ~0.116 ms "
-        "today, which is what this row quotes. Issue #358."),
-}
+# Empty, and worth keeping empty. `sdf_move` sat here for one release while
+# `layer_move_surface` was 1.46x slower than the figure its baseline held as the
+# target a fix must return to (#358). The fix landed and it measures 0.083
+# against that 0.0791, so the row quotes the baseline again like every other.
+HELD: dict[str, str] = {}
 
 # A table row: ... | `case_name` | 1.234 | class |
 ROW = re.compile(

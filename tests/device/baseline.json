@@ -56,11 +56,11 @@
       "rawMs": 0.4457
     },
     "move_drags": {
-      "budgetMs": 0.2287,
+      "budgetMs": 0.104,
       "class": "gesture",
-      "machineFactor": 1.2257,
-      "measuredMs": 0.1525,
-      "rawMs": 0.3514
+      "machineFactor": 1.302,
+      "measuredMs": 0.0581,
+      "rawMs": 0.1219
     },
     "noise_detail": {
       "budgetMs": 0.2419,
@@ -1109,78 +1109,78 @@
       "backend": "cpu",
       "budgetClass": "gesture",
       "bundle": "com.cyberdyne.claycore.devicegallery",
-      "canaryAfterMs": 153.678417,
-      "canaryBeforeMs": 169.742042,
-      "growthExponent": 0.319066130763179,
+      "canaryAfterMs": 160.15475,
+      "canaryBeforeMs": 182.258084,
+      "growthExponent": -0.12233866147196677,
       "measurements": [
         {
           "batch": 1,
-          "p50Ms": 0.181,
-          "p95Ms": 0.181,
-          "p95SpreadMs": 0.025125999999999996,
+          "p50Ms": 0.121875,
+          "p95Ms": 0.121875,
+          "p95SpreadMs": 0.042042,
           "repeats": 5,
           "samples": 1,
           "stamps": 1
         },
         {
           "batch": 1,
-          "p50Ms": 0.125834,
-          "p95Ms": 0.125834,
-          "p95SpreadMs": 0.037250000000000005,
+          "p50Ms": 0.064,
+          "p95Ms": 0.064,
+          "p95SpreadMs": 0.021084000000000002,
           "repeats": 5,
           "samples": 1,
           "stamps": 2
         },
         {
           "batch": 1,
-          "p50Ms": 0.154,
-          "p95Ms": 0.154,
-          "p95SpreadMs": 0.047959,
+          "p50Ms": 0.061167,
+          "p95Ms": 0.061167,
+          "p95SpreadMs": 0.016917,
           "repeats": 5,
           "samples": 1,
           "stamps": 3
         },
         {
           "batch": 1,
-          "p50Ms": 0.155208,
-          "p95Ms": 0.155208,
-          "p95SpreadMs": 0.079958,
+          "p50Ms": 0.073542,
+          "p95Ms": 0.073542,
+          "p95SpreadMs": 0.013874999999999998,
           "repeats": 5,
           "samples": 1,
           "stamps": 4
         },
         {
           "batch": 1,
-          "p50Ms": 0.19275,
-          "p95Ms": 0.19275,
-          "p95SpreadMs": 0.04841699999999999,
+          "p50Ms": 0.07050000000000001,
+          "p95Ms": 0.07050000000000001,
+          "p95SpreadMs": 0.019958999999999998,
           "repeats": 5,
           "samples": 1,
           "stamps": 5
         },
         {
           "batch": 1,
-          "p50Ms": 0.216999,
-          "p95Ms": 0.216999,
-          "p95SpreadMs": 0.06483299999999997,
+          "p50Ms": 0.077876,
+          "p95Ms": 0.077876,
+          "p95SpreadMs": 0.022126000000000007,
           "repeats": 5,
           "samples": 1,
           "stamps": 6
         },
         {
           "batch": 1,
-          "p50Ms": 0.284833,
-          "p95Ms": 0.284833,
-          "p95SpreadMs": 0.06958299999999998,
+          "p50Ms": 0.086209,
+          "p95Ms": 0.086209,
+          "p95SpreadMs": 0.023541000000000006,
           "repeats": 5,
           "samples": 1,
           "stamps": 7
         },
         {
           "batch": 1,
-          "p50Ms": 0.351418,
-          "p95Ms": 0.351418,
-          "p95SpreadMs": 0.182375,
+          "p50Ms": 0.0945,
+          "p95Ms": 0.0945,
+          "p95SpreadMs": 0.023417000000000007,
           "repeats": 5,
           "samples": 1,
           "stamps": 8
@@ -1188,7 +1188,7 @@
       ],
       "name": "move_drags",
       "servedBy": "cpu",
-      "startedAtMs": 1340.801292,
+      "startedAtMs": 1368.97575,
       "thermalStateEnd": "nominal",
       "thermalStateStart": "nominal",
       "verb": "session.move_drags"
@@ -4504,7 +4504,7 @@
       "verb": "sdf_stroke_incremental"
     }
   ],
-  "claycoreCommit": "b4dcec3c92097bb0ce4433e684e6f4f1035e3a60",
+  "claycoreCommit": "240316506c7ab587ee041a322948b447c2cfdb53",
   "deviceModel": "iPad15,5",
   "osVersion": "Version 26.5.2 (Build 23F84)",
   "tolerance": 1.4

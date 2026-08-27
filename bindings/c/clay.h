@@ -4019,7 +4019,13 @@ typedef struct clay_move_params {
  * maps it into each one's frame, and puts it at the FRONT of each chain —
  * which is where a warp has to go to act on the assembled shape.
  *
- * With undo enabled the whole drag is ONE step however many items it touched.
+ * With undo enabled the whole drag is ONE step however many items it touched,
+ * and ONE cache invalidation for the same reason: the region a drag can reach
+ * is its own ball — the warp's weight is zero outside `radius` of the centre,
+ * and a point with zero weight is not moved — so the whole gesture states that
+ * once instead of deriving a region per item. Cheaper and TIGHTER than the
+ * per-item union, which is why a drag no longer costs the brick cache every
+ * item it grazed.
  *
  * *out_applied receives how many items took a warp, so a host can tell "the
  * drag reached nothing" from "the drag did nothing visible". A drag that

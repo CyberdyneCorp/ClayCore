@@ -852,6 +852,53 @@ clay_document* abi_sculpt(int nodes) {
     return d;
 }
 
+// A MOVE DRAG, through the C ABI, because that is where its cost is.
+//
+// `clay_layer_move_surface` issues one SetDeformersCmd per node the drag
+// reaches -- 257 of them over a 1,000-item document -- and each one used to pay
+// two `command_influence_bound` calls and a seed-store walk inside apply_edit.
+// That is how the path lost 1.34x when region invalidation landed and kept it
+// for four releases (#358): no CPU benchmark covered the drag, and the only
+// gate that did was the device suite, which cannot run in CI.
+//
+// The document is rebuilt per iteration, untimed, because a drag PREPENDS a
+// warp to every node it catches: measured without the rebuild the chains grow
+// as the benchmark runs and the row reports an average over depths rather than
+// the depth in its name.
+void abi_move_drag(benchmark::State& state, int nodes) {
+    clay_move_params params{};
+    params.struct_size = sizeof(params);
+    params.radius = 0.4f;
+    params.ease = 0;
+    params.front_only = 0;
+    // ON the shell the dabs sit on, not at the origin: `abi_sculpt` puts its
+    // dabs over the unit sphere, so a drag at the centre reaches exactly one
+    // item and measures a loop that never runs.
+    const float centre[3] = {1.0f, 0.0f, 0.0f};
+    const float disp[3] = {0.05f, 0.0f, 0.0f};
+
+    std::size_t applied = 0;
+    for (auto _ : state) {
+        state.PauseTiming();
+        clay_document* d = abi_sculpt(nodes);
+        state.ResumeTiming();
+        clay_layer_move_surface(d, 1, centre, disp, &params, &applied);
+        state.PauseTiming();
+        clay_document_destroy(d);
+        state.ResumeTiming();
+    }
+    // A drag that reached nothing would be an empty loop reporting a fast row.
+    if (applied == 0) state.SkipWithError("the drag warped no node; nothing is being measured");
+    state.counters["warped"] = static_cast<double>(applied);
+    state.counters["nodes"] = static_cast<double>(nodes);
+}
+
+void BM_MoveDrag1000(benchmark::State& state) { abi_move_drag(state, 1000); }
+BENCHMARK(BM_MoveDrag1000)->Unit(benchmark::kMillisecond);
+void BM_MoveDrag10000(benchmark::State& state) { abi_move_drag(state, 10000); }
+BENCHMARK(BM_MoveDrag10000)->Unit(benchmark::kMillisecond);
+
+
 constexpr int kRefillHistory = 5000;
 
 void refill_stroke(benchmark::State& state, bool prime) {
