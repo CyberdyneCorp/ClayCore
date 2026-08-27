@@ -2,6 +2,7 @@
 
 #include "clay/field/volume.h"
 #include <algorithm>
+#include <memory>
 
 #include "clay/scene/bounds.h"
 #include "clay/scene/cull_index.h"
@@ -520,6 +521,23 @@ Node dab(cfloat3 at, float k = 0.05f) {
     return n;
 }
 
+// How many items an index believes its layers' root chains hold. Everything
+// survives a plan over an all-containing region, so this is the index's own
+// cached entries. Summed over layers rather than per chain because the corpus
+// instances a layer: one appended item lands in every chain over that root
+// list, so what an append adds here is more than one and is compared against a
+// fresh build rather than counted.
+std::size_t root_entries(const CullIndex& ix) {
+    const CullPlan plan = ix.plan(math::Aabb{cf3(-100, -100, -100), cf3(100, 100, 100)});
+    std::size_t n = 0;
+    for (const Layer& layer : ix.document()->layers) {
+        if (!layer.visible || layer.kind != LayerKind::Sdf || !layer.sdf) continue;
+        if (const std::vector<CullIndex::Entry>* e = plan.chain(layer, layer.sdf->roots))
+            n += e->size();
+    }
+    return n;
+}
+
 }  // namespace
 
 TEST_CASE("cull index: an appended index is the index a rebuild would give") {
@@ -579,6 +597,41 @@ TEST_CASE("cull index: an appended index is the index a rebuild would give") {
         CHECK(grown.cull_pad() > before);  // it really did move
     }
 
+    SUBCASE("a GROUP whose CHILD is what widens the pad") {
+        // The pad folds over the layer's FLAT node map, so the subtree an
+        // append adds sets it wherever inside that subtree the wide blend
+        // sits. An index that raised its pad only from the ids it was handed
+        // would keep the old one here and plan against too small a region.
+        Document doc = gnarly_document();
+        CullIndex grown(doc);
+        const float before = grown.cull_pad();
+        Node g;
+        g.is_group = true;  // the group itself drags nothing (Hard, k = 0)
+        const NodeId gid = doc.layers[0].sdf->insert(g);
+        REQUIRE(gid != kNoNode);
+        doc.layers[0].sdf->insert(dab(cf3(0.45f, -0.15f, 0.1f), 1.7f), gid);
+        check_append_matches_fresh(doc, {gid}, grown, 817);
+        CHECK(grown.cull_pad() > before);
+    }
+
+    SUBCASE("an INVISIBLE group, whose child the pad still counts") {
+        // The sharp form of the case above: the build never descends into an
+        // invisible group -- it gets no entries and no chain -- but cull_pad
+        // walks the node map, which does not care what the build descended
+        // into, and the visible child inside it sets the pad either way.
+        Document doc = gnarly_document();
+        CullIndex grown(doc);
+        const float before = grown.cull_pad();
+        Node g;
+        g.is_group = true;
+        g.visible = false;
+        const NodeId gid = doc.layers[0].sdf->insert(g);
+        REQUIRE(gid != kNoNode);
+        doc.layers[0].sdf->insert(dab(cf3(0.55f, -0.25f, 0.15f), 1.9f), gid);
+        check_append_matches_fresh(doc, {gid}, grown, 818);
+        CHECK(grown.cull_pad() > before);
+    }
+
     SUBCASE("a stroke: every dab carried forward on the same index") {
         // The case this exists for. Each append builds on the one before, so a
         // drift would compound rather than show up once.
@@ -594,6 +647,49 @@ TEST_CASE("cull index: an appended index is the index a rebuild would give") {
         check_append_matches_fresh(doc, {doc.layers[0].sdf->insert(dab(cf3(0.8f, 0.0f, 0.0f)))},
                                    grown, 816);
     }
+}
+
+TEST_CASE("cull index: the pad an append raises is a maximum of SUMS over layers") {
+    // The trap that keeps the pad's two terms PER LAYER (scene/cull_index.h).
+    // Layer A holds a feathered volume replace and blends nothing; layer B
+    // blends and holds no volume. A fresh build reports max(A.feather,
+    // B.blend). One pair of maxima for the whole document would report
+    // A.feather + B.blend -- larger, so safe to cull with, but not the number a
+    // rebuild gives, and an appended index is held EQUAL to a rebuilt one.
+    Document doc;
+    // Both layers first: add_sdf_layer grows doc.layers, which moves the ones
+    // already in it.
+    doc.add_sdf_layer("feathered");
+    doc.add_sdf_layer("blended");
+    Layer& a = doc.layers[0];
+    Layer& b = doc.layers[1];
+    Node v;
+    v.prim = Prim::volume();
+    v.volume = std::make_shared<field::FieldVolume>(feathered_ball(cf3(0.0f, 0.0f, 0.0f), 0.4f));
+    v.op = Op::Replace;  // Hard, k = 0 by default: it drags no chain
+    a.sdf->insert(std::move(v));
+
+    b.xform.position = cf3(0.0f, 1.5f, 0.0f);
+    b.sdf->insert(dab(cf3(0.0f, 0.0f, 0.0f), 0.3f));
+
+    const CullPadTerms ta = cull_pad_terms(*a.sdf, a);
+    const CullPadTerms tb = cull_pad_terms(*b.sdf, b);
+    REQUIRE(ta.feather > 0.0f);
+    REQUIRE(ta.blend == 0.0f);
+    REQUIRE(tb.feather == 0.0f);
+    REQUIRE(tb.blend > 0.0f);
+
+    CullIndex grown(doc);
+    CHECK(grown.cull_pad() == std::max(ta.total(), tb.total()));
+    CHECK(grown.cull_pad() < ta.feather + tb.blend);  // NOT the sum of maxima
+
+    // Now raise the blended layer's term with an append. The document's pad
+    // must follow ITS layer's sum, not collect a term from each layer.
+    const NodeId id = b.sdf->insert(dab(cf3(0.2f, 0.1f, 0.0f), 0.9f));
+    check_append_matches_fresh(doc, {id}, grown, 819);
+    const CullPadTerms after = cull_pad_terms(*b.sdf, b);
+    CHECK(grown.cull_pad() == std::max(ta.total(), after.total()));
+    CHECK(grown.cull_pad() < ta.feather + after.blend);
 }
 
 TEST_CASE("cull index: an append it cannot be sure of is refused, not guessed") {
@@ -613,6 +709,24 @@ TEST_CASE("cull index: an append it cannot be sure of is refused, not guessed") 
         std::vector<NodeId> too_many(roots.size() + 2, roots.back());
         CHECK_FALSE(ix.append(too_many));
     }
+    SUBCASE("the node map gained a node the append did not name") {
+        // An append raises the pad from the subtree it names, so a node map
+        // that gained anything ELSE would leave the pad below what a fresh
+        // build reports -- and too small a pad plans against too small a
+        // region, which is the one direction that loses items a brick needed.
+        // The map's size is the O(1) check that catches it; a mismatch refuses,
+        // which costs the caller the rebuild it would have done anyway.
+        CullIndex ix(doc);
+        SdfContent& c = *doc.layers[0].sdf;
+        NodeId group = kNoNode;
+        for (const auto& [id, n] : c.nodes())
+            if (n.is_group) group = id;
+        REQUIRE(group != kNoNode);
+        c.insert(dab(cf3(0.1f, 0.4f, -0.6f), 1.3f), group);  // not at any tail
+        const NodeId tail = c.insert(dab(cf3(0.7f, 0.2f, 0.1f)));
+        CHECK_FALSE(ix.append({tail}));
+    }
+
     SUBCASE("a refusal leaves the index usable") {
         // Nothing is written until every check has passed, so the index a
         // refused caller still holds is the one it had.
@@ -627,6 +741,88 @@ TEST_CASE("cull index: an append it cannot be sure of is refused, not guessed") 
         const CullPlan fresh_plan = fresh.plan(region);
         require_same_tape(compile_document(doc, &cull, &ix, &kept_plan),
                           compile_document(doc, &cull, &fresh, &fresh_plan));
+    }
+}
+
+TEST_CASE("cull index: a cached index is extended in place only while unobserved") {
+    // scene::append_cached, the cache's half of an append. Extending the cached
+    // index itself is what makes a dab cost the dab rather than the document,
+    // and it is safe only while nothing else holds that index: a holder planned
+    // against what it took and must go on seeing it, entries and pad both.
+    //
+    // Both directions are asserted here rather than through the C ABI because
+    // the C ABI never lets a handle out from under its mutex, so the copy
+    // branch is reachable there only across threads -- see cull_index.h.
+
+    SUBCASE("a stroke extends the cached index without copying it") {
+        Document doc = gnarly_document();
+        auto slot = std::make_shared<CullIndex>(doc);
+        // A weak handle rather than a bare address: a copy destroys the index
+        // it replaces, and the allocator is free to hand the copy the very
+        // block it just freed -- comparing addresses passed by luck on half the
+        // iterations of this loop. A weak_ptr adds no owner, so it does not
+        // itself force the copy branch, and it goes empty exactly when the
+        // index it watches is replaced.
+        //
+        // Compared as raw pointers because MSVC's <memory> cannot stream a
+        // shared_ptr, which doctest needs to report the operands (/WX). It is
+        // the same assertion: an expired lock() is null, and null is never one
+        // of these addresses.
+        std::weak_ptr<CullIndex> watch = slot;
+        const std::size_t before = root_entries(*slot);
+        for (int i = 0; i < 6; ++i) {
+            const NodeId id = doc.layers[0].sdf->insert(dab(cf3(0.1f * i, 0.35f, -0.2f)));
+            REQUIRE(slot.use_count() == 1);
+            REQUIRE(append_cached(slot, {id}));
+            CHECK(watch.lock().get() == slot.get());  // the same index, grown, not a copy
+        }
+        const CullIndex fresh(doc);
+        CHECK(root_entries(*slot) > before);
+        CHECK(root_entries(*slot) == root_entries(fresh));
+        CHECK(slot->cull_pad() == fresh.cull_pad());
+    }
+
+    SUBCASE("a held index is not mutated under its holder") {
+        Document doc = gnarly_document();
+        auto slot = std::make_shared<CullIndex>(doc);
+        // What a reader has: a handle it keeps for as long as it reads, and the
+        // numbers it planned against.
+        const std::shared_ptr<const CullIndex> held = slot;
+        const float held_pad = held->cull_pad();
+        const std::size_t held_entries = root_entries(*held);
+
+        // Wide enough to move the pad, so an in-place extension would show up
+        // in BOTH numbers the holder plans with and not just in the entries.
+        const NodeId id = doc.layers[0].sdf->insert(dab(cf3(0.45f, -0.15f, 0.1f), 1.7f));
+        REQUIRE(append_cached(slot, {id}));
+
+        // Addresses are sound here where they were not above: `held` keeps the
+        // old index alive, so nothing can be handed its block.
+        CHECK(slot.get() != held.get());  // the cache took a copy to extend
+        CHECK(held->cull_pad() == held_pad);  // and left the holder its own
+        CHECK(root_entries(*held) == held_entries);
+
+        // And the copy is the extended index a rebuild would give, not merely
+        // an untouched copy.
+        const CullIndex fresh(doc);
+        CHECK(slot->cull_pad() > held_pad);
+        CHECK(root_entries(*slot) > held_entries);
+        CHECK(root_entries(*slot) == root_entries(fresh));
+        CHECK(slot->cull_pad() == fresh.cull_pad());
+    }
+
+    SUBCASE("a refused append leaves the holder and the slot alone") {
+        // The copy branch has the same contract as the in-place one: a refusal
+        // costs a rebuild, never a half-extended index in either hand.
+        Document doc = gnarly_document();
+        auto slot = std::make_shared<CullIndex>(doc);
+        const std::shared_ptr<const CullIndex> held = slot;
+        const float pad = held->cull_pad();
+        const NodeId id = doc.layers[0].sdf->insert(dab(cf3(0.2f, 0.2f, 0.2f)));
+        doc.layers[0].sdf->insert(dab(cf3(0.3f, 0.2f, 0.2f)));  // id is no longer the tail
+        CHECK_FALSE(append_cached(slot, {id}));
+        CHECK(slot.get() == held.get());
+        CHECK(held->cull_pad() == pad);
     }
 }
 

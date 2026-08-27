@@ -106,6 +106,32 @@ float chain_drag_reach(const Node& item);
 // See the definition for the measurements.
 float blend_cull_pad(const SdfContent& content, const Layer& layer);
 
+// The two terms above, UNADDED. Kept apart because the document's pad is a
+// MAXIMUM OF SUMS over its layers: adding a layer's two maxima gives that
+// layer's sum, which is what `cull_pad` returns, but folding two layers' terms
+// together and adding at the end would give a SUM OF MAXIMA -- larger, so safe,
+// and no longer the number a fresh build reports. A caller that wants to raise
+// a pad incrementally (scene/cull_index.h) therefore holds these PER LAYER.
+struct CullPadTerms {
+    float feather = 0.0f;
+    float blend = 0.0f;
+
+    void raise(const CullPadTerms& o) {
+        feather = kernel::cmax(feather, o.feather);
+        blend = kernel::cmax(blend, o.blend);
+    }
+    float total() const { return feather + blend; }
+};
+
+// One node's contribution, so a caller that has GAINED a node can raise a
+// layer's terms from it alone instead of walking the layer again -- what makes
+// extending a cull index cost the dab rather than the document (#347). An
+// invisible node contributes nothing, exactly as the walk skips it.
+CullPadTerms cull_pad_terms(const Node& node, const Layer& layer);
+
+// A whole layer's terms, in ONE walk of the node map.
+CullPadTerms cull_pad_terms(const SdfContent& content, const Layer& layer);
+
 // Both of the above, in ONE walk of the node map. What a compile actually
 // wants: each of them walks every node, and at ten thousand items the second
 // walk measured 20-30% on the per-brick cull benchmarks.

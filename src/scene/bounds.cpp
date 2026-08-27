@@ -758,21 +758,34 @@ float blend_cull_pad(const SdfContent& content, const Layer& layer) {
     return pad;
 }
 
+// ONE node's contribution to both pads, and the ONE definition of either: the
+// walks below are folds of this, so a new feathered shape or a new dragging
+// combine cannot reach the pad through one of them and not the other.
+CullPadTerms cull_pad_terms(const Node& n, const Layer& layer) {
+    CullPadTerms t;
+    if (!n.visible) return t;
+    if (!n.is_group && item_is_feathered_replace(n))
+        t.feather = n.volume->band() * layer.xform.scale * n.xform.scale *
+                    scale_axes_factor(n.scale_axes);
+    t.blend = chain_drag_reach(n);
+    return t;
+}
+
 // Both pads in ONE walk of the node map. Worth its own function rather than
 // adding the two: each of them walks every node in the layer, the compiler asks
 // for the total on every uncached compile, and at ten thousand items that
 // second walk measured 20-30% on the per-brick cull benchmarks.
-float cull_pad(const SdfContent& content, const Layer& layer) {
-    float feather = 0.0f, blend = 0.0f;
+CullPadTerms cull_pad_terms(const SdfContent& content, const Layer& layer) {
+    CullPadTerms total;
     for (const auto& [id, n] : content.nodes()) {
         (void)id;
-        if (!n.visible) continue;
-        if (!n.is_group && item_is_feathered_replace(n))
-            feather = kernel::cmax(feather, n.volume->band() * layer.xform.scale * n.xform.scale *
-                                                scale_axes_factor(n.scale_axes));
-        blend = kernel::cmax(blend, chain_drag_reach(n));
+        total.raise(cull_pad_terms(n, layer));
     }
-    return feather + blend;
+    return total;
+}
+
+float cull_pad(const SdfContent& content, const Layer& layer) {
+    return cull_pad_terms(content, layer).total();
 }
 
 bool item_influence_is_local(const Node& item) {

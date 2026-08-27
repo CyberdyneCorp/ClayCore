@@ -35,10 +35,12 @@
 // document the same way and additionally must not outlive its index's
 // revision.
 
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
 #include "clay/math/geom.h"
+#include "clay/scene/bounds.h"
 #include "clay/scene/document.h"
 
 namespace clay {
@@ -138,12 +140,62 @@ class CullIndex {
         bool prunable;               // no feathered volume replace among the items
     };
 
+    // One layer's cull pad, kept as its TWO TERMS rather than as the sum, so
+    // that an append can raise them from the subtree it added instead of
+    // walking the layer's whole node map again. That walk was ALL BUT 0.0003 ms
+    // of the 0.054 ms an append cost at 20,000 items -- a cheap walk against the
+    // 2.45 ms rebuild it replaced, and essentially the whole of an append once
+    // that rebuild was gone (#347).
+    //
+    // PER LAYER, which is the whole of why keeping the terms apart is exact:
+    // the document's pad is a MAXIMUM OF SUMS over layers, so the terms fold
+    // per layer and the maximum is taken of their sums. One global pair would
+    // give a SUM OF MAXIMA -- larger, so safe, but no longer the number a fresh
+    // build reports, and an appended index is held EQUAL to a rebuilt one.
+    //
+    // `nodes` is the size of the content's node map when the terms were taken.
+    // The terms are raised from the appended subtree, so anything ELSE the map
+    // gained would leave them low -- and low is the unsafe direction, a pad
+    // that plans against too small a region. Checked rather than trusted: a map
+    // that did not grow by exactly the subtree refuses the append, which costs
+    // a rebuild.
+    //
+    // A COUNT catches what the map GAINED, not what it changed: a node already
+    // in it whose band or `k` widened leaves the count alone and the terms low.
+    // That is not a new hole -- the entry bounds cached beside them were
+    // already stale by then, which is why the class contract is an append "and
+    // nothing else" -- and the C ABI cannot reach it, since every non-append
+    // mutation runs through `touch()` or `touch_region()`, both of which forget
+    // the append log, leaving nothing to append and forcing the rebuild
+    // (bindings/c/clay_c.cpp).
+    struct LayerPad {
+        const Layer* layer;
+        CullPadTerms terms;
+        std::size_t nodes;
+    };
+
+    // What one appended subtree adds to a layer, gathered in one walk BEFORE
+    // anything is written so a refusal can leave the index untouched.
+    struct PadGain {
+        std::size_t slot;  // index into pads_
+        CullPadTerms terms;
+        std::size_t nodes;  // the map size these terms are now good for
+    };
+
     void build_chain(const SdfContent& content, const std::vector<NodeId>& ids,
                      const Layer& layer);
+    // The chains built over `ids`, one per layer that compiles that list.
+    std::vector<std::size_t> chains_over(const std::vector<NodeId>& ids) const;
+    // False when the pad of any touched layer cannot be raised incrementally.
+    bool plan_pads(const std::vector<std::size_t>& targets,
+                   const std::vector<NodeId>& appended, std::vector<PadGain>* gains) const;
+    // pad_ from pads_: the maximum of the layers' sums.
+    void refresh_pad();
 
     const Document* doc_;
     float pad_ = 0.0f;
     std::vector<Chain> chains_;
+    std::vector<LayerPad> pads_;
 };
 
 // The survivors of one coarse cull (CullIndex::plan). Handed to
@@ -165,6 +217,27 @@ class CullPlan {
     std::unordered_map<CullIndex::Key, std::vector<CullIndex::Entry>, CullIndex::KeyHash>
         pruned_;
 };
+
+// The cached-index form of CullIndex::append, and the ONE place the decision
+// between extending in place and copying first is made -- so that the decision
+// itself is testable, which it is not when it lives inside a cache whose handle
+// never leaves the mutex it is taken under (#347).
+//
+// Extends what `slot` holds for `appended`. IN PLACE WHEN NOBODY ELSE IS
+// LOOKING: the copy exists to protect a reader holding the index against a
+// plan it already made, so an ownership count of one means no such reader
+// exists, and the extension can skip an O(document) copy to add one item's
+// bounds. Otherwise `slot` is replaced by an extended COPY and the holder's
+// index is left exactly as it was.
+//
+// Returns false when the append was refused, leaving `slot` -- and every other
+// holder -- untouched, so the caller rebuilds as it would have anyway.
+//
+// THREADING is the caller's: the count is only meaningful while no new handle
+// can be born, which for the C ABI means under the same mutex every handle is
+// taken under (bindings/c/clay_c.cpp, cull_index_locked). A holder dropping its
+// handle concurrently can only make the count read HIGH, which costs a copy.
+bool append_cached(std::shared_ptr<CullIndex>& slot, const std::vector<NodeId>& appended);
 
 }  // namespace scene
 }  // namespace clay
