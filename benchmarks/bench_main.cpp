@@ -10,17 +10,20 @@
 #include <cmath>
 #include <cstdint>
 #include <ctime>
+#include <optional>
 #include <thread>
 #include <vector>
 
 #include "clay.h"
 #include "clay_internal.h"
 #include "clay/brick/cache.h"
+#include "clay/brush/move.h"
 #include "clay/eval/backend.h"
 #include "clay/eval/bake_points.h"
 #include "clay/eval/bake_volume.h"
 #include "clay/field/move_topological.h"
 #include "clay/field/redistance.h"
+#include "clay/field/relax.h"
 #include "clay/kernel/field.h"
 #include "clay/mesh/bvh.h"
 #include "clay/mesh/marching.h"
@@ -31,6 +34,7 @@
 #include "clay/scene/consolidate.h"
 #include "clay/scene/cull_index.h"
 #include "clay/scene/tape.h"
+#include "clay/session/sdf_sculpt.h"
 #include "clay/voxel/grid.h"
 #include "scatter_spread.h"
 
@@ -2793,6 +2797,495 @@ void BM_TapeCombineAddColoredRef(benchmark::State& state) {
 BENCHMARK(BM_TapeCombineAddColoredRef)->Unit(benchmark::kMillisecond);
 
 }  // namespace
+
+// -- live SDF sculpt transactions (sdf-sculpt-transaction) -------------------
+//
+// The two verbs an edit-list brush cannot spell. Both used to cost the MODEL
+// per pointer event and both now cost the GESTURE once plus the dab, and this
+// group is where that claim is measured rather than asserted.
+//
+// SMOOTH bakes, because averaging a field has no node that means "the average
+// of what was here" (field/relax.h says so first). A host with nowhere to keep
+// the baked volume between pointer events has exactly one implementation: bake
+// the layer, relax, throw the volume away, per dab. That is
+// BM_SdfSmoothStandalone, and it is the reason Smooth shipped without a live
+// preview at all. `SdfSmoothTransaction` moves that bake to pointer-down —
+// BM_SdfSmoothTransactionBegin — and leaves the dab paying `relax_in_place`
+// over the bricks its own region touches, which is BM_SdfSmoothTransactionUpdate.
+//
+// The gesture rows exist because the pair above does not settle the trade on
+// its own: a transaction that made every dab free and cost a second at
+// pointer-down would be worse to sculpt with. BM_SdfSmoothTransaction100 and
+// BM_SdfSmoothTransaction1000 time a WHOLE gesture — one begin and N updates —
+// so the one-time cost is amortised where an artist actually pays it, and the
+// break-even against N standalone dabs can be read straight off the table.
+//
+// The dab is region-limited, at the pole `sculpted_sphere` piles its 192 extra
+// spheres on. A relax with no region is a filter over the whole volume rather
+// than a brush, and it would hide the property the update row exists to show:
+// that a dab costs the ball it moves and not the model it sits on.
+namespace {
+
+constexpr float kSculptCell = 0.05f;
+
+session::SdfSculptPolicy smooth_policy() {
+    session::SdfSculptPolicy policy;
+    policy.cell_size = kSculptCell;  // band and padding take their defaults
+    return policy;
+}
+
+// One dab, at the -x pole where `sculpted_sphere` puts every dab it adds.
+field::RelaxSettings smooth_dab() {
+    field::RelaxSettings settings;
+    settings.strength = 0.5f;
+    settings.radius_cells = 1;
+    settings.iterations = 1;
+    settings.centre = cf3(-1.0f, 0.0f, 0.0f);
+    settings.region_radius = 0.25f;
+    return settings;
+}
+
+}  // namespace
+
+// THE "BEFORE". One dab of Smooth with nowhere to keep a volume: sample the
+// whole layer, relax the result, discard it. `field::relax` rather than
+// `relax_in_place` on purpose — a caller with no working volume of its own has
+// nothing to relax in place, so the copy is part of what the old path costs.
+void BM_SdfSmoothStandalone(benchmark::State& state) {
+    scene::Document doc = sculpted_sphere(193);
+    scene::ConsolidationParams params;
+    params.cell_size = kSculptCell;
+    const field::RelaxSettings dab = smooth_dab();
+    std::size_t samples = 0;
+    for (auto _ : state) {
+        std::optional<field::FieldVolume> v =
+            scene::bake_layer(doc.layers.front(), params, nullptr, eval::pooled_bake_eval());
+        if (!v) {
+            state.SkipWithError("the layer did not bake; nothing is being measured");
+            return;
+        }
+        const field::FieldVolume relaxed = field::relax(*v, dab);
+        samples = relaxed.sample_count();
+        // A SEPARATE sink, never the variable a counter is read from after the
+        // loop. DoNotOptimize takes its argument as a read-write operand, so
+        // the compiler must assume the asm changed it -- reading it afterwards
+        // is reading whatever the register happened to hold, and it prints as a
+        // fourteen-digit number that looks like a measurement.
+        std::size_t sink = samples;
+        benchmark::DoNotOptimize(sink);
+    }
+    state.counters["nodes"] = 193;
+    state.counters["samples"] = static_cast<double>(samples);
+}
+BENCHMARK(BM_SdfSmoothStandalone)->Unit(benchmark::kMillisecond);
+
+// The one-time half, alone. This is the cost the transaction MOVES rather than
+// removes — see the note on SdfSmoothTransaction about the working set being
+// the whole finite layer — so it is benchmarked separately and deliberately,
+// and it is what a lazy local checkpoint would later have to beat.
+void BM_SdfSmoothTransactionBegin(benchmark::State& state) {
+    scene::Document doc = sculpted_sphere(193);
+    const scene::LayerId layer = doc.layers.front().id;
+    const session::SdfSculptPolicy policy = smooth_policy();
+    for (auto _ : state) {
+        std::optional<session::SdfSmoothTransaction> tx =
+            session::SdfSmoothTransaction::begin(doc, layer, policy, eval::pooled_bake_eval());
+        if (!tx) {
+            state.SkipWithError("the transaction did not begin; nothing is being measured");
+            return;
+        }
+        state.counters["samples"] = static_cast<double>(tx->preview_volume().sample_count());
+        std::size_t sink = tx->preview_volume().sample_count();
+        benchmark::DoNotOptimize(sink);
+        tx->cancel();
+    }
+    state.counters["nodes"] = 193;
+}
+BENCHMARK(BM_SdfSmoothTransactionBegin)->Unit(benchmark::kMillisecond);
+
+// THE "AFTER". `begin` runs ONCE, outside the timed loop, and the loop is one
+// live dab: `relax_in_place` over the bricks the dab's ball reaches, and no
+// bake, no compile, no command and no undo entry.
+//
+// FIXED ITERATION COUNT, because the setup is a whole bake. Left to fill a time
+// budget the harness re-invokes the function with a larger count until it does,
+// and every re-invocation pays that bake again — which is fine for the total
+// runtime and wrong for the reading, since the row is meant to be the dab
+// alone.
+//
+// The volume is relaxed repeatedly and so converges towards its own average.
+// That does not change what is being timed: `rewrite_region` visits the same
+// bricks and blends the same stencil whatever the samples hold, and the
+// `bricks` counter says so.
+void BM_SdfSmoothTransactionUpdate(benchmark::State& state) {
+    scene::Document doc = sculpted_sphere(193);
+    const session::SdfSculptPolicy policy = smooth_policy();
+    std::optional<session::SdfSmoothTransaction> tx = session::SdfSmoothTransaction::begin(
+        doc, doc.layers.front().id, policy, eval::pooled_bake_eval());
+    if (!tx) {
+        state.SkipWithError("the transaction did not begin; nothing is being measured");
+        return;
+    }
+    const field::RelaxSettings dab = smooth_dab();
+    std::size_t bricks = 0;
+    for (auto _ : state) {
+        const session::SdfSculptDirty dirty = tx->update(dab);
+        bricks = dirty.touched_bricks;
+        std::size_t sink = bricks;  // see the note in BM_SdfSmoothStandalone
+        benchmark::DoNotOptimize(sink);
+    }
+    // A dab that touched nothing would be an empty loop reporting a fast row.
+    if (bricks == 0) state.SkipWithError("the dab touched no brick; nothing is being measured");
+    state.counters["bricks"] = static_cast<double>(bricks);
+    state.counters["nodes"] = 193;
+}
+BENCHMARK(BM_SdfSmoothTransactionUpdate)->Unit(benchmark::kMillisecond)->Iterations(200);
+
+namespace {
+
+// A WHOLE gesture: pointer-down, N dabs, pointer-up. Timed together, including
+// the begin, because that is the trade a host is actually making — the
+// one-time bake is only affordable if a stroke has enough dabs to amortise it,
+// and the number of dabs at which it does is what these rows report.
+void smooth_gesture(benchmark::State& state, int dabs) {
+    scene::Document doc = sculpted_sphere(193);
+    const scene::LayerId layer = doc.layers.front().id;
+    const session::SdfSculptPolicy policy = smooth_policy();
+    const field::RelaxSettings dab = smooth_dab();
+    std::size_t bricks = 0;
+    for (auto _ : state) {
+        std::optional<session::SdfSmoothTransaction> tx =
+            session::SdfSmoothTransaction::begin(doc, layer, policy, eval::pooled_bake_eval());
+        if (!tx) {
+            state.SkipWithError("the transaction did not begin; nothing is being measured");
+            return;
+        }
+        for (int i = 0; i < dabs; ++i) bricks = tx->update(dab).touched_bricks;
+        std::size_t sink = tx->preview_volume().sample_count();
+        benchmark::DoNotOptimize(sink);
+        // Cancelled, not committed: the commit is one command group and a
+        // policy pass, and neither is part of the per-frame claim. The document
+        // is untouched either way, which is what lets one fixture serve every
+        // iteration.
+        tx->cancel();
+    }
+    if (bricks == 0) state.SkipWithError("the dabs touched no brick; nothing is being measured");
+    state.counters["dabs"] = static_cast<double>(dabs);
+    state.counters["bricks"] = static_cast<double>(bricks);
+    state.counters["nodes"] = 193;
+}
+
+}  // namespace
+
+// NAMED rather than Arg()-parameterised, for the reason the deep-document rows
+// give: check_bench.py keys a gate on the part of a name before "/".
+void BM_SdfSmoothTransaction100(benchmark::State& state) { smooth_gesture(state, 100); }
+BENCHMARK(BM_SdfSmoothTransaction100)->Unit(benchmark::kMillisecond)->Iterations(3);
+
+void BM_SdfSmoothTransaction1000(benchmark::State& state) { smooth_gesture(state, 1000); }
+BENCHMARK(BM_SdfSmoothTransaction1000)->Unit(benchmark::kMillisecond)->Iterations(1);
+
+// -- Move: a drag that costs what it drags -----------------------------------
+//
+// `move_brush` prepares and resolves in one call, so a host driving it per
+// pointer event re-walks the whole edit list sixty times a second to
+// rediscover which items a fixed anchor and a fixed radius reach — an answer
+// that cannot have changed. BM_SdfMoveResolve is that per-frame cost;
+// BM_SdfMoveTransactionBegin is the same traversal paid once at pointer-down;
+// BM_SdfMoveTransactionUpdate is what a frame costs afterwards, which is
+// `resolve_prepared_move` and a chain rebuild per AFFECTED item and no scene
+// access at all.
+//
+// The fixture holds the AFFECTED SET FIXED and grows the rest of the layer,
+// which is the only shape in which the claim can be seen. A drag over a scene
+// twice the size must cost the same per frame, so growing the scene while
+// holding the drag is the experiment; growing both would measure nothing.
+// `sculpted_sphere` cannot serve — its dabs all land on one pole, so a bigger
+// document is also a bigger drag — hence a fixture of its own.
+namespace {
+
+// The items the drag reaches. Small and constant: 32 is enough that the
+// per-item loop is real work and few enough that the row is dominated by it
+// rather than by allocation.
+constexpr int kMoveCluster = 32;
+constexpr float kMoveRadius = 0.3f;
+
+kernel::cfloat3 move_anchor() { return cf3(1.0f, 0.0f, 0.0f); }
+
+// A cluster the drag reaches, plus `unrelated` items five world units clear of
+// it. The far items are on a Fibonacci shell of radius 6, so they are spread
+// rather than coincident — a pile of items at one point would let a bounds
+// test cull them as a block and understate what a traversal costs.
+scene::Document move_scene(int unrelated) {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("move");
+    for (int i = 0; i < kMoveCluster; ++i) {
+        scene::Node dab;
+        dab.prim = scene::Prim::sphere(0.05f);
+        dab.xform.position = cf3(1.0f + 0.08f * std::sin(static_cast<float>(i) * 1.7f),
+                                 0.08f * std::cos(static_cast<float>(i) * 2.3f),
+                                 0.08f * std::sin(static_cast<float>(i) * 0.9f));
+        l.sdf->insert(dab);
+    }
+    const double golden = 0.6180339887;
+    for (int i = 0; i < unrelated; ++i) {
+        // `elsewhere` rather than `far`, which older MSVC headers still define
+        // as a macro.
+        scene::Node elsewhere;
+        elsewhere.prim = scene::Prim::sphere(0.05f);
+        const double u = std::fmod(static_cast<double>(i) * golden, 1.0);
+        const double v = (static_cast<double>(i) + 0.5) / static_cast<double>(unrelated);
+        const double phi = std::acos(1.0 - 2.0 * v);
+        const double th = 6.283185307 * u;
+        elsewhere.xform.position = cf3(static_cast<float>(6.0 * std::sin(phi) * std::cos(th)),
+                                       static_cast<float>(6.0 * std::cos(phi)),
+                                       static_cast<float>(6.0 * std::sin(phi) * std::sin(th)));
+        l.sdf->insert(elsewhere);
+    }
+    return doc;
+}
+
+brush::MoveSettings move_settings() {
+    brush::MoveSettings settings;
+    settings.radius = kMoveRadius;
+    return settings;
+}
+
+// THE "BEFORE": one frame of a drag driven through `move_brush`, which
+// prepares from scratch every call. Pure — the layer is read and never written
+// — so the fixture is built once and no per-iteration rebuild is needed, unlike
+// the ABI drag above which commits its warps.
+void move_resolve(benchmark::State& state, int unrelated) {
+    scene::Document doc = move_scene(unrelated);
+    const brush::MoveSettings settings = move_settings();
+    std::size_t warped = 0;
+    for (auto _ : state) {
+        const std::vector<brush::MoveWarp> warps =
+            brush::move_brush(doc.layers.front(), move_anchor(), cf3(0.05f, 0.0f, 0.0f), settings);
+        warped = warps.size();
+        const brush::MoveWarp* sink = warps.data();
+        benchmark::DoNotOptimize(sink);
+    }
+    if (warped == 0) state.SkipWithError("the drag warped no item; nothing is being measured");
+    state.counters["warped"] = static_cast<double>(warped);
+    state.counters["items"] = static_cast<double>(unrelated + kMoveCluster);
+}
+
+// THE "AFTER": `begin` once, outside the loop, then one frame per iteration.
+// The `visited` counter is the whole gate — it is what must stay at the
+// affected count whatever the rest of the layer holds, and unlike a
+// millisecond it means the same thing on every machine.
+void move_transaction_update(benchmark::State& state, int unrelated) {
+    scene::Document doc = move_scene(unrelated);
+    std::optional<session::SdfMoveTransaction> tx = session::SdfMoveTransaction::begin(
+        doc, doc.layers.front().id, move_anchor(), move_settings());
+    if (!tx || tx->affected_count() == 0) {
+        state.SkipWithError("the drag reached no item; nothing is being measured");
+        return;
+    }
+    // A GROWING TOTAL, never an increment: a live drag reports how far it has
+    // come from the anchor, and feeding the same displacement every frame would
+    // let a future implementation notice nothing had changed.
+    float travelled = 0.0f;
+    for (auto _ : state) {
+        travelled += 0.0001f;
+        std::size_t touched = tx->update(cf3(travelled, 0.0f, 0.0f)).touched_bricks;
+        benchmark::DoNotOptimize(touched);
+    }
+    state.counters["visited"] = static_cast<double>(tx->last_update_visited());
+    state.counters["affected"] = static_cast<double>(tx->affected_count());
+    // What `begin` walked, for contrast: this one DOES grow with the layer, and
+    // it is paid once a gesture rather than once a frame.
+    state.counters["prepared"] = static_cast<double>(tx->prepare_stats().visited);
+    state.counters["items"] = static_cast<double>(unrelated + kMoveCluster);
+}
+
+}  // namespace
+
+void BM_SdfMoveResolve(benchmark::State& state) { move_resolve(state, 1000); }
+BENCHMARK(BM_SdfMoveResolve)->Unit(benchmark::kMillisecond);
+
+// The traversal, paid once. Reports both halves of MovePrepareStats: `visited`
+// is what grows with the layer and `reached` is what the frames afterwards
+// cost.
+void BM_SdfMoveTransactionBegin(benchmark::State& state) {
+    scene::Document doc = move_scene(1000);
+    const scene::LayerId layer = doc.layers.front().id;
+    const brush::MoveSettings settings = move_settings();
+    std::size_t reached = 0;
+    for (auto _ : state) {
+        std::optional<session::SdfMoveTransaction> tx =
+            session::SdfMoveTransaction::begin(doc, layer, move_anchor(), settings);
+        if (!tx) {
+            state.SkipWithError("the transaction did not begin; nothing is being measured");
+            return;
+        }
+        reached = tx->affected_count();
+        state.counters["visited"] = static_cast<double>(tx->prepare_stats().visited);
+        std::size_t sink = reached;  // see the note in BM_SdfSmoothStandalone
+        benchmark::DoNotOptimize(sink);
+        tx->cancel();
+    }
+    if (reached == 0) state.SkipWithError("the drag reached no item; nothing is being measured");
+    state.counters["reached"] = static_cast<double>(reached);
+    state.counters["items"] = static_cast<double>(1000 + kMoveCluster);
+}
+BENCHMARK(BM_SdfMoveTransactionBegin)->Unit(benchmark::kMillisecond);
+
+void BM_SdfMoveTransactionUpdate(benchmark::State& state) { move_transaction_update(state, 1000); }
+BENCHMARK(BM_SdfMoveTransactionUpdate)->Unit(benchmark::kMillisecond)->Iterations(20000);
+
+// A whole 1000-frame drag: one begin and a thousand updates, which is about
+// sixteen seconds of dragging at 60 Hz. Timed together for the same reason the
+// Smooth gesture rows are — the one-time traversal is only affordable if a
+// gesture amortises it, and this row is where that is read.
+void BM_SdfMoveTransaction1000(benchmark::State& state) {
+    scene::Document doc = move_scene(1000);
+    const scene::LayerId layer = doc.layers.front().id;
+    const brush::MoveSettings settings = move_settings();
+    std::size_t affected = 0;
+    for (auto _ : state) {
+        std::optional<session::SdfMoveTransaction> tx =
+            session::SdfMoveTransaction::begin(doc, layer, move_anchor(), settings);
+        if (!tx) {
+            state.SkipWithError("the transaction did not begin; nothing is being measured");
+            return;
+        }
+        for (int i = 1; i <= 1000; ++i)
+            tx->update(cf3(0.0001f * static_cast<float>(i), 0.0f, 0.0f));
+        affected = tx->affected_count();
+        std::size_t sink = affected;  // see the note in BM_SdfSmoothStandalone
+        benchmark::DoNotOptimize(sink);
+        tx->cancel();
+    }
+    if (affected == 0) state.SkipWithError("the drag reached no item; nothing is being measured");
+    state.counters["frames"] = 1000;
+    state.counters["affected"] = static_cast<double>(affected);
+    state.counters["items"] = static_cast<double>(1000 + kMoveCluster);
+}
+BENCHMARK(BM_SdfMoveTransaction1000)->Unit(benchmark::kMillisecond)->Iterations(5);
+
+// THE SCALING PAIR, and the reason the fixture was written the way it was. The
+// drag is identical in every row — same anchor, same radius, same 32 items —
+// and only the UNRELATED bulk of the layer grows. `move_brush` re-walks that
+// bulk per frame and its row climbs with it; a prepared update never touches
+// the scene again and its row must not move at all.
+//
+// Both rows are in MILLISECONDS even though the update row is microseconds
+// wide, because check_bench.py's ratio gates divide raw `real_time` values and
+// two rows in different units would divide numbers in different units.
+//
+// PARAMETERISED here rather than named, unlike everywhere else in this file,
+// because the gate that matters is a COUNTER and not a time: check_bench.py
+// keys on the name before "/", so the row it lands on is the last registered —
+// 50 000 unrelated items, the largest — which is exactly the row where
+// `visited` staying at 32 is worth asserting.
+void BM_SdfMoveResolveScaling(benchmark::State& state) {
+    move_resolve(state, static_cast<int>(state.range(0)));
+}
+BENCHMARK(BM_SdfMoveResolveScaling)
+    ->Unit(benchmark::kMillisecond)
+    ->Args({100})
+    ->Args({1000})
+    ->Args({10000})
+    ->Args({50000})
+    ->Iterations(100);
+
+void BM_SdfMoveTransactionUpdateScaling(benchmark::State& state) {
+    move_transaction_update(state, static_cast<int>(state.range(0)));
+}
+BENCHMARK(BM_SdfMoveTransactionUpdateScaling)
+    ->Unit(benchmark::kMillisecond)
+    ->Args({100})
+    ->Args({1000})
+    ->Args({10000})
+    ->Args({50000})
+    ->Iterations(20000);
+
+// -- what repeated drags do to a layer, and what the policy does about it ----
+//
+// A grab does not replace the one before it unless it is the SAME drag still
+// in progress — `moved_chain` identifies that by the centre and the radius —
+// so N separate drags leave N deformers on every item they all reached. Each
+// one raises the layer's declared Lipschitz, and `safe_step_scale` is 1 over
+// that: the marcher's step shrinks with the artist's history whether or not
+// the shape changed much.
+//
+// These rows report the two numbers `SdfSculptComplexityPolicy` is written
+// against, measured after N complete transactions — begin, update, commit —
+// with the policy OFF, and then the same run with it ON and consolidation
+// authorised. The `consolidations` counter says how many times it actually
+// fired, which is the honest reading: `settle_budget` declines to collapse a
+// layer that is already a single volume item, so a run that has consolidated
+// once reports over budget afterwards and acts no further.
+namespace {
+
+void move_repeated(benchmark::State& state, int drags, bool policy_on) {
+    session::SdfSculptPolicy policy;
+    policy.cell_size = 0.02f;
+    if (policy_on) {
+        policy.complexity.min_safe_step_scale = 0.5f;
+        policy.complexity.allow_consolidation = true;
+        policy.complexity.consolidation.cell_size = 0.02f;
+    }
+    const brush::MoveSettings settings = move_settings();
+    double chain = 0, step = 0, consolidations = 0;
+    for (auto _ : state) {
+        // Rebuilt per iteration, untimed, because every drag PREPENDS a warp:
+        // measured without the rebuild the chains grow as the benchmark runs
+        // and the row reports an average over depths rather than the depth in
+        // its name. Same reason as the ABI drag rows above.
+        state.PauseTiming();
+        scene::Document doc = move_scene(0);
+        const scene::LayerId layer = doc.layers.front().id;
+        consolidations = 0;
+        state.ResumeTiming();
+        for (int i = 0; i < drags; ++i) {
+            // A DIFFERENT anchor each time, which is what makes these separate
+            // drags rather than one drag's frames: `moved_chain` replaces a
+            // leading grab only when the centre and the radius match, so an
+            // unmoved anchor would measure a chain of depth one N times.
+            const kernel::cfloat3 centre = cf3(1.0f, 0.002f * static_cast<float>(i), 0.0f);
+            std::optional<session::SdfMoveTransaction> tx =
+                session::SdfMoveTransaction::begin(doc, layer, centre, settings, policy);
+            if (!tx) {
+                state.SkipWithError("the transaction did not begin; nothing is being measured");
+                return;
+            }
+            tx->update(cf3(0.0f, 0.004f, 0.0f));
+            if (!tx->commit(nullptr)) {
+                state.SkipWithError("the commit was refused; nothing is being measured");
+                return;
+            }
+            if (tx->budget().consolidated) consolidations += 1;
+        }
+        state.PauseTiming();
+        const scene::FieldReport report = scene::report_layer(doc.layers.front());
+        chain = static_cast<double>(report.longest_deformer_chain);
+        step = static_cast<double>(report.safe_step_scale);
+        state.ResumeTiming();
+    }
+    state.counters["drags"] = static_cast<double>(drags);
+    // The two numbers the policy is written against. With it off they are the
+    // damage a session does to a layer; with it on they are what it is held to.
+    state.counters["chain"] = chain;
+    state.counters["safe_step_scale"] = step;
+    state.counters["consolidations"] = consolidations;
+}
+
+}  // namespace
+
+void BM_SdfMoveRepeated10(benchmark::State& state) { move_repeated(state, 10, false); }
+BENCHMARK(BM_SdfMoveRepeated10)->Unit(benchmark::kMillisecond)->Iterations(20);
+
+void BM_SdfMoveRepeated100(benchmark::State& state) { move_repeated(state, 100, false); }
+BENCHMARK(BM_SdfMoveRepeated100)->Unit(benchmark::kMillisecond)->Iterations(5);
+
+// The same hundred drags with the policy ON. It costs a bake where it fires,
+// which is why this row is slower than the one above and why the gate on it is
+// a counter rather than a time.
+void BM_SdfMoveRepeatedPolicy100(benchmark::State& state) { move_repeated(state, 100, true); }
+BENCHMARK(BM_SdfMoveRepeatedPolicy100)->Unit(benchmark::kMillisecond)->Iterations(3);
 
 // Resident uploaded tapes (accel/metal-persistent): the Metal backend keeps
 // the uploaded form of recent tapes resident, keyed on the process-unique

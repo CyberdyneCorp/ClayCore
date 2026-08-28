@@ -304,6 +304,102 @@ says nobody has measured one, because the gesture is what was instrumented.
 first two would numerically fit a frame; they are `operation` because that is
 what they are, and a host should give them progress UI rather than a frame.
 
+### The tier a per-dab number cannot tell you about
+
+`sdf_relax` sits at 0.73 ms and `sdf_move` in Tier 3, and read as a table both
+of them look affordable. Neither was, as a **live brush**, and the reason is
+not in any column above: the axis of these cases is one application of the
+verb, and the thing that made Smooth and Move unusable live was what a host had
+to do *around* each application.
+
+- `field::relax` takes a volume and returns a volume. A layer is an edit list,
+  so a host holding a layer bakes it to get a volume — and with nowhere to keep
+  that volume between pointer events, it bakes again next event. The per-dab
+  cost is `sdf_consolidate + sdf_relax`, **313 + 0.73**, not 0.73. The only
+  affordable shape for that is one bake at pointer-up, which is why Smooth
+  showed nothing until the pen lifted.
+- Move resolves against every item in the edit list to find the ones a *fixed*
+  anchor and radius reach, then writes one `SetDeformersCmd` per item. Per
+  pointer event that is a full traversal plus a document mutation, and the
+  mutation churns the revision, the tape, the caches and picking to produce one
+  edit that only exists at pointer-up.
+
+Both are the same missing thing — somewhere to keep transient state for one
+gesture — and `session/sdf_sculpt.h` is it. See §3.1 of
+[07 — brushes and features](07-brushes-and-features.md).
+
+**Measured on a 24-thread Linux desktop, not the reference device.** Per
+[RELEASE.md](RELEASE.md) the ratio transfers and the absolute does not; the
+absolutes here are `clay_bench` rows and the ratios are what
+`tools/check_bench.py` gates. Load average held at 3.11 -> 2.94 across the run.
+The same table taken earlier at load 5.67 gave absolutes about 12% slower and
+**every ratio within 10%** — `visited` and `chain` identical — which is why the
+gates are ratios between two rows of one run rather than millisecond floors.
+
+| gesture | before | after | |
+|---|---:|---:|---|
+| Smooth, one live dab (193-item layer, cell 0.05) | 29.88 ms | **0.152 ms** | 197x |
+| Smooth, whole 100-dab stroke | 2,988 ms | **44.8 ms** | 67x |
+| Smooth, whole 1000-dab stroke | 29,880 ms | **182 ms** | 164x |
+| Smooth, layer bakes per stroke | one per dab | **one, at pointer-down** | |
+| Move, one live frame (1,032-item layer) | 0.0587 ms | **0.00121 ms** | 49x |
+| Move, whole 1000-frame drag | 58.7 ms | **1.59 ms** | 37x |
+| Move, one live frame (50,032-item layer) | 2.873 ms | **0.00121 ms** | 2,369x |
+| Move, persistent commands per drag | one per frame | **one, at pointer-up** | |
+
+The last Move row is the one that matters and the only one that is a *shape*
+rather than a speedup. The prepared frame measures 0.001208, 0.001244, 0.001246
+and 0.001213 ms at 132, 1,032, 10,032 and 50,032 items — **flat to within 3%
+across a 379x growth in scene size** — because the traversal that scales with
+the model happens once at pointer-down, and the `visited` counter reads 32 at
+every one of those sizes while `prepared` reads 132 / 1,032 / 10,032 / 50,032.
+`move_brush` over the same axis reads 0.0086 -> 2.873 ms, a 336x spread.
+`BM_SdfMoveTransactionUpdateScaling` and `BM_SdfMoveResolveScaling` are
+parameterised over exactly that axis and the gate is the ratio between their
+last rows, so the claim is checked rather than asserted.
+
+**`begin()` is not free and the table should not hide it.**
+`BM_SdfSmoothTransactionBegin` measures **29.65 ms** — 0.99x one standalone
+dab, because it *is* the same whole-layer bake. What the transaction changes is
+how many times it is paid: once, where a brush cursor covers it, instead of
+once per pointer event. So the transaction is ahead from the *second* dab
+onward. It is still O(model), and on a very large layer at a fine cell it will
+be felt at pointer-down — which is what makes local checkpoints the named
+follow-up in the change's `tasks.md`, and why this number is measured on its
+own axis rather than folded into the dab. Move's equivalent, the one-time edit
+list traversal, is 0.355 ms on a 1,032-item layer and pays for itself in about
+28 frames — under half a second of dragging.
+
+### What the policy actually bounds
+
+Repeated *independent* Move strokes compose — that is correct, and
+`moved_chain`'s leading-grab replacement is about frames of one drag, not
+strokes. So the chain grows a grab per stroke and the declared Lipschitz
+multiplies with it:
+
+| 100 independent drags | chain | `safe_step_scale` | consolidations | total |
+|---|---:|---:|---:|---:|
+| policy off, 10 drags | 10 | 0.848 | 0 | 1.9 ms |
+| policy off, 100 drags | 100 | 0.191 | 0 | 122 ms |
+| policy on, 100 drags | **4** | **0.540** | 7 | 1,021 ms |
+
+The chain is **held**, not merely dented, and the safe step ends nearly three
+times better than the unbounded run. What it costs is visible in the same row:
+1,021 ms against 122 ms for the same hundred drags, because seven bakes
+happened. That is the trade the opt-in exists to let a host decline, and it is
+why nothing here fires without `allow_consolidation`.
+
+This table is also the one that caught a bug in review, which is the argument
+for measuring a policy rather than reasoning about it. The post-stroke check
+originally skipped on `consolidation_state` alone — "the layer is already one
+volume item, nothing to collapse". Consolidating *makes* that true forever
+after, so the policy fired once and never again while later drags stacked grabs
+on the volume item: the run ended at a chain of 58 and 0.221 with one
+consolidation. A volume item carrying a deformer chain is not "already
+collapsed" — a bake absorbs those grabs into the samples — and only an empty
+chain means there is nothing left to do, which is exactly the state Smooth's
+own commit leaves behind.
+
 ## What does not fit, and by how much
 
 Only three things miss, and one of them is not in the gate at all.

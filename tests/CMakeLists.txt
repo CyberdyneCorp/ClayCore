@@ -80,6 +80,7 @@ add_executable(clay_unit_tests
   unit/test_mesh_import.cpp
   unit/test_c_volume.cpp
   unit/test_relax.cpp
+  unit/test_sdf_sculpt.cpp
   unit/test_flatten.cpp
   unit/test_snakehook.cpp
   unit/test_magnify.cpp
@@ -87,6 +88,7 @@ add_executable(clay_unit_tests
   unit/test_move_brush.cpp
   unit/test_move_topological.cpp
   unit/test_c_move_brush.cpp
+  unit/test_c_sdf_sculpt.cpp
   unit/test_relief.cpp
   unit/test_mask_brush.cpp
   unit/test_masked_combine.cpp

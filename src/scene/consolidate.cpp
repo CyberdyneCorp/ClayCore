@@ -369,28 +369,63 @@ bool install_bake(Document& doc, LayerId layer_id, const std::vector<NodeId>& ab
     return run(Command{AddNodeCmd{layer_id, parent, index, std::vector<Node>{std::move(baked)}}});
 }
 
+namespace {
+
+// The roots a bake would absorb, or nothing when there is no layer to bake.
+//
+// Hidden roots are left alone. They contribute nothing to the field, so
+// absorbing them would discard their parameters in exchange for nothing — and
+// the artist hid them precisely to come back to them.
+//
+// The protection check lives here so it happens BEFORE the bake, not after: a
+// locked layer should not cost a full resampling to say no. apply() refuses it
+// again on the way through, which is what keeps protection a property of the
+// command rather than of an entry point.
+bool absorbable_roots(const Document& doc, LayerId layer_id, std::vector<NodeId>* out) {
+    const Layer* layer = doc.find_layer(layer_id);
+    if (!layer || layer->kind != LayerKind::Sdf || !layer->sdf) return false;
+    if (layer->protected_from_edits()) return false;
+    for (NodeId id : layer->sdf->roots) {
+        const Node* n = layer->sdf->find(id);
+        if (n && n->visible) out->push_back(id);
+    }
+    return !out->empty();
+}
+
+}  // namespace
+
+bool replace_layer_with_volume(Document& doc, LayerId layer_id, field::FieldVolume volume,
+                               UndoStack* undo, ConsolidationCost* out_cost) {
+    std::vector<NodeId> absorb;
+    if (!absorbable_roots(doc, layer_id, &absorb)) return false;
+    // Reported from the volume that is about to be installed, so a caller that
+    // computed its own gets the same numbers a bake would have handed it.
+    if (out_cost) fill_cost(volume, *out_cost);
+
+    auto run = [&doc, undo](const Command& cmd) {
+        if (undo) return undo->perform(doc, cmd);
+        return scene::apply(doc, cmd).has_value();
+    };
+
+    // The sever and the bake go into ONE group, so a single undo puts back both
+    // the items that were absorbed and the sharing that was severed. Nested
+    // inside a caller's own group this collapses into it rather than opening a
+    // second step — see UndoStack::begin_group — which is what lets a sculpt
+    // transaction commit its stroke and consolidate it as one undo.
+    if (undo) undo->begin_group();
+    const bool added = install_bake(doc, layer_id, absorb, std::move(volume), run);
+    if (undo) undo->end_group();
+    return added;
+}
+
 bool consolidate_layer(Document& doc, LayerId layer_id, const ConsolidationParams& params,
                        UndoStack* undo, ConsolidationCost* out_cost,
                        const BakePointEval& point_eval, parallel::CancelToken* token,
                        bool* out_cancelled) {
     if (out_cancelled) *out_cancelled = false;
-    const Layer* layer = doc.find_layer(layer_id);
-    if (!layer || layer->kind != LayerKind::Sdf || !layer->sdf) return false;
-    // Checked before the bake, not after: a locked layer should not cost a
-    // full resampling to say no. apply() refuses it again on the way through,
-    // which is what keeps protection a property of the command rather than of
-    // this entry point.
-    if (layer->protected_from_edits()) return false;
-
-    // Hidden roots are left alone. They contribute nothing to the field, so
-    // absorbing them would discard their parameters in exchange for nothing —
-    // and the artist hid them precisely to come back to them.
     std::vector<NodeId> absorb;
-    for (NodeId id : layer->sdf->roots) {
-        const Node* n = layer->sdf->find(id);
-        if (n && n->visible) absorb.push_back(id);
-    }
-    if (absorb.empty()) return false;
+    if (!absorbable_roots(doc, layer_id, &absorb)) return false;
+    const Layer* layer = doc.find_layer(layer_id);
 
     std::optional<field::FieldVolume> volume =
         bake_layer(*layer, params, out_cost, point_eval, token);
@@ -402,17 +437,9 @@ bool consolidate_layer(Document& doc, LayerId layer_id, const ConsolidationParam
     }
     if (!volume) return false;
 
-    auto run = [&doc, undo](const Command& cmd) {
-        if (undo) return undo->perform(doc, cmd);
-        return scene::apply(doc, cmd).has_value();
-    };
-
-    // The sever and the bake go into ONE group, so a single undo puts back both
-    // the items that were absorbed and the sharing that was severed.
-    if (undo) undo->begin_group();
-    const bool added = install_bake(doc, layer_id, absorb, std::move(*volume), run);
-    if (undo) undo->end_group();
-    return added;
+    // `out_cost` is already filled by the bake, from the same volume, so the
+    // installer is not asked for it a second time.
+    return replace_layer_with_volume(doc, layer_id, std::move(*volume), undo, nullptr);
 }
 
 bool consolidation_state(const Layer& layer, ConsolidationCost* out_cost) {

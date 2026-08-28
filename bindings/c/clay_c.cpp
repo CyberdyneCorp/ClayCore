@@ -60,6 +60,7 @@
 #include "clay/scene/curve.h"
 #include "clay/scene/tape.h"
 #include "clay/session/history.h"
+#include "clay/session/sdf_sculpt.h"
 #include "clay/version.h"
 #include "clay/voxel/grid.h"
 #include "clay/voxel/groups.h"
@@ -5455,6 +5456,303 @@ clay_result clay_layer_move_surface_preview(const clay_document* doc, clay_layer
         out_nodes[i] = warps[i].node;
     return CLAY_OK;
 }
+
+// -- transient SDF sculpt transactions (sdf-sculpt-transaction spec) ----------
+//
+// See clay.h for the shape and why the two verbs need it. The handles below own
+// a session transaction and BORROW the document, exactly as the header says.
+
+struct clay_sdf_smooth_tx {
+    clay_document* doc = nullptr;
+    std::optional<session::SdfSmoothTransaction> tx;
+};
+
+struct clay_sdf_move_tx {
+    clay_document* doc = nullptr;
+    std::optional<session::SdfMoveTransaction> tx;
+};
+
+// Defined further down, beside the other relax entry points; declared here so
+// the live Smooth reads its dab exactly as clay_item_volume_relax reads one.
+static clay_result read_relax_settings(const clay_relax_params* params,
+                                       field::RelaxSettings* out);
+
+namespace {
+
+constexpr std::size_t kSculptPolicyOriginal =
+    offsetof(clay_sculpt_policy, allow_consolidation) + sizeof(std::int32_t);
+constexpr std::size_t kSculptDirtyOriginal =
+    offsetof(clay_sculpt_dirty, has_bounds) + sizeof(std::int32_t);
+constexpr std::size_t kSculptBudgetOriginal =
+    offsetof(clay_sculpt_budget, item_count) + sizeof(std::int32_t);
+
+clay_result read_sculpt_policy(const clay_sculpt_policy* policy, session::SdfSculptPolicy* out) {
+    // A null policy is a gesture with no budget and no sampling of its own,
+    // which is meaningful for Move and refused for Smooth by the cell check.
+    if (!policy) {
+        *out = session::SdfSculptPolicy{};
+        return CLAY_OK;
+    }
+    clay_sculpt_policy p;
+    clay_result r = read_desc(policy, kSculptPolicyOriginal, &p);
+    if (r != CLAY_OK) return r;
+    session::SdfSculptPolicy sp;
+    sp.cell_size = p.cell_size;
+    sp.band = p.band;
+    sp.padding = p.padding;
+    sp.complexity.min_safe_step_scale = p.min_safe_step_scale;
+    sp.complexity.max_deformer_chain = p.max_deformer_chain;
+    sp.complexity.max_item_count = p.max_item_count;
+    sp.complexity.allow_consolidation = p.allow_consolidation != 0;
+    // The consolidation, if it is authorised, resamples at the gesture's own
+    // resolution: the ABI has no nested descriptors, and inventing a second
+    // cell size for a host to get out of step with would be worse than reusing
+    // the one it already chose for this sculpt mode.
+    *out = sp;
+    return CLAY_OK;
+}
+
+// The out-descriptors, through write_desc so an older caller's buffer is not
+// overrun -- the natural `*out = clay_thing{}` spelling does exactly that.
+clay_result write_dirty(const session::SdfSculptDirty& dirty, clay_sculpt_dirty* out) {
+    clay_sculpt_dirty probe;
+    clay_result r = read_desc(out, kSculptDirtyOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    clay_sculpt_dirty value{};
+    value.struct_size = sizeof(clay_sculpt_dirty);
+    value.touched_bricks = static_cast<std::uint64_t>(dirty.touched_bricks);
+    value.changed = dirty.changed ? 1 : 0;
+    value.has_bounds = dirty.bounds.empty() ? 0 : 1;
+    if (value.has_bounds) {
+        value.bounds_min[0] = dirty.bounds.min.x;
+        value.bounds_min[1] = dirty.bounds.min.y;
+        value.bounds_min[2] = dirty.bounds.min.z;
+        value.bounds_max[0] = dirty.bounds.max.x;
+        value.bounds_max[1] = dirty.bounds.max.y;
+        value.bounds_max[2] = dirty.bounds.max.z;
+    }
+    write_desc(out, out->struct_size, value);
+    return CLAY_OK;
+}
+
+clay_result write_budget(const session::SdfSculptBudget& budget, clay_sculpt_budget* out) {
+    clay_sculpt_budget probe;
+    clay_result r = read_desc(out, kSculptBudgetOriginal, &probe);
+    if (r != CLAY_OK) return r;
+    clay_sculpt_budget value{};
+    value.struct_size = sizeof(clay_sculpt_budget);
+    value.over_budget = budget.over_budget ? 1 : 0;
+    value.consolidated = budget.consolidated ? 1 : 0;
+    value.lipschitz = budget.report.lipschitz;
+    value.safe_step_scale = budget.report.safe_step_scale;
+    value.steepest_volume = budget.report.steepest_volume;
+    value.longest_deformer_chain = budget.report.longest_deformer_chain;
+    value.item_count = budget.report.item_count;
+    write_desc(out, out->struct_size, value);
+    return CLAY_OK;
+}
+
+// What a committed transaction owes the document handle: the history learns how
+// many entries appeared on the wrapped stack, and every cache keyed on the
+// revision is dropped. Consolidation has done exactly this since it landed --
+// both perform commands through the stack directly rather than through the
+// per-command funnel.
+void settle_commit(clay_document* doc) {
+    if (doc->undo) doc->undo->sync_scene_steps();
+    doc->touch();
+}
+
+}  // namespace
+
+clay_sdf_smooth_tx* clay_sdf_smooth_begin(clay_document* doc, clay_layer_id layer,
+                                          const clay_sculpt_policy* policy,
+                                          clay_cancel_token* token) {
+    if (!doc || !policy) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or policy");
+        return nullptr;
+    }
+    session::SdfSculptPolicy sp;
+    if (read_sculpt_policy(policy, &sp) != CLAY_OK) return nullptr;
+    if (!(sp.cell_size > 0.0f)) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "cell_size must be > 0");
+        return nullptr;
+    }
+    std::optional<session::SdfSmoothTransaction> tx = session::SdfSmoothTransaction::begin(
+        doc->doc.document, layer, sp, eval::pooled_bake_eval(),
+        token ? &token->token : nullptr);
+    if (!tx) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT,
+             "cannot smooth this layer: it is missing, not an SDF layer, protected, or its "
+             "field is empty or unbounded");
+        return nullptr;
+    }
+    auto* handle = new clay_sdf_smooth_tx();
+    handle->doc = doc;
+    handle->tx = std::move(tx);
+    return handle;
+}
+
+clay_result clay_sdf_smooth_update(clay_sdf_smooth_tx* tx, const clay_relax_params* params,
+                                   clay_cancel_token* token, clay_sculpt_dirty* out_dirty) {
+    if (!tx || !params) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transaction or params");
+    if (!tx->tx || !tx->tx->live())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this transaction is spent");
+    field::RelaxSettings settings;
+    clay_result r = read_relax_settings(params, &settings);
+    if (r != CLAY_OK) return r;
+    const session::SdfSculptDirty dirty =
+        tx->tx->update(settings, token ? &token->token : nullptr);
+    if (out_dirty) return write_dirty(dirty, out_dirty);
+    return CLAY_OK;
+}
+
+clay_result clay_sdf_smooth_preview_item(const clay_sdf_smooth_tx* tx, clay_item** out_item) {
+    if (!tx || !out_item) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transaction or out");
+    *out_item = nullptr;
+    if (!tx->tx || !tx->tx->live())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this transaction is spent");
+    auto* item = new clay_item();
+    item->node.prim = scene::Prim::volume();
+    item->node.volume = std::make_shared<field::FieldVolume>(tx->tx->preview_volume());
+    *out_item = item;
+    return CLAY_OK;
+}
+
+clay_result clay_sdf_smooth_commit(clay_sdf_smooth_tx* tx, clay_sculpt_budget* out_budget) {
+    if (!tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transaction");
+    if (!tx->tx || !tx->tx->live())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this transaction is spent");
+    scene::UndoStack* stack = tx->doc->undo ? tx->doc->undo->commands() : nullptr;
+    if (!tx->tx->commit(stack))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the layer changed since this stroke began, so the preview was discarded "
+                    "rather than written over the newer edit");
+    settle_commit(tx->doc);
+    if (out_budget) return write_budget(tx->tx->budget(), out_budget);
+    return CLAY_OK;
+}
+
+void clay_sdf_smooth_cancel(clay_sdf_smooth_tx* tx) {
+    if (tx && tx->tx) tx->tx->cancel();
+}
+
+void clay_sdf_smooth_destroy(clay_sdf_smooth_tx* tx) {
+    // Destroying without committing IS a cancel, which is what makes an error
+    // path that simply drops the handle safe. Nothing persistent was written,
+    // so there is nothing to unwind.
+    delete tx;
+}
+
+clay_sdf_move_tx* clay_sdf_move_begin(clay_document* doc, clay_layer_id layer,
+                                      const float centre[3], const clay_move_params* params,
+                                      const clay_sculpt_policy* policy) {
+    if (!doc || !centre || !params) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "null document, centre or move parameters");
+        return nullptr;
+    }
+    clay_move_params p;
+    if (read_desc(params, kMoveParamsOriginal, &p) != CLAY_OK) return nullptr;
+    if (!(p.radius > 0.0f)) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT, "radius must be > 0");
+        return nullptr;
+    }
+    if (check_ease(p.ease) != CLAY_OK) return nullptr;
+    session::SdfSculptPolicy sp;
+    if (read_sculpt_policy(policy, &sp) != CLAY_OK) return nullptr;
+
+    brush::MoveSettings settings;
+    settings.radius = p.radius;
+    settings.ease = static_cast<std::uint8_t>(p.ease);
+    settings.front_only = p.front_only != 0;
+
+    std::optional<session::SdfMoveTransaction> tx = session::SdfMoveTransaction::begin(
+        doc->doc.document, layer, kernel::cf3(centre[0], centre[1], centre[2]), settings, sp,
+        eval::pooled_bake_eval());
+    if (!tx) {
+        fail(CLAY_ERROR_INVALID_ARGUMENT,
+             "cannot drag this layer: it is missing, not an SDF layer, or protected");
+        return nullptr;
+    }
+    auto* handle = new clay_sdf_move_tx();
+    handle->doc = doc;
+    handle->tx = std::move(tx);
+    return handle;
+}
+
+clay_result clay_sdf_move_update(clay_sdf_move_tx* tx, const float total_displacement[3],
+                                 clay_sculpt_dirty* out_dirty) {
+    if (!tx || !total_displacement)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transaction or displacement");
+    if (!tx->tx || !tx->tx->live())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this transaction is spent");
+    const session::SdfSculptDirty dirty =
+        tx->tx->update(kernel::cf3(total_displacement[0], total_displacement[1],
+                                   total_displacement[2]));
+    if (out_dirty) return write_dirty(dirty, out_dirty);
+    return CLAY_OK;
+}
+
+clay_result clay_sdf_move_preview_nodes(const clay_sdf_move_tx* tx, clay_node_id* out_nodes,
+                                        size_t capacity, size_t* out_count) {
+    if (!tx || !out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transaction or count");
+    if (!tx->tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "this transaction is spent");
+    const std::vector<scene::NodeId>& ids = tx->tx->affected_nodes();
+    *out_count = ids.size();
+    if (!out_nodes) return CLAY_OK;  // the size query
+    if (capacity < ids.size())
+        return fail(CLAY_ERROR_BUFFER_TOO_SMALL,
+                    "buffer holds " + std::to_string(capacity) + " of " +
+                        std::to_string(ids.size()) + " affected nodes");
+    for (std::size_t i = 0; i < ids.size(); ++i)
+        out_nodes[i] = static_cast<clay_node_id>(ids[i]);
+    return CLAY_OK;
+}
+
+clay_result clay_sdf_move_preview_grab(const clay_sdf_move_tx* tx, clay_node_id node,
+                                       float out_centre[3], float* out_radius,
+                                       float out_displacement[3], int32_t* out_ease,
+                                       int32_t* out_front_only) {
+    if (!tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transaction");
+    if (!tx->tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "this transaction is spent");
+    scene::Deformer grab;
+    if (!tx->tx->preview_grab(static_cast<scene::NodeId>(node), &grab))
+        return fail(CLAY_ERROR_NOT_FOUND,
+                    "node " + std::to_string(node) + " is not one this drag reaches");
+    if (out_centre) {
+        out_centre[0] = grab.k;
+        out_centre[1] = grab.a;
+        out_centre[2] = grab.b;
+    }
+    if (out_radius) *out_radius = grab.c;
+    if (out_displacement) {
+        out_displacement[0] = grab.ext[0];
+        out_displacement[1] = grab.ext[1];
+        out_displacement[2] = grab.ext[2];
+    }
+    if (out_ease) *out_ease = static_cast<std::int32_t>(grab.ease);
+    if (out_front_only) *out_front_only = grab.ext[3] != 0.0f ? 1 : 0;
+    return CLAY_OK;
+}
+
+clay_result clay_sdf_move_commit(clay_sdf_move_tx* tx, clay_sculpt_budget* out_budget) {
+    if (!tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transaction");
+    if (!tx->tx || !tx->tx->live())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT, "this transaction is spent");
+    scene::UndoStack* stack = tx->doc->undo ? tx->doc->undo->commands() : nullptr;
+    if (!tx->tx->commit(stack))
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "the layer changed since this drag began, so the preview was discarded "
+                    "rather than written over the newer edit");
+    settle_commit(tx->doc);
+    if (out_budget) return write_budget(tx->tx->budget(), out_budget);
+    return CLAY_OK;
+}
+
+void clay_sdf_move_cancel(clay_sdf_move_tx* tx) {
+    if (tx && tx->tx) tx->tx->cancel();
+}
+
+void clay_sdf_move_destroy(clay_sdf_move_tx* tx) { delete tx; }
 
 clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
                                     const float centre[3], const float displacement[3],

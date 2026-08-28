@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-08-28
+goal: Give a FIELD and a DEFORMATION brush the gesture lifetime an edit-list
+  brush does not need, so Smooth previews live and a Move drag writes the
+  document once

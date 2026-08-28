@@ -40,6 +40,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "clay/math/transform.h"
 #include "clay/scene/document.h"
 #include "clay/scene/types.h"
 
@@ -62,6 +63,66 @@ struct MoveWarp {
     scene::NodeId node = scene::kNoNode;
     scene::Deformer deformer;
 };
+
+// One affected item's share of a drag, resolved as far as it can be BEFORE the
+// displacement is known.
+//
+// A drag holds its anchor and its radius fixed for the whole gesture and only
+// grows the displacement. Everything that depends on the anchor and the radius
+// — which items the drag reaches, where its centre lands in each item's own
+// frame, what its radius becomes there — is therefore decided once, at pointer
+// down, and only the displacement is per frame. Without this a live drag walks
+// the entire SDF tree once per pointer event to rediscover an answer that
+// cannot have changed.
+//
+// The transform data is kept as the terms `move_brush` already divides and
+// rotates by, not as pre-inverted equivalents: a reciprocal multiplied is not a
+// division, and a preview that differs from its commit in the last bits is a
+// preview of something else.
+struct PreparedMove {
+    scene::NodeId node = scene::kNoNode;
+
+    // The anchor and the reach in this item's own scaled-local frame.
+    kernel::cfloat3 local_centre = kernel::cf3(0, 0, 0);
+    float local_radius = 0.0f;
+
+    // What turns a world DISPLACEMENT into this item's local one: the rotation
+    // and the scale, but not the translation, and the per-axis scale last
+    // because it is innermost.
+    math::Quat inverse_rotation = math::Quat::identity();
+    float world_scale = 1.0f;
+    kernel::cfloat3 scale_axes = kernel::cf3(1.0f, 1.0f, 1.0f);
+
+    std::uint8_t ease = 0;
+    bool front_only = false;
+};
+
+// What preparing a drag walked, so a scaling test has a number that does not
+// depend on how fast the machine is. `visited` is the whole point: it is what
+// must stay put per FRAME once preparation has happened, and it is what grows
+// with unrelated model if a live drag is still traversing the tree.
+struct MovePrepareStats {
+    std::size_t visited = 0;  // nodes the traversal looked at, groups included
+    std::size_t reached = 0;  // of those, the items the drag can actually reach
+};
+
+// The half of a drag that does not depend on how far it has gone: which items
+// it reaches, and their frames. Empty for a non-positive radius or a layer with
+// no edit list, exactly as `move_brush` is.
+std::vector<PreparedMove> prepare_move(const scene::Layer& layer, kernel::cfloat3 world_centre,
+                                       const MoveSettings& settings = {},
+                                       MovePrepareStats* out_stats = nullptr);
+
+// The other half: the warp for a TOTAL world displacement. O(1), and no scene
+// access at all — which is what makes a live drag cost the items it moves.
+//
+// TOTAL, from the anchor, never an increment on the last frame: a chain of
+// increments composes warps that were each authored against a different
+// intermediate surface, and the result is not the drag the artist made. The
+// same reason `moved_chain` REPLACES a leading grab from the same drag rather
+// than stacking on it.
+MoveWarp resolve_prepared_move(const PreparedMove& prepared,
+                               kernel::cfloat3 total_world_displacement);
 
 // Resolve a world-space drag into the warps that reproduce it on the layer's
 // assembled surface.
@@ -87,6 +148,14 @@ std::vector<MoveWarp> move_brush(const scene::Layer& layer, kernel::cfloat3 worl
 // The chain `node` should end up with: the move first, then whatever was there.
 // One place for the ordering rule, so a caller cannot get it subtly wrong.
 std::vector<scene::Deformer> moved_chain(const scene::Node& node, const MoveWarp& warp);
+
+// The same rule against a CHAIN rather than a node, for a caller holding the
+// pre-stroke chain by value — which a live drag must, since the node in the
+// document is the one thing it has promised not to touch. The overload above
+// is this one applied to `node.deformers`, so there is one ordering rule and
+// not two.
+std::vector<scene::Deformer> moved_chain(const std::vector<scene::Deformer>& chain,
+                                         const MoveWarp& warp);
 
 }  // namespace brush
 }  // namespace clay

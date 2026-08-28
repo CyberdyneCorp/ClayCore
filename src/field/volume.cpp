@@ -705,7 +705,13 @@ FieldVolume::RegionSnapshot FieldVolume::snapshot_region(const Region& region) c
 
 void FieldVolume::rewrite_region(const Region& region,
                                  const std::function<float(int, int, int, float)>& fn) {
-    if (empty() || region.box.empty()) return;
+    rewrite_region_tallied(region, fn);
+}
+
+FieldVolume::RewriteTally FieldVolume::rewrite_region_tallied(
+    const Region& region, const std::function<float(int, int, int, float)>& fn) {
+    RewriteTally tally;
+    if (empty() || region.box.empty()) return tally;
     const int n = kBrickDim + 1;
     const float brick = static_cast<float>(kBrickDim) * cell_size_;
 
@@ -717,7 +723,7 @@ void FieldVolume::rewrite_region(const Region& region,
     // generous selection cannot break.
     int lo[3], hi[3];
     if (!region_brick_range(origin_, bcount_, brick, region.box, lo, hi))
-        return;  // nothing meets it
+        return tally;  // nothing meets it
 
     for (int bz = lo[2]; bz <= hi[2]; ++bz)
         for (int by = lo[1]; by <= hi[1]; ++by)
@@ -729,15 +735,25 @@ void FieldVolume::rewrite_region(const Region& region,
                 // The brush is a ball; the brick range is a box around it. A
                 // brick the ball cannot reach holds only samples the operator
                 // is required to leave alone, so skipping it is the identity.
-                if (!region.meets(brick_box_of(origin_, cell_size_, bx, by, bz))) continue;
+                const math::Aabb box = brick_box_of(origin_, cell_size_, bx, by, bz);
+                if (!region.meets(box)) continue;
+                ++tally.touched_bricks;
+                tally.bounds.expand(box);
                 for (int i = 0; i < kBrickSamples; ++i) {
                     const int lx = i % n, ly = (i / n) % n, lz = i / (n * n);
                     const std::size_t at =
                         static_cast<std::size_t>(entry) + static_cast<std::size_t>(i);
-                    data_[at] = fn(bx * kBrickDim + lx, by * kBrickDim + ly,
-                                   bz * kBrickDim + lz, data_[at]);
+                    const float was = data_[at];
+                    const float now = fn(bx * kBrickDim + lx, by * kBrickDim + ly,
+                                         bz * kBrickDim + lz, was);
+                    // Compared rather than assumed: a dab whose weight came out
+                    // zero everywhere still selects its bricks, and a host told
+                    // it had something to redraw would redraw nothing.
+                    if (now != was) tally.changed = true;
+                    data_[at] = now;
                 }
             }
+    return tally;
 }
 
 // The bricks that meet `region`, in ascending slot order, with `fill`'s block

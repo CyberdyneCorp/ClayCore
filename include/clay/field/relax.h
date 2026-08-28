@@ -70,6 +70,43 @@ struct RelaxSettings {
     MaskGate mask;
 };
 
+// What one relax touched, for a caller holding a preview of the volume it
+// relaxed. See FieldVolume::RewriteTally for why the bounds and the count are
+// geometric while `changed` is not.
+struct RelaxResult {
+    math::Aabb dirty_bounds;
+    std::size_t touched_bricks = 0;
+    bool changed = false;
+    // Set when `token` fired. The checkpoint is the PASS boundary, so a
+    // cancelled call has applied some number of whole passes and no fraction
+    // of one — there is no half-written state to inspect or to discard.
+    bool cancelled = false;
+};
+
+// Smooth `volume` IN PLACE.
+//
+// The same algorithm as `relax` below with different ownership, and that is
+// the whole of the difference. `relax` begins by copying its input, which is
+// right for a standalone operation and wrong for a live gesture: a Smooth
+// stroke already owns a private working volume, so building a second complete
+// result object per dab puts a term that scales with the MODEL back into a dab
+// that was made to scale with itself.
+//
+// CANCELLATION cannot mean "hand back the input" here, because there is no
+// input to hand back — the caller's volume IS the working state. What it means
+// instead is the strongest thing an in-place operator can promise: the check
+// sits between whole passes, so every pass is applied entirely or not at all,
+// and `cancelled` says a later pass was not run. A live transaction keeps the
+// passes it paid for; a standalone `relax` discards the lot, which is what it
+// has always done.
+//
+// The band is narrowed by what the COMPLETED passes could have moved the
+// surface, not by what all of them would have: a cancelled relax that shrank
+// the band for work it never did would understate the distance a sample-free
+// brick reports, which is the one direction a bound may not be wrong in.
+RelaxResult relax_in_place(FieldVolume& volume, const RelaxSettings& settings = {},
+                           parallel::CancelToken* token = nullptr);
+
 // Smooth `v`, returning a new volume sampled over the same region at the same
 // resolution. The input is not modified.
 FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings = {},

@@ -79,11 +79,12 @@ float mask_gate(const MaskGate& mask, cfloat3 p) {
 
 }  // namespace
 
-FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings,
-                  parallel::CancelToken* token) {
-    if (v.empty()) return v;
+RelaxResult relax_in_place(FieldVolume& volume, const RelaxSettings& settings,
+                           parallel::CancelToken* token) {
+    RelaxResult result;
+    if (volume.empty()) return result;
 
-    const float cell = v.cell_size();
+    const float cell = volume.cell_size();
     const float strength = std::clamp(settings.strength, 0.0f, 1.0f);
     const int iterations = std::max(1, settings.iterations);
     const int radius = std::max(1, settings.radius_cells);
@@ -105,14 +106,21 @@ FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings,
         region_bounds = FieldVolume::Region::ball(tuned.centre,
                                                   tuned.region_radius + tuned.falloff);
 
-    FieldVolume current = v;
+    FieldVolume& current = volume;
     // The checkpoint is the pass boundary, which is the granularity that
     // already exists: relax is `iterations` sweeps of the whole band, so a
-    // check per pass costs one relaxed load per sweep. A partially-relaxed
-    // volume is discarded by the caller, not returned.
+    // check per pass costs one relaxed load per sweep. That granularity is now
+    // a CONTRACT rather than a convenience -- an in-place operator has no input
+    // to hand back, so "whole passes only" is the strongest thing it can
+    // promise, and it is what `RelaxResult::cancelled` reports. The copying
+    // `relax` below still discards the lot, which is what it always did.
     parallel::ProgressScope progress(token, static_cast<std::uint32_t>(iterations));
+    int completed = 0;
     for (int pass = 0; pass < iterations; ++pass) {
-        if (parallel::cancelled(token)) return v;  // unchanged: the input copy
+        if (parallel::cancelled(token)) {
+            result.cancelled = true;
+            break;  // whole passes only: nothing is half-written to unwind
+        }
         progress.phase(static_cast<std::uint32_t>(pass));
         // The pass's INPUT, for the bricks the pass will overwrite. Copying the
         // whole volume for that -- which is what this was -- costs six
@@ -178,8 +186,32 @@ FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings,
         // sample inside the region may read neighbours outside it freely. What
         // the region bounds is where values CHANGE, and that is exactly where
         // the weight is non-zero, on this pass and on every later one.
-        if (region_bounds) current.rewrite_region(*region_bounds, blend);
-        else current.rewrite(blend);
+        if (region_bounds) {
+            const FieldVolume::RewriteTally tally =
+                current.rewrite_region_tallied(*region_bounds, blend);
+            result.dirty_bounds.expand(tally.bounds);
+            // The same region every pass selects the same bricks, so this is
+            // the pass's count rather than a sum over passes -- which is what a
+            // host invalidating a preview and a scaling test both want.
+            result.touched_bricks = std::max(result.touched_bricks, tally.touched_bricks);
+            result.changed = result.changed || tally.changed;
+        } else {
+            // The unregioned path is a FILTER over the whole volume, and
+            // `rewrite` has no tally to give because there is no selection to
+            // report: everything stored is written. The dirty region is the
+            // volume, and whether anything moved is the one question left.
+            bool moved = false;
+            auto watched = [&blend, &moved](int gx, int gy, int gz, float old) {
+                const float now = blend(gx, gy, gz, old);
+                if (now != old) moved = true;
+                return now;
+            };
+            current.rewrite(watched);
+            result.dirty_bounds.expand(current.bounds());
+            result.touched_bricks = current.brick_count();
+            result.changed = result.changed || moved;
+        }
+        ++completed;
     }
 
     // Smoothing MOVES the surface, and the sample-free bricks were classified
@@ -187,8 +219,25 @@ FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings,
     // distance to the surface that is there now, which is the one thing a
     // bound may never do. A pass cannot move it further than the kernel
     // reaches, so that is the margin.
-    current.shrink_band(static_cast<float>(radius) * cell * static_cast<float>(iterations));
-    return current;
+    // ...by what the passes that RAN could have moved it. A cancelled relax
+    // that narrowed the band for passes it never made would leave the empty
+    // bricks claiming less than the truth, and understating a distance is the
+    // one direction the bound may not err in.
+    current.shrink_band(static_cast<float>(radius) * cell * static_cast<float>(completed));
+    return result;
+}
+
+FieldVolume relax(const FieldVolume& v, const RelaxSettings& settings,
+                  parallel::CancelToken* token) {
+    if (v.empty()) return v;
+    FieldVolume out = v;
+    // A standalone relax still hands back the INPUT on a cancel, which is what
+    // it has always done and what its callers are written against: the volume
+    // is the return value, so there is no half-relaxed thing for them to hold.
+    // The in-place form cannot offer that, and does not have to -- a
+    // transaction keeps the passes it paid for. Same algorithm, two ownerships.
+    if (relax_in_place(out, settings, token).cancelled) return v;
+    return out;
 }
 
 FieldVolume relax(const std::function<float(kernel::cfloat3)>& source, const math::Aabb& region,
