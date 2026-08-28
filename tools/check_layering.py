@@ -81,7 +81,17 @@ ALLOWED = {
     # about session, so there is no cycle. A transaction is not a stroke engine,
     # which is why it does not simply live in brush: its subject is the GESTURE
     # lifetime — begin, update, commit — and that is what `session` is for.
-    "session": {"parallel", "kernel", "math", "scene", "voxel", "mesh", "field", "brush"},
+    # session -> eval is the prefix field cache (add-sdf-prefix-cache): a cached
+    # prefix is only worth having if the suffix that continues it can be
+    # evaluated onto it, and `eval::eval_points_seeded` is the one function that
+    # does that. Free, like the brush edge beside it: eval's own set
+    # {parallel, kernel, math, scene, field} is already a subset of session's,
+    # and nothing in eval includes session. It is also the ordinary shape for a
+    # module at this height -- mesh, pick and io all depend on eval, and
+    # src/mesh reaches the backend registry exactly as this does. The INJECTION
+    # pattern (scene::BakePointEval) exists for the opposite case, a module
+    # BELOW eval that must not name it; session is above.
+    "session": {"parallel", "kernel", "math", "scene", "voxel", "mesh", "field", "brush", "eval"},
     "io": {"parallel", "kernel", "math", "scene", "eval", "brick", "voxel", "mesh", "field",
            "session"},
 }

@@ -34,6 +34,7 @@ add_library(claycore
   src/voxel/hide.cpp
   src/session/history.cpp
   src/session/sdf_sculpt.cpp
+  src/session/sdf_prefix_cache.cpp
   src/scene/bounds.cpp
   src/scene/cull_index.cpp
   src/scene/curve.cpp
