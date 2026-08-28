@@ -135,7 +135,36 @@ inline constexpr std::uint16_t kClaySpaceMajor = 1;
 // group AND every hidden flag, so a region an artist had put away comes back
 // visible. That is the safe direction — geometry reappearing is recoverable and
 // obvious, geometry silently staying hidden is neither.
-inline constexpr std::uint16_t kClaySpaceMinor = 14;
+//
+// Minor 14 adds an item's per-axis scale, which is a SCENE PAYLOAD change —
+// see scene::kSceneMinor.
+//
+// Minor 15 adds a layer record's CONTENT SOURCE, and it is a scene payload
+// change too: one layer id in every layer record, before the content, 0 for
+// "the content follows" and any other id for "share that layer's edit list,
+// and nothing follows here". It is what lets an INSTANCE layer — several
+// layers over one shared edit list, each with its own transform — be written
+// once instead of once per instance. Ten instances of a blockout were ten
+// copies in the file and are now one, which is also the accounting
+// io::layer_memory promises and could not previously keep across a save.
+//
+// So it is the shape of minors 7, 8, 11 and 14 rather than of 13: a field
+// inside a back-to-back record, not a new chunk. A build that predates 15
+// reading a 15 document is one layer id long on the first record and
+// desynchronised for every record after it, and FAILS — the reader's bounds
+// and element-count checks reject the stream rather than misread it.
+//
+// Writing AT minor 14 or below is the way to hand such a document to an older
+// build, and what it drops is exactly the sharing: every layer goes out with
+// its own copy of the content, so the ten instances open as ten independent
+// layers. The shapes are all there and every one of them evaluates as it did;
+// what is lost is that they were the same subtool — an edit through one no
+// longer reaches the others, and the document is ten times the edit list it
+// was. An older build SAVING such a document back keeps them independent, so
+// reopening it here does not restore the link. That is the recoverable
+// direction: duplicated geometry is visible and re-instanceable, whereas a
+// silently dropped layer would not be.
+inline constexpr std::uint16_t kClaySpaceMinor = 15;
 
 // The document bundle a .clayspace file holds. Voxel layer content is keyed
 // by layer id (the scene module stays voxel-agnostic by layering rule).

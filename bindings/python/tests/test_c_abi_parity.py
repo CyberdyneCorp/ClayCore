@@ -75,6 +75,24 @@ class MeshLayerDesc(ctypes.Structure):
     ]
 
 
+class LayerInfo(ctypes.Structure):
+    """The 0.58.0 layout: content_source and share_count were appended to the
+    output descriptor, so a ctypes host that declares the whole struct receives
+    them and one that declares the older prefix does not."""
+
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32),
+        ("id", ctypes.c_uint32),
+        ("representation", ctypes.c_int32),
+        ("stack_index", ctypes.c_int32),
+        ("visible", ctypes.c_int32),
+        ("ghost", ctypes.c_int32),
+        ("locked", ctypes.c_int32),
+        ("content_source", ctypes.c_uint32),
+        ("share_count", ctypes.c_uint32),
+    ]
+
+
 def find_shared_library():
     start = Path(clay.__file__).resolve().parent
     names = ("libclay_shared.so", "libclay_shared.dylib", "clay_shared.dll")
@@ -131,6 +149,18 @@ def lib():
                                         ctypes.POINTER(ctypes.c_uint32),
                                         ctypes.POINTER(ctypes.c_size_t)]
     lib.clay_last_error.restype = ctypes.c_char_p
+    lib.clay_document_instance_layer.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                                 ctypes.c_char_p,
+                                                 ctypes.POINTER(ctypes.c_uint32)]
+    lib.clay_document_layer_info.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                            ctypes.POINTER(LayerInfo)]
+    lib.clay_layer_node_count.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                          ctypes.POINTER(ctypes.c_size_t)]
+    lib.clay_document_set_layer_transform.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                                      f32, f32, ctypes.c_float,
+                                                      ctypes.c_float]
+    lib.clay_eval_points.argtypes = [ctypes.c_void_p, ctypes.c_char_p, f32,
+                                     ctypes.c_size_t, f32, f32]
 
     i32 = ctypes.POINTER(ctypes.c_int32)
     brush_p = ctypes.POINTER(BrushParams)
@@ -960,6 +990,128 @@ def test_mesh_layer_written_by_pyclay_reads_back_through_c(lib, tmp_path):
         assert lib.clay_document_mesh_layer(doc, b"scan", None,
                                             ctypes.byref(again)) == CLAY_OK
         assert lib.clay_mesh_vertex_count(again) == len(TETRA_POSITIONS)
+    finally:
+        lib.clay_document_destroy(doc)
+
+
+# -- instance layers -----------------------------------------------------------
+
+
+def _sphere_item(lib, radius=0.5, position=(0.0, 0.0, 0.0)):
+    item = lib.clay_item_create(0, floats(radius), 1)  # CLAY_PRIM_SPHERE
+    assert item
+    assert lib.clay_item_set_position(item, floats(*position)) == CLAY_OK
+    return item
+
+
+def _layer_info(lib, doc, layer):
+    info = LayerInfo()
+    info.struct_size = ctypes.sizeof(LayerInfo)
+    assert lib.clay_document_layer_info(doc, layer, ctypes.byref(info)) == CLAY_OK
+    return info
+
+
+def test_instance_layer_shares_one_edit_list_over_two_placements(lib):
+    """A duplicate subtool: one edit list, two placements, and an edit through
+    either layer is an edit to both. The C entry point is the only way to make
+    one, so this is also where a ctypes host learns the descriptor grew."""
+    doc = lib.clay_document_create()
+    try:
+        source = ctypes.c_uint32(0)
+        assert lib.clay_add_sdf_layer(doc, b"body", ctypes.byref(source)) == CLAY_OK
+        item = _sphere_item(lib)
+        assert lib.clay_layer_add_item(doc, source.value, item, None) == CLAY_OK
+        lib.clay_item_destroy(item)
+
+        instance = ctypes.c_uint32(0)
+        assert lib.clay_document_instance_layer(doc, source.value, b"bolt",
+                                                ctypes.byref(instance)) == CLAY_OK
+        assert instance.value != source.value
+        assert lib.clay_document_set_layer_transform(
+            doc, instance.value, floats(5.0, 0.0, 0.0), floats(0.0, 1.0, 0.0),
+            0.0, 1.0) == CLAY_OK
+
+        distances = (ctypes.c_float * 3)()
+        assert lib.clay_eval_points(doc, None, floats(0, 0, 0, 5, 0, 0, 2.5, 0, 0), 3,
+                                    distances, None) == CLAY_OK
+        assert distances[0] < 0 and distances[1] < 0, "one item, both placements"
+        assert distances[2] > 0, "and nothing between them"
+
+        # Both ends of the link, which is what a subtool panel draws.
+        assert _layer_info(lib, doc, source.value).content_source == 0
+        assert _layer_info(lib, doc, source.value).share_count == 2
+        assert _layer_info(lib, doc, instance.value).content_source == source.value
+
+        # An edit through the INSTANCE is an edit to the source's list.
+        item = _sphere_item(lib, position=(0.0, 1.2, 0.0))
+        assert lib.clay_layer_add_item(doc, instance.value, item, None) == CLAY_OK
+        lib.clay_item_destroy(item)
+        count = ctypes.c_size_t(0)
+        assert lib.clay_layer_node_count(doc, source.value, ctypes.byref(count)) == CLAY_OK
+        assert count.value == 2
+    finally:
+        lib.clay_document_destroy(doc)
+
+
+def test_instance_layer_survives_a_round_trip_as_a_reference(lib, tmp_path):
+    """Ten instances are one edit list in the file, not ten — the accounting
+    clay_layer_memory promises and could not keep across a save before."""
+    doc = lib.clay_document_create()
+    try:
+        source = ctypes.c_uint32(0)
+        assert lib.clay_add_sdf_layer(doc, b"body", ctypes.byref(source)) == CLAY_OK
+        for i in range(60):
+            item = _sphere_item(lib, position=(0.05 * i, 0.0, 0.0))
+            assert lib.clay_layer_add_item(doc, source.value, item, None) == CLAY_OK
+            lib.clay_item_destroy(item)
+        made = []
+        for i in range(9):
+            layer = ctypes.c_uint32(0)
+            assert lib.clay_document_instance_layer(
+                doc, source.value, f"bolt {i}".encode(), ctypes.byref(layer)) == CLAY_OK
+            made.append(layer.value)
+
+        path = tmp_path / "instances.clayspace"
+        assert lib.clay_document_save(doc, str(path).encode()) == CLAY_OK
+        # One edit list in the file: ten copies of sixty items would be far
+        # larger than a document that holds them once.
+        alone = lib.clay_document_create()
+        try:
+            plain = ctypes.c_uint32(0)
+            assert lib.clay_add_sdf_layer(alone, b"body", ctypes.byref(plain)) == CLAY_OK
+            for i in range(60):
+                item = _sphere_item(lib, position=(0.05 * i, 0.0, 0.0))
+                assert lib.clay_layer_add_item(alone, plain.value, item, None) == CLAY_OK
+                lib.clay_item_destroy(item)
+            one_copy = tmp_path / "one.clayspace"
+            assert lib.clay_document_save(alone, str(one_copy).encode()) == CLAY_OK
+        finally:
+            lib.clay_document_destroy(alone)
+        assert one_copy.stat().st_size > 2000, "a ratio against nothing means nothing"
+        assert path.stat().st_size < one_copy.stat().st_size * 1.5
+
+        back = ctypes.c_void_p(0)
+        assert lib.clay_document_load(str(path).encode(), ctypes.byref(back)) == CLAY_OK
+        try:
+            assert _layer_info(lib, back, made[-1]).content_source == source.value
+            assert _layer_info(lib, back, made[-1]).share_count == 10
+        finally:
+            lib.clay_document_destroy(back)
+    finally:
+        lib.clay_document_destroy(doc)
+
+
+def test_instance_layer_refuses_what_it_cannot_share(lib):
+    doc = lib.clay_document_create()
+    try:
+        source = ctypes.c_uint32(0)
+        assert lib.clay_add_sdf_layer(doc, b"body", ctypes.byref(source)) == CLAY_OK
+        made = ctypes.c_uint32(0)
+        assert lib.clay_document_instance_layer(doc, 4242, b"x",
+                                                ctypes.byref(made)) == CLAY_ERROR_NOT_FOUND
+        assert lib.clay_document_instance_layer(
+            doc, source.value, b"", ctypes.byref(made)) == CLAY_ERROR_INVALID_ARGUMENT
+        assert b"empty" in lib.clay_last_error()
     finally:
         lib.clay_document_destroy(doc)
 

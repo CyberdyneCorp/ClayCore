@@ -2862,6 +2862,15 @@ TailAppend tail_append(const scene::Document& doc, const scene::Command& cmd) {
     if (!add || add->parent != scene::kNoNode || add->index != -1) return {};
     const scene::Layer* l = doc.find_layer(add->layer);
     if (!l || l->kind != scene::LayerKind::Sdf || !l->sdf || l->sdf->roots.empty()) return {};
+    // And no other layer may share this one's content. An append to shared
+    // content grows the edit list of every layer holding it, while the append
+    // fast path is per LAYER: it would extend the cached tape for the layer
+    // named and leave every instance of it stale, so an edit through one
+    // subtool would stop appearing in its duplicates — visibly, and only in
+    // the cached path. Refused the way command_frontier refuses the same
+    // situation below: the legacy region drop, and a full recompile.
+    for (const scene::Layer& other : doc.layers)
+        if (&other != l && other.sdf == l->sdf) return {};
     // roots.back(), not the command's own subtree: this cannot then disagree
     // with what apply() actually did to the list.
     return TailAppend{add->layer, l->sdf->roots.back()};
@@ -4336,6 +4345,46 @@ clay_result clay_layer_node_at(const clay_document* doc, clay_layer_id layer, si
     return CLAY_OK;
 }
 
+clay_result clay_document_instance_layer(clay_document* doc, clay_layer_id source,
+                                         const char* name, clay_layer_id* out_layer) {
+    if (!doc || !name) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or name");
+    // clay_document_set_layer_name's rule, for its reason: an empty name is
+    // what a cleared text field submits.
+    if (!*name) return fail(CLAY_ERROR_INVALID_ARGUMENT, "a layer name may not be empty");
+    const scene::Layer* src = doc->doc.document.find_layer(source);
+    if (!src) return fail(CLAY_ERROR_NOT_FOUND, "source layer not found");
+    // A voxel grid and a mesh live beside the document keyed by layer id, not
+    // behind the shared pointer an instance shares, so instancing one would be
+    // a second kind of sharing with its own memory contract. Refused, and the
+    // message says which kind it found.
+    if (src->kind != scene::LayerKind::Sdf || !src->sdf)
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    std::string("only an SDF layer can be instanced: layer ") +
+                        std::to_string(source) + " is a " +
+                        (src->kind == scene::LayerKind::Voxel ? "voxel" : "mesh") + " layer");
+
+    // The Layer is COPIED, so the instance starts with the source's transform,
+    // visibility, protection, mirror and radial and diverges from there; the
+    // CONTENT is the source's shared_ptr, so nothing proportional to the edit
+    // list is paid here. Through the command vocabulary, exactly as
+    // clay_add_sdf_layer and clay_document_add_voxel_layer do, so an enabled
+    // undo stack records the creation as one step.
+    scene::Layer layer = *src;
+    layer.id = doc->doc.document.reserve_layer_id();
+    layer.name = name;
+    const clay_layer_id id = layer.id;
+    // `content_source` is what makes the share survive the command being
+    // SERIALIZED — into the journal, and through the same layer record the
+    // document format writes. In memory the shared_ptr above is already the
+    // whole story.
+    scene::AddLayerCmd add{std::move(layer), -1, source};
+    clay_result r = apply_edit(doc, scene::Command{std::move(add)},
+                               "the instance layer could not be added");
+    if (r != CLAY_OK) return r;
+    if (out_layer) *out_layer = id;
+    return CLAY_OK;
+}
+
 clay_result clay_document_remove_layer(clay_document* doc, clay_layer_id layer) {
     return apply_edit(doc, scene::Command{scene::RemoveLayerCmd{layer}}, "layer not found");
 }
@@ -4345,6 +4394,14 @@ clay_result clay_document_move_layer(clay_document* doc, clay_layer_id layer, in
     const scene::Layer* found = doc->doc.document.find_layer(layer);
     if (!found) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
     scene::Layer copy = *found;
+    // Which layer the reinsertion NAMES as its content source, taken before
+    // the remove while the sharer is still findable. 0 for a layer that shares
+    // with nobody, which is every layer that was never instanced. In memory
+    // this changes nothing — `copy.sdf` is non-null, so apply_one ignores the
+    // field — but a journal replay of a reorder without it deserializes the
+    // content inline and silently unlinks the instances (see
+    // scene::content_sharer_of).
+    const scene::LayerId sharer = scene::content_sharer_of(doc->doc.document, layer);
     // One group, so one undo puts the layer back where it was. Ungrouped, the
     // undo stack held a remove and an insert separately and a single undo
     // applied only the remove — the layer vanished.
@@ -4352,7 +4409,7 @@ clay_result clay_document_move_layer(clay_document* doc, clay_layer_id layer, in
     clay_result r = apply_edit(doc, scene::Command{scene::RemoveLayerCmd{layer}},
                                "layer not found");
     if (r == CLAY_OK)
-        r = apply_edit(doc, scene::Command{scene::AddLayerCmd{std::move(copy), index}},
+        r = apply_edit(doc, scene::Command{scene::AddLayerCmd{std::move(copy), index, sharer}},
                        "layer could not be reinserted");
     if (doc->undo) doc->undo->end_group();
     return r;
@@ -4417,6 +4474,26 @@ clay_result clay_document_layer_at(const clay_document* doc, size_t index,
 namespace {
 constexpr std::size_t kLayerInfoOriginal =
     offsetof(clay_layer_info, locked) + sizeof(std::int32_t);
+
+// Who owns a shared edit list, by the FIRST-IN-STACK-ORDER rule the document
+// writer uses to decide whose record carries the bytes (scene::kSceneMinor,
+// minor 15). Deriving it the same way on both sides is what makes the answer
+// survive a save and reload, and what makes removing the layer that happened
+// to be instanced re-home the link instead of dangling it: the first survivor
+// becomes the owner and reports 0.
+void fill_content_share(const std::vector<scene::Layer>& layers, const scene::Layer& l,
+                        clay_layer_info* out) {
+    if (!l.sdf) return;  // a voxel or mesh layer shares nothing
+    std::uint32_t count = 0;
+    clay_layer_id owner = 0;
+    for (const scene::Layer& other : layers) {
+        if (other.sdf != l.sdf) continue;
+        ++count;
+        if (owner == 0) owner = other.id;
+    }
+    out->share_count = count;
+    out->content_source = owner == l.id ? 0 : owner;
+}
 }  // namespace
 
 clay_result clay_document_layer_info(const clay_document* doc, clay_layer_id layer,
@@ -4440,6 +4517,7 @@ clay_result clay_document_layer_info(const clay_document* doc, clay_layer_id lay
         filled.visible = l.visible ? 1 : 0;
         filled.ghost = l.ghost ? 1 : 0;
         filled.locked = l.locked ? 1 : 0;
+        fill_content_share(layers, l, &filled);
         write_desc(out_info, declared, filled);
         return CLAY_OK;
     }
@@ -5408,6 +5486,27 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
     const kernel::cfloat3 c = kernel::cf3(centre[0], centre[1], centre[2]);
     math::Aabb reach{c, c};
     reach = reach.dilated(radius + pull);
+
+    // ... IN ONE PLACEMENT. The ball above is stated in the dragged layer's
+    // frame, and an instanced edit list is placed by every layer that shares
+    // it: the same nodes move under every one of those transforms, so the
+    // field changes in regions the ball does not contain and nothing else
+    // here would dirty them. Left out, the seeds there were advanced to the
+    // new revision while still clean and handed back as the whole answer --
+    // measured 0.4 world units stale, the whole displacement, in a second
+    // placement four units away.
+    //
+    // Widened by each sharer's WHOLE influence bound rather than by the ball
+    // mapped through its transform: mirror and radial place one ball in
+    // several spots and layer_influence_bound already accounts for all of
+    // them. Conservative, and only a shared edit list pays it -- the common
+    // layer shares with nobody and the loop finds nothing. This is the same
+    // union node_command_bound takes for the per-command path, which is why
+    // every other edit route was already right.
+    for (const scene::Layer& other : doc->doc.document.layers) {
+        if (&other == l || other.sdf != l->sdf) continue;
+        reach.expand(scene::layer_influence_bound(other));
+    }
 
     // What the drag can state about HISTORY, beside what the ball states about
     // space (#360): every command it issues is a SetDeformersCmd -- a parameter

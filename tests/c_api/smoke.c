@@ -1580,6 +1580,80 @@ static int check_meshing(clay_document* doc) {
     return 0;
 }
 
+/* Instance layers: a duplicate subtool costs a layer record, an edit through
+ * either layer is an edit to both, and the sharing survives a save. */
+static int check_instance_layers(void) {
+    clay_document* doc = clay_document_create();
+    clay_layer_id source = 0, instance = 0;
+    clay_item_desc sphere;
+    clay_layer_info source_info, instance_info;
+    clay_blob* blob = NULL;
+    clay_document* back = NULL;
+    size_t nodes = 0;
+    float probe[6] = {0.0f, 0.0f, 0.0f, 5.0f, 0.0f, 0.0f};
+    float distances[2] = {0.0f, 0.0f};
+    const float position[3] = {5.0f, 0.0f, 0.0f};
+    const float axis[3] = {0.0f, 1.0f, 0.0f};
+
+    REQUIRE(doc != NULL);
+    REQUIRE(clay_add_sdf_layer(doc, "body", &source) == CLAY_OK);
+    memset(&sphere, 0, sizeof sphere);
+    sphere.struct_size = sizeof sphere;
+    sphere.prim = CLAY_PRIM_SPHERE;
+    sphere.params[0] = 0.5f;
+    sphere.rotation[3] = 1.0f;
+    sphere.scale = 1.0f;
+    sphere.op = CLAY_OP_ADD;
+    REQUIRE(clay_add_item(doc, source, &sphere, NULL) == CLAY_OK);
+
+    REQUIRE(clay_document_instance_layer(doc, source, "bolt", &instance) == CLAY_OK);
+    REQUIRE(clay_document_set_layer_transform(doc, instance, position, axis, 0.0f, 1.0f) ==
+            CLAY_OK);
+    /* One edit list, two placements. */
+    REQUIRE(clay_eval_points(doc, NULL, probe, 2, distances, NULL) == CLAY_OK);
+    REQUIREF(distances[0] < 0.0f && distances[1] < 0.0f,
+             "the shared item reads %g at the source and %g at the instance",
+             (double)distances[0], (double)distances[1]);
+
+    /* Both ends of the link, from the descriptor a host would draw it with. */
+    memset(&source_info, 0, sizeof source_info);
+    memset(&instance_info, 0, sizeof instance_info);
+    source_info.struct_size = sizeof source_info;
+    instance_info.struct_size = sizeof instance_info;
+    REQUIRE(clay_document_layer_info(doc, source, &source_info) == CLAY_OK);
+    REQUIRE(clay_document_layer_info(doc, instance, &instance_info) == CLAY_OK);
+    REQUIRE(source_info.content_source == 0 && source_info.share_count == 2);
+    REQUIRE(instance_info.content_source == source && instance_info.share_count == 2);
+
+    /* An edit through the instance is an edit to the source's list. */
+    sphere.position[1] = 1.2f;
+    REQUIRE(clay_add_item(doc, instance, &sphere, NULL) == CLAY_OK);
+    REQUIRE(clay_layer_node_count(doc, source, &nodes) == CLAY_OK);
+    REQUIREF(nodes == 2, "the source holds %zu nodes after an edit through the instance",
+             nodes);
+
+    /* And a round trip keeps the sharing rather than turning it into a copy. */
+    REQUIRE(clay_document_save_memory(doc, &blob) == CLAY_OK);
+    REQUIRE(clay_document_load_memory(clay_blob_data(blob), clay_blob_size(blob), &back) ==
+            CLAY_OK);
+    clay_blob_destroy(blob);
+    memset(&instance_info, 0, sizeof instance_info);
+    instance_info.struct_size = sizeof instance_info;
+    REQUIRE(clay_document_layer_info(back, instance, &instance_info) == CLAY_OK);
+    REQUIREF(instance_info.content_source == source && instance_info.share_count == 2,
+             "the reloaded instance names %u and is shared by %u layers",
+             instance_info.content_source, instance_info.share_count);
+
+    /* The refusals, so a C consumer sees them too. */
+    REQUIRE(clay_document_instance_layer(doc, 4242, "x", &instance) == CLAY_ERROR_NOT_FOUND);
+    REQUIRE(clay_document_instance_layer(doc, source, "", &instance) ==
+            CLAY_ERROR_INVALID_ARGUMENT);
+
+    clay_document_destroy(back);
+    clay_document_destroy(doc);
+    return 0;
+}
+
 static int check_round_trip(clay_document* doc) {
     float pts[9] = {0, 0, 0, 3, 0, 0, 0.9f, 0, 0};
     float before[3], after[3];
@@ -1633,6 +1707,7 @@ int main(void) {
     if (check_picking() != 0) return 1;
     if (check_meshers(doc) != 0) return 1;
     if (check_meshing(doc) != 0) return 1;
+    if (check_instance_layers() != 0) return 1;
     if (check_round_trip(doc) != 0) return 1;
     if (check_voxel_rasterize(doc) != 0) return 1;
 

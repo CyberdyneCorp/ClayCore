@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -286,6 +287,88 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
     return volume;
 }
 
+// COPY-ON-WRITE before a bake, because a bake is about ONE subtool.
+//
+// An instance layer shares its `SdfContent` by shared_ptr, and consolidation
+// edits that content through the command vocabulary. Baking in place would
+// therefore replace the edit list of every layer instancing it — nine subtools
+// silently collapsing into a volume because the artist baked the tenth, which
+// is not a reading of "this shape is finished" anyone asks for.
+//
+// Expressed as the remove-then-add pair clay_document_move_layer already uses,
+// rather than by assigning `layer->sdf` directly, and that is the point: both
+// halves are ordinary commands, so the sever serializes, journals and undoes
+// like everything else. RemoveLayerCmd's inverse carries the Layer BY VALUE
+// with its original shared_ptr intact, so one undo of the whole consolidation
+// puts the layer back sharing the content it shared before.
+//
+// Returns false only when the pair could not be applied; a layer that shares
+// with nobody is left exactly alone.
+bool sever_shared_content(Document& doc, LayerId layer_id,
+                          const std::function<bool(const Command&)>& run) {
+    const Layer* layer = doc.find_layer(layer_id);
+    if (!layer || !layer->sdf) return true;
+    // Counted over the document's LAYERS rather than by use_count(): an undo
+    // stack holds inverses carrying a Layer by value, so a layer that was
+    // removed and put back has a use count above one while sharing with
+    // nobody. Severing it would cost a deep copy on a document that never
+    // instanced anything.
+    std::size_t sharers = 0;
+    for (const Layer& l : doc.layers)
+        if (l.sdf == layer->sdf) ++sharers;
+    if (sharers <= 1) return true;
+
+    Layer severed = *layer;
+    severed.sdf = std::make_shared<SdfContent>(*layer->sdf);
+    int index = -1;
+    for (std::size_t i = 0; i < doc.layers.size(); ++i)
+        if (doc.layers[i].id == layer_id) index = static_cast<int>(i);
+
+    if (!run(Command{RemoveLayerCmd{layer_id}})) return false;
+    return run(Command{AddLayerCmd{std::move(severed), index}});
+}
+
+// Everything the bake CHANGES, as commands, from the sever to the installed
+// volume. Split out of consolidate_layer so the group bracket around it is
+// opened and closed in exactly one place: with the sever's two exits inline,
+// `end_group` had to be repeated at each of them, which is the shape a missed
+// one hides in.
+bool install_bake(Document& doc, LayerId layer_id, const std::vector<NodeId>& absorb,
+                  field::FieldVolume volume, const std::function<bool(const Command&)>& run) {
+    // First, so that nothing below can reach a layer this one only borrows.
+    if (!sever_shared_content(doc, layer_id, run)) return false;
+    // The sever removed and reinserted the layer, so any pointer taken before
+    // it is dangling — and the content behind it may now be a different object.
+    const Layer* layer = doc.find_layer(layer_id);
+    if (!layer || !layer->sdf) return false;
+
+    Node baked;
+    // Reserved from the layer's OWN content: reserving from the shared object
+    // would advance an id counter that belongs to every other instance.
+    baked.id = layer->sdf->reserve_id();
+    baked.prim = Prim::volume();
+    // The bake sampled the layer's field, mirror copies included, so the
+    // volume already holds both sides. Re-mirroring it is idempotent for the
+    // union but doubles what every later evaluation pays.
+    baked.mirror = false;
+    baked.volume = std::make_shared<const field::FieldVolume>(std::move(volume));
+    // One colour for what may have been many. A volume carries a single
+    // colour, so the first absorbed item's is the one that survives — stated
+    // here because it is a loss, not a detail.
+    if (const Node* first = layer->sdf->find(absorb.front())) baked.color = first->color;
+
+    int index = -1;
+    NodeId parent = kNoNode;
+    layer->sdf->locate(absorb.front(), &parent, &index);
+
+    // Removed last-first so that the recorded inverses, replayed in reverse on
+    // undo, reinsert at ascending indices — which is what puts the edit list
+    // back in its original order rather than reversed.
+    for (auto it = absorb.rbegin(); it != absorb.rend(); ++it)
+        run(Command{RemoveNodeCmd{layer_id, *it}});
+    return run(Command{AddNodeCmd{layer_id, parent, index, std::vector<Node>{std::move(baked)}}});
+}
+
 bool consolidate_layer(Document& doc, LayerId layer_id, const ConsolidationParams& params,
                        UndoStack* undo, ConsolidationCost* out_cost,
                        const BakePointEval& point_eval, parallel::CancelToken* token,
@@ -319,36 +402,15 @@ bool consolidate_layer(Document& doc, LayerId layer_id, const ConsolidationParam
     }
     if (!volume) return false;
 
-    Node baked;
-    baked.id = layer->sdf->reserve_id();
-    baked.prim = Prim::volume();
-    // The bake sampled the layer's field, mirror copies included, so the
-    // volume already holds both sides. Re-mirroring it is idempotent for the
-    // union but doubles what every later evaluation pays.
-    baked.mirror = false;
-    baked.volume = std::make_shared<const field::FieldVolume>(std::move(*volume));
-    // One colour for what may have been many. A volume carries a single
-    // colour, so the first absorbed item's is the one that survives — stated
-    // here because it is a loss, not a detail.
-    if (const Node* first = layer->sdf->find(absorb.front())) baked.color = first->color;
-
-    int index = -1;
-    NodeId parent = kNoNode;
-    layer->sdf->locate(absorb.front(), &parent, &index);
-
     auto run = [&doc, undo](const Command& cmd) {
         if (undo) return undo->perform(doc, cmd);
         return scene::apply(doc, cmd).has_value();
     };
 
+    // The sever and the bake go into ONE group, so a single undo puts back both
+    // the items that were absorbed and the sharing that was severed.
     if (undo) undo->begin_group();
-    // Removed last-first so that the recorded inverses, replayed in reverse on
-    // undo, reinsert at ascending indices — which is what puts the edit list
-    // back in its original order rather than reversed.
-    for (auto it = absorb.rbegin(); it != absorb.rend(); ++it)
-        run(Command{RemoveNodeCmd{layer_id, *it}});
-    const bool added =
-        run(Command{AddNodeCmd{layer_id, parent, index, std::vector<Node>{std::move(baked)}}});
+    const bool added = install_bake(doc, layer_id, absorb, std::move(*volume), run);
     if (undo) undo->end_group();
     return added;
 }

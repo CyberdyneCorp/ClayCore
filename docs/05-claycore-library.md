@@ -296,6 +296,45 @@ The document tree the app and specs already define, owned here so every consumer
 
 `clay::brick`: sparse virtual grid of 8³/16³ bricks, fp16 narrow band (±3 voxels), dirty-set tracking, async-friendly (evaluation requests are plain data; the app owns threading/queues via the backend), LOD mip bricks for far view.
 
+### Duplicating a subtool costs a layer record
+
+An **instance layer** is a second layer over the same edit list. It is what a
+ZBrush-style *duplicate subtool* is for — ten bolts from one bolt, an earring on
+the other ear, a blockout repeated along a belt — and the point is that it costs
+a layer record rather than a copy of everything already sculpted.
+
+```c
+clay_layer_id bolt = 0;
+clay_document_instance_layer(doc, blockout, "bolt 2", &bolt);
+float where[3] = {5, 0, 0}, up[3] = {0, 1, 0};
+clay_document_set_layer_transform(doc, bolt, where, up, 0.0f, 1.0f);
+```
+
+**Shared: the edit list, and only the edit list.** An edit through either layer
+is an edit to one list and appears through both — which is why
+`clay_layer_node_influence_bound` reports the union over every layer sharing the
+node, so a host that dirties by what it was told refills every instance rather
+than leaving nine of them stale.
+
+**Not shared: everything else the layer carries** — transform, name, visibility,
+protection, mirror, radial. Those are copied from the source at creation and
+diverge from there; placing the instance somewhere else is what turns one edit
+list into two bolts.
+
+Five consequences worth stating, because each is a question a host will ask:
+
+| | |
+|---|---|
+| **Consolidate** | severs first. A bake replaces an edit list, and a bake means *this subtool is finished*, so the layer gets a private copy and the other instances stay parametric. One undo restores both the items and the sharing. |
+| **Save and load** | keeps the sharing. From `.clayspace` minor 15 a layer record can name the layer whose edit list it shares, so ten instances are one edit list in the file. Written at minor 14 or below they come back as ten independent layers — the shapes are right, the link is gone. |
+| **Removing the source** | is legal and unremarkable. The content is held by every layer sharing it, so this removes a placement. `clay_document_layer_info` re-homes the link: the first survivor in stack order reports `content_source == 0` and the rest name it. |
+| **Reordering** | keeps the sharing across a crash too. A reorder is a remove and an add, and the add names a surviving sharer, so a journal replay restores instances rather than deep copies. Without the name the recovery is silent and wrong: the shapes are right and the subtools are no longer linked. |
+| **Dragging** | dirties every placement. `clay_layer_move_surface` states its reach as one ball instead of deriving a region per item, and that ball sits in the dragged layer's placement — so on shared content it also invalidates each sharer's influence bound. Only a shared edit list pays that. |
+
+`clay_document_layer_info` is also how a subtool panel draws the link at all:
+`content_source` is the following end and `share_count` is how many layers hold
+the list, so the source of a link is distinguishable from an ordinary layer.
+
 ### History: one undo, and exactly what it covers
 
 `correct-the-undo-scope` found that the library had **three unrelated history
@@ -823,6 +862,15 @@ allowed to touch.
 `clay_layer_memory` gives the same breakdown for one layer, so a large document
 can be attributed to the abandoned blockout that is 200 MB of it rather than
 merely called large.
+
+**Instance layers are counted once**, document-wide, and in full per layer — ten
+instances of one blockout are one allocation, and saying otherwise would invite
+you to free memory that does not exist, while reporting zero for an instance
+would call displaying it free. Since 0.58.0 that survives a **save**: a shared
+edit list is written once and named from the other instances, so reading the
+report back after a reload gives the figure it gave before. Through 0.57.0 every
+layer's content went out inline, so a document of ten instances reloaded ten
+times heavier and the layers were quietly no longer linked.
 
 **Three things to expect, none of them a defect:**
 
