@@ -330,42 +330,45 @@ gesture — and `session/sdf_sculpt.h` is it. See §3.1 of
 
 **Measured on a 24-thread Linux desktop, not the reference device.** Per
 [RELEASE.md](RELEASE.md) the ratio transfers and the absolute does not; the
-absolute numbers here are `clay_bench` rows, and the ratios are what
-`tools/check_bench.py` gates. Load average was 5.7 before the run and 7.9
-after, on a machine that takes other jobs — which is exactly why the gates are
-ratios between two rows measured in the same run and not millisecond floors.
+absolutes here are `clay_bench` rows and the ratios are what
+`tools/check_bench.py` gates. Load average held at 3.11 -> 2.94 across the run.
+The same table taken earlier at load 5.67 gave absolutes about 12% slower and
+**every ratio within 10%** — `visited` and `chain` identical — which is why the
+gates are ratios between two rows of one run rather than millisecond floors.
 
 | gesture | before | after | |
 |---|---:|---:|---|
-| Smooth, one live dab (193-item layer, cell 0.05) | 33.69 ms | **0.154 ms** | 219× |
-| Smooth, whole 100-dab stroke | 3,369 ms | **53.5 ms** | 63× |
-| Smooth, whole 1000-dab stroke | 33,689 ms | **211 ms** | 159× |
+| Smooth, one live dab (193-item layer, cell 0.05) | 29.88 ms | **0.152 ms** | 197x |
+| Smooth, whole 100-dab stroke | 2,988 ms | **44.8 ms** | 67x |
+| Smooth, whole 1000-dab stroke | 29,880 ms | **182 ms** | 164x |
 | Smooth, layer bakes per stroke | one per dab | **one, at pointer-down** | |
-| Move, one live frame (1,032-item layer) | 0.0676 ms | **0.00122 ms** | 55× |
-| Move, whole 1000-frame drag | 67.6 ms | **1.60 ms** | 42× |
-| Move, one live frame (50,032-item layer) | 3.048 ms | **0.00122 ms** | 2,500× |
+| Move, one live frame (1,032-item layer) | 0.0587 ms | **0.00121 ms** | 49x |
+| Move, whole 1000-frame drag | 58.7 ms | **1.59 ms** | 37x |
+| Move, one live frame (50,032-item layer) | 2.873 ms | **0.00121 ms** | 2,369x |
 | Move, persistent commands per drag | one per frame | **one, at pointer-up** | |
 
-The last Move row is the one that matters most and the only one that is a
-*shape* rather than a speedup. The prepared frame measures 0.00122, 0.00161,
-0.00127 and 0.00122 ms at 132, 1,032, 10,032 and 50,032 items — **flat**,
-because the traversal that scales with the model happens once at pointer-down,
-and the `visited` counter reads 32 at every one of those sizes. `move_brush`
-over the same axis reads 0.0086, 0.0604, 0.649 and 3.048 ms.
+The last Move row is the one that matters and the only one that is a *shape*
+rather than a speedup. The prepared frame measures 0.001208, 0.001244, 0.001246
+and 0.001213 ms at 132, 1,032, 10,032 and 50,032 items — **flat to within 3%
+across a 379x growth in scene size** — because the traversal that scales with
+the model happens once at pointer-down, and the `visited` counter reads 32 at
+every one of those sizes while `prepared` reads 132 / 1,032 / 10,032 / 50,032.
+`move_brush` over the same axis reads 0.0086 -> 2.873 ms, a 336x spread.
 `BM_SdfMoveTransactionUpdateScaling` and `BM_SdfMoveResolveScaling` are
-parameterised over exactly that axis, and the gate is the ratio between their
+parameterised over exactly that axis and the gate is the ratio between their
 last rows, so the claim is checked rather than asserted.
 
 **`begin()` is not free and the table should not hide it.**
-`BM_SdfSmoothTransactionBegin` measures **33.99 ms** — within 1% of one
-standalone dab, because it *is* the same whole-layer bake. What the transaction
-changes is how many times it is paid: once, at the point in the gesture where a
-brush cursor covers it, instead of once per pointer event. A 100-dab stroke
-costs 53.5 ms of which 34 is that one bake; the old path's 100 dabs cost 3,369.
-It is still O(model), and on a very large layer at a fine cell it will be felt
-at pointer-down — which is what makes local checkpoints the named follow-up in
-the change's `tasks.md`, and why this number is measured on its own axis rather
-than folded into the dab.
+`BM_SdfSmoothTransactionBegin` measures **29.65 ms** — 0.99x one standalone
+dab, because it *is* the same whole-layer bake. What the transaction changes is
+how many times it is paid: once, where a brush cursor covers it, instead of
+once per pointer event. So the transaction is ahead from the *second* dab
+onward. It is still O(model), and on a very large layer at a fine cell it will
+be felt at pointer-down — which is what makes local checkpoints the named
+follow-up in the change's `tasks.md`, and why this number is measured on its
+own axis rather than folded into the dab. Move's equivalent, the one-time edit
+list traversal, is 0.355 ms on a 1,032-item layer and pays for itself in about
+28 frames — under half a second of dragging.
 
 ### What the policy actually bounds
 
@@ -376,17 +379,26 @@ multiplies with it:
 
 | 100 independent drags | chain | `safe_step_scale` | consolidations | total |
 |---|---:|---:|---:|---:|
-| policy off | 100 | 0.191 | 0 | 131 ms |
-| policy on | **58** | **0.221** | 1 | 827 ms |
+| policy off, 10 drags | 10 | 0.848 | 0 | 1.9 ms |
+| policy off, 100 drags | 100 | 0.191 | 0 | 122 ms |
+| policy on, 100 drags | **4** | **0.540** | 7 | 1,021 ms |
 
-Read this honestly: the policy **bounds** the decay, it does not remove it. One
-consolidation fired, the chain restarted, and by drag 100 it had grown back to
-58 — better than 100, and the step scale is better with it, but the shape is
-still linear between bakes. The cost of the bake shows up too: 827 ms against
-131 ms for a hundred drags, which is the trade the opt-in exists to let a host
-decline. What the policy guarantees is that the decay is *bounded by the
-threshold the host set* rather than unbounded, and that the artist's parameters
-are never spent without being asked.
+The chain is **held**, not merely dented, and the safe step ends nearly three
+times better than the unbounded run. What it costs is visible in the same row:
+1,021 ms against 122 ms for the same hundred drags, because seven bakes
+happened. That is the trade the opt-in exists to let a host decline, and it is
+why nothing here fires without `allow_consolidation`.
+
+This table is also the one that caught a bug in review, which is the argument
+for measuring a policy rather than reasoning about it. The post-stroke check
+originally skipped on `consolidation_state` alone — "the layer is already one
+volume item, nothing to collapse". Consolidating *makes* that true forever
+after, so the policy fired once and never again while later drags stacked grabs
+on the volume item: the run ended at a chain of 58 and 0.221 with one
+consolidation. A volume item carrying a deformer chain is not "already
+collapsed" — a bake absorbs those grabs into the samples — and only an empty
+chain means there is nothing left to do, which is exactly the state Smooth's
+own commit leaves behind.
 
 ## What does not fit, and by how much
 

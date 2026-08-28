@@ -463,9 +463,12 @@ MAX_RATIO = [
     # SMOOTH, before and after. The old path had nowhere to keep a baked volume
     # between pointer events, so a dab was bake-the-layer, relax, discard; a
     # transaction bakes once at pointer-down and a dab is `relax_in_place` over
-    # the bricks its own ball reaches. Measured 0.154 ms against 33.7 ms on a
-    # 24-thread Linux desktop under load average 5.7 -- 219x, or 0.0046 as a
-    # ratio -- and the ceiling sits at 0.10, twenty times above it.
+    # the bricks its own ball reaches. Measured 0.152 ms against 29.9 ms on a
+    # 24-thread Linux desktop -- 197x, or 0.0051 as a ratio -- and the ceiling
+    # sits at 0.10, twenty times above it. The same pair under load average 5.7
+    # rather than 3.1 reads 0.154 / 33.7, or 0.0046: both sides move together,
+    # which is what makes the ratio the gateable form and a floor on the dab
+    # not.
     #
     # Generous on purpose, and the failure it catches is categorical rather
     # than gradual: a dab that started sampling the layer again (a transaction
@@ -478,7 +481,7 @@ MAX_RATIO = [
     # one-time bake is only worth moving to pointer-down if a stroke amortises
     # it. A thousand-dab Smooth through a transaction must cost at most
     # twenty-five standalone dabs, where the old path cost a thousand of them.
-    # Measured 6.28 (211 ms against 33.7 ms), against a ceiling of 25 -- four
+    # Measured 6.09 (182 ms against 29.9 ms), against a ceiling of 25 -- four
     # times the headroom, and still forty times below the 1000x the old path
     # would report if `begin` were being paid per dab.
     ("BM_SdfSmoothTransaction1000", "BM_SdfSmoothStandalone", 25.0),
@@ -486,12 +489,12 @@ MAX_RATIO = [
     # scratch every call, so a live drag re-walks the edit list per pointer
     # event to rediscover which items a FIXED anchor and radius reach;
     # `SdfMoveTransaction` walks it once and a frame is one
-    # `resolve_prepared_move` per affected item. 0.00122 ms against 0.0676 ms,
-    # or 0.018, against a ceiling of 0.20.
+    # `resolve_prepared_move` per affected item. 0.00121 ms against 0.0587 ms,
+    # or 0.021, against a ceiling of 0.20.
     ("BM_SdfMoveTransactionUpdate", "BM_SdfMoveResolve", 0.20),
     # The same claim over a whole drag: a thousand frames of prepared drag
-    # against one frame of the old path. 23.6 measured (1.60 ms against
-    # 0.0676 ms), so the traversal pays for itself inside twenty-four frames --
+    # against one frame of the old path. 27.0 measured (1.59 ms against
+    # 0.0587 ms), so the traversal pays for itself inside twenty-eight frames --
     # under half a second of dragging. 100 is the ceiling, which a per-frame
     # traversal coming back would blow by an order of magnitude.
     ("BM_SdfMoveTransaction1000", "BM_SdfMoveResolve", 100.0),
@@ -500,9 +503,11 @@ MAX_RATIO = [
     # set held at 32, and the loop above keys on name.split("/")[0], so the rows
     # that land here are the last registered -- Args({50000}) on both sides,
     # 50,032 items, which is exactly where a per-frame traversal is most
-    # visible. 3.05 ms against 0.00122 ms there, or 0.0004; the ceiling is 0.05,
+    # visible. 2.87 ms against 0.00121 ms there, or 0.00042; the ceiling is 0.05,
     # a hundred and twenty times above it, and the same gate at the smallest row
-    # would read 0.14 because move_brush over 132 items is nearly free.
+    # would read 0.14 because move_brush over 132 items is nearly free. The
+    # per-frame row is FLAT across the four sizes -- 0.001208, 0.001244,
+    # 0.001246, 0.001213 ms -- while move_brush climbs 336x over the same span.
     ("BM_SdfMoveTransactionUpdateScaling", "BM_SdfMoveResolveScaling", 0.05),
 ]
 
@@ -597,14 +602,18 @@ MAX_COUNTER = [
     # 0.848 at ten drags to 0.191 at a hundred with the policy off.
     #
     # With `min_safe_step_scale = 0.5` and consolidation authorised the same
-    # hundred drags end at a chain of 58 and 0.221, so this ceiling of 90 is
-    # what says the policy ACTED. It is not tighter because the policy fires
-    # ONCE here and not repeatedly: `settle_budget` declines to collapse a layer
-    # whose edit list is already a single volume item, and consolidating turns
-    # this fixture into exactly that, so the chain regrows afterwards
-    # unattended. 90 gates the thing that is true today -- the run without the
-    # policy reads 100 -- and would need revisiting if that early-out changes.
-    ("BM_SdfMoveRepeatedPolicy100", "chain", 90),
+    # hundred drags end at a chain of 4 and 0.540, over 7 consolidations. That
+    # is the claim: the chain is HELD, not merely dented.
+    #
+    # The ceiling is 20 rather than 4 because the exact number depends on how
+    # many drags it takes to cross the threshold again after each bake, which
+    # is a property of the fixture's geometry. What 20 catches is the failure
+    # this gate exists for, and it is a real one that shipped in review: keyed
+    # on `consolidation_state` alone, the early-out in `settle_budget` fired the
+    # policy ONCE -- consolidating makes that predicate true forever after --
+    # and the chain regrew to 58 unattended. A regression there reads 58 or 100,
+    # both far above this line, and the policy-off row beside it reads 100.
+    ("BM_SdfMoveRepeatedPolicy100", "chain", 20),
 ]
 
 

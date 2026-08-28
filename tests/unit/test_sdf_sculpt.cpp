@@ -9,6 +9,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <vector>
@@ -722,4 +723,76 @@ TEST_CASE("sculpt: a Move that applied nothing does not trigger a policy bake") 
     REQUIRE(moved->commit(&undo));
     CHECK(moved->budget().consolidated);
     CHECK(consolidation_state(doc.layers.front()));
+}
+
+TEST_CASE("sculpt: an authorised policy keeps firing, not just once") {
+    // REGRESSION. The post-stroke check used to skip on consolidation_state()
+    // alone — "the layer is already one volume item, nothing to collapse".
+    // Consolidating MAKES that predicate true forever after, so the policy
+    // fired on the stroke that first crossed the budget and never again, while
+    // every later drag stacked another grab on the volume item and the safe
+    // step decayed exactly as it had before. Measured on the benchmark: a
+    // hundred drags ended at a chain of 58 with ONE consolidation.
+    //
+    // A volume item carrying a deformer chain is not "already collapsed": a
+    // bake absorbs those grabs into the samples. Only a volume with an EMPTY
+    // chain is, which is what Smooth's own commit leaves behind.
+    Document doc = two_balls();
+    const LayerId id = doc.layers.front().id;
+    SdfSculptPolicy policy = smooth_policy();
+    policy.complexity.max_deformer_chain = 2;  // every third stroke crosses it
+    policy.complexity.allow_consolidation = true;
+
+    int consolidations = 0;
+    int longest_seen = 0;
+    for (int stroke = 0; stroke < 12; ++stroke) {
+        const float y = 0.01f * static_cast<float>(stroke);
+        auto tx = SdfMoveTransaction::begin(doc, id, cf3(0, y, 0),
+                                            brush::MoveSettings{0.8f, 0, false}, policy);
+        REQUIRE(tx);
+        tx->update(cf3(0, 0.05f, 0));
+        REQUIRE(tx->commit(nullptr));
+        if (tx->budget().consolidated) ++consolidations;
+        longest_seen = std::max(longest_seen, tx->budget().report.longest_deformer_chain);
+    }
+
+    // Fired more than once — the whole point — and the chain never ran away.
+    CHECK(consolidations > 1);
+    CHECK(longest_seen <= policy.complexity.max_deformer_chain + 1);
+    CHECK(report_layer(doc.layers.front()).longest_deformer_chain <=
+          policy.complexity.max_deformer_chain + 1);
+}
+
+TEST_CASE("sculpt: a bare consolidated layer is still not re-baked") {
+    // The other half of the pair above: relaxing the check must not turn it
+    // off. A single volume item with an EMPTY chain is what a bake produces,
+    // and baking it again resamples samples into samples — measurably steeper,
+    // which is the degradation consolidate.h opens by describing.
+    Document doc = two_balls();
+    const LayerId id = doc.layers.front().id;
+    SdfSculptPolicy policy = smooth_policy();
+    policy.complexity.min_safe_step_scale = 1.5f;  // nothing can satisfy this
+    policy.complexity.allow_consolidation = true;
+
+    auto tx = SdfSmoothTransaction::begin(doc, id, policy);
+    REQUIRE(tx);
+    tx->update(dab(cf3(0, 0.42f, 0)));
+    const std::vector<std::uint8_t> preview = tx->preview_volume().serialize();
+    REQUIRE(tx->commit(nullptr));
+    CHECK(tx->budget().over_budget);
+    CHECK_FALSE(tx->budget().consolidated);
+    CHECK(report_layer(doc.layers.front()).longest_deformer_chain == 0);
+
+    // A second Smooth over the already-baked layer: still nothing to collapse,
+    // and still byte-identical to what it previewed.
+    auto again = SdfSmoothTransaction::begin(doc, id, policy);
+    REQUIRE(again);
+    again->update(dab(cf3(0, 0.42f, 0)));
+    const std::vector<std::uint8_t> second = again->preview_volume().serialize();
+    REQUIRE(again->commit(nullptr));
+    CHECK_FALSE(again->budget().consolidated);
+    const Layer& after = doc.layers.front();
+    REQUIRE(after.sdf->roots.size() == 1);
+    CHECK(after.sdf->find(after.sdf->roots.front())->volume->serialize() == second);
+    CHECK(second != preview);  // the second stroke did something
 }

@@ -271,6 +271,17 @@ against a document that is gone. Refusing means the host must be able to say
 "the layer changed, your smooth was dropped" — which is a UI it did not need
 before. That is the right side to fail on and it is not free.
 
+**The policy's early-out is a predicate about WORK, not about shape.** It skips
+a collapse when there is nothing a bake would change, and the first version got
+that wrong: it tested `consolidation_state` alone, which consolidating makes
+true forever after, so the policy fired once and every later drag stacked grabs
+on the volume item unattended — a chain of 58 over a hundred drags instead of
+4. The predicate is now "a single volume item AND an empty deformer chain",
+which is exactly the state Smooth's own commit leaves and exactly not the state
+a drag leaves. Worth recording because the shape of the mistake generalises:
+`consolidation_state` answers from CONTENT by design (consolidate.h says why),
+so it says what a layer IS and never what is left to do about it.
+
 **The C preview copies the working volume every time it is asked for.** A host
 that asks per frame pays a full volume copy per frame, which is worse than what
 it replaces on a large layer. The dirty bounds exist so it does not have to,

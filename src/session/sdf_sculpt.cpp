@@ -234,13 +234,30 @@ scene::ConsolidationParams consolidation_params_from(const SdfSculptPolicy& poli
     return params;
 }
 
+// Whether a bake would change what this layer COSTS, or only resample it.
+//
+// A single volume item with nothing on it is already the thing a bake produces:
+// baking it again reads samples and writes samples, and since a resample of a
+// resample is measurably steeper (consolidate.h opens on exactly that), it
+// would make the layer worse rather than better. Smooth's own commit leaves the
+// layer in that state, so it must not immediately re-bake itself.
+//
+// A single volume item WITH A DEFORMER CHAIN is not that case, and the
+// difference is the whole point. Consolidating turns a layer into one volume
+// node, which makes `consolidation_state` true FOREVER AFTER — so a test on
+// that predicate alone fires the policy once and then never again, while every
+// later drag stacks another grab on the volume item and the safe step decays
+// exactly as it did before. Measured: a hundred drags with the policy on ended
+// at a chain of 58 and 0.221, one consolidation, instead of being held near the
+// threshold. A bake absorbs those grabs into the samples, so where there is a
+// chain there is something to collapse.
+bool nothing_left_to_collapse(const scene::Layer& layer, const scene::FieldReport& report,
+                              scene::ConsolidationCost* out_cost) {
+    return scene::consolidation_state(layer, out_cost) && report.longest_deformer_chain == 0;
+}
+
 // The whole post-stroke half, run INSIDE the caller's open undo group so that
 // the stroke and anything it triggers are one thing to undo.
-//
-// Consolidation is skipped on a layer that is already a single volume item.
-// Baking one of those again would resample samples into samples for no change
-// in what the layer costs — consolidate.h's `consolidation_state` is exactly
-// the question, and Smooth's own commit leaves the layer in that state.
 SdfSculptBudget settle_budget(scene::Document& doc, scene::LayerId layer_id,
                               const SdfSculptPolicy& policy, const scene::BakePointEval& eval,
                               scene::UndoStack* undo, bool may_consolidate) {
@@ -256,7 +273,7 @@ SdfSculptBudget settle_budget(scene::Document& doc, scene::LayerId layer_id,
     // triggered by one would be a destructive edit the artist did not make: a
     // drag over empty space would silently collapse the layer.
     if (!may_consolidate) return out;
-    if (scene::consolidation_state(*layer, &out.cost)) return out;  // nothing left to collapse
+    if (nothing_left_to_collapse(*layer, out.report, &out.cost)) return out;
     out.consolidated = scene::consolidate_layer(doc, layer_id, consolidation_params_from(policy),
                                                 undo, &out.cost, eval);
     if (out.consolidated) {
