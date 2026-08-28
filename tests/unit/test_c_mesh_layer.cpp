@@ -6,6 +6,7 @@
 
 #include <doctest/doctest.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -535,4 +536,68 @@ TEST_CASE("c mesh layer: a removed layer's id stops reaching the geometry it kep
     // The payload is genuinely still there — this is the check being made, not
     // an absence standing in for it.
     CHECK(clay_mesh_vertex_count(borrowed) == 4);
+}
+
+TEST_CASE("c mesh layer: a layer whose geometry did not come with the file is not found by id") {
+    // The mesh twin of the voxel case in test_c_voxel.cpp, and the only one of
+    // the three refusals that needs a document built by hand. The loader drops
+    // a mesh chunk naming no mesh layer but keeps a mesh layer whose chunk is
+    // gone, so a file that lost its MESH chunk comes back as a mesh layer with
+    // nothing behind it. The by-name lookup already reports NOT_FOUND there and
+    // the by-id lookup has to agree, or an id would reach a borrow with no
+    // geometry behind it that the name refuses to hand out.
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+    clay_mesh* source = tetrahedron();
+    clay_mesh_layer_desc desc = layer_desc("scan");
+    clay_layer_id layer = 0;
+    REQUIRE(clay_document_add_mesh_layer(doc, source, &desc, &layer, nullptr) == CLAY_OK);
+    clay_mesh_destroy(source);
+
+    clay_blob* blob = nullptr;
+    REQUIRE(clay_document_save_memory(doc, &blob) == CLAY_OK);
+    const std::uint8_t* bytes = clay_blob_data(blob);
+    const std::size_t size = clay_blob_size(blob);
+
+    // Container layout: "CLAY", major, minor, then (fourcc, u64 length,
+    // payload) repeated. Copy every chunk but the mesh ones.
+    const std::uint32_t kMeshChunk = 0x4853454Du;  // "MESH" little-endian
+    std::vector<std::uint8_t> stripped(bytes, bytes + 8);
+    std::size_t at = 8, dropped = 0;
+    while (at + 12 <= size) {
+        std::uint32_t cc = 0;
+        std::uint64_t len = 0;
+        std::memcpy(&cc, bytes + at, 4);
+        std::memcpy(&len, bytes + at + 4, 8);
+        const std::size_t end = at + 12 + static_cast<std::size_t>(len);
+        REQUIRE(end <= size);
+        if (cc == kMeshChunk)
+            ++dropped;
+        else
+            stripped.insert(stripped.end(), bytes + at, bytes + end);
+        at = end;
+    }
+    CHECK(at == size);
+    REQUIRE(dropped == 1);  // the surgery found something, so the load is a real case
+    clay_blob_destroy(blob);
+    clay_document_destroy(doc);
+
+    clay_document* back = nullptr;
+    REQUIRE(clay_document_load_memory(stripped.data(), stripped.size(), &back) == CLAY_OK);
+    // The layer is there — this is a layer with no geometry, not a missing layer.
+    clay_layer_info info;
+    std::memset(&info, 0, sizeof info);
+    info.struct_size = static_cast<std::uint32_t>(sizeof info);
+    REQUIRE(clay_document_layer_info(back, layer, &info) == CLAY_OK);
+    CHECK(info.id == layer);
+    CHECK(info.representation == CLAY_LAYER_MESH);
+
+    clay_mesh* missing = nullptr;
+    CHECK(clay_document_mesh_layer_by_id(back, layer, &missing) == CLAY_ERROR_NOT_FOUND);
+    CHECK(missing == nullptr);
+    // The by-name form refuses the same layer, which is the agreement being
+    // checked rather than an incidental second assertion.
+    CHECK(clay_document_mesh_layer(back, "scan", nullptr, &missing) == CLAY_ERROR_NOT_FOUND);
+    CHECK(missing == nullptr);
+    clay_document_destroy(back);
 }

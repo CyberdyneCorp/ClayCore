@@ -919,8 +919,11 @@ struct clay_document;
 // standalone grid, or a borrow of the grid a document keeps for one layer.
 // A borrow names the layer rather than pointing at it, so nothing caches a
 // pointer into the document's layer map: the lookup is redone on every call.
-// No entry point removes a layer today, so the miss below cannot be reached
-// through this ABI; it is what keeps that true if one is ever added.
+// clay_document_remove_layer removes the LAYER and leaves the grid beside the
+// document, so a borrow held across a removal still resolves. The miss below
+// guards a grid that stops being held while a handle still names it — which
+// nothing in this ABI does today, and which would be a use after free without
+// it.
 struct clay_voxel_grid {
     voxel::VoxelGrid* owned = nullptr;  // non-null: the caller destroys it
     clay_document* doc = nullptr;       // non-null: borrowed from a layer
@@ -2269,7 +2272,9 @@ clay_result resolve(const clay_voxel_grid* grid, voxel::VoxelGrid** out) {
         return CLAY_OK;
     }
     auto it = grid->doc->doc.voxel_layers.find(grid->layer);
-    if (it == grid->doc->doc.voxel_layers.end())  // no removal call exists yet
+    // A removal keeps the grid (see the handle's comment), so no call reaches
+    // this today; it is the guard that keeps a dropped payload a refusal.
+    if (it == grid->doc->doc.voxel_layers.end())
         return fail(CLAY_ERROR_NOT_FOUND, "voxel layer is no longer in its document");
     *out = &it->second;
     return CLAY_OK;

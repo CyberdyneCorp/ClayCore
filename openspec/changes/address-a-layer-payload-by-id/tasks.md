@@ -43,6 +43,14 @@
       shadowing is described. RELEASE.md keeps no per-minor entry for an
       additive release — 0.55.0 and 0.56.0 have none either — so it is left
       alone deliberately
+- [x] 3.5 The two-lifetimes note said "Nothing in this ABI removes a layer
+      today", and `clay_document_remove_layer` has existed the whole time. Both
+      halves of the sentence were wrong: a removal keeps the payload beside the
+      document, so a handle held across one goes on resolving rather than
+      turning into `CLAY_ERROR_NOT_FOUND`. Say what the code does — pre-existing,
+      but this change puts two new calls' contract on top of it, and the same
+      claim in `clay_c.cpp` (the handle struct's comment and `resolve`'s) goes
+      with it
 
 ## 4. Prove it
 
@@ -59,21 +67,29 @@
 - [x] 4.7 An undone creation: the id is not reachable even though the grid is
       still beside the document, and a redo makes it reachable again
 - [x] 4.8 A layer whose payload chunk is absent from the file is
-      `CLAY_ERROR_NOT_FOUND`, as it is by name
+      `CLAY_ERROR_NOT_FOUND`, as it is by name — for BOTH halves. The mesh case
+      was missing while this task was already ticked, and revert D proved it: a
+      build with the mesh payload check taken out passed everything. Stripping
+      the `MESH` chunk is the mesh twin of stripping `VOXL`
 - [x] 4.9 Null document and null out pointer, with nothing written
 - [x] 4.10 The C consumer smoke test and the ctypes parity exercise drive both
       calls
 - [x] 4.11 Each property FAILS under a targeted mis-implementation that still
-      COMPILES. Baseline: 7 cases, 118 assertions, all passing. Every revert
-      built with zero `error:` lines before its run was believed.
+      COMPILES. Baseline: 8 cases, 134 assertions, all passing. Every revert was
+      applied to BOTH accessors and built with zero `error` lines before its run
+      was believed.
 
       | revert (both accessors) | cases failed | assertions failed |
       |---|---|---|
-      | A — resolve through the layer's NAME instead of its id | 2 of 7 (the two duplicate-name cases) | 7 of 118 |
-      | B — resolve in the payload table alone, never in the document | 2 of 7 (undone creation, removed layer) | 4 of 118 |
-      | C — no representation guard: any existing layer id borrows | 3 of 7 (both wrong-representation cases, payload absent) | 7 of 118 |
-      | D — drop the payload-entry check | 1 of 7 (payload absent) | 2 of 118 |
-      | E — drop the kind check alone | 0 of 7 | 0 of 118 |
+      | A — resolve through the layer's NAME instead of its id | 2 of 8 (the two duplicate-name cases) | 7 of 134 |
+      | B — resolve in the payload table alone, never in the document | 2 of 8 (undone creation, removed layer) | 4 of 134 |
+      | C — no representation guard: any existing layer id borrows | 4 of 8 (both wrong-representation cases, both payload-absent cases) | 10 of 134 |
+      | D — drop the payload-entry check | 2 of 8 (both payload-absent cases) | 5 of 134 |
+      | E — drop the kind check alone | 0 of 8 | 0 of 134 |
+
+      C and D each covered one case fewer before the mesh payload-absent case
+      was added: D failed only the voxel half, so the mesh accessor's third
+      refusal was documented, spec'd and unverified.
 
       Revert A also fails the smoke test at smoke.c:1052 and the ctypes case
       `test_same_named_layers_are_told_apart_by_id`; revert C fails the smoke

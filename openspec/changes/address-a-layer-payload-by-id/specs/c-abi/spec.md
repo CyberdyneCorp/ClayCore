@@ -50,9 +50,10 @@ The output pointer SHALL be REQUIRED, and a null one SHALL be refused as an inva
 - **THEN** the same id reaches the same grid, with the cells it held
 
 #### Scenario: A layer whose payload is absent is not found
-- **GIVEN** a loaded document carrying a voxel layer whose payload did not come with it
-- **WHEN** that layer's id is passed to the voxel accessor
-- **THEN** the call returns not-found rather than borrowing a payload that is not there
+- **GIVEN** a loaded document carrying a voxel layer whose grid did not come with it, and one carrying a mesh layer whose geometry did not come with it
+- **WHEN** each layer's id is passed to the accessor for its own representation
+- **THEN** each call returns not-found rather than borrowing a payload that is not there
+- **AND** the by-name lookup refuses the same layer, so the two agree
 
 #### Scenario: The refusals are typed
 - **WHEN** either accessor is called with a null document, or with a null output pointer

@@ -2787,11 +2787,17 @@ clay_result clay_item_volume_move_topological(clay_item* item,
  *    rejected rather than obeyed.
  * A borrowed handle names its layer rather than pointing at the grid, and
  * looks it up again on every call, so it never caches a pointer that a later
- * edit to the document could move. Nothing in this ABI removes a layer today,
- * so that lookup does not fail; if a removal call is ever added, calls through
- * a handle to the removed layer become CLAY_ERROR_NOT_FOUND rather than a use
- * after free. Destroying the document does invalidate the handle and nothing
- * can detect that, so a borrowed handle must not outlive its document. */
+ * edit to the document could move. clay_document_remove_layer removes the
+ * LAYER and leaves the grid beside the document — the inverse of a removal
+ * could not carry it — so a handle held across a removal goes on resolving and
+ * goes on reading the grid it names. What the removal does change is the
+ * lookup: clay_document_voxel_layer and clay_document_voxel_layer_by_id both
+ * resolve in the document, so neither hands out a NEW handle to a layer that
+ * is no longer there. Should a grid ever stop being held beside its document
+ * while a handle still names it, calls through that handle are
+ * CLAY_ERROR_NOT_FOUND rather than a use after free. Destroying the document
+ * does invalidate the handle and nothing can detect that, so a borrowed handle
+ * must not outlive its document. */
 
 typedef struct clay_voxel_grid clay_voxel_grid; /* opaque */
 
