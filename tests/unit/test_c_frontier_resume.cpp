@@ -837,7 +837,13 @@ TEST_CASE("frontier: spatial dirtying is the influence union, not a raw box") {
         std::vector<float> warm;
         refill_counting(fix.doc.d, span, &warm);
         const clay_brick_request beyond = brick(7, -1, -1);
-        const clay_brick_request untouched = brick(-3, -1, -1);
+        // The untouched control must HOLD FIELD CONTENT: a brick whose culled
+        // tape kept nothing stores all-FAR values, and seed_for declines an
+        // accumulator-less seed (had_acc), taking the cheap full walk instead
+        // of the shortcut this subcase pins. kx -2 straddles the base ball's
+        // surface at x = -0.5; kx -3 only held values by grace of the cull
+        // pad's width, which #335 narrowed.
+        const clay_brick_request untouched = brick(-2, -1, -1);
         REQUIRE(probe(fix.doc.d, beyond).found);
 
         // Deformer parameters are node-LOCAL; the target sits at x 1.35.

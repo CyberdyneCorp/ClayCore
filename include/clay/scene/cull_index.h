@@ -153,7 +153,10 @@ class CullIndex {
     // give a SUM OF MAXIMA -- larger, so safe, but no longer the number a fresh
     // build reports, and an appended index is held EQUAL to a rebuilt one.
     //
-    // `nodes` is the size of the content's node map when the terms were taken.
+    // `nodes` is the size of the content's node map when the terms were taken
+    // -- the RAW size, never multiplied by the layer's symmetry: refresh_pad
+    // applies the multiplicity from the live layer at resolve time, and the
+    // raw count doubles as the append-exactness check below.
     // The terms are raised from the appended subtree, so anything ELSE the map
     // gained would leave them low -- and low is the unsafe direction, a pad
     // that plans against too small a region. Checked rather than trusted: a map

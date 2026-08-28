@@ -1,6 +1,9 @@
 #include "clay/kernel/ease.h"
 #include "clay/scene/bounds.h"
 
+#include <bit>
+#include <cmath>
+
 #include "clay/scene/curve.h"
 
 #include "clay/kernel/exactness.h"
@@ -718,12 +721,128 @@ float feather_cull_pad(const SdfContent& content, const Layer& layer) {
     return pad;
 }
 
+// The measured envelope (#335): pad-in-k-multiples = base + slope *
+// log2(N / 75), clamped below at its N = 75 value, clamped by the CALLER at
+// the profile's support. The coefficients are a fit over the sweep
+// blend_cull_pad's definition records, holding at least 0.5k above every
+// measured knee — the drift the knees show across brick-seed draws — at every
+// measured (profile, N):
+//
+//     profile    fit                        worst knee (k-multiples)
+//     quadratic  2.80 + 0.35 * log2(N/75)   2.30@75 .. 3.90@5000
+//     cubic      2.75 + 0.50 * log2(N/75)   2.15@75 .. 4.85@5000 (x86-64)
+//     circular   2.70 + 0.30 * log2(N/75)   2.05@75 .. 3.45@2400
+//
+// The support clamp takes over where the product crosses it: N ~ 808 for
+// quadratic (4k), N ~ 6788 for cubic (6k), N ~ 391 for circular (~3.41k) —
+// beyond that the pad IS the support, the pre-#335 value.
+namespace {
+struct EnvelopeFit {
+    float base;
+    float slope;
+};
+
+bool envelope_fit_for(BlendProfile profile, EnvelopeFit* fit) {
+    switch (profile) {
+        case BlendProfile::Quadratic: *fit = {2.80f, 0.35f}; return true;
+        case BlendProfile::Cubic: *fit = {2.75f, 0.50f}; return true;
+        case BlendProfile::Circular: *fit = {2.70f, 0.30f}; return true;
+        default: return false;  // hard drags nothing; chamfer's support is k
+    }
+}
+
+// One measured profile's resolved pad: min(support, k * envelope(N)). Support
+// is linear in k for a fixed profile, so this is monotone in k and the
+// per-profile maximum k resolves to the layer's largest per-node pad exactly.
+float profile_chain_pad(BlendProfile profile, float k, std::size_t nodes) {
+    if (k <= 0.0f) return 0.0f;
+    return kernel::cmin(kernel::ctape_blend_support(static_cast<int>(profile), k),
+                        k * chain_pad_envelope(profile, nodes));
+}
+}  // namespace
+
+float chain_pad_envelope(BlendProfile profile, std::size_t nodes) {
+    EnvelopeFit fit{0.0f, 0.0f};
+    if (!envelope_fit_for(profile, &fit)) return 0.0f;
+    if (nodes <= 75) return fit.base;
+    return fit.base + fit.slope * std::log2(static_cast<float>(nodes) / 75.0f);
+}
+
+// How many instances of a mirrored item this layer's symmetry emits. The
+// modes compose ADDITIVELY — emit_item (tape_build.cpp) copies the BASE item
+// once per set mirror axis and radial_count - 1 times around the axis, and
+// never emits mirror-of-rotation products — so the total is a sum, not a
+// product. Deliberately CONSERVATIVE as a chain-length multiplier: it also
+// counts groups, invisible nodes and items that opted out of the mirror,
+// which only raises the envelope, and every term blend_total resolves stays
+// clamped at its own support, so the pad never exceeds the pre-#335 one.
+std::size_t layer_symmetry_multiplicity(const Layer& layer) {
+    std::size_t m = 1 + static_cast<std::size_t>(std::popcount(
+                            static_cast<unsigned>(layer.mirror_axes & 0x7u)));
+    if (layer.radial_count > 1) m += static_cast<std::size_t>(layer.radial_count) - 1;
+    return m;
+}
+
+float CullPadTerms::blend_total(std::size_t n_eff) const {
+    float pad = blend_fixed;
+    pad = kernel::cmax(pad, profile_chain_pad(BlendProfile::Quadratic, blend_k_quadratic, n_eff));
+    pad = kernel::cmax(pad, profile_chain_pad(BlendProfile::Cubic, blend_k_cubic, n_eff));
+    pad = kernel::cmax(pad, profile_chain_pad(BlendProfile::Circular, blend_k_circular, n_eff));
+    if (blend_k_seam <= 0.0f) return pad;
+    // The SEAM term: every symmetry copy enters the chain through a quadratic
+    // blend with the LAYER's seam k (tape_build.cpp emit_item), independent of
+    // any item k, so it drags exactly as a quadratic item of that k would —
+    // measured: item k = 0.04 under a 0.12 seam kneed at 5.0 ITEM-k, right
+    // where the seam's own envelope sits. Clamped at the CEILING the item
+    // maxima alone resolve to, which IS the pre-#335 pad (that pad never saw
+    // a seam k either): each item term is <= its own support <= the ceiling,
+    // so the whole stays <= the pre-#335 pad everywhere, and where the seam
+    // demands more than that pad ever granted the cull is identical to it.
+    float ceiling = blend_fixed;
+    ceiling = kernel::cmax(ceiling, kernel::ctape_blend_support(
+                                        static_cast<int>(BlendProfile::Quadratic),
+                                        blend_k_quadratic));
+    ceiling = kernel::cmax(
+        ceiling, kernel::ctape_blend_support(static_cast<int>(BlendProfile::Cubic), blend_k_cubic));
+    ceiling = kernel::cmax(ceiling, kernel::ctape_blend_support(
+                                        static_cast<int>(BlendProfile::Circular),
+                                        blend_k_circular));
+    const float seam = profile_chain_pad(BlendProfile::Quadratic, blend_k_seam, n_eff);
+    return kernel::cmax(pad, kernel::cmin(seam, ceiling));
+}
+
+namespace {
+// One node's blend contribution, into the raw-maxima form. The ONE definition
+// of the reach: chain_drag_reach and both cull_pad_terms walks are written in
+// terms of it, so a new dragging combine cannot reach the pad through one and
+// not the others.
+void raise_blend_term(const Node& item, CullPadTerms* t) {
+    // Paint and the extended modes keep the FULL reach whatever the profile:
+    // it is for the mix/colour channel, whose weight fades over all of it.
+    if (item.op == Op::Paint || op_is_extended(item.op)) {
+        t->blend_fixed = kernel::cmax(t->blend_fixed,
+                                      kernel::cmax(item.blend.support(), item.blend.k));
+        return;
+    }
+    EnvelopeFit fit{0.0f, 0.0f};
+    if (envelope_fit_for(item.blend.profile, &fit)) {
+        float* slot = item.blend.profile == BlendProfile::Quadratic ? &t->blend_k_quadratic
+                      : item.blend.profile == BlendProfile::Cubic   ? &t->blend_k_cubic
+                                                                    : &t->blend_k_circular;
+        *slot = kernel::cmax(*slot, item.blend.k);
+        return;
+    }
+    // Hard drags nothing — support is zero and so is this. Chamfer's support
+    // IS its k, below any envelope value, so the clamp binds: keep support.
+    t->blend_fixed = kernel::cmax(t->blend_fixed, item.blend.support());
+}
+}  // namespace
+
 // See bounds.h, including why this is not the reach a node's own bound uses.
-float chain_drag_reach(const Node& item) {
-    if (item.blend.profile == BlendProfile::Hard && item.op != Op::Paint &&
-        !op_is_extended(item.op))
-        return 0.0f;
-    return kernel::cmax(item.blend.support(), item.blend.k);
+float chain_drag_reach(const Node& item, std::size_t effective_nodes) {
+    CullPadTerms t;
+    raise_blend_term(item, &t);
+    return t.blend_total(effective_nodes);
 }
 
 // The pad a SMOOTH-UNION CHAIN needs beyond the caller's band, for the same
@@ -743,31 +862,83 @@ float chain_drag_reach(const Node& item) {
 // Hard unions do not have it: min() is exact and associative, and the same
 // documents measure zero disagreements at any chain length.
 //
-// The pad is the largest single-item reach in the layer, which closed every
-// case measured, at chain lengths from 5 to 600. It is not a proof for an
-// arbitrary chain -- no fixed dilation is, since the drag grows with length --
-// and tape.h says so rather than implying otherwise.
+// The pad is the largest min(support, k * envelope(N)) in the layer, where N
+// is the layer's EFFECTIVE contributor count — node-map size times
+// layer_symmetry_multiplicity — and the envelope is the per-profile fit above
+// (chain_pad_envelope). NO FIXED K-MULTIPLE SUFFICES: the sufficient pad
+// grows with chain length, and a sweep of 700+ synthesized configs -- chain
+// lengths 75 to 8000, k from 0.03 to 0.24, quadratic/cubic/circular profiles,
+// stroke/shuffled/reversed and constructed descending-ladder chain orders,
+// mixed hard/smooth and smooth-subtract compositions, three brick-seed draws
+// per config, 200 bricks and up to 160,000 in-band samples per config, on
+// arm64 and x86-64 -- measured the minimal sufficient quadratic pad, worst
+// order per length, climbing from 2.30k at 75 nodes through 3.05k at 600,
+// 3.45k at 1200 and 3.90k at 5000 (cubic: to 4.85k; circular tops out at its
+// ~3.41k support by 2400). A fixed 3k cap left 3-26 in-band band-clamped
+// disagreements per config at 2000-5000 nodes, the worst 9.75e-4 -- 14x the
+// fp16 quantization the brick cache stores through (about 7e-5 at band 0.15)
+// and the magnitude of one real contributor entering the chain, not last-ULP
+// dust. Thresholds cluster in k-units ACROSS profiles because the drag each
+// step adds is normalized to k, while support only shapes the blend's fringe
+// -- which is why the envelope is a k-multiple and not a support fraction,
+// and why cubic's 6k support buys the most back.
+//
+// N COUNTS SYMMETRY COPIES. emit_item compiles a mirrored item once per copy
+// the layer's mirror and radial modes emit -- 1 + popcount(mirror_axes) +
+// (radial_count - 1) instances, each folded into the layer's ONE serial
+// chain through its own seam combine -- so a 75-node map under radial_count
+// 64 is a ~4800-contributor chain, and resolving the envelope against the
+// map size alone left it floored at 2.75-2.80k where the measured need was
+// ~4k: 15 configs at radial 8-64 with dabs confined to one sector measured
+// real in-band disagreements, the worst 1.9e-3 = 27x the fp16 floor, against
+// zero for the pre-#335 pad. A second knee campaign over the amplified
+// family (radial 4-64, mirror 1-3 axes, combined, N 75-600, both salts)
+// measured the amplified knees matching plain chains of the same effective
+// length -- additive composition validated on a combined radial-and-mirror
+// config -- and envelope(N_eff) clears every one of its 49 unclamped knees
+// by at least 0.89k (the sub-0.5k margins were all seam-k configs, which the
+// seam term in blend_total closes; item k = 0.04 under a 3x seam k kneed at
+// 5.0 item-k, right where the seam's own quadratic envelope sits).
+//
+// The support clamp is what bounds the story: where k * envelope(N) crosses
+// the profile's support the pad IS `max(support, k)` for a smooth blend --
+// the pre-#335 pad -- so the envelope never culls wider than that pad did,
+// and where the clamp binds it culls identically. The correctness bar is
+// RELATIVE for the same reason (#339): the shipped `max(support, k)` itself
+// measures a handful of non-zero configs at k = 0.03 past 2400 nodes, so
+// what is held is equal-or-fewer disagreements than it, per config -- which
+// the envelope fit meets at every one of the sweep's 710 grid points, with
+// at least 0.5k of margin (the knees' drift across seed draws) below the
+// clamp. It is not a proof for an arbitrary chain -- no fixed dilation is,
+// since the drag grows with length -- and tape.h says so rather than
+// implying otherwise.
 float blend_cull_pad(const SdfContent& content, const Layer& layer) {
-    (void)layer;
-    float pad = 0.0f;
-    for (const auto& [id, n] : content.nodes()) {
-        (void)id;
-        if (!n.visible) continue;
-        pad = kernel::cmax(pad, chain_drag_reach(n));
-    }
-    return pad;
+    return cull_pad_terms(content, layer)
+        .blend_total(content.nodes().size() * layer_symmetry_multiplicity(layer));
 }
 
 // ONE node's contribution to both pads, and the ONE definition of either: the
 // walks below are folds of this, so a new feathered shape or a new dragging
-// combine cannot reach the pad through one of them and not the other.
+// combine cannot reach the pad through one of them and not the other. The
+// blend half stays RAW (largest k per profile) here -- bounds.h records why
+// resolving it against the node count must wait until read time.
 CullPadTerms cull_pad_terms(const Node& n, const Layer& layer) {
     CullPadTerms t;
     if (!n.visible) return t;
-    if (!n.is_group && item_is_feathered_replace(n))
+    const bool feathered = !n.is_group && item_is_feathered_replace(n);
+    if (feathered)
         t.feather = n.volume->band() * layer.xform.scale * n.xform.scale *
                     scale_axes_factor(n.scale_axes);
-    t.blend = chain_drag_reach(n);
+    raise_blend_term(n, &t);
+    // The SEAM blends this node's symmetry copies enter the chain through.
+    // Exactly the nodes emit_item copies: items participating in the mirror,
+    // minus feathered replaces, which skip both symmetry blocks. A zero seam
+    // k is a HARD seam and drags nothing — its copies still lengthen the
+    // chain, which the multiplicity counts.
+    if (!n.is_group && n.mirror && !feathered) {
+        if (layer.mirror_axes != 0) t.blend_k_seam = kernel::cmax(t.blend_k_seam, layer.mirror_k);
+        if (layer.radial_count > 1) t.blend_k_seam = kernel::cmax(t.blend_k_seam, layer.radial_k);
+    }
     return t;
 }
 
@@ -785,7 +956,8 @@ CullPadTerms cull_pad_terms(const SdfContent& content, const Layer& layer) {
 }
 
 float cull_pad(const SdfContent& content, const Layer& layer) {
-    return cull_pad_terms(content, layer).total();
+    return cull_pad_terms(content, layer)
+        .total(content.nodes().size() * layer_symmetry_multiplicity(layer));
 }
 
 bool item_influence_is_local(const Node& item) {

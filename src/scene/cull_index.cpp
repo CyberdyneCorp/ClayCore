@@ -20,10 +20,24 @@ CullIndex::CullIndex(const Document& doc) : doc_(&doc) {
 }
 
 // The document's pad from the layers': a maximum of their sums, never a sum of
-// their maxima. O(layers), so an append pays it whole.
+// their maxima. O(layers), so an append pays it whole. Each layer's blend term
+// is resolved against its CURRENT effective contributor count here — the terms
+// hold raw maxima (bounds.h, CullPadTerms), the count `plan_pads` maintains is
+// the raw map size, and the symmetry multiplicity is read from the LIVE layer,
+// so an appended index resolves exactly what a fresh build would.
+//
+// Reading the multiplicity live is safe because a symmetry edit can never
+// reach an index between builds: SetLayerMirrorCmd/SetLayerRadialCmd are not
+// AddNodeCmds, so tail_append (bindings/c/clay_c.cpp) never routes them to
+// touch_appended — they take the general invalidation, which forgets the
+// append log and forces the rebuild. Within an index's life the layer's
+// symmetry is constant; appends only grow `nodes`, and both factors of the
+// product only rise, keeping the raise-only append contract exact.
 void CullIndex::refresh_pad() {
     pad_ = 0.0f;
-    for (const LayerPad& p : pads_) pad_ = kernel::cmax(pad_, p.terms.total());
+    for (const LayerPad& p : pads_)
+        pad_ = kernel::cmax(pad_,
+                            p.terms.total(p.nodes * layer_symmetry_multiplicity(*p.layer)));
 }
 
 // One Chain per (layer, child list), mirroring the compiler's traversal:

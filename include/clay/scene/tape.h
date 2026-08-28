@@ -98,11 +98,23 @@ struct Tape {
 //     without the pad, samples INSIDE the band differed from the full tape by
 //     up to half a cell.
 //
-// The chain pad is the largest single-item reach in the layer. That closed
-// every case measured, at chain lengths from 5 to 600, but it is not a proof:
-// the drag grows with chain length and no fixed dilation bounds it for an
-// arbitrary document. Hard unions have no such term — min() is exact and
-// associative — and measure identical at any length.
+// The chain pad is min(support, k * envelope(N)) per item, maximized over the
+// layer, with N the layer's EFFECTIVE contributor count — node count times
+// the symmetry multiplicity, since a mirrored item is compiled once per
+// mirror/radial copy and every copy is a real contributor to the one serial
+// chain — and the envelope a measured per-profile fit that RISES with N
+// (bounds.cpp records both campaigns) — because the sufficient pad does: no
+// fixed k-multiple closes every length, and the support clamp is what keeps
+// the pad at or under the pre-#335 `max(support, k)` everywhere. The seam
+// blends the copies enter through fold in as a quadratic term of the LAYER's
+// seam k, clamped at the ceiling the item blends alone resolve to — the
+// pre-#335 pad — so a seam wider than any item k pads the chain without ever
+// exceeding that pad. The fit clears every measured knee, to 8000 nodes and
+// to 64-fold radial amplification, with the margin the knees drift by across
+// seed draws; it is not a proof — the drag grows with chain length and no
+// fixed dilation bounds it for an arbitrary document, which is why the
+// clamp, not the fit, is the last word. Hard unions have no such term —
+// min() is exact and associative — and measure identical at any length.
 struct CullRegion {
     math::Aabb region;
 };
