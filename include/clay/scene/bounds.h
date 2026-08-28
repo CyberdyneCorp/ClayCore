@@ -79,6 +79,33 @@ bool item_is_feathered_replace(const Node& item);
 // caller built it.
 float feather_cull_pad(const SdfContent& content, const Layer& layer);
 
+// The chain pad's length-aware envelope, in K-MULTIPLES: how many k of pad a
+// smooth distance blend of this profile needs in a chain of `nodes`
+// CONTRIBUTORS. Grows with the count because the drag a chain accumulates
+// grows with its length (see blend_cull_pad's definition); the caller clamps
+// the product `k * envelope` at the profile's support, which is the pre-#335
+// pad, so the result never exceeds it. Only the three measured smooth
+// distance profiles have a fit; everything else takes the clamp.
+//
+// `nodes` is the EFFECTIVE contributor count, not the node-map size: a layer
+// with mirror or radial symmetry compiles every mirrored item once per copy
+// (tape_build.cpp, emit_item), each copy a real leaf entering the layer's one
+// serial chain through its own seam combine, so the chain is
+// layer_symmetry_multiplicity times as long as the map says. Resolving the
+// envelope against the map size alone measured real in-band disagreements at
+// radial_count 8-64 — the amplified knees match plain chains of the same
+// effective length.
+float chain_pad_envelope(BlendProfile profile, std::size_t nodes);
+
+// How many instances of a mirrored item this layer's symmetry emits: 1 for
+// the item, one per set mirror axis, and radial_count - 1 rotated copies —
+// the modes compose ADDITIVELY (tape_build.cpp emit_item copies the BASE
+// item; no mirror-of-rotation products are emitted). Multiplying the node
+// count by this over-counts items that opted out of the mirror, groups and
+// feathered replaces, which is safe: the chain-pad envelope is monotone and
+// every per-item term stays clamped at its own support.
+std::size_t layer_symmetry_multiplicity(const Layer& layer);
+
 // How far this node can drag a CHAIN's running value, which is the quantity the
 // pad below is the maximum of — and NOT the same question as how far the node's
 // own combine reaches, which is `max(support, k)` and stays that way.
@@ -87,18 +114,33 @@ float feather_cull_pad(const SdfContent& content, const Layer& layer);
 // running value it produces is `min()` of two operands and moves by no `k` at
 // all. `Paint` and the extended modes still drag — paint's colour fades over
 // `max(support, k)` whatever the profile, and the extended modes ignore the
-// profile by design — so they keep it.
+// profile by design — so they keep the full reach.
 //
 // A `k` left on a hard node, which is what a UI that keeps its blend slider
 // when the artist picks "hard" writes, therefore used to set the pad for the
 // WHOLE LAYER out of a blend that drags nothing (#335).
+//
+// An ordinary smooth distance blend returns `min(support, k * envelope(N))`
+// (#335), where N is the layer's EFFECTIVE contributor count — node-map size
+// times layer_symmetry_multiplicity, the conservative stand-in for the chain
+// length the drag actually grows with, and the reason this takes the count:
+// one node cannot know how long a chain it sits in. The envelope is a
+// K-MULTIPLE, not a support fraction, because the measured sufficient pads
+// cluster in k-units across every profile — the drag a step adds is normalized
+// to k, support only sets the fringe's shape. It RISES WITH N because the
+// measured knees do: the quadratic knee, worst order per length, measured
+// 2.30k at 75 nodes, 3.05k at 600, 3.45k at 1200 and 3.90k at 5000
+// (blend_cull_pad's definition records the campaign). The fit must clear
+// EVERY measured knee with at least the 0.5k the knees drift across seed
+// draws; changing it needs that sweep's breadth of evidence, not a tuning
+// pass.
 //
 // DO NOT reuse this for a node's own bound. That bound's `max(support, k)`
 // dilation is doing a second job in a mixed chain — margin for the drag its
 // SMOOTH neighbours apply to a running value it contributed to — and taking it
 // away measured 540 -> 10,105 band-clamped disagreements on a 12-node
 // hard/smooth document, against 0 for narrowing the pad alone.
-float chain_drag_reach(const Node& item);
+float chain_drag_reach(const Node& item, std::size_t effective_nodes);
 
 // The pad a smooth-union CHAIN needs beyond the caller's band. An item's own
 // bound covers what ONE blend can move; a chain's running value sits above its
@@ -106,21 +148,62 @@ float chain_drag_reach(const Node& item);
 // See the definition for the measurements.
 float blend_cull_pad(const SdfContent& content, const Layer& layer);
 
-// The two terms above, UNADDED. Kept apart because the document's pad is a
-// MAXIMUM OF SUMS over its layers: adding a layer's two maxima gives that
-// layer's sum, which is what `cull_pad` returns, but folding two layers' terms
-// together and adding at the end would give a SUM OF MAXIMA -- larger, so safe,
-// and no longer the number a fresh build reports. A caller that wants to raise
-// a pad incrementally (scene/cull_index.h) therefore holds these PER LAYER.
+// The pad's terms, UNADDED and UNRESOLVED. Kept apart because the document's
+// pad is a MAXIMUM OF SUMS over its layers: adding a layer's resolved terms
+// gives that layer's sum, which is what `cull_pad` returns, but folding two
+// layers' terms together and adding at the end would give a SUM OF MAXIMA --
+// larger, so safe, and no longer the number a fresh build reports. A caller
+// that wants to raise a pad incrementally (scene/cull_index.h) therefore
+// holds these PER LAYER.
+//
+// The blend term is held as RAW MAXIMA (largest k per profile, largest
+// N-independent reach) rather than as a folded pad, because the chain pad
+// depends on the layer's node count and the count is not known until READ
+// time. Folding `min(support, k * envelope(N))` per node at gather time would
+// freeze each node's N at whatever the map held when it was gathered: an
+// append that grows the map would leave the old nodes' folded contributions
+// below what a fresh build reports, breaking the raise-only incremental
+// contract cull_index.cpp relies on. Raw maxima and the count only rise, and
+// the envelope rises with the count, so resolving at read time keeps an
+// appended index equal to a rebuilt one. The symmetry multiplicity is read
+// at resolve time too, from the live layer — a symmetry edit is never an
+// append (cull_index.cpp, refresh_pad), so it cannot go stale between the
+// two.
 struct CullPadTerms {
     float feather = 0.0f;
-    float blend = 0.0f;
+    // N-independent reaches: Paint/extended full reach, and the support of any
+    // profile the envelope does not narrow (chamfer's support is its k).
+    float blend_fixed = 0.0f;
+    // Largest k per measured smooth distance profile. Per profile the support
+    // is linear in k, so min(support(k_max), k_max * envelope(N)) IS the
+    // largest per-node pad of that profile — the fold is exact, not merely
+    // conservative.
+    float blend_k_quadratic = 0.0f;
+    float blend_k_cubic = 0.0f;
+    float blend_k_circular = 0.0f;
+    // Largest SEAM k among the layer's mirrored items: the blends the layer's
+    // mirror/radial copies enter the chain through (tape_build.cpp emit_item —
+    // both seams are quadratic with the LAYER's k, independent of any item k).
+    // A NEW slot, not folded into blend_k_quadratic: the item slots stay pure
+    // so the pre-#335 pad remains derivable from them alone as the ceiling
+    // blend_total clamps the seam term to.
+    float blend_k_seam = 0.0f;
 
     void raise(const CullPadTerms& o) {
         feather = kernel::cmax(feather, o.feather);
-        blend = kernel::cmax(blend, o.blend);
+        blend_fixed = kernel::cmax(blend_fixed, o.blend_fixed);
+        blend_k_quadratic = kernel::cmax(blend_k_quadratic, o.blend_k_quadratic);
+        blend_k_cubic = kernel::cmax(blend_k_cubic, o.blend_k_cubic);
+        blend_k_circular = kernel::cmax(blend_k_circular, o.blend_k_circular);
+        blend_k_seam = kernel::cmax(blend_k_seam, o.blend_k_seam);
     }
-    float total() const { return feather + blend; }
+    // The blend term resolved for a layer whose chain holds `n_eff` EFFECTIVE
+    // contributors — node-map size times layer_symmetry_multiplicity, both
+    // read at resolve time so a symmetry edit and an append flow through the
+    // same refresh. ONE layer-wide value, so the seed keying the C ABI gates
+    // on a single pad float stays valid (#362).
+    float blend_total(std::size_t n_eff) const;
+    float total(std::size_t n_eff) const { return feather + blend_total(n_eff); }
 };
 
 // One node's contribution, so a caller that has GAINED a node can raise a

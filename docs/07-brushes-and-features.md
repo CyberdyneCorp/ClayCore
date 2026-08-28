@@ -496,14 +496,28 @@ The last row is the point of the table. A smooth union's cull pad grows with
 `k`, so a wide enough blend keeps every item in every brick's tape and the
 per-brick compile becomes pure overhead — measured at 0.55× before the guard
 existed. That slope is the whole of the frame-path cost #335 reported: the pad
-is `4k` for a quadratic profile against a region that is a fixed brick plus
-band, so doubling `k` from 0.03 to 0.06 costs 1.87× on a refill — and the cull
+was `4k` for a quadratic profile against a region that is a fixed brick plus
+band, so doubling `k` from 0.03 to 0.06 cost 1.87× on a refill — and the cull
 benchmarks all blended at 0.03, which is why the fixtures could not show it.
 `BM_DeepDocCullPlanned2000K06` is the same document at the other radius, gated
-against it as a ratio. A **hard** blend contributes nothing to the pad however
-its `k` reads, since the profile makes the smin a step (#335) — though its own
-bound keeps the dilation, which in a mixed chain is margin for the drag its
-smooth neighbours apply. The bake therefore **measures** a sample of the lattice and falls back
+against it as a ratio. **The pad now grows with the chain instead of standing
+at the support** (#335): `min(support, k · envelope(N))` per profile, where the
+envelope rises with `log2` of the layer's effective contributor count — every
+node times its mirror and radial copies, since each copy is a leaf the tape
+folds through its own seam blend — from about `2.8k` at 75 contributors to the
+full support past ~800 for quadratic (~390 circular, ~6,800 cubic), and the
+layer's seam `k` enters as its own quadratic term capped at the pad the item
+maxima alone would set. Sweeps to 8,000 contributors over three profiles,
+adversarial orders and symmetric layers found the sufficient pad creeping
+about `0.4k` per doubling of length, and the fit clears every measured knee
+by at least `0.5k`; where the clamp binds the tapes are instruction-identical
+to the old pad's, so no document is culled wider than before. What it buys
+back sits at real stroke lengths — 12–15% of surviving instructions on a
+quadratic chain of a few hundred nodes, 17–24% cubic. A **hard** blend
+contributes nothing to the pad however its `k` reads, since the profile makes
+the smin a step — though its own bound keeps the dilation, which in a mixed
+chain is margin for the drag its smooth neighbours apply. The bake therefore
+**measures** a sample of the lattice and falls back
 to the whole tape when a brick's tape is not a third of the document's or less.
 
 The result is byte-identical to the whole-tape bake, and that is a consequence
