@@ -72,7 +72,16 @@ ALLOWED = {
     # `parallel` got one when the layering rule put the thread pool out of
     # reach. It depends on nothing above it: the object that OWNS the three
     # (io::ClaySpaceDoc) sits above, so the resolvers are passed IN.
-    "session": {"parallel", "kernel", "math", "scene", "voxel", "mesh", "field"},
+    # session -> brush is the SDF sculpt transaction (add-sdf-sculpt-transaction):
+    # a live Move drag prepares brush::PreparedMove once and resolves one warp
+    # per pointer event, and it must reuse brush's resolver rather than grow a
+    # second one — a preview computed by different arithmetic than the commit is
+    # a preview of something else. It adds no edge to the transitive graph:
+    # brush's own set is already a subset of session's, and brush knows nothing
+    # about session, so there is no cycle. A transaction is not a stroke engine,
+    # which is why it does not simply live in brush: its subject is the GESTURE
+    # lifetime — begin, update, commit — and that is what `session` is for.
+    "session": {"parallel", "kernel", "math", "scene", "voxel", "mesh", "field", "brush"},
     "io": {"parallel", "kernel", "math", "scene", "eval", "brick", "voxel", "mesh", "field",
            "session"},
 }

@@ -239,6 +239,14 @@ protecting.
   the Move brush (drags the *assembled* surface), and tubes
 - Baked field operations: relax (Smooth), flatten (two-sided / hPolish cut-only
   / fill-only), Move Topological, and mask extrude
+- **Live sculpt transactions** for the two brushes an edit list cannot spell:
+  Smooth samples the layer once at pointer-down, relaxes its own working volume
+  per dab and installs that volume at pointer-up; Move finds the items a drag
+  reaches once and previews one warp per frame from the untouched pre-stroke
+  chains. Between pointer-down and pointer-up the document does not change —
+  no nodes, no deformers, no undo entries — and one gesture is one undo step.
+  An explicit session policy decides, between strokes and never during one,
+  when a long session's deformer history may be collapsed
 - The stroke engine: spacing, pressure, jitter, taper, steady stroke, buildup
   vs clamped — a stroke resolves into ordinary edit items
 - **Masking that gates any operation**, a boolean included: an item carries the
@@ -305,7 +313,7 @@ names, is in
 
 | Verb | SDF | Voxel | Mesh | Which to reach for |
 |---|---|---|---|---|
-| **Smooth** | `field::relax` — **bakes** | `sculpt_smooth` | `Smooth` | **Voxel.** The only side where passes chain at no cost; each SDF bake steepens the field until `consolidate` redistances it |
+| **Smooth** | `field::relax` — **bakes**; live through `session::SdfSmoothTransaction` | `sculpt_smooth` | `Smooth` | **Voxel** when passes must chain at no cost — each SDF bake steepens the field until `consolidate` redistances it. SDF Smooth is now *live* inside a transaction: one bake per gesture instead of one per dab |
 | **Flatten** | `field::flatten` — two-sided / cut-only / fill-only | `sculpt_flatten` — two-sided | `Flatten` — the same three modes | **SDF or mesh** when you want hPolish, which is cut-only; voxel when you want to repeat it |
 | **Inflate** | `Op::Relief` | `sculpt_inflate` (dilates, or erodes when negative) | `Inflate` — each vertex's own normal | **SDF** while it must stay re-editable, voxel for free repetition |
 | **Pinch / Magnify** | `magnify`, one signed strength | `sculpt_pinch` / `sculpt_magnify` | `Pinch` — tangential, signed | Same shape everywhere. Pick by which layer already holds the form |

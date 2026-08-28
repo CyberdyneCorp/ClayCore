@@ -191,6 +191,30 @@ bool consolidate_layer(Document& doc, LayerId layer, const ConsolidationParams& 
                        parallel::CancelToken* token = nullptr,
                        bool* out_cancelled = nullptr);
 
+// Install an ALREADY-COMPUTED volume as the layer's single item, as one undo
+// step — the second half of `consolidate_layer` without the first.
+//
+// Consolidation is two things that happen to be sold together: sample the
+// layer's field into a volume, then replace the layer's edit list with it. A
+// live Smooth stroke has already done the first half, once, at pointer-down,
+// and has been mutating that volume locally ever since; making it bake the
+// layer AGAIN at pointer-up to reach the installer would throw away the whole
+// point of holding the volume. So the installer is a function.
+//
+// Everything the collapsed form guarantees is guaranteed here, because it is
+// the same code: the sever of shared instance content, the removals and the
+// add as ONE group whose inverse restores the absorbed items with their ids,
+// parameters, colours and deformers, the refusal on a protected layer, the
+// layer's own transform left where it was authored, and the first absorbed
+// item's colour surviving onto the volume.
+//
+// What it does NOT do is check that `volume` is a plausible bake of this
+// layer. It cannot: a volume is a volume. The caller owns that claim, which is
+// exactly what a sculpt transaction is for.
+bool replace_layer_with_volume(Document& doc, LayerId layer, field::FieldVolume volume,
+                               UndoStack* undo = nullptr,
+                               ConsolidationCost* out_cost = nullptr);
+
 // What a host may still promise about a layer: whether its edit list is a
 // single item carrying samples, and at what resolution. False for anything
 // else, including a layer that merely contains a volume among other items —

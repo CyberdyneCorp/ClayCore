@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 58
+#define CLAY_ABI_MINOR 59
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -4250,6 +4250,216 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
                                     const float centre[3],
                             const float displacement[3], const clay_move_params* params,
                             size_t* out_applied);
+
+/* -- transient SDF sculpt transactions ------------------------------------- */
+
+/* The lifetime a FIELD or DEFORMATION brush needs and an edit-list brush does
+ * not (sdf-sculpt-transaction spec).
+ *
+ * An ordinary SDF stroke becomes nodes as it goes, so undo, picking and
+ * serialization already understand the whole gesture. Two verbs cannot be
+ * spelled that way and both are core sculpting:
+ *
+ *  - SMOOTH averages the assembled field, and there is no node meaning "the
+ *    average of what was here" — relax BAKES. A host with nowhere to keep the
+ *    baked volume between pointer events pays the whole MODEL per dab, so the
+ *    only affordable implementation ran once at pointer-up. That is why Smooth
+ *    had no live preview.
+ *  - MOVE warps the assembled surface, which is a deformer on each item it
+ *    reaches. Written into the document per pointer event, a drag churns
+ *    revisions, tapes, caches and picking sixty times a second to produce one
+ *    edit.
+ *
+ * The shape is the same for both:
+ *
+ *      begin    capture the source; build the transient state ONCE
+ *      update   mutate only that state; receive the dirty region
+ *      commit   one persistent command group, one undo step
+ *      cancel   nothing persistent ever happened
+ *
+ * Between begin and commit the document is untouched: no nodes, no deformers,
+ * no undo entries, and a save taken mid-gesture is the one taken before it.
+ *
+ * DESTROYING WITHOUT COMMITTING IS A CANCEL, so a host that drops the handle on
+ * an error path cannot leave half a stroke behind.
+ *
+ * THE TRANSACTION BORROWS ITS DOCUMENT. Destroy it before the document, and do
+ * not edit the layer through other entry points while it is open — a commit
+ * that finds the layer changed underneath it FAILS with
+ * CLAY_ERROR_INVALID_ARGUMENT rather than overwriting the other edit, which is
+ * a refusal a host must be ready for and never a corruption. */
+
+typedef struct clay_sdf_smooth_tx clay_sdf_smooth_tx; /* opaque */
+typedef struct clay_sdf_move_tx clay_sdf_move_tx;     /* opaque */
+
+/* Where a gesture samples, and when a session is willing to spend an artist's
+ * parametric history to keep the marcher affordable.
+ *
+ * The three sampling numbers carry clay_consolidation_params' meanings exactly:
+ * `cell_size` is REQUIRED and > 0 for Smooth, because a document has no
+ * intrinsic resolution and guessing one here would fix a shape's resolution at
+ * a number nobody chose; `band` <= 0 means three cells; `padding` <= 0 means
+ * the band. A Move transaction ignores all three unless it consolidates.
+ *
+ * The three budget numbers are the two degradation mechanisms
+ * clay_field_report names separately plus the size of the list. ZERO DISABLES
+ * A CRITERION, so a policy of all zeros authorises nothing and is never over
+ * budget — the safe reading of a struct a caller only partly filled in.
+ *
+ * `allow_consolidation` is the whole opt-in. Over budget without it is a
+ * REPORT: the commit says so in clay_sculpt_budget and changes nothing else. A
+ * bake discards the parameters of everything it absorbs, and an engine doing
+ * that unasked would be deciding on an artist's behalf that a sphere's radius
+ * is no longer editable. With it, the consolidation happens INSIDE the
+ * stroke's own undo step, so one undo puts back both. */
+typedef struct clay_sculpt_policy {
+    uint32_t struct_size; /* = sizeof(clay_sculpt_policy); required */
+    float cell_size;      /* required and > 0 for Smooth */
+    float band;           /* <= 0 means three cells */
+    float padding;        /* <= 0 means the band */
+    float min_safe_step_scale;     /* 0 disables */
+    int32_t max_deformer_chain;    /* 0 disables */
+    int32_t max_item_count;        /* 0 disables */
+    int32_t allow_consolidation;   /* non-zero: destructive collapse is authorised */
+} clay_sculpt_policy;
+
+/* What one update changed, so a host invalidates a region rather than a model.
+ *
+ * `touched_bricks` and the bounds are GEOMETRIC — they describe what the brush
+ * selected, not which samples happened to move — so they are reproducible for a
+ * given brush over a given lattice however much unrelated model surrounds it.
+ * `changed` is the value question, answered separately: a dab whose weight came
+ * out zero everywhere still selects its bricks and has nothing to redraw.
+ *
+ * `has_bounds` is the third state the rest of this ABI already uses: when 0,
+ * bounds_min/bounds_max are left untouched. */
+typedef struct clay_sculpt_dirty {
+    uint32_t struct_size; /* = sizeof(clay_sculpt_dirty); required */
+    float bounds_min[3];
+    float bounds_max[3];
+    uint64_t touched_bricks;
+    int32_t changed;
+    int32_t has_bounds;
+} clay_sculpt_dirty;
+
+/* What the budget said after a committed stroke, and what was done about it.
+ * The report fields are clay_field_report's, measured AFTER any consolidation
+ * so they describe the layer the artist is now looking at. */
+typedef struct clay_sculpt_budget {
+    uint32_t struct_size; /* = sizeof(clay_sculpt_budget); required */
+    int32_t over_budget;  /* at least one enabled criterion was crossed */
+    int32_t consolidated; /* the layer was collapsed, inside the stroke's step */
+    float lipschitz;
+    float safe_step_scale;
+    float steepest_volume;
+    int32_t longest_deformer_chain;
+    int32_t item_count;
+} clay_sculpt_budget;
+
+/* Begin a live Smooth on `layer`. NULL on failure, detail in clay_last_error():
+ * no such layer, not an SDF layer, a protected layer, a cell size of zero, a
+ * layer whose field cannot be sampled, or a cancelled `token`.
+ *
+ * THE ONLY evaluation of the source layer in the whole gesture happens here,
+ * and it is the same sampling clay_layer_consolidate does — local frame, the
+ * pooled evaluator, redistance, compact, measured Lipschitz. That is the
+ * pointer-down cost, and it is the trade this design makes deliberately: the
+ * whole finite layer once, so that every dab afterwards costs what it touches.
+ *
+ * `token` may be NULL. It cancels only the sampling. */
+clay_sdf_smooth_tx* clay_sdf_smooth_begin(clay_document* doc, clay_layer_id layer,
+                                          const clay_sculpt_policy* policy,
+                                          clay_cancel_token* token);
+
+/* One live dab, relaxing the transaction's own working volume in place.
+ *
+ * `params` is clay_relax_params exactly as clay_item_volume_relax takes it,
+ * mask included. `token` may be NULL; cancellation is at whole passes, so a
+ * cancelled update has applied some number of complete passes and no fraction
+ * of one, and the passes it did apply stay applied.
+ *
+ * `out_dirty` may be NULL. Touches NOTHING in the document. */
+clay_result clay_sdf_smooth_update(clay_sdf_smooth_tx* tx, const clay_relax_params* params,
+                                   clay_cancel_token* token, clay_sculpt_dirty* out_dirty);
+
+/* The preview so far, as a fresh volume item the caller owns and destroys with
+ * clay_item_destroy.
+ *
+ * A COPY of the working samples, which is honest about what it costs: the
+ * transaction goes on mutating its own volume, and handing out a view of
+ * something that is about to change under a compiled tape is the bug this
+ * refuses to offer. A host drawing every frame should read the dirty bounds
+ * from clay_sdf_smooth_update and decide from those how often it needs the
+ * samples themselves. */
+clay_result clay_sdf_smooth_preview_item(const clay_sdf_smooth_tx* tx, clay_item** out_item);
+
+/* Install the working volume as the layer's one item, as ONE undo step, then
+ * evaluate the complexity policy inside that same step.
+ *
+ * NEVER re-samples the layer: the volume being installed is the one the dabs
+ * were applied to, which is the entire point of the transaction.
+ *
+ * CLAY_ERROR_INVALID_ARGUMENT, changing nothing, when the layer was edited,
+ * removed or protected since begin. `out_budget` may be NULL. The transaction
+ * is spent either way and must still be destroyed. */
+clay_result clay_sdf_smooth_commit(clay_sdf_smooth_tx* tx, clay_sculpt_budget* out_budget);
+
+/* Discard the preview. The document was never touched, so this only ends the
+ * gesture; the handle must still be destroyed. */
+void clay_sdf_smooth_cancel(clay_sdf_smooth_tx* tx);
+void clay_sdf_smooth_destroy(clay_sdf_smooth_tx* tx);
+
+/* Begin a live Move drag anchored at `centre`. NULL on failure: no such layer,
+ * not an SDF layer, a protected layer, or a non-positive radius, which is not
+ * a drag. A drag that reaches NOTHING succeeds with zero affected items — the
+ * artist pressed on empty space, which is not an error.
+ *
+ * THE ONLY traversal of the edit list in the whole gesture happens here. A drag
+ * holds its anchor and radius fixed and only grows the displacement, so which
+ * items it reaches and where its centre lands in each of their frames cannot
+ * change; every frame after this costs the items it moves and nothing else.
+ *
+ * `policy` may be NULL, which means no budget and no consolidation. */
+clay_sdf_move_tx* clay_sdf_move_begin(clay_document* doc, clay_layer_id layer,
+                                      const float centre[3], const clay_move_params* params,
+                                      const clay_sculpt_policy* policy);
+
+/* The drag so far, measured from the ANCHOR — the total, never an increment on
+ * the last frame. Updates of 0.1, 0.2 then 0.5 must end at exactly what a
+ * single fresh drag of 0.5 produces; a composition of the three would move the
+ * surface further than 0.5 ever asked for. `out_dirty` may be NULL, and its
+ * bounds are the conservative swept ball: where the surface was, united with
+ * where it went. */
+clay_result clay_sdf_move_update(clay_sdf_move_tx* tx, const float total_displacement[3],
+                                 clay_sculpt_dirty* out_dirty);
+
+/* Which nodes the drag reaches. Fixed for the gesture — that is the point.
+ * Size-query pattern, exactly as clay_layer_move_surface_preview: call with
+ * out_nodes NULL to receive the count. */
+clay_result clay_sdf_move_preview_nodes(const clay_sdf_move_tx* tx, clay_node_id* out_nodes,
+                                        size_t capacity, size_t* out_count);
+
+/* The grab the last update resolved for one affected node, in that node's own
+ * frame — the parameters clay_item_add_deformer(CLAY_DEFORM_GRAB, ...) takes,
+ * so a host can reproduce the preview through machinery it already has. It
+ * belongs at the FRONT of that node's chain. CLAY_ERROR_NOT_FOUND for a node
+ * the drag does not reach. Any out pointer may be NULL. */
+clay_result clay_sdf_move_preview_grab(const clay_sdf_move_tx* tx, clay_node_id node,
+                                       float out_centre[3], float* out_radius,
+                                       float out_displacement[3], int32_t* out_ease,
+                                       int32_t* out_front_only);
+
+/* One deformer chain per affected node, all inside ONE undo step, then the
+ * complexity policy inside that same step. The final chains are rebuilt from
+ * the chains captured at begin and the current total displacement, so a commit
+ * is what the preview showed even if the host never called update.
+ *
+ * CLAY_ERROR_INVALID_ARGUMENT, changing nothing, when the layer was edited,
+ * removed or protected since begin. `out_budget` may be NULL. */
+clay_result clay_sdf_move_commit(clay_sdf_move_tx* tx, clay_sculpt_budget* out_budget);
+
+void clay_sdf_move_cancel(clay_sdf_move_tx* tx);
+void clay_sdf_move_destroy(clay_sdf_move_tx* tx);
 
 /* One CAGE over a layer — ZBrush's Gizmo Lattice, which acts on the whole
  * subtool rather than on one item in its own frame.

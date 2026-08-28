@@ -545,3 +545,126 @@ TEST_CASE("move: a squashed frame never drags outside what was circled") {
     const cfloat3 far_off = cf3(0.0f, 1.0f, 0.0f);
     CHECK(value_at(doc, far_off) == doctest::Approx(value_at(untouched, far_off)).epsilon(1e-4));
 }
+
+// -- prepare / resolve (sdf-sculpt-transaction spec) ---------------------------
+//
+// A drag holds its anchor and radius fixed and only grows the displacement, so
+// which items it reaches and where its centre lands in each of their frames is
+// decided once. `move_brush` is now that preparation followed by that
+// resolution, which is the point: there is ONE resolver, so a live drag cannot
+// drift away from what committing through the old entry point would produce.
+
+namespace {
+
+bool same_deformer(const Deformer& a, const Deformer& b) {
+    if (a.type != b.type || a.ease != b.ease) return false;
+    if (a.k != b.k || a.a != b.a || a.b != b.b || a.c != b.c) return false;
+    for (int i = 0; i < 6; ++i)
+        if (a.ext[i] != b.ext[i]) return false;
+    return true;
+}
+
+// Every warp `move_brush` produces, reproduced from a preparation taken once.
+// BIT-identical, not close: a preview and its commit must be the same field.
+void check_prepare_matches(const Layer& layer, cfloat3 centre, cfloat3 displacement,
+                           const MoveSettings& settings) {
+    const std::vector<MoveWarp> direct = brush::move_brush(layer, centre, displacement, settings);
+    const std::vector<brush::PreparedMove> prepared =
+        brush::prepare_move(layer, centre, settings);
+    REQUIRE(prepared.size() == direct.size());
+    for (std::size_t i = 0; i < direct.size(); ++i) {
+        const MoveWarp resolved = brush::resolve_prepared_move(prepared[i], displacement);
+        CHECK(resolved.node == direct[i].node);
+        CHECK(same_deformer(resolved.deformer, direct[i].deformer));
+    }
+}
+
+}  // namespace
+
+TEST_CASE("move: a prepared drag reproduces move_brush exactly, frame by frame") {
+    const cfloat3 centre = cf3(0, 0, 0);
+    const MoveSettings settings{0.8f, 0, false};
+
+    SUBCASE("a blended pair") {
+        Document doc = two_balls();
+        for (float d : {0.1f, -0.4f, 1.7f})
+            check_prepare_matches(doc.layers[0], centre, cf3(0.3f, d, -0.2f), settings);
+    }
+    SUBCASE("a rotated item under a transformed layer") {
+        Document doc = two_balls();
+        doc.layers[0].xform.position = cf3(0.3f, -0.2f, 0.1f);
+        doc.layers[0].xform.rotation = math::Quat::from_axis_angle(cf3(0, 1, 0), 0.7f);
+        doc.layers[0].xform.scale = 1.4f;
+        Node* n = doc.layers[0].sdf->find_mut(doc.layers[0].sdf->roots[0]);
+        n->xform.rotation = math::Quat::from_axis_angle(cf3(1, 0, 0), -0.5f);
+        n->xform.scale = 0.6f;
+        check_prepare_matches(doc.layers[0], centre, cf3(0.2f, 0.5f, 0.1f), settings);
+    }
+    SUBCASE("a per-axis scale, which is innermost") {
+        Document doc = two_balls();
+        doc.layers[0].sdf->find_mut(doc.layers[0].sdf->roots[0])->scale_axes = cf3(3.0f, 1.0f, 0.5f);
+        check_prepare_matches(doc.layers[0], centre, cf3(0.0f, 0.4f, 0.0f), settings);
+    }
+    SUBCASE("front_only and a non-default ease") {
+        Document doc = two_balls();
+        check_prepare_matches(doc.layers[0], centre, cf3(0, 0.4f, 0), MoveSettings{0.8f, 3, true});
+    }
+    SUBCASE("a group, whose children carry the drag") {
+        Document doc = two_balls();
+        Node group;
+        group.is_group = true;
+        const NodeId gid = doc.layers[0].sdf->insert(group);
+        Node inner;
+        inner.prim = Prim::sphere(0.3f);
+        inner.xform.position = cf3(0, 0.4f, 0);
+        doc.layers[0].sdf->insert(inner, gid);
+        check_prepare_matches(doc.layers[0], centre, cf3(0, 0.4f, 0), settings);
+    }
+    SUBCASE("nothing in reach, and a radius that is not a drag") {
+        Document doc = two_balls();
+        check_prepare_matches(doc.layers[0], cf3(50, 0, 0), cf3(0, 0.4f, 0), MoveSettings{0.2f});
+        CHECK(brush::prepare_move(doc.layers[0], centre, MoveSettings{0.0f}).empty());
+    }
+}
+
+TEST_CASE("move: preparing walks the tree, resolving does not") {
+    Document doc = two_balls();
+    // Unrelated model, far out of reach of the drag.
+    for (int i = 0; i < 2000; ++i) {
+        Node dab;
+        dab.prim = Prim::sphere(0.02f);
+        dab.xform.position = cf3(40.0f + 0.1f * static_cast<float>(i), 0, 0);
+        doc.layers[0].sdf->insert(dab);
+    }
+
+    brush::MovePrepareStats stats;
+    const std::vector<brush::PreparedMove> prepared =
+        brush::prepare_move(doc.layers[0], cf3(0, 0, 0), MoveSettings{0.8f, 0, false}, &stats);
+    CHECK(stats.visited == 2002);  // the traversal that scales, paid ONCE
+    CHECK(stats.reached == 2);
+    CHECK(prepared.size() == 2);
+    // ...and every frame after it costs the two items it moves. A counter, not
+    // a clock: this must hold on a loaded CI machine as firmly as on an idle one.
+    for (const brush::PreparedMove& p : prepared)
+        CHECK(brush::resolve_prepared_move(p, cf3(0, 0.4f, 0)).node == p.node);
+}
+
+TEST_CASE("move: moved_chain against a chain is moved_chain against its node") {
+    Document doc = two_balls();
+    Node* n = doc.layers[0].sdf->find_mut(doc.layers[0].sdf->roots[0]);
+    n->deformers.push_back(Deformer::twist(0.4f));
+
+    const std::vector<MoveWarp> warps = brush::move_brush(doc.layers[0], cf3(0, 0, 0),
+                                                          cf3(0, 0.4f, 0), MoveSettings{0.8f});
+    REQUIRE(!warps.empty());
+    const std::vector<Deformer> from_node = brush::moved_chain(*n, warps[0]);
+    const std::vector<Deformer> from_chain = brush::moved_chain(n->deformers, warps[0]);
+    REQUIRE(from_node.size() == from_chain.size());
+    for (std::size_t i = 0; i < from_node.size(); ++i)
+        CHECK(same_deformer(from_node[i], from_chain[i]));
+
+    // The leading-grab replacement travels with it: a chain that already leads
+    // with this drag's grab is continued, not stacked on.
+    const std::vector<Deformer> again = brush::moved_chain(from_chain, warps[0]);
+    CHECK(again.size() == from_chain.size());
+}

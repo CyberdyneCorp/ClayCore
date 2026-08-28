@@ -354,3 +354,144 @@ TEST_CASE("a region-limited relax touches nothing outside its taper") {
     // became a no-op.
     CHECK(changed_inside > 0);
 }
+
+// -- relax_in_place (sdf-sculpt-transaction spec) ------------------------------
+//
+// The same algorithm with a different owner. `relax` copies its input and hands
+// back the result; a live Smooth stroke already owns a working volume and would
+// otherwise pay for a second complete one per dab. These hold the two to being
+// the same arithmetic, because a preview that is merely close to what a commit
+// produces is a preview of something else.
+
+TEST_CASE("relax_in_place: one pass is byte-identical to relax") {
+    const FieldVolume base = bumpy_volume();
+    field::RelaxSettings settings;
+    settings.strength = 0.7f;
+    settings.radius_cells = 2;
+
+    FieldVolume in_place = base;
+    const field::RelaxResult r = field::relax_in_place(in_place, settings);
+    CHECK(in_place.serialize() == field::relax(base, settings).serialize());
+    CHECK(r.changed);
+    CHECK_FALSE(r.cancelled);
+    CHECK(r.touched_bricks == base.brick_count());  // unregioned: the whole band
+    CHECK_FALSE(r.dirty_bounds.empty());
+}
+
+TEST_CASE("relax_in_place: repeated calls equal a chain of relax calls") {
+    const FieldVolume base = bumpy_volume();
+    field::RelaxSettings a;
+    a.strength = 0.6f;
+    a.centre = cf3(0.7f, 0, 0);
+    a.region_radius = 0.2f;
+    field::RelaxSettings b = a;
+    b.strength = 0.9f;
+    b.iterations = 3;
+    b.centre = cf3(0, 0.7f, 0);
+
+    FieldVolume live = base;
+    const field::RelaxResult ra = field::relax_in_place(live, a);
+    const field::RelaxResult rb = field::relax_in_place(live, b);
+
+    FieldVolume chained = field::relax(base, a);
+    chained = field::relax(chained, b);
+    CHECK(live.serialize() == chained.serialize());
+
+    // A region-limited pass reports the bricks it selected, which is fewer than
+    // the volume holds — that number is what a host invalidates and what a
+    // scaling test asserts on.
+    CHECK(ra.touched_bricks > 0);
+    CHECK(ra.touched_bricks < base.brick_count());
+    CHECK(rb.touched_bricks > 0);
+    CHECK(rb.touched_bricks < base.brick_count());
+    // Different brushes, different regions.
+    CHECK_FALSE(ra.dirty_bounds.contains(b.centre));
+}
+
+TEST_CASE("relax_in_place: an empty volume is left alone and reports nothing") {
+    FieldVolume empty;
+    const field::RelaxResult r = field::relax_in_place(empty, {});
+    CHECK(empty.empty());
+    CHECK(r.touched_bricks == 0);
+    CHECK_FALSE(r.changed);
+    CHECK(r.dirty_bounds.empty());
+}
+
+TEST_CASE("relax_in_place: strength zero selects bricks and moves nothing") {
+    const FieldVolume base = bumpy_volume();
+    field::RelaxSettings settings;
+    settings.strength = 0.0f;
+    settings.centre = cf3(0.7f, 0, 0);
+    settings.region_radius = 0.2f;
+
+    FieldVolume v = base;
+    const field::RelaxResult r = field::relax_in_place(v, settings);
+    CHECK(r.touched_bricks > 0);  // geometric: the region is where it is
+    CHECK_FALSE(r.changed);       // and not one sample in it moved
+    for (int gz = 0; gz < base.sample_extent(2); ++gz)
+        for (int gy = 0; gy < base.sample_extent(1); ++gy)
+            for (int gx = 0; gx < base.sample_extent(0); ++gx)
+                REQUIRE(base.sample_at(gx, gy, gz) == v.sample_at(gx, gy, gz));
+}
+
+TEST_CASE("relax_in_place: a mask freezes exactly what it covers") {
+    const FieldVolume base = bumpy_volume();
+    field::RelaxSettings settings;
+    settings.strength = 1.0f;
+    settings.mask = [](kernel::cfloat3) { return 1.0f; };
+
+    FieldVolume v = base;
+    const field::RelaxResult r = field::relax_in_place(v, settings);
+    CHECK_FALSE(r.changed);
+    CHECK(v.serialize() == field::relax(base, settings).serialize());
+}
+
+TEST_CASE("relax_in_place: a cancel is whole passes, and relax still returns its input") {
+    const FieldVolume base = bumpy_volume();
+    field::RelaxSettings settings;
+    settings.strength = 0.8f;
+    settings.iterations = 4;
+
+    // Cancelled before anything ran: nothing applied, and the band did not move
+    // either — narrowing it for passes that were never made would understate
+    // what an empty brick reports, which is the one direction a bound may not
+    // err in.
+    parallel::CancelToken token;
+    token.cancel();
+    FieldVolume v = base;
+    const field::RelaxResult r = field::relax_in_place(v, settings, &token);
+    CHECK(r.cancelled);
+    CHECK_FALSE(r.changed);
+    CHECK(v.band() == base.band());
+    CHECK(v.serialize() == base.serialize());
+
+    // The standalone form keeps its own contract: the INPUT comes back, because
+    // the volume is its return value and there is no half-relaxed thing for a
+    // caller to hold.
+    CHECK(field::relax(base, settings, &token).serialize() == base.serialize());
+}
+
+TEST_CASE("relax_in_place: the band narrows exactly as relax narrows it") {
+    const FieldVolume base = bumpy_volume();
+    field::RelaxSettings settings;
+    settings.radius_cells = 2;
+    settings.iterations = 2;
+
+    FieldVolume v = base;
+    field::relax_in_place(v, settings);
+    CHECK(v.band() == field::relax(base, settings).band());
+    CHECK(v.band() < base.band());
+}
+
+TEST_CASE("relax_in_place: the measured slope stays a usable Lipschitz bound") {
+    const FieldVolume base = bumpy_volume();
+    field::RelaxSettings settings;
+    settings.strength = 1.0f;
+    settings.iterations = 3;
+
+    FieldVolume v = base;
+    for (int i = 0; i < 5; ++i) field::relax_in_place(v, settings);
+    // Averaging can only SHRINK the bound — see field/relax.h — so a repeatedly
+    // relaxed volume must never be steeper than the one it came from.
+    CHECK(v.measure_sample_lipschitz() <= base.measure_sample_lipschitz() + 1e-4f);
+}

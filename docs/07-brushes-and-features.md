@@ -343,6 +343,98 @@ brush touches. It now copies only the bricks the pass will overwrite, and reads
 outside them from the volume itself, which still holds what it held because
 those bricks are never written.
 
+### A dab that costs the dab still is not a live brush
+
+All of the above makes one relax cheap. It does not make Smooth **online**,
+and that gap is worth naming precisely because the numbers above look like it
+should have.
+
+`relax` takes a volume and returns a volume. A layer is an edit list, so a host
+holding a layer and a brush has to bake the layer to get the volume — and if
+it has nowhere to keep that volume between pointer events, it bakes again on
+the next one. The per-dab cost is then *bake + relax*, and the bake is
+`sdf_consolidate`: 313 ms on the reference iPad. The only affordable shape for
+that is one bake at pointer-up, which is why Smooth showed the artist nothing
+until they lifted the pen, however local the dab underneath had become.
+
+The missing piece was never the kernel. It was a **place to keep the working
+volume for the length of a gesture**, and that is what `session/sdf_sculpt.h`
+adds — see §3.1 below.
+
+### 3.1 Field brushes as transactions
+
+Two brushes are not spelled as edit-list stamps and cannot be: relax bakes
+(there is no node meaning "the average of what was here"), and Move is a warp
+on every item it reaches. Both are now driven as a **transaction** —
+`clay::session::SdfSmoothTransaction` and `SdfMoveTransaction`:
+
+```
+begin    capture the source; build the transient state ONCE
+update   mutate only that state; receive the dirty region
+commit   one persistent command group, one undo step
+cancel   nothing persistent ever happened
+```
+
+Between `begin` and `commit` the document is untouched — no nodes, no
+deformers, no undo entries, and a save taken mid-gesture is byte-for-byte the
+one taken before it. That negative is the whole architecture, and it is the
+first thing the tests assert.
+
+| | before | with a transaction |
+|---|---|---|
+| Smooth, per dab | bake the layer, relax, discard | relax the retained working volume in place |
+| Smooth, layer evaluations per stroke | one per dab | **one, at pointer-down** |
+| Smooth, live preview | none — the result appears at pointer-up | the working volume, with dirty bounds per dab |
+| Move, per pointer event | `move_brush` walks the whole edit list, then one `SetDeformersCmd` per item | one `resolve_prepared_move` per *affected* item; nothing persistent |
+| Move, undo entries per drag | one per frame, coalesced by `moved_chain` | one, at pointer-up |
+
+Each `update` returns a `SdfSculptDirty`: a conservative world-space box, the
+number of bricks the brush selected, and whether anything actually moved. The
+box and the count are **geometric** — they describe what the brush selected,
+not which samples happened to change — so they are reproducible for a given
+brush over a given lattice however much unrelated model surrounds it. `changed`
+is the value question, kept separate because a dab whose weight came out zero
+everywhere still selects its bricks and has nothing to redraw.
+
+**Move updates take the TOTAL displacement from the anchor**, never an
+increment on the last frame. Updates of 0.1, 0.2 then 0.5 end at exactly what a
+single fresh drag of 0.5 produces; a composition of the three would move the
+surface further than 0.5 ever asked for. The preview is rebuilt each frame from
+the chains captured at `begin` plus one grab for the current total, which is
+also what the commit installs — so a preview and its commit cannot disagree.
+
+**A commit refuses a source that moved underneath it.** The layer is
+fingerprinted at `begin` and re-checked at `commit`; if another tool, a
+replayed journal or an undo has edited it, the commit fails and the external
+edit stands. A preview computed against a document that no longer exists is
+never written over one that does.
+
+### 3.2 Bounding a long session
+
+Both degradation mechanisms `scene::report_layer` measures — a lengthening
+deformer chain, a steepening resampled volume — decay the marcher's safe step
+with every completed stroke. Consolidation cures both and destroys the
+parameters it absorbs, which is why `report_layer` measures and never bakes.
+
+`session::SdfSculptComplexityPolicy` is the other half: the place a *session*
+says when that trade is acceptable.
+
+```cpp
+session::SdfSculptPolicy policy;
+policy.cell_size = 0.01f;                       // required; the host's own
+policy.complexity.min_safe_step_scale = 0.25f;  // 0 disables a criterion
+policy.complexity.max_deformer_chain  = 8;
+policy.complexity.allow_consolidation = true;   // the whole opt-in
+```
+
+Zero disables a criterion, so a value-initialised policy authorises nothing and
+is never over budget. The check runs **only between completed strokes** — never
+while the pointer is down — and over budget without `allow_consolidation` is a
+*report*: `budget().over_budget` is set and the document is untouched. With it,
+the collapse happens inside the stroke's own undo step, so one undo puts back
+both the stroke and the layer it consolidated. A layer that is already a single
+volume item is not baked again.
+
 | 24-dab stroke, cell 0.01 | before | after |
 |---|---:|---:|
 | first dab | 2.96 ms | **2.31 ms** |

@@ -304,6 +304,90 @@ says nobody has measured one, because the gesture is what was instrumented.
 first two would numerically fit a frame; they are `operation` because that is
 what they are, and a host should give them progress UI rather than a frame.
 
+### The tier a per-dab number cannot tell you about
+
+`sdf_relax` sits at 0.73 ms and `sdf_move` in Tier 3, and read as a table both
+of them look affordable. Neither was, as a **live brush**, and the reason is
+not in any column above: the axis of these cases is one application of the
+verb, and the thing that made Smooth and Move unusable live was what a host had
+to do *around* each application.
+
+- `field::relax` takes a volume and returns a volume. A layer is an edit list,
+  so a host holding a layer bakes it to get a volume — and with nowhere to keep
+  that volume between pointer events, it bakes again next event. The per-dab
+  cost is `sdf_consolidate + sdf_relax`, **313 + 0.73**, not 0.73. The only
+  affordable shape for that is one bake at pointer-up, which is why Smooth
+  showed nothing until the pen lifted.
+- Move resolves against every item in the edit list to find the ones a *fixed*
+  anchor and radius reach, then writes one `SetDeformersCmd` per item. Per
+  pointer event that is a full traversal plus a document mutation, and the
+  mutation churns the revision, the tape, the caches and picking to produce one
+  edit that only exists at pointer-up.
+
+Both are the same missing thing — somewhere to keep transient state for one
+gesture — and `session/sdf_sculpt.h` is it. See §3.1 of
+[07 — brushes and features](07-brushes-and-features.md).
+
+**Measured on a 24-thread Linux desktop, not the reference device.** Per
+[RELEASE.md](RELEASE.md) the ratio transfers and the absolute does not; the
+absolute numbers here are `clay_bench` rows, and the ratios are what
+`tools/check_bench.py` gates. Load average was 5.7 before the run and 7.9
+after, on a machine that takes other jobs — which is exactly why the gates are
+ratios between two rows measured in the same run and not millisecond floors.
+
+| gesture | before | after | |
+|---|---:|---:|---|
+| Smooth, one live dab (193-item layer, cell 0.05) | 33.69 ms | **0.154 ms** | 219× |
+| Smooth, whole 100-dab stroke | 3,369 ms | **53.5 ms** | 63× |
+| Smooth, whole 1000-dab stroke | 33,689 ms | **211 ms** | 159× |
+| Smooth, layer bakes per stroke | one per dab | **one, at pointer-down** | |
+| Move, one live frame (1,032-item layer) | 0.0676 ms | **0.00122 ms** | 55× |
+| Move, whole 1000-frame drag | 67.6 ms | **1.60 ms** | 42× |
+| Move, one live frame (50,032-item layer) | 3.048 ms | **0.00122 ms** | 2,500× |
+| Move, persistent commands per drag | one per frame | **one, at pointer-up** | |
+
+The last Move row is the one that matters most and the only one that is a
+*shape* rather than a speedup. The prepared frame measures 0.00122, 0.00161,
+0.00127 and 0.00122 ms at 132, 1,032, 10,032 and 50,032 items — **flat**,
+because the traversal that scales with the model happens once at pointer-down,
+and the `visited` counter reads 32 at every one of those sizes. `move_brush`
+over the same axis reads 0.0086, 0.0604, 0.649 and 3.048 ms.
+`BM_SdfMoveTransactionUpdateScaling` and `BM_SdfMoveResolveScaling` are
+parameterised over exactly that axis, and the gate is the ratio between their
+last rows, so the claim is checked rather than asserted.
+
+**`begin()` is not free and the table should not hide it.**
+`BM_SdfSmoothTransactionBegin` measures **33.99 ms** — within 1% of one
+standalone dab, because it *is* the same whole-layer bake. What the transaction
+changes is how many times it is paid: once, at the point in the gesture where a
+brush cursor covers it, instead of once per pointer event. A 100-dab stroke
+costs 53.5 ms of which 34 is that one bake; the old path's 100 dabs cost 3,369.
+It is still O(model), and on a very large layer at a fine cell it will be felt
+at pointer-down — which is what makes local checkpoints the named follow-up in
+the change's `tasks.md`, and why this number is measured on its own axis rather
+than folded into the dab.
+
+### What the policy actually bounds
+
+Repeated *independent* Move strokes compose — that is correct, and
+`moved_chain`'s leading-grab replacement is about frames of one drag, not
+strokes. So the chain grows a grab per stroke and the declared Lipschitz
+multiplies with it:
+
+| 100 independent drags | chain | `safe_step_scale` | consolidations | total |
+|---|---:|---:|---:|---:|
+| policy off | 100 | 0.191 | 0 | 131 ms |
+| policy on | **58** | **0.221** | 1 | 827 ms |
+
+Read this honestly: the policy **bounds** the decay, it does not remove it. One
+consolidation fired, the chain restarted, and by drag 100 it had grown back to
+58 — better than 100, and the step scale is better with it, but the shape is
+still linear between bakes. The cost of the bake shows up too: 827 ms against
+131 ms for a hundred drags, which is the trade the opt-in exists to let a host
+decline. What the policy guarantees is that the decay is *bounded by the
+threshold the host set* rather than unbounded, and that the artist's parameters
+are never spent without being asked.
+
 ## What does not fit, and by how much
 
 Only three things miss, and one of them is not in the gate at all.

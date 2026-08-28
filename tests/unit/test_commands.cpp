@@ -488,3 +488,64 @@ TEST_CASE("a layer-add naming a source that is gone is refused") {
     REQUIRE(doc.layers.size() == 2);
     CHECK((doc.layers[1].sdf == doc.layers[0].sdf));
 }
+
+// -- nested brackets (sdf-sculpt-transaction spec) -----------------------------
+
+TEST_CASE("undo: a nested group collapses into the outermost step") {
+    // A bracket inside a bracket used to open a second step, so an entry point
+    // that groups its own work — consolidate_layer does — could not be called
+    // from inside a caller's group without splitting one gesture into two
+    // undos. A sculpt transaction commits a stroke and may then consolidate it;
+    // the artist did one thing and must undo one thing.
+    Document doc = base_document();
+    UndoStack stack;
+    const LayerId lid = doc.layers[0].id;
+    const NodeId sphere = nth_root(doc, 0);
+    const std::vector<std::uint8_t> initial = serialize_document(doc);
+
+    stack.begin_group();
+    REQUIRE(stack.perform(doc, SetColorCmd{lid, sphere, cf3(1, 0, 0)}));
+    stack.begin_group();  // an inner bracket, as a nested entry point opens one
+    REQUIRE(stack.perform(doc, SetPrimCmd{lid, sphere, Prim::sphere(3.0f)}));
+    stack.end_group();
+    REQUIRE(stack.perform(
+        doc, SetTransformCmd{lid, sphere, math::Transform{cf3(9, 9, 9), {}, 1.0f}}));
+    stack.end_group();
+
+    CHECK(stack.undo_depth() == 1);
+    const std::vector<std::uint8_t> after = serialize_document(doc);
+    REQUIRE(stack.undo(doc));
+    CHECK(serialize_document(doc) == initial);
+    REQUIRE(stack.redo(doc));
+    CHECK(serialize_document(doc) == after);
+}
+
+TEST_CASE("undo: an unbalanced end_group is ignored rather than corrupting the stack") {
+    Document doc = base_document();
+    UndoStack stack;
+    const LayerId lid = doc.layers[0].id;
+    const NodeId sphere = nth_root(doc, 0);
+
+    stack.end_group();  // nothing was opened
+    REQUIRE(stack.perform(doc, SetColorCmd{lid, sphere, cf3(1, 0, 0)}));
+    CHECK(stack.undo_depth() == 1);
+
+    stack.begin_group();
+    REQUIRE(stack.perform(doc, SetPrimCmd{lid, sphere, Prim::sphere(2.0f)}));
+    stack.end_group();
+    stack.end_group();  // one too many
+    CHECK(stack.undo_depth() == 2);
+    // The next command still opens its own step rather than joining the last.
+    REQUIRE(stack.perform(doc, SetColorCmd{lid, sphere, cf3(0, 1, 0)}));
+    CHECK(stack.undo_depth() == 3);
+}
+
+TEST_CASE("undo: an empty outer bracket with an empty inner one records nothing") {
+    Document doc = base_document();
+    UndoStack stack;
+    stack.begin_group();
+    stack.begin_group();
+    stack.end_group();
+    stack.end_group();
+    CHECK(stack.undo_depth() == 0);
+}

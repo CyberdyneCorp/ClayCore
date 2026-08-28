@@ -1427,7 +1427,7 @@ bool UndoStack::perform(Document& doc, const Command& cmd) {
     std::optional<Command> inverse = scene::apply(doc, cmd);
     if (!inverse) return false;
     redo_.clear();
-    if (grouping_ && !undo_.empty()) {
+    if (group_depth_ > 0 && !undo_.empty()) {
         undo_.back().inverses.push_back(std::move(*inverse));
         return true;
     }
@@ -1531,12 +1531,21 @@ std::size_t UndoStack::redo_bytes() const {
 }
 
 void UndoStack::begin_group() {
-    grouping_ = true;
-    undo_.push_back(Entry{});
+    // NESTED brackets collapse into the outermost one rather than opening a
+    // step of their own. An entry pushed here for an inner bracket would be a
+    // second undo step for what the user did once — and the case is real:
+    // consolidate_layer brackets its own sever-and-install, and a sculpt
+    // transaction that commits a stroke and then consolidates it wants both
+    // inside the one step the artist can undo.
+    //
+    // Depth rather than a bool for the same reason a bool was enough before:
+    // at depth 0 this is exactly what it was.
+    if (group_depth_++ == 0) undo_.push_back(Entry{});
 }
 
 void UndoStack::end_group() {
-    grouping_ = false;
+    if (group_depth_ == 0) return;  // unbalanced: nothing was opened
+    if (--group_depth_ > 0) return;  // an inner bracket; the outer one is still open
     if (!undo_.empty() && undo_.back().inverses.empty()) undo_.pop_back();
 }
 

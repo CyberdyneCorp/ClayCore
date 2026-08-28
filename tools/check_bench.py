@@ -458,6 +458,52 @@ MAX_RATIO = [
     # Measured 1.2-1.3x; 3.0 catches an O(history x entries) path coming
     # back, not runner noise.
     ("BM_TouchRegionFromDeepHistory", "BM_TouchRegionFromSeedStore", 3.0),
+    # -- live SDF sculpt transactions (sdf-sculpt-transaction) ---------------
+    #
+    # SMOOTH, before and after. The old path had nowhere to keep a baked volume
+    # between pointer events, so a dab was bake-the-layer, relax, discard; a
+    # transaction bakes once at pointer-down and a dab is `relax_in_place` over
+    # the bricks its own ball reaches. Measured 0.154 ms against 33.7 ms on a
+    # 24-thread Linux desktop under load average 5.7 -- 219x, or 0.0046 as a
+    # ratio -- and the ceiling sits at 0.10, twenty times above it.
+    #
+    # Generous on purpose, and the failure it catches is categorical rather
+    # than gradual: a dab that started sampling the layer again (a transaction
+    # silently falling back to bake-per-dab, which is the shape of the bug) is
+    # not 2x, it is ~1x. A ratio is also the only form this can take -- both
+    # sides move together on a slower runner, which a millisecond ceiling on
+    # the dab would not.
+    ("BM_SdfSmoothTransactionUpdate", "BM_SdfSmoothStandalone", 0.10),
+    # And the WHOLE gesture, which is the number that settles the trade: the
+    # one-time bake is only worth moving to pointer-down if a stroke amortises
+    # it. A thousand-dab Smooth through a transaction must cost at most
+    # twenty-five standalone dabs, where the old path cost a thousand of them.
+    # Measured 6.28 (211 ms against 33.7 ms), against a ceiling of 25 -- four
+    # times the headroom, and still forty times below the 1000x the old path
+    # would report if `begin` were being paid per dab.
+    ("BM_SdfSmoothTransaction1000", "BM_SdfSmoothStandalone", 25.0),
+    # MOVE, before and after, on a 1,032-item layer. `move_brush` prepares from
+    # scratch every call, so a live drag re-walks the edit list per pointer
+    # event to rediscover which items a FIXED anchor and radius reach;
+    # `SdfMoveTransaction` walks it once and a frame is one
+    # `resolve_prepared_move` per affected item. 0.00122 ms against 0.0676 ms,
+    # or 0.018, against a ceiling of 0.20.
+    ("BM_SdfMoveTransactionUpdate", "BM_SdfMoveResolve", 0.20),
+    # The same claim over a whole drag: a thousand frames of prepared drag
+    # against one frame of the old path. 23.6 measured (1.60 ms against
+    # 0.0676 ms), so the traversal pays for itself inside twenty-four frames --
+    # under half a second of dragging. 100 is the ceiling, which a per-frame
+    # traversal coming back would blow by an order of magnitude.
+    ("BM_SdfMoveTransaction1000", "BM_SdfMoveResolve", 100.0),
+    # THE SCALING CLAIM, and the sharpest of these gates. Both benchmarks are
+    # PARAMETERISED over the same four unrelated-item counts with the affected
+    # set held at 32, and the loop above keys on name.split("/")[0], so the rows
+    # that land here are the last registered -- Args({50000}) on both sides,
+    # 50,032 items, which is exactly where a per-frame traversal is most
+    # visible. 3.05 ms against 0.00122 ms there, or 0.0004; the ceiling is 0.05,
+    # a hundred and twenty times above it, and the same gate at the smallest row
+    # would read 0.14 because move_brush over 132 items is nearly free.
+    ("BM_SdfMoveTransactionUpdateScaling", "BM_SdfMoveResolveScaling", 0.05),
 ]
 
 # counter gates: (bench, counter, max_value) — the named counter must be at
@@ -525,6 +571,40 @@ MAX_COUNTER = [
     # is the row most likely to lose a seed to the store's 64 MB bound and so
     # the right one to hold. Measured 0.000 at all nine rows.
     ("BM_BrickRefillWindow", "refilled_frac", 0.05),
+    # -- the prepared drag's per-frame work, in NODES rather than milliseconds -
+    #
+    # The scaling ratio above says the prepared update is fast at 50,032 items.
+    # This says WHY, and says it in a number that is identical on every machine:
+    # a frame visits the AFFECTED items and nothing else. The fixture holds that
+    # set at 32 and grows only the unrelated bulk of the layer, so `visited`
+    # must read 32 at every row -- and `prepare_stats().visited`, reported
+    # beside it, reads the whole layer, which is the traversal that was moved to
+    # pointer-down rather than removed.
+    #
+    # PARAMETERISED, so this gates the last row registered -- Args({50000}) --
+    # which is the one where a live drag still traversing the tree would read
+    # 50,032 instead of 32. The ceiling is 40 rather than 32 so that a fixture
+    # tweak of a dab or two is not a CI failure; the failure worth catching is
+    # three orders of magnitude away.
+    ("BM_SdfMoveTransactionUpdateScaling", "visited", 40),
+    # The same guard on the un-parameterised 1,032-item row, so the property is
+    # asserted on the row the before/after ratio is quoted from as well.
+    ("BM_SdfMoveTransactionUpdate", "visited", 40),
+    # What the complexity policy is FOR, held as the number it bounds. A hundred
+    # separate drags leave a hundred grabs on every item they all reached --
+    # `moved_chain` replaces a leading grab only within one drag -- and each one
+    # raises the layer's declared Lipschitz, so `safe_step_scale` fell from
+    # 0.848 at ten drags to 0.191 at a hundred with the policy off.
+    #
+    # With `min_safe_step_scale = 0.5` and consolidation authorised the same
+    # hundred drags end at a chain of 58 and 0.221, so this ceiling of 90 is
+    # what says the policy ACTED. It is not tighter because the policy fires
+    # ONCE here and not repeatedly: `settle_budget` declines to collapse a layer
+    # whose edit list is already a single volume item, and consolidating turns
+    # this fixture into exactly that, so the chain regrows afterwards
+    # unattended. 90 gates the thing that is true today -- the run without the
+    # policy reads 100 -- and would need revisiting if that early-out changes.
+    ("BM_SdfMoveRepeatedPolicy100", "chain", 90),
 ]
 
 

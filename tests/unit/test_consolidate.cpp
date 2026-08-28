@@ -886,3 +886,95 @@ TEST_CASE("consolidation preserves painted colour exactly") {
         CHECK(now.z == doctest::Approx(was[i].z).epsilon(0.02));
     }
 }
+
+// -- installing a volume the caller already has (sdf-sculpt-transaction spec) --
+//
+// Consolidation is two things sold together: sample the layer, then replace its
+// edit list with the result. A live Smooth stroke has already done the first
+// half, once, at pointer-down; making it bake the layer AGAIN at pointer-up to
+// reach the installer would throw away the whole reason it held the volume. So
+// the installer is a function, and it is the SAME code — these hold it to that.
+
+TEST_CASE("consolidate: installing a volume is exactly what consolidate_layer installs") {
+    scene::Document baked = sphere_document(0.6f);
+    scene::Document installed = sphere_document(0.6f);
+    const scene::ConsolidationParams params = params_at(0.04f, 0.12f);
+
+    scene::ConsolidationCost baked_cost, installed_cost;
+    REQUIRE(scene::consolidate_layer(baked, baked.layers.front().id, params, nullptr,
+                                     &baked_cost));
+
+    std::optional<FieldVolume> v =
+        scene::bake_layer(installed.layers.front(), params, nullptr);
+    REQUIRE(v);
+    REQUIRE(scene::replace_layer_with_volume(installed, installed.layers.front().id,
+                                             std::move(*v), nullptr, &installed_cost));
+
+    // Same document, byte for byte: same node ids, same colour, same samples.
+    CHECK(scene::serialize_document(installed) == scene::serialize_document(baked));
+    CHECK(installed_cost.brick_count == baked_cost.brick_count);
+    CHECK(installed_cost.sample_lipschitz == baked_cost.sample_lipschitz);
+    CHECK(scene::consolidation_state(installed.layers.front()));
+}
+
+TEST_CASE("consolidate: installing a volume is one undo step, and its inverse is exact") {
+    scene::Document doc = sphere_document(0.6f);
+    scene::UndoStack undo;
+    const std::vector<std::uint8_t> before = scene::serialize_document(doc);
+
+    std::optional<FieldVolume> v =
+        scene::bake_layer(doc.layers.front(), params_at(0.04f, 0.12f), nullptr);
+    REQUIRE(v);
+    REQUIRE(scene::replace_layer_with_volume(doc, doc.layers.front().id, std::move(*v), &undo));
+
+    CHECK(undo.undo_depth() == 1);
+    const std::vector<std::uint8_t> after = scene::serialize_document(doc);
+    REQUIRE(undo.undo(doc));
+    CHECK(scene::serialize_document(doc) == before);  // the sphere's radius is back
+    REQUIRE(undo.redo(doc));
+    CHECK(scene::serialize_document(doc) == after);
+}
+
+TEST_CASE("consolidate: installing a volume refuses a protected layer") {
+    scene::Document doc = sphere_document(0.6f);
+    std::optional<FieldVolume> v =
+        scene::bake_layer(doc.layers.front(), params_at(0.04f, 0.12f), nullptr);
+    REQUIRE(v);
+    const std::vector<std::uint8_t> before = scene::serialize_document(doc);
+
+    doc.layers.front().locked = true;
+    CHECK_FALSE(scene::replace_layer_with_volume(doc, doc.layers.front().id, *v, nullptr));
+    doc.layers.front().locked = false;
+    doc.layers.front().ghost = true;
+    CHECK_FALSE(scene::replace_layer_with_volume(doc, doc.layers.front().id, *v, nullptr));
+    doc.layers.front().ghost = false;
+
+    CHECK_FALSE(scene::replace_layer_with_volume(doc, 9999, *v, nullptr));
+    CHECK(scene::serialize_document(doc) == before);
+}
+
+TEST_CASE("consolidate: installing a volume severs shared instance content") {
+    scene::Document doc = sphere_document(0.6f);
+    const scene::LayerId src = doc.layers.front().id;
+    scene::Layer* inst = doc.instance_layer(src, "copy");
+    REQUIRE(inst);
+    REQUIRE(inst->sdf == doc.layers.front().sdf);
+
+    std::optional<FieldVolume> v =
+        scene::bake_layer(doc.layers.front(), params_at(0.04f, 0.12f), nullptr);
+    REQUIRE(v);
+    scene::UndoStack undo;
+    REQUIRE(scene::replace_layer_with_volume(doc, src, std::move(*v), &undo));
+
+    // Nine subtools must not collapse because the artist baked the tenth.
+    const scene::Layer* instance = doc.find_layer(doc.layers.back().id);
+    REQUIRE(instance);
+    REQUIRE(instance->sdf->roots.size() == 1);
+    CHECK(instance->sdf->find(instance->sdf->roots.front())->prim.type ==
+          scene::PrimType::Sphere);
+    CHECK(scene::consolidation_state(*doc.find_layer(src)));
+    // ...and one undo puts back both the absorbed item and the sharing.
+    CHECK(undo.undo_depth() == 1);
+    REQUIRE(undo.undo(doc));
+    CHECK(doc.find_layer(src)->sdf == doc.layers.back().sdf);
+}

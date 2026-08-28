@@ -320,6 +320,36 @@ class FieldVolume {
     void rewrite_region(const Region& region,
                         const std::function<float(int, int, int, float)>& fn);
 
+    // What a region rewrite actually wrote: the bricks it selected, the world
+    // box they span, and whether any stored sample moved.
+    //
+    // A host holding a preview of this volume cannot SEE a rewrite. The volume
+    // keeps its identity, its brick set and its bounds, so nothing a consumer
+    // can diff from outside says which part of it went stale — and the only
+    // safe answer without this is "all of it", which is the term scaling with
+    // the model that a local dab exists to remove.
+    //
+    // The count and the bounds are GEOMETRIC: they describe the bricks the
+    // region selected, not the samples whose values happened to move. That is
+    // deliberate, and it is what makes them a TEST's quantity as well as a
+    // host's — the same brush over the same lattice selects the same bricks
+    // however much unrelated model is added around it, so a scaling test can
+    // assert on a number that does not depend on how fast the machine is.
+    //
+    // `changed` is the value question, kept separate because it is a different
+    // question: a dab whose weight came out zero everywhere still selects its
+    // bricks, and a host wants to know it has nothing to redraw.
+    struct RewriteTally {
+        math::Aabb bounds;               // union of the selected bricks' boxes
+        std::size_t touched_bricks = 0;  // bricks the rewrite wrote
+        bool changed = false;            // any stored sample actually moved
+    };
+
+    // The same rewrite, reporting what it touched. `rewrite_region` is this
+    // with the report dropped, so there is one walk and not two.
+    RewriteTally rewrite_region_tallied(const Region& region,
+                                        const std::function<float(int, int, int, float)>& fn);
+
     // The samples `rewrite_region` is about to overwrite, kept so an operator
     // can read what was there while it writes what comes next.
     //

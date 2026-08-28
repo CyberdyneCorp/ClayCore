@@ -335,7 +335,9 @@ class UndoStack {
     static Entry replay(Document& doc, const Entry& entry, math::Aabb* bound);
     std::vector<Entry> undo_;
     std::vector<Entry> redo_;
-    bool grouping_ = false;
+    // How many brackets are open, not whether one is. Nested brackets collapse
+    // into the outermost step — see begin_group.
+    int group_depth_ = 0;
 };
 
 }  // namespace scene
