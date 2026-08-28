@@ -31,6 +31,7 @@ TAPER_EASE = 5  # in-out quad, so the index is not the identity curve
 
 CLAY_OK = 0
 CLAY_ERROR_INVALID_ARGUMENT = 1
+CLAY_ERROR_NOT_FOUND = 2
 CLAY_ERROR_BUFFER_TOO_SMALL = 3
 CLAY_BRUSH_SHAPE_CUBE = 0
 CLAY_BRUSH_SHAPE_SPHERE = 1
@@ -158,6 +159,8 @@ def lib():
     lib.clay_document_voxel_layer.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
                                               ctypes.POINTER(ctypes.c_uint32),
                                               ctypes.POINTER(ctypes.c_void_p)]
+    lib.clay_document_voxel_layer_by_id.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                                    ctypes.POINTER(ctypes.c_void_p)]
     lib.clay_voxel_palette_add.argtypes = [ctypes.c_void_p, f32, i32]
     lib.clay_voxel_get.argtypes = [ctypes.c_void_p, i32, i32]
     lib.clay_voxel_set.argtypes = [ctypes.c_void_p, i32, ctypes.c_int32]
@@ -186,6 +189,8 @@ def lib():
     lib.clay_document_mesh_layer.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
                                              ctypes.POINTER(ctypes.c_uint32),
                                              ctypes.POINTER(ctypes.c_void_p)]
+    lib.clay_document_mesh_layer_by_id.argtypes = [ctypes.c_void_p, ctypes.c_uint32,
+                                                   ctypes.POINTER(ctypes.c_void_p)]
     return lib
 
 
@@ -955,5 +960,101 @@ def test_mesh_layer_written_by_pyclay_reads_back_through_c(lib, tmp_path):
         assert lib.clay_document_mesh_layer(doc, b"scan", None,
                                             ctypes.byref(again)) == CLAY_OK
         assert lib.clay_mesh_vertex_count(again) == len(TETRA_POSITIONS)
+    finally:
+        lib.clay_document_destroy(doc)
+
+
+# -- addressing a layer's payload by id (#365) ------------------------------------
+
+def test_same_named_layers_are_told_apart_by_id(lib, tmp_path):
+    """Spec: "a layer's payload is reachable by layer id".
+
+    Two voxel layers wearing one name is the case a host meets the moment an
+    artist adds a second sphere from the same starting form. By name only the
+    first in stack order is reachable, and the lookup SUCCEEDS, so the second
+    layer's grid is shadowed with no error to check. By id each one answers for
+    itself — before and after a round trip through the file, since that is
+    where the ids being stable and the names not being a key stops being an
+    abstract distinction."""
+    doc = lib.clay_document_create()
+    try:
+        first, second = ctypes.c_uint32(0), ctypes.c_uint32(0)
+        one, two = ctypes.c_void_p(0), ctypes.c_void_p(0)
+        assert lib.clay_document_add_voxel_layer(doc, b"Esfera", VOXEL_SIZE,
+                                                 ctypes.byref(first),
+                                                 ctypes.byref(one)) == CLAY_OK
+        assert lib.clay_document_add_voxel_layer(doc, b"Esfera", VOXEL_SIZE,
+                                                 ctypes.byref(second),
+                                                 ctypes.byref(two)) == CLAY_OK
+        assert first.value != second.value
+        index = ctypes.c_int32(0)
+        lib.clay_voxel_palette_add(one, floats(*hex_rgb(ORANGE)), ctypes.byref(index))
+        assert lib.clay_voxel_set(one, cell(1, 0, 0), index) == CLAY_OK
+        lib.clay_voxel_palette_add(two, floats(*hex_rgb(ORANGE)), ctypes.byref(index))
+        assert lib.clay_voxel_set(two, cell(9, 9, 9), index) == CLAY_OK
+
+        found, by_name = ctypes.c_uint32(0), ctypes.c_void_p(0)
+        assert lib.clay_document_voxel_layer(doc, b"Esfera", ctypes.byref(found),
+                                             ctypes.byref(by_name)) == CLAY_OK
+        assert found.value == first.value, "the name stopped answering with the first"
+
+        by_id = ctypes.c_void_p(0)
+        assert lib.clay_document_voxel_layer_by_id(doc, second.value,
+                                                   ctypes.byref(by_id)) == CLAY_OK
+        assert by_id.value == two.value, "the id reached the shadowing layer's grid"
+        assert c_voxel_cells(lib, by_id) == c_voxel_cells(lib, two)
+        assert c_voxel_cells(lib, by_id) != c_voxel_cells(lib, one)
+
+        # A refusal is typed and writes nothing; the out pointer is required
+        # here, unlike in the by-name form.
+        untouched = ctypes.c_void_p(0)
+        assert lib.clay_document_voxel_layer_by_id(doc, second.value + 9999,
+                                                   ctypes.byref(untouched)) == CLAY_ERROR_NOT_FOUND
+        assert not untouched.value
+        assert lib.clay_document_voxel_layer_by_id(doc, second.value,
+                                                   None) == CLAY_ERROR_INVALID_ARGUMENT
+
+        path = tmp_path / "same_named.clayspace"
+        assert lib.clay_document_save(doc, str(path).encode()) == CLAY_OK
+    finally:
+        lib.clay_document_destroy(doc)
+
+    reloaded = ctypes.c_void_p(0)
+    assert lib.clay_document_load(str(path).encode(), ctypes.byref(reloaded)) == CLAY_OK
+    try:
+        back = ctypes.c_void_p(0)
+        assert lib.clay_document_voxel_layer_by_id(reloaded, second.value,
+                                                   ctypes.byref(back)) == CLAY_OK
+        assert set(c_voxel_cells(lib, back)) == {(9, 9, 9)}
+        assert lib.clay_document_voxel_layer_by_id(reloaded, first.value,
+                                                   ctypes.byref(back)) == CLAY_OK
+        assert set(c_voxel_cells(lib, back)) == {(1, 0, 0)}
+    finally:
+        lib.clay_document_destroy(reloaded)
+
+
+def test_mesh_layer_by_id_reaches_the_geometry_the_name_shadows(lib):
+    """The mesh half of the same requirement, and the refusal that matters most:
+    an id naming a layer of another representation is NOT_FOUND rather than a
+    borrow of the wrong kind."""
+    doc, layer, borrowed = c_mesh_layer_document(lib)
+    try:
+        by_id = ctypes.c_void_p(0)
+        assert lib.clay_document_mesh_layer_by_id(doc, layer,
+                                                  ctypes.byref(by_id)) == CLAY_OK
+        assert by_id.value == borrowed.value
+        got = c_mesh_arrays(lib, by_id)
+        assert np.array_equal(got["indices"].reshape(-1), np.array(TETRA_INDICES, np.uint32))
+
+        voxel, grid = ctypes.c_uint32(0), ctypes.c_void_p(0)
+        assert lib.clay_document_add_voxel_layer(doc, b"grade", VOXEL_SIZE,
+                                                 ctypes.byref(voxel),
+                                                 ctypes.byref(grid)) == CLAY_OK
+        untouched = ctypes.c_void_p(0)
+        assert lib.clay_document_mesh_layer_by_id(doc, voxel.value,
+                                                  ctypes.byref(untouched)) == CLAY_ERROR_NOT_FOUND
+        assert lib.clay_document_voxel_layer_by_id(doc, layer,
+                                                   ctypes.byref(untouched)) == CLAY_ERROR_NOT_FOUND
+        assert not untouched.value
     finally:
         lib.clay_document_destroy(doc)

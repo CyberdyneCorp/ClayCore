@@ -419,3 +419,50 @@ TEST_CASE("c abi: an undone crossing saves nothing, and its id is reusable") {
 
     clay_document_destroy(reloaded);
 }
+
+TEST_CASE("c abi: an undone voxel layer is not reachable by its id either") {
+    // #365. The grid deliberately OUTLIVES the layer across an undo, so that a
+    // redo can pick the cells back up. That is exactly what makes an
+    // id-addressed lookup dangerous if it resolves the id in the grids held
+    // beside the document: it would hand back the grid of a layer that is not
+    // in the document, which is a state the by-name lookup reports as
+    // NOT_FOUND. The two have to agree, so the id is resolved in the DOCUMENT.
+    clay_document* d = clay_document_create();
+    REQUIRE(d != nullptr);
+    REQUIRE(clay_document_enable_undo(d) == CLAY_OK);
+
+    // The crossing the header recommends bracketing: one step covering the
+    // layer and the fill, so a single undo takes back what the user asked to.
+    clay_layer_id id = 0;
+    clay_voxel_grid* g = nullptr;
+    const std::int32_t cell[3] = {2, 3, 4};
+    REQUIRE(clay_document_begin_undo_group(d) == CLAY_OK);
+    REQUIRE(clay_document_add_voxel_layer(d, "blocks", 0.1f, &id, &g) == CLAY_OK);
+    REQUIRE(clay_voxel_set(g, cell, 5) == CLAY_OK);
+    REQUIRE(clay_document_end_undo_group(d) == CLAY_OK);
+
+    clay_voxel_grid* by_id = nullptr;
+    REQUIRE(clay_document_voxel_layer_by_id(d, id, &by_id) == CLAY_OK);
+    CHECK(by_id == g);
+
+    std::int32_t undone = 0;
+    REQUIRE(clay_document_undo(d, &undone) == CLAY_OK);
+    CHECK(undone == 1);
+    clay_voxel_grid* after = nullptr;
+    CHECK(clay_document_voxel_layer_by_id(d, id, &after) == CLAY_ERROR_NOT_FOUND);
+    CHECK(after == nullptr);  // a refused lookup writes nothing
+    // The same answer the name gives, which is the agreement being asserted.
+    clay_layer_id found = 0;
+    CHECK(clay_document_voxel_layer(d, "blocks", &found, &after) == CLAY_ERROR_NOT_FOUND);
+
+    // Redo brings the layer back under its own id, with the cells the undo kept.
+    std::int32_t redone = 0;
+    REQUIRE(clay_document_redo(d, &redone) == CLAY_OK);
+    CHECK(redone == 1);
+    REQUIRE(clay_document_voxel_layer_by_id(d, id, &after) == CLAY_OK);
+    std::int32_t read = 0;
+    REQUIRE(clay_voxel_get(after, cell, &read) == CLAY_OK);
+    CHECK(read == 5);
+
+    clay_document_destroy(d);
+}

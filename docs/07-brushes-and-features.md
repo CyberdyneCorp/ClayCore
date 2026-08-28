@@ -1184,7 +1184,7 @@ Names differ between bindings, so this lists them rather than ticking boxes.
 | A per-axis scale on an item | `scene::Node::scale_axes`, `cscale_nu_*` | `scale=(sx, sy, sz)` on every placement | `clay_item_set_scale_nonuniform`, `clay_layer_set_transform_nonuniform`, `clay_layer_node_transform_nonuniform`, `clay_mesh_transform_nonuniform` |
 | Quad meshing, with a target count | `mesh::mesh_tape_quads`, `mesh_tape_quads_fit`, `VoxelGrid::mesh_quads` | `Document.mesh_quads(...)`, `VoxelGrid.mesh_quads(...)` | `clay_document_mesh_quads`, `clay_voxel_mesh_quads` |
 | Triangles straight to voxels | `VoxelGrid::rasterize_mesh` | `VoxelGrid.rasterize_mesh(...)` | `clay_voxel_rasterize_mesh` |
-| A mesh a document carries | `scene::LayerKind::Mesh` | `Document.add_mesh_layer(...)`, `.mesh_layer(...)` | `clay_document_add_mesh_layer`, `clay_document_mesh_layer`, `clay_mesh_layer` |
+| A mesh a document carries | `scene::LayerKind::Mesh` | `Document.add_mesh_layer(...)`, `.mesh_layer(...)` | `clay_document_add_mesh_layer`, `clay_document_mesh_layer`, `clay_document_mesh_layer_by_id`, `clay_mesh_layer` |
 | Fixed-topology mesh brushes | `mesh::MeshSculptor::stamp`, `mesh::MeshBrush` | `MeshSculptor.stamp(...)` | `clay_mesh_sculptor_stamp`, `CLAY_MESH_BRUSH_*` |
 | Lattice cage on a mesh layer | `mesh::Lattice`, `mesh::MeshSculptor::apply_lattice` | `Lattice(...)`, `MeshSculptor.lattice(...)` | `clay_mesh_lattice_*`, `clay_mesh_sculptor_lattice` |
 | Lattice cage on an SDF item | `scene::Deformer::lattice` | `p.lattice(...)` | `clay_item_add_lattice`, `CLAY_DEFORM_LATTICE` |

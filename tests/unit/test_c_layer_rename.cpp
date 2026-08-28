@@ -70,6 +70,25 @@ clay_layer_id add_mesh_layer(clay_document* doc, const char* name) {
     return layer;
 }
 
+// A second mesh layer whose geometry is a different SIZE from the tetrahedron's,
+// so a lookup that reached the wrong one of two same-named layers is visible in
+// the vertex count rather than only in the coordinates.
+clay_layer_id add_triangle_layer(clay_document* doc, const char* name) {
+    const float positions[9] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+    const std::uint32_t indices[3] = {0, 1, 2};
+    clay_mesh* tri = nullptr;
+    REQUIRE(clay_mesh_from_triangles(positions, 3, indices, 3, &tri) == CLAY_OK);
+    clay_mesh_layer_desc desc;
+    std::memset(&desc, 0, sizeof desc);
+    desc.struct_size = sizeof desc;
+    desc.name = name;
+    clay_layer_id layer = 0;
+    clay_mesh* borrowed = nullptr;
+    REQUIRE(clay_document_add_mesh_layer(doc, tri, &desc, &layer, &borrowed) == CLAY_OK);
+    clay_mesh_destroy(tri);
+    return layer;
+}
+
 }  // namespace
 
 // The regression: on 0.29.1 the rename lived only in the host, so the reloaded
@@ -250,4 +269,113 @@ TEST_CASE("a UTF-8 name round-trips byte for byte") {
     REQUIRE(clay_layer_name(d.doc, layer, nullptr, &size) == CLAY_OK);
     CHECK(size == name.size() + 1);
     CHECK(name_of(d.doc, layer) == name);
+}
+
+// #365. The advice above clay_document_set_layer_name — hold the id, names are
+// not a key — could not be followed for the two representations that have a
+// payload: the only route back to a grid or to a mesh went through the name,
+// and answered with the first layer carrying it. So two layers sharing a name
+// shadowed one another SILENTLY, since the lookup succeeded, and a host's only
+// defence was to forbid duplicate names on voxel layers.
+TEST_CASE("two voxel layers sharing a name are told apart by their ids") {
+    const std::string path = temp_path("c_layer_by_id_voxel.clayspace");
+    clay_layer_id first = 0, second = 0;
+    const int32_t cell_a[3] = {1, 0, 0};
+    const int32_t cell_b[3] = {2, 0, 0};
+    {
+        Doc d;
+        clay_voxel_grid* grid = nullptr;
+        REQUIRE(clay_document_add_voxel_layer(d.doc, "Esfera", 0.05f, &first, &grid) == CLAY_OK);
+        REQUIRE(clay_voxel_set(grid, cell_a, 1) == CLAY_OK);
+        REQUIRE(clay_document_add_voxel_layer(d.doc, "Esfera", 0.05f, &second, &grid) == CLAY_OK);
+        REQUIRE(clay_voxel_set(grid, cell_b, 2) == CLAY_OK);
+
+        // The by-name lookup reaches the first in stack order and nothing else:
+        // that is the shadowing, and it is not a defect being fixed here.
+        clay_layer_id found = 0;
+        REQUIRE(clay_document_voxel_layer(d.doc, "Esfera", &found, &grid) == CLAY_OK);
+        CHECK(found == first);
+
+        // The ids reach their own layers, which is the whole ask.
+        clay_voxel_grid* a = nullptr;
+        clay_voxel_grid* b = nullptr;
+        REQUIRE(clay_document_voxel_layer_by_id(d.doc, first, &a) == CLAY_OK);
+        REQUIRE(clay_document_voxel_layer_by_id(d.doc, second, &b) == CLAY_OK);
+        CHECK(a != b);
+        int32_t read = 0;
+        REQUIRE(clay_voxel_get(a, cell_a, &read) == CLAY_OK);
+        CHECK(read == 1);
+        REQUIRE(clay_voxel_get(a, cell_b, &read) == CLAY_OK);
+        CHECK(read == 0);  // the second layer's cell is not in the first's grid
+        REQUIRE(clay_voxel_get(b, cell_b, &read) == CLAY_OK);
+        CHECK(read == 2);
+        REQUIRE(clay_voxel_get(b, cell_a, &read) == CLAY_OK);
+        CHECK(read == 0);
+
+        REQUIRE(clay_document_save(d.doc, path.c_str()) == CLAY_OK);
+    }
+
+    // Ids are stable across a save and load and names are not, so the round
+    // trip is where holding an id has to pay off.
+    clay_document* back = nullptr;
+    REQUIRE(clay_document_load(path.c_str(), &back) == CLAY_OK);
+    clay_voxel_grid* a = nullptr;
+    clay_voxel_grid* b = nullptr;
+    REQUIRE(clay_document_voxel_layer_by_id(back, first, &a) == CLAY_OK);
+    REQUIRE(clay_document_voxel_layer_by_id(back, second, &b) == CLAY_OK);
+    int32_t read = 0;
+    REQUIRE(clay_voxel_get(a, cell_a, &read) == CLAY_OK);
+    CHECK(read == 1);
+    REQUIRE(clay_voxel_get(b, cell_b, &read) == CLAY_OK);
+    CHECK(read == 2);
+
+    // And a rename moves the name without moving what the id reaches — the
+    // property the header promised and could not deliver.
+    REQUIRE(clay_document_set_layer_name(back, second, "Cabeca") == CLAY_OK);
+    REQUIRE(clay_document_voxel_layer_by_id(back, second, &b) == CLAY_OK);
+    REQUIRE(clay_voxel_get(b, cell_b, &read) == CLAY_OK);
+    CHECK(read == 2);
+    clay_document_destroy(back);
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("two mesh layers sharing a name are told apart by their ids") {
+    const std::string path = temp_path("c_layer_by_id_mesh.clayspace");
+    clay_layer_id first = 0, second = 0;
+    {
+        Doc d;
+        // Four vertices against three, so "the right layer" is checked rather
+        // than "a layer".
+        first = add_mesh_layer(d.doc, "Malha");
+        second = add_triangle_layer(d.doc, "Malha");
+
+        clay_layer_id found = 0;
+        clay_mesh* by_name = nullptr;
+        REQUIRE(clay_document_mesh_layer(d.doc, "Malha", &found, &by_name) == CLAY_OK);
+        CHECK(found == first);
+
+        clay_mesh* a = nullptr;
+        clay_mesh* b = nullptr;
+        REQUIRE(clay_document_mesh_layer_by_id(d.doc, first, &a) == CLAY_OK);
+        REQUIRE(clay_document_mesh_layer_by_id(d.doc, second, &b) == CLAY_OK);
+        CHECK(a != b);
+        CHECK(clay_mesh_vertex_count(a) == 4);
+        CHECK(clay_mesh_vertex_count(b) == 3);
+        REQUIRE(clay_document_save(d.doc, path.c_str()) == CLAY_OK);
+    }
+
+    clay_document* back = nullptr;
+    REQUIRE(clay_document_load(path.c_str(), &back) == CLAY_OK);
+    clay_mesh* a = nullptr;
+    clay_mesh* b = nullptr;
+    REQUIRE(clay_document_mesh_layer_by_id(back, first, &a) == CLAY_OK);
+    REQUIRE(clay_document_mesh_layer_by_id(back, second, &b) == CLAY_OK);
+    CHECK(clay_mesh_vertex_count(a) == 4);
+    CHECK(clay_mesh_vertex_count(b) == 3);
+
+    REQUIRE(clay_document_set_layer_name(back, first, "Referencia") == CLAY_OK);
+    REQUIRE(clay_document_mesh_layer_by_id(back, first, &a) == CLAY_OK);
+    CHECK(clay_mesh_vertex_count(a) == 4);
+    clay_document_destroy(back);
+    std::filesystem::remove(path);
 }
