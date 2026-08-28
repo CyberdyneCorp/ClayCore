@@ -972,7 +972,14 @@ clay_result clay_document_set_layer_visible(clay_document* doc, clay_layer_id la
  * onto a name already in use shadows the other layer's grid, and renaming it
  * away leaves the old name looking up nothing. Hold the id from creation or
  * from clay_document_layer_at when the lookup has to survive a rename — ids
- * are stable across save and load; names are not a key anything enforces. */
+ * are stable across save and load; names are not a key anything enforces.
+ *
+ * That advice is followable: clay_document_voxel_layer_by_id and
+ * clay_document_mesh_layer_by_id reach a layer's grid or its geometry from the
+ * id alone, so a duplicate name shadows nothing a host holds an id for. Through
+ * 0.56.0 they did not exist and the name was the ONLY route back to a payload,
+ * which is what pushed hosts into enforcing a uniqueness on voxel layers that
+ * nothing here ever asked for (#365). */
 clay_result clay_document_set_layer_name(clay_document* doc, clay_layer_id layer,
                                          const char* name);
 /* Protection, both off by default. A GHOSTED layer is still evaluated but is
@@ -2517,9 +2524,36 @@ clay_result clay_document_add_mesh_layer(clay_document* doc, const clay_mesh* me
 /* Borrows the mesh of an existing mesh layer by name; CLAY_ERROR_NOT_FOUND
  * when the document has no mesh layer carrying that name. Names are not
  * unique, so this answers with the FIRST mesh layer in stack order carrying
- * the name, and it follows clay_document_set_layer_name — see there. */
+ * the name, and it follows clay_document_set_layer_name — see there. When the
+ * lookup has to survive a rename, or has to tell two same-named layers apart,
+ * use clay_document_mesh_layer_by_id below; this one stays for the ordinary
+ * case of a document with one layer of that name. */
 clay_result clay_document_mesh_layer(clay_document* doc, const char* name,
                                      clay_layer_id* out_layer, clay_mesh** out_mesh);
+
+/* Borrows the mesh of the mesh layer carrying this id — the same lookup with
+ * the name resolution taken out, so nothing about the borrow changes: see the
+ * lifetime note above clay_document_add_voxel_layer, which governs a borrowed
+ * mesh exactly as it governs a borrowed grid.
+ *
+ * Ids are stable across a save and load, so this is the lookup that survives a
+ * rename and the one that tells two layers sharing a name apart. It refuses on
+ * the same terms as its by-name sibling, which is the point of it rather than a
+ * detail: CLAY_ERROR_NOT_FOUND when no layer carries the id, when the layer
+ * carrying it is not a mesh layer, and when it is a mesh layer whose geometry
+ * is not held beside the document — a layer whose payload did not come with the
+ * file it was loaded from. Anything the by-name form refuses for a given layer,
+ * this refuses too.
+ *
+ * out_mesh is REQUIRED, unlike the by-name form's. There a NULL means
+ * something — the call doubles as an existence probe and still answers through
+ * out_layer — while here the caller supplied the id and the handle is the only
+ * answer there is, so a NULL asks nothing. clay_document_layer_info is the call
+ * that says whether a layer exists and what representation it is. A NULL
+ * document or a NULL out_mesh is CLAY_ERROR_INVALID_ARGUMENT, and a refused
+ * call writes nothing. */
+clay_result clay_document_mesh_layer_by_id(clay_document* doc, clay_layer_id layer,
+                                           clay_mesh** out_mesh);
 
 /* The layer a borrowed mesh belongs to — what the ordinary layer calls
  * (transform, visibility, ghost, lock, ordering, removal) take. A mesh the
@@ -2865,17 +2899,24 @@ clay_result clay_item_volume_move_topological(clay_item* item,
  *
  * Two lifetimes, and the handle records which one it is:
  *  - clay_voxel_grid_create returns a grid the CALLER owns and destroys.
- *  - clay_document_add_voxel_layer and clay_document_voxel_layer return a
- *    grid BORROWED from a document layer: the document owns both the grid and
- *    the handle, edits through it are what clay_document_save writes, and
- *    clay_voxel_grid_destroy on it is rejected rather than obeyed.
+ *  - clay_document_add_voxel_layer, clay_document_voxel_layer and
+ *    clay_document_voxel_layer_by_id return a grid BORROWED from a document
+ *    layer: the document owns both the grid and the handle, edits through it
+ *    are what clay_document_save writes, and clay_voxel_grid_destroy on it is
+ *    rejected rather than obeyed.
  * A borrowed handle names its layer rather than pointing at the grid, and
  * looks it up again on every call, so it never caches a pointer that a later
- * edit to the document could move. Nothing in this ABI removes a layer today,
- * so that lookup does not fail; if a removal call is ever added, calls through
- * a handle to the removed layer become CLAY_ERROR_NOT_FOUND rather than a use
- * after free. Destroying the document does invalidate the handle and nothing
- * can detect that, so a borrowed handle must not outlive its document. */
+ * edit to the document could move. clay_document_remove_layer removes the
+ * LAYER and leaves the grid beside the document — the inverse of a removal
+ * could not carry it — so a handle held across a removal goes on resolving and
+ * goes on reading the grid it names. What the removal does change is the
+ * lookup: clay_document_voxel_layer and clay_document_voxel_layer_by_id both
+ * resolve in the document, so neither hands out a NEW handle to a layer that
+ * is no longer there. Should a grid ever stop being held beside its document
+ * while a handle still names it, calls through that handle are
+ * CLAY_ERROR_NOT_FOUND rather than a use after free. Destroying the document
+ * does invalidate the handle and nothing can detect that, so a borrowed handle
+ * must not outlive its document. */
 
 typedef struct clay_voxel_grid clay_voxel_grid; /* opaque */
 
@@ -2971,9 +3012,41 @@ clay_result clay_document_add_voxel_layer(clay_document* doc, const char* name,
  * when the document has no such layer. The name is not a unique key — nothing
  * has ever required one — so this answers with the FIRST voxel layer in stack
  * order carrying the name, and it follows clay_document_set_layer_name: hold
- * the id when a lookup has to survive a rename. */
+ * the id when a lookup has to survive a rename, and reach the grid with
+ * clay_document_voxel_layer_by_id below. This one stays for the ordinary case
+ * of a document with one layer of that name. */
 clay_result clay_document_voxel_layer(clay_document* doc, const char* name,
                                       clay_layer_id* out_layer, clay_voxel_grid** out_grid);
+
+/* Borrows the grid of the voxel layer carrying this id — the same lookup with
+ * the name resolution taken out. The borrow is unchanged in every respect: see
+ * the lifetime note above clay_document_add_voxel_layer.
+ *
+ * Ids are stable across a save and load, so this is the lookup that survives a
+ * rename and the one that tells two layers sharing a name apart. Before it
+ * existed a host holding an id had no way to spend it, and the workaround was
+ * to forbid duplicate names on voxel layers — a rule this ABI asks for nowhere
+ * else, and one an artist naming two spheres the same thing runs into first.
+ *
+ * CLAY_ERROR_NOT_FOUND when no layer carries the id, when the layer carrying it
+ * is not a voxel layer, and when it is a voxel layer whose grid is not held
+ * beside the document. The layer is resolved in the DOCUMENT, not in the grids
+ * held beside it, and that order is load-bearing: undoing the creation of a
+ * voxel layer removes the layer and deliberately KEEPS its cells so a redo can
+ * pick them back up, so a lookup that consulted the grids alone would hand back
+ * the grid of a layer that is not currently in the document. The by-name form
+ * reports NOT_FOUND there and so does this one — anything it refuses for a
+ * given layer, this refuses too.
+ *
+ * out_grid is REQUIRED, unlike the by-name form's. There a NULL means
+ * something — the call doubles as an existence probe and still answers through
+ * out_layer — while here the caller supplied the id and the handle is the only
+ * answer there is, so a NULL asks nothing. clay_document_layer_info is the call
+ * that says whether a layer exists and what representation it is. A NULL
+ * document or a NULL out_grid is CLAY_ERROR_INVALID_ARGUMENT, and a refused
+ * call writes nothing. */
+clay_result clay_document_voxel_layer_by_id(clay_document* doc, clay_layer_id layer,
+                                            clay_voxel_grid** out_grid);
 
 /* Cell size of the grid's ACTIVE resolution level (see below). */
 clay_result clay_voxel_size(const clay_voxel_grid* grid, float* out_voxel_size);

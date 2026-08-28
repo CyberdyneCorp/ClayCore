@@ -995,3 +995,104 @@ TEST_CASE("c voxel: a mesh layer's bounds are a region rasterize_mesh accepts") 
 
     clay_document_destroy(doc);
 }
+
+// #365: the id-addressed route back to a grid. The refusals are the design —
+// an id that names no layer, an id that names a layer of another
+// representation, and an id whose layer holds no grid are all NOT_FOUND, and a
+// borrow of the wrong kind would be worse than any of them.
+TEST_CASE("a voxel grid is reachable by its layer id, and refuses what it cannot answer") {
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+    clay_layer_id voxel = 0;
+    clay_voxel_grid* grid = nullptr;
+    REQUIRE(clay_document_add_voxel_layer(doc, "sculpt", 0.05f, &voxel, &grid) == CLAY_OK);
+    const std::int32_t cell[3] = {4, 5, 6};
+    REQUIRE(clay_voxel_set(grid, cell, 3) == CLAY_OK);
+
+    // The same borrow the creation and the by-name lookup hand back: a handle
+    // names its layer rather than caching a pointer, so all three are one.
+    clay_voxel_grid* by_id = nullptr;
+    REQUIRE(clay_document_voxel_layer_by_id(doc, voxel, &by_id) == CLAY_OK);
+    CHECK(by_id == grid);
+    std::int32_t read = 0;
+    REQUIRE(clay_voxel_get(by_id, cell, &read) == CLAY_OK);
+    CHECK(read == 3);
+
+    clay_layer_id sdf = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "body", &sdf) == CLAY_OK);
+
+    clay_voxel_grid* untouched = grid;
+    // An SDF layer's id is a layer, and is still not a voxel layer.
+    CHECK(clay_document_voxel_layer_by_id(doc, sdf, &untouched) == CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_document_voxel_layer_by_id(doc, voxel + 9999, &untouched) == CLAY_ERROR_NOT_FOUND);
+    CHECK(untouched == grid);  // a refused lookup writes nothing
+
+    CHECK(clay_document_voxel_layer_by_id(nullptr, voxel, &untouched) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    // Required here and optional in the by-name form: there a NULL still leaves
+    // the call something to answer with, here it asks nothing at all.
+    CHECK(clay_document_voxel_layer_by_id(doc, voxel, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(untouched == grid);
+
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("a voxel layer whose grid did not come with the file is not found by id") {
+    // The third refusal, and the only one that needs a document built by hand:
+    // the loader drops a grid whose layer is gone but keeps a layer whose grid
+    // is gone, so a file that lost its voxel chunk comes back as a voxel layer
+    // with nothing behind it. The by-name lookup already reports NOT_FOUND
+    // there and the by-id lookup has to agree, or an id would reach a payload
+    // the name cannot.
+    clay_document* doc = clay_document_create();
+    REQUIRE(doc != nullptr);
+    clay_layer_id voxel = 0;
+    clay_voxel_grid* grid = nullptr;
+    REQUIRE(clay_document_add_voxel_layer(doc, "sculpt", 0.05f, &voxel, &grid) == CLAY_OK);
+    const std::int32_t cell[3] = {0, 0, 0};
+    REQUIRE(clay_voxel_set(grid, cell, 1) == CLAY_OK);
+
+    clay_blob* blob = nullptr;
+    REQUIRE(clay_document_save_memory(doc, &blob) == CLAY_OK);
+    const std::uint8_t* bytes = clay_blob_data(blob);
+    const std::size_t size = clay_blob_size(blob);
+
+    // Container layout: "CLAY", major, minor, then (fourcc, u64 length,
+    // payload) repeated. Copy every chunk but the voxel ones.
+    const std::uint32_t kVoxelChunk = 0x4C584F56u;  // "VOXL" little-endian
+    std::vector<std::uint8_t> stripped(bytes, bytes + 8);
+    std::size_t at = 8, dropped = 0;
+    while (at + 12 <= size) {
+        std::uint32_t cc = 0;
+        std::uint64_t len = 0;
+        std::memcpy(&cc, bytes + at, 4);
+        std::memcpy(&len, bytes + at + 4, 8);
+        const std::size_t end = at + 12 + static_cast<std::size_t>(len);
+        REQUIRE(end <= size);
+        if (cc == kVoxelChunk)
+            ++dropped;
+        else
+            stripped.insert(stripped.end(), bytes + at, bytes + end);
+        at = end;
+    }
+    CHECK(at == size);
+    REQUIRE(dropped == 1);  // the surgery found something, so the load is a real case
+    clay_blob_destroy(blob);
+    clay_document_destroy(doc);
+
+    clay_document* back = nullptr;
+    REQUIRE(clay_document_load_memory(stripped.data(), stripped.size(), &back) == CLAY_OK);
+    // The layer is there — this is a layer with no grid, not a missing layer.
+    clay_layer_info info;
+    std::memset(&info, 0, sizeof info);
+    info.struct_size = static_cast<std::uint32_t>(sizeof info);
+    REQUIRE(clay_document_layer_info(back, voxel, &info) == CLAY_OK);
+    CHECK(info.id == voxel);
+    CHECK(info.representation == CLAY_LAYER_VOXEL);
+
+    clay_voxel_grid* missing = nullptr;
+    CHECK(clay_document_voxel_layer_by_id(back, voxel, &missing) == CLAY_ERROR_NOT_FOUND);
+    CHECK(missing == nullptr);
+    CHECK(clay_document_voxel_layer(back, "sculpt", nullptr, &missing) == CLAY_ERROR_NOT_FOUND);
+    clay_document_destroy(back);
+}

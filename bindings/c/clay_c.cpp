@@ -919,8 +919,11 @@ struct clay_document;
 // standalone grid, or a borrow of the grid a document keeps for one layer.
 // A borrow names the layer rather than pointing at it, so nothing caches a
 // pointer into the document's layer map: the lookup is redone on every call.
-// No entry point removes a layer today, so the miss below cannot be reached
-// through this ABI; it is what keeps that true if one is ever added.
+// clay_document_remove_layer removes the LAYER and leaves the grid beside the
+// document, so a borrow held across a removal still resolves. The miss below
+// guards a grid that stops being held while a handle still names it — which
+// nothing in this ABI does today, and which would be a use after free without
+// it.
 struct clay_voxel_grid {
     voxel::VoxelGrid* owned = nullptr;  // non-null: the caller destroys it
     clay_document* doc = nullptr;       // non-null: borrowed from a layer
@@ -2269,7 +2272,9 @@ clay_result resolve(const clay_voxel_grid* grid, voxel::VoxelGrid** out) {
         return CLAY_OK;
     }
     auto it = grid->doc->doc.voxel_layers.find(grid->layer);
-    if (it == grid->doc->doc.voxel_layers.end())  // no removal call exists yet
+    // A removal keeps the grid (see the handle's comment), so no call reaches
+    // this today; it is the guard that keeps a dropped payload a refusal.
+    if (it == grid->doc->doc.voxel_layers.end())
         return fail(CLAY_ERROR_NOT_FOUND, "voxel layer is no longer in its document");
     *out = &it->second;
     return CLAY_OK;
@@ -7166,6 +7171,37 @@ clay_result clay_document_voxel_layer(clay_document* doc, const char* name,
     return fail(CLAY_ERROR_NOT_FOUND, std::string("no voxel layer named ") + name);
 }
 
+clay_result clay_document_voxel_layer_by_id(clay_document* doc, clay_layer_id layer,
+                                            clay_voxel_grid** out_grid) {
+    // out_grid is required here and optional in the by-name form: there a NULL
+    // still leaves the call something to answer (the resolved id), here the
+    // caller already supplied the id and the handle is the whole answer.
+    if (!doc || !out_grid) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out_grid");
+    // Resolved in the DOCUMENT first, not in voxel_layers. Undoing the creation
+    // removes the layer and KEEPS the grid beside the document (see
+    // clay_document_add_voxel_layer), so the side table alone would hand back
+    // the grid of a layer that is not currently there — which is not what the
+    // by-name lookup does and would be a new way to edit an undone layer.
+    //
+    // The kind check is not redundant with the payload check below by
+    // CONTRACT, only by coincidence: voxel_layers is keyed by layer id and is
+    // written by nothing but the voxel create call, so today a layer of
+    // another kind is never in it. Reverting this line alone therefore fails
+    // no test. It stays because the by-name form checks the kind in the same
+    // position and the two are required to agree, and because the coincidence
+    // is a property of the create calls rather than of the type.
+    const scene::Layer* found = doc->doc.document.find_layer(layer);
+    if (!found || found->kind != scene::LayerKind::Voxel)
+        return fail(CLAY_ERROR_NOT_FOUND, "no voxel layer with id " + std::to_string(layer));
+    // A voxel layer whose grid did not come with the file it was loaded from:
+    // the by-name form guards the same way, and the two must agree.
+    if (!doc->doc.voxel_layers.count(layer))
+        return fail(CLAY_ERROR_NOT_FOUND,
+                    "voxel layer " + std::to_string(layer) + " holds no grid");
+    *out_grid = borrow_layer(doc, layer);
+    return CLAY_OK;
+}
+
 // -- mesh layers (c-abi spec: mesh layers across the ABI) --------------------
 
 namespace {
@@ -7245,6 +7281,22 @@ clay_result clay_document_mesh_layer(clay_document* doc, const char* name,
         return CLAY_OK;
     }
     return fail(CLAY_ERROR_NOT_FOUND, std::string("no mesh layer named ") + name);
+}
+
+// The mesh half of clay_document_voxel_layer_by_id, on the same terms and for
+// the same reasons — see there for why the layer is resolved in the document
+// rather than in the payloads held beside it.
+clay_result clay_document_mesh_layer_by_id(clay_document* doc, clay_layer_id layer,
+                                           clay_mesh** out_mesh) {
+    if (!doc || !out_mesh) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null document or out_mesh");
+    const scene::Layer* found = doc->doc.document.find_layer(layer);
+    if (!found || found->kind != scene::LayerKind::Mesh)
+        return fail(CLAY_ERROR_NOT_FOUND, "no mesh layer with id " + std::to_string(layer));
+    if (!doc->doc.mesh_layers.count(layer))
+        return fail(CLAY_ERROR_NOT_FOUND,
+                    "mesh layer " + std::to_string(layer) + " holds no geometry");
+    *out_mesh = borrow_mesh_layer(doc, layer);
+    return CLAY_OK;
 }
 
 clay_result clay_mesh_layer(const clay_mesh* mesh, clay_layer_id* out_layer) {

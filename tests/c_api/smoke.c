@@ -1037,6 +1037,23 @@ static int check_voxel_ownership(void) {
     REQUIRE(clay_add_sdf_layer(doc, "body", &sdf) == CLAY_OK);
     REQUIRE(clay_document_voxel_layer(doc, "body", NULL, &again) == CLAY_ERROR_NOT_FOUND);
 
+    /* the same grid by the layer's id, which is what a host holds across a
+     * rename: a second layer wearing the same name shadows the name and not
+     * the id */
+    clay_voxel_grid* by_id = NULL;
+    clay_layer_id twin = 0;
+    clay_voxel_grid* twin_grid = NULL;
+    REQUIRE(clay_document_voxel_layer_by_id(doc, layer, &by_id) == CLAY_OK);
+    REQUIRE(by_id == grid);
+    REQUIRE(clay_document_add_voxel_layer(doc, "voxels", 0.2f, &twin, &twin_grid) == CLAY_OK);
+    REQUIRE(clay_document_voxel_layer(doc, "voxels", &found_layer, &again) == CLAY_OK);
+    REQUIRE(found_layer == layer); /* the name still answers with the first */
+    REQUIRE(clay_document_voxel_layer_by_id(doc, twin, &by_id) == CLAY_OK);
+    REQUIRE(by_id == twin_grid);
+    REQUIRE(clay_document_voxel_layer_by_id(doc, sdf, &by_id) == CLAY_ERROR_NOT_FOUND);
+    REQUIRE(clay_document_voxel_layer_by_id(doc, layer + 9999, &by_id) == CLAY_ERROR_NOT_FOUND);
+    REQUIRE(clay_document_remove_layer(doc, twin) == CLAY_OK);
+
     /* edits through the borrow are what the document saves */
     REQUIRE(clay_document_save(doc, "c_api_smoke_voxels.clayspace") == CLAY_OK);
     clay_document* loaded = NULL;
@@ -1071,6 +1088,10 @@ static int check_voxel_rejections(void) {
     REQUIRE(clay_document_add_voxel_layer(NULL, NULL, 0.1f, NULL, NULL) ==
             CLAY_ERROR_INVALID_ARGUMENT);
     REQUIRE(clay_document_voxel_layer(NULL, NULL, NULL, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    /* the by-id lookup REQUIRES its out pointer, unlike the by-name one: the
+     * caller already supplied the id, so a NULL asks nothing */
+    REQUIRE(clay_document_voxel_layer_by_id(NULL, 0, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
+    REQUIRE(clay_document_mesh_layer_by_id(NULL, 0, NULL) == CLAY_ERROR_INVALID_ARGUMENT);
 
     /* out-of-range palette indices are rejected, not truncated to a byte */
     REQUIRE(clay_voxel_set(grid, cell, 256) == CLAY_ERROR_INVALID_ARGUMENT);
