@@ -60,6 +60,7 @@
 #include <cstdint>
 #include <optional>
 #include <vector>
+#include <algorithm>
 
 #include "clay/brush/move.h"
 #include "clay/field/relax.h"
@@ -241,6 +242,24 @@ class SdfSmoothTransaction {
     const field::FieldVolume& preview_volume() const { return working_; }
 
     const SdfSmoothMaterializationStats& materialization() const { return materialized_; }
+
+    // -- the preview delta ----------------------------------------------------
+    //
+    // Which bricks of the preview hold bytes a consumer has not seen: the ones
+    // a dab materialized, and the ones a dab's relax actually moved. A host
+    // patching a GPU cache wants these; copying the whole working volume every
+    // frame is what this exists to replace.
+    //
+    // Deduplicated across dabs and held until taken, so a host that skips a
+    // frame does not lose one. `take_preview_delta` hands the list over and
+    // clears it; `preview_delta` looks without taking.
+    const std::vector<field::FieldVolume::BrickCoord>& preview_delta() const { return dirty_; }
+    void take_preview_delta(std::vector<field::FieldVolume::BrickCoord>* out);
+
+    // Bumped by every update that changed the preview, and by nothing else. A
+    // host uses it to tell a duplicate read from a skipped frame, and to drop
+    // an upload it started against an older one.
+    std::uint64_t preview_generation() const { return generation_; }
     // Whether any update actually moved a stored sample. A gesture that changed
     // nothing commits without replacing the layer — see commit().
     bool changed() const { return changed_; }
@@ -293,6 +312,9 @@ class SdfSmoothTransaction {
     // rather than guessed: the ball it rewrites, plus the stencil's reach,
     // plus a brick for the outward rounding rewrite_region does.
     field::FieldVolume::Region dependency_region(const field::RelaxSettings& settings) const;
+    // Fold the coordinates appended since `from` against everything already
+    // held, in place.
+    void dedup_delta(std::size_t from);
 
     scene::Document* doc_ = nullptr;
     scene::LayerId layer_ = 0;
@@ -307,6 +329,11 @@ class SdfSmoothTransaction {
     math::Aabb region_;      // the lattice both the working field and commit use
     math::Aabb edited_;      // union of what the dabs actually changed
     bool changed_ = false;
+    std::uint64_t generation_ = 0;
+    // Reused across dabs rather than allocated per dab, which is the whole
+    // reason the field layer appends to a caller's vector.
+    std::vector<field::FieldVolume::BrickCoord> dirty_;
+    std::vector<std::uint64_t> dirty_seen_;  // packed coords, sorted; for the dedup
     SdfSmoothMaterializationStats materialized_;
     SdfSculptBudget budget_;
 };

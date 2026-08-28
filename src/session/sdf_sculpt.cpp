@@ -222,8 +222,9 @@ SdfSculptDirty SdfSmoothTransaction::update(const field::RelaxSettings& settings
     // materialized are counted and left alone: refilling one would throw away
     // the edits earlier dabs made to it, which is the difference between a
     // cache and a bug.
-    const field::FieldVolume::ResampleTally brought =
-        working_.materialize_region(dependency_region(settings), field_source_->block_fill());
+    const std::size_t before = dirty_.size();
+    const field::FieldVolume::ResampleTally brought = working_.materialize_region(
+        dependency_region(settings), field_source_->block_fill(), &dirty_);
     materialized_.materialized_bricks += brought.added;
     materialized_.reused_bricks += brought.kept;
     ++materialized_.updates;
@@ -234,7 +235,7 @@ SdfSculptDirty SdfSmoothTransaction::update(const field::RelaxSettings& settings
     // The dab itself, unchanged — the same in-place relax over the same
     // stencil. `rewrite_region` writes only bricks that store samples, and
     // everything this dab reads now does.
-    const field::RelaxResult r = field::relax_in_place(working_, settings, token);
+    const field::RelaxResult r = field::relax_in_place(working_, settings, token, &dirty_);
     dirty.bounds = r.dirty_bounds;
     dirty.touched_bricks = r.touched_bricks;
     dirty.changed = r.changed;
@@ -242,7 +243,45 @@ SdfSculptDirty SdfSmoothTransaction::update(const field::RelaxSettings& settings
         changed_ = true;
         edited_.expand(r.dirty_bounds);
     }
+    // Deduplicated ONCE over what this update appended, rather than per push:
+    // a dab materializes a brick and then relaxes it, so the same coordinate
+    // arrives twice by construction, and a host uploading it twice would be
+    // paying for the bookkeeping this exists to save.
+    dedup_delta(before);
+    // Bumped only when the preview actually moved, so a host can tell a
+    // duplicate read from a skipped frame. A dab that changed nothing leaves
+    // the generation where it was, which is what makes repeated reads
+    // deterministic.
+    if (r.changed || brought.added > 0) ++generation_;
     return dirty;
+}
+
+void SdfSmoothTransaction::dedup_delta(std::size_t from) {
+    auto packed = [](const field::FieldVolume::BrickCoord& c) {
+        // Biased into unsigned so a negative coordinate -- which a lattice does
+        // not produce today, but a Region rounded outward could -- still packs
+        // to a distinct key rather than aliasing another brick.
+        const std::uint64_t x = static_cast<std::uint64_t>(c.x + (1 << 20));
+        const std::uint64_t y = static_cast<std::uint64_t>(c.y + (1 << 20));
+        const std::uint64_t z = static_cast<std::uint64_t>(c.z + (1 << 20));
+        return (x << 42) | (y << 21) | z;
+    };
+    std::size_t keep = from;
+    for (std::size_t i = from; i < dirty_.size(); ++i) {
+        const std::uint64_t key = packed(dirty_[i]);
+        const auto at = std::lower_bound(dirty_seen_.begin(), dirty_seen_.end(), key);
+        if (at != dirty_seen_.end() && *at == key) continue;
+        dirty_seen_.insert(at, key);
+        dirty_[keep++] = dirty_[i];
+    }
+    dirty_.resize(keep);
+}
+
+void SdfSmoothTransaction::take_preview_delta(
+    std::vector<field::FieldVolume::BrickCoord>* out) {
+    if (out) out->swap(dirty_);
+    dirty_.clear();
+    dirty_seen_.clear();
 }
 
 bool SdfSmoothTransaction::commit(scene::UndoStack* undo) {

@@ -1582,6 +1582,82 @@ static int check_meshing(clay_document* doc) {
 
 /* Instance layers: a duplicate subtool costs a layer record, an edit through
  * either layer is an edit to both, and the sharing survives a save. */
+/* The live Smooth transaction and its incremental preview, from pure C11: an
+ * opaque handle, a versioned policy, and the two-call delta drain. Declarations
+ * only reachable from C are the point -- a C++ test cannot show that a struct
+ * initialises or that a function links without a namespace. */
+static int check_sdf_smooth_preview(void) {
+    clay_document* doc = clay_document_create();
+    clay_layer_id layer = 0;
+    clay_item_desc sphere;
+    clay_sculpt_policy policy;
+    clay_relax_params dab;
+    clay_sculpt_dirty dirty;
+    clay_sdf_preview_delta_info info;
+    clay_sdf_smooth_tx* tx = NULL;
+    clay_sdf_preview_brick* bricks = NULL;
+    float* samples = NULL;
+    uint64_t got_bricks = 0, got_samples = 0;
+    uint64_t i;
+
+    if (!doc) return 1;
+    if (clay_add_sdf_layer(doc, "form", &layer) != CLAY_OK) return 1;
+    memset(&sphere, 0, sizeof sphere);
+    sphere.struct_size = (uint32_t)sizeof sphere;
+    sphere.prim = CLAY_PRIM_SPHERE;
+    sphere.params[0] = 0.5f;
+    if (clay_add_item(doc, layer, &sphere, NULL) != CLAY_OK) return 1;
+
+    memset(&policy, 0, sizeof policy);
+    policy.struct_size = (uint32_t)sizeof policy;
+    policy.cell_size = 0.05f;
+    tx = clay_sdf_smooth_begin(doc, layer, &policy, NULL);
+    if (!tx) return 1;
+
+    memset(&dab, 0, sizeof dab);
+    dab.struct_size = (uint32_t)sizeof dab;
+    dab.strength = 0.8f;
+    dab.radius_cells = 1;
+    dab.iterations = 1;
+    dab.centre[1] = 0.5f;
+    dab.region_radius = 0.25f;
+    memset(&dirty, 0, sizeof dirty);
+    dirty.struct_size = (uint32_t)sizeof dirty;
+    if (clay_sdf_smooth_update(tx, &dab, NULL, &dirty) != CLAY_OK) return 1;
+    if (dirty.changed != 1) return 1;
+
+    memset(&info, 0, sizeof info);
+    info.struct_size = (uint32_t)sizeof info;
+    if (clay_sdf_smooth_preview_delta_info(tx, &info) != CLAY_OK) return 1;
+    if (info.brick_count == 0 || info.generation != 1) return 1;
+    if (info.sample_floats != info.brick_count * 729u) return 1;
+
+    bricks = (clay_sdf_preview_brick*)malloc((size_t)info.brick_count * sizeof *bricks);
+    samples = (float*)malloc((size_t)info.sample_floats * sizeof *samples);
+    if (!bricks || !samples) return 1;
+    if (clay_sdf_smooth_preview_delta_take(tx, bricks, info.brick_count, samples,
+                                           info.sample_floats, &got_bricks,
+                                           &got_samples) != CLAY_OK)
+        return 1;
+    if (got_bricks != info.brick_count || got_samples != info.sample_floats) return 1;
+    for (i = 0; i < got_bricks; ++i) {
+        if (bricks[i].sample_dim != 9u) return 1;
+        if (bricks[i].sample_offset != i * 729u) return 1;
+    }
+    /* Taken means cleared. */
+    memset(&info, 0, sizeof info);
+    info.struct_size = (uint32_t)sizeof info;
+    if (clay_sdf_smooth_preview_delta_info(tx, &info) != CLAY_OK) return 1;
+    if (info.brick_count != 0) return 1;
+
+    if (clay_sdf_smooth_commit(tx, NULL) != CLAY_OK) return 1;
+    clay_sdf_smooth_destroy(tx);
+    free(bricks);
+    free(samples);
+    clay_document_destroy(doc);
+    return 0;
+}
+
 static int check_instance_layers(void) {
     clay_document* doc = clay_document_create();
     clay_layer_id source = 0, instance = 0;
@@ -1708,6 +1784,7 @@ int main(void) {
     if (check_meshers(doc) != 0) return 1;
     if (check_meshing(doc) != 0) return 1;
     if (check_instance_layers() != 0) return 1;
+    if (check_sdf_smooth_preview() != 0) return 1;
     if (check_round_trip(doc) != 0) return 1;
     if (check_voxel_rasterize(doc) != 0) return 1;
 

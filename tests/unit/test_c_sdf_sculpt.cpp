@@ -325,3 +325,151 @@ TEST_CASE("c abi: an authorised sculpt policy bounds a repeated Move") {
     // The stroke AND the consolidation it triggered are ONE thing to undo.
     CHECK(undo_depth(d.doc) == 2);
 }
+
+// -- the incremental preview delta (add-sdf-prefix-cache) ----------------------
+
+namespace {
+
+clay_sdf_preview_delta_info delta_info_out() {
+    clay_sdf_preview_delta_info i;
+    std::memset(&i, 0, sizeof i);
+    i.struct_size = static_cast<uint32_t>(sizeof i);
+    return i;
+}
+
+}  // namespace
+
+TEST_CASE("c abi: a preview delta carries only the bricks that changed") {
+    CDoc d;
+    const clay_layer_id layer = blended_form(d.doc);
+    const clay_sculpt_policy policy = sculpt_policy(0.05f);
+    clay_sdf_smooth_tx* tx = clay_sdf_smooth_begin(d.doc, layer, &policy, nullptr);
+    REQUIRE(tx != nullptr);
+
+    // Nothing has happened yet, so there is nothing to take and no generation.
+    clay_sdf_preview_delta_info info = delta_info_out();
+    REQUIRE(clay_sdf_smooth_preview_delta_info(tx, &info) == CLAY_OK);
+    CHECK(info.brick_count == 0);
+    CHECK(info.generation == 0);
+    CHECK(info.has_bounds == 0);
+
+    const clay_relax_params dab = relax_params(0.0f, 0.42f, 0.0f, 0.25f);
+    REQUIRE(clay_sdf_smooth_update(tx, &dab, nullptr, nullptr) == CLAY_OK);
+
+    REQUIRE(clay_sdf_smooth_preview_delta_info(tx, &info) == CLAY_OK);
+    CHECK(info.brick_count > 0);
+    CHECK(info.generation == 1);
+    CHECK(info.has_bounds == 1);
+    CHECK(info.sample_floats == info.brick_count * 729);  // 9^3, halo included
+    CHECK(info.bounds_min[0] < info.bounds_max[0]);
+
+    // A short buffer takes NOTHING and says how far it fell short, so the
+    // caller can grow and ask again without having stranded a brick.
+    std::vector<clay_sdf_preview_brick> bricks(1);
+    std::vector<float> samples(729);
+    uint64_t got_bricks = 0, got_samples = 0;
+    CHECK(clay_sdf_smooth_preview_delta_take(tx, bricks.data(), 1, samples.data(), 729,
+                                             &got_bricks, &got_samples) ==
+          CLAY_ERROR_BUFFER_TOO_SMALL);
+    CHECK(got_bricks == info.brick_count);
+    CHECK(got_samples == info.sample_floats);
+
+    clay_sdf_preview_delta_info still = delta_info_out();
+    REQUIRE(clay_sdf_smooth_preview_delta_info(tx, &still) == CLAY_OK);
+    CHECK(still.brick_count == info.brick_count);  // nothing was taken
+
+    bricks.resize(static_cast<std::size_t>(info.brick_count));
+    samples.resize(static_cast<std::size_t>(info.sample_floats));
+    REQUIRE(clay_sdf_smooth_preview_delta_take(tx, bricks.data(), bricks.size(), samples.data(),
+                                               samples.size(), &got_bricks,
+                                               &got_samples) == CLAY_OK);
+    CHECK(got_bricks == info.brick_count);
+    CHECK(got_samples == info.sample_floats);
+    for (uint64_t i = 0; i < got_bricks; ++i) {
+        CHECK(bricks[i].sample_dim == 9);
+        CHECK(bricks[i].spacing == doctest::Approx(0.05f));
+        CHECK(bricks[i].sample_offset == i * 729);
+    }
+
+    // Taking clears it; the generation stays, because it names what the caller
+    // now holds rather than what is waiting.
+    clay_sdf_preview_delta_info after = delta_info_out();
+    REQUIRE(clay_sdf_smooth_preview_delta_info(tx, &after) == CLAY_OK);
+    CHECK(after.brick_count == 0);
+    CHECK(after.generation == 1);
+
+    clay_sdf_smooth_destroy(tx);
+}
+
+TEST_CASE("c abi: the delta accumulates across frames and dedups by brick") {
+    CDoc d;
+    const clay_layer_id layer = blended_form(d.doc);
+    const clay_sculpt_policy policy = sculpt_policy(0.05f);
+    clay_sdf_smooth_tx* tx = clay_sdf_smooth_begin(d.doc, layer, &policy, nullptr);
+    REQUIRE(tx != nullptr);
+    const clay_relax_params dab = relax_params(0.0f, 0.42f, 0.0f, 0.25f);
+
+    REQUIRE(clay_sdf_smooth_update(tx, &dab, nullptr, nullptr) == CLAY_OK);
+    clay_sdf_preview_delta_info first = delta_info_out();
+    REQUIRE(clay_sdf_smooth_preview_delta_info(tx, &first) == CLAY_OK);
+
+    // The SAME dab again: it materializes nothing new and moves the same
+    // bricks, so a host that skipped the first frame is told about them once.
+    REQUIRE(clay_sdf_smooth_update(tx, &dab, nullptr, nullptr) == CLAY_OK);
+    clay_sdf_preview_delta_info second = delta_info_out();
+    REQUIRE(clay_sdf_smooth_preview_delta_info(tx, &second) == CLAY_OK);
+    CHECK(second.brick_count == first.brick_count);
+    CHECK(second.generation == 2);  // the preview did move, twice
+
+    clay_sdf_smooth_destroy(tx);
+}
+
+TEST_CASE("c abi: delta payload follows the brush, not the model") {
+    // 11.2: the whole point. The same tiny dab on a layer with far more in it
+    // must hand over the same number of bricks.
+    uint64_t small_bricks = 0, large_bricks = 0;
+    for (int extra : {0, 300}) {
+        CDoc d;
+        const clay_layer_id layer = blended_form(d.doc);
+        for (int i = 0; i < extra; ++i) {
+            clay_item_desc it;
+            std::memset(&it, 0, sizeof it);
+            it.struct_size = static_cast<uint32_t>(sizeof it);
+            it.prim = CLAY_PRIM_SPHERE;
+            it.params[0] = 0.05f;
+            it.position[0] = 20.0f + 0.2f * static_cast<float>(i);
+            clay_node_id node = 0;
+            REQUIRE(clay_add_item(d.doc, layer, &it, &node) == CLAY_OK);
+        }
+        const clay_sculpt_policy policy = sculpt_policy(0.05f);
+        clay_sdf_smooth_tx* tx = clay_sdf_smooth_begin(d.doc, layer, &policy, nullptr);
+        REQUIRE(tx != nullptr);
+        const clay_relax_params dab = relax_params(0.0f, 0.42f, 0.0f, 0.25f);
+        REQUIRE(clay_sdf_smooth_update(tx, &dab, nullptr, nullptr) == CLAY_OK);
+        clay_sdf_preview_delta_info info = delta_info_out();
+        REQUIRE(clay_sdf_smooth_preview_delta_info(tx, &info) == CLAY_OK);
+        (extra == 0 ? small_bricks : large_bricks) = info.brick_count;
+        clay_sdf_smooth_destroy(tx);
+    }
+    CHECK(small_bricks > 0);
+    CHECK(small_bricks == large_bricks);
+}
+
+TEST_CASE("c abi: the delta refuses a spent transaction rather than dangling") {
+    CDoc d;
+    const clay_layer_id layer = blended_form(d.doc);
+    const clay_sculpt_policy policy = sculpt_policy(0.05f);
+    clay_sdf_smooth_tx* tx = clay_sdf_smooth_begin(d.doc, layer, &policy, nullptr);
+    REQUIRE(tx != nullptr);
+    const clay_relax_params dab = relax_params(0.0f, 0.42f, 0.0f, 0.25f);
+    REQUIRE(clay_sdf_smooth_update(tx, &dab, nullptr, nullptr) == CLAY_OK);
+
+    clay_sdf_smooth_cancel(tx);
+    clay_sdf_preview_delta_info info = delta_info_out();
+    uint64_t a = 0, b = 0;
+    CHECK(clay_sdf_smooth_preview_delta_info(tx, &info) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_sdf_smooth_preview_delta_take(tx, nullptr, 0, nullptr, 0, &a, &b) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_sdf_smooth_preview_delta_info(nullptr, &info) == CLAY_ERROR_INVALID_ARGUMENT);
+    clay_sdf_smooth_destroy(tx);
+}

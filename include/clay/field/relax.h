@@ -24,6 +24,7 @@
 // That is inherent to relaxing a field, not a shortcut taken here.
 
 #include <functional>
+#include <vector>
 
 #include "clay/field/volume.h"
 #include "clay/parallel/cancel.h"
@@ -104,8 +105,13 @@ struct RelaxResult {
 // surface, not by what all of them would have: a cancelled relax that shrank
 // the band for work it never did would understate the distance a sample-free
 // brick reports, which is the one direction a bound may not be wrong in.
+// `out_changed` (optional) is APPENDED with the coordinate of every brick in
+// which a stored sample actually moved, so a caller transporting a preview
+// sends the bytes that are new rather than the whole volume. The vector is the
+// caller's and is reused across dabs; see FieldVolume::rewrite_region_tallied.
 RelaxResult relax_in_place(FieldVolume& volume, const RelaxSettings& settings = {},
-                           parallel::CancelToken* token = nullptr);
+                           parallel::CancelToken* token = nullptr,
+                           std::vector<FieldVolume::BrickCoord>* out_changed = nullptr);
 
 // Smooth `v`, returning a new volume sampled over the same region at the same
 // resolution. The input is not modified.

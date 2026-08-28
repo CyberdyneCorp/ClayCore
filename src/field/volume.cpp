@@ -728,7 +728,8 @@ void FieldVolume::rewrite_region(const Region& region,
 }
 
 FieldVolume::RewriteTally FieldVolume::rewrite_region_tallied(
-    const Region& region, const std::function<float(int, int, int, float)>& fn) {
+    const Region& region, const std::function<float(int, int, int, float)>& fn,
+    std::vector<BrickCoord>* out_changed) {
     RewriteTally tally;
     if (empty() || region.box.empty()) return tally;
     const int n = kBrickDim + 1;
@@ -758,6 +759,7 @@ FieldVolume::RewriteTally FieldVolume::rewrite_region_tallied(
                 if (!region.meets(box)) continue;
                 ++tally.touched_bricks;
                 tally.bounds.expand(box);
+                bool brick_moved = false;
                 for (int i = 0; i < kBrickSamples; ++i) {
                     const int lx = i % n, ly = (i / n) % n, lz = i / (n * n);
                     const std::size_t at =
@@ -768,9 +770,16 @@ FieldVolume::RewriteTally FieldVolume::rewrite_region_tallied(
                     // Compared rather than assumed: a dab whose weight came out
                     // zero everywhere still selects its bricks, and a host told
                     // it had something to redraw would redraw nothing.
-                    if (now != was) tally.changed = true;
+                    if (now != was) {
+                        tally.changed = true;
+                        brick_moved = true;
+                    }
                     data_[at] = now;
                 }
+                // The bricks whose BYTES are new, which is what a delta
+                // carries -- not every brick the region selected, most of
+                // which a brush hands back unchanged.
+                if (brick_moved && out_changed) out_changed->push_back(BrickCoord{bx, by, bz});
             }
     return tally;
 }
@@ -809,8 +818,22 @@ std::vector<std::size_t> FieldVolume::fill_region_bricks(const Region& region,
     return slots;
 }
 
+bool FieldVolume::read_brick(BrickCoord c, float* out) const {
+    if (!out) return false;
+    if (c.x < 0 || c.y < 0 || c.z < 0 || c.x >= bcount_[0] || c.y >= bcount_[1] ||
+        c.z >= bcount_[2])
+        return false;
+    const std::size_t slot =
+        static_cast<std::size_t>((c.z * bcount_[1] + c.y) * bcount_[0] + c.x);
+    const std::int32_t entry = index_[slot];
+    if (entry < 0) return false;
+    std::copy(data_.begin() + entry, data_.begin() + entry + kBrickSamples, out);
+    return true;
+}
+
 FieldVolume::ResampleTally FieldVolume::materialize_region(const Region& region,
-                                                           const BrickBlockFill& fill) {
+                                                           const BrickBlockFill& fill,
+                                                           std::vector<BrickCoord>* out_added) {
     ResampleTally tally;
     if (index_.empty() || region.box.empty()) return tally;
 
@@ -844,6 +867,7 @@ FieldVolume::ResampleTally FieldVolume::materialize_region(const Region& region,
                 data_.insert(data_.end(), block.begin(), block.end());
                 sample_lipschitz_ =
                     std::max(sample_lipschitz_, steepest_in_block(block.data()) / cell_size_);
+                if (out_added) out_added->push_back(BrickCoord{bx, by, bz});
                 ++tally.added;
             }
     // A volume that carried colour cannot keep a complete channel once bricks

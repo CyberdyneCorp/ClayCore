@@ -360,10 +360,38 @@ class FieldVolume {
         bool changed = false;            // any stored sample actually moved
     };
 
+    // A brick's position on the lattice, in bricks. What a consumer holding a
+    // copy of this volume needs in order to say WHICH part of it went stale —
+    // a bounding box says where to look, and this says what to fetch.
+    struct BrickCoord {
+        int x = 0, y = 0, z = 0;
+    };
+
+    // The world position of a brick's first sample, and the extent of its
+    // samples. A host patching a preview needs to place what it is given.
+    kernel::cfloat3 brick_origin(BrickCoord c) const {
+        return origin_ + kernel::cf3(static_cast<float>(c.x), static_cast<float>(c.y),
+                                     static_cast<float>(c.z)) *
+                             (static_cast<float>(kBrickDim) * cell_size_);
+    }
+
+    // One brick's stored samples, x-fastest over (kBrickDim+1)^3 — the same
+    // order `sample_blocks` fills and `to_blob` writes. False when that brick
+    // stores none, and then `out` is untouched.
+    bool read_brick(BrickCoord c, float* out) const;
+
     // The same rewrite, reporting what it touched. `rewrite_region` is this
     // with the report dropped, so there is one walk and not two.
+    //
+    // `out_changed` (optional) is APPENDED with the coordinate of every brick
+    // in which a stored sample actually moved — not every brick selected, which
+    // is what `touched_bricks` counts. A consumer transporting a delta wants the
+    // bricks whose bytes are new; a caller sizing work wants the count. The
+    // vector is the CALLER'S, so a gesture reuses one across dabs rather than
+    // allocating per dab, and duplicates across calls are the caller's to fold.
     RewriteTally rewrite_region_tallied(const Region& region,
-                                        const std::function<float(int, int, int, float)>& fn);
+                                        const std::function<float(int, int, int, float)>& fn,
+                                        std::vector<BrickCoord>* out_changed = nullptr);
 
     // The samples `rewrite_region` is about to overwrite, kept so an operator
     // can read what was there while it writes what comes next.
@@ -493,7 +521,11 @@ class FieldVolume {
     // `fill` is asked for one brick at a time, exactly as `resample_region`
     // asks, and must produce the same values a full sampling would at those
     // lattice points.
-    ResampleTally materialize_region(const Region& region, const BrickBlockFill& fill);
+    // `out_added` (optional) is APPENDED with the coordinate of every brick
+    // this materialized. Those bricks are new bytes to anyone holding a copy,
+    // exactly as a rewritten one is.
+    ResampleTally materialize_region(const Region& region, const BrickBlockFill& fill,
+                                     std::vector<BrickCoord>* out_added = nullptr);
 
     // Whether the brick holding `p` stores samples. The lazily-filled caller's
     // question — see materialize_region — and cheaper than sample_at when the
