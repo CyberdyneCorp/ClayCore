@@ -19,6 +19,15 @@ A command that carries content SHALL be applied unchanged, so the in-memory path
 - **WHEN** a layer-add command naming a content source is applied to a document without that layer
 - **THEN** the command is refused and the document is unchanged
 
+### Requirement: Reinserting an existing layer names the content it shares
+A command pair that REMOVES an existing layer and adds it back — a reorder, and the sever a consolidation performs — SHALL decide, before the remove, whether the layer's edit list is shared, and the add SHALL name a surviving sharer when it is.
+
+In memory the add already carries the layer's own shared pointer and the name changes nothing. The name is what makes the pair correct once SERIALIZED: an add that names no source writes the edit list inline, so a replay of a reorder deserializes it as private content and unlinks the layers. An add whose content is deliberately private — the consolidation's sever — SHALL name nothing and keep the inline form.
+
+#### Scenario: A reordered instance replays as an instance
+- **WHEN** a journal containing a reorder of a shared layer is replayed onto the snapshot it was taken against
+- **THEN** the reordered layer still shares the other's edit list
+
 ### Requirement: Consolidation gives a shared layer its own content first
 Consolidating a layer SHALL affect that layer only. When the layer's edit list is shared with other layers, consolidation SHALL first replace it with a private copy, and that replacement SHALL be part of the same undo step as the bake so that undoing the consolidation restores the shared content.
 

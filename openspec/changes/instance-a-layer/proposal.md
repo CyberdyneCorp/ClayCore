@@ -50,6 +50,19 @@ wrong for sharing, and the constructor alone would have shipped all three:
    is not a question the ABI can be asked. A subtool panel cannot draw what it
    cannot query.
 
+Three more turned up once the constructor existed and tests could reach them.
+`tail_append` routed an append on shared content to the per-LAYER tape-cache
+fast path, leaving every other instance stale — `command_frontier` already
+refused the same situation ten lines below. `clay_layer_move_surface` states
+the region it invalidates ANALYTICALLY, as the ball the drag reaches, and that
+ball is stated in the dragged layer's placement alone: measured 0.4 world units
+stale — the whole displacement — at a second placement four units away. And a
+REORDER is a remove and an add, so the journalled add wrote the shared edit
+list inline and a crash recovery came back with the subtools unlinked and the
+edit list multiplied. All three are the same shape: a path that answers per
+layer where the content is per document, each fixed here with a regression test
+whose revert compiles.
+
 ## What changes
 
 **The constructor.** `clay_document_instance_layer(doc, source, name,
@@ -84,6 +97,15 @@ intact.
 
 **A read side.** `clay_layer_info` gains `content_source` and `share_count`,
 appended to a descriptor that already negotiates `struct_size`.
+
+**The two paths that answer per layer.** `clay_layer_move_surface` widens its
+stated ball by each sharer's `layer_influence_bound`, which is the same union
+`node_command_bound` already takes for the per-command paths — conservative,
+and only a shared edit list pays it. `clay_document_move_layer` names a
+surviving sharer on the add half of its remove-then-add pair, through
+`scene::content_sharer_of`; in memory the add already carries the shared
+pointer and the name changes nothing, and the bake's sever deliberately names
+nothing because its content really is private.
 
 ## What we decided, and why
 

@@ -49,6 +49,26 @@ A source that is not an SDF layer SHALL be refused with `CLAY_ERROR_INVALID_ARGU
 - **WHEN** an instance is itself instanced
 - **THEN** all three layers share one edit list and the document counts it once
 
+### Requirement: A gesture that states its own reach covers every placement
+An entry point that states the region it invalidates ANALYTICALLY instead of deriving it per command — the surface drag is the only one — SHALL widen that region to cover every layer sharing the edited content.
+
+The drag's reach is a ball around the drag centre, and that ball is stated in the EDITED layer's placement. An instanced edit list is placed by every layer sharing it, so the same warp changes the field wherever those layers put the nodes, outside the ball. Left unwidened the host is told nothing about that region, its cached bricks there are advanced to the new revision while still holding pre-drag values, and it draws stale geometry with nothing to say so — the same failure the dirty-bounds contract already forbids for the per-command paths.
+
+Only a shared edit list SHALL pay the widening; a layer nothing instances SHALL invalidate its ball alone, which is what makes the drag cheaper than the per-item union it replaced.
+
+#### Scenario: A drag through one placement dirties the other
+- **WHEN** a layer is instanced and placed elsewhere, a brick over the instance's placement is refilled, and the SOURCE layer's surface is then dragged
+- **THEN** refilling that brick again yields what the document now evaluates to, not the values from before the drag
+
+### Requirement: Reordering a shared layer keeps it shared
+Reordering a layer is expressed as a remove and an add. When the layer's edit list is shared, the add SHALL name a surviving sharer as its content source, so that the pair carries a reference wherever it travels rather than only in memory.
+
+Without it the reorder is silent in memory and wrong once serialized: the add writes the edit list inline, and a journal replay after a crash restores the layers UNLINKED and the edit list multiplied, with every shape right and nothing to see.
+
+#### Scenario: Replaying a reorder keeps the sharing
+- **WHEN** an instance is reordered on a document with undo enabled and the journal is replayed onto the snapshot it was taken against
+- **THEN** the recovered layers still share one edit list, and an edit through one is visible through the other
+
 ### Requirement: An instance survives a save and load as a reference
 A document holding instanced layers SHALL serialize the shared edit list ONCE and SHALL restore the sharing on load. A round trip SHALL NOT multiply the allocation the memory report promises to count once, and SHALL NOT silently unlink the layers.
 

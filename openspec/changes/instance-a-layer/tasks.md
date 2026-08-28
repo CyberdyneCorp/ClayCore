@@ -108,6 +108,10 @@
 - [x] 8.11 A journal replay of an instance creation shares rather than copies
 - [x] 8.12 `clay_layer_info` reports the link, after a reload and after the
       source is gone
+- [x] 8.13 A surface drag on a shared layer dirties the OTHER placement: a
+      brick over the instance refilled before and after the drag agrees with
+      what the document evaluates to
+- [x] 8.14 A journal replay of a REORDER of a shared layer keeps the sharing
 
 ## 9. Proving the tests
 
@@ -132,10 +136,23 @@
 - [x] 9.6 REVERT F: an unresolvable content source falls back to an empty or
       copied edit list instead of refusing, on both the command path and the
       load path
-- [x] 9.7 Each revert COMPILES under `-Werror` before its result is believed.
-      Counts, C ABI suite: A 10/14 cases, 30 assertions; B 2/14, 5; C 2/14, 7;
-      D 1/14, 1. Command suite: E 1/15, 2; F 2/15, 4. Plus the C smoke
-      consumer under A and B
+- [x] 9.7 REVERT G: drop the sharer widening in `clay_layer_move_surface`, so
+      the drag invalidates its ball alone. FOUND IN REVIEW: the ball is stated
+      in the DRAGGED layer's placement, and the seeds at the other placement
+      were advanced to the new revision while still clean and then handed back
+      as the whole answer — measured 0.4 world units stale, the whole
+      displacement. Every per-command path was already right, because
+      `command_influence_bound` unions over the sharers; this is the one call
+      that states its reach instead of deriving it
+- [x] 9.8 REVERT H: `scene::content_sharer_of` returns 0. FOUND IN REVIEW: a
+      reorder is a remove and an add, so the journalled add wrote the shared
+      edit list INLINE and a crash recovery came back with the subtools
+      unlinked and the edit list multiplied — invisibly, because the shapes
+      are right
+- [x] 9.9 Each revert COMPILES under `-Werror` before its result is believed.
+      Counts, C ABI suite: A 10/16 cases, 30 assertions; B 2/16, 5; C 2/16, 7;
+      D 1/16, 1; G 1/16, 1; H 1/16, 4. Command suite: E 1/15, 2; F 2/15, 4.
+      Plus the C smoke consumer under A and B
 
 ## 10. Gates
 

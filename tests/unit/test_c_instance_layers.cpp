@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -13,14 +14,18 @@
 // The engine could already share an edit list between layers — evaluation,
 // bounds, culling and the memory report were all written for it — and nothing
 // in the ABI could produce the state they described. What these cases hold is
-// the three things that had to be true before the constructor was worth
-// shipping, and each is a property a separate revert can break:
+// the things that had to be true before the constructor was worth shipping,
+// and each is a property a separate revert can break:
 //
 //   * an edit through either layer is an edit to ONE edit list, so it is
 //     visible through both and its dirty bounds cover both placements;
 //   * a save and reload keeps the sharing, so the document's memory does not
 //     scale with the instance count and the layers stay linked;
-//   * consolidating one instance severs it and leaves the others alone.
+//   * consolidating one instance severs it and leaves the others alone;
+//   * a gesture that states its own reach — the surface drag — states it for
+//     every placement, not only the one whose layer was named;
+//   * a reorder, which is a remove and an add, replays out of the journal
+//     still sharing rather than as a deep copy.
 
 namespace {
 
@@ -84,6 +89,66 @@ std::uint64_t layer_edit_list(const clay_document* doc, clay_layer_id layer) {
     m.struct_size = sizeof(m);
     REQUIRE(clay_layer_memory(doc, layer, &m) == CLAY_OK);
     return m.edit_list;
+}
+
+// One brick of a host's cache, named by its key. A brick spans
+// key * dim * spacing to that plus dim * spacing on each axis, and its lattice
+// sample (i, j, k) sits at origin + (i, j, k) * spacing.
+clay_brick_request brick_at(std::int32_t x, std::int32_t y, std::int32_t z) {
+    clay_brick_request req{};
+    req.key[0] = x;
+    req.key[1] = y;
+    req.key[2] = z;
+    req.spacing = 0.125f;
+    for (int axis = 0; axis < 3; ++axis) {
+        req.dims[axis] = 8;
+        req.origin[axis] = static_cast<float>(req.key[axis]) *
+                           static_cast<float>(req.dims[axis]) * req.spacing;
+    }
+    req.band = 4.0f * req.spacing;
+    return req;
+}
+
+std::size_t brick_samples(const clay_brick_request& req) {
+    return static_cast<std::size_t>(req.dims[0]) * static_cast<std::size_t>(req.dims[1]) *
+           static_cast<std::size_t>(req.dims[2]);
+}
+
+// The brick as a host would refill it — which is the call that consults the
+// document's resume seeds, and so the call an under-invalidation shows up in.
+std::vector<float> refill_brick(const clay_document* doc, const clay_brick_request& req) {
+    std::vector<float> values(brick_samples(req));
+    REQUIRE(clay_brick_cache_eval_requests(doc, nullptr, &req, 1, values.data(), values.size(),
+                                           nullptr, 0) == CLAY_OK);
+    return values;
+}
+
+// The same lattice evaluated point by point, which consults nothing and is
+// therefore the ground truth to hold a refill against.
+std::vector<float> sample_brick(const clay_document* doc, const clay_brick_request& req) {
+    std::vector<float> points;
+    points.reserve(brick_samples(req) * 3);
+    for (std::int32_t k = 0; k < req.dims[2]; ++k)
+        for (std::int32_t j = 0; j < req.dims[1]; ++j)
+            for (std::int32_t i = 0; i < req.dims[0]; ++i) {
+                points.push_back(req.origin[0] + static_cast<float>(i) * req.spacing);
+                points.push_back(req.origin[1] + static_cast<float>(j) * req.spacing);
+                points.push_back(req.origin[2] + static_cast<float>(k) * req.spacing);
+            }
+    std::vector<float> values(brick_samples(req));
+    REQUIRE(clay_eval_points(doc, nullptr, points.data(), values.size(), values.data(),
+                             nullptr) == CLAY_OK);
+    return values;
+}
+
+float max_abs_diff(const std::vector<float>& a, const std::vector<float>& b) {
+    REQUIRE(a.size() == b.size());
+    float worst = 0.0f;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        const float d = std::fabs(a[i] - b[i]);
+        if (d > worst) worst = d;
+    }
+    return worst;
 }
 
 // Save and reload through the buffer entry points, so a round trip costs no
@@ -563,6 +628,91 @@ TEST_CASE("replaying an instance creation shares rather than copies") {
     // quietly cost twice the edit list it was recovering.
     CHECK(info_of(recovered, instance).share_count == 2);
     CHECK(info_of(recovered, instance).content_source == source);
+    CHECK(document_edit_list(recovered) < document_edit_list(doc) * 3 / 2);
+    add_sphere(recovered, instance, 0.2f, 40.0f);
+    CHECK(node_count(recovered, source) == 201);
+
+    clay_blob_destroy(snapshot);
+    clay_blob_destroy(journal);
+    clay_document_destroy(recovered);
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("a drag through one placement dirties the others") {
+    clay_document* doc = clay_document_create();
+    clay_layer_id source = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "body", &source) == CLAY_OK);
+    add_sphere(doc, source, 0.5f, 0.0f);
+    clay_layer_id instance = 0;
+    REQUIRE(clay_document_instance_layer(doc, source, "bolt", &instance) == CLAY_OK);
+    place(doc, instance, 4.0f);
+
+    const clay_brick_request req = brick_at(4, 0, 0);
+    const std::vector<float> before = refill_brick(doc, req);
+    REQUIRE(before == sample_brick(doc, req));
+
+    clay_move_params params{};
+    params.struct_size = sizeof(params);
+    params.radius = 1.0f;
+    const float centre[3] = {0.0f, 0.5f, 0.0f};
+    const float displacement[3] = {0.0f, 0.4f, 0.0f};
+    std::size_t applied = 0;
+    REQUIRE(clay_layer_move_surface(doc, source, centre, displacement, &params, &applied) ==
+            CLAY_OK);
+    REQUIRE(applied == 1);
+
+    const std::vector<float> truth = sample_brick(doc, req);
+    REQUIRE(max_abs_diff(truth, before) > 0.05f);  // the drag really reached here
+    CHECK(max_abs_diff(refill_brick(doc, req), truth) < 1e-4f);
+
+    clay_document_destroy(doc);
+}
+
+TEST_CASE("replaying a reorder of a shared layer keeps the sharing") {
+    clay_document* doc = clay_document_create();
+    clay_layer_id source = 0;
+    REQUIRE(clay_add_sdf_layer(doc, "body", &source) == CLAY_OK);
+    for (int i = 0; i < 200; ++i) add_sphere(doc, source, 0.2f, 0.05f * static_cast<float>(i));
+    clay_layer_id instance = 0;
+    REQUIRE(clay_document_instance_layer(doc, source, "bolt", &instance) == CLAY_OK);
+    REQUIRE(clay_document_enable_undo(doc) == CLAY_OK);
+
+    // The snapshot already holds both layers sharing, so the only thing the
+    // journal has to carry is the reorder.
+    clay_blob* snapshot = nullptr;
+    REQUIRE(clay_document_save_memory(doc, &snapshot) == CLAY_OK);
+    std::size_t at = 0;
+    REQUIRE(clay_document_journal_range(doc, nullptr, &at) == CLAY_OK);
+
+    // A reorder is a remove and an add. In memory the add carries the shared
+    // pointer and nothing looks wrong; the journal serializes the command, and
+    // an add that names no source writes the edit list inline.
+    REQUIRE(clay_document_move_layer(doc, instance, 0) == CLAY_OK);
+    CHECK(info_of(doc, instance).share_count == 2);
+
+    clay_blob* journal = nullptr;
+    std::size_t now_at = 0;
+    REQUIRE(clay_document_journal_since(doc, at, &journal, &now_at) == CLAY_OK);
+
+    clay_document* recovered = nullptr;
+    REQUIRE(clay_document_load_memory(clay_blob_data(snapshot), clay_blob_size(snapshot),
+                                      &recovered) == CLAY_OK);
+    REQUIRE(clay_document_enable_undo(recovered) == CLAY_OK);
+    std::size_t applied = 0;
+    std::int32_t barrier = 0;
+    REQUIRE(clay_document_replay_journal(recovered, clay_blob_data(journal),
+                                         clay_blob_size(journal), &applied, &barrier) == CLAY_OK);
+    CHECK(barrier == 0);
+
+    // The reorder happened, and the layers are still one edit list. Recovered
+    // as copies, an artist who reordered a duplicated subtool would come back
+    // to unlinked subtools and twice the edit list, with the shapes right and
+    // nothing to see.
+    clay_layer_id first = 0;
+    REQUIRE(clay_document_layer_at(recovered, 0, &first) == CLAY_OK);
+    CHECK(first == instance);
+    CHECK(info_of(recovered, instance).share_count == 2);
+    CHECK(info_of(recovered, source).share_count == 2);
     CHECK(document_edit_list(recovered) < document_edit_list(doc) * 3 / 2);
     add_sphere(recovered, instance, 0.2f, 40.0f);
     CHECK(node_count(recovered, source) == 201);

@@ -223,6 +223,21 @@ LayerId edited_layer(const Command& cmd);
 // protection flag — reports an empty box rather than the layer's.
 math::Aabb command_influence_bound(const Document& doc, const Command& cmd);
 
+// What an AddLayerCmd that REINSERTS an existing layer must name as its
+// content source: the first OTHER layer in stack order holding the same edit
+// list, or 0 when this layer holds it alone.
+//
+// A reorder is a remove and an add, and so is the sever a bake performs. In
+// memory the add carries the layer's own shared_ptr and the field changes
+// nothing — but the journal serializes the command, and an add naming no
+// source writes the edit list INLINE. Replayed, that record deserializes as
+// its own content and the layers come back unlinked, with the shapes right
+// and nothing to see. So a reinsertion of a shared layer names a sharer, and
+// at replay time that sharer is present because it was present when the
+// command ran. A deep copy the caller wants (the bake's sever) passes 0 and
+// gets the old, inline behaviour.
+LayerId content_sharer_of(const Document& doc, LayerId layer);
+
 // The scene payload layout this build writes. It tracks the .clayspace
 // container's minor version, which is what a reader is told; io asserts they
 // agree so the two cannot drift.

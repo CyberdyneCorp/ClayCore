@@ -4389,6 +4389,14 @@ clay_result clay_document_move_layer(clay_document* doc, clay_layer_id layer, in
     const scene::Layer* found = doc->doc.document.find_layer(layer);
     if (!found) return fail(CLAY_ERROR_NOT_FOUND, "layer not found");
     scene::Layer copy = *found;
+    // Which layer the reinsertion NAMES as its content source, taken before
+    // the remove while the sharer is still findable. 0 for a layer that shares
+    // with nobody, which is every layer that was never instanced. In memory
+    // this changes nothing — `copy.sdf` is non-null, so apply_one ignores the
+    // field — but a journal replay of a reorder without it deserializes the
+    // content inline and silently unlinks the instances (see
+    // scene::content_sharer_of).
+    const scene::LayerId sharer = scene::content_sharer_of(doc->doc.document, layer);
     // One group, so one undo puts the layer back where it was. Ungrouped, the
     // undo stack held a remove and an insert separately and a single undo
     // applied only the remove — the layer vanished.
@@ -4396,7 +4404,7 @@ clay_result clay_document_move_layer(clay_document* doc, clay_layer_id layer, in
     clay_result r = apply_edit(doc, scene::Command{scene::RemoveLayerCmd{layer}},
                                "layer not found");
     if (r == CLAY_OK)
-        r = apply_edit(doc, scene::Command{scene::AddLayerCmd{std::move(copy), index}},
+        r = apply_edit(doc, scene::Command{scene::AddLayerCmd{std::move(copy), index, sharer}},
                        "layer could not be reinserted");
     if (doc->undo) doc->undo->end_group();
     return r;
@@ -5473,6 +5481,27 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
     const kernel::cfloat3 c = kernel::cf3(centre[0], centre[1], centre[2]);
     math::Aabb reach{c, c};
     reach = reach.dilated(radius + pull);
+
+    // ... IN ONE PLACEMENT. The ball above is stated in the dragged layer's
+    // frame, and an instanced edit list is placed by every layer that shares
+    // it: the same nodes move under every one of those transforms, so the
+    // field changes in regions the ball does not contain and nothing else
+    // here would dirty them. Left out, the seeds there were advanced to the
+    // new revision while still clean and handed back as the whole answer --
+    // measured 0.4 world units stale, the whole displacement, in a second
+    // placement four units away.
+    //
+    // Widened by each sharer's WHOLE influence bound rather than by the ball
+    // mapped through its transform: mirror and radial place one ball in
+    // several spots and layer_influence_bound already accounts for all of
+    // them. Conservative, and only a shared edit list pays it -- the common
+    // layer shares with nobody and the loop finds nothing. This is the same
+    // union node_command_bound takes for the per-command path, which is why
+    // every other edit route was already right.
+    for (const scene::Layer& other : doc->doc.document.layers) {
+        if (&other == l || other.sdf != l->sdf) continue;
+        reach.expand(scene::layer_influence_bound(other));
+    }
 
     // What the drag can state about HISTORY, beside what the ball states about
     // space (#360): every command it issues is a SetDeformersCmd -- a parameter

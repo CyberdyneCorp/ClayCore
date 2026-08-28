@@ -5501,10 +5501,17 @@ NB_MODULE(pyclay, m) {
                  if (!found)
                      throw std::invalid_argument("move_layer: no layer with that id");
                  scene::Layer copy = *found;
+                 // Taken before the remove, while the sharer is still
+                 // findable: a reinsertion of a layer whose edit list is
+                 // shared must NAME a sharer, or the serialized form of the
+                 // add carries the content inline and a journal replay comes
+                 // back with the instances unlinked (scene::content_sharer_of).
+                 const scene::LayerId sharer =
+                     scene::content_sharer_of(d.doc->document, layer);
                  apply_or_throw(d.doc->document, scene::Command{scene::RemoveLayerCmd{layer}},
                                 "move_layer", d.undo.get());
                  apply_or_throw(d.doc->document,
-                                scene::Command{scene::AddLayerCmd{std::move(copy), index}},
+                                scene::Command{scene::AddLayerCmd{std::move(copy), index, sharer}},
                                 "move_layer", d.undo.get());
              },
              "layer"_a, "index"_a, "Reorder a layer (applied as remove then add)")

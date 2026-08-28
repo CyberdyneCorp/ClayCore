@@ -937,7 +937,10 @@ clay_result clay_document_instance_layer(clay_document* doc, clay_layer_id sourc
  * survivors are untouched. See clay_document_instance_layer. */
 clay_result clay_document_remove_layer(clay_document* doc, clay_layer_id layer);
 /* Reorder a layer. The command vocabulary expresses this as remove-then-add,
- * so it is the one edit that is a pair rather than a single command. */
+ * so it is the one edit that is a pair rather than a single command. The add
+ * NAMES the layer it shares its edit list with when there is one, so a
+ * reordered instance survives a journal replay still sharing rather than
+ * coming back as a deep copy — see clay_document_instance_layer. */
 clay_result clay_document_move_layer(clay_document* doc, clay_layer_id layer, int32_t index);
 /* A hidden layer contributes nothing to the field; showing it again restores
  * the original field exactly. */
@@ -4142,6 +4145,14 @@ typedef struct clay_move_params {
  * once instead of deriving a region per item. Cheaper and TIGHTER than the
  * per-item union, which is why a drag no longer costs the brick cache every
  * item it grazed.
+ *
+ * The ball is the reach IN THIS LAYER'S PLACEMENT. A layer whose edit list is
+ * INSTANCED (clay_document_instance_layer) has the same nodes placed by every
+ * layer sharing it, so a drag also changes the field wherever those layers put
+ * them, and the invalidation covers each sharer's whole influence bound as
+ * well — the union clay_layer_node_influence_bound reports, and what the
+ * dirty-bounds contract there already promised. Only a shared edit list pays
+ * that; a layer nothing instances invalidates its ball alone.
  *
  * *out_applied receives how many items took a warp, so a host can tell "the
  * drag reached nothing" from "the drag did nothing visible". A drag that

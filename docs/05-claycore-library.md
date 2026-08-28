@@ -321,13 +321,15 @@ protection, mirror, radial. Those are copied from the source at creation and
 diverge from there; placing the instance somewhere else is what turns one edit
 list into two bolts.
 
-Three consequences worth stating, because each is a question a host will ask:
+Five consequences worth stating, because each is a question a host will ask:
 
 | | |
 |---|---|
 | **Consolidate** | severs first. A bake replaces an edit list, and a bake means *this subtool is finished*, so the layer gets a private copy and the other instances stay parametric. One undo restores both the items and the sharing. |
 | **Save and load** | keeps the sharing. From `.clayspace` minor 15 a layer record can name the layer whose edit list it shares, so ten instances are one edit list in the file. Written at minor 14 or below they come back as ten independent layers — the shapes are right, the link is gone. |
 | **Removing the source** | is legal and unremarkable. The content is held by every layer sharing it, so this removes a placement. `clay_document_layer_info` re-homes the link: the first survivor in stack order reports `content_source == 0` and the rest name it. |
+| **Reordering** | keeps the sharing across a crash too. A reorder is a remove and an add, and the add names a surviving sharer, so a journal replay restores instances rather than deep copies. Without the name the recovery is silent and wrong: the shapes are right and the subtools are no longer linked. |
+| **Dragging** | dirties every placement. `clay_layer_move_surface` states its reach as one ball instead of deriving a region per item, and that ball sits in the dragged layer's placement — so on shared content it also invalidates each sharer's influence bound. Only a shared edit list pays that. |
 
 `clay_document_layer_info` is also how a subtool panel draws the link at all:
 `content_source` is the following end and `share_count` is how many layers hold

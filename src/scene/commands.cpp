@@ -334,6 +334,14 @@ math::Aabb layer_command_bound(const Document& doc, LayerId layer_id) {
 
 }  // namespace
 
+LayerId content_sharer_of(const Document& doc, LayerId layer) {
+    const Layer* l = doc.find_layer(layer);
+    if (!l || !l->sdf) return 0;
+    for (const Layer& other : doc.layers)
+        if (other.id != layer && other.sdf == l->sdf) return other.id;
+    return 0;
+}
+
 math::Aabb command_influence_bound(const Document& doc, const Command& cmd) {
     return std::visit(
         [&](const auto& c) -> math::Aabb {
