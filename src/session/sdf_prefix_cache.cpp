@@ -304,9 +304,14 @@ std::optional<SdfSourceField> SdfSourceField::open(const scene::Document& doc,
     if (!cache) return out;
     const std::size_t boundary = prefix_boundary_for(*view_layer, policy);
     if (boundary == 0) return out;
+    // FIND, never build. Opening a source must not pay for a bake: this is the
+    // call a Smooth transaction makes at pointer-down, and building a prefix
+    // there would put back the whole-layer cost the lazy path exists to
+    // remove. A host schedules `build` when it has somewhere to put the work;
+    // until then every window is the full walk, which is correct and slower.
+    (void)point_eval;
+    (void)token;
     const SdfPrefixField* prefix = cache->find(*view_layer, boundary, policy);
-    if (!prefix)
-        prefix = cache->build(out.view_, layer_id, policy, point_eval, token);
     if (!prefix) return out;
 
     const std::vector<scene::NodeId>& roots = view_layer->sdf->roots;

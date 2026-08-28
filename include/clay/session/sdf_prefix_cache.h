@@ -249,6 +249,12 @@ class SdfSourceField {
     // Null when the layer is missing or holds no SDF content. `cache` may be
     // null, and a null cache is simply the full walk — which is what makes
     // every accelerated path optional rather than load-bearing.
+    //
+    // NEVER BUILDS. An existing cache entry is used and a missing one is not
+    // filled in, because this is the call a Smooth transaction makes at
+    // pointer-down and a bake there would be the whole-layer cost the lazy path
+    // exists to remove. `SdfPrefixCache::build` is the door for a host that has
+    // somewhere to put that work.
     static std::optional<SdfSourceField> open(const scene::Document& doc, scene::LayerId layer,
                                               SdfPrefixCache* cache = nullptr,
                                               const SdfPrefixPolicy& policy = {},

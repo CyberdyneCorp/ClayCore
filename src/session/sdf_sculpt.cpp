@@ -9,6 +9,7 @@
 #include <memory>
 #include <utility>
 
+#include "clay/field/redistance.h"
 #include "clay/scene/bounds.h"
 
 #include "layer_digest.h"
@@ -37,16 +38,6 @@ const scene::Layer* editable_layer(const scene::Document& doc, scene::LayerId id
     if (!layer || layer->kind != scene::LayerKind::Sdf || !layer->sdf) return nullptr;
     if (layer->protected_from_edits()) return nullptr;
     return layer;
-}
-
-// The three sampling numbers, with ConsolidationParams' defaults applied once
-// so Smooth's working volume and any later consolidation of it agree.
-scene::ConsolidationParams params_from(const SdfSculptPolicy& policy) {
-    scene::ConsolidationParams params;
-    params.cell_size = policy.cell_size;
-    params.band = policy.band;
-    params.padding = policy.padding;
-    return params;
 }
 
 // What a policy-triggered consolidation should resample at. Its own numbers
@@ -139,39 +130,118 @@ bool over_sculpt_budget(const SdfSculptComplexityPolicy& policy,
 
 std::optional<SdfSmoothTransaction> SdfSmoothTransaction::begin(
     scene::Document& doc, scene::LayerId layer_id, const SdfSculptPolicy& policy,
-    const scene::BakePointEval& point_eval, parallel::CancelToken* token) {
+    const scene::BakePointEval& point_eval, parallel::CancelToken* token,
+    SdfPrefixCache* cache) {
     const scene::Layer* layer = editable_layer(doc, layer_id);
     if (!layer) return std::nullopt;
     if (!(policy.cell_size > 0.0f)) return std::nullopt;
 
-    // THE ONLY evaluation of the source layer in the whole gesture. Through
-    // bake_layer, so the sampling is the one consolidation already does —
-    // local frame, pooled evaluator, redistance, compact, measured Lipschitz —
-    // and a Smooth commit installs something a bake could have produced.
-    std::optional<field::FieldVolume> volume =
-        scene::bake_layer(*layer, params_from(policy), nullptr, point_eval, token);
-    if (!volume) return std::nullopt;
+    // NOTHING IS SAMPLED HERE. The source compiles the layer and looks for a
+    // cached prefix; it never bakes. What used to happen at this line was a
+    // whole-layer bake — the model's cost, paid at the one moment in a gesture
+    // when the artist is already waiting.
+    SdfPrefixPolicy prefix_policy = policy.prefix;
+    prefix_policy.cell_size = policy.cell_size;
+    prefix_policy.band = policy.band;
+    prefix_policy.padding = policy.padding;
+    std::optional<SdfSourceField> source =
+        SdfSourceField::open(doc, layer_id, cache, prefix_policy, point_eval, token);
+    if (!source) return std::nullopt;
+    // Refused on the same terms bake_layer refuses: a layer with no field has
+    // nothing to smooth, and a lattice cannot be derived from unbounded bounds.
+    const math::Aabb bounds = source->bounds();
+    if (bounds.empty() || bounds.is_infinite()) return std::nullopt;
+
+    const float band = policy.band > 0.0f ? policy.band : policy.cell_size * 3.0f;
+    const float padding = policy.padding > 0.0f ? policy.padding : band;
+    const kernel::cfloat3 pad = cf3(padding, padding, padding);
+    // THE LATTICE, and the one both the working field and the commit assembly
+    // use — they must share it, because the overlay at commit is per sample and
+    // `sample_blocks` takes its origin straight from `region.min`. It is also
+    // the region a prefix is cached over, so a seed read here is the stored
+    // number rather than an interpolation of two.
+    const math::Aabb region{bounds.min - pad, bounds.max + pad};
 
     SdfSmoothTransaction tx;
     tx.doc_ = &doc;
     tx.layer_ = layer_id;
     tx.policy_ = policy;
     tx.point_eval_ = point_eval;
-    tx.source_ = layer_fingerprint(*layer);
-    tx.working_ = std::move(*volume);
+    tx.fingerprint_ = layer_fingerprint(*layer);
+    tx.region_ = region;
+    // An index and a far bound per brick, and no samples: the whole allocation
+    // is the lattice, and every brick reads as sample-free until a dab asks.
+    tx.working_ = field::FieldVolume::empty_lattice(region, policy.cell_size, band);
+    tx.field_source_ = std::move(*source);
     return tx;
+}
+
+field::FieldVolume::Region SdfSmoothTransaction::dependency_region(
+    const field::RelaxSettings& settings) const {
+    const float cell = working_.cell_size();
+    const int radius = std::max(1, settings.radius_cells);
+    // relax's own widening, reproduced rather than guessed: a falloff narrower
+    // than the kernel cannot hide the seam the kernel makes, so relax silently
+    // widens it and the region it rewrites is the widened one.
+    const float falloff = std::max(settings.falloff, cell * static_cast<float>(radius) * 2.0f);
+    if (!(settings.region_radius > 0.0f)) {
+        // A radius of zero means EVERYWHERE — a filter rather than a brush —
+        // and there is nothing local about it. The whole lattice is the
+        // dependency, which is the eager cost, correctly.
+        return field::FieldVolume::Region{region_};
+    }
+    // What relax rewrites, plus what its stencil READS from outside that.
+    //
+    // The rewrite is every brick whose BOX meets the ball, so a written sample
+    // can sit a whole brick DIAGONAL beyond the ball's surface — not a brick
+    // edge, which is the mistake this had first. From there the stencil reaches
+    // `radius` cells further. A tap landing in a brick nobody materialized does
+    // not read a wrong number, it reads NOTHING: `sample_at` returns nothing
+    // for an unstored brick and relax renormalizes over the taps that exist, so
+    // the sample comes out smoothed against a smaller neighbourhood. That is a
+    // seam at a brick boundary, and invisible except as a measurement.
+    //
+    // sqrt(3) is the diagonal; 1.75 is it rounded up, because a brick of margin
+    // costs a brick of fill and being short costs correctness. Margin on the
+    // argument above rather than on a number: the whole-layer comparison this
+    // was chased with turned out to be dominated by force-stored bricks past
+    // the band, so widening the halo did not move it and the reasoning is what
+    // stands behind this.
+    const float reach = settings.region_radius + falloff +
+                        static_cast<float>(radius) * cell +
+                        1.75f * static_cast<float>(field::kBrickDim) * cell;
+    return field::FieldVolume::Region::ball(settings.centre, reach);
 }
 
 SdfSculptDirty SdfSmoothTransaction::update(const field::RelaxSettings& settings,
                                             parallel::CancelToken* token) {
     SdfSculptDirty dirty;
-    if (!live()) return dirty;
-    // The whole update, and deliberately all of it: no compile, no bake, no
-    // command, no undo entry. The working volume is already the layer's field.
+    if (!live() || !field_source_) return dirty;
+
+    // Bring in what this dab will READ, and only that. Bricks already
+    // materialized are counted and left alone: refilling one would throw away
+    // the edits earlier dabs made to it, which is the difference between a
+    // cache and a bug.
+    const field::FieldVolume::ResampleTally brought =
+        working_.materialize_region(dependency_region(settings), field_source_->block_fill());
+    materialized_.materialized_bricks += brought.added;
+    materialized_.reused_bricks += brought.kept;
+    ++materialized_.updates;
+    // Cancelled while filling: what was materialized is source values and is
+    // sound, but the dab has not run and must not run on a half-filled region.
+    if (parallel::cancelled(token)) return dirty;
+
+    // The dab itself, unchanged — the same in-place relax over the same
+    // stencil. `rewrite_region` writes only bricks that store samples, and
+    // everything this dab reads now does.
     const field::RelaxResult r = field::relax_in_place(working_, settings, token);
     dirty.bounds = r.dirty_bounds;
     dirty.touched_bricks = r.touched_bricks;
     dirty.changed = r.changed;
+    if (r.changed) {
+        changed_ = true;
+        edited_.expand(r.dirty_bounds);
+    }
     return dirty;
 }
 
@@ -182,17 +252,67 @@ bool SdfSmoothTransaction::commit(scene::UndoStack* undo) {
     // Refused rather than forced. The preview was computed from a layer that no
     // longer exists, and installing it would delete whatever replaced it
     // without the artist having asked for that.
-    if (!layer || layer_fingerprint(*layer) != source_) {
+    if (!layer || layer_fingerprint(*layer) != fingerprint_) {
         cancel();
         return false;
     }
+
+    // A GESTURE THAT CHANGED NOTHING CHANGES NOTHING. No volume, no undo entry,
+    // no consolidation, and the layer keeps every parametric item it had — a
+    // pointer-down and pointer-up with no dab between them must not be a way to
+    // lose an artist's history.
+    if (!changed_ || !field_source_) {
+        budget_ = SdfSculptBudget{};
+        doc_ = nullptr;
+        return true;
+    }
+
+    // The whole layer, once, through the SAME source the dabs materialized
+    // from and on the SAME lattice. Not `bake_layer`: this is where the prefix
+    // cache pays, and re-walking the history the dabs already paid for would
+    // be the cost this design exists to remove.
+    field::FieldVolume final_volume = field::FieldVolume::sample_blocks(
+        field_source_->block_fill(), region_, working_.cell_size(), working_.band());
+    if (final_volume.brick_count() == 0) {
+        cancel();
+        return false;
+    }
+
+    if (!edited_.empty()) {
+        const field::FieldVolume::Region edited{edited_};
+        // The edited bricks have to STORE samples before they can receive them:
+        // a dab can move the surface into a brick the source classified as
+        // empty, and `rewrite_region` writes only bricks that store something.
+        final_volume.materialize_region(edited, field_source_->block_fill());
+        // ...and then the dabs' own samples, over exactly the region they
+        // changed. Identity outside it by construction — where the working
+        // field has no sample the source's value stands — which is what
+        // rewrite_region requires.
+        final_volume.rewrite_region(edited, [this](int gx, int gy, int gz, float old) {
+            const std::optional<float> mine = working_.sample_at(gx, gy, gz);
+            return mine ? *mine : old;
+        });
+    }
+
+    // The bake's post-process, once, at the end. This is the one place the lazy
+    // path differs from the whole-layer one it replaces: that relaxed a
+    // redistanced bake, and this redistances a relaxed field. Both are sound,
+    // neither approximates the other, and the difference is measured rather
+    // than asserted away.
+    if (!field::redistance(final_volume)) {
+        // Redistancing declined, so compacting would be dropping bricks on the
+        // strength of samples nothing has earned the right to conclude from.
+    } else {
+        final_volume.compact();
+    }
+    final_volume.set_sample_lipschitz(final_volume.measure_sample_lipschitz());
 
     // ONE user-facing step, opened here and closed once, with the install's own
     // bracket and any consolidation's bracket nesting inside it — see
     // UndoStack::begin_group.
     if (undo) undo->begin_group();
     scene::ConsolidationCost installed_cost;
-    const bool installed = scene::replace_layer_with_volume(doc, layer_, std::move(working_),
+    const bool installed = scene::replace_layer_with_volume(doc, layer_, std::move(final_volume),
                                                             undo, &installed_cost);
     if (installed) {
         budget_ = settle_budget(doc, layer_, policy_, point_eval_, undo, /*may_consolidate=*/true);
@@ -208,9 +328,10 @@ bool SdfSmoothTransaction::commit(scene::UndoStack* undo) {
 
 void SdfSmoothTransaction::cancel() {
     // Nothing persistent was ever written, so there is nothing to unwind. The
-    // working volume is released because a cancelled preview is not a thing a
-    // host should still be able to draw.
+    // working field and its source are released because a cancelled preview is
+    // not a thing a host should still be able to draw.
     working_ = field::FieldVolume();
+    field_source_.reset();
     doc_ = nullptr;
 }
 

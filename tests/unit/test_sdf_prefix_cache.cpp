@@ -129,6 +129,9 @@ TEST_CASE("prefix cache: an accelerated field equals the full walk") {
             scene::Document doc = worked(80, c.blend_k, c.op);
             const scene::Tape want = oracle_tape(doc);
             SdfPrefixCache cache;
+            // open() never builds -- see its doc comment. A host schedules the
+            // build; here the test is the host.
+            REQUIRE(cache.build(doc, doc.layers.front().id, policy_keeping(live)) != nullptr);
             auto src = SdfSourceField::open(doc, doc.layers.front().id, &cache,
                                             policy_keeping(live));
             REQUIRE(src);
@@ -154,6 +157,7 @@ TEST_CASE("prefix cache: a volume seeds only where it stores samples") {
     scene::Document doc = worked(80);
     const scene::Tape want = oracle_tape(doc);
     SdfPrefixCache cache;
+    REQUIRE(cache.build(doc, doc.layers.front().id, policy_keeping(8)) != nullptr);
     auto src = SdfSourceField::open(doc, doc.layers.front().id, &cache, policy_keeping(8));
     REQUIRE(src);
     REQUIRE(src->accelerated());
@@ -209,6 +213,7 @@ TEST_CASE("prefix cache: exact on the lattice it was built for") {
     params.region = math::Aabb{want.bounds.min - pad, want.bounds.max + pad};
 
     SdfPrefixCache cache;
+    REQUIRE(cache.build(doc, id, policy_keeping(8)) != nullptr);
     auto src = SdfSourceField::open(doc, id, &cache, policy_keeping(8));
     REQUIRE(src);
     REQUIRE(src->accelerated());
@@ -255,6 +260,19 @@ TEST_CASE("prefix cache: exact on the lattice it was built for") {
     MESSAGE("on-lattice worst error: " << worst);
     CHECK(worst < 1e-5);  // float rounding, not sampling
     CHECK(cache.stats().seeded_windows > 0);
+}
+
+TEST_CASE("prefix cache: opening a source never builds one") {
+    // The property lazy Smooth's pointer-down cost rests on. Opening is
+    // metadata plus a compile; a bake here would be exactly the whole-layer
+    // cost the lazy path exists to remove.
+    scene::Document doc = worked(60);
+    SdfPrefixCache cache;
+    auto src = SdfSourceField::open(doc, doc.layers.front().id, &cache, policy_keeping(8));
+    REQUIRE(src);
+    CHECK(cache.stats().builds == 0);
+    CHECK(cache.stats().entries == 0);
+    CHECK_FALSE(src->accelerated());  // ...and it is correct anyway
 }
 
 TEST_CASE("prefix cache: with no cache at all the source is still correct") {

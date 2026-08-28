@@ -135,6 +135,21 @@ class FieldVolume {
                                      parallel::CancelToken* token = nullptr,
                                      bool* out_cancelled = nullptr);
 
+    // A volume with the LATTICE of `region` at `cell_size` and no stored
+    // samples at all: the index, the brick counts and the far bounds, and an
+    // empty sample store.
+    //
+    // What a lazily filled working field starts from. Cheap by construction —
+    // one index entry and one far bound per brick, and no evaluation of
+    // anything — which is what lets a gesture allocate its working set at
+    // pointer-down without sampling the model. Every brick reads as sample-free
+    // until `materialize_region` fills it.
+    //
+    // Sharing a `region` and a `cell_size` with another volume means sharing a
+    // lattice, because the origin is `region.min`; that is the property a
+    // caller overlaying one volume onto another depends on.
+    static FieldVolume empty_lattice(const math::Aabb& region, float cell_size, float band);
+
     // What this volume holds. A sampled volume is the largest payload a scene
     // node can carry — bricks of floats, plus an optional color channel — and
     // it went entirely unaccounted until roll-up-document-memory, including in
@@ -441,6 +456,49 @@ class FieldVolume {
     // region selects a scattered set rather than the consecutive run
     // `sample_blocks` walks.
     ResampleTally resample_region(const Region& region, const BrickBlockFill& fill);
+
+    // -- materializing a region into a volume that does not hold it yet -------
+    //
+    // FORCE every brick meeting `region` to store samples from `fill`, whether
+    // or not the values look near the surface. Appends to the sample store, so
+    // the cost is the bricks it adds and not the ones the volume already holds.
+    //
+    // This is `resample_region`'s job done for a different owner, and the two
+    // differ in exactly the way their owners do:
+    //
+    //   resample_region()   re-DECIDES sparsity from the values, and rebuilds
+    //                       the whole store to do it. Right for an operator
+    //                       that displaces a surface into bricks that held
+    //                       nothing; O(stored) per call, which is a bake's
+    //                       scale.
+    //   materialize_region() takes sparsity as GIVEN by the caller: a selected
+    //                       brick stores samples afterwards, full stop. O(the
+    //                       bricks it adds), which is a dab's scale.
+    //
+    // Why "force". A lazily filled working field needs to tell "this brick
+    // holds no surface" apart from "nobody has asked yet", and `kBrickEmpty`
+    // already means the first — it carries a SIGN and a distance that a reader
+    // is entitled to believe. Storing every materialized brick, even one whose
+    // samples are all past the band, keeps stored-ness an honest record of what
+    // has been filled in. It costs the samples of a brick that says nothing
+    // interesting, which is the price of not overloading a sentinel that
+    // already has a meaning.
+    //
+    // The far bounds are NOT re-derived: they describe the distance from a
+    // sample-free brick to the nearest stored one, and rebuilding that array is
+    // a two-pass chamfer over every slot in the lattice — the term `shrink_band`
+    // was changed to stop paying per dab. A caller materializing a region is by
+    // definition going to read inside it, where the stored samples answer.
+    //
+    // `fill` is asked for one brick at a time, exactly as `resample_region`
+    // asks, and must produce the same values a full sampling would at those
+    // lattice points.
+    ResampleTally materialize_region(const Region& region, const BrickBlockFill& fill);
+
+    // Whether the brick holding `p` stores samples. The lazily-filled caller's
+    // question — see materialize_region — and cheaper than sample_at when the
+    // answer is all that is wanted.
+    bool brick_stored_at(kernel::cfloat3 p) const { return has_samples_at(p); }
 
     // Drop the bricks whose samples all lie beyond the band, and re-derive
     // what the resulting sample-free bricks report. Returns how many went.

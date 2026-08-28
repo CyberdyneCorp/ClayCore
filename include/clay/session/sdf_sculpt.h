@@ -68,6 +68,7 @@
 #include "clay/scene/commands.h"
 #include "clay/scene/consolidate.h"
 #include "clay/scene/document.h"
+#include "clay/session/sdf_prefix_cache.h"
 
 namespace clay {
 namespace session {
@@ -132,6 +133,15 @@ struct SdfSculptPolicy {
     float padding = 0.0f;
 
     SdfSculptComplexityPolicy complexity;
+    // Where an old prefix may be cached, for the materialization a gesture
+    // does. The three sampling numbers above are copied over it, so a caller
+    // cannot ask for a prefix at a resolution the gesture is not using — a
+    // seed off a different lattice is an interpolation rather than the stored
+    // sample, which is the whole point of sharing one.
+    //
+    // A zeroed one caches nothing, and then every fill is the full walk:
+    // slower, and identical.
+    SdfPrefixPolicy prefix;
 };
 
 // What one update changed, so a host invalidates a region rather than a model.
@@ -165,29 +175,55 @@ struct SdfSculptBudget {
 bool over_sculpt_budget(const SdfSculptComplexityPolicy& policy,
                         const scene::FieldReport& report);
 
+// What a gesture's materialization has cost so far, in counts rather than
+// clocks — the form a scaling claim can be tested in.
+struct SdfSmoothMaterializationStats {
+    std::size_t materialized_bricks = 0;  // brought into the working field
+    std::size_t reused_bricks = 0;        // already there when a dab asked
+    std::size_t updates = 0;
+};
+
 // -- Smooth ------------------------------------------------------------------
 //
-// One layer sampled ONCE at pointer-down into a working volume the transaction
-// owns, relaxed locally per dab, and installed as the layer's single item at
-// pointer-up without being sampled again.
+// The layer's field is materialized LAZILY, around the brush, as dabs ask for
+// it. `begin()` evaluates nothing.
 //
-// The working set is the whole finite layer, not a local patch, and that is a
-// decision rather than an oversight. A patch would need exact composition
-// semantics at its boundary — what the patch means where it meets the field it
-// was cut from — which is new correctness surface for a P0 whose subject is
-// interaction latency. The volume is sparse, `rewrite_region` makes every dab
-// after the first cost what it touches, and the one-time cost is at pointer
-// down where a brush cursor can cover it. Lazy local checkpoints are the
-// follow-up, and `begin()` is benchmarked separately so the trade stays
-// visible.
+// It used to sample the whole finite layer at pointer-down, which was the
+// honest first version of this: a patch needs a rule for what it means where it
+// meets the field it was cut from, and that rule is new correctness surface. It
+// is now written down. The working field is a volume on the layer's own
+// lattice with NO stored samples, and a brick that stores samples is exactly a
+// brick that has been materialized — so:
+//
+//   * a dab materializes the bricks its relax will read, which is its rewrite
+//     region plus the stencil's reach, and nothing else;
+//   * `rewrite_region` writes only bricks that store samples, so an
+//     unmaterialized brick is skipped rather than filled with a guess;
+//   * a later dab over the same place materializes nothing, and one that
+//     reaches past it materializes only the new bricks.
+//
+// The thing that would be silently wrong is treating "nobody has asked for this
+// brick yet" as "empty space here", which is what `kBrickEmpty` means to every
+// other reader of a volume. That is why materialization FORCE-stores: stored-ness
+// is the record of what has been filled in, and the dependency halo is derived
+// from `relax`'s own stencil rather than guessed at.
+//
+// COMMIT assembles the whole layer once — see `commit()` for the one semantic
+// difference that buys, which is real and stated rather than hidden.
 class SdfSmoothTransaction {
   public:
     // Null on: no such layer, not an SDF layer, no edit list, a protected
     // layer, a cell size of zero, or a layer whose field could not be sampled
     // (empty, unbounded, or cancelled through `token`).
+    // Evaluates NOTHING: a compile of the layer, an index for the working
+    // lattice, and a digest. `cache` may be null; when it holds a prefix for
+    // this layer the materialization each dab pays is the suffix's rather than
+    // the whole history's, and when it does not every fill is the full walk.
+    // A cache is never BUILT here — that is a host's to schedule.
     static std::optional<SdfSmoothTransaction> begin(
         scene::Document& doc, scene::LayerId layer, const SdfSculptPolicy& policy,
-        const scene::BakePointEval& point_eval = {}, parallel::CancelToken* token = nullptr);
+        const scene::BakePointEval& point_eval = {}, parallel::CancelToken* token = nullptr,
+        SdfPrefixCache* cache = nullptr);
 
     SdfSmoothTransaction(SdfSmoothTransaction&&) = default;
     SdfSmoothTransaction& operator=(SdfSmoothTransaction&&) = default;
@@ -200,16 +236,40 @@ class SdfSmoothTransaction {
     SdfSculptDirty update(const field::RelaxSettings& settings,
                           parallel::CancelToken* token = nullptr);
 
-    // What the host draws. Valid until commit or cancel.
+    // What the host draws, materialized so far. Bricks nobody has reached read
+    // as sample-free; the dirty bounds from `update` say which part is new.
     const field::FieldVolume& preview_volume() const { return working_; }
+
+    const SdfSmoothMaterializationStats& materialization() const { return materialized_; }
+    // Whether any update actually moved a stored sample. A gesture that changed
+    // nothing commits without replacing the layer — see commit().
+    bool changed() const { return changed_; }
 
     scene::LayerId layer() const { return layer_; }
     // False once commit or cancel has run. A dead transaction updates nothing
     // and commits nothing.
     bool live() const { return doc_ != nullptr; }
 
-    // Install the working volume as the layer's one item, as ONE undo step,
-    // then evaluate the complexity policy inside that same step.
+    // Assemble the layer's final volume once and install it as its one item, as
+    // ONE undo step, then evaluate the complexity policy inside that same step.
+    //
+    // A LOCAL working field is not a layer, so commit samples the whole layer
+    // through the same source the dabs materialized from, overlays the samples
+    // the dabs actually changed, and post-processes once. It does NOT re-run
+    // Smooth, and it does not re-evaluate anything a dab already paid for
+    // inside the edited region.
+    //
+    // THE ONE SEMANTIC DIFFERENCE, stated because it is real: the old
+    // whole-layer path relaxed a REDISTANCED bake, and this redistances a
+    // relaxed field. Both are sound signed distance fields and neither is an
+    // approximation of the other; they are not byte-identical, and
+    // test_sdf_smooth_lazy.cpp measures how far apart they are rather than
+    // asserting they are not.
+    //
+    // A gesture that changed NOTHING — no dab, strength zero, a mask that
+    // froze everything — installs nothing at all: no volume, no undo entry, no
+    // consolidation. Pointer-down and pointer-up with no effect in between must
+    // not cost an artist their parametric history.
     //
     // Fails, changing nothing, when the source layer has been edited since
     // begin: an external edit is not something a preview may overwrite. Fails
@@ -229,12 +289,25 @@ class SdfSmoothTransaction {
   private:
     SdfSmoothTransaction() = default;
 
+    // The dependency region one dab reads, derived from relax's own stencil
+    // rather than guessed: the ball it rewrites, plus the stencil's reach,
+    // plus a brick for the outward rounding rewrite_region does.
+    field::FieldVolume::Region dependency_region(const field::RelaxSettings& settings) const;
+
     scene::Document* doc_ = nullptr;
     scene::LayerId layer_ = 0;
     SdfSculptPolicy policy_;
     scene::BakePointEval point_eval_;
-    std::uint64_t source_ = 0;
+    std::uint64_t fingerprint_ = 0;
+    // The immutable source this gesture began against. Holds its own view of
+    // the document, so later edits to the caller's cannot be sampled by
+    // accident — the stale check at commit is what refuses them.
+    std::optional<SdfSourceField> field_source_;
     field::FieldVolume working_;
+    math::Aabb region_;      // the lattice both the working field and commit use
+    math::Aabb edited_;      // union of what the dabs actually changed
+    bool changed_ = false;
+    SdfSmoothMaterializationStats materialized_;
     SdfSculptBudget budget_;
 };
 
