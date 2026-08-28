@@ -418,7 +418,10 @@ TEST_CASE("a shared edit list serializes once and reloads shared") {
     std::optional<Document> back = deserialize_document(shared.data(), shared.size());
     REQUIRE(back.has_value());
     REQUIRE(back->layers.size() == 2);
-    CHECK(back->layers[0].sdf == back->layers[1].sdf);
+    // Extra parens: doctest decomposes a bare `a == b` and then tries to
+    // stringify each side, which has no operator<< for a shared_ptr under
+    // MSVC's standard library. Wrapped, the whole thing is one bool.
+    CHECK((back->layers[0].sdf == back->layers[1].sdf));
     // Shared, not merely equal: an edit through one is an edit through both.
     Node extra;
     extra.id = back->find_layer(cid)->sdf->reserve_id();
@@ -433,7 +436,7 @@ TEST_CASE("a shared edit list serializes once and reloads shared") {
     std::optional<Document> older = deserialize_document(old.data(), old.size(), 14);
     REQUIRE(older.has_value());
     REQUIRE(older->layers.size() == 2);
-    CHECK(older->layers[0].sdf != older->layers[1].sdf);
+    CHECK((older->layers[0].sdf != older->layers[1].sdf));
     CHECK(older->layers[0].sdf->roots.size() == 40);
     CHECK(older->layers[1].sdf->roots.size() == 40);
 }
@@ -483,5 +486,5 @@ TEST_CASE("a layer-add naming a source that is gone is refused") {
     // And it resolves against a source that IS there.
     REQUIRE(clay::scene::apply(doc, Command{AddLayerCmd{named, -1, src.id}}).has_value());
     REQUIRE(doc.layers.size() == 2);
-    CHECK(doc.layers[1].sdf == doc.layers[0].sdf);
+    CHECK((doc.layers[1].sdf == doc.layers[0].sdf));
 }
