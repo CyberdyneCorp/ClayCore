@@ -478,3 +478,61 @@ TEST_CASE("c mesh combine: a sculpt exports beside its reference model") {
     clay_mesh_destroy(field_only);
     clay_mesh_destroy(combined);
 }
+
+// #365: the id-addressed route back to a mesh layer's geometry. A reopened
+// document could reach it only through the name, which answers with the first
+// layer in stack order carrying it, so a held id — the thing this ABI calls
+// stable — could not be spent.
+TEST_CASE("c mesh layer: the geometry is reachable by layer id, and refuses what it cannot") {
+    Doc d;
+    clay_mesh* source = tetrahedron();
+    clay_mesh_layer_desc desc = layer_desc("scan");
+    clay_layer_id layer = 0;
+    clay_mesh* borrowed = nullptr;
+    REQUIRE(clay_document_add_mesh_layer(d.doc, source, &desc, &layer, &borrowed) == CLAY_OK);
+    clay_mesh_destroy(source);
+
+    // One borrow: the handle names its layer rather than caching a pointer, so
+    // the creation, the name and the id all resolve to it.
+    clay_mesh* by_id = nullptr;
+    REQUIRE(clay_document_mesh_layer_by_id(d.doc, layer, &by_id) == CLAY_OK);
+    CHECK(by_id == borrowed);
+    CHECK(clay_mesh_vertex_count(by_id) == 4);
+    CHECK(clay_mesh_index_count(by_id) == 12);
+
+    add_sphere(d.doc);  // an SDF layer, whose id is a layer and not a mesh layer
+    clay_layer_id sdf = 0;
+    REQUIRE(clay_document_layer_at(d.doc, 0, &sdf) == CLAY_OK);
+    if (sdf == layer) REQUIRE(clay_document_layer_at(d.doc, 1, &sdf) == CLAY_OK);
+    CHECK(sdf != layer);
+
+    clay_mesh* untouched = borrowed;
+    CHECK(clay_document_mesh_layer_by_id(d.doc, sdf, &untouched) == CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_document_mesh_layer_by_id(d.doc, layer + 9999, &untouched) ==
+          CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_document_mesh_layer_by_id(nullptr, layer, &untouched) ==
+          CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_document_mesh_layer_by_id(d.doc, layer, nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(untouched == borrowed);  // a refused lookup writes nothing
+}
+
+TEST_CASE("c mesh layer: a removed layer's id stops reaching the geometry it kept") {
+    // The removal keeps the payload — the inverse of a removal cannot carry it
+    // — so the id must be resolved in the DOCUMENT rather than in the payloads
+    // held beside it, or an id would reach a layer that is no longer there.
+    Doc d;
+    clay_mesh* source = tetrahedron();
+    clay_mesh_layer_desc desc = layer_desc("scan");
+    clay_layer_id layer = 0;
+    clay_mesh* borrowed = nullptr;
+    REQUIRE(clay_document_add_mesh_layer(d.doc, source, &desc, &layer, &borrowed) == CLAY_OK);
+    clay_mesh_destroy(source);
+    REQUIRE(clay_document_remove_layer(d.doc, layer) == CLAY_OK);
+
+    clay_mesh* gone = nullptr;
+    CHECK(clay_document_mesh_layer_by_id(d.doc, layer, &gone) == CLAY_ERROR_NOT_FOUND);
+    CHECK(gone == nullptr);
+    // The payload is genuinely still there — this is the check being made, not
+    // an absence standing in for it.
+    CHECK(clay_mesh_vertex_count(borrowed) == 4);
+}

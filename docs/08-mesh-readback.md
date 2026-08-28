@@ -124,7 +124,7 @@ form at three target counts, with requested against actual printed for each.
 | mesh the field | `doc.mesh(...)` | `clay_document_mesh` | `mesh::mesh_tape(compile_document(doc), …)` |
 | field + visible mesh layers | — | `clay_document_mesh_combined` | compose by hand |
 | load a file (.obj/.ply/.fbx) | `clay.load_mesh(path)` | `clay_mesh_load` | `io::load_obj_file` / `load_ply_file` / `load_fbx_file` |
-| a mesh layer's triangles | `doc.mesh_layer(name)` | `clay_document_mesh_layer` | `io::ClaySpaceDoc::mesh_layers` |
+| a mesh layer's triangles | `doc.mesh_layer(name)` | `clay_document_mesh_layer`, `clay_document_mesh_layer_by_id` | `io::ClaySpaceDoc::mesh_layers` |
 | a voxel grid | `grid.mesh()` | `clay_voxel_mesh` | `VoxelGrid::mesh_greedy()` |
 | a brick subset (incremental) | — | `clay_brick_cache_mesh` | `mesh::mesh_bricks` |
 | a coarse level of the bricks | — | `clay_brick_cache_mesh_lod` | `mesh::mesh_bricks(…, lod)` |
@@ -512,7 +512,7 @@ Three cases, and the middle one is the trap.
 | you got the mesh from | you own it | free it with |
 |---|---|---|
 | `clay_document_mesh`, `clay_mesh_load`, `clay_mesh_from_triangles`, `clay_mesh_transform`, `clay_mesh_concat`, `clay_document_mesh_combined`, `clay_voxel_mesh`, `clay_brick_cache_mesh`, `clay_brick_cache_mesh_lod` | yes | `clay_mesh_destroy` |
-| `clay_document_mesh_layer`, and the `out_mesh` of `clay_document_add_mesh_layer` | **no — the document owns it** | nothing; `clay_mesh_destroy` on it is a silent no-op |
+| `clay_document_mesh_layer`, `clay_document_mesh_layer_by_id`, and the `out_mesh` of `clay_document_add_mesh_layer` | **no — the document owns it** | nothing; `clay_mesh_destroy` on it is a silent no-op |
 | Python: any `Mesh` | the interpreter | — |
 
 A **borrowed** mesh is a live window onto a mesh layer, not a snapshot: every
