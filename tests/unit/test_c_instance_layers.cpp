@@ -647,9 +647,14 @@ TEST_CASE("a drag through one placement dirties the others") {
     REQUIRE(clay_document_instance_layer(doc, source, "bolt", &instance) == CLAY_OK);
     place(doc, instance, 4.0f);
 
+    // The refill agrees with the document before anything moves, so a
+    // disagreement afterwards can only be the invalidation. Compared through
+    // max_abs_diff rather than as two vectors: doctest decomposes a bare
+    // `a == b` and stringifies each side, which is what made a shared_ptr
+    // comparison fail MSVC's /W4 /WX job while libstdc++ compiled it.
     const clay_brick_request req = brick_at(4, 0, 0);
     const std::vector<float> before = refill_brick(doc, req);
-    REQUIRE(before == sample_brick(doc, req));
+    REQUIRE(max_abs_diff(before, sample_brick(doc, req)) == 0.0f);
 
     clay_move_params params{};
     params.struct_size = sizeof(params);
