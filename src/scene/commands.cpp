@@ -925,15 +925,21 @@ void write_layer(Writer& w, const Layer& l, LayerId content_source = 0) {
     // From minor 15, and gated exactly as the radial fields above are. The id
     // goes out BEFORE the content flag so a reader knows, before it reaches
     // the flag, whether a content section follows it.
-    if (w.minor >= 15) w.pod(content_source);
+    //
+    // BELOW 15 THE LAYER OWNS ITS CONTENT WHATEVER THE CALLER SAID. There is
+    // no field to name a source with, so writing the caller's id would drop
+    // the sharer's content into a stream that has nothing pointing at it —
+    // silent loss on the way out, and a short record the reader desynchronises
+    // on. The older layout's answer is a copy per layer, which is what those
+    // files always meant.
+    const LayerId named = w.minor >= 15 ? content_source : 0;
+    if (w.minor >= 15) w.pod(named);
     bool has_sdf = l.sdf != nullptr;
     w.pod(has_sdf);
     // A sharer says it HAS content — it does, and clay_layer_node_count and
     // every other reader of the flag mean exactly that — but writes none: the
-    // layer it names carries the bytes. At minor 14 and below there is no id
-    // to name it with, so every layer writes its own copy and the sharing is
-    // what the older layout loses.
-    if (has_sdf && content_source == 0) write_content(w, *l.sdf);
+    // layer it names carries the bytes.
+    if (has_sdf && named == 0) write_content(w, *l.sdf);
 }
 
 // `out_content_source` receives the id this layer shares its content with, or

@@ -124,9 +124,18 @@
       instance stale — an edit through one subtool visibly stopped appearing
       in its duplicates. `command_frontier` already refused the same
       situation, ten lines below; `tail_append` now does too
-- [x] 9.5 Each revert COMPILES under `-Werror` before its result is believed.
-      Counts: A 10/14 cases, 30 assertions; B 2/14, 5; C 2/14, 7; D 1/14, 1 —
-      plus the C smoke consumer under A and B
+- [x] 9.5 REVERT E: `write_layer` honours the caller's content source BELOW
+      minor 15 too. CAUGHT A REAL DEFECT — the first version did, so a sharer
+      written at minor 14 wrote no id AND no content: silent loss on the way
+      out and a short record the reader desynchronises on. The older layout
+      owns its content whatever the caller says
+- [x] 9.6 REVERT F: an unresolvable content source falls back to an empty or
+      copied edit list instead of refusing, on both the command path and the
+      load path
+- [x] 9.7 Each revert COMPILES under `-Werror` before its result is believed.
+      Counts, C ABI suite: A 10/14 cases, 30 assertions; B 2/14, 5; C 2/14, 7;
+      D 1/14, 1. Command suite: E 1/15, 2; F 2/15, 4. Plus the C smoke
+      consumer under A and B
 
 ## 10. Gates
 

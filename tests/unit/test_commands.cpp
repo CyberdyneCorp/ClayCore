@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <cstring>
 
 #include "clay/scene/commands.h"
 #include "kernel_utils.h"
@@ -382,4 +383,105 @@ TEST_CASE("the undo bound is opt-in and changes nothing when it is not asked for
     }
     CHECK(serialize_document(quiet) == serialize_document(loud));
     CHECK_FALSE(bound.empty());
+}
+
+TEST_CASE("a shared edit list serializes once and reloads shared") {
+    // The scene payload at minor 15 (instance-a-layer): a layer record names
+    // the layer whose edit list it shares instead of repeating it. Written at
+    // an older minor the content goes out inline, which is the recoverable
+    // degradation — the shapes are all there and the sharing is not.
+    Document doc;
+    Layer& src = doc.add_sdf_layer("body");
+    const LayerId lid = src.id;
+    for (int i = 0; i < 40; ++i) {
+        Node n;
+        n.id = src.sdf->reserve_id();
+        n.prim = Prim::sphere(0.2f);
+        n.xform.position = cf3(0.1f * static_cast<float>(i), 0, 0);
+        src.sdf->insert(n);
+    }
+    Layer* copy = doc.instance_layer(lid, "body copy");
+    REQUIRE(copy != nullptr);
+    const LayerId cid = copy->id;
+
+    Document plain;
+    Layer& only = plain.add_sdf_layer("body");
+    only.sdf = doc.layers[0].sdf;
+
+    const std::vector<std::uint8_t> shared = serialize_document(doc);
+    const std::vector<std::uint8_t> single = serialize_document(plain);
+    // Non-degenerate: a comparison against a handful of bytes means nothing.
+    REQUIRE(single.size() > 1000);
+    // One edit list on the wire, not two.
+    CHECK(shared.size() < single.size() * 3 / 2);
+
+    std::optional<Document> back = deserialize_document(shared.data(), shared.size());
+    REQUIRE(back.has_value());
+    REQUIRE(back->layers.size() == 2);
+    CHECK(back->layers[0].sdf == back->layers[1].sdf);
+    // Shared, not merely equal: an edit through one is an edit through both.
+    Node extra;
+    extra.id = back->find_layer(cid)->sdf->reserve_id();
+    extra.prim = Prim::sphere(0.2f);
+    back->find_layer(cid)->sdf->insert(extra);
+    CHECK(back->find_layer(lid)->sdf->roots.size() == 41);
+
+    // At minor 14 the sharing is what is lost, and only that: two independent
+    // layers, each carrying the whole edit list.
+    const std::vector<std::uint8_t> old = serialize_document(doc, 14);
+    CHECK(old.size() > single.size() * 3 / 2);
+    std::optional<Document> older = deserialize_document(old.data(), old.size(), 14);
+    REQUIRE(older.has_value());
+    REQUIRE(older->layers.size() == 2);
+    CHECK(older->layers[0].sdf != older->layers[1].sdf);
+    CHECK(older->layers[0].sdf->roots.size() == 40);
+    CHECK(older->layers[1].sdf->roots.size() == 40);
+}
+
+TEST_CASE("a document naming content it does not carry is refused") {
+    // Rather than opened with an empty layer where an instance was: an artist
+    // reading "the subtool is empty" would take it for their own work lost.
+    Document doc;
+    Layer& src = doc.add_sdf_layer("body");
+    Node n;
+    n.id = src.sdf->reserve_id();
+    n.prim = Prim::sphere(0.5f);
+    src.sdf->insert(n);
+    Layer* copy = doc.instance_layer(src.id, "body copy");
+    REQUIRE(copy != nullptr);
+
+    std::vector<std::uint8_t> bytes = serialize_document(doc);
+    REQUIRE(deserialize_document(bytes.data(), bytes.size()).has_value());
+    // A sharing layer's record ENDS with its content source and the content
+    // flag, and it carries no content — so the last five bytes of the stream
+    // are that pair, and the source id is the first four of them. Addressed
+    // by position rather than by searching for the value, which a node id or
+    // a float would collide with.
+    REQUIRE(bytes.size() > 5);
+    const LayerId missing = 9999;
+    std::memcpy(bytes.data() + bytes.size() - 5, &missing, sizeof(missing));
+    CHECK_FALSE(deserialize_document(bytes.data(), bytes.size()).has_value());
+}
+
+TEST_CASE("a layer-add naming a source that is gone is refused") {
+    // The replay half of the same rule: an AddLayerCmd that names its content
+    // rather than carrying it must not fall back to an empty or copied edit
+    // list, which would unlink the layers where nothing can see it.
+    Document doc;
+    Layer& src = doc.add_sdf_layer("body");
+    Node n;
+    n.id = src.sdf->reserve_id();
+    n.prim = Prim::sphere(0.5f);
+    src.sdf->insert(n);
+
+    Layer named;
+    named.id = doc.reserve_layer_id();
+    named.name = "instance";
+    CHECK_FALSE(clay::scene::apply(doc, Command{AddLayerCmd{named, -1, 4242}}).has_value());
+    CHECK(doc.layers.size() == 1);
+
+    // And it resolves against a source that IS there.
+    REQUIRE(clay::scene::apply(doc, Command{AddLayerCmd{named, -1, src.id}}).has_value());
+    REQUIRE(doc.layers.size() == 2);
+    CHECK(doc.layers[1].sdf == doc.layers[0].sdf);
 }
