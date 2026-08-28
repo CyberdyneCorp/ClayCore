@@ -165,6 +165,33 @@ std::optional<field::FieldVolume> bake_layer(const Layer& layer,
                                              const BakePointEval& point_eval = {},
                                              parallel::CancelToken* token = nullptr);
 
+// Sample an already-compiled TAPE into a volume: the half of `bake_layer` that
+// does not need a layer.
+//
+// Same sampling, same redistance-then-compact, same colour pass, same measured
+// Lipschitz — it IS `bake_layer`'s body, so a volume built here is one a
+// consolidation could have produced and there is one definition of what a
+// baked volume is rather than two.
+//
+// The caller owes the two things a tape cannot state for itself:
+//
+//   * THE FRAME. `bake_layer` compiles a `local_view` — the layer visible and
+//     its own transform identity — because sampling the world-space field and
+//     putting the result back under the layer applies the transform twice. A
+//     caller compiling its own tape owes the same convention.
+//   * `want_color`. The compiler folds colour into instructions, so by the time
+//     a tape exists the question "can this produce more than one colour" cannot
+//     be asked of it. `layer_colors_vary` is public for exactly this reason,
+//     and passing `true` unconditionally adds a channel a one-colour bake does
+//     not have — which is different bytes, not a slower path.
+//
+// `tape` is BORROWED and must outlive the call.
+std::optional<field::FieldVolume> bake_tape(const Tape& tape,
+                                            const ConsolidationParams& params, bool want_color,
+                                            ConsolidationCost* out_cost = nullptr,
+                                            const BakePointEval& point_eval = {},
+                                            parallel::CancelToken* token = nullptr);
+
 // Collapse a layer's edit list into one volume item, as ONE undo step.
 //
 // The step is a group of removals plus one add, so its inverse is the group's

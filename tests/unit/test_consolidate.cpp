@@ -981,3 +981,83 @@ TEST_CASE("consolidate: installing a volume severs shared instance content") {
     REQUIRE(undo.undo(doc));
     CHECK(doc.find_layer(src)->sdf.get() == doc.layers.back().sdf.get());
 }
+
+// -- the pure tape half of a bake (add-sdf-prefix-cache) -----------------------
+//
+// `bake_layer` is now `compile a local view` plus `bake_tape`, so that a caller
+// holding a tape that belongs to no layer — the prefix cache samples exactly
+// that — gets the same sampling, redistance, compact, colour and measurement
+// without a second definition of what a baked volume is. These hold the two to
+// being the same code rather than two that agree today.
+
+TEST_CASE("consolidate: bake_tape reproduces bake_layer byte for byte") {
+    scene::Document doc = sphere_document(0.6f);
+    const scene::ConsolidationParams params = params_at(0.04f, 0.12f);
+    const scene::Layer& layer = doc.layers.front();
+
+    std::optional<FieldVolume> through_layer = scene::bake_layer(layer, params);
+    REQUIRE(through_layer);
+
+    // The caller's half of the contract, spelled out: the layer's own frame,
+    // visible, and the colour question asked of the NODES.
+    scene::Layer view = layer;
+    view.visible = true;
+    view.xform = math::Transform{};
+    const scene::Tape tape = scene::compile_layer(view);
+    std::optional<FieldVolume> through_tape =
+        scene::bake_tape(tape, params, scene::layer_colors_vary(layer));
+    REQUIRE(through_tape);
+
+    CHECK(through_tape->serialize() == through_layer->serialize());
+}
+
+TEST_CASE("consolidate: bake_tape carries colour on exactly the same rule") {
+    // Two documents that differ only in whether the layer can produce more than
+    // one colour. `want_color` is the caller's to supply because the tape has
+    // already folded colour into instructions and cannot be asked; passing it
+    // wrongly is different BYTES, not a slower path, which is what this pins.
+    scene::Document grey = sphere_document(0.6f);
+    scene::Document painted = sphere_document(0.6f);
+    scene::Node red;
+    red.prim = scene::Prim::sphere(0.2f);
+    red.xform.position = cf3(0.5f, 0, 0);
+    red.color = cf3(1, 0, 0);
+    painted.layers.front().sdf->insert(red);
+
+    CHECK_FALSE(scene::layer_colors_vary(grey.layers.front()));
+    CHECK(scene::layer_colors_vary(painted.layers.front()));
+
+    const scene::ConsolidationParams params = params_at(0.04f, 0.12f);
+    for (scene::Document* d : {&grey, &painted}) {
+        scene::Layer view = d->layers.front();
+        view.visible = true;
+        view.xform = math::Transform{};
+        const scene::Tape tape = scene::compile_layer(view);
+        const bool vary = scene::layer_colors_vary(d->layers.front());
+        std::optional<FieldVolume> want = scene::bake_layer(d->layers.front(), params);
+        std::optional<FieldVolume> got = scene::bake_tape(tape, params, vary);
+        REQUIRE(want);
+        REQUIRE(got);
+        CHECK(got->has_color() == vary);
+        CHECK(got->serialize() == want->serialize());
+    }
+}
+
+TEST_CASE("consolidate: bake_tape refuses what bake_layer refuses") {
+    scene::Document doc = sphere_document(0.6f);
+    scene::Layer view = doc.layers.front();
+    view.visible = true;
+    view.xform = math::Transform{};
+    const scene::Tape tape = scene::compile_layer(view);
+
+    scene::ConsolidationParams no_cell;  // cell_size stays 0
+    CHECK_FALSE(scene::bake_tape(tape, no_cell, false));
+
+    const scene::Tape empty;  // no instructions: nothing to sample
+    CHECK_FALSE(scene::bake_tape(empty, params_at(0.04f, 0.12f), false));
+
+    // ...and a cancelled token discards rather than returning a partial bake.
+    parallel::CancelToken token;
+    token.cancel();
+    CHECK_FALSE(scene::bake_tape(tape, params_at(0.04f, 0.12f), false, nullptr, {}, &token));
+}
