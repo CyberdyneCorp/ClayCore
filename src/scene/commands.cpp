@@ -6,6 +6,8 @@
 #include <cstring>
 #include <memory>
 #include <optional>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace clay {
@@ -166,8 +168,24 @@ std::optional<Command> apply_one(Document& doc, const SetDeformersCmd& c) {
 }
 
 std::optional<Command> apply_one(Document& doc, const AddLayerCmd& c) {
-    doc.insert_layer(c.layer, c.index);
-    return Command{RemoveLayerCmd{c.layer.id}};
+    Layer layer = c.layer;
+    // An instance that arrived through a serialized command names its source
+    // rather than carrying the content, so the share is restored here. In
+    // memory the command already holds the source's shared_ptr and this does
+    // not fire; a replay is where it does, against the snapshot the journal
+    // was taken against, so the source layer is there.
+    //
+    // Refused rather than deep-copied when the id does not resolve: a silent
+    // copy would put back exactly the multiplication a reference exists to
+    // avoid, and would unlink the layers where nothing can see it.
+    if (c.content_source != 0 && !layer.sdf) {
+        const Layer* src = doc.find_layer(c.content_source);
+        if (!src || !src->sdf) return std::nullopt;
+        layer.sdf = src->sdf;
+    }
+    const LayerId added = layer.id;
+    doc.insert_layer(std::move(layer), c.index);
+    return Command{RemoveLayerCmd{added}};
 }
 
 std::optional<Command> apply_one(Document& doc, const RemoveLayerCmd& c) {
@@ -874,7 +892,11 @@ std::shared_ptr<SdfContent> read_content(Reader& r) {
     return content;
 }
 
-void write_layer(Writer& w, const Layer& l) {
+// `content_source` is 0 when this layer owns the content that follows, and
+// otherwise the id of the layer whose edit list it shares — in which case
+// nothing follows. See kSceneMinor's minor-15 note; who owns what is the
+// caller's to decide, because only a walk of the whole layer stack can.
+void write_layer(Writer& w, const Layer& l, LayerId content_source = 0) {
     w.pod(l.id);
     w.u32(static_cast<std::uint32_t>(l.name.size()));
     w.bytes(l.name.data(), l.name.size());
@@ -900,12 +922,25 @@ void write_layer(Writer& w, const Layer& l) {
         w.pod(l.radial_axis);
         w.pod(l.radial_k);
     }
+    // From minor 15, and gated exactly as the radial fields above are. The id
+    // goes out BEFORE the content flag so a reader knows, before it reaches
+    // the flag, whether a content section follows it.
+    if (w.minor >= 15) w.pod(content_source);
     bool has_sdf = l.sdf != nullptr;
     w.pod(has_sdf);
-    if (has_sdf) write_content(w, *l.sdf);
+    // A sharer says it HAS content — it does, and clay_layer_node_count and
+    // every other reader of the flag mean exactly that — but writes none: the
+    // layer it names carries the bytes. At minor 14 and below there is no id
+    // to name it with, so every layer writes its own copy and the sharing is
+    // what the older layout loses.
+    if (has_sdf && content_source == 0) write_content(w, *l.sdf);
 }
 
-Layer read_layer(Reader& r) {
+// `out_content_source` receives the id this layer shares its content with, or
+// 0. A layer that names another comes back with a NULL `sdf`: only a second
+// pass over the whole stack can resolve it, since the owner may be any layer
+// before this one.
+Layer read_layer(Reader& r, LayerId* out_content_source = nullptr) {
     Layer l;
     l.id = r.pod<LayerId>();
     std::uint32_t ns = r.u32();
@@ -932,7 +967,13 @@ Layer read_layer(Reader& r) {
         l.radial_axis = r.pod<std::uint8_t>();
         l.radial_k = r.pod<float>();
     }
-    if (r.pod<bool>()) l.sdf = read_content(r);
+    LayerId content_source = 0;
+    if (r.minor >= 15) content_source = r.pod<LayerId>();
+    if (out_content_source) *out_content_source = content_source;
+    // A stream written at minor 14 or below has no source id and therefore no
+    // sharers: every layer carries its own content, which is what those files
+    // always meant.
+    if (r.pod<bool>() && content_source == 0) l.sdf = read_content(r);
     return l;
 }
 
@@ -1058,7 +1099,7 @@ struct SerializeVisitor {
     void operator()(const AddLayerCmd& c) {
         w.pod(Tag::AddLayer);
         w.pod(c.index);
-        write_layer(w, c.layer);
+        write_layer(w, c.layer, c.content_source);
     }
     void operator()(const RemoveLayerCmd& c) {
         w.pod(Tag::RemoveLayer);
@@ -1232,7 +1273,7 @@ std::optional<Command> deserialize(const std::uint8_t* data, std::size_t size) {
         case Tag::AddLayer: {
             AddLayerCmd c;
             c.index = r.pod<int>();
-            c.layer = read_layer(r);
+            c.layer = read_layer(r, &c.content_source);
             cmd = std::move(c);
             break;
         }
@@ -1301,7 +1342,21 @@ std::vector<std::uint8_t> serialize_document(const Document& doc, std::uint16_t 
     Writer w;
     w.minor = minor;
     w.u32(static_cast<std::uint32_t>(doc.layers.size()));
-    for (const Layer& l : doc.layers) write_layer(w, l);
+    // Which layer OWNS a shared edit list is derived from the identity of the
+    // content, in stack order: the first layer holding it writes it, every
+    // later holder names that layer. Nothing about ownership is stored in the
+    // document, so the file cannot contradict it — and the case where the
+    // layer originally instanced has since been removed needs no handling at
+    // all, because the first survivor simply becomes the owner.
+    std::unordered_map<const SdfContent*, LayerId> owner;
+    for (const Layer& l : doc.layers) {
+        LayerId source = 0;
+        if (l.sdf) {
+            auto [it, fresh] = owner.emplace(l.sdf.get(), l.id);
+            if (!fresh) source = it->second;
+        }
+        write_layer(w, l, source);
+    }
     return std::move(w.out);
 }
 
@@ -1312,11 +1367,29 @@ std::optional<Document> deserialize_document(const std::uint8_t* data, std::size
     std::uint32_t count = r.u32();
     if (!r.ok || count > 100000) return std::nullopt;
     Document doc;
+    // (layer id, the layer it shares content with), filled as the records are
+    // read and resolved once they all are. A second pass rather than a lookup
+    // in the loop because a record names an id, not an offset, and nothing in
+    // the format promises the owner was written first — the writer does write
+    // it first, and a reader that relied on that would be trusting the file.
+    std::vector<std::pair<LayerId, LayerId>> shares;
     for (std::uint32_t i = 0; i < count && r.ok; ++i) {
-        Layer l = read_layer(r);
-        if (r.ok) doc.insert_layer(std::move(l), -1);
+        LayerId source = 0;
+        Layer l = read_layer(r, &source);
+        if (!r.ok) break;
+        if (source != 0) shares.emplace_back(l.id, source);
+        doc.insert_layer(std::move(l), -1);
     }
     if (!r.ok) return std::nullopt;
+    for (const auto& [id, source] : shares) {
+        Layer* target = doc.find_layer(id);
+        const Layer* src = doc.find_layer(source);
+        // A document naming content it does not carry is refused rather than
+        // opened with an empty layer where an instance was: an artist reading
+        // "the subtool is empty" would take it for their own work lost.
+        if (!target || !src || !src->sdf) return std::nullopt;
+        target->sdf = src->sdf;
+    }
     return doc;
 }
 

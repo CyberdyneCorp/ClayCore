@@ -75,6 +75,23 @@ struct TrimStrokeCmd {
 struct AddLayerCmd {
     Layer layer;
     int index = -1;
+    // An INSTANCE names the layer whose edit list it shares instead of
+    // carrying one. 0 — the default, and what every other layer-add means —
+    // is "the Layer above carries its own content".
+    //
+    // Needed because this command travels: in memory `layer.sdf` is already
+    // the source's `shared_ptr` and this field changes nothing, but the
+    // journal and the document file serialize the command, and a Layer
+    // serialized with its content inline comes back as a COPY. That is the
+    // multiplication `io::layer_memory` promises does not happen, so the
+    // reference has to survive the encoding rather than only the pointer.
+    //
+    // Resolved on apply against the document being applied to, which for a
+    // replay is the snapshot the journal was taken against — so the source
+    // layer is present and its id resolves. An id that does not resolve
+    // REFUSES the command; falling back to a copy would reintroduce the
+    // defect one recovery later, silently.
+    LayerId content_source = 0;
 };
 struct RemoveLayerCmd {
     LayerId id = 0;
@@ -222,7 +239,19 @@ math::Aabb command_influence_bound(const Document& doc, const Command& cmd);
 // drops them, and the item degrades to its UNIFORM scale — a squashed cylinder
 // comes back round rather than missing, which is the recoverable direction and
 // the one an older build can evaluate.
-inline constexpr std::uint16_t kSceneMinor = 14;
+//
+// Minor 15 adds a layer record's CONTENT SOURCE (issue #364): one layer id
+// before the content, 0 meaning "the content follows" and any other id meaning
+// "share that layer's edit list, and nothing follows". It is what makes an
+// INSTANCE layer survive a save as a reference instead of as a copy, and it is
+// the same field on AddLayerCmd. Which layer owns the content is derived at
+// write time from the identity of the content — first holder in stack order
+// owns it — so nothing is stored that the document could contradict, and a
+// document whose original source layer was removed writes with no special case.
+// Writing AT minor 14 or below writes every layer's content inline exactly as
+// it always did, and the instances come back as independent copies: the shapes
+// are right, the sharing is gone.
+inline constexpr std::uint16_t kSceneMinor = 15;
 
 // Apply a command; returns its inverse, or nullopt if the target does not
 // exist or is protected (ghosted or locked). The document is unchanged in

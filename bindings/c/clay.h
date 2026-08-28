@@ -24,7 +24,7 @@ extern "C" {
 #endif
 
 #define CLAY_ABI_MAJOR 0
-#define CLAY_ABI_MINOR 56
+#define CLAY_ABI_MINOR 58
 #define CLAY_ABI_PATCH 0
 
 /* Upper bound on the element count of any batch call: points, rays, cells,
@@ -518,6 +518,13 @@ clay_result clay_document_memory(const clay_document* doc, clay_memory_report* o
  * reporting zero would call it free). A layer's edit_list is a CEILING on its
  * contribution, not a partition of it.
  *
+ * The "counted ONCE" half of that survives a SAVE, since 0.58.0: a document
+ * writes a shared edit list once and names it from the other instances, so
+ * reading this report back after a save and reload gives the figure it gave
+ * before. Through 0.57.0 it did not — every layer's content went out inline
+ * and came back as its own allocation, so a document of ten instances reloaded
+ * ten times heavier and the layers were quietly no longer linked.
+ *
  * An unknown layer id is CLAY_ERROR_NOT_FOUND, not a zeroed report: a zeroed
  * report reads as an empty layer and shows a wrong answer confidently. */
 clay_result clay_layer_memory(const clay_document* doc, clay_layer_id layer,
@@ -873,6 +880,61 @@ clay_result clay_layer_trim_stroke(clay_document* doc, clay_layer_id layer, clay
 
 /* -- editing layers -------------------------------------------------------- */
 
+/* Add a layer SHARING `source`'s edit list — a ZBrush-style duplicate subtool,
+ * and the constructor the memory and dirty-bounds contracts above have been
+ * describing since before anything could make one.
+ *
+ * Nothing is copied but the layer record, so the call costs the same on a
+ * blockout of one item and on one of fifty thousand, and ten instances of a
+ * blockout are ONE edit list in memory and ONE in the file. That is the whole
+ * reason it exists: the alternative a host has without it is to replay or
+ * deep-copy the source's edit list per copy, paying memory and time
+ * proportional to everything the artist has already sculpted, ten times.
+ *
+ * WHAT IS SHARED is the edit list, and only that. An edit through EITHER layer
+ * is an edit to the shared content and appears through both — that is what a
+ * shared edit list means, and it is why the dirty bounds of such an edit report
+ * the union over every layer sharing the content rather than the one layer you
+ * named (see clay_layer_node_influence_bound). A host that dirties by what it
+ * was told refills every instance; a host that dirties the named layer alone
+ * leaves the other nine holding stale geometry with nothing to say so.
+ *
+ * WHAT IS NOT SHARED is everything else the layer carries: its transform, its
+ * name, its visibility, its protection, its mirror and its radial mode. Those
+ * are COPIED from the source at creation — an instance starts out looking like
+ * what it was made from — and diverge from there. Placing the instance
+ * somewhere else is what turns one edit list into two bolts; hiding it, ghosting
+ * it or mirroring it touches the source not at all.
+ *
+ * ONE UNDO STEP, like every other layer creation: the add goes through the
+ * command vocabulary, so a single clay_document_undo removes the instance and
+ * leaves the source exactly as it was, and a redo brings it back still sharing.
+ *
+ * INSTANCING AN INSTANCE shares the same edit list rather than chaining. There
+ * is one allocation and the layers over it are peers; a chain would invent a
+ * parent layer whose later removal would have to mean something, and it means
+ * nothing — see clay_document_remove_layer below.
+ *
+ * REMOVING THE SOURCE is legal while instances remain. The content is held by
+ * every layer sharing it, so removing the layer that happened to be instanced
+ * removes a placement and nothing else: the survivors still evaluate, still
+ * save and still reload with their content. There is no "original" to lose.
+ *
+ * CONSOLIDATING AN INSTANCE severs it first — see clay_layer_consolidate.
+ *
+ * Refusals. `source` must exist (CLAY_ERROR_NOT_FOUND) and must be an SDF
+ * layer: a voxel grid and a mesh are held beside the document by layer id
+ * rather than behind the shared pointer an instance is, so a voxel or mesh
+ * source is CLAY_ERROR_INVALID_ARGUMENT rather than a second kind of sharing
+ * that would need its own memory contract. `name` follows
+ * clay_document_set_layer_name: NULL and the empty string are refused, and
+ * names are not unique — an instance may carry the source's own name. */
+clay_result clay_document_instance_layer(clay_document* doc, clay_layer_id source,
+                                         const char* name, clay_layer_id* out_layer);
+
+/* Removing a layer that others INSTANCE removes that placement and nothing
+ * else: the shared edit list is held by every layer sharing it, so the
+ * survivors are untouched. See clay_document_instance_layer. */
 clay_result clay_document_remove_layer(clay_document* doc, clay_layer_id layer);
 /* Reorder a layer. The command vocabulary expresses this as remove-then-add,
  * so it is the one edit that is a pair rather than a single command. */
@@ -1013,10 +1075,40 @@ typedef struct clay_layer_info {
     int32_t visible;        /* what clay_document_set_layer_visible set */
     int32_t ghost;          /* both what clay_document_set_layer_protection */
     int32_t locked;         /* set; also clay_document_layer_protection */
+    /* Appended in 0.58.0 with clay_document_instance_layer: a host compiled
+     * against the older layout declares the older struct_size and does not
+     * receive them. Both describe the SAME relation from opposite ends, and a
+     * subtool panel drawing the link needs both — content_source alone marks
+     * the following end and leaves the source indistinguishable from an
+     * ordinary layer. */
+    clay_layer_id content_source; /* the layer this one shares its edit list
+                                   * with, or 0 when it owns it */
+    uint32_t share_count;         /* how many layers hold this edit list; 1
+                                   * when nobody instances it, and 0 for a
+                                   * voxel or mesh layer, which holds none */
 } clay_layer_info;
 
 clay_result clay_document_layer_info(const clay_document* doc, clay_layer_id layer,
                                      clay_layer_info* out_info);
+
+/* How `content_source` is decided, because after a reload the only thing that
+ * distinguishes an instance is that two layers happen to hold one edit list,
+ * and something has to name which of them it belongs to.
+ *
+ * The answer is the FIRST layer in stack order holding that content: it reports
+ * 0, and every other holder reports its id. That is the same rule the saved
+ * document uses to decide which layer's record carries the bytes, so what you
+ * are told here is exactly what a save would write, and the pair survives a
+ * save and reload unchanged.
+ *
+ * It also means there is nothing to dangle. Remove the layer that was
+ * instanced and the first survivor becomes the owner — it starts reporting 0,
+ * the others start reporting its id, and `share_count` falls by one. A host
+ * redrawing its panel from this after any removal is always right; a host
+ * caching "layer 4 is the original" is not, and never was, because the document
+ * does not record an original. */
+
+
 
 /* The layer's UTF-8 name by the size-query pattern clay_list_backends uses:
  * call with buffer == NULL to receive the required size (incl. NUL) in
@@ -1759,7 +1851,12 @@ typedef struct clay_consolidation_cost {
  * `region_min`/`region_max` are an optional world-space box, or NULL for the
  * layer's own bounds padded. Pin it when consolidating the SAME region
  * repeatedly: a volume's geometric bound is its whole sampled box, so each
- * bake would otherwise pad the previous padding. */
+ * bake would otherwise pad the previous padding.
+ *
+ * The document is not changed, and that includes an INSTANCE layer's sharing:
+ * clay_layer_consolidate severs a shared edit list before it bakes, and this
+ * call does not, because it does not bake. Asking what a bake would cost must
+ * never be the thing that unlinks a subtool. */
 clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_id layer,
                                           const clay_consolidation_params* params,
                                           const float region_min[3], const float region_max[3],
@@ -1770,6 +1867,25 @@ clay_result clay_layer_consolidation_cost(const clay_document* doc, clay_layer_i
  * deformers intact, because the undo record carries the removed subtrees by
  * value. No new command was needed for this; the vocabulary could already say
  * it, which is why this is a policy rather than a verb.
+ *
+ * ON AN INSTANCE THIS SEVERS. A layer created by clay_document_instance_layer
+ * shares its edit list, and a bake replaces an edit list — so before baking,
+ * a layer sharing its content is given a PRIVATE copy of it and the bake
+ * lands on that copy alone. Every other layer over the shared content keeps
+ * its items and stays parametric.
+ *
+ * That is the only sound reading of the gesture. A bake says "this shape is
+ * finished", which is a statement about ONE subtool; there is no reading under
+ * which baking the tenth instance should turn the other nine into volumes,
+ * and doing it in place would have done exactly that, silently. Refusing was
+ * the alternative and is worse: an artist who duplicates a subtool would find
+ * that neither copy can be baked any more, including the one they started
+ * from, for a reason nothing in the UI can explain.
+ *
+ * The cost of severing is that the layer stops following the source, which is
+ * what "finished" means, and it is VISIBLE: clay_document_layer_info reports
+ * the link gone. The sever is part of the same undo step as the bake, so one
+ * undo puts back both the items and the sharing.
  *
  * Refused on a protected layer, and refused BEFORE the bake, so a locked layer
  * does not cost a full resampling to say no.
