@@ -164,8 +164,13 @@ TEST_CASE("sculpt: a Smooth transaction equals the same dabs through field::rela
     const Layer& after = doc.layers.front();
     REQUIRE(after.sdf->roots.size() == 1);
     const Node* installed = after.sdf->find(after.sdf->roots.front());
-    REQUIRE(installed);
-    REQUIRE(installed->volume);
+    REQUIRE(installed != nullptr);
+    // .get(), not the shared_ptr: doctest stringifies both sides of what it
+    // decomposes, and MSVC's <memory> declares an operator<< for shared_ptr
+    // that a raw element pointer cannot deduce against — so a smart pointer in
+    // an assertion is a Windows-only build error. test_cull_index.cpp already
+    // compares .get() for the same reason.
+    REQUIRE(installed->volume.get() != nullptr);
     CHECK(installed->volume->serialize() == expected.serialize());
 }
 

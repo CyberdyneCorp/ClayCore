@@ -957,8 +957,11 @@ TEST_CASE("consolidate: installing a volume severs shared instance content") {
     scene::Document doc = sphere_document(0.6f);
     const scene::LayerId src = doc.layers.front().id;
     scene::Layer* inst = doc.instance_layer(src, "copy");
-    REQUIRE(inst);
-    REQUIRE(inst->sdf == doc.layers.front().sdf);
+    REQUIRE(inst != nullptr);
+    // .get() on both sides: a shared_ptr inside an assertion is a Windows-only
+    // build error, because MSVC's <memory> declares an operator<< for one that
+    // doctest's stringifier then cannot deduce against.
+    REQUIRE(inst->sdf.get() == doc.layers.front().sdf.get());
 
     std::optional<FieldVolume> v =
         scene::bake_layer(doc.layers.front(), params_at(0.04f, 0.12f), nullptr);
@@ -968,7 +971,7 @@ TEST_CASE("consolidate: installing a volume severs shared instance content") {
 
     // Nine subtools must not collapse because the artist baked the tenth.
     const scene::Layer* instance = doc.find_layer(doc.layers.back().id);
-    REQUIRE(instance);
+    REQUIRE(instance != nullptr);
     REQUIRE(instance->sdf->roots.size() == 1);
     CHECK(instance->sdf->find(instance->sdf->roots.front())->prim.type ==
           scene::PrimType::Sphere);
@@ -976,5 +979,5 @@ TEST_CASE("consolidate: installing a volume severs shared instance content") {
     // ...and one undo puts back both the absorbed item and the sharing.
     CHECK(undo.undo_depth() == 1);
     REQUIRE(undo.undo(doc));
-    CHECK(doc.find_layer(src)->sdf == doc.layers.back().sdf);
+    CHECK(doc.find_layer(src)->sdf.get() == doc.layers.back().sdf.get());
 }
