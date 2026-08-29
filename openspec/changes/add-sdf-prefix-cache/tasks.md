@@ -345,7 +345,7 @@
       shared-instance case that a pointer digest gets wrong
 - [x] 14.6 The lazy commit's distance from the path it replaces is 0.073 of a
       cell — held by 10.4 as a measured bound
-- [ ] 14.7 MEASURED: the cache's own benchmark. §17.1 — the numbers in §1.4 are
+- [x] 14.7 MEASURED: the cache's own benchmark. §17.1 — the numbers in §1.4 are
       the "before" and there is no gated "after" yet
 
 ## 15. Proving the tests
@@ -401,7 +401,7 @@
 
 ## 17. Remaining
 
-- [ ] 17.1 THE BENCHMARKS, with gates in `tools/check_bench.py`. Four families,
+- [x] 17.1 THE BENCHMARKS, with gates in `tools/check_bench.py`. Four families,
       and each one is a claim in §14 that currently has only a unit test's
       counter behind it:
       - the prefix pair — one dab through an accelerated source against the

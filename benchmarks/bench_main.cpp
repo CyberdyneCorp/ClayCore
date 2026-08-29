@@ -2809,16 +2809,23 @@ BENCHMARK(BM_TapeCombineAddColoredRef)->Unit(benchmark::kMillisecond);
 // the baked volume between pointer events has exactly one implementation: bake
 // the layer, relax, throw the volume away, per dab. That is
 // BM_SdfSmoothStandalone, and it is the reason Smooth shipped without a live
-// preview at all. `SdfSmoothTransaction` moves that bake to pointer-down —
-// BM_SdfSmoothTransactionBegin — and leaves the dab paying `relax_in_place`
-// over the bricks its own region touches, which is BM_SdfSmoothTransactionUpdate.
+// preview at all.
+//
+// THESE ROWS HAVE SHIFTED MEANING ONCE ALREADY, and the note says so rather
+// than leaving the old reading in place. `SdfSmoothTransaction` first MOVED the
+// bake to pointer-down, and BM_SdfSmoothTransactionBegin was that bake — 29.6
+// ms of whole-layer sampling before an artist saw anything. It is now LAZY: it
+// compiles, indexes a lattice and takes a digest, and evaluates nothing at all,
+// which the `samples` counter reads as 0. The bake did not move again, it was
+// broken up — a dab materializes the bricks its own relax will read and then
+// relaxes them in place, and that is BM_SdfSmoothTransactionUpdate.
 //
 // The gesture rows exist because the pair above does not settle the trade on
 // its own: a transaction that made every dab free and cost a second at
 // pointer-down would be worse to sculpt with. BM_SdfSmoothTransaction100 and
 // BM_SdfSmoothTransaction1000 time a WHOLE gesture — one begin and N updates —
-// so the one-time cost is amortised where an artist actually pays it, and the
-// break-even against N standalone dabs can be read straight off the table.
+// so whatever is paid once is amortised where an artist actually pays it, and
+// the break-even against N standalone dabs can be read straight off the table.
 //
 // The dab is region-limited, at the pole `sculpted_sphere` piles its 192 extra
 // spheres on. A relax with no region is a filter over the whole volume rather
@@ -2879,10 +2886,19 @@ void BM_SdfSmoothStandalone(benchmark::State& state) {
 }
 BENCHMARK(BM_SdfSmoothStandalone)->Unit(benchmark::kMillisecond);
 
-// The one-time half, alone. This is the cost the transaction MOVES rather than
-// removes — see the note on SdfSmoothTransaction about the working set being
-// the whole finite layer — so it is benchmarked separately and deliberately,
-// and it is what a lazy local checkpoint would later have to beat.
+// Pointer-down, alone. This row USED TO BE A WHOLE-LAYER BAKE — the cost the
+// transaction moved rather than removed, benchmarked separately so that a lazy
+// local checkpoint would have something to beat. The checkpoint landed and this
+// is now the lazy begin: a compile, an index for the working lattice and a
+// digest, and no evaluation whatsoever.
+//
+// `samples` IS THE MEASUREMENT, not decoration. It reads the working volume's
+// stored sample count immediately after `begin`, and a lazy begin materializes
+// no brick, so a correct row reports 0 where the old one reported 123,930. A
+// begin that started sampling again would report the sample count of the model
+// and no wall clock on a shared runner could tell that from a slow machine.
+// BM_SdfSmoothTransactionBegin5000 and BM_SdfSmoothTransactionBegin20000 below
+// carry the same row over two larger models.
 void BM_SdfSmoothTransactionBegin(benchmark::State& state) {
     scene::Document doc = sculpted_sphere(193);
     const scene::LayerId layer = doc.layers.front().id;
@@ -2907,11 +2923,24 @@ BENCHMARK(BM_SdfSmoothTransactionBegin)->Unit(benchmark::kMillisecond);
 // live dab: `relax_in_place` over the bricks the dab's ball reaches, and no
 // bake, no compile, no command and no undo entry.
 //
-// FIXED ITERATION COUNT, because the setup is a whole bake. Left to fill a time
-// budget the harness re-invokes the function with a larger count until it does,
-// and every re-invocation pays that bake again — which is fine for the total
-// runtime and wrong for the reading, since the row is meant to be the dab
-// alone.
+// FIXED ITERATION COUNT. It used to be fixed because the setup was a whole
+// bake; the setup is now a lazy begin, and the reason survives in a sharper
+// form: the FIRST update materializes the bricks the dab reads and every one
+// after it reuses them, so THE ITERATION COUNT DECIDES how much of that
+// one-time cost the average carries. Left to fill a time budget it would be a
+// property of the machine.
+//
+// The row therefore MOVED, 0.152 -> 0.31 ms, without anything getting slower,
+// and the shape is worth recording because it is the honest reading of the
+// lazy path on a small model. Measured on this fixture at three counts — 20,
+// 200 and 2000 iterations — the row is a fixed ~27-30 ms plus ~0.15 ms per dab:
+// 1.49, 0.31 and 0.162 ms. The 0.15 is the steady-state dab, unchanged and
+// identical to what this row read when `begin` baked; the ~28 ms is that bake,
+// which at 193 nodes did not go away but arrived at the first dab instead,
+// because one 0.25-radius dab's dependency region covers most of a unit
+// sphere's band. On a model the dab does NOT cover, it is a fraction of the
+// layer — which is the whole point, and which is what
+// BM_SdfSmoothLazyFirstUpdateNoPrefix below measures at 5,000 roots.
 //
 // The volume is relaxed repeatedly and so converges towards its own average.
 // That does not change what is being timed: `rewrite_region` visits the same
@@ -3286,6 +3315,588 @@ BENCHMARK(BM_SdfMoveRepeated100)->Unit(benchmark::kMillisecond)->Iterations(5);
 // a counter rather than a time.
 void BM_SdfMoveRepeatedPolicy100(benchmark::State& state) { move_repeated(state, 100, true); }
 BENCHMARK(BM_SdfMoveRepeatedPolicy100)->Unit(benchmark::kMillisecond)->Iterations(3);
+// -- the history a dab stops paying for (sdf-prefix-cache) -------------------
+//
+// #306 measured the shape of the problem and this group measures the cure. A
+// dirty region over worked geometry re-evaluates every item that contributes
+// there and almost none of them changed: one dab into 12 bricks cost 0.23 ms at
+// 200 items and 18.07 ms at 50,000, so an artist's cost per stroke followed
+// what they had already sculpted. `SdfPrefixCache` samples the old roots into
+// an fp32 volume and keeps the nodes, so the same 12 bricks fold a 64-item
+// suffix onto a stored seed instead of replaying the whole list.
+//
+// THE FIXED WORK IS THE 12 BRICKS, and the HISTORY is what grows. That is the
+// only shape in which the claim can be read: a benchmark that grew the dirty
+// region with the document would measure the region. Both sides evaluate the
+// identical points through the identical entry point (`SdfSourceField`) and
+// differ only in whether a prefix was built first — and they are bit-identical
+// where the volume covers the window, which is the property
+// test_sdf_prefix_cache.cpp asserts and this group never re-checks.
+//
+// TWO DISTRIBUTIONS, because they are two different documents to the cull and
+// to the bake even though they are the same number of roots. SPREAD scatters
+// the dabs over the whole sphere, which is what a host's own `abi_sculpt`
+// fixture does and what a survey stroke looks like; PILED lands every dab in
+// one patch, which is what actually happens when an artist works a detail —
+// and it is the case where the dirty bricks sit under the deepest stack.
+//
+// THE FALLBACK COUNTERS ARE THE HONEST HALF. The far-bound rule (see
+// sdf_prefix_cache.h) sends a window to the prefix TAPE wherever the volume
+// does not store every sample of it, which is correct and slow, so a row whose
+// `fallback_windows` is high is a row where the cache is not working rather
+// than one where it is wrong. They are counts, identical on every machine, and
+// that is what makes them gateable where a millisecond is not.
+namespace {
+
+constexpr float kHistoryCell = 0.05f;
+// A WIDER BAND THAN THE DEFAULT THREE CELLS, and the reason is the far-bound
+// rule rather than fidelity: a query brick spans eight cells, so a band only
+// six cells thick cannot store every sample of a brick that straddles the
+// surface and every window would fall back to the tape. The band a host picks
+// for a prefix has to cover the windows it means to serve.
+constexpr float kHistoryBand = 0.30f;
+// The dirty region #306 measured, held FIXED while the history grows.
+constexpr int kHistoryBricks = 12;
+// What stays live in front of the boundary. The suffix is what still costs per
+// evaluation, so this — and not the document — is what a cached dab pays for.
+constexpr std::size_t kHistoryLiveSuffix = 64;
+
+session::SdfPrefixPolicy history_policy() {
+    session::SdfPrefixPolicy policy;
+    policy.cell_size = kHistoryCell;
+    policy.band = kHistoryBand;
+    policy.padding = kHistoryBand;
+    policy.min_history_roots = 256;
+    policy.keep_live_suffix_roots = kHistoryLiveSuffix;
+    policy.max_bytes = 512u << 20;  // 0 would DISABLE the cache, not unbound it
+    return policy;
+}
+
+// SPREAD: `roots` dabs over the whole unit sphere on a Fibonacci shell, the
+// same distribution the C ABI fixture above builds. Every part of the surface
+// carries history, so the dirty window below sits over a full stack wherever it
+// is put.
+scene::Document history_spread(int roots) {
+    scene::Document doc;
+    scene::Layer& l = doc.add_sdf_layer("history");
+    scene::Node base;
+    base.prim = scene::Prim::sphere(1.0f);
+    l.sdf->insert(base);
+    const double golden = 0.6180339887;
+    for (int i = 1; i < roots; ++i) {
+        scene::Node dab;
+        dab.prim = scene::Prim::sphere(0.04f);
+        const double u = std::fmod(static_cast<double>(i) * golden, 1.0);
+        const double v = (static_cast<double>(i) + 0.5) / static_cast<double>(roots);
+        const double phi = std::acos(1.0 - 2.0 * v);
+        const double th = 6.283185307 * u;
+        dab.xform.position = cf3(static_cast<float>(std::sin(phi) * std::cos(th)),
+                                 static_cast<float>(std::cos(phi)),
+                                 static_cast<float>(std::sin(phi) * std::sin(th)));
+        l.sdf->insert(dab);
+    }
+    return doc;
+}
+
+// PILED: `sculpted_sphere` already is this — every dab lands in one patch at
+// the -x pole — so it is named rather than re-written, and the probe window
+// below sits on that patch. Both fixtures therefore share a surface and a
+// window and differ only in where the history is.
+scene::Document history_piled(int roots) { return sculpted_sphere(roots); }
+
+// Twelve dim-8 bricks that STRADDLE THE SURFACE at the -x pole, on the lattice
+// a brick key implies (origin = key * kBrickDim * cell), which is the shape a
+// refill request has. Chosen by walking a 4x3 grid of (y, z) brick columns and
+// taking, in each, the brick the sphere actually passes through: a fixed block
+// of keys would spend most of its twelve on empty space, where every window
+// falls back and the row measures the tape rather than the cache.
+std::vector<float> history_probe_points() {
+    const float span = kHistoryCell * static_cast<float>(field::kBrickDim);
+    std::vector<float> pts;
+    pts.reserve(static_cast<std::size_t>(kHistoryBricks) * field::kBrickSamples * 3);
+    for (int ky = -2; ky <= 1; ++ky) {
+        for (int kz = -1; kz <= 1; ++kz) {
+            const float yc = (static_cast<float>(ky) + 0.5f) * span;
+            const float zc = (static_cast<float>(kz) + 0.5f) * span;
+            const float r2 = yc * yc + zc * zc;
+            const float xs = -std::sqrt(std::max(0.05f, 1.0f - r2));
+            const int kx = static_cast<int>(std::floor(xs / span));
+            const float o[3] = {static_cast<float>(kx) * span, static_cast<float>(ky) * span,
+                                static_cast<float>(kz) * span};
+            for (int k = 0; k <= field::kBrickDim; ++k)
+                for (int j = 0; j <= field::kBrickDim; ++j)
+                    for (int i = 0; i <= field::kBrickDim; ++i) {
+                        pts.push_back(o[0] + static_cast<float>(i) * kHistoryCell);
+                        pts.push_back(o[1] + static_cast<float>(j) * kHistoryCell);
+                        pts.push_back(o[2] + static_cast<float>(k) * kHistoryCell);
+                    }
+        }
+    }
+    return pts;
+}
+
+// One iteration is the 12 bricks, ONE `fill_points` CALL PER BRICK. That is not
+// a detail of the harness: `fill_points` decides the far-bound question for the
+// whole call, so a single 8,748-point call would drag every brick onto the slow
+// path as soon as one of them was uncovered — which is exactly why
+// `SdfSourceField::block_fill` splits per brick, and this fixture drives it the
+// same way a bake through it would.
+void history_eval(benchmark::State& state, scene::Document doc, int roots, bool with_prefix) {
+    const scene::LayerId layer = doc.layers.front().id;
+    const session::SdfPrefixPolicy policy = history_policy();
+    session::SdfPrefixCache cache;
+    if (with_prefix && !cache.build(doc, layer, policy, eval::pooled_bake_eval())) {
+        state.SkipWithError("the prefix did not build; nothing is being measured");
+        return;
+    }
+    // A NULL cache on the control side, not an empty one: a null cache is
+    // documented to be the full walk, and that is the "before" this pair is
+    // about. `open` never builds either way.
+    std::optional<session::SdfSourceField> src = session::SdfSourceField::open(
+        doc, layer, with_prefix ? &cache : nullptr, policy, eval::pooled_bake_eval());
+    if (!src) {
+        state.SkipWithError("the source did not open; nothing is being measured");
+        return;
+    }
+    if (with_prefix && !src->accelerated()) {
+        // The row would still be correct and would silently be the control,
+        // which is precisely the failure the cache is designed to have.
+        state.SkipWithError("the prefix did not attach; the control is being measured twice");
+        return;
+    }
+    const std::vector<float> pts = history_probe_points();
+    std::vector<float> out(static_cast<std::size_t>(kHistoryBricks) * field::kBrickSamples);
+    for (auto _ : state) {
+        for (int b = 0; b < kHistoryBricks; ++b) {
+            const std::size_t at = static_cast<std::size_t>(b) * field::kBrickSamples;
+            src->fill_points(pts.data() + at * 3, field::kBrickSamples, out.data() + at);
+        }
+        // A SEPARATE sink, never a variable read after the loop -- see the note
+        // in BM_SdfSmoothStandalone.
+        float sink = out.front();
+        benchmark::DoNotOptimize(sink);
+    }
+    const double iters = static_cast<double>(state.iterations());
+    state.counters["roots"] = static_cast<double>(roots);
+    state.counters["prefix_roots"] = static_cast<double>(src->prefix_roots());
+    state.counters["suffix_roots"] = static_cast<double>(src->suffix_roots());
+    // PER ITERATION, so the pair reads as "of the twelve bricks, how many were
+    // served from the volume". The control reports zero of each because a null
+    // cache has nothing to count, which is the honest reading and not a hole.
+    state.counters["seeded_windows"] = static_cast<double>(cache.stats().seeded_windows) / iters;
+    state.counters["fallback_windows"] =
+        static_cast<double>(cache.stats().fallback_windows) / iters;
+    state.counters["bricks"] = kHistoryBricks;
+}
+
+// Building the prefix, ON ITS OWN AND UNAMORTISED. It is a whole-layer bake of
+// the roots behind the boundary and it is not free, and a group that only
+// showed the hit would be hiding the half a host has to schedule. A FRESH cache
+// per iteration, because `build` returns the entry it already holds and would
+// otherwise measure a hash lookup.
+void prefix_build(benchmark::State& state, scene::Document doc, int roots) {
+    const scene::LayerId layer = doc.layers.front().id;
+    const session::SdfPrefixPolicy policy = history_policy();
+    std::size_t bricks = 0, bytes = 0, prefix_roots = 0;
+    for (auto _ : state) {
+        session::SdfPrefixCache cache;
+        const session::SdfPrefixField* built =
+            cache.build(doc, layer, policy, eval::pooled_bake_eval());
+        if (!built) {
+            state.SkipWithError("the prefix did not build; nothing is being measured");
+            return;
+        }
+        bricks = built->volume.brick_count();
+        bytes = built->bytes();
+        prefix_roots = built->prefix_roots;
+        std::size_t sink = bricks;  // see the note in BM_SdfSmoothStandalone
+        benchmark::DoNotOptimize(sink);
+    }
+    state.counters["roots"] = static_cast<double>(roots);
+    state.counters["prefix_roots"] = static_cast<double>(prefix_roots);
+    state.counters["stored_bricks"] = static_cast<double>(bricks);
+    state.counters["bytes"] = static_cast<double>(bytes);
+    state.counters["MiB"] = static_cast<double>(bytes) / (1024.0 * 1024.0);
+}
+
+}  // namespace
+
+void BM_SdfHistoryFullSpread5000(benchmark::State& state) {
+    history_eval(state, history_spread(5000), 5000, false);
+}
+BENCHMARK(BM_SdfHistoryFullSpread5000)->Unit(benchmark::kMillisecond);
+
+void BM_SdfHistoryPrefixSpread5000(benchmark::State& state) {
+    history_eval(state, history_spread(5000), 5000, true);
+}
+BENCHMARK(BM_SdfHistoryPrefixSpread5000)->Unit(benchmark::kMillisecond);
+
+void BM_SdfHistoryFullSpread20000(benchmark::State& state) {
+    history_eval(state, history_spread(20000), 20000, false);
+}
+BENCHMARK(BM_SdfHistoryFullSpread20000)->Unit(benchmark::kMillisecond);
+
+void BM_SdfHistoryPrefixSpread20000(benchmark::State& state) {
+    history_eval(state, history_spread(20000), 20000, true);
+}
+BENCHMARK(BM_SdfHistoryPrefixSpread20000)->Unit(benchmark::kMillisecond);
+
+void BM_SdfHistoryFullPiled5000(benchmark::State& state) {
+    history_eval(state, history_piled(5000), 5000, false);
+}
+BENCHMARK(BM_SdfHistoryFullPiled5000)->Unit(benchmark::kMillisecond);
+
+void BM_SdfHistoryPrefixPiled5000(benchmark::State& state) {
+    history_eval(state, history_piled(5000), 5000, true);
+}
+BENCHMARK(BM_SdfHistoryPrefixPiled5000)->Unit(benchmark::kMillisecond);
+
+void BM_SdfHistoryFullPiled20000(benchmark::State& state) {
+    history_eval(state, history_piled(20000), 20000, false);
+}
+BENCHMARK(BM_SdfHistoryFullPiled20000)->Unit(benchmark::kMillisecond);
+
+void BM_SdfHistoryPrefixPiled20000(benchmark::State& state) {
+    history_eval(state, history_piled(20000), 20000, true);
+}
+BENCHMARK(BM_SdfHistoryPrefixPiled20000)->Unit(benchmark::kMillisecond);
+
+// The cost that must NOT be hidden behind the four hits above. FIXED ITERATION
+// COUNTS, because a whole-layer bake left to fill a time budget is minutes of
+// CI for a number that does not get more accurate.
+void BM_SdfPrefixBuildSpread5000(benchmark::State& state) {
+    prefix_build(state, history_spread(5000), 5000);
+}
+BENCHMARK(BM_SdfPrefixBuildSpread5000)->Unit(benchmark::kMillisecond)->Iterations(3);
+
+void BM_SdfPrefixBuildSpread20000(benchmark::State& state) {
+    prefix_build(state, history_spread(20000), 20000);
+}
+BENCHMARK(BM_SdfPrefixBuildSpread20000)->Unit(benchmark::kMillisecond)->Iterations(1);
+
+void BM_SdfPrefixBuildPiled5000(benchmark::State& state) {
+    prefix_build(state, history_piled(5000), 5000);
+}
+BENCHMARK(BM_SdfPrefixBuildPiled5000)->Unit(benchmark::kMillisecond)->Iterations(3);
+
+void BM_SdfPrefixBuildPiled20000(benchmark::State& state) {
+    prefix_build(state, history_piled(20000), 20000);
+}
+BENCHMARK(BM_SdfPrefixBuildPiled20000)->Unit(benchmark::kMillisecond)->Iterations(1);
+
+// -- a lazy begin, and the first dab that pays for it ------------------------
+//
+// `SdfSmoothTransaction::begin` used to sample the whole finite layer, and the
+// row above (BM_SdfSmoothTransactionBegin) used to be that bake. It now
+// evaluates NOTHING — a compile, an index for the working lattice, and a digest
+// — so the pair of sizes here holds the property that replaced it: begin no
+// longer follows the MODEL. It is not constant, and this group does not claim
+// it is: a compile and a digest are both linear in the root count, and what
+// went away is the sampling, which was linear in roots TIMES samples.
+//
+// The dab is where the work went, so the second pair measures the FIRST update
+// after a lazy begin — the one that materializes, and the only one that can be
+// slow. With a prefix built, that materialization folds a 64-item suffix onto a
+// stored seed; without one it replays the whole edit list, which is the #306
+// cost arriving at the dab instead of at pointer-down. `materialized_bricks` is
+// the count that says the two rows did the same amount of work.
+namespace {
+
+// A WIDER BAND STILL THAN THE HISTORY ROWS', and the dab is the reason. A
+// dab's dependency region is a BALL -- `smooth_dab`'s 0.25 region radius plus
+// the stencil's reach plus a brick of outward rounding -- and a prefix volume
+// is a SHELL, so any band narrower than that ball guarantees that the bricks
+// the ball reaches inside and outside it are not stored and every one of them
+// falls back to the prefix tape. Measured at the history rows' 0.30: 37 of the
+// 112 bricks seeded and 75 fell back, and the pair read 0.69 rather than the
+// 0.03 the same mechanism gives on a covered window. That is the far-bound
+// rule working exactly as written, and it is a POLICY question rather than a
+// defect: a host caches a band that covers the windows it means to serve.
+//
+// 0.60 is the brush's own reach, and it is NOT the number that reads best.
+// Widening to 0.90 leaves 20 fallbacks of 159 and the pair reads 0.16 instead
+// of 0.27 -- for a fatter prefix to build and hold, bought against edge bricks
+// a ball reaches and a shell never stores. The residual fallbacks are that
+// geometry rather than a machine, and the counters below say how many.
+constexpr float kSculptBand = 0.60f;
+
+// The same sampling the Smooth rows above use, plus a prefix the gesture is
+// allowed to reach for. The three sampling numbers are copied over the prefix
+// policy by `begin` itself, so a caller cannot ask for a seed off a lattice the
+// gesture is not using.
+session::SdfSculptPolicy lazy_policy() {
+    session::SdfSculptPolicy policy;
+    policy.cell_size = kHistoryCell;
+    policy.band = kSculptBand;
+    policy.padding = kSculptBand;
+    policy.prefix.min_history_roots = 256;
+    policy.prefix.keep_live_suffix_roots = kHistoryLiveSuffix;
+    policy.prefix.max_bytes = 512u << 20;
+    return policy;
+}
+
+// The prefix policy `begin` will compose, so a cache built out here is the one
+// `find` matches inside. A key includes the resolution; a mismatch would be a
+// silent miss and a row that measured the control twice.
+session::SdfPrefixPolicy lazy_prefix_policy() {
+    const session::SdfSculptPolicy sculpt = lazy_policy();
+    session::SdfPrefixPolicy prefix = sculpt.prefix;
+    prefix.cell_size = sculpt.cell_size;
+    prefix.band = sculpt.band;
+    prefix.padding = sculpt.padding;
+    return prefix;
+}
+
+void smooth_begin(benchmark::State& state, scene::Document doc, int roots) {
+    const scene::LayerId layer = doc.layers.front().id;
+    const session::SdfSculptPolicy policy = lazy_policy();
+    std::size_t samples = 0;
+    for (auto _ : state) {
+        std::optional<session::SdfSmoothTransaction> tx =
+            session::SdfSmoothTransaction::begin(doc, layer, policy, eval::pooled_bake_eval());
+        if (!tx) {
+            state.SkipWithError("the transaction did not begin; nothing is being measured");
+            return;
+        }
+        samples = tx->preview_volume().sample_count();
+        std::size_t sink = samples;  // see the note in BM_SdfSmoothStandalone
+        benchmark::DoNotOptimize(sink);
+        tx->cancel();
+    }
+    state.counters["roots"] = static_cast<double>(roots);
+    // ZERO, and that is the measurement: a lazy begin materializes no brick, so
+    // the working volume it hands back stores no sample at all.
+    state.counters["samples"] = static_cast<double>(samples);
+}
+
+// One dab straight after a lazy begin. The transaction is rebuilt per
+// iteration, UNTIMED, because materialization is a once-per-brick event: left
+// to run against one transaction every iteration after the first would reuse
+// what the first materialized and the row would report the steady-state dab
+// that BM_SdfSmoothTransactionUpdate already reports.
+void smooth_first_update(benchmark::State& state, int roots, bool with_prefix) {
+    scene::Document doc = history_piled(roots);
+    const scene::LayerId layer = doc.layers.front().id;
+    const session::SdfSculptPolicy policy = lazy_policy();
+    session::SdfPrefixCache cache;
+    if (with_prefix &&
+        !cache.build(doc, layer, lazy_prefix_policy(), eval::pooled_bake_eval())) {
+        state.SkipWithError("the prefix did not build; nothing is being measured");
+        return;
+    }
+    const field::RelaxSettings dab = smooth_dab();
+    session::SdfSmoothMaterializationStats stats;
+    for (auto _ : state) {
+        state.PauseTiming();
+        std::optional<session::SdfSmoothTransaction> tx = session::SdfSmoothTransaction::begin(
+            doc, layer, policy, eval::pooled_bake_eval(), nullptr, with_prefix ? &cache : nullptr);
+        if (!tx) {
+            state.SkipWithError("the transaction did not begin; nothing is being measured");
+            return;
+        }
+        state.ResumeTiming();
+
+        const session::SdfSculptDirty dirty = tx->update(dab);
+
+        state.PauseTiming();
+        stats = tx->materialization();
+        tx->cancel();
+        state.ResumeTiming();
+        std::size_t sink = dirty.touched_bricks;  // see BM_SdfSmoothStandalone
+        benchmark::DoNotOptimize(sink);
+    }
+    if (stats.materialized_bricks == 0) {
+        state.SkipWithError("the dab materialized nothing; nothing is being measured");
+        return;
+    }
+    const double iters = static_cast<double>(state.iterations());
+    state.counters["roots"] = static_cast<double>(roots);
+    // THE PAIR'S OWN CONTROL: both rows must materialize the same bricks, or
+    // the ratio between them is measuring two different dabs.
+    state.counters["materialized_bricks"] = static_cast<double>(stats.materialized_bricks);
+    state.counters["reused_bricks"] = static_cast<double>(stats.reused_bricks);
+    state.counters["updates"] = static_cast<double>(stats.updates);
+    // AND WHY THE RATIO IS WHAT IT IS. A dab's dependency region is a BALL,
+    // and a prefix volume is a SHELL: the bricks that straddle the surface are
+    // seeded and the ones the ball reaches inside and outside the band are not,
+    // so a first update is part cache and part tape by construction. These two
+    // counts are that split, per iteration, and they are what a reader should
+    // check before blaming the machine for a modest margin.
+    state.counters["seeded_windows"] = static_cast<double>(cache.stats().seeded_windows) / iters;
+    state.counters["fallback_windows"] =
+        static_cast<double>(cache.stats().fallback_windows) / iters;
+}
+
+}  // namespace
+
+// The two larger models, against BM_SdfSmoothTransactionBegin's 193 above. Same
+// fixture family (`sculpted_sphere`), so the three rows differ only in how much
+// history sits behind the gesture.
+void BM_SdfSmoothTransactionBegin5000(benchmark::State& state) {
+    smooth_begin(state, history_piled(5000), 5000);
+}
+BENCHMARK(BM_SdfSmoothTransactionBegin5000)->Unit(benchmark::kMillisecond);
+
+void BM_SdfSmoothTransactionBegin20000(benchmark::State& state) {
+    smooth_begin(state, history_piled(20000), 20000);
+}
+BENCHMARK(BM_SdfSmoothTransactionBegin20000)->Unit(benchmark::kMillisecond);
+
+void BM_SdfSmoothLazyFirstUpdateNoPrefix(benchmark::State& state) {
+    smooth_first_update(state, 5000, false);
+}
+BENCHMARK(BM_SdfSmoothLazyFirstUpdateNoPrefix)->Unit(benchmark::kMillisecond)->Iterations(5);
+
+void BM_SdfSmoothLazyFirstUpdateWithPrefix(benchmark::State& state) {
+    smooth_first_update(state, 5000, true);
+}
+BENCHMARK(BM_SdfSmoothLazyFirstUpdateWithPrefix)->Unit(benchmark::kMillisecond)->Iterations(5);
+
+// -- the preview transport, through the C ABI a host actually draws from -----
+//
+// `clay_sdf_smooth_preview_item` copies the WHOLE working volume and hands it
+// over as a fresh item the caller owns. That is the right call for a host
+// joining mid-gesture and the wrong one for a per-frame loop: a dab moves a
+// ball of bricks and the host re-uploads the model.
+// `clay_sdf_smooth_preview_delta_take` hands over only the bricks whose bytes
+// are new.
+//
+// THE HEADLINE IS BYTES, NOT MILLISECONDS, and the `bytes` counter on both rows
+// is the number the pair exists to report: it is exact, deterministic and the
+// same on every machine, where the wall clock of a memcpy is a property of the
+// runner's memory bandwidth. `delta_frac` is the two divided, which is the
+// gateable form.
+//
+// THE WORKING SET IS WARMED FIRST. Every dab of the path is run once, untimed,
+// so the timed loop is a steady-state frame — the model already materialized,
+// the dab moving samples inside it — which is the state a stroke spends almost
+// all of its time in. Measured without the warm-up the delta row would carry
+// the materialization of a growing model and would understate itself.
+namespace {
+
+constexpr int kPreviewHistory = 2000;
+constexpr int kPreviewPathDabs = 16;
+
+// A dab sweeping a short arc of the shell `abi_sculpt` puts its dabs on, so
+// successive frames move different samples rather than re-averaging one ball
+// into its own fixed point.
+clay_relax_params preview_dab(int i) {
+    clay_relax_params p{};
+    p.struct_size = sizeof(p);
+    p.strength = 0.5f;
+    p.radius_cells = 1;
+    p.iterations = 1;
+    const float a = 0.6f * (static_cast<float>(i) / static_cast<float>(kPreviewPathDabs) - 0.5f);
+    p.centre[0] = std::cos(a);
+    p.centre[1] = std::sin(a);
+    p.centre[2] = 0.0f;
+    p.region_radius = 0.2f;
+    p.falloff = 0.0f;
+    p.mask = nullptr;
+    return p;
+}
+
+void abi_preview(benchmark::State& state, bool delta) {
+    // Layer id 1 is `abi_sculpt`'s one layer, as the refill rows above already
+    // assume.
+    clay_document* d = abi_sculpt(kPreviewHistory);
+    clay_sculpt_policy policy{};
+    policy.struct_size = sizeof(policy);
+    policy.cell_size = kHistoryCell;
+    policy.band = kHistoryBand;
+    policy.padding = kHistoryBand;
+    clay_sdf_smooth_tx* tx = clay_sdf_smooth_begin(d, 1, &policy, nullptr);
+    if (!tx) {
+        state.SkipWithError("the transaction did not begin; nothing is being measured");
+        clay_document_destroy(d);
+        return;
+    }
+    for (int i = 0; i < kPreviewPathDabs; ++i) {
+        const clay_relax_params p = preview_dab(i);
+        clay_sdf_smooth_update(tx, &p, nullptr, nullptr);
+    }
+    // What the whole working volume holds now, which is what the snapshot call
+    // copies every frame. Read through the delta's own `info` call BEFORE
+    // anything is taken: nothing has been taken yet, and a brick enters the
+    // delta exactly when it is materialized, so what is waiting is precisely
+    // the set of bricks the volume stores.
+    clay_sdf_preview_delta_info info{};
+    info.struct_size = sizeof(info);
+    if (clay_sdf_smooth_preview_delta_info(tx, &info) != CLAY_OK || info.sample_floats == 0) {
+        state.SkipWithError("the preview holds nothing; nothing is being measured");
+        clay_sdf_smooth_destroy(tx);
+        clay_document_destroy(d);
+        return;
+    }
+    const double snapshot_bytes = static_cast<double>(info.sample_floats) * sizeof(float);
+
+    std::vector<clay_sdf_preview_brick> bricks;
+    std::vector<float> samples;
+    double taken_bytes = 0, taken_bricks = 0;
+    int at = 0;
+    for (auto _ : state) {
+        // THE DAB IS NOT MEASURED. Both rows pay the identical update and it is
+        // two orders of magnitude wider than either transport, so leaving it
+        // inside made the pair read 0.154 ms against 0.151 ms -- the same
+        // number twice, with the thing being compared invisible underneath it.
+        state.PauseTiming();
+        const clay_relax_params p = preview_dab(at++ % kPreviewPathDabs);
+        clay_sdf_smooth_update(tx, &p, nullptr, nullptr);
+        state.ResumeTiming();
+        if (!delta) {
+            // THE WHOLE-VOLUME COPY, destroy included: the item is the caller's
+            // and freeing it is part of what the transport costs.
+            clay_item* item = nullptr;
+            if (clay_sdf_smooth_preview_item(tx, &item) != CLAY_OK) {
+                state.SkipWithError("the snapshot failed; nothing is being measured");
+                break;
+            }
+            clay_item_destroy(item);
+            taken_bytes += snapshot_bytes;
+            continue;
+        }
+        clay_sdf_preview_delta_info frame{};
+        frame.struct_size = sizeof(frame);
+        if (clay_sdf_smooth_preview_delta_info(tx, &frame) != CLAY_OK) {
+            state.SkipWithError("the delta info failed; nothing is being measured");
+            break;
+        }
+        // GROWN, NEVER SHRUNK, and never inside the measurement after the first
+        // frames: a host owns these buffers across a stroke, and reallocating
+        // one per frame would measure the allocator.
+        if (bricks.size() < frame.brick_count) bricks.resize(frame.brick_count);
+        if (samples.size() < frame.sample_floats) samples.resize(frame.sample_floats);
+        std::uint64_t got_bricks = 0, got_samples = 0;
+        if (clay_sdf_smooth_preview_delta_take(tx, bricks.data(), bricks.size(), samples.data(),
+                                               samples.size(), &got_bricks,
+                                               &got_samples) != CLAY_OK) {
+            state.SkipWithError("the delta take failed; nothing is being measured");
+            break;
+        }
+        taken_bytes += static_cast<double>(got_samples) * sizeof(float);
+        taken_bricks += static_cast<double>(got_bricks);
+    }
+    const double iters = static_cast<double>(state.iterations());
+    state.counters["nodes"] = kPreviewHistory;
+    // The whole working volume, for scale on both rows.
+    state.counters["snapshot_bytes"] = snapshot_bytes;
+    // WHAT THIS ROW ACTUALLY COPIED, per frame. On the snapshot row it is the
+    // whole volume by construction; on the delta row it is what the dab moved.
+    state.counters["bytes"] = taken_bytes / iters;
+    state.counters["bricks"] = taken_bricks / iters;
+    // The two divided, which is the machine-independent form of the claim.
+    state.counters["delta_frac"] = (taken_bytes / iters) / snapshot_bytes;
+    clay_sdf_smooth_destroy(tx);
+    clay_document_destroy(d);
+}
+
+}  // namespace
+
+void BM_CAbiSmoothPreviewFullSnapshot(benchmark::State& state) { abi_preview(state, false); }
+BENCHMARK(BM_CAbiSmoothPreviewFullSnapshot)->Unit(benchmark::kMillisecond)->Iterations(200);
+
+void BM_CAbiSmoothPreviewDelta(benchmark::State& state) { abi_preview(state, true); }
+BENCHMARK(BM_CAbiSmoothPreviewDelta)->Unit(benchmark::kMillisecond)->Iterations(200);
 
 // Resident uploaded tapes (accel/metal-persistent): the Metal backend keeps
 // the uploaded form of recent tapes resident, keyed on the process-unique

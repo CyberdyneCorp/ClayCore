@@ -461,29 +461,43 @@ MAX_RATIO = [
     # -- live SDF sculpt transactions (sdf-sculpt-transaction) ---------------
     #
     # SMOOTH, before and after. The old path had nowhere to keep a baked volume
-    # between pointer events, so a dab was bake-the-layer, relax, discard; a
-    # transaction bakes once at pointer-down and a dab is `relax_in_place` over
-    # the bricks its own ball reaches. Measured 0.152 ms against 29.9 ms on a
-    # 24-thread Linux desktop -- 197x, or 0.0051 as a ratio -- and the ceiling
-    # sits at 0.10, twenty times above it. The same pair under load average 5.7
-    # rather than 3.1 reads 0.154 / 33.7, or 0.0046: both sides move together,
-    # which is what makes the ratio the gateable form and a floor on the dab
-    # not.
+    # between pointer events, so a dab was bake-the-layer, relax, discard.
+    #
+    # THIS COMMENT DESCRIBED A DIFFERENT BENCHMARK UNTIL sdf-prefix-cache
+    # LANDED, and the correction is recorded rather than quietly swapped in.
+    # What it used to say was that a transaction "bakes once at pointer-down"
+    # and quoted 0.152 ms against 29.9 ms, or 0.0051. `begin` no longer bakes at
+    # all -- it is lazy, evaluates nothing, and a dab materializes only the
+    # bricks its own relax will read -- so the whole-layer cost was not moved
+    # again but broken up, and this row now carries a share of it.
+    #
+    # RE-MEASURED on the same 24-thread Linux desktop: 0.307 ms against 28.7 ms,
+    # or 0.0107. THE GATE IS UNCHANGED AT 0.10 and it passes by a NARROWER
+    # margin than it used to -- about 9x of headroom where the old reading had
+    # 20x -- which is stated plainly rather than smoothed over by loosening the
+    # number. Nothing got slower: the row is a fixed ~28 ms of first-dab
+    # materialization plus ~0.15 ms per dab (measured at 20, 200 and 2000
+    # iterations: 1.49, 0.31, 0.162 ms), the 0.15 being exactly what this row
+    # read when `begin` baked, and the ~28 ms being that bake arriving at the
+    # first dab because on a 193-node unit sphere one 0.25-radius dab covers
+    # most of the band. See the note on the benchmark itself.
     #
     # Generous on purpose, and the failure it catches is categorical rather
-    # than gradual: a dab that started sampling the layer again (a transaction
-    # silently falling back to bake-per-dab, which is the shape of the bug) is
-    # not 2x, it is ~1x. A ratio is also the only form this can take -- both
-    # sides move together on a slower runner, which a millisecond ceiling on
-    # the dab would not.
+    # than gradual: a dab that started sampling the WHOLE layer again (a
+    # transaction silently falling back to bake-per-dab, which is the shape of
+    # the bug) is not 2x, it is ~1x. A ratio is also the only form this can take
+    # -- both sides move together on a slower runner, which a millisecond
+    # ceiling on the dab would not.
     ("BM_SdfSmoothTransactionUpdate", "BM_SdfSmoothStandalone", 0.10),
-    # And the WHOLE gesture, which is the number that settles the trade: the
-    # one-time bake is only worth moving to pointer-down if a stroke amortises
-    # it. A thousand-dab Smooth through a transaction must cost at most
-    # twenty-five standalone dabs, where the old path cost a thousand of them.
-    # Measured 6.09 (182 ms against 29.9 ms), against a ceiling of 25 -- four
-    # times the headroom, and still forty times below the 1000x the old path
-    # would report if `begin` were being paid per dab.
+    # And the WHOLE gesture, which is the number that settles the trade: a
+    # thousand-dab Smooth through a transaction must cost at most twenty-five
+    # standalone dabs, where the old path cost a thousand of them. RE-MEASURED
+    # after the lazy begin at 6.26 (179.6 ms against 28.7 ms), where the same
+    # row read 6.09 when `begin` was a bake -- the trade barely moved, because a
+    # thousand dabs amortise a whole-layer cost whether it is paid at
+    # pointer-down or at the first dab. The ceiling of 25 keeps four times the
+    # headroom and is still forty times below the 1000x the old path would
+    # report if the layer were being sampled per dab.
     ("BM_SdfSmoothTransaction1000", "BM_SdfSmoothStandalone", 25.0),
     # MOVE, before and after, on a 1,032-item layer. `move_brush` prepares from
     # scratch every call, so a live drag re-walks the edit list per pointer
@@ -509,6 +523,104 @@ MAX_RATIO = [
     # per-frame row is FLAT across the four sizes -- 0.001208, 0.001244,
     # 0.001246, 0.001213 ms -- while move_brush climbs 336x over the same span.
     ("BM_SdfMoveTransactionUpdateScaling", "BM_SdfMoveResolveScaling", 0.05),
+    # -- the history a dab stops paying for (sdf-prefix-cache) ---------------
+    #
+    # #306's workload, held as the ratio it is about: a FIXED 12 dirty bricks
+    # evaluated through `SdfSourceField` against a growing edit list, once with
+    # a built prefix and once with none. Both sides evaluate the identical
+    # points through the identical entry point and are bit-identical where the
+    # volume covers the window (test_sdf_prefix_cache.cpp holds that half); they
+    # differ only in whether the old roots were sampled into a volume first.
+    #
+    # A SCALING LAW RATHER THAN A PERCENTAGE, which is why there are two sizes
+    # and not one. The suffix is 64 roots whatever the document holds, so the
+    # margin widens with the history exactly as the seeded-dab pair above does.
+    # Measured on a 24-thread Linux desktop, two runs at load average 1.1-4.1:
+    #
+    #   spread  5,000    2.27 / 80.8 ms = 0.028      (0.030 on the second run)
+    #   spread 20,000    2.24 / 270  ms = 0.0083     (0.0082)
+    #   piled   5,000    2.28 / 86.5 ms = 0.026      (0.030)
+    #   piled  20,000    2.25 / 257  ms = 0.0088     (0.0085)
+    #
+    # THE TWO SIDES DO NOT SHARE A BOTTLENECK, and the ceilings are set from
+    # that rather than from the measurement. The full walk goes through the CPU
+    # backend's pool and the seeded path is serial, so a runner with fewer cores
+    # makes the FULL side slower and the ratio BETTER -- the safe direction --
+    # while a machine with more cores than this one moves it the other way.
+    # 0.25 and 0.10 sit eight to twelve times above what is measured on
+    # twenty-four threads and still an order of magnitude below the ~1.0 a cache
+    # that stopped firing would read.
+    ("BM_SdfHistoryPrefixSpread5000", "BM_SdfHistoryFullSpread5000", 0.25),
+    ("BM_SdfHistoryPrefixSpread20000", "BM_SdfHistoryFullSpread20000", 0.10),
+    ("BM_SdfHistoryPrefixPiled5000", "BM_SdfHistoryFullPiled5000", 0.25),
+    ("BM_SdfHistoryPrefixPiled20000", "BM_SdfHistoryFullPiled20000", 0.10),
+    # THE BUILD, WHICH MUST NOT BE HIDDEN BEHIND THE FOUR HITS ABOVE. Building a
+    # prefix is a whole-layer bake of the roots behind the boundary and it is
+    # not free: 467 ms at 5,000 roots and 1,876 ms at 20,000 on this desktop,
+    # for 268 stored bricks and 1.43 MiB either way -- the same shell, sampled
+    # against four times the history. The GATE is that linearity, held as a
+    # ratio so the runner cancels: 4.0x measured over 4x the roots, against a
+    # ceiling of 10.0. A build that went quadratic in the history reads 16x.
+    #
+    # Generous rather than tight for a second reason: the 20,000 row runs ONE
+    # iteration by design, because a whole-layer bake left to fill a time budget
+    # is minutes of CI for a number that gets no more accurate, and one iteration
+    # on a shared runner is the noisiest form a measurement takes.
+    ("BM_SdfPrefixBuildSpread20000", "BM_SdfPrefixBuildSpread5000", 10.0),
+    ("BM_SdfPrefixBuildPiled20000", "BM_SdfPrefixBuildPiled5000", 10.0),
+    # POINTER-DOWN NO LONGER COSTS A BAKE. `begin` used to sample the whole
+    # finite layer; it now compiles, indexes a lattice and takes a digest, and
+    # this holds the claim in the only form that survives a shared runner:
+    # beginning a gesture on a 20,000-root layer must cost less than the
+    # whole-layer BAKE of a 193-node one. Measured 7.04 ms against 28.7 ms,
+    # 0.245 (0.276 on the second run), against a ceiling of 1.0.
+    #
+    # Categorical, not gradual: a begin that started sampling again would pay a
+    # bake of a hundred times the model, which lands near 100x rather than near
+    # 1.2x. The `samples` counter below is the exact form of the same check.
+    ("BM_SdfSmoothTransactionBegin20000", "BM_SdfSmoothStandalone", 1.0),
+    # AND THE SLOPE, which the ratio above cannot show. `begin` is NOT constant
+    # and this file does not claim it is -- a compile and a digest are both
+    # linear in the root count. What went away is the sampling, which was linear
+    # in roots TIMES samples. Four times the roots measured 3.76x and 4.42x over
+    # two runs, so the ceiling of 8.0 catches a begin that went superlinear
+    # while leaving room for the compile's own constants and for a one-iteration
+    # runner. Both sides are the same work on the same machine, so they move
+    # together.
+    ("BM_SdfSmoothTransactionBegin20000", "BM_SdfSmoothTransactionBegin5000", 8.0),
+    # THE FIRST DAB, with a prefix and without. This is where the whole-layer
+    # cost went when `begin` stopped paying it, and it is the row a host feels
+    # as the pause after pointer-down. 166 ms against 319 ms at 5,000 roots, or
+    # 0.52 on a box at load 3.7.
+    #
+    # THE MARGIN NARROWED ON PURPOSE, and the ceiling was NOT loosened to suit
+    # it. An earlier measurement read 0.27, when materialization filled one
+    # brick per pooled dispatch; filling consecutive runs instead cut the
+    # no-prefix side from 846 ms to 319 and the with-prefix side from 249 to
+    # 166, so the prefix's share of the win shrank as the shared cost came out
+    # of both. 0.75 still catches the prefix ceasing to help.
+    #
+    # AND THE COUNTERS SAY WHY IT IS NOT 0.03 like the history rows: a dab's
+    # dependency region is a BALL and a prefix volume is a SHELL, so 17 of the
+    # windows a first update materializes fall outside the stored band and take
+    # the prefix TAPE. The fallback count is gated exactly below, which is the
+    # sharper half of this
+    # pair; 0.75 here is the loose half, sitting 2.7x above the measurement and
+    # still below the ~1.0 a prefix that stopped attaching would read.
+    ("BM_SdfSmoothLazyFirstUpdateWithPrefix", "BM_SdfSmoothLazyFirstUpdateNoPrefix", 0.75),
+    # THE PREVIEW TRANSPORT, through the C ABI a host draws from.
+    # `clay_sdf_smooth_preview_item` copies the whole working volume;
+    # `clay_sdf_smooth_preview_delta_take` hands over only the bricks whose
+    # bytes are new. 0.0011 ms against 0.0088 ms, or 0.125, with the dab itself
+    # paused out of both -- left inside it, the identical update dominated both
+    # rows and the pair read 0.154 against 0.151 ms, the same number twice.
+    #
+    # THE TIME IS THE WEAKER HALF HERE and the ceiling is set accordingly: both
+    # sides are memory traffic, so they move together on a slower runner, but
+    # they are microseconds wide and a pause/resume sits inside each. The BYTES
+    # are the headline and `delta_frac` below gates them exactly. 0.50 catches a
+    # delta that started copying the model, which reads 1.0.
+    ("BM_CAbiSmoothPreviewDelta", "BM_CAbiSmoothPreviewFullSnapshot", 0.50),
 ]
 
 # counter gates: (bench, counter, max_value) — the named counter must be at
@@ -614,6 +726,61 @@ MAX_COUNTER = [
     # and the chain regrew to 58 unattended. A regression there reads 58 or 100,
     # both far above this line, and the policy-off row beside it reads 100.
     ("BM_SdfMoveRepeatedPolicy100", "chain", 20),
+    # -- a lazy begin, in the number a wall clock cannot fake ----------------
+    #
+    # `begin` evaluates NOTHING, so the working volume it hands back stores no
+    # sample at all: `samples` is the count read off `preview_volume()`
+    # immediately after begin, and a correct row reports 0 where the whole-layer
+    # bake this replaced reported 123,930. Exact, deterministic, and identical
+    # on every machine -- where a millisecond ceiling on a begin cannot tell a
+    # bake from a slow runner. A ceiling of 0 is exact because the check is
+    # strictly-greater.
+    ("BM_SdfSmoothTransactionBegin", "samples", 0),
+    ("BM_SdfSmoothTransactionBegin20000", "samples", 0),
+    # -- how the twelve dirty bricks were actually answered ------------------
+    #
+    # The far-bound rule (see include/clay/session/sdf_prefix_cache.h) sends a
+    # window to the prefix TAPE wherever the volume does not store every sample
+    # of it. Correct either way, and only the cost differs -- so a cache whose
+    # fallback rate is high is a cache that is NOT WORKING rather than one that
+    # is wrong, and no wall clock distinguishes that from a busy runner.
+    #
+    # Measured 0 of 12 at both root counts and both distributions, with the
+    # policy's band set wide enough to cover a query brick. The ceiling of 2
+    # leaves room for a fixture tweak at the window's edge; the failure worth
+    # catching is 12.
+    ("BM_SdfHistoryPrefixSpread5000", "fallback_windows", 2),
+    ("BM_SdfHistoryPrefixSpread20000", "fallback_windows", 2),
+    ("BM_SdfHistoryPrefixPiled5000", "fallback_windows", 2),
+    ("BM_SdfHistoryPrefixPiled20000", "fallback_windows", 2),
+    # The same question asked of a real dab, where the answer is a SPLIT rather
+    # than a clean sweep: a dependency ball reaches inside and outside a stored
+    # shell, so some of what a first update materializes takes the tape. That
+    # split is geometry and is the same on every machine; it is also the honest
+    # explanation of why the pair's time ratio is 0.52 rather than the 0.01 the
+    # history rows show. Measured 17 windows -- the count is in WINDOWS, and a
+    # window is a run of consecutive bricks that agree, so it moves when the
+    # fill's batching does. 60 catches the band being lost entirely.
+    ("BM_SdfSmoothLazyFirstUpdateWithPrefix", "fallback_windows", 60),
+    # -- the preview transport, in BYTES ------------------------------------
+    #
+    # THE HEADLINE OF THAT PAIR, and the half that is exact. `delta_frac` is the
+    # bytes one frame of the delta path copied divided by the bytes the
+    # whole-volume snapshot copies -- 43,463 against 431,568, or 0.1007 -- and
+    # it is deterministic: the same dab over the same lattice moves the same
+    # bricks on every machine, where the memcpy behind it is a property of the
+    # runner's memory bandwidth.
+    #
+    # 0.25 is 2.5x above the measurement and leaves room for a fixture whose dab
+    # path materializes a little differently; a delta that degenerated to the
+    # whole volume -- the failure this exists for -- reads 1.0.
+    ("BM_CAbiSmoothPreviewDelta", "delta_frac", 0.25),
+    # And the build's memory, beside the build's time above: the prefix is a
+    # SHELL and its size is a property of the surface rather than of the
+    # history, which is why 5,000 and 20,000 roots store the same 268 bricks.
+    # A build that stopped culling to the band would store the box.
+    ("BM_SdfPrefixBuildSpread20000", "stored_bricks", 600),
+    ("BM_SdfPrefixBuildPiled20000", "stored_bricks", 600),
 ]
 
 
