@@ -119,6 +119,13 @@ enum Coverage {
         // the same reason sdf_stroke is named apart from sdf_stamp -- one is
         // not evidence for the other.
         .measured("sdf_stroke_incremental", by: "sdf_stroke_bricks"),
+        // The same stroke on a SMOOTH-blended document. Every other SDF row
+        // here is hard-blended, and a hard blend contributes nothing to the
+        // chain pad — so the pad resolves to a constant zero and the suite
+        // could not see it at all. The clay and build brushes are smooth by
+        // default; the hard-blended fixture is not the document a sculptor
+        // makes.
+        .measured("sdf_stroke_smooth", by: "sdf_stroke_smooth_bricks"),
 
         // -- masks ------------------------------------------------------------
         .measured("mask_paint", by: "mask_paint"),

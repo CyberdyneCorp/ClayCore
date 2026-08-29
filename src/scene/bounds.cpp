@@ -750,6 +750,26 @@ float feather_cull_pad(const SdfContent& content, const Layer& layer) {
 // quadratic (4k), N ~ 6788 for cubic (6k), N ~ 391 for circular (~3.41k) —
 // beyond that the pad IS the support, the pre-#335 value.
 namespace {
+// The step the envelope is held still by, in the k-multiples the envelope is
+// expressed in.
+//
+// Chosen so ONE STROKE crosses at most one boundary. The fit grows fastest
+// just above 75 nodes -- d(envelope)/dn is slope / (n ln2), which for
+// quadratic at n = 76 is 0.0067 a node, or 0.16 across a 24-dab stroke. A
+// quantum at or above that means a stroke pays a step at most once, and the
+// dabs either side of it are answered from their stored values.
+//
+// The cost of a coarser step is a wider pad: the resolved value can exceed the
+// fit by up to this much times k, which keeps items in a brick's culled tape
+// that the fit would have dropped. 0.25 spends about 9% of the pad at the top
+// of the band to buy back a cache that was returning nothing, and the
+// overshoot vanishes entirely once the support clamp takes over.
+//
+// Across the whole quadratic band (2.80 at 75 nodes to the 4.0 clamp at 808)
+// that is five steps, at roughly 76, 123, 202, 331 and 544 nodes -- five full
+// refills over an entire blockout, against one per dab.
+constexpr float kEnvelopeQuantum = 0.25f;
+
 struct EnvelopeFit {
     float base;
     float slope;
@@ -778,7 +798,31 @@ float chain_pad_envelope(BlendProfile profile, std::size_t nodes) {
     EnvelopeFit fit{0.0f, 0.0f};
     if (!envelope_fit_for(profile, &fit)) return 0.0f;
     if (nodes <= 75) return fit.base;
-    return fit.base + fit.slope * std::log2(static_cast<float>(nodes) / 75.0f);
+    // QUANTISED, and this is not a detail of the fit -- it is what makes the
+    // pad usable as a cache key.
+    //
+    // A brick's stored value is keyed on the pad by exact equality
+    // (bindings/c/clay_c.cpp, seed_for). The raw fit changes on EVERY node
+    // added, so every dab invalidated every seed and the brick resume was not
+    // degraded but DEAD, for every document between 76 nodes and wherever the
+    // support clamp took over -- 808 for quadratic. Measured on the reference
+    // iPad, a 24-dab stroke on a smooth-blended document: 0.144 ms a dab at 10
+    // stamps, 4.435 at 300, 4.079 at 800, 0.175 at 2000, with bricks resumed
+    // per dab going 38.5, ZERO, 26.0, 38.5. A dab in the middle of a blockout
+    // cost 31x a dab at the start and cleared the whole frame share.
+    //
+    // Rounded UP, never down. The pad is conservative: a larger one keeps MORE
+    // items in a brick's culled tape, and a band-clamped result cannot be
+    // changed by keeping an item that could not have changed it. Rounding down
+    // would drop items the fit says are needed, which is a wrong field rather
+    // than a slow one. `std::ceil` is what makes the resolved value >= the fit
+    // at every node count, which is the property the tests pin.
+    //
+    // The step is taken on the GROWTH above the base rather than on the whole
+    // envelope, so the value at and below 75 nodes is exactly what it was and
+    // no existing measurement moves for a document that never enters the band.
+    const float growth = fit.slope * std::log2(static_cast<float>(nodes) / 75.0f);
+    return fit.base + kEnvelopeQuantum * std::ceil(growth / kEnvelopeQuantum);
 }
 
 // How many instances of a mirrored item this layer's symmetry emits. The

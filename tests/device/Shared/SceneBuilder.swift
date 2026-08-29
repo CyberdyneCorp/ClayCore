@@ -122,6 +122,17 @@ enum SceneBuilder {
         return node
     }
 
+    /// The blend a SMOOTH-blended fixture uses.
+    ///
+    /// Every SDF fixture here was hard-blended until 2026-08-29, and the
+    /// default `clay_item_create` blend is `Hard` with k = 0. A hard blend
+    /// contributes NOTHING to the chain pad — `profile_chain_pad` returns 0
+    /// for k <= 0 — so the pad resolved to a constant zero and the whole suite
+    /// was blind to every effect that depends on it, however many cases it
+    /// carried. The clay and build brushes are smooth by default, so the
+    /// hard-blended document is also not the one a sculptor makes.
+    static let smoothBlendK: Float = 0.05
+
     /// One stamp: a small blended sphere, which is what a stroke deposits.
     /// Returns the node it became, which the brick-cache case needs to dirty
     /// exactly the region the new item influences.
@@ -138,6 +149,50 @@ enum SceneBuilder {
         var node: clay_node_id = 0
         guard clay_layer_add_item(doc, layer, item, &node) == CLAY_OK else { return nil }
         return node
+    }
+
+    /// The same dab, carrying a smooth blend. Beside the hard-blended one
+    /// rather than replacing it: both are worth measuring and neither stands
+    /// for the other.
+    static func addSmoothStrokeDabNode(_ doc: OpaquePointer, _ layer: clay_layer_id,
+                                       dab k: Int) -> clay_node_id? {
+        var params: [Float] = [0.12]
+        guard let item = clay_item_create(Int32(CLAY_PRIM_SPHERE.rawValue), &params, 1) else {
+            return nil
+        }
+        defer { clay_item_destroy(item) }
+        let (x, y, z) = strokeDabPosition(k)
+        var position: [Float] = [x, y, z]
+        if clay_item_set_position(item, &position) != CLAY_OK { return nil }
+        if clay_item_set_blend(item, Int32(CLAY_BLEND_QUADRATIC.rawValue), smoothBlendK)
+            != CLAY_OK { return nil }
+        var node: clay_node_id = 0
+        guard clay_layer_add_item(doc, layer, item, &node) == CLAY_OK else { return nil }
+        return node
+    }
+
+    /// A document of `count` SMOOTH-blended stamps.
+    static func smoothSdfDocument(stamps count: Int) -> (OpaquePointer, clay_layer_id)? {
+        guard let doc = clay_document_create() else { return nil }
+        var layer: clay_layer_id = 0
+        guard clay_add_sdf_layer(doc, "bench", &layer) == CLAY_OK else {
+            clay_document_destroy(doc); return nil
+        }
+        for i in 0..<count {
+            var params: [Float] = [0.12]
+            guard let item = clay_item_create(Int32(CLAY_PRIM_SPHERE.rawValue), &params, 1) else {
+                clay_document_destroy(doc); return nil
+            }
+            let (x, y, z) = stampPosition(i)
+            var position: [Float] = [x, y, z]
+            let ok = clay_item_set_position(item, &position) == CLAY_OK
+                && clay_item_set_blend(item, Int32(CLAY_BLEND_QUADRATIC.rawValue),
+                                       smoothBlendK) == CLAY_OK
+                && clay_layer_add_item(doc, layer, item, nil) == CLAY_OK
+            clay_item_destroy(item)
+            guard ok else { clay_document_destroy(doc); return nil }
+        }
+        return (doc, layer)
     }
 
     @discardableResult
