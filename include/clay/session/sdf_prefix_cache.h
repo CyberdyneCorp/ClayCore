@@ -283,6 +283,10 @@ class SdfSourceField {
 
   private:
     SdfSourceField() = default;
+    // One batch, with the coverage question already answered for all of it.
+    void fill_span(const float* points_xyz, std::size_t count, float* out, bool covered) const;
+    // Whether the cached prefix stores every one of these points.
+    bool covers(const float* points_xyz, std::size_t count) const;
 
     // A shallow copy: Layer holds its SdfContent by shared_ptr, so this shares
     // every node and only overrides visibility and the layer transform. Node

@@ -333,7 +333,8 @@ std::optional<SdfSourceField> SdfSourceField::open(const scene::Document& doc,
     return out;
 }
 
-void SdfSourceField::fill_points(const float* points_xyz, std::size_t count, float* out) const {
+void SdfSourceField::fill_span(const float* points_xyz, std::size_t count, float* out,
+                               bool covered) const {
     if (count == 0) return;
     eval::Backend* cpu = eval::Registry::instance().find("cpu");
     const eval::PointQuery q{points_xyz, count, 1e-4f};
@@ -351,19 +352,6 @@ void SdfSourceField::fill_points(const float* points_xyz, std::size_t count, flo
                          .d;
         return;
     }
-
-    // THE FAR-BOUND RULE. The cached volume may seed this window only if it
-    // stores every sample of it; outside its stored bricks `eval` answers with
-    // a conservative bound rather than the distance the history had, and a
-    // suffix folded onto that is wrong by cells rather than by rounding.
-    //
-    // Decided for the WINDOW, not per point, so the fast path stays a straight
-    // loop and the slow one is a whole extra tape evaluation rather than a
-    // branch inside the inner loop.
-    bool covered = true;
-    for (std::size_t i = 0; i < count && covered; ++i)
-        covered = prefix_->volume.has_samples_at(
-            kernel::cf3(points_xyz[i * 3], points_xyz[i * 3 + 1], points_xyz[i * 3 + 2]));
 
     std::vector<float> seed(count);
     if (covered) {
@@ -384,25 +372,65 @@ void SdfSourceField::fill_points(const float* points_xyz, std::size_t count, flo
                              eval::PointResults{out, nullptr, nullptr});
 }
 
+bool SdfSourceField::covers(const float* points_xyz, std::size_t count) const {
+    if (!composed_) return false;
+    for (std::size_t i = 0; i < count; ++i)
+        if (!prefix_->volume.has_samples_at(kernel::cf3(
+                points_xyz[i * 3], points_xyz[i * 3 + 1], points_xyz[i * 3 + 2])))
+            return false;
+    return true;
+}
+
+void SdfSourceField::fill_points(const float* points_xyz, std::size_t count, float* out) const {
+    // THE FAR-BOUND RULE. The cached volume may seed these points only if it
+    // stores every one of them; outside its stored bricks `eval` answers with a
+    // conservative bound rather than the distance the history had, and a suffix
+    // folded onto that is wrong by cells rather than by rounding.
+    fill_span(points_xyz, count, out, covers(points_xyz, count));
+}
+
 field::FieldVolume::BrickBlockFill SdfSourceField::block_fill() const {
     return [this](const field::FieldVolume::BrickGrid& grid, std::size_t first, std::size_t count,
                   float* out) {
-        const std::size_t n = count * field::kBrickSamples;
+        const std::size_t per = static_cast<std::size_t>(field::kBrickSamples);
+        const std::size_t n = count * per;
         std::vector<float> points(n * 3);
         for (std::size_t s = 0; s < count; ++s)
             for (int i = 0; i < field::kBrickSamples; ++i) {
                 const kernel::cfloat3 p = grid.sample_position(first + s, i);
-                const std::size_t at = (s * field::kBrickSamples + static_cast<std::size_t>(i)) * 3;
+                const std::size_t at = (s * per + static_cast<std::size_t>(i)) * 3;
                 points[at] = p.x;
                 points[at + 1] = p.y;
                 points[at + 2] = p.z;
             }
-        // Per BRICK rather than per window: one brick that the prefix does not
-        // cover would otherwise drag a whole 512-brick window onto the slow
-        // path, and the coverage question is a brick's to answer.
-        for (std::size_t s = 0; s < count; ++s)
-            fill_points(points.data() + s * field::kBrickSamples * 3, field::kBrickSamples,
-                        out + s * field::kBrickSamples);
+
+        // ONE CALL FOR THE WHOLE WINDOW where there is no coverage question to
+        // ask. Splitting a window into per-brick evaluations costs far more
+        // than the sparsity it buys: the backend batches a window across its
+        // pool, and 729 points at a time is a fraction of the work per dispatch
+        // that 512 bricks is. Measured before this was written: a first dab at
+        // 5,000 roots took 830 ms per-brick against a 543 ms whole-layer bake
+        // -- the lazy path materialized a tenth of the bricks and still lost.
+        if (!composed_) {
+            fill_span(points.data(), n, out, false);
+            return;
+        }
+
+        // With a prefix the question IS per brick, so runs of bricks that agree
+        // are evaluated together and only a change of answer ends a batch. A
+        // window is usually all-covered or all-not, so this is normally still
+        // one call.
+        std::size_t run_start = 0;
+        bool run_covered = covers(points.data(), per);
+        for (std::size_t s = 1; s <= count; ++s) {
+            const bool here =
+                s < count && covers(points.data() + s * per * 3, per);
+            if (s < count && here == run_covered) continue;
+            fill_span(points.data() + run_start * per * 3, (s - run_start) * per,
+                      out + run_start * per, run_covered);
+            run_start = s;
+            run_covered = here;
+        }
     };
 }
 

@@ -837,16 +837,28 @@ FieldVolume::ResampleTally FieldVolume::materialize_region(const Region& region,
     ResampleTally tally;
     if (index_.empty() || region.box.empty()) return tally;
 
-    // Only the bricks that do not already store samples. A brick already
-    // materialized holds either the source values it was filled with or the
-    // operator's edits to them, and refilling it would throw the edits away —
-    // which is the difference between a cache and a bug.
     const float brick = static_cast<float>(kBrickDim) * cell_size_;
     int lo[3], hi[3];
     if (!region_brick_range(origin_, bcount_, brick, region.box, lo, hi)) return tally;
 
     const BrickGrid grid{origin_, cell_size_, band_, {bcount_[0], bcount_[1], bcount_[2]}};
-    std::vector<float> block(kBrickSamples);
+
+    // COLLECTED FIRST, THEN FILLED IN CONSECUTIVE RUNS.
+    //
+    // `resample_region` asks for one brick at a time because a region selects a
+    // scattered set and `BrickBlockFill` can only name a consecutive one. That
+    // is true of the SET and false of its rows: slot is
+    // (bz*bcount1 + by)*bcount0 + bx, so bricks adjacent in x are adjacent
+    // slots, and a ball's cross-section in x is an interval. Filling a row at a
+    // time therefore costs one dispatch where filling a brick at a time costs
+    // eight or ten.
+    //
+    // It is worth the two passes because the fill is a POOLED evaluation: 729
+    // points across two dozen threads is most of a dispatch and very little
+    // work, and a first Smooth dab at 5,000 roots measured 830 ms per brick
+    // against a 543 ms whole-layer bake that evaluated MORE bricks. The
+    // sparsity was being paid for twice over.
+    std::vector<std::size_t> wanted;
     for (int bz = lo[2]; bz <= hi[2]; ++bz)
         for (int by = lo[1]; by <= hi[1]; ++by)
             for (int bx = lo[0]; bx <= hi[0]; ++bx) {
@@ -854,22 +866,45 @@ FieldVolume::ResampleTally FieldVolume::materialize_region(const Region& region,
                 const std::size_t slot =
                     static_cast<std::size_t>((bz * bcount_[1] + by) * bcount_[0] + bx);
                 ++tally.evaluated;
+                // A brick already materialized holds either the source values
+                // it was filled with or an operator's edits to them, and
+                // refilling it would throw the edits away -- which is the
+                // difference between a cache and a bug.
                 if (index_[slot] >= 0) {
                     ++tally.kept;
                     continue;
                 }
-                fill(grid, slot, 1, block.data());
-                // APPENDED, not rebuilt. Each stored brick owns a contiguous
-                // run of `data_` and nothing before it moves, so a new brick is
-                // a push_back and an index write -- which is what makes this a
-                // dab's cost rather than the model's.
-                index_[slot] = static_cast<std::int32_t>(data_.size());
-                data_.insert(data_.end(), block.begin(), block.end());
-                sample_lipschitz_ =
-                    std::max(sample_lipschitz_, steepest_in_block(block.data()) / cell_size_);
-                if (out_added) out_added->push_back(BrickCoord{bx, by, bz});
-                ++tally.added;
+                wanted.push_back(slot);
             }
+    if (wanted.empty()) return tally;
+
+    std::vector<float> block;
+    for (std::size_t i = 0; i < wanted.size();) {
+        std::size_t run = 1;
+        while (i + run < wanted.size() && wanted[i + run] == wanted[i] + run) ++run;
+        block.resize(run * kBrickSamples);
+        fill(grid, wanted[i], run, block.data());
+        for (std::size_t k = 0; k < run; ++k) {
+            const std::size_t slot = wanted[i] + k;
+            const float* one = block.data() + k * kBrickSamples;
+            // APPENDED, not rebuilt. Each stored brick owns a contiguous run of
+            // `data_` and nothing before it moves, so a new brick is a
+            // push_back and an index write -- which is what makes this a dab's
+            // cost rather than the model's.
+            index_[slot] = static_cast<std::int32_t>(data_.size());
+            data_.insert(data_.end(), one, one + kBrickSamples);
+            sample_lipschitz_ =
+                std::max(sample_lipschitz_, steepest_in_block(one) / cell_size_);
+            if (out_added) {
+                const int bx = static_cast<int>(slot) % bcount_[0];
+                const int by = (static_cast<int>(slot) / bcount_[0]) % bcount_[1];
+                const int bz = static_cast<int>(slot) / (bcount_[0] * bcount_[1]);
+                out_added->push_back(BrickCoord{bx, by, bz});
+            }
+            ++tally.added;
+        }
+        i += run;
+    }
     // A volume that carried colour cannot keep a complete channel once bricks
     // arrive whose colours nobody supplied, and a facet of default grey in the
     // middle of a painted surface is worse than none. The same call
