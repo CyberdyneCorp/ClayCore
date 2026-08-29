@@ -460,8 +460,8 @@ std::optional<DynamicSurface> DynamicSurface::from_mesh(const Mesh& mesh,
         const std::uint32_t raw = representative[c];
         DynamicVertex v;
         v.position = mesh.positions[raw];
-        if (has_normals) v.normal = mesh.normals[raw];
         if (has_colors) v.color = mesh.colors[raw];
+        // The NORMAL is deliberately not taken from the file. See below.
         vertex_of_class[c] = surface.vertices_.create(v);
     }
 
@@ -619,7 +619,23 @@ std::optional<DynamicSurface> DynamicSurface::from_mesh(const Mesh& mesh,
         });
     }
 
-    if (!has_normals) surface.refresh_all_normals();
+    // NORMALS ARE ALWAYS GEOMETRIC, never the file's, and this is the same
+    // decision `class_normal` records for the fixed sculptor: displacement is
+    // about where the surface IS, not about how it shades, so a mesh imported
+    // without normals must sculpt exactly like one that has them.
+    //
+    // Taking the file's normals here instead was the first version, and the
+    // parity test caught it immediately in the most legible possible way: a
+    // Draw on a dynamic surface deposited in the OPPOSITE direction from the
+    // same Draw through `MeshSculptor`, so the two disagreed by exactly twice
+    // the deposit. An authored normal that disagrees with the winding is
+    // common — it is what a mesh with flipped normals IS — and the sculptor
+    // must follow the surface rather than the annotation.
+    //
+    // `had_normals` still records whether the source carried them, because that
+    // decides whether the EXPORT writes any; what it must not decide is which
+    // way a brush pushes.
+    surface.refresh_all_normals();
     return surface;
 }
 

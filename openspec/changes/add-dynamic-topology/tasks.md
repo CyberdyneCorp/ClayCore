@@ -104,16 +104,16 @@
 
 ## 6. The sculptor
 
-- [ ] 6.1 `mesh::DynamicSculptor` over the shared kernels from
+- [x] 6.1 `mesh::DynamicSculptor` over the shared kernels from
       `add-shared-brush-kernels`. NO second copy of any deformation
-- [ ] 6.2 Region gather by stable id through the chunked index; geodesic walk
+- [x] 6.2 Region gather by stable id through the chunked index; geodesic walk
       over the mutable adjacency with a bounded queue, preserving the path
       budget the fixed geodesic walk already uses
-- [ ] 6.3 Mask gate support, identical in meaning to the fixed path
-- [ ] 6.4 The verbs an adaptive surface offers, and the ones it does not,
+- [x] 6.3 Mask gate support, identical in meaning to the fixed path
+- [x] 6.4 The verbs an adaptive surface offers, and the ones it does not,
       decided and documented rather than silently partial
-- [ ] 6.5 Local normal recompute over the changed faces and their ring
-- [ ] 6.6 PARITY: with topology changes disabled, a stamp on a dynamic surface
+- [x] 6.5 Local normal recompute over the changed faces and their ring
+- [x] 6.6 PARITY: with topology changes disabled, a stamp on a dynamic surface
       and the same stamp on the same mesh through `MeshSculptor` agree within
       the stated tolerance. Anything larger means the kernels drifted
 - [ ] 6.7 THE MILESTONE: a coarse sphere sculpted into a nose, an ear and a
