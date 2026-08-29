@@ -86,20 +86,20 @@
 
 ## 5. The remesher
 
-- [ ] 5.1 `include/clay/mesh/remesh_local.h` — target edge length with split
+- [x] 5.1 `include/clay/mesh/remesh_local.h` — target edge length with split
       and collapse factors, bounded passes and a bounded operation count per
       stamp
-- [ ] 5.2 Hysteresis between the split and collapse thresholds, so a stationary
+- [x] 5.2 Hysteresis between the split and collapse thresholds, so a stationary
       brush cannot ping-pong an edge
-- [ ] 5.3 Brush-relative detail as well as world and constant modes, so a
+- [x] 5.3 Brush-relative detail as well as world and constant modes, so a
       smaller brush creates finer geometry without a second slider
-- [ ] 5.4 Tangential relax after remeshing, constrained on boundaries and seams
-- [ ] 5.5 Remesh timing per verb — before, after, or both — with the defaults
+- [x] 5.4 Tangential relax after remeshing, constrained on boundaries and seams
+- [x] 5.5 Remesh timing per verb — before, after, or both — with the defaults
       recorded and justified per verb rather than shared
-- [ ] 5.6 CONVERGENCE test: a stretched patch under repeated remeshing
+- [x] 5.6 CONVERGENCE test: a stretched patch under repeated remeshing
       converges toward the target edge distribution without the surface
       drifting past a stated bound
-- [ ] 5.7 Boundary and seam preservation tested directly, including a patch
+- [x] 5.7 Boundary and seam preservation tested directly, including a patch
       whose boundary would close under an unconstrained collapse
 
 ## 6. The sculptor
