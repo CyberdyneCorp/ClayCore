@@ -554,6 +554,121 @@ TEST_CASE("sculpt: a whole Move drag is one undo step across every affected item
     CHECK(snapshot(doc) == committed);
 }
 
+// -- a live drag under a layer mirror (#363) ----------------------------------
+
+TEST_CASE("sculpt: a live Move under a mirror is the drag move_brush commits") {
+    // The prepared drag carries every image the layer's symmetry makes of the
+    // ball, so a live drag near the plane previews and commits what the
+    // one-step resolver produces: the item under the ball moves, the item whose
+    // COPY sits under the ball moves through that copy, and a straddler takes
+    // one grab per image. Sample for sample, because the two are one resolver.
+    const auto make = [] {
+        Document doc;
+        Layer& layer = doc.add_sdf_layer("mirrored");
+        layer.mirror_axes = kMirrorX;
+        layer.mirror_k = 0.05f;
+        const auto ball = [&](cfloat3 pos, float r) {
+            Node n;
+            n.prim = Prim::sphere(r);
+            n.op = Op::Add;
+            n.blend = Blend{BlendProfile::Quadratic, 0.05f};
+            n.xform.position = pos;
+            return layer.sdf->insert(n);
+        };
+        struct Ids {
+            Document doc;
+            NodeId base, A, B;
+        } r{std::move(doc), kNoNode, kNoNode, kNoNode};
+        r.base = ball(cf3(0, 0, 0), 0.4f);       // straddles the plane
+        r.A = ball(cf3(1.0f, 0.3f, 0), 0.2f);    // under the ball
+        r.B = ball(cf3(-1.0f, -0.3f, 0), 0.2f);  // its copy is under the ball
+        return r;
+    };
+    const brush::MoveSettings settings{0.45f, 0, false};
+    const cfloat3 centre = cf3(1.1f, 0, 0), total = cf3(0.2f, 0, 0);
+
+    auto live = make();
+    const std::vector<std::uint8_t> before = snapshot(live.doc);
+    auto tx = SdfMoveTransaction::begin(live.doc, live.doc.layers.front().id, centre, settings);
+    REQUIRE(tx);
+    // A and B, through the ball and its reflection; the base is out of reach of
+    // both (the mirror-expanded bound used to take it, for a warp that did
+    // nothing).
+    REQUIRE(tx->affected_count() == 2);
+    for (int i = 1; i <= 20; ++i) tx->update(total * (static_cast<float>(i) / 20.0f));
+    CHECK(snapshot(live.doc) == before);
+
+    // The preview carries one grab on each, B's at the REFLECTED centre.
+    std::vector<Deformer> grabs;
+    REQUIRE(tx->preview_grabs(live.B, &grabs));
+    REQUIRE(grabs.size() == 1);
+    CHECK(grabs[0].k == doctest::Approx(-0.1f));
+    CHECK(grabs[0].ext[0] == doctest::Approx(-0.2f));
+    CHECK_FALSE(tx->preview_grabs(live.base, &grabs));
+
+    // The one-step resolver on a fresh document, committed by hand.
+    auto once = make();
+    const std::vector<brush::MoveWarp> warps =
+        brush::move_brush(once.doc.layers.front(), centre, total, settings);
+    REQUIRE(warps.size() == 2);
+    for (const brush::MoveWarp& w : warps) {
+        const Node* n = once.doc.layers.front().sdf->find(w.node);
+        REQUIRE(scene::apply(once.doc, Command{SetDeformersCmd{once.doc.layers.front().id, w.node,
+                                                               brush::moved_chain(*n, w)}}));
+    }
+    const auto same_field = [](const Layer& a, const Layer& b) {
+        const Tape ta = compile_layer(a), tb = compile_layer(b);
+        for (float z = -0.5f; z <= 0.5f; z += 0.1f)
+            for (float y = -0.7f; y <= 0.7f; y += 0.05f)
+                for (float x = -1.6f; x <= 1.6f; x += 0.05f)
+                    CHECK(ta.eval(cf3(x, y, z)).d == tb.eval(cf3(x, y, z)).d);
+    };
+    same_field(tx->preview_layer(), once.doc.layers.front());
+
+    UndoStack undo;
+    REQUIRE(tx->commit(&undo));
+    CHECK(undo.undo_depth() == 1);
+    same_field(live.doc.layers.front(), once.doc.layers.front());
+
+    // The material under the ball moved whether it is an item or a copy, and
+    // by the same amount.
+    const auto untouched = make();
+    const Tape was = compile_layer(untouched.doc.layers.front());
+    const Tape now = compile_layer(live.doc.layers.front());
+    const float moved_a = now.eval(cf3(1.2f, 0.3f, 0)).d - was.eval(cf3(1.2f, 0.3f, 0)).d;
+    const float moved_b = now.eval(cf3(1.2f, -0.3f, 0)).d - was.eval(cf3(1.2f, -0.3f, 0)).d;
+    CHECK(moved_a < -0.05f);
+    CHECK(moved_b == moved_a);
+}
+
+TEST_CASE("sculpt: a live Move on the plane gives a straddler both grabs, every frame") {
+    Document doc;
+    Layer& layer = doc.add_sdf_layer("mirrored");
+    layer.mirror_axes = kMirrorX;
+    Node n;
+    n.prim = Prim::sphere(0.4f);
+    const NodeId base = layer.sdf->insert(n);
+    const brush::MoveSettings settings{0.5f, 0, false};
+
+    auto tx = SdfMoveTransaction::begin(doc, layer.id, cf3(0, 0, 0), settings);
+    REQUIRE(tx);
+    REQUIRE(tx->affected_count() == 1);
+    for (int i = 1; i <= 5; ++i) {
+        tx->update(cf3(0.05f * static_cast<float>(i), 0.02f, 0));
+        // One grab per image, replaced frame to frame rather than stacked.
+        CHECK(tx->preview_layer().sdf->find(base)->deformers.size() == 2);
+    }
+    std::vector<Deformer> grabs;
+    REQUIRE(tx->preview_grabs(base, &grabs));
+    REQUIRE(grabs.size() == 2);
+    CHECK(grabs[0].ext[0] == -grabs[1].ext[0]);  // opposite pulls across the plane
+    CHECK(grabs[0].ext[1] == grabs[1].ext[1]);   // the same pull along it
+
+    UndoStack undo;
+    REQUIRE(tx->commit(&undo));
+    CHECK(doc.layers.front().sdf->find(base)->deformers.size() == 2);
+}
+
 TEST_CASE("sculpt: a Move commit refuses a layer that changed underneath it") {
     Document doc = two_balls();
     const LayerId id = doc.layers.front().id;

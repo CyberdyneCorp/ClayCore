@@ -642,7 +642,14 @@ Aabb item_local_bounds(const Node& item) {
     return local;
 }
 
-Aabb item_geometry_bound(const Node& item, const Layer& layer) {
+namespace {
+
+// The geometry bound, with or without the copies the layer's symmetry emits.
+// One body for both readings so the dilations cannot drift apart: the
+// every-copy bound is what culling and invalidation consult, the item-alone
+// bound is what a brush that has already reflected ITSELF tests against
+// (brush/move.cpp, drag_images).
+Aabb geometry_bound(const Node& item, const Layer& layer, bool with_copies) {
     Aabb local = item_local_bounds(item);
     if (local.empty()) return local;
 
@@ -654,7 +661,7 @@ Aabb item_geometry_bound(const Node& item, const Layer& layer) {
     const math::cfloat4x4 axes = math::scale_matrix(item.scale_axes);
     const float axis_factor = scale_axes_factor(item.scale_axes);
     Aabb bound = local.transformed(math::mul(world.matrix(), axes));
-    if (item.mirror && layer.mirror_axes != 0) {
+    if (with_copies && item.mirror && layer.mirror_axes != 0) {
         for (int axis = 0; axis < 3; ++axis) {
             if (!(layer.mirror_axes & (1u << axis))) continue;
             math::cfloat4x4 m = math::mul(
@@ -668,7 +675,7 @@ Aabb item_geometry_bound(const Node& item, const Layer& layer) {
     // misses a copy lets the cull drop an item that is on screen. A rotated box
     // is not axis-aligned, so each copy contributes the AABB OF the rotated box
     // — it over-covers, which costs cull precision and never correctness.
-    if (item.mirror && layer.radial_count > 1) {
+    if (with_copies && item.mirror && layer.radial_count > 1) {
         const int axis = layer.radial_axis < 3 ? layer.radial_axis : 1;
         const int count = static_cast<int>(layer.radial_count);
         for (int k = 1; k < count; ++k) {
@@ -696,6 +703,12 @@ Aabb item_geometry_bound(const Node& item, const Layer& layer) {
                                                             item.blend.k, round_world)
                         : kernel::cmax(item.blend.support(), item.blend.k);
     return bound.dilated(kernel::cmax(round_world, 0.0f) + combine);
+}
+
+}  // namespace
+
+Aabb item_geometry_bound(const Node& item, const Layer& layer) {
+    return geometry_bound(item, layer, /*with_copies=*/true);
 }
 
 bool item_is_feathered_replace(const Node& item) {
@@ -975,6 +988,11 @@ bool item_influence_is_local(const Node& item) {
 Aabb item_influence_bound(const Node& item, const Layer& layer) {
     if (!item_influence_is_local(item)) return Aabb::infinite();
     return item_geometry_bound(item, layer);
+}
+
+Aabb item_own_influence_bound(const Node& item, const Layer& layer) {
+    if (!item_influence_is_local(item)) return Aabb::infinite();
+    return geometry_bound(item, layer, /*with_copies=*/false);
 }
 
 Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& layer) {

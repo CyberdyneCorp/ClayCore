@@ -435,12 +435,11 @@ SdfSculptDirty SdfMoveTransaction::update(cfloat3 total_world_displacement) {
 
     for (Affected& a : affected_) {
         ++last_update_visited_;
-        const brush::MoveWarp warp =
-            brush::resolve_prepared_move(a.prepared, total_world_displacement);
+        brush::resolve_prepared_move(a.prepared, total_world_displacement, &a.warp);
         // Against the ORIGINAL chain, through the one function that owns the
-        // ordering rule. A grab goes at the FRONT, and one already leading from
-        // this same drag is replaced rather than stacked on.
-        a.preview_chain = brush::moved_chain(a.original_chain, warp);
+        // ordering rule. The grabs go at the FRONT, and those already leading
+        // from this same drag are replaced rather than stacked on.
+        a.preview_chain = brush::moved_chain(a.original_chain, a.warp);
         if (scene::Node* n = preview_.sdf->find_mut(a.id)) n->deformers = a.preview_chain;
     }
 
@@ -450,10 +449,20 @@ SdfSculptDirty SdfMoveTransaction::update(cfloat3 total_world_displacement) {
     // surface was and where it went. Tighter is possible and not worth being
     // wrong about — a dirty region that is too small leaves stale pixels, and a
     // preview that lies is worse than one that redraws a little extra.
+    //
+    // Per IMAGE of the drag: under the layer's symmetry the copies move where
+    // the reflected and rotated balls are, and a region that named the ball
+    // alone would leave the reflected side stale. One box is what this report
+    // carries, so under a mirror it spans the plane; a host keeping the images
+    // apart has `brush::drag_images`. The preview layer holds the symmetry the
+    // drag began under, so this reads no document state.
     const cfloat3 r = cf3(settings_.radius, settings_.radius, settings_.radius);
-    dirty.bounds.expand(math::Aabb{anchor_ - r, anchor_ + r});
-    const cfloat3 moved = anchor_ + total_world_displacement;
-    dirty.bounds.expand(math::Aabb{moved - r, moved + r});
+    for (const brush::DragImage& image :
+         brush::drag_images(preview_, anchor_, total_world_displacement)) {
+        dirty.bounds.expand(math::Aabb{image.centre - r, image.centre + r});
+        const cfloat3 moved = image.centre + image.displacement;
+        dirty.bounds.expand(math::Aabb{moved - r, moved + r});
+    }
     dirty.touched_bricks = affected_.size();
     dirty.changed = !affected_.empty() && kernel::clength(total_world_displacement) > 0.0f;
     return dirty;
@@ -495,13 +504,14 @@ bool SdfMoveTransaction::commit(scene::UndoStack* undo) {
     return ok;
 }
 
-bool SdfMoveTransaction::preview_grab(scene::NodeId node, scene::Deformer* out) const {
+bool SdfMoveTransaction::preview_grabs(scene::NodeId node,
+                                       std::vector<scene::Deformer>* out) const {
     for (const Affected& a : affected_) {
         if (a.id != node) continue;
         // Resolved fresh from the prepared candidate rather than read off the
         // preview chain: the two are the same warp, and taking it from the
         // resolver means a host and a commit cannot see different numbers.
-        if (out) *out = brush::resolve_prepared_move(a.prepared, displacement_).deformer;
+        if (out) *out = brush::resolve_prepared_move(a.prepared, displacement_).deformers;
         return true;
     }
     return false;

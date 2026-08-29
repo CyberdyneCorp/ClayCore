@@ -157,9 +157,13 @@ inline cfloat4x4 inverse_scale_matrix(cfloat3 s) {
     return scale_matrix(cf3(1.0f / s.x, 1.0f / s.y, 1.0f / s.z));
 }
 
+inline cfloat4x4 identity_matrix() {
+    return cfloat4x4{cf4(1, 0, 0, 0), cf4(0, 1, 0, 0), cf4(0, 0, 1, 0), cf4(0, 0, 0, 1)};
+}
+
 // Reflection across the local plane whose normal is axis 0/1/2.
 inline cfloat4x4 reflection_matrix(int axis) {
-    cfloat4x4 m{cf4(1, 0, 0, 0), cf4(0, 1, 0, 0), cf4(0, 0, 1, 0), cf4(0, 0, 0, 1)};
+    cfloat4x4 m = identity_matrix();
     if (axis == 0) m.c0.x = -1;
     if (axis == 1) m.c1.y = -1;
     if (axis == 2) m.c2.z = -1;

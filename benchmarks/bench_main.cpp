@@ -903,6 +903,49 @@ BENCHMARK(BM_MoveDrag1000)->Unit(benchmark::kMillisecond);
 void BM_MoveDrag10000(benchmark::State& state) { abi_move_drag(state, 10000); }
 BENCHMARK(BM_MoveDrag10000)->Unit(benchmark::kMillisecond);
 
+// The same drag under a LAYER MIRROR (#363). abi_sculpt puts every dab on the
+// +x hemisphere, so the mirror puts their copies at x < 0 and the ball at
+// (1, 0, 0) touches no copy: a drag that selects by what the ball or its
+// reflection touches warps exactly the items the unmirrored drag does, and
+// one that selects on the mirror-expanded bound warps every item whose
+// expanded bound spans the plane -- 46 items against 22 on the ridge fixture
+// of #363, each extra one a grab that does nothing. `warped_ratio` is the
+// mirrored count over the unmirrored one, in
+// ITEMS (a straddler counts once), resolved untimed through the preview on a
+// fresh unmirrored document; the gate on it is machine-independent where a
+// time would not be.
+void BM_MoveDragMirrored1000(benchmark::State& state) {
+    clay_move_params params{};
+    params.struct_size = sizeof(params);
+    params.radius = 0.4f;
+    const float centre[3] = {1.0f, 0.0f, 0.0f};
+    const float disp[3] = {0.05f, 0.0f, 0.0f};
+
+    std::size_t unmirrored = 0;
+    {
+        clay_document* d = abi_sculpt(1000);
+        clay_layer_move_surface_preview(d, 1, centre, disp, &params, nullptr, 0, &unmirrored);
+        clay_document_destroy(d);
+    }
+    std::size_t applied = 0;
+    for (auto _ : state) {
+        state.PauseTiming();
+        clay_document* d = abi_sculpt(1000);
+        clay_set_layer_mirror(d, 1, 1, 0, 0, 0.05f);
+        state.ResumeTiming();
+        clay_layer_move_surface(d, 1, centre, disp, &params, &applied);
+        state.PauseTiming();
+        clay_document_destroy(d);
+        state.ResumeTiming();
+    }
+    if (applied == 0 || unmirrored == 0)
+        state.SkipWithError("the drag warped no node; nothing is being measured");
+    state.counters["warped"] = static_cast<double>(applied);
+    state.counters["warped_ratio"] =
+        static_cast<double>(applied) / static_cast<double>(unmirrored);
+}
+BENCHMARK(BM_MoveDragMirrored1000)->Unit(benchmark::kMillisecond);
+
 
 constexpr int kRefillHistory = 5000;
 
@@ -1244,9 +1287,20 @@ clay_document* frontier_sculpt(int history) {
 // the drag dirties (kx 1..3) with ground it leaves clean, as a real re-mesh
 // region does. The cold row is byte-identical but runs with the resume budget
 // at zero, so every frame is the full walk -- the gated #360 ratio.
-void move_drag_refill(benchmark::State& state, int history, bool keep_seeds) {
+void move_drag_refill(benchmark::State& state, int history, bool keep_seeds,
+                      bool mirrored = false) {
     clay_document* d = frontier_sculpt(history);
     if (!keep_seeds) clay_internal_set_resume_budget(d, 0);
+    // Under a layer mirror (#363), set BEFORE the warm refill: the mirror edit
+    // is a layer-wide parameter edit and takes the legacy drop itself. The
+    // drag then has to state the target's ordinal as its frontier, or the
+    // guard below skips this row. On THIS fixture the base sits far enough
+    // from the ball that even the mirror-expanded bound never took it, so the
+    // row resumed before the brush was reflected too; what it holds is that
+    // the frontier path saves the same fraction under a mirror as without one.
+    // The selection defect itself is pinned by BM_MoveDragMirrored1000's
+    // warped_ratio, whose fixture the expanded bound did over-select.
+    if (mirrored) clay_set_layer_mirror(d, 1, 1, 0, 0, 0.05f);
     const float centre[3] = {1.6f, 0.0f, 0.0f};
     std::vector<clay_brick_request> reqs;
     for (int kx = -1; kx <= 3; ++kx) reqs.push_back(frontier_brick(kx, -1, -1));
@@ -1461,6 +1515,23 @@ BENCHMARK(BM_MoveDragRefill)->Unit(benchmark::kMillisecond)->Iterations(300);
 
 void BM_MoveDragRefillCold(benchmark::State& state) { move_drag_refill(state, 2000, false); }
 BENCHMARK(BM_MoveDragRefillCold)->Unit(benchmark::kMillisecond)->Iterations(300);
+
+// The warm frame under a layer mirror (#363): the same drag on the same
+// document must still resume every brick, held against ITS OWN cold row.
+// A mirrored document carries twice the geometry -- every item's bound and
+// every brick's tape pay for the copy -- so both the warm frame and the full
+// walk cost more than their unmirrored twins (measured 0.63 ms against
+// 0.32 ms warm), and the claim this pair holds is that the frontier path
+// saves the same fraction under a mirror as it does without one.
+void BM_MoveDragRefillMirrored(benchmark::State& state) {
+    move_drag_refill(state, 2000, true, /*mirrored=*/true);
+}
+BENCHMARK(BM_MoveDragRefillMirrored)->Unit(benchmark::kMillisecond)->Iterations(300);
+
+void BM_MoveDragRefillMirroredCold(benchmark::State& state) {
+    move_drag_refill(state, 2000, false, /*mirrored=*/true);
+}
+BENCHMARK(BM_MoveDragRefillMirroredCold)->Unit(benchmark::kMillisecond)->Iterations(300);
 
 // The same warm frame at two histories: the whole point of the prefix seed is
 // that a frame costs what the SUFFIX costs, so these two rows must sit

@@ -12,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -1674,7 +1675,17 @@ struct clay_document {
     // An EMPTY box means the edit cannot change what the document evaluates to
     // (a rename, a protection flag), so every seed survives. An INFINITE one
     // reaches everywhere and takes them all.
-    void touch_region(const math::Aabb& changed) {
+    void touch_region(const math::Aabb& changed) { touch_regions({&changed, 1}); }
+
+    // The same drop for a change that lands in SEVERAL places at once -- a
+    // drag under a layer mirror moves material under the ball and under its
+    // reflection (#363) -- taken as one invalidation, one revision, one lock.
+    // Stated as the boxes rather than their union because the union of two
+    // balls a diameter apart is the slab between them, and under a mirror
+    // that slab is the whole document: every warm brick would resume every
+    // frame for ground the drag never touched (measured 0.35x the cold refill
+    // against 0.16x for the same drag unmirrored).
+    void touch_regions(std::span<const math::Aabb> changed) {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         forget_appends();  // not an append; no prefix may be reused
         const std::uint64_t next = revision.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1692,7 +1703,7 @@ struct clay_document {
         forget_appends();
         ++structure_revision_;
         const std::uint64_t next = revision.fetch_add(1, std::memory_order_relaxed) + 1;
-        touch_region_locked(changed, kFrontierDrop, next);
+        touch_region_locked({&changed, 1}, kFrontierDrop, next);
     }
 
     // The frontier invalidation (#360): a parameter edit inside root ordinal
@@ -1700,6 +1711,11 @@ struct clay_document {
     // still serve that frontier are KEPT and marked dirty rather than dropped;
     // everything else behaves exactly as touch_region.
     void touch_region_from(const math::Aabb& changed, std::uint32_t frontier) {
+        touch_regions_from({&changed, 1}, frontier);
+    }
+
+    // touch_region_from over several boxes, as touch_regions is to touch_region.
+    void touch_regions_from(std::span<const math::Aabb> changed, std::uint32_t frontier) {
         std::lock_guard<std::mutex> lock(cache_mutex_);
         forget_appends();  // not an append either; the log's contiguity is broken
         const std::uint64_t next = revision.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -2019,9 +2035,14 @@ struct clay_document {
     // -- MIN because two edits at two ordinals dirty from the EARLIER one, and
     // an overwrite would resurrect a prefix the first edit already
     // invalidated.
-    void touch_region_locked(const math::Aabb& changed, std::uint32_t frontier,
+    //
+    // `changed` is one box per place the edit lands; an entry is reached when
+    // ANY of them intersects its cull region, and one infinite box takes
+    // everything, exactly as it does alone.
+    void touch_region_locked(std::span<const math::Aabb> changed, std::uint32_t frontier,
                              std::uint64_t next) const {
-        if (changed.is_infinite()) {
+        if (std::any_of(changed.begin(), changed.end(),
+                        [](const math::Aabb& b) { return b.is_infinite(); })) {
             forget_resume();
             return;
         }
@@ -2035,7 +2056,11 @@ struct clay_document {
                 width;
             const math::Aabb cull =
                 math::Aabb{lo, lo + kernel::cf3(width, width, width)}.dilated(k.band + e.pad);
-            if (!changed.empty() && changed.intersects(cull)) {
+            const bool reached =
+                std::any_of(changed.begin(), changed.end(), [&](const math::Aabb& b) {
+                    return !b.empty() && b.intersects(cull);
+                });
+            if (reached) {
                 // ELIGIBILITY, not proof: kept only when the prefix's claims
                 // still stand -- same structure, right shape, boundary at or
                 // before both the existing frontier and this one. The refill
@@ -3036,7 +3061,11 @@ clay_result apply_edit_in_gesture(clay_document* doc, const scene::Command& cmd,
 // document.
 struct GestureRegion {
     clay_document* doc = nullptr;
-    math::Aabb reach;
+    // One box per place the gesture lands. Several rather than their union
+    // because a gesture under a layer mirror lands under the ball AND under
+    // its reflection, and the union of those is the slab between them --
+    // which under a mirror is the whole document (#363).
+    std::vector<math::Aabb> reach;
     // A gesture that states its reach may state its FRONTIER for the same
     // reason (#360): it knows every command it issues is a parameter edit on
     // nodes whose root ordinals it resolved, so the seeds it dirties can keep
@@ -3047,15 +3076,15 @@ struct GestureRegion {
     // its prefix can still serve the stated frontier.
     std::uint32_t frontier = clay_document::kFrontierDrop;
 
-    GestureRegion(clay_document* d, const math::Aabb& r,
+    GestureRegion(clay_document* d, std::vector<math::Aabb> r,
                   std::uint32_t f = clay_document::kFrontierDrop)
-        : doc(d), reach(r), frontier(f) {}
+        : doc(d), reach(std::move(r)), frontier(f) {}
     ~GestureRegion() {
         if (!doc) return;
         if (frontier == clay_document::kFrontierDrop)
-            doc->touch_region(reach);
+            doc->touch_regions(reach);
         else
-            doc->touch_region_from(reach, frontier);
+            doc->touch_regions_from(reach, frontier);
     }
     GestureRegion(const GestureRegion&) = delete;
     GestureRegion& operator=(const GestureRegion&) = delete;
@@ -5811,16 +5840,33 @@ clay_result clay_sdf_move_preview_nodes(const clay_sdf_move_tx* tx, clay_node_id
     return CLAY_OK;
 }
 
+clay_result clay_sdf_move_preview_grab_count(const clay_sdf_move_tx* tx, clay_node_id node,
+                                             size_t* out_count) {
+    if (!tx || !out_count) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transaction or count");
+    if (!tx->tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "this transaction is spent");
+    std::vector<scene::Deformer> grabs;
+    if (!tx->tx->preview_grabs(static_cast<scene::NodeId>(node), &grabs))
+        return fail(CLAY_ERROR_NOT_FOUND,
+                    "node " + std::to_string(node) + " is not one this drag reaches");
+    *out_count = grabs.size();
+    return CLAY_OK;
+}
+
 clay_result clay_sdf_move_preview_grab(const clay_sdf_move_tx* tx, clay_node_id node,
-                                       float out_centre[3], float* out_radius,
+                                       size_t index, float out_centre[3], float* out_radius,
                                        float out_displacement[3], int32_t* out_ease,
                                        int32_t* out_front_only) {
     if (!tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "null transaction");
     if (!tx->tx) return fail(CLAY_ERROR_INVALID_ARGUMENT, "this transaction is spent");
-    scene::Deformer grab;
-    if (!tx->tx->preview_grab(static_cast<scene::NodeId>(node), &grab))
+    std::vector<scene::Deformer> grabs;
+    if (!tx->tx->preview_grabs(static_cast<scene::NodeId>(node), &grabs))
         return fail(CLAY_ERROR_NOT_FOUND,
                     "node " + std::to_string(node) + " is not one this drag reaches");
+    if (index >= grabs.size())
+        return fail(CLAY_ERROR_INVALID_ARGUMENT,
+                    "grab " + std::to_string(index) + " of " + std::to_string(grabs.size()) +
+                        " on node " + std::to_string(node));
+    const scene::Deformer& grab = grabs[index];
     if (out_centre) {
         out_centre[0] = grab.k;
         out_centre[1] = grab.a;
@@ -5881,12 +5927,29 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
     // catches the edge of 257 items spread through the volume invalidates the
     // union of 257 whole items -- far more than the ball the drag actually
     // reached.
+    //
+    // ... ONCE PER IMAGE THE LAYER'S SYMMETRY MAKES OF IT (#363). The copies a
+    // mirror or radial layer emits move where the REFLECTED ball is, and the
+    // drag's warps are aimed there too (brush::drag_images), so the reach is
+    // the union of every image's ball. Left at the one ball, a seed warm on
+    // the reflected side was advanced to the new revision still describing
+    // the undragged copies and handed back whole: measured 997 of 8,192
+    // samples stale, up to 0.023 -- the whole pull -- on the ridge fixture.
+    // The prepare pass records prefixes from the mirror-expanded spans, so a
+    // prepared seed on that side is exactly one this would otherwise serve
+    // stale. One BOX PER IMAGE and still one invalidation per gesture: the
+    // union of two balls a diameter apart is the slab between them, and
+    // under a mirror that slab is the whole document -- stated as the union,
+    // every warm brick resumed every frame and the warm mirrored refill
+    // measured 0.35x the cold one against 0.16x unmirrored.
     const float pull = std::sqrt(displacement[0] * displacement[0] +
                                  displacement[1] * displacement[1] +
                                  displacement[2] * displacement[2]);
-    const kernel::cfloat3 c = kernel::cf3(centre[0], centre[1], centre[2]);
-    math::Aabb reach{c, c};
-    reach = reach.dilated(radius + pull);
+    std::vector<math::Aabb> reach;
+    for (const brush::DragImage& image :
+         brush::drag_images(*l, kernel::cf3(centre[0], centre[1], centre[2]),
+                            kernel::cf3(displacement[0], displacement[1], displacement[2])))
+        reach.push_back(math::Aabb{image.centre, image.centre}.dilated(radius + pull));
 
     // ... IN ONE PLACEMENT. The ball above is stated in the dragged layer's
     // frame, and an instanced edit list is placed by every layer that shares
@@ -5906,7 +5969,7 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
     // every other edit route was already right.
     for (const scene::Layer& other : doc->doc.document.layers) {
         if (&other == l || other.sdf != l->sdf) continue;
-        reach.expand(scene::layer_influence_bound(other));
+        reach.push_back(scene::layer_influence_bound(other));
     }
 
     // What the drag can state about HISTORY, beside what the ball states about
@@ -5931,7 +5994,7 @@ clay_result clay_layer_move_surface(clay_document* doc, clay_layer_id layer,
     // One group for the whole drag: it is one gesture, and undoing it item by
     // item would be the implementation showing through. One invalidation too,
     // for the same reason and at the same grain (#358).
-    GestureRegion region{doc, reach,
+    GestureRegion region{doc, std::move(reach),
                          states_frontier ? frontier.min_ordinal
                                          : clay_document::kFrontierDrop};
     if (doc->undo) doc->undo->begin_group();

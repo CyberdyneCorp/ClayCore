@@ -4231,6 +4231,20 @@ typedef struct clay_move_params {
  * drag reached nothing" from "the drag did nothing visible". A drag that
  * reaches nothing succeeds and changes nothing.
  *
+ * UNDER A LAYER MIRROR OR RADIAL SYMMETRY the drag is reflected and rotated
+ * into every image the layer emits of it — the ball, one reflection per mirror
+ * axis, one rotation per radial copy — and an item is selected by what the
+ * ball OR one of its images touches, on the item's own bound. An item whose
+ * mirror copy sits under the ball therefore moves (through its copy), and an
+ * item nowhere near the ball or its images is left alone, where selecting on
+ * the mirror-expanded bound used to warp every item on both sides of the
+ * plane. Items that opted out of the mirror (clay_item_desc.mirror < 0) see
+ * the ball alone. An item both the ball and an image reach — one straddling
+ * the plane — composes both pulls, as two brushes would; *out_applied still
+ * counts ITEMS, so it counts once. The invalidation covers every image's
+ * ball, and with an identity layer transform a drag and its mirror image
+ * produce the same field bit for bit.
+ *
  * The surface moves LESS than the displacement asked for — the region weight
  * is taken at the sample point rather than at its preimage, so a drag of 0.5
  * over a radius of 0.8 moves a tip about 0.31. That is grab's documented
@@ -4507,13 +4521,22 @@ clay_result clay_sdf_move_update(clay_sdf_move_tx* tx, const float total_displac
 clay_result clay_sdf_move_preview_nodes(const clay_sdf_move_tx* tx, clay_node_id* out_nodes,
                                         size_t capacity, size_t* out_count);
 
-/* The grab the last update resolved for one affected node, in that node's own
- * frame — the parameters clay_item_add_deformer(CLAY_DEFORM_GRAB, ...) takes,
- * so a host can reproduce the preview through machinery it already has. It
- * belongs at the FRONT of that node's chain. CLAY_ERROR_NOT_FOUND for a node
- * the drag does not reach. Any out pointer may be NULL. */
+/* How many grabs the last update resolved for one affected node: one, unless
+ * the layer carries a mirror or a radial count, when it is one per IMAGE of the
+ * drag that reaches the node — a straddler takes the ball's grab and its
+ * reflection's, and a host that drew only the first would preview half the
+ * drag. CLAY_ERROR_NOT_FOUND for a node the drag does not reach. */
+clay_result clay_sdf_move_preview_grab_count(const clay_sdf_move_tx* tx, clay_node_id node,
+                                             size_t* out_count);
+
+/* Grab `index` of those, in that node's own frame — the parameters
+ * clay_item_add_deformer(CLAY_DEFORM_GRAB, ...) takes, so a host can reproduce
+ * the preview through machinery it already has. Together, in index order, they
+ * belong at the FRONT of that node's chain. CLAY_ERROR_NOT_FOUND for a node
+ * the drag does not reach, CLAY_ERROR_INVALID_ARGUMENT for an index past the
+ * count. Any out pointer may be NULL. */
 clay_result clay_sdf_move_preview_grab(const clay_sdf_move_tx* tx, clay_node_id node,
-                                       float out_centre[3], float* out_radius,
+                                       size_t index, float out_centre[3], float* out_radius,
                                        float out_displacement[3], int32_t* out_ease,
                                        int32_t* out_front_only);
 
