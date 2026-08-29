@@ -46,6 +46,7 @@
 
 #include "clay/math/geom.h"
 #include "clay/mesh/sculpt.h"
+#include "clay/mesh/topology_delta.h"
 #include "clay/scene/commands.h"
 #include "clay/voxel/grid.h"
 #include "clay/voxel/groups.h"
@@ -61,6 +62,12 @@ struct Step {
         Scene,   // one entry on the wrapped UndoStack
         Voxel,   // a recorded run of cell writes on one layer's grid
         Mesh,    // sparse vertex deltas on one layer's mesh
+        // A whole gesture on an ADAPTIVE surface: connectivity, geometry and
+        // attributes together. Its own kind rather than an overload of Mesh,
+        // because `VertexDeltas` deliberately records no indices — the
+        // fixed-topology contract paying off — and a payload that can add and
+        // remove faces is a different thing reversed a different way.
+        DynamicMesh,
         Mask,    // the cells one mask edit changed, on one layer's mask
         // The document's surface groups, before and after one edit. Named
         // SurfaceGroup and not Group because JournalEvent::Kind already spends
@@ -88,6 +95,7 @@ struct Step {
     std::vector<voxel::VoxelGrid::SculptChange> cells;   // Voxel
     std::vector<voxel::MaskField::MaskChange> mask_cells;  // Mask
     mesh::VertexDeltas deltas;                // Mesh
+    mesh::TopologyDelta topology_delta;        // DynamicMesh
     // SurfaceGroup: the whole field, serialised, on each side of the edit.
     //
     // A WHOLE SNAPSHOT where every other kind stores a DIFF, and deliberately.
@@ -124,6 +132,17 @@ class History {
     using GridFor = std::function<voxel::VoxelGrid*(scene::LayerId)>;
     using MeshFor = std::function<mesh::Mesh*(scene::LayerId)>;
     using MaskFor = std::function<voxel::MaskField*(scene::LayerId)>;
+    // An adaptive surface, by the layer that holds it.
+    //
+    // SET ONCE rather than passed to undo, redo and replay like the three
+    // above, following `GroupsFor`'s precedent for a different reason: those
+    // three are in every caller's signature already, and adding a fourth would
+    // break every host compiled against this header to serve a payload most
+    // documents never carry. Still a callable rather than a pointer, so the
+    // owner is consulted at the moment of use and this cannot outlive what it
+    // names.
+    using DynamicMeshFor = std::function<mesh::DynamicSurface*(scene::LayerId)>;
+    void set_dynamic_resolver(DynamicMeshFor resolver) { dynamic_for_ = std::move(resolver); }
     // The document's surface groups. NOT keyed by layer, because the lattice is
     // per document — which is also why this is set once rather than passed to
     // undo, redo and replay like the three above: those resolve a MAP lookup
@@ -191,6 +210,9 @@ class History {
     // A mesh edit, as the deltas the sculptor already produced. Empty deltas
     // are dropped, for the reason above.
     void record_mesh_step(scene::LayerId layer, mesh::VertexDeltas deltas);
+    // One adaptive gesture — every split, collapse, flip and displacement it
+    // made — as ONE step.
+    void record_dynamic_mesh_step(scene::LayerId layer, mesh::TopologyDelta delta);
 
     // An operation NO mechanism records. The examples matter, because the
     // obvious ones are wrong: consolidate IS undoable (it takes an UndoStack
@@ -259,7 +281,12 @@ class History {
         // that this enum now has to hold at once — spelled apart rather than
         // left to context.
         enum class Kind {
-            Command, GroupBegin, GroupEnd, Voxel, Mesh, Mask, SurfaceGroup, Barrier, Undo, Redo
+            Command, GroupBegin, GroupEnd, Voxel, Mesh, Mask, SurfaceGroup, Barrier, Undo, Redo,
+            // APPENDED, so every enumerator an older journal wrote keeps its
+            // value and an old journal still replays. A new kind at the front
+            // would renumber the rest and silently reinterpret every event in
+            // every file already on disk.
+            DynamicMesh
         };
         Kind kind = Kind::Command;
         scene::Command command;                   // Kind::Command
@@ -267,6 +294,7 @@ class History {
         std::vector<voxel::VoxelGrid::SculptChange> cells;
         std::vector<voxel::MaskField::MaskChange> mask_cells;  // Kind::Mask  // Voxel
         mesh::VertexDeltas deltas;                // Mesh
+        mesh::TopologyDelta topology_delta;        // DynamicMesh
         // SurfaceGroup: the field AFTER the edit. Only the after side, unlike
         // the step — a journal replays forward onto the snapshot it was taken
         // against and never runs backwards, so the before side would be bytes
@@ -402,6 +430,7 @@ class History {
     bool voxel_open_ = false;
     bool mask_open_ = false;
     GroupsFor groups_for_;
+    DynamicMeshFor dynamic_for_;
     bool group_open_ = false;
     std::vector<std::uint8_t> group_snapshot_;
     scene::LayerId open_mask_layer_ = 0;

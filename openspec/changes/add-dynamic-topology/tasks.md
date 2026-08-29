@@ -130,14 +130,14 @@
       taken
 - [x] 7.3 Revert is BIT-EXACT and idempotent; revert-then-apply returns the
       surface exactly
-- [ ] 7.4 `session::History` gains the step kind and a resolver, following the
+- [x] 7.4 `session::History` gains the step kind and a resolver, following the
       inversion the existing kinds use — `scene` may not see `mesh`, and the
       owner passes the resolver in
-- [ ] 7.5 Journal encode, decode and replay for the new kind, with old
+- [x] 7.5 Journal encode, decode and replay for the new kind, with old
       journals still replaying
 - [x] 7.6 A decoder refuses hostile or truncated counts BEFORE allocating,
       matching `VertexDeltas::decode`'s defensive style
-- [ ] 7.7 A compound step spanning a scene command and a topology delta undoes
+- [x] 7.7 A compound step spanning a scene command and a topology delta undoes
       as one
 
 ## 8. Serialization
