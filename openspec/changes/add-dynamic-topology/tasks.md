@@ -1,6 +1,6 @@
 # Tasks: add-dynamic-topology
 
-- [ ] 0.1 SEQUENCING (see ROADMAP, "Phase 5 — the surface tier"): after
+- [x] 0.1 SEQUENCING (see ROADMAP, "Phase 5 — the surface tier"): after
       `add-shared-brush-kernels`, whose extracted kernels this consumes.
       `add-mesh-multires` follows it and shares its chunk runtime; the two
       SHALL NOT be built in parallel by different hands, because the chunk unit
@@ -8,43 +8,43 @@
 
 ## 1. Decide first
 
-- [ ] 1.1 DECIDE who owns a dynamic surface — a mesh layer with a new payload
+- [x] 1.1 DECIDE who owns a dynamic surface — a mesh layer with a new payload
       kind, or the host with `mesh::Mesh` at the boundaries. Recommendation:
       engine types now, document ownership as its own change, so this change
       does not carry a format decision it cannot yet justify
-- [ ] 1.2 DECIDE the determinism contract and write it into the requirement:
+- [x] 1.2 DECIDE the determinism contract and write it into the requirement:
       the candidate set is ordered by stable id before any operator runs, so
       the same input produces the same sequence of operations on every platform
       and every standard library. Assuming single-threading supplies an order
       is how this promise breaks quietly
-- [ ] 1.3 DECIDE what happens to `quads` on conversion. A dynamic surface is
+- [x] 1.3 DECIDE what happens to `quads` on conversion. A dynamic surface is
       triangles; state whether export re-derives none and says so
-- [ ] 1.4 DECIDE collapse placement for P0 — midpoint, projected midpoint, or
+- [x] 1.4 DECIDE collapse placement for P0 — midpoint, projected midpoint, or
       the quadric the offline decimator already computes
 
 ## 2. The representation
 
-- [ ] 2.1 `include/clay/mesh/slot_pool.h` — stable slots, free list,
+- [x] 2.1 `include/clay/mesh/slot_pool.h` — stable slots, free list,
       generation per slot, no compaction on erase
-- [ ] 2.2 `include/clay/mesh/dynamic_surface.h` + `src/` — triangular
+- [x] 2.2 `include/clay/mesh/dynamic_surface.h` + `src/` — triangular
       half-edge over vertices, edges, half-edges and faces, all
       generation-tagged
-- [ ] 2.3 Attribute domains from the start: UV on the corner, colour and mask
+- [x] 2.3 Attribute domains from the start: UV on the corner, colour and mask
       on the vertex. P0 need not author corner UVs; the representation SHALL
       be able to express them or the operators cannot be retrofitted
-- [ ] 2.4 Edge constraint flags: boundary, UV seam, sharp, material,
+- [x] 2.4 Edge constraint flags: boundary, UV seam, sharp, material,
       user-locked
-- [ ] 2.5 `from_mesh` — validate indices, treat quads as provenance, weld by
+- [x] 2.5 `from_mesh` — validate indices, treat quads as provenance, weld by
       position, identify seams from the duplicates, carry colours and corner
       UVs, mark boundaries, build constraints
-- [ ] 2.6 `to_mesh` — contiguous arrays, export duplicates where corner
+- [x] 2.6 `to_mesh` — contiguous arrays, export duplicates where corner
       attributes require a seam, clear `quads`, produce a mesh every existing
       consumer accepts unchanged
-- [ ] 2.7 `include/clay/mesh/dynamic_validate.h` — twin symmetry, closed next
+- [x] 2.7 `include/clay/mesh/dynamic_validate.h` — twin symmetry, closed next
       loops, three corners per face, no live reference to a dead slot, no face
       with a repeated vertex, consistent boundary links, no NaNs, consistent
       attribute domains
-- [ ] 2.8 Round-trip test: mesh → surface → mesh preserves geometry and the
+- [x] 2.8 Round-trip test: mesh → surface → mesh preserves geometry and the
       supported attributes under the stated seam semantics
 
 ## 3. The operators

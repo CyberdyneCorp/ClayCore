@@ -79,6 +79,8 @@ add_library(claycore
   src/mesh/sculpt_kernels.cpp
   src/mesh/brush_model.cpp
   src/mesh/automask.cpp
+  src/mesh/dynamic_surface.cpp
+  src/mesh/dynamic_validate.cpp
   src/mesh/deform.cpp
   src/mesh/transfer.cpp
   src/mesh/to_field.cpp
