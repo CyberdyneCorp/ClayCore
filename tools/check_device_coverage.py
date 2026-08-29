@@ -84,6 +84,19 @@ VERB_PATTERNS = [
     # the exact failure this list exists to prevent, and the one its own
     # comment names tube, Trim Curve and the level stack for.
     r"clay_mesh_sculptor_(stamp|apply_stroke|deform)",
+    # Placing what is already there -- the Move/Rotate/Scale gizmo. Absent from
+    # this list until 2026-08-29, which is why the gate carried 62 cases and
+    # none of them transformed anything: the gap was not a gap on the record,
+    # it was invisible. Exactly what this list's own docstring names tube, Trim
+    # Curve and the level stack for.
+    #
+    # The two node forms are matched separately rather than by one prefix, for
+    # the reason spelled out above for `_region`: a pattern matches only where
+    # it is followed by "(", so `clay_layer_set_transform` does NOT cover
+    # `clay_layer_set_transform_nonuniform`, and the per-axis form has to be
+    # covered or exempt on its own.
+    r"clay_layer_set_transform(_nonuniform)?",
+    r"clay_document_set_layer_transform",
 ]
 
 # Verbs the engine has no C entry point for, so pattern-matching clay.h cannot
@@ -116,6 +129,25 @@ EXTRA_VERBS = {
     # already measured, under the session verbs `session_magnify_pinch` and
     # `session_noise`; pose is ZBrush's Rotate and had no case at all.
     "pose",
+    # A node placement whose node sits inside a GROUP. The same entry point as
+    # `layer_set_transform` and a different cost: what an edit invalidates is
+    # derived from the edited node's ancestry, so the grouped shape is a
+    # separate measurement rather than the same one with a different fixture.
+    # No entry point of its own, for the same reason `sdf_stroke` has none.
+    "sdf_group_transform",
+    # A stamp that FOLLOWS a drag frame. The drag's seed drop is not paid by
+    # the drag -- a drag frame refills what the frame before it dirtied either
+    # way -- it is paid by whatever is edited next. No entry point of its own:
+    # it is `sdf_stamp` in a state a previous edit left, which is a different
+    # cost and the one a wide invalidation actually charges for.
+    "sdf_stamp_after_drag",
+    "sdf_stamp_after_group_drag",
+    # The same stroke with its dabs inside a GROUP. A separate verb because it
+    # is a separate path, not a variant: `tail_append` requires a root-list
+    # parent, so a dab added into a group misses the append fast path and takes
+    # a structural invalidation and a full recompile. No entry point of its own
+    # for the same reason `sdf_stroke` has none.
+    "sdf_stroke_in_group",
     # The same stroke on a SMOOTH-blended document. A hard blend contributes
     # nothing to the chain pad, so every other SDF verb here is measured on a
     # document whose pad is a constant zero -- which is why the pad band went
