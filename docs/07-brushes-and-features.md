@@ -409,6 +409,105 @@ replayed journal or an undo has edited it, the commit fails and the external
 edit stands. A preview computed against a document that no longer exists is
 never written over one that does.
 
+### 3.1.1 Where the working field comes from
+
+A transaction has to start somewhere, and the first version of this sampled the
+whole finite layer at pointer-down. That was the honest first answer — a local
+patch needs a rule for what it means where it meets the field it was cut from,
+and that rule is real correctness surface — but it moved a cost rather than
+removing one: `begin()` measured within 1% of a whole `bake_layer`.
+
+It is now lazy. `begin()` compiles the layer, allocates an index for the working
+lattice and takes a digest; it **evaluates nothing**. Each dab materializes the
+bricks its relax will read, and no others:
+
+```
+begin        a lattice, and no samples at all
+update A     materialize A's dependency region, relax it
+update B     reuse what A brought in, materialize only what B newly reaches
+commit       assemble the layer once, overlay what the dabs changed
+```
+
+Two things make that safe rather than merely fast.
+
+**A brick that stores samples is exactly a brick that has been materialized.**
+`kBrickEmpty` already means something specific — "no surface here, and here is
+which side" — and consumers are entitled to believe it. Rather than overload it
+with a second meaning, materialization *force-stores* every brick it fills, even
+one whose samples are all past the band. Stored-ness is then an honest record of
+what has been filled in, at the cost of a brick that says nothing interesting.
+
+**The dependency halo is derived from Relax's own stencil, not guessed.** It is
+the ball Relax rewrites, plus a brick *diagonal* — `rewrite_region` writes whole
+bricks that merely touch the ball, so a written sample can sit a diagonal beyond
+it — plus the stencil's reach. Getting this short does not read a wrong number:
+`sample_at` returns *nothing* for an unmaterialized brick and Relax renormalizes
+over the taps that exist, so the sample comes out smoothed against a smaller
+neighbourhood. A seam at a brick face, invisible except as a measurement.
+
+**And one semantic change, which is real.** The whole-layer path relaxed a
+*redistanced* bake. The lazy path redistances a *relaxed* field, because a local
+working field cannot start from a globally post-processed one — redistancing is
+not something you can do to one brick. Both are sound signed distance fields and
+neither approximates the other. Measured on the surface they differ by **0.0037,
+about 0.073 of a cell**, and the tests record that distance rather than claiming
+the two match.
+
+### 3.1.2 Not paying for history that has not changed
+
+A dab over worked geometry still has to evaluate whatever contributes there, and
+almost none of it changed since the last dab. Measured (#306) at a 0.05 voxel,
+one dab into 12 bricks: 0.23 ms at 200 items, **18.07 ms at 50,000**.
+Consolidating the layer shows the floor — but a bake discards the parameters of
+everything it absorbs, so the cure costs the artist their history.
+
+`session::SdfPrefixCache` is the same split without the loss. An old, stable
+prefix of the root list is sampled into a volume; the live suffix is evaluated
+over it; the document is untouched and every item stays editable.
+
+```
+roots [0, K)              roots [K, N)
+cached FieldVolume    +   live suffix     ==  the layer's field
+```
+
+It can be exact because the tape compiler already emits a layer's chain as a
+**fold at item boundaries**: after every root the stack holds one value.
+`compile_layer_prefix` and `compile_layer_suffix` name that boundary, and
+`eval::eval_points_seeded` continues from it. Prefix-tape-then-seeded-suffix is
+**bit-identical** to compiling the whole document — zero difference over 20,000
+random points, not a tolerance.
+
+What needs care is when the cached *volume* may stand in for that seed, and the
+answer is sharper than it looks:
+
+| where the prefix volume… | error in the composed field |
+|---|---:|
+| **stores** the samples | 3e-7 — float rounding |
+| stores **nothing** | 0.27 — about **14 cells** |
+
+Outside its stored bricks a volume answers with a conservative *far bound*, not
+the distance the history had, and a blend folded onto that is silently wrong by
+cells. So the volume seeds a window only where it stores every sample of it, and
+anywhere else the prefix tape is evaluated instead — correct either way, only the
+cost differs. `fallback_windows` counts how often the slow answer was needed,
+because a cache with a high fallback rate is one that is not working rather than
+one that is wrong.
+
+Two further things had to be right, and both were measured wrong first: the
+prefix is baked **without redistance** (which rewrites every sample: 0.063, two
+cells) and over the **whole layer's region** rather than its own (the lattice
+origin is `region.min`, so a different region is a different lattice: 0.0074).
+
+The result is a **sampling** source, and worth reading as one: exact on the
+lattice it was built for, ordinary interpolation error between lattice points
+(7.6e-3 at a 0.03 cell — the fidelity a consolidation of the same prefix would
+have), and exact outside the stored region. A consumer that needs the true field
+at arbitrary points wants the walk.
+
+The cache is derived state. It is never serialized, never a node, never visible
+to undo, and **deleting every entry must be equivalent to flushing a CPU cache**:
+slower, and identical output.
+
 ### 3.2 Bounding a long session
 
 Both degradation mechanisms `scene::report_layer` measures — a lengthening

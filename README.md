@@ -239,6 +239,14 @@ protecting.
   the Move brush (drags the *assembled* surface), and tubes
 - Baked field operations: relax (Smooth), flatten (two-sided / hPolish cut-only
   / fill-only), Move Topological, and mask extrude
+- **A derived prefix field cache**, so a long history stops being re-evaluated
+  on every dab. An old, stable run of the edit list is sampled into a volume and
+  only the live suffix is evaluated over it; the document is untouched and every
+  item stays editable. Exact because the tape already folds a chain at item
+  boundaries — prefix-then-seeded-suffix is bit-identical to the whole walk — and
+  conservative where it cannot be: a cached volume seeds a region only where it
+  stores the samples, and falls back to evaluating the prefix everywhere else.
+  Never serialized; deleting the cache is a flush, not an edit
 - **Live sculpt transactions** for the two brushes an edit list cannot spell:
   Smooth samples the layer once at pointer-down, relaxes its own working volume
   per dab and installs that volume at pointer-up; Move finds the items a drag
@@ -246,7 +254,10 @@ protecting.
   chains. Between pointer-down and pointer-up the document does not change —
   no nodes, no deformers, no undo entries — and one gesture is one undo step.
   An explicit session policy decides, between strokes and never during one,
-  when a long session's deformer history may be collapsed
+  when a long session's deformer history may be collapsed. Smooth materializes
+  its working field lazily around the brush rather than sampling the whole layer
+  at pointer-down, and the C ABI hands a host only the preview bricks that
+  changed instead of the whole volume every frame
 - The stroke engine: spacing, pressure, jitter, taper, steady stroke, buildup
   vs clamped — a stroke resolves into ordinary edit items
 - **Masking that gates any operation**, a boolean included: an item carries the
