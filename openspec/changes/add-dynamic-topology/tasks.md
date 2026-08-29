@@ -70,18 +70,18 @@
 
 ## 4. Spatial index
 
-- [ ] 4.1 `include/clay/mesh/dynamic_bvh.h` — chunked leaves of a few hundred
+- [x] 4.1 `include/clay/mesh/dynamic_bvh.h` — chunked leaves of a few hundred
       triangles with bounds and revisions, a top-level tree over the leaves
-- [ ] 4.2 Insert, erase and update at leaf granularity; local leaf split and
+- [x] 4.2 Insert, erase and update at leaf granularity; local leaf split and
       merge when a leaf grows or shrinks past its thresholds
-- [ ] 4.3 Ball query, closest point and raycast, each checked against a
+- [x] 4.3 Ball query, closest point and raycast, each checked against a
       brute-force oracle for exact parity
-- [ ] 4.4 Dirty leaf tracking by epoch marks rather than a hash set per dab
-- [ ] 4.5 A leaf-quality metric marks a rebuild; the rebuild runs between
+- [x] 4.4 Dirty leaf tracking by epoch marks rather than a hash set per dab
+- [x] 4.5 A leaf-quality metric marks a rebuild; the rebuild runs between
       strokes, never mid-drag. The fixed BVH's own finding applies — a refit
       stays correct and does not stay fast, and a rebuild is not automatically
       an improvement
-- [ ] 4.6 A topology mutation SHALL touch the leaves it changed and no others,
+- [x] 4.6 A topology mutation SHALL touch the leaves it changed and no others,
       asserted rather than profiled
 
 ## 5. The remesher

@@ -83,6 +83,7 @@ add_library(claycore
   src/mesh/dynamic_validate.cpp
   src/mesh/topology_delta.cpp
   src/mesh/topology_ops.cpp
+  src/mesh/dynamic_bvh.cpp
   src/mesh/deform.cpp
   src/mesh/transfer.cpp
   src/mesh/to_field.cpp
