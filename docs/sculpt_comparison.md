@@ -102,7 +102,7 @@ in [`07-brushes-and-features.md`](07-brushes-and-features.md).
 | Surface brushes on a MESH (Standard, Move, Inflate, Smooth, Pinch, Flatten, Clay, DamStandard, Trim Dynamic, hPolish, SnakeHook, Layer, Nudge, Relax) | `mesh::MeshSculptor`, **14 verbs, with alphas** | ✅ on a mesh LAYER's own triangles, with topology fixed — see below |
 | Polypaint / Smear on a MESH | `mesh::MeshSculptor` `paint`, `smear` | ✅ the only two verbs that move no vertex; they refuse a mesh with no colour attribute rather than creating one |
 | Elastic (Blender), ZProject | — | 🟡 Elastic was filed "does not survive the representation change", which was true for fields and is no longer true on a mesh layer. Undecided rather than rejected; it is the one entry that is new *math* rather than a new composition of the eleven |
-| Dyntopo, LiveClay, multires | — | ❌ deliberate: an SDF sidesteps topology, and dynamic tessellation is not this engine's fight |
+| Dyntopo, LiveClay, multires | — | ❌ **absent, and no longer deliberate.** The reasoning — an SDF sidesteps topology, and dynamic tessellation is not this engine's fight — held until fixed-topology mesh brushes shipped and made the stretch below a reason to leave the engine rather than a boundary. Reversed 2026-08-29 and scoped as separate representations beside the fixed-topology one (`openspec/ROADMAP.md` Phase 5). None of it is implemented; this row moves when it is |
 
 ### Surface brushes: the row that moved
 
@@ -116,7 +116,10 @@ are for, and it is what lets a Move brush draw a lobe out of a sheet
 indefinitely. claycore's do not: `indices` and `quads` come out byte for byte,
 and a large grab stretches the triangles it has instead. That stretch is the
 signal the mesh wants retopo — the same signal Blender gives with Dyntopo off —
-and it is where this stops on purpose.
+and it is where this stops today. **The word that changed on 2026-08-29 is
+"purpose":** the stretch is still what happens and is still documented, but it
+is now the reason an adaptive representation is scoped rather than the reason
+one is not. See `openspec/ROADMAP.md` Phase 5.
 
 So the honest position is neither "we have surface brushes now" nor the old
 "❌ out of scope":
@@ -288,10 +291,17 @@ drag: it reaches as far as the drag goes and the field stays exact (step scale
 Recorded so they read as decisions rather than oversights. In full in
 [`../openspec/ROADMAP.md`](../openspec/ROADMAP.md).
 
-- **Topology-CHANGING mesh sculpting** — dyntopo, multires, remeshing,
-  subdivision (3DCoat's LiveClay, ZBrush's dynamic tessellation). An SDF
-  sidesteps topology entirely; competing on dynamic tessellation is not this
-  engine's fight.
+- ~~**Topology-CHANGING mesh sculpting** — dyntopo, multires, remeshing,
+  subdivision (3DCoat's LiveClay, ZBrush's dynamic tessellation).~~
+  **REVERSED 2026-08-29** — scoped as Phase 5 in
+  [`../openspec/ROADMAP.md`](../openspec/ROADMAP.md), and implemented nowhere
+  yet. The original reasoning is kept because it still frames what remains: an
+  SDF sidesteps topology entirely; competing on dynamic tessellation is not
+  this engine's fight. What it never answered is what happens to a mesh layer
+  after a snakehook has stretched it, and shipping those brushes is what made
+  the question live. The reversal is bounded: adaptive topology is a SEPARATE
+  representation, and `MeshSculptor` keeps its byte-identical `indices` and
+  `quads` unchanged.
 
   **Amended, not deleted.** This row used to read "mesh surface-mode
   sculpting", and that was wider than the decision behind it. Moving the
@@ -305,9 +315,12 @@ Recorded so they read as decisions rather than oversights. In full in
   [`docs/07-brushes-and-features.md` § 8](07-brushes-and-features.md). A large
   grab stretches triangles and `snakehook` stretches them badly; that is the
   signal the mesh wants retopo, and it is where this stops.
-- **Subdivision multires on the SDF side.** Resolution is an evaluation
-  parameter for an SDF layer, so the Res+/Resample apparatus has nothing to
-  attach to there. Voxel layers now DO carry a level stack — level 0 coarsest,
+- **Subdivision multires on the SDF side**, and there only. Resolution is an
+  evaluation parameter for an SDF layer, so the Res+/Resample apparatus has
+  nothing to attach to there — which is exactly why the sentence never applied
+  to a mesh layer, whose resolution is fixed by its import and is neither
+  evaluated nor stacked. A mesh subdivision hierarchy is scoped as
+  `add-mesh-multires` in Phase 5. Voxel layers now DO carry a level stack — level 0 coarsest,
   half the cell size per level, detail held as offsets so a coarse stroke does
   not flatten fine work — because a voxel layer's resolution is real storage
   rather than a sampling choice. Discrete levels rather than an octree, so the

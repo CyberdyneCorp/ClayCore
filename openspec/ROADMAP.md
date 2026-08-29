@@ -626,6 +626,136 @@ against their 2026 custom profiles) · `add-convenience-transforms`
 `add-field-stamps` (capture a region's field as a reusable brush — the VDM
 analog, and a differentiator rather than a parity item).
 
+## Phase 5 — the surface tier, proposed 2026-08-29
+
+Five changes raised by four external implementation specifications
+(`ClayCore_Sculpt_Engine_Gap_and_Roadmap`,
+`ClayCore_Dynamic_Topology_and_Multiresolution_Implementation_Spec`,
+`ClayCore_High_Frequency_Detail_and_Mesh_Sculpt_Layers_Spec`,
+`ClayCore_Professional_Brush_and_Extreme_Poly_iPad_Implementation_Guide`),
+audited against the tree on 2026-08-29 rather than accepted.
+
+**The documents are technically sound and their reading of `main` is accurate**
+— checked claim by claim: the flat `Mesh` and its quad invariant, `Adjacency`
+over weld classes going stale on a count change, `MeshSculptor`'s pre-stamp
+snapshot and local refit, `Bvh::refit` refusing topology change, meshoptimizer
+behind `decimate`, `transfer_attributes` as attribute-only, `VertexDeltas`
+holding no indices, `session::History`'s resolver inversion, the pure
+`resolve_stroke`, the borrowed alpha, `kMaxSmoothIterations`, the voxel
+sculpt-layer vocabulary, and the layering rule that lets `mesh` see
+`{parallel, kernel, math, scene, eval, brick, field}`. Their central
+architectural instinct — **do not make `MeshSculptor` topology-mutable; build
+new representations beside it and share the brush kernels** — is the right one
+and matches how this repository has taken every other representation.
+
+**But they are a reversal of a standing non-goal, and they never say so.**
+Dyntopo, multires, remeshing and subdivision are recorded twice below as
+decisions, and once as a normative `SHALL NOT` in `openspec/specs/meshing`
+("the library SHALL NOT re-tessellate to recover from a deformation …
+remeshing remains outside this engine's scope"). A specification that
+contradicts a shipped requirement is a change delta, not a plan. That is what
+Phase 5 is: the reversal written down, with its trigger, and the requirement
+modified rather than quietly outlived.
+
+### What the audit corrected
+
+Six of the documents' premises are stale, all in our favour, and each one moves
+work out of the plan rather than into it:
+
+| The documents say | Actually, as of 2026-08-29 |
+|---|---|
+| **Stage 0: finish the SDF P0** — prefix cache, lazy Smooth initialization, incremental C-ABI Smooth preview | **All three landed** (#371, `add-sdf-prefix-cache`), before the documents were dated. The programme starts at its item #1 |
+| Face sets / polygroups **incomplete**, surface hide/isolation **incomplete (P2)** | `add-surface-groups` landed 2026-08-24: a world-lattice `GroupField`, grow/shrink/border, isolate, a `'GRUP'` chunk, undo, both bindings, and hiding that filters the produced mesh. **The proposed per-face `uint32 face_set` contradicts that design on purpose-built grounds** — groups are a world lattice precisely so they survive a representation bridge — so what is missing is group-aware *automasking*, not the group primitive |
+| Curvature / cavity / normal **automasking incomplete (P2)** | The estimators shipped 2026-08-24 (`brush/procedural_mask.h`, and the per-point measure behind `add-claycore-bridge`). What is missing is evaluating them over a brush WORKSET and composing them into the weight — a smaller change than "add automasking", and one that must reuse the estimator so a cavity mask and a cavity automask cannot disagree |
+| Undo memory budget, and cancellation, proposed as new work | `add-history-budget` and `add-operation-cancellation` both landed 2026-08-24. `cancel()` is already the one call safe from another thread and the token carries progress the host POLLS |
+| Advanced stroke stabilization **needs maturation** | Spacing, steady/lazy stroke, taper, deterministic jitter, buildup-vs-clamped, versioned presets and — since 2026-08-24 — azimuth, velocity and timestamp all ship. **The gap is a consumer, not the engine, and it is one line wide**: `resolve_stroke` puts azimuth into `Stamp::rotation`, `stamps_to_nodes` applies it to the node transform, and `apply_to_mesh` never reads it — so a rake or chisel brush is inexpressible on a mesh layer because the stamp's orientation does not reach the alpha's |
+| `io::MemoryBreakdown` should gain categories | The type is `io::MemoryReport` and it already separates essential content from history from rebuildable caches. It gains rows here; it is not built here |
+
+One correction the other way, and it is the expensive one: the documents assume
+a **five**-representation library (SDF, voxel, fixed mesh, dynamic surface,
+multires) and cost only the new two. Every promise this repository makes in the
+singular — one stroke engine, one mask model, one document, one undo history —
+is a cross-product that grows with the representation count. That is the real
+price of Phase 5 and it belongs in the proposal of every change below.
+
+### The decision, and what would reverse it back
+
+**Reversed 2026-08-29: topology-changing mesh sculpting moves from a non-goal
+to a scoped programme.** The trigger is the one this file already named when it
+audited the outside review: *the non-goal is about not building dyntopo, and it
+does not answer what happens when a mesh-layer snakehook stretches triangles
+past usefulness.* Fixed-topology brushes shipped 2026-08-14 and made that
+question live rather than theoretical — the library now invites an artist to
+sculpt a mesh and then hands them a stretch it calls "the signal the mesh wants
+retopo", which is a signal to leave the engine.
+
+Two things are NOT reversed, and stating them is what keeps the reversal
+bounded:
+
+- **The fixed-topology contract stands, unmodified, for `MeshSculptor`.** An
+  imported retopologised mesh must still come back with `indices` and `quads`
+  byte-identical. Adaptive topology is a DIFFERENT representation with a
+  different invariant, chosen explicitly, never a mode the existing sculptor
+  slips into.
+- **Resolution stays an evaluation parameter on SDF layers.** The multires row
+  below is about a MESH subdivision hierarchy, where resolution is fixed by the
+  import and there is nothing to evaluate; the old non-goal's reasoning
+  ("resolution is an evaluation parameter here, so multires has nothing to
+  attach to") was always about the field and never held for a mesh layer.
+
+**What would reverse it back**, so the decision can be re-examined rather than
+cited: if the sculpting workflow settles on SDF blockout → voxel free-form →
+quad export → *external* retopology, and mesh layers stay a refinement stop
+rather than a place work is created, then two authoritative representations
+have been added to serve a detour. The tell is a dynamic surface that is
+converted to a mesh layer immediately after every session rather than lived in.
+
+### The order, and why it is not the documents' order
+
+The documents order the work topology → multires → layers → brush framework.
+The audit moves the brush work FIRST, for a reason the documents themselves
+supply and then do not act on: all three of the new sculptors are specified to
+share extracted brush kernels, and extracting them from `src/mesh/sculpt.cpp`
+is a refactor with an exact parity gate (the fixed-mesh results must not move
+by a bit) — which is much easier to hold before two new callers exist than
+after.
+
+| Order | Change | Why here |
+|---|---|---|
+| 1 | `add-shared-brush-kernels` | The prerequisite the other four assume. Representation-neutral kernels, a compiled per-stroke runtime plan, a reusable workset and scratch arena, brush frames and automasking over the workset, and a versioned `BrushPreset` so the artist-facing families (ClayBuildup, DamStandard, hPolish, TrimDynamic, Rake) become presets rather than engine paths. **Ships zero behaviour change on the fixed path, and that is the acceptance criterion** |
+| 2 | `add-dynamic-topology` | A stable-ID mutable triangular surface beside `mesh::Mesh`, local split/collapse/flip under constraints, a chunked mutable spatial index, a local remesher driven by brush-relative detail, sparse topology undo, and a dirty-chunk C ABI. The largest single row in the file |
+| 3 | `add-mesh-multires` | A deterministic subdivision hierarchy with detail stored in a transported local frame, sculpt level independent of display level, local low→high propagation. Ordered after dynamic topology because the free-form construction stage feeds it, and because both want the same chunk runtime |
+| 4 | `add-mesh-sculpt-layers` | Non-destructive detail passes on the multires detail representation — the mesh answer to what voxel sculpt layers already are, and the third and last representation to get them. **Must be designed WITH the multires detail storage** or the library ends up with two displacement systems |
+| 5 | `add-extreme-poly-runtime` | Chunk revisions, dirty-chunk transport, memory profiles and pressure trim, subdivision preflight, and the scaling gates that make "a dab costs what it touches" testable at 1M–20M vertices. Last because it optimises an architecture rather than compensating for a missing one — and first to be pulled forward if an iPad build stalls |
+
+### What the documents leave out, and this file requires
+
+Four repository gates appear in none of the four specifications, and every one
+of them has already caught a shipped feature here:
+
+- **Both bindings, gated.** Three capabilities in a row landed reachable from
+  no host. Every change below carries the C ABI *and* pyclay, with
+  `tools/check_binding_parity.py` green.
+- **A numbered example that renders and asserts.** The gallery is how a
+  sculpting feature gets inspected; a benchmark is not an example.
+- **Determinism, stated per requirement.** The mesh verbs promise bit-identical
+  positions on every run and every platform, and the voxel dither is hashed on
+  a cell coordinate to keep that promise. A topology operator ordered by hash
+  map iteration breaks it silently. Dyntopo's determinism contract has to be
+  written into its requirement, not assumed from the CPU being single-threaded.
+- **The version lines.** Every ABI-growing change touches `CMakeLists.txt`,
+  `bindings/c/clay.h`, `pyproject.toml` and `release_check.py` together, and
+  the two most recent releases both shipped with them out of step.
+
+Two overlaps with existing rows, named so nothing is built twice:
+`add-field-stamps` (Phase 4, currently the highest-value unstarted item) is the
+FIELD-space VDM analog and `add-mesh-sculpt-layers` carries the tangent-space
+image one — they are two mechanisms for one artist verb and should share the
+stamp vocabulary. And the mesh multires level stack should read
+`clay_voxel_add_level_region` first: the voxel side already refines over a
+region with watertight transitions as a construction, which is the property the
+mesh hierarchy will be asked for next.
+
 ## Deferred, but recorded
 
 Not scheduled, and not rejected either — small enough to slot in when something
@@ -821,7 +951,7 @@ Each was checked by searching the public surface, not inferred.
 | **Instancing / scatter** | Absent. Phase 4 already names `add-surface-scatter`; the review is right that scatter without instancing duplicates geometry | Medium |
 | **Generic named attributes** | `colors`, `uvs`, `normals` and nothing else. A host cannot carry `material_id` or a custom channel through the engine | Medium. The review is right to separate this from PBR: allowing an app to carry channels is not the same as rendering them, and only the second is a declared non-goal |
 | **Voxel beyond 256³** | Real: a grid's `dims` product must be ≤ `CLAY_MAX_BATCH`, which is 256³ exactly. The spec's "at least 256³" reads as a floor and is also the ceiling | Medium — already recorded under "Deferred, but recorded", now with the number that makes it concrete |
-| **Local remesh** | Absent, and topology-changing sculpting is a declared non-goal. **The review's half-agreement is the right one**: the non-goal is about not building dyntopo, and it does not answer what happens when a mesh-layer snakehook stretches triangles past usefulness. That is a recovery operation, not a sculpting mode | Medium; needs a decision before a proposal |
+| **Local remesh** | Absent, and topology-changing sculpting ~~is~~ **was** a declared non-goal. **The review's half-agreement is the right one**: the non-goal is about not building dyntopo, and it does not answer what happens when a mesh-layer snakehook stretches triangles past usefulness. That is a recovery operation, not a sculpting mode — **and the decision taken 2026-08-29 was that a recovery operation is not enough**, because the same local split/collapse/flip that repairs a stretch is the whole of Dyntopo minus the policy that drives it. Scoped as `add-dynamic-topology`, Phase 5 | ~~Medium; needs a decision before a proposal~~ **P0 of Phase 5** |
 | **Surface conform / shrinkwrap** | Absent | Low-medium |
 
 ### Misframed, or a decision before an implementation
@@ -903,7 +1033,7 @@ moves are the ones already shipped.
 | ~~**P1**~~ | ~~Stroke input: azimuth, velocity, timestamp~~ **landed 2026-08-24** | And the row was right that it was cheapest now: `clay_stroke_resolve` takes a FLAT count*5 float array, so widening the packing in place would have changed the stride under every compiled host — a second entry point taking a real struct array instead, with the older call as sugar. pyclay needed neither, because a numpy array carries its own shape. **Azimuth is the one that unlocks a capability rather than refining one**: tilt says how far the stylus leans, azimuth says which way, and without it a rake or chisel brush is not expressible at all |
 | **P1** | `add-field-stamps` | The review is right that this is a differentiator rather than parity, and right that a captured field can carry more than displacement. **Now the highest-value unstarted item**, since every P0 and every other P1 above it is closed |
 | **P2** | Morph targets · generic attributes · instancing · ~~radial symmetry~~ (`add-radial-symmetry`, landed) · conform | Real, none blocking |
-| **Decide, do not build** | auto-consolidation · preview/commit protocol · representation policy · local remesh · >256³ voxels | Each needs a written decision before it needs a proposal |
+| **Decide, do not build** | auto-consolidation · preview/commit protocol · representation policy · ~~local remesh~~ **decided 2026-08-29, Phase 5** · >256³ voxels | Each needs a written decision before it needs a proposal. Local remesh got one: it is now the second row of Phase 5 rather than a recovery operation bolted to the fixed-topology layer |
 
 The review's closing criterion is worth adopting verbatim, because it is
 testable and nothing here currently tests it end to end:
@@ -921,13 +1051,26 @@ reason to believe the hours are where it would fail.
 
 Recorded so they are decisions rather than oversights:
 
-- **Topology-CHANGING mesh sculpting** — dyntopo, multires, remeshing,
-  subdivision (their LiveClay, ZBrush's dynamic tessellation). An SDF sidesteps
-  topology entirely; competing on dynamic tessellation is not this engine's
-  fight. **Amended 2026-08-14, not dropped**: this row used to say "mesh
-  surface-mode sculpting", which was wider than the decision behind it. Moving
-  the vertices that already exist is a different claim, and
-  `mesh-fixed-topology-brushes` makes it; tessellating new ones stays out.
+- ~~**Topology-CHANGING mesh sculpting** — dyntopo, multires, remeshing,
+  subdivision (their LiveClay, ZBrush's dynamic tessellation).~~ **REVERSED
+  2026-08-29 — see Phase 5 above.** Kept in full because the reasoning is still
+  the right frame for the boundary that remains: *an SDF sidesteps topology
+  entirely; competing on dynamic tessellation is not this engine's fight.*
+  **Amended 2026-08-14, not dropped**: this row used to say "mesh surface-mode
+  sculpting", which was wider than the decision behind it. Moving the vertices
+  that already exist is a different claim, and `mesh-fixed-topology-brushes`
+  makes it; tessellating new ones stays out.
+
+  What the 2026-08-14 amendment did not answer is what happens AFTER a
+  fixed-topology snakehook stretches the triangles past usefulness, and shipping
+  those brushes is what made the question live. The audit of the outside review
+  had already recorded the half-agreement — *that is a recovery operation, not a
+  sculpting mode* — and left it under "decide, do not build". Phase 5 is that
+  decision, taken the other way, and bounded: `MeshSculptor`'s byte-identical
+  `indices`/`quads` contract is untouched, adaptive topology is a separate
+  representation a caller chooses explicitly, and `openspec/specs/meshing`'s
+  "SHALL NOT re-tessellate" is scoped to the fixed-topology layer by a delta
+  rather than deleted.
 - **Mesh-level booleans (composition on a mesh layer).** Decided 2026-08-21,
   against. Composition here means being an operand in the SDF edit list —
   `compile_document` chains visible SDF layers, and a voxel or mesh layer is
@@ -997,8 +1140,15 @@ Recorded so they are decisions rather than oversights:
   DamStandard remains available where it is meaningful: `Op::Incise` on an SDF
   layer, and `MeshBrush::Crease` on a mesh layer.
 
-- **Subdivision multires.** Resolution is an evaluation parameter here, so the
-  whole Res+/Resample/multires apparatus has nothing to attach to.
+- ~~**Subdivision multires.** Resolution is an evaluation parameter here, so the
+  whole Res+/Resample/multires apparatus has nothing to attach to.~~ **REVERSED
+  for MESH layers only, 2026-08-29 — see Phase 5 above.** The reasoning holds
+  exactly where it was written and nowhere else: on an SDF layer resolution IS
+  an evaluation parameter and Res+ has nothing to attach to, and on a voxel
+  layer the level stack (`add-multi-resolution`, `add_level_region`) is the
+  apparatus and it landed. A mesh layer is the one representation where
+  resolution is neither evaluated nor stacked — it is fixed by the import — so
+  the sentence was true of the field and was never tested against the mesh.
 - **Node-graph texturing UI.** The edit list already *is* non-destructive
   procedural sculpting; the research corpus ruled the node-graph out as primary
   UX.
