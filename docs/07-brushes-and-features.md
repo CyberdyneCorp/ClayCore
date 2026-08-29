@@ -1337,9 +1337,16 @@ directly, through the layer transform, and hands back the surface point, the
 normal and the weld class a surface walk should start from. Back faces are not
 culled: a sculptor working inside a shell means it.
 
-**Not dynamic topology.** No dyntopo, no multires, no remeshing, no
-subdivision — see the amended non-goal in
-[`docs/sculpt_comparison.md`](sculpt_comparison.md). Not in the parity system
+**Not dynamic topology, on this representation.** No dyntopo, no multires,
+no remeshing, no subdivision reaches a mesh layer's own triangles, and that
+contract is what makes the layer worth holding after a retopology pass — see
+the amended non-goal in
+[`docs/sculpt_comparison.md`](sculpt_comparison.md). What changed on
+2026-08-29 is the wider claim rather than this one: adaptive topology and a
+subdivision hierarchy are now scoped as SEPARATE representations beside this
+one, in `openspec/ROADMAP.md` Phase 5, and neither is implemented today. When
+they land, a caller converts into them by name; these sixteen verbs still
+guarantee `indices` and `quads` byte for byte. Not in the parity system
 either: this is CPU-side like the voxel verbs, and the determinism bar is
 asserted instead — same stroke, same mesh, same result, bit for bit.
 
@@ -1385,7 +1392,7 @@ parity — the mechanism usually differs even where the result matches.
 | Slice / Knife (polygroup splits) | — | Splitting without removing volume has no single-solid equivalent; it needs two items |
 | ZRemesher (quad retopology) | partly — `mesh_quads` | **Not the same thing, and the difference matters.** claycore meshes a sculpt into a QUAD GRID DERIVED FROM ITS LATTICE: quad-only, regular, no T-junctions, with a target count you choose — enough to hand a form to a DCC as OBJ or FBX. What it is not is field-aligned: no edge loops following the form, no poles placed at features, density that does not follow curvature. A retopology pass REPLACES this rather than refining it |
 | Surface-mode mesh brushes | `mesh::MeshSculptor` (§ 8) | **The non-goal was narrowed, not dropped.** Vertices move on a mesh layer's own triangles; dyntopo, multires and remeshing remain out of scope |
-| Dynamic tessellation (Dyntopo, LiveClay) | — | Out of scope on purpose: an SDF sidesteps topology entirely, and competing on dynamic tessellation is not this engine's fight |
+| Dynamic tessellation (Dyntopo, LiveClay) | — | **Absent today, and no longer a non-goal.** It was out of scope on the grounds that an SDF sidesteps topology entirely — which stayed true and stopped being the whole answer once fixed-topology brushes shipped and a stretched snakehook became a reason to leave the engine. Scoped as `add-dynamic-topology`, `openspec/ROADMAP.md` Phase 5 |
 
 ---
 

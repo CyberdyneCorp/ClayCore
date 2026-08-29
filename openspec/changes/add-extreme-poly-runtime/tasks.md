@@ -1,0 +1,137 @@
+# Tasks: add-extreme-poly-runtime
+
+- [ ] 0.1 SEQUENCING (see ROADMAP, "Phase 5 — the surface tier"): last of the
+      five, because it optimises an architecture rather than compensating for a
+      missing one — the reverted `add-item-spatial-index` is what that costs
+      when it is done in the other order. FIRST to be pulled forward if an iPad
+      build stalls on memory rather than on latency
+
+## 1. Decide first
+
+- [ ] 1.1 DECIDE the chunk size from a benchmark matrix over 64, 128, 256, 512
+      and 1024 triangles per leaf, measuring query cost, false-positive touched
+      vertices, normal recompute, upload size, locality and topology mutation
+      cost. Do not adopt a number from prior art without running it here
+- [ ] 1.2 DECIDE where the memory profile lives — a new `memory` module with a
+      layering entry, or `io` beside the existing report. `parallel` is the
+      precedent for a new leaf module; `io::MemoryReport` is the precedent for
+      the type
+- [ ] 1.3 DECIDE whether the interactive budget is a hint or a contract, per
+      deferrable item. Deferring exact normals during a drag is safe; deferring
+      a topology decision changes the committed result and is not
+- [ ] 1.4 DECIDE how much residency policy the engine owns. A host that must
+      ask before every level switch is a bad API; an engine that evicts on its
+      own is a document mutating behind a host that may be mid-save
+
+## 2. The shared chunk
+
+- [ ] 2.1 `include/clay/mesh/surface_chunks.h` — bounds, triangles, unique
+      vertices, and separate revisions for topology, geometry, normals and
+      attributes
+- [ ] 2.2 ONE unit serving the spatial index leaf, the brush candidate set, the
+      parallel work unit, the normal recompute unit, the dirty set and the host
+      upload unit. A subsystem that invents a second granularity SHALL say why
+- [ ] 2.3 An epoch-marked dirty set rather than a hash set per stamp
+- [ ] 2.4 Chunk-local vertex indexing for derived buffers, with the mapping to
+      global identity kept; authoritative topology stays 32-bit
+- [ ] 2.5 Integrate with the adaptive surface and with each multires level
+
+## 3. Local update path
+
+- [ ] 3.1 The query path is: brush volume → top-level tree → candidate chunks →
+      candidate vertices → exact footprint. Never a scan over every vertex
+- [ ] 3.2 An optional caller-supplied seed from the pick subsystem, validated
+      against a revision, so a stroke does not re-search a centre the host
+      already picked
+- [ ] 3.3 Local normals over the write region and its ring, with an optional
+      deferral to stroke end whose FINAL state is exact
+- [ ] 3.4 Spatial index quality tracked; a rebuild is marked and deferred, and
+      it runs between strokes rather than mid-drag
+- [ ] 3.5 A deferred-maintenance queue — index quality rebuild, cache
+      compaction, sparse-to-dense conversion, slot-pool compaction — that a
+      host services with a time budget between interactions and that never runs
+      in a pointer event
+- [ ] 3.6 Parallel granularity chosen per operation, one level only: the pool
+      runs a nested `parallel_for` inline by design, so parallel-chunks inside
+      parallel-vertices is a mistake the code must not make
+- [ ] 3.7 A serial threshold below which a small footprint does not dispatch at
+      all, measured rather than guessed
+
+## 4. Memory
+
+- [ ] 4.1 `SculptMemoryProfile` with a memory class and byte budgets, filled by
+      the HOST. NO device detection, no platform API, no `if iPad` in the
+      portable core — the policy has to be testable on a desktop
+- [ ] 4.2 Extend the memory report with the new categories: adaptive surface
+      content, multires authoritative detail, sculpt layers, sculpt undo; and
+      separately the rebuildable ones — chunk indices, per-level runtime
+      caches, evaluated layer caches, scratch, preview staging
+- [ ] 4.3 Roll up three totals a host can act on: essential, rebuildable,
+      undoable
+- [ ] 4.4 `trim(pressure)` with the eviction order written into the spec:
+      transient scratch, preview buffers, evaluated caches, inactive spatial
+      indices, inactive derived positions, other rebuildable caches, history to
+      the host's policy — and NEVER unsaved authoritative content
+- [ ] 4.5 A trim report saying what was released and how much
+- [ ] 4.6 THE GATE: after a critical trim, the authoritative checksum is
+      unchanged and every dropped cache reconstructs to an identical surface
+- [ ] 4.7 Residency: sculpt level and display level resident by default on a
+      constrained profile, other levels compact detail only
+- [ ] 4.8 Scratch capacity tracks the largest recent footprint with a soft and
+      a hard bound; past the hard bound the work is processed in blocks rather
+      than allocated
+
+## 5. Preflight
+
+- [ ] 5.1 A capacity estimate — authoritative, runtime and PEAK bytes — for
+      any operation whose peak exceeds its result: adding a level, converting
+      between representations, flattening a stack, global remesh, serialization
+- [ ] 5.2 Refuse with a typed budget error BEFORE allocating, never after
+      allocating half. The peak, not the steady state, is what kills an app on
+      the target device
+- [ ] 5.3 Checked arithmetic on every estimate; an overflow reports a refusal
+      rather than a small number
+- [ ] 5.4 Build-then-publish on every such operation, and cancellation through
+      the existing token
+
+## 6. Transport
+
+- [ ] 6.1 Revisioned dirty-chunk C ABI: count, info, positions, normals,
+      indices, and an acknowledgement so a host can drain incrementally
+- [ ] 6.2 Caller-owned buffers with a capacity query; no heap object per chunk
+      per frame
+- [ ] 6.3 Topology revision distinct from geometry revision, so an index buffer
+      is re-uploaded only when connectivity changed
+- [ ] 6.4 A stale-revision result is discardable by the host: the revision it
+      requested is echoed with what the engine is at now
+- [ ] 6.5 The whole-surface path stays for correctness, and the test compares
+      the reconstruction from the dirty stream against it
+- [ ] 6.6 pyclay reaches the same transport, and parity is green
+
+## 7. The gates
+
+- [ ] 7.1 A benchmark suite at 100k, 1M, 5M, 10M and 20M vertices with
+      footprints of 1k, 5k, 20k, 100k and 500k, across fixed mesh, adaptive
+      surface, multires, and multires with layers
+- [ ] 7.2 Per-stage timing — seed, chunk query, gather, geodesic, snapshot,
+      weight, alpha, automask, kernel, remesh, detail write, normals, index
+      update, readback — because a total without stages is not actionable
+- [ ] 7.3 THE LOCALITY GATE: for one footprint, stamp time stays in one band
+      from 1M to 20M vertices
+- [ ] 7.4 THE ALLOCATION GATE: after warm-up an ordinary stable-topology stamp
+      performs no heap allocation; adaptive stamps allocate only from
+      preallocated pools
+- [ ] 7.5 THE PREVIEW GATE: bytes handed to a host per stamp follow the dirty
+      chunks and not the model size
+- [ ] 7.6 THE MEMORY-PRESSURE GATE: 4.6, as a test rather than a claim
+- [ ] 7.7 Peak telemetry — scratch, workset, dirty chunks, topology operations
+      — reported as high-water marks for profile tuning
+- [ ] 7.8 Measured on the reference iPad as well as on a desktop: median and
+      p95 stamp latency, footprint and peak memory, and a sustained multi-minute
+      session for thermal behaviour. The device gate already exists and this
+      extends it rather than inventing a second one
+- [ ] 7.9 Four presets green plus `release_check`; `tsan` under `setarch -R`;
+      `check_layering.py` green including whatever 1.2 decided
+- [ ] 7.10 Docs: `docs/09-brush-latency-and-coverage.md` gains the new
+      representations' measured costs; the memory documentation gains the
+      eviction order verbatim, because a host implementer needs it in prose

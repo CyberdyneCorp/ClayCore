@@ -532,9 +532,16 @@ reference iPad is in
 Recorded as decisions rather than gaps, with the reasoning in
 [`openspec/ROADMAP.md`](openspec/ROADMAP.md):
 
-- **No dynamic topology** — no dyntopo, multires, subdivision or remeshing. An
-  SDF sidesteps topology entirely; competing on dynamic tessellation is not
-  this engine's fight. A large pull stretches the triangles it has.
+- **No dynamic topology today** — no dyntopo, multires, subdivision or
+  remeshing, so a large pull stretches the triangles it has. This was a
+  non-goal on the grounds that an SDF sidesteps topology entirely; it stopped
+  being one on 2026-08-29, because shipping mesh brushes turned "that stretch
+  is your signal to retopologise elsewhere" into a signal to leave the engine.
+  Adaptive topology and a mesh subdivision hierarchy are now scoped as separate
+  representations beside the fixed-topology one — `openspec/ROADMAP.md`
+  Phase 5 — and **none of it is implemented**. The fixed-topology guarantee is
+  not weakened by the plan: these verbs will still hand back `indices` and
+  `quads` byte for byte.
 - **No PBR channels.** Polypaint works on all three representations; roughness
   and metallic want a UV parameterisation and a texture set, which live
   upstream of this library.
