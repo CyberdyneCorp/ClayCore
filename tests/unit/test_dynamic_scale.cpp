@@ -12,6 +12,15 @@
 // requirement is actually about and which does not move when the box is busy.
 // The wall-clock numbers at the sizes the requirement names are in
 // `benchmarks/bench_main.cpp`, where a benchmark harness can control for it.
+//
+// AND THAT CHOICE HAS A KNOWN BLIND SPOT, which cost a real defect. An operator
+// that reads the whole surface to find four half-edges still TOUCHES four, so
+// every assertion in this file stayed green while a 320k-face stamp ran 570x a
+// 20k-face one at an identical footprint. Work-counting cannot see a cost that
+// is paid in reading rather than writing. The complement lives in
+// `test_sculpt_allocation.cpp`, which asserts that a topology operator's
+// APPETITE does not follow the surface either; the two together are the gate,
+// and neither is sufficient alone.
 
 #include <doctest/doctest.h>
 

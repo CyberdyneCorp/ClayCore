@@ -220,8 +220,14 @@ SplitResult split_edge(DynamicSurface& surface, EdgeId edge, float t,
     // splits (it stays a boundary), a seam splits (both sides interpolate their
     // own UV), and a crease splits (it stays a crease) — splitting never
     // removes a feature, which is why it has by far the shortest refusal list.
-    const DynamicEdge& edge_rec = surface.edges().at(edge);
-    if (has_constraint(edge_rec.constraints, EdgeConstraint::UserLocked)) {
+    // COPIED, NOT REFERENCED. Every pool here is a vector, so anything that
+    // creates an element can reallocate it and leave a reference into it
+    // dangling. This one is read again after `create_edge`, which is exactly
+    // when the edge pool grows — ASan caught it as a heap-use-after-free, and
+    // it is the kind of defect that only bites when the vector happens to
+    // reallocate, so it would have been intermittent and mystifying.
+    const std::uint32_t edge_constraints = surface.edges().at(edge).constraints;
+    if (has_constraint(edge_constraints, EdgeConstraint::UserLocked)) {
         out.result = TopologyResult::Constrained;
         return out;
     }
@@ -239,8 +245,9 @@ SplitResult split_edge(DynamicSurface& surface, EdgeId edge, float t,
     //
     // Everything read here is read from the UNTOUCHED surface, and nothing is
     // written until every check has passed. That is the whole of atomicity.
-    const DynamicVertex& a = surface.vertices().at(v0);
-    const DynamicVertex& b = surface.vertices().at(v1);
+    // Copied for the same reason: `create_vertex` below reallocates this pool.
+    const DynamicVertex a = surface.vertices().at(v0);
+    const DynamicVertex b = surface.vertices().at(v1);
     const kernel::cfloat3 pos = lerp3(a.position, b.position, param);
 
     // The opposite corners, one per live side.
@@ -320,7 +327,7 @@ SplitResult split_edge(DynamicSurface& surface, EdgeId edge, float t,
     // The new edge, from the midpoint to v1. `edge` keeps v0 -> midpoint, so a
     // handle to it still names the half of the edge nearest where it was.
     const EdgeId e_new = surface.create_edge(DynamicEdge{});
-    surface.edges_mutable().at(e_new).constraints = edge_rec.constraints;
+    surface.edges_mutable().at(e_new).constraints = edge_constraints;
     scribe.note_new(e_new);
 
     // h0 keeps origin v0 and now targets vm; a new half-edge carries vm -> v1.
@@ -342,6 +349,9 @@ SplitResult split_edge(DynamicSurface& surface, EdgeId edge, float t,
 
     out.vertex = vm;
     out.face_count = 0;
+    // The spokes each side creates, kept so the outgoing seeds below can name
+    // them without searching the surface for them.
+    std::vector<HalfEdgeId> spokes;
 
     if (side0) {
         // The old face becomes two: (v0, vm, opp0) and (vm, v1, opp0).
@@ -361,6 +371,8 @@ SplitResult split_edge(DynamicSurface& surface, EdgeId edge, float t,
         const HalfEdgeId sp_twin = surface.create_halfedge(s1);
         scribe.note_new(sp);
         scribe.note_new(sp_twin);
+        spokes.push_back(sp);
+        spokes.push_back(sp_twin);
         surface.bind_edge(e_spoke, sp, sp_twin);
 
         // (v0 -> vm -> opp0): h0, sp, h0_prev
@@ -401,6 +413,8 @@ SplitResult split_edge(DynamicSurface& surface, EdgeId edge, float t,
         const HalfEdgeId sp_twin = surface.create_halfedge(s1);
         scribe.note_new(sp);
         scribe.note_new(sp_twin);
+        spokes.push_back(sp);
+        spokes.push_back(sp_twin);
         surface.bind_edge(e_spoke, sp, sp_twin);
 
         // h1 now runs vm -> v0, and h1b runs v1 -> vm.
@@ -429,7 +443,19 @@ SplitResult split_edge(DynamicSurface& surface, EdgeId edge, float t,
     // onto the midpoint; a walk starting there would traverse the wrong fan and
     // the validator would report a vertex pointing at a half-edge that does not
     // start where it says.
+    // THE CANDIDATES ARE THE HALF-EDGES THIS OPERATOR TOUCHED, named explicitly.
+    //
+    // The first version swept every live half-edge in the surface looking for
+    // ones originating at the midpoint. It is correct, it is O(surface) per
+    // split, and it is invisible to a test that counts vertices moved — the
+    // work the stamp reports is unchanged, and only the clock knows. Measured
+    // on a 320k-face patch it was most of a 750 ms stamp; the scaling gate was
+    // green throughout, because the gate counts what a stamp TOUCHES.
+    //
+    // Everything leaving the midpoint was created a dozen lines above, so there
+    // is nothing to search for.
     std::vector<HalfEdgeId> seeds{h0, h1, h0b, h1b};
+    seeds.insert(seeds.end(), spokes.begin(), spokes.end());
     if (side0) {
         seeds.push_back(h0_next);
         seeds.push_back(h0_prev);
@@ -438,9 +464,6 @@ SplitResult split_edge(DynamicSurface& surface, EdgeId edge, float t,
         seeds.push_back(h1_next);
         seeds.push_back(h1_prev);
     }
-    surface.halfedges().for_each_live([&](HalfEdgeId id, const DynamicHalfEdge& he) {
-        if (he.origin == vm) seeds.push_back(id);
-    });
     reseat_outgoing(surface, v0, seeds);
     reseat_outgoing(surface, v1, seeds);
     reseat_outgoing(surface, vm, seeds);
@@ -465,140 +488,142 @@ SplitResult split_edge(DynamicSurface& surface, EdgeId edge, float t,
 
 // -- collapse -----------------------------------------------------------------
 
-CollapseResult collapse_edge(DynamicSurface& surface, EdgeId edge,
-                             const TopologyOpOptions& options, TopologyDelta* delta) {
-    CollapseResult out;
-    if (!surface.live(edge)) return out;
+namespace {
 
-    const HalfEdgeId h0 = surface.halfedge_of(edge);
-    const HalfEdgeId h1 = surface.twin_of(h0);
-    if (!surface.live(h0) || !surface.live(h1)) return out;
-
-    const DynamicEdge& edge_rec = surface.edges().at(edge);
-    if ((edge_rec.constraints & options.collapse_blockers) != 0) {
-        out.result = TopologyResult::Constrained;
-        return out;
-    }
-
-    const VertexId v0 = surface.origin_of(h0);
-    const VertexId v1 = surface.origin_of(h1);
-    if (!surface.live(v0) || !surface.live(v1)) return out;
-
-    // -- the link condition ---------------------------------------------------
-    //
-    // THE TOPOLOGICAL test, and the reason a geometric one is not enough: a
-    // collapse whose endpoints share a neighbour that is NOT opposite the edge
-    // pinches the surface into a non-manifold state. It looks fine in a render
-    // and is unusable afterwards — the two faces that meet at the pinch have no
-    // consistent orientation between them, and every later walk through that
-    // vertex visits both sides of a surface that no longer has two sides.
+// WHAT THE DECIDE PHASE OF A COLLAPSE WORKS OUT, so the write phase does not
+// work any of it out again.
+//
+// A collapse is decide-then-write for a reason the fuzz run made concrete: once
+// the first half-edge is retired the surface is briefly inconsistent, and a
+// refusal discovered at that point cannot be honoured. So every refusal is
+// reached before anything is written, and this is what a successful decision
+// leaves behind.
+struct CollapsePlan {
+    HalfEdgeId h0, h1;
+    VertexId v0, v1;
     std::vector<VertexId> ring0, ring1;
-    if (!surface.one_ring(v0, &ring0) || !surface.one_ring(v1, &ring1)) return out;
+    // The faces incident to each endpoint. Gathered by the geometric refusal
+    // and kept, because the write phase has to note every one of them and
+    // walking both fans a second time would be the same work twice.
+    std::vector<FaceId> faces0, faces1;
+    std::uint32_t edge_constraints = 0;
+    kernel::cfloat3 target = kernel::cf3(0, 0, 0);
+    // The border loop around a boundary edge's ghost, captured while the ghost
+    // is still alive. See the note at the call site.
+    HalfEdgeId border_pred, border_succ;
+};
 
+// THE TOPOLOGICAL test, and the reason a geometric one is not enough: a
+// collapse whose endpoints share a neighbour that is NOT opposite the edge
+// pinches the surface into a non-manifold state. It looks fine in a render and
+// is unusable afterwards — the two faces that meet at the pinch have no
+// consistent orientation between them, and every later walk through that vertex
+// visits both sides of a surface that no longer has two sides.
+//
+// Necessary and NOT SUFFICIENT, which is why the duplicate-triangle check below
+// is a separate one.
+TopologyResult collapse_link_refusal(const DynamicSurface& surface, HalfEdgeId h0, HalfEdgeId h1,
+                                     const std::vector<VertexId>& ring0,
+                                     const std::vector<VertexId>& ring1) {
     // The vertices opposite the edge: the third corner of each incident face.
     std::vector<VertexId> opposite;
     for (HalfEdgeId h : {h0, h1}) {
         if (!surface.live(surface.face_of(h))) continue;
         const HalfEdgeId prev = surface.next_of(surface.next_of(h));
-        if (!surface.live(prev)) return out;
+        if (!surface.live(prev)) return TopologyResult::InvalidInput;
         opposite.push_back(surface.origin_of(prev));
     }
 
-    std::vector<std::uint32_t> shared;
-    {
-        std::vector<std::uint32_t> a, b;
-        for (VertexId v : ring0) a.push_back(v.slot);
-        for (VertexId v : ring1) b.push_back(v.slot);
-        std::sort(a.begin(), a.end());
-        std::sort(b.begin(), b.end());
-        std::set_intersection(a.begin(), a.end(), b.begin(), b.end(), std::back_inserter(shared));
-    }
-    if (shared.size() != opposite.size()) {
-        out.result = TopologyResult::LinkCondition;
-        return out;
-    }
-    for (std::uint32_t s : shared) {
+    std::vector<std::uint32_t> a, b, shared;
+    for (VertexId v : ring0) a.push_back(v.slot);
+    for (VertexId v : ring1) b.push_back(v.slot);
+    std::sort(a.begin(), a.end());
+    std::sort(b.begin(), b.end());
+    std::set_intersection(a.begin(), a.end(), b.begin(), b.end(), std::back_inserter(shared));
+
+    if (shared.size() != opposite.size()) return TopologyResult::LinkCondition;
+    for (std::uint32_t sl : shared) {
         bool is_opposite = false;
         for (VertexId o : opposite)
-            if (o.slot == s) is_opposite = true;
-        if (!is_opposite) {
-            out.result = TopologyResult::LinkCondition;
-            return out;
+            if (o.slot == sl) is_opposite = true;
+        if (!is_opposite) return TopologyResult::LinkCondition;
+    }
+    if (ring0.size() < 3 || ring1.size() < 3) return TopologyResult::LinkCondition;
+    return TopologyResult::Ok;
+}
+
+// WOULD ANY TWO FACES BECOME THE SAME TRIANGLE?
+//
+// The tetrahedron is the case that shows the link condition is not sufficient:
+// every one of its edges passes the link test — the endpoints' rings intersect
+// in exactly the two opposite vertices — and collapsing any of them leaves two
+// faces on the same three vertices, which is a surface with no interior.
+//
+// So the surviving faces are enumerated with the merge applied and checked for
+// repeats. This is the "duplicate triangle" refusal the requirement names, and
+// it is not reachable from the link condition alone.
+TopologyResult collapse_duplicate_face_refusal(const DynamicSurface& surface, HalfEdgeId h0,
+                                               HalfEdgeId h1, VertexId v0, VertexId v1) {
+    std::vector<FaceId> around;
+    std::vector<std::array<std::uint32_t, 3>> triples;
+    for (VertexId v : {v0, v1}) {
+        if (!surface.incident_faces(v, &around)) return TopologyResult::InvalidInput;
+        for (FaceId f : around) {
+            bool dies = false;
+            for (HalfEdgeId h : {h0, h1})
+                if (surface.face_of(h) == f) dies = true;
+            if (dies) continue;
+            VertexId tri[3];
+            if (!surface.face_vertices(f, tri)) return TopologyResult::InvalidInput;
+            std::array<std::uint32_t, 3> key{};
+            for (int i = 0; i < 3; ++i) key[i] = (tri[i] == v1) ? v0.slot : tri[i].slot;
+            std::sort(key.begin(), key.end());
+            triples.push_back(key);
         }
     }
+    std::sort(triples.begin(), triples.end());
+    if (std::adjacent_find(triples.begin(), triples.end()) != triples.end())
+        return TopologyResult::LinkCondition;
+    return TopologyResult::Ok;
+}
 
-    if (ring0.size() < 3 || ring1.size() < 3) {
-        out.result = TopologyResult::LinkCondition;
-        return out;
-    }
-
-    // WOULD ANY TWO FACES BECOME THE SAME TRIANGLE?
-    //
-    // The link condition is necessary and not sufficient, and the tetrahedron is
-    // the case that shows it: every one of its edges passes the link test — the
-    // endpoints' rings intersect in exactly the two opposite vertices — and
-    // collapsing any of them leaves two faces on the same three vertices, which
-    // is a surface with no interior.
-    //
-    // So the surviving faces are enumerated with the merge applied and checked
-    // for repeats. This is the "duplicate triangle" refusal the requirement
-    // names, and it is not reachable from the link condition alone.
-    {
-        std::vector<FaceId> around;
-        std::vector<std::array<std::uint32_t, 3>> triples;
-        for (VertexId v : {v0, v1}) {
-            if (!surface.incident_faces(v, &around)) return out;
-            for (FaceId f : around) {
-                bool dies = false;
-                for (HalfEdgeId h : {h0, h1})
-                    if (surface.face_of(h) == f) dies = true;
-                if (dies) continue;
-                VertexId tri[3];
-                if (!surface.face_vertices(f, tri)) return out;
-                std::array<std::uint32_t, 3> key{};
-                for (int i = 0; i < 3; ++i)
-                    key[i] = (tri[i] == v1) ? v0.slot : tri[i].slot;
-                std::sort(key.begin(), key.end());
-                triples.push_back(key);
-            }
-        }
-        std::sort(triples.begin(), triples.end());
-        if (std::adjacent_find(triples.begin(), triples.end()) != triples.end()) {
-            out.result = TopologyResult::LinkCondition;
-            return out;
-        }
-    }
-
-    // -- placement ------------------------------------------------------------
-    //
-    // Midpoint, except that a constraint wins over geometry: exactly one
-    // constrained endpoint keeps its position so the feature does not move, and
-    // both constrained is refused unless the edge itself carries the same
-    // constraint, in which case the feature collapses along itself. See D12.
+// WHERE THE MERGED VERTEX GOES.
+//
+// Midpoint, except that a constraint wins over geometry: exactly one
+// constrained endpoint keeps its position so the feature does not move, and
+// both constrained is refused unless the edge itself carries the same
+// constraint, in which case the feature collapses along itself. See D12.
+TopologyResult collapse_target(const DynamicSurface& surface, EdgeId edge, VertexId v0, VertexId v1,
+                               std::uint32_t edge_constraints, kernel::cfloat3* out) {
     const bool b0 = surface.is_boundary_vertex(v0);
     const bool b1 = surface.is_boundary_vertex(v1);
-    const bool edge_is_boundary = has_constraint(edge_rec.constraints, EdgeConstraint::Boundary);
-    kernel::cfloat3 target;
+    const bool edge_is_boundary = has_constraint(edge_constraints, EdgeConstraint::Boundary);
     if (b0 && b1 && !edge_is_boundary) {
-        // Two border vertices joined by an INTERIOR edge: collapsing them
-        // welds two parts of the border together, which changes the surface's
-        // shape in a way no local rule can justify.
-        out.result = TopologyResult::LinkCondition;
-        return out;
-    } else if (b0 && !b1) {
-        target = surface.position_of(v0);
-    } else if (b1 && !b0) {
-        target = surface.position_of(v1);
-    } else {
-        target = surface.edge_midpoint(edge);
+        // Two border vertices joined by an INTERIOR edge: collapsing them welds
+        // two parts of the border together, which changes the surface's shape
+        // in a way no local rule can justify.
+        return TopologyResult::LinkCondition;
     }
+    if (b0 && !b1)
+        *out = surface.position_of(v0);
+    else if (b1 && !b0)
+        *out = surface.position_of(v1);
+    else
+        *out = surface.edge_midpoint(edge);
+    return TopologyResult::Ok;
+}
 
-    // -- geometric refusals ---------------------------------------------------
-    //
-    // What the link condition cannot see: a collapse that is topologically fine
-    // and folds the surface over itself.
-    std::vector<FaceId> faces0, faces1;
-    if (!surface.incident_faces(v0, &faces0) || !surface.incident_faces(v1, &faces1)) return out;
+// WHAT THE LINK CONDITION CANNOT SEE: a collapse that is topologically fine and
+// folds the surface over itself.
+TopologyResult collapse_geometric_refusal(const DynamicSurface& surface, HalfEdgeId h0,
+                                          HalfEdgeId h1, VertexId v0, VertexId v1,
+                                          kernel::cfloat3 target,
+                                          const TopologyOpOptions& options,
+                                          std::vector<FaceId>* faces0_out,
+                                          std::vector<FaceId>* faces1_out) {
+    std::vector<FaceId>&faces0 = *faces0_out, &faces1 = *faces1_out;
+    if (!surface.incident_faces(v0, &faces0) || !surface.incident_faces(v1, &faces1))
+        return TopologyResult::InvalidInput;
 
     std::vector<FaceId> dying;
     for (HalfEdgeId h : {h0, h1}) {
@@ -615,23 +640,55 @@ CollapseResult collapse_edge(DynamicSurface& surface, EdgeId edge,
         for (FaceId f : *list) {
             if (is_dying(f)) continue;
             VertexId v[3];
-            if (!surface.face_vertices(f, v)) return out;
+            if (!surface.face_vertices(f, v)) return TopologyResult::InvalidInput;
             kernel::cfloat3 p[3];
             for (int i = 0; i < 3; ++i)
                 p[i] = (v[i] == v0 || v[i] == v1) ? target : surface.position_of(v[i]);
-            if (triangle_area_x2(p[0], p[1], p[2]) < options.min_area_x2) {
-                out.result = TopologyResult::WouldDegenerate;
-                return out;
-            }
+            if (triangle_area_x2(p[0], p[1], p[2]) < options.min_area_x2)
+                return TopologyResult::WouldDegenerate;
             const kernel::cfloat3 before = surface.face_normal(f);
             const kernel::cfloat3 after = triangle_normal(p[0], p[1], p[2]);
             const float dot = std::clamp(kernel::cdot(before, after), -1.0f, 1.0f);
-            if (std::acos(dot) > options.max_normal_swing) {
-                out.result = TopologyResult::NormalFlip;
-                return out;
-            }
+            if (std::acos(dot) > options.max_normal_swing) return TopologyResult::NormalFlip;
         }
     }
+    return TopologyResult::Ok;
+}
+
+// EVERY REFUSAL, IN ORDER, before a single write. Ok means the plan is filled
+// in and the collapse will succeed.
+TopologyResult plan_collapse(const DynamicSurface& surface, EdgeId edge,
+                             const TopologyOpOptions& options, CollapsePlan* plan) {
+    if (!surface.live(edge)) return TopologyResult::InvalidInput;
+    plan->h0 = surface.halfedge_of(edge);
+    plan->h1 = surface.twin_of(plan->h0);
+    if (!surface.live(plan->h0) || !surface.live(plan->h1)) return TopologyResult::InvalidInput;
+
+    // A VALUE, not a reference into the pool. Nothing here creates an element
+    // today, so nothing reallocates — but the same shape in `split_edge` was a
+    // heap-use-after-free ASan had to find, and a reference that is only safe
+    // because of what the rest of the function happens not to do is a trap for
+    // whoever edits it next.
+    plan->edge_constraints = surface.edges().at(edge).constraints;
+    if ((plan->edge_constraints & options.collapse_blockers) != 0)
+        return TopologyResult::Constrained;
+
+    plan->v0 = surface.origin_of(plan->h0);
+    plan->v1 = surface.origin_of(plan->h1);
+    if (!surface.live(plan->v0) || !surface.live(plan->v1)) return TopologyResult::InvalidInput;
+    if (!surface.one_ring(plan->v0, &plan->ring0) || !surface.one_ring(plan->v1, &plan->ring1))
+        return TopologyResult::InvalidInput;
+
+    TopologyResult r =
+        collapse_link_refusal(surface, plan->h0, plan->h1, plan->ring0, plan->ring1);
+    if (r != TopologyResult::Ok) return r;
+    r = collapse_duplicate_face_refusal(surface, plan->h0, plan->h1, plan->v0, plan->v1);
+    if (r != TopologyResult::Ok) return r;
+    r = collapse_target(surface, edge, plan->v0, plan->v1, plan->edge_constraints, &plan->target);
+    if (r != TopologyResult::Ok) return r;
+    r = collapse_geometric_refusal(surface, plan->h0, plan->h1, plan->v0, plan->v1, plan->target,
+                                   options, &plan->faces0, &plan->faces1);
+    if (r != TopologyResult::Ok) return r;
 
     // THE BORDER LOOP, captured before anything is written.
     //
@@ -639,16 +696,37 @@ CollapseResult collapse_edge(DynamicSurface& surface, EdgeId edge,
     // BEFORE it in the border loop is then pointing at a dead one. Nothing in
     // the fan rewiring notices, because the predecessor is not in either
     // endpoint's fan — it is one step further round the border. The fuzz run
-    // found this at seed 2 step 40, as "half-edge 156 has a dead next", which
-    // is exactly the shape of defect that only a randomized interleaving
-    // reaches.
-    HalfEdgeId border_pred, border_succ;
-    for (HalfEdgeId ghost : {h0, h1}) {
+    // found this at seed 2 step 40, as "half-edge 156 has a dead next", which is
+    // exactly the shape of defect that only a randomized interleaving reaches.
+    for (HalfEdgeId ghost : {plan->h0, plan->h1}) {
         if (!surface.is_boundary_halfedge(ghost)) continue;
-        border_pred = boundary_predecessor(surface, ghost);
-        border_succ = surface.next_of(ghost);
+        plan->border_pred = boundary_predecessor(surface, ghost);
+        plan->border_succ = surface.next_of(ghost);
         break;
     }
+    return TopologyResult::Ok;
+}
+
+}  // namespace
+
+CollapseResult collapse_edge(DynamicSurface& surface, EdgeId edge,
+                             const TopologyOpOptions& options, TopologyDelta* delta) {
+    CollapseResult out;
+    CollapsePlan plan;
+    out.result = plan_collapse(surface, edge, options, &plan);
+    if (out.result != TopologyResult::Ok) return out;
+    // Named locally, because the write phase below reads them on nearly every
+    // line and `plan.` on all of them would bury what it is doing.
+    const HalfEdgeId h0 = plan.h0, h1 = plan.h1;
+    const VertexId v0 = plan.v0, v1 = plan.v1;
+    const std::vector<VertexId>& ring0 = plan.ring0;
+    const std::vector<VertexId>& ring1 = plan.ring1;
+    const std::vector<FaceId>& faces0 = plan.faces0;
+    const std::vector<FaceId>& faces1 = plan.faces1;
+    const kernel::cfloat3 target = plan.target;
+    const HalfEdgeId border_pred = plan.border_pred, border_succ = plan.border_succ;
+    // `out.result` is Ok from here; every refusal was reached above.
+    out.result = TopologyResult::InvalidInput;
 
     // -- write ----------------------------------------------------------------
     DeltaScribe scribe{surface, delta, {}, {}, {}, {}};
@@ -662,10 +740,17 @@ CollapseResult collapse_edge(DynamicSurface& surface, EdgeId edge,
     for (VertexId v : ring1) scribe.note(v);
     for (FaceId f : faces0) scribe.note(f);
     for (FaceId f : faces1) scribe.note(f);
+    // Every half-edge in the two-ring, which is exactly what a collapse rewires
+    // and exactly where a surviving outgoing handle can come from.
+    std::vector<HalfEdgeId> neighbourhood;
     std::vector<HalfEdgeId> ring_h;
     for (VertexId v : {v0, v1}) {
         if (surface.outgoing_halfedges(v, &ring_h))
             for (HalfEdgeId h : ring_h) {
+                neighbourhood.push_back(h);
+                neighbourhood.push_back(surface.twin_of(h));
+                neighbourhood.push_back(surface.next_of(h));
+                neighbourhood.push_back(surface.next_of(surface.next_of(h)));
                 scribe.note(h);
                 scribe.note(surface.twin_of(h));
                 scribe.note(surface.next_of(h));
@@ -750,14 +835,15 @@ CollapseResult collapse_edge(DynamicSurface& surface, EdgeId edge,
     // walk cannot supply one: a collapse erases six half-edges, and a vertex
     // whose seed was one of them has no valid place for the walk to start.
     // The surviving half-edges of the neighbourhood are where to look.
-    std::vector<HalfEdgeId> survivors;
-    surface.halfedges().for_each_live(
-        [&](HalfEdgeId id, const DynamicHalfEdge&) { survivors.push_back(id); });
-    reseat_outgoing(surface, v0, survivors);
+    // THE NEIGHBOURHOOD, captured before the erases rather than swept out of the
+    // whole surface afterwards — same defect as the one in `split_edge` above,
+    // and the same reason it was invisible: it changes the clock and not the
+    // reported work.
+    reseat_outgoing(surface, v0, neighbourhood);
     for (VertexId v : ring0)
-        if (surface.live(v)) reseat_outgoing(surface, v, survivors);
+        if (surface.live(v)) reseat_outgoing(surface, v, neighbourhood);
     for (VertexId v : ring1)
-        if (surface.live(v)) reseat_outgoing(surface, v, survivors);
+        if (surface.live(v)) reseat_outgoing(surface, v, neighbourhood);
 
     out.faces.clear();
     if (surface.incident_faces(v0, &out.faces)) surface.refresh_normals(out.faces);
@@ -790,8 +876,8 @@ FlipResult flip_edge(DynamicSurface& surface, EdgeId edge, const TopologyOpOptio
         out.result = TopologyResult::Constrained;
         return out;
     }
-    const DynamicEdge& edge_rec = surface.edges().at(edge);
-    if ((edge_rec.constraints & options.flip_blockers) != 0) {
+    const std::uint32_t edge_constraints = surface.edges().at(edge).constraints;
+    if ((edge_constraints & options.flip_blockers) != 0) {
         out.result = TopologyResult::Constrained;
         return out;
     }

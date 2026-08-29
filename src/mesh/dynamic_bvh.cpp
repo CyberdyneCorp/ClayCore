@@ -217,6 +217,14 @@ std::uint32_t DynamicBvh::build_node(std::vector<std::uint32_t>& order, std::siz
     return index;
 }
 
+// Rebuild if a leaf split or merged since the last query. Called from the
+// queries rather than from the mutations, so a stamp's thousands of inserts pay
+// for one rebuild instead of thousands.
+void DynamicBvh::ensure_tree() const {
+    if (!tree_stale_) return;
+    const_cast<DynamicBvh*>(this)->rebuild_tree();
+}
+
 void DynamicBvh::rebuild_tree() {
     nodes_.clear();
     std::vector<std::uint32_t> order;
@@ -333,7 +341,11 @@ void DynamicBvh::insert(const DynamicSurface& surface, FaceId face) {
 
     if (leaves_[leaf_index].faces.size() > options_.max_leaf_faces)
         split_leaf(surface, leaf_index);
-    if (tree_stale_) rebuild_tree();
+    // THE TREE IS NOT REBUILT HERE. `insert` runs once per face per topology
+    // operation, and a stamp on a big surface runs thousands of them; rebuilding
+    // the tree over the leaves inside it made the stamp O(operations x leaves)
+    // and turned a 4x bigger model into a 40x slower dab. The rebuild is
+    // deferred to the next QUERY, which needs it and happens once.
 }
 
 void DynamicBvh::split_leaf(const DynamicSurface& surface, std::uint32_t leaf_index) {
@@ -431,6 +443,7 @@ void DynamicBvh::update_many(const DynamicSurface& surface, const std::vector<Fa
 void DynamicBvh::faces_in_ball(const DynamicSurface& surface, kernel::cfloat3 centre, float radius,
                                std::vector<FaceId>* out) const {
     out->clear();
+    ensure_tree();
     if (root_ == 0xffffffffu || radius <= 0.0f) return;
     const float r2 = radius * radius;
     std::vector<std::uint32_t> stack{root_};
@@ -465,6 +478,7 @@ void DynamicBvh::faces_in_ball(const DynamicSurface& surface, kernel::cfloat3 ce
 DynamicBvh::ClosestPoint DynamicBvh::closest(const DynamicSurface& surface,
                                              kernel::cfloat3 p) const {
     ClosestPoint out;
+    ensure_tree();
     if (root_ == 0xffffffffu) return out;
     float best2 = std::numeric_limits<float>::max();
     std::vector<std::uint32_t> stack{root_};
@@ -503,6 +517,7 @@ DynamicBvh::ClosestPoint DynamicBvh::closest(const DynamicSurface& surface,
 DynamicBvh::RayHit DynamicBvh::raycast(const DynamicSurface& surface, kernel::cfloat3 origin,
                                        kernel::cfloat3 direction) const {
     RayHit out;
+    ensure_tree();
     if (root_ == 0xffffffffu) return out;
     const float len = kernel::clength(direction);
     if (len < 1e-20f) return out;

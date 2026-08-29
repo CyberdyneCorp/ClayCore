@@ -67,7 +67,12 @@ void DynamicSculptor::geodesic_region(kernel::cfloat3 centre, float radius, Vert
     if (!surface_.live(seed)) return;
 
     const std::size_t slots = surface_.vertices().capacity_slots();
-    if (walk_distance_.size() != slots) walk_distance_.assign(slots, -1.0f);
+    // RESIZE, NOT ASSIGN. The vertex pool grows on every stamp that splits, so
+    // `assign` here re-wrote the whole array once per dab — O(surface) work on
+    // the one path that must cost the footprint. `resize` fills only the slots
+    // that are new, and every older slot is already `kUnreached` because the
+    // walk retires its own marks through `walk_dirty_` before it returns.
+    if (walk_distance_.size() < slots) walk_distance_.resize(slots, -1.0f);
     walk_dirty_.clear();
     walk_frontier_.clear();
 
@@ -142,8 +147,13 @@ void DynamicSculptor::geodesic_region(kernel::cfloat3 centre, float radius, Vert
 bool DynamicSculptor::gather(const MeshBrushSettings& brush, const field::MaskGate& gate,
                              bool geodesic) {
     const std::size_t slots = surface_.vertices().capacity_slots();
-    if (slot_.size() != slots) {
-        slot_.assign(slots, kNoClass);
+    if (slot_.size() < slots) {
+        // Grown, not rewritten — same reason as the walk's distance array. The
+        // slots that already existed still hold `kNoClass`, because the gather
+        // below retires its own marks through the workset it kept.
+        slot_.resize(slots, kNoClass);
+        for (VertexId v : region_vertices_)
+            if (v.slot < slot_.size()) slot_[v.slot] = kNoClass;
         region_vertices_.clear();
     } else {
         // Retire the LAST stamp's marks through its own list, so the reset costs

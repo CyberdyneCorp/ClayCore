@@ -184,7 +184,25 @@
       10k and 50k vertices, timed per stage: candidate query, gather, split,
       collapse, flip, relax, deformation, normals, index update, dirty export
 - [x] 10.2 THE SCALING GATE: for a fixed footprint the stamp cost stays in one
-      band as the surface grows 100k → 1M → 5M. A 50x model is not a 50x stamp
+      band as the surface grows 100k → 1M → 5M. A 50x model is not a 50x stamp.
+      **THIS GATE FAILED ON FIRST HONEST MEASUREMENT AND THE FAILURE WAS REAL.**
+      `test_dynamic_scale.cpp` asserts on work TOUCHED, deliberately, so the
+      suite does not measure a shared CI box — and that is exactly the blind
+      spot an operator which READS the whole surface slips through. Both
+      `split_edge` and `collapse_edge` were finding the few live half-edges
+      `reseat_outgoing` needs by sweeping every live half-edge in the surface:
+      correct, O(surface) per operation, and invisible to every assertion in
+      the suite. At a fixed footprint a 320k-face patch stamped in 750 ms
+      against 1.3 ms for 20k. Fixed by naming the neighbourhood instead — in
+      `split_edge` everything leaving the midpoint was created a dozen lines
+      above, and in `collapse_edge` the two-ring is captured before the erases.
+      Measured after, at a fixed brush footprint and a fixed tessellation
+      density: 1.31 ms at 20k faces, 1.55 ms at 80k, 2.17 ms at 320k — one
+      band across a 16x model. Deformation alone (topology off) is 0.22 /
+      0.37 / 1.02 ms. The regression is `test_sculpt_allocation.cpp`'s
+      "a topology operator's cost does not follow the surface", which asserts
+      the property in bytes rather than in wall-clock so the suite can carry it;
+      reverting either half of the fix fails it at a 15.6x ratio
 - [x] 10.3 No full adjacency build and no whole-index rebuild on an ordinary
       dab, asserted by instrumentation rather than inferred from a timing
 - [x] 10.4 Memory per live vertex, edge, half-edge and face, per index
@@ -205,7 +223,7 @@
       correctness comes first and the colouring of independent edge sets is its
       own piece of work. The scaling gate passes without it, which is what says
       the sequencing is right
-- [ ] 10.7 Four presets green plus `release_check`; `tsan` under `setarch -R`
+- [x] 10.7 Four presets green plus `release_check`; `tsan` under `setarch -R`
 - [x] 10.8 `python3 tools/check_layering.py` green
 - [x] 10.9 Docs: `docs/07-brushes-and-features.md` gains the third mesh mode
       and what it costs; `README.md`'s "deliberately does not do" entry is

@@ -3984,48 +3984,47 @@ BENCHMARK(BM_CAbiSmoothPreviewDelta)->Unit(benchmark::kMillisecond)->Iterations(
 
 namespace {
 
-clay::mesh::Mesh bench_cube_sphere(int n, float radius) {
+// A GRID AT FIXED SPACING. `n` grows the model's EXTENT, not its density.
+//
+// The obvious fixture — subdivide a unit sphere further for each size — is the
+// wrong one, and measuring with it is how the O(surface) cost in the topology
+// operators stayed hidden. Subdividing a fixed-radius sphere makes the surface
+// finer, so a brush of fixed world radius covers quadratically more faces: the
+// stamp does more work because it was ASKED to, and a rising curve says nothing
+// about whether the cost is local. Here the triangles are the same size at
+// every `n`, so a fixed-radius brush covers the same face count in all three
+// rows and the only thing that changes is how much surface it is embedded in.
+// That is the question the scaling gate asks.
+clay::mesh::Mesh bench_surface_patch(int n, float spacing) {
     using namespace clay;
     using namespace clay::kernel;
     mesh::Mesh m;
-    const int axes[6][3] = {{0, 1, 2}, {0, 1, 2}, {1, 2, 0}, {1, 2, 0}, {2, 0, 1}, {2, 0, 1}};
-    const float signs[6] = {1.0f, -1.0f, 1.0f, -1.0f, 1.0f, -1.0f};
-    for (int f = 0; f < 6; ++f) {
-        const std::uint32_t base = static_cast<std::uint32_t>(m.positions.size());
-        for (int v = 0; v <= n; ++v)
-            for (int u = 0; u <= n; ++u) {
-                float c[3];
-                c[axes[f][0]] = -1.0f + 2.0f * static_cast<float>(u) / static_cast<float>(n);
-                c[axes[f][1]] = -1.0f + 2.0f * static_cast<float>(v) / static_cast<float>(n);
-                c[axes[f][2]] = signs[f];
-                const cfloat3 p = cf3(c[0], c[1], c[2]);
-                const cfloat3 unit = p / clength(p);
-                m.positions.push_back(unit * radius);
-            }
-        const std::uint32_t stride = static_cast<std::uint32_t>(n + 1);
-        for (int v = 0; v < n; ++v)
-            for (int u = 0; u < n; ++u) {
-                const std::uint32_t a =
-                    base + static_cast<std::uint32_t>(v) * stride + static_cast<std::uint32_t>(u);
-                const std::uint32_t b = a + 1, c2 = a + stride, d = c2 + 1;
-                if (signs[f] > 0.0f)
-                    m.indices.insert(m.indices.end(), {a, c2, b, b, c2, d});
-                else
-                    m.indices.insert(m.indices.end(), {a, b, c2, b, d, c2});
-            }
-    }
+    const float half = spacing * static_cast<float>(n) * 0.5f;
+    for (int z = 0; z <= n; ++z)
+        for (int x = 0; x <= n; ++x)
+            m.positions.push_back(cf3(-half + spacing * static_cast<float>(x), 0.0f,
+                                      -half + spacing * static_cast<float>(z)));
+    const std::uint32_t stride = static_cast<std::uint32_t>(n + 1);
+    for (int z = 0; z < n; ++z)
+        for (int x = 0; x < n; ++x) {
+            const std::uint32_t a =
+                static_cast<std::uint32_t>(z) * stride + static_cast<std::uint32_t>(x);
+            const std::uint32_t b = a + 1, c = a + stride, d = c + 1;
+            m.indices.insert(m.indices.end(), {a, c, b, b, c, d});
+        }
     return m;
 }
 
 }  // namespace
 
-// `state.range(0)` is the cube-sphere subdivision: 6 * 2 * n^2 triangles, so
-// 92 is ~100k, 289 is ~1M and 646 is ~5M.
+// `state.range(0)` is the patch's side in quads: 2 * n^2 triangles, so 224 is
+// ~100k, 707 is ~1M and 1581 is ~5M. The brush footprint is identical in all
+// three; only the surface around it grows.
 void BM_DynamicStamp(benchmark::State& state) {
     using namespace clay;
     using namespace clay::kernel;
     const int n = static_cast<int>(state.range(0));
-    auto surface = mesh::DynamicSurface::from_mesh(bench_cube_sphere(n, 1.0f));
+    auto surface = mesh::DynamicSurface::from_mesh(bench_surface_patch(n, 0.02f));
     if (!surface) {
         state.SkipWithError("could not build the surface");
         return;
@@ -4041,7 +4040,7 @@ void BM_DynamicStamp(benchmark::State& state) {
 
     int i = 0;
     for (auto _ : state) {
-        brush.center = cf3(0.05f * static_cast<float>(i % 5) - 0.1f, 0.0f, 0.99f);
+        brush.center = cf3(0.02f * static_cast<float>(i % 5) - 0.04f, 0.0f, 0.0f);
         sculptor.stamp(mesh::MeshBrush::Draw, brush, topo);
         ++i;
     }
@@ -4050,9 +4049,9 @@ void BM_DynamicStamp(benchmark::State& state) {
         static_cast<double>(surface->bytes()) / static_cast<double>(surface->stats().faces);
 }
 BENCHMARK(BM_DynamicStamp)
-    ->Arg(92)    // ~100k triangles
-    ->Arg(289)   // ~1M
-    ->Arg(646)   // ~5M
+    ->Arg(224)   // ~100k triangles
+    ->Arg(707)   // ~1M
+    ->Arg(1581)  // ~5M
     ->Unit(benchmark::kMillisecond)
     ->Iterations(20);
 
@@ -4062,7 +4061,7 @@ void BM_DynamicStampNoTopology(benchmark::State& state) {
     using namespace clay;
     using namespace clay::kernel;
     const int n = static_cast<int>(state.range(0));
-    auto surface = mesh::DynamicSurface::from_mesh(bench_cube_sphere(n, 1.0f));
+    auto surface = mesh::DynamicSurface::from_mesh(bench_surface_patch(n, 0.02f));
     if (!surface) {
         state.SkipWithError("could not build the surface");
         return;
@@ -4076,16 +4075,16 @@ void BM_DynamicStampNoTopology(benchmark::State& state) {
 
     int i = 0;
     for (auto _ : state) {
-        brush.center = cf3(0.05f * static_cast<float>(i % 5) - 0.1f, 0.0f, 0.99f);
+        brush.center = cf3(0.02f * static_cast<float>(i % 5) - 0.04f, 0.0f, 0.0f);
         sculptor.stamp(mesh::MeshBrush::Draw, brush, topo);
         ++i;
     }
     state.counters["faces"] = static_cast<double>(surface->stats().faces);
 }
 BENCHMARK(BM_DynamicStampNoTopology)
-    ->Arg(92)
-    ->Arg(289)
-    ->Arg(646)
+    ->Arg(224)   // ~100k triangles
+    ->Arg(707)   // ~1M
+    ->Arg(1581)  // ~5M
     ->Unit(benchmark::kMillisecond)
     ->Iterations(20);
 

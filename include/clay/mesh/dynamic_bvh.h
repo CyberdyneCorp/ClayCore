@@ -155,6 +155,9 @@ class DynamicBvh {
     };
 
     void rebuild_tree();
+    // Rebuilt lazily, from the queries: a stamp inserts thousands of faces and
+    // needs one rebuild, not thousands.
+    void ensure_tree() const;
     std::uint32_t build_node(std::vector<std::uint32_t>& order, std::size_t begin, std::size_t end,
                              std::uint32_t parent);
     void refit_leaf(const DynamicSurface& surface, std::uint32_t leaf_index);
@@ -175,7 +178,7 @@ class DynamicBvh {
     std::vector<std::uint32_t> dirty_epoch_;
     std::uint32_t epoch_ = 1;
     std::uint64_t revision_ = 1;
-    bool tree_stale_ = false;
+    mutable bool tree_stale_ = false;
 };
 
 }  // namespace mesh
