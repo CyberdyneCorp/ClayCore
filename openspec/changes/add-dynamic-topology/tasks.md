@@ -116,7 +116,7 @@
 - [x] 6.6 PARITY: with topology changes disabled, a stamp on a dynamic surface
       and the same stamp on the same mesh through `MeshSculptor` agree within
       the stated tolerance. Anything larger means the kernels drifted
-- [ ] 6.7 THE MILESTONE: a coarse sphere sculpted into a nose, an ear and a
+- [x] 6.7 THE MILESTONE: a coarse sphere sculpted into a nose, an ear and a
       horn, with local geometry created and removed and no global remesh — as
       an example that renders and asserts
 
@@ -157,21 +157,21 @@
 
 ## 9. The C ABI and the host path
 
-- [ ] 9.1 Opaque `clay_dynamic_surface` and `clay_dynamic_sculptor`; NO change
+- [x] 9.1 Opaque `clay_dynamic_surface` and `clay_dynamic_sculptor`; NO change
       to `clay_mesh_sculptor`'s semantics, which existing hosts rely on
-- [ ] 9.2 Versioned descriptors for the surface, the topology policy and the
+- [x] 9.2 Versioned descriptors for the surface, the topology policy and the
       stamp report, `struct_size` on input, bounded output fills
-- [ ] 9.3 Triple revision — topology, geometry, attributes — so a host
+- [x] 9.3 Triple revision — topology, geometry, attributes — so a host
       re-uploads an index buffer only when connectivity changed
-- [ ] 9.4 Whole-surface export for correctness AND dirty-chunk transport for
+- [x] 9.4 Whole-surface export for correctness AND dirty-chunk transport for
       production, with the test comparing the two
-- [ ] 9.5 Caller-owned buffers with a capacity query; no heap object per dirty
+- [x] 9.5 Caller-owned buffers with a capacity query; no heap object per dirty
       chunk per frame
-- [ ] 9.6 Borrowed position pointers are NOT offered where a mutation can
+- [x] 9.6 Borrowed position pointers are NOT offered where a mutation can
       invalidate them without a generation the caller can check
-- [ ] 9.7 pyclay, and `tools/check_binding_parity.py` green
+- [x] 9.7 pyclay, and `tools/check_binding_parity.py` green
 - [ ] 9.8 Swift smoke coverage on macOS and in the simulator
-- [ ] 9.9 Version lines together — `CMakeLists.txt`, `bindings/c/clay.h`,
+- [x] 9.9 Version lines together — `CMakeLists.txt`, `bindings/c/clay.h`,
       `pyproject.toml`, `release_check.py`
 
 ## 10. Scale, memory and the gates

@@ -225,7 +225,7 @@ TEST_CASE("topology delta: a whole gesture reverts as one step") {
 
         REQUIRE(delta.revert(*surface));
         CHECK(fingerprint(*surface) == before);
-        const mesh::ValidationReport report = mesh::validate_dynamic_surface(*surface);
+        const mesh::DynamicValidationReport report = mesh::validate_dynamic_surface(*surface);
         CAPTURE(report.summary());
         CHECK(report.ok);
     }

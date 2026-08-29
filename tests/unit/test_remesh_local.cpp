@@ -142,7 +142,7 @@ TEST_CASE("remesh: a stretched patch converges toward the target") {
         CAPTURE(pass);
         CAPTURE(stats.split);
         CAPTURE(stats.collapsed);
-        const mesh::ValidationReport report = mesh::validate_dynamic_surface(*surface);
+        const mesh::DynamicValidationReport report = mesh::validate_dynamic_surface(*surface);
         CAPTURE(report.summary());
         REQUIRE(report.ok);
     }
@@ -266,7 +266,7 @@ TEST_CASE("remesh: a boundary is preserved and never closed") {
 
     for (int i = 0; i < 6; ++i) mesh::remesh_region(*surface, &bvh, cf3(0, 0, 0), 3.0f, settings);
 
-    const mesh::ValidationReport report = mesh::validate_dynamic_surface(*surface);
+    const mesh::DynamicValidationReport report = mesh::validate_dynamic_surface(*surface);
     CAPTURE(report.summary());
     REQUIRE(report.ok);
 

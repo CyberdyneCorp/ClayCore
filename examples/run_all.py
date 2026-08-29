@@ -114,6 +114,7 @@ CAPABILITY_EXAMPLES = {
     "evaluation-backends": None,  # the same field on four devices — a parity test, not a render
     # plus 19_mesh_import for the reverse direction, 44_quad_export for quads,
     # and 45-47 for the fixed-topology mesh brushes
+    # plus 66_dynamic_topology for the adaptive surface — the third mesh mode
     "meshing": "08_meshing_and_io",
     "picking": "10_editing",  # plus 45_mesh_brushes for raycasting a mesh layer
     # plus 36_mesh_layers for the mesh chunk
@@ -129,6 +130,8 @@ CAPABILITY_EXAMPLES = {
     "python-bindings": None,      # every example IS this capability
     "c-abi": None,                # exercised from Swift and C, not from the gallery
     "build-packaging": None,      # a build concern; nothing to render
+    # The adaptive surface: its own capability, its own example.
+    "dynamic-topology": "66_dynamic_topology",
     "examples": None,             # this file
 }
 

@@ -48,6 +48,7 @@ add_executable(clay_unit_tests
   unit/test_remesh_local.cpp
   unit/test_dynamic_sculpt.cpp
   unit/test_dynamic_history.cpp
+  unit/test_c_dynamic_topology.cpp
   unit/test_sculpt_allocation.cpp
   unit/test_brush_preset.cpp
   unit/test_c_brush_preset.cpp

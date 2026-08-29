@@ -23,15 +23,15 @@
 namespace clay {
 namespace mesh {
 
-struct ValidationIssue {
+struct DynamicValidationIssue {
     // What broke, in a sentence, with the slot that broke it.
     std::string what;
     std::uint32_t slot = 0;
 };
 
-struct ValidationReport {
+struct DynamicValidationReport {
     bool ok = true;
-    std::vector<ValidationIssue> issues;
+    std::vector<DynamicValidationIssue> issues;
 
     // Bounded on purpose: a corrupted surface can produce one issue per element,
     // and a report with a million entries helps nobody find the first one.
@@ -39,7 +39,7 @@ struct ValidationReport {
 
     void add(std::string what, std::uint32_t slot) {
         ok = false;
-        if (issues.size() < kMaxIssues) issues.push_back(ValidationIssue{std::move(what), slot});
+        if (issues.size() < kMaxIssues) issues.push_back(DynamicValidationIssue{std::move(what), slot});
     }
     // The first issue, which is the one worth reading: later ones are usually
     // the same corruption seen from other elements.
@@ -64,12 +64,12 @@ struct ValidationReport {
 //   - boundary half-edges form closed loops
 //   - no NaN or infinity in a position or a normal
 //   - the boundary constraint flag agrees with the actual incidence
-ValidationReport validate_dynamic_surface(const DynamicSurface& surface);
+DynamicValidationReport validate_dynamic_surface(const DynamicSurface& surface);
 
 // The cheap subset, for the after-every-operator check in a debug build: twin
 // symmetry, face loops and dead references, over the elements an operator
 // touched rather than the whole surface.
-ValidationReport validate_local(const DynamicSurface& surface,
+DynamicValidationReport validate_local(const DynamicSurface& surface,
                                 const std::vector<FaceId>& faces);
 
 }  // namespace mesh

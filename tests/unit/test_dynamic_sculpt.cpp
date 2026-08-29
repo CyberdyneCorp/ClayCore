@@ -185,7 +185,7 @@ TEST_CASE("dynamic sculpt: a stamp with topology on creates geometry where the b
     CHECK(r.remesh.split > 0);
     CHECK(surface->stats().faces > before);
 
-    const mesh::ValidationReport report = mesh::validate_dynamic_surface(*surface);
+    const mesh::DynamicValidationReport report = mesh::validate_dynamic_surface(*surface);
     CAPTURE(report.summary());
     CHECK(report.ok);
 
@@ -322,7 +322,7 @@ TEST_CASE("dynamic sculpt: a whole adaptive stroke reverts as one step") {
 
     // ONE STEP for the whole gesture, geometry and connectivity together.
     REQUIRE(record.revert(*surface));
-    const mesh::ValidationReport report = mesh::validate_dynamic_surface(*surface);
+    const mesh::DynamicValidationReport report = mesh::validate_dynamic_surface(*surface);
     CAPTURE(report.summary());
     REQUIRE(report.ok);
 

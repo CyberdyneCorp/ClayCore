@@ -134,7 +134,7 @@ TEST_CASE("dynamic surface: a closed mesh imports and validates") {
     REQUIRE(surface.has_value());
     CHECK(err == mesh::DynamicBuildError::None);
 
-    const mesh::ValidationReport report = mesh::validate_dynamic_surface(*surface);
+    const mesh::DynamicValidationReport report = mesh::validate_dynamic_surface(*surface);
     CAPTURE(report.summary());
     CHECK(report.ok);
 

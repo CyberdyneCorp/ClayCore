@@ -124,7 +124,7 @@ TEST_CASE("topology ops: an interior split makes two faces into four") {
     CHECK(r.vertex.valid());
     CHECK(r.face_count == 4);
 
-    const mesh::ValidationReport report = mesh::validate_dynamic_surface(*surface);
+    const mesh::DynamicValidationReport report = mesh::validate_dynamic_surface(*surface);
     CAPTURE(report.summary());
     REQUIRE(report.ok);
 
@@ -153,7 +153,7 @@ TEST_CASE("topology ops: a boundary split makes one face into two") {
     CHECK(r.result == TopologyResult::Ok);
     CHECK(r.face_count == 2);
 
-    const mesh::ValidationReport report = mesh::validate_dynamic_surface(*surface);
+    const mesh::DynamicValidationReport report = mesh::validate_dynamic_surface(*surface);
     CAPTURE(report.summary());
     REQUIRE(report.ok);
 
@@ -237,7 +237,7 @@ TEST_CASE("topology ops: an interior collapse removes a vertex and two faces") {
         const mesh::CollapseResult r = mesh::collapse_edge(*surface, e);
         if (r.result != TopologyResult::Ok) continue;
         ++collapsed;
-        const mesh::ValidationReport report = mesh::validate_dynamic_surface(*surface);
+        const mesh::DynamicValidationReport report = mesh::validate_dynamic_surface(*surface);
         CAPTURE(report.summary());
         REQUIRE(report.ok);
         break;
@@ -341,7 +341,7 @@ TEST_CASE("topology ops: a flip on a grid rewires exactly two faces") {
         const mesh::FlipResult r = mesh::flip_edge(*surface, e, {}, nullptr, /*force=*/true);
         if (r.result != TopologyResult::Ok) continue;
         ++flipped;
-        const mesh::ValidationReport report = mesh::validate_dynamic_surface(*surface);
+        const mesh::DynamicValidationReport report = mesh::validate_dynamic_surface(*surface);
         CAPTURE(report.summary());
         REQUIRE(report.ok);
         break;
@@ -437,7 +437,7 @@ TEST_CASE("topology ops: thousands of interleaved operations keep every invarian
 
             // AFTER EVERY SINGLE OPERATION. Validating at the end would tell us
             // that something broke and nothing about which operation did it.
-            const mesh::ValidationReport report = mesh::validate_dynamic_surface(*surface);
+            const mesh::DynamicValidationReport report = mesh::validate_dynamic_surface(*surface);
             CAPTURE(step);
             CAPTURE(report.summary());
             REQUIRE(report.ok);

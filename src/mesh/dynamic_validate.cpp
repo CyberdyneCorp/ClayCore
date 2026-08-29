@@ -16,7 +16,7 @@ std::string s(std::uint32_t v) { return std::to_string(v); }
 
 // The face-loop check, shared by the full and the local validator: three steps,
 // closing, every corner naming this face and a live origin, and no repeats.
-void check_face(const DynamicSurface& surface, FaceId f, ValidationReport* report) {
+void check_face(const DynamicSurface& surface, FaceId f, DynamicValidationReport* report) {
     const DynamicFace* rec = surface.face(f);
     if (!rec) return;
     if (!surface.live(rec->halfedge)) {
@@ -54,7 +54,7 @@ void check_face(const DynamicSurface& surface, FaceId f, ValidationReport* repor
         report->add("face " + s(f.slot) + " repeats a vertex", f.slot);
 }
 
-void check_halfedge(const DynamicSurface& surface, HalfEdgeId h, ValidationReport* report) {
+void check_halfedge(const DynamicSurface& surface, HalfEdgeId h, DynamicValidationReport* report) {
     const DynamicHalfEdge* he = surface.halfedge(h);
     if (!he) return;
     if (!surface.live(he->twin)) {
@@ -88,8 +88,8 @@ void check_halfedge(const DynamicSurface& surface, HalfEdgeId h, ValidationRepor
 
 }  // namespace
 
-ValidationReport validate_dynamic_surface(const DynamicSurface& surface) {
-    ValidationReport report;
+DynamicValidationReport validate_dynamic_surface(const DynamicSurface& surface) {
+    DynamicValidationReport report;
 
     surface.halfedges().for_each_live(
         [&](HalfEdgeId id, const DynamicHalfEdge&) { check_halfedge(surface, id, &report); });
@@ -145,9 +145,9 @@ ValidationReport validate_dynamic_surface(const DynamicSurface& surface) {
     return report;
 }
 
-ValidationReport validate_local(const DynamicSurface& surface,
+DynamicValidationReport validate_local(const DynamicSurface& surface,
                                 const std::vector<FaceId>& faces) {
-    ValidationReport report;
+    DynamicValidationReport report;
     for (FaceId f : faces) {
         if (!surface.live(f)) continue;
         check_face(surface, f, &report);
