@@ -42,6 +42,8 @@ add_executable(clay_unit_tests
   unit/test_mesh_sculpt_parity.cpp
   unit/test_sculpt_kernels.cpp
   unit/test_dynamic_surface.cpp
+  unit/test_topology_ops.cpp
+  unit/test_topology_delta.cpp
   unit/test_sculpt_allocation.cpp
   unit/test_brush_preset.cpp
   unit/test_c_brush_preset.cpp

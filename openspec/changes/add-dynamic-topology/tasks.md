@@ -49,21 +49,21 @@
 
 ## 3. The operators
 
-- [ ] 3.1 `split_edge` — interior and boundary, interpolating position,
+- [x] 3.1 `split_edge` — interior and boundary, interpolating position,
       colour, mask and corner UVs; normals recomputed locally rather than
       interpolated
-- [ ] 3.2 `collapse_edge` — link-condition validity test, and REFUSAL on
+- [x] 3.2 `collapse_edge` — link-condition validity test, and REFUSAL on
       inversion, duplicate triangle, non-manifold result, boundary corruption,
       seam destruction, normal flip past a threshold, and zero-area output
-- [ ] 3.3 `flip_edge` — refuses boundaries, constrained edges, an existing
+- [x] 3.3 `flip_edge` — refuses boundaries, constrained edges, an existing
       diagonal, orientation inversion, and any flip that does not improve the
       quality metric
-- [ ] 3.4 Each operator is ATOMIC: it applies fully or leaves the surface
+- [x] 3.4 Each operator is ATOMIC: it applies fully or leaves the surface
       exactly as it found it. A cancelled or refused operation SHALL NOT leave
       half an edge collapse behind
-- [ ] 3.5 Every operator records into a `TopologyDelta` when given one
-- [ ] 3.6 A validator run after every operator in the debug build
-- [ ] 3.7 FUZZ: randomized valid patches under thousands of interleaved
+- [x] 3.5 Every operator records into a `TopologyDelta` when given one
+- [x] 3.6 A validator run after every operator in the debug build
+- [x] 3.7 FUZZ: randomized valid patches under thousands of interleaved
       split/collapse/flip/move operations, validating every invariant. A
       mandatory CI target — rare local connectivity failures do not surface any
       other way
@@ -122,20 +122,20 @@
 
 ## 7. Undo and history
 
-- [ ] 7.1 `mesh::TopologyDelta` — created and deleted vertices, edges and
+- [x] 7.1 `mesh::TopologyDelta` — created and deleted vertices, edges and
       faces, connectivity changes, position and attribute changes, with
       `revert`, `apply`, `bytes`, and versioned encode/decode
-- [ ] 7.2 COALESCED over a gesture: one entry per element, first `before` and
+- [x] 7.2 COALESCED over a gesture: one entry per element, first `before` and
       last `after`, so the size follows the elements touched and not the stamps
       taken
-- [ ] 7.3 Revert is BIT-EXACT and idempotent; revert-then-apply returns the
+- [x] 7.3 Revert is BIT-EXACT and idempotent; revert-then-apply returns the
       surface exactly
 - [ ] 7.4 `session::History` gains the step kind and a resolver, following the
       inversion the existing kinds use — `scene` may not see `mesh`, and the
       owner passes the resolver in
 - [ ] 7.5 Journal encode, decode and replay for the new kind, with old
       journals still replaying
-- [ ] 7.6 A decoder refuses hostile or truncated counts BEFORE allocating,
+- [x] 7.6 A decoder refuses hostile or truncated counts BEFORE allocating,
       matching `VertexDeltas::decode`'s defensive style
 - [ ] 7.7 A compound step spanning a scene command and a topology delta undoes
       as one

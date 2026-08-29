@@ -74,6 +74,12 @@ template <typename T, typename Id>
 class SlotPool {
    public:
     Id create(const T& value) {
+        // Skip free-list entries that have since been REVIVED by `restore`.
+        // Removing one from a singly-linked list on restore would be O(n) and
+        // would run on the undo path; skipping here costs one comparison on a
+        // path that is already touching the slot.
+        while (free_head_ != Id::kInvalid && slots_[free_head_].live)
+            free_head_ = slots_[free_head_].next_free;
         if (free_head_ != Id::kInvalid) {
             const std::uint32_t slot = free_head_;
             free_head_ = slots_[slot].next_free;
@@ -160,6 +166,54 @@ class SlotPool {
     // How much of the storage is dead, so a caller can decide whether an
     // incremental compaction outside the pointer-event path is worth running.
     std::size_t dead_slots() const { return dead_; }
+
+    // Revive a dead slot with an explicit generation and value.
+    //
+    // FOR UNDO, and only for undo. Reverting a creation must put the slot back
+    // exactly as it was — generation included — so a handle taken before the
+    // gesture still resolves afterwards. An undo that restored the geometry and
+    // left every handle stale would be one the spatial index and the host's
+    // upload buffers could not survive.
+    bool restore(Id id, const T& value) {
+        if (!id.valid() || id.slot >= slots_.size()) return false;
+        Slot& s = slots_[id.slot];
+        if (s.live) {
+            // Already live: this is a re-apply, so only the contents move.
+            s.value = value;
+            s.generation = id.generation;
+            return true;
+        }
+        s.value = value;
+        s.generation = id.generation;
+        s.live = true;
+        --dead_;
+        return true;
+    }
+
+    // Force a slot dead at a given generation, for the other direction of the
+    // same operation.
+    bool retire(Id id) {
+        if (!id.valid() || id.slot >= slots_.size()) return false;
+        Slot& s = slots_[id.slot];
+        if (!s.live) return true;  // already gone; idempotent
+        s.live = false;
+        s.generation = id.generation;
+        s.next_free = free_head_;
+        free_head_ = id.slot;
+        ++dead_;
+        return true;
+    }
+
+    // Make room for a slot index a decoder or an undo record names, without
+    // making anything live. A record from before an operator that grew the pool
+    // can name a slot this pool has not reached yet.
+    void ensure_slots(std::size_t count) {
+        while (slots_.size() < count) {
+            slots_.push_back(Slot{T{}, 0u, free_head_, false});
+            free_head_ = static_cast<std::uint32_t>(slots_.size() - 1);
+            ++dead_;
+        }
+    }
 
     // -- decoding ------------------------------------------------------------
     //
