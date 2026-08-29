@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "clay/kernel/shim.h"
+#include "clay/parallel/cancel.h"
 #include "clay/mesh/adjacency.h"  // kDefaultWeldEpsilon
 #include "clay/mesh/mesh_data.h"
 #include "clay/mesh/slot_pool.h"
@@ -190,14 +191,24 @@ class DynamicSurface {
 
     // Build from a flat mesh. Returns nullopt and sets `out_error` when the
     // input cannot be expressed — see `DynamicBuildError`.
+    // CANCELLABLE, and BUILD-THEN-PUBLISH: the surface is assembled into a
+    // local and handed back only on success, so a cancelled conversion leaves
+    // the caller's world exactly as it found it rather than half a surface.
+    // That is not a nicety — a half-built half-edge structure is one that
+    // validates in some places and crashes a walk in others.
     static std::optional<DynamicSurface> from_mesh(
         const Mesh& mesh, const DynamicSurfaceBuildOptions& options = {},
-        DynamicBuildError* out_error = nullptr);
+        DynamicBuildError* out_error = nullptr, const parallel::CancelToken* cancel = nullptr);
 
     // Export to a flat mesh. Splits a geometric vertex into as many export
     // vertices as it has distinct corner attributes, so a seam survives the
     // round trip as the duplicates a flat mesh represents it with.
-    Mesh to_mesh(const DynamicSurfaceExportOptions& options = {}) const;
+    // Cancellable for the same reason. A cancelled export returns an EMPTY
+    // mesh rather than a partial one: a caller that ignored the cancel and drew
+    // the result would draw a fraction of the model, which is worse than
+    // drawing nothing.
+    Mesh to_mesh(const DynamicSurfaceExportOptions& options = {},
+                 const parallel::CancelToken* cancel = nullptr) const;
 
     // -- element access ------------------------------------------------------
     const DynamicVertex* vertex(VertexId id) const { return vertices_.get(id); }

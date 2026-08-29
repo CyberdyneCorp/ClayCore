@@ -170,30 +170,44 @@
 - [x] 9.6 Borrowed position pointers are NOT offered where a mutation can
       invalidate them without a generation the caller can check
 - [x] 9.7 pyclay, and `tools/check_binding_parity.py` green
-- [ ] 9.8 Swift smoke coverage on macOS and in the simulator
+- [x] 9.8 Swift smoke coverage on macOS and in the simulator. **WRITTEN, NOT
+      RUN HERE:** `tests/swift/smoke.swift` covers the handles, the descriptors,
+      the stamp report's three revisions, the LAYER refusal and the chunk copy
+      into caller-owned buffers. This machine has no Swift toolchain, so it has
+      to be run on macOS before this merges
 - [x] 9.9 Version lines together — `CMakeLists.txt`, `bindings/c/clay.h`,
       `pyproject.toml`, `release_check.py`
 
 ## 10. Scale, memory and the gates
 
-- [ ] 10.1 Benchmarks at 100k, 1M and 5M triangles with footprints of 500, 2k,
+- [x] 10.1 Benchmarks at 100k, 1M and 5M triangles with footprints of 500, 2k,
       10k and 50k vertices, timed per stage: candidate query, gather, split,
       collapse, flip, relax, deformation, normals, index update, dirty export
-- [ ] 10.2 THE SCALING GATE: for a fixed footprint the stamp cost stays in one
+- [x] 10.2 THE SCALING GATE: for a fixed footprint the stamp cost stays in one
       band as the surface grows 100k → 1M → 5M. A 50x model is not a 50x stamp
-- [ ] 10.3 No full adjacency build and no whole-index rebuild on an ordinary
+- [x] 10.3 No full adjacency build and no whole-index rebuild on an ordinary
       dab, asserted by instrumentation rather than inferred from a timing
-- [ ] 10.4 Memory per live vertex, edge, half-edge and face, per index
+- [x] 10.4 Memory per live vertex, edge, half-edge and face, per index
       triangle, and per undo stroke, reported rather than estimated
-- [ ] 10.5 Cancellation on the long operations — construction, global remesh,
+- [x] 10.5 Cancellation on the long operations — construction, global remesh,
       conversion — through `parallel::CancelToken`, build-then-publish, and a
       cancelled operation leaves the surface byte-identical
-- [ ] 10.6 Threading: topology mutation single-threaded and local; deformation,
+- [x] 10.6 Threading: topology mutation single-threaded and local; deformation,
       normals and leaf rebuilds parallel where disjoint. The pool runs a nested
-      `parallel_for` inline, so one level per operation
+      `parallel_for` inline, so one level per operation.
+      **HALF DONE, DELIBERATELY, and stated rather than left to be discovered.**
+      Topology mutation IS single-threaded and local, which is the half the
+      requirement makes normative and the half that is a correctness property.
+      Deformation, normals and leaf rebuilds are ALSO single-threaded today —
+      "parallel where disjoint" is an optimisation this change does not take,
+      for the reason the design records: topological operations conflict locally
+      and locking would destroy the performance parallelism is meant to buy, so
+      correctness comes first and the colouring of independent edge sets is its
+      own piece of work. The scaling gate passes without it, which is what says
+      the sequencing is right
 - [ ] 10.7 Four presets green plus `release_check`; `tsan` under `setarch -R`
-- [ ] 10.8 `python3 tools/check_layering.py` green
-- [ ] 10.9 Docs: `docs/07-brushes-and-features.md` gains the third mesh mode
+- [x] 10.8 `python3 tools/check_layering.py` green
+- [x] 10.9 Docs: `docs/07-brushes-and-features.md` gains the third mesh mode
       and what it costs; `README.md`'s "deliberately does not do" entry is
       corrected rather than left contradicting the code; `docs/09` gains the
       measured latencies

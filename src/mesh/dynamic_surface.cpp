@@ -379,7 +379,8 @@ std::size_t DynamicSurface::bytes() const {
 
 std::optional<DynamicSurface> DynamicSurface::from_mesh(const Mesh& mesh,
                                                         const DynamicSurfaceBuildOptions& options,
-                                                        DynamicBuildError* out_error) {
+                                                        DynamicBuildError* out_error,
+                                                        const parallel::CancelToken* cancel) {
     auto fail = [&](DynamicBuildError e) -> std::optional<DynamicSurface> {
         if (out_error) *out_error = e;
         return std::nullopt;
@@ -487,6 +488,10 @@ std::optional<DynamicSurface> DynamicSurface::from_mesh(const Mesh& mesh,
     directed.reserve(triangles * 3);
 
     for (std::size_t t = 0; t < triangles; ++t) {
+        // CHECKED AT BOUNDED INTERVALS, not per triangle: the check is a relaxed
+        // atomic load and a cancel observed one batch late is indistinguishable
+        // from one issued a moment later.
+        if (cancel && (t & 0x3ff) == 0 && cancel->cancelled()) return std::nullopt;
         const std::uint32_t raw[3] = {mesh.indices[t * 3], mesh.indices[t * 3 + 1],
                                       mesh.indices[t * 3 + 2]};
         const std::uint32_t cls[3] = {weld_of[raw[0]], weld_of[raw[1]], weld_of[raw[2]]};
@@ -641,7 +646,8 @@ std::optional<DynamicSurface> DynamicSurface::from_mesh(const Mesh& mesh,
 
 // -- to_mesh ------------------------------------------------------------------
 
-Mesh DynamicSurface::to_mesh(const DynamicSurfaceExportOptions& options) const {
+Mesh DynamicSurface::to_mesh(const DynamicSurfaceExportOptions& options,
+                             const parallel::CancelToken* cancel) const {
     Mesh out;
     const bool want_normals = options.normals && had_normals_;
     const bool want_colors = options.colors && had_colors_;
@@ -683,7 +689,9 @@ Mesh DynamicSurface::to_mesh(const DynamicSurfaceExportOptions& options) const {
     };
 
     out.indices.reserve(ordered.size() * 3);
+    std::size_t emitted_faces = 0;
     for (FaceId f : ordered) {
+        if (cancel && (emitted_faces++ & 0x3ff) == 0 && cancel->cancelled()) return Mesh{};
         const DynamicFace& rec = faces_.at(f);
         HalfEdgeId h = rec.halfedge;
         std::uint32_t corner[3];
