@@ -30,6 +30,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -973,4 +974,168 @@ TEST_CASE("frontier: the probe's error paths") {
     CHECK(dirty == kClean);
     CHECK(boundary == 0);
     CHECK(structure == 0);
+}
+
+// -- a drag under a layer mirror (#363) ---------------------------------------
+// The move brush selected its items on the MIRROR-EXPANDED influence bound, so
+// under a mirror the base ball (ordinal 0) was in every drag: the gesture's
+// frontier was 0, which is an empty prefix, frontier_prepare recorded nothing
+// and touch_region_locked found nothing keepable -- every mirrored drag took
+// the legacy drop and this whole path never fired (resumed 0 / refilled 24 on
+// the fixture below, probe MISSING). The brush is reflected instead of the
+// bound now, so the frontier is the dragged items' own.
+
+namespace {
+
+// The 325-item fixture of #363 through the C ABI: unit base, 300 dabs over
+// the +x hemisphere, a 24-ball ridge at x 1.45 appended last (root ordinals
+// 301..324). The grab on the crest (1.53, radius .35) reaches ridge balls
+// only; the reflected ball at x -1.53 reaches nothing at all.
+struct MirroredRidge {
+    Doc doc;
+    std::vector<clay_node_id> ridge;
+    explicit MirroredRidge(bool mirrored = true) {
+        place(1.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+        const int nodes = 301;
+        for (int i = 1; i < nodes; ++i) {
+            const double z = 1.0 - 2.0 * (i + 0.5) / nodes;
+            const double rr = std::sqrt(std::max(0.0, 1.0 - z * z));
+            const double th = 2.399963 * i;
+            const double a = rr * std::cos(th), b = rr * std::sin(th);
+            place(0.05f, static_cast<float>(std::sqrt(std::max(0.0, 1.0 - a * a - b * b))),
+                  static_cast<float>(a), static_cast<float>(b), 0.0f);
+        }
+        for (int j = 0; j < 24; ++j)
+            ridge.push_back(place(0.08f, 1.45f, 0.0f, (static_cast<float>(j) - 11.5f) * 0.055f,
+                                  0.05f));
+        // BEFORE any refill: the mirror edit itself is a layer-wide parameter
+        // edit and takes the legacy drop, prefixes and all.
+        if (mirrored) REQUIRE(clay_set_layer_mirror(doc.d, doc.layer, 1, 0, 0, 0.05f) == CLAY_OK);
+    }
+    clay_node_id place(float r, float x, float y, float z, float k) {
+        clay_item_desc desc;
+        std::memset(&desc, 0, sizeof desc);
+        desc.struct_size = static_cast<std::uint32_t>(sizeof desc);
+        desc.prim = CLAY_PRIM_SPHERE;
+        desc.params[0] = r;
+        desc.op = CLAY_OP_ADD;
+        desc.blend = k > 0.0f ? CLAY_BLEND_QUADRATIC : CLAY_BLEND_HARD;
+        desc.blend_k = k;
+        desc.position[0] = x;
+        desc.position[1] = y;
+        desc.position[2] = z;
+        desc.rotation[3] = 1.0f;
+        desc.scale = 1.0f;
+        clay_node_id id = 0;
+        REQUIRE(clay_add_item(doc.d, doc.layer, &desc, &id) == CLAY_OK);
+        return id;
+    }
+    // Centre and radius fixed, displacement growing: one continuing gesture.
+    void frame(int f) {
+        const float centre[3] = {1.53f, 0.0f, 0.0f};
+        drag(doc.d, doc.layer, centre, 0.35f, 0.03f + 0.002f * static_cast<float>(f));
+    }
+};
+
+// A window of bricks over the ridge (or, negated, over its copies). Its
+// corner bricks are ground no prefix item reaches -- the dabs sit on the unit
+// sphere and a brick at (kx 3, ky 0, kz 1) starts 1.08 from the origin, band
+// included -- so their prefix holds no accumulator and frontier_seed_for
+// correctly refuses them per brick. That is why the cases below hold the
+// mirrored split against the UNMIRRORED fixture's rather than against zero:
+// the claim is that the mirror changes nothing about which bricks resume.
+std::vector<clay_brick_request> ridge_window(int kx_from, int kx_to) {
+    std::vector<clay_brick_request> reqs;
+    for (int kx = kx_from; kx <= kx_to; ++kx)
+        for (int ky = -1; ky <= 0; ++ky)
+            for (int kz = -2; kz <= 1; ++kz) reqs.push_back(brick(kx, ky, kz));
+    return reqs;
+}
+
+// The earliest root ordinal the drag would touch, read off the preview: ids
+// are 1-based and every item is a root, so ordinal == id - 1.
+std::uint32_t first_touched_ordinal(clay_document* d, clay_layer_id layer) {
+    clay_move_params p;
+    std::memset(&p, 0, sizeof p);
+    p.struct_size = static_cast<std::uint32_t>(sizeof p);
+    p.radius = 0.35f;
+    const float centre[3] = {1.53f, 0.0f, 0.0f};
+    const float disp[3] = {0.03f, 0.0f, 0.0f};
+    std::size_t count = 0;
+    REQUIRE(clay_layer_move_surface_preview(d, layer, centre, disp, &p, nullptr, 0, &count) ==
+            CLAY_OK);
+    std::vector<clay_node_id> ids(count);
+    REQUIRE(clay_layer_move_surface_preview(d, layer, centre, disp, &p, ids.data(), count,
+                                            &count) == CLAY_OK);
+    REQUIRE(count > 0);
+    return *std::min_element(ids.begin(), ids.end()) - 1;
+}
+
+}  // namespace
+
+TEST_CASE("frontier: a mirrored drag on late-history items states a late frontier and resumes") {
+    // Acceptance (3) of #363. Under the mirror the drag must state the ridge's
+    // own ordinal -- not 0, the base's -- so the pre-drag prefix seeds are
+    // recorded, the applies min-merge onto them and the window resumes
+    // exactly as it does without the mirror. On the mirror-expanded selection
+    // the first REQUIRE fails (the drag's earliest ordinal reads 0), and past
+    // it the probe reads MISSING: the entry is erased at every frame,
+    // resumed 0 and refilled 16.
+    const std::vector<clay_brick_request> window = ridge_window(2, 3);
+    const clay_brick_request hot = brick(3, -1, -1);  // holds the crest
+
+    MirroredRidge fix;
+    MirroredRidge control(/*mirrored=*/false);
+    const std::uint32_t ridge_ordinal = first_touched_ordinal(fix.doc.d, fix.doc.layer);
+    REQUIRE(ridge_ordinal >= 301);  // a ridge ball, not the base or a dab
+    CHECK(ridge_ordinal == first_touched_ordinal(control.doc.d, control.doc.layer));
+    refill(fix.doc.d, window);  // warm: every brick holds a seed
+    refill(control.doc.d, window);
+    REQUIRE(probe(fix.doc.d, hot).found);
+
+    for (int f = 1; f <= 3; ++f) {
+        CAPTURE(f);
+        fix.frame(f);
+        control.frame(f);
+        const FrontierProbe before = probe(fix.doc.d, hot);
+        REQUIRE(before.found);
+        CHECK(before.dirty == ridge_ordinal);
+        CHECK(before.boundary == ridge_ordinal);
+
+        std::vector<float> got;
+        const RefillSplit split = refill_counting(fix.doc.d, window, &got);
+        const RefillSplit plain = refill_counting(control.doc.d, window);
+        CHECK(split.resumed == plain.resumed);
+        CHECK(split.refilled == plain.refilled);
+        CHECK(split.resumed > split.refilled);  // the window mostly resumes
+        CHECK(probe(fix.doc.d, hot).dirty == kClean);
+
+        // Parity against a fresh mirrored oracle that never held a seed.
+        MirroredRidge oracle;
+        for (int g = 1; g <= f; ++g) oracle.frame(g);
+        CHECK(got == refill(oracle.doc.d, window));
+    }
+}
+
+TEST_CASE("frontier: the reflected side of a mirrored drag is not served stale") {
+    // The copies the mirror emits move where the REFLECTED ball is, so the
+    // gesture's stated reach has to cover that ball too: a seed warm on the
+    // -x side that the invalidation missed would be advanced to the new
+    // revision still describing the undragged copies, and handed back whole.
+    // Pinned bit-for-bit against a fresh mirrored oracle's cold refill.
+    const std::vector<clay_brick_request> copies = ridge_window(-4, -3);  // x -1.6..-.8
+    MirroredRidge fix;
+    refill(fix.doc.d, copies);  // warm on the reflected side only
+    fix.frame(1);
+    const std::vector<float> got = refill(fix.doc.d, copies);
+
+    MirroredRidge oracle;
+    oracle.frame(1);
+    const std::vector<float> want = refill(oracle.doc.d, copies);
+    REQUIRE(got.size() == want.size());
+    CHECK(got == want);
+    // Teeth: the copies MOVED, or the parity above compares two readings of
+    // an undragged document.
+    MirroredRidge still;
+    CHECK(refill(still.doc.d, copies) != want);
 }

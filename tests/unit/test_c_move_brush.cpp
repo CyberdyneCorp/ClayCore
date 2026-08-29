@@ -1,9 +1,11 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <initializer_list>
+#include <vector>
 
 #include "clay.h"
 
@@ -273,6 +275,162 @@ TEST_CASE("c move: previewing a drag names the nodes and touches nothing") {
     REQUIRE(clay_layer_move_surface(doc.doc, layer, centre, displacement, &p, &applied) ==
             CLAY_OK);
     CHECK(applied == count);
+}
+
+// -- a drag under symmetry (#363) ----------------------------------------------
+// Under a layer mirror the move used to select on the item's MIRROR-EXPANDED
+// bound: every participating item's bound spanned the plane, so a grab on a
+// ridge at x 1.45 also took the base ball and dabs on both sides -- 46 items
+// where the unmirrored drag took 22, and the base (ordinal 0) in every drag,
+// which is what kept the dirty-prefix path (#360) from ever engaging under a
+// mirror. The brush is now reflected instead of the bound, so a mirrored drag
+// selects exactly what the ball or its reflection touches.
+
+namespace {
+
+// The fixture of #363: a unit base ball, 300 dabs over the +x hemisphere
+// (abi_sculpt's placement, bench_main.cpp), and a 24-ball ridge sticking out
+// at x 1.45 appended LAST -- the items a grab on its crest should take, and
+// the only ones. Everything sits at x >= 0, so the reflected ball at x -1.53
+// reaches nothing and the mirrored selection has to equal the unmirrored one.
+struct Ridge {
+    clay_layer_id layer = 0;
+    std::vector<clay_node_id> ridge;
+};
+
+clay_node_id ridge_ball(clay_document* doc, clay_layer_id layer, float r, float x, float y, float z,
+                        float k) {
+    clay_item_desc d;
+    std::memset(&d, 0, sizeof d);
+    d.struct_size = static_cast<uint32_t>(sizeof d);
+    d.prim = CLAY_PRIM_SPHERE;
+    d.params[0] = r;
+    d.op = CLAY_OP_ADD;
+    d.blend = k > 0.0f ? CLAY_BLEND_QUADRATIC : CLAY_BLEND_HARD;
+    d.blend_k = k;
+    d.position[0] = x;
+    d.position[1] = y;
+    d.position[2] = z;
+    d.rotation[3] = 1.0f;
+    d.scale = 1.0f;
+    clay_node_id id = 0;
+    REQUIRE(clay_add_item(doc, layer, &d, &id) == CLAY_OK);
+    return id;
+}
+
+Ridge ridge_sculpt(clay_document* doc, bool mirrored) {
+    Ridge r;
+    REQUIRE(clay_add_sdf_layer(doc, "ridge", &r.layer) == CLAY_OK);
+    ridge_ball(doc, r.layer, 1.0f, 0, 0, 0, 0.0f);
+    const int nodes = 301;
+    for (int i = 1; i < nodes; ++i) {
+        const double z = 1.0 - 2.0 * (i + 0.5) / nodes;
+        const double rr = std::sqrt(std::max(0.0, 1.0 - z * z));
+        const double th = 2.399963 * i;
+        const double a = rr * std::cos(th), b = rr * std::sin(th);
+        ridge_ball(doc, r.layer, 0.05f,
+                   static_cast<float>(std::sqrt(std::max(0.0, 1.0 - a * a - b * b))),
+                   static_cast<float>(a), static_cast<float>(b), 0.0f);
+    }
+    for (int j = 0; j < 24; ++j)
+        r.ridge.push_back(ridge_ball(doc, r.layer, 0.08f, 1.45f, 0,
+                                     (static_cast<float>(j) - 11.5f) * 0.055f, 0.05f));
+    if (mirrored) REQUIRE(clay_set_layer_mirror(doc, r.layer, 1, 0, 0, 0.05f) == CLAY_OK);
+    return r;
+}
+
+std::vector<clay_node_id> preview_nodes(clay_document* doc, clay_layer_id layer,
+                                        const float centre[3], const float disp[3],
+                                        const clay_move_params& p) {
+    std::size_t count = 0;
+    REQUIRE(clay_layer_move_surface_preview(doc, layer, centre, disp, &p, nullptr, 0, &count) ==
+            CLAY_OK);
+    std::vector<clay_node_id> nodes(count);
+    REQUIRE(clay_layer_move_surface_preview(doc, layer, centre, disp, &p, nodes.data(), count,
+                                            &count) == CLAY_OK);
+    std::sort(nodes.begin(), nodes.end());
+    return nodes;
+}
+
+constexpr float kCrest[3] = {1.53f, 0.0f, 0.0f};
+constexpr float kCrestRadius = 0.35f;
+
+}  // namespace
+
+TEST_CASE("c move: under a mirror the drag selects what the ball touches, not the plane") {
+    // Acceptance (1) and (5) of #363. Compared as SETS, because the count is
+    // a property of the ridge spacing: the point is that the mirror adds
+    // nothing here and the base is not among the selected. Reverting the
+    // selection to the mirror-expanded bound re-selects node 1 (the base) and
+    // 24 more items off the ridge.
+    const float disp[3] = {0.03f, 0.0f, 0.0f};
+    const clay_move_params p = move_params(kCrestRadius);
+
+    CDoc plain;
+    const Ridge a = ridge_sculpt(plain.doc, false);
+    const std::vector<clay_node_id> unmirrored = preview_nodes(plain.doc, a.layer, kCrest, disp, p);
+
+    CDoc mirrored;
+    const Ridge b = ridge_sculpt(mirrored.doc, true);
+    const std::vector<clay_node_id> under_mirror =
+        preview_nodes(mirrored.doc, b.layer, kCrest, disp, p);
+
+    REQUIRE_FALSE(unmirrored.empty());
+    CHECK(under_mirror == unmirrored);
+    // Every selected node is on the ridge, and the base is not among them.
+    for (clay_node_id id : under_mirror) {
+        CAPTURE(id);
+        CHECK(std::find(b.ridge.begin(), b.ridge.end(), id) != b.ridge.end());
+    }
+    CHECK(std::find(under_mirror.begin(), under_mirror.end(), 1u) == under_mirror.end());
+}
+
+TEST_CASE("c move: a mirrored gesture accumulates the warps of an unmirrored one") {
+    // Acceptance (2). Twelve segments along the ridge, each a fresh centre so
+    // nothing coalesces: the mirrored gesture used to leave 532 warps where
+    // the unmirrored one left 244 (2.18x), each a grab evaluated per sample on
+    // every later refill. On this fixture the reflected ball reaches nothing,
+    // so the two totals are now EQUAL; the 2x bound is the acceptance line.
+    const clay_move_params p = move_params(kCrestRadius);
+    const float disp[3] = {0.05f, 0.0f, 0.0f};
+    std::size_t totals[2] = {0, 0};
+    for (int m = 0; m < 2; ++m) {
+        CDoc doc;
+        const Ridge r = ridge_sculpt(doc.doc, m == 1);
+        for (int s = 0; s < 12; ++s) {
+            const float centre[3] = {1.53f, 0.0f, -0.33f + 0.06f * static_cast<float>(s)};
+            std::size_t applied = 0;
+            REQUIRE(clay_layer_move_surface(doc.doc, r.layer, centre, disp, &p, &applied) ==
+                    CLAY_OK);
+            totals[m] += applied;
+        }
+    }
+    REQUIRE(totals[0] > 0);
+    CHECK(totals[1] == totals[0]);
+    CHECK(totals[1] <= 2 * totals[0]);
+}
+
+TEST_CASE("c move: a mirrored preview names what the move applies, and a straddler once") {
+    // *out_applied and the preview count ITEMS. An item both the ball and its
+    // reflection reach -- one sitting on the plane -- takes one grab per
+    // image inside a single SetDeformersCmd, so it is reported once by both.
+    CDoc doc;
+    clay_layer_id layer = 0;
+    REQUIRE(clay_add_sdf_layer(doc.doc, "s", &layer) == CLAY_OK);
+    ridge_ball(doc.doc, layer, 0.4f, 0, 0, 0, 0.05f);          // base, out of this reach
+    ridge_ball(doc.doc, layer, 0.2f, 0, 1.5f, 0, 0.05f);       // straddler on the plane
+    ridge_ball(doc.doc, layer, 0.2f, 1.0f, 0.3f, 0, 0.05f);    // far from this drag
+    REQUIRE(clay_set_layer_mirror(doc.doc, layer, 1, 0, 0, 0.05f) == CLAY_OK);
+
+    const float centre[3] = {0.25f, 1.5f, 0.0f};  // both images reach the straddler
+    const float disp[3] = {0.15f, 0.0f, 0.0f};
+    const clay_move_params p = move_params(0.35f);
+    const std::vector<clay_node_id> previewed = preview_nodes(doc.doc, layer, centre, disp, p);
+    CHECK(previewed == std::vector<clay_node_id>{2});  // the straddler, once
+
+    std::size_t applied = 0;
+    REQUIRE(clay_layer_move_surface(doc.doc, layer, centre, disp, &p, &applied) == CLAY_OK);
+    CHECK(applied == previewed.size());
 }
 
 TEST_CASE("c move: a preview refuses what the move refuses") {

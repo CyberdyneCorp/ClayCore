@@ -64,6 +64,13 @@ FLOORS = {
     # output where there was silence.
     "BM_MoveDrag1000": {"max_ms": 0.6},
     "BM_MoveDrag10000": {"max_ms": 6.0},
+    # The same drag under a layer mirror (#363). Same ceiling as the
+    # unmirrored row, because the mirrored drag now warps the same items: the
+    # reflected ball touches none of abi_sculpt's copies. A floor rather than
+    # only the MAX_COUNTER row below because a floor FAILS when its bench is
+    # missing, and the counter gate skips an absent bench by design -- this is
+    # what makes the counter gate's presence enforced.
+    "BM_MoveDragMirrored1000": {"max_ms": 0.6},
     # Writing INTO a whole level stack — the same defect #137 hoisted out of
     # subdivide_into, in the two places propagation reaches it: record_detail
     # (via refresh_detail, per child of every downward step) and propagate_up
@@ -443,6 +450,21 @@ MAX_RATIO = [
     # SkipWithErrors first when the warm row stops resuming) — so 0.5 is the
     # usual generosity, not a tight delta.
     ("BM_MoveDragRefill", "BM_MoveDragRefillCold", 0.50),
+    # The same warm frame under a LAYER MIRROR (#363), against its own cold
+    # row: the frontier path must save the same fraction with a mirror on as
+    # without one. Not the detector for the selection defect -- on this
+    # fixture the base sits outside even the mirror-expanded bound, so the row
+    # resumed before the brush was reflected; BM_MoveDragMirrored1000's
+    # warped_ratio below is the row a revert fails. The fixture guard
+    # SkipWithErrors when a warm frame stops resuming, and a missing MAX_RATIO
+    # name is a FAIL.
+    # Its own cold row rather than the unmirrored one because a mirrored
+    # document carries twice the geometry on both sides of the ratio (every
+    # bound and every brick tape pay for the copy): 0.63 ms against 8.6 ms,
+    # 0.07x, where the unmirrored pair reads 0.30 against 1.97, 0.16x -- the
+    # full walk pays for the copies per brick and the resumed suffix does
+    # not. The same 0.50 generosity; a lost fast path lands at ~1x.
+    ("BM_MoveDragRefillMirrored", "BM_MoveDragRefillMirroredCold", 0.50),
     # The spec's own <=5% overhead line, held directly: MARKING a live
     # 288-entry store (touch_region_from, one dirty_from write per kept entry)
     # must not cost more than the legacy DROP of the same store under the same
@@ -504,7 +526,9 @@ MAX_RATIO = [
     # event to rediscover which items a FIXED anchor and radius reach;
     # `SdfMoveTransaction` walks it once and a frame is one
     # `resolve_prepared_move` per affected item. 0.00121 ms against 0.0587 ms,
-    # or 0.021, against a ceiling of 0.20.
+    # or 0.021, against a ceiling of 0.20. With the warp carrying a chain of
+    # grabs (reflect-the-brush-not-the-bound) the frame resolves into a warp
+    # it keeps, so the row still pays no allocation per item for the resolve.
     ("BM_SdfMoveTransactionUpdate", "BM_SdfMoveResolve", 0.20),
     # The same claim over a whole drag: a thousand frames of prepared drag
     # against one frame of the old path. 27.0 measured (1.59 ms against
@@ -781,6 +805,14 @@ MAX_COUNTER = [
     # A build that stopped culling to the band would store the box.
     ("BM_SdfPrefixBuildSpread20000", "stored_bricks", 600),
     ("BM_SdfPrefixBuildPiled20000", "stored_bricks", 600),
+    # A mirrored drag warps what the ball or its reflection touches, in ITEMS,
+    # over what the unmirrored drag warps (#363). On abi_sculpt the reflected
+    # ball touches nothing, so this is exactly 1.0; selecting on the
+    # mirror-expanded bound took 46 items against 22 on the issue's ridge
+    # fixture (every item whose expanded bound spans the plane), 2.1x. 2.0 is
+    # the issue's acceptance line -- a mirror can at most
+    # double what a drag reaches -- and the counter is exact on every machine.
+    ("BM_MoveDragMirrored1000", "warped_ratio", 2.0),
 ]
 
 

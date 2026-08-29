@@ -694,6 +694,11 @@ struct Compiler {
         // could mean. A feathered bake is a world-space patch; mirror the
         // strokes it was baked from, or bake each side. Documented on
         // clay_volume_params.feather.
+        //
+        // This gate -- `item.mirror && !is_feathered_replace(item)` -- is the
+        // one the move brush repeats to decide which images of a drag an item
+        // can see (brush/move.cpp, warp_for). Change one and change the other,
+        // or the brush warps an item where no copy was emitted.
         if (item.mirror && layer.mirror_axes != 0 && !is_feathered_replace(item)) {
             Blend mirror_blend{layer.mirror_k > 0.0f ? BlendProfile::Quadratic
                                                      : BlendProfile::Hard,

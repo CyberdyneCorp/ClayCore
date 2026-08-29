@@ -341,9 +341,11 @@ class SdfSmoothTransaction {
 // -- Move --------------------------------------------------------------------
 //
 // The affected items and their frames found ONCE at pointer-down, the preview
-// rebuilt per frame from the immutable pre-stroke chains plus one grab for the
-// CURRENT TOTAL displacement, and every final chain written as one undo step
-// at pointer-up.
+// rebuilt per frame from the immutable pre-stroke chains plus the grabs for
+// the CURRENT TOTAL displacement — one per image of the drag that reaches the
+// item, so under a layer mirror the copy under the ball moves too (see
+// brush/move.h) — and every final chain written as one undo step at
+// pointer-up.
 //
 // TOTAL, never incremental. Updates of 0.10, 0.20, 0.50 must end at exactly
 // what a single fresh drag of 0.50 produces, not at a composition of three
@@ -387,10 +389,12 @@ class SdfMoveTransaction {
     // ...and which ones, in preparation order. For a host that draws its own
     // preview rather than compiling `preview_layer()`.
     const std::vector<scene::NodeId>& affected_nodes() const { return affected_ids_; }
-    // The grab the last update resolved for one of them, in THAT NODE'S own
-    // frame — the deformer that belongs at the front of its chain. False for a
-    // node this drag does not reach.
-    bool preview_grab(scene::NodeId node, scene::Deformer* out) const;
+    // The grabs the last update resolved for one of them, in THAT NODE'S own
+    // frame — the deformers that belong at the front of its chain, in chain
+    // order. One under no symmetry; one per image of the drag that reaches the
+    // node under a mirror or a radial count. False for a node this drag does
+    // not reach.
+    bool preview_grabs(scene::NodeId node, std::vector<scene::Deformer>* out) const;
     // What preparing the drag walked, for a scaling test.
     const brush::MovePrepareStats& prepare_stats() const { return prepare_stats_; }
     // Nodes the LAST update looked at. Must equal affected_count(), whatever
@@ -411,6 +415,10 @@ class SdfMoveTransaction {
     struct Affected {
         scene::NodeId id = scene::kNoNode;
         brush::PreparedMove prepared;
+        // Resolved into per frame rather than returned, so the grab vectors
+        // keep their capacity and a frame allocates nothing per item for the
+        // resolve itself.
+        brush::MoveWarp warp;
         std::vector<scene::Deformer> original_chain;
         std::vector<scene::Deformer> preview_chain;
     };

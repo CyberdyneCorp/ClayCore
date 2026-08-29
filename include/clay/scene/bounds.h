@@ -67,6 +67,20 @@ bool item_influence_is_local(const Node& item);
 // morphs). This is what per-brick culling must consult.
 math::Aabb item_influence_bound(const Node& item, const Layer& layer);
 
+// The item ALONE, as the layer places it: the influence bound without the
+// reflected and rotated copies the layer's symmetry emits and without the
+// seam dilation they bring. Same rounding and combine dilations, infinite for
+// the same non-local items.
+//
+// This is what a brush that has already reflected ITSELF tests against
+// (brush/move.cpp): under a mirror every participating item's
+// item_influence_bound spans the plane, so a ball on one side reaches every
+// item on both, and a warp aimed at the ball is a no-op for the ones whose
+// body sits on the far side. Culling and invalidation keep
+// item_influence_bound — the copies are real geometry there, and its
+// every-copy contract is untouched.
+math::Aabb item_own_influence_bound(const Node& item, const Layer& layer);
+
 // Whether this item is a volume placed with Replace that asked for a
 // feathered placement. The ONE definition of the test the compiler's mirror
 // skip, combine choice and field-info fold share with the cull index's

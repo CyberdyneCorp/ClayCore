@@ -255,14 +255,20 @@ TEST_CASE("c abi: a live Move previews without touching the document") {
     float grab_disp[3] = {0, 0, 0};
     float grab_radius = 0.0f;
     int32_t ease = -1, front_only = -1;
-    REQUIRE(clay_sdf_move_preview_grab(tx, nodes[0], grab_centre, &grab_radius, grab_disp, &ease,
-                                       &front_only) == CLAY_OK);
+    size_t grabs = 0;
+    REQUIRE(clay_sdf_move_preview_grab_count(tx, nodes[0], &grabs) == CLAY_OK);
+    CHECK(grabs == 1);  // no symmetry: the ball alone
+    REQUIRE(clay_sdf_move_preview_grab(tx, nodes[0], 0, grab_centre, &grab_radius, grab_disp,
+                                       &ease, &front_only) == CLAY_OK);
     CHECK(grab_radius == doctest::Approx(0.8f));
     CHECK(grab_disp[1] == doctest::Approx(0.4f));  // the TOTAL, not the last increment
     CHECK(ease == 0);
     CHECK(front_only == 0);
-    CHECK(clay_sdf_move_preview_grab(tx, 9999, nullptr, nullptr, nullptr, nullptr, nullptr) ==
+    CHECK(clay_sdf_move_preview_grab(tx, nodes[0], 1, nullptr, nullptr, nullptr, nullptr,
+                                     nullptr) == CLAY_ERROR_INVALID_ARGUMENT);
+    CHECK(clay_sdf_move_preview_grab(tx, 9999, 0, nullptr, nullptr, nullptr, nullptr, nullptr) ==
           CLAY_ERROR_NOT_FOUND);
+    CHECK(clay_sdf_move_preview_grab_count(tx, 9999, &grabs) == CLAY_ERROR_NOT_FOUND);
 
     clay_sculpt_budget budget = budget_out();
     REQUIRE(clay_sdf_move_commit(tx, &budget) == CLAY_OK);

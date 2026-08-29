@@ -266,6 +266,37 @@ Without this a two-second drag at 60fps leaves 120 warps on every item it
 touched, each one multiplying into the declared Lipschitz. A different centre is
 a different gesture and is kept beside the first.
 
+**Under symmetry, the brush is reflected — not the item's bound.** The
+compiler emits a mirrored item as itself plus one copy per axis, and a copy's
+field at `p` is the item's whole record, deformer chain included, at the
+reflected point. So a grab in an item's chain moves the item near the ball *and*
+its copy near the ball's reflection — and an item whose **copy** sits under the
+ball has its body at the reflection, where a grab centred on the ball weighs
+zero: measured on a ball whose copy sat under a drag, the copy's pole moved by
+0.00000 while everything else moved by -0.05945. Selecting items on the
+mirror-expanded influence bound made that the common case (a grab on a ridge at
+x 1.45 took 46 items where the unmirrored drag took 22, the base among them,
+each a warp that did nothing) and left a drag and its mirror image asymmetric.
+
+The drag is therefore stated as the **images** the layer's symmetry makes of it
+— the ball, one reflection per mirror axis, one rotation per radial copy;
+additive, exactly the copies `emit_item` emits — and every item is tested on
+its **own** bound against each image. An image that reaches an item gives it a
+grab at that image's centre with that image's displacement, so the reflected
+ball grabs the items whose reflections sit under the ball. Items that opted out
+of the mirror (`mirror=False`, `-1` in C) and feathered volume replaces see the
+ball alone, because the compiler emits no copy of them. An item both images
+reach — one straddling the plane — takes both grabs in one warp, **composing
+the two pulls as two brushes would**: a drag centred on the plane pulling along
+it lifts a ball of radius .4 by 0.1645 against 0.0950 under one grab (1.73x),
+continuously as the centre leaves the plane (0.1650 at x .01, 0.1600 at .05,
+0.1460 at .1); pulling across the plane the two cancel to a pinch. This is the
+mesh-sculpt default; an overlap reducer would be a kernel-level opt-in. With
+an identity layer transform a drag and its mirror image produce the same field
+**bit for bit**, and a mirrored drag on late-history items states its own
+frontier and resumes where it used to take the base's ordinal 0 and drop.
+The gesture's invalidation covers every image's ball, as separate boxes.
+
 `move_brush` is pure, so a drag can be **previewed** — `Layer.move_surface_preview`
 and `clay_layer_move_surface_preview` return the nodes it would warp without
 touching the document.
@@ -400,8 +431,14 @@ everywhere still selects its bricks and has nothing to redraw.
 increment on the last frame. Updates of 0.1, 0.2 then 0.5 end at exactly what a
 single fresh drag of 0.5 produces; a composition of the three would move the
 surface further than 0.5 ever asked for. The preview is rebuilt each frame from
-the chains captured at `begin` plus one grab for the current total, which is
-also what the commit installs — so a preview and its commit cannot disagree.
+the chains captured at `begin` plus the grabs for the current total — one per
+image of the drag that reaches the item, so under a layer mirror the copy under
+the ball moves in the preview exactly as it does in the commit — which is also
+what the commit installs, so a preview and its commit cannot disagree. The
+prepared half of the drag (`brush::PreparedMove`) carries those images: where
+each lands in the item's frame and whether it reaches, decided at pointer-down
+with the rest of the reach; the per-frame half maps the displacement through
+each image and touches no scene state.
 
 **A commit refuses a source that moved underneath it.** The layer is
 fingerprinted at `begin` and re-checked at `commit`; if another tool, a
