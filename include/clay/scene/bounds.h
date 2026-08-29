@@ -238,6 +238,26 @@ float cull_pad(const SdfContent& content, const Layer& layer);
 // group's blend support; infinite for intersect anywhere in the subtree).
 math::Aabb node_influence_bound(const SdfContent& content, NodeId id, const Layer& layer);
 
+// How far a GROUP's combine spreads a change in one of its operands. Shared by
+// node_influence_bound, which applies it to the union of the children, and
+// node_reach_bound, which applies it to one child — two spellings of the same
+// quantity would be one refactor away from disagreeing.
+float group_blend_support(const Node& group, const Layer& layer);
+
+// Where an edit to `id` can change the layer's field: node_influence_bound,
+// dilated once per enclosing group by that group's blend support, up to the
+// root.
+//
+// This is the answer to "where does an edit to this node LAND", which is a
+// different question from "where is this node" and used to be answered with
+// the root ancestor's whole bound. It is conservative in the same band-clamped
+// sense every bound here is, and it does NOT grow with the size of the group:
+// a sibling's geometry is not something an edit to `id` can reach.
+//
+// Infinite when the node is non-local or any group above it is; empty when the
+// node, or any group above it, is hidden or absent.
+math::Aabb node_reach_bound(const SdfContent& content, NodeId id, const Layer& layer);
+
 // Whole-layer bound (union of root node bounds).
 // The box outside which this node cannot change the DOCUMENT's field: the union
 // over every visible layer sharing its content, since an instanced layer

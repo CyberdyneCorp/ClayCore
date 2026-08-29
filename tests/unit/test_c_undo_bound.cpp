@@ -159,7 +159,7 @@ TEST_CASE("an undone removal is bounded by what came back") {
     CHECK(r.covers(3.0f, 0.0f, 0.0f));
 }
 
-TEST_CASE("a child of a blended group reports the group, so the seam is covered") {
+TEST_CASE("a child of a blended group covers the seam without covering the group") {
     Doc doc;
     const float k = 0.5f;
     clay_node_id group = 0;
@@ -187,13 +187,31 @@ TEST_CASE("a child of a blended group reports the group, so the seam is covered"
     Bound b = undo_of(doc);  // undo the child's add
     CHECK(b.undone == 1);
     REQUIRE(b.has == 1);
+    // BOTH halves, and the change to this case is the second one.
+    //
     // The group's blend spreads the child's influence past the child's own
-    // box. A bound that stopped at the child would leave a stale seam, so the
-    // answer is the group's bound and not the child's.
+    // box, so a bound that stopped at the child would leave a stale seam. That
+    // has always been the requirement and still is.
     CHECK(b.hi[0] > chi[0]);
+    // It used to be met by reporting the GROUP's whole bound, which also
+    // covers the anchor at the far end and everything between. The anchor is
+    // not something an edit to the child can reach, and including it made the
+    // region grow with the size of the group rather than with the size of the
+    // edit. The bound is now the child's, dilated by the group's blend
+    // support: still past the seam, and strictly inside the group.
+    CHECK(b.lo[0] > glo[0]);
+    CHECK_FALSE(b.lo[0] <= glo[0]);
+    // The seam it must cover is the one at the child's own edge, and the
+    // dilation that covers it is the group's support -- which for a quadratic
+    // profile is wider than k, so asserting `>= k` here is the weaker claim
+    // that holds for every profile.
+    CHECK(b.hi[0] >= chi[0] + k);
+    // Never SMALLER than the child's own influence: a bound that is may leave
+    // stale bricks, which is the failure this whole family of checks exists
+    // to prevent.
     for (int a = 0; a < 3; ++a) {
-        CHECK(b.lo[a] <= glo[a]);
-        CHECK(b.hi[a] >= ghi[a]);
+        CHECK(b.lo[a] <= clo[a]);
+        CHECK(b.hi[a] >= chi[a]);
     }
 }
 

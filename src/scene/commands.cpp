@@ -294,35 +294,28 @@ std::optional<Command> apply(Document& doc, const Command& cmd) {
 
 namespace {
 
-// The root of the tree `id` hangs off, or kNoNode when the content does not
-// hold it. Bounded by the node count rather than trusting the tree to be
-// acyclic: SdfContent::move refuses to close a cycle, but `roots` is a public
-// member and this walk must terminate whatever a caller wrote there.
-NodeId root_ancestor(const SdfContent& content, NodeId id) {
-    NodeId cur = id;
-    for (std::size_t step = 0; step <= content.nodes().size(); ++step) {
-        NodeId parent = kNoNode;
-        int index = -1;
-        if (!content.locate(cur, &parent, &index)) return kNoNode;
-        if (parent == kNoNode) return cur;
-        cur = parent;
-    }
-    return kNoNode;
-}
-
-// The bound of a node command's target: the root ancestor's influence bound,
+// The bound of a node command's target: where an edit to THAT NODE reaches,
 // unioned over every layer sharing the content. Empty when the layer, the
 // content or the node is not there — which is the honest answer on the side of
 // an apply where the node does not exist yet, or no longer does.
+//
+// This used to take the ROOT ANCESTOR's whole influence bound, which was
+// conservative for a real reason — a group's blend spreads a child's influence
+// past the child's own box — and much larger than that reason needs. The
+// correction is the ancestors' blend SUPPORTS, not the whole subtree: see
+// node_reach_bound, which is the same conservativeness argument stated where
+// bounds are defined. A sibling's geometry is not something the edit can
+// reach, and including it made the region grow with the size of the group
+// rather than with the size of the edit.
 math::Aabb node_command_bound(const Document& doc, LayerId layer_id, NodeId node) {
     const Layer* target = doc.find_layer(layer_id);
     if (!target || !target->sdf) return math::Aabb{};
-    NodeId root = root_ancestor(*target->sdf, node);
-    if (root == kNoNode) return math::Aabb{};
     math::Aabb bound;
     for (const Layer& l : doc.layers) {
         if (l.sdf != target->sdf) continue;
-        bound.expand(node_influence_bound(*l.sdf, root, l));
+        const math::Aabb b = node_reach_bound(*l.sdf, node, l);
+        if (b.is_infinite()) return math::Aabb::infinite();
+        bound.expand(b);
     }
     return bound;
 }
