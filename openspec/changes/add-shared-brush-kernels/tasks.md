@@ -45,19 +45,19 @@
 
 ## 3. The brush model
 
-- [ ] 3.1 `include/clay/brush/model.h` — `BrushFootprint`, `BrushWeightModel`,
+- [x] 3.1 `include/clay/brush/model.h` — `BrushFootprint`, `BrushWeightModel`,
       `BrushFrameModel`, `BrushKernel`, accumulation, write target, post
       policy. Enums and PODs; no virtual dispatch in a per-vertex loop
-- [ ] 3.2 Frames named rather than implied: region normal, vertex normal,
+- [x] 3.2 Frames named rather than implied: region normal, vertex normal,
       stroke direction, stylus azimuth, given plane, view plane. Draw and
       Inflate become one kernel under two frames, and the existing distinction
       between them SHALL be preserved exactly by that reading
-- [ ] 3.3 `include/clay/brush/runtime.h` — `BrushRuntimePlan` compiled once at
+- [x] 3.3 `include/clay/brush/runtime.h` — `BrushRuntimePlan` compiled once at
       stroke begin: what the kernel needs (normals, neighbours, snapshot,
       alpha, automask), precomputed reciprocals, and nothing the loop must
       re-derive
-- [ ] 3.4 A plan is cached on preset revision, not recompiled per stamp
-- [ ] 3.5 Determinism: the same samples produce the same stamps whether the
+- [x] 3.4 A plan is cached on preset revision, not recompiled per stamp
+- [x] 3.5 Determinism: the same samples produce the same stamps whether the
       host delivers them in one batch or five, with the transaction state
       retained. Test it as a comparison, not as an assertion about jitter
 - [x] 3.6 `apply_to_mesh` consumes `Stamp::rotation`, which today it drops.
@@ -69,48 +69,48 @@
 
 ## 4. Workset and scratch
 
-- [ ] 4.1 `include/clay/mesh/sculpt_workset.h` — vertices, triangles,
+- [x] 4.1 `include/clay/mesh/sculpt_workset.h` — vertices, triangles,
       positions, normals, weights, automask, bounds, and `clear_keep_capacity`
-- [ ] 4.2 READ HALO distinguished from WRITE REGION. Smooth, Relax and Polish
+- [x] 4.2 READ HALO distinguished from WRITE REGION. Smooth, Relax and Polish
       read a ring they do not write, and the dirty report SHALL cover the write
       region only or a host uploads geometry that did not change
-- [ ] 4.3 Scratch arena per sculptor, reset rather than freed between stamps
-- [ ] 4.4 Epoch-marked visited sets rather than a hash set per dab
-- [ ] 4.5 ALLOCATION GATE: after warm-up, an ordinary local stamp on a
+- [x] 4.3 Scratch arena per sculptor, reset rather than freed between stamps
+- [x] 4.4 Epoch-marked visited sets rather than a hash set per dab
+- [x] 4.5 ALLOCATION GATE: after warm-up, an ordinary local stamp on a
       fixed-topology mesh performs zero heap allocations. Instrumented in the
       benchmark build, asserted in a test, and allowed to fail loudly on the
       first stamp of a larger footprint
-- [ ] 4.6 Smooth's iteration loop ping-pongs local buffers and queries the tree
+- [x] 4.6 Smooth's iteration loop ping-pongs local buffers and queries the tree
       ONCE, not once per pass. `kMaxSmoothIterations` stays the bound
 
 ## 5. Automasking
 
-- [ ] 5.1 `include/clay/mesh/automask.h` — normal-angle, topology-connected,
+- [x] 5.1 `include/clay/mesh/automask.h` — normal-angle, topology-connected,
       boundary, cavity and surface-group gates, each producing one scalar per
       WORKSET vertex and never one per mesh vertex
-- [ ] 5.2 Cavity and curvature call the SAME estimator `brush/procedural_mask`
+- [x] 5.2 Cavity and curvature call the SAME estimator `brush/procedural_mask`
       uses. A painted cavity mask and a cavity automask disagreeing about one
       surface is the failure this task exists to prevent
-- [ ] 5.3 The surface-group gate reads `voxel::GroupField` through the caller,
+- [x] 5.3 The surface-group gate reads `voxel::GroupField` through the caller,
       not a new per-face id — the world-lattice decision in `add-surface-groups`
       is what makes a group survive a representation bridge, and a per-face
       copy would be a second answer to the same question
-- [ ] 5.4 A fully automasked vertex is bit-identical to its input position
-- [ ] 5.5 Automasks compose by multiplication, and the composition is tested
+- [x] 5.4 A fully automasked vertex is bit-identical to its input position
+- [x] 5.5 Automasks compose by multiplication, and the composition is tested
       against each factor alone
 
 ## 6. Presets
 
-- [ ] 6.1 `brush::BrushPreset` — name, `StrokePreset`, `BrushModel`, schema
+- [x] 6.1 `brush::BrushPreset` — name, `StrokePreset`, `BrushModel`, schema
       version from v1. An unknown newer version is REFUSED, not reinterpreted,
       as `StrokePreset` already does
-- [ ] 6.2 No image bytes in a preset. Alpha and any future displacement image
+- [x] 6.2 No image bytes in a preset. Alpha and any future displacement image
       stay caller-owned and borrowed for the call
-- [ ] 6.3 A reference preset library covering the artist families — Standard,
+- [x] 6.3 A reference preset library covering the artist families — Standard,
       Clay, Clay Buildup, Clay Strips, Inflate, Smooth, Relax, Move, Move
       Topological, Snake Hook, Pinch, Dam/Crease, Flatten, Scrape, hPolish,
       Trim, Layer, Nudge, Rake — as data, with no engine path of their own
-- [ ] 6.4 Round-trip: serialize, deserialize, resolve a stroke, compare stamps
+- [x] 6.4 Round-trip: serialize, deserialize, resolve a stroke, compare stamps
 
 ## 7. Bindings, gallery, gates
 

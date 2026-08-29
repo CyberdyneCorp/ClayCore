@@ -29,6 +29,8 @@
 #include "clay/mesh/sculpt.h"
 #include "clay/scene/document.h"
 #include "clay/voxel/grid.h"
+#include "clay/brush/surface_measure.h"
+#include "clay/voxel/groups.h"
 #include "clay/voxel/mask.h"
 
 namespace clay {
@@ -190,6 +192,53 @@ struct Stamp {
 std::vector<Stamp> resolve_stroke(const std::vector<StrokeSample>& samples,
                                   const StrokePreset& preset);
 
+// A stroke resolved AS THE SAMPLES ARRIVE (brush-engine spec).
+//
+// `resolve_stroke` is pure and takes a whole path, which is the right shape for
+// a stroke that is already finished and the wrong one for a stroke under a
+// finger. A host receives pointer events in batches whose size is a property of
+// the DEVICE — coalescing, frame rate, how busy the main thread is — and the
+// artist's gesture must not depend on any of that.
+//
+// So the transaction accumulates the samples and re-resolves the path, handing
+// back only the stamps it has not handed back before. Resolving one batch of
+// forty samples and five batches of eight produce the same stamps, because both
+// end up resolving the same path.
+//
+// WHY RE-RESOLVE RATHER THAN EXTEND. Two of a stamp's fields are properties of
+// the WHOLE path and cannot be known from a prefix: `along` is the fraction of
+// the stroke covered, and `taper_end` ramps the radius out over the last
+// stretch of it. A resolver that only ever appended would have to guess the
+// final length and would be wrong on every stroke that is still moving. So a
+// stamp already emitted may be REVISED by a later append — `stamps()` is always
+// the truth, and the return of `append` is the new tail. A host drawing a live
+// preview redraws from `stamps()`; one that only ever adds geometry can use the
+// tail and accept that a tapered stroke's last few stamps settle when the
+// finger lifts.
+class StrokeTransaction {
+   public:
+    explicit StrokeTransaction(const StrokePreset& preset) : preset_(preset) {}
+
+    // Add samples and resolve. Returns the stamps beyond the ones previous
+    // calls already returned.
+    std::vector<Stamp> append(const std::vector<StrokeSample>& samples);
+
+    // Every stamp of the stroke as it now stands, including any earlier ones a
+    // later append revised.
+    const std::vector<Stamp>& stamps() const { return stamps_; }
+    const std::vector<StrokeSample>& samples() const { return samples_; }
+    const StrokePreset& preset() const { return preset_; }
+
+    // Start again, keeping the preset.
+    void clear();
+
+   private:
+    StrokePreset preset_;
+    std::vector<StrokeSample> samples_;
+    std::vector<Stamp> stamps_;
+    std::size_t emitted_ = 0;
+};
+
 // -- consumers ----------------------------------------------------------------
 // Both take the mask the same way the voxel brushes do: a stamp centred in a
 // fully masked region is dropped, and a partially masked one has its strength
@@ -286,6 +335,30 @@ struct MeshStrokeOptions {
     // `alpha_tangent` is exactly what the caller set, including its derived
     // default.
     bool orient_alpha_by_stamp = false;
+
+    // -- automasking ----------------------------------------------------------
+    //
+    // Two of the five automask factors cannot be computed inside `mesh`, and
+    // this is where they are supplied. `brush` is the one module that can see
+    // all three vocabularies — the mesh sculptor, the field estimator and the
+    // document's group lattice — which is the same reason `apply_to_mesh` is
+    // the only place a `MaskField` becomes a `field::MaskGate`.
+    //
+    // Set once for the stroke rather than per stamp: they become
+    // `std::function`s, and copying those per dab is an allocation per dab.
+
+    // The field the cavity automask measures. `brush::measure_at` is the SAME
+    // estimator `mask_from_surface` uses, which is what makes "a painted cavity
+    // mask and a cavity automask agree about this surface" a construction
+    // rather than a claim. Null leaves the cavity factor inert.
+    std::function<float(kernel::cfloat3)> cavity_field;
+    MeasureSettings cavity_measure;
+
+    // The document's polygroups, for the surface-group automask. A WORLD
+    // LATTICE rather than a per-face identifier, which is what lets a group
+    // survive a representation bridge.
+    const voxel::GroupField* groups = nullptr;
+    std::uint32_t active_group = 0;
 };
 
 // Apply a resolved stroke to a mesh. Returns the number of stamps that moved a

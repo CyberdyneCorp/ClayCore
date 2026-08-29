@@ -27,6 +27,7 @@
 
 #include "clay/field/flatten.h"  // FlattenMode
 #include "clay/kernel/shim.h"
+#include "clay/mesh/automask.h"
 
 namespace clay {
 namespace mesh {
@@ -202,6 +203,17 @@ struct MeshBrushSettings {
     // Smear ignores it — its colour comes from the surface it is dragging
     // across, which is the whole difference between the two verbs.
     kernel::cfloat3 color = kernel::cf3(1, 1, 1);
+
+    // -- automasking ----------------------------------------------------------
+    // The gates the brush applies to ITSELF, composed into the per-vertex
+    // weight rather than branched into each verb. Off by default, and a stamp
+    // with none is bit-identical to one taken before automasking existed — the
+    // factor is applied last, so it multiplies by an exact 1.0.
+    //
+    // The two factors this struct cannot carry — the cavity estimator and the
+    // group field — are set on the SCULPTOR for the stroke, because they hold
+    // `std::function`s and copying those per stamp is an allocation per dab.
+    AutomaskSettings automask;
 
     bool has_alpha() const { return alpha != nullptr && alpha_width >= 2 && alpha_height >= 2; }
 };

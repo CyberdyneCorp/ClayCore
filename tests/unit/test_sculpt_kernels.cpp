@@ -251,3 +251,90 @@ TEST_CASE("sculpt kernels: the colour pair moves no vertex and smear needs a dir
     mesh::kernel_smear(s, nb, settings, current.data(), out.data());
     for (std::size_t i = 0; i < s.count; ++i) CHECK(out[i].z == 1.0f);
 }
+
+// -- the brush model ----------------------------------------------------------
+
+TEST_CASE("brush model: every verb decomposes into axis values") {
+    // The table has to stay true: a verb that could not be written as a row is
+    // evidence an axis is missing, which is the requirement's own test.
+    const MeshBrush verbs[] = {
+        MeshBrush::Grab,    MeshBrush::Draw,   MeshBrush::Inflate, MeshBrush::Smooth,
+        MeshBrush::Pinch,   MeshBrush::Flatten, MeshBrush::Clay,   MeshBrush::Crease,
+        MeshBrush::Scrape,  MeshBrush::Polish, MeshBrush::Snakehook, MeshBrush::Relax,
+        MeshBrush::Layer,   MeshBrush::Nudge,  MeshBrush::Paint,  MeshBrush::Smear};
+    for (MeshBrush v : verbs) {
+        const mesh::BrushModel m = mesh::model_of(v);
+        CHECK(m.verb == v);
+        // The two axes that are DERIVED from the vocabulary rather than chosen
+        // must agree with the vocabulary, or the model would be a second answer
+        // to a question the library already answers.
+        CHECK((m.target == mesh::BrushWriteTarget::Color) == mesh::writes_color(v));
+        CHECK((m.footprint == mesh::BrushFootprint::SurfaceWalk) == mesh::default_geodesic(v));
+        // A colour pass changes nothing about the surface, so it owes no
+        // normals; every displacement verb does.
+        CHECK((m.post == mesh::BrushPostPolicy::None) == mesh::writes_color(v));
+    }
+}
+
+TEST_CASE("brush model: draw and inflate differ in exactly one axis") {
+    const mesh::BrushModel draw = mesh::model_of(MeshBrush::Draw);
+    const mesh::BrushModel inflate = mesh::model_of(MeshBrush::Inflate);
+    // Same kernel — that is the claim the unification rests on.
+    CHECK(draw.kernel == inflate.kernel);
+    CHECK(draw.kernel == mesh::BrushKernelId::Displace);
+    CHECK(draw.footprint == inflate.footprint);
+    CHECK(draw.target == inflate.target);
+    // ...and one axis apart.
+    CHECK(draw.frame == mesh::BrushFrame::RegionNormal);
+    CHECK(inflate.frame == mesh::BrushFrame::VertexNormal);
+}
+
+TEST_CASE("brush model: one stamp of snakehook is a grab") {
+    // Identical rows, and correctly so: what makes a snakehook is the
+    // re-anchoring BETWEEN stamps, which is a fact about a stroke rather than
+    // about a brush.
+    const mesh::BrushModel grab = mesh::model_of(MeshBrush::Grab);
+    const mesh::BrushModel hook = mesh::model_of(MeshBrush::Snakehook);
+    CHECK(grab.kernel == hook.kernel);
+    CHECK(grab.frame == hook.frame);
+    CHECK(grab.footprint == hook.footprint);
+}
+
+TEST_CASE("brush model: a plan records what its kernel reads and nothing else") {
+    MeshBrushSettings settings = base_settings();
+    settings.smooth_iterations = 4;
+
+    // Polish is the only verb that reads a NEIGHBOUR's own normal.
+    const mesh::BrushRuntimePlan polish =
+        mesh::compile_plan(mesh::model_of(MeshBrush::Polish), settings);
+    CHECK(polish.needs_neighbors);
+    CHECK(polish.needs_neighbor_normals);
+    CHECK_FALSE(polish.needs_neighbor_colors);
+
+    // Smooth reads the same one-ring and not the normals, which is the saving
+    // the flag exists for: neighbour normals are a walk over the whole two-ring.
+    const mesh::BrushRuntimePlan smooth =
+        mesh::compile_plan(mesh::model_of(MeshBrush::Smooth), settings);
+    CHECK(smooth.needs_neighbors);
+    CHECK_FALSE(smooth.needs_neighbor_normals);
+
+    // Smear reads colours; paint reads no neighbour at all.
+    CHECK(mesh::compile_plan(mesh::model_of(MeshBrush::Smear), settings).needs_neighbor_colors);
+    CHECK_FALSE(mesh::compile_plan(mesh::model_of(MeshBrush::Paint), settings).needs_neighbors);
+
+    // Layer is the one kernel that measures from the stroke's own start.
+    CHECK(mesh::compile_plan(mesh::model_of(MeshBrush::Layer), settings).needs_stroke_origin);
+    CHECK_FALSE(mesh::compile_plan(mesh::model_of(MeshBrush::Draw), settings).needs_stroke_origin);
+
+    // Draw reads nothing but the snapshot, which is why it is the cheap one.
+    const mesh::BrushRuntimePlan draw =
+        mesh::compile_plan(mesh::model_of(MeshBrush::Draw), settings);
+    CHECK_FALSE(draw.needs_neighbors);
+
+    // The pass count is clamped ONCE, here, rather than per pass.
+    settings.smooth_iterations = 100000;
+    CHECK(mesh::compile_plan(mesh::model_of(MeshBrush::Smooth), settings).smooth_passes ==
+          mesh::kMaxSmoothIterations);
+    settings.smooth_iterations = -3;
+    CHECK(mesh::compile_plan(mesh::model_of(MeshBrush::Smooth), settings).smooth_passes == 1);
+}

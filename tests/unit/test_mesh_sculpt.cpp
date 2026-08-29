@@ -1556,3 +1556,471 @@ TEST_CASE("mesh stroke: orienting is opt-in, and continuous where it is on") {
     for (std::size_t i = 0; i < straight.size(); ++i)
         CHECK(straight[i].y == doctest::Approx(nearly[i].y).epsilon(1e-3));
 }
+
+// A stroke compiles its brush ONCE (add-shared-brush-kernels 3.3/3.4).
+TEST_CASE("mesh sculpt: a stroke compiles its plan once, not per stamp") {
+    Mesh m = plane_grid(16, 1.0f);
+    MeshSculptor sculptor(m);
+    MeshBrushSettings settings;
+    settings.radius = 0.3f;
+    settings.strength = 0.25f;
+
+    CHECK(sculptor.plan_compilations() == 0);
+    for (int i = 0; i < 20; ++i) {
+        // Radius, strength and centre move on every stamp of a real stroke and
+        // change nothing about what the kernel reads, so none of them may
+        // trigger a recompile.
+        settings.center = cf3(-0.5f + 0.05f * static_cast<float>(i), 0.0f, 0.0f);
+        settings.radius = 0.3f + 0.01f * static_cast<float>(i);
+        settings.strength = 0.25f + 0.01f * static_cast<float>(i);
+        sculptor.stamp(MeshBrush::Draw, settings);
+    }
+    CHECK(sculptor.plan_compilations() == 1);
+
+    // A different verb is a different brush and must compile.
+    sculptor.stamp(MeshBrush::Smooth, settings);
+    CHECK(sculptor.plan_compilations() == 2);
+    sculptor.stamp(MeshBrush::Smooth, settings);
+    CHECK(sculptor.plan_compilations() == 2);
+
+    // ...and so is a change to one of the three things the plan actually reads.
+    settings.smooth_iterations = 3;
+    sculptor.stamp(MeshBrush::Smooth, settings);
+    CHECK(sculptor.plan_compilations() == 3);
+}
+
+// Batching is a property of the device, not of the gesture
+// (add-shared-brush-kernels 3.5).
+TEST_CASE("stroke transaction: one batch and five batches agree") {
+    brush::StrokePreset preset;
+    preset.radius = 0.2f;
+    preset.spacing = 0.25f;
+    // The two fields that are properties of the WHOLE path, both on, because
+    // they are exactly what a naive appending resolver would get wrong.
+    preset.taper_start = 0.2f;
+    preset.taper_end = 0.2f;
+    preset.jitter_position = 0.1f;
+    preset.jitter_size = 0.1f;
+    preset.seed = 7;
+
+    std::vector<brush::StrokeSample> path;
+    for (int i = 0; i < 40; ++i) {
+        brush::StrokeSample s;
+        s.position = cf3(-1.0f + 0.05f * static_cast<float>(i), 0.0f,
+                         0.1f * static_cast<float>(i % 3));
+        s.pressure = 0.5f + 0.5f * static_cast<float>(i % 4) / 4.0f;
+        path.push_back(s);
+    }
+
+    const std::vector<brush::Stamp> whole = brush::resolve_stroke(path, preset);
+    REQUIRE(whole.size() > 4);
+
+    brush::StrokeTransaction txn(preset);
+    std::size_t tail_total = 0;
+    for (int batch = 0; batch < 5; ++batch) {
+        const std::vector<brush::StrokeSample> slice(
+            path.begin() + static_cast<std::ptrdiff_t>(batch * 8),
+            path.begin() + static_cast<std::ptrdiff_t>((batch + 1) * 8));
+        tail_total += txn.append(slice).size();
+    }
+
+    // The gesture is the same gesture however the device chopped it up.
+    REQUIRE(txn.stamps().size() == whole.size());
+    for (std::size_t i = 0; i < whole.size(); ++i) {
+        CHECK(txn.stamps()[i].position.x == whole[i].position.x);
+        CHECK(txn.stamps()[i].position.y == whole[i].position.y);
+        CHECK(txn.stamps()[i].position.z == whole[i].position.z);
+        CHECK(txn.stamps()[i].radius == whole[i].radius);
+        CHECK(txn.stamps()[i].strength == whole[i].strength);
+        CHECK(txn.stamps()[i].along == whole[i].along);
+    }
+
+    // Every stamp was handed to the caller exactly once as a tail.
+    CHECK(tail_total == whole.size());
+
+    // One batch through the same transaction agrees with the pure resolver too,
+    // so the transaction is not merely self-consistent.
+    brush::StrokeTransaction single(preset);
+    single.append(path);
+    REQUIRE(single.stamps().size() == whole.size());
+    for (std::size_t i = 0; i < whole.size(); ++i)
+        CHECK(single.stamps()[i].radius == whole[i].radius);
+}
+
+// The dirty report names what MOVED, not what was read
+// (add-shared-brush-kernels 4.2).
+TEST_CASE("mesh sculpt: the write region excludes the read halo") {
+    Mesh m = plane_grid(24, 1.0f);
+    // A ripple, so smoothing has something to remove.
+    for (std::size_t i = 0; i < m.positions.size(); ++i)
+        m.positions[i] = cf3(m.positions[i].x, (i & 1) ? 0.0625f : 0.0f, m.positions[i].z);
+    const std::vector<cfloat3> before = m.positions;
+
+    MeshSculptor sculptor(m);
+    MeshBrushSettings s;
+    s.center = cf3(0, 0, 0);
+    s.radius = 0.3f;
+    s.strength = 0.5f;
+    s.smooth_iterations = 2;
+    const std::size_t moved = sculptor.stamp(MeshBrush::Smooth, s);
+    REQUIRE(moved > 0);
+
+    const std::vector<std::uint32_t>& written = sculptor.write_region();
+    const mesh::SculptWorkset& ws = sculptor.workset();
+    CHECK(written.size() == moved);
+
+    // Everything named actually moved. A report naming a vertex that did not
+    // move costs a host an upload for nothing.
+    for (std::uint32_t c : written) {
+        std::size_t n = 0;
+        const std::uint32_t v = sculptor.adjacency().members(c, &n)[0];
+        CAPTURE(c);
+        const bool unmoved = before[v].x == m.positions[v].x &&
+                             before[v].y == m.positions[v].y && before[v].z == m.positions[v].z;
+        CHECK_FALSE(unmoved);
+    }
+
+    // THE READ HALO EXISTS AND IS UNTOUCHED, which is the claim. A Laplacian
+    // averages over a one-ring, so it reads a ring of classes one edge BEYOND
+    // the workset. Those are the vertices a report must not name, and they are
+    // also the vertices the stamp must not have moved.
+    std::size_t halo = 0;
+    for (std::uint32_t c : written) {
+        std::size_t rc = 0;
+        const std::uint32_t* ring = sculptor.adjacency().ring(c, &rc);
+        for (std::size_t k = 0; k < rc; ++k) {
+            if (ws.slot[ring[k]] != mesh::kNoClass) continue;  // inside the workset
+            ++halo;
+            std::size_t n = 0;
+            const std::uint32_t v = sculptor.adjacency().members(ring[k], &n)[0];
+            CAPTURE(ring[k]);
+            const bool moved_halo = before[v].x != m.positions[v].x ||
+                                    before[v].y != m.positions[v].y ||
+                                    before[v].z != m.positions[v].z;
+            CHECK_FALSE(moved_halo);
+        }
+    }
+    // ...and there really was one, so the check above is not vacuous.
+    CHECK(halo > 0);
+
+    // Every moved vertex is inside the brush's ball.
+    for (std::uint32_t c : written) {
+        std::size_t n = 0;
+        const std::uint32_t v = sculptor.adjacency().members(c, &n)[0];
+        CHECK(kernel::clength(before[v] - s.center) <= s.radius);
+    }
+
+    // The bounds cover what moved and nothing beyond the brush.
+    CHECK_FALSE(sculptor.write_bounds().empty());
+    CHECK(sculptor.write_bounds().min.x >= s.center.x - s.radius);
+    CHECK(sculptor.write_bounds().max.x <= s.center.x + s.radius);
+}
+
+// The multi-pass verbs iterate LOCAL buffers rather than re-querying
+// (add-shared-brush-kernels 4.6).
+TEST_CASE("mesh sculpt: more smoothing passes cost no more queries") {
+    Mesh m = plane_grid(24, 1.0f);
+    for (std::size_t i = 0; i < m.positions.size(); ++i)
+        m.positions[i] = cf3(m.positions[i].x, (i & 1) ? 0.0625f : 0.0f, m.positions[i].z);
+
+    MeshSculptor sculptor(m);
+    MeshBrushSettings s;
+    s.center = cf3(0, 0, 0);
+    s.radius = 0.3f;
+    s.strength = 0.5f;
+
+    // One pass and sixteen reach exactly the same set: the workset is gathered
+    // once per stamp and the passes ping-pong over it. A verb that re-queried
+    // per pass could reach further on a later pass, and the region would depend
+    // on the iteration count — which would make the falloff mean something
+    // different at each setting.
+    s.smooth_iterations = 1;
+    sculptor.stamp(MeshBrush::Smooth, s);
+    const std::size_t one_pass = sculptor.workset().size();
+
+    Mesh m2 = plane_grid(24, 1.0f);
+    for (std::size_t i = 0; i < m2.positions.size(); ++i)
+        m2.positions[i] = cf3(m2.positions[i].x, (i & 1) ? 0.0625f : 0.0f, m2.positions[i].z);
+    MeshSculptor sculptor2(m2);
+    s.smooth_iterations = 16;
+    sculptor2.stamp(MeshBrush::Smooth, s);
+    CHECK(sculptor2.workset().size() == one_pass);
+
+    // And the bound holds: a count from a host's slider typo is clamped rather
+    // than run.
+    s.smooth_iterations = 1000000;
+    CHECK(sculptor2.stamp(MeshBrush::Smooth, s) > 0);
+}
+
+// -- automasking (add-shared-brush-kernels 5.x) -------------------------------
+
+namespace {
+
+// A plane with an open border all round it, so the boundary gate has something
+// to find, and a second disconnected sheet just above it, so the connectivity
+// gate does too.
+Mesh two_sheets(int n, float half, float gap) {
+    Mesh lower = plane_grid(n, half);
+    Mesh m = lower;
+    const std::uint32_t offset = static_cast<std::uint32_t>(lower.positions.size());
+    for (std::size_t i = 0; i < lower.positions.size(); ++i) {
+        m.positions.push_back(lower.positions[i] + cf3(0.0f, gap, 0.0f));
+        m.normals.push_back(cf3(0, 1, 0));
+    }
+    for (std::size_t i = 0; i < lower.indices.size(); ++i)
+        m.indices.push_back(lower.indices[i] + offset);
+    return m;
+}
+
+std::size_t moved_count(const std::vector<cfloat3>& a, const std::vector<cfloat3>& b) {
+    std::size_t n = 0;
+    for (std::size_t i = 0; i < a.size() && i < b.size(); ++i) {
+        const bool same = a[i].x == b[i].x && a[i].y == b[i].y && a[i].z == b[i].z;
+        if (!same) ++n;
+    }
+    return n;
+}
+
+}  // namespace
+
+TEST_CASE("automask: a fully masked vertex is bit-identical to its input") {
+    // The requirement is bit-identical, not close. A vertex that a gate closed
+    // on must not be written at all — a lerp toward its own position lands one
+    // ulp away and leaves a visible seam along every gate's edge.
+    Mesh m = plane_grid(16, 1.0f);
+    const std::vector<cfloat3> before = m.positions;
+    MeshSculptor sculptor(m);
+
+    MeshBrushSettings s;
+    s.center = cf3(0, 0, 0);
+    s.radius = 0.5f;
+    s.strength = 0.5f;
+    s.automask.factors = static_cast<std::uint32_t>(mesh::AutomaskFactor::SurfaceGroup);
+
+    // A group field that answers "not your group" everywhere.
+    mesh::AutomaskInputs inputs;
+    inputs.active_group = 1;
+    inputs.group = [](cfloat3) -> std::uint32_t { return 2; };
+    sculptor.set_automask_inputs(inputs);
+
+    CHECK(sculptor.stamp(MeshBrush::Draw, s) == 0);
+    CHECK(moved_count(before, m.positions) == 0);
+    // Not merely unmoved — untouched, so the buffer is byte-identical.
+    CHECK(std::memcmp(before.data(), m.positions.data(), before.size() * sizeof(cfloat3)) == 0);
+}
+
+TEST_CASE("automask: the group gate keeps a stroke inside its own group") {
+    Mesh m = plane_grid(16, 1.0f);
+    const std::vector<cfloat3> before = m.positions;
+    MeshSculptor sculptor(m);
+
+    MeshBrushSettings s;
+    s.center = cf3(0, 0, 0);
+    s.radius = 0.5f;
+    s.strength = 0.5f;
+
+    // Ungated first, for the count to beat.
+    const std::size_t all = sculptor.stamp(MeshBrush::Draw, s);
+    REQUIRE(all > 0);
+
+    Mesh m2 = plane_grid(16, 1.0f);
+    MeshSculptor gated(m2);
+    s.automask.factors = static_cast<std::uint32_t>(mesh::AutomaskFactor::SurfaceGroup);
+    mesh::AutomaskInputs inputs;
+    inputs.active_group = 1;
+    // Half the plane is group 1 and half is group 2 — the world lattice the
+    // group gate reads, standing in for a document's group field.
+    inputs.group = [](cfloat3 p) -> std::uint32_t { return p.x < 0.0f ? 1u : 2u; };
+    gated.set_automask_inputs(inputs);
+    const std::size_t half = gated.stamp(MeshBrush::Draw, s);
+
+    CHECK(half > 0);
+    CHECK(half < all);
+    // Nothing on the far side of the group border moved at all.
+    for (std::size_t i = 0; i < m2.positions.size(); ++i)
+        if (before[i].x >= 0.0f) {
+            CAPTURE(i);
+            CHECK(m2.positions[i].y == before[i].y);
+        }
+}
+
+TEST_CASE("automask: connectivity refuses a second sheet a euclidean ball reaches") {
+    // The hazard the gate exists for: two surfaces a hair apart, and a verb
+    // whose footprint is a BALL rather than a surface walk — which is where
+    // flatten and scrape live.
+    Mesh m = two_sheets(12, 1.0f, 0.03125f);
+    MeshSculptor sculptor(m);
+
+    MeshBrushSettings s;
+    s.center = cf3(0, 0, 0);
+    s.radius = 0.4f;
+    s.strength = 0.5f;
+    s.geodesic = false;  // the ball footprint
+    const std::size_t both = sculptor.stamp(MeshBrush::Draw, s);
+    REQUIRE(both > 0);
+
+    Mesh m2 = two_sheets(12, 1.0f, 0.03125f);
+    MeshSculptor gated(m2);
+    s.automask.factors = static_cast<std::uint32_t>(mesh::AutomaskFactor::TopologyConnected);
+    const std::size_t one = gated.stamp(MeshBrush::Draw, s);
+    CHECK(one > 0);
+    CHECK(one < both);
+}
+
+TEST_CASE("automask: the boundary gate protects an open border") {
+    Mesh m = plane_grid(12, 1.0f);
+    MeshSculptor sculptor(m);
+    // A brush ON the corner, so most of what it reaches is border.
+    MeshBrushSettings s;
+    s.center = cf3(-1.0f, 0.0f, -1.0f);
+    s.radius = 0.5f;
+    s.strength = 0.5f;
+
+    const std::size_t open = sculptor.stamp(MeshBrush::Draw, s);
+    REQUIRE(open > 0);
+    const float corner_open = m.positions[0].y;
+
+    Mesh m2 = plane_grid(12, 1.0f);
+    MeshSculptor gated(m2);
+    s.automask.factors = static_cast<std::uint32_t>(mesh::AutomaskFactor::Boundary);
+    s.automask.boundary_rings = 2;
+    gated.stamp(MeshBrush::Draw, s);
+    // The corner vertex IS the border, so it must not move at all.
+    CHECK(m2.positions[0].y == 0.0f);
+    CHECK(corner_open != 0.0f);  // ...and it did without the gate
+}
+
+TEST_CASE("automask: factors compose by multiplication") {
+    // Each factor alone, then both, and the composition must be the product —
+    // which is what lets a host stack them without the engine knowing which
+    // combinations exist.
+    Mesh base = plane_grid(16, 1.0f);
+    MeshBrushSettings s;
+    // Near the border, so the boundary gate is PARTIAL over part of the brush
+    // rather than off everywhere.
+    s.center = cf3(-0.75f, 0.0f, 0.0f);
+    s.radius = 0.5f;
+    s.strength = 0.5f;
+
+    // TWO CONTINUOUS GATES. The group gate is binary by construction — a vertex
+    // is in the group or it is not — so a product with it can never be strictly
+    // less than both factors, and using it here tested nothing. Cavity and the
+    // boundary fade both take intermediate values, which is what makes "the
+    // composition is the product" an observable claim rather than a definition.
+    mesh::AutomaskInputs inputs;
+    inputs.cavity = [](cfloat3 p) { return std::clamp(0.5f + 0.5f * p.x, 0.0f, 1.0f); };
+
+    auto run = [&](std::uint32_t factors) {
+        Mesh m = base;
+        MeshSculptor sc(m);
+        sc.set_automask_inputs(inputs);
+        MeshBrushSettings local = s;
+        local.automask.factors = factors;
+        local.automask.boundary_rings = 2;
+        sc.stamp(MeshBrush::Draw, local);
+        return m.positions;
+    };
+
+    const std::uint32_t group = static_cast<std::uint32_t>(mesh::AutomaskFactor::Cavity);
+    const std::uint32_t boundary = static_cast<std::uint32_t>(mesh::AutomaskFactor::Boundary);
+
+    const std::vector<cfloat3> none = run(0);
+    const std::vector<cfloat3> g = run(group);
+    const std::vector<cfloat3> b = run(boundary);
+    const std::vector<cfloat3> both = run(group | boundary);
+
+    // Each factor alone removes motion; together they remove at least as much
+    // as either, which is what multiplication by values in [0,1] means.
+    for (std::size_t i = 0; i < none.size(); ++i) {
+        const float full = std::fabs(none[i].y);
+        CAPTURE(i);
+        CHECK(std::fabs(g[i].y) <= full + 1e-6f);
+        CHECK(std::fabs(b[i].y) <= full + 1e-6f);
+        CHECK(std::fabs(both[i].y) <= std::fabs(g[i].y) + 1e-6f);
+        CHECK(std::fabs(both[i].y) <= std::fabs(b[i].y) + 1e-6f);
+    }
+
+    // ...and the composition is genuinely the PRODUCT of the two gates, not the
+    // minimum of them: where both gates are partial, the result is strictly
+    // less than either alone.
+    std::size_t strictly_less = 0;
+    for (std::size_t i = 0; i < none.size(); ++i) {
+        const float gi = std::fabs(g[i].y), bi = std::fabs(b[i].y);
+        if (gi > 1e-6f && bi > 1e-6f && gi < std::fabs(none[i].y) - 1e-6f &&
+            bi < std::fabs(none[i].y) - 1e-6f && std::fabs(both[i].y) < std::min(gi, bi) - 1e-6f)
+            ++strictly_less;
+    }
+    CHECK(strictly_less > 0);
+}
+
+TEST_CASE("automask: an off automask changes nothing, bit for bit") {
+    // The property the whole weight-composition order exists to protect: a
+    // stamp with no automask must land on exactly the bits it landed on before
+    // automasking was added.
+    Mesh a = plane_grid(16, 1.0f);
+    Mesh b = plane_grid(16, 1.0f);
+    MeshBrushSettings s;
+    s.center = cf3(0, 0, 0);
+    s.radius = 0.5f;
+    s.strength = 0.5f;
+
+    MeshSculptor sa(a);
+    sa.stamp(MeshBrush::Draw, s);
+
+    MeshSculptor sb(b);
+    mesh::AutomaskInputs inputs;
+    inputs.cavity = [](cfloat3) { return 1.0f; };  // present but unused: no factor is set
+    sb.set_automask_inputs(inputs);
+    sb.stamp(MeshBrush::Draw, s);
+
+    REQUIRE(a.positions.size() == b.positions.size());
+    CHECK(std::memcmp(a.positions.data(), b.positions.data(),
+                      a.positions.size() * sizeof(cfloat3)) == 0);
+}
+
+TEST_CASE("automask: the cavity automask is the painted cavity mask's own estimator") {
+    // THE FAILURE THIS PREVENTS: a mesh-side curvature estimated from a vertex
+    // ring, and a field-side one from the Laplacian, disagreeing about the same
+    // surface — so that freezing the crevices by hand and automasking them
+    // protect different vertices. `mesh` structurally cannot reach the
+    // estimator, so there is no second implementation to drift; this checks the
+    // wiring actually goes through the first one.
+    auto sphere = [](cfloat3 p) { return kernel::clength(p) - 0.5f; };
+    brush::MeasureSettings measure;
+    measure.scale = 0.5f;
+
+    Mesh m = plane_grid(12, 1.0f);
+    MeshSculptor sculptor(m);
+
+    brush::MeshStrokeOptions options;
+    options.cavity_field = sphere;
+    options.cavity_measure = measure;
+
+    std::vector<brush::StrokeSample> path;
+    for (int i = 0; i < 4; ++i) {
+        brush::StrokeSample s;
+        s.position = cf3(-0.3f + 0.2f * static_cast<float>(i), 0.0f, 0.0f);
+        path.push_back(s);
+    }
+    brush::StrokePreset preset;
+    preset.radius = 0.25f;
+    preset.spacing = 0.5f;
+    const std::vector<brush::Stamp> stamps = brush::resolve_stroke(path, preset);
+    REQUIRE(!stamps.empty());
+
+    MeshBrushSettings settings;
+    settings.strength = 0.5f;
+    settings.automask.factors = static_cast<std::uint32_t>(mesh::AutomaskFactor::Cavity);
+    brush::apply_to_mesh(sculptor, stamps, MeshBrush::Draw, settings, nullptr, nullptr, options);
+
+    // The automask the sculptor ended up holding IS the estimator, so asking it
+    // and asking `measure_at` directly must give the same number. Not close —
+    // the same call.
+    REQUIRE(static_cast<bool>(sculptor.automask_inputs().cavity));
+    for (float x = -0.4f; x <= 0.4f; x += 0.2f) {
+        const cfloat3 p = cf3(x, 0.0f, 0.0f);
+        CAPTURE(x);
+        CHECK(sculptor.automask_inputs().cavity(p) ==
+              brush::measure_at(sphere, brush::SurfaceMeasure::Cavity, p, measure));
+    }
+}

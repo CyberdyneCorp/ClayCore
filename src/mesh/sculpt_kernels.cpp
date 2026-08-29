@@ -230,22 +230,23 @@ void kernel_grab(const SculptSnapshot& s, const MeshBrushSettings& settings,
     for (std::size_t i = 0; i < s.count; ++i) out[i] = settings.direction * s.weights[i];
 }
 
-void kernel_draw(const SculptSnapshot& s, const MeshBrushSettings& settings,
-                 kernel::cfloat3* out) {
-    // ONE shared direction for the whole stamp. That is what makes draw a
-    // rounded organic swell rather than a balloon, and it is the entire
-    // difference from inflate.
+void kernel_displace(const SculptSnapshot& s, const MeshBrushSettings& settings,
+                     BrushFrame frame, kernel::cfloat3* out) {
+    const float amount = settings.strength * settings.radius;
+    if (frame == BrushFrame::VertexNormal) {
+        // Each vertex along its OWN normal — inflate. The per-vertex direction
+        // is the entire difference from the branch below.
+        for (std::size_t i = 0; i < s.count; ++i) out[i] = s.normals[i] * (amount * s.weights[i]);
+        return;
+    }
+    // ONE shared direction for the whole stamp — draw. That is what makes it a
+    // rounded organic swell rather than a balloon.
+    //
+    // The branch is hoisted OUT of the loop rather than tested per vertex, and
+    // the two arms multiply in the same order, so both readings land on exactly
+    // the bits their separate implementations produced.
     const kernel::cfloat3 dir = deposit_direction(s, settings);
-    const float amount = settings.strength * settings.radius;
     for (std::size_t i = 0; i < s.count; ++i) out[i] = dir * (amount * s.weights[i]);
-}
-
-void kernel_inflate(const SculptSnapshot& s, const MeshBrushSettings& settings,
-                    kernel::cfloat3* out) {
-    // Each vertex along its OWN normal. The per-vertex direction is exactly
-    // what distinguishes this from draw.
-    const float amount = settings.strength * settings.radius;
-    for (std::size_t i = 0; i < s.count; ++i) out[i] = s.normals[i] * (amount * s.weights[i]);
 }
 
 void kernel_pinch(const SculptSnapshot& s, const MeshBrushSettings& settings,

@@ -48,8 +48,10 @@
 #include "clay/mesh/bvh.h"
 #include "clay/mesh/lattice.h"
 #include "clay/mesh/mesh_data.h"
+#include "clay/mesh/brush_model.h"
 #include "clay/mesh/sculpt_common.h"
 #include "clay/mesh/sculpt_kernels.h"
+#include "clay/mesh/sculpt_workset.h"
 
 namespace clay {
 namespace mesh {
@@ -60,37 +62,9 @@ namespace mesh {
 // re-exported here, so every existing caller of `mesh/sculpt.h` sees exactly
 // what it saw before.
 
-// The PRE-STAMP SNAPSHOT. Everything a verb reads, captured before anything is
-// written, which is what lets a composed verb be one operation:
-//
-//   - Draw takes ONE direction for the whole stamp from `average_normal`, so a
-//     stroke does not chase its own deposit into a balloon.
-//   - Smooth's Laplacian reads neighbours from here where they are in the
-//     region, so it is a simultaneous average rather than a Gauss-Seidel sweep
-//     whose result depends on vertex order.
-//   - Scrape is flatten-cut-only AND smooth against these same positions, and
-//     Crease is a draw AND a pinch against them. Calling the halves in
-//     sequence is a different operation and a worse one — the same rule
-//     `VoxelGrid::sculpt_scrape` already states.
-struct BrushRegion {
-    std::vector<std::uint32_t> classes;      // weld classes the falloff reached
-    std::vector<float> weights;              // falloff * (1 - mask), in [0,1]
-    std::vector<kernel::cfloat3> positions;  // pre-stamp, one per class
-    std::vector<kernel::cfloat3> normals;    // pre-stamp, area-weighted, unit
-
-    kernel::cfloat3 average_normal = kernel::cf3(0, 1, 0);
-    kernel::cfloat3 centroid = kernel::cf3(0, 0, 0);
-    kernel::cfloat3 plane_point = kernel::cf3(0, 0, 0);
-    kernel::cfloat3 plane_normal = kernel::cf3(0, 1, 0);
-
-    bool empty() const { return classes.empty(); }
-    std::size_t size() const { return classes.size(); }
-
-    // class -> index into `classes`, kNoClass outside the region. Sized to the
-    // adjacency's class count and reset over `classes` alone, so a stamp costs
-    // what it reached rather than what the mesh holds.
-    std::vector<std::uint32_t> slot;
-};
+// The workset — the pre-stamp snapshot of everything under the brush — is in
+// `sculpt_workset.h`, because the adaptive and multiresolution sculptors gather
+// one too and must not each invent their own.
 
 // A sparse, coalesced record of what a gesture moved: the undo a mesh stroke
 // cannot get from the edit list, because vertex displacement is destructive
@@ -253,6 +227,33 @@ class MeshSculptor {
     // as it is, so this is safe to call before every stroke.
     bool ensure_colors(kernel::cfloat3 fill = kernel::cf3(1, 1, 1));
 
+    // How many times a plan has been compiled over this sculptor's life. The
+    // brush-engine requirement is that a stroke compiles its preset ONCE and
+    // every stamp reads the compiled plan, and a count is the only way a test
+    // can tell the difference between that and recompiling silently.
+    std::size_t plan_compilations() const { return plan_compilations_; }
+
+    // -- what the last stamp touched -----------------------------------------
+    //
+    // The WRITE REGION: the weld classes the last stamp actually moved (or
+    // recoloured), and the bounds of that motion. Not the workset — the rim of
+    // a falloff and a fully masked vertex are gathered and never move — and not
+    // the read halo either, which is the ring Smooth, Relax and Polish average
+    // over without touching. A host uploading the halo would re-send geometry
+    // that did not change.
+    const std::vector<std::uint32_t>& write_region() const { return region_.write_region; }
+    const math::Aabb& write_bounds() const { return region_.write_bounds; }
+    // The whole workset, including the entries that did not move. For a caller
+    // that wants to know what the brush REACHED rather than what it changed.
+    const SculptWorkset& workset() const { return region_; }
+
+    // The automask factors `mesh` may not compute for itself — the cavity
+    // estimator and the surface-group field, both of which live in modules that
+    // depend on this one. Set once for a STROKE: they hold `std::function`s,
+    // and copying those per stamp would allocate on every dab.
+    void set_automask_inputs(AutomaskInputs inputs) { automask_inputs_ = std::move(inputs); }
+    const AutomaskInputs& automask_inputs() const { return automask_inputs_; }
+
     void set_defer_normals(bool defer) { defer_normals_ = defer; }
     bool defer_normals() const { return defer_normals_; }
     // Recompute the deferred region and clear it. A no-op when nothing is
@@ -344,6 +345,10 @@ class MeshSculptor {
     // read neighbours, and the normals only for polish, which is the one verb
     // that reads a neighbour's own normal.
     void build_neighbors(bool want_normals, bool want_colors);
+    // The compiled plan for this verb and these settings, recompiled only when
+    // one of the three things it actually depends on changes.
+    const BrushRuntimePlan& plan_for(MeshBrush verb, const MeshBrushSettings& settings);
+    kernel::cfloat3 automask_reference(const MeshBrushSettings& settings);
     // The ray tree, refitted — or null when the host has never built one, in
     // which case every caller below falls back to the scan it replaced.
     const Bvh* surface_index();
@@ -365,8 +370,25 @@ class MeshSculptor {
     // so a verb that leaves an entry alone writes nothing rather than
     // rewriting a colour with itself.
     std::vector<kernel::cfloat3> color_target_;
+    // The pre-stamp colours the colour kernels read while writing
+    // `color_target_`. A member, so a colour stroke does not allocate per dab.
+    std::vector<kernel::cfloat3> color_current_;
+    AutomaskInputs automask_inputs_;
+    // The class the last gather anchored on, shared by the connectivity automask
+    // and the normal-angle reference so the two cannot disagree about where the
+    // brush landed.
+    std::uint32_t automask_seed_ = kNoClass;
     // The multi-pass kernels' buffers, reset rather than freed between stamps.
     SculptScratch scratch_;
+    // The compiled plan and the three inputs it depends on. Not the whole
+    // settings struct: radius, strength, centre and direction change on every
+    // stamp of a stroke and change nothing about what the kernel needs.
+    BrushRuntimePlan plan_;
+    MeshBrush plan_verb_ = MeshBrush::Draw;
+    int plan_iterations_ = 0;
+    bool plan_geodesic_ = false;
+    bool plan_valid_ = false;
+    std::size_t plan_compilations_ = 0;
     // The region's one-rings, flattened. Kept as members for the same reason
     // everything else here is: a stroke of similar stamps must allocate on its
     // first stamp and never again.

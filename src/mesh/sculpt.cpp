@@ -5,6 +5,7 @@
 #include <cmath>
 
 #include "clay/kernel/deform.h"  // calpha_sample, calpha_frame
+#include "clay/mesh/automask.h"
 
 namespace clay {
 namespace mesh {
@@ -329,6 +330,18 @@ std::uint32_t MeshSculptor::nearest_class(kernel::cfloat3 p) {
     return adjacency_.class_of(v);
 }
 
+// The brush's OWN facing, for the normal-angle automask. Fixed for the stamp
+// and never taken from the region: the region's average normal is weighted by
+// the very weights the automask is shaping, so reading it here would be
+// circular.
+kernel::cfloat3 MeshSculptor::automask_reference(const MeshBrushSettings& settings) {
+    if (!is_zero(settings.deposit_normal))
+        return safe_normalize(settings.deposit_normal, kernel::cf3(0, 1, 0));
+    const std::uint32_t near = automask_seed_ != kNoClass ? automask_seed_
+                                                          : nearest_class(settings.center);
+    return near != kNoClass ? class_normal(mesh_, adjacency_, near) : kernel::cf3(0, 1, 0);
+}
+
 void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGate& gate) {
     BrushRegion& r = region_;
     // Retire the LAST stamp's slots before `r.classes` is overwritten, so the
@@ -358,6 +371,7 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
         std::uint32_t seed = settings.seed_class;
         if (seed >= adjacency_.class_count() && surface_index() != nullptr)
             seed = nearest_class(settings.center);
+        automask_seed_ = seed < adjacency_.class_count() ? seed : kNoClass;
         geodesic_region(mesh_, adjacency_, settings.center, settings.radius, walk_, &r.classes,
                         &distance_, seed);
     } else {
@@ -365,6 +379,15 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
         // scan over every class. Flatten and Scrape are the two verbs that take
         // this path (`default_geodesic`), and they are the two that most want a
         // large radius.
+        // The connectivity automask needs an anchor and a ball query has no
+        // walk to have chosen one, so it is resolved here — and ONLY when a
+        // factor actually wants it, because it costs a query.
+        automask_seed_ = kNoClass;
+        if (has_factor(settings.automask.factors, AutomaskFactor::TopologyConnected)) {
+            automask_seed_ = settings.seed_class < adjacency_.class_count()
+                                 ? settings.seed_class
+                                 : nearest_class(settings.center);
+        }
         if (classes_in_ball(settings.center, settings.radius, &r.classes)) {
             // SORTED, so the region is the same list whether it came from the
             // tree or from the scan below — and so it does not depend on the
@@ -466,6 +489,46 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
     for (std::size_t i = 0; i < r.classes.size(); ++i)
         r.slot[r.classes[i]] = static_cast<std::uint32_t>(i);
 
+    // THE AUTOMASK IS A SECOND PASS, and it has to be: two of its five factors
+    // — the boundary fade and the connectivity walk — spread over the workset's
+    // own neighbourhood, so they cannot be answered one vertex at a time while
+    // the workset is still being built. It multiplies into the weight LAST,
+    // which is what keeps a stamp with no automask on exactly the bits it had
+    // before automasking existed.
+    r.automask.clear();
+    if (settings.automask.any()) {
+        r.automask.resize(kept);
+        compute_automask(mesh_, adjacency_, r, settings.automask, automask_inputs_,
+                         automask_reference(settings), automask_seed_, r.automask.data());
+        std::size_t survived = 0;
+        for (std::size_t i = 0; i < kept; ++i) {
+            const float w = r.weights[i] * r.automask[i];
+            if (w <= 0.0f) {
+                // A fully automasked vertex leaves the workset entirely, which
+                // is what makes it BIT-IDENTICAL to its input rather than
+                // merely close: nothing writes it at all.
+                r.slot[r.classes[i]] = kNoClass;
+                continue;
+            }
+            r.classes[survived] = r.classes[i];
+            r.weights[survived] = w;
+            r.positions[survived] = r.positions[i];
+            r.normals[survived] = r.normals[i];
+            r.automask[survived] = r.automask[i];
+            ++survived;
+        }
+        if (survived != kept) {
+            r.classes.resize(survived);
+            r.weights.resize(survived);
+            r.positions.resize(survived);
+            r.normals.resize(survived);
+            r.automask.resize(survived);
+            for (std::size_t i = 0; i < survived; ++i)
+                r.slot[r.classes[i]] = static_cast<std::uint32_t>(i);
+            kept = survived;
+        }
+    }
+
     // The plane and the shared direction, taken from the snapshot and never
     // from what the stamp is about to deposit.
     kernel::cfloat3 nsum = kernel::cf3(0, 0, 0), psum = kernel::cf3(0, 0, 0);
@@ -491,63 +554,46 @@ void MeshSculptor::gather(const MeshBrushSettings& settings, const field::MaskGa
     }
 }
 
-namespace {
-
-// What one verb READS, so a stamp gathers only what it will use. The
-// neighbour normals are the expensive entry and polish is the only verb that
-// reads them: a geometric normal per neighbour costs a pass over that
-// neighbour's own ring, which is a walk over the region's whole two-ring.
+// THE PLAN IS COMPILED ONCE PER STROKE, not per stamp.
 //
-// This is the embryo of the compiled runtime plan — it is derived once per
-// stamp today, from the verb alone.
-struct KernelNeeds {
-    bool neighbors = false;
-    bool neighbor_normals = false;
-    bool neighbor_colors = false;
-};
-
-KernelNeeds needs_of(MeshBrush verb) {
-    KernelNeeds n;
-    switch (verb) {
-        case MeshBrush::Smooth:
-        case MeshBrush::Scrape:
-        case MeshBrush::Relax:
-            n.neighbors = true;
-            break;
-        case MeshBrush::Polish:
-            n.neighbors = true;
-            n.neighbor_normals = true;
-            break;
-        case MeshBrush::Smear:
-            n.neighbors = true;
-            n.neighbor_colors = true;
-            break;
-        default:
-            break;
+// Nothing in it depends on where the stamp landed or how hard: the verb decides
+// the kernel, the kernel decides what the gather owes it, and only
+// `smooth_iterations` and the geodesic override come from the settings. So the
+// key is those three, and a stroke of two hundred stamps with an unchanged
+// brush compiles exactly once.
+const BrushRuntimePlan& MeshSculptor::plan_for(MeshBrush verb,
+                                               const MeshBrushSettings& settings) {
+    if (!plan_valid_ || plan_verb_ != verb || plan_iterations_ != settings.smooth_iterations ||
+        plan_geodesic_ != settings.geodesic) {
+        plan_ = compile_plan(model_of(verb), settings);
+        plan_verb_ = verb;
+        plan_iterations_ = settings.smooth_iterations;
+        plan_geodesic_ = settings.geodesic;
+        plan_valid_ = true;
+        ++plan_compilations_;
     }
-    return n;
+    return plan_;
 }
-
-}  // namespace
 
 std::size_t MeshSculptor::stamp(MeshBrush verb, const MeshBrushSettings& settings,
                                 const field::MaskGate& gate, VertexDeltas* record) {
     if (!valid() || settings.radius <= 0.0f || mesh_.positions.empty()) return 0;
+    const BrushRuntimePlan& plan = plan_for(verb, settings);
     gather(settings, gate);
     if (region_.empty()) return 0;
 
-    const KernelNeeds needs = needs_of(verb);
-    if (needs.neighbors)
-        build_neighbors(needs.neighbor_normals, needs.neighbor_colors);
+    if (plan.needs_neighbors)
+        build_neighbors(plan.needs_neighbor_normals, plan.needs_neighbor_colors);
 
     const SculptSnapshot snapshot = snapshot_of();
-    const SculptNeighbors neighbors = needs.neighbors ? neighbors_of() : SculptNeighbors{};
+    const SculptNeighbors neighbors = plan.needs_neighbors ? neighbors_of() : SculptNeighbors{};
 
     // The colour verbs take a different path end to end: they fill a colour
     // target rather than a displacement, and they write through write_colors.
     // Sharing `displacement_` would have made "moved nothing" and "painted
     // nothing" the same number.
-    if (writes_color(verb)) return stamp_color(verb, settings, snapshot, neighbors, record);
+    if (plan.model.target == BrushWriteTarget::Color)
+        return stamp_color(verb, settings, snapshot, neighbors, record);
 
     displacement_.assign(region_.size(), kernel::cf3(0, 0, 0));
     kernel::cfloat3* out = displacement_.data();
@@ -593,8 +639,9 @@ std::size_t MeshSculptor::stamp(MeshBrush verb, const MeshBrushSettings& setting
             // Without a record there is no stroke to measure from, and every
             // stamp would clamp against the CURRENT surface — which is draw
             // wearing layer's name. A verb that silently becomes a different
-            // verb is worse than one that refuses.
-            if (!record) return 0;
+            // verb is worse than one that refuses. The plan is what says this
+            // kernel needs the gesture's origin.
+            if (plan.needs_stroke_origin && !record) return 0;
             gather_stroke_origin(*record);
             kernel_layer(snapshot, settings, origin_.data(), out);
             break;
@@ -623,11 +670,16 @@ std::size_t MeshSculptor::stamp_color(MeshBrush verb, const MeshBrushSettings& s
     // A copy, because both kernels read every entry's PRE-STAMP colour while
     // writing the same array: a smear that read what it had already written
     // would be a sweep whose result depends on the order the entries sit in.
-    const std::vector<kernel::cfloat3> current = color_target_;
+    //
+    // A MEMBER rather than a local, which is the allocation gate rather than a
+    // style choice: a local vector here allocated and freed on every dab of
+    // every colour stroke, which is exactly the "an ordinary local stamp
+    // performs no heap allocation" rule this change is asserting.
+    color_current_.assign(color_target_.begin(), color_target_.end());
     if (verb == MeshBrush::Paint)
-        kernel_paint(snapshot, settings, current.data(), color_target_.data());
+        kernel_paint(snapshot, settings, color_current_.data(), color_target_.data());
     else
-        kernel_smear(snapshot, neighbors, settings, current.data(), color_target_.data());
+        kernel_smear(snapshot, neighbors, settings, color_current_.data(), color_target_.data());
     return write_colors(record);
 }
 
@@ -717,6 +769,8 @@ bool MeshSculptor::ensure_colors(kernel::cfloat3 fill) {
 // mark: a colour is a per-vertex value that changes nothing about the surface,
 // which is why this is twenty lines and `write` is fifty.
 std::size_t MeshSculptor::write_colors(VertexDeltas* record) {
+    region_.write_region.clear();
+    region_.write_bounds = math::Aabb{};
     std::size_t painted = 0;
     for (std::size_t i = 0; i < region_.size(); ++i) {
         const std::uint32_t c = region_.classes[i];
@@ -726,6 +780,8 @@ std::size_t MeshSculptor::write_colors(VertexDeltas* record) {
         // record does not grow entries whose before and after are equal.
         if (is_zero(color_target_[i] - mesh_.colors[members[0]])) continue;
         ++painted;
+        region_.write_region.push_back(c);
+        region_.write_bounds.expand(region_.positions[i]);
         for (std::size_t k = 0; k < mc; ++k) {
             if (record) record->note(members[k], mesh_);
             mesh_.colors[members[k]] = color_target_[i];
@@ -746,6 +802,13 @@ std::size_t MeshSculptor::write(VertexDeltas* record) {
             if (c < normal_mark_.size()) normal_mark_[c] = 0;
     }
     pending_normals_.clear();
+    // THE WRITE REGION, not the workset. The rim of a falloff, a fully masked
+    // vertex and a verb that declined all leave entries in `classes` that never
+    // move, and a host told about those would upload geometry that did not
+    // change. Smooth, Relax and Polish additionally READ a ring they do not
+    // write, and that ring is not here either.
+    region_.write_region.clear();
+    region_.write_bounds = math::Aabb{};
     std::size_t moved = 0;
     for (std::size_t i = 0; i < region_.size(); ++i) {
         if (is_zero(displacement_[i])) continue;
@@ -753,6 +816,9 @@ std::size_t MeshSculptor::write(VertexDeltas* record) {
         const std::uint32_t c = region_.classes[i];
         mark_bvh_dirty(c);  // for the next refit_bvh, which drains the whole set
         const kernel::cfloat3 target = region_.positions[i] + displacement_[i];
+        region_.write_region.push_back(c);
+        region_.write_bounds.expand(region_.positions[i]);
+        region_.write_bounds.expand(target);
         std::size_t mc = 0;
         const std::uint32_t* members = adjacency_.members(c, &mc);
         for (std::size_t k = 0; k < mc; ++k) {

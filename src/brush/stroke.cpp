@@ -411,6 +411,25 @@ std::size_t apply_to_mask(voxel::MaskField& mask, const std::vector<Stamp>& stam
     return stamps.size();
 }
 
+void StrokeTransaction::clear() {
+    samples_.clear();
+    stamps_.clear();
+    emitted_ = 0;
+}
+
+std::vector<Stamp> StrokeTransaction::append(const std::vector<StrokeSample>& samples) {
+    samples_.insert(samples_.end(), samples.begin(), samples.end());
+    stamps_ = resolve_stroke(samples_, preset_);
+    // A re-resolve can in principle produce FEWER stamps than a previous one —
+    // the steady-stroke filter trails the cursor, so a path that doubles back
+    // can shorten. Clamping rather than subtracting keeps the tail well defined
+    // instead of wrapping a size_t.
+    const std::size_t start = std::min(emitted_, stamps_.size());
+    std::vector<Stamp> tail(stamps_.begin() + static_cast<std::ptrdiff_t>(start), stamps_.end());
+    emitted_ = stamps_.size();
+    return tail;
+}
+
 std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>& stamps,
                           mesh::MeshBrush verb, const mesh::MeshBrushSettings& settings,
                           const voxel::MaskField* mask, mesh::VertexDeltas* deltas,
@@ -425,6 +444,33 @@ std::size_t apply_to_mesh(mesh::MeshSculptor& sculptor, const std::vector<Stamp>
     if (mask) {
         const math::Transform to_world = options.mesh_to_world;
         mask_gate = [mask, to_world](kernel::cfloat3 p) { return mask->sample(to_world.apply(p)); };
+    }
+
+    // The automask factors `mesh` cannot reach on its own, wired here because
+    // this is the one function that can see all three modules. Built ONCE for
+    // the stroke: they are `std::function`s, and rebuilding them per stamp
+    // would allocate on every dab.
+    if (options.cavity_field || options.groups) {
+        mesh::AutomaskInputs automask;
+        if (options.cavity_field) {
+            const std::function<float(kernel::cfloat3)>& field = options.cavity_field;
+            const MeasureSettings measure = options.cavity_measure;
+            // THE SAME ESTIMATOR a painted cavity mask uses. Not a mesh-side
+            // curvature from a vertex ring — two implementations of one measure
+            // is two answers about one surface, and the requirement is that
+            // they cannot disagree.
+            automask.cavity = [field, measure](kernel::cfloat3 p) {
+                return measure_at(field, SurfaceMeasure::Cavity, p, measure);
+            };
+        }
+        if (options.groups) {
+            const voxel::GroupField* groups = options.groups;
+            automask.group = [groups](kernel::cfloat3 p) -> std::uint32_t {
+                return static_cast<std::uint32_t>(groups->at(p));
+            };
+        }
+        automask.active_group = options.active_group;
+        sculptor.set_automask_inputs(std::move(automask));
     }
 
     const bool was_deferring = sculptor.defer_normals();

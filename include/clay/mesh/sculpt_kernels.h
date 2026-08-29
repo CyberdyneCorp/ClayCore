@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "clay/kernel/shim.h"
+#include "clay/mesh/brush_model.h"
 #include "clay/mesh/sculpt_common.h"
 
 namespace clay {
@@ -171,8 +172,22 @@ struct SculptScratch {
 // has sized to `snapshot.count`. None of them reads or writes a surface.
 
 void kernel_grab(const SculptSnapshot&, const MeshBrushSettings&, kernel::cfloat3* out);
-void kernel_draw(const SculptSnapshot&, const MeshBrushSettings&, kernel::cfloat3* out);
-void kernel_inflate(const SculptSnapshot&, const MeshBrushSettings&, kernel::cfloat3* out);
+
+// ONE deformation under two frames, which is what draw and inflate always
+// were: the region's averaged normal gives a rounded organic swell, each
+// vertex's own normal gives a balloon, and nothing else about them differed.
+// `kernel_draw` and `kernel_inflate` remain as the two named readings, and
+// their results are unchanged bit for bit.
+void kernel_displace(const SculptSnapshot&, const MeshBrushSettings&, BrushFrame frame,
+                     kernel::cfloat3* out);
+inline void kernel_draw(const SculptSnapshot& s, const MeshBrushSettings& settings,
+                        kernel::cfloat3* out) {
+    kernel_displace(s, settings, BrushFrame::RegionNormal, out);
+}
+inline void kernel_inflate(const SculptSnapshot& s, const MeshBrushSettings& settings,
+                           kernel::cfloat3* out) {
+    kernel_displace(s, settings, BrushFrame::VertexNormal, out);
+}
 void kernel_pinch(const SculptSnapshot&, const MeshBrushSettings&, kernel::cfloat3* out);
 void kernel_flatten(const SculptSnapshot&, const MeshBrushSettings&, kernel::cfloat3* out);
 void kernel_clay(const SculptSnapshot&, const MeshBrushSettings&, kernel::cfloat3* out);
