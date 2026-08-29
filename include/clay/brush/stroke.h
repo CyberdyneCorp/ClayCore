@@ -267,6 +267,25 @@ struct MeshStrokeOptions {
 
     // Where the mesh sits, for sampling the mask alone.
     math::Transform mesh_to_world = math::Transform::identity();
+
+    // Let each stamp's ORIENTATION turn the brush's alpha, which is what makes
+    // a rake or a chisel expressible on a mesh layer.
+    //
+    // `resolve_stroke` has put rotate-along-stroke and the stylus azimuth into
+    // `Stamp::rotation` since they shipped, and `stamps_to_nodes` applies it to
+    // an SDF item's transform; this consumer dropped it, so a mesh stamp faced
+    // the same way however the artist turned the stylus. It is only observable
+    // through an alpha — a round brush has nothing to orient — which is why the
+    // gap survived.
+    //
+    // A SWITCH RATHER THAN AN INFERENCE FROM THE QUATERNION. Consuming the
+    // rotation whenever it is not the identity is discontinuous at zero: an
+    // azimuth of exactly 0 resolves to the identity and would keep the derived
+    // tangent, while an azimuth of one ten-thousandth would not, so the stamp
+    // would snap through 90 degrees as the stylus crossed straight ahead. Off,
+    // `alpha_tangent` is exactly what the caller set, including its derived
+    // default.
+    bool orient_alpha_by_stamp = false;
 };
 
 // Apply a resolved stroke to a mesh. Returns the number of stamps that moved a

@@ -60,7 +60,7 @@
 - [ ] 3.5 Determinism: the same samples produce the same stamps whether the
       host delivers them in one batch or five, with the transaction state
       retained. Test it as a comparison, not as an assertion about jitter
-- [ ] 3.6 `apply_to_mesh` consumes `Stamp::rotation`, which today it drops.
+- [x] 3.6 `apply_to_mesh` consumes `Stamp::rotation`, which today it drops.
       `resolve_stroke` puts azimuth and rotate-along-stroke there and
       `stamps_to_nodes` applies it to the node transform; the mesh consumer
       never reads it, which is exactly why a rake or chisel brush is

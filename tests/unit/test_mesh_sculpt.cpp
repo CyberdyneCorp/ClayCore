@@ -1438,3 +1438,121 @@ TEST_CASE("a colour brush is deterministic") {
         CHECK(same_bytes(ma.colors, mb.colors));
     }
 }
+
+// A rake on a mesh layer: the stamp's ORIENTATION reaches the alpha
+// (add-shared-brush-kernels 3.6).
+//
+// `resolve_stroke` has put rotate-along-stroke and the stylus azimuth into
+// `Stamp::rotation` since they shipped, and `stamps_to_nodes` applies it to an
+// SDF item's transform — but `apply_to_mesh` dropped it, so a mesh stamp faced
+// the same way however the artist turned the stylus. That made a rake or a
+// chisel inexpressible on a mesh layer, and it was invisible without an alpha
+// because a round brush has nothing to orient.
+namespace {
+
+// HALF the stamp, which is the most asymmetric alpha there is: turning it by 90
+// degrees moves the deposit to a different side of the brush entirely. A bar
+// through the middle was tried first and is far weaker — it is symmetric under
+// a half turn, and one grid step wide at any sane brush radius.
+std::vector<float> half_alpha(int n) {
+    std::vector<float> a(static_cast<std::size_t>(n) * static_cast<std::size_t>(n), 0.0f);
+    for (int y = 0; y < n; ++y)
+        for (int x = n / 2; x < n; ++x)
+            a[static_cast<std::size_t>(y) * static_cast<std::size_t>(n) +
+              static_cast<std::size_t>(x)] = 1.0f;
+    return a;
+}
+
+std::vector<brush::StrokeSample> azimuth_path(float azimuth) {
+    std::vector<brush::StrokeSample> path;
+    for (int i = 0; i < 5; ++i) {
+        brush::StrokeSample s;
+        s.position = cf3(-0.5f + 0.25f * static_cast<float>(i), 0.0f, 0.0f);
+        s.tilt = 0.5f;
+        s.azimuth = azimuth;
+        path.push_back(s);
+    }
+    return path;
+}
+
+// Run one stroke over a fresh plane and hand back the vertices it moved.
+std::vector<cfloat3> rake_stroke(float azimuth, bool follow_barrel) {
+    Mesh m = plane_grid(16, 1.0f);
+    MeshSculptor sculptor(m);
+
+    const int n = 8;
+    const std::vector<float> alpha = half_alpha(n);
+    MeshBrushSettings settings;
+    settings.strength = 0.5f;
+    settings.alpha = alpha.data();
+    settings.alpha_width = n;
+    settings.alpha_height = n;
+    settings.alpha_direction = cf3(0, 1, 0);
+    // The square covers the brush disc exactly, so half the disc deposits and
+    // half does not.
+    settings.alpha_extent = 0.5f;
+
+    brush::StrokePreset preset;
+    preset.radius = 0.25f;
+    preset.spacing = 0.5f;
+    preset.rotate_to_azimuth = follow_barrel;
+    const std::vector<brush::Stamp> stamps =
+        brush::resolve_stroke(azimuth_path(azimuth), preset);
+    REQUIRE(stamps.size() > 1);
+    brush::MeshStrokeOptions options;
+    options.orient_alpha_by_stamp = follow_barrel;
+    brush::apply_to_mesh(sculptor, stamps, MeshBrush::Draw, settings, nullptr, nullptr, options);
+    return m.positions;
+}
+
+}  // namespace
+
+TEST_CASE("mesh stroke: the stylus barrel orients an alpha stamp") {
+    // Two strokes over the same path, differing only in which way the barrel
+    // points. With the barrel followed, the bar lands across the stroke in one
+    // and along it in the other, so the surfaces must differ.
+    const std::vector<cfloat3> across = rake_stroke(0.0f, true);
+    const std::vector<cfloat3> along = rake_stroke(1.5707963f, true);
+    REQUIRE(across.size() == along.size());
+
+    std::size_t differing = 0;
+    for (std::size_t i = 0; i < across.size(); ++i)
+        if (across[i].y != along[i].y) ++differing;
+    CHECK(differing > 0);
+
+    // ...and both actually deposited something, so "they differ" is not two
+    // different ways of having done nothing.
+    std::size_t moved_across = 0, moved_along = 0;
+    for (std::size_t i = 0; i < across.size(); ++i) {
+        if (across[i].y != 0.0f) ++moved_across;
+        if (along[i].y != 0.0f) ++moved_along;
+    }
+    CHECK(moved_across > 0);
+    CHECK(moved_along > 0);
+}
+
+TEST_CASE("mesh stroke: orienting is opt-in, and continuous where it is on") {
+    // The gate on the change. Left off — which is what every existing caller
+    // does — the azimuth must reach nothing and the two strokes must be
+    // byte-identical, or every stroke already in the wild would silently
+    // re-orient its alpha.
+    const std::vector<cfloat3> a = rake_stroke(0.0f, false);
+    const std::vector<cfloat3> b = rake_stroke(1.5707963f, false);
+    REQUIRE(a.size() == b.size());
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        CHECK(a[i].x == b[i].x);
+        CHECK(a[i].y == b[i].y);
+        CHECK(a[i].z == b[i].z);
+    }
+
+    // CONTINUITY AT ZERO, which is the defect the opt-in exists to avoid.
+    // `align_x_to` returns the identity for an azimuth of exactly 0, so a rule
+    // that consumed the rotation only when it was non-identity would snap the
+    // stamp through 90 degrees as the stylus crossed straight ahead. A hair off
+    // zero must be a hair off the result.
+    const std::vector<cfloat3> straight = rake_stroke(0.0f, true);
+    const std::vector<cfloat3> nearly = rake_stroke(1e-4f, true);
+    REQUIRE(straight.size() == nearly.size());
+    for (std::size_t i = 0; i < straight.size(); ++i)
+        CHECK(straight[i].y == doctest::Approx(nearly[i].y).epsilon(1e-3));
+}
