@@ -7,40 +7,40 @@
 
 ## 1. Decide before extracting
 
-- [ ] 1.1 DECIDE where the scratch arena lives — a new `memory` module with a
+- [x] 1.1 DECIDE where the scratch arena lives — a new `memory` module with a
       `tools/check_layering.py` entry, or an addition to `parallel`. The
       precedent is `parallel` itself, moved out of the CPU backend because the
       layering rule locked the core library out of the only pool in the tree
-- [ ] 1.2 DECIDE whether `MeshBrushSettings` stays as the public mesh surface
+- [x] 1.2 DECIDE whether `MeshBrushSettings` stays as the public mesh surface
       (projected onto `BrushModel` internally) or is replaced. Both bindings
       and every compiled host pass it today
-- [ ] 1.3 DECIDE the automask composition rule and write it once:
+- [x] 1.3 DECIDE the automask composition rule and write it once:
       `weight = falloff * alpha * (1 - gate) * automask`, with a single clamp
       at the boundary rather than per factor
-- [ ] 1.4 DECIDE which axes reach the C ABI in this change and which wait. A
+- [x] 1.4 DECIDE which axes reach the C ABI in this change and which wait. A
       descriptor mirroring every axis is a large surface to get wrong once
 
 ## 2. Extract the kernels, changing nothing
 
-- [ ] 2.1 `include/clay/mesh/sculpt_common.h` — `MeshBrush`, `MeshFalloff` and
+- [x] 2.1 `include/clay/mesh/sculpt_common.h` — `MeshBrush`, `MeshFalloff` and
       the settings vocabulary, so a second sculptor can name a verb without
       including the fixed-topology implementation
-- [ ] 2.2 `include/clay/mesh/sculpt_kernels.h` + `src/mesh/sculpt_kernels.cpp`
+- [x] 2.2 `include/clay/mesh/sculpt_kernels.h` + `src/mesh/sculpt_kernels.cpp`
       — snapshot in, displacement out. The interface SHALL name no `Mesh`, no
       `Adjacency` and no vertex index: a span of positions, normals and
       weights, a neighbourhood view, the stamp frame, and the plane a flatten
       family verb was given or computed
-- [ ] 2.3 Move all sixteen verbs' math behind it, `Paint` and `Smear` included
+- [x] 2.3 Move all sixteen verbs' math behind it, `Paint` and `Smear` included
       — a colour write is a kernel with a different output channel, not an
       exception to the model
-- [ ] 2.4 `MeshSculptor` calls the shared kernels; the gather, the write-back,
+- [x] 2.4 `MeshSculptor` calls the shared kernels; the gather, the write-back,
       the weld-class semantics, the normal recompute and the BVH refit stay
       exactly where they are
-- [ ] 2.5 PARITY GATE: golden fixtures for every verb on plane, sphere, cube,
+- [x] 2.5 PARITY GATE: golden fixtures for every verb on plane, sphere, cube,
       folded sheet and two-close-sheets, compared BIT FOR BIT against main, not
       within a tolerance. A tolerance would admit a reordered accumulation,
       which is the one mistake this refactor is likely to make
-- [ ] 2.6 The pre-stamp snapshot rule survives the move: one stamp resolves
+- [x] 2.6 The pre-stamp snapshot rule survives the move: one stamp resolves
       against one snapshot, so a composed verb stays a single operation
 
 ## 3. The brush model

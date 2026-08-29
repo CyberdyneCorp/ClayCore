@@ -75,6 +75,7 @@ add_library(claycore
   src/mesh/mesh_data.cpp
   src/mesh/lattice.cpp
   src/mesh/sculpt.cpp
+  src/mesh/sculpt_kernels.cpp
   src/mesh/deform.cpp
   src/mesh/transfer.cpp
   src/mesh/to_field.cpp
