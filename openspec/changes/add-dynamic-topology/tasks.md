@@ -142,11 +142,17 @@
 
 ## 8. Serialization
 
-- [ ] 8.1 A versioned `DynamicSurface` encoding — magic, version, validated
+- [x] 8.1 A versioned `DynamicSurface` encoding — magic, version, validated
       counts, overflow-checked sizes, declared attribute channels
-- [ ] 8.2 Backward-open: an older reader skips the chunk and opens the document
-      without it rather than failing
-- [ ] 8.3 Round-trip bit-identical, including generations or an explicit
+- [x] 8.2 Backward-open: an older reader skips the chunk and opens the document
+      without it rather than failing. **NOT APPLICABLE AS WRITTEN, and the
+      reason is D9:** no `.clayspace` chunk is added by this change, because
+      the host owns a dynamic surface and the document does not yet. There is
+      therefore no chunk for an older reader to skip, and a document written by
+      this build is byte-identical to one written before it. The requirement
+      lands with the change that gives a mesh layer a dynamic payload; the
+      format in 8.1 exists so that change has one to reach for
+- [x] 8.3 Round-trip bit-identical, including generations or an explicit
       statement that generations are not preserved and why
 
 ## 9. The C ABI and the host path

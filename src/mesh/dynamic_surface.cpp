@@ -713,5 +713,237 @@ Mesh DynamicSurface::to_mesh(const DynamicSurfaceExportOptions& options) const {
     return out;
 }
 
+
+// -- serialization ------------------------------------------------------------
+//
+// Layout, little-endian throughout:
+//
+//   u32 magic 'CDSF'  u16 version  u8 flags(normals|colors|uvs)  u8 reserved
+//   u32 vertex_slots  u32 halfedge_slots  u32 edge_slots  u32 face_slots
+//   u32 vertex_count  u32 halfedge_count  u32 edge_count  u32 face_count
+//   then each live element as (u32 slot, u32 generation, payload)
+//
+// SLOT COUNTS AND LIVE COUNTS BOTH, because the decoder has to size the pools
+// before it fills them and has to know how many records follow. The counts are
+// checked against the buffer before a single allocation, matching
+// `VertexDeltas::decode`'s defensive style: a count larger than the remaining
+// bytes could hold is how a reader gets asked for a gigabyte.
+
+namespace {
+
+constexpr std::uint32_t kSurfaceMagic = 0x46534443u;  // 'CDSF'
+constexpr std::uint16_t kSurfaceVersion = 1;
+
+void sput_u32(std::vector<std::uint8_t>& out, std::uint32_t v) {
+    out.push_back(static_cast<std::uint8_t>(v));
+    out.push_back(static_cast<std::uint8_t>(v >> 8));
+    out.push_back(static_cast<std::uint8_t>(v >> 16));
+    out.push_back(static_cast<std::uint8_t>(v >> 24));
+}
+void sput_f32(std::vector<std::uint8_t>& out, float f) {
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &f, 4);
+    sput_u32(out, bits);
+}
+void sput_v3(std::vector<std::uint8_t>& out, kernel::cfloat3 v) {
+    sput_f32(out, v.x);
+    sput_f32(out, v.y);
+    sput_f32(out, v.z);
+}
+template <typename Id>
+void sput_id(std::vector<std::uint8_t>& out, Id id) {
+    sput_u32(out, id.slot);
+    sput_u32(out, id.generation);
+}
+
+// Bytes per record, which the decoder needs BEFORE it allocates.
+constexpr std::size_t kVertexRecord = 8 + 4 * 3 * 3 + 4 + 8 + 4;
+constexpr std::size_t kHalfEdgeRecord = 8 + 8 * 4 + 4 * 2;
+constexpr std::size_t kEdgeRecord = 8 + 8 + 4;
+constexpr std::size_t kFaceRecord = 8 + 8 + 4 * 3 + 4;
+
+struct SReader {
+    const std::uint8_t* data;
+    std::size_t size;
+    std::size_t at = 0;
+    bool ok = true;
+
+    std::uint8_t u8() {
+        if (at + 1 > size) {
+            ok = false;
+            return 0;
+        }
+        return data[at++];
+    }
+    std::uint32_t u32() {
+        if (at + 4 > size) {
+            ok = false;
+            return 0;
+        }
+        const std::uint32_t v = static_cast<std::uint32_t>(data[at]) |
+                                (static_cast<std::uint32_t>(data[at + 1]) << 8) |
+                                (static_cast<std::uint32_t>(data[at + 2]) << 16) |
+                                (static_cast<std::uint32_t>(data[at + 3]) << 24);
+        at += 4;
+        return v;
+    }
+    float f32() {
+        const std::uint32_t bits = u32();
+        float f = 0.0f;
+        std::memcpy(&f, &bits, 4);
+        return f;
+    }
+    kernel::cfloat3 v3() {
+        const float x = f32(), y = f32(), z = f32();
+        return kernel::cf3(x, y, z);
+    }
+    template <typename Id>
+    Id id() {
+        Id out;
+        out.slot = u32();
+        out.generation = u32();
+        return out;
+    }
+};
+
+}  // namespace
+
+std::vector<std::uint8_t> DynamicSurface::encode() const {
+    std::vector<std::uint8_t> out;
+    sput_u32(out, kSurfaceMagic);
+    out.push_back(static_cast<std::uint8_t>(kSurfaceVersion));
+    out.push_back(static_cast<std::uint8_t>(kSurfaceVersion >> 8));
+    out.push_back(static_cast<std::uint8_t>((had_normals_ ? 1 : 0) | (had_colors_ ? 2 : 0) |
+                                            (had_uvs_ ? 4 : 0)));
+    out.push_back(0);
+
+    sput_u32(out, static_cast<std::uint32_t>(vertices_.capacity_slots()));
+    sput_u32(out, static_cast<std::uint32_t>(halfedges_.capacity_slots()));
+    sput_u32(out, static_cast<std::uint32_t>(edges_.capacity_slots()));
+    sput_u32(out, static_cast<std::uint32_t>(faces_.capacity_slots()));
+    sput_u32(out, static_cast<std::uint32_t>(vertices_.size()));
+    sput_u32(out, static_cast<std::uint32_t>(halfedges_.size()));
+    sput_u32(out, static_cast<std::uint32_t>(edges_.size()));
+    sput_u32(out, static_cast<std::uint32_t>(faces_.size()));
+
+    vertices_.for_each_live([&](VertexId id, const DynamicVertex& v) {
+        sput_id(out, id);
+        sput_v3(out, v.position);
+        sput_v3(out, v.normal);
+        sput_v3(out, v.color);
+        sput_f32(out, v.mask);
+        sput_id(out, v.outgoing);
+        sput_u32(out, v.flags);
+    });
+    halfedges_.for_each_live([&](HalfEdgeId id, const DynamicHalfEdge& h) {
+        sput_id(out, id);
+        sput_id(out, h.origin);
+        sput_id(out, h.face);
+        sput_id(out, h.next);
+        sput_id(out, h.twin);
+        sput_id(out, h.edge);
+        sput_f32(out, h.uv.x);
+        sput_f32(out, h.uv.y);
+    });
+    edges_.for_each_live([&](EdgeId id, const DynamicEdge& e) {
+        sput_id(out, id);
+        sput_id(out, e.halfedge);
+        sput_u32(out, e.constraints);
+    });
+    faces_.for_each_live([&](FaceId id, const DynamicFace& f) {
+        sput_id(out, id);
+        sput_id(out, f.halfedge);
+        sput_v3(out, f.normal);
+        sput_u32(out, f.flags);
+    });
+    return out;
+}
+
+bool DynamicSurface::decode(const std::uint8_t* data, std::size_t size, DynamicSurface* out) {
+    if (!data || !out) return false;
+    SReader r{data, size};
+    if (r.u32() != kSurfaceMagic) return false;
+    const std::uint16_t version =
+        static_cast<std::uint16_t>(r.u8() | (static_cast<std::uint16_t>(r.u8()) << 8));
+    const std::uint8_t flags = r.u8();
+    r.u8();
+    // Refused rather than reinterpreted. A newer layout read as this one would
+    // build a surface whose connectivity points at the wrong elements, and it
+    // would still validate for a while.
+    if (!r.ok || version != kSurfaceVersion) return false;
+
+    const std::uint32_t vs = r.u32(), hs = r.u32(), es = r.u32(), fs = r.u32();
+    const std::uint32_t vc = r.u32(), hc = r.u32(), ec = r.u32(), fc = r.u32();
+    if (!r.ok) return false;
+    // A live count larger than its slot count is inconsistent on its face.
+    if (vc > vs || hc > hs || ec > es || fc > fs) return false;
+
+    // CHECKED AGAINST THE BUFFER BEFORE ANYTHING IS ALLOCATED.
+    const std::size_t remaining = size - r.at;
+    const std::size_t claimed = static_cast<std::size_t>(vc) * kVertexRecord +
+                                static_cast<std::size_t>(hc) * kHalfEdgeRecord +
+                                static_cast<std::size_t>(ec) * kEdgeRecord +
+                                static_cast<std::size_t>(fc) * kFaceRecord;
+    if (claimed > remaining) return false;
+
+    DynamicSurface built;
+    built.set_source_attributes((flags & 1) != 0, (flags & 2) != 0, (flags & 4) != 0);
+    built.vertices_.decode_resize(vs);
+    built.halfedges_.decode_resize(hs);
+    built.edges_.decode_resize(es);
+    built.faces_.decode_resize(fs);
+
+    for (std::uint32_t i = 0; i < vc && r.ok; ++i) {
+        const VertexId id = r.id<VertexId>();
+        if (id.slot >= vs) return false;
+        DynamicVertex v;
+        v.position = r.v3();
+        v.normal = r.v3();
+        v.color = r.v3();
+        v.mask = r.f32();
+        v.outgoing = r.id<HalfEdgeId>();
+        v.flags = r.u32();
+        built.vertices_.decode_set(id.slot, v, id.generation);
+    }
+    for (std::uint32_t i = 0; i < hc && r.ok; ++i) {
+        const HalfEdgeId id = r.id<HalfEdgeId>();
+        if (id.slot >= hs) return false;
+        DynamicHalfEdge h;
+        h.origin = r.id<VertexId>();
+        h.face = r.id<FaceId>();
+        h.next = r.id<HalfEdgeId>();
+        h.twin = r.id<HalfEdgeId>();
+        h.edge = r.id<EdgeId>();
+        const float u = r.f32(), vv = r.f32();
+        h.uv = kernel::cf2(u, vv);
+        built.halfedges_.decode_set(id.slot, h, id.generation);
+    }
+    for (std::uint32_t i = 0; i < ec && r.ok; ++i) {
+        const EdgeId id = r.id<EdgeId>();
+        if (id.slot >= es) return false;
+        DynamicEdge e;
+        e.halfedge = r.id<HalfEdgeId>();
+        e.constraints = r.u32();
+        built.edges_.decode_set(id.slot, e, id.generation);
+    }
+    for (std::uint32_t i = 0; i < fc && r.ok; ++i) {
+        const FaceId id = r.id<FaceId>();
+        if (id.slot >= fs) return false;
+        DynamicFace f;
+        f.halfedge = r.id<HalfEdgeId>();
+        f.normal = r.v3();
+        f.flags = r.u32();
+        built.faces_.decode_set(id.slot, f, id.generation);
+    }
+    if (!r.ok) return false;
+
+    built.vertices_.decode_finish();
+    built.halfedges_.decode_finish();
+    built.edges_.decode_finish();
+    built.faces_.decode_finish();
+    *out = std::move(built);
+    return true;
+}
+
 }  // namespace mesh
 }  // namespace clay

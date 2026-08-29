@@ -222,6 +222,28 @@ class DynamicSurface {
     DynamicSurfaceStats stats() const;
     std::size_t bytes() const;
 
+    // -- serialization --------------------------------------------------------
+    //
+    // A VERSIONED FORMAT OF ITS OWN, not an overload of the mesh blob. A flat
+    // mesh's encoding cannot express a half-edge structure, and widening it to
+    // try would make every existing reader's understanding of that chunk wrong.
+    //
+    // GENERATIONS ARE PRESERVED, and that is worth stating because the cheap
+    // answer is not to. A handle is a slot AND a generation; a document reloaded
+    // with the generations reset would hand back handles that a saved undo
+    // record, a saved selection or a host's own bookkeeping would silently
+    // mis-resolve — the exact failure the generation exists to prevent, arriving
+    // through the one path nobody tests interactively.
+    //
+    // DEAD SLOTS ARE NOT preserved. They carry nothing, and a file that stored
+    // them would grow with a session's history rather than with its content.
+    // The generation of a live slot survives; the free list is rebuilt.
+    std::vector<std::uint8_t> encode() const;
+    // Refuses a truncated, hostile or newer buffer rather than returning a
+    // surface whose connectivity points at nothing. Returns false and leaves
+    // `out` untouched.
+    static bool decode(const std::uint8_t* data, std::size_t size, DynamicSurface* out);
+
     // -- traversal -----------------------------------------------------------
     //
     // The queries every operator is written in terms of. Each is a few lines,

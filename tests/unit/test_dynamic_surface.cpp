@@ -17,6 +17,7 @@
 
 #include "clay/mesh/dynamic_surface.h"
 #include "clay/mesh/dynamic_validate.h"
+#include "clay/mesh/topology_ops.h"
 
 using namespace clay;
 using namespace clay::kernel;
@@ -346,4 +347,101 @@ TEST_CASE("dynamic surface: traversal answers what the connectivity says") {
         ++checked;
     });
     CHECK(checked > 20);
+}
+
+TEST_CASE("dynamic surface: the encoding round-trips, generations included") {
+    auto surface = DynamicSurface::from_mesh(cube_sphere(4, 1.0f));
+    REQUIRE(surface.has_value());
+
+    // Edit it first, so the pools carry dead slots and bumped generations —
+    // which is what a real document holds and what a naive encoding gets wrong.
+    std::vector<mesh::EdgeId> edges;
+    surface->edges().for_each_live(
+        [&](mesh::EdgeId id, const mesh::DynamicEdge&) { edges.push_back(id); });
+    std::size_t edited = 0;
+    for (std::size_t i = 0; i < edges.size() && edited < 12; i += 5) {
+        if (mesh::split_edge(*surface, edges[i], 0.5f).result == mesh::TopologyResult::Ok)
+            ++edited;
+    }
+    REQUIRE(edited > 4);
+    for (std::size_t i = 1; i < edges.size() && edited < 20; i += 9) {
+        if (surface->live(edges[i]) &&
+            mesh::collapse_edge(*surface, edges[i]).result == mesh::TopologyResult::Ok)
+            ++edited;
+    }
+
+    const std::vector<std::uint8_t> bytes = surface->encode();
+    REQUIRE(bytes.size() > 32);
+
+    DynamicSurface back;
+    REQUIRE(DynamicSurface::decode(bytes.data(), bytes.size(), &back));
+    CHECK(mesh::validate_dynamic_surface(back).ok);
+
+    // The same surface, element for element.
+    CHECK(back.stats().vertices == surface->stats().vertices);
+    CHECK(back.stats().edges == surface->stats().edges);
+    CHECK(back.stats().faces == surface->stats().faces);
+    CHECK(back.stats().halfedges == surface->stats().halfedges);
+    CHECK(back.stats().boundary_edges == surface->stats().boundary_edges);
+
+    // GENERATIONS PRESERVED, which is the part a cheap encoding skips. A
+    // document reloaded with them reset hands back handles that a saved undo
+    // record or a host's own bookkeeping would silently mis-resolve.
+    std::size_t checked = 0;
+    surface->vertices().for_each_live([&](mesh::VertexId id, const mesh::DynamicVertex& v) {
+        const mesh::DynamicVertex* other = back.vertex(id);
+        REQUIRE(other != nullptr);  // the SAME handle resolves, generation and all
+        CHECK(other->position.x == v.position.x);
+        CHECK(other->position.y == v.position.y);
+        CHECK(other->position.z == v.position.z);
+        CHECK(other->outgoing.slot == v.outgoing.slot);
+        ++checked;
+    });
+    CHECK(checked == surface->stats().vertices);
+
+    // ...and the exported mesh is identical, which is the property a consumer
+    // downstream actually sees.
+    const Mesh a = surface->to_mesh();
+    const Mesh b = back.to_mesh();
+    REQUIRE(a.positions.size() == b.positions.size());
+    REQUIRE(a.indices.size() == b.indices.size());
+    for (std::size_t i = 0; i < a.indices.size(); ++i) CHECK(a.indices[i] == b.indices[i]);
+}
+
+TEST_CASE("dynamic surface: a hostile or truncated encoding is refused") {
+    auto surface = DynamicSurface::from_mesh(cube_sphere(3, 1.0f));
+    REQUIRE(surface.has_value());
+    const std::vector<std::uint8_t> bytes = surface->encode();
+
+    DynamicSurface out;
+    CHECK_FALSE(DynamicSurface::decode(nullptr, 0, &out));
+    CHECK_FALSE(DynamicSurface::decode(bytes.data(), 8, &out));
+    for (std::size_t cut = 24; cut < bytes.size(); cut += 101)
+        CHECK_FALSE(DynamicSurface::decode(bytes.data(), cut, &out));
+
+    // A wrong magic and a newer version, each refused rather than read as a
+    // prefix of something this build understands.
+    std::vector<std::uint8_t> wrong = bytes;
+    wrong[0] ^= 0xFF;
+    CHECK_FALSE(DynamicSurface::decode(wrong.data(), wrong.size(), &out));
+    std::vector<std::uint8_t> newer = bytes;
+    newer[4] = 42;
+    CHECK_FALSE(DynamicSurface::decode(newer.data(), newer.size(), &out));
+
+    // A COUNT larger than the buffer could hold, which is how a reader gets
+    // asked to allocate a gigabyte.
+    std::vector<std::uint8_t> hostile = bytes;
+    hostile[24] = 0xff;
+    hostile[25] = 0xff;
+    hostile[26] = 0xff;
+    hostile[27] = 0x0f;
+    CHECK_FALSE(DynamicSurface::decode(hostile.data(), hostile.size(), &out));
+
+    // A live count larger than its own slot count is inconsistent on its face.
+    std::vector<std::uint8_t> inconsistent = bytes;
+    inconsistent[24] = 0xff;
+    inconsistent[25] = 0x00;
+    inconsistent[26] = 0x00;
+    inconsistent[27] = 0x00;
+    CHECK_FALSE(DynamicSurface::decode(inconsistent.data(), inconsistent.size(), &out));
 }
