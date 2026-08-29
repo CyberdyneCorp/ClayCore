@@ -83,6 +83,79 @@ forward-refuse).
    compiled against 0.36.0 changes behaviour — a caller that never passed a
    `.glb` path cannot tell the difference.
 
+   **0.55.0, 0.57.0 and 0.59.0 are not such releases**: all three are additive.
+   0.55.0 adds `clay_document_resume_stats` and the `clay_resume_stats`
+   descriptor; 0.57.0 adds `clay_document_voxel_layer_by_id` and
+   `clay_document_mesh_layer_by_id`; 0.59.0 adds the thirteen `clay_sdf_smooth_*`
+   / `clay_sdf_move_*` transaction entry points with their two opaque handles and
+   three versioned descriptors. Nothing that compiled against the version before
+   each of them changes behaviour.
+
+   **0.56.0 IS such a release, in two ways that a host can observe without
+   calling anything new.** Neither is a compile-time break.
+
+   First, **a bracket now groups every representation**. `History::begin_group`
+   forwarded to `UndoStack::begin_group` alone, so it bundled scene commands and
+   only those: a voxel, mask or mesh step recorded between the brackets stayed
+   its own undo entry. `clay.h` has promised "bracket a burst of edits so they
+   undo as one step" since the bracket shipped, and for every representation but
+   the edit list the promise was false. A host that counted undo steps per
+   gesture must recount — one bracket is one step now. The journal format is
+   unchanged and takes no version bump: `Step::Kind` is never serialized, and a
+   replay re-performs `GroupBegin`/`GroupEnd`.
+
+   Second, **a saved document no longer carries voxel chunks for layers it does
+   not contain, and one that already does loses them on load.** Undoing a layer
+   creation removes the layer and KEEPS its payload — an `AddLayerCmd` carries a
+   `scene::Layer` by value, so an orphaned grid is an ordinary state — while
+   `deserialize_document` derives `next_layer_id_` from the layers PRESENT. A
+   saved orphan could therefore be captured by the next voxel layer to take that
+   id and come up holding a dead sculpt. Saving already filtered orphaned MESH
+   chunks; this makes the voxel side agree.
+
+   **0.58.0 IS such a release, and it is the one to read before upgrading a
+   host that opens files written elsewhere.** The scene and `.clayspace` formats
+   go to **minor 15**: a layer record carries a content-source layer id, where 0
+   means "this layer owns the content that follows" and any other id means "share
+   that layer's edit list and read nothing here". Ownership is derived at save
+   time from `shared_ptr` identity — the FIRST layer in stack order holding a
+   given `SdfContent` owns it.
+
+   **A build older than 0.58.0 opening a minor-15 document FAILS rather than
+   misreading it.** The layer record is not length-prefixed, so the new field
+   desynchronises the stream and the reader's own bounds checks reject it. That
+   is the safe direction and it is deliberate. Written AT minor 14 by a 0.58.0
+   build, every layer's content goes out inline and the instances open as
+   independent copies — shapes right, sharing gone, and an edit through one no
+   longer reaches the others. Written at minor 13, a per-axis scale degrades to a
+   uniform one. Those are the same trades minors 7, 8, 11 and 14 already make.
+
+   `clay_layer_info` grows two fields, `content_source` and `share_count`,
+   appended to a descriptor that already negotiates `struct_size` — so a caller
+   compiled against the older layout passes the shorter size and gets exactly the
+   fields it had.
+
+   **0.60.0 changes one thing under a caller, and it is worth reading because
+   both answers are correct.** `SdfSmoothTransaction`'s commit used to relax a
+   REDISTANCED bake; it now redistances a RELAXED field, because a working field
+   materialized brick by brick cannot start from a globally post-processed one —
+   redistance rewrites every sample, and there is no such thing as redistancing
+   one brick. Both are sound signed distance fields and neither approximates the
+   other. Measured on the surface of the two-ball fixture, the lazy commit and
+   the whole-layer commit differ by **0.0037 — 0.073 cells**. Four tests that
+   asserted byte-identity against `relax(bake_layer(...))` were rewritten to the
+   new contract rather than deleted.
+
+   **And one signature changed, which is only allowed because the version it
+   changed against was never published.** `clay_sdf_move_preview_grab` gained an
+   index parameter between 0.59.0 and 0.60.0, alongside the new
+   `clay_sdf_move_preview_grab_count`, when a mirrored drag turned out to resolve
+   one grab per reaching image rather than one per node. **0.59.0 was never
+   tagged**, so no released caller can see the old arity; anyone building against
+   an untagged 0.59.0 checkout must recompile. Recorded here rather than left
+   implicit, because "unreleased" is a claim about this repository's tags and not
+   about what somebody has on disk.
+
    **0.54.1 is not such a release**: no symbol added or removed and no
    signature changed. It is a BEHAVIOUR fix to one existing verb, and the kind
    worth reading because the old behaviour was not wrong-looking, it was inert.
@@ -1389,8 +1462,8 @@ release's body when the workflow finishes.
 They exist to tell a host what it must DO, so the two sections that are not
 optional are what moves under a caller who changes nothing (an entry point that
 returns a different answer, a format that round-trips lossily, a C++ member that
-moved) and what is still known-broken or unmeasured. `docs/release-notes/v0.52.2.md`
-is the worked example. v0.49.0's notes predate the convention and live only on
+moved) and what is still known-broken or unmeasured. `docs/release-notes/v0.60.0.md`
+is the worked example, and `docs/release-notes/v0.52.2.md` the one before it. v0.49.0's notes predate the convention and live only on
 the GitHub release.
 
 Every measurement quoted must name what it was measured on. A device number
