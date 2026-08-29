@@ -43,6 +43,7 @@ add_executable(clay_unit_tests
   unit/test_sculpt_kernels.cpp
   unit/test_sculpt_allocation.cpp
   unit/test_brush_preset.cpp
+  unit/test_c_brush_preset.cpp
   unit/test_mesh_deform.cpp
   unit/test_mesh_transfer.cpp
   unit/test_bench_spread.cpp

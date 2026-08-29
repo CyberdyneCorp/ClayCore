@@ -1,6 +1,6 @@
 # Tasks: add-shared-brush-kernels
 
-- [ ] 0.1 SEQUENCING (see ROADMAP, "Phase 5 — the surface tier"): first of the
+- [x] 0.1 SEQUENCING (see ROADMAP, "Phase 5 — the surface tier"): first of the
       five, and a prerequisite of `add-dynamic-topology`, `add-mesh-multires`
       and `add-mesh-sculpt-layers`. Runs in parallel with nothing that touches
       `src/mesh/sculpt.cpp`
@@ -114,20 +114,20 @@
 
 ## 7. Bindings, gallery, gates
 
-- [ ] 7.1 C ABI: preset create/serialize/deserialize and the model axes decided
+- [x] 7.1 C ABI: preset create/serialize/deserialize and the model axes decided
       in 1.4, `struct_size` on every descriptor, bounded output fills
-- [ ] 7.2 pyclay: the same surface, numpy-native where an array is natural
-- [ ] 7.3 `tools/check_binding_parity.py` green — a capability reachable from
+- [x] 7.2 pyclay: the same surface, numpy-native where an array is natural
+- [x] 7.3 `tools/check_binding_parity.py` green — a capability reachable from
       C and not from pyclay does not count as shipped, and three capabilities
       in a row landed reachable from neither
-- [ ] 7.4 A numbered example that renders the same gesture through five presets
+- [x] 7.4 A numbered example that renders the same gesture through five presets
       over one mesh and ASSERTS what separates them, raising `SystemExit` when
       the claim stops holding
-- [ ] 7.5 Version lines together: `CMakeLists.txt`, `bindings/c/clay.h`,
+- [x] 7.5 Version lines together: `CMakeLists.txt`, `bindings/c/clay.h`,
       `pyproject.toml`, and `release_check.py`'s row
 - [ ] 7.6 Four presets green (release, metal, opencl, asan-ubsan) plus
       `release_check`; `tsan` under `setarch -R`
-- [ ] 7.7 `python3 tools/check_layering.py` green, including whatever 1.1
+- [x] 7.7 `python3 tools/check_layering.py` green, including whatever 1.1
       decided
-- [ ] 7.8 Docs: `docs/07-brushes-and-features.md` gains the model as the way
+- [x] 7.8 Docs: `docs/07-brushes-and-features.md` gains the model as the way
       the vocabulary is organised, and says which named brushes are presets

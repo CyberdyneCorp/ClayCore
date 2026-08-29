@@ -1356,6 +1356,112 @@ Runnable: [`examples/45_mesh_brushes.py`](../examples/45_mesh_brushes.py),
 
 ---
 
+## 8a. The brush model — how this vocabulary is organised
+
+Read this before the ZBrush map below, because it is the answer to the question
+that map raises: if ClayCore has sixteen verbs and ZBrush has dozens of named
+brushes, where do the rest come from?
+
+**They are not deformations.** Clay Buildup, Dam Standard, hPolish, Trim
+Dynamic, Snake Hook and Rake are each a kernel plus a falloff plus a frame plus
+an accumulation rule plus a spacing. Naming those axes separately is what turns
+a named brush into a PRESET instead of an engine path, and it is what lets the
+next one cost a serialized struct rather than a switch case.
+
+### The axes
+
+| Axis | Values | What it decides |
+|---|---|---|
+| **Footprint** | Ball, SurfaceWalk | How the region is REACHED — in a straight line, or along the surface |
+| **Falloff** | Constant, Linear, Smooth, Gaussian | How the weight decays across it |
+| **Frame** | None, RegionNormal, VertexNormal, StrokeDirection, RegionPlane | The direction a kernel displaces along |
+| **Kernel** | Translate, Displace, Gather, Tangential, Plane, PlaneDeposit, CutAndGather, Laplacian, DepositCeiling, ColorBlend, ColorAdvect | The deformation itself |
+| **Write target** | Position, Color | Which buffer it writes |
+| **Post policy** | None, RecomputeNormals | What has to happen afterwards |
+
+`mesh::model_of(verb)` is the decomposition table, and it is the requirement's
+own test: **a verb that could not be written as a row in it would be evidence
+an axis is missing**, and the axis is what should be added rather than a
+seventeenth verb.
+
+Two readings of that table are worth having in front of you:
+
+- **Draw and inflate are ONE kernel under two frames.** They were two verbs
+  whose only documented difference was the direction each takes — the region's
+  averaged normal, or each vertex's own — so naming the direction made that the
+  entire difference. Their results did not move by a bit when they were merged.
+- **Grab and snakehook are the same row.** One stamp of snakehook IS a grab;
+  what makes it a snakehook is the re-anchoring BETWEEN stamps, which is a fact
+  about a stroke rather than about a brush.
+
+### Where the axes live, and why not in `brush`
+
+`mesh/brush_model.h`, not `brush/`. `tools/check_layering.py` records
+`brush -> mesh` — `brush::apply_to_mesh` is the stroke engine's fourth
+consumer — so `mesh` may not include `brush`, and the per-vertex loop that has
+to read the axes is `MeshSculptor::stamp`. `brush::BrushPreset`, which pairs
+the axes with a `StrokePreset`, does live in `brush`: it is the one module that
+can see both vocabularies, for the same reason `apply_to_mesh` is the only
+place a `MaskField` becomes a `field::MaskGate`.
+
+### The named brushes, as data
+
+`brush::reference_presets()` is the library, and every entry is axis values over
+existing kernels:
+
+| Preset | Is | Differs from its neighbour by |
+|---|---|---|
+| Standard | Draw | — |
+| Clay | Clay | — |
+| Clay Buildup | Clay | the STROKE alone: denser spacing, buildup accumulation |
+| Clay Strips | Clay | a constant falloff, and the caller's alpha |
+| Move | Grab, ball footprint | — |
+| Move Topological | Grab, surface walk | ONE axis: the footprint |
+| Snake Hook | Snakehook | the stroke re-anchors per stamp |
+| Dam Standard | Crease | a tighter spacing |
+| hPolish | Polish | a tight gate angle, two passes |
+| Trim Dynamic | Flatten | `flatten_mode` cut-only |
+| Flatten | Flatten | two-sided |
+| Rake | Draw | the stroke follows the stylus BARREL |
+
+A preset carries a schema version from v1, refuses a newer one rather than
+reading a prefix of it, and **carries no image bytes**: an alpha stays
+caller-owned and borrowed for the call, so a preset is a couple of hundred
+bytes and a host owns its own resource cache.
+
+### Automasking
+
+The gates a brush applies to itself — normal angle, topology connectivity,
+boundary proximity, cavity, surface group — are composed into the per-vertex
+weight **by multiplication**, never branched into each verb. Sixteen verbs times
+five factors is eighty places to get a gate wrong; one multiplication is one.
+
+The weight's factors compose in one fixed order, and the order is a contract
+rather than an implementation detail, because float multiplication is not
+associative:
+
+```
+falloff -> path taper -> (1 - mask gate) -> alpha -> automask
+```
+
+The automask is applied LAST specifically so that a stamp with none of them
+multiplies by an exact 1.0 and lands on the bits it landed on before
+automasking existed.
+
+Two of the five factors — cavity and surface group — are not computed in `mesh`
+and cannot be: cavity is a field's Laplacian (`brush::measure_at`) and groups
+are a world lattice (`voxel::GroupField`), and both modules depend on `mesh`.
+They arrive as callbacks through `brush::MeshStrokeOptions`. That constraint is
+load-bearing rather than an inconvenience: the requirement is that a painted
+cavity mask and a cavity automask cannot disagree about one surface, and `mesh`
+structurally cannot write a second estimator to disagree with.
+
+Runnable: [`examples/65_brush_presets.py`](../examples/65_brush_presets.py) —
+one gesture through five presets, with every claim above asserted rather than
+illustrated.
+
+---
+
 ## 9. ZBrush equivalents
 
 Where a ZBrush brush maps onto the list above. This is a map, not a claim of

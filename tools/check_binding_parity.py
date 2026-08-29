@@ -46,6 +46,14 @@ CLASS_PREFIX = {
     "VertexDeltas": ("clay_mesh_deltas_",),
     "Lattice": ("clay_mesh_lattice_",),
     "StrokePreset": ("clay_stroke_preset_",),
+    # The brush model and preset (add-shared-brush-kernels). Their fields cross
+    # as members of clay_brush_model and clay_brush_preset rather than as
+    # functions, so a field is satisfied by the call that carries the whole
+    # descriptor — the same reading StrokePreset's own scalar fields get.
+    "BrushPreset": ("clay_brush_preset_",),
+    "BrushModel": ("clay_brush_model_",),
+    "AutomaskSettings": ("clay_automask_",),
+    "MeshBrushSettings": ("clay_mesh_brush_",),
     "CancelToken": ("clay_cancel_token_",),
     # A Python-idiom wrapper over clay_voxel_begin/end_sculpt_layer. See
     # CLASS_CTOR['SculptLayerScope'].
@@ -73,6 +81,8 @@ CLASS_PREFIX = {
 # exist, which is what the gate is for.
 CLASS_STRUCT = {
     "StrokePreset": "clay_stroke_preset",
+    "BrushPreset": "clay_brush_preset",
+    "BrushModel": "clay_brush_model",
 }
 
 # Classes whose members name an enumerator rather than an entry point: a new
@@ -84,6 +94,14 @@ CLASS_ENUM_PREFIX = {
     "Op": "CLAY_OP_",
     "Profile": "CLAY_PROFILE_",
     "Prim": "CLAY_DEFORM_",  # the deformer chain; the rest falls to the prefixes
+    # The brush model's axes (add-shared-brush-kernels). Each is an enumerator
+    # on the C side, spelled the same way the Python member is.
+    "BrushFootprint": "CLAY_BRUSH_FOOTPRINT_",
+    "BrushFrame": "CLAY_BRUSH_FRAME_",
+    "BrushKernel": "CLAY_BRUSH_KERNEL_",
+    "BrushWriteTarget": "CLAY_BRUSH_TARGET_",
+    "BrushPostPolicy": "CLAY_BRUSH_POST_",
+    "AutomaskFactor": "CLAY_AUTOMASK_",
 }
 
 # The names that do not derive. Kept explicit so the difference is reviewable.
@@ -134,6 +152,40 @@ ALIASES = {
     "Document.to_bytes": "clay_document_save_memory",
     "Document.journal_since": "clay_document_journal_since",
     "Document.history_bytes": "clay_document_history_bytes",
+    # The preset's scalar fields cross as members of clay_brush_preset, so the
+    # serializer is the call that carries them — StrokePreset's own scalars are
+    # read the same way, just below.
+    "BrushPreset.name": "clay_brush_preset_serialize",
+    "BrushPreset.stroke": "clay_brush_preset_serialize",
+    "BrushPreset.model": "clay_brush_preset_serialize",
+    "BrushPreset.settings": "clay_brush_preset_serialize",
+    "BrushPreset.library": "clay_brush_preset_library_at",
+    "BrushPreset.by_name": "clay_brush_preset_by_name",
+    "BrushPreset.version": "clay_brush_preset_version",
+    "BrushPreset.serialize": "clay_brush_preset_serialize",
+    "BrushPreset.deserialize": "clay_brush_preset_deserialize",
+    "MeshSculptor.apply_preset": "clay_mesh_sculptor_apply_preset",
+    "BrushModel.of": "clay_brush_model_of",
+    "BrushModel.verb": "clay_brush_model_of",
+    "BrushModel.footprint": "clay_brush_model_of",
+    "BrushModel.falloff": "clay_brush_model_of",
+    "BrushModel.frame": "clay_brush_model_of",
+    "BrushModel.kernel": "clay_brush_model_of",
+    "BrushModel.target": "clay_brush_model_of",
+    "BrushModel.post": "clay_brush_model_of",
+    "AutomaskSettings.factors": "clay_mesh_brush_defaults",
+    "AutomaskSettings.normal_angle": "clay_mesh_brush_defaults",
+    "AutomaskSettings.boundary_rings": "clay_mesh_brush_defaults",
+    "AutomaskSettings.cavity_strength": "clay_mesh_brush_defaults",
+    "MeshBrushSettings.radius": "clay_mesh_brush_defaults",
+    "MeshBrushSettings.strength": "clay_mesh_brush_defaults",
+    "MeshBrushSettings.falloff": "clay_mesh_brush_defaults",
+    "MeshBrushSettings.geodesic": "clay_mesh_brush_defaults",
+    "MeshBrushSettings.flatten_mode": "clay_mesh_brush_defaults",
+    "MeshBrushSettings.polish_angle": "clay_mesh_brush_defaults",
+    "MeshBrushSettings.smooth_iterations": "clay_mesh_brush_defaults",
+    "MeshBrushSettings.layer_height": "clay_mesh_brush_defaults",
+    "MeshBrushSettings.automask": "clay_mesh_brush_defaults",
     "StrokePreset.rotate_to_azimuth": "clay_stroke_preset_serialize",
     "StrokePreset.velocity_size": "clay_stroke_preset_serialize",
     "StrokePreset.velocity_strength": "clay_stroke_preset_serialize",
@@ -190,7 +242,22 @@ CLASS_CTOR = {
     "CancelToken": "clay_cancel_token_create",
     "Lattice": "clay_mesh_lattice_create",
     "Accumulation": None,
+    # Plain enumerators: nothing "builds" one, in C or in Python, so there is
+    # no constructor to name — the same reading Accumulation already gets.
+    "BrushFootprint": None,
+    "BrushFrame": None,
+    "BrushKernel": None,
+    "BrushWriteTarget": None,
+    "BrushPostPolicy": None,
+    "AutomaskFactor": None,
     "StrokePreset": "clay_stroke_preset_defaults",
+    "BrushPreset": "clay_brush_preset_defaults",
+    "BrushModel": "clay_brush_model_of",
+    # Value types carried INSIDE another descriptor rather than built on their
+    # own: a host fills clay_brush_preset.brush and its automask block, so the
+    # call that builds the carrier is what builds these.
+    "AutomaskSettings": "clay_mesh_brush_defaults",
+    "MeshBrushSettings": "clay_mesh_brush_defaults",
     # Built by VoxelGrid.sculpt_layer, which is itself exempt: `with` is a
     # Python statement and C has no counterpart to bind to.
     "SculptLayerScope": None,

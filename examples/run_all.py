@@ -121,8 +121,9 @@ CAPABILITY_EXAMPLES = {
     # plus 11_masks, 33_mask_extrude, 39_multi_resolution for the level stack,
     # and 48_mesh_to_voxels for the triangles-to-cells bridge
     "voxel-engine": "15_voxel_verbs_and_repair",
-    # plus 26_move_brush and 11_masks for the mask brush, and 45_mesh_brushes
-    # for apply_to_mesh, the fourth consumer
+    # plus 26_move_brush and 11_masks for the mask brush, 45_mesh_brushes for
+    # apply_to_mesh (the fourth consumer), and 65_brush_presets for the brush
+    # model and the named families as data
     "brush-engine": "12_strokes",
     "cut-tool": "14_cut",
     "python-bindings": None,      # every example IS this capability

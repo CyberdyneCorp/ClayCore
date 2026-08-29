@@ -319,8 +319,11 @@ std::vector<BrushPreset> reference_presets() {
     // -- the moving family ---------------------------------------------------
     {
         // Move anchors on the first stamp and drags by the motion between
-        // stamps.
+        // stamps, measuring its falloff IN A STRAIGHT LINE — which is what
+        // makes the next entry a different brush rather than the same one.
         BrushPreset p = make("Move", mesh::MeshBrush::Grab);
+        p.model.footprint = mesh::BrushFootprint::Ball;
+        p.settings.geodesic = false;
         p.stroke.spacing = 0.05f;
         out.push_back(p);
     }
