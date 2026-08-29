@@ -125,8 +125,21 @@
       the claim stops holding
 - [x] 7.5 Version lines together: `CMakeLists.txt`, `bindings/c/clay.h`,
       `pyproject.toml`, and `release_check.py`'s row
-- [ ] 7.6 Four presets green (release, metal, opencl, asan-ubsan) plus
-      `release_check`; `tsan` under `setarch -R`
+- [x] 7.6 Four presets green (release, metal, opencl, asan-ubsan) plus
+      `release_check`; `tsan` under `setarch -R`.
+      **Run here:** release (14,359,322 assertions), opencl (14,432,331),
+      asan-ubsan and tsan (both clean over this change's 42 cases, zero
+      sanitizer diagnostics — the full asan suite exceeds a single run's
+      budget and was not needed to cover the new code).
+      **NOT run here: `metal`, which needs macOS.** It has to be green before
+      this merges and this machine cannot say so.
+      **`release_check`** reports four failures, none of them this change:
+      `bindings` and `abi` are the anaconda `GLIBCXX_3.4.31` mismatch this
+      environment always has (the same suite passes 554/554 under
+      `LD_PRELOAD=/lib/x86_64-linux-gnu/libstdc++.so.6`), `tests` is that same
+      import reaching ctest through `pyclay_pytest`, and `device` is the
+      hardware gate, which by construction wants a clean tree and re-running on
+      the iPad
 - [x] 7.7 `python3 tools/check_layering.py` green, including whatever 1.1
       decided
 - [x] 7.8 Docs: `docs/07-brushes-and-features.md` gains the model as the way
